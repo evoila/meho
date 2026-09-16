@@ -906,7 +906,9 @@ class ReviewService:
 
         Cascade rule: every child op gets ``is_enabled=True``,
         except rows whose most-recent ``edit_op`` audit row set
-        ``is_enabled=False`` (operator override).
+        ``is_enabled=False`` (operator override). The cascade covers
+        the connector's ungrouped (``group_id IS NULL``) descriptors
+        too (#3681) — a full enable leaves nothing at default-deny.
         """
         await self._transition_connector(
             connector_id,
@@ -1014,9 +1016,11 @@ class ReviewService:
         Allowed source states: ``staged`` or ``enabled``. Re-running
         on a fully-disabled connector is a no-op.
 
-        Cascade: every child op gets ``is_enabled=False``. Unlike
-        the enable cascade, the disable cascade does NOT consult
-        operator overrides — a connector-level disable is a
+        Cascade: every child op gets ``is_enabled=False``, including
+        the connector's ungrouped (``group_id IS NULL``) descriptors
+        (#3681) so a full disable locks down exactly what a full enable
+        opened. Unlike the enable cascade, the disable cascade does NOT
+        consult operator overrides — a connector-level disable is a
         regression rollback / bad-ingest reset and the operator's
         intent overrides their own earlier per-op overrides for
         the duration of the disabled state.
@@ -1186,11 +1190,21 @@ class ReviewService:
                 transitioned_keys.append(group.group_key)
             transitioned_ids = [group.id for group in transitionable]
             excluded_op_ids: list[str] = []
+            # #3681: both the enable and disable cascades cover the
+            # connector's ungrouped descriptors (``group_id IS NULL``), the
+            # same connector scope ``enable-reads`` reaches group-agnostically.
+            # A full enable no longer strands ungrouped write/typed ops at
+            # default-deny, and a full disable still locks down exactly what a
+            # full enable opened (otherwise enabling then disabling would leave
+            # ungrouped writes enabled). The enable branch also widens the
+            # operator-override lookup to ungrouped ops so a per-op
+            # ``is_enabled=False`` override still sticks through the cascade.
             if target_status == "enabled":
                 excluded_op_ids = await operator_disabled_op_ids(
                     session,
                     scope,
                     transitioned_ids,
+                    include_ungrouped=True,
                 )
                 ops_changed = await cascade_is_enabled(
                     session,
@@ -1198,6 +1212,7 @@ class ReviewService:
                     transitioned_ids,
                     target=True,
                     excluded_op_ids=excluded_op_ids,
+                    include_ungrouped=True,
                 )
             else:
                 ops_changed = await cascade_is_enabled(
@@ -1206,6 +1221,7 @@ class ReviewService:
                     transitioned_ids,
                     target=False,
                     excluded_op_ids=[],
+                    include_ungrouped=True,
                 )
             await write_audit_row(
                 session,

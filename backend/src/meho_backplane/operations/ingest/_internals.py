@@ -30,7 +30,7 @@ from typing import Any, Final
 from uuid import UUID
 
 import structlog
-from sqlalchemy import CursorResult, func, literal, select, update
+from sqlalchemy import CursorResult, func, literal, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGroup
@@ -68,6 +68,7 @@ __all__ = [
     "load_ops_in_groups",
     "operator_disabled_op_ids",
     "scope_has_groups",
+    "ungrouped_op_ids",
     "validate_edit_op_args",
     "write_audit_row",
 ]
@@ -470,10 +471,37 @@ async def audit_profile_stamp(
 # ---------------------------------------------------------------------------
 
 
+async def ungrouped_op_ids(
+    session: AsyncSession,
+    scope: ConnectorScope,
+) -> set[str]:
+    """Return the ``op_id``s of *scope*'s descriptors with ``group_id IS NULL``.
+
+    The grouping pass leaves some descriptors ungrouped (#3681); the
+    enable cascade and its operator-override exclusion both need to see
+    them. Same ``(product, version, impl_id, tenant_id)`` scope predicate
+    as :func:`load_ops_in_groups`, restricted to the ungrouped remainder.
+    """
+    stmt = select(EndpointDescriptor.op_id).where(
+        EndpointDescriptor.product == scope.product,
+        EndpointDescriptor.version == scope.version,
+        EndpointDescriptor.impl_id == scope.impl_id,
+        EndpointDescriptor.group_id.is_(None),
+    )
+    if scope.tenant_id is None:
+        stmt = stmt.where(EndpointDescriptor.tenant_id.is_(None))
+    else:
+        stmt = stmt.where(EndpointDescriptor.tenant_id == scope.tenant_id)
+    result = await session.execute(stmt)
+    return set(result.scalars().all())
+
+
 async def operator_disabled_op_ids(
     session: AsyncSession,
     scope: ConnectorScope,
     group_ids: list[UUID],
+    *,
+    include_ungrouped: bool = False,
 ) -> list[str]:
     """Return ``op_id``s the operator explicitly disabled via ``edit_op``.
 
@@ -499,10 +527,16 @@ async def operator_disabled_op_ids(
       Python-side after loading the candidate rows (rows with
       ``path = 'meho_connector_edit_op'``).
     """
-    if not group_ids:
+    if not group_ids and not include_ungrouped:
         return []
     ops = await load_ops_in_groups(session, scope, group_ids)
     valid_op_ids = {op.op_id for op in ops}
+    if include_ungrouped:
+        # #3681: the enable cascade now also flips ungrouped rows, so an
+        # operator's per-op ``is_enabled=False`` override on an ungrouped
+        # op must be honoured too — widen the candidate set to include the
+        # connector's ``group_id IS NULL`` descriptors.
+        valid_op_ids |= await ungrouped_op_ids(session, scope)
     if not valid_op_ids:
         return []
     stmt = (
@@ -545,6 +579,7 @@ async def cascade_is_enabled(
     *,
     target: bool,
     excluded_op_ids: list[str],
+    include_ungrouped: bool = False,
 ) -> int:
     """Bulk-update child ops' ``is_enabled`` to *target*.
 
@@ -561,15 +596,32 @@ async def cascade_is_enabled(
     to a sub-select if the exclusion list grows past SQL parameter
     limits.
     """
-    if not group_ids:
+    if not group_ids and not include_ungrouped:
         return 0
+    # #3681: when ``include_ungrouped`` is set the cascade also reaches
+    # rows the grouping pass left with ``group_id IS NULL`` — the same
+    # connector scope ``enable-reads`` covers group-agnostically — so a
+    # full connector enable/disable no longer strands ungrouped
+    # write/typed descriptors at their default-deny state. The
+    # ``(product, version, impl_id, tenant_id)`` scope below is the
+    # connector-scope predicate; ``group_id IS NULL`` restricts to the
+    # ungrouped remainder within it.
+    if include_ungrouped and group_ids:
+        group_predicate = or_(
+            EndpointDescriptor.group_id.in_(group_ids),
+            EndpointDescriptor.group_id.is_(None),
+        )
+    elif include_ungrouped:
+        group_predicate = EndpointDescriptor.group_id.is_(None)
+    else:
+        group_predicate = EndpointDescriptor.group_id.in_(group_ids)
     stmt = (
         update(EndpointDescriptor)
         .where(
             EndpointDescriptor.product == scope.product,
             EndpointDescriptor.version == scope.version,
             EndpointDescriptor.impl_id == scope.impl_id,
-            EndpointDescriptor.group_id.in_(group_ids),
+            group_predicate,
             EndpointDescriptor.is_enabled != target,
         )
         .values(is_enabled=target)

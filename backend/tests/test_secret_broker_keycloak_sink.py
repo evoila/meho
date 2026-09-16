@@ -42,6 +42,7 @@ from meho_backplane.connectors.keycloak import KeycloakConnector
 from meho_backplane.connectors.keycloak.secret_endpoint import (
     KeycloakCredentialSecretEndpoint,
     KeycloakSecretRefError,
+    build_keycloak_secret_endpoint,
 )
 from meho_backplane.connectors.keycloak.session import (
     KeycloakAdminCredentials,
@@ -192,8 +193,15 @@ async def _fetch_move_audit_rows() -> list[AuditLog]:
 
 
 def test_keycloak_kind_registered_in_secret_registry() -> None:
-    """The keycloak sink registers under kind ``"keycloak"`` at import time."""
-    assert SECRET_ENDPOINT_REGISTRY.get("keycloak") is KeycloakCredentialSecretEndpoint
+    """The keycloak dual-dispatch factory registers under kind ``"keycloak"``.
+
+    The registered callable is the dispatch factory (#3619); a
+    user-password sink ref still resolves to the unchanged
+    :class:`KeycloakCredentialSecretEndpoint` sink.
+    """
+    assert SECRET_ENDPOINT_REGISTRY.get("keycloak") is build_keycloak_secret_endpoint
+    sink = SECRET_ENDPOINT_REGISTRY["keycloak"](f"{_TARGET_NAME}/{_REALM}/{_USERNAME}#password")
+    assert isinstance(sink, KeycloakCredentialSecretEndpoint)
 
 
 # ---------------------------------------------------------------------------

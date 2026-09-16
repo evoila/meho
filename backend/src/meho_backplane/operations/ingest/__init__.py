@@ -81,6 +81,7 @@ from meho_backplane.operations.ingest.error_envelopes import (
 )
 from meho_backplane.operations.ingest.exceptions import (
     AmbiguousConnectorScopeError,
+    BuiltinConnectorWriteForbiddenError,
     ConnectorNotFoundError,
     ConnectorScopeCandidate,
     InvalidSchemaError,
@@ -154,6 +155,7 @@ __all__ = [
     "AffectedSensorModel",
     "AmbiguousConnectorScopeError",
     "AnthropicMessagesLlmClient",
+    "BuiltinConnectorWriteForbiddenError",
     "CatalogError",
     "CatalogListResponse",
     "ConnectorListItem",

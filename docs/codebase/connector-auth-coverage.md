@@ -213,6 +213,41 @@ catalog's existing behaviour fixed and to fail closed on the new surface:
   combination outside the intended cluster-internal (`http`, no TLS) shape.
   The default (no override) is byte-identical to today.
 
+### `token_url` from the per-target credential (external-issuer extension)
+
+When the external issuer is a **per-deployment** value (each deployment mints
+against its own realm), the token endpoint is not a reviewable constant that
+belongs in a shipped, public profile. `oauth2_mint` therefore also sources
+`token_url` from the resolved **secret bundle**: name `token_url` in
+`auth.secret_fields` and the operator stores it in the target's Vault
+credential alongside `client_id` / `client_secret`. At dispatch,
+`_oauth2_login_path_from_secret` (`connectors/_shared/profile_auth.py`)
+resolves the endpoint with precedence **credential `token_url` → profile
+`auth.token_url` (#3571) → target-relative `/realms/master/...`**, wired onto
+the scheme through the additive `SessionSchemeSpec.login_path_with_secret`
+hook (the profile-only `login_path` signature the typed session connectors
+call at import is untouched). A credential-sourced value clears the **same**
+fail-closed `_validate_token_url` rule the profile field does (`https` for a
+public host; plaintext `http` only for a cluster-internal / private issuer),
+so a fat-fingered Vault value can never ship the client secret to a public
+host over cleartext. A credential bundle with no `token_url` (keycloak) falls
+straight through — the override is invisible to every existing `oauth2_mint`
+user.
+
+| Profiled connector | Scheme | Secret-bundle fields | `token_url` source | Non-secret profile knobs |
+|---|---|---|---|---|
+| meho-automation add-on (`mehoauto-rest`) | `oauth2_mint` | `client_id`, `client_secret`, `token_url` | per-target Vault credential (`token_url` field) | `audience: meho-automation` |
+
+This is the meho-automation add-on connector's shape — see
+`docs/codebase/connectors-meho-automation.md` for the full registration
+recipe and the operator decision that launch / validate / gate all ride
+`caution` without a backplane approval park (validate is a read-side dry-run
+that still rides `caution` because an ingested POST never sits below the
+caution floor). The connector's op set is **closed** to exactly those three
+ops even though the add-on's `/openapi.json` publishes its full API: a
+declarative catalog `op_allowlist` drops every other route before persistence
+(see that doc's "Ingest op allowlist" section).
+
 ## References
 
 - `backend/src/meho_backplane/connectors/profile.py` — the schema + catalog.

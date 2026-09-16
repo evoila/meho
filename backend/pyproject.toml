@@ -13,6 +13,9 @@ dependencies = [
     "prometheus-client>=0.26.0",
     "authlib>=1.3",
     "httpx>=0.27",
+    # Authlib 1.8's AsyncOAuth2Client performs token grants through
+    # httpx2; flow, routes, and refresh import its transport exceptions.
+    "httpx2>=2.12.0",
     # httpx's async transport (httpcore) runs on anyio; the
     # net.http_probe diagnostic op imports it directly to classify
     # TLS-phase connect failures — httpcore's start_tls maps
@@ -165,6 +168,18 @@ docs = [
     "mkdocs-material>=9.7.7",
     "mike>=2.2.0",
 ]
+# Build backend, pinned into the lock so the image build fetches it through
+# uv's reliable locked-download path (direct wheel URLs) instead of a fresh
+# build-isolation resolution. That fresh resolve — an index query plus a PEP
+# 658 `.whl.metadata` fetch — fails with `client error (Connect)` from the CI
+# runner cluster whenever the buildkit uv-cache mount is cold, on both native
+# amd64 and emulated arm64 (evoila/meho#3626), while locked full-wheel
+# downloads from the same host succeed. Non-default group: neither the Docker
+# image (`--no-dev`) nor a plain `uv sync` installs it; the wheel-builder stage
+# uses `uv sync --locked --only-group build` + `uv build --no-build-isolation`.
+build = [
+    "hatchling",
+]
 
 [tool.uv]
 # Transitive-version floors the resolver MUST honour without promoting the
@@ -174,18 +189,10 @@ docs = [
 # else pulls in (uv docs: "Constraints … used to restrict the versions of
 # a requirement, without adding it as a dependency").
 #
-# httpx2 / httpcore2 arrive only transitively —
-# ``genai-prices`` -> ``httpx2`` -> ``httpcore2`` — via
-# ``pydantic-ai-slim[anthropic,bedrock,openai]``; neither is (nor should
-# become) a direct dependency. CVE-2026-84382 (httpx2) and CVE-2026-84381
-# (httpcore2) were published against the 2.3.0 releases the parent pinned,
-# turning the trivy image gate red on every main build from 2026-09-09.
-# A plain ``uv lock --upgrade-package`` is a no-op here (the parent's
-# resolution holds them at 2.3.0), so a floor is the surgical fix: bump
-# httpx2 to the first fixed release (>=2.12.0) and httpcore2 to its first
-# fixed release (>=2.10.0). Revisit / drop once the parent's own pins move
-# past the fixed versions.
-constraint-dependencies = ["httpx2>=2.12.0", "httpcore2>=2.10.0"]
+# httpcore2 remains transitive through httpx2. CVE-2026-84381 affected the
+# 2.3.0 release its parent pinned, so retain its first-fixed-release floor.
+# Revisit / drop the constraint once the parent's own pin moves past it.
+constraint-dependencies = ["httpcore2>=2.10.0"]
 
 [build-system]
 requires = ["hatchling"]

@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# ExecutionProfile for the `mehoauto/0.1.0` profile-backed catalog row —
+# the meho-automation add-on registered as a versioned generic-connector
+# target so the backplane drives its launch / validate / gate-decision API
+# through the same auth -> policy -> audit -> JSONFlux path as any vendor
+# API (public #3571 external-issuer mint; #2900 P1 auth design). The add-on
+# is a peer control plane reached only over the wire — no reverse code
+# coupling.
+#
+# NO SPEC IS VENDORED. The catalog row carries no `spec_resource`; the
+# connector is ingested at registration time from the add-on's published
+# `/openapi.json` (OpenAPI 3.1) via the operator `--spec` on-ramp. See
+# docs/codebase/connectors-meho-automation.md for the registration recipe.
+#
+# AUTH. `oauth2_mint` with an EXTERNAL issuer. The add-on validates an
+# inbound realm bearer whose issuer (the identity provider) is a different
+# host from the add-on API itself, so the mint dials an absolute token
+# endpoint rather than the target-relative `/realms/master/...` default.
+#   - `client_id` / `client_secret` resolve from the Vault-backed target
+#     credential (the client-credentials identity the operator provisions
+#     in the realm for the backplane).
+#   - `token_url` is ALSO a credential field, NOT a profile field: the
+#     realm token endpoint is a per-deployment value (each deployment mints
+#     against its own realm), so it is not a reviewable constant that
+#     belongs in a shipped, public profile. The oauth2_mint scheme sources
+#     it from the resolved secret bundle and validates it fail-closed with
+#     the same rule the profile `token_url` field clears
+#     (`_oauth2_login_path_from_secret` in
+#     connectors/_shared/profile_auth.py). Declaring it in `secret_fields`
+#     makes it mandatory-in-Vault (fail-closed if the operator omits it).
+#   - `audience` = `meho-automation` ships here (non-secret): the grant
+#     requests a token whose audience the add-on's verify_access_token
+#     accepts. This is the Keycloak service NAME the add-on binds to; it is
+#     unrelated to the hyphen-free dispatch product slug `mehoauto`.
+#   - no `scope` — the client-credentials grant carries none.
+#
+# FINGERPRINT. `GET /api/v1/version` returns a top-level `version` string
+# (the add-on's ops-plane version endpoint), satisfying the FingerprintSpec
+# literal-top-level-key constraint (#1177 — no dotted paths). Unauthenticated
+# (`authenticated: false`) — the version/health ops plane takes no bearer.
+# `version_splitter: none` — the add-on returns a clean MAJOR.MINOR.PATCH.
+#
+# PROBE. `delegate` — the single fingerprint round-trip covers reachability.
+#
+# PAGINATION. `none` — the three curated ops are single-object POSTs
+# (launch / validate / gate each return one object, never a page); no list
+# op is in scope. `items_key` names a rows key for the unwrapped shape but
+# is never exercised while `strategy: none` and no list op is ingested.
+#
+# Validated at boot by validate_shipped_artifacts (ExecutionProfile.model_
+# validate + validate_execution_profile) and stamped into the v2 registry by
+# stamp_catalog_profiled_connectors.
+product: mehoauto
+version: "0.1.0"
+auth:
+  scheme: oauth2_mint
+  secret_fields:
+    - client_id
+    - client_secret
+    - token_url
+  audience: meho-automation
+fingerprint:
+  path: /api/v1/version
+  authenticated: false
+  version_key: version
+  version_splitter: none
+probe: delegate
+pagination:
+  strategy: none
+  items_key: items

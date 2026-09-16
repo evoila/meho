@@ -6112,6 +6112,7 @@ class ApprovalRequest(Base):
         nullable=True,
         default=None,
     )
+    execution_handle: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True, unique=True)
     # Preview-result-hash binding for the ``destructive`` tier (#3197).
     # SHA-256 hex over the canonicalised resolved preview envelope of the
     # identical (connector_id, op_id, target, params); stamped at park time

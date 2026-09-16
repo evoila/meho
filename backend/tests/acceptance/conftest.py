@@ -195,6 +195,10 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     # errors at setup with ``cannot truncate a table referenced in a
     # foreign key constraint``.
     "agent_run",
+    # ``approval_execution_payload.request_id`` references
+    # ``approval_request(id)``. It holds the encrypted credential-write
+    # handoff, so the non-cascading reset must list it with its parent.
+    "approval_execution_payload",
     # ``approval_request.tenant_id`` is a real ``REFERENCES tenant(id)`` FK
     # from migration ``0023`` (G11.2-T4 #817). Same rule: PG rejects
     # truncating ``tenant`` unless every referencing table is listed in

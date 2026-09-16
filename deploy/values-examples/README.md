@@ -339,6 +339,25 @@ The `helm test <release>` Pod
 vars resolve — the two `secretKeyRef` values and the plain client_id —
 when `uiConsole.enabled: true`.
 
+## Credential-write approval custody (#3537)
+
+Credential-write approvals need a dedicated Fernet key. It is unrelated to
+the optional browser-console session key, and the chart accepts only a
+Kubernetes `secretKeyRef`:
+
+```yaml
+approvalHandoff:
+  enabled: true
+  secretName: meho-approval-handoff
+  secretKey: approval_handoff_encryption_key
+```
+
+Create or sync the Secret through the deployment's normal secret manager; do
+not put the Fernet key in a values file. Rotate it by updating the referenced
+Secret and restarting every backplane pod together. First reject or let expire
+any pending credential-write approvals, because their one-time payloads remain
+encrypted with the former key.
+
 ## Check-runner service principal (#2642)
 
 Sensor evaluations run on a background tick with **no calling operator**,

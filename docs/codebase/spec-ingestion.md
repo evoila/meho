@@ -1505,6 +1505,22 @@ null = built-in / global, own tenant UUID = tenant-curated, any
 other UUID → 403 from the service-layer guard), so cross-tenant
 writes remain impossible.
 
+Mutating an *existing* built-in (global, `tenant_id IS NULL`) row is
+a stricter case: `PATCH /groups`, `PATCH /operations`, `POST
+/enable`, `POST /enable-reads`, and `POST /disable` resolve the
+connector tenant-preferring (the operator's own tenant row wins;
+otherwise the built-in row — the #1135 global fall-back these write
+paths previously lacked, which made a built-in-only connector return
+404 on `/enable` to every tenant-scoped principal). Because a
+built-in row is shared by every tenant, mutating it requires
+`platform_admin`, mirroring the doc-collection global-row seat
+(#3616): a `tenant_admin` without it gets a structured 403
+`builtin_connector_write_forbidden` (MCP `-32602`) rather than the
+historical 404 or a silent all-tenant write. When the id maps to
+*both* a tenant row and a built-in row, `/enable` / `/disable` /
+edit act on the tenant row (unchanged) and `/enable-reads` keeps its
+#1801 `connector_scope_ambiguous` 409.
+
 **Bulk read-class enable (G0.25-T7 #1749).** `POST
 /{id}/enable-reads` flips `is_enabled=true` on every *ingested*
 operation whose HTTP `method` is `GET` or `HEAD`

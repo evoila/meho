@@ -1,6 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
+# code-quality-allow: file-size — the cohesive bulk-upsert helper for parsed
+# specs (batch orchestration + result projection + safety-change join);
+# already over the line-count limit on origin/main. This change only adds the
+# op-allowlist filter call + the dropped-op result fields (security review
+# T3-F01); the per-op upsert already lives in _upsert.py.
+
 """``register_ingested_operations()`` -- bulk upsert helper for parsed specs.
 
 G0.7-T2 (#403) of Initiative #389. Takes the
@@ -134,12 +140,16 @@ from meho_backplane.operations.ingest.connector_registration import (
     ensure_connector_class_registered,
 )
 from meho_backplane.operations.ingest.exceptions import OpIdCollision
+from meho_backplane.operations.ingest.op_allowlist import DroppedOp, apply_op_allowlist
 from meho_backplane.operations.ingest.safety_floors import apply_safety_floor
 from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
 from meho_backplane.retrieval.embedding import EmbeddingService
 
+_log = structlog.get_logger(__name__)
+
 __all__ = [
     "AffectedSensor",
+    "DroppedOp",
     "IngestionResult",
     "SafetyChange",
     "register_ingested_operations",
@@ -215,6 +225,14 @@ class IngestionResult:
         this call (#2702), each carrying the Sensors pinning the
         reclassified op. Empty on first ingests, dry runs, and
         re-ingests that leave every op's safety class unchanged.
+    dropped_count:
+        Number of parsed operations the product's declared ingest op
+        allowlist dropped before persistence (security review T3-F01).
+        ``0`` for products that declare no allowlist (the common case).
+    dropped_ops:
+        The ``(method, path)`` of each dropped operation, so the
+        operator sees exactly what the allowlist excluded. Empty when
+        ``dropped_count`` is ``0``.
     """
 
     inserted_count: int
@@ -223,6 +241,8 @@ class IngestionResult:
     connector_registered: bool
     operations_grouped: bool
     safety_changes: tuple[SafetyChange, ...] = ()
+    dropped_count: int = 0
+    dropped_ops: tuple[DroppedOp, ...] = ()
 
 
 def _detect_op_id_collisions(
@@ -284,6 +304,7 @@ def _build_ingestion_result(
     *,
     connector_registered: bool,
     safety_changes: tuple[SafetyChange, ...],
+    dropped: tuple[DroppedOp, ...] = (),
 ) -> IngestionResult:
     """Project batch counters into the public registration result."""
     return IngestionResult(
@@ -293,6 +314,8 @@ def _build_ingestion_result(
         connector_registered=connector_registered,
         operations_grouped=False,
         safety_changes=safety_changes,
+        dropped_count=len(dropped),
+        dropped_ops=dropped,
     )
 
 
@@ -414,8 +437,24 @@ async def register_ingested_operations(
             per-row in :func:`_upsert.upsert_one_operation`); the
             exception names both colliding specs.
     """
+    # Security floor (T3-F01): drop any parsed op outside the product's
+    # declared ingest allowlist BEFORE persistence, so it is never staged and
+    # a later ``enable_connector`` cascade cannot reach it. Absence of an
+    # allowlist keeps every op (the common case). Runs on every register call,
+    # so a re-ingest with a wider spec is bounded the same way.
+    allowlist_result = apply_op_allowlist(product=product, version=version, operations=operations)
+    if allowlist_result.dropped:
+        _log.info(
+            "ingest_op_allowlist_dropped",
+            product=product,
+            version=version,
+            impl_id=impl_id,
+            spec_source=spec_source,
+            dropped_count=len(allowlist_result.dropped),
+            dropped_ops=[f"{op.method} {op.path}" for op in allowlist_result.dropped],
+        )
     floored_operations = _prepare_ingested_operations(
-        operations,
+        allowlist_result.kept,
         product=product,
         version=version,
         impl_id=impl_id,
@@ -444,6 +483,7 @@ async def register_ingested_operations(
         counts,
         connector_registered=connector_registered,
         safety_changes=safety_changes,
+        dropped=allowlist_result.dropped,
     )
 
 

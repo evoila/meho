@@ -60,6 +60,7 @@ EXPECTED_DECLARING_TOOLS: frozenset[str] = frozenset(
         "meho_automation_list",
         "create_doc_collections",
         "delete_doc_collections",
+        "update_doc_collections",
         "list_doc_collections",
         "list_operation_groups",
         "list_targets",

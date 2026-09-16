@@ -27,10 +27,10 @@
 # share these inventory read shapes. Paths and params copy the vendor's
 # verbatim names because the dispatcher must address the real appliance
 # with them; the descriptions are vendor-neutral, MEHO-authored prose. The
-# spec declares the modern /api op paths; the typed connector re-mounts
-# them onto the legacy /rest base when a target authenticates via the
-# legacy session endpoint, so a legacy-only appliance is addressed
-# correctly.
+# spec declares spec-relative op paths (bare `/vcenter/...`, the `/api` mount
+# living on `servers[0].url`); the typed connector re-mounts them onto the
+# modern /api or legacy /rest base per target (see the `servers` note below),
+# so a legacy-only appliance is addressed correctly.
 #
 # CONSTRAINTS. OpenAPI 3.0 (the parser rejects Swagger 2.0); self-contained
 # with only local `$ref`s (the parser rejects cross-document `$ref`); every
@@ -49,12 +49,28 @@ info:
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0
-# No `servers` block: the `/api` mount is baked into each path key below
-# (`/api/about`, `/api/vcenter/...`). Declaring `servers:[{url:/api}]` here
-# while the paths already carry `/api` would double-prefix to
-# `/api/api/about`. The mount is documented in `info.description` instead;
-# the vCenter connector's `mount_op_path` hook owns the modern `/api` vs
-# legacy `/rest` selection.
+# `servers[0].url` carries the absolute `/api` mount, mirroring the vendor
+# `vcenter.yaml` form (#3614) and the 9.0 minimal (kept identical per the
+# reconcile lane's lock-step guard). The ingest parser folds only a
+# *relative* server base into op paths (openapi.py::_server_base_path); an
+# absolute base like this is left to the operator, so each op_id is exactly
+# its bare path key -- `GET:/vcenter/vm`, byte-identical to the vendor catalog
+# and to the spec-relative form the connector expects (_mount.py::mounted_path
+# prefixes `/api` on a modern session or `/rest` on a legacy one, per target).
+# Keying `/api/vcenter/...` here instead (the pre-#3614 shape, with no
+# `servers` block) produced `GET:/api/vcenter/vm` op_ids that diverged from
+# the vendor form and, being already-mounted, bypassed that per-target
+# `/api`<->`/rest` selection. The `/api/about` fingerprint-probe path stays
+# keyed literally: it is the ESXi/host REST surface MEHO probes for
+# fingerprinting (the vCenter Automation `vcenter.yaml`'s only about is
+# `/vcenter/phm/about`), addressed directly by the connector, not a re-mounted
+# ingested op.
+servers:
+  - url: https://{host}/api
+    variables:
+      host:
+        default: vcenter.example.com
+        description: The vCenter appliance host.
 paths:
   /api/about:
     get:
@@ -71,7 +87,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/About"
-  /api/vcenter/datacenter:
+  /vcenter/datacenter:
     get:
       operationId: listDatacenters
       summary: List datacenters
@@ -85,7 +101,7 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/DatacenterSummary"
-  /api/vcenter/cluster:
+  /vcenter/cluster:
     get:
       operationId: listClusters
       summary: List clusters
@@ -99,7 +115,7 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/ClusterSummary"
-  /api/vcenter/host:
+  /vcenter/host:
     get:
       operationId: listHosts
       summary: List ESXi hosts
@@ -113,7 +129,7 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/HostSummary"
-  /api/vcenter/datastore:
+  /vcenter/datastore:
     get:
       operationId: listDatastores
       summary: List datastores
@@ -127,7 +143,7 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/DatastoreSummary"
-  /api/vcenter/network:
+  /vcenter/network:
     get:
       operationId: listNetworks
       summary: List networks
@@ -141,7 +157,7 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/NetworkSummary"
-  /api/vcenter/folder:
+  /vcenter/folder:
     get:
       operationId: listFolders
       summary: List folders
@@ -155,7 +171,7 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/FolderSummary"
-  /api/vcenter/vm:
+  /vcenter/vm:
     get:
       operationId: listVms
       summary: List virtual machines
@@ -169,7 +185,7 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/VmSummary"
-  /api/vcenter/vm/{vm}:
+  /vcenter/vm/{vm}:
     get:
       operationId: getVm
       summary: Get a virtual machine by id

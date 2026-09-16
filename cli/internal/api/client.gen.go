@@ -3472,6 +3472,7 @@ type ConnectorSpecEntry struct {
 	CatalogIngest              *ConnectorSpecEntryCatalogIngest `json:"catalog_ingest,omitempty"`
 	ImplId                     string                           `json:"impl_id"`
 	Notes                      *string                          `json:"notes,omitempty"`
+	OpAllowlist                *[]OpAllowlistEntry              `json:"op_allowlist"`
 	Product                    string                           `json:"product"`
 	ProfileResource            *string                          `json:"profile_resource"`
 	RequiresConnectorClass     string                           `json:"requires_connector_class"`
@@ -4137,6 +4138,36 @@ type DiscardTemplateResponse struct {
 	Version int    `json:"version"`
 }
 
+// DocCollection Full read shape — maps 1:1 to the “doc_collections“ table.
+//
+// Frozen so callers can stash instances in request state or structured
+// logs without fear of mutation. “products“ is “tuple[str, ...]“
+// and the JSON columns are “Mapping[str, Any]“ so a frozen instance
+// cannot be mutated in-place via “list.append“ / “dict.__setitem__“.
+//
+// “backend“ is the operator-set “{type, ref}“ routing record the
+// T2 (#1551) router resolves server-side. “status“ is the lifecycle
+// enum (“provisioning“ / “ready“ / “rebuilding“ / “disabled“);
+// “last_ingested_at“ / “doc_count“ / “readiness“ are
+// probe-written liveness (T6 #1555), “None“ until the first probe.
+type DocCollection struct {
+	Backend        map[string]interface{}  `json:"backend"`
+	CollectionKey  string                  `json:"collection_key"`
+	CreatedAt      time.Time               `json:"created_at"`
+	Description    *string                 `json:"description"`
+	DocCount       *int                    `json:"doc_count"`
+	Extras         map[string]interface{}  `json:"extras"`
+	Id             openapi_types.UUID      `json:"id"`
+	LastIngestedAt *time.Time              `json:"last_ingested_at"`
+	Products       []string                `json:"products"`
+	Readiness      *map[string]interface{} `json:"readiness"`
+	Status         string                  `json:"status"`
+	TenantId       *openapi_types.UUID     `json:"tenant_id"`
+	UpdatedAt      time.Time               `json:"updated_at"`
+	Vendor         string                  `json:"vendor"`
+	WhenToUse      *string                 `json:"when_to_use"`
+}
+
 // DocCollectionBackend The “{type, ref}“ backend routing record a create supplies.
 //
 // “type“ is the search-backend type the row routes to (validated at
@@ -4245,6 +4276,46 @@ type DocCollectionSummary struct {
 	WhenToUse      *string                 `json:"when_to_use"`
 }
 
+// DocCollectionUpdate Request body for updating a doc collection's mutable fields (#3601).
+//
+// A PATCH-style partial update: every field is optional and only the
+// fields actually present in the request are written (the service reads
+// “model_dump(exclude_unset=True)“). It carries the operator-mutable
+// subset — “backend“ (the routing record, including the “corpus-http“
+// endpoint the SSRF screen validates), plus “description“ /
+// “when_to_use“ / “products“. “id“ / “tenant_id“ / timestamps /
+// “status“ / the probe-written liveness are server-owned and absent,
+// exactly as on :class:`DocCollectionCreate`; “collection_key“ is the
+// path segment / tool argument that names the row, never a body field, so
+// a PATCH can neither rename nor re-scope a collection (“extra="forbid"“
+// rejects a smuggled “tenant_id“ / “collection_key“).
+//
+// The motivator is repointing a migration-seeded collection's
+// “backend.ref["endpoint"]“ when a deployment moves its corpus endpoint
+// (e.g. plain-“http“ → internal-CA “https“): create 409s on the
+// existing key and delete refuses a global row, so there was no in-place
+// repoint. A “backend“ change runs the same “backend.type“ registry
+// validation + “https“ / SSRF-allowlist endpoint screen the create path
+// runs, and resets the collection to “provisioning“ (clearing the
+// stale probe-written liveness) so a follow-up probe re-validates against
+// the new endpoint — the service owns that reset.
+type DocCollectionUpdate struct {
+	// Backend The ``{type, ref}`` backend routing record a create supplies.
+	//
+	// ``type`` is the search-backend type the row routes to (validated at
+	// the service layer against
+	// :func:`~meho_backplane.docs_search.backends.registry.all_backends` so
+	// an unroutable row is rejected at create time, not at probe time).
+	// ``ref`` is the per-collection backend config the resolved adapter
+	// reads (e.g. ``{"endpoint": "https://corpus/v1/search"}`` for
+	// ``corpus-http``); it is opaque to the create surface — the adapter
+	// owns its shape — so it is a free ``Mapping``.
+	Backend     *DocCollectionBackend `json:"backend,omitempty"`
+	Description *string               `json:"description"`
+	Products    *[]string             `json:"products"`
+	WhenToUse   *string               `json:"when_to_use"`
+}
+
 // DocsChunk One cited chunk in MEHO's “search_docs“ response surface.
 //
 // A stable projection of the corpus's :class:`~meho_backplane.auth.corpus.CorpusChunk`
@@ -4315,6 +4386,17 @@ type DraftTemplateResponse struct {
 	Slug    string `json:"slug"`
 	Status  string `json:"status"`
 	Version int    `json:"version"`
+}
+
+// DroppedOpModel Pydantic projection of
+// :class:`~meho_backplane.operations.ingest.op_allowlist.DroppedOp`.
+//
+// One operation the product's declared ingest op allowlist excluded
+// before persistence (security review T3-F01) — surfaced so the operator
+// sees exactly what an ingest of a wider spec dropped.
+type DroppedOpModel struct {
+	Method string `json:"method"`
+	Path   string `json:"path"`
 }
 
 // EditGroupBody PATCH body for “/api/v1/connectors/{id}/groups/{key}“.
@@ -5196,7 +5278,9 @@ type IngestJobStatusResponse struct {
 	// an extra ``connector_id`` echo for round-trip clarity.
 	// ``safety_changes`` (#2702) is additive with an empty-list default,
 	// so pre-existing clients see no shape change on ingests that
-	// reclassify nothing.
+	// reclassify nothing. ``dropped_count`` / ``dropped_ops`` (T3-F01) are
+	// likewise additive with empty defaults — ``0`` / ``[]`` for every
+	// product that declares no ingest op allowlist.
 	Ingestion *IngestionResultModel         `json:"ingestion,omitempty"`
 	JobId     openapi_types.UUID            `json:"job_id"`
 	Product   *string                       `json:"product"`
@@ -5344,7 +5428,9 @@ type IngestResponse struct {
 	// an extra ``connector_id`` echo for round-trip clarity.
 	// ``safety_changes`` (#2702) is additive with an empty-list default,
 	// so pre-existing clients see no shape change on ingests that
-	// reclassify nothing.
+	// reclassify nothing. ``dropped_count`` / ``dropped_ops`` (T3-F01) are
+	// likewise additive with empty defaults — ``0`` / ``[]`` for every
+	// product that declares no ingest op allowlist.
 	Ingestion IngestionResultModel `json:"ingestion"`
 }
 
@@ -5357,10 +5443,14 @@ type IngestResponse struct {
 // an extra “connector_id“ echo for round-trip clarity.
 // “safety_changes“ (#2702) is additive with an empty-list default,
 // so pre-existing clients see no shape change on ingests that
-// reclassify nothing.
+// reclassify nothing. “dropped_count“ / “dropped_ops“ (T3-F01) are
+// likewise additive with empty defaults — “0“ / “[]“ for every
+// product that declares no ingest op allowlist.
 type IngestionResultModel struct {
 	ConnectorId         string               `json:"connector_id"`
 	ConnectorRegistered bool                 `json:"connector_registered"`
+	DroppedCount        *int                 `json:"dropped_count,omitempty"`
+	DroppedOps          *[]DroppedOpModel    `json:"dropped_ops,omitempty"`
 	InsertedCount       int                  `json:"inserted_count"`
 	OperationsGrouped   bool                 `json:"operations_grouped"`
 	SafetyChanges       *[]SafetyChangeModel `json:"safety_changes,omitempty"`
@@ -5709,6 +5799,23 @@ type NextStepRequest struct {
 // NextStepRequest_VerifyResponse defines model for NextStepRequest.VerifyResponse.
 type NextStepRequest_VerifyResponse struct {
 	union json.RawMessage
+}
+
+// OpAllowlistEntry One “(method, path)“ an ingested connector's op set is closed to.
+//
+// Declarative half of the per-product ingest op allowlist (security
+// review T3-F01). A catalog row that declares
+// :attr:`ConnectorSpecEntry.op_allowlist` names the *exact* operations
+// that may persist from an ingest of that product; every other parsed
+// operation is dropped before persistence (see
+// :mod:`meho_backplane.operations.ingest.op_allowlist`), so a connector
+// whose design invariant is "closed to these N ops" is enforced in code,
+// not by operator discipline. The pair is normalised the same way the
+// ingest filter keys a parsed operation: “method“ upper-cased, “path“
+// the verbatim spec path template (query string already stripped).
+type OpAllowlistEntry struct {
+	Method string `json:"method"`
+	Path   string `json:"path"`
 }
 
 // OperationCallStep A step the agent dispatches via the operation registry.
@@ -9651,6 +9758,11 @@ type DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteParams struct
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchParams defines parameters for UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatch.
+type UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostParams defines parameters for DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePost.
 type DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -10701,6 +10813,9 @@ type UpdateConventionApiV1ConventionsSlugPatchJSONRequestBody = ConventionUpdate
 
 // CreateDocCollectionEndpointApiV1DocCollectionsPostJSONRequestBody defines body for CreateDocCollectionEndpointApiV1DocCollectionsPost for application/json ContentType.
 type CreateDocCollectionEndpointApiV1DocCollectionsPostJSONRequestBody = DocCollectionCreate
+
+// UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchJSONRequestBody defines body for UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatch for application/json ContentType.
+type UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchJSONRequestBody = DocCollectionUpdate
 
 // CreateEventSourceApiV1EventSourcesPostJSONRequestBody defines body for CreateEventSourceApiV1EventSourcesPost for application/json ContentType.
 type CreateEventSourceApiV1EventSourcesPostJSONRequestBody = EventSourceCreate
@@ -12712,6 +12827,11 @@ type ClientInterface interface {
 
 	// DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDelete request
 	DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDelete(ctx context.Context, collectionKey string, params *DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchWithBody request with any body
+	UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchWithBody(ctx context.Context, collectionKey string, params *UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatch(ctx context.Context, collectionKey string, params *UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchParams, body UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePost request
 	DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePost(ctx context.Context, collectionKey string, params *DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -15164,6 +15284,30 @@ func (c *Client) CreateDocCollectionEndpointApiV1DocCollectionsPost(ctx context.
 
 func (c *Client) DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDelete(ctx context.Context, collectionKey string, params *DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewDeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteRequest(c.Server, collectionKey, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchWithBody(ctx context.Context, collectionKey string, params *UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchRequestWithBody(c.Server, collectionKey, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatch(ctx context.Context, collectionKey string, params *UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchParams, body UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchRequest(c.Server, collectionKey, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -25509,6 +25653,68 @@ func NewDeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteRequest(se
 	if err != nil {
 		return nil, err
 	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewUpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchRequest calls the generic UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatch builder with application/json body
+func NewUpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchRequest(server string, collectionKey string, params *UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchParams, body UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchRequestWithBody(server, collectionKey, params, "application/json", bodyReader)
+}
+
+// NewUpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchRequestWithBody generates requests for UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatch with any type of body
+func NewUpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchRequestWithBody(server string, collectionKey string, params *UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "collection_key", runtime.ParamLocationPath, collectionKey)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/doc_collections/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("PATCH", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	if params != nil {
 
@@ -42829,6 +43035,11 @@ type ClientWithResponsesInterface interface {
 	// DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteWithResponse request
 	DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteWithResponse(ctx context.Context, collectionKey string, params *DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteParams, reqEditors ...RequestEditorFn) (*DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteResponse, error)
 
+	// UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchWithBodyWithResponse request with any body
+	UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchWithBodyWithResponse(ctx context.Context, collectionKey string, params *UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchResponse, error)
+
+	UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchWithResponse(ctx context.Context, collectionKey string, params *UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchParams, body UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchResponse, error)
+
 	// DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostWithResponse request
 	DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostWithResponse(ctx context.Context, collectionKey string, params *DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostParams, reqEditors ...RequestEditorFn) (*DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostResponse, error)
 
@@ -45830,6 +46041,28 @@ func (r DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteResponse) 
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *DocCollection
+}
+
+// Status returns HTTPResponse.Status
+func (r UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -53549,6 +53782,23 @@ func (c *ClientWithResponses) DeleteCollectionEndpointApiV1DocCollectionsCollect
 	return ParseDeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteResponse(rsp)
 }
 
+// UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchWithBodyWithResponse request with arbitrary body returning *UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchResponse
+func (c *ClientWithResponses) UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchWithBodyWithResponse(ctx context.Context, collectionKey string, params *UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchResponse, error) {
+	rsp, err := c.UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchWithBody(ctx, collectionKey, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchResponse(rsp)
+}
+
+func (c *ClientWithResponses) UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchWithResponse(ctx context.Context, collectionKey string, params *UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchParams, body UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchResponse, error) {
+	rsp, err := c.UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatch(ctx, collectionKey, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchResponse(rsp)
+}
+
 // DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostWithResponse request returning *DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostResponse
 func (c *ClientWithResponses) DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostWithResponse(ctx context.Context, collectionKey string, params *DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostParams, reqEditors ...RequestEditorFn) (*DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostResponse, error) {
 	rsp, err := c.DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePost(ctx, collectionKey, params, reqEditors...)
@@ -60011,6 +60261,32 @@ func ParseDeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteResponse
 			return nil, err
 		}
 		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchResponse parses an HTTP response from a UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchWithResponse call
+func ParseUpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchResponse(rsp *http.Response) (*UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UpdateDocCollectionEndpointApiV1DocCollectionsCollectionKeyPatchResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest DocCollection
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
 
 	}
 

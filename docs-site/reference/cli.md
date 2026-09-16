@@ -1317,7 +1317,7 @@ meho docs
 
 ### `meho docs collections`
 
-List, create, delete, and probe / toggle doc collections
+List, create, update, delete, and probe / toggle doc collections
 
 ```
 meho docs collections
@@ -1398,6 +1398,23 @@ meho docs collections probe <collection-key> [flags]
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit raw BackendReadiness JSON
+
+#### `meho docs collections update`
+
+Repoint / update an existing doc collection in place (tenant_admin)
+
+```
+meho docs collections update <collection-key> [flags]
+```
+
+- `--backend-ref` — replacement backend config as a JSON object (e.g. '{"endpoint":"https://corpus/v1/search"}'); requires --backend-type; '{}' clears the ref
+- `--backend-type` — replacement search-backend type (e.g. corpus-http); the backend is replaced as a whole
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--description` — replacement free-text description
+- `--from-file` — read the update body (fields to change) from a JSON file instead of the flags
+- `--json` — emit the updated collection as JSON instead of a confirmation line
+- `--product` — replacement product list (repeatable, e.g. --product vsphere --product nsx)
+- `--when-to-use` — replacement 'pick this collection when…' blurb surfaced to agents
 
 ### `meho docs search`
 

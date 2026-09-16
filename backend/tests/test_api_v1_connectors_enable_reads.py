@@ -99,7 +99,12 @@ def client() -> Iterator[TestClient]:
     yield TestClient(_build_app())
 
 
-def _token(*, tenant_id: uuid.UUID, role: str = "tenant_admin") -> tuple[Any, str]:
+def _token(
+    *,
+    tenant_id: uuid.UUID,
+    role: str = "tenant_admin",
+    platform_admin: bool = False,
+) -> tuple[Any, str]:
     """Mint a (private_key, JWT) pair for *tenant_id* with *role*."""
     key = _make_rsa_keypair("kid-enable-reads")
     token = _mint_token(
@@ -107,6 +112,7 @@ def _token(*, tenant_id: uuid.UUID, role: str = "tenant_admin") -> tuple[Any, st
         sub=f"op-{role}",
         tenant_id=str(tenant_id),
         tenant_role=role,
+        platform_admin=platform_admin,
     )
     return key, token
 
@@ -306,12 +312,13 @@ async def test_enable_reads_builtin_only_falls_back_to_global(client: TestClient
     """G0.26-T1 (#1801): a built-in-only label enables its reads, not a 404.
 
     The dogfood footgun in reverse: a connector that exists only as a
-    built-in (``tenant_id IS NULL``) row must enable-reads for a
-    ``tenant_admin`` via the shared-resolver global fallback —
-    matching ``GET /{id}/review`` returning 200 on the same label.
+    built-in (``tenant_id IS NULL``) row must enable-reads via the
+    shared-resolver global fallback — matching ``GET /{id}/review``
+    returning 200 on the same label. Writing the built-in scope is a
+    platform action, so the caller holds ``platform_admin``.
     """
     operator_tenant = uuid.uuid4()
-    key, token = _token(tenant_id=operator_tenant)  # tenant_admin
+    key, token = _token(tenant_id=operator_tenant, platform_admin=True)
     await _seed_rows(tenant_id=None)  # built-in / global rows only
 
     with respx.mock as mock_router:
@@ -328,6 +335,37 @@ async def test_enable_reads_builtin_only_falls_back_to_global(client: TestClient
     for op_id, enabled in builtin_state.items():
         method = op_id.split(":", 1)[0]
         assert enabled is (method in _READ_METHODS)
+
+
+@pytest.mark.asyncio
+async def test_enable_reads_builtin_only_forbidden_for_tenant_admin(
+    client: TestClient,
+) -> None:
+    """A plain ``tenant_admin`` bulk-enabling a built-in-only label → 403.
+
+    The built-in row is shared by every tenant, so writing it needs
+    ``platform_admin``; the route maps
+    :class:`BuiltinConnectorWriteForbiddenError` to a structured 403
+    ``builtin_connector_write_forbidden`` rather than the historical 404
+    or a silent all-tenant flip. Nothing flips.
+    """
+    operator_tenant = uuid.uuid4()
+    key, token = _token(tenant_id=operator_tenant)  # tenant_admin, no platform_admin
+    await _seed_rows(tenant_id=None)  # built-in / global rows only
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            f"/api/v1/connectors/{_CONNECTOR_ID}/enable-reads",
+            headers=_authed(token),
+        )
+
+    assert response.status_code == 403, response.text
+    detail = response.json()["detail"]
+    assert detail["error"] == "builtin_connector_write_forbidden"
+    assert detail["connector_id"] == _CONNECTOR_ID
+    # Nothing flipped on the built-in scope.
+    assert not any((await _ops_enabled_state(None)).values())
 
 
 @pytest.mark.asyncio
@@ -400,9 +438,9 @@ async def test_enable_reads_prefer_tenant_applies_to_tenant_row(client: TestClie
 
 @pytest.mark.asyncio
 async def test_enable_reads_prefer_builtin_applies_to_builtin_row(client: TestClient) -> None:
-    """#2029: ``?prefer=builtin`` flips the built-in row's reads (tenant_admin)."""
+    """#2029: ``?prefer=builtin`` flips the built-in row's reads (platform_admin)."""
     operator_tenant = uuid.uuid4()
-    key, token = _token(tenant_id=operator_tenant)  # tenant_admin
+    key, token = _token(tenant_id=operator_tenant, platform_admin=True)
     await _seed_rows(tenant_id=operator_tenant)
     await _seed_rows(tenant_id=None)
 

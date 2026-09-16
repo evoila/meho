@@ -57,27 +57,53 @@ Origin".
 
 ## Secret custody
 
-Two secrets exist, both operator-held (never in the repo, never in CI
-secrets — the skills run on operator machines):
+The review App credentials are operator-held: never in the repository or CI
+secrets. The normal source is an operator-only MEHO secret path. The helper
+reads each required field through the governed, audited operator primitive;
+it does not use a raw Vault CLI, Vault address, or token.
 
-| Secret | Where it lives | Notes |
+| Secret | Normal custody | Field |
 |---|---|---|
-| App private key (PEM) | 1Password item `meho-review-app`, field `private-key` | generated in the App's settings page; GitHub keeps no copy |
-| Client ID | same item, field `client-id` | not secret in itself, stored alongside for one-stop reads |
+| App private key (PEM) | operator-only MEHO secret path | `private-key` |
+| Client ID | same path | `client-id` |
 
-Optional convenience fields on the same item: `app-id`,
-`installation-id` (the mint script auto-discovers the installation id,
-so this is cache, not contract).
+The path is an operator-owned deployment setting, conventionally under the
+automation review identity namespace (for example
+`automation/review-app/<environment>`). It is supplied at mint time as a
+target and path, not embedded in public source. The target, path, and both
+field names are configurable with `--vault-*` options or matching
+`MEHO_REVIEW_APP_VAULT_*` environment settings.
 
-Canonical read pattern (see the `op-cli` conventions — no secret values
-on command lines):
+Canonical governed read pattern:
 
 ```bash
-op read "op://<vault>/meho-review-app/private-key" | \
-  scripts/setup/mint-review-app-token.sh \
-    --client-id "$(op read --no-newline "op://<vault>/meho-review-app/client-id")" \
-    --key-file -
+scripts/setup/mint-review-app-token.sh \
+  --credential-source governed-vault \
+  --vault-target <operator-vault-target> \
+  --vault-path automation/review-app/<environment>
 ```
+
+The PEM moves from `meho secret read` to OpenSSL through a pipe descriptor and
+is consumed once for signing. It is never printed, placed in argv, written to
+a regular file, or separately parsed before signing.
+
+### Explicit 1Password fallback
+
+1Password remains available for environments whose governed custody has not
+yet been provisioned. Select it explicitly; it is not an implicit fallback
+from a failed governed read:
+
+```bash
+scripts/setup/mint-review-app-token.sh \
+  --credential-source 1password \
+  --op-vault <vault> \
+  --op-item meho-review-app
+```
+
+The item fields default to `client-id` and `private-key` and can be changed
+with `--op-client-id-field` and `--op-private-key-field`. Optional fields
+such as `app-id` and `installation-id` are cache only: installation discovery
+is still the mint contract.
 
 ## Token flow
 
@@ -103,10 +129,10 @@ by integration" on GraphQL reads, and `gh pr view` and friends use
 GraphQL):
 
 ```bash
-MEHO_REVIEW_APP_TOKEN=$(op read "op://<vault>/meho-review-app/private-key" | \
-  scripts/setup/mint-review-app-token.sh \
-    --client-id "$(op read --no-newline "op://<vault>/meho-review-app/client-id")" \
-    --key-file -)
+MEHO_REVIEW_APP_TOKEN=$(scripts/setup/mint-review-app-token.sh \
+  --credential-source governed-vault \
+  --vault-target <operator-vault-target> \
+  --vault-path automation/review-app/<environment>)
 
 # Formal review — the ONLY calls that use the App token:
 GH_TOKEN="$MEHO_REVIEW_APP_TOKEN" gh pr review <n> --repo evoila/meho \
@@ -122,7 +148,8 @@ Contract implemented by
 (review posting) and consumed by the orchestrators' merge gates:
 
 1. **Machine token present** (`MEHO_REVIEW_APP_TOKEN` set, or mintable
-   from the 1Password item via the script above) → post the review
+   from the governed custody path; explicitly from 1Password only where
+   selected) → post the review
    formally under the App identity. `reviewDecision` flips; this is
    the normal path.
 2. **Machine credential absent or invalid** → the mint step fails
@@ -166,18 +193,22 @@ openssl genrsa 2048 2>/dev/null | \
 echo "exit=$?"                                            # expect non-zero, empty stdout
 
 # 3. Degraded posting: run /auto-review-pr with no
-#    MEHO_REVIEW_APP_TOKEN and no 1Password item reachable; verify the
+#    MEHO_REVIEW_APP_TOKEN and no selected credential source reachable; verify the
 #    posted comment opens with the degraded banner and
 #    gh pr view <n> --json reviewDecision is unchanged.
 ```
 
 ## Rotation
 
-- **Routine rotation** (or key compromise): App settings →
-  "Private keys" → *Generate a private key*; update the
-  `meho-review-app` 1Password item; **delete the old key** in the App
-  settings. Deleting the key invalidates JWT minting immediately;
-  already-minted installation tokens die within 1 hour on their own.
+- **Routine rotation** (or key compromise): the review identity custody
+  operator generates a new key in App settings, updates the operator-only
+  governed path, then **deletes the old key** in App settings. The App admin
+  owns GitHub key generation and deletion; the custody operator owns the
+  governed field update and records the rotation. Delete invalidates JWT
+  minting immediately; already-minted installation tokens die within 1 hour.
+- **Fallback-only environments:** update the selected `meho-review-app`
+  1Password item before deleting the old GitHub key, then migrate the
+  environment to governed custody when available.
 - **Immediate revocation** of a live token:
   `DELETE /installation/token` authenticated with that token.
 - **Losing the key entirely** is recoverable: generate a new key in the
@@ -204,36 +235,37 @@ by automation. Record completion in the decision record's
    *Generate a private key*; a `.pem` downloads.
 4. **Install the App** — *Install App* (left sidebar) → `evoila` →
    *Only select repositories* → `evoila/meho` → Install.
-5. **Store the credentials** (then delete the downloaded `.pem`):
+5. **Store the credentials** in the operator-only governed path (then delete
+   the downloaded `.pem`). Provisioning and access policy are owned by the
+   custody operator; the path must expose only `client-id` and `private-key`
+   to the review operator identity. 1Password is a selectable transitional
+   fallback, not the normal source:
 
    ```bash
-   # Per the op-cli template flow — do not put the key on a command line.
-   # Item: meho-review-app, fields: client-id, private-key.
-   # See .claude/skills/op-cli/SKILL.md for the create-via-template shape.
-   op item get meho-review-app --vault <vault> >/dev/null 2>&1 || \
-     echo "create item meho-review-app in <vault> with fields client-id, private-key"
+   # Use the governed custody runbook; never put PEM data on a command line.
    # Plain rm — secure-wipe flags are platform-specific (and moot on
-   # modern filesystems); if the deletion worries you, rotate the key.
+   # modern filesystems); if deletion worries you, rotate the key.
    rm ~/Downloads/meho-review.*.private-key.pem
    ```
 
 6. **Smoke-test the mint path:**
 
    ```bash
-   op read "op://<vault>/meho-review-app/private-key" | \
-     scripts/setup/mint-review-app-token.sh \
-       --client-id "$(op read --no-newline "op://<vault>/meho-review-app/client-id")" \
-       --key-file - | wc -c    # expect a non-zero length, no errors
+   scripts/setup/mint-review-app-token.sh \
+     --credential-source governed-vault \
+     --vault-target <operator-vault-target> \
+     --vault-path automation/review-app/<environment> | wc -c
+   # expect a non-zero length, no errors
    ```
 
 7. **Verify the two-party property on a real PR** (#2733 acceptance
    criterion 1): on any open PR authored by a maintainer,
 
    ```bash
-   GH_TOKEN=$(op read "op://<vault>/meho-review-app/private-key" | \
-     scripts/setup/mint-review-app-token.sh \
-       --client-id "$(op read --no-newline "op://<vault>/meho-review-app/client-id")" \
-       --key-file -) \
+   GH_TOKEN=$(scripts/setup/mint-review-app-token.sh \
+     --credential-source governed-vault \
+     --vault-target <operator-vault-target> \
+     --vault-path automation/review-app/<environment>) \
    gh pr review <n> --repo evoila/meho --approve --body "Provisioning smoke test (#2733)."
    gh pr view <n> --repo evoila/meho --json reviewDecision   # expect "APPROVED"
    ```

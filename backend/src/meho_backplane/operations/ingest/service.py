@@ -117,6 +117,7 @@ from meho_backplane.operations.ingest.delete_connector import (
 )
 from meho_backplane.operations.ingest.exceptions import (
     AmbiguousConnectorScopeError,
+    BuiltinConnectorWriteForbiddenError,
     ConnectorNotFoundError,
     ConnectorScopeCandidate,
     InvalidStateTransitionError,
@@ -284,16 +285,17 @@ class ReviewService:
           miss, not a silent slide to the built-in row.
         * ``prefer == "builtin"`` — the built-in (``tenant_id IS NULL``)
           scope, which must hold rows or :class:`ConnectorNotFoundError`.
-          No extra gate here: this mirrors the un-preferred built-in
-          fall-back in :meth:`_resolve_existing_scope`, which returns the
-          built-in scope to a tenant operator without re-gating — built-in
-          *reads* are operator-level by design (matching the list endpoint
-          + the #1135 read fall-back), and built-in *writes*
-          (:meth:`enable_reads`) are already ``tenant_admin``-gated at the
-          surface (the REST route's ``_require_admin`` dependency and the
-          MCP tool's ``required_role=TENANT_ADMIN``). So ``prefer=builtin``
-          grants no access the operator did not already have on the
-          built-in scope through the un-preferred path.
+          No scope selection happens beyond naming the built-in row:
+          this mirrors the un-preferred built-in fall-back in
+          :meth:`_resolve_existing_scope`, which returns the built-in scope
+          to a tenant operator. Built-in *reads* are operator-level by
+          design (matching the list endpoint + the #1135 read fall-back);
+          built-in *writes* (:meth:`enable_reads`) additionally require
+          ``platform_admin`` — the caller applies
+          :meth:`_require_platform_admin_for_builtin` to whatever scope
+          this returns, so ``prefer=builtin`` grants no write access a
+          plain ``tenant_admin`` did not already have (it is refused with
+          :class:`BuiltinConnectorWriteForbiddenError`).
         """
         if prefer == "builtin":
             builtin_scope = ConnectorScope(
@@ -342,7 +344,9 @@ class ReviewService:
           the footgun #1801 closes); only one exists → that scope (the
           built-in-only case is the G0.13-T5 #1135 global fall-back,
           now shared with writes and intentionally operator-readable —
-          writes are ``tenant_admin``-gated at the route); neither →
+          built-in writes are additionally ``platform_admin``-gated by
+          the caller, see :meth:`_require_platform_admin_for_builtin`);
+          neither →
           :class:`ConnectorNotFoundError`.
 
         ``prefer`` (G0.26-T? #2029) makes the ambiguity *actionable*
@@ -405,6 +409,86 @@ class ReviewService:
         if tenant_exists:
             return scope
         if builtin_exists:
+            return builtin_scope
+        raise ConnectorNotFoundError(
+            connector_id=connector_id,
+            tenant_id=tenant_id,
+        )
+
+    def _require_platform_admin_for_builtin(
+        self,
+        connector_id: str,
+        scope: ConnectorScope,
+    ) -> None:
+        """Gate a mutating action on a built-in (``tenant_id IS NULL``) row.
+
+        A built-in connector row is a shared, global-catalogue entry every
+        tenant sees, so mutating it (enable / disable / bulk-enable-reads /
+        edit-group / edit-op) affects every tenant and is a platform action.
+        Mirrors :func:`~meho_backplane.docs_collections.service.update_doc_collection`'s
+        global-row seat (#3616): a ``tenant_admin`` without
+        ``platform_admin`` is refused with
+        :class:`BuiltinConnectorWriteForbiddenError` (the fronts map it to
+        REST ``403`` / MCP ``-32602``), never the historical ``404``. A
+        tenant-scoped row (``scope.tenant_id`` is a UUID) is a no-op here:
+        the route's ``tenant_admin`` floor already authorises it.
+        """
+        if scope.tenant_id is None and not self._operator.platform_admin:
+            raise BuiltinConnectorWriteForbiddenError(connector_id=connector_id)
+
+    async def _resolve_writable_scope(
+        self,
+        connector_id: str,
+        tenant_id: UUID | None,
+        session: AsyncSession,
+    ) -> ConnectorScope:
+        """Resolve ``(connector_id, tenant_id)`` for a mutating state/edit action.
+
+        The write counterpart to :meth:`_resolve_existing_scope` for the
+        transition + edit paths (:meth:`enable_connector`,
+        :meth:`disable_connector`, :meth:`edit_op`, :meth:`edit_group`),
+        which historically resolved strictly inside the caller's tenant via
+        :meth:`_resolve_scope` and so ``404``'d on a built-in-only label
+        that no tenant had shadow-copied. Authorises + parses via
+        :meth:`_resolve_scope`, then resolves **tenant-preferring** with a
+        built-in fall-back:
+
+        * the operator's own tenant row when it holds rows — today's
+          behaviour, unchanged, including the #2085 shadow-copy case: a
+          tenant shadow of a built-in is still enabled / edited in tenant
+          scope, gated by the route's ``tenant_admin`` floor.
+        * else the built-in (``tenant_id IS NULL``) row when it holds
+          rows — the G0.13-T5 #1135 global fall-back these write paths
+          lacked. Mutating it requires ``operator.platform_admin``
+          (:meth:`_require_platform_admin_for_builtin` ->
+          :class:`BuiltinConnectorWriteForbiddenError`, a ``403`` not a
+          ``404``), mirroring the doc-collection global-row gate (#3616).
+        * neither → :class:`ConnectorNotFoundError` (the ``404``
+          conflation every sibling method uses).
+
+        Unlike :meth:`_resolve_existing_scope` this does **not** raise
+        :class:`AmbiguousConnectorScopeError` when both a tenant row and a
+        built-in row exist: the transition + edit surfaces never wired the
+        #1801 disambiguation (only ``/review`` + ``/enable-reads`` did), so
+        they have always silently acted on the tenant row in that case and
+        that behaviour is deliberately preserved. When ``tenant_id is
+        None`` (the MCP admin path's explicit built-in probe) the tenant
+        branch is skipped and the built-in row is resolved (still behind
+        the ``platform_admin`` gate). A cross-tenant ``tenant_id`` never
+        reaches here: :meth:`_resolve_scope` -> :meth:`_authorize_scope`
+        already collapsed it into :class:`ConnectorNotFoundError`.
+        """
+        scope = self._resolve_scope(connector_id, tenant_id)
+        if tenant_id is not None and await scope_has_groups(session, scope):
+            return scope
+        builtin_scope = ConnectorScope(
+            product=scope.product,
+            version=scope.version,
+            impl_id=scope.impl_id,
+            tenant_id=None,
+        )
+        if await scope_has_groups(session, builtin_scope):
+            self._require_platform_admin_for_builtin(connector_id, builtin_scope)
             return builtin_scope
         raise ConnectorNotFoundError(
             connector_id=connector_id,
@@ -592,9 +676,9 @@ class ReviewService:
             raise ValueError(
                 "edit_group requires at least one of when_to_use or name",
             )
-        scope = self._resolve_scope(connector_id, tenant_id)
         sessionmaker = self._sessionmaker()
         async with sessionmaker() as session:
+            scope = await self._resolve_writable_scope(connector_id, tenant_id, session)
             group = await load_group(session, scope, connector_id, group_key)
             fields_updated: list[str] = []
             if when_to_use is not None:
@@ -684,9 +768,9 @@ class ReviewService:
             is_enabled=is_enabled,
             llm_instructions=llm_instructions,
         )
-        scope = self._resolve_scope(connector_id, tenant_id)
         sessionmaker = self._sessionmaker()
         async with sessionmaker() as session:
+            scope = await self._resolve_writable_scope(connector_id, tenant_id, session)
             op_row = await load_op(session, scope, connector_id, op_id)
             fields_updated = apply_op_overrides(
                 op_row,
@@ -878,7 +962,7 @@ class ReviewService:
         *prefer* (G0.26-T? #2029) resolves the ambiguous-scope 409
         directly: ``prefer="tenant"`` applies to the tenant row,
         ``prefer="builtin"`` to the built-in row (still behind the
-        ``tenant_admin`` gate :meth:`_resolve_existing_scope` re-checks),
+        ``platform_admin`` gate this method applies after resolution),
         and ``prefer=None`` (the default) keeps the fail-loud raise.
         """
         sessionmaker = self._sessionmaker()
@@ -894,6 +978,13 @@ class ReviewService:
                 session,
                 prefer=prefer,
             )
+            # A built-in row is shared by every tenant, so bulk-enabling its
+            # reads is a platform action (#3616 parity): a tenant_admin
+            # without platform_admin is refused here (403 / -32602), the same
+            # gate the transition + edit paths apply via
+            # _resolve_writable_scope. Resolution (incl. the #1801 ambiguity
+            # 409 and the prefer selector) is untouched.
+            self._require_platform_admin_for_builtin(connector_id, scope)
             ops_enabled = await bulk_enable_read_ops(session, scope)
             if ops_enabled == 0:
                 # Idempotent no-op: nothing changed, so write no audit
@@ -1066,9 +1157,9 @@ class ReviewService:
         raises :class:`InvalidStateTransitionError`. Idempotent
         path: empty transitionable set → no audit row.
         """
-        scope = self._resolve_scope(connector_id, tenant_id)
         sessionmaker = self._sessionmaker()
         async with sessionmaker() as session:
+            scope = await self._resolve_writable_scope(connector_id, tenant_id, session)
             groups = await load_groups(session, scope, connector_id)
             transitionable = []
             rejected = []

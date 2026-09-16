@@ -633,6 +633,8 @@ class OperationResult(BaseModel):
     error: str | None = None
     duration_ms: float
     handle: ResultHandle | None = None
+    audit_id: UUID | None = None
+    delivery: Literal["complete", "partial", "unavailable"] | None = None
     extras: Mapping[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")

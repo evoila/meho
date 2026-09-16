@@ -920,7 +920,7 @@ async def _reduce_and_audit_success(
     summary, handle = reduced
     duration_ms = _elapsed_ms(started)
     try:
-        await audit_and_broadcast_safe(
+        receipt = await audit_and_broadcast_safe(
             audit_id=audit_id,
             operator=operator,
             descriptor=descriptor,
@@ -970,6 +970,7 @@ async def _reduce_and_audit_success(
         duration_ms,
         handle,
         extras={**activity_advisory, **checks_advisory, **reflex_advisory},
+        audit_id=receipt,
     )
 
 
@@ -1417,10 +1418,9 @@ async def _audit_error_and_return(
     passes the one ``duration_ms`` it built the result with. The broadcast
     frame is untouched (params-only) -- the envelope rides the audit row alone.
 
-    *raw_payload* / *redaction_manifest* / *redaction_policy_id* carry the
-    connector-boundary redaction artefacts through for the one error arm that
-    has them (the post-redaction reducer failure in :func:`_reduce_or_error`);
-    ``None`` for the pre-response error arms. Fail-open on the audit write is
+    *raw_payload* / *redaction_manifest* / *redaction_policy_id* are available
+    to error arms that already hold connector-boundary redaction artefacts;
+    pre-response error arms pass ``None``. Fail-open on the audit write is
     preserved: ``audit_and_broadcast_safe`` swallows its own internal failures,
     so the never-raises contract holds and the built ``result`` is always
     returned.
@@ -1913,6 +1913,58 @@ def _result_digest_from_descriptor(descriptor: EndpointDescriptor) -> dict[str, 
     return None
 
 
+async def _unavailable_delivery_result(
+    *,
+    op_id: str,
+    descriptor: EndpointDescriptor,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    params_hash: str,
+    audit_id: uuid.UUID,
+    duration_ms: float,
+    raw_payload: Any | None,
+    redaction_manifest: list[dict[str, Any]] | None,
+    redaction_policy_id: str | None,
+) -> OperationResult:
+    """Record a completed handler whose response could not be shaped.
+
+    The handler already returned successfully. A reducer failure must not invite a
+    retry, particularly for a mutation; the audit receipt is exposed only when its
+    write committed.
+    """
+    try:
+        receipt = await audit_and_broadcast_safe(
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            result_status="ok",
+            duration_ms=duration_ms,
+            raw_payload=raw_payload,
+            redaction_manifest=redaction_manifest,
+            redaction_policy_id=redaction_policy_id,
+            require_audit=_requires_durable_audit(descriptor),
+        )
+    except AuditCommitError as exc:
+        return result_connector_error(op_id, exc, duration_ms)
+    return OperationResult(
+        status="ok",
+        op_id=op_id,
+        duration_ms=duration_ms,
+        audit_id=receipt,
+        delivery="unavailable",
+        extras={
+            "remediation": (
+                "Operation already executed; inspect its audit record when an audit_id is present, "
+                "or inspect operation status. Do not re-invoke it."
+            )
+        },
+    )
+
+
 async def _reduce_or_error(
     *,
     op_id: str,
@@ -1928,7 +1980,7 @@ async def _reduce_or_error(
     redaction_manifest_for_audit: list[dict[str, Any]] | None = None,
     redaction_policy_id: str | None = None,
 ) -> tuple[Any, ResultHandle | None] | OperationResult:
-    """Run the JSONFlux reducer; return ``(summary, handle)`` or a structured error.
+    """Run the reducer; return ``(summary, handle)`` or completed-delivery state.
 
     The dispatcher's module docstring contracts "never raises". The
     :class:`~meho_backplane.operations.reducer.PassThroughReducer` shim can't
@@ -1936,10 +1988,9 @@ async def _reduce_or_error(
     :class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
     (and other swappable reducers — DuckDB materialization, future MinIO/S3
     I/O, schema validation) can. Any reducer exception is
-    converted to a structured ``connector_error``
-    :class:`OperationResult` — same shape the handler-call exception path
-    produces — and the audit row + broadcast event still fire so the
-    failure is observable.
+    converted into an ``ok`` result with unavailable delivery because the handler
+    already completed. The audit row keeps the governed diagnostics while the caller
+    receives only stable remediation, never exception text.
 
     *raw_payload_for_audit* / *redaction_manifest_for_audit* /
     *redaction_policy_id* carry the connector-boundary redaction
@@ -2016,17 +2067,16 @@ async def _reduce_or_error(
             descriptor.response_schema,
             reducer_context,
         )
-    except Exception as exc:
-        duration_ms = _elapsed_ms(started)
-        return await _audit_error_and_return(
-            result_connector_error(op_id, exc, duration_ms),
-            audit_id=audit_id,
-            operator=operator,
+    except Exception:
+        return await _unavailable_delivery_result(
+            op_id=op_id,
             descriptor=descriptor,
+            operator=operator,
             target=target,
             params=params,
             params_hash=params_hash,
-            duration_ms=duration_ms,
+            audit_id=audit_id,
+            duration_ms=_elapsed_ms(started),
             raw_payload=raw_payload_for_audit,
             redaction_manifest=redaction_manifest_for_audit,
             redaction_policy_id=redaction_policy_id,

@@ -36,6 +36,7 @@ import uuid
 from collections.abc import Mapping
 from functools import lru_cache
 from typing import Any, Literal
+from uuid import UUID
 
 import httpx
 
@@ -1964,6 +1965,8 @@ def wrap_ok_result(
     duration_ms: float,
     handle: ResultHandle | None,
     extras: Mapping[str, Any] | None = None,
+    audit_id: UUID | None = None,
+    delivery: Literal["complete", "partial", "unavailable"] | None = "complete",
 ) -> OperationResult:
     """Build a successful :class:`OperationResult` from a reducer's output.
 
@@ -1989,6 +1992,8 @@ def wrap_ok_result(
         result=result_value,
         duration_ms=duration_ms,
         handle=handle,
+        audit_id=audit_id,
+        delivery=delivery,
         extras=extras if extras is not None else {},
     )
 

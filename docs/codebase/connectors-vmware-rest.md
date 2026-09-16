@@ -1142,10 +1142,19 @@ task, timeout_seconds=600, poll_interval=2)` re-reads `Task.info` (via
 builder generalized from `tasks.recent`) on a fixed cadence until the vim
 state is `success` / `error` or the wall-clock deadline elapses, returning
 a `VimTaskResult{task, state, result, error_message, progress}`. On a
-fault, `error_message` carries the best available description via a
-fallback chain (#3116): `error.localizedMessage` (optional on the wire) →
-the joined `fault.faultMessage[*].message` texts → the concrete fault's
-`_typeName` (e.g. `InvalidArgument`) — so every vim-arm composite's
+fault, `error_message` carries the best available description via the
+shared `vim_body.fault_message` extractor, which spans both VI-JSON fault
+shapes. On **9.x** `TaskInfo.error` is a `LocalizedMethodFault` and the
+chain (#3116) is `error.localizedMessage` (optional on the wire) → the
+joined `fault.faultMessage[*].message` texts → the concrete fault's
+`_typeName` (e.g. `InvalidArgument`). On **8.0.x** the concrete fault is
+flattened directly onto `error` (`_typeName` + `faultstring`, no
+`LocalizedMethodFault` wrapper and no nested `fault`); the extractor reads
+`error.faultstring` / its joined `faultMessage` and prefixes the concrete
+`_typeName`, surfacing e.g. `InvalidArgument: A specified parameter was
+not correct: configSpec.guestId` where the 9.x-only chain previously lost
+the text (#3663). The same helper backs `tasks.recent`'s `error_message`
+and the OVF/lease `fault_text` projection. Every vim-arm composite's
 `rollback_reason` degrades to `<no fault reported>` only when the
 `TaskInfo` truly carries no fault content. It does
 **not** raise on a task *fault* — the outcome is a legible value each

@@ -60,7 +60,7 @@ from meho_backplane.connectors.vmware_rest.typed_ops import _int_or_none, _unwra
 from meho_backplane.connectors.vmware_rest.typed_ops_tasks_recent import (
     build_task_info_retrieve_params,
 )
-from meho_backplane.connectors.vmware_rest.vim_body import unwrap_vim_value
+from meho_backplane.connectors.vmware_rest.vim_body import fault_message, unwrap_vim_value
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -189,47 +189,17 @@ def _extract_task_info(retrieve_result: Any, task_moid: str) -> dict[str, Any] |
 
 
 def _fault_message(info: dict[str, Any]) -> str | None:
-    """Return the best fault description from a faulted ``TaskInfo`` (#3116).
+    """Return the best fault description from a faulted ``TaskInfo``.
 
-    ``TaskInfo.error`` is a ``LocalizedMethodFault`` -- ``localizedMessage``
-    plus the concrete ``fault`` DataObject -- and ``localizedMessage`` is
-    optional on the wire, so the extraction falls back through the fault
-    body rather than discarding it:
-
-    1. ``error.localizedMessage`` -- the server-localized text, when present;
-    2. ``fault.faultMessage[*].message`` joined -- each ``LocalizableMessage``
-       carries an optional per-message text;
-    3. ``fault._typeName`` -- the concrete fault class (``InvalidArgument``,
-       ...), always tagged on a live VI-JSON DataObject.
-
-    Returns ``None`` -- the callers' ``<no fault reported>`` path -- only
-    when the ``TaskInfo`` carries no usable fault content at all. Boxed
-    nested primitives (the #3106 live-8.0.3 shape) are already bare here:
-    :func:`_extract_task_info` funnels the whole ``TaskInfo`` through the
-    recursive :func:`unwrap_vim_value` before any field read.
+    Delegates to the shared :func:`vim_body.fault_message`, which handles
+    both the 9.x ``LocalizedMethodFault`` shape (#3116) and the 8.0.x
+    flattened VI-JSON ``info.error`` shape where the concrete fault
+    (``faultstring`` / ``_typeName``) sits directly on ``error`` (#3663).
+    Boxed nested primitives (the #3106 live-8.0.3 shape) are already bare
+    here: :func:`_extract_task_info` funnels the whole ``TaskInfo`` through
+    the recursive :func:`unwrap_vim_value` before any field read.
     """
-    error = info.get("error")
-    if not isinstance(error, dict):
-        return None
-    localized = error.get("localizedMessage")
-    if isinstance(localized, str) and localized.strip():
-        return localized
-    fault = error.get("fault")
-    if not isinstance(fault, dict):
-        return None
-    fault_messages = fault.get("faultMessage")
-    if isinstance(fault_messages, list):
-        texts = [
-            message
-            for entry in fault_messages
-            if isinstance(entry, dict)
-            and isinstance(message := entry.get("message"), str)
-            and message.strip()
-        ]
-        if texts:
-            return "; ".join(texts)
-    type_name = fault.get("_typeName")
-    return type_name if isinstance(type_name, str) and type_name.strip() else None
+    return fault_message(info.get("error"))
 
 
 def _progress(info: dict[str, Any]) -> int | None:

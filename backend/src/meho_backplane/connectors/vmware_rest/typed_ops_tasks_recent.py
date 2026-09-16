@@ -38,6 +38,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.vmware_rest.session import VsphereTargetLike
 from meho_backplane.connectors.vmware_rest.typed_ops import VmwareTypedOp, _unwrap_value
 from meho_backplane.connectors.vmware_rest.vim_body import (
+    fault_message,
     retrieve_properties_body,
     unwrap_vim_value,
 )
@@ -129,11 +130,10 @@ def _extract_recent_task_moids(retrieve_result: Any) -> list[str]:
 def _parse_task_info(task_moid: str, info: Any) -> dict[str, Any]:
     """Flatten one :class:`TaskInfo` into the operator-facing row."""
     ti = info if isinstance(info, dict) else {}
-    error = ti.get("error")
-    error_message = None
-    if isinstance(error, dict):
-        localized = error.get("localizedMessage")
-        error_message = localized if isinstance(localized, str) else None
+    # Shared extractor: handles both the 9.x ``LocalizedMethodFault`` shape
+    # and the 8.0.x flattened ``info.error`` fault (#3663), so a faulted
+    # recent task surfaces its text on either vCenter version.
+    error_message = fault_message(ti.get("error"))
     entity = ti.get("entity")
     return {
         "task": task_moid,

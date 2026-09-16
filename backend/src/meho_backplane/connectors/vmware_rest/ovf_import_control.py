@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors.vmware_rest.vim_body import (
     VIM_TYPE_NAME_KEY,
+    fault_message,
     retrieve_properties_body,
     unwrap_vim_value,
     vim_moref,
@@ -93,28 +94,14 @@ def issue(category: str, severity: str, message: str) -> dict[str, Any]:
 def fault_text(fault: Any) -> str:
     """Best human-readable text from a vim ``MethodFault`` / ``LocalizedMethodFault``.
 
-    Mirrors :func:`vim_task._fault_message`'s fallback order:
-    ``localizedMessage`` -> joined ``faultMessage[*].message`` -> the fault's
-    ``_typeName`` concrete class -- so a genuine placement / OVF fault reaches
-    the operator as text, never a bare ``<no message>``.
+    Delegates to the shared :func:`vim_body.fault_message`, which handles
+    both the 9.x ``LocalizedMethodFault`` shape and the 8.0.x flattened
+    VI-JSON fault where ``faultstring`` / ``_typeName`` sit directly on the
+    fault object (#3663) -- so a genuine placement / OVF fault reaches the
+    operator as text on either vCenter version, falling back to
+    ``<no fault reported>`` only when no usable content exists.
     """
-    if not isinstance(fault, dict):
-        return "<no fault reported>"
-    localized = fault.get("localizedMessage")
-    if isinstance(localized, str) and localized.strip():
-        return localized
-    body = fault.get("fault") if isinstance(fault.get("fault"), dict) else fault
-    messages = body.get("faultMessage") if isinstance(body, dict) else None
-    if isinstance(messages, list):
-        texts = [
-            m
-            for entry in messages
-            if isinstance(entry, dict) and isinstance(m := entry.get("message"), str) and m.strip()
-        ]
-        if texts:
-            return "; ".join(texts)
-    type_name = body.get("_typeName") if isinstance(body, dict) else None
-    return type_name if isinstance(type_name, str) and type_name.strip() else "<no fault reported>"
+    return fault_message(fault) or "<no fault reported>"
 
 
 def _cisp_body(placement: ImportPlacement) -> dict[str, Any]:

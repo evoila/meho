@@ -24,11 +24,13 @@ per-op MCP tool family:
   The add-on publishes its **full** API (~30 mutating routes: tenant / site /
   adoption / run DELETEs, fleet import, blueprint / environment / deployment
   CRUD), but this connector's op set is **closed** to exactly launch /
-  validate / gate plus the two run-read GETs a governed launcher needs to
-  observe the run it created (#3699) — a declarative catalog op-allowlist
-  enforces that closure in code (see
-  [Ingest op allowlist](#ingest-op-allowlist) below).
-- **No new agent tools.** The five curated ops ride `op_id` under
+  validate / gate / resume plus the two run-read GETs a governed launcher needs
+  to observe the run it created (#3699) and nudge a failed node in (#3707) — a
+  declarative catalog op-allowlist enforces that closure in code (see
+  [Ingest op allowlist](#ingest-op-allowlist) below). The sibling run-node
+  **skip** route is human-only in the add-on and is deliberately kept off this
+  surface (see [Run-node control](#run-node-control-resume-vs-skip)).
+- **No new agent tools.** The six curated ops ride `op_id` under
   `call_operation`; the MCP working surface is unchanged (no per-op tools).
 
 Dispatch triple: `(product="mehoauto", version="0.1.0",
@@ -59,6 +61,7 @@ eager-imported at boot like every other connector subpackage.
 | `POST:/api/v1/runs` | Launch a run | `caution` (no approval park) |
 | `POST:/api/v1/blueprints/{blueprint_id}/validate` | Validate a blueprint (read-side dry-run) | `caution` (no approval park) |
 | `POST:/api/v1/runs/{run_id}/gates/{node_id}/decision` | Decide an in-run gate | `caution` (no approval park) |
+| `POST:/api/v1/runs/{run_id}/nodes/{node_id}/resume` | Re-check or re-run a failed run node (agent nudge; `action` = `recheck`\|`rerun`) | `caution` (no approval park) |
 | `GET:/api/v1/runs/{run_id}` | Read a single run (carries `awaiting_decision_nodes` + per-node states — the authoritative terminality / gate-readiness source) | `safe` |
 | `GET:/api/v1/runs` | List runs (set-shaped) | `safe` |
 
@@ -71,7 +74,7 @@ validates it and rejects a body missing any field its schema requires.
 created through the same dispatch path, instead of inferring terminality from a
 second gate-decision call (a write used as a read). They are read-class, so the
 generic verb heuristic lands them `safe` — below the `caution` write floor — and
-the connector-owned safety floor pins no key for them (it only pins the three
+the connector-owned safety floor pins no key for them (it only pins the four
 write ops; see [the pin](#safety-tiers-and-the-pin)). `GET:/api/v1/runs` is
 set-shaped: a large run list rides the backplane's result-handle / JSONFlux
 reducer path (v0.1-spec §4) automatically once the op is dispatchable — no agent
@@ -89,9 +92,33 @@ discovery is a separate concern that can be added under its own change if a
 governed launcher needs it. Keeping it out holds the op set to the minimum the
 lab proof exercised.
 
+### Run-node control (resume vs skip)
+
+The add-on exposes two run-node control routes for a **failed** node:
+`POST /api/v1/runs/{run_id}/nodes/{node_id}/resume` (body
+`{"action":"recheck"|"rerun"}`) and `POST .../skip`. Only **resume** is on this
+connector's surface (#3707): a governed launcher that has observed a failed node
+through the run-read GETs can nudge it — re-check or re-run — through the same
+`call_operation` dispatch path instead of an out-of-band call. Resume is a
+write (POST), so it rides the `caution` write floor with **`requires_approval=False`**
+(a nudge on the add-on's own run, audited synchronously; the add-on's in-run
+gate nodes remain the human control, the same operator decision as
+launch/gate/validate).
+
+The sibling **skip** route — which abandons a node — is a **human-only**
+decision in the add-on and is deliberately kept **off** this surface: it is
+added to **no** production file (allowlist, safety floor, or profile). Because
+the `op_allowlist` keys on `(method, path)` only, the skip pair shares resume's
+method but not its path, so it never matches the allowlist and is dropped before
+persistence like every other non-allowlisted route — an agent cannot reach it
+through `call_operation`. A negative test
+(`test_shipped_mehoauto_allowlist_excludes_the_run_node_skip_op` in
+`test_operations_ingest_catalog.py`) and a wide-spec-ingest drop assertion
+(`test_connectors_meho_automation.py`) enforce that omission.
+
 ### Safety tiers and the pin
 
-The three **write** routes are POSTs, so the generic ingest heuristic
+The four **write** routes are POSTs, so the generic ingest heuristic
 classifies each `caution` by default (#3563). The connector-owned floor
 (`meho_automation_safety_floor`) **pins** the decided tiers so a spec
 re-ingest — or a future change to the verb heuristic — cannot silently drift
@@ -105,6 +132,12 @@ them:
   immediately with no approval park, so the tier is operationally identical
   to a lower one here; pinning it `caution` keeps the decided tier the same
   whether or not the floor registration is in force at ingest time.
+- run-node resume → `caution`, **`requires_approval=False`** (#3707). An agent
+  nudge that re-checks or re-runs a failed node on the add-on's own run,
+  audited synchronously; the add-on's in-run gate nodes remain the human
+  control. The sibling human-only **skip** route is deliberately off this
+  surface (see [Run-node control](#run-node-control-resume-vs-skip)), so it is
+  neither allowlisted nor floor-pinned.
 
 The two **run-read GETs** (#3699) are read-class: the same verb heuristic
 lands them `safe`, below the `caution` write floor, so the floor pins **no**
@@ -245,23 +278,25 @@ so the value never transits an operator terminal or shell history.
 
    That OpenAPI document is the add-on's **full** API (~30 mutating routes),
    but the catalog op-allowlist (see below) drops every route except the
-   five curated ops **before persistence** regardless of how wide the
-   document is, so exactly five `EndpointDescriptor` rows land —
+   six curated ops **before persistence** regardless of how wide the
+   document is, so exactly six `EndpointDescriptor` rows land —
    `POST /api/v1/runs` (launch),
    `POST /api/v1/blueprints/{blueprint_id}/validate` (validate),
    `POST /api/v1/runs/{run_id}/gates/{node_id}/decision` (gate),
+   `POST /api/v1/runs/{run_id}/nodes/{node_id}/resume` (run-node resume),
    `GET /api/v1/runs/{run_id}` (single-run read), and
    `GET /api/v1/runs` (run list) — **staged / disabled**
    (`is_enabled=false`, `source_kind=ingested`) with the tiers above (the
-   three writes pinned `caution`, the two reads `safe`). The ingest result
+   four writes pinned `caution`, the two reads `safe`). The ingest result
    reports the dropped count + the dropped `(method, path)` list. Because the
-   ~27 dropped mutating routes are never persisted and never staged, the
+   ~26 dropped mutating routes — including the human-only run-node `.../skip`
+   sibling of resume — are never persisted and never staged, the
    `enable` in the next step cannot cascade `is_enabled=true` onto a tenant/run
-   DELETE or a fleet import.
+   DELETE, a fleet import, or the skip route.
 
 3. **Review the LLM-proposed op groups + per-group hints**, then **enable**
    the connector (staged → enabled) once the surface looks right. Enable is
-   safe: only the five allowlisted ops exist to enable. The two run-read GETs
+   safe: only the six allowlisted ops exist to enable. The two run-read GETs
    land in the **Run Monitoring** group — confirm its when-to-use hint reads
    well before enabling.
 
@@ -302,7 +337,7 @@ so the value never transits an operator terminal or shell history.
 The add-on's `/openapi.json` publishes its full API — ~30 mutating routes
 across tenant / site / adoption / run (including DELETEs), fleet import, and
 blueprint / environment / deployment CRUD. This connector's design invariant
-is that its op set is **closed** to exactly five operations — three writes and
+is that its op set is **closed** to exactly six operations — four writes and
 the two run-read GETs (#3699):
 
 | op | `(method, path)` | tier |
@@ -310,12 +345,17 @@ the two run-read GETs (#3699):
 | launch | `POST /api/v1/runs` | `caution` |
 | validate | `POST /api/v1/blueprints/{blueprint_id}/validate` | `caution` |
 | gate decision | `POST /api/v1/runs/{run_id}/gates/{node_id}/decision` | `caution` |
+| run-node resume | `POST /api/v1/runs/{run_id}/nodes/{node_id}/resume` | `caution` |
 | single-run read | `GET /api/v1/runs/{run_id}` | `safe` |
 | run list | `GET /api/v1/runs` | `safe` |
 
+The sibling `POST /api/v1/runs/{run_id}/nodes/{node_id}/skip` route is
+**not** on this list — it is human-only in the add-on (see
+[Run-node control](#run-node-control-resume-vs-skip)).
+
 That closure is enforced in code, declared in data. The catalog row
 (`operations/ingest/catalog.yaml`, product `mehoauto`) declares an
-`op_allowlist` naming exactly those five `(method, path)` pairs. On the
+`op_allowlist` naming exactly those six `(method, path)` pairs. On the
 ingest path — for both a first ingest and any re-ingest of a wider spec —
 `operations/ingest/op_allowlist.py` drops every parsed operation outside the
 allowlist **before persistence**: dropped ops are never written and never
@@ -327,7 +367,7 @@ drop.
 The allowlist `(method, path)` pairs are kept consistent with the
 connector-owned safety floor's pinned keys
 (`connectors/meho_automation/ingest_safety.py`) by a drift-guard test. The
-floor pins only the three write ops (`caution`); the two GET reads land `safe`
+floor pins only the four write ops (`caution`); the two GET reads land `safe`
 naturally and need no floor entry. So the invariant the guard enforces is a
 **subset** relation, not equality: every floor-pinned key must be on the
 allowlist (a pinned op must be persistable), and the allowlist's only extra

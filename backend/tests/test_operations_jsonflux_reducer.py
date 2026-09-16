@@ -934,6 +934,44 @@ class _NamespaceStatusConnector:
         }
 
 
+class _NamespaceIORecorder:
+    """Connector double that records any I/O so a reject-before-I/O test can prove none fired."""
+
+    def __init__(self) -> None:
+        self.io_calls: list[str] = []
+
+    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
+        del target, operator
+        return f"/api{path}"
+
+    async def adapt_op_query(
+        self, target: Any, query: dict[str, Any] | None, operator: Operator
+    ) -> dict[str, Any] | None:
+        del target, operator
+        return query or None
+
+    async def _get_json(
+        self, target: Any, path: str, *, operator: Operator, params: Any = None
+    ) -> dict[str, Any]:
+        del target, operator, params
+        self.io_calls.append(f"GET {path}")
+        return {"value": {}}
+
+    async def _post_json(
+        self,
+        target: Any,
+        path: str,
+        *,
+        operator: Operator,
+        verb: str = "POST",
+        json: Any = None,
+        timeout: Any = None,
+    ) -> Any:
+        del target, operator, json, timeout
+        self.io_calls.append(f"{verb} {path}")
+        return None
+
+
 def _make_operator() -> Operator:
     """Construct an :class:`Operator` directly — no JWT round-trip."""
     return Operator(
@@ -2291,6 +2329,47 @@ async def test_namespace_status_descriptor_keeps_poll_scalars_when_messages_redu
     assert result.result["source_key"] == "messages"
     assert "messages" not in result.result
     assert result.result["stats"] == {"cpu_used": 1, "memory_used": 2, "storage_used": 3}
+
+
+@pytest.mark.parametrize(
+    "namespace",
+    ["../other", "a/b", "name?x=1", "name#fragment", "name\n", "a" * 64],
+)
+async def test_namespace_delete_dispatch_rejects_path_injecting_name_before_io(
+    stub_embedding_service: AsyncMock, namespace: str
+) -> None:
+    """Handler-level guard: a path-injecting namespace is rejected before any I/O.
+
+    ``vmware.composite.namespace.delete`` interpolates the name into the DELETE
+    path via ``_split_sub_op``.  The dispatcher validates ``params`` against the
+    DNS-label ``parameter_schema`` (Step 3) before the handler runs, so a name
+    carrying path / query / fragment / newline syntax (or an over-length label)
+    returns ``invalid_params`` and the connector never issues the destructive
+    DELETE or the read-back GET -- the schema is the reject-before-I/O guard on
+    the real dispatch path, not only in schema-object isolation.
+    """
+    await register_vmware_composite_operations(embedding_service=stub_embedding_service)
+    register_connector_v2(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        cls=VmwareRestConnector,
+    )
+    recorder = _NamespaceIORecorder()
+    _CONNECTOR_INSTANCE_CACHE[VmwareRestConnector] = recorder  # type: ignore[assignment]
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id="vmware.composite.namespace.delete",
+        target=_FakeVmwareTarget(),
+        params={"namespace": namespace},
+    )
+
+    assert result.status == "error"
+    assert result.extras["error_code"] == "invalid_params"
+    # The destructive DELETE and its read-back never reached the connector.
+    assert recorder.io_calls == []
 
 
 async def _tls_shaped_handler(target: Any, params: dict[str, Any]) -> dict[str, Any]:

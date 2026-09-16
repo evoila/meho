@@ -467,7 +467,7 @@ def test_legacy_payload_defaults_are_unknown_and_independent() -> None:
         {
             "operator_sub": "op",
             "op_id": None,
-            "rows": [],
+            "rows": [{"i": 1}],
             "total_rows": 1,
             "stored_rows": 1,
             "created_at": "x",
@@ -513,31 +513,38 @@ async def test_spill_accounts_for_count_digit_width_and_complete_label(
         return stored, next(iter(fake.store.values()), b"")
 
     created = fixed.isoformat()
-    ten_rows = [{"i": i} for i in range(10)]
-    cap_at_nine = len(
-        msgspec.json.encode(_StoredPayload("op", None, ten_rows[:9], 10, 9, created, 10, "partial"))
-    )
-    stored, encoded = await spill_with_cap(ten_rows, cap_at_nine)
-    assert stored == 9
-    assert len(encoded) == cap_at_nine
-
-    hundred_rows = [{"i": i} for i in range(100)]
-    cap_at_ninety_nine = len(
-        msgspec.json.encode(
-            _StoredPayload("op", None, hundred_rows[:99], 100, 99, created, 100, "partial")
+    for target_prefix in (9, 10, 99, 100):
+        rows = [{"i": i} for i in range(target_prefix + 1)]
+        exact_cap = len(
+            msgspec.json.encode(
+                _StoredPayload(
+                    "op",
+                    None,
+                    rows[:target_prefix],
+                    len(rows),
+                    target_prefix,
+                    created,
+                    len(rows),
+                    "partial",
+                )
+            )
         )
-    )
-    stored, encoded = await spill_with_cap(hundred_rows, cap_at_ninety_nine)
-    assert stored == 99
-    assert len(encoded) == cap_at_ninety_nine
+        stored, encoded = await spill_with_cap(rows, exact_cap)
+        assert stored == target_prefix
+        assert len(encoded) == exact_cap
+        stored, encoded = await spill_with_cap(rows, exact_cap - 1)
+        assert stored == target_prefix - 1
+        assert len(encoded) <= exact_cap - 1
 
-    one_row = [{"i": 1}]
+    complete_rows = [{"i": 1}, {"i": 2}]
     complete_size = len(
-        msgspec.json.encode(_StoredPayload("op", None, one_row, 1, 1, created, 1, "complete"))
+        msgspec.json.encode(_StoredPayload("op", None, complete_rows, 2, 2, created, 2, "complete"))
     )
-    assert (await spill_with_cap(one_row, complete_size - 1))[0] == 0
-    stored, encoded = await spill_with_cap(one_row, complete_size)
+    stored, encoded = await spill_with_cap(complete_rows, complete_size - 1)
     assert stored == 1
+    assert len(encoded) <= complete_size - 1
+    stored, encoded = await spill_with_cap(complete_rows, complete_size)
+    assert stored == 2
     assert len(encoded) == complete_size
 
 

@@ -1508,8 +1508,10 @@ async def test_reduce_advertises_the_real_byte_capped_store_prefix(
         assert stored is not None
         assert 0 < stored.stored_rows < len(rows)
         assert [row["seq"] for row in stored.rows] == list(range(stored.stored_rows))
-        assert str(stored.stored_rows) in handle.fetch_more.drill_in.rationale
-        assert str(len(rows)) in handle.fetch_more.drill_in.rationale
+        assert (
+            f"Only the first {stored.stored_rows} of {len(rows)} rows were"
+            in handle.fetch_more.drill_in.rationale
+        )
 
         window = await store.fetch_window(
             tenant_id=uuid.UUID(context["tenant_id"]),

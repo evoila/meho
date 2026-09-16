@@ -49,7 +49,7 @@ Bounded size
 A pathological op could return millions of rows; spilling all of them
 would blow the per-key value size. :meth:`spill` caps the persisted record by
 row count and encoded bytes, using the configured limits.
-and records both the cap-applied ``stored_rows`` and the true
+It records both the cap-applied ``stored_rows`` and the true
 ``total_rows`` so a reader can tell when the tail was truncated. Combined
 with the TTL, the store's footprint is bounded on both axes.
 

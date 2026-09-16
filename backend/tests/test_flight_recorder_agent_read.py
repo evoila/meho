@@ -280,6 +280,8 @@ async def test_agent_trace_handle_advertises_the_real_byte_capped_prefix(
         )
 
         assert handle is not None
+        assert handle.total_rows == len(spans)
+        assert handle.fetch_more.drill_in.available is True
         stored = await store.fetch_rows(
             tenant_id=tenant_id,
             operator_sub=operator.sub,
@@ -288,12 +290,15 @@ async def test_agent_trace_handle_advertises_the_real_byte_capped_prefix(
         assert stored is not None
         assert 0 < stored.stored_rows < len(spans)
         assert [row["seq"] for row in stored.rows] == list(range(stored.stored_rows))
-        assert str(stored.stored_rows) in handle.fetch_more.drill_in.rationale
-        assert "available" in handle.fetch_more.drill_in.rationale
+        assert handle.fetch_more.drill_in.rationale.startswith(
+            f"{stored.stored_rows} of {len(spans)} span(s) are available;"
+        )
 
         window = await read_result_window(operator, handle.handle_id, offset=0, limit=50)
         assert window["total_rows"] == len(spans)
         assert window["returned_rows"] == stored.stored_rows
+        assert window["stored_rows"] == stored.stored_rows
+        assert window["truncated"] is True
         assert [row["seq"] for row in window["rows"]] == list(range(stored.stored_rows))
     finally:
         get_settings.cache_clear()

@@ -291,16 +291,29 @@ the one-time transfer `url` — with `content_fetch="deferred"`. Pass
 - **Refuse, don't truncate — with a bounded, streamed read.** A file
   larger than `max_inline_bytes` (default 1 MiB, hard cap 8 MiB) is
   refused with an error naming the size, never returned truncated. The
-  body is **streamed under a running byte budget** (mirroring the shared
-  transport's `_read_capped_json_response`): a `Content-Length` over the
-  cap is fast-rejected before a byte is read, and the streamed running
-  total aborts the read the instant it exceeds the cap — so a guest /
-  transfer host that under-reports or omits the size (or omits
-  `Content-Length` entirely) can never make MEHO buffer an unbounded body
-  into memory (the memory-exhaustion guard, #3720). The pre-fetch guard
-  still refuses before any GET when the guest-reported size is known and
-  over cap. Re-read without `fetch_content` for the transfer handle, or
-  raise `max_inline_bytes` up to the hard cap.
+  body is **streamed under a running byte budget over the raw wire bytes**
+  (`aiter_raw`, mirroring the shared transport's
+  `_read_capped_json_response`): a `Content-Length` over the cap is
+  fast-rejected before a byte is read, and the streamed running total
+  aborts the read the instant it exceeds the cap — so a guest / transfer
+  host that under-reports or omits the size (or omits `Content-Length`
+  entirely) can never make MEHO buffer an unbounded body into memory (the
+  memory-exhaustion guard, #3720). The GET sends `Accept-Encoding:
+  identity` and **refuses any response `Content-Encoding` other than
+  `identity`**: guest files are not transport-compressed, and httpx
+  auto-decodes regardless of the request header, so a `gzip` bomb could
+  otherwise balloon one decoded read past the cap before the running total
+  trips (counting `aiter_raw` wire bytes keeps `raw == decoded`, immune to
+  amplification). The pre-fetch guard still refuses before any GET when the
+  guest-reported size is known and over cap. Re-read without `fetch_content`
+  for the transfer handle, or raise `max_inline_bytes` up to the hard cap.
+- **A non-2xx transfer GET returns a clean structured error.** An expired /
+  consumed one-time ticket (404/403), a transfer-host 5xx, or a refused
+  cross-origin 3xx is turned into a `connector_error` naming the HTTP status
+  and a bounded (~4 KiB) body snippet — never the raw `httpx.HTTPStatusError`
+  with an unread streamed response (which would make the dispatcher's
+  downstream body-read enrichment raise `httpx.ResponseNotRead` and skip the
+  synchronous error-audit row) and never the transfer URL/token (#3720).
 - **URL/token never leak.** On the fetch path the one-time URL is
   consumed by the GET and carries the transfer token, so the result
   omits `url` entirely and the URL is never logged; flight-recorder

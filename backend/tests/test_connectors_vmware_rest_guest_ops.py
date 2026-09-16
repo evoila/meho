@@ -86,11 +86,12 @@ class _FakeStreamResponse:
     """A minimal streamed httpx-like response for the file.read fetch tests.
 
     Mirrors the surface :func:`_guest._get_guest_file_bytes` uses on a streamed
-    GET: ``status_code`` + ``raise_for_status`` (non-2xx propagation), a
-    case-insensitive ``headers`` (the ``Content-Length`` fast-reject), and a
-    chunked ``aiter_bytes`` (the running-total byte-budget abort). ``state``
-    accumulates the bytes actually yielded, so a test can prove the read aborted
-    mid-body rather than draining the whole (possibly unbounded) payload.
+    GET: ``status_code`` + ``is_success`` (the non-2xx clean-refusal branch), a
+    case-insensitive ``headers`` (the ``Content-Length`` fast-reject + the
+    ``Content-Encoding`` refusal), and a chunked ``aiter_raw`` (the running-total
+    byte-budget abort and the bounded error-snippet read). ``state`` accumulates
+    the raw bytes actually yielded, so a test can prove the read aborted mid-body
+    rather than draining the whole (possibly unbounded) payload.
     """
 
     def __init__(
@@ -101,6 +102,7 @@ class _FakeStreamResponse:
         declare_content_length: bool,
         chunk_size: int,
         state: dict[str, int],
+        content_encoding: str | None = None,
     ) -> None:
         self.status_code = status
         self._body = body
@@ -110,18 +112,15 @@ class _FakeStreamResponse:
         headers: dict[str, str] = {}
         if declare_content_length:
             headers["content-length"] = str(len(body))
+        if content_encoding is not None:
+            headers["content-encoding"] = content_encoding
         self.headers = httpx.Headers(headers)
 
-    def raise_for_status(self) -> _FakeStreamResponse:
-        if self.status_code >= 400:
-            raise httpx.HTTPStatusError(
-                f"HTTP {self.status_code}",
-                request=self.request,
-                response=httpx.Response(self.status_code, request=self.request),
-            )
-        return self
+    @property
+    def is_success(self) -> bool:
+        return 200 <= self.status_code < 300
 
-    async def aiter_bytes(self) -> AsyncIterator[bytes]:
+    async def aiter_raw(self) -> AsyncIterator[bytes]:
         for i in range(0, len(self._body), self._chunk_size):
             chunk = self._body[i : i + self._chunk_size]
             self._state["yielded"] += len(chunk)
@@ -162,6 +161,7 @@ class _FakeTransferClient:
         get_body: bytes = b"",
         declare_content_length: bool = True,
         chunk_size: int = 65536,
+        get_content_encoding: str | None = None,
     ) -> None:
         self._put_calls = put_calls
         self._get_calls = get_calls
@@ -171,13 +171,19 @@ class _FakeTransferClient:
         self._get_body = get_body
         self._declare_content_length = declare_content_length
         self._chunk_size = chunk_size
+        self._get_content_encoding = get_content_encoding
 
     async def put(self, url: str, *, content: bytes | None = None) -> httpx.Response:
         self._put_calls.append({"url": url, "content": content})
         return httpx.Response(self._put_status, request=httpx.Request("PUT", url))
 
-    def stream(self, method: str, url: str) -> _FakeStreamCtx:
+    def stream(
+        self, method: str, url: str, *, headers: dict[str, str] | None = None
+    ) -> _FakeStreamCtx:
         self._get_calls.append({"url": url})
+        # Stash the request headers so a test can assert Accept-Encoding: identity
+        # without perturbing the get_calls equality checks other tests make.
+        self._stream_state["request_headers"] = dict(headers or {})
         return _FakeStreamCtx(
             _FakeStreamResponse(
                 status=self._get_status,
@@ -185,6 +191,7 @@ class _FakeTransferClient:
                 declare_content_length=self._declare_content_length,
                 chunk_size=self._chunk_size,
                 state=self._stream_state,
+                content_encoding=self._get_content_encoding,
             )
         )
 
@@ -209,6 +216,7 @@ class _GuestRecordingConnector:
     get_body: bytes = b""
     declare_content_length: bool = True
     stream_chunk_size: int = 65536
+    get_content_encoding: str | None = None
     vmomi_calls: list[dict[str, Any]] = field(default_factory=list)
     put_calls: list[dict[str, Any]] = field(default_factory=list)
     get_calls: list[dict[str, Any]] = field(default_factory=list)
@@ -236,6 +244,7 @@ class _GuestRecordingConnector:
             get_body=self.get_body,
             declare_content_length=self.declare_content_length,
             chunk_size=self.stream_chunk_size,
+            get_content_encoding=self.get_content_encoding,
         )
 
 
@@ -775,17 +784,82 @@ async def test_file_read_fetch_never_leaks_url_or_token(creds: _CredRecorder) ->
 
 
 @pytest.mark.asyncio
-async def test_file_read_fetch_get_failure_propagates(creds: _CredRecorder) -> None:
-    """A non-2xx GET on the transfer URL raises for the dispatcher to wrap."""
-    info = _read_info(size=10)
-    conn = _read_conn(info, get_status=500, get_body=b"oops")
-    with pytest.raises(httpx.HTTPStatusError):
+async def test_file_read_fetch_get_failure_raises_clean_connector_error(
+    creds: _CredRecorder,
+) -> None:
+    """A non-2xx GET raises a CLEAN RuntimeError (status + snippet), never httpx.
+
+    The handler must not raise ``httpx.HTTPStatusError`` on a non-2xx transfer
+    GET: that error carries an unread, then-closed streamed response whose
+    ``__str__`` embeds the one-time transfer URL/token, and the dispatcher's
+    downstream ``.text`` / ``.json`` enrichment would raise
+    ``httpx.ResponseNotRead`` (B1-REGRESSION). Instead it raises a plain
+    ``RuntimeError`` naming the HTTP status and a bounded body snippet, with no
+    transfer URL / token and no chained ``HTTPStatusError``.
+    """
+    info = _read_info(size=10, url="https://vc.example.test/guestFile?id=1&token=abc&api_key=SEKRIT")
+    conn = _read_conn(info, get_status=500, get_body=b"transfer host exploded")
+    with pytest.raises(RuntimeError) as excinfo:
         await _guest.guest_file_read_composite(
             operator=_operator(),
             target=_Target(),
             params={"vm": "vm-42", "guest_path": "/etc/hostname", "fetch_content": True},
             connector=conn,  # type: ignore[arg-type]
         )
+    exc = excinfo.value
+    # A clean RuntimeError, not an httpx error with an (unread) response attached.
+    assert not isinstance(exc, httpx.HTTPError)
+    assert exc.__cause__ is None and exc.__context__ is None
+    message = str(exc)
+    assert "HTTP 500" in message
+    assert "transfer host exploded" in message  # the bounded body snippet
+    # The one-time ticket never leaks into the error message.
+    assert "token=abc" not in message
+    assert "SEKRIT" not in message
+    assert "guestFile" not in message
+
+
+@pytest.mark.asyncio
+async def test_file_read_fetch_sends_accept_encoding_identity(creds: _CredRecorder) -> None:
+    """The transfer GET requests identity encoding (decompression-bomb guard)."""
+    info = _read_info(size=5)
+    conn = _read_conn(info, get_body=b"hello")
+    await _guest.guest_file_read_composite(
+        operator=_operator(),
+        target=_Target(),
+        params={"vm": "vm-42", "guest_path": "/etc/hostname", "fetch_content": True},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert conn.stream_state["request_headers"].get("Accept-Encoding") == "identity"
+
+
+@pytest.mark.asyncio
+async def test_file_read_fetch_refuses_content_encoded_response(creds: _CredRecorder) -> None:
+    """A transfer response carrying Content-Encoding: gzip is refused, not decoded.
+
+    httpx auto-decodes on the response Content-Encoding regardless of the
+    request Accept-Encoding, so a gzip bomb could balloon one decoded network
+    read past the cap. The fetch refuses any non-identity transport encoding
+    before draining the body, so no amplification is possible.
+    """
+    info = _read_info(size=20)
+    # A tiny compressed-looking body that, if decoded, could be far larger; the
+    # point is the refusal fires on the header before any body is drained.
+    conn = _read_conn(
+        info,
+        get_body=b"\x1f\x8b" + b"\x00" * 64,
+        get_content_encoding="gzip",
+        declare_content_length=False,
+    )
+    with pytest.raises(RuntimeError, match=r"Content-Encoding.*gzip"):
+        await _guest.guest_file_read_composite(
+            operator=_operator(),
+            target=_Target(),
+            params={"vm": "vm-42", "guest_path": "/blob.bin", "fetch_content": True},
+            connector=conn,  # type: ignore[arg-type]
+        )
+    # Refused on the header: not a single body byte was drained/decoded.
+    assert conn.stream_state["yielded"] == 0
 
 
 # ---------------------------------------------------------------------------

@@ -1931,6 +1931,40 @@ async def test_cross_origin_redirect_warning_strips_url_query() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cross_origin_redirect_warning_strips_location_query() -> None:
+    """The refused (attacker-chosen) Location destination is logged scrubbed too.
+
+    The Location header names a host MEHO refuses to follow, but it could carry
+    a secret in its own query string, so the WARNING must log scheme+host+path
+    for that destination, never its query.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            302,
+            headers={"Location": "https://attacker.example.com/steal?leak=DEST_SECRET&x=1"},
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with _SameOriginRedirectClient(
+        base_url="https://vc.example.com",
+        transport=transport,
+    ) as client:
+        with capture_logs() as captured:
+            resp = await client.get("/guestFile?token=abc")
+
+    assert resp.status_code == 302
+    warning = next(
+        e for e in captured if e["event"] == "connector_redirect_not_followed_cross_origin"
+    )
+    # The destination origin + path is preserved for diagnosis...
+    assert warning["location"] == "https://attacker.example.com/steal"
+    # ...but any secret in the destination's own query never reaches the log.
+    assert "DEST_SECRET" not in warning["location"]
+    assert "?" not in warning["location"]
+
+
+@pytest.mark.asyncio
 async def test_pooled_client_caps_same_origin_redirect_chain() -> None:
     """A same-origin redirect loop is bounded, not followed indefinitely.
 

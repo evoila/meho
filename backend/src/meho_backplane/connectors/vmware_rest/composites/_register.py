@@ -1511,7 +1511,7 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
             "existence + size + attributes without MEHO proxying the bytes. With "
             "fetch_content=true MEHO fetches the bytes server-side over the "
             "one-time transfer URL and returns them as content_lines (utf-8 text, "
-            "or 76-char base64 chunks for binary, flagged by content_encoding), "
+            "or wide base64 chunks for binary, flagged by content_encoding), "
             "capped by max_inline_bytes (default 1 MiB, hard cap 8 MiB) and "
             "JSONFlux-wrapped into a result handle when large; a file over the cap "
             "is refused (not truncated) with an error naming its size, and the "

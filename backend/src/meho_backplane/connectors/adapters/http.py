@@ -555,6 +555,23 @@ def _origin_and_path(url: httpx.URL) -> str:
     return str(url.copy_with(query=None, fragment=None, username=None, password=None))
 
 
+def _scrub_location_header(location: str | None) -> str | None:
+    """Scrub a raw ``Location`` header the same way :func:`_origin_and_path` does.
+
+    The refused cross-origin redirect destination is attacker-chosen and may
+    itself carry a secret in its own query string (or userinfo), so the header
+    is reduced to ``scheme://host[:port]/path`` before it reaches a log line.
+    A relative or absolute ``Location`` both parse; a value ``httpx`` cannot
+    parse is logged as a placeholder rather than verbatim.
+    """
+    if location is None:
+        return None
+    try:
+        return _origin_and_path(httpx.URL(location))
+    except httpx.InvalidURL:
+        return "<unparseable-location>"
+
+
 class _SameOriginRedirectClient(httpx.AsyncClient):
     """An ``AsyncClient`` that follows redirects **only within one origin**.
 
@@ -609,9 +626,11 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
                     method=request.method,
                     # Scheme+host+path only: a guest-transfer / session URL
                     # carries a one-time ticket in its query string, so the
-                    # full URL must never land in a log line.
+                    # full URL must never land in a log line. The refused
+                    # (attacker-chosen) Location destination is scrubbed the
+                    # same way -- its own query could carry a secret too.
                     from_url=_origin_and_path(request.url),
-                    location=response.headers.get("Location"),
+                    location=_scrub_location_header(response.headers.get("Location")),
                 )
                 return response
             await response.aclose()

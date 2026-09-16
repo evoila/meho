@@ -258,6 +258,40 @@ def _configure_recording_handler(raw_payload: dict[str, Any]) -> list[dict[str, 
     return _recording_handler_calls
 
 
+async def _module_streamed_non2xx_handler(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Raise an HTTPStatusError carrying a REAL unread, then-closed streamed response.
+
+    Reproduces the guest file-transfer failure shape at the dispatcher boundary:
+    a non-2xx raised inside a ``client.stream(...)`` context before the body is
+    read leaves ``exc.response`` **unread and closed**, so its ``.json()`` /
+    ``.text`` raise :exc:`httpx.ResponseNotRead` (a ``StreamError`` /
+    ``RuntimeError`` -- neither ``ValueError``/``UnicodeDecodeError`` nor
+    ``httpx.HTTPError``). The body is a lazy async generator, not eager
+    ``content=``, so the response is genuinely unread (an eager MockTransport
+    body would be pre-read and would NOT reproduce the crash -- exactly the gap
+    in the prior in-memory get-failure test).
+    """
+
+    async def _lazy_body() -> Any:
+        yield b'{"message":'
+        yield b'"boom"}'
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, content=_lazy_body())
+
+    transport = httpx.MockTransport(_handler)
+    async with (
+        httpx.AsyncClient(transport=transport) as client,
+        client.stream("GET", "https://transfer.example.test/guestFile") as response,
+    ):
+        response.raise_for_status()
+    raise AssertionError("unreachable: raise_for_status must have raised")  # pragma: no cover
+
+
 class _FakeFingerprint:
     def __init__(self, version: str | None = None) -> None:
         self.version = version
@@ -668,3 +702,60 @@ async def test_broadcast_failure_after_audit_commit_keeps_receipt(
     assert rows[0].id == result.audit_id
     assert rows[0].status_code == 200
     assert rows[0].payload["result_status"] == "ok"
+
+
+# ---------------------------------------------------------------------------
+# HALF 5 -- an HTTPStatusError carrying an UNREAD streamed response must not
+# crash the dispatcher's downstream body-read enrichment (B1-REGRESSION,
+# #3720). The prior guest-ops get-failure test used an in-memory (pre-read)
+# response and so never exercised the dispatcher's .text/.json body read on a
+# real unread stream. This drives dispatch() end to end.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dispatch_streamed_non2xx_returns_structured_error_with_audit_row(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+    committed_audit_writes: list[dict[str, Any]],
+) -> None:
+    """A handler raising HTTPStatusError with an UNREAD streamed response is safe.
+
+    dispatch() must return a structured ``connector_error`` and commit a
+    synchronous error-audit row, never let ``httpx.ResponseNotRead`` escape from
+    ``_http_upstream_message`` (which would break both the never-raises and the
+    append-only-audit contracts).
+    """
+    await _register_op(
+        "demo.stream.get",
+        safety_level="safe",
+        embedding=stub_embedding_service,
+        handler=_module_streamed_non2xx_handler,
+    )
+
+    # dispatch() returns rather than raising ResponseNotRead.
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="demo-1.x",
+        op_id="demo.stream.get",
+        target=_FakeTarget(),
+        params={},
+    )
+
+    # Structured connector_error, classified off the 500 status.
+    assert result.status == "error"
+    assert result.error == "connector_error: HTTPStatusError"
+    assert result.extras["error_code"] == "connector_error"
+    assert result.extras["http_status"] == 500
+    # The unread streamed body yields no extractable upstream message -- the
+    # hardened helper returns None instead of raising ResponseNotRead.
+    assert result.extras["upstream_message"] is None
+
+    # A synchronous error-audit row was committed (append-only-audit postulate):
+    # the raise happened BEFORE _audit_error_and_return at 21a4a4c0, so no row
+    # landed; the fix restores it.
+    assert len(committed_audit_writes) == 1
+    rows = await _committed_rows_for("demo.stream.get")
+    assert len(rows) == 1
+    assert rows[0].payload["result_status"] == "error"
+    assert rows[0].payload["error"]["error_code"] == "connector_error"

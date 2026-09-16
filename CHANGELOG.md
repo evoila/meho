@@ -90,6 +90,10 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed
+
+- Keep completed operations successful when response formatting fails. `call_operation` now reports `delivery=unavailable`, includes a committed audit receipt when available, and tells callers not to repeat the operation. (#3636 / #3714)
+
 ## [0.35.2] - 2026-09-16
 
 ### Security

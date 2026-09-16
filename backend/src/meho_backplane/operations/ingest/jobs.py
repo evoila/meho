@@ -54,7 +54,10 @@ from uuid import UUID
 
 import structlog
 
-from meho_backplane.operations.ingest.pipeline import IngestionPipelineResult
+from meho_backplane.operations.ingest.pipeline import (
+    GroupingPhaseFailedError,
+    IngestionPipelineResult,
+)
 
 __all__ = [
     "IngestJob",
@@ -441,6 +444,16 @@ def reset_job_registry_for_tests() -> None:
 #: usable landed" (``degraded`` with this class). claude-rdc-hetzner-dc#1136.
 INGESTED_NOT_DISPATCHABLE = "ingested_not_dispatchable"
 
+#: Structured ``error_class`` an async ingest carries when the register
+#: phase (T2) committed but the LLM grouping phase (T3) then raised. The
+#: connector is registered and dispatchable — only grouping failed — so the
+#: job ends ``degraded`` (carrying the durable register counts) rather than
+#: a flat ``failed`` that reads as "the whole ingest failed". Distinct from
+#: :data:`INGESTED_NOT_DISPATCHABLE` so operators / agents can branch on
+#: which honesty gate fired: nothing-dispatchable vs registered-but-
+#: ungrouped. #3685.
+GROUPING_FAILED_AFTER_REGISTER = "grouping_failed_after_register"
+
 #: Post-run dispatchability probe injected by the route. Given the
 #: pipeline's :class:`IngestionPipelineResult`, returns whether the
 #: connector it produced is resolvable by the dispatch/query surface
@@ -514,6 +527,15 @@ async def run_ingest_job(
                     registry=registry,
                     dispatchability_check=dispatchability_check,
                 )
+        except GroupingPhaseFailedError as exc:
+            # The register phase (T2) committed but the grouping phase (T3)
+            # then raised: the connector is registered and dispatchable, only
+            # its ingested ops were not grouped. Reconcile as ``degraded``
+            # (registered, grouping failed), NOT the flat ``failed`` a bare
+            # exception lands (#3685). Caught before the generic
+            # ``except BaseException`` below so the distinction survives.
+            await _reconcile_grouping_failure(job_id, exc=exc, registry=registry)
+            return
         except BaseException as exc:
             _log.info(
                 "ingest_job_failed",
@@ -579,6 +601,50 @@ async def _reconcile_returned_result(
         groups_created=result.grouping.groups_created if result.grouping else None,
     )
     await registry.complete(job_id, result=result)
+
+
+async def _reconcile_grouping_failure(
+    job_id: UUID,
+    *,
+    exc: GroupingPhaseFailedError,
+    registry: IngestJobRegistry,
+) -> None:
+    """Flip a *register-committed / grouping-failed* run to ``degraded``.
+
+    The pipeline runs register (T2) and LLM grouping (T3) in two
+    independent transactions; register commits first. When grouping then
+    raises, the connector is registered and dispatchable — only its
+    ingested operations went ungrouped (#3685). Recording that as a flat
+    ``failed`` (what a bare exception lands) misleads operators into
+    thinking the whole ingest failed.
+
+    Reconcile it the way :func:`_reconcile_returned_result` reconciles the
+    persisted-but-invisible case: ``degraded`` carrying the **durable**
+    register :class:`IngestionResult` (so the operator still sees the
+    inserted/updated/skipped counts that landed) plus the structured
+    :data:`GROUPING_FAILED_AFTER_REGISTER` ``error_class`` and a
+    human-readable reason. ``grouping=None`` on the projected result — the
+    grouping session rolled back, so there are no grouping counts. Distinct
+    ``error_class`` from :data:`INGESTED_NOT_DISPATCHABLE` so the CLI /
+    agent can tell "registered but ungrouped" from "nothing dispatchable".
+    """
+    _log.warning(
+        "ingest_job_grouping_failed_after_register",
+        connector_id=exc.connector_id,
+        inserted_count=exc.ingestion.inserted_count,
+        error_class=GROUPING_FAILED_AFTER_REGISTER,
+        cause_class=type(exc.cause).__name__,
+    )
+    await registry.degrade(
+        job_id,
+        result=IngestionPipelineResult(
+            connector_id=exc.connector_id,
+            ingestion=exc.ingestion,
+            grouping=None,
+        ),
+        error_class=GROUPING_FAILED_AFTER_REGISTER,
+        error=str(exc),
+    )
 
 
 async def _dispatchability_failure_reason(

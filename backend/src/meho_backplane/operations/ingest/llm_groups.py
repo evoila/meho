@@ -441,6 +441,41 @@ def _apply_assignments_to_rows(
 # ---------------------------------------------------------------------------
 
 
+def _project_persisted_groups(
+    existing_groups: Sequence[OperationGroup],
+) -> list[GroupProposal]:
+    """Project already-persisted groups into :class:`GroupProposal` shapes.
+
+    The partial-regrouping branch reuses the connector's existing groups
+    as Pass-2 targets. It must **not** re-run the :class:`GroupProposal`
+    field validators against them: the ``group_key`` validator enforces
+    snake_case (``^[a-z][a-z0-9_]*$``), but persisted keys are already
+    authoritative and are legitimately hyphenated on the typed-operation
+    path -- :mod:`meho_backplane.operations.ingest.typed_register` inserts
+    groups such as ``vmware-host-usage`` with no format check, and derives
+    the display name via ``group_key.replace("-", " ")``. Only the LLM
+    Pass-1 path (fresh model proposals) is snake_case-constrained.
+
+    Constructing a validated ``GroupProposal`` from a persisted hyphenated
+    key raised :class:`ValueError` and rolled the whole grouping
+    transaction back on every re-ingest, marking the job ``failed`` even
+    though the register phase had already committed (#3685). Using
+    :meth:`pydantic.BaseModel.model_construct` bypasses validation entirely
+    -- the persisted row is the source of truth, so re-validating it is
+    both wrong (it can reject valid stored keys) and pointless. The keys
+    round-trip verbatim into the Pass-2 prompt and the ``group_key -> id``
+    map, so no persisted group is ever renamed.
+    """
+    return [
+        GroupProposal.model_construct(
+            group_key=row.group_key,
+            name=row.name,
+            when_to_use=row.when_to_use,
+        )
+        for row in existing_groups
+    ]
+
+
 async def _resolve_groups_for_pass2(
     session: AsyncSession,
     llm_client: LlmClient,
@@ -473,14 +508,7 @@ async def _resolve_groups_for_pass2(
             existing_group_count=len(existing_groups),
             unassigned_op_count=len(unassigned_ops),
         )
-        groups = [
-            GroupProposal(
-                group_key=row.group_key,
-                name=row.name,
-                when_to_use=row.when_to_use,
-            )
-            for row in existing_groups
-        ]
+        groups = _project_persisted_groups(existing_groups)
         return groups, {row.group_key: row.id for row in existing_groups}
 
     _log.info(

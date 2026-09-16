@@ -773,7 +773,13 @@ the **whole subtree**. Underneath, the same credential-shape net runs
 over every surviving leaf, so a shaped secret at an *undeclared* nested
 path is still caught. JSON is the only structurally-redactable shape:
 a str/bytes body is parsed when the content-type is JSON or unknown;
-anything else fails closed (see F2 uncertainty).
+anything else fails closed (see F2 uncertainty). One structural rule runs
+without any per-connector config: every property `value` inside an OVF
+`PropertyParams` block (`additional_parameters[] {type: "PropertyParams",
+properties: [{id, value}]}`) is redacted — those are OVF property inputs
+which commonly carry appliance credentials under a vendor-specific `id` no
+key-name heuristic or shape net can place — keeping the `id` and every
+non-secret field (network mappings, name, placement) intact.
 
 **F2.3 — hard-excluded op families** (`families.py`). Some op families
 carry secrets *as their body* — credential reads, session mints, token

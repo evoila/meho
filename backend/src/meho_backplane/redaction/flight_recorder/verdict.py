@@ -37,6 +37,7 @@ from pydantic import BaseModel, ConfigDict
 __all__ = [
     "BODY_OMITTED_MARKER",
     "BODY_PATH_MARKER",
+    "OVF_PROPERTY_VALUE_MARKER",
     "SECRET_FAMILY_OMITTED_MARKER",
     "UNPLACEABLE_FAMILY_MARKER",
     "RedactionOutcome",
@@ -49,6 +50,15 @@ __all__ = [
 #: matching path so a nested credential object never round-trips even
 #: partially.
 BODY_PATH_MARKER: Final[str] = "[MEHO-REDACTED:body-path]"
+
+#: Placed over every property *value* inside an OVF ``PropertyParams``
+#: block (``additional_parameters[] {type: "PropertyParams", properties:
+#: [{id, value}]}``). Those values are OVF property inputs which commonly
+#: carry appliance credentials, keyed on a vendor-specific ``id`` no
+#: key-name heuristic or credential-shape net can place; the structural
+#: rule redacts them all while leaving the ``id`` and sibling fields
+#: intact. A *certain* redaction -- the trace stays agent-readable.
+OVF_PROPERTY_VALUE_MARKER: Final[str] = "[MEHO-REDACTED:ovf-property-value]"
 
 #: Placed where a body could not be proven fully redacted and was
 #: therefore dropped fail-closed (unparseable / binary / malformed /

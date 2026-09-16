@@ -47,6 +47,12 @@ The pipeline is broken into work items per Initiative #389:
 * **T4 — Review-queue state machine** (`ingest/service.py`). Operators
   move connectors through `staged → enabled` (and `disabled` for
   regression rollback) before any op becomes dispatchable.
+  The enable and disable cascades cover the connector's **ungrouped**
+  descriptors (`group_id IS NULL`) too (#3681) — the same connector scope
+  `enable-reads` reaches group-agnostically — so a full `enable` never
+  strands ungrouped write/typed ops at default-deny, and `connector review`
+  reports the ungrouped count (`ungrouped_op_count`, printed in the CLI
+  render) so an operator can see any the grouping pass left out.
 * **T5–T7 — CLI / REST / MCP surfaces** that drive the pipeline. T6
   (REST routes) lands the seven `/api/v1/connectors*` endpoints —
   `POST /ingest`, `GET /` (list), `GET /{id}/review`, `PATCH

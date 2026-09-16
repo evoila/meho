@@ -42,6 +42,7 @@ from __future__ import annotations
 from typing import Any
 
 from meho_backplane.connectors.vcf_installer.typed_ops import INSTALLER_TYPED_OPS
+from meho_backplane.jsonflux.query.result_catalog import AdmissionGuard
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 
 _OPS_BY_ID = {op.op_id: op for op in INSTALLER_TYPED_OPS}
@@ -54,6 +55,11 @@ _SDDC_TASK_OPS = (
     "installer.sddc.bringup.retry",
     "installer.sddc.bringup.status",
 )
+
+
+def _reducer(**kwargs: Any) -> JsonFluxReducer:
+    """Use explicit admission bounds in these configuration-free unit tests."""
+    return JsonFluxReducer(admission_guard=AdmissionGuard(), **kwargs)
 
 
 def _registered_scalars_context(op_id: str) -> dict[str, Any]:
@@ -222,7 +228,7 @@ async def test_validate_scalars_survive_when_checks_exceed_threshold() -> None:
     registered hint — ``id`` / ``executionStatus`` / ``resultStatus`` /
     ``description`` are top-level result fields the caller can poll with.
     """
-    reducer = JsonFluxReducer(sample_size=5, sample_byte_budget=4096)
+    reducer = _reducer(sample_size=5, sample_byte_budget=4096)
     payload = _validation(60)
 
     for op_id in _VALIDATION_OPS:
@@ -249,7 +255,7 @@ async def test_validate_small_check_set_passes_through_verbatim() -> None:
     threshold and within the byte bound, so the whole ``Validation``
     passes through verbatim — scalars trivially present, no handle. The
     hint must not force a reduction that the thresholds don't."""
-    reducer = JsonFluxReducer()
+    reducer = _reducer()
     payload = _validation(14)
 
     reduced, handle = await reducer.reduce(
@@ -274,7 +280,7 @@ async def test_bringup_task_scalars_survive_single_list_reduction() -> None:
     the ``id`` the status poll needs. The registered hints pin them, and
     (#3122) the digest rides inline.
     """
-    reducer = JsonFluxReducer(sample_size=5, sample_byte_budget=4096)
+    reducer = _reducer(sample_size=5, sample_byte_budget=4096)
     payload = _sddc_task(60, with_milestones=False, active=2, failed=1)
 
     for op_id in _SDDC_TASK_OPS:
@@ -318,7 +324,7 @@ async def test_bringup_task_with_milestones_reduces_and_digests_the_live_gap() -
     summary keeps the task scalars AND the sub-task digest — including every
     failure WITH its ``errors[]`` so restart-from-failed needs no drill-in.
     """
-    reducer = JsonFluxReducer(sample_size=5, sample_byte_budget=4096)
+    reducer = _reducer(sample_size=5, sample_byte_budget=4096)
     # 260 sub-tasks: 3 in progress, 2 failed (with errors), 255 succeeded.
     payload = _sddc_task(260, with_milestones=True, active=3, failed=2)
 
@@ -359,7 +365,7 @@ async def test_two_list_task_without_digest_hint_stays_exempt() -> None:
     still passes through verbatim — proving the generic exemption other
     connectors rely on (k8s.pod.info) is untouched.
     """
-    reducer = JsonFluxReducer()
+    reducer = _reducer()
     payload = _sddc_task(60, with_milestones=True, active=3, failed=2)
 
     reduced, handle = await reducer.reduce(
@@ -381,7 +387,7 @@ async def test_small_two_list_task_passes_through_even_with_digest_hint() -> Non
     WHETHER the thresholds are met. Both arrays and the task scalars stay
     inline; no handle.
     """
-    reducer = JsonFluxReducer()
+    reducer = _reducer()
     payload = _sddc_task(5, with_milestones=True, active=1)
 
     reduced, handle = await reducer.reduce(

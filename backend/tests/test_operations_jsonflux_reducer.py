@@ -820,6 +820,26 @@ async def test_admission_rejects_unencodable_huge_integer_before_serialization(
     assert reduced["status"] == "unprofiled"
 
 
+async def test_admission_guard_uses_configured_settings_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reducer-created guards read the configured work limits before reduction."""
+
+    class _Settings:
+        result_reduction_max_decoded_bytes = 67_108_864
+        result_reduction_max_depth = 64
+        result_reduction_max_nodes = 1
+
+    monkeypatch.setattr(reducer_module, "get_settings", lambda: _Settings())
+    reduced, handle = await JsonFluxReducer(sample_byte_budget=4096).reduce(
+        {"results": [{"ok": 1}]}, None
+    )
+
+    assert handle is not None
+    assert handle.fetch_more.drill_in.reason == "admission_limit_exceeded"
+    assert reduced["reason"] == "admission_limit_exceeded"
+
+
 async def test_admission_fallback_envelope_is_bounded_without_raw_values() -> None:
     """A normal JSON encoder sees only bounded fallback metadata, never input rows."""
     deep: dict[str, object] = {"leaf": "x" * 10_000}

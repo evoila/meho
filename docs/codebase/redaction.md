@@ -793,7 +793,14 @@ allowlists — `vault.kv.read`, `harbor.robot.create`, `vault.kv.put`,
 structured secret bodies (`{"data": {"password": …}}`) whose opaque
 values have no in-leaf label the shape net could catch, so this
 delegation — not the pattern net — is what protects them, and the two
-planes cannot drift. On top of that, a **broadening net** covers generic
+planes cannot drift. The vSphere guest-ops composites that log into the
+guest (`vmware.composite.vm.guest.{process.list,env.read,file.read,file.write,program.run}`)
+are pinned in `_CREDENTIAL_WRITE_OPS` for the same reason: their guest OS
+password rides the downstream vim `NamePasswordAuthentication` block in the
+*request* body, not an op param or a declared property, so this `classify_op`
+delegation — not the shape/pattern net — is what keeps their vendor-call
+bodies from ever being recorded (`net.show` is not pinned: it sends no
+in-guest login). On top of that, a **broadening net** covers generic
 (`METHOD:/path`) ops and hand-authored tags the typed classifier does not
 see: case-sensitive `fnmatchcase` globs (`SECRET_FAMILY_PATTERNS`, e.g.
 `*token*`, `*secret*`, `*login*`, `*.auth.*`, `*:*/key`) plus

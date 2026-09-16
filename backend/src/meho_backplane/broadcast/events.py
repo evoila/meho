@@ -162,6 +162,19 @@ _CREDENTIAL_MINT_OPS: Final[frozenset[str]] = frozenset(
 #: * ``k8s.job.create`` — the Job ``spec`` carries a pod template whose
 #:   inline ``env`` entries can hold credential material in ``params``
 #:   (G3.14-T1 #1403).
+#: * ``vmware.composite.vm.guest.{process.list,env.read,file.read,
+#:   file.write,program.run}`` (#3717) — the vSphere guest-ops composites
+#:   that log into the guest. Unlike every other member here, their secret
+#:   is **not** in ``params``: the guest OS password rides the downstream
+#:   vim ``NamePasswordAuthentication`` block in the *request body*,
+#:   resolved from ``secret_ref`` (``composites/_guest.py::_guest_auth``).
+#:   The pin is what the flight recorder's
+#:   :func:`~meho_backplane.redaction.flight_recorder.classify_body_exclusion`
+#:   delegates to, so these spans never record that body; the broadcast
+#:   collapse is defence-in-depth here (their params are non-secret). The
+#:   sibling ``vmware.composite.vm.guest.net.show`` is deliberately absent —
+#:   it reads Tools-reported VM state with no in-guest login and sends no
+#:   credential.
 _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
     {
         "vault.auth.userpass.write",
@@ -236,6 +249,25 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # This was the last guest-ops write riding broadcast unredacted
         # (flagged as the unpinned sibling in the #3255 pin above).
         "vmware.composite.vm.guest.file.write",
+        # #3717 — the guest-ops READ composites that log into the guest.
+        # process.list / env.read / file.read each resolve the guest OS
+        # credential from secret_ref and send it as the vim
+        # ``NamePasswordAuthentication`` block in the request BODY
+        # (composites/_guest.py::_guest_auth). Unlike the sibling writes above,
+        # the secret is NOT an op param and NOT a declared schema property, so
+        # neither the classifier-coverage lint nor the flight recorder's
+        # shape/pattern nets can see it — a ``read`` / ``other`` classification
+        # (``.list`` read-suffix / bare ``.read``) leaves the flight-recorder
+        # vendor-call + typed spans recording the guest password in plaintext
+        # (redaction/flight_recorder/families.py delegates body exclusion to
+        # this classifier). Pinning them ``credential_write`` sets
+        # body_recorded=false for their spans and collapses their broadcast to
+        # aggregate-only. ``net.show`` is deliberately NOT here: it reads
+        # Tools-reported VM state with no in-guest login, so it sends no
+        # credential (composites/_guest.py::guest_net_show_composite).
+        "vmware.composite.vm.guest.process.list",
+        "vmware.composite.vm.guest.env.read",
+        "vmware.composite.vm.guest.file.read",
         # #3361 — the governed linux-ssh config-file write. Its ``content``
         # param is the file body to write; ``content`` is neither a
         # secret-*named* key nor a recognisable secret *shape*, so the

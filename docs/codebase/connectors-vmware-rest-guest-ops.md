@@ -125,7 +125,14 @@ load-bearing-ness:
    never appears in an operation parameter, an `OperationResult`, an
    audit row, a broadcast event, or a log line — it lives only as the
    ephemeral in-memory `NamePasswordAuthentication` object the vim
-   request body carries. For the guest **login** credential this is a
+   request body carries. That request body itself is never captured
+   either: every guest composite that logs into the guest
+   (`process.list` / `env.read` / `file.read` / `file.write` /
+   `program.run`) is pinned in `_CREDENTIAL_WRITE_OPS`, so the
+   flight recorder's `classify_body_exclusion` hard-excludes its
+   vendor-call + typed spans from body recording — the vim request body,
+   guest password included, is never recorded (#3717; `net.show` is not
+   pinned — it sends no in-guest login). For the guest **login** credential this is a
    deliberate improvement on the GOSC `credential-class` ops
    (`guest.customization_spec.create`), which accept the Windows admin
    password *in params*: here the login secret is never in params to begin
@@ -193,10 +200,14 @@ load-bearing-ness:
    `guest.file.write`'s `content`, from shared machinery, not a
    `program.run` bug:** the durable **`ApprovalRequest.params`** row stores
    the *full* params verbatim (the resume path re-dispatches the exact call
-   after a human approves, so it must persist them), and **flight-recorder
-   vendor-call spans** (only when a capture policy is active) record the
-   `StartProgramInGuest` request body. So **operators must not put bare
-   secrets in `arguments` / `env`.** Where a program needs a secret, pass
+   after a human approves, so it must persist them). The **flight-recorder
+   vendor-call + typed spans do NOT** record the `StartProgramInGuest`
+   request body: `program.run` (and every login-bearing guest composite) is
+   pinned in `_CREDENTIAL_WRITE_OPS`, and the recorder's
+   `classify_body_exclusion` delegates to that classification, so its body is
+   hard-excluded from recording (#3717 closed the same gap for the guest
+   reads). So **operators must not put bare secrets in `arguments` / `env`**
+   for the `ApprovalRequest.params` reason alone. Where a program needs a secret, pass
    its env-var *name* and stage the value guest-side (a file the guest user
    reads, a Vault-agent-templated env file), or use the guest's own
    credential store — the same discipline the guest OS credential itself

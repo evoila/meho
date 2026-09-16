@@ -224,6 +224,15 @@ class TestClassifyOp:
             # secret-named/shaped key, so the pin collapses its broadcast to
             # aggregate-only rather than shipping the file body on the feed.
             "vmware.composite.vm.guest.file.write",
+            # #3717 — the login-bearing guest READ composites. Their secret
+            # (the guest OS password) is not in params at all — it rides the
+            # downstream vim ``NamePasswordAuthentication`` request body — so
+            # the pin is what makes the flight recorder's
+            # ``classify_body_exclusion`` suppress those spans; the broadcast
+            # collapse is defence-in-depth (their params are non-secret).
+            "vmware.composite.vm.guest.process.list",
+            "vmware.composite.vm.guest.env.read",
+            "vmware.composite.vm.guest.file.read",
         ],
     )
     def test_credential_write_allowlist(self, op_id: str) -> None:

@@ -35,6 +35,7 @@ exist.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import inspect
 import sys
@@ -46,6 +47,9 @@ import pytest
 import meho_backplane.operations.typed_register as typed_register
 from meho_backplane.broadcast.events import _is_secret_param_name, classify_op
 from meho_backplane.connectors.registry import _eager_import_connectors
+from meho_backplane.connectors.vmware_rest.composites import _guest
+from meho_backplane.connectors.vmware_rest.composites._register import _COMPOSITES
+from meho_backplane.redaction.flight_recorder import classify_body_exclusion
 
 #: Op classes whose broadcast ships full request params by default
 #: (decision #3). A secret-bearing registered op landing in one of
@@ -259,3 +263,67 @@ def test_rke2_node_write_ops_are_registered_and_pinned(
     assert "rke2.node.config.update" in ids
     unpinned = {op_id for op_id, _, _ in _unpinned_secret_bearing_ops(registered_ops)}
     assert "rke2.node.config.update" not in unpinned
+
+
+def _funcs_reaching(module: Any, target: str) -> set[str]:
+    """Names of module-level functions that call *target*, directly or transitively.
+
+    The guest login secret is never a declared schema property — it is the
+    ephemeral vim ``NamePasswordAuthentication`` block ``_guest_auth`` builds
+    — so the schema-walking sweep above cannot see it. Instead of a hardcoded
+    op-id list, discover the login-bearing property structurally: a composite
+    is login-bearing iff its handler reaches ``_guest_auth`` (``program.run``
+    reaches it transitively via ``_start_guest_program``). A new sibling is
+    then covered automatically the moment it wires the guest login in.
+    """
+    tree = ast.parse(inspect.getsource(module))
+    calls: dict[str, set[str]] = {}
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            names: set[str] = set()
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Call):
+                    fn = sub.func
+                    if isinstance(fn, ast.Name):
+                        names.add(fn.id)
+                    elif isinstance(fn, ast.Attribute):
+                        names.add(fn.attr)
+            calls[node.name] = names
+    reaching: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for name, callees in calls.items():
+            if name in reaching:
+                continue
+            if target in callees or (callees & reaching):
+                reaching.add(name)
+                changed = True
+    return reaching
+
+
+def test_login_bearing_guest_composites_never_record_body() -> None:
+    """#3717 — every guest-ops composite that logs into the guest is body-excluded.
+
+    The guest OS password rides the downstream vim
+    ``NamePasswordAuthentication`` request body (not an op param / declared
+    property), so the ONLY control that stops the flight recorder recording
+    it is a ``credential_*`` classification via ``_CREDENTIAL_WRITE_OPS``.
+    The universe is discovered from the registry and the login-bearing
+    property from ``_guest_auth`` reachability, so a future login-bearing
+    sibling fails this loop until pinned, and a future no-login sibling fails
+    the set-difference until consciously reviewed. ``net.show`` is the sole
+    guest composite with no in-guest login.
+    """
+    guest = [s for s in _COMPOSITES if s.group_key == "guest_ops"]
+    assert guest, "guest_ops group must be non-empty (registry discovery broke)"
+    login_funcs = _funcs_reaching(_guest, "_guest_auth")
+    assert login_funcs, "no guest composite resolves _guest_auth (AST walk broke)"
+    login_bearing = [s for s in guest if s.handler.__name__ in login_funcs]
+    assert {s.op_id for s in guest} - {s.op_id for s in login_bearing} == {
+        "vmware.composite.vm.guest.net.show"
+    }
+    for spec in login_bearing:
+        assert classify_op(spec.op_id) == "credential_write", spec.op_id
+        excl = classify_body_exclusion(spec.op_id)
+        assert excl.excluded is True and excl.family == "secret-bearing", spec.op_id

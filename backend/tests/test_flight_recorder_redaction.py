@@ -597,6 +597,16 @@ _REAL_CREDENTIAL_OPS = [
     "keycloak.user.reset_password",
     "sddc.credential.list",
     "rke2.token.rotate",
+    # #3717 — the vSphere guest-ops composites that log into the guest. The
+    # guest OS password rides the downstream vim ``NamePasswordAuthentication``
+    # request body (not a param), so the ``_CREDENTIAL_WRITE_OPS`` pin is what
+    # makes ``classify_body_exclusion`` suppress the span body. All five must
+    # be excluded; ``net.show`` (no in-guest login) is intentionally absent.
+    "vmware.composite.vm.guest.file.read",
+    "vmware.composite.vm.guest.process.list",
+    "vmware.composite.vm.guest.env.read",
+    "vmware.composite.vm.guest.file.write",
+    "vmware.composite.vm.guest.program.run",
 ]
 
 
@@ -717,6 +727,47 @@ def test_span_secret_op_records_no_body_but_stays_certain() -> None:
     assert span.response_body == SECRET_FAMILY_OMITTED_MARKER
     assert span.uncertain is False
     assert "authorization" not in span.request_headers
+    _assert_no_secret(span, _SENTINEL)
+
+
+def test_span_guest_file_read_request_body_never_records_guest_password() -> None:
+    """#3717 — a guest.file.read span never records the vim guest password.
+
+    The observed leak: ``InitiateFileTransferFromGuest`` carries the guest OS
+    password in the request-body ``NamePasswordAuthentication`` block, which is
+    not a declared property nor a secret-*shaped* value, so only the
+    ``credential_write`` pin suppresses it. This asserts both bodies are
+    omitted — the response transfer-URL is dropped by whole-body omission
+    (a strict superset of the prior api_key shape-net redaction), so nothing
+    regresses on the response side.
+    """
+    span = redact_span(
+        op_id="vmware.composite.vm.guest.file.read",
+        connector_id="vmware-rest-9.0",
+        method="POST",
+        tags=["composite", "read-only", "guest", "vi-json", "file"],
+        request_body={
+            "vm": {
+                "_typeName": "ManagedObjectReference",
+                "type": "VirtualMachine",
+                "value": "vm-1",
+            },
+            "auth": {
+                "_typeName": "NamePasswordAuthentication",
+                "interactiveSession": False,
+                "username": "svc",
+                "password": "PLACEHOLDER-guest-pw",
+            },
+            "guestFilePath": "/etc/app/config",
+        },
+        response_body={"url": "https://*/guestFile?id=1&token=PLACEHOLDER-api-key"},
+        request_content_type="application/json",
+        response_content_type="application/json",
+    )
+    assert span.body_recorded is False
+    assert span.request_body == SECRET_FAMILY_OMITTED_MARKER
+    assert span.response_body == SECRET_FAMILY_OMITTED_MARKER
+    assert span.uncertain is False
     _assert_no_secret(span, _SENTINEL)
 
 

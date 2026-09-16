@@ -61,9 +61,12 @@ _CLASSIFIER_OTHER = frozenset(
         "vmware.composite.host.datastore_mount_nfs",
         "vmware.composite.host.disk_mark_flash",
         "vmware.composite.host.service_control",
-        "vmware.composite.vm.guest.env.read",
+        # #3717 — guest.env.read / guest.file.read moved OUT of ``other`` into
+        # ``credential_write``: they log into the guest and their vim
+        # ``NamePasswordAuthentication`` request body must never be recorded by
+        # the flight recorder (which delegates body exclusion to classify_op).
+        # ``net.show`` stays ``other`` — it sends no in-guest login.
         "vmware.composite.vm.guest.net.show",
-        "vmware.composite.vm.guest.file.read",
         "vmware.composite.supervisor.enable",
         "vmware.composite.supervisor.disable",
         "vmware.composite.supervisor.status",

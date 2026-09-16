@@ -339,6 +339,107 @@ def test_body_without_property_params_is_unchanged() -> None:
     assert out.uncertain is False
 
 
+def test_top_level_property_params_block_is_redacted_both_directions() -> None:
+    """The rule is keyed on the type marker, not a path: a PropertyParams
+    block at the *top level* (not nested under ``deployment_spec``) is
+    redacted just the same, on request and response bodies."""
+    body = {
+        "type": "PropertyParams",
+        "properties": [
+            {"id": "guest.password", "value": "PLACEHOLDER-top-pw"},
+            {"id": "guest.hostname", "value": "PLACEHOLDER-top-host"},
+        ],
+    }
+    for content in (body, {"additional_parameters": [dict(body)]}):
+        red = redact_span(
+            op_id="POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy",
+            connector_id="vmware-rest-9.0",
+            method="POST",
+            request_body=content,
+            response_body=content,
+            request_content_type="application/json",
+            response_content_type="application/json",
+        )
+        for recorded in (red.request_body, red.response_body):
+            props = _find_property_list(recorded)
+            assert props is not None
+            assert all(p["value"] == OVF_PROPERTY_VALUE_MARKER for p in props)
+            assert [p["id"] for p in props] == ["guest.password", "guest.hostname"]
+        assert red.uncertain is False
+        _assert_no_secret(red.request_body, "PLACEHOLDER-top-pw")
+        _assert_no_secret(red.response_body, "PLACEHOLDER-top-host")
+
+
+def _find_property_list(node: Any) -> Any:
+    """Return the ``properties`` list of the first PropertyParams block found."""
+    if isinstance(node, dict):
+        if node.get("type") == "PropertyParams" and isinstance(node.get("properties"), list):
+            return node["properties"]
+        for value in node.values():
+            found = _find_property_list(value)
+            if found is not None:
+                return found
+    elif isinstance(node, list):
+        for item in node:
+            found = _find_property_list(item)
+            if found is not None:
+                return found
+    return None
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        pytest.param({"type": "PropertyParams"}, id="properties-absent"),
+        pytest.param(
+            {"type": "PropertyParams", "properties": "not-a-list"}, id="properties-string"
+        ),
+        pytest.param(
+            {"type": "PropertyParams", "properties": {"id": "x", "value": "PLACEHOLDER-map"}},
+            id="properties-mapping",
+        ),
+        pytest.param(
+            {"type": "PropertyParams", "properties": [{"id": "guest.hostname"}]},
+            id="entry-without-value",
+        ),
+    ],
+)
+def test_malformed_property_params_never_crashes(block: dict[str, Any]) -> None:
+    """A PropertyParams block that does not match the ``[{id, value}]`` shape
+    must not crash and must not raise the fail-closed uncertainty flag: there
+    is no property ``value`` string to redact, so the block round-trips."""
+    out = redact_body(dict(block), paths=(), content_type="application/json")
+    assert out.uncertain is False
+    assert out.value == block
+
+
+def test_property_params_non_string_value_is_redacted() -> None:
+    """A non-string property ``value`` (int / nested object) is still replaced
+    by the marker -- the rule redacts the value regardless of its type."""
+    body = {
+        "type": "PropertyParams",
+        "properties": [
+            {"id": "guest.enabled", "value": 1},
+            {"id": "guest.config", "value": {"nested": "PLACEHOLDER-nested"}},
+            {"id": "guest.password", "value": "PLACEHOLDER-str-pw"},
+        ],
+    }
+    out = redact_body(body, paths=(), content_type="application/json")
+    assert [p["value"] for p in out.value["properties"]] == [OVF_PROPERTY_VALUE_MARKER] * 3
+    assert out.uncertain is False
+    _assert_no_secret(out.value, "PLACEHOLDER-nested")
+    _assert_no_secret(out.value, "PLACEHOLDER-str-pw")
+
+
+def test_property_params_redaction_is_idempotent() -> None:
+    """Redacting an already-redacted body yields the same result (redact twice
+    == redact once), so a re-processed capture never double-mangles."""
+    body = _ovf_deploy_body()
+    once = redact_body(body, paths=(), content_type="application/json").value
+    twice = redact_body(once, paths=(), content_type="application/json").value
+    assert twice == once
+
+
 # ===========================================================================
 # F2 -- redaction-uncertainty (fail-closed on every ambiguity)
 # ===========================================================================

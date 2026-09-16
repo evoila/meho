@@ -14,8 +14,8 @@ G0.6.1-T3 (#753) of Initiative #750. Bridges the vendored
 The reducer's job, per CLAUDE.md postulate 6 / v0.1-spec §4 L294-311:
 small / scalar payloads pass through verbatim with a ``None`` handle; a
 set-shaped payload above the threshold (50 rows OR 4 KB serialized by
-default) is materialized into an in-memory DuckDB table, summarized as
-markdown, frozen into a JSON Schema, and addressed by a
+default) is catalogued from captured JSON, summarized as markdown, frozen
+into a JSON Schema, and addressed by a
 :class:`~meho_backplane.connectors.schemas.ResultHandle` carrying a
 bounded sample so no agent ever sees the full set inline.
 
@@ -25,22 +25,18 @@ reducer returns alongside the handle carries the *count* of preview rows
 (``sample_rows_returned``) but not a second full copy of them. It is
 bounded by *serialized bytes* (``jsonflux_sample_byte_budget`` setting,
 default 4 KB), not only by row count -- an object-heavy list op whose
-rows are tens of KB each is shrunk (fewer rows, values truncated as a
-last resort) so the reduced envelope stays under a ceiling independent
-of per-row object size. The full set is untouched and stays reachable
-via the spill + ``result_query``.
+rows are tens of KB each drops preview rows.  A single selected row over the
+budget is explicitly omitted rather than changed. The full set is untouched
+and stays reachable via the spill + ``result_query``.
 
-Why ``QueryEngine`` directly, not ``JsonFlux``
-==============================================
+Why captured JSON is authoritative
+==================================
 
-The vendored :class:`~meho_backplane.jsonflux.JsonFlux` facade exposes
-``analyze`` / ``tree`` / ``stats`` / ``query`` but **not** the smart
-``register(unwrap=...)`` method — that lives on the lower-level
-:class:`~meho_backplane.jsonflux.query.engine.QueryEngine` (the
-list-of-dicts → DuckDB-table materializer the T2 vendoring preserved
-verbatim from MEHO.X commit ``8f48c141``). The reducer therefore drives
-``QueryEngine`` directly: it is the component that owns ``register`` +
-``describe_tables`` + ``DESCRIBE`` + sample querying.
+The reducer bounds the detected payload before it serializes that payload for
+threshold checking, then profiles all retained rows when it materializes.
+DuckDB remains on the lazy relational
+``result_query`` path only: it is not an authoritative source for schema,
+summary, or preview rows, because its Arrow projection can be lossy.
 
 Why the reducer detects the collection itself
 =============================================
@@ -82,7 +78,12 @@ from meho_backplane.connectors.schemas import (
     ResultHandle,
 )
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
-from meho_backplane.jsonflux.query.engine import QueryEngine
+from meho_backplane.jsonflux.query.result_catalog import (
+    AdmissionGuard,
+    AdmissionLimitError,
+    ResultFieldCatalog,
+    _build_catalog_from_admitted,
+)
 from meho_backplane.settings import get_settings
 
 __all__ = ["JsonFluxReducer"]
@@ -132,6 +133,11 @@ _DRILL_IN_UNAVAILABLE_RATIONALES: dict[DrillInUnavailableReason, str] = {
         "this handle: the result store did not persist the rows (backend "
         f"unreachable, write rejected, or disabled). {_DRILL_IN_WORKAROUND}"
     ),
+    "admission_limit_exceeded": (
+        "The captured result exceeded the reducer profiling work limit, so "
+        "its rows were not profiled or retained for drill-in. "
+        f"{_DRILL_IN_WORKAROUND}"
+    ),
 }
 
 
@@ -164,12 +170,6 @@ _NATIVE_PAGINATION_UNAVAILABLE_RATIONALE: str = (
     "registration ``llm_instructions.pagination_hint`` slot to surface "
     "specific param names + an example next call."
 )
-
-#: In-memory DuckDB table name the reducer registers each payload under.
-#: One :class:`QueryEngine` is created per :meth:`JsonFluxReducer.reduce`
-#: call, so a fixed name is safe — there is never table contention
-#: across concurrent dispatches.
-_TABLE = "result"
 
 #: Envelope keys vendor list ops wrap their collections under, in
 #: priority order: vCenter REST (``value``), NSX policy/manager API
@@ -278,64 +278,14 @@ _RESULT_OBJECT_VALUE_BYTE_BUDGET = 1024
 _RESULT_OBJECT_LIST_ITEMS = 16
 _RESULT_OBJECT_TRUNCATIONS_KEY = "result_object_truncations"
 
-#: Positional row-ordinal column the tail-sample query assigns via
-#: ``row_number() OVER ()``. DuckDB does not guarantee the order of a bare
-#: ``SELECT``; numbering the registered (Arrow-backed, insertion-ordered)
-#: scan gives a deterministic ordinal we can sort on to pick the tail. The
-#: name is leading-underscored so it can't collide with a real payload
-#: column and is excluded from the returned rows.
-_ROWNUM_COLUMN = "_jsonflux_rownum"
-
-#: Map a DuckDB type's leading token to a JSON Schema ``type``. DuckDB
-#: reports composite types as ``BIGINT[]`` (array) and ``STRUCT(...)``
-#: (object); the prefix match below covers those without enumerating
-#: every width-suffixed variant.
-_DUCKDB_TYPE_PREFIXES: tuple[tuple[str, str], ...] = (
-    ("BOOLEAN", "boolean"),
-    ("TINYINT", "integer"),
-    ("SMALLINT", "integer"),
-    ("INTEGER", "integer"),
-    ("BIGINT", "integer"),
-    ("HUGEINT", "integer"),
-    ("UINTEGER", "integer"),
-    ("UBIGINT", "integer"),
-    ("UTINYINT", "integer"),
-    ("USMALLINT", "integer"),
-    ("DOUBLE", "number"),
-    ("FLOAT", "number"),
-    ("DECIMAL", "number"),
-    ("STRUCT", "object"),
-    ("MAP", "object"),
-    ("JSON", "object"),
-)
-
-
-def _json_schema_type(duckdb_type: str) -> str:
-    """Map a DuckDB column type to a JSON Schema scalar ``type`` string.
-
-    Array types (``BIGINT[]``) collapse to ``"array"``; everything not
-    matched by :data:`_DUCKDB_TYPE_PREFIXES` (``VARCHAR``, ``UUID``,
-    ``DATE``, ``TIMESTAMP``, ...) maps to ``"string"`` — the safe JSON
-    representation DuckDB itself uses when serializing those columns.
-    """
-    upper = duckdb_type.upper()
-    if upper.endswith("[]") or upper.startswith("LIST"):
-        return "array"
-    for prefix, json_type in _DUCKDB_TYPE_PREFIXES:
-        if upper.startswith(prefix):
-            return json_type
-    return "string"
-
 
 @dataclass(frozen=True, slots=True)
 class _MaterializedSet:
     """The artefacts :meth:`JsonFluxReducer._materialize` carries forward.
 
-    Decouples the synchronous DuckDB step (which closes its engine in a
-    ``finally``) from the asynchronous spill + the handle assembly.
-    ``full_rows`` is the complete normalized row list -- the data that
-    used to be discarded at engine close, now carried out so it can be
-    persisted to the read-back store.
+    ``full_rows`` is the complete normalized row list carried to the
+    asynchronous spill.  An admission-limited result intentionally leaves it
+    empty: rejected graphs are never copied, serialized, or persisted.
     """
 
     handle_id: UUID
@@ -344,6 +294,7 @@ class _MaterializedSet:
     summary_md: str
     sample_rows: list[dict[str, Any]]
     full_rows: list[dict[str, Any]]
+    admission_limited: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -387,6 +338,7 @@ class JsonFluxReducer:
         store: ResultHandleStore | None = None,
         max_spill_rows: int | None = None,
         sample_byte_budget: int | None = None,
+        admission_guard: AdmissionGuard | None = None,
     ) -> None:
         self._row_threshold = row_threshold
         self._byte_threshold = byte_threshold
@@ -402,6 +354,7 @@ class JsonFluxReducer:
         self._store = store
         self._max_spill_rows = max_spill_rows
         self._sample_byte_budget = sample_byte_budget
+        self._admission_guard = admission_guard
 
     async def reduce(
         self,
@@ -430,7 +383,7 @@ class JsonFluxReducer:
         machine-readable ``reason`` naming which skip fired so the
         reduced-but-unspilled response is self-explanatory.
         """
-        del schema  # schema is inferred from the registered table
+        del schema  # schema is inferred from captured rows
 
         # Resolve the digest hint once (#3122) so both the collection detection
         # and the row-digest read the same validated spec — a single warning on
@@ -441,6 +394,23 @@ class JsonFluxReducer:
             # Not a set-shaped payload (scalar, dict-of-scalars, None) —
             # nothing to reduce.
             return payload, None
+
+        # Bound the entire captured payload before normalizing rows,
+        # inspecting hinted siblings, or serializing the enclosing payload for
+        # the byte threshold. This keeps deep/wide rejected envelope graphs
+        # out of every later reducer path.
+        try:
+            self._resolve_admission_guard().require(payload)
+        except AdmissionLimitError:
+            materialized = self._admission_limited_materialized(len(rows))
+            summary, handle = self._assemble(
+                materialized,
+                None,
+                context,
+                _SpillOutcome(skip_reason="admission_limit_exceeded"),
+            )
+            self._record_flux_span(rows, materialized, summary, context)
+            return summary, handle
 
         if not self._over_threshold(rows, payload):
             return payload, None
@@ -499,16 +469,12 @@ class JsonFluxReducer:
         rows: list[Any],
         context: dict[str, Any] | None,
     ) -> _MaterializedSet:
-        """Register *rows* in DuckDB; return the materialized artefacts.
+        """Build all derived result artifacts from captured JSON rows.
 
-        A fresh :class:`QueryEngine` is created per call (in-memory,
-        per-payload isolation) and closed before returning so no DuckDB
-        connection leaks across dispatches. The full normalized row list
-        is carried out on :attr:`_MaterializedSet.full_rows` so
-        :meth:`_spill` can persist it **after** the engine closes --
-        decoupling the (sync) DuckDB work from the (async) spill keeps the
-        ``finally``-close discipline intact while still surfacing the rows
-        that used to be discarded here.
+        ``rows`` has passed the admission guard at :meth:`reduce` before
+        normalization and threshold serialization. The catalog therefore
+        traverses top-level values only; nested values are already admitted.
+        DuckDB/Arrow construction is deliberately deferred to ``result_query``.
 
         ``context`` carries the dispatcher's per-call extras --
         ``op_id``, ``operator_sub``, ``source_kind``, ``target_id``,
@@ -518,16 +484,12 @@ class JsonFluxReducer:
         ``operator_sub`` to spill; the rest is informational.
         """
         table_rows = _normalize_rows(rows)
+        catalog = _build_catalog_from_admitted(table_rows)
         sample_from_tail = _sample_from_tail(context)
-        engine = QueryEngine()
-        try:
-            engine.register(_TABLE, table_rows, unwrap="auto")
-            total_rows = engine.tables[_TABLE]["row_count"]
-            schema_ = _build_json_schema(engine)
-            summary_md = engine.describe_tables(samples=self._sample_size)
-            sample_rows = _query_sample(engine, self._sample_size, from_tail=sample_from_tail)
-        finally:
-            engine.close()
+        total_rows = len(table_rows)
+        schema_ = catalog.to_json_schema()
+        sample_rows = _sample_from_raw(table_rows, self._sample_size, from_tail=sample_from_tail)
+        summary_md = _describe_from_catalog(catalog, total_rows)
 
         return _MaterializedSet(
             handle_id=uuid.uuid4(),
@@ -536,6 +498,29 @@ class JsonFluxReducer:
             summary_md=summary_md,
             sample_rows=sample_rows,
             full_rows=table_rows,
+        )
+
+    @staticmethod
+    def _admission_limited_materialized(total_rows: int) -> _MaterializedSet:
+        """Return the bounded handle artifacts for a rejected raw graph."""
+        return _MaterializedSet(
+            handle_id=uuid.uuid4(),
+            total_rows=total_rows,
+            schema_={
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {},
+                    "x-result-reduction-status": "unprofiled",
+                    "x-result-reduction-admission-reason": "admission_limit_exceeded",
+                },
+            },
+            summary_md=(
+                "Result fields were not profiled because the admission work limit was exceeded."
+            ),
+            sample_rows=[],
+            full_rows=[],
+            admission_limited=True,
         )
 
     async def _spill(
@@ -558,6 +543,8 @@ class JsonFluxReducer:
         skip used to be fully silent, which left the RDC cycle-8
         ``k8s.logs tail=300`` diagnosis with nothing to grep for.
         """
+        if materialized.admission_limited:
+            return _SpillOutcome(skip_reason="admission_limit_exceeded")
         tenant_raw = context.get("tenant_id") if context else None
         operator_sub = context.get("operator_sub") if context else None
         if not tenant_raw or not operator_sub:
@@ -673,7 +660,9 @@ class JsonFluxReducer:
             ttl_seconds=self._ttl_seconds,
         )
         sample_rows = _fit_sample_to_budget(
-            materialized.sample_rows, self._resolve_sample_byte_budget()
+            materialized.sample_rows,
+            self._resolve_sample_byte_budget(),
+            from_tail=_sample_from_tail(context),
         )
         handle = ResultHandle(
             handle_id=materialized.handle_id,
@@ -708,6 +697,13 @@ class JsonFluxReducer:
         )
         if envelope_key is not None:
             summary["source_key"] = envelope_key
+        if materialized.admission_limited:
+            summary["status"] = "unprofiled"
+            summary["reason"] = "admission_limit_exceeded"
+        elif materialized.sample_rows and not sample_rows:
+            summary["sample_note"] = (
+                "Preview omitted because the selected row exceeds the byte budget."
+            )
         return summary, handle
 
     def _resolve_sample_byte_budget(self) -> int:
@@ -721,6 +717,17 @@ class JsonFluxReducer:
         if self._sample_byte_budget is not None:
             return self._sample_byte_budget
         return get_settings().jsonflux_sample_byte_budget
+
+    def _resolve_admission_guard(self) -> AdmissionGuard:
+        """Read the catalog work limits lazily with the other reducer knobs."""
+        if self._admission_guard is not None:
+            return self._admission_guard
+        settings = get_settings()
+        return AdmissionGuard(
+            max_decoded_bytes=settings.result_reduction_max_decoded_bytes,
+            max_depth=settings.result_reduction_max_depth,
+            max_nodes=settings.result_reduction_max_nodes,
+        )
 
 
 def _detect_collection(
@@ -822,23 +829,21 @@ def _detect_collection(
 
 
 def _normalize_rows(rows: list[Any]) -> list[dict[str, Any]]:
-    """Coerce *rows* into a list of dicts DuckDB can register.
+    """Wrap non-object captured rows without changing object rows.
 
-    A list of dicts is returned unchanged. A list of scalars (Vault's
-    ``keys``) is wrapped one-per-row under :data:`_SCALAR_COLUMN` so the
-    smart ``register`` materializes one row per element rather than
-    collapsing the list to metadata.
+    A dict row is retained by identity. Each non-object JSON value is wrapped
+    under :data:`_SCALAR_COLUMN`, including mixed object/scalar collections,
+    so every spill and raw preview has a uniform row shape without coercing
+    source values.
     """
-    if rows and isinstance(rows[0], dict):
-        return rows
-    return [{_SCALAR_COLUMN: item} for item in rows]
+    return [row if isinstance(row, dict) else {_SCALAR_COLUMN: row} for row in rows]
 
 
 def _flux_kept_fields(schema: dict[str, Any] | None) -> list[str]:
     """Kept-field names for the flight-recorder JSONFlux span (#3214).
 
-    ``_build_json_schema`` nests the object's properties under ``items`` (the
-    set-of-objects contract). Fully isinstance-guarded so it can never raise
+    The catalog schema nests the object's properties under ``items``. Fully
+    isinstance-guarded so it can never raise
     into :meth:`JsonFluxReducer.reduce` -- capture must never alter a dispatch
     (F7).
     """
@@ -853,65 +858,28 @@ def _flux_kept_fields(schema: dict[str, Any] | None) -> list[str]:
     return [str(key) for key in props]
 
 
-def _build_json_schema(engine: QueryEngine) -> dict[str, Any]:
-    """Build a JSON Schema (Draft 2020-12) for the registered table.
-
-    Reads the DuckDB ``DESCRIBE`` for the main table and maps each
-    column's type to a JSON Schema property. The shape is
-    ``{"type": "array", "items": {"type": "object", "properties":
-    {...}}}`` — the set-of-objects contract the query surface
-    reports.
-    """
-    described = engine.conn.execute(f"DESCRIBE {_TABLE}").fetchall()
-    properties = {
-        column_name: {"type": _json_schema_type(column_type)}
-        for column_name, column_type, *_ in described
-    }
-    return {
-        "type": "array",
-        "items": {"type": "object", "properties": properties},
-    }
-
-
-def _query_sample(
-    engine: QueryEngine, sample_size: int, *, from_tail: bool = False
+def _sample_from_raw(
+    rows: list[dict[str, Any]], sample_size: int, *, from_tail: bool = False
 ) -> list[dict[str, Any]]:
-    """Return *sample_size* rows of the table as plain dicts.
-
-    Default (``from_tail=False``): the **head** -- the first ``sample_size``
-    rows in registration order. Correct for order-agnostic sets (Vault key
-    lists, topology rows) where neither end is more salient.
-
-    ``from_tail=True``: the **tail** -- the *most-recent* ``sample_size``
-    rows, returned in chronological (oldest-first) order so the inline
-    preview reads like the bottom of a ``kubectl logs`` window. This is the
-    fix for the v0.10.0 dogfood defect where a ``k8s.logs(tail=500)`` reduce
-    surfaced the oldest 5 lines (health-probe noise) instead of the 5 most
-    recent. A bare ``SELECT ... LIMIT`` has no ``ORDER BY`` and so returns
-    an implementation-ordered subset (DuckDB docs: order is uncontrolled
-    without ``ORDER BY``); numbering the scan with ``row_number() OVER ()``
-    and selecting the tail makes the choice deterministic.
-    """
+    """Return a chronological head or tail slice of captured rows unchanged."""
     if sample_size <= 0:
         return []
-    limit = int(sample_size)
-    if not from_tail:
-        # Safe (sqlalchemy-execute-raw-query): DuckDB in-memory SELECT; the
-        # table name is the fixed module constant and the limit is an int.
-        return engine.query(f"SELECT * FROM {_TABLE} LIMIT {limit}")
-    # Tail: assign a positional ordinal over the registered scan, keep the
-    # highest-ordinal (most-recent) ``limit`` rows, and re-sort ascending so
-    # the returned slice stays chronological. ``EXCLUDE`` drops the helper
-    # ordinal so callers never see it.
-    # Safe (sqlalchemy-execute-raw-query): DuckDB in-memory SELECT; the table
-    # name + ordinal column are fixed module constants and the limit is an int.
-    sql = (
-        f"SELECT * EXCLUDE ({_ROWNUM_COLUMN}) FROM ("
-        f"SELECT *, row_number() OVER () AS {_ROWNUM_COLUMN} FROM {_TABLE} "
-        f"ORDER BY {_ROWNUM_COLUMN} DESC LIMIT {limit}"
-        f") ORDER BY {_ROWNUM_COLUMN} ASC"
-    )
-    return engine.query(sql)
+    if from_tail:
+        return rows[-sample_size:]
+    return rows[:sample_size]
+
+
+def _describe_from_catalog(catalog: ResultFieldCatalog, total_rows: int) -> str:
+    """Describe fields and kinds without repeating raw preview values."""
+    if not catalog.fields:
+        return f"{total_rows} rows; no top-level fields observed."
+    field_lines = []
+    for field in catalog.fields:
+        kinds = "/".join(sorted(field.kinds))
+        nullable = ", nullable" if field.nullable else ""
+        field_lines.append(f"- `{field.name}`: {kinds}{nullable}")
+    heading = f"{total_rows} rows; {len(catalog.fields)} top-level fields."
+    return f"{heading}\n\n" + "\n".join(field_lines)
 
 
 def _sample_from_tail(context: dict[str, Any] | None) -> bool:
@@ -1295,33 +1263,20 @@ def _serialize(payload: Any) -> bytes:
         return str(payload).encode("utf-8", "replace")
 
 
-#: Marker appended to a value that :func:`_truncate_row_values` shortened,
-#: so a reader can tell the inline preview clipped a field rather than the
-#: op returning a short value. The full value is still reachable via the
-#: spilled handle + ``result_query``.
-_TRUNCATION_MARKER = "…[truncated]"
-
-
 def _fit_sample_to_budget(
-    sample_rows: list[dict[str, Any]], byte_budget: int
+    sample_rows: list[dict[str, Any]], byte_budget: int, *, from_tail: bool = False
 ) -> list[dict[str, Any]]:
     """Shrink *sample_rows* so its serialized JSON fits *byte_budget* (#134).
 
     ``sample_size`` bounds the sample by *row count* only, so a handful of
     object-heavy rows (tens of KB each) still overflow the MCP token
-    ceiling. This bounds the sample by *serialized bytes* independently of
-    per-row object size, in two stages:
+    ceiling. A head preview drops rows from its tail; a chronological tail
+    preview drops its oldest rows, retaining the newest selected values. If
+    the selected single row remains too large, it is omitted: a preview may be
+    absent, but it must never edit a nested captured value.
 
-    1. **Drop rows** from the tail until the serialized sample fits the
-       budget, but never below one row -- a reduced set must still carry a
-       real preview, and full fidelity stays reachable via the spill +
-       ``result_query``.
-    2. If a **single** row still exceeds the budget, truncate that row's
-       oversized string values (:func:`_truncate_row_values`) so even one
-       pathologically large object cannot blow the ceiling.
-
-    An empty input returns empty. The returned rows are fresh dicts (the
-    caller freezes them into the handle); the materialized ``full_rows``
+    An empty input returns empty. The returned list is a shallow selection of
+    the captured row dictionaries; the materialized ``full_rows``
     spilled for read-back are untouched, so recovery is byte-for-byte
     unchanged.
     """
@@ -1331,41 +1286,12 @@ def _fit_sample_to_budget(
 
     rows = list(sample_rows)
     while len(rows) > 1 and len(_serialize(rows)) > budget:
-        rows = rows[:-1]
+        rows = rows[1:] if from_tail else rows[:-1]
 
     if len(_serialize(rows)) <= budget:
         return rows
 
-    # One row still over budget: truncate its oversized string values.
-    return [_truncate_row_values(rows[0], budget)]
-
-
-def _truncate_row_values(row: dict[str, Any], byte_budget: int) -> dict[str, Any]:
-    """Return *row* with oversized string values clipped to fit *byte_budget*.
-
-    Distributes the budget across the row's string-valued fields and clips
-    each to an equal share (leaving non-string values -- ints, nested
-    objects -- intact, since the object-heavy overflow this guards against
-    is dominated by long string blobs). Clipped values carry
-    :data:`_TRUNCATION_MARKER` so the clip is visible; the untruncated
-    value is recoverable via ``result_query``. This is the last-resort
-    branch: it only runs when a single row already exceeds the whole
-    budget, which a well-behaved op never hits.
-    """
-    string_keys = [key for key, value in row.items() if isinstance(value, str)]
-    if not string_keys:
-        return dict(row)
-    # Per-field character allowance. ``byte_budget`` is a byte bound and
-    # characters are >= 1 byte, so clipping to this many characters keeps
-    # the row's string payload under budget with headroom for the JSON
-    # structure (keys, quotes, non-string fields).
-    per_field_chars = max(byte_budget // (len(string_keys) * 2), 1)
-    truncated = dict(row)
-    for key in string_keys:
-        value = row[key]
-        if len(value.encode("utf-8")) > per_field_chars:
-            truncated[key] = value[:per_field_chars] + _TRUNCATION_MARKER
-    return truncated
+    return []
 
 
 def _build_fetch_more(

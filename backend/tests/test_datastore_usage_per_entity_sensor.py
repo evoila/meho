@@ -45,6 +45,7 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     DATASTORE_USAGE_PARAMETER_SCHEMA,
     DATASTORE_USAGE_RESPONSE_SCHEMA,
 )
+from meho_backplane.jsonflux.query.result_catalog import AdmissionGuard
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 
 #: Fixed, timezone-aware instant (evaluate_assertion requires an aware now).
@@ -77,9 +78,14 @@ def _reducer() -> JsonFluxReducer:
     ever moves. ``sample_byte_budget`` is set only so the over-threshold
     assemble path does not read app settings (``get_settings()``) in this
     pure-module test; it sizes the envelope's inline sample, not the collapse
-    decision.
+    decision. The explicit admission guard keeps the pre-threshold payload
+    walk equally configuration-free.
     """
-    return JsonFluxReducer(byte_threshold=_BYTE_THRESHOLD, sample_byte_budget=_BYTE_THRESHOLD)
+    return JsonFluxReducer(
+        byte_threshold=_BYTE_THRESHOLD,
+        sample_byte_budget=_BYTE_THRESHOLD,
+        admission_guard=AdmissionGuard(),
+    )
 
 
 def _make_operator() -> Operator:

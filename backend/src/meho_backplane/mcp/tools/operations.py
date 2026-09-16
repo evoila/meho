@@ -558,7 +558,7 @@ register_mcp_tool(
                 "audit_id": {
                     "type": ["string", "null"],
                     "format": "uuid",
-                    "description": "Committed dispatcher audit receipt; null when no audit row can be promised.",
+                    "description": ("Committed audit receipt; null when a row cannot be promised."),
                 },
                 "delivery": {
                     "type": ["string", "null"],

@@ -247,6 +247,7 @@ from typing import Any, Literal
 
 import httpx
 import hvac.exceptions
+import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.announce_gate import announce_gate_blocks
@@ -366,6 +367,8 @@ from meho_backplane.redaction import (
     manifest_to_audit_payload,
 )
 from meho_backplane.settings import get_settings
+
+_log = structlog.get_logger(__name__)
 
 __all__ = [
     "CompositeRecursionLimitExceeded",
@@ -2067,7 +2070,13 @@ async def _reduce_or_error(
             descriptor.response_schema,
             reducer_context,
         )
-    except Exception:
+    except Exception as exc:
+        _log.warning(
+            "result_delivery_unavailable",
+            op_id=op_id,
+            audit_id=str(audit_id),
+            exception_class=type(exc).__name__,
+        )
         return await _unavailable_delivery_result(
             op_id=op_id,
             descriptor=descriptor,

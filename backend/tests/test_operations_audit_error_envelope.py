@@ -41,6 +41,7 @@ from uuid import UUID
 
 import httpx
 import pytest
+from sqlalchemy import select
 
 import meho_backplane.operations._audit as audit_module
 import meho_backplane.operations.dispatcher as dispatcher_module
@@ -49,6 +50,8 @@ from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import AuditLog
 from meho_backplane.operations import (
     PassThroughReducer,
     dispatch,
@@ -319,15 +322,26 @@ def _raise_audit_commit(*_args: Any, **_kwargs: Any) -> Any:
 
 
 @pytest.fixture
-def captured_audit_rows(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
-    """Capture durable-write inputs without replacing dispatcher ordering."""
-    rows: list[dict[str, Any]] = []
+def committed_audit_writes(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Record actual audit writes while retaining the real commit implementation."""
+    original_write = audit_module.write_audit_row
+    writes: list[dict[str, Any]] = []
 
-    async def _record(**kwargs: Any) -> None:
-        rows.append(kwargs)
+    async def _record_after_commit(**kwargs: Any) -> None:
+        await original_write(**kwargs)
+        writes.append(kwargs)
 
-    monkeypatch.setattr(audit_module, "write_audit_row", _record)
-    return rows
+    monkeypatch.setattr(audit_module, "write_audit_row", _record_after_commit)
+    return writes
+
+
+async def _committed_rows_for(op_id: str) -> list[AuditLog]:
+    """Read freshly committed dispatch rows through a separate DB session."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        return list(
+            (await session.execute(select(AuditLog).where(AuditLog.path == op_id))).scalars().all()
+        )
 
 
 def _install_exploding_reducer() -> None:
@@ -476,7 +490,7 @@ async def test_completed_handler_reducer_failure_keeps_committed_audit_receipt(
     op_id: str,
     stub_embedding_service: AsyncMock,
     captured_events: list[BroadcastEvent],
-    captured_audit_rows: list[dict[str, Any]],
+    committed_audit_writes: list[dict[str, Any]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Read and write handlers are not retried when only shaping fails.
@@ -519,13 +533,17 @@ async def test_completed_handler_reducer_failure_keeps_committed_audit_receipt(
     assert "raw-delivery-secret" not in str(result)
     assert "private diagnostic" not in str(result)
     assert calls == [{"request": "once"}]
-    assert len(captured_audit_rows) == 1
-    row = captured_audit_rows[0]
-    assert row["audit_id"] == result.audit_id
-    assert row["result_status"] == "ok"
-    assert row["raw_payload"] == expected_raw
-    assert row["redaction_manifest"] == expected_manifest
-    assert row["redaction_policy_id"] == expected_policy
+    assert len(committed_audit_writes) == 1
+    assert committed_audit_writes[0]["audit_id"] == result.audit_id
+    rows = await _committed_rows_for(op_id)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.id == result.audit_id
+    assert row.status_code == 200
+    assert row.payload["result_status"] == "ok"
+    assert row.raw_payload == expected_raw
+    assert row.redaction_manifest == expected_manifest
+    assert row.payload["redaction_policy_id"] == expected_policy
     assert len(captured_events) == 1
     assert captured_events[0].audit_id == result.audit_id
     assert captured_events[0].result_status == "ok"
@@ -614,7 +632,7 @@ async def test_completed_safe_read_reducer_failure_stays_ok_without_audit_receip
 @pytest.mark.asyncio
 async def test_broadcast_failure_after_audit_commit_keeps_receipt(
     stub_embedding_service: AsyncMock,
-    captured_audit_rows: list[dict[str, Any]],
+    committed_audit_writes: list[dict[str, Any]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A failed fan-out cannot erase the receipt for an already committed row."""
@@ -643,6 +661,10 @@ async def test_broadcast_failure_after_audit_commit_keeps_receipt(
     assert result.audit_id is not None
     assert "broadcast private diagnostic" not in str(result)
     assert calls == [{}]
-    assert len(captured_audit_rows) == 1
-    assert captured_audit_rows[0]["audit_id"] == result.audit_id
-    assert captured_audit_rows[0]["result_status"] == "ok"
+    assert len(committed_audit_writes) == 1
+    assert committed_audit_writes[0]["audit_id"] == result.audit_id
+    rows = await _committed_rows_for("demo.thing.create")
+    assert len(rows) == 1
+    assert rows[0].id == result.audit_id
+    assert rows[0].status_code == 200
+    assert rows[0].payload["result_status"] == "ok"

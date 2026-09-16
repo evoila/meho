@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -642,17 +642,18 @@ async def test_dispatch_returns_unavailable_delivery_when_reducer_raises(
         embedding_service=stub_embedding_service,
     )
 
-    set_default_reducer(_ExplodingReducer())
-    try:
-        result = await dispatch(
-            operator=_make_operator(),
-            connector_id="vault-1.x",
-            op_id="vault.kv.list",
-            target=_FakeTarget(product="vault"),
-            params={"path": "/secret"},
-        )
-    finally:
-        set_default_reducer(PassThroughReducer())
+    with patch("meho_backplane.operations.dispatcher._log") as mock_log:
+        set_default_reducer(_ExplodingReducer())
+        try:
+            result = await dispatch(
+                operator=_make_operator(),
+                connector_id="vault-1.x",
+                op_id="vault.kv.list",
+                target=_FakeTarget(product="vault"),
+                params={"path": "/secret"},
+            )
+        finally:
+            set_default_reducer(PassThroughReducer())
 
     assert result.status == "ok"
     assert result.result is None
@@ -661,6 +662,13 @@ async def test_dispatch_returns_unavailable_delivery_when_reducer_raises(
     assert result.audit_id is not None
     assert "RuntimeError" not in str(result.extras)
     assert "already executed" in result.extras["remediation"]
+    mock_log.warning.assert_called_once_with(
+        "result_delivery_unavailable",
+        op_id="vault.kv.list",
+        audit_id=str(result.audit_id),
+        exception_class="RuntimeError",
+    )
+    assert "simulated reducer explosion" not in str(mock_log.warning.call_args)
     assert len(captured_events) == 1
     assert captured_events[0].result_status == "ok"
 

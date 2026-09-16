@@ -32,8 +32,9 @@ with embedded quotes escaped).
 Bounds
 ======
 
-Filter predicates ≤ 10, ``group_by`` ≤ 4, ``order_by`` ≤ 4, ``select``
-projection ≤ 64 columns, and each ``IN`` value list ≤ 1000 elements (all
+Filter predicates ≤ 10, aggregate outputs ≤ 8, ``group_by`` ≤ 4,
+``order_by`` ≤ 4, ``select`` projection ≤ 64 columns, and each ``IN`` value
+list ≤ 1000 elements (all
 rejected at model construction). The ``select`` and ``IN`` caps bound the
 compile-time expansion — one quoted identifier per projected column, one
 bound placeholder per ``IN`` element — so a caller cannot force an
@@ -48,7 +49,8 @@ keep the vendored ``jsonflux`` package free of an ``operations`` back-edge.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import re
+from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -103,6 +105,15 @@ _MAX_IN_VALUES = 1000
 #: Omitting ``select`` still projects the handle's full (non-caller-shaped)
 #: schema via ``SELECT *``, so this bounds only caller-driven expansion.
 _MAX_SELECT_COLUMNS = 64
+
+#: Cap on aggregate outputs. Each aggregate adds an expression and generated
+#: alias to the caller-shaped SELECT, so bound the construction work in the
+#: same way as the other query lists.
+_MAX_AGGREGATES = 8
+
+#: Maximum number of known columns included in an unknown-field remediation.
+#: A result handle can be very wide; the error remains agent-readable.
+_MAX_KNOWN_SUGGESTIONS = 20
 
 
 class QueryContractError(ValueError):
@@ -187,9 +198,9 @@ class ResultQuerySpec(BaseModel):
 
     Every field is optional: an empty spec compiles to ``SELECT * FROM
     result LIMIT <max>`` — a full read-back capped at the output ceiling.
-    The list caps (``filter`` ≤ 10, ``group_by`` ≤ 4, ``order_by`` ≤ 4,
-    ``select`` ≤ 64, and each ``IN`` value list ≤ 1000) and the
-    operator/aggregate allow-lists are enforced here, at construction;
+    The list caps (``filter`` ≤ 10, ``aggregate`` ≤ 8, ``group_by`` ≤ 4,
+    ``order_by`` ≤ 4, ``select`` ≤ 64, and each ``IN`` value list ≤ 1000)
+    and the operator/aggregate allow-lists are enforced here, at construction;
     field-vs-schema validation needs the handle's columns and happens in
     :func:`compile_query`.
     """
@@ -217,6 +228,7 @@ class ResultQuerySpec(BaseModel):
     )
     aggregate: list[Aggregate] = Field(
         default_factory=list,
+        max_length=_MAX_AGGREGATES,
         description="Aggregate output columns (COUNT/SUM/MIN/MAX/AVG).",
     )
     order_by: list[OrderBy] = Field(
@@ -268,9 +280,49 @@ def _quote_ident(name: str) -> str:
 def _require_known(field: str, known: set[str]) -> None:
     """Reject a field that is not a column on the handle's schema."""
     if field not in known:
+        suggestions = sorted(known)[:_MAX_KNOWN_SUGGESTIONS]
+        omitted = len(known) - len(suggestions)
+        suffix = f" (and {omitted} more)" if omitted else ""
         raise QueryContractError(
             f"unknown field {field!r}: not a column on this result handle. "
-            f"Known columns: {sorted(known)}."
+            f"Known columns: {suggestions}{suffix}."
+        )
+
+
+def _validate_filter_literal(field: str, column_type: str, value: Any) -> None:
+    """Reject a value whose Python kind cannot represent a scalar column type.
+
+    This guard intentionally recognizes only canonical scalar types reported
+    by DuckDB ``DESCRIBE``. Other types retain the existing parameter-binding
+    behavior until catalog-aware field admission can make a fuller decision.
+    """
+    normalized = column_type.upper()
+    if normalized == "BOOLEAN":
+        matches = isinstance(value, bool)
+    elif normalized in {
+        "TINYINT",
+        "SMALLINT",
+        "INTEGER",
+        "BIGINT",
+        "HUGEINT",
+        "UTINYINT",
+        "USMALLINT",
+        "UINTEGER",
+        "UBIGINT",
+        "UHUGEINT",
+        "FLOAT",
+        "REAL",
+        "DOUBLE",
+    } or re.fullmatch(r"DECIMAL\(\d+,\s*\d+\)", normalized):
+        matches = isinstance(value, (int, float)) and not isinstance(value, bool)
+    elif normalized == "VARCHAR":
+        matches = isinstance(value, str)
+    else:
+        return
+    if not matches:
+        raise QueryContractError(
+            f"filter value for field {field!r} with column type {column_type!r} "
+            f"must be a compatible scalar, got {type(value).__name__}."
         )
 
 
@@ -278,6 +330,7 @@ def _build_where(
     predicates: Sequence[FilterPredicate],
     known: set[str],
     params: list[Any],
+    column_types: Mapping[str, str] | None,
 ) -> str:
     """Compile the predicate list into a parameterized ``WHERE`` body."""
     terms: list[str] = []
@@ -295,6 +348,10 @@ def _build_where(
                 raise QueryContractError(
                     f"operator 'IN' on field {pred.field!r} needs a non-empty list value."
                 )
+            column_type = column_types.get(pred.field) if column_types is not None else None
+            if column_type is not None:
+                for value in pred.value:
+                    _validate_filter_literal(pred.field, column_type, value)
             placeholders = ", ".join("?" for _ in pred.value)
             terms.append(f"{ident} IN ({placeholders})")
             params.extend(pred.value)
@@ -303,6 +360,9 @@ def _build_where(
                 raise QueryContractError(
                     f"operator {pred.op!r} on field {pred.field!r} needs a scalar value."
                 )
+            column_type = column_types.get(pred.field) if column_types is not None else None
+            if column_type is not None:
+                _validate_filter_literal(pred.field, column_type, pred.value)
             terms.append(f"{ident} {pred.op} ?")
             params.append(pred.value)
     return " AND ".join(terms)
@@ -331,6 +391,11 @@ def _build_aggregate_projection(spec: ResultQuerySpec, known: set[str]) -> tuple
     seen_aliases: set[str] = set()
     for col in spec.group_by:
         _require_known(col, known)
+        if col in seen_aliases:
+            raise QueryContractError(
+                f"duplicate output column {col!r}; each output column must be distinct."
+            )
+        seen_aliases.add(col)
         select_parts.append(_quote_ident(col))
     for agg in spec.aggregate:
         if agg.func == "COUNT" and agg.field is None:
@@ -363,8 +428,14 @@ def _build_projection(spec: ResultQuerySpec, known: set[str]) -> tuple[str, str]
     if spec.aggregate:
         return _build_aggregate_projection(spec, known)
     if spec.group_by:
+        seen_group_keys: set[str] = set()
         for col in spec.group_by:
             _require_known(col, known)
+            if col in seen_group_keys:
+                raise QueryContractError(
+                    f"duplicate output column {col!r}; each output column must be distinct."
+                )
+            seen_group_keys.add(col)
         cols = ", ".join(_quote_ident(col) for col in spec.group_by)
         return cols, cols
     if spec.select:
@@ -403,6 +474,7 @@ def compile_query(
     columns: Sequence[str],
     *,
     max_limit: int,
+    column_types: Mapping[str, str] | None = None,
 ) -> CompiledQuery:
     """Compile *spec* into one parameterized, read-only ``SELECT``.
 
@@ -414,13 +486,16 @@ def compile_query(
     can set ``truncated`` when the underlying result had more rows than fit.
 
     Raises :class:`QueryContractError` on any field-vs-schema or
-    value-shape violation. The returned SQL is always a single ``SELECT``
-    over :data:`RESULT_TABLE` with no trailing statement separator.
+    value-shape violation. When present, *column_types* contains exact
+    ``DESCRIBE`` types for a subset of *columns* and validates recognized
+    scalar filter literals without coercion. The returned SQL is always a
+    single ``SELECT`` over :data:`RESULT_TABLE` with no trailing statement
+    separator.
     """
     known = set(columns)
     params: list[Any] = []
 
-    where_sql = _build_where(spec.filter, known, params)
+    where_sql = _build_where(spec.filter, known, params, column_types)
     select_sql, group_sql = _build_projection(spec, known)
     order_sql = _build_order(spec, known)
 

@@ -210,6 +210,17 @@ def test_select_at_cap_compiles() -> None:
     assert sql.count('"id"') == 64
 
 
+def test_more_than_eight_aggregates_is_rejected() -> None:
+    with pytest.raises(ValidationError):
+        ResultQuerySpec(aggregate=[{"func": "COUNT"}] * 9)
+
+
+def test_eight_aggregates_are_accepted_and_exposed_in_schema() -> None:
+    spec = ResultQuerySpec(aggregate=[{"func": "COUNT"}] * 8)
+    assert len(spec.aggregate) == 8
+    assert ResultQuerySpec.model_json_schema()["properties"]["aggregate"]["maxItems"] == 8
+
+
 def test_extra_top_level_argument_is_rejected() -> None:
     with pytest.raises(ValidationError):
         ResultQuerySpec(bogus=1)  # type: ignore[call-arg]
@@ -229,6 +240,96 @@ def test_group_by_with_aggregate_projects_keys_then_aggregates() -> None:
     )
     assert '"project", COUNT(*) AS "count", SUM("memoryMB") AS "sum_memoryMB"' in sql
     assert 'GROUP BY "project"' in sql
+
+
+def test_duplicate_group_key_is_rejected() -> None:
+    with pytest.raises(QueryContractError, match="duplicate output column"):
+        _compile(ResultQuerySpec(group_by=["project", "project"], aggregate=[{"func": "COUNT"}]))
+
+
+def test_duplicate_group_key_without_aggregate_is_rejected() -> None:
+    with pytest.raises(QueryContractError, match="duplicate output column"):
+        _compile(ResultQuerySpec(group_by=["project", "project"]))
+
+
+def test_group_key_that_matches_aggregate_alias_is_rejected() -> None:
+    with pytest.raises(QueryContractError, match="duplicate aggregate output 'count'"):
+        compile_query(
+            ResultQuerySpec(group_by=["count"], aggregate=[{"func": "COUNT"}]),
+            ["count", "id"],
+            max_limit=_MAX,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Typed filter literals (only when the operation supplies DESCRIBE metadata)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("column_type", "value"),
+    [("BOOLEAN", True), ("BIGINT", 1), ("DOUBLE", 1.5), ("DECIMAL(10,2)", 2), ("VARCHAR", "ok")],
+)
+def test_native_typed_filter_literal_compiles(column_type: str, value: object) -> None:
+    compiled = compile_query(
+        ResultQuerySpec(filter=[{"field": "value", "op": "=", "value": value}]),
+        ["value"],
+        max_limit=_MAX,
+        column_types={"value": column_type},
+    )
+    assert compiled.params == [value]
+
+
+@pytest.mark.parametrize(
+    ("column_type", "value"),
+    [("BOOLEAN", "false"), ("BIGINT", "1"), ("DOUBLE", True), ("VARCHAR", 1)],
+)
+def test_wrong_typed_filter_literal_is_rejected(column_type: str, value: object) -> None:
+    with pytest.raises(QueryContractError, match="column type"):
+        compile_query(
+            ResultQuerySpec(filter=[{"field": "value", "op": "=", "value": value}]),
+            ["value"],
+            max_limit=_MAX,
+            column_types={"value": column_type},
+        )
+
+
+def test_every_in_literal_is_validated_against_column_type() -> None:
+    with pytest.raises(QueryContractError, match="got str"):
+        compile_query(
+            ResultQuerySpec(filter=[{"field": "value", "op": "IN", "value": [1, "2"]}]),
+            ["value"],
+            max_limit=_MAX,
+            column_types={"value": "INTEGER"},
+        )
+
+
+def test_collection_type_metadata_is_not_misclassified_as_a_scalar() -> None:
+    compiled = compile_query(
+        ResultQuerySpec(filter=[{"field": "value", "op": "=", "value": "not-a-boolean"}]),
+        ["value"],
+        max_limit=_MAX,
+        column_types={"value": "BOOLEAN[]"},
+    )
+    assert compiled.params == ["not-a-boolean"]
+
+
+def test_unknown_field_suggestions_are_bounded_and_sorted() -> None:
+    known = [f"field_{index:02d}" for index in range(21)]
+    with pytest.raises(QueryContractError) as exc:
+        compile_query(ResultQuerySpec(select=["missing"]), known, max_limit=_MAX)
+    message = str(exc.value)
+    assert "field_00" in message and "field_19" in message
+    assert "field_20" not in message
+    assert "(and 1 more)" in message
+
+
+def test_unknown_field_suggestions_include_all_at_boundary() -> None:
+    known = [f"field_{index:02d}" for index in range(20)]
+    with pytest.raises(QueryContractError) as exc:
+        compile_query(ResultQuerySpec(select=["missing"]), known, max_limit=_MAX)
+    assert "field_19" in str(exc.value)
+    assert "more)" not in str(exc.value)
 
 
 def test_select_alongside_aggregate_is_rejected() -> None:

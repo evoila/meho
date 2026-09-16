@@ -32,6 +32,7 @@ on `handle.fetch_more.drill_in`:
 | Spilled | `true` | `null` | Call `result_query(handle_id, offset, limit)` until `expires_at` |
 | No usable tenant context | `false` | `no_tenant_context` | Re-call with narrower params / native pagination |
 | Store did not persist | `false` | `result_store_unavailable` | Re-call with narrower params / native pagination; operator checks the Valkey backend |
+| Admission work limit exceeded | `false` | `admission_limit_exceeded` | Re-call with narrower params; the captured graph was not profiled or retained |
 
 The handle itself is minted **unconditionally** on every reduce — a
 skipped spill never suppresses the handle, it only flips the drill-in
@@ -96,7 +97,7 @@ total.
 | Symbol | Where | Role |
 |---|---|---|
 | `JsonFluxReducer._spill` / `_SpillOutcome` | `backend/src/meho_backplane/operations/jsonflux_reducer.py` | Persists the materialized rows; reports `stored_rows` **or** a machine-readable `skip_reason` |
-| `FetchMoreDrillIn.reason` / `DrillInUnavailableReason` | `backend/src/meho_backplane/connectors/schemas.py` | The two-valued no-spill cause on the wire (#1629) |
+| `FetchMoreDrillIn.reason` / `DrillInUnavailableReason` | `backend/src/meho_backplane/connectors/schemas.py` | The machine-readable no-spill cause on the wire |
 | `ResultHandleStore.spill` / `fetch_window` / `fetch_rows` | `backend/src/meho_backplane/connectors/result_handle_store.py` | Fail-open Valkey persistence + operator/tenant-scoped read-back; `fetch_rows` returns the full authorized set for the query surface (#3366) |
 | `read_result_window` / `run_result_query` / `ResultHandleNotFoundError` | `backend/src/meho_backplane/operations/result_query.py` | Transport-neutral windowed-read core (#3179) + bounded query core (#3366) both surfaces wrap; misses raise the recoverable not-found error |
 | `compile_query` / `ResultQuerySpec` / `QueryContractError` | `backend/src/meho_backplane/jsonflux/query/contract.py` | Compiles the validated query grammar to one parameterized read-only `SELECT` (#3366) |
@@ -111,7 +112,10 @@ total.
    whenever the operator has a tenant. `Operator.tenant_id` and
    `Operator.sub` are **required** fields on the auth model, so an
    authenticated MCP/REST dispatch always carries both.
-2. The reducer materializes (DuckDB), then `_spill()`:
+2. The reducer validates the captured payload and derives schema, summary,
+   and preview directly from raw rows, then `_spill()`:
+   - an admission-limit breach returns an unprofiled handle with no spill,
+     reason `admission_limit_exceeded`;
    - no usable `tenant_id`/`operator_sub` (absent or non-UUID) →
      skip, reason `no_tenant_context`;
    - `ResultHandleStore.spill()` returns `False` (Valkey unreachable,
@@ -121,10 +125,12 @@ total.
      RESULT_HANDLE_MAX_SPILL_ROWS)`.
 3. `_assemble()` builds the inline summary + handle; the drill-in
    branch carries the outcome (`available` + `reason` + rationale).
-4. Every skip logs a structured `jsonflux_spill_skipped` warning with
-   `reason`, `op_id`, `handle_id`, `total_rows` (plus boolean
-   breadcrumbs for which context key was absent/malformed). A
-   store-level exception additionally logs
+4. The tenant-context and store-unavailable spill skips log a structured
+   `jsonflux_spill_skipped` warning with `reason`, `op_id`, `handle_id`,
+   `total_rows` (plus boolean breadcrumbs for which context key was
+   absent/malformed). The admission-limit result returns before the spill
+   path, so its response reason is the diagnostic. A store-level exception
+   additionally logs
    `result_handle_spill_failed` with the underlying error string.
 
 ## Diagnosis: the RDC cycle-8 `k8s.logs tail=300` finding (#1629)
@@ -197,7 +203,8 @@ code-level diagnosis at `v0.13.0` (`f6ee330`):
   output rows, serialized size, and wall time (#3366); all validated
   `> 0`.
 - `duckdb==1.5.5` / `pyarrow==25.0.1` (pinned) — the sandboxed
-  `QueryEngine` the compiled query runs inside.
+  `QueryEngine` the lazy compiled-query path runs inside. The reducer does
+  not construct an engine for its catalog, summary, or preview.
 
 ## Known issues
 

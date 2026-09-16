@@ -2,11 +2,11 @@
 
 The `JsonFluxReducer` is MEHO's production answer to CLAUDE.md postulate 6
 and v0.1-spec §4: no agent ever sees a 4 MB raw API response. Any
-operation returning a set-shaped payload above threshold is materialized
-into an in-memory DuckDB table, summarized, and replaced with a
+operation returning a set-shaped payload above threshold is profiled from its
+captured JSON rows, summarized, and replaced with a
 [`ResultHandle`](operations-substrate.md#jsonflux-integration) carrying a
 bounded inline `sample` plus a self-documenting `fetch_more` envelope. The
-**full** materialized set is spilled to a Valkey-backed
+**full** normalized row set is spilled to a Valkey-backed
 `ResultHandleStore` (keyed by `(tenant_id, handle_id)`, server-enforced
 TTL, row count capped by `RESULT_HANDLE_MAX_SPILL_ROWS`), and the
 `result_query` read surface — the MCP meta-tool and the REST route `POST
@@ -232,16 +232,20 @@ installed as the production default at app startup via
 fallback in the dispatcher remains `PassThroughReducer()`; the running app
 overwrites it with `JsonFluxReducer`.
 
-The adapter drives the lower-level `QueryEngine` directly (not the
-`JsonFlux` facade) because only `QueryEngine` exposes the smart
-`register(unwrap=...)`. Per `reduce(payload, schema, context)`: it
-detects the primary collection (envelope key or bare list), normalizes
-list-of-scalars to row dicts, checks the threshold, and — when over —
-registers the rows in a fresh in-memory DuckDB table, builds a JSON-Schema
-(Draft 2020-12) `schema_` dict from the DuckDB `DESCRIBE`, renders a
-markdown summary, samples N rows, and returns
+The adapter derives its handle artifacts without constructing an engine.
+Per `reduce(payload, schema, context)`: it detects the primary collection
+(envelope key or bare list), admits the complete captured payload against
+bounded work limits, normalizes list-of-scalars to row dicts, checks the
+threshold, and — when over — builds an all-row field catalog from captured
+JSON. The catalog drives the JSON Schema (Draft 2020-12), markdown summary,
+and raw preview before the reducer returns
 `(summary_dict, ResultHandle)`. Small / scalar payloads return
 `(payload, None)` unchanged.
+
+The catalog records which scalar families are safe for a later relational
+projection, but it does not alter `result_query` in this change. That lazy
+DuckDB conversion remains on the drill-in path until its dedicated catalog
+consumer lands.
 
 Collection detection distinguishes a *paginable list* from a
 *dict-of-arrays detail object* (#2113). A dict with no recognized
@@ -280,13 +284,29 @@ Read off the shipped adapter
 |---|---|---|
 | `row_threshold` | `50` | Materialize when the detected collection has **more than** this many rows. `0` forces materialization for every non-empty set (force / test mode). |
 | `byte_threshold` | `4096` | Materialize when the serialized payload exceeds this many bytes, even if under `row_threshold`. |
-| `sample_size` | `5` | Rows surfaced inline on the `ResultHandle.sample_rows` preview and in the markdown summary. `0` returns no sample. |
+| `sample_size` | `5` | Rows surfaced inline on the `ResultHandle.sample_rows` preview. The Markdown summary lists catalogued fields. `0` returns no sample. |
 | `ttl_seconds` | `3600` | Lifetime stamped onto `ResultHandle.ttl_seconds` for the backing store. |
-| `sample_byte_budget` | settings `jsonflux_sample_byte_budget` (default `4096`) | Upper bound, in serialized JSON bytes, on the inline sample (#134). The reducer shrinks the sample — fewer rows (never below one), then truncated values as a last resort — so it fits this budget regardless of per-row object size. Resolved lazily from settings when the constructor arg is `None`. |
+| `sample_byte_budget` | settings `jsonflux_sample_byte_budget` (default `4096`) | Upper bound, in serialized JSON bytes, on the inline sample (#134). A head preview drops tail rows; a tail preview drops its oldest selected rows. If the selected single row still exceeds the budget, the preview is omitted without changing any captured value. Resolved lazily from settings when the constructor arg is `None`. |
 
 All are keyword-only. The threshold defaults match v0.1-spec §4 (50 rows /
 4 KB). Empty collections never materialize — a 0-row handle carries no
 information a pass-through doesn't.
+
+### Captured-result admission bounds
+
+Before threshold serialization, a detected collection causes the reducer to
+walk the complete captured payload with bounded work:
+`RESULT_REDUCTION_MAX_DECODED_BYTES` (default `67108864`), `RESULT_REDUCTION_MAX_DEPTH` (default
+`64`), and `RESULT_REDUCTION_MAX_NODES` (default `2000000`). The accounting
+is for catalog work (UTF-8 keys and strings plus JSON scalar/container work),
+not a claim about transport or heap limits. Cycles, non-JSON values, invalid
+UTF-8 strings, and any breached bound return an unprofiled handle with empty
+schema properties and `drill_in.reason=admission_limit_exceeded`; rejected
+graphs are neither serialized nor spilled. The `64` depth limit intentionally
+does not inherit the vendored analyzer's `32`-level limit, because the catalog
+does not use that analyzer. For integers, the guard also rejects a conservative
+decimal-digit estimate over Python's active integer-to-string conversion cap,
+before an encoder can raise while measuring the payload.
 
 ### The inline sample is serialized once (#134)
 
@@ -302,9 +322,10 @@ byte-identical copies of a large preview — measured at 91.7 % of a
 result token ceiling even though the `result_query` handle worked.
 
 The preview is bounded by serialized bytes (`sample_byte_budget`), not
-only by `sample_size` rows: an object-heavy list (rows of tens of KB) is
-shrunk to fit the budget so the reduced envelope stays under a ceiling
-independent of per-row object size. The `handle.sample_rows` audit hoist
+only by `sample_size` rows: a head preview drops tail rows, while a
+chronological tail preview drops its oldest selected rows to retain the
+newest lines. An oversized selected row is omitted with a summary note rather
+than clipped. The `handle.sample_rows` audit hoist
 (`sample_rows_returned`) and the connector e2e assertions that read
 `handle.sample_rows` are unchanged; the full set is untouched and stays
 reachable via the spill + `result_query`.
@@ -340,10 +361,12 @@ naming which no-spill branch fired — `no_tenant_context` (no usable
 `tenant_id` / `operator_sub` pair in the reducer context, so the spill
 could not be keyed) or `result_store_unavailable` (the Valkey-backed
 store did not persist the rows: unreachable, write rejected, or
-disabled). `reason` is `None` on the `available=True` branch, and every
-skip also logs a structured `jsonflux_spill_skipped` warning carrying
-the same reason plus `op_id` / `handle_id`, so a reduced-but-unspilled
-response is diagnosable from logs as well as from the envelope (see
+disabled). `admission_limit_exceeded` names a separate early bounded
+no-spill result. `reason` is `None` on the `available=True` branch. The
+tenant-context and store-unavailable spill skips log a structured
+`jsonflux_spill_skipped` warning carrying the same reason plus `op_id` /
+`handle_id`, so those responses are diagnosable from logs as well as from
+the envelope (see
 [`docs/codebase/result-spill.md`](../codebase/result-spill.md) for the
 triage runbook). The spill
 + read-back are described under *"Read-back: the `ResultHandleStore`"*
@@ -409,11 +432,10 @@ the reducer owns the validation boundary.
 
 ### Read-back: the `ResultHandleStore` (G0.20-T7, #1507)
 
-The inline `sample` is a bounded preview; the **full** materialized set
-is spilled so an agent that needs rows beyond the sample can read them
-back. At materialize time the reducer registers the rows in DuckDB
-(as before), then — after the engine closes — persists the full
-normalized row list to
+The inline `sample` is a bounded preview; the **full** normalized set is
+spilled so an agent that needs rows beyond the sample can read it back. The
+reducer admits the complete detected payload before it serializes or profiles
+it, then persists the full normalized row list to
 [`ResultHandleStore`](../../backend/src/meho_backplane/connectors/result_handle_store.py),
 a thin wrapper over the broadcast Valkey client:
 
@@ -432,10 +454,11 @@ learns when the tail was capped. The dispatcher threads `tenant_id` +
 `operator_sub` into `reducer_context`; a reduce with neither (a
 non-dispatch call) skips the spill, and a Valkey error is swallowed
 (`spill` returns `False`) — a read never fails because the spill backend
-is unreachable. Both skip shapes surface in the response as
+is unreachable. The two spill-path skip shapes surface in the response as
 `drill_in.available=false` with the matching `reason`
-(`no_tenant_context` / `result_store_unavailable`, #1629) and log a
-`jsonflux_spill_skipped` warning; the store-level failure additionally
+(`no_tenant_context` / `result_store_unavailable`) and log a
+`jsonflux_spill_skipped` warning. `admission_limit_exceeded` instead names
+the separate early bounded no-spill result; the store-level failure additionally
 logs `result_handle_spill_failed` with the underlying error.
 
 The read surface is dual — MCP and REST share one windowed-read core
@@ -514,17 +537,15 @@ whole-inventory total.
 
 ### Sample ordering — head vs tail (G0.19-T1, #1479)
 
-The inline `sample` is the first `sample_size` rows of the materialized
-table (registration order) **by default**. That is correct for
+The inline `sample` is the first `sample_size` captured rows **by default**.
+That is correct for
 order-agnostic sets — a Vault key list, a topology row set — where
 neither end is more salient.
 
 It is *wrong* for a chronologically-ordered collection. `k8s.logs`
-returns its `lines` oldest-first (kubectl/k8s API order), so a bare
-`SELECT … LIMIT 5` surfaces the **oldest** five lines — typically
-health-probe noise — when a log-triage reader wants the **most-recent**
-five. (DuckDB applies no implicit ordering: without an explicit
-`ORDER BY`, `LIMIT` returns an implementation-ordered subset.)
+returns its `lines` oldest-first (kubectl/k8s API order), so a head preview
+surfaces the **oldest** five lines — typically health-probe noise — when a
+log-triage reader wants the **most-recent** five.
 
 Connectors whose op returns an oldest-first collection declare a
 `result_ordering` hint under `llm_instructions`:
@@ -544,10 +565,8 @@ register_typed_operation(
 dict from `descriptor.llm_instructions["result_ordering"]` and threads it
 through `reducer_context["result_ordering"]` — the exact sibling of the
 `pagination_hint` path. `JsonFluxReducer._sample_from_tail` reads it; on
-`{"sample": "tail"}` the reducer's `_query_sample` numbers the scan with
-`row_number() OVER ()`, keeps the highest-ordinal (most-recent)
-`sample_size` rows, and re-sorts ascending so the returned slice stays
-chronological (reads like the bottom of a `kubectl logs` window). A
+`{"sample": "tail"}` the reducer takes the raw chronological tail slice,
+which reads like the bottom of a `kubectl logs` window. A
 missing / malformed / any-other value keeps the head-first default —
 the hint is purely additive, so an op without it is unchanged. A
 non-dict value is logged once (actionable for the connector author) and

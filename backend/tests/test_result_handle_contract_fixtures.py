@@ -99,7 +99,6 @@ async def _stored_rows(rows: list[dict[str, Any]]) -> SpilledRowSet:
     return row_set
 
 
-@pytest.mark.xfail(reason="A2 all-row catalog", strict=True, raises=AssertionError)
 async def test_late_and_final_fields_are_advertised_by_the_handle_schema() -> None:
     """Fields first present after the analyzer sample remain discoverable."""
     rows = [{"stable": index} for index in range(200)]

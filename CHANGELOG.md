@@ -90,19 +90,35 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.35.2] - 2026-09-16
+
 ### Security
 
 - Keep parked `credential_write` secret values off approval rows and all approval read surfaces by encrypting execution input in a tenant-bound, one-time hand-off. Operators must configure the dedicated `APPROVAL_HANDOFF_ENCRYPTION_KEY` through the Helm `approvalHandoff` Secret reference; historical approval rows are not backfilled. (#3537 / #3664)
+- Redact OVF property values in captured deploy bodies: captured vendor request bodies could retain OVF property values, which commonly carry appliance credentials, in the 30-day trace store; the flight recorder now redacts them structurally on both request and response bodies, for every connector. (#3698)
+
+  **Operator upgrade note.** Redaction is forward-only — deploy-body traces captured before this release retain their plaintext OVF property values until they age out of the 30-day trace store.
 
 ### Added
 
+- Add three governed vSphere Namespace lifecycle composites on `vmware-rest-9.0` — `vmware.composite.namespace.create` (`caution`, approval-gated), `vmware.composite.namespace.delete` (`destructive`, approval-gated, with a blast-radius preview and an absent/removing/present readback), and `vmware.composite.namespace.status` (`safe`, boot-enabled read) — all dispatched through the shared `call_operation` policy / audit / approval / JSONFlux path, with a strict DNS-1123 label contract before path interpolation and a v2 Supervisor readback. (#3502 / #3618)
 - Add a selectable governed-Vault source for review-App credentials: audited operator-context reads provide the client ID and one-pass RS256 signing key without exposing the PEM in a file, argv, or terminal output. The explicit 1Password fallback and manual interface remain available; live custody acceptance is governed separately. (#3620 / #3665)
 - Add test-only result-handle fidelity fixtures for ten known reducer, store, compiler, and query discrepancies. The strict expected failures establish the repair baseline and do not change production result-handle behavior. (#3630 / #3679)
+- `mehoauto` connector allowlists the run read operations (`GET /api/v1/runs/{run_id}`, `GET /api/v1/runs`) at the safe tier so a governed launcher can observe the run it created. (#3699 / #3703)
 
 ### Fixed
 
 - Preserve a successful review-App token mint when the caller supplies an existing key file; cleanup now removes only temporary files it owns. (#3620 / #3662)
 - Restore OAuth callback and refresh failure handling after Authlib 1.8 moved its async token client to `httpx2`, while retaining the structured upstream-auth and fail-closed session-expired behavior. (#3451)
+- Surface vCenter 8.0.x flattened task faults in `poll_vim_task`, `tasks.recent`, and OVF import: on 8.0.x VI-JSON the concrete fault is flattened directly onto `error` (no `LocalizedMethodFault` wrapper and no nested `fault`), so the 9.x-only extractor returned `<no fault reported>`; a shared extractor now spans both wire shapes and attaches the concrete fault type name to the text. (#3663 / #3689)
+- Cover a connector's ungrouped descriptors (`group_id IS NULL`) in the `connector enable` / `disable` cascade, and report the ungrouped op count in `connector review`: a full enable previously stranded ungrouped write/typed ops at their default-deny state with no read-only way to find them. (#3681 / #3691)
+
+  **Operator upgrade note.** `connector enable` now also enables a connector's ungrouped descriptors, and a `disable` → `enable` cycle sweeps previously stranded ungrouped write/typed ops into the enabled set. Operators who ran an earlier full enable can re-run `connector enable` (or `disable` then `enable`) to pick up ungrouped ops left at default-deny.
+
+- Guard `result_query` compiler inputs before the query runs — validate recognized scalar filter literals (every `IN` element included) without coercion, reject duplicate group-key and aggregate output names, and cap aggregate requests — closing silent wrong-answer and unbounded-error paths. (#3634 / #3687)
+- Keep the re-ingest grouping pass alive for connectors carrying hyphenated typed group keys: the pass re-validated already-persisted group keys against the snake_case contract and crashed after the register/upsert had already committed; persisted keys now round-trip verbatim, and a grouping fault after a durable register lands the job in `degraded` with `error_class="grouping_failed_after_register"` (register counts preserved) instead of a bare `failed`. (#3685 / #3690)
+
+  **Operator upgrade note.** A re-ingest whose LLM grouping pass fails after the register/upsert has committed now ends `degraded` with `error_class="grouping_failed_after_register"`, where it previously reported a bare `failed`; `ingest-status` and the REST projection surface the new terminal reason.
 
 ## [0.35.1] - 2026-09-15
 

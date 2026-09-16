@@ -1175,13 +1175,16 @@ def test_op_allowlist_entry_rejects_unknown_field() -> None:
 
 
 def test_shipped_mehoauto_row_declares_its_op_allowlist() -> None:
-    """The shipped mehoauto row closes ingest to exactly launch/validate/gate
-    plus the two run-read GETs a governed launcher observes with (#3699)."""
+    """The shipped mehoauto row closes ingest to exactly launch/validate/gate,
+    the run-node resume write a governed launcher nudges a failed node with
+    (#3707), plus the two run-read GETs a governed launcher observes with
+    (#3699). The human-only run-node skip route is deliberately absent."""
     allow = op_allowlist_for("mehoauto", "0.1.0")
     assert allow == {
         ("POST", "/api/v1/runs"),
         ("POST", "/api/v1/blueprints/{blueprint_id}/validate"),
         ("POST", "/api/v1/runs/{run_id}/gates/{node_id}/decision"),
+        ("POST", "/api/v1/runs/{run_id}/nodes/{node_id}/resume"),
         ("GET", "/api/v1/runs/{run_id}"),
         ("GET", "/api/v1/runs"),
     }
@@ -1206,6 +1209,19 @@ def test_shipped_mehoauto_allowlist_covers_the_connector_safety_floor_keys() -> 
         ("GET", "/api/v1/runs/{run_id}"),
         ("GET", "/api/v1/runs"),
     }
+
+
+def test_shipped_mehoauto_allowlist_excludes_the_run_node_skip_op() -> None:
+    """The run-node SKIP op is human-only in the add-on and must never be
+    allowlisted or floor-pinned (agents get resume, not skip). The allowlist
+    keys on (method, path), so the skip pair — sharing resume's method but not
+    its path — is not admitted and drops before persistence (#3707)."""
+    allow = op_allowlist_for("mehoauto", "0.1.0")
+    skip = ("POST", "/api/v1/runs/{run_id}/nodes/{node_id}/skip")
+    assert skip not in allow
+    assert skip not in meho_automation_ingest_safety._CAUTION_OPS
+    # resume IS on-surface (the paired positive).
+    assert ("POST", "/api/v1/runs/{run_id}/nodes/{node_id}/resume") in allow
 
 
 def test_only_mehoauto_row_declares_an_op_allowlist() -> None:

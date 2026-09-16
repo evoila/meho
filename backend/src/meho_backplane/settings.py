@@ -1354,6 +1354,12 @@ class Settings(BaseModel):
     checks_evidence_prune_interval_seconds: int = Field(default=604800, ge=60, le=604800)
     checks_evidence_prune_enabled: bool = True
     result_handle_max_spill_rows: int = Field(default=10000, gt=0)
+    # Bounds captured-JSON catalog work before the reducer serializes or
+    # profiles a detected collection. These are deliberately separate from
+    # transport/decompression and lazy result-query output limits.
+    result_reduction_max_decoded_bytes: int = Field(default=67108864, gt=0)
+    result_reduction_max_depth: int = Field(default=64, gt=0)
+    result_reduction_max_nodes: int = Field(default=2000000, gt=0)
     # #3366 -- bounds on the ``result_query`` structured query surface. These
     # are the query interface's own resource ceilings; it inherits neither the
     # spill row cap above nor the reducer's hardcoded TTL.
@@ -2317,6 +2323,15 @@ def get_settings() -> Settings:
         ),
         result_handle_max_spill_rows=int(
             os.environ.get("RESULT_HANDLE_MAX_SPILL_ROWS", "10000"),
+        ),
+        result_reduction_max_decoded_bytes=int(
+            os.environ.get("RESULT_REDUCTION_MAX_DECODED_BYTES", "67108864"),
+        ),
+        result_reduction_max_depth=int(
+            os.environ.get("RESULT_REDUCTION_MAX_DEPTH", "64"),
+        ),
+        result_reduction_max_nodes=int(
+            os.environ.get("RESULT_REDUCTION_MAX_NODES", "2000000"),
         ),
         result_query_max_output_rows=int(
             os.environ.get("RESULT_QUERY_MAX_OUTPUT_ROWS", "500"),

@@ -64,7 +64,13 @@ __all__ = [
 #: required field). ``result_store_unavailable`` -- tenant context was
 #: present but the Valkey-backed read-back store did not persist the
 #: rows (unreachable, rejected the write, or disabled by configuration).
-DrillInUnavailableReason = Literal["no_tenant_context", "result_store_unavailable"]
+#: ``admission_limit_exceeded`` -- the captured graph exceeded the reducer's
+#: bounded profiling work limit, so it was never retained for read-back.
+DrillInUnavailableReason = Literal[
+    "no_tenant_context",
+    "result_store_unavailable",
+    "admission_limit_exceeded",
+]
 
 
 NodeKind = Literal[
@@ -170,7 +176,8 @@ class FetchMoreDrillIn(BaseModel):
     ``reason`` (#1629) is the machine-readable counterpart of the
     ``available=False`` rationale: one of
     :data:`DrillInUnavailableReason`, naming *which* no-spill branch
-    fired (``no_tenant_context`` vs ``result_store_unavailable``) so a
+    fired (``no_tenant_context``, ``result_store_unavailable``, or
+    ``admission_limit_exceeded``) so a
     reduced-but-unspilled result is self-explanatory instead of a
     silent N-of-M sample. ``None`` on the ``available=True`` branch.
     Hardens the RDC cycle-8 ``k8s.logs tail=300`` finding where the
@@ -194,9 +201,11 @@ class FetchMoreDrillIn(BaseModel):
         description=(
             "Machine-readable cause when ``available=False``: "
             "``no_tenant_context`` (the reduce ran outside a "
-            "tenant-scoped dispatch, so the spill could not be keyed) or "
+            "tenant-scoped dispatch, so the spill could not be keyed), "
             "``result_store_unavailable`` (the read-back store did not "
-            "persist the rows). ``None`` when ``available=True``."
+            "persist the rows), or ``admission_limit_exceeded`` (the "
+            "captured graph exceeded the reducer profiling work limit). "
+            "``None`` when ``available=True``."
         ),
     )
     mcp_tool: str | None = Field(

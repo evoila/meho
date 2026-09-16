@@ -56,23 +56,24 @@ from meho_backplane.connectors.schemas import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
-from meho_backplane.jsonflux.query.engine import QueryEngine
+from meho_backplane.jsonflux.query import engine as query_engine
+from meho_backplane.jsonflux.query.result_catalog import AdmissionGuard
 from meho_backplane.operations import (
     dispatch,
     register_typed_operation,
     reset_dispatcher_caches,
 )
+from meho_backplane.operations import jsonflux_reducer as reducer_module
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.jsonflux_reducer import (
-    _TRUNCATION_MARKER,
     JsonFluxReducer,
     _detect_collection,
     _fit_sample_to_budget,
     _preserved_objects,
     _preserved_scalars,
-    _query_sample,
     _resolve_digest_hint,
     _row_digest,
+    _sample_from_raw,
     _sample_from_tail,
     _serialize,
 )
@@ -244,71 +245,63 @@ async def test_inline_sample_lives_in_exactly_one_location() -> None:
     assert reduced["sample_rows_returned"] == len(handle.sample_rows)
 
 
-async def test_inline_sample_stays_under_byte_budget_independent_of_row_size() -> None:
-    """The reduced envelope size is bounded by bytes, independent of ``K`` (#134).
-
-    #134 acceptance criterion 2: given ``N`` rows each ~``K`` bytes where a
-    fixed 5-row sample would blow the budget, the serialized sample stays
-    under a fixed ceiling regardless of ``K`` — the row count shrinks as
-    ``K`` grows, never below one. Feed 8 KB and 50 KB rows and assert the
-    same ceiling holds for both while the sample row count drops.
-    """
+async def test_inline_sample_omits_an_oversized_selected_row_without_mutating_it() -> None:
+    """An oversized raw preview is omitted instead of recursively clipped."""
     budget = 4096
 
-    async def _sample_for_row_size(blob_bytes: int) -> list[dict[str, Any]]:
+    async def _sample_for_row_size(blob_bytes: int) -> tuple[dict[str, Any], ResultHandle]:
         reducer = JsonFluxReducer(sample_size=5, sample_byte_budget=budget)
         rows = [{"id": f"row-{i}", "blob": "x" * blob_bytes} for i in range(60)]
-        _reduced, handle = await reducer.reduce({"results": rows}, None)
-        assert handle is not None and handle.sample_rows is not None
-        return [dict(row) for row in handle.sample_rows]
+        reduced, handle = await reducer.reduce({"results": rows}, None)
+        assert handle is not None
+        return reduced, handle
 
-    sample_8k = await _sample_for_row_size(8 * 1024)
-    sample_50k = await _sample_for_row_size(50 * 1024)
+    reduced_8k, handle_8k = await _sample_for_row_size(8 * 1024)
+    reduced_50k, handle_50k = await _sample_for_row_size(50 * 1024)
 
-    # Each row alone exceeds the budget, so the sample shrinks to a single
-    # row whose oversized ``blob`` is truncated to fit — but never empty.
-    for sample in (sample_8k, sample_50k):
-        assert len(sample) >= 1
-        serialized = len(_serialize(sample))
-        assert serialized <= budget, (
-            f"serialized sample ({serialized} bytes) must stay under the "
-            f"{budget}-byte budget regardless of per-row size"
+    for reduced, handle in ((reduced_8k, handle_8k), (reduced_50k, handle_50k)):
+        assert handle.sample_rows is None
+        assert reduced["sample_rows_returned"] == 0
+        assert reduced["sample_note"] == (
+            "Preview omitted because the selected row exceeds the byte budget."
         )
-    # A larger per-row size cannot produce a larger serialized sample.
-    assert len(_serialize(sample_50k)) <= budget
-    assert len(_serialize(sample_8k)) <= budget
 
 
-def test_fit_sample_to_budget_drops_rows_then_truncates() -> None:
-    """``_fit_sample_to_budget`` shrinks by rows first, then truncates values.
+def test_fit_sample_to_budget_drops_rows_then_omits_an_oversized_single_row() -> None:
+    """``_fit_sample_to_budget`` preserves rows whole or returns no preview.
 
     Three regimes, all bounded by the budget:
 
     * a sample already under budget is returned unchanged;
     * a multi-row sample over budget drops rows down toward one;
-    * a single row over budget has its oversized string values truncated
-      (marked with :data:`_TRUNCATION_MARKER`) rather than dropped to zero.
+    * a single row over budget is omitted rather than changed.
     """
     # Under budget — unchanged.
     small = [{"k": "v"}, {"k": "w"}]
     assert _fit_sample_to_budget(small, 4096) == small
 
-    # Multi-row over budget — rows drop, result fits, never below one.
+    # Multi-row over budget — rows drop, result fits, and retained rows are exact.
     fat_rows = [{"id": i, "blob": "x" * 2000} for i in range(5)]
     fitted = _fit_sample_to_budget(fat_rows, 4096)
     assert 1 <= len(fitted) < len(fat_rows)
     assert len(_serialize(fitted)) <= 4096
 
-    # A single row larger than the whole budget — truncated, not emptied.
+    # A single row larger than the whole budget — omitted, never mutated.
     huge = [{"id": "only", "blob": "x" * 20000}]
-    clipped = _fit_sample_to_budget(huge, 4096)
-    assert len(clipped) == 1
-    assert clipped[0]["id"] == "only"
-    assert clipped[0]["blob"].endswith(_TRUNCATION_MARKER)
-    assert len(_serialize(clipped)) <= 4096
+    assert _fit_sample_to_budget(huge, 4096) == []
 
     # Empty input stays empty.
     assert _fit_sample_to_budget([], 4096) == []
+
+
+def test_fit_tail_sample_to_budget_retains_newest_rows_in_chronological_order() -> None:
+    """A byte-bounded tail preview discards its oldest selected rows first."""
+    rows = [{"seq": index, "blob": "x" * 1500} for index in range(5)]
+
+    fitted = _fit_sample_to_budget(rows, 4096, from_tail=True)
+
+    assert [row["seq"] for row in fitted] == [3, 4]
+    assert len(_serialize(fitted)) <= 4096
 
 
 # ---------------------------------------------------------------------------
@@ -316,39 +309,21 @@ def test_fit_sample_to_budget_drops_rows_then_truncates() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _register_ordered_table(engine: QueryEngine, n: int) -> None:
-    """Register an ``n``-row table whose ``seq`` column is the row order.
-
-    ``seq`` ascends with registration order so an assertion can name the
-    expected head / tail rows without depending on DuckDB's (unguaranteed)
-    scan order for a bare ``SELECT``.
-    """
-    engine.register(
-        "result",
-        [{"seq": i, "line": f"line-{i}"} for i in range(n)],
-        unwrap="auto",
-    )
-
-
-def test_query_sample_default_returns_head() -> None:
-    """``_query_sample`` without ``from_tail`` returns the first N rows.
+def test_raw_sample_default_returns_head() -> None:
+    """Raw sampling returns the first N captured rows without an engine.
 
     The order-agnostic default: a Vault key list or topology set has no
     "more recent" end, so the head sample is the right preview. Pins the
     pre-#1479 behaviour so the tail path is strictly additive.
     """
-    engine = QueryEngine()
-    try:
-        _register_ordered_table(engine, 20)
-        sample = _query_sample(engine, 5)
-    finally:
-        engine.close()
+    rows = [{"seq": index, "line": f"line-{index}"} for index in range(20)]
+    sample = _sample_from_raw(rows, 5)
 
     assert [row["seq"] for row in sample] == [0, 1, 2, 3, 4]
 
 
-def test_query_sample_from_tail_returns_most_recent_in_chronological_order() -> None:
-    """``_query_sample(from_tail=True)`` returns the LAST N rows, oldest-first.
+def test_raw_sample_from_tail_returns_most_recent_in_chronological_order() -> None:
+    """Raw tail sampling returns the last N rows in captured order.
 
     The #1479 fix: a ``k8s.logs(tail=500)`` reduce must preview the
     most-recent lines (the bottom of the window), not the oldest five
@@ -356,26 +331,18 @@ def test_query_sample_from_tail_returns_most_recent_in_chronological_order() -> 
     re-sorted ascending so it reads like the bottom of a ``kubectl logs``
     window rather than reversed.
     """
-    engine = QueryEngine()
-    try:
-        _register_ordered_table(engine, 20)
-        sample = _query_sample(engine, 5, from_tail=True)
-    finally:
-        engine.close()
+    rows = [{"seq": index, "line": f"line-{index}"} for index in range(20)]
+    sample = _sample_from_raw(rows, 5, from_tail=True)
 
     # The five most-recent rows (16..19 plus 15), in chronological order.
     assert [row["seq"] for row in sample] == [15, 16, 17, 18, 19]
 
 
-def test_query_sample_zero_size_returns_empty_in_both_modes() -> None:
-    """``sample_size <= 0`` short-circuits to ``[]`` regardless of ``from_tail``."""
-    engine = QueryEngine()
-    try:
-        _register_ordered_table(engine, 10)
-        assert _query_sample(engine, 0) == []
-        assert _query_sample(engine, 0, from_tail=True) == []
-    finally:
-        engine.close()
+def test_raw_sample_zero_size_returns_empty_in_both_modes() -> None:
+    """``sample_size <= 0`` short-circuits to ``[]`` regardless of tail mode."""
+    rows = [{"seq": index} for index in range(10)]
+    assert _sample_from_raw(rows, 0) == []
+    assert _sample_from_raw(rows, 0, from_tail=True) == []
 
 
 def test_sample_from_tail_resolves_only_the_tail_ordering() -> None:
@@ -717,11 +684,202 @@ async def test_single_small_certificate_payload_remains_inline() -> None:
     }
     payload = {"handshake": True, "chain": [leaf], "leaf": leaf}
 
-    reduced, handle = await JsonFluxReducer().reduce(payload, None)
+    _reduced, handle = await JsonFluxReducer().reduce(payload, None)
 
     assert handle is None
-    assert reduced is payload
-    assert reduced["leaf"]["pem"] == leaf["pem"]
+    assert _reduced is payload
+    assert _reduced["leaf"]["pem"] == leaf["pem"]
+
+
+async def test_reduce_uses_no_query_engine_for_catalog_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reducer handle derives from captured JSON without constructing DuckDB."""
+
+    def fail_query_engine() -> None:
+        raise AssertionError("the reducer must not construct QueryEngine")
+
+    monkeypatch.setattr(query_engine, "QueryEngine", fail_query_engine)
+    large_integer = 2**53 + 1
+    rows = [
+        {"truth": False, "shape": {"nested": "object"}, "number": large_integer},
+        {"truth": "false", "shape": ["list"], "number": 1.5},
+        {"truth": False, "shape": "scalar", "number": large_integer},
+    ]
+    reducer = JsonFluxReducer(row_threshold=0, sample_size=3, sample_byte_budget=4096)
+    reduced, handle = await reducer.reduce(
+        {"results": rows}, None
+    )
+
+    assert handle is not None
+    properties = handle.schema_["items"]["properties"]
+    assert properties["truth"]["type"] == ["boolean", "string"]
+    assert properties["shape"]["type"] == ["string", "array", "object"]
+    assert properties["number"]["type"] == ["integer", "number"]
+    assert handle.sample_rows is not None
+    assert [dict(row) for row in handle.sample_rows] == rows
+    assert reduced["sample_rows_returned"] == 3
+
+
+async def test_reduce_late_field_and_final_field_catalog_is_permutation_stable() -> None:
+    """All retained rows, including final-row keys, define the handle schema."""
+    rows = [{"stable": index} for index in range(201)]
+    rows.extend([{"stable": 201, "late": "row-201"}, {"stable": 202, "final": True}])
+    reducer = JsonFluxReducer(row_threshold=0, sample_byte_budget=4096)
+
+    _reduced, handle = await reducer.reduce({"results": rows}, None)
+    _permuted_reduced, permuted_handle = await reducer.reduce(
+        {"results": list(reversed(rows))}, None
+    )
+
+    assert handle is not None and permuted_handle is not None
+    properties = handle.schema_["items"]["properties"]
+    assert list(properties) == ["final", "late", "stable"]
+    assert set(properties) == {"final", "late", "stable"}
+    assert handle.schema_ == permuted_handle.schema_
+
+
+async def test_reduce_coercion_preserves_raw_preview_values_and_kinds() -> None:
+    """Schema and preview retain JSON kinds that Arrow conversion used to alter."""
+    large_integer = 2**53 + 1
+    rows = [
+        {"truth": False, "value": {"kind": "object"}, "number": large_integer},
+        {"truth": "false", "value": ["list"], "number": 1.5},
+        {"truth": False, "value": "scalar", "number": large_integer},
+    ]
+
+    _reduced, handle = await JsonFluxReducer(
+        row_threshold=0, sample_size=3, sample_byte_budget=4096
+    ).reduce({"results": rows}, None)
+
+    assert handle is not None and handle.sample_rows is not None
+    assert [dict(row) for row in handle.sample_rows] == rows
+    properties = handle.schema_["items"]["properties"]
+    assert properties["truth"]["type"] == ["boolean", "string"]
+    assert properties["value"]["type"] == ["string", "array", "object"]
+    assert properties["number"]["type"] == ["integer", "number"]
+
+
+async def test_admission_rejection_does_not_serialize_or_spill_raw_graph(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rejected collection returns an honest unprofiled no-spill handle."""
+
+    def fail_serialize(value: object) -> bytes:
+        raise AssertionError(f"rejected value was serialized: {type(value).__name__}")
+
+    monkeypatch.setattr(reducer_module, "_serialize", fail_serialize)
+    class _ThrowingStore:
+        async def spill(self, **_: object) -> bool:
+            raise AssertionError("rejected graph reached spill")
+
+    guard = AdmissionGuard(max_decoded_bytes=1024, max_depth=2, max_nodes=100)
+    reducer = JsonFluxReducer(
+        admission_guard=guard,
+        sample_byte_budget=4096,
+        store=_ThrowingStore(),  # type: ignore[arg-type]
+    )
+    deep: dict[str, object] = {"leaf": "value"}
+    for index in range(3):
+        deep = {f"level-{index}": deep}
+
+    reduced, handle = await reducer.reduce(
+        {"results": [deep]},
+        None,
+        context={
+            "tenant_id": "00000000-0000-0000-0000-00000000a0a0",
+            "operator_sub": "admission-test",
+        },
+    )
+
+    assert handle is not None
+    assert handle.total_rows == 1
+    assert handle.sample_rows is None
+    assert handle.fetch_more.drill_in.reason == "admission_limit_exceeded"
+    assert handle.schema_["items"]["properties"] == {}
+    assert reduced["status"] == "unprofiled"
+    assert reduced["reason"] == "admission_limit_exceeded"
+
+
+async def test_admission_fallback_envelope_is_bounded_without_raw_values() -> None:
+    """A normal JSON encoder sees only bounded fallback metadata, never input rows."""
+    deep: dict[str, object] = {"leaf": "x" * 10_000}
+    for index in range(3):
+        deep = {f"level-{index}": deep}
+
+    reduced, handle = await JsonFluxReducer(
+        admission_guard=AdmissionGuard(max_decoded_bytes=128, max_depth=2, max_nodes=100),
+        sample_byte_budget=4096,
+    ).reduce({"results": [deep]}, None)
+
+    assert handle is not None
+    encoded = json.dumps({"result": reduced, "handle": handle.model_dump(mode="json")}).encode()
+    assert len(encoded) < 2048
+    assert b"level-" not in encoded
+    assert b"x" * 100 not in encoded
+
+
+@pytest.mark.parametrize("levels", [30, 61], ids=["depth-33", "depth-64"])
+async def test_admission_depth_through_64_reduces_without_analyzer(
+    levels: int,
+) -> None:
+    """Captured rows at depths 33 through 64 do not use Analyzer's depth-32 cap."""
+    nested: object = None
+    for _ in range(levels):
+        nested = [nested]
+
+    _reduced, handle = await JsonFluxReducer(
+        row_threshold=0, sample_byte_budget=4096
+    ).reduce({"results": [{"nested": nested}]}, None)
+
+    assert handle is not None
+    assert handle.schema_["items"]["properties"]["nested"]["type"] == "array"
+
+
+async def test_admission_depth_65_returns_bounded_unprofiled_handle() -> None:
+    """The first level above the default work limit follows the no-spill branch."""
+    nested: object = None
+    for _ in range(62):
+        nested = [nested]
+
+    reduced, handle = await JsonFluxReducer(sample_byte_budget=4096).reduce(
+        {"results": [{"nested": nested}]}, None
+    )
+
+    assert handle is not None
+    assert handle.fetch_more.drill_in.reason == "admission_limit_exceeded"
+    assert reduced["status"] == "unprofiled"
+
+
+@pytest.mark.parametrize("sibling", ["☃" * 1000, None], ids=["unicode", "cycle"])
+async def test_admission_rejection_bounds_the_entire_detected_payload(
+    sibling: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Envelope siblings cannot bypass the pre-threshold admission walk."""
+
+    def fail_serialize(value: object) -> bytes:
+        raise AssertionError(f"rejected value was serialized: {type(value).__name__}")
+
+    monkeypatch.setattr(reducer_module, "_serialize", fail_serialize)
+    payload: dict[str, object] = {"results": [{"ok": 1}]}
+    if sibling is None:
+        cycle: list[object] = []
+        cycle.append(cycle)
+        payload["metadata"] = cycle
+    else:
+        payload["metadata"] = sibling
+
+    reduced, handle = await JsonFluxReducer(
+        admission_guard=AdmissionGuard(max_decoded_bytes=128, max_depth=64, max_nodes=100),
+        sample_byte_budget=4096,
+    ).reduce(payload, None)
+
+    assert handle is not None
+    assert handle.total_rows == 1
+    assert handle.sample_rows is None
+    assert handle.fetch_more.drill_in.reason == "admission_limit_exceeded"
+    assert reduced["status"] == "unprofiled"
 
 
 def test_preserved_objects_rejects_nested_values_and_obeys_byte_budget() -> None:
@@ -1237,7 +1395,7 @@ async def test_recovery_unchanged_when_inline_sample_is_byte_bounded() -> None:
     """Byte-budgeting the inline sample leaves the spilled full set intact (#134).
 
     #134 acceptance criterion 4: the recovery path is untouched. Even when
-    the inline sample is shrunk / truncated to fit the byte budget, the
+    the inline sample is omitted when its selected row exceeds the budget, the
     **full** object-heavy rows are spilled verbatim; paging the handle to
     its last row via the store returns the row byte-for-byte, with
     ``total_rows`` correct and ``truncated=False`` (no cap applied).
@@ -1246,7 +1404,7 @@ async def test_recovery_unchanged_when_inline_sample_is_byte_bounded() -> None:
     reducer = JsonFluxReducer(
         sample_size=5, sample_byte_budget=4096, store=store, max_spill_rows=10000
     )
-    # Object-heavy rows: each ~8 KB, so the inline sample must shrink+truncate.
+    # Object-heavy rows: each ~8 KB, so the selected preview row is omitted.
     rows = [{"id": f"row-{i}", "blob": f"{i}-" + "x" * 8000} for i in range(60)]
     context = {
         "op_id": "k8s.apps.list",
@@ -1257,9 +1415,8 @@ async def test_recovery_unchanged_when_inline_sample_is_byte_bounded() -> None:
     _reduced, handle = await reducer.reduce({"results": rows}, None, context)
 
     assert handle is not None
-    # The inline sample was byte-bounded (a single truncated row).
-    assert handle.sample_rows is not None
-    assert len(_serialize([dict(r) for r in handle.sample_rows])) <= 4096
+    # The inline preview is omitted rather than changing captured nested values.
+    assert handle.sample_rows is None
 
     # The FULL, un-truncated rows were spilled — recovery is unaffected.
     window = await store.fetch_window(
@@ -1273,7 +1430,7 @@ async def test_recovery_unchanged_when_inline_sample_is_byte_bounded() -> None:
     assert window["total_rows"] == 60
     assert window["truncated"] is False
     # The last row round-trips byte-for-byte — the spill is full fidelity,
-    # NOT the truncated inline preview.
+    # NOT a transformed inline preview.
     assert window["rows"] == [{"id": "row-59", "blob": "59-" + "x" * 8000}]
 
 

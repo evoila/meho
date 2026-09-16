@@ -46,6 +46,7 @@ from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.connectors.schemas import (
     FetchMore,
     FetchMoreDrillIn,
@@ -1215,7 +1216,7 @@ class _FakeStore:
         total_rows: int,
         ttl_seconds: int,
         max_rows: int,
-    ) -> bool:
+    ) -> int:
         stored = rows[:max_rows]
         self.spills.append(
             {
@@ -1231,7 +1232,7 @@ class _FakeStore:
         )
         self._rows[(str(tenant_id), str(handle_id))] = stored
         self._totals[(str(tenant_id), str(handle_id))] = total_rows
-        return bool(stored)
+        return len(stored)
 
     async def fetch_window(
         self,
@@ -1262,6 +1263,20 @@ class _FakeStore:
             "stored_rows": stored,
             "truncated": stored < total,
         }
+
+
+class _ResultStoreRedis:
+    """Minimal async Valkey double for the real store integration test."""
+
+    def __init__(self) -> None:
+        self.values: dict[str, bytes] = {}
+
+    async def set(self, name: str, value: Any, ex: int | None = None) -> None:
+        del ex
+        self.values[name] = value
+
+    async def get(self, name: str) -> bytes | None:
+        return self.values.get(name)
 
 
 async def test_reduce_spills_full_rows_and_flips_drill_in_available() -> None:
@@ -1415,8 +1430,8 @@ async def test_reduce_store_rejection_reports_result_store_unavailable() -> None
     """
 
     class _DownStore:
-        async def spill(self, **_kwargs: Any) -> bool:
-            return False
+        async def spill(self, **_kwargs: Any) -> int:
+            return 0
 
     reducer = JsonFluxReducer(sample_size=5, store=_DownStore(), max_spill_rows=10000)
     rows = [{"id": f"seg-{i}"} for i in range(60)]
@@ -1462,6 +1477,52 @@ async def test_reduce_spill_capped_reports_truncated_tail() -> None:
     # The rationale flags that only the first 40 of 60 rows are retrievable.
     assert "40" in drill_in.rationale
     assert "60" in drill_in.rationale
+
+
+async def test_reduce_advertises_the_real_byte_capped_store_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reducer count/rationale and read-back match the persisted byte prefix."""
+    monkeypatch.setenv("RESULT_HANDLE_MAX_RECORD_BYTES", "5000")
+    get_settings.cache_clear()
+    try:
+        redis = _ResultStoreRedis()
+        store = ResultHandleStore(redis)  # type: ignore[arg-type]
+        rows = [{"seq": i, "blob": "x" * 2000} for i in range(5)]
+        context = {
+            "op_id": "inventory.list",
+            "operator_sub": "op-a",
+            "tenant_id": "00000000-0000-0000-0000-00000000a0a0",
+        }
+
+        _reduced, handle = await JsonFluxReducer(store=store, max_spill_rows=100).reduce(
+            {"results": rows}, None, context
+        )
+
+        assert handle is not None
+        stored = await store.fetch_rows(
+            tenant_id=uuid.UUID(context["tenant_id"]),
+            operator_sub="op-a",
+            handle_id=handle.handle_id,
+        )
+        assert stored is not None
+        assert 0 < stored.stored_rows < len(rows)
+        assert [row["seq"] for row in stored.rows] == list(range(stored.stored_rows))
+        assert str(stored.stored_rows) in handle.fetch_more.drill_in.rationale
+        assert str(len(rows)) in handle.fetch_more.drill_in.rationale
+
+        window = await store.fetch_window(
+            tenant_id=uuid.UUID(context["tenant_id"]),
+            operator_sub="op-a",
+            handle_id=handle.handle_id,
+            offset=0,
+            limit=50,
+        )
+        assert window is not None
+        assert window.stored_rows == stored.stored_rows
+        assert window.truncated is True
+    finally:
+        get_settings.cache_clear()
 
 
 # ---------------------------------------------------------------------------
@@ -1539,8 +1600,8 @@ async def test_k8s_logs_shape_store_down_states_the_reason() -> None:
     """
 
     class _DownStore:
-        async def spill(self, **_kwargs: Any) -> bool:
-            return False
+        async def spill(self, **_kwargs: Any) -> int:
+            return 0
 
     reducer = JsonFluxReducer(sample_size=5, store=_DownStore(), max_spill_rows=10000)
     context = {

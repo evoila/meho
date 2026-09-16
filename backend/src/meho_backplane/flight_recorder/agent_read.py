@@ -193,8 +193,8 @@ def _build_handle(
         handle_id=handle_id,
         summary_md=(
             f"Flight-recorder trace: {total_rows} span(s) captured for dispatch "
-            f"{audit_id}. Bodies redacted and capped at capture; page the full "
-            "ordered set via `result_query`."
+            f"{audit_id}. Bodies redacted and capped at capture; page the retained "
+            "ordered spans via `result_query`."
         ),
         schema_=_SPAN_ROW_SCHEMA,
         total_rows=total_rows,
@@ -204,7 +204,7 @@ def _build_handle(
             drill_in=FetchMoreDrillIn(
                 available=True,
                 rationale=(
-                    f"Full trace ({stored_rows} of {total_rows} span(s)) is spilled; "
+                    f"{stored_rows} of {total_rows} span(s) are available; "
                     f"page it with {_RESULT_QUERY_TOOL}(handle_id={handle_id})."
                 ),
                 mcp_tool=_RESULT_QUERY_TOOL,
@@ -331,7 +331,7 @@ async def materialize_agent_trace_handle(
         resolved_store = store if store is not None else get_result_handle_store()
         settings = get_settings()
         max_rows = settings.result_handle_max_spill_rows
-        stored = await resolved_store.spill(
+        stored_rows = await resolved_store.spill(
             tenant_id=tenant_id,
             operator_sub=operator.sub,
             handle_id=handle_id,
@@ -341,7 +341,7 @@ async def materialize_agent_trace_handle(
             ttl_seconds=_TRACE_HANDLE_TTL_SECONDS,
             max_rows=max_rows,
         )
-        if not stored:
+        if not stored_rows:
             # Fail-open: empty trace or unreachable store -> no agent-readable
             # handle. The operator plane still reads the trace.
             return None
@@ -351,7 +351,7 @@ async def materialize_agent_trace_handle(
             audit_id=audit_id,
             sample_rows=_bounded_sample(rows, byte_budget=settings.jsonflux_sample_byte_budget),
             total_rows=total_rows,
-            stored_rows=min(total_rows, max_rows),
+            stored_rows=stored_rows,
             minted_at=minted_at,
         )
     except Exception:

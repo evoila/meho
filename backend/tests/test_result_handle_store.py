@@ -15,7 +15,7 @@ contract that matters for the read-back surface:
 * the spill is capped at ``max_rows`` and the window metadata reports
   the truncation;
 * the store fails open — an unreachable client makes ``spill`` return
-  ``False`` and ``fetch_window`` return ``None`` rather than raising.
+  ``0`` and ``fetch_window`` return ``None`` rather than raising.
 """
 
 from __future__ import annotations
@@ -24,14 +24,25 @@ import json
 from typing import Any
 from uuid import UUID, uuid4
 
+import msgspec
 import pytest
 import redis.exceptions
 
+import meho_backplane.connectors.result_handle_store as store_module
 from meho_backplane.connectors.result_handle_store import (
     ResultHandleStore,
     SpilledRowSet,
     SpilledWindow,
 )
+from meho_backplane.settings import get_settings
+
+
+@pytest.fixture(autouse=True)
+def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
 
 
 class _FakeRedis:
@@ -86,7 +97,7 @@ async def test_spill_then_fetch_round_trips_full_rows() -> None:
         ttl_seconds=3600,
         max_rows=10000,
     )
-    assert ok is True
+    assert ok == 120
     assert fake.last_ex == 3600
 
     # A window past the inline sample returns the real rows.
@@ -195,7 +206,7 @@ async def test_spill_caps_at_max_rows_and_reports_truncation() -> None:
         ttl_seconds=3600,
         max_rows=100,  # cap below the row count
     )
-    assert ok is True
+    assert ok == 100
 
     window = await store.fetch_window(
         tenant_id=tenant,
@@ -230,7 +241,7 @@ async def test_spill_caps_at_max_rows_and_reports_truncation() -> None:
 async def test_spill_skips_degenerate_inputs(
     rows: list[dict[str, Any]], ttl: int, max_rows: int
 ) -> None:
-    """Empty rows, non-positive TTL, or zero cap → no spill (returns False)."""
+    """Empty rows, non-positive TTL, or zero cap → no spill (returns 0)."""
     store = ResultHandleStore(_FakeRedis())
     ok = await store.spill(
         tenant_id=uuid4(),
@@ -242,11 +253,11 @@ async def test_spill_skips_degenerate_inputs(
         ttl_seconds=ttl,
         max_rows=max_rows,
     )
-    assert ok is False
+    assert ok == 0
 
 
 async def test_store_fails_open_on_unreachable_client() -> None:
-    """An unreachable Valkey makes spill return False and fetch return None."""
+    """An unreachable Valkey makes spill return zero and fetch return None."""
     store = ResultHandleStore(_BrokenRedis())
     ok = await store.spill(
         tenant_id=uuid4(),
@@ -258,7 +269,7 @@ async def test_store_fails_open_on_unreachable_client() -> None:
         ttl_seconds=3600,
         max_rows=10000,
     )
-    assert ok is False
+    assert ok == 0
 
     window = await store.fetch_window(
         tenant_id=uuid4(),
@@ -380,3 +391,246 @@ async def test_fetch_rows_fails_open_on_unreachable_store() -> None:
     """An unreachable client yields None, never an exception (fail-open)."""
     store = ResultHandleStore(_BrokenRedis())
     assert await store.fetch_rows(tenant_id=uuid4(), operator_sub="op-a", handle_id=uuid4()) is None
+
+
+async def test_spill_byte_cap_accepts_exact_prefix_and_rejects_next(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import UTC, datetime
+
+    from meho_backplane.connectors.result_handle_store import _StoredPayload
+
+    fixed = datetime(2026, 1, 1, tzinfo=UTC)
+    monkeypatch.setattr(
+        store_module, "datetime", type("Clock", (), {"now": staticmethod(lambda _tz: fixed)})
+    )
+    rows = [{"value": "é" * 10}, {"value": "b" * 100}, {"value": "later"}]
+    created = fixed.isoformat()
+    prefix = _StoredPayload(
+        "op", "x", [rows[0]], 3, 1, created, 3, "partial", "unknown", {"note": "μ"}
+    )
+    cap = len(msgspec.json.encode(prefix))
+    fake = _FakeRedis()
+    store = ResultHandleStore(fake)
+    stored = await store.spill(
+        tenant_id=uuid4(),
+        operator_sub="op",
+        handle_id=uuid4(),
+        op_id="x",
+        rows=rows,
+        total_rows=3,
+        ttl_seconds=60,
+        max_rows=3,
+        max_record_bytes=cap,
+        metadata={"note": "μ"},
+    )
+    assert stored == 1
+    assert len(next(iter(fake.store.values()))) == cap
+    assert (
+        await store.spill(
+            tenant_id=uuid4(),
+            operator_sub="op",
+            handle_id=uuid4(),
+            op_id="x",
+            rows=rows,
+            total_rows=3,
+            ttl_seconds=60,
+            max_rows=3,
+            max_record_bytes=cap - 1,
+            metadata={"note": "μ"},
+        )
+        == 0
+    )
+
+
+async def test_spill_rejects_wide_first_row_without_writing() -> None:
+    fake = _FakeRedis()
+    stored = await ResultHandleStore(fake).spill(
+        tenant_id=uuid4(),
+        operator_sub="op",
+        handle_id=uuid4(),
+        op_id=None,
+        rows=[{"value": "x" * 1000}, {"value": "later"}],
+        total_rows=2,
+        ttl_seconds=60,
+        max_rows=2,
+        max_record_bytes=20,
+    )
+    assert stored == 0
+    assert fake.store == {}
+
+
+def test_legacy_payload_defaults_are_unknown_and_independent() -> None:
+    from meho_backplane.connectors.result_handle_store import _StoredPayload
+
+    raw = msgspec.json.encode(
+        {
+            "operator_sub": "op",
+            "op_id": None,
+            "rows": [],
+            "total_rows": 1,
+            "stored_rows": 1,
+            "created_at": "x",
+        }
+    )
+    one = msgspec.json.decode(raw, type=_StoredPayload)
+    two = msgspec.json.decode(raw, type=_StoredPayload)
+    assert (one.captured_rows, one.storage_coverage, one.source_coverage) == (
+        0,
+        "unknown",
+        "unknown",
+    )
+    one.metadata["x"] = 1
+    assert two.metadata == {}
+
+
+async def test_spill_accounts_for_count_digit_width_and_complete_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Byte selection includes stored-count width and the final complete label."""
+    from datetime import UTC, datetime
+
+    from meho_backplane.connectors.result_handle_store import _StoredPayload
+
+    fixed = datetime(2026, 1, 1, tzinfo=UTC)
+    monkeypatch.setattr(
+        store_module, "datetime", type("Clock", (), {"now": staticmethod(lambda _tz: fixed)})
+    )
+
+    async def spill_with_cap(rows: list[dict[str, Any]], cap: int) -> tuple[int, bytes]:
+        fake = _FakeRedis()
+        stored = await ResultHandleStore(fake).spill(
+            tenant_id=uuid4(),
+            operator_sub="op",
+            handle_id=uuid4(),
+            op_id=None,
+            rows=rows,
+            total_rows=len(rows),
+            ttl_seconds=60,
+            max_rows=len(rows),
+            max_record_bytes=cap,
+        )
+        return stored, next(iter(fake.store.values()), b"")
+
+    created = fixed.isoformat()
+    ten_rows = [{"i": i} for i in range(10)]
+    cap_at_nine = len(
+        msgspec.json.encode(_StoredPayload("op", None, ten_rows[:9], 10, 9, created, 10, "partial"))
+    )
+    stored, encoded = await spill_with_cap(ten_rows, cap_at_nine)
+    assert stored == 9
+    assert len(encoded) == cap_at_nine
+
+    hundred_rows = [{"i": i} for i in range(100)]
+    cap_at_ninety_nine = len(
+        msgspec.json.encode(
+            _StoredPayload("op", None, hundred_rows[:99], 100, 99, created, 100, "partial")
+        )
+    )
+    stored, encoded = await spill_with_cap(hundred_rows, cap_at_ninety_nine)
+    assert stored == 99
+    assert len(encoded) == cap_at_ninety_nine
+
+    one_row = [{"i": 1}]
+    complete_size = len(
+        msgspec.json.encode(_StoredPayload("op", None, one_row, 1, 1, created, 1, "complete"))
+    )
+    assert (await spill_with_cap(one_row, complete_size - 1))[0] == 0
+    stored, encoded = await spill_with_cap(one_row, complete_size)
+    assert stored == 1
+    assert len(encoded) == complete_size
+
+
+async def test_spill_reports_storage_coverage_for_complete_and_capped_prefixes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stored fidelity is measured against captured rows, not source total_rows."""
+    from datetime import UTC, datetime
+
+    from meho_backplane.connectors.result_handle_store import _StoredPayload
+
+    fixed = datetime(2026, 1, 1, tzinfo=UTC)
+    monkeypatch.setattr(
+        store_module, "datetime", type("Clock", (), {"now": staticmethod(lambda _tz: fixed)})
+    )
+    rows = [{"i": i, "text": "x" * 20} for i in range(3)]
+
+    async def payload_for(*, max_rows: int, max_record_bytes: int) -> _StoredPayload:
+        fake = _FakeRedis()
+        stored = await ResultHandleStore(fake).spill(
+            tenant_id=uuid4(),
+            operator_sub="op",
+            handle_id=uuid4(),
+            op_id=None,
+            rows=rows,
+            total_rows=99,
+            ttl_seconds=60,
+            max_rows=max_rows,
+            max_record_bytes=max_record_bytes,
+        )
+        assert stored > 0
+        return msgspec.json.decode(next(iter(fake.store.values())), type=_StoredPayload)
+
+    complete = await payload_for(max_rows=3, max_record_bytes=10_000)
+    assert (complete.captured_rows, complete.stored_rows, complete.storage_coverage) == (
+        3,
+        3,
+        "complete",
+    )
+    assert complete.source_coverage == "unknown"
+
+    row_capped = await payload_for(max_rows=2, max_record_bytes=10_000)
+    assert (row_capped.captured_rows, row_capped.stored_rows, row_capped.storage_coverage) == (
+        3,
+        2,
+        "partial",
+    )
+
+    one_row_size = len(
+        msgspec.json.encode(
+            _StoredPayload("op", None, rows[:1], 99, 1, fixed.isoformat(), 3, "partial")
+        )
+    )
+    byte_capped = await payload_for(max_rows=3, max_record_bytes=one_row_size)
+    assert (byte_capped.captured_rows, byte_capped.stored_rows, byte_capped.storage_coverage) == (
+        3,
+        1,
+        "partial",
+    )
+
+
+@pytest.mark.parametrize("cap", [0, -1])
+async def test_spill_explicit_nonpositive_byte_cap_skips_without_writing(cap: int) -> None:
+    """An explicit disabled/invalid cap never resolves settings or writes a key."""
+    fake = _FakeRedis()
+    stored = await ResultHandleStore(fake).spill(
+        tenant_id=uuid4(),
+        operator_sub="op",
+        handle_id=uuid4(),
+        op_id=None,
+        rows=[{"i": 1}],
+        total_rows=1,
+        ttl_seconds=60,
+        max_rows=1,
+        max_record_bytes=cap,
+    )
+    assert stored == 0
+    assert fake.store == {}
+
+
+async def test_spill_fails_open_for_an_unencodable_row_without_writing() -> None:
+    """A real serialization TypeError preserves the no-spill fail-open contract."""
+    fake = _FakeRedis()
+    stored = await ResultHandleStore(fake).spill(
+        tenant_id=uuid4(),
+        operator_sub="op",
+        handle_id=uuid4(),
+        op_id=None,
+        rows=[{"unsupported": object()}],
+        total_rows=1,
+        ttl_seconds=60,
+        max_rows=1,
+        max_record_bytes=10_000,
+    )
+    assert stored == 0
+    assert fake.store == {}

@@ -47,9 +47,8 @@ Bounded size
 ============
 
 A pathological op could return millions of rows; spilling all of them
-would blow the per-key value size. :meth:`spill` caps the persisted row
-count at ``max_rows`` (the reducer passes
-:attr:`~meho_backplane.settings.Settings.result_handle_max_spill_rows`)
+would blow the per-key value size. :meth:`spill` caps the persisted record by
+row count and encoded bytes, using the configured limits.
 and records both the cap-applied ``stored_rows`` and the true
 ``total_rows`` so a reader can tell when the tail was truncated. Combined
 with the TTL, the store's footprint is bounded on both axes.
@@ -58,7 +57,7 @@ Fail-open
 =========
 
 Every method swallows Valkey/serialization errors and degrades to the
-"no spill" path (``spill`` returns ``False``; ``fetch_window`` returns
+"no spill" path (``spill`` returns ``0``; ``fetch_window`` returns
 ``None``). A reduce must never fail because the spill backend is
 unreachable — the inline sample still ships, exactly as it did before
 this store existed. The MCP read tool surfaces the miss as a typed
@@ -74,6 +73,8 @@ from uuid import UUID
 import msgspec
 import redis.asyncio as redis
 import structlog
+
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "ResultHandleStore",
@@ -149,6 +150,10 @@ class _StoredPayload(msgspec.Struct):
     total_rows: int
     stored_rows: int
     created_at: str
+    captured_rows: int = 0
+    storage_coverage: str = "unknown"
+    source_coverage: str = "unknown"
+    metadata: dict[str, Any] = msgspec.field(default_factory=dict)
 
 
 class ResultHandleStore:
@@ -174,13 +179,15 @@ class ResultHandleStore:
         total_rows: int,
         ttl_seconds: int,
         max_rows: int,
-    ) -> bool:
-        """Persist *rows* (capped at *max_rows*) under the handle key.
+        max_record_bytes: int | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> int:
+        """Persist a row-capped, byte-capped prefix of *rows* under the handle key.
 
-        Returns ``True`` when the rows were stored and are retrievable via
-        :meth:`fetch_window`, ``False`` when the spill was skipped or
+        Returns the positive stored-row count when rows were stored and are retrievable via
+        :meth:`fetch_window`, ``0`` when the spill was skipped or
         failed (Valkey unreachable, serialization error, empty input). A
-        ``False`` return is non-fatal: the caller keeps the inline sample
+        zero return is non-fatal: the caller keeps the inline sample
         and leaves the handle's drill-in surface marked unavailable.
 
         The TTL is enforced server-side by Valkey (``SET ... EX``); no
@@ -188,20 +195,58 @@ class ResultHandleStore:
         past the TTL.
         """
         if not rows or ttl_seconds <= 0 or max_rows <= 0:
-            return False
-        stored = rows[:max_rows]
-        payload = _StoredPayload(
-            operator_sub=operator_sub,
-            op_id=op_id,
-            rows=stored,
-            total_rows=total_rows,
-            stored_rows=len(stored),
-            created_at=datetime.now(UTC).isoformat(),
-        )
+            return 0
+        if max_record_bytes is None:
+            max_record_bytes = get_settings().result_handle_max_record_bytes
+        if max_record_bytes <= 0:
+            return 0
+        created_at = datetime.now(UTC).isoformat()
+        metadata = metadata or {}
+        candidates = rows[:max_rows]
+        captured_rows = len(rows)
         try:
+            baseline = _StoredPayload(
+                operator_sub=operator_sub,
+                op_id=op_id,
+                rows=[],
+                total_rows=total_rows,
+                stored_rows=0,
+                created_at=created_at,
+                captured_rows=captured_rows,
+                storage_coverage="partial",
+                metadata=metadata,
+            )
+            size = len(msgspec.json.encode(baseline))
+            selected: list[dict[str, Any]] = []
+            for row in candidates:
+                row_size = len(msgspec.json.encode(row))
+                candidate_size = size + row_size + (1 if selected else 0)
+                count = len(selected) + 1
+                complete = count == captured_rows
+                candidate_size += len(str(count)) - 1 + (1 if complete else 0)
+                if candidate_size > max_record_bytes:
+                    break
+                selected.append(row)
+                size += row_size + (1 if len(selected) > 1 else 0)
+            if not selected:
+                return 0
+            coverage = "complete" if len(selected) == captured_rows else "partial"
+            payload = _StoredPayload(
+                operator_sub=operator_sub,
+                op_id=op_id,
+                rows=selected,
+                total_rows=total_rows,
+                stored_rows=len(selected),
+                created_at=created_at,
+                captured_rows=captured_rows,
+                storage_coverage=coverage,
+                metadata=metadata,
+            )
             encoded = msgspec.json.encode(payload)
+            if len(encoded) > max_record_bytes:
+                return 0
             await self._client.set(_key(tenant_id, handle_id), encoded, ex=ttl_seconds)
-        except (redis.RedisError, msgspec.EncodeError, OSError) as exc:
+        except (redis.RedisError, msgspec.EncodeError, TypeError, OSError) as exc:
             # Fail-open: a reduce must never fail because the spill
             # backend is unreachable. The inline sample still ships.
             _log.warning(
@@ -211,17 +256,17 @@ class ResultHandleStore:
                 op_id=op_id,
                 error=str(exc),
             )
-            return False
+            return 0
         _log.info(
             "result_handle_spilled",
             handle_id=str(handle_id),
             tenant_id=str(tenant_id),
             op_id=op_id,
-            stored_rows=len(stored),
+            stored_rows=len(selected),
             total_rows=total_rows,
             ttl_seconds=ttl_seconds,
         )
-        return True
+        return len(selected)
 
     async def fetch_window(
         self,

@@ -250,6 +250,55 @@ async def test_inline_sample_is_byte_bounded_not_a_raw_payload(
     assert window["returned_rows"] == 5
 
 
+async def test_agent_trace_handle_advertises_the_real_byte_capped_prefix(
+    shared_store: tuple[ResultHandleStore, _FakeRedis],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Trace mint and result_query both expose only the persisted byte prefix."""
+    monkeypatch.setenv("RESULT_HANDLE_MAX_RECORD_BYTES", "5000")
+    get_settings.cache_clear()
+    try:
+        store, _fake = shared_store
+        tenant_id = await _new_tenant(slug="fr-ar-bytecap", enabled=True)
+        audit_id = uuid.uuid4()
+        started = datetime(2026, 8, 31, 9, 0, 0, tzinfo=UTC)
+        spans = [
+            SpanInput(
+                span_kind="vendor_call",
+                name=f"GET /rest/big/{i}",
+                started_at=started,
+                status="200",
+                attributes={"redacted_body": "x" * 2000, "marker": i},
+            )
+            for i in range(5)
+        ]
+        await record_trace(audit_id=audit_id, tenant_id=tenant_id, spans=spans)
+
+        operator = _operator(tenant_id)
+        handle = await materialize_agent_trace_handle(
+            operator=operator, audit_id=audit_id, store=store
+        )
+
+        assert handle is not None
+        stored = await store.fetch_rows(
+            tenant_id=tenant_id,
+            operator_sub=operator.sub,
+            handle_id=handle.handle_id,
+        )
+        assert stored is not None
+        assert 0 < stored.stored_rows < len(spans)
+        assert [row["seq"] for row in stored.rows] == list(range(stored.stored_rows))
+        assert str(stored.stored_rows) in handle.fetch_more.drill_in.rationale
+        assert "available" in handle.fetch_more.drill_in.rationale
+
+        window = await read_result_window(operator, handle.handle_id, offset=0, limit=50)
+        assert window["total_rows"] == len(spans)
+        assert window["returned_rows"] == stored.stored_rows
+        assert [row["seq"] for row in window["rows"]] == list(range(stored.stored_rows))
+    finally:
+        get_settings.cache_clear()
+
+
 # --------------------------------------------------------------------------
 # AC: redaction-uncertain trace is agent-INVISIBLE but operator-VISIBLE
 #     (the F5 discharge: a secret-bearing / uncertain span never reaches the

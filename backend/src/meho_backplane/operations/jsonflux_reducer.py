@@ -584,7 +584,7 @@ class JsonFluxReducer:
             if self._max_spill_rows is not None
             else get_settings().result_handle_max_spill_rows
         )
-        stored = await store.spill(
+        stored_rows = await store.spill(
             tenant_id=tenant_id,
             operator_sub=str(operator_sub),
             handle_id=materialized.handle_id,
@@ -594,9 +594,9 @@ class JsonFluxReducer:
             ttl_seconds=self._ttl_seconds,
             max_rows=max_rows,
         )
-        if not stored:
+        if not stored_rows:
             return self._skip("result_store_unavailable", materialized, context)
-        return _SpillOutcome(stored_rows=min(materialized.total_rows, max_rows))
+        return _SpillOutcome(stored_rows=stored_rows)
 
     @staticmethod
     def _skip(

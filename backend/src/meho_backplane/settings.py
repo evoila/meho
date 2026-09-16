@@ -1354,6 +1354,7 @@ class Settings(BaseModel):
     checks_evidence_prune_interval_seconds: int = Field(default=604800, ge=60, le=604800)
     checks_evidence_prune_enabled: bool = True
     result_handle_max_spill_rows: int = Field(default=10000, gt=0)
+    result_handle_max_record_bytes: int = Field(default=16777216, gt=0)
     # #3366 -- bounds on the ``result_query`` structured query surface. These
     # are the query interface's own resource ceilings; it inherits neither the
     # spill row cap above nor the reducer's hardcoded TTL.
@@ -2317,6 +2318,9 @@ def get_settings() -> Settings:
         ),
         result_handle_max_spill_rows=int(
             os.environ.get("RESULT_HANDLE_MAX_SPILL_ROWS", "10000"),
+        ),
+        result_handle_max_record_bytes=int(
+            os.environ.get("RESULT_HANDLE_MAX_RECORD_BYTES", "16777216"),
         ),
         result_query_max_output_rows=int(
             os.environ.get("RESULT_QUERY_MAX_OUTPUT_ROWS", "500"),

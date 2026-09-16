@@ -867,3 +867,29 @@ def test_result_query_bounds_reject_non_positive(field: str) -> None:
             database_url="sqlite+aiosqlite:///:memory:",
             **{field: 0},
         )
+
+
+@pytest.mark.parametrize(("value", "expected"), [(None, 16777216), ("4096", 4096)])
+def test_result_handle_max_record_bytes_default_and_override(
+    monkeypatch: pytest.MonkeyPatch, value: str | None, expected: int
+) -> None:
+    _base_env(monkeypatch)
+    if value is None:
+        monkeypatch.delenv("RESULT_HANDLE_MAX_RECORD_BYTES", raising=False)
+    else:
+        monkeypatch.setenv("RESULT_HANDLE_MAX_RECORD_BYTES", value)
+    get_settings.cache_clear()
+    try:
+        assert get_settings().result_handle_max_record_bytes == expected
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_result_handle_max_record_bytes_rejects_nonpositive_values(value: int) -> None:
+    """The per-record bound is always positive in validated settings."""
+    with pytest.raises(ValidationError):
+        Settings(
+            **_settings_kwargs("sqlite+aiosqlite:///:memory:"),
+            result_handle_max_record_bytes=value,
+        )

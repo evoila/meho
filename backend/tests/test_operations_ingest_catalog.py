@@ -1174,24 +1174,38 @@ def test_op_allowlist_entry_rejects_unknown_field() -> None:
         OpAllowlistEntry.model_validate({"method": "POST", "path": "/x", "typo": 1})
 
 
-def test_shipped_mehoauto_row_declares_the_three_op_allowlist() -> None:
-    """The shipped mehoauto row closes ingest to exactly launch/validate/gate."""
+def test_shipped_mehoauto_row_declares_its_op_allowlist() -> None:
+    """The shipped mehoauto row closes ingest to exactly launch/validate/gate
+    plus the two run-read GETs a governed launcher observes with (#3699)."""
     allow = op_allowlist_for("mehoauto", "0.1.0")
     assert allow == {
         ("POST", "/api/v1/runs"),
         ("POST", "/api/v1/blueprints/{blueprint_id}/validate"),
         ("POST", "/api/v1/runs/{run_id}/gates/{node_id}/decision"),
+        ("GET", "/api/v1/runs/{run_id}"),
+        ("GET", "/api/v1/runs"),
     }
 
 
-def test_shipped_mehoauto_allowlist_matches_the_connector_safety_floor_keys() -> None:
-    """Drift guard (T3-F01 crit. d): the catalog allowlist and the connector-
-    owned safety floor's pinned keys must name the SAME three ops, so the set
-    of ops that may persist can never diverge from the set whose tiers are
-    pinned. If they drift, one of the two files was edited without the other.
+def test_shipped_mehoauto_allowlist_covers_the_connector_safety_floor_keys() -> None:
+    """Drift guard (T3-F01 crit. d): every op the connector-owned safety floor
+    pins MUST be on the catalog allowlist, so a pinned op can actually persist;
+    the set of pinned ops can never grow beyond the set of ops that may persist.
+    The allowlist may additionally carry read ops that need no floor entry — the
+    two run-read GETs land ``safe`` naturally (below the ``caution`` write
+    floor), so they are allowlisted but unpinned. If a floor key drops off the
+    allowlist, or an unexpected op joins it, one of the two files drifted.
     """
     allow = op_allowlist_for("mehoauto", "0.1.0")
-    assert allow == meho_automation_ingest_safety._CAUTION_OPS
+    floor = meho_automation_ingest_safety._CAUTION_OPS
+    # Every caution-pinned op is allowlisted (a pinned op must be persistable).
+    assert floor <= allow
+    # The allowlist's extra entries are exactly the two run-read GETs, which
+    # ride the generic ``safe`` tier and are deliberately floor-free.
+    assert allow - floor == {
+        ("GET", "/api/v1/runs/{run_id}"),
+        ("GET", "/api/v1/runs"),
+    }
 
 
 def test_only_mehoauto_row_declares_an_op_allowlist() -> None:

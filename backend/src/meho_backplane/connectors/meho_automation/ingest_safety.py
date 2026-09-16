@@ -3,11 +3,13 @@
 
 """Safety floor for the meho-automation add-on generic connector.
 
-The three ops ingested from the add-on's ``/openapi.json`` are all POSTs, so
-the generic ingest heuristic (``_safety_level_for``: POST/PUT/PATCH ->
-``caution``, #3563) classifies every one ``caution`` by default. This floor
-**pins** the decided tiers so a spec re-ingest — or any future change to the
-generic verb heuristic — cannot silently reset them:
+The connector's op allowlist admits five ops (see the catalog row): three
+**write** POSTs and two run-read GETs (#3699). This floor governs only the
+three writes. They are all POSTs, so the generic ingest heuristic
+(``_safety_level_for``: POST/PUT/PATCH -> ``caution``, #3563) classifies every
+one ``caution`` by default. This floor **pins** those decided tiers so a spec
+re-ingest — or any future change to the generic verb heuristic — cannot
+silently reset them:
 
 * ``POST /api/v1/runs`` (**launch**) -> ``caution``. Launch executes a
   potentially destructive lifecycle run, but does **not** park for a
@@ -46,10 +48,14 @@ from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
 #: The version label the floor governs (the catalog row / target fingerprint).
 _MEHO_AUTOMATION_VERSION = "0.1.0"
 
-#: All three add-on ops are pinned ``caution`` (no approval park). Keyed by
-#: ``(METHOD, canonical path)``. Paths are the add-on's spec paths verbatim
+#: The three add-on WRITE ops are pinned ``caution`` (no approval park). Keyed
+#: by ``(METHOD, canonical path)``. Paths are the add-on's spec paths verbatim
 #: (its OpenAPI declares no servers block, so no mount prefix is stripped at
-#: ingest).
+#: ingest). The two allowlisted run-read GETs (#3699) are deliberately absent:
+#: reads land ``safe`` under the generic verb heuristic, below the caution
+#: write floor, so they need no pin. A drift-guard test
+#: (``test_operations_ingest_catalog.py``) asserts this set is a subset of the
+#: catalog allowlist, whose only extra entries are those two GET reads.
 _CAUTION_OPS: frozenset[tuple[str, str]] = frozenset(
     {
         ("POST", "/api/v1/runs"),

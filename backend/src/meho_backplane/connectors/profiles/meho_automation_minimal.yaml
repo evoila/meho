@@ -44,10 +44,16 @@
 #
 # PROBE. `delegate` — the single fingerprint round-trip covers reachability.
 #
-# PAGINATION. `none` — the three curated ops are single-object POSTs
-# (launch / validate / gate each return one object, never a page); no list
-# op is in scope. `items_key` names a rows key for the unwrapped shape but
-# is never exercised while `strategy: none` and no list op is ingested.
+# PAGINATION. `none` — reconciled for the run-read GETs added in #3699.
+# `GET /api/v1/runs` IS a list op, but the add-on does not paginate it: like
+# every other add-on list endpoint (`response_model=list[...]`) it returns
+# the full result set as a single un-paginated JSON array in one response, so
+# there is no page cursor for the dispatch loop to follow — `none` is the
+# correct strategy, not a placeholder-for-absence. Set-shapedness is handled
+# separately: a large array rides the backplane's result-handle / JSONFlux
+# reducer path (v0.1-spec §4) regardless of the vendor pagination strategy.
+# `items_key` names a rows key for a wrapped page shape; a bare-array response
+# has no top-level wrapper key, so it stays unexercised while `strategy: none`.
 #
 # Validated at boot by validate_shipped_artifacts (ExecutionProfile.model_
 # validate + validate_execution_profile) and stamped into the v2 registry by

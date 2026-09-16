@@ -47,17 +47,23 @@ def test_unknown_product_keeps_every_op() -> None:
 
 def test_allowlisted_product_drops_ops_outside_the_allowlist() -> None:
     ops = [
-        _proto("POST", "/api/v1/runs"),  # kept
+        _proto("POST", "/api/v1/runs"),  # kept (launch)
+        _proto("GET", "/api/v1/runs"),  # kept (run-list read, #3699)
+        _proto("GET", "/api/v1/runs/{run_id}"),  # kept (single-run read, #3699)
+        _proto("GET", "/api/v1/tenants"),  # dropped — a read is NOT auto-allowed
         _proto("DELETE", "/api/v1/tenants/{tenant_id}"),  # dropped
         _proto("POST", "/api/v1/fleet/import"),  # dropped
-        _proto("POST", "/api/v1/blueprints/{blueprint_id}/validate"),  # kept
+        _proto("POST", "/api/v1/blueprints/{blueprint_id}/validate"),  # kept (validate)
     ]
     result = apply_op_allowlist(product=_MEHOAUTO[0], version=_MEHOAUTO[1], operations=ops)
     assert {op.op_id for op in result.kept} == {
         "POST:/api/v1/runs",
+        "GET:/api/v1/runs",
+        "GET:/api/v1/runs/{run_id}",
         "POST:/api/v1/blueprints/{blueprint_id}/validate",
     }
     assert {(d.method, d.path) for d in result.dropped} == {
+        ("GET", "/api/v1/tenants"),
         ("DELETE", "/api/v1/tenants/{tenant_id}"),
         ("POST", "/api/v1/fleet/import"),
     }
@@ -68,11 +74,11 @@ def test_key_normalisation_lowercase_verb_and_query_string() -> None:
     the same keying the connector-owned safety floor uses."""
     ops = [
         _proto("post", "/api/v1/runs?dry_run=true"),  # matches after normalise
-        _proto("get", "/api/v1/runs"),  # different verb -> dropped
+        _proto("delete", "/api/v1/runs/{run_id}"),  # different verb -> dropped
     ]
     result = apply_op_allowlist(product=_MEHOAUTO[0], version=_MEHOAUTO[1], operations=ops)
     assert [op.op_id for op in result.kept] == ["post:/api/v1/runs?dry_run=true"]
-    assert [(d.method, d.path) for d in result.dropped] == [("GET", "/api/v1/runs")]
+    assert [(d.method, d.path) for d in result.dropped] == [("DELETE", "/api/v1/runs/{run_id}")]
 
 
 def test_empty_operations_is_a_noop() -> None:

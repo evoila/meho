@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import meho_backplane.operations.approval_queue as approval_queue
 import meho_backplane.operations.meta_tools as meta_tools
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     OperationRun,
@@ -105,13 +106,17 @@ async def test_submit_call_persists_result_envelope_retrievable_via_handle(
     handle even though nothing was returned to the submitter.
     """
 
-    async def fake_call(operator: Operator, arguments: dict[str, object]) -> dict[str, object]:
-        return {
-            "status": "ok",
-            "op_id": arguments["op_id"],
-            "result": {"vms": ["a", "b", "c"]},
-            "duration_ms": 42.0,
-        }
+    audit_id = uuid.uuid4()
+
+    async def fake_call(operator: Operator, arguments: dict[str, object]) -> OperationResult:
+        return OperationResult(
+            status="ok",
+            op_id=str(arguments["op_id"]),
+            result={"vms": ["a", "b", "c"]},
+            duration_ms=42.0,
+            audit_id=audit_id,
+            delivery="complete",
+        )
 
     monkeypatch.setattr(meta_tools, "call_operation", fake_call)
 
@@ -140,6 +145,11 @@ async def test_submit_call_persists_result_envelope_retrievable_via_handle(
         "op_id": "vm.list",
         "result": {"vms": ["a", "b", "c"]},
         "duration_ms": 42.0,
+        "audit_id": str(audit_id),
+        "delivery": "complete",
+        "error": None,
+        "handle": None,
+        "extras": {},
     }
     assert post.ended_at is not None
 

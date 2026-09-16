@@ -41,21 +41,28 @@ from uuid import UUID
 
 import httpx
 import pytest
+from sqlalchemy import select
 
 import meho_backplane.operations._audit as audit_module
+import meho_backplane.operations.dispatcher as dispatcher_module
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import AuditLog
 from meho_backplane.operations import (
+    PassThroughReducer,
     dispatch,
     register_typed_operation,
     reset_dispatcher_caches,
+    set_default_reducer,
 )
 from meho_backplane.operations._audit import _build_audit_payload
 from meho_backplane.operations._errors import result_connector_error
 from meho_backplane.operations.dispatcher import _requires_durable_audit
+from meho_backplane.redaction import RedactionManifestEntry, RedactionMiddlewareResult
 from meho_backplane.settings import get_settings
 
 
@@ -229,6 +236,28 @@ async def _module_mutating_handler(
     return {"echo": params, "created": True}
 
 
+_recording_handler_calls: list[dict[str, Any]] = []
+_recording_handler_payload: dict[str, Any] = {}
+
+
+async def _module_recording_handler(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Module-level test handler so typed registration exercises import resolution."""
+    _recording_handler_calls.append(params)
+    return _recording_handler_payload
+
+
+def _configure_recording_handler(raw_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Set the module-level handler outcome and clear its per-test call trace."""
+    _recording_handler_calls.clear()
+    _recording_handler_payload.clear()
+    _recording_handler_payload.update(raw_payload)
+    return _recording_handler_calls
+
+
 class _FakeFingerprint:
     def __init__(self, version: str | None = None) -> None:
         self.version = version
@@ -262,14 +291,20 @@ def _make_operator() -> Operator:
     )
 
 
-async def _register_op(op_id: str, *, safety_level: str, embedding: AsyncMock) -> None:
+async def _register_op(
+    op_id: str,
+    *,
+    safety_level: str,
+    embedding: AsyncMock,
+    handler: Any = _module_mutating_handler,
+) -> None:
     register_connector_v2(product="demo", version="", impl_id="", cls=_NoOpConnector)
     await register_typed_operation(
         product="demo",
         version="1.x",
         impl_id="demo",
         op_id=op_id,
-        handler=_module_mutating_handler,
+        handler=handler,
         summary="Demo op.",
         description="Demo op used by the S07 audit-precondition tests.",
         parameter_schema={"type": "object"},
@@ -284,6 +319,77 @@ def _raise_audit_commit(*_args: Any, **_kwargs: Any) -> Any:
         raise RuntimeError("audit DB unavailable")
 
     return _boom()
+
+
+@pytest.fixture
+def committed_audit_writes(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Record actual audit writes while retaining the real commit implementation."""
+    original_write = audit_module.write_audit_row
+    writes: list[dict[str, Any]] = []
+
+    async def _record_after_commit(**kwargs: Any) -> None:
+        await original_write(**kwargs)
+        writes.append(kwargs)
+
+    monkeypatch.setattr(audit_module, "write_audit_row", _record_after_commit)
+    return writes
+
+
+async def _committed_rows_for(op_id: str) -> list[AuditLog]:
+    """Read freshly committed dispatch rows through a separate DB session."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        return list(
+            (await session.execute(select(AuditLog).where(AuditLog.path == op_id))).scalars().all()
+        )
+
+
+def _install_exploding_reducer() -> None:
+    """Install a reducer failure carrying text that must never reach callers."""
+
+    class _ExplodingReducer:
+        async def reduce(
+            self,
+            payload: Any,
+            schema: dict[str, Any] | None = None,
+            context: dict[str, Any] | None = None,
+        ) -> tuple[Any, Any]:
+            raise RuntimeError("reducer private diagnostic: raw-delivery-secret")
+
+    set_default_reducer(_ExplodingReducer())
+
+
+def _install_preserved_redaction(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    raw_payload: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]], str]:
+    """Make the dispatch seam carry distinct raw/redacted audit artefacts."""
+    redacted = {"credential": "[REDACTED:token]", "state": "complete"}
+    manifest = (
+        RedactionManifestEntry(
+            rule="test-token-rule",
+            pattern="token",
+            action="redact",
+            count=1,
+            span=(0, 1),
+            reason="test audit preservation",
+            path="$.credential",
+        ),
+    )
+    policy_id = "test-delivery-policy"
+
+    def _redact(raw: Any, **_kwargs: Any) -> RedactionMiddlewareResult:
+        assert raw == raw_payload
+        return RedactionMiddlewareResult(
+            raw=raw_payload,
+            redacted=redacted,
+            manifest=manifest,
+            policy_id=policy_id,
+        )
+
+    monkeypatch.setattr(dispatcher_module, "apply_connector_boundary_redaction", _redact)
+    return raw_payload, [entry.model_dump(mode="json") for entry in manifest], policy_id
 
 
 def test_requires_durable_audit_gates_on_write_class_and_safety_tier() -> None:
@@ -329,6 +435,9 @@ async def test_write_class_dispatch_fails_closed_when_audit_row_cannot_commit(
     assert result.error == "connector_error: AuditCommitError"
     assert result.extras["error_code"] == "connector_error"
     assert result.extras["exception_class"] == "AuditCommitError"
+    # A failed write has no committed receipt and cannot claim delivery.
+    assert result.audit_id is None
+    assert result.delivery is None
     # AC3: no phantom broadcast when the audit commit fails.
     assert captured_events == []
     # AC4: the error-level dispatch_audit_failed log line still fires.
@@ -357,8 +466,205 @@ async def test_read_class_dispatch_stays_fail_open_when_audit_row_cannot_commit(
 
     # Fail-open preserved for read-class: the caller still sees ok.
     assert result.status == "ok", result.error
+    # No committed row means no receipt even though the response itself delivered.
+    assert result.audit_id is None
+    assert result.delivery == "complete"
     # The broadcast is still skipped when the audit row does not land.
     assert captured_events == []
     # The failure is still recorded for the on-call.
     logged = [call.args[0] for call in mock_log.exception.call_args_list if call.args]
     assert "dispatch_audit_failed" in logged
+
+
+# ---------------------------------------------------------------------------
+# HALF 4 -- committed receipt and unavailable delivery after response shaping
+# failures (#3636). These tests deliberately drive dispatch end to end: the
+# handler completed, redaction supplied audit artefacts, the reducer failed,
+# then the audit/broadcast boundary chose the caller-visible outcome.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op_id", ["demo.thing.list", "demo.thing.create"])
+async def test_completed_handler_reducer_failure_keeps_committed_audit_receipt(
+    op_id: str,
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+    committed_audit_writes: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Read and write handlers are not retried when only shaping fails.
+
+    The reducer cannot change the completed upstream action into a caller
+    error. The response is unavailable, while its one committed audit row
+    retains the raw payload and redaction provenance needed to investigate.
+    """
+    raw_payload = {"credential": "raw-delivery-secret", "state": "complete"}
+    expected_raw, expected_manifest, expected_policy = _install_preserved_redaction(
+        monkeypatch,
+        raw_payload=raw_payload,
+    )
+    calls = _configure_recording_handler(raw_payload)
+
+    await _register_op(
+        op_id,
+        safety_level="safe",
+        embedding=stub_embedding_service,
+        handler=_module_recording_handler,
+    )
+    _install_exploding_reducer()
+    try:
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id="demo-1.x",
+            op_id=op_id,
+            target=_FakeTarget(),
+            params={"request": "once"},
+        )
+    finally:
+        set_default_reducer(PassThroughReducer())
+
+    assert result.status == "ok"
+    assert result.error is None
+    assert result.result is None
+    assert result.handle is None
+    assert result.delivery == "unavailable"
+    assert result.audit_id is not None
+    assert "raw-delivery-secret" not in str(result)
+    assert "private diagnostic" not in str(result)
+    assert calls == [{"request": "once"}]
+    assert len(committed_audit_writes) == 1
+    assert committed_audit_writes[0]["audit_id"] == result.audit_id
+    rows = await _committed_rows_for(op_id)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.id == result.audit_id
+    assert row.status_code == 200
+    assert row.payload["result_status"] == "ok"
+    assert row.raw_payload == expected_raw
+    assert row.redaction_manifest == expected_manifest
+    assert row.payload["redaction_policy_id"] == expected_policy
+    assert len(captured_events) == 1
+    assert captured_events[0].audit_id == result.audit_id
+    assert captured_events[0].result_status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_completed_write_reducer_failure_fails_closed_when_audit_cannot_commit(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mutation with failed shaping still cannot report success without its row."""
+    raw_payload = {"credential": "raw-delivery-secret"}
+    _install_preserved_redaction(monkeypatch, raw_payload=raw_payload)
+    calls = _configure_recording_handler(raw_payload)
+
+    await _register_op(
+        "demo.thing.create",
+        safety_level="safe",
+        embedding=stub_embedding_service,
+        handler=_module_recording_handler,
+    )
+    monkeypatch.setattr(audit_module, "write_audit_row", _raise_audit_commit)
+    _install_exploding_reducer()
+    try:
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id="demo-1.x",
+            op_id="demo.thing.create",
+            target=_FakeTarget(),
+            params={},
+        )
+    finally:
+        set_default_reducer(PassThroughReducer())
+
+    assert result.status == "error"
+    assert result.error == "connector_error: AuditCommitError"
+    assert result.audit_id is None
+    assert result.delivery is None
+    assert "raw-delivery-secret" not in str(result)
+    assert "private diagnostic" not in str(result)
+    assert calls == [{}]
+    assert captured_events == []
+
+
+@pytest.mark.asyncio
+async def test_completed_safe_read_reducer_failure_stays_ok_without_audit_receipt(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The historical safe-read audit fail-open rule also covers shaping failure."""
+    raw_payload = {"credential": "raw-delivery-secret"}
+    _install_preserved_redaction(monkeypatch, raw_payload=raw_payload)
+    calls = _configure_recording_handler(raw_payload)
+
+    await _register_op(
+        "demo.thing.list",
+        safety_level="safe",
+        embedding=stub_embedding_service,
+        handler=_module_recording_handler,
+    )
+    monkeypatch.setattr(audit_module, "write_audit_row", _raise_audit_commit)
+    _install_exploding_reducer()
+    try:
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id="demo-1.x",
+            op_id="demo.thing.list",
+            target=_FakeTarget(),
+            params={},
+        )
+    finally:
+        set_default_reducer(PassThroughReducer())
+
+    assert result.status == "ok"
+    assert result.error is None
+    assert result.audit_id is None
+    assert result.delivery == "unavailable"
+    assert "raw-delivery-secret" not in str(result)
+    assert "private diagnostic" not in str(result)
+    assert calls == [{}]
+    assert captured_events == []
+
+
+@pytest.mark.asyncio
+async def test_broadcast_failure_after_audit_commit_keeps_receipt(
+    stub_embedding_service: AsyncMock,
+    committed_audit_writes: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed fan-out cannot erase the receipt for an already committed row."""
+    calls = _configure_recording_handler({"state": "complete"})
+
+    async def _raise_broadcast(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("broadcast private diagnostic")
+
+    await _register_op(
+        "demo.thing.create",
+        safety_level="safe",
+        embedding=stub_embedding_service,
+        handler=_module_recording_handler,
+    )
+    monkeypatch.setattr(audit_module, "publish_event", _raise_broadcast)
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="demo-1.x",
+        op_id="demo.thing.create",
+        target=_FakeTarget(),
+        params={},
+    )
+
+    assert result.status == "ok"
+    assert result.delivery == "complete"
+    assert result.audit_id is not None
+    assert "broadcast private diagnostic" not in str(result)
+    assert calls == [{}]
+    assert len(committed_audit_writes) == 1
+    assert committed_audit_writes[0]["audit_id"] == result.audit_id
+    rows = await _committed_rows_for("demo.thing.create")
+    assert len(rows) == 1
+    assert rows[0].id == result.audit_id
+    assert rows[0].status_code == 200
+    assert rows[0].payload["result_status"] == "ok"

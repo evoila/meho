@@ -575,6 +575,12 @@ def test_call_operation_ok_envelope_conforms(
     payload = _assert_conforms("call_operation", response)
     assert payload["status"] == "ok", payload
     assert "handle" in payload
+    # A successful governed write has committed before this envelope returns:
+    # the receipt and delivery state are contract fields, not optional
+    # presentation metadata.  The schema validation above additionally pins
+    # their declared UUID / enum shapes against the real dispatcher path.
+    assert uuid.UUID(payload["audit_id"])
+    assert payload["delivery"] == "complete"
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)

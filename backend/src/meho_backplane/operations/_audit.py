@@ -725,8 +725,8 @@ async def audit_and_broadcast_safe(
     handle_metadata: dict[str, Any] | None = None,
     error_extras: dict[str, Any] | None = None,
     require_audit: bool = False,
-) -> None:
-    """Write the audit row + publish broadcast; swallow internal failures.
+) -> uuid.UUID | None:
+    """Write the audit row + publish broadcast; return a committed receipt.
 
     Broadcast failures are always fail-open (per :func:`publish_event`'s
     contract): they are recorded at error level and never flip the
@@ -798,7 +798,7 @@ async def audit_and_broadcast_safe(
             raise AuditCommitError(
                 f"DISPATCH audit row could not be committed for {descriptor.op_id}"
             ) from audit_exc
-        return
+        return None
     try:
         await publish_broadcast(
             audit_id=audit_id,
@@ -815,6 +815,7 @@ async def audit_and_broadcast_safe(
             result_status=result_status,
             operator_sub=operator.sub,
         )
+    return audit_id
 
 
 async def audit_rejection_safe(

@@ -201,12 +201,14 @@ load-bearing-ness:
    reads, a Vault-agent-templated env file), or use the guest's own
    credential store — the same discipline the guest OS credential itself
    follows (point 1, resolved from `secret_ref`, never a parameter).
-5. **Full audit of command + result + truncated output.** Every op
+5. **Full audit of command + result + bounded output.** Every op
    dispatches through the synchronous append-only audit path
    (v0.1-spec §6). The audit row names the op, the VM, and the outcome;
-   set-shaped and byte-shaped outputs are truncated (JSONFlux result
-   handle for the process list; a byte cap on file reads) so the audit
-   and the agent surface never carry an unbounded guest payload.
+   set-shaped outputs spill to a JSONFlux result handle (the process
+   list; the opt-in `file.read` content lines), and `file.read` refuses
+   a file over its inline-fetch cap rather than proxying an unbounded
+   payload, so the audit and the agent surface never carry an unbounded
+   guest payload.
 6. **Read/write split is explicit.** The four reads never mutate guest
    state; the two writes (`guest.file.write`, `guest.program.run`) are the
    only mutating ops and the only ones that park.
@@ -225,7 +227,7 @@ carries full `parameter_schema` + `response_schema` (JSON Schema
 | `vmware.composite.vm.guest.process.list` | `GuestProcessManager.ListProcessesInGuest` | yes | safe | set → JSONFlux handle |
 | `vmware.composite.vm.guest.env.read` | `GuestProcessManager.ReadEnvironmentVariableInGuest` | yes | safe | set → JSONFlux handle |
 | `vmware.composite.vm.guest.net.show` | `PropertyCollector.RetrievePropertiesEx` on `guest.net` + `guest.ipStack` | **no** (Tools-reported) | safe | aggregate dict |
-| `vmware.composite.vm.guest.file.read` | `GuestFileManager.InitiateFileTransferFromGuest` + guest-transfer GET | yes | safe | truncated content + attrs |
+| `vmware.composite.vm.guest.file.read` | `GuestFileManager.InitiateFileTransferFromGuest` (+ opt-in guest-transfer GET via `fetch_content`) | yes | safe | metadata + attrs; opt-in `content_lines` → JSONFlux handle |
 | `vmware.composite.vm.guest.file.write` | `GuestFileManager.InitiateFileTransferToGuest` + guest-transfer PUT | yes | **dangerous / approval** | write report |
 | `vmware.composite.vm.guest.program.run` | `GuestProcessManager.StartProgramInGuest` (+ `ListProcessesInGuest` poll when `wait=true`) | yes | **dangerous / approval** | pid (+ exit code / times) |
 
@@ -240,13 +242,49 @@ Notes:
 - **File transfer is two-step by vim design.** `InitiateFileTransfer*`
   returns a one-time guest-transfer URL; the file bytes flow directly
   over that URL (GET for read, PUT for write), never through the vim
-  channel. The read caps returned content and the write echoes only
-  path + size to the reviewer.
+  channel. `file.read` returns the metadata + one-time URL by default;
+  `fetch_content=true` fetches the bytes server-side as `content_lines`
+  (utf-8 or base64), refuses files over `max_inline_bytes` (default
+  1 MiB, hard cap 8 MiB), JSONFlux-wraps large content into a
+  `result_query` handle, and never returns or logs the URL/token. The
+  write echoes only path + size to the reviewer.
 - **Set-shaped responses are JSONFlux-wrapped (postulate 6).** The
   process list and env list return arrays; the dispatcher wraps any
   response over the size threshold into a result handle, so the agent
   drills in via `result_query` rather than receiving an unbounded guest
   process table.
+
+### Inline file fetch (`fetch_content`)
+
+`file.read` is opt-in for the bytes. By default (`fetch_content=false`)
+it returns only the transfer metadata — `size_bytes`, `attributes`, and
+the one-time transfer `url` — with `content_fetch="deferred"`. Pass
+`fetch_content=true` to have MEHO fetch the bytes server-side:
+
+- **Same egress seam as the write.** The GET rides the connector's
+  pooled, TLS-configured client (the one `file.write` already uses for
+  its PUT), resolving a `*` placeholder host to the target's host. The
+  transfer ticket rides the URL, so no auth header is attached.
+- **Set-shaped, so it JSONFlux-wraps.** The bytes come back as
+  `content_lines`: utf-8 text lines when the file decodes as UTF-8
+  (`content_encoding="utf-8"`), or 76-char base64 chunks when it does
+  not (`content_encoding="base64"`; reassemble with
+  `base64.b64decode("".join(content_lines))`). Being a list, it spills
+  to a result handle over the size threshold and the agent pages it with
+  `result_query`; the identifying/size scalars stay on the reduced
+  summary so the metadata envelope survives alongside the handle.
+- **Refuse, don't truncate.** A file larger than `max_inline_bytes`
+  (default 1 MiB, hard cap 8 MiB) is refused with an error naming the
+  size — before any GET when the guest-reported size is known, and
+  defensively on the received body when the guest under-reports or omits
+  the size. A partial file would be misleading, so it is never returned
+  truncated; re-read without `fetch_content` for the transfer handle, or
+  raise `max_inline_bytes` up to the hard cap.
+- **URL/token never leak.** On the fetch path the one-time URL is
+  consumed by the GET and carries the transfer token, so the result
+  omits `url` entirely and the URL is never logged; flight-recorder
+  spans already strip the URL query. Safety tier is unchanged (`safe`
+  read).
 
 ### Why `guest.file.write` is the proving write (not `guest.net.set_mtu`)
 

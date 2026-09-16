@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: file-size — pre-existing guest-operations channel module
+# (#3100 / #3255); one cohesive unit (auth + manager resolution + the six
+# guest.* handlers), already over the soft limit on main before this change.
 
 """Governed guest-operations channel handlers (``vmware.composite.vm.guest.*``, #3100 / #3255).
 
@@ -61,6 +64,7 @@ An operator whose deployment names the top manager differently overrides
 from __future__ import annotations
 
 import asyncio
+import base64
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -126,6 +130,15 @@ _PROP_GUEST_IP_STACK = "guest.ipStack"
 #: Cap on the number of processes returned inline before the list is
 #: JSONFlux-handled by the dispatcher.
 _DEFAULT_MAX_PROCESSES = 200
+
+#: ``file.read`` inline-fetch byte caps. A caller-supplied ``max_inline_bytes``
+#: is clamped into ``[1, _FILE_READ_HARD_CAP_BYTES]``; absent, the default
+#: budget applies. The schema also enforces these bounds declaratively, so the
+#: clamp is defence-in-depth (a direct handler call / a schema drift).
+_FILE_READ_DEFAULT_MAX_BYTES = 1024 * 1024  # 1 MiB
+_FILE_READ_HARD_CAP_BYTES = 8 * 1024 * 1024  # 8 MiB
+#: Base64 line width for binary ``content_lines`` (RFC 2045 MIME wrapping).
+_BASE64_LINE_WIDTH = 76
 
 #: Default wall-clock ceiling (seconds) for the ``guest.program.run``
 #: exit-code poll. Matches VMware Tools' ~5-minute retention of a finished
@@ -386,15 +399,33 @@ async def guest_file_read_composite(
 
     Op-id: ``vmware.composite.vm.guest.file.read``. Returns the
     ``FileTransferInformation`` the guest file manager issues -- the file
-    ``size``, POSIX ``attributes``, and a one-time transfer ``url`` -- for
-    ``guest_path``. Inline content retrieval (a raw GET of ``url``) is a
-    deliberate follow-up (see the design note): the first increment returns
-    the transfer handle so the file's existence, size, and attributes are
-    known without MEHO proxying the bytes.
+    ``size``, POSIX/Windows ``attributes``, and a one-time transfer ``url`` --
+    for ``guest_path``.
+
+    ``fetch_content`` (default ``False``) selects the shape:
+
+    * **false** -- returns the transfer metadata + one-time ``url`` and
+      ``content_fetch="deferred"`` (byte-identical to the read's first
+      increment): existence + size + attributes without MEHO proxying bytes.
+    * **true** -- MEHO GETs the one-time transfer URL server-side over the
+      same pooled TLS client the write path uses (:func:`_get_guest_file_bytes`)
+      and returns the bytes as set-shaped ``content_lines`` (utf-8 text, or
+      76-char base64 chunks for non-decodable binary; flagged by
+      ``content_encoding``). Large content is JSONFlux-wrapped into a result
+      handle by the dispatcher (drill in via ``result_query``). A file larger
+      than ``max_inline_bytes`` (default 1 MiB, hard cap 8 MiB) is **refused**
+      (not truncated) with an error naming the size -- before any GET when the
+      guest-reported size is known, and defensively on the received body. The
+      one-time URL and its token are never returned or logged on this path
+      (the result omits ``url``).
+
+    Safety tier is unchanged (``safe`` read) either way.
     """
     vm_moid = params["vm"]
     guest_path = params["guest_path"]
     top_moid = params.get("guest_ops_manager_moid", _DEFAULT_GUEST_OPS_MANAGER_MOID)
+    fetch_content = bool(params.get("fetch_content", False))
+    max_inline_bytes = _bounded_max_inline_bytes(params.get("max_inline_bytes"))
     auth = await _guest_auth(connector, target, operator)
     manager_moid = await _resolve_guest_manager_moid(
         connector, target, operator, top_moid=top_moid, property_name=_PROP_FILE_MANAGER
@@ -414,14 +445,39 @@ async def guest_file_read_composite(
     info = _unwrap_envelope(raw)
     info = info if isinstance(info, dict) else {}
     size = unwrap_vim_value(info.get("size"))
+    size_bytes = size if isinstance(size, int) and not isinstance(size, bool) else None
+
+    if not fetch_content:
+        return {
+            "vm": vm_moid,
+            "file_manager_moid": manager_moid,
+            "guest_path": guest_path,
+            "url": unwrap_vim_value(info.get("url")),
+            "size_bytes": size_bytes,
+            "attributes": unwrap_vim_value(info.get("attributes")),
+            "content_fetch": "deferred",
+        }
+
+    url = unwrap_vim_value(info.get("url"))
+    if not isinstance(url, str) or not url:
+        raise RuntimeError(
+            f"guest.file.read: {_OP_FILE_TRANSFER_FROM!r} returned no transfer URL "
+            f"for {guest_path!r} on vm {vm_moid!r}"
+        )
+    # Refuse before egress when the guest-reported size is known and over cap.
+    if size_bytes is not None and size_bytes > max_inline_bytes:
+        raise _file_too_large(size_bytes, max_inline_bytes)
+    content = await _get_guest_file_bytes(connector, target, url=url, max_bytes=max_inline_bytes)
+    encoding, content_lines = _shape_guest_file_content(content)
     return {
         "vm": vm_moid,
         "file_manager_moid": manager_moid,
         "guest_path": guest_path,
-        "url": unwrap_vim_value(info.get("url")),
-        "size_bytes": size if isinstance(size, int) and not isinstance(size, bool) else None,
+        "size_bytes": size_bytes,
         "attributes": unwrap_vim_value(info.get("attributes")),
-        "content_fetch": "deferred",
+        "content_fetch": "inline",
+        "content_encoding": encoding,
+        "content_lines": content_lines,
     }
 
 
@@ -551,6 +607,82 @@ async def _put_guest_file_bytes(
     client = await connector._http_client(target)
     response = await client.put(resolved, content=content)
     response.raise_for_status()
+
+
+def _bounded_max_inline_bytes(raw: Any) -> int:
+    """Validate + clamp the inline-fetch byte budget into ``[1, hard cap]``.
+
+    ``None`` selects the default budget. The schema already bounds the param
+    declaratively (``minimum:1`` / ``maximum:8388608``); this is defence in
+    depth for a direct handler call or a schema drift -- a sub-1 value is a
+    caller error (raise), an over-cap value clamps to the hard cap.
+    """
+    if raw is None:
+        return _FILE_READ_DEFAULT_MAX_BYTES
+    value = int(raw)
+    if value < 1:
+        raise ValueError("max_inline_bytes must be >= 1")
+    return min(value, _FILE_READ_HARD_CAP_BYTES)
+
+
+def _file_too_large(size_bytes: int, max_bytes: int) -> RuntimeError:
+    """Build the over-cap refusal error -- names the size + cap, never the URL.
+
+    The dispatcher maps a :class:`RuntimeError` to ``connector_error`` with the
+    message intact (as the other guest-handler guards do), so the caller sees
+    an actionable size + remediation.
+    """
+    return RuntimeError(
+        f"guest.file.read: file is {size_bytes} bytes, over the "
+        f"{max_bytes}-byte inline-fetch cap (max_inline_bytes; hard cap "
+        f"{_FILE_READ_HARD_CAP_BYTES}). Re-read without fetch_content for the "
+        f"transfer handle, or raise max_inline_bytes."
+    )
+
+
+async def _get_guest_file_bytes(
+    connector: VmwareRestConnector, target: Any, *, url: str, max_bytes: int
+) -> bytes:
+    """GET the guest-transfer ``url`` server-side on the pooled target client.
+
+    Symmetric to :func:`_put_guest_file_bytes`: resolves the ``*`` placeholder
+    host to the target's, uses the target's pooled, TLS-configured client (the
+    transfer ticket rides the URL, so no ``auth_headers`` are attached), and
+    raises on a non-2xx. **Refuses** a body larger than ``max_bytes`` --
+    defence in depth against a guest that under-reports or omits
+    ``FileTransferInformation.size`` (the pre-fetch size check cannot bound
+    egress then). The URL (and its ``api_key`` / token query) is never logged.
+    """
+    resolved = _resolve_transfer_url(url, target)
+    client = await connector._http_client(target)
+    response = await client.get(resolved)
+    response.raise_for_status()
+    body = response.content
+    if len(body) > max_bytes:
+        raise _file_too_large(len(body), max_bytes)
+    return body
+
+
+def _shape_guest_file_content(content: bytes) -> tuple[str, list[str]]:
+    """Return ``(encoding, lines)`` -- set-shaped so the reducer can spill.
+
+    UTF-8-decodable bytes decode and split on newline (the trailing empty token
+    dropped, exactly as ``k8s.logs`` shapes its ``lines``); ``encoding="utf-8"``.
+    Non-decodable (binary) bytes base64-encode and wrap at 76 chars (RFC 2045);
+    ``encoding="base64"``, reassembled as ``base64.b64decode("".join(lines))``.
+    A strict ``decode`` cleanly detects binary and routes it to base64 rather
+    than lossily rendering a binary file as replacement-char "text".
+    """
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        b64 = base64.b64encode(content).decode("ascii")
+        lines = [b64[i : i + _BASE64_LINE_WIDTH] for i in range(0, len(b64), _BASE64_LINE_WIDTH)]
+        return "base64", lines
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return "utf-8", lines
 
 
 async def guest_program_run_composite(

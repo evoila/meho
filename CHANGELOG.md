@@ -90,6 +90,20 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Security
+
+- Keep parked `credential_write` secret values off approval rows and all approval read surfaces by encrypting execution input in a tenant-bound, one-time hand-off. Operators must configure the dedicated `APPROVAL_HANDOFF_ENCRYPTION_KEY` through the Helm `approvalHandoff` Secret reference; historical approval rows are not backfilled. (#3537 / #3664)
+
+### Added
+
+- Add a selectable governed-Vault source for review-App credentials: audited operator-context reads provide the client ID and one-pass RS256 signing key without exposing the PEM in a file, argv, or terminal output. The explicit 1Password fallback and manual interface remain available; live custody acceptance is governed separately. (#3620 / #3665)
+- Add test-only result-handle fidelity fixtures for ten known reducer, store, compiler, and query discrepancies. The strict expected failures establish the repair baseline and do not change production result-handle behavior. (#3630 / #3679)
+
+### Fixed
+
+- Preserve a successful review-App token mint when the caller supplies an existing key file; cleanup now removes only temporary files it owns. (#3620 / #3662)
+- Restore OAuth callback and refresh failure handling after Authlib 1.8 moved its async token client to `httpx2`, while retaining the structured upstream-auth and fail-closed session-expired behavior. (#3451)
+
 ## [0.35.1] - 2026-09-15
 
 ### Fixed

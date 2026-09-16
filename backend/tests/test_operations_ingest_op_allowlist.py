@@ -50,6 +50,8 @@ def test_allowlisted_product_drops_ops_outside_the_allowlist() -> None:
         _proto("POST", "/api/v1/runs"),  # kept (launch)
         _proto("GET", "/api/v1/runs"),  # kept (run-list read, #3699)
         _proto("GET", "/api/v1/runs/{run_id}"),  # kept (single-run read, #3699)
+        _proto("POST", "/api/v1/runs/{run_id}/nodes/{node_id}/resume"),  # kept (resume, #3707)
+        _proto("POST", "/api/v1/runs/{run_id}/nodes/{node_id}/skip"),  # dropped — human-only skip
         _proto("GET", "/api/v1/tenants"),  # dropped — a read is NOT auto-allowed
         _proto("DELETE", "/api/v1/tenants/{tenant_id}"),  # dropped
         _proto("POST", "/api/v1/fleet/import"),  # dropped
@@ -60,9 +62,13 @@ def test_allowlisted_product_drops_ops_outside_the_allowlist() -> None:
         "POST:/api/v1/runs",
         "GET:/api/v1/runs",
         "GET:/api/v1/runs/{run_id}",
+        "POST:/api/v1/runs/{run_id}/nodes/{node_id}/resume",
         "POST:/api/v1/blueprints/{blueprint_id}/validate",
     }
     assert {(d.method, d.path) for d in result.dropped} == {
+        # The resume op's sibling skip route shares the (method) but differs in
+        # (path), so it drops — the run-node skip is human-only in the add-on.
+        ("POST", "/api/v1/runs/{run_id}/nodes/{node_id}/skip"),
         ("GET", "/api/v1/tenants"),
         ("DELETE", "/api/v1/tenants/{tenant_id}"),
         ("POST", "/api/v1/fleet/import"),

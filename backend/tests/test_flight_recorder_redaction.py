@@ -27,6 +27,7 @@ from meho_backplane.redaction.flight_recorder import (
     BODY_OMITTED_MARKER,
     BODY_PATH_MARKER,
     HEADER_ALLOWLIST,
+    OVF_PROPERTY_VALUE_MARKER,
     SECRET_FAMILY_OMITTED_MARKER,
     UNPLACEABLE_FAMILY_MARKER,
     BodyExclusion,
@@ -232,6 +233,211 @@ def test_json_bytes_body_is_decoded_and_redacted() -> None:
     )
     assert out.value["secret"] == BODY_PATH_MARKER
     assert out.value["ok"] == 1
+
+
+# ===========================================================================
+# F2.2 -- OVF PropertyParams structural redaction
+# ===========================================================================
+#
+# A vSphere OVF deploy body carries operator-supplied property values in a
+# type-discriminated union member ``{type: "PropertyParams", properties:
+# [{id, value}]}`` under a dynamic ``additional_parameters[]`` index. Those
+# values are OVF property inputs that commonly carry appliance credentials,
+# keyed on a vendor-specific ``id`` no key-name heuristic or credential-shape
+# net can place -- so a plaintext value would otherwise round-trip into the
+# trace. The structural rule redacts every property value while leaving the
+# id and every non-secret field intact. The property values below are fake
+# placeholder strings, deliberately *not* credential-shaped, so the test
+# proves the *structural* rule fires (not the underlying shape net).
+
+
+def _ovf_deploy_body() -> dict[str, Any]:
+    """A synthetic OVF deploy request body with a PropertyParams block."""
+    return {
+        "deployment_spec": {
+            "accept_all_eula": True,
+            "name": "keep-vm-name",
+            "network_mappings": {"NetA": "network-11", "NetB": "network-22"},
+            "additional_parameters": [
+                {
+                    "type": "PropertyParams",
+                    "properties": [
+                        {"id": "guest.password", "value": "PLACEHOLDER-pw-value"},
+                        {"id": "guest.rootpw", "value": "PLACEHOLDER-root-value"},
+                        {"id": "guest.hostname", "value": "PLACEHOLDER-host-value"},
+                    ],
+                }
+            ],
+        },
+        "target": {"resource_pool_id": "resgroup-9"},
+    }
+
+
+def test_ovf_property_params_values_are_redacted_ids_and_others_survive() -> None:
+    body = _ovf_deploy_body()
+    out = redact_body(body, paths=(), content_type="application/json")
+
+    spec = out.value["deployment_spec"]
+    props = spec["additional_parameters"][0]["properties"]
+    # Every property value redacted, regardless of the id.
+    assert [p["value"] for p in props] == [OVF_PROPERTY_VALUE_MARKER] * 3
+    # The ids (config keys, not secrets) survive for debugging.
+    assert [p["id"] for p in props] == ["guest.password", "guest.rootpw", "guest.hostname"]
+    # Non-secret deploy fields survive verbatim.
+    assert spec["name"] == "keep-vm-name"
+    assert spec["network_mappings"] == {"NetA": "network-11", "NetB": "network-22"}
+    assert spec["accept_all_eula"] is True
+    assert out.value["target"] == {"resource_pool_id": "resgroup-9"}
+    # No fake property value leaks anywhere in the recorded body.
+    _assert_no_secret(out.value, "PLACEHOLDER-pw-value")
+    _assert_no_secret(out.value, "PLACEHOLDER-root-value")
+    _assert_no_secret(out.value, "PLACEHOLDER-host-value")
+    assert out.uncertain is False
+
+
+def test_ovf_property_params_redacted_in_response_body_too() -> None:
+    """The structural rule runs on response bodies as well as requests."""
+    out = redact_body(_ovf_deploy_body(), paths=(), content_type="application/json")
+    props = out.value["deployment_spec"]["additional_parameters"][0]["properties"]
+    assert all(p["value"] == OVF_PROPERTY_VALUE_MARKER for p in props)
+
+
+def test_ovf_property_params_redacted_via_redact_span_both_directions() -> None:
+    """End-to-end through redact_span: request and response both scrubbed."""
+    body = _ovf_deploy_body()
+    red = redact_span(
+        op_id="POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy",
+        connector_id="vmware-rest-9.0",
+        method="POST",
+        request_body=body,
+        response_body=body,
+        request_content_type="application/json",
+        response_content_type="application/json",
+    )
+    for recorded in (red.request_body, red.response_body):
+        props = recorded["deployment_spec"]["additional_parameters"][0]["properties"]
+        assert all(p["value"] == OVF_PROPERTY_VALUE_MARKER for p in props)
+    assert red.body_recorded is True
+    assert red.uncertain is False
+    _assert_no_secret(red.request_body, "PLACEHOLDER-pw-value")
+
+
+def test_body_without_property_params_is_unchanged() -> None:
+    """Regression: a body carrying no PropertyParams block round-trips intact."""
+    body = {
+        "deployment_spec": {
+            "name": "vm-x",
+            "network_mappings": {"NetA": "network-1"},
+            # A benign additional_parameters member of a different subtype.
+            "additional_parameters": [{"type": "DeploymentOptionParams", "selected_key": "small"}],
+        },
+        "target": {"resource_pool_id": "resgroup-1"},
+        "properties": [{"id": "not-a-property-params-block", "value": "keep-me"}],
+    }
+    out = redact_body(body, paths=(), content_type="application/json")
+    assert out.value == body
+    assert out.uncertain is False
+
+
+def test_top_level_property_params_block_is_redacted_both_directions() -> None:
+    """The rule is keyed on the type marker, not a path: a PropertyParams
+    block at the *top level* (not nested under ``deployment_spec``) is
+    redacted just the same, on request and response bodies."""
+    body = {
+        "type": "PropertyParams",
+        "properties": [
+            {"id": "guest.password", "value": "PLACEHOLDER-top-pw"},
+            {"id": "guest.hostname", "value": "PLACEHOLDER-top-host"},
+        ],
+    }
+    for content in (body, {"additional_parameters": [dict(body)]}):
+        red = redact_span(
+            op_id="POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy",
+            connector_id="vmware-rest-9.0",
+            method="POST",
+            request_body=content,
+            response_body=content,
+            request_content_type="application/json",
+            response_content_type="application/json",
+        )
+        for recorded in (red.request_body, red.response_body):
+            props = _find_property_list(recorded)
+            assert props is not None
+            assert all(p["value"] == OVF_PROPERTY_VALUE_MARKER for p in props)
+            assert [p["id"] for p in props] == ["guest.password", "guest.hostname"]
+        assert red.uncertain is False
+        _assert_no_secret(red.request_body, "PLACEHOLDER-top-pw")
+        _assert_no_secret(red.response_body, "PLACEHOLDER-top-host")
+
+
+def _find_property_list(node: Any) -> Any:
+    """Return the ``properties`` list of the first PropertyParams block found."""
+    if isinstance(node, dict):
+        if node.get("type") == "PropertyParams" and isinstance(node.get("properties"), list):
+            return node["properties"]
+        for value in node.values():
+            found = _find_property_list(value)
+            if found is not None:
+                return found
+    elif isinstance(node, list):
+        for item in node:
+            found = _find_property_list(item)
+            if found is not None:
+                return found
+    return None
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        pytest.param({"type": "PropertyParams"}, id="properties-absent"),
+        pytest.param(
+            {"type": "PropertyParams", "properties": "not-a-list"}, id="properties-string"
+        ),
+        pytest.param(
+            {"type": "PropertyParams", "properties": {"id": "x", "value": "PLACEHOLDER-map"}},
+            id="properties-mapping",
+        ),
+        pytest.param(
+            {"type": "PropertyParams", "properties": [{"id": "guest.hostname"}]},
+            id="entry-without-value",
+        ),
+    ],
+)
+def test_malformed_property_params_never_crashes(block: dict[str, Any]) -> None:
+    """A PropertyParams block that does not match the ``[{id, value}]`` shape
+    must not crash and must not raise the fail-closed uncertainty flag: there
+    is no property ``value`` string to redact, so the block round-trips."""
+    out = redact_body(dict(block), paths=(), content_type="application/json")
+    assert out.uncertain is False
+    assert out.value == block
+
+
+def test_property_params_non_string_value_is_redacted() -> None:
+    """A non-string property ``value`` (int / nested object) is still replaced
+    by the marker -- the rule redacts the value regardless of its type."""
+    body = {
+        "type": "PropertyParams",
+        "properties": [
+            {"id": "guest.enabled", "value": 1},
+            {"id": "guest.config", "value": {"nested": "PLACEHOLDER-nested"}},
+            {"id": "guest.password", "value": "PLACEHOLDER-str-pw"},
+        ],
+    }
+    out = redact_body(body, paths=(), content_type="application/json")
+    assert [p["value"] for p in out.value["properties"]] == [OVF_PROPERTY_VALUE_MARKER] * 3
+    assert out.uncertain is False
+    _assert_no_secret(out.value, "PLACEHOLDER-nested")
+    _assert_no_secret(out.value, "PLACEHOLDER-str-pw")
+
+
+def test_property_params_redaction_is_idempotent() -> None:
+    """Redacting an already-redacted body yields the same result (redact twice
+    == redact once), so a re-processed capture never double-mangles."""
+    body = _ovf_deploy_body()
+    once = redact_body(body, paths=(), content_type="application/json").value
+    twice = redact_body(once, paths=(), content_type="application/json").value
+    assert twice == once
 
 
 # ===========================================================================

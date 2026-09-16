@@ -391,9 +391,11 @@ shared `IngestJobRegistry`, fires the pipeline off the request via
 well inside the agent's tool-call deadline. The agent polls
 `meho_connector_ingest_status` with the returned `job_id` until the
 status is `succeeded` (carries the final ingestion + grouping counts),
-`degraded` (the pipeline ran but persisted nothing dispatchable —
-carries the counts **and** `error_class="ingested_not_dispatchable"` +
-`error`; see "Dispatchability postcondition" below), or `failed`
+`degraded` (a partial success carrying the counts **and** an
+`error_class` + `error` — either `ingested_not_dispatchable` when the
+pipeline persisted nothing dispatchable, or `grouping_failed_after_register`
+when register committed but grouping then crashed; see "Dispatchability
+postcondition" and its sibling below), or `failed`
 (the pipeline raised — carries `error_class` + `error`). Because both surfaces
 share `get_job_registry()`, a run started over MCP is poll-able over
 the REST `GET /api/v1/connectors/ingest/jobs/{job_id}` endpoint and
@@ -1377,6 +1379,32 @@ no-op re-run into a non-zero CLI failure. A probe that *raises* fails
 open to `succeeded` (a transient DB blip must not strand or degrade a
 completed pipeline). Regression coverage:
 `tests/test_operations_ingest_jobs.py`.
+
+#### Second `degraded` cause: grouping failed after register committed (#3685)
+
+`degraded` also covers a different partial success: the register phase
+(T2) committed but the LLM grouping phase (T3) then raised. Register and
+grouping run in **independent** transactions (register commits per-spec
+before grouping opens its own session), so a grouping crash leaves the
+connector registered and dispatchable — only its ingested operations went
+ungrouped. Recording that as a bare `failed` (what a raised exception
+otherwise lands) misleads operators into thinking the whole ingest failed.
+`_dispatch_real_run` (`ingest/pipeline.py`) therefore wraps the grouping
+call: an *unexpected* grouping exception is re-raised as
+`GroupingPhaseFailedError` carrying the committed register `IngestionResult`,
+and `run_ingest_job` reconciles it to `degraded` carrying
+`error_class="grouping_failed_after_register"` (distinct from
+`ingested_not_dispatchable` so operators/agents can tell "registered but
+ungrouped" from "nothing dispatchable") plus the durable register counts.
+The operator-facing grouping-error contract is preserved: `LlmClientUnavailable`
+(→ 503) and `LlmOutputInvalid` (→ 400) pass through **unwrapped** rather
+than degrading the job. The concrete trigger this closed was a re-ingest
+of a connector carrying typed-op groups with hyphenated `group_key`s (e.g.
+`vmware-host-usage`) crashing T3's persisted-group projection in the
+partial-regrouping branch. Regression coverage:
+`tests/test_operations_ingest_jobs.py` (consumer) and
+`tests/test_operations_ingest_llm_groups.py` (the pipeline seam +
+projection helper).
 
 #### Watchdog: a job always reaches a terminal state (#2275)
 

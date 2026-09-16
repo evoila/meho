@@ -42,15 +42,18 @@ from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
 import pytest
+import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGroup
 from meho_backplane.operations.ingest import (
     GroupingResult,
     GroupProposal,
+    IngestionPipelineService,
     LlmOutputInvalid,
     register_ingested_operations,
     run_llm_grouping,
@@ -70,6 +73,12 @@ from meho_backplane.operations.ingest._llm_grouping_internals import (
     render_propose_groups_prompt,
     strip_code_fences,
 )
+from meho_backplane.operations.ingest.llm_groups import _project_persisted_groups
+from meho_backplane.operations.ingest.pipeline import (
+    GroupingPhaseFailedError,
+    LlmClientUnavailable,
+)
+from meho_backplane.operations.ingest.register_ingested import IngestionResult
 from meho_backplane.settings import get_settings
 from tests.fixtures.llm_groups import medium_corpus, small_corpus
 
@@ -879,6 +888,249 @@ async def test_run_llm_grouping_partial_regrouping_runs_pass2_only(
             )
         ).scalar_one()
         assert new_row.group_id is not None
+
+
+# ---------------------------------------------------------------------------
+# Hyphenated persisted group keys (#3685)
+# ---------------------------------------------------------------------------
+
+
+def test_project_persisted_groups_preserves_hyphenated_key() -> None:
+    """The projection helper must NOT re-validate persisted group keys.
+
+    Typed-operation registration inserts groups with hyphenated
+    ``group_key`` (e.g. ``vmware-host-usage``) and never runs the
+    snake_case format check the LLM Pass-1 path enforces. Projecting such
+    a persisted row back through a *validated* :class:`GroupProposal`
+    raised ``ValueError`` and rolled the whole T3 grouping transaction
+    back on every re-ingest (#3685). :func:`_project_persisted_groups`
+    bypasses validation, so a hyphenated key round-trips verbatim.
+    """
+    rows = [
+        OperationGroup(
+            tenant_id=None,
+            product="vmware",
+            version="9.0",
+            impl_id="vmware-rest",
+            group_key="vmware-host-usage",
+            name="Host Usage",
+            when_to_use="Use for ESXi host CPU / memory usage reads.",
+            review_status="enabled",
+        ),
+        OperationGroup(
+            tenant_id=None,
+            product="vmware",
+            version="9.0",
+            impl_id="vmware-rest",
+            group_key="inventory",  # a snake_case key still projects fine
+            name="Inventory",
+            when_to_use="Use for listing inventory objects.",
+            review_status="staged",
+        ),
+    ]
+
+    projected = _project_persisted_groups(rows)
+
+    assert [p.group_key for p in projected] == ["vmware-host-usage", "inventory"]
+    assert projected[0].name == "Host Usage"
+    assert projected[0].when_to_use == "Use for ESXi host CPU / memory usage reads."
+
+    # Pin the regression: the *validated* constructor (the Pass-1 LLM path)
+    # still rejects the hyphenated key. If that ever changes the projection
+    # bypass is no longer load-bearing and this contract should be revisited.
+    with pytest.raises(ValueError, match="snake_case"):
+        GroupProposal(
+            group_key="vmware-host-usage",
+            name="Host Usage",
+            when_to_use="Use for ESXi host CPU / memory usage reads.",
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_llm_grouping_reingest_groups_ungrouped_ops_with_hyphenated_typed_group(
+    stub_embedding_service: Any,
+) -> None:
+    """Re-ingest groups ungrouped ops even when a hyphenated typed group exists.
+
+    Reproduces the #3685 crash end-to-end: a connector carrying a
+    hyphenated typed-op group (``vmware-host-usage``) plus freshly-ingested
+    ungrouped descriptors. The partial-regrouping branch projects the
+    persisted group into Pass 2; before the fix, constructing a validated
+    :class:`GroupProposal` from the hyphenated key raised ``ValueError``
+    and rolled the grouping transaction back. With the fix the projection
+    bypasses validation, Pass-1 is skipped (an existing group is present),
+    and the ungrouped ops assign cleanly onto the hyphenated group without
+    renaming it.
+    """
+    # T2: register the small corpus -- 5 ops, all group_id=NULL.
+    await _ingest_small_corpus(stub_embedding_service)
+
+    # Simulate a typed-op group already persisted with a HYPHENATED key --
+    # exactly what typed_register inserts (no snake_case check there).
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as seed:
+        seed.add(
+            OperationGroup(
+                tenant_id=None,
+                product="vmware",
+                version="9.0",
+                impl_id="vmware-rest",
+                group_key="vmware-host-usage",
+                name="Host Usage",
+                when_to_use="Use for ESXi host CPU / memory usage reads.",
+                review_status="enabled",
+            )
+        )
+        await seed.commit()
+
+        ungrouped_op_ids = (
+            (
+                await seed.execute(
+                    select(EndpointDescriptor.op_id).where(
+                        EndpointDescriptor.product == "vmware",
+                        EndpointDescriptor.impl_id == "vmware-rest",
+                        EndpointDescriptor.group_id.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(ungrouped_op_ids) == 5
+
+    # Pass-2-only stub: assign every ungrouped op onto the hyphenated group.
+    # Pass 1 must NOT fire (an existing group is present), so a single
+    # canned response is all the stub is allowed to serve.
+    assign_stub = StubLlmClient(
+        responses=[json.dumps(dict.fromkeys(ungrouped_op_ids, "vmware-host-usage"))],
+    )
+
+    result = await run_llm_grouping(
+        llm_client=assign_stub,
+        operator_sub=_OPERATOR_SUB,
+        operator_tenant_id=_OPERATOR_TENANT,
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+    )
+
+    # Pass-1 skipped (partial-regrouping path); no ValueError raised.
+    assert assign_stub.call_count == 1
+    assert result.llm_call_count == 1
+    assert result.groups_created == 0
+    assert result.operations_assigned == 5
+    assert result.operations_unassigned == 0
+
+    async with sessionmaker() as fresh:
+        groups = (
+            (await fresh.execute(select(OperationGroup).where(OperationGroup.product == "vmware")))
+            .scalars()
+            .all()
+        )
+        # The persisted hyphenated group is unchanged and un-renamed.
+        assert len(groups) == 1
+        group = groups[0]
+        assert group.group_key == "vmware-host-usage"
+
+        rows = (
+            (
+                await fresh.execute(
+                    select(EndpointDescriptor).where(EndpointDescriptor.product == "vmware")
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(rows) == 5
+        assert all(row.group_id == group.id for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_real_run_wraps_unexpected_grouping_error_passes_contract_errors_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin the pipeline seam: wrap unexpected grouping crashes, pass contract errors through.
+
+    ``_dispatch_real_run`` runs register (T2, committed) then grouping
+    (T3). This exercises the producer branch of the #3685 fix directly:
+
+    * an *unexpected* grouping exception is re-raised as
+      :class:`GroupingPhaseFailedError` carrying the durable register
+      :class:`IngestionResult` (so the async-job layer degrades rather than
+      flat-fails), and
+    * the operator-facing grouping-error contract passes through unwrapped
+      -- :class:`LlmClientUnavailable` (route -> 503) and
+      :class:`LlmOutputInvalid` (route -> 400) must NOT become
+      ``GroupingPhaseFailedError`` or their status mappings break.
+
+    Both phases are stubbed so the test pins exactly the wrapping seam in
+    :meth:`IngestionPipelineService._dispatch_real_run`, independent of the
+    DB / parser / LLM path.
+    """
+    operator = Operator(
+        sub="op-seam-test",
+        raw_jwt="jwt",
+        tenant_id=uuid.uuid4(),
+        tenant_role=TenantRole.TENANT_ADMIN,
+    )
+    service = IngestionPipelineService(operator)
+
+    aggregated = IngestionResult(
+        inserted_count=7,
+        updated_count=2,
+        skipped_count=1,
+        connector_registered=True,
+        operations_grouped=False,
+    )
+
+    async def _fake_register(**_kwargs: Any) -> IngestionResult:
+        return aggregated
+
+    monkeypatch.setattr(service, "_run_register_phase", _fake_register)
+
+    async def _dispatch() -> Any:
+        return await service._dispatch_real_run(
+            product="vmware",
+            version="9.0",
+            impl_id="vmware-rest",
+            specs=[],
+            base_url=None,
+            tenant_id=None,
+            connector_id="vmware-rest-9.0",
+            log=structlog.get_logger(__name__).bind(test=True),
+        )
+
+    # (a) A generic grouping crash is wrapped and carries the register counts.
+    async def _raise_runtime(**_kwargs: Any) -> GroupingResult:
+        raise RuntimeError("grouping blew up")
+
+    monkeypatch.setattr(service, "_run_grouping_phase", _raise_runtime)
+    with pytest.raises(GroupingPhaseFailedError) as wrapped:
+        await _dispatch()
+    assert wrapped.value.connector_id == "vmware-rest-9.0"
+    assert wrapped.value.ingestion is aggregated
+    assert wrapped.value.ingestion.inserted_count == 7
+    assert isinstance(wrapped.value.cause, RuntimeError)
+
+    # (b) LlmOutputInvalid propagates UNWRAPPED (the route maps it to 400).
+    async def _raise_llm_output(**_kwargs: Any) -> GroupingResult:
+        raise LlmOutputInvalid(
+            pass_name="propose_groups",
+            raw_output="not json",
+            parse_error=ValueError("bad"),
+        )
+
+    monkeypatch.setattr(service, "_run_grouping_phase", _raise_llm_output)
+    with pytest.raises(LlmOutputInvalid):
+        await _dispatch()
+
+    # (c) LlmClientUnavailable propagates UNWRAPPED (the route maps it to 503).
+    async def _raise_unavailable(**_kwargs: Any) -> GroupingResult:
+        raise LlmClientUnavailable("no anthropic key configured")
+
+    monkeypatch.setattr(service, "_run_grouping_phase", _raise_unavailable)
+    with pytest.raises(LlmClientUnavailable):
+        await _dispatch()
 
 
 # ---------------------------------------------------------------------------

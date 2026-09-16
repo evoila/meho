@@ -35,6 +35,22 @@ The dotted-path glob grammar is reused verbatim from the Tier-2 matcher
 (object or array) redacts the **whole subtree** at that path, so a
 declared ``credentials`` object never round-trips even partially.
 
+OVF PropertyParams structural rule
+----------------------------------
+A positional glob cannot condition on a *sibling* field's value, but a
+vSphere OVF deploy body carries its operator-supplied property values in a
+type-discriminated union: ``additional_parameters[]`` holds a mix of
+subtypes at dynamic indices, and only the ``{type: "PropertyParams",
+properties: [{id, value}]}`` member carries secrets. Those values are OVF
+property inputs which commonly carry appliance credentials, yet each sits
+under a vendor-specific ``id`` no key-name heuristic or credential-shape
+net can place. :func:`_redact_property_params` therefore runs a structural
+pass keyed on the ``PropertyParams`` type marker (not a path, not a key
+name): it redacts **every** property ``value`` (replay analysis does not
+need OVF property inputs) while leaving the ``id`` and every non-secret
+field -- network mappings, name, placement -- intact. It runs on both
+request and response bodies and needs no per-connector config.
+
 Parse posture
 -------------
 JSON is the only structurally-redactable body shape, so the engine
@@ -61,11 +77,17 @@ from meho_backplane.redaction.flight_recorder._content import scrub_content
 from meho_backplane.redaction.flight_recorder.verdict import (
     BODY_OMITTED_MARKER,
     BODY_PATH_MARKER,
+    OVF_PROPERTY_VALUE_MARKER,
     RedactionOutcome,
 )
 from meho_backplane.redaction.path_glob import glob_to_regex, path_matches
 
 __all__ = ["BodyPathRedactionConfig", "redact_body"]
+
+#: The ``type`` discriminator of an OVF ``PropertyParams`` union member in a
+#: vSphere OVF deploy body (``Vcenter.Ovf.OvfParams``). A structural marker,
+#: not a key name -- see :func:`_redact_property_params`.
+_PROPERTY_PARAMS_TYPE: Final[str] = "PropertyParams"
 
 
 #: Content-type bases the engine will not attempt to parse as JSON. A
@@ -170,7 +192,8 @@ def redact_body(
 
     try:
         path_redacted = _apply_path_redaction(parsed, paths)
-        scrubbed, _fired = scrub_content(path_redacted)
+        prop_redacted = _redact_property_params(path_redacted)
+        scrubbed, _fired = scrub_content(prop_redacted)
     except Exception as exc:  # any walk/glob/scrub fault fails closed (F2 uncertainty)
         # Covers a RecursionError from an adversarially deep pre-parsed
         # body handed straight in (bypassing the guarded JSON parse), so
@@ -316,3 +339,54 @@ def _join_path(parent: str, child: str) -> str:
     if not parent:
         return child
     return f"{parent}.{child}"
+
+
+def _is_json_array(node: Any) -> bool:
+    """``True`` for a walkable JSON array (a ``Sequence`` that is not text)."""
+    return isinstance(node, Sequence) and not isinstance(node, (str, bytes, bytearray))
+
+
+def _redact_property_params(node: Any) -> Any:
+    """Redact every property ``value`` inside an OVF ``PropertyParams`` block.
+
+    Walks *node* and, for any object shaped ``{type: "PropertyParams",
+    properties: [...]}``, replaces each property entry's ``value`` with
+    :data:`~...verdict.OVF_PROPERTY_VALUE_MARKER`, keeping the entry's ``id``
+    and every sibling field. Keyed on the ``PropertyParams`` type marker
+    (a structural discriminator), so it fires wherever such a block sits --
+    the dynamic ``additional_parameters[]`` index, or any other placement --
+    without a per-connector path.
+
+    Non-mutating: returns a new structure so a pre-parsed caller body is
+    never rewritten in place (``_apply_path_redaction`` returns the input
+    object unchanged when no globs are declared, which is the common case).
+    """
+    if isinstance(node, Mapping):
+        if _is_property_params_block(node):
+            return {
+                str(key): (
+                    _redact_property_list(value)
+                    if key == "properties"
+                    else _redact_property_params(value)
+                )
+                for key, value in node.items()
+            }
+        return {str(key): _redact_property_params(value) for key, value in node.items()}
+    if _is_json_array(node):
+        return [_redact_property_params(item) for item in node]
+    return node
+
+
+def _is_property_params_block(node: Mapping[Any, Any]) -> bool:
+    """``True`` when *node* is an OVF ``PropertyParams`` union member."""
+    return node.get("type") == _PROPERTY_PARAMS_TYPE and _is_json_array(node.get("properties"))
+
+
+def _redact_property_list(properties: Any) -> Any:
+    """Redact the ``value`` of every property entry, keeping ``id`` + siblings."""
+    return [
+        {**item, "value": OVF_PROPERTY_VALUE_MARKER}
+        if isinstance(item, Mapping) and "value" in item
+        else _redact_property_params(item)
+        for item in properties
+    ]

@@ -63,14 +63,13 @@ from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.jsonflux.query import engine as query_engine
 from meho_backplane.jsonflux.query import result_catalog as result_catalog_module
 from meho_backplane.jsonflux.query.result_catalog import AdmissionGuard
-from meho_backplane.jsonflux.query.engine import QueryEngine
 from meho_backplane.operations import (
     dispatch,
     register_typed_operation,
     reset_dispatcher_caches,
 )
-from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
 from meho_backplane.operations import jsonflux_reducer as reducer_module
+from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.jsonflux_reducer import (
     JsonFluxReducer,

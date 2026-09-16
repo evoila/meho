@@ -32,8 +32,9 @@ and stays reachable via the spill + ``result_query``.
 Why captured JSON is authoritative
 ==================================
 
-The reducer profiles all retained rows before it serializes the detected
-collection for threshold checking.  DuckDB remains on the lazy relational
+The reducer bounds the detected payload before it serializes that payload for
+threshold checking, then profiles all retained rows when it materializes.
+DuckDB remains on the lazy relational
 ``result_query`` path only: it is not an authoritative source for schema,
 summary, or preview rows, because its Arrow projection can be lossy.
 
@@ -276,6 +277,7 @@ _RESULT_OBJECT_BYTE_BUDGET = 4096
 _RESULT_OBJECT_VALUE_BYTE_BUDGET = 1024
 _RESULT_OBJECT_LIST_ITEMS = 16
 _RESULT_OBJECT_TRUNCATIONS_KEY = "result_object_truncations"
+
 
 @dataclass(frozen=True, slots=True)
 class _MaterializedSet:
@@ -1273,8 +1275,8 @@ def _fit_sample_to_budget(
     the selected single row remains too large, it is omitted: a preview may be
     absent, but it must never edit a nested captured value.
 
-    An empty input returns empty. The returned rows are fresh dicts (the
-    caller freezes them into the handle); the materialized ``full_rows``
+    An empty input returns empty. The returned list is a shallow selection of
+    the captured row dictionaries; the materialized ``full_rows``
     spilled for read-back are untouched, so recovery is byte-for-byte
     unchanged.
     """

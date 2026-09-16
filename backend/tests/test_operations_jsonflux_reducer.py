@@ -707,9 +707,7 @@ async def test_reduce_uses_no_query_engine_for_catalog_schema(
         {"truth": False, "shape": "scalar", "number": large_integer},
     ]
     reducer = JsonFluxReducer(row_threshold=0, sample_size=3, sample_byte_budget=4096)
-    reduced, handle = await reducer.reduce(
-        {"results": rows}, None
-    )
+    reduced, handle = await reducer.reduce({"results": rows}, None)
 
     assert handle is not None
     properties = handle.schema_["items"]["properties"]
@@ -769,6 +767,7 @@ async def test_admission_rejection_does_not_serialize_or_spill_raw_graph(
         raise AssertionError(f"rejected value was serialized: {type(value).__name__}")
 
     monkeypatch.setattr(reducer_module, "_serialize", fail_serialize)
+
     class _ThrowingStore:
         async def spill(self, **_: object) -> bool:
             raise AssertionError("rejected graph reached spill")
@@ -828,9 +827,9 @@ async def test_admission_depth_through_64_reduces_without_analyzer(
     for _ in range(levels):
         nested = [nested]
 
-    _reduced, handle = await JsonFluxReducer(
-        row_threshold=0, sample_byte_budget=4096
-    ).reduce({"results": [{"nested": nested}]}, None)
+    _reduced, handle = await JsonFluxReducer(row_threshold=0, sample_byte_budget=4096).reduce(
+        {"results": [{"nested": nested}]}, None
+    )
 
     assert handle is not None
     assert handle.schema_["items"]["properties"]["nested"]["type"] == "array"

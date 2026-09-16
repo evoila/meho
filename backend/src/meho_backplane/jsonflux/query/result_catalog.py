@@ -195,8 +195,8 @@ def build_catalog(rows: list[dict[str, Any]], *, guard: AdmissionGuard) -> Resul
     """Validate and profile every top-level key in *rows*.
 
     Direct callers receive the same guard as the reducer.  The reducer uses
-    :func:`_build_catalog_from_admitted` after it has already bounded the raw
-    detected collection before threshold serialization.
+    :func:`_build_catalog_from_admitted` after it has already bounded the
+    complete captured payload before threshold serialization.
     """
     guard.require(rows)
     return _build_catalog_from_admitted(rows)
@@ -276,9 +276,7 @@ def _kind(value: Any) -> str:
 
 def _is_int64(value: Any) -> bool:
     return (
-        isinstance(value, int)
-        and not isinstance(value, bool)
-        and _INT64_MIN <= value <= _INT64_MAX
+        isinstance(value, int) and not isinstance(value, bool) and _INT64_MIN <= value <= _INT64_MAX
     )
 
 

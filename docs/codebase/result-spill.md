@@ -123,10 +123,12 @@ total.
      RESULT_HANDLE_MAX_SPILL_ROWS)`.
 3. `_assemble()` builds the inline summary + handle; the drill-in
    branch carries the outcome (`available` + `reason` + rationale).
-4. Every skip logs a structured `jsonflux_spill_skipped` warning with
-   `reason`, `op_id`, `handle_id`, `total_rows` (plus boolean
-   breadcrumbs for which context key was absent/malformed). A
-   store-level exception additionally logs
+4. The tenant-context and store-unavailable spill skips log a structured
+   `jsonflux_spill_skipped` warning with `reason`, `op_id`, `handle_id`,
+   `total_rows` (plus boolean breadcrumbs for which context key was
+   absent/malformed). The admission-limit result returns before the spill
+   path, so its response reason is the diagnostic. A store-level exception
+   additionally logs
    `result_handle_spill_failed` with the underlying error string.
 
 ## Diagnosis: the RDC cycle-8 `k8s.logs tail=300` finding (#1629)

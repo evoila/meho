@@ -284,9 +284,9 @@ Read off the shipped adapter
 |---|---|---|
 | `row_threshold` | `50` | Materialize when the detected collection has **more than** this many rows. `0` forces materialization for every non-empty set (force / test mode). |
 | `byte_threshold` | `4096` | Materialize when the serialized payload exceeds this many bytes, even if under `row_threshold`. |
-| `sample_size` | `5` | Rows surfaced inline on the `ResultHandle.sample_rows` preview and in the markdown summary. `0` returns no sample. |
+| `sample_size` | `5` | Rows surfaced inline on the `ResultHandle.sample_rows` preview. The Markdown summary lists catalogued fields. `0` returns no sample. |
 | `ttl_seconds` | `3600` | Lifetime stamped onto `ResultHandle.ttl_seconds` for the backing store. |
-| `sample_byte_budget` | settings `jsonflux_sample_byte_budget` (default `4096`) | Upper bound, in serialized JSON bytes, on the inline sample (#134). The reducer drops tail rows until it fits; if the selected single row still exceeds the budget, the preview is omitted without changing any captured value. Resolved lazily from settings when the constructor arg is `None`. |
+| `sample_byte_budget` | settings `jsonflux_sample_byte_budget` (default `4096`) | Upper bound, in serialized JSON bytes, on the inline sample (#134). A head preview drops tail rows; a tail preview drops its oldest selected rows. If the selected single row still exceeds the budget, the preview is omitted without changing any captured value. Resolved lazily from settings when the constructor arg is `None`. |
 
 All are keyword-only. The threshold defaults match v0.1-spec §4 (50 rows /
 4 KB). Empty collections never materialize — a 0-row handle carries no
@@ -359,10 +359,12 @@ naming which no-spill branch fired — `no_tenant_context` (no usable
 `tenant_id` / `operator_sub` pair in the reducer context, so the spill
 could not be keyed) or `result_store_unavailable` (the Valkey-backed
 store did not persist the rows: unreachable, write rejected, or
-disabled). `reason` is `None` on the `available=True` branch, and every
-skip also logs a structured `jsonflux_spill_skipped` warning carrying
-the same reason plus `op_id` / `handle_id`, so a reduced-but-unspilled
-response is diagnosable from logs as well as from the envelope (see
+disabled). `admission_limit_exceeded` names a separate early bounded
+no-spill result. `reason` is `None` on the `available=True` branch. The
+tenant-context and store-unavailable spill skips log a structured
+`jsonflux_spill_skipped` warning carrying the same reason plus `op_id` /
+`handle_id`, so those responses are diagnosable from logs as well as from
+the envelope (see
 [`docs/codebase/result-spill.md`](../codebase/result-spill.md) for the
 triage runbook). The spill
 + read-back are described under *"Read-back: the `ResultHandleStore`"*
@@ -450,11 +452,11 @@ learns when the tail was capped. The dispatcher threads `tenant_id` +
 `operator_sub` into `reducer_context`; a reduce with neither (a
 non-dispatch call) skips the spill, and a Valkey error is swallowed
 (`spill` returns `False`) — a read never fails because the spill backend
-is unreachable. Both skip shapes surface in the response as
+is unreachable. The two spill-path skip shapes surface in the response as
 `drill_in.available=false` with the matching `reason`
-(`no_tenant_context` / `result_store_unavailable` / `admission_limit_exceeded`)
-and log a
-`jsonflux_spill_skipped` warning; the store-level failure additionally
+(`no_tenant_context` / `result_store_unavailable`) and log a
+`jsonflux_spill_skipped` warning. `admission_limit_exceeded` instead names
+the separate early bounded no-spill result; the store-level failure additionally
 logs `result_handle_spill_failed` with the underlying error.
 
 The read surface is dual — MCP and REST share one windowed-read core

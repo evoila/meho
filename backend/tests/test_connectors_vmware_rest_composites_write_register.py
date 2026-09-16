@@ -449,6 +449,43 @@ async def test_full_registration_produces_thirty_three_composite_rows(
 
 
 @pytest.mark.asyncio
+async def test_namespace_status_registration_preserves_poll_scalars_after_jsonflux_reduction(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Persist the descriptor hint the dispatcher forwards to JSONFlux.
+
+    ``messages`` is the response's one real list, so a wide projected message
+    can materialize a handle even at its 25-row default.  These scalar fields
+    are the asynchronous create/delete poll contract and must remain inline.
+    The dispatcher-to-reducer wiring itself is covered by the end-to-end
+    result-scalars regression in ``test_operations_jsonflux_reducer``.
+    """
+    await register_vmware_composite_operations(embedding_service=stub_embedding_service)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        row = await fresh.scalar(
+            select(EndpointDescriptor).where(
+                EndpointDescriptor.op_id == "vmware.composite.namespace.status"
+            )
+        )
+    assert row is not None
+    assert row.llm_instructions is not None
+    assert row.llm_instructions["result_scalars"] == {
+        "keys": [
+            "namespace",
+            "exists",
+            "config_status",
+            "ready",
+            "description",
+            "message_count",
+        ]
+    }
+    assert row.llm_instructions["result_objects"] == {
+        "objects": {"stats": ["cpu_used", "memory_used", "storage_used"]}
+    }
+
+
+@pytest.mark.asyncio
 async def test_every_write_composite_row_uses_dangerous_requires_approval(
     stub_embedding_service: AsyncMock,
 ) -> None:

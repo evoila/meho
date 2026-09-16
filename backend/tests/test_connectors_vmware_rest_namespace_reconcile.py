@@ -6,9 +6,9 @@
 ``vmware.composite.namespace.create`` / ``.delete`` orchestrate three pure
 vCenter REST paths -- ``POST /vcenter/namespaces/instances/v2`` (the v2 create
 spec), ``DELETE /vcenter/namespaces/instances/{namespace}`` (delete by name),
-and the read-back ``GET /vcenter/namespaces/instances/{namespace}`` (get by
-name -- there is no ``/v2/`` GET-by-name variant; the v2 form is create/list
-only). No SOAP / vim seam is involved, so unlike the storage-policy lane there
+and the read-back ``GET /vcenter/namespaces/instances/v2/{namespace}`` (v2
+get-by-name, returning ``InfoV2``). No SOAP / vim seam is involved, so unlike
+the storage-policy lane there
 is no PBM partition -- every declared op_id must be REST-served by the pinned
 ``vcenter.yaml``. Per the spec-reconcile-guards standard
 (``docs/decisions/spec-reconcile-guards-standard.md``):
@@ -35,7 +35,7 @@ from tests._spec_shelf import (
 _EXPECTED_OP_IDS = {
     "POST:/vcenter/namespaces/instances/v2",
     "DELETE:/vcenter/namespaces/instances/{namespace}",
-    "GET:/vcenter/namespaces/instances/{namespace}",
+    "GET:/vcenter/namespaces/instances/v2/{namespace}",
 }
 
 

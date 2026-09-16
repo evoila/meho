@@ -5399,6 +5399,17 @@ STORAGE_POLICY_DELETE_RESPONSE_SCHEMA: dict[str, Any] = {
 #: optional pass-through sub-objects with vendor sub-fields left open
 #: (``additionalProperties: True``), so a valid CreateSpecV2 is not rejected by
 #: an over-tight schema before it reaches vCenter.
+#: Namespace labels are interpolated into a REST path for status/delete and
+#: are the CreateSpecV2 ``namespace`` field for create.  The negative
+#: lookahead is a portable end assertion: unlike ``$``, it does not accept a
+#: trailing newline as a valid complete input.
+_NAMESPACE_DNS_LABEL_SCHEMA: dict[str, Any] = {
+    "type": "string",
+    "minLength": 1,
+    "maxLength": 63,
+    "pattern": r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?![\s\S])",
+}
+
 NAMESPACE_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -5413,8 +5424,7 @@ NAMESPACE_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             ),
         },
         "namespace": {
-            "type": "string",
-            "minLength": 1,
+            **_NAMESPACE_DNS_LABEL_SCHEMA,
             "description": (
                 "vSphere Namespace name (a DNS-1123 label; becomes the Kubernetes "
                 "namespace a VKS guest cluster is created into)."
@@ -5481,7 +5491,7 @@ NAMESPACE_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
         "config_status": {
             "type": ["string", "null"],
             "description": (
-                "Read-back Namespaces.Instances.Info.config_status "
+                "Read-back Namespaces.Instances.InfoV2.config_status "
                 "(CONFIGURING / RUNNING / ERROR); ``null`` when the read-back is not "
                 "yet visible or faulted."
             ),
@@ -5497,8 +5507,7 @@ NAMESPACE_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "namespace": {
-            "type": "string",
-            "minLength": 1,
+            **_NAMESPACE_DNS_LABEL_SCHEMA,
             "description": (
                 "vSphere Namespace name to delete. Rides the ``{namespace}`` path "
                 "segment of DELETE /vcenter/namespaces/instances/{namespace}. "
@@ -5543,12 +5552,11 @@ NAMESPACE_STATUS_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "namespace": {
-            "type": "string",
-            "minLength": 1,
+            **_NAMESPACE_DNS_LABEL_SCHEMA,
             "description": (
                 "vSphere Namespace name to read status for (rides the "
                 "``{namespace}`` segment of "
-                "GET /vcenter/namespaces/instances/{namespace})."
+                "GET /vcenter/namespaces/instances/v2/{namespace})."
             ),
         },
         "messages_limit": {

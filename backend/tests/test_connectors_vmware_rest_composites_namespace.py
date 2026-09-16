@@ -207,7 +207,7 @@ async def test_create_happy_path_dispatches_spec_body(gate: _GateRecorder) -> No
     assert write["json"]["storage_specs"] == [{"policy": "nfs-policy-1"}]
     assert write["json"]["vm_service_spec"]["content_libraries"] == ["lib-tkr-1"]
     # Read-back GET by name happened.
-    assert connector.gets == ["/api/vcenter/namespaces/instances/envision-ns"]
+    assert connector.gets == ["/api/vcenter/namespaces/instances/v2/envision-ns"]
 
 
 async def test_create_omits_optional_fields_when_absent(gate: _GateRecorder) -> None:
@@ -278,7 +278,7 @@ async def test_delete_happy_path_verifies_absence(gate: _GateRecorder) -> None:
     # No request body on delete.
     assert write["json"] is None
     # Read-back GET by name happened (and 404'd -> absent).
-    assert connector.gets == ["/api/vcenter/namespaces/instances/envision-ns"]
+    assert connector.gets == ["/api/vcenter/namespaces/instances/v2/envision-ns"]
 
 
 async def test_delete_removing_when_read_back_reports_removing(gate: _GateRecorder) -> None:
@@ -353,7 +353,7 @@ async def test_status_running_is_ready_and_projects_fields() -> None:
     assert len(result["messages"]) == 1
     # A read never routes through the write gate.
     assert connector.writes == []
-    assert connector.gets == ["/api/vcenter/namespaces/instances/envision-ns"]
+    assert connector.gets == ["/api/vcenter/namespaces/instances/v2/envision-ns"]
     # Response is schema-valid.
     Draft202012Validator(NAMESPACE_STATUS_RESPONSE_SCHEMA).validate(result)
 
@@ -440,6 +440,57 @@ def test_status_schema_accepts_namespace_and_optional_limit() -> None:
     validator.validate({"namespace": "ns", "messages_limit": 10})
     assert list(validator.iter_errors({"namespace": "ns", "extra": 1}))
     assert list(validator.iter_errors({}))
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        NAMESPACE_CREATE_PARAMETER_SCHEMA,
+        NAMESPACE_DELETE_PARAMETER_SCHEMA,
+        NAMESPACE_STATUS_PARAMETER_SCHEMA,
+    ],
+)
+def test_namespace_schemas_accept_dns_label_boundaries(schema: dict[str, Any]) -> None:
+    """The name that reaches a path segment is the documented DNS label."""
+    validator = Draft202012Validator(schema)
+    for namespace in ("a", "a" * 63, "a-1"):
+        params: dict[str, Any] = {"namespace": namespace}
+        if schema is NAMESPACE_CREATE_PARAMETER_SCHEMA:
+            params["supervisor"] = "domain-c8"
+        validator.validate(params)
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        NAMESPACE_CREATE_PARAMETER_SCHEMA,
+        NAMESPACE_DELETE_PARAMETER_SCHEMA,
+        NAMESPACE_STATUS_PARAMETER_SCHEMA,
+    ],
+)
+@pytest.mark.parametrize(
+    "namespace",
+    [
+        "../other",
+        "a/b",
+        "name?x=1",
+        "name#fragment",
+        "name%2fother",
+        "name\n",
+        "Uppercase",
+        "-leading",
+        "trailing-",
+        "a" * 64,
+    ],
+)
+def test_namespace_schemas_reject_non_dns_label_path_inputs(
+    schema: dict[str, Any], namespace: str
+) -> None:
+    """Reject path/query syntax before any namespace composite can issue I/O."""
+    params: dict[str, Any] = {"namespace": namespace}
+    if schema is NAMESPACE_CREATE_PARAMETER_SCHEMA:
+        params["supervisor"] = "domain-c8"
+    assert list(Draft202012Validator(schema).iter_errors(params))
 
 
 def test_governed_subop_manifest_references_namespace_writes() -> None:

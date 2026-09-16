@@ -1909,7 +1909,7 @@ id) + `namespace` (the DNS-1123 name) are required, and `access_list` /
 sub-objects. Both are lifted straight into the top-level POST body (the
 top-level-`*Spec` envelope convention; there are no path vars). The create is
 **asynchronous** vCenter-side (`config_status` moves `CONFIGURING` → `RUNNING`);
-the handler read-backs `GET:/vcenter/namespaces/instances/{namespace}` best-effort
+the handler read-backs `GET:/vcenter/namespaces/instances/v2/{namespace}` best-effort
 to surface `config_status` and returns `status='created'`. A read-back that 404s
 (not yet visible) or faults leaves `config_status=None` — the create was still
 accepted.
@@ -1927,8 +1927,8 @@ list). Asynchronous read-back matrix: a `GET` that 404s → `status='deleted'`
 (teardown draining); a non-REMOVING status → `status='still_present'`.
 
 **`namespace.status`** (`safe` / `requires_approval=False`) reads
-`GET:/vcenter/namespaces/instances/{namespace}` and reshapes
-`Namespaces.Instances.Info` into a compact, inline-pollable envelope: the
+`GET:/vcenter/namespaces/instances/v2/{namespace}` and reshapes
+`Namespaces.Instances.InfoV2` into a compact, inline-pollable envelope: the
 scalar `config_status` (`CONFIGURING`/`REMOVING`/`RUNNING`/`ERROR`) + a derived
 `ready` flag (`config_status == 'RUNNING'`) + `stats` + `description` + capped
 `messages` (`messages_limit`, default 25; `message_count` carries the uncapped
@@ -1940,14 +1940,13 @@ propagates as `connector_error`. This is the **governed, boot-enabled** poll op
 `namespace.create` / `.delete` hand the caller, and it is what their runtime
 `guidance` names (rather than the raw `GET` path). **Delivery shape — a
 boot-enabled read composite, not the ingested get-by-name row:** the ingested
-`GET .../instances/{namespace}` row lands `is_enabled=False` behind
+`GET .../instances/v2/{namespace}` row lands `is_enabled=False` behind
 per-deployment operator review, so a caller polling create/delete convergence
 on a fresh boot would have no governed read; a typed read composite is
 dispatchable at connector import on every deployment — symmetric with
 `supervisor.status`.
 
-The get-by-name path is `GET:/vcenter/namespaces/instances/{namespace}` —
-there is **no** `/v2/` GET-by-name variant (the v2 form is create/list only).
+The get-by-name path is `GET:/vcenter/namespaces/instances/v2/{namespace}`. It returns `Namespaces.Instances.InfoV2` for the Supervisor-backed 9.x surface (including its Supervisor identity and optional zone data).
 Both writes ride the standard governed REST sub-op seam
 (`_write._write_sub_op` → `enforce_subop_policy` → `_post_json`/DELETE); the
 `namespace.status` read and the create/delete read-backs ride the un-gated
@@ -1957,7 +1956,7 @@ each write's grant set. The **list** read
 ingested rows, JSONFlux-reduced by the dispatcher; the single-namespace **get**
 is wrapped as the boot-enabled `namespace.status` composite above. The three
 op_ids (`POST .../instances/v2`, `DELETE .../instances/{namespace}`, `GET
-.../instances/{namespace}`) are pinned against `vcenter.yaml` by the reconcile
+.../instances/v2/{namespace}`) are pinned against `vcenter.yaml` by the reconcile
 lane `tests/test_connectors_vmware_rest_namespace_reconcile.py` (always-on shape
 test + spec-backed path-existence).
 

@@ -11,7 +11,7 @@ is no ``/tkg/*`` vCenter REST family -- so the Namespace create is the last
 vCenter-REST step before the flow moves to ``k8s.apply`` of a ``Cluster`` CR
 on the Supervisor target. Creating the namespace out of band (``kubectl`` /
 raw REST) escapes the governed policy / audit / approval path the demo is
-built to show; these two composites close that gap:
+built to show; these three composites close that gap:
 
 * ``vmware.composite.namespace.create`` --
   ``POST /vcenter/namespaces/instances/v2`` with the
@@ -19,7 +19,7 @@ built to show; these two composites close that gap:
   + optional ``access_list`` / ``storage_specs`` / ``vm_service_spec``) -> 204.
   ``safety_level="caution"`` + ``requires_approval=True`` (a write that always
   parks for a human decision, but not the intrinsic destruction tier). Reads
-  the created namespace back (``GET /vcenter/namespaces/instances/{namespace}``)
+  the created namespace back (``GET /vcenter/namespaces/instances/v2/{namespace}``)
   to surface ``config_status``.
 * ``vmware.composite.namespace.delete`` --
   ``DELETE /vcenter/namespaces/instances/{namespace}`` -> 204.
@@ -27,7 +27,7 @@ built to show; these two composites close that gap:
   approval; a ``DELETE`` child is never grant-clearable, so this always parks).
   Read-back verifies absence (``GET`` 404) -> ``status="deleted"``.
 * ``vmware.composite.namespace.status`` --
-  ``GET /vcenter/namespaces/instances/{namespace}`` -> the scalar
+  ``GET /vcenter/namespaces/instances/v2/{namespace}`` -> the scalar
   ``config_status`` (``CONFIGURING`` -> ``RUNNING`` / ``ERROR`` / ``REMOVING``)
   + a derived ``ready`` flag + ``stats`` + capped ``messages``.
   ``safety_level="safe"`` + ``requires_approval=False``. The **governed,
@@ -39,7 +39,7 @@ The **list** read (``GET /vcenter/namespaces/instances`` / ``.../v2``) is left
 to the already-enabled ingested rows; the dispatcher JSONFlux-reduces the
 set-shaped list automatically. The single-namespace **get** is wrapped as the
 boot-enabled ``namespace.status`` composite above -- *not* left to the ingested
-``GET /vcenter/namespaces/instances/{namespace}`` row, because that row lands
+``GET /vcenter/namespaces/instances/v2/{namespace}`` row, because that row lands
 ``is_enabled=False`` behind per-deployment operator review, so a caller polling
 create/delete convergence on a fresh boot would have no governed read. A typed
 read composite is dispatchable at connector import on every deployment
@@ -116,14 +116,14 @@ __all__ = [
 # Canonical ``METHOD:/path`` op_ids -- byte-for-byte the strings the ingest
 # parser emits from the pinned ``vcenter.yaml``. The ``{namespace}`` path var
 # is the namespace name (the instances API keys a single namespace by name; it
-# has no ``/v2/`` GET-by-name variant -- the v2 form is create/list only).
+# uses the v2 GET-by-name form required for Supervisor-backed namespaces).
 # These are the governance op_ids fed to ``enforce_subop_policy`` via
 # ``_write_sub_op`` and the read seam via ``_read_sub_op``; the reconcile lane
 # (``tests/test_connectors_vmware_rest_namespace_reconcile.py``) pins each
 # against the canonical pinned spec.
 _OP_CREATE_NAMESPACE: Final = "POST:/vcenter/namespaces/instances/v2"
 _OP_DELETE_NAMESPACE: Final = "DELETE:/vcenter/namespaces/instances/{namespace}"
-_OP_GET_NAMESPACE: Final = "GET:/vcenter/namespaces/instances/{namespace}"
+_OP_GET_NAMESPACE: Final = "GET:/vcenter/namespaces/instances/v2/{namespace}"
 
 #: REST governed-child manifests (parallel to ``_write._SUB_OPS_*``).
 #: Referenced by :mod:`._governed_subops` so the discovery surface publishes
@@ -140,11 +140,11 @@ _OPTIONAL_CREATE_SPEC_FIELDS: Final[tuple[str, ...]] = (
     "vm_service_spec",
 )
 
-#: ``Namespaces.Instances.Info.config_status`` value that means the namespace
+#: ``Namespaces.Instances.InfoV2.config_status`` value that means the namespace
 #: is being asynchronously torn down (delete accepted, workloads draining).
 _CONFIG_STATUS_REMOVING: Final = "REMOVING"
 
-#: ``Namespaces.Instances.Info.config_status`` value that means the namespace
+#: ``Namespaces.Instances.InfoV2.config_status`` value that means the namespace
 #: has finished configuring and is ready for VKS guest clusters -- the single
 #: poll predicate ``namespace.status`` exposes as ``ready``.
 _CONFIG_STATUS_RUNNING: Final = "RUNNING"
@@ -161,9 +161,9 @@ async def _read_namespace_info(
     operator: Operator,
     namespace: str,
 ) -> dict[str, Any] | None:
-    """Read a namespace's ``Info`` back; return the dict, or ``None`` when absent.
+    """Read a namespace's ``InfoV2`` back; return the dict, or ``None`` when absent.
 
-    Issues the un-gated ``GET /vcenter/namespaces/instances/{namespace}`` read
+    Issues the un-gated ``GET /vcenter/namespaces/instances/v2/{namespace}`` read
     sub-op. A vCenter 404 (the namespace does not exist) is the load-bearing
     read-back-absence signal -- it returns ``None`` rather than raising. Any
     other transport / status fault propagates for the dispatcher to wrap
@@ -338,8 +338,8 @@ async def namespace_status_composite(
 
     Op-id: ``vmware.composite.namespace.status``. ``safety_level="safe"`` +
     ``requires_approval=False``. Issues the un-gated
-    ``GET /vcenter/namespaces/instances/{namespace}`` read and reshapes
-    ``Namespaces.Instances.Info`` into a compact, inline-pollable envelope: the
+    ``GET /vcenter/namespaces/instances/v2/{namespace}`` read and reshapes
+    ``Namespaces.Instances.InfoV2`` into a compact, inline-pollable envelope: the
     scalar ``config_status`` (``CONFIGURING`` / ``REMOVING`` / ``RUNNING`` /
     ``ERROR``) and the derived ``ready`` flag stay top-level so a runbook
     ``OperationCallVerify`` step or a Sensor assertion can poll
@@ -348,7 +348,7 @@ async def namespace_status_composite(
 
     This is the **governed, boot-enabled** poll op ``namespace.create`` /
     ``.delete`` hand the caller. Unlike the raw ingested
-    ``GET /vcenter/namespaces/instances/{namespace}`` row -- which lands
+    ``GET /vcenter/namespaces/instances/v2/{namespace}`` row -- which lands
     ``is_enabled=False`` behind per-deployment operator review -- a typed read
     composite is dispatchable at connector import on every deployment,
     symmetric with ``vmware.composite.supervisor.status``.

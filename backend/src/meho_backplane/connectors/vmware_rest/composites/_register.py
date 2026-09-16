@@ -1721,7 +1721,7 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
             "for human approval before the write; the governed child POST flows "
             "through the sub-op seam (its own audit row + grant point). Asynchronous "
             "vCenter-side (config_status CONFIGURING -> RUNNING); the handler "
-            "read-backs GET /vcenter/namespaces/instances/{namespace} to surface "
+            "read-backs GET /vcenter/namespaces/instances/v2/{namespace} to surface "
             "config_status. Equivalent of an out-of-band 'kubectl'/raw-REST "
             "namespace create, governed."
         ),
@@ -1739,7 +1739,7 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         description=(
             "The teardown counterpart of namespace.create (#3502). Issues DELETE "
             "/vcenter/namespaces/instances/{namespace}, then read-backs GET "
-            "/vcenter/namespaces/instances/{namespace} to confirm absence. "
+            "/vcenter/namespaces/instances/v2/{namespace} to confirm absence. "
             "safety_level='destructive' + requires_approval=True -- mandatory human "
             "approval (a DELETE child is never grant-clearable, so it always parks). "
             "Deleting a namespace cascades: it destroys every workload inside it "
@@ -1767,8 +1767,8 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         handler=namespace_status_composite,
         summary="Read a vSphere Namespace's config status (poll-friendly, boot-enabled).",
         description=(
-            "Reads GET /vcenter/namespaces/instances/{namespace} and reshapes "
-            "Namespaces.Instances.Info into a compact, inline-pollable envelope: "
+            "Reads GET /vcenter/namespaces/instances/v2/{namespace} and reshapes "
+            "Namespaces.Instances.InfoV2 into a compact, inline-pollable envelope: "
             "the scalar config_status (CONFIGURING/REMOVING/RUNNING/ERROR) + a "
             "derived ready flag + stats + description + capped messages stay "
             "top-level so a runbook OperationCallVerify step or a Sensor "
@@ -1787,6 +1787,19 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "read-only", "namespace-management", "namespace", "vks", "supervisor"],
         safety_level="safe",
         requires_approval=False,
+        llm_instructions={
+            "result_scalars": {
+                "keys": [
+                    "namespace",
+                    "exists",
+                    "config_status",
+                    "ready",
+                    "description",
+                    "message_count",
+                ]
+            },
+            "result_objects": {"objects": {"stats": ["cpu_used", "memory_used", "storage_used"]}},
+        },
     ),
     # storage_policy.* — governed NFS tag-based SPBM policy (#3494)
     # ----------------------------------------------------------------

@@ -54,14 +54,19 @@ from meho_backplane.connectors.schemas import (
     ProbeResult,
     ResultHandle,
 )
+from meho_backplane.connectors.vmware_rest import VmwareRestConnector
+from meho_backplane.connectors.vmware_rest.composites._register import (
+    register_vmware_composite_operations,
+)
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog
+from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.jsonflux.query.engine import QueryEngine
 from meho_backplane.operations import (
     dispatch,
     register_typed_operation,
     reset_dispatcher_caches,
 )
+from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.jsonflux_reducer import (
     _TRUNCATION_MARKER,
@@ -890,6 +895,43 @@ class _FakeTarget:
         self.host = "test.example.com"
         self.port = 443
         self.auth_model = "shared_service_account"
+
+
+class _FakeVmwareTarget(_FakeTarget):
+    """Minimal vCenter target that resolves the real namespace composite."""
+
+    def __init__(self) -> None:
+        super().__init__(product="vmware")
+        self.fingerprint = _FakeFingerprint(version="9.0")
+        self.preferred_impl_id = "vmware-rest"
+
+
+class _NamespaceStatusConnector:
+    """Serve a large InfoV2 response through the composite's direct read seam."""
+
+    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
+        del target, operator
+        return f"/api{path}"
+
+    async def adapt_op_query(
+        self, target: Any, query: dict[str, Any] | None, operator: Operator
+    ) -> dict[str, Any] | None:
+        del target, operator
+        return query or None
+
+    async def _get_json(
+        self, target: Any, path: str, *, operator: Operator, params: Any = None
+    ) -> dict[str, Any]:
+        del target, operator, params
+        assert path == "/api/vcenter/namespaces/instances/v2/envision-ns"
+        return {
+            "value": {
+                "config_status": "RUNNING",
+                "stats": {"cpu_used": 1, "memory_used": 2, "storage_used": 3},
+                "description": "ready for guest clusters",
+                "messages": [{"details": "x" * 300} for _ in range(25)],
+            }
+        }
 
 
 def _make_operator() -> Operator:
@@ -2198,6 +2240,57 @@ async def test_reducing_dispatch_preserves_registered_result_scalars(
     assert result.result["row_count"] == 60
     assert result.result["source_key"] == "validationChecks"
     assert "validationChecks" not in result.result
+
+
+async def test_namespace_status_descriptor_keeps_poll_scalars_when_messages_reduce(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Exercise the real namespace handler and persisted metadata through dispatch → reducer."""
+    await register_vmware_composite_operations(embedding_service=stub_embedding_service)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        namespace_status = await session.scalar(
+            select(EndpointDescriptor).where(
+                EndpointDescriptor.op_id == "vmware.composite.namespace.status"
+            )
+        )
+    assert namespace_status is not None
+    assert namespace_status.llm_instructions is not None
+    register_connector_v2(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        cls=VmwareRestConnector,
+    )
+    _CONNECTOR_INSTANCE_CACHE[VmwareRestConnector] = _NamespaceStatusConnector()  # type: ignore[assignment]
+    set_default_reducer(JsonFluxReducer(sample_size=5))
+    try:
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id="vmware-rest-9.0",
+            op_id="vmware.composite.namespace.status",
+            target=_FakeVmwareTarget(),
+            params={"namespace": "envision-ns"},
+        )
+    finally:
+        set_default_reducer(PassThroughReducer())
+
+    assert result.status == "ok", result.error
+    assert result.handle is not None
+    assert result.handle.total_rows == 25
+    assert isinstance(result.result, dict)
+    for key, value in {
+        "namespace": "envision-ns",
+        "exists": True,
+        "config_status": "RUNNING",
+        "ready": True,
+        "description": "ready for guest clusters",
+        "message_count": 25,
+    }.items():
+        assert result.result[key] == value
+    assert result.result["source_key"] == "messages"
+    assert "messages" not in result.result
+    assert result.result["stats"] == {"cpu_used": 1, "memory_used": 2, "storage_used": 3}
 
 
 async def _tls_shaped_handler(target: Any, params: dict[str, Any]) -> dict[str, Any]:

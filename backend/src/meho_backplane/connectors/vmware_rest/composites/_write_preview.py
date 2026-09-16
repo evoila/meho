@@ -1482,7 +1482,7 @@ async def _namespace_delete_preview(ctx: PreviewContext) -> dict[str, Any] | Non
     Populates the ``blast_radius`` block the destructive-tier park gate requires
     (:func:`~meho_backplane.operations._preview.blast_radius_missing_reason`):
     the namespace identity (name + best-effort ``config_status`` / ``supervisor``
-    read from ``GET /vcenter/namespaces/instances/{namespace}``), an empty
+    read from ``GET /vcenter/namespaces/instances/v2/{namespace}``), an empty
     ``children`` list (deleting a namespace cascades to every workload inside it
     — VKS guest clusters, pods, PVCs — which are **not** enumerable through the
     vCenter-REST namespace-instances surface; the cascade is stated as the

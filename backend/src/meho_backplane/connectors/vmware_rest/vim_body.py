@@ -55,6 +55,7 @@ __all__ = [
     "MOREF_TYPE_NAME",
     "VIM_TYPE_NAME_KEY",
     "VIM_VALUE_KEY",
+    "fault_message",
     "retrieve_properties_body",
     "unwrap_vim_value",
     "vim_moref",
@@ -177,3 +178,90 @@ def unwrap_vim_value(value: Any) -> Any:
     if isinstance(value, list):
         return [unwrap_vim_value(item) for item in value]
     return value
+
+
+def _join_fault_messages(fault: dict[str, Any]) -> str | None:
+    """Join a fault DataObject's ``faultMessage[*].message`` texts, else ``None``.
+
+    Each ``LocalizableMessage`` in ``faultMessage`` carries an optional
+    per-message ``message``; blank / non-string entries are skipped and the
+    surviving texts join with ``; `` (#3116).
+    """
+    messages = fault.get("faultMessage")
+    if not isinstance(messages, list):
+        return None
+    texts = [
+        message
+        for entry in messages
+        if isinstance(entry, dict)
+        and isinstance(message := entry.get("message"), str)
+        and message.strip()
+    ]
+    return "; ".join(texts) if texts else None
+
+
+def _fault_type_name(fault: dict[str, Any]) -> str | None:
+    """Return a fault DataObject's concrete ``_typeName`` when it is real text."""
+    type_name = fault.get(VIM_TYPE_NAME_KEY)
+    return type_name if isinstance(type_name, str) and type_name.strip() else None
+
+
+def fault_message(error: Any) -> str | None:
+    """Best human-readable text from a vim ``TaskInfo.error`` / ``MethodFault``.
+
+    A faulted task's ``error`` (and the OVF / lease fault projections) arrive
+    in one of two VI-JSON shapes, depending on the vCenter version's
+    serializer:
+
+    * **9.x** -- a ``LocalizedMethodFault``: an optional ``localizedMessage``
+      plus the concrete ``fault`` DataObject
+      (``fault.faultMessage[*].message`` / ``fault._typeName``).
+    * **8.0.x** -- the concrete fault DataObject **flattened directly onto**
+      ``error`` (``_typeName`` + ``faultstring`` [+ ``faultMessage``], no
+      ``LocalizedMethodFault`` wrapper and no nested ``fault``). The 9.x chain
+      read ``error.get("fault")``, found nothing, and discarded the fault
+      text, so operators saw ``<no fault reported>`` even though vCenter had
+      reported an actionable fault (#3663).
+
+    Extraction order:
+
+    1. ``error.localizedMessage`` -- the server-localized text, when present
+       (9.x). Returned verbatim, preserving the historical shape (#3116).
+    2. nested ``error.fault`` present (9.x ``LocalizedMethodFault``): the
+       joined ``fault.faultMessage[*].message``, else the concrete
+       ``fault._typeName`` -- verbatim, as before (#3116).
+    3. otherwise ``error`` *is* the flattened fault (8.0.x): its
+       ``faultstring`` / joined ``faultMessage[*].message`` prefixed with the
+       concrete ``_typeName`` so the operator sees both (e.g.
+       ``InvalidArgument: A specified parameter was not correct:
+       configSpec.guestId``); the bare ``_typeName`` when the flattened fault
+       carries a type but no text (#3663).
+
+    Returns ``None`` only when ``error`` is not a dict or carries no usable
+    fault content at all. Callers funnel ``error`` through
+    :func:`unwrap_vim_value` first, so boxed nested primitives (#3106) are
+    already bare here.
+    """
+    if not isinstance(error, dict):
+        return None
+    localized = error.get("localizedMessage")
+    if isinstance(localized, str) and localized.strip():
+        return localized
+    nested = error.get("fault")
+    if isinstance(nested, dict):
+        # 9.x LocalizedMethodFault: the concrete fault is nested. Preserve the
+        # historical bare-text output (#3116) -- no type-name prefix.
+        joined = _join_fault_messages(nested)
+        if joined is not None:
+            return joined
+        return _fault_type_name(nested)
+    # 8.0.x flattened VI-JSON: ``error`` itself is the concrete fault (#3663).
+    type_name = _fault_type_name(error)
+    faultstring = error.get("faultstring")
+    if isinstance(faultstring, str) and faultstring.strip():
+        text: str | None = faultstring
+    else:
+        text = _join_fault_messages(error)
+    if text is not None:
+        return f"{type_name}: {text}" if type_name is not None else text
+    return type_name

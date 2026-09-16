@@ -8,15 +8,19 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 51 hand-authored composites
-that orchestrate cross-spec workflows: 13 read composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 54 hand-authored composites
+that orchestrate cross-spec workflows: 14 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
 in `#2258`; plus the four guest-operations reads `#3100` and the
-Supervisor status read `#3281` + the storage-policy list read `#3494` +
+Supervisor status read `#3281` + the vSphere Namespace status read
+`namespace.status` / `#3502` + the storage-policy list read `#3494` +
 the two SUBSCRIBED content-library reads `content_library.subscribed.status` +
-`content_library.subscribed.items.list` / `#3495`) and 38 write
+`content_library.subscribed.items.list` / `#3495`) and 40 write
 composites (G3.1-T6 / `#509`, incl. the destructive-tier `vm.destroy` / `#3198`, the
+governed vSphere Namespace `namespace.create` (caution) +
+`namespace.delete` (destructive) / `#3502` (see the **Governed vSphere
+Namespace composites** subsection under Control flow), the
 governed NFS tag-based SPBM `storage_policy.create` (caution) +
 `storage_policy.delete` (destructive) / `#3494`, the
 single-VM `vm.power` verb incl. Tools soft shutdown / `#2301`, the
@@ -370,9 +374,9 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `vcenter.yaml` by `test_connectors_vmware_rest_library_reconcile.py`.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 51
-  `_CompositeSpec` rows (13 read + 36 dangerous/destructive writes + 2
-  caution content-library subscribed writes); each row carries its
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 54
+  `_CompositeSpec` rows (14 read + 34 dangerous/destructive writes + 6
+  caution writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. The derived registration-coverage guard uses explicit, closed exceptions only for write operations whose existing semantics intentionally omit a preview or governed-suboperation discovery entry; every other registry id must be represented. `test_reference_docs_drift.py` remains the single total-set drift gate for generated `docs-site/reference/connectors.md`; regenerate it with `cd backend && uv run python scripts/generate_reference_docs.py` when the registry changes. Idempotent on re-run via the body-hash skip path.
 - **Typed ops** (`typed_ops.py`, `#2257`) — the first vmware
@@ -821,7 +825,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 51 composites (13 reads + 38 writes) land as `source_kind="composite"`
+The 54 composites (14 reads + 40 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -1142,10 +1146,19 @@ task, timeout_seconds=600, poll_interval=2)` re-reads `Task.info` (via
 builder generalized from `tasks.recent`) on a fixed cadence until the vim
 state is `success` / `error` or the wall-clock deadline elapses, returning
 a `VimTaskResult{task, state, result, error_message, progress}`. On a
-fault, `error_message` carries the best available description via a
-fallback chain (#3116): `error.localizedMessage` (optional on the wire) →
-the joined `fault.faultMessage[*].message` texts → the concrete fault's
-`_typeName` (e.g. `InvalidArgument`) — so every vim-arm composite's
+fault, `error_message` carries the best available description via the
+shared `vim_body.fault_message` extractor, which spans both VI-JSON fault
+shapes. On **9.x** `TaskInfo.error` is a `LocalizedMethodFault` and the
+chain (#3116) is `error.localizedMessage` (optional on the wire) → the
+joined `fault.faultMessage[*].message` texts → the concrete fault's
+`_typeName` (e.g. `InvalidArgument`). On **8.0.x** the concrete fault is
+flattened directly onto `error` (`_typeName` + `faultstring`, no
+`LocalizedMethodFault` wrapper and no nested `fault`); the extractor reads
+`error.faultstring` / its joined `faultMessage` and prefixes the concrete
+`_typeName`, surfacing e.g. `InvalidArgument: A specified parameter was
+not correct: configSpec.guestId` where the 9.x-only chain previously lost
+the text (#3663). The same helper backs `tasks.recent`'s `error_message`
+and the OVF/lease `fault_text` projection. Every vim-arm composite's
 `rollback_reason` degrades to `<no fault reported>` only when the
 `TaskInfo` truly carries no fault content. It does
 **not** raise on a task *fault* — the outcome is a legible value each
@@ -1884,6 +1897,77 @@ The three op_ids are byte-for-byte the strings the ingest parser emits from
 the pinned `vcenter.yaml`; the reconcile guard
 `tests/acceptance/test_supervisor_op_id_reconcile.py` pins them (always-on
 string test + spec-backed parse).
+
+### Governed vSphere Namespace composites (`namespace.create` / `namespace.delete` / `namespace.status`, #3502)
+
+`composites/_namespace.py` (group `namespace_management`) governs the vSphere
+Namespace lifecycle on an enabled Supervisor. A vSphere Namespace is the
+container a VKS guest cluster is created into; it binds an SPBM storage policy
+(`#3494`), VM classes, and a TKr/VKr content library (`#3495`). VKS guest-cluster
+lifecycle then runs entirely from *inside* the Supervisor via Kubernetes CRDs
+(there is no `/tkg/*` vCenter REST family), so the namespace create is the last
+vCenter-REST step before the flow moves to `k8s.apply` of a `Cluster` CR on the
+Supervisor target. Three ops (two writes + one `safe` status read):
+
+**`namespace.create`** (`caution` / `requires_approval=True`) issues
+`POST:/vcenter/namespaces/instances/v2` with the
+`Namespaces.Instances.CreateSpecV2` body — `supervisor` (the enabled Supervisor
+id) + `namespace` (the DNS-1123 name) are required, and `access_list` /
+`storage_specs` (SPBM policy ids from `#3494`) / `vm_service_spec`
+(`content_libraries` from `#3495` + `vm_classes`) are optional pass-through
+sub-objects. Both are lifted straight into the top-level POST body (the
+top-level-`*Spec` envelope convention; there are no path vars). The create is
+**asynchronous** vCenter-side (`config_status` moves `CONFIGURING` → `RUNNING`);
+the handler read-backs `GET:/vcenter/namespaces/instances/v2/{namespace}` best-effort
+to surface `config_status` and returns `status='created'`. A read-back that 404s
+(not yet visible) or faults leaves `config_status=None` — the create was still
+accepted.
+
+**`namespace.delete`** (`destructive` / `requires_approval=True`) issues
+`DELETE:/vcenter/namespaces/instances/{namespace}`, then read-back verifies
+absence. Mandatory human approval — the `DELETE` child is never grant-clearable,
+so it always parks. Deleting a namespace **cascades**: it destroys every
+workload inside it (VKS guest clusters, pods, PVCs), which the destructive-tier
+`_write_preview` builder states as the `permanent-cascades-to-workloads`
+irreversibility class (the individual workloads are not enumerable through the
+vCenter-REST namespace-instances surface, so `children` is an explicit empty
+list). Asynchronous read-back matrix: a `GET` that 404s → `status='deleted'`
+(the verified happy path); `config_status='REMOVING'` → `status='removing'`
+(teardown draining); a non-REMOVING status → `status='still_present'`.
+
+**`namespace.status`** (`safe` / `requires_approval=False`) reads
+`GET:/vcenter/namespaces/instances/v2/{namespace}` and reshapes
+`Namespaces.Instances.InfoV2` into a compact, inline-pollable envelope: the
+scalar `config_status` (`CONFIGURING`/`REMOVING`/`RUNNING`/`ERROR`) + a derived
+`ready` flag (`config_status == 'RUNNING'`) + `stats` + `description` + capped
+`messages` (`messages_limit`, default 25; `message_count` carries the uncapped
+size) stay top-level so a runbook `OperationCallVerify` step or a Sensor
+assertion can poll `ready==true` directly — never behind a set-shaped handle.
+A `GET` 404 returns `exists=false` (namespace not yet visible mid-create, or
+gone after delete) rather than a fault; any other transport / status fault
+propagates as `connector_error`. This is the **governed, boot-enabled** poll op
+`namespace.create` / `.delete` hand the caller, and it is what their runtime
+`guidance` names (rather than the raw `GET` path). **Delivery shape — a
+boot-enabled read composite, not the ingested get-by-name row:** the ingested
+`GET .../instances/v2/{namespace}` row lands `is_enabled=False` behind
+per-deployment operator review, so a caller polling create/delete convergence
+on a fresh boot would have no governed read; a typed read composite is
+dispatchable at connector import on every deployment — symmetric with
+`supervisor.status`.
+
+The get-by-name path is `GET:/vcenter/namespaces/instances/v2/{namespace}`. It returns `Namespaces.Instances.InfoV2` for the Supervisor-backed 9.x surface (including its Supervisor identity and optional zone data).
+Both writes ride the standard governed REST sub-op seam
+(`_write._write_sub_op` → `enforce_subop_policy` → `_post_json`/DELETE); the
+`namespace.status` read and the create/delete read-backs ride the un-gated
+`_read_sub_op` read seam. `_governed_subops._GOVERNED_SUBOP_MANIFEST` publishes
+each write's grant set. The **list** read
+(`GET /vcenter/namespaces/instances` / `.../v2`) is left to the already-enabled
+ingested rows, JSONFlux-reduced by the dispatcher; the single-namespace **get**
+is wrapped as the boot-enabled `namespace.status` composite above. The three
+op_ids (`POST .../instances/v2`, `DELETE .../instances/{namespace}`, `GET
+.../instances/v2/{namespace}`) are pinned against `vcenter.yaml` by the reconcile
+lane `tests/test_connectors_vmware_rest_namespace_reconcile.py` (always-on shape
+test + spec-backed path-existence).
 
 ### Read-composite best-effort enrichment (`datastore.usage`, #1908)
 

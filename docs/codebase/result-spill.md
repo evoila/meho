@@ -56,8 +56,8 @@ shared core:
   read-only `SELECT`** over the handle's rows and returns just the
   matching rows or the per-group aggregates. The `query` grammar is
   filter predicates (≤10; operators `=, !=, <, <=, >, >=, IN, IS NULL`),
-  `select` projection, `group_by` (≤4), aggregates
-  (`COUNT/SUM/MIN/MAX/AVG`), `order_by` (≤4), and `limit`. There is **no
+  `select` projection, `group_by` (≤4), aggregates (≤8;
+  `COUNT/SUM/MIN/MAX/AVG`), `order_by` (≤4), and `limit`. There is **no
   raw-SQL argument** on any transport.
 
 The query runs inside the reduce-time `QueryEngine`'s sandbox rebuilt
@@ -65,8 +65,10 @@ per call: the full authorized rows come back from `fetch_rows`, are
 `register`ed under the table name `result`, and the compiled statement
 is the only thing that touches them. Every referenced field is validated
 against the handle's known columns (unknown field → rejected); operators
-and aggregate functions are fixed allow-lists; caller values bind as
-DuckDB prepared-statement parameters, never string-interpolated. See
+and aggregate functions are fixed allow-lists; recognized scalar filter
+literals are checked against the exact DuckDB column type before binding;
+caller values bind as DuckDB prepared-statement parameters, never
+string-interpolated. See
 [`docs/architecture/jsonflux.md`](../architecture/jsonflux.md#query-surface-3366)
 for why compiling from a fixed template is a stronger safety property
 than sanitizing a caller SQL string (verified on the pinned

@@ -127,6 +127,11 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     # Governed NFS tag-based SPBM storage-policy writes (#3494).
     "vmware.composite.storage_policy.create",
     "vmware.composite.storage_policy.delete",
+    # Governed vSphere Namespace create/delete (#3502). create is caution +
+    # approval, delete is destructive + approval; both live in _WRITE_OP_IDS and
+    # are special-cased in the tier assertion below (like storage_policy.*).
+    "vmware.composite.namespace.create",
+    "vmware.composite.namespace.delete",
 )
 
 # 5 reads (T5 / #508) -- carried over so the combined-count assertion
@@ -146,6 +151,8 @@ _READ_OP_IDS: tuple[str, ...] = (
     "vmware.composite.vm.guest.file.read",
     # Supervisor (WCP) status read (#3281).
     "vmware.composite.supervisor.status",
+    # Governed vSphere Namespace status read (#3502) -- boot-enabled poll op.
+    "vmware.composite.namespace.status",
     # Storage-policy list read (#3494).
     "vmware.composite.storage_policy.list",
     # Content-library SUBSCRIBED reads (#3495).
@@ -163,9 +170,11 @@ _CAUTION_OP_IDS: tuple[str, ...] = (
     "vmware.composite.content_library.subscribed.sync",
 )
 
-# 51 total -- 13 read (T5 / #508 + 4 guest-ops reads / #3100 + the
-# supervisor status read / #3281 + storage_policy.list / #3494 + 2 SUBSCRIBED
-# content-library reads / #3495) + 2 caution content-library writes / #3495 + 36 write
+# 54 total -- 14 read (T5 / #508 + 4 guest-ops reads / #3100 + the
+# supervisor status read / #3281 + the vSphere Namespace status read / #3502 +
+# storage_policy.list / #3494 + 2 SUBSCRIBED
+# content-library reads / #3495) + 2 caution content-library writes / #3495 + 38 write
+# (the two below + the governed vSphere Namespace create/delete / #3502)
 # (T6 / #509 + vm.power / #2301 + vm.disk.grow / #2893 +
 # vm.clone_from_template / #2894 + vim cluster/inventory writes
 # cluster.drs_rule.create + folder.create / #2895 + #2891 hardware
@@ -295,6 +304,12 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
         "meho_backplane.connectors.vmware_rest.composites._storage_policy."
         "storage_policy_delete_composite"
     ),
+    "vmware.composite.namespace.create": (
+        "meho_backplane.connectors.vmware_rest.composites._namespace.namespace_create_composite"
+    ),
+    "vmware.composite.namespace.delete": (
+        "meho_backplane.connectors.vmware_rest.composites._namespace.namespace_delete_composite"
+    ),
 }
 
 
@@ -335,6 +350,8 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.supervisor.disable": "namespace_management",
     "vmware.composite.storage_policy.create": "storage",
     "vmware.composite.storage_policy.delete": "storage",
+    "vmware.composite.namespace.create": "namespace_management",
+    "vmware.composite.namespace.delete": "namespace_management",
 }
 
 
@@ -432,6 +449,43 @@ async def test_full_registration_produces_thirty_three_composite_rows(
 
 
 @pytest.mark.asyncio
+async def test_namespace_status_registration_preserves_poll_scalars_after_jsonflux_reduction(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Persist the descriptor hint the dispatcher forwards to JSONFlux.
+
+    ``messages`` is the response's one real list, so a wide projected message
+    can materialize a handle even at its 25-row default.  These scalar fields
+    are the asynchronous create/delete poll contract and must remain inline.
+    The dispatcher-to-reducer wiring itself is covered by the end-to-end
+    result-scalars regression in ``test_operations_jsonflux_reducer``.
+    """
+    await register_vmware_composite_operations(embedding_service=stub_embedding_service)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        row = await fresh.scalar(
+            select(EndpointDescriptor).where(
+                EndpointDescriptor.op_id == "vmware.composite.namespace.status"
+            )
+        )
+    assert row is not None
+    assert row.llm_instructions is not None
+    assert row.llm_instructions["result_scalars"] == {
+        "keys": [
+            "namespace",
+            "exists",
+            "config_status",
+            "ready",
+            "description",
+            "message_count",
+        ]
+    }
+    assert row.llm_instructions["result_objects"] == {
+        "objects": {"stats": ["cpu_used", "memory_used", "storage_used"]}
+    }
+
+
+@pytest.mark.asyncio
 async def test_every_write_composite_row_uses_dangerous_requires_approval(
     stub_embedding_service: AsyncMock,
 ) -> None:
@@ -469,11 +523,13 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
         "vmware.composite.resource_pool.create",
         "vmware.composite.cluster.drs_vm_host_rule.create",
         "vmware.composite.storage_policy.create",
+        "vmware.composite.namespace.create",
     }
     for row in rows:
         if row.op_id in (
             "vmware.composite.vm.destroy",
             "vmware.composite.storage_policy.delete",
+            "vmware.composite.namespace.delete",
         ):
             expected_level = "destructive"
         elif row.op_id in caution_ops:
@@ -742,6 +798,13 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
         "vmware.composite.storage_policy.delete": {
             "deleted",
             "delete_failed",
+            "still_present",
+        },
+        # #3502: governed vSphere Namespace create/delete.
+        "vmware.composite.namespace.create": {"created"},
+        "vmware.composite.namespace.delete": {
+            "deleted",
+            "removing",
             "still_present",
         },
     }

@@ -162,6 +162,9 @@ from typing import Any
 
 import httpx
 
+from meho_backplane.connectors.vmware_rest.composites._namespace import (
+    _OP_GET_NAMESPACE,
+)
 from meho_backplane.connectors.vmware_rest.composites._storage_policy import (
     _OP_STORAGE_POLICIES_LIST,
 )
@@ -181,6 +184,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     _resolve_repoint_target,
     _resolve_vm_list,
     _resolve_vm_name,
+    _unwrap_value,
 )
 from meho_backplane.connectors.vmware_rest.host_target import (
     HOST_FLAVOR_ESXI,
@@ -1438,6 +1442,87 @@ async def _content_library_subscribed_sync_preview(
     }
 
 
+async def _namespace_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``namespace.create`` — echo the caution-tier create shape (no I/O, #3502).
+
+    Not destructive, so no mandatory blast_radius: a plain ``preview`` block
+    naming the supervisor + namespace the approver is authorising, plus the
+    counts of the bound storage policies / content libraries / VM classes / ACL
+    entries (identity + shape, no secret material — the create body carries
+    none). Declines (``None``) on malformed params (the schema validator has
+    already run, but the builder fails soft).
+    """
+    supervisor = ctx.params.get("supervisor")
+    namespace = ctx.params.get("namespace")
+    if not isinstance(supervisor, str) or not isinstance(namespace, str):
+        return None
+    storage_specs = ctx.params.get("storage_specs")
+    access_list = ctx.params.get("access_list")
+    vm_service_spec = ctx.params.get("vm_service_spec")
+    content_libraries = (
+        vm_service_spec.get("content_libraries") if isinstance(vm_service_spec, dict) else None
+    )
+    vm_classes = vm_service_spec.get("vm_classes") if isinstance(vm_service_spec, dict) else None
+    return {
+        "preview": {
+            "action": "create_vsphere_namespace",
+            "supervisor": supervisor,
+            "namespace": namespace,
+            "storage_spec_count": len(storage_specs) if isinstance(storage_specs, list) else 0,
+            "access_list_count": len(access_list) if isinstance(access_list, list) else 0,
+            "content_libraries": content_libraries if isinstance(content_libraries, list) else [],
+            "vm_classes": vm_classes if isinstance(vm_classes, list) else [],
+        }
+    }
+
+
+async def _namespace_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``namespace.delete`` — the mandatory destructive blast radius (#3502).
+
+    Populates the ``blast_radius`` block the destructive-tier park gate requires
+    (:func:`~meho_backplane.operations._preview.blast_radius_missing_reason`):
+    the namespace identity (name + best-effort ``config_status`` / ``supervisor``
+    read from ``GET /vcenter/namespaces/instances/v2/{namespace}``), an empty
+    ``children`` list (deleting a namespace cascades to every workload inside it
+    — VKS guest clusters, pods, PVCs — which are **not** enumerable through the
+    vCenter-REST namespace-instances surface; the cascade is stated as the
+    ``permanent`` irreversibility class rather than an item list), and the
+    irreversibility class. Declines (``None``) only when no ``namespace`` was
+    supplied; the identity read degrades to name-only on a 404 / transport fault
+    so the block is always well-formed.
+    """
+    namespace = ctx.params.get("namespace")
+    if not isinstance(namespace, str) or not namespace:
+        return None
+    obj: dict[str, Any] = {"kind": "namespace", "name": namespace}
+    if ctx.connector_instance is not None:
+        try:
+            payload = await _read_sub_op(
+                ctx.connector_instance,  # type: ignore[arg-type]
+                ctx.target,
+                ctx.operator,
+                _OP_GET_NAMESPACE,
+                {"namespace": namespace},
+            )
+        except httpx.HTTPError:
+            payload = None
+        info = _unwrap_value(payload)
+        if isinstance(info, dict):
+            config_status = info.get("config_status")
+            if isinstance(config_status, str):
+                obj["config_status"] = config_status
+            supervisor = info.get("supervisor")
+            if isinstance(supervisor, str):
+                obj["supervisor"] = supervisor
+    return {
+        "blast_radius": {
+            "object": obj,
+            "children": [],
+            "irreversibility": "permanent-cascades-to-workloads",
+        },
+    }
+
+
 _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "vmware.composite.supervisor.enable": _supervisor_enable_preview,
     "vmware.composite.supervisor.disable": _supervisor_disable_preview,
@@ -1472,6 +1557,8 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "vmware.composite.host.service_control": _host_service_control_preview,
     "vmware.composite.storage_policy.create": _storage_policy_create_preview,
     "vmware.composite.storage_policy.delete": _storage_policy_delete_preview,
+    "vmware.composite.namespace.create": _namespace_create_preview,
+    "vmware.composite.namespace.delete": _namespace_delete_preview,
     "vmware.composite.content_library.subscribed.create": (
         _content_library_subscribed_create_preview
     ),
@@ -1480,7 +1567,7 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
 
 
 def _register_vmware_write_preview_builders() -> None:
-    """Wire the 35 write-composite park-time preview builders. Import-time.
+    """Wire the 37 write-composite park-time preview builders. Import-time.
 
     The 13 read composites register no builder — they are
     ``requires_approval=False`` and never park, so a preview would be

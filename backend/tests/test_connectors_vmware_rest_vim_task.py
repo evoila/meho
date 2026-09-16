@@ -436,6 +436,59 @@ async def test_poll_fault_with_no_usable_content_reports_none() -> None:
     assert outcome.error_message is None
 
 
+async def test_poll_fault_flattened_8_0_x_shape_surfaces_type_and_faultstring() -> None:
+    """8.0.x VI-JSON flattens the concrete fault onto ``info.error`` (#3663).
+
+    ``_typeName`` + ``faultstring`` sit directly on ``error`` -- no
+    ``LocalizedMethodFault`` wrapper, no nested ``fault`` -- the shape a live
+    vCenter 8.0.3 ``CreateVM_Task`` rejection returns (a ``vmkernel9Guest``
+    ``guestId`` on an 8.0.3 target). The 9.x-only extractor discarded it,
+    surfacing ``<no fault reported>``; the fix surfaces the type name with
+    the faultstring text.
+    """
+    conn = _SeqTaskConnector(
+        [
+            _task_info_result(
+                "task-1",
+                state="error",
+                error={
+                    "_typeName": "InvalidArgument",
+                    "faultstring": "A specified parameter was not correct: configSpec.guestId",
+                    "invalidProperty": "configSpec.guestId",
+                },
+            )
+        ]
+    )
+    outcome = await poll_vim_task(
+        conn,  # type: ignore[arg-type]
+        object(),
+        object(),  # type: ignore[arg-type]
+        task="task-1",
+        poll_interval=0.0,
+    )
+    assert outcome.state == TASK_STATE_ERROR
+    assert outcome.error_message == (
+        "InvalidArgument: A specified parameter was not correct: configSpec.guestId"
+    )
+
+
+async def test_poll_fault_flattened_8_0_x_no_text_reports_type_name() -> None:
+    """A flattened 8.0.x fault with a type but no text still surfaces the type
+    name -- never a crash, never ``<no fault reported>`` (#3663)."""
+    conn = _SeqTaskConnector(
+        [_task_info_result("task-1", state="error", error={"_typeName": "TaskInProgress"})]
+    )
+    outcome = await poll_vim_task(
+        conn,  # type: ignore[arg-type]
+        object(),
+        object(),  # type: ignore[arg-type]
+        task="task-1",
+        poll_interval=0.0,
+    )
+    assert outcome.state == TASK_STATE_ERROR
+    assert outcome.error_message == "TaskInProgress"
+
+
 async def test_poll_times_out_when_never_terminal() -> None:
     """A zero deadline that observes a non-terminal state returns a ``timeout`` outcome."""
     conn = _SeqTaskConnector([_task_info_result("task-1", state="running", progress=25)])

@@ -105,6 +105,10 @@ _WRITE_COMPOSITE_OP_IDS: frozenset[str] = frozenset(
         "vmware.composite.supervisor.disable",
         "vmware.composite.storage_policy.create",
         "vmware.composite.storage_policy.delete",
+        # Governed vSphere Namespace writes (#3502): create (caution) echoes the
+        # spec shape, delete (destructive) carries the mandatory blast_radius.
+        "vmware.composite.namespace.create",
+        "vmware.composite.namespace.delete",
         # Content-library SUBSCRIBED writes (#3495): caution + approval, so
         # they park and carry a bespoke park-time preview builder (create's is
         # secret-hygienic — it never echoes the subscription password).
@@ -321,7 +325,7 @@ def _strip_uniform_identity(effect: dict[str, Any], *, op_id: str) -> dict[str, 
 
 
 # ===========================================================================
-# Wiring — all 35 preview-carrying write composites register a builder (criterion 4)
+# Wiring — all 37 preview-carrying write composites register a builder (criterion 4)
 # ===========================================================================
 
 

@@ -270,6 +270,7 @@ register_mcp_tool(
                         },
                         "aggregate": {
                             "type": "array",
+                            "maxItems": 8,
                             "description": "Aggregate output columns (COUNT/SUM/MIN/MAX/AVG).",
                             "items": {
                                 "type": "object",

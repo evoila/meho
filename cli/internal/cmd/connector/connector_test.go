@@ -1202,6 +1202,49 @@ func TestPrintReviewTableHappyPath(t *testing.T) {
 	}
 }
 
+// TestPrintReviewTableRendersUngroupedCount — the review render surfaces
+// the count of ungrouped descriptors (evoila/meho#3681). The grouping pass
+// can leave descriptors with no group; they never appear in any group's op
+// list, so the render prints their count so an operator can see the gap.
+func TestPrintReviewTableRendersUngroupedCount(t *testing.T) {
+	ungrouped := 8
+	r := &api.ConnectorReviewPayload{
+		ConnectorId:      "vmware-rest-9.0",
+		Product:          "vmware",
+		Version:          "9.0",
+		ImplId:           "vmware-rest",
+		TotalOpCount:     2,
+		UngroupedOpCount: &ungrouped,
+		Groups: []api.ConnectorReviewGroup{
+			{GroupKey: "cluster", Name: "Cluster", ReviewStatus: "staged", OpCount: 0},
+		},
+	}
+	var buf bytes.Buffer
+	printReviewTable(&buf, r)
+	out := buf.String()
+	for _, want := range []string{"Ungrouped ops:", "8"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("review render missing ungrouped token %q in:\n%s", want, out)
+		}
+	}
+}
+
+// TestPrintReviewTableOmitsUngroupedLineWhenZero — a connector whose ops are
+// all grouped (UngroupedOpCount nil or zero) prints no ungrouped line.
+func TestPrintReviewTableOmitsUngroupedLineWhenZero(t *testing.T) {
+	r := &api.ConnectorReviewPayload{
+		ConnectorId: "k8s-1.x",
+		Groups: []api.ConnectorReviewGroup{
+			{GroupKey: "core", Name: "Core", ReviewStatus: "enabled", OpCount: 0},
+		},
+	}
+	var buf bytes.Buffer
+	printReviewTable(&buf, r)
+	if strings.Contains(buf.String(), "Ungrouped ops:") {
+		t.Errorf("review render printed an ungrouped line for a fully-grouped connector:\n%s", buf.String())
+	}
+}
+
 // TestPrintReviewTableRendersProvenance — the review render surfaces
 // per-spec provenance (#2291): the fetched/inline/shipped origin, the
 // audit uri, a sha256 prefix, and the operator, so an operator can tell

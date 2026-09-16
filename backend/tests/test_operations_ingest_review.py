@@ -163,6 +163,43 @@ async def _seed_connector(
     return group_ids
 
 
+async def _add_ungrouped_op(
+    *,
+    tenant_id: uuid.UUID | None,
+    op_id: str,
+    method: str | None,
+    is_enabled: bool = False,
+    source_kind: str = "ingested",
+    product: str = "vmware",
+    version: str = "9.0",
+    impl_id: str = "vmware-rest",
+) -> None:
+    """Insert one descriptor with ``group_id IS NULL`` (the grouping pass left it out).
+
+    The #3681 fixture shape: a descriptor the LLM grouping pass never
+    bucketed. ``method=None`` seeds a typed / composite op (path NULL too);
+    a string method seeds an ingested read/write.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        session.add(
+            EndpointDescriptor(
+                tenant_id=tenant_id,
+                product=product,
+                version=version,
+                impl_id=impl_id,
+                op_id=op_id,
+                source_kind=source_kind,
+                method=method,
+                path=(f"/api/v1/{op_id}" if method is not None else None),
+                group_id=None,
+                summary=f"Ungrouped {op_id}",
+                is_enabled=is_enabled,
+            )
+        )
+        await session.commit()
+
+
 async def _count_audit_rows(*, op_id: str | None = None) -> int:
     """Return the number of ``audit_log`` rows.
 
@@ -367,6 +404,43 @@ async def test_get_review_payload_surfaces_needs_reingest_flag_and_count() -> No
     assert ops_by_id["GET:/api/v1/group-0/1"].needs_reingest is False
     assert payload.needs_reingest_op_count == 2
     assert payload.ungrouped_op_count == 1
+
+
+@pytest.mark.asyncio
+async def test_review_payload_reports_ungrouped_descriptor_count() -> None:
+    """#3681: the review payload reports ungrouped descriptors so an operator can see the gap.
+
+    Ungrouped descriptors (``group_id IS NULL``) never appear in any
+    rendered group's op list, so the reconciling ``ungrouped_op_count`` is
+    the operator's read-only signal that they exist. It counts ungrouped
+    reads and writes alike, whatever their ``is_enabled`` state.
+    """
+    tenant_id = uuid.uuid4()
+    await _seed_connector(tenant_id=tenant_id, group_count=1, ops_per_group=2)
+    await _add_ungrouped_op(
+        tenant_id=tenant_id,
+        op_id="GET:/api/v1/ungrouped/list",
+        method="GET",
+        is_enabled=True,
+    )
+    await _add_ungrouped_op(
+        tenant_id=tenant_id,
+        op_id="POST:/api/v1/ungrouped/create",
+        method="POST",
+        is_enabled=False,
+    )
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+
+    payload = await service.get_review_payload("vmware-rest-9.0", tenant_id)
+
+    # The two grouped ops are the rendered total; the two ungrouped ops
+    # (one read, one write) are the reconciling remainder and appear in no
+    # rendered group.
+    assert payload.total_op_count == 2
+    assert payload.ungrouped_op_count == 2
+    grouped_op_ids = {op.op_id for group in payload.groups for op in group.ops}
+    assert "POST:/api/v1/ungrouped/create" not in grouped_op_ids
+    assert "GET:/api/v1/ungrouped/list" not in grouped_op_ids
 
 
 @pytest.mark.asyncio
@@ -1230,6 +1304,127 @@ async def test_disable_then_re_enable_round_trip() -> None:
     assert set(statuses.values()) == {"enabled"}
     enabled_state = await _ops_enabled_state(tenant_id=tenant_id)
     assert all(enabled_state.values())
+
+
+@pytest.mark.asyncio
+async def test_enable_connector_cascades_to_ungrouped_descriptors() -> None:
+    """#3681: a full ``enable_connector`` also enables ungrouped (``group_id IS NULL``) ops.
+
+    The LLM grouping pass can leave descriptors ungrouped. Before #3681 the
+    enable cascade filtered by ``group_id IN (<transitioned groups>)`` and
+    skipped them, silently stranding ungrouped write/typed ops at
+    default-deny. The cascade now also reaches ``group_id IS NULL`` rows in
+    the connector scope, so a full enable enables the whole catalog — reads,
+    writes, and typed ops alike.
+    """
+    tenant_id = uuid.uuid4()
+    await _seed_connector(
+        tenant_id=tenant_id,
+        group_count=1,
+        ops_per_group=2,
+        review_status="staged",
+        op_is_enabled=False,
+    )
+    # Three descriptors the grouping pass never bucketed: a read, a write,
+    # and a typed op (method NULL). All default-deny.
+    await _add_ungrouped_op(tenant_id=tenant_id, op_id="GET:/api/v1/ungrouped/list", method="GET")
+    await _add_ungrouped_op(
+        tenant_id=tenant_id, op_id="POST:/api/v1/ungrouped/create", method="POST"
+    )
+    await _add_ungrouped_op(
+        tenant_id=tenant_id,
+        op_id="typed:ungrouped.composite",
+        method=None,
+        source_kind="typed",
+    )
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+
+    await service.enable_connector("vmware-rest-9.0", tenant_id=tenant_id)
+
+    enabled_state = await _ops_enabled_state(tenant_id=tenant_id)
+    # Grouped ops flipped ...
+    assert enabled_state["GET:/api/v1/group-0/0"] is True
+    assert enabled_state["GET:/api/v1/group-0/1"] is True
+    # ... and so did the ungrouped read, write, and typed op (#3681).
+    assert enabled_state["GET:/api/v1/ungrouped/list"] is True
+    assert enabled_state["POST:/api/v1/ungrouped/create"] is True
+    assert enabled_state["typed:ungrouped.composite"] is True
+
+    row = await _latest_audit_row(op_id="meho_connector_enable")
+    payload: Any = row.payload
+    # 2 grouped + 3 ungrouped all flipped in the one cascade.
+    assert payload["ops_cascade_count"] == 5
+
+
+@pytest.mark.asyncio
+async def test_enable_connector_respects_operator_override_on_ungrouped_op() -> None:
+    """#3681: an operator ``is_enabled=False`` override on an ungrouped op survives enable.
+
+    Widening the cascade to ungrouped rows must not stomp a per-op operator
+    override on one of them — the override-exclusion lookup was widened to
+    ungrouped ops in the same change.
+    """
+    tenant_id = uuid.uuid4()
+    await _seed_connector(
+        tenant_id=tenant_id,
+        group_count=1,
+        ops_per_group=1,
+        review_status="staged",
+        op_is_enabled=False,
+    )
+    await _add_ungrouped_op(tenant_id=tenant_id, op_id="GET:/api/v1/ungrouped/list", method="GET")
+    await _add_ungrouped_op(
+        tenant_id=tenant_id, op_id="POST:/api/v1/ungrouped/create", method="POST"
+    )
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+
+    # Operator explicitly disables the ungrouped write.
+    await service.edit_op(
+        "vmware-rest-9.0",
+        "POST:/api/v1/ungrouped/create",
+        tenant_id=tenant_id,
+        is_enabled=False,
+    )
+    await service.enable_connector("vmware-rest-9.0", tenant_id=tenant_id)
+
+    enabled_state = await _ops_enabled_state(tenant_id=tenant_id)
+    assert enabled_state["POST:/api/v1/ungrouped/create"] is False, (
+        "operator override on an ungrouped op clobbered by the enable cascade"
+    )
+    # The other ungrouped op and the grouped op still flipped.
+    assert enabled_state["GET:/api/v1/ungrouped/list"] is True
+    assert enabled_state["GET:/api/v1/group-0/0"] is True
+
+
+@pytest.mark.asyncio
+async def test_disable_connector_cascades_to_ungrouped_descriptors() -> None:
+    """#3681: a full ``disable_connector`` also disables ungrouped ops.
+
+    Kept symmetric with the enable cascade so a full disable locks down
+    exactly what a full enable opened — otherwise enabling then disabling
+    would leave ungrouped writes stranded in an enabled state.
+    """
+    tenant_id = uuid.uuid4()
+    await _seed_connector(
+        tenant_id=tenant_id,
+        group_count=1,
+        ops_per_group=1,
+        review_status="enabled",
+        op_is_enabled=True,
+    )
+    await _add_ungrouped_op(
+        tenant_id=tenant_id,
+        op_id="POST:/api/v1/ungrouped/create",
+        method="POST",
+        is_enabled=True,
+    )
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+
+    await service.disable_connector("vmware-rest-9.0", tenant_id=tenant_id)
+
+    enabled_state = await _ops_enabled_state(tenant_id=tenant_id)
+    assert enabled_state["POST:/api/v1/ungrouped/create"] is False
+    assert enabled_state["GET:/api/v1/group-0/0"] is False
 
 
 # ---------------------------------------------------------------------------

@@ -145,6 +145,18 @@ func printReviewTable(w io.Writer, r *api.ConnectorReviewPayload) {
 			*r.NeedsReingestOpCount,
 		)
 	}
+	// #3681: ungrouped descriptors (group_id IS NULL) never land in any
+	// group's op list below — the grouping pass left them out — so the
+	// per-group render alone hides them. Surface the count here so an
+	// operator can see the gap. A full `connector enable` covers them
+	// (the cascade now reaches ungrouped rows too), as does
+	// `connector enable-reads` for read-class ops; `--json` carries the
+	// reconciling `ungrouped_op_count` for tooling.
+	if r.UngroupedOpCount != nil && *r.UngroupedOpCount > 0 {
+		fmt.Fprintf(w, "\nUngrouped ops: %d — not shown in any group above; `connector enable` covers them (per-op `connector edit-op` can still override individual ones). Use --json for the full descriptor universe.\n",
+			*r.UngroupedOpCount,
+		)
+	}
 	if len(r.Groups) == 0 {
 		fmt.Fprintln(w, "(no groups; the connector has no operations or the grouping pass produced no buckets)")
 		return

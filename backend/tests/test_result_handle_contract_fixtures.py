@@ -116,9 +116,6 @@ async def test_late_and_final_fields_are_advertised_by_the_handle_schema() -> No
     [([{"enabled": False}], "false"), ([{"count": 1}], "1")],
     ids=["string-false-against-boolean", "string-one-against-integer"],
 )
-@pytest.mark.xfail(
-    reason="A5/A6 literal-family validation", strict=True, raises=pytest.fail.Exception
-)
 async def test_string_literals_are_rejected_for_non_string_columns(
     rows: list[dict[str, Any]], value: str
 ) -> None:
@@ -233,7 +230,6 @@ async def test_case_distinct_keys_remain_independently_queryable() -> None:
     assert set(result[0]) == {"Foo", "foo"}
 
 
-@pytest.mark.xfail(reason="A5 group output collision", strict=True, raises=pytest.fail.Exception)
 def test_group_key_named_count_is_rejected_before_query_execution() -> None:
     """A group identity cannot be overwritten by COUNT(*)'s public alias."""
     with pytest.raises(QueryContractError):

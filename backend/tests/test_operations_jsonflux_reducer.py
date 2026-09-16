@@ -30,7 +30,6 @@ the captured broadcast event).
 from __future__ import annotations
 
 import json
-import sys
 import uuid
 from collections.abc import AsyncIterator, Iterator, Mapping
 from datetime import UTC, datetime, timedelta
@@ -58,6 +57,7 @@ from meho_backplane.connectors.schemas import (
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
 from meho_backplane.jsonflux.query import engine as query_engine
+from meho_backplane.jsonflux.query import result_catalog as result_catalog_module
 from meho_backplane.jsonflux.query.result_catalog import AdmissionGuard
 from meho_backplane.operations import (
     dispatch,
@@ -801,10 +801,6 @@ async def test_admission_rejection_does_not_serialize_or_spill_raw_graph(
     assert reduced["reason"] == "admission_limit_exceeded"
 
 
-@pytest.mark.skipif(
-    sys.get_int_max_str_digits() == 0,
-    reason="the active Python runtime has disabled its integer conversion cap",
-)
 async def test_admission_rejects_unencodable_huge_integer_before_serialization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -813,6 +809,7 @@ async def test_admission_rejects_unencodable_huge_integer_before_serialization(
     def fail_serialize(value: object) -> bytes:
         raise AssertionError(f"unencodable integer reached serialization: {type(value).__name__}")
 
+    monkeypatch.setattr(result_catalog_module.sys, "get_int_max_str_digits", lambda: 4300)
     monkeypatch.setattr(reducer_module, "_serialize", fail_serialize)
     reduced, handle = await JsonFluxReducer(sample_byte_budget=4096).reduce(
         {"results": [{"value": 1 << 15_000}]}, None

@@ -137,8 +137,13 @@ _DEFAULT_MAX_PROCESSES = 200
 #: clamp is defence-in-depth (a direct handler call / a schema drift).
 _FILE_READ_DEFAULT_MAX_BYTES = 1024 * 1024  # 1 MiB
 _FILE_READ_HARD_CAP_BYTES = 8 * 1024 * 1024  # 8 MiB
-#: Base64 line width for binary ``content_lines`` (RFC 2045 MIME wrapping).
-_BASE64_LINE_WIDTH = 76
+#: Chunk width (base64 characters per ``content_lines`` row) for binary content.
+#: Wider than RFC 2045's 76-char MIME wrap so a large binary spilling to a
+#: result handle produces far fewer rows to page (an 8 MiB file is ~1.4k rows
+#: here vs ~147k at width 76) -- the rows are not independently meaningful (the
+#: agent concatenates them all before one b64decode), so a wide row is pure
+#: paging economy. A multiple of 4 keeps each row a whole base64 quantum.
+_BASE64_LINE_WIDTH = 8192
 
 #: Default wall-clock ceiling (seconds) for the ``guest.program.run``
 #: exit-code poll. Matches VMware Tools' ~5-minute retention of a finished
@@ -409,17 +414,24 @@ async def guest_file_read_composite(
       increment): existence + size + attributes without MEHO proxying bytes.
     * **true** -- MEHO GETs the one-time transfer URL server-side over the
       same pooled TLS client the write path uses (:func:`_get_guest_file_bytes`)
-      and returns the bytes as set-shaped ``content_lines`` (utf-8 text, or
-      76-char base64 chunks for non-decodable binary; flagged by
-      ``content_encoding``). Large content is JSONFlux-wrapped into a result
-      handle by the dispatcher (drill in via ``result_query``). A file larger
-      than ``max_inline_bytes`` (default 1 MiB, hard cap 8 MiB) is **refused**
-      (not truncated) with an error naming the size -- before any GET when the
-      guest-reported size is known, and defensively on the received body. The
-      one-time URL and its token are never returned or logged on this path
-      (the result omits ``url``).
+      and returns the bytes as set-shaped ``content_lines`` (utf-8 text lines
+      when the whole file decodes cleanly, else wide base64 chunks for binary /
+      non-decodable content; flagged by ``content_encoding``). Large content is
+      JSONFlux-wrapped into a result handle by the dispatcher (drill in via
+      ``result_query``). A file larger than ``max_inline_bytes`` (default 1 MiB,
+      hard cap 8 MiB) is **refused** (not truncated) with an error naming the
+      size -- before any GET when the guest-reported size is known, and, when it
+      is not, by :func:`_get_guest_file_bytes`'s streamed running byte-budget
+      (which aborts the read mid-body rather than buffering an unbounded
+      payload). The one-time URL and its token are never returned or logged on
+      this path (the result omits ``url``).
 
-    Safety tier is unchanged (``safe`` read) either way.
+    Safety tier is ``caution`` (not ``safe``): with ``fetch_content=true`` the
+    op returns arbitrary guest file bytes read as the (often privileged)
+    in-guest login with no allow-list, so it auto-parks for agent / service
+    principals (a human seat still executes it immediately). The tier is
+    op-level, so a metadata-only ``fetch_content=false`` read parks for agents
+    too.
     """
     vm_moid = params["vm"]
     guest_path = params["guest_path"]
@@ -648,19 +660,52 @@ async def _get_guest_file_bytes(
     Symmetric to :func:`_put_guest_file_bytes`: resolves the ``*`` placeholder
     host to the target's, uses the target's pooled, TLS-configured client (the
     transfer ticket rides the URL, so no ``auth_headers`` are attached), and
-    raises on a non-2xx. **Refuses** a body larger than ``max_bytes`` --
-    defence in depth against a guest that under-reports or omits
-    ``FileTransferInformation.size`` (the pre-fetch size check cannot bound
-    egress then). The URL (and its ``api_key`` / token query) is never logged.
+    raises on a non-2xx.
+
+    The body is read **streamed with a running byte budget** (the shape of the
+    shared transport's
+    :func:`~meho_backplane.connectors.adapters.http._read_capped_json_response`),
+    so at most ``max_bytes`` (plus one trailing chunk) is ever held in memory:
+
+    * a ``Content-Length`` that already exceeds ``max_bytes`` is
+      **fast-rejected before a single body byte is read**, and
+    * the streamed running total **aborts the read the instant** the
+      accumulated bytes exceed ``max_bytes``.
+
+    This bounds memory even when the transfer host / guest under-reports or
+    omits ``FileTransferInformation.size`` (the pre-fetch size guard cannot
+    bound egress then) *and* omits or understates ``Content-Length`` (a chunked
+    or lying transfer host) -- a non-streaming ``client.get`` would materialise
+    the whole body into memory first and could OOM the pod before the cap ever
+    fired. The URL (and its ``api_key`` / token query) is never logged.
     """
     resolved = _resolve_transfer_url(url, target)
     client = await connector._http_client(target)
-    response = await client.get(resolved)
-    response.raise_for_status()
-    body = response.content
-    if len(body) > max_bytes:
-        raise _file_too_large(len(body), max_bytes)
-    return body
+    async with client.stream("GET", resolved) as response:
+        response.raise_for_status()
+        # Fast-reject an honest oversized body on its declared length, before
+        # reading a byte. A missing / malformed header falls through to the
+        # streaming running-total guard below (the real backstop against an
+        # absent or understated length).
+        declared = response.headers.get("content-length")
+        if declared is not None:
+            try:
+                length = int(declared)
+            except ValueError:
+                length = None
+            if length is not None and length > max_bytes:
+                raise _file_too_large(length, max_bytes)
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in response.aiter_bytes():
+            total += len(chunk)
+            if total > max_bytes:
+                # Abort mid-read: the accumulated body already exceeds the cap,
+                # so exiting the stream context closes the connection without
+                # buffering the rest of the (possibly unbounded) body.
+                raise _file_too_large(total, max_bytes)
+            chunks.append(chunk)
+        return b"".join(chunks)
 
 
 def _shape_guest_file_content(content: bytes) -> tuple[str, list[str]]:
@@ -668,10 +713,13 @@ def _shape_guest_file_content(content: bytes) -> tuple[str, list[str]]:
 
     UTF-8-decodable bytes decode and split on newline (the trailing empty token
     dropped, exactly as ``k8s.logs`` shapes its ``lines``); ``encoding="utf-8"``.
-    Non-decodable (binary) bytes base64-encode and wrap at 76 chars (RFC 2045);
-    ``encoding="base64"``, reassembled as ``base64.b64decode("".join(lines))``.
-    A strict ``decode`` cleanly detects binary and routes it to base64 rather
-    than lossily rendering a binary file as replacement-char "text".
+    That split is line-oriented, not byte-reversible: a trailing newline is
+    dropped and a CRLF file keeps a dangling ``\\r`` -- callers needing the exact
+    bytes use the base64 path. Non-decodable (binary) bytes base64-encode and
+    wrap at :data:`_BASE64_LINE_WIDTH` chars per row; ``encoding="base64"``,
+    reassembled byte-exactly as ``base64.b64decode("".join(lines))``. A strict
+    ``decode`` cleanly detects binary and routes it to base64 rather than lossily
+    rendering a binary file as replacement-char "text".
     """
     try:
         text = content.decode("utf-8")

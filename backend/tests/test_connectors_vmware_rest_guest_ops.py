@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import base64
 import json
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -36,10 +37,28 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.vmware_rest.composites import _guest, _register
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
+from meho_backplane.settings import get_settings
 
 # ---------------------------------------------------------------------------
 # Fixtures / doubles
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Pin the ``Settings`` fields the reducer reads (JSONFlux admission guard).
+
+    The ``file.read`` inline/large-spill tests pass their handler output through
+    the real :class:`JsonFluxReducer`, whose admission guard reads
+    ``result_reduction_*`` limits via :func:`get_settings`; per this suite's
+    convention every test file pins these env vars in its own fixture.
+    """
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 def _operator() -> Operator:
@@ -63,58 +82,137 @@ class _Target:
     verify_tls: bool = False
 
 
+class _FakeStreamResponse:
+    """A minimal streamed httpx-like response for the file.read fetch tests.
+
+    Mirrors the surface :func:`_guest._get_guest_file_bytes` uses on a streamed
+    GET: ``status_code`` + ``raise_for_status`` (non-2xx propagation), a
+    case-insensitive ``headers`` (the ``Content-Length`` fast-reject), and a
+    chunked ``aiter_bytes`` (the running-total byte-budget abort). ``state``
+    accumulates the bytes actually yielded, so a test can prove the read aborted
+    mid-body rather than draining the whole (possibly unbounded) payload.
+    """
+
+    def __init__(
+        self,
+        *,
+        status: int,
+        body: bytes,
+        declare_content_length: bool,
+        chunk_size: int,
+        state: dict[str, int],
+    ) -> None:
+        self.status_code = status
+        self._body = body
+        self._chunk_size = chunk_size
+        self._state = state
+        self.request = httpx.Request("GET", "https://vc.example.test/guestFile")
+        headers: dict[str, str] = {}
+        if declare_content_length:
+            headers["content-length"] = str(len(body))
+        self.headers = httpx.Headers(headers)
+
+    def raise_for_status(self) -> _FakeStreamResponse:
+        if self.status_code >= 400:
+            raise httpx.HTTPStatusError(
+                f"HTTP {self.status_code}",
+                request=self.request,
+                response=httpx.Response(self.status_code, request=self.request),
+            )
+        return self
+
+    async def aiter_bytes(self) -> AsyncIterator[bytes]:
+        for i in range(0, len(self._body), self._chunk_size):
+            chunk = self._body[i : i + self._chunk_size]
+            self._state["yielded"] += len(chunk)
+            yield chunk
+
+
+class _FakeStreamCtx:
+    """Async context manager returned by ``_FakeTransferClient.stream``."""
+
+    def __init__(self, response: _FakeStreamResponse) -> None:
+        self._response = response
+
+    async def __aenter__(self) -> _FakeStreamResponse:
+        return self._response
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+
 class _FakeTransferClient:
-    """Pooled-client stand-in that records PUTs and GETs on the transfer URL.
+    """Pooled-client stand-in that records PUTs and streamed GETs on the transfer URL.
 
     ``put`` returns ``put_status`` and records the URL + content (the write
-    path); ``get`` returns ``get_status`` with ``get_body`` and records the URL
-    (the opt-in file.read inline fetch). Both are the guest-transfer seam the
-    connector's pooled TLS client serves.
+    path); ``stream`` records the URL and yields a :class:`_FakeStreamResponse`
+    carrying ``get_body`` at ``get_status`` (the opt-in file.read inline fetch,
+    which streams the body under a byte budget). Both are the guest-transfer seam
+    the connector's pooled TLS client serves.
     """
 
     def __init__(
         self,
         put_calls: list[dict[str, Any]],
         get_calls: list[dict[str, Any]],
+        stream_state: dict[str, int],
         *,
         put_status: int = 200,
         get_status: int = 200,
         get_body: bytes = b"",
+        declare_content_length: bool = True,
+        chunk_size: int = 65536,
     ) -> None:
         self._put_calls = put_calls
         self._get_calls = get_calls
+        self._stream_state = stream_state
         self._put_status = put_status
         self._get_status = get_status
         self._get_body = get_body
+        self._declare_content_length = declare_content_length
+        self._chunk_size = chunk_size
 
     async def put(self, url: str, *, content: bytes | None = None) -> httpx.Response:
         self._put_calls.append({"url": url, "content": content})
         return httpx.Response(self._put_status, request=httpx.Request("PUT", url))
 
-    async def get(self, url: str) -> httpx.Response:
+    def stream(self, method: str, url: str) -> _FakeStreamCtx:
         self._get_calls.append({"url": url})
-        return httpx.Response(
-            self._get_status, content=self._get_body, request=httpx.Request("GET", url)
+        return _FakeStreamCtx(
+            _FakeStreamResponse(
+                status=self._get_status,
+                body=self._get_body,
+                declare_content_length=self._declare_content_length,
+                chunk_size=self._chunk_size,
+                state=self._stream_state,
+            )
         )
 
 
 @dataclass
 class _GuestRecordingConnector:
-    """Records vmomi sub-calls + PUTs/GETs, serving canned VI-JSON responses.
+    """Records vmomi sub-calls + PUTs/streamed GETs, serving canned VI-JSON responses.
 
     ``vmomi`` is keyed by the RetrievePropertiesEx queried object type
     (``GuestOperationsManager`` / ``VirtualMachine``) and by the concrete
     method path for the guest-ops methods. ``get_status`` / ``get_body`` drive
-    the canned guest-transfer GET the opt-in file.read fetch issues.
+    the canned guest-transfer GET the opt-in file.read fetch streams;
+    ``declare_content_length`` toggles whether the response advertises a
+    ``Content-Length`` (off = a chunked / lying host, exercising the streamed
+    running-total abort); ``stream_state["yielded"]`` records how many body
+    bytes were actually drained.
     """
 
     vmomi: dict[str, Any] = field(default_factory=dict)
     put_status: int = 200
     get_status: int = 200
     get_body: bytes = b""
+    declare_content_length: bool = True
+    stream_chunk_size: int = 65536
     vmomi_calls: list[dict[str, Any]] = field(default_factory=list)
     put_calls: list[dict[str, Any]] = field(default_factory=list)
     get_calls: list[dict[str, Any]] = field(default_factory=list)
+    stream_state: dict[str, int] = field(default_factory=lambda: {"yielded": 0})
 
     async def _post_vmomi_json(
         self, target: Any, path: str, *, operator: Operator, json: Any = None
@@ -132,9 +230,12 @@ class _GuestRecordingConnector:
         return _FakeTransferClient(
             self.put_calls,
             self.get_calls,
+            self.stream_state,
             put_status=self.put_status,
             get_status=self.get_status,
             get_body=self.get_body,
+            declare_content_length=self.declare_content_length,
+            chunk_size=self.stream_chunk_size,
         )
 
 
@@ -560,8 +661,14 @@ async def test_file_read_over_cap_refuses_before_get(creds: _CredRecorder) -> No
 
 
 @pytest.mark.asyncio
-async def test_file_read_over_cap_refuses_on_oversized_body(creds: _CredRecorder) -> None:
-    """An under-reported / absent size is caught by the post-fetch body check."""
+async def test_file_read_over_cap_refuses_on_content_length(creds: _CredRecorder) -> None:
+    """A VIM-size-absent read is fast-rejected on the transfer Content-Length.
+
+    The guest omits ``FileTransferInformation.size`` so the pre-fetch guard
+    cannot bound egress, but an honest transfer host still advertises a
+    ``Content-Length``; the fetch fast-rejects on that declared length before
+    reading a single body byte.
+    """
     # Omit ``size`` so the pre-fetch check cannot bound egress.
     info = {
         "url": "https://vc.example.test/guestFile?id=1&token=abc",
@@ -581,8 +688,53 @@ async def test_file_read_over_cap_refuses_on_oversized_body(creds: _CredRecorder
             },
             connector=conn,  # type: ignore[arg-type]
         )
-    # The GET ran (size was unknown) but no content_lines were produced.
+    # The stream was opened (size was unknown), but the Content-Length fast-reject
+    # fired before a single body byte was drained.
     assert conn.get_calls == [{"url": info["url"]}]
+    assert conn.stream_state["yielded"] == 0
+
+
+@pytest.mark.asyncio
+async def test_file_read_streaming_aborts_mid_body_without_content_length(
+    creds: _CredRecorder,
+) -> None:
+    """A chunked / lying host (no Content-Length) is bounded by the running total.
+
+    With neither a VIM ``size`` nor a ``Content-Length`` to bound egress, the
+    fetch must not buffer the whole body: it streams under a running byte budget
+    and aborts the instant the accumulated bytes exceed ``max_inline_bytes`` --
+    so only ~one chunk past the cap is ever drained, never the full payload.
+    This is the memory-exhaustion guard (B1): a non-streaming read would
+    materialize the entire body first.
+    """
+    info = {
+        "url": "https://vc.example.test/guestFile?id=1&token=abc",
+        "attributes": {"_typeName": "GuestPosixFileAttributes", "permissions": 420},
+    }
+    body = b"x" * (5 * 1024 * 1024)  # 5 MiB delivered in 64 KiB chunks
+    conn = _read_conn(
+        info,
+        get_body=body,
+        declare_content_length=False,  # chunked / size hidden
+        stream_chunk_size=64 * 1024,
+    )
+    with pytest.raises(RuntimeError, match=r"inline-fetch cap"):
+        await _guest.guest_file_read_composite(
+            operator=_operator(),
+            target=_Target(),
+            params={
+                "vm": "vm-42",
+                "guest_path": "/big.bin",
+                "fetch_content": True,
+                "max_inline_bytes": 1_048_576,
+            },
+            connector=conn,  # type: ignore[arg-type]
+        )
+    assert conn.get_calls == [{"url": info["url"]}]
+    # Aborted mid-read: at most the cap plus one trailing chunk was drained, far
+    # short of the full 5 MiB body.
+    assert conn.stream_state["yielded"] <= 1_048_576 + 64 * 1024
+    assert conn.stream_state["yielded"] < len(body)
 
 
 @pytest.mark.asyncio

@@ -254,7 +254,7 @@ alongside it, all on the same connector:
 | Operation | What it does | Tier |
 |---|---|---|
 | `vmware.composite.vm.guest.process.list` | List running guest processes | `safe` |
-| `vmware.composite.vm.guest.file.read` | Read a guest file (metadata; opt-in byte fetch via `fetch_content`, capped/refused over `max_inline_bytes`) | `safe` |
+| `vmware.composite.vm.guest.file.read` | Read a guest file (metadata; opt-in byte fetch via `fetch_content`, capped/refused over `max_inline_bytes`) | `caution` (byte fetch reads as the in-guest login; auto-parks for agents/service) |
 | `vmware.composite.vm.guest.env.read` | Read a guest environment variable | `safe` |
 | `vmware.composite.vm.guest.net.show` | Guest NIC / IP state (Tools-reported, no guest login) | `safe` |
 | `vmware.composite.vm.guest.file.write` | Write a guest file | `dangerous` + approval |

@@ -1515,14 +1515,25 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
             "capped by max_inline_bytes (default 1 MiB, hard cap 8 MiB) and "
             "JSONFlux-wrapped into a result handle when large; a file over the cap "
             "is refused (not truncated) with an error naming its size, and the "
-            "transfer URL + token are never returned or logged. Read-only. "
-            "Requires VMware Tools in the guest."
+            "transfer URL + token are never returned or logged. Reads run as the "
+            "in-guest login from the target's secret_ref (often root / "
+            "Administrator) with no path allow-list, so the op is caution-tier: "
+            "it auto-parks for agent / service principals (a human operator diag "
+            "read still executes immediately). Requires VMware Tools in the guest."
         ),
         parameter_schema=GUEST_FILE_READ_PARAMETER_SCHEMA,
         response_schema=GUEST_FILE_READ_RESPONSE_SCHEMA,
         group_key="guest_ops",
         tags=["composite", "read-only", "guest", "vi-json", "file"],
-        safety_level="safe",
+        # Caution, not safe (#3720): fetch_content=true returns arbitrary guest
+        # file bytes read as the in-guest login (often privileged) with no
+        # allow-list and no redaction, so the op must auto-park for agent /
+        # service principals. requires_approval stays False -- caution parks for
+        # non-human principals but executes immediately for a human seat, so an
+        # operator's diagnostic read is unaffected. The tier is op-level, so even
+        # a metadata-only fetch_content=false read parks for agents (the
+        # conservative posture chosen in review over per-param tiering).
+        safety_level="caution",
         requires_approval=False,
         llm_instructions={
             "when_to_use": (
@@ -1530,7 +1541,10 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
                 "or obtain a one-time transfer URL for it. Set fetch_content=true "
                 "to get the bytes inline (as content_lines); large files return a "
                 "result handle to page with result_query. Files over "
-                "max_inline_bytes are refused, not truncated."
+                "max_inline_bytes are refused, not truncated. Reads as the "
+                "in-guest user (often privileged) with no allow-list, so it can "
+                "disclose sensitive file contents; caution-tier -- auto-parks for "
+                "agent / service principals."
             ),
             "preconditions": (
                 "VMware Tools running; guest credential in the target's "

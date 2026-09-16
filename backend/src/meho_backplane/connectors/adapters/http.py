@@ -544,6 +544,17 @@ def _same_origin(a: httpx.URL, b: httpx.URL) -> bool:
     )
 
 
+def _origin_and_path(url: httpx.URL) -> str:
+    """Return ``scheme://host[:port]/path`` -- query, fragment, and userinfo dropped.
+
+    A guest-transfer / session URL carries a one-time ticket in its query string
+    (and could carry credentials in its userinfo). This scrubs both so the ticket
+    never reaches a log line, while still naming the origin + path that was
+    refused for diagnosis.
+    """
+    return str(url.copy_with(query=None, fragment=None, username=None, password=None))
+
+
 class _SameOriginRedirectClient(httpx.AsyncClient):
     """An ``AsyncClient`` that follows redirects **only within one origin**.
 
@@ -596,7 +607,10 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
                 logger.warning(
                     "connector_redirect_not_followed_cross_origin",
                     method=request.method,
-                    from_url=str(request.url),
+                    # Scheme+host+path only: a guest-transfer / session URL
+                    # carries a one-time ticket in its query string, so the
+                    # full URL must never land in a log line.
+                    from_url=_origin_and_path(request.url),
                     location=response.headers.get("Location"),
                 )
                 return response

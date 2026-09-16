@@ -780,9 +780,7 @@ async def _get_guest_file_bytes(
     """
     resolved = _resolve_transfer_url(url, target)
     client = await connector._http_client(target)
-    async with client.stream(
-        "GET", resolved, headers={"Accept-Encoding": "identity"}
-    ) as response:
+    async with client.stream("GET", resolved, headers={"Accept-Encoding": "identity"}) as response:
         if not response.is_success:
             # Read a BOUNDED error snippet off the still-unread stream and raise
             # a clean connector error. Do NOT call response.raise_for_status()
@@ -791,9 +789,7 @@ async def _get_guest_file_bytes(
             # error enrichment (.text / .json) would then raise
             # httpx.ResponseNotRead and escape -- no structured result, no
             # error-audit row.
-            raise _transfer_get_failed(
-                response.status_code, await _bounded_error_snippet(response)
-            )
+            raise _transfer_get_failed(response.status_code, await _bounded_error_snippet(response))
         # Refuse a transport Content-Encoding (see _transfer_content_encoding_refused):
         # with identity enforced, the aiter_raw wire budget below bounds exactly
         # what the agent receives, immune to a gzip decompression bomb.

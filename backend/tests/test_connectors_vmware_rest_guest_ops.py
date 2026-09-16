@@ -797,7 +797,9 @@ async def test_file_read_fetch_get_failure_raises_clean_connector_error(
     ``RuntimeError`` naming the HTTP status and a bounded body snippet, with no
     transfer URL / token and no chained ``HTTPStatusError``.
     """
-    info = _read_info(size=10, url="https://vc.example.test/guestFile?id=1&token=abc&api_key=SEKRIT")
+    info = _read_info(
+        size=10, url="https://vc.example.test/guestFile?id=1&token=abc&api_key=SEKRIT"
+    )
     conn = _read_conn(info, get_status=500, get_body=b"transfer host exploded")
     with pytest.raises(RuntimeError) as excinfo:
         await _guest.guest_file_read_composite(

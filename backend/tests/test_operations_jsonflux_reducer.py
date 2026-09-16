@@ -30,6 +30,7 @@ the captured broadcast event).
 from __future__ import annotations
 
 import json
+import sys
 import uuid
 from collections.abc import AsyncIterator, Iterator, Mapping
 from datetime import UTC, datetime, timedelta
@@ -798,6 +799,28 @@ async def test_admission_rejection_does_not_serialize_or_spill_raw_graph(
     assert handle.schema_["items"]["properties"] == {}
     assert reduced["status"] == "unprofiled"
     assert reduced["reason"] == "admission_limit_exceeded"
+
+
+@pytest.mark.skipif(
+    sys.get_int_max_str_digits() == 0,
+    reason="the active Python runtime has disabled its integer conversion cap",
+)
+async def test_admission_rejects_unencodable_huge_integer_before_serialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An active Python decimal cap cannot be reached through `_serialize`."""
+
+    def fail_serialize(value: object) -> bytes:
+        raise AssertionError(f"unencodable integer reached serialization: {type(value).__name__}")
+
+    monkeypatch.setattr(reducer_module, "_serialize", fail_serialize)
+    reduced, handle = await JsonFluxReducer(sample_byte_budget=4096).reduce(
+        {"results": [{"value": 1 << 15_000}]}, None
+    )
+
+    assert handle is not None
+    assert handle.fetch_more.drill_in.reason == "admission_limit_exceeded"
+    assert reduced["status"] == "unprofiled"
 
 
 async def test_admission_fallback_envelope_is_bounded_without_raw_values() -> None:

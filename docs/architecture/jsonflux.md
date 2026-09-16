@@ -304,7 +304,9 @@ UTF-8 strings, and any breached bound return an unprofiled handle with empty
 schema properties and `drill_in.reason=admission_limit_exceeded`; rejected
 graphs are neither serialized nor spilled. The `64` depth limit intentionally
 does not inherit the vendored analyzer's `32`-level limit, because the catalog
-does not use that analyzer.
+does not use that analyzer. For integers, the guard also rejects a conservative
+decimal-digit estimate over Python's active integer-to-string conversion cap,
+before an encoder can raise while measuring the payload.
 
 ### The inline sample is serialized once (#134)
 

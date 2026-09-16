@@ -11,6 +11,7 @@ lazy concerns of the drill-in query path.
 from __future__ import annotations
 
 import math
+import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any, Final
@@ -76,6 +77,7 @@ class AdmissionGuard:
         """Return whether *value* fits the configured bounded JSON walk."""
         size = 0
         nodes = 0
+        int_digit_limit = sys.get_int_max_str_digits()
         active: set[int] = set()
         stack: list[tuple[Iterator[Any], int, int, bool]] = []
 
@@ -115,6 +117,8 @@ class AdmissionGuard:
                 # makes enormous Python integers consume a proportional
                 # rational upper-bound estimate of decimal digits.
                 decimal_digits = max(1, (item.bit_length() * 30_103 + 99_999) // 100_000)
+                if int_digit_limit and decimal_digits > int_digit_limit:
+                    return False
                 return add_size(decimal_digits + (1 if item < 0 else 0))
             if isinstance(item, float):
                 return math.isfinite(item) and add_size(24)

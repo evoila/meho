@@ -53,6 +53,7 @@ from meho_backplane.redaction.flight_recorder.span import SpanRedaction, redact_
 from meho_backplane.redaction.flight_recorder.verdict import (
     BODY_OMITTED_MARKER,
     BODY_PATH_MARKER,
+    OVF_PROPERTY_VALUE_MARKER,
     SECRET_FAMILY_OMITTED_MARKER,
     UNPLACEABLE_FAMILY_MARKER,
     RedactionOutcome,
@@ -63,6 +64,7 @@ __all__ = [
     "BODY_OMITTED_MARKER",
     "BODY_PATH_MARKER",
     "HEADER_ALLOWLIST",
+    "OVF_PROPERTY_VALUE_MARKER",
     "SECRET_FAMILY_OMITTED_MARKER",
     "SECRET_FAMILY_PATTERNS",
     "SECRET_FAMILY_TAGS",

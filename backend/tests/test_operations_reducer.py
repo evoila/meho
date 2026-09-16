@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -608,20 +608,11 @@ async def test_dispatch_passes_context_to_reducer(
 
 
 @pytest.mark.asyncio
-async def test_dispatch_returns_connector_error_when_reducer_raises(
+async def test_dispatch_returns_unavailable_delivery_when_reducer_raises(
     stub_embedding_service: AsyncMock,
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """Reducer exception lands as ``connector_error`` — dispatcher never raises.
-
-    The dispatcher's module docstring contracts "never raises". v0.2's
-    pass-through reducer can't raise, but ``set_default_reducer(...)``
-    invites swappable real reducers (MinIO/S3 I/O, schema validation)
-    that will. A reducer that raises must be caught inside ``dispatch()``,
-    converted to a structured ``connector_error`` :class:`OperationResult`,
-    audited, and broadcast — same shape the handler-call exception path
-    produces.
-    """
+    """A completed handler stays successful when only reduction fails."""
 
     class _ExplodingReducer:
         async def reduce(
@@ -651,26 +642,35 @@ async def test_dispatch_returns_connector_error_when_reducer_raises(
         embedding_service=stub_embedding_service,
     )
 
-    set_default_reducer(_ExplodingReducer())
-    try:
-        result = await dispatch(
-            operator=_make_operator(),
-            connector_id="vault-1.x",
-            op_id="vault.kv.list",
-            target=_FakeTarget(product="vault"),
-            params={"path": "/secret"},
-        )
-    finally:
-        set_default_reducer(PassThroughReducer())
+    with patch("meho_backplane.operations.dispatcher._log") as mock_log:
+        set_default_reducer(_ExplodingReducer())
+        try:
+            result = await dispatch(
+                operator=_make_operator(),
+                connector_id="vault-1.x",
+                op_id="vault.kv.list",
+                target=_FakeTarget(product="vault"),
+                params={"path": "/secret"},
+            )
+        finally:
+            set_default_reducer(PassThroughReducer())
 
-    assert result.status == "error"
-    assert result.error is not None
-    assert result.error.startswith("connector_error:")
-    assert result.extras["error_code"] == "connector_error"
-    assert result.extras["exception_class"] == "RuntimeError"
-    # Audit row + broadcast event still fired — the failure is observable.
+    assert result.status == "ok"
+    assert result.result is None
+    assert result.handle is None
+    assert result.delivery == "unavailable"
+    assert result.audit_id is not None
+    assert "RuntimeError" not in str(result.extras)
+    assert "already executed" in result.extras["remediation"]
+    mock_log.warning.assert_called_once_with(
+        "result_delivery_unavailable",
+        op_id="vault.kv.list",
+        audit_id=str(result.audit_id),
+        exception_class="RuntimeError",
+    )
+    assert "simulated reducer explosion" not in str(mock_log.warning.call_args)
     assert len(captured_events) == 1
-    assert captured_events[0].result_status == "error"
+    assert captured_events[0].result_status == "ok"
 
 
 # ---------------------------------------------------------------------------

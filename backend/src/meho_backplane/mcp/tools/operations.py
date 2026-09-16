@@ -555,6 +555,18 @@ register_mcp_tool(
                 },
                 "error": {"type": ["string", "null"]},
                 "duration_ms": {"type": "number"},
+                "audit_id": {
+                    "type": ["string", "null"],
+                    "format": "uuid",
+                    "description": ("Committed audit receipt; null when a row cannot be promised."),
+                },
+                "delivery": {
+                    "type": ["string", "null"],
+                    "enum": ["complete", "partial", "unavailable", None],
+                    "description": (
+                        "Response delivery state, separate from whether the operation executed."
+                    ),
+                },
                 # ``handle`` was missing from the declared properties
                 # (#2774 schema-honesty sweep): the payload is
                 # ``OperationResult.model_dump`` verbatim, which always

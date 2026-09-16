@@ -13,17 +13,18 @@ Three axes, per the Task:
   (``handle_id`` / ``summary_md`` / ``schema_`` / ``total_rows`` /
   ``sample_rows`` / ``ttl_seconds``) reflect the DuckDB-materialized
   table, not a synthetic placeholder.
-* **exception tolerance via the dispatcher** — a reducer that raises
-  propagates as a ``connector_error`` :class:`OperationResult` through
-  :func:`~meho_backplane.operations.dispatcher._reduce_or_error`, and the
-  audit row + broadcast event still commit (the dispatcher's
-  never-raises contract).
+* **delivery tolerance via the dispatcher** — a reducer that raises after a
+  successful handler returns an ``ok`` :class:`OperationResult` with
+  ``delivery="unavailable"`` through
+  :func:`~meho_backplane.operations.dispatcher._reduce_or_error`; the audit
+  row + broadcast event still commit, so callers do not repeat a completed
+  operation.
 
 The third test wires a deliberately-broken reducer through the real
 dispatch path the same way :mod:`tests.test_operations_dispatcher` does
 (register a typed op, install the reducer via
 :func:`~meho_backplane.operations.dispatcher.set_default_reducer`,
-dispatch, assert on the structured error + the persisted audit row +
+dispatch, assert on the delivery signal + the persisted audit row +
 the captured broadcast event).
 """
 
@@ -985,7 +986,7 @@ def test_preserved_objects_bounds_a_long_san_list_without_silent_drop() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Dispatcher integration — broken reducer → connector_error
+# Dispatcher integration — broken reducer → unavailable delivery
 # ---------------------------------------------------------------------------
 
 
@@ -1211,23 +1212,16 @@ async def _registered_typed_op(
     yield
 
 
-async def test_reducer_exception_yields_connector_error_via_dispatcher(
+async def test_reducer_exception_marks_completed_delivery_unavailable_via_dispatcher(
     _registered_typed_op: None,
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """A reducer raise propagates as ``connector_error``; audit + broadcast commit.
+    """A reducer failure preserves completed execution and its committed receipt.
 
-    Pins the dispatcher's never-raises contract for the JSONFlux seam
-    (:func:`~meho_backplane.operations.dispatcher._reduce_or_error`):
-
-    * ``status == 'error'`` with ``error`` prefixed ``connector_error:``
-      and ``extras['error_code'] == 'connector_error'`` — the reducer's
-      ``RuntimeError`` was converted, not propagated.
-    * exactly one ``audit_log`` row for the op carries
-      ``result_status == 'error'`` — the audit write committed despite
-      the reducer failure.
-    * exactly one broadcast event fired with ``result_status == 'error'``
-      — the failure is observable on the feed.
+    The reducer runs only after the handler succeeds. Its exception must not
+    relabel that completed operation as ``connector_error`` or expose the
+    exception text. The single audit row and broadcast event retain
+    ``result_status == 'ok'`` for the completed dispatch.
     """
     set_default_reducer(_BrokenReducer())
     try:
@@ -1241,11 +1235,16 @@ async def test_reducer_exception_yields_connector_error_via_dispatcher(
     finally:
         set_default_reducer(PassThroughReducer())
 
-    assert result.status == "error"
-    assert result.error is not None
-    assert result.error.startswith("connector_error:")
-    assert result.extras["error_code"] == "connector_error"
-    assert result.extras["exception_class"] == "RuntimeError"
+    assert result.status == "ok"
+    assert result.delivery == "unavailable"
+    assert result.result is None
+    assert result.handle is None
+    assert result.error is None
+    assert result.audit_id is not None
+    assert "already executed" in result.extras["remediation"]
+    assert "Do not re-invoke" in result.extras["remediation"]
+    assert "simulated reducer explosion" not in str(result.extras)
+    assert "connector_error" not in str(result.extras)
 
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -1255,9 +1254,12 @@ async def test_reducer_exception_yields_connector_error_via_dispatcher(
             .all()
         )
     assert len(rows) == 1
-    assert rows[0].payload["result_status"] == "error"
+    assert rows[0].id == result.audit_id
+    assert rows[0].payload["result_status"] == "ok"
 
     assert len(captured_events) == 1
+    assert captured_events[0].audit_id == result.audit_id
+    assert captured_events[0].result_status == "ok"
 
 
 # ---------------------------------------------------------------------------

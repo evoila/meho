@@ -315,7 +315,13 @@ in prod**:
 
 A tool that cannot honestly declare its output shape should drop the
 declaration (spec-legal — proven by the ~60 non-declaring tools)
-rather than publish a schema its payloads violate.
+rather than publish a schema its payloads violate. `call_operation` exposes an
+`audit_id` only after its dispatcher audit row commits; a null value promises no
+audit receipt. Its nullable `delivery` is about response shaping, not how much
+upstream data a result handle retained: `complete` means the shaped response was
+delivered, `unavailable` means execution completed but shaping failed and callers
+must inspect audit/status evidence without re-invoking it, and `partial` is
+reserved for later delivery-budget handling.
 
 ## Agent-surface scoping (working vs. operator, #3154)
 

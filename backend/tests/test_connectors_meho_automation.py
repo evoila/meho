@@ -19,12 +19,16 @@ validate / gate ops; oauth2_mint external issuer; runtime spec ingest):
   disabled with the decided tiers: launch + gate ``caution`` (no approval
   park), and validate ``caution`` too — a read-side dry-run that still rides
   caution because ingested POSTs never sit below the caution floor.
-* A wide-spec ingest persists exactly the FIVE allowlisted ops — the three
-  write ops above plus the two run-read GETs a governed launcher observes with
-  (``GET /api/v1/runs/{run_id}`` + ``GET /api/v1/runs``, #3699) — and drops
-  every other mutating route before persistence. The two GETs land ``safe``
-  (below the ``caution`` write floor, floor untouched); ``GET /api/v1/runs`` is
-  set-shaped and rides the result-handle path once dispatchable.
+* A wide-spec ingest persists exactly the SIX allowlisted ops — the three
+  write ops above, the run-node resume write a governed launcher nudges a
+  failed node with (``POST /api/v1/runs/{run_id}/nodes/{node_id}/resume``,
+  ``caution``, #3707), and the two run-read GETs a governed launcher observes
+  with (``GET /api/v1/runs/{run_id}`` + ``GET /api/v1/runs``, #3699) — and
+  drops every other mutating route before persistence, including the human-only
+  run-node ``.../skip`` sibling of resume (never allowlisted). The two GETs
+  land ``safe`` (below the ``caution`` write floor, floor untouched);
+  ``GET /api/v1/runs`` is set-shaped and rides the result-handle path once
+  dispatchable.
 * The v2 registry resolves the connector for a ``(mehoauto, 0.1.0)`` target
   fingerprint (boot-stamped from the shipped profile).
 
@@ -83,6 +87,10 @@ _TRIPLE = (_PRODUCT, _VERSION, _IMPL_ID)
 _LAUNCH = "/api/v1/runs"
 _VALIDATE = "/api/v1/blueprints/{blueprint_id}/validate"
 _GATE = "/api/v1/runs/{run_id}/gates/{node_id}/decision"
+_RESUME = "/api/v1/runs/{run_id}/nodes/{node_id}/resume"
+#: The human-only sibling of _RESUME — never allowlisted, never floor-pinned,
+#: always dropped before persistence (the negative case, #3707).
+_SKIP = "/api/v1/runs/{run_id}/nodes/{node_id}/skip"
 
 
 @pytest.fixture(autouse=True)
@@ -303,6 +311,7 @@ def test_boot_guards_accept_the_row_and_profile_without_a_spec() -> None:
         ("POST", _LAUNCH, "caution"),
         ("POST", _GATE, "caution"),
         ("POST", _VALIDATE, "caution"),
+        ("POST", _RESUME, "caution"),
     ],
 )
 def test_safety_floor_pins_the_decided_tiers(method: str, path: str, expected: str) -> None:
@@ -480,9 +489,10 @@ def test_connector_registers_its_safety_floor_in_the_global_registry() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Ingest op allowlist (security review T3-F01; run reads #3699) — a wide spec
-# persists exactly the five allowlisted ops (three writes + two run-read GETs);
-# every other route is dropped before persistence.
+# Ingest op allowlist (security review T3-F01; run reads #3699, resume #3707) —
+# a wide spec persists exactly the six allowlisted ops (four writes + two
+# run-read GETs); every other route is dropped before persistence, including
+# the human-only run-node skip sibling of resume.
 # ---------------------------------------------------------------------------
 
 # The add-on's real /openapi.json publishes ~30 mutating routes; this synthetic
@@ -492,8 +502,9 @@ def test_connector_registers_its_safety_floor_in_the_global_registry() -> None:
 # three allowlisted ops plus DELETE routes and a POST /api/v1/fleet/import.
 _WIDE_ROUTE_KEYS: frozenset[tuple[str, str]] = frozenset(
     {
-        # The three allowlisted WRITE ops (must survive ingest). The two
-        # allowlisted run-read GETs live in the "runs" block below (#3699).
+        # Three of the four allowlisted WRITE ops (must survive ingest). The
+        # fourth write (run-node resume, #3707) and the two allowlisted
+        # run-read GETs (#3699) live in the "runs" block below.
         ("POST", _LAUNCH),
         ("POST", _VALIDATE),
         ("POST", _GATE),
@@ -534,11 +545,15 @@ _WIDE_ROUTE_KEYS: frozenset[tuple[str, str]] = frozenset(
         # fleet
         ("POST", "/api/v1/fleet/import"),
         ("GET", "/api/v1/fleet"),
-        # runs: the two run-read GETs are allowlisted (#3699); DELETE stays
-        # non-allowlisted and must still be dropped.
+        # runs: the two run-read GETs are allowlisted (#3699) and the run-node
+        # resume write is allowlisted (#3707); DELETE stays non-allowlisted and
+        # must still be dropped, and the run-node SKIP write is human-only in
+        # the add-on so it must drop too (the paired negative of resume).
         ("GET", "/api/v1/runs"),
         ("GET", "/api/v1/runs/{run_id}"),
         ("DELETE", "/api/v1/runs/{run_id}"),
+        ("POST", _RESUME),
+        ("POST", _SKIP),
     }
 )
 
@@ -571,7 +586,7 @@ def _wide_spec() -> str:
 
 
 @pytest.mark.asyncio
-async def test_wide_spec_ingests_to_exactly_the_five_allowlisted_ops(
+async def test_wide_spec_ingests_to_exactly_the_six_allowlisted_ops(
     stub_embedding_service: AsyncMock,
 ) -> None:
     register_safety_floor()
@@ -590,23 +605,29 @@ async def test_wide_spec_ingests_to_exactly_the_five_allowlisted_ops(
         embedding_service=stub_embedding_service,
         register_shim=False,
     )
-    # Exactly the five allowlisted ops persist (three writes + two run-read
-    # GETs, #3699); every other route is dropped before persistence (never
-    # staged), and the result carries the count.
-    assert result.inserted_count == 5
-    assert result.dropped_count == len(_WIDE_ROUTE_KEYS) - 5
+    # Exactly the six allowlisted ops persist (four writes + two run-read
+    # GETs, #3699/#3707); every other route is dropped before persistence
+    # (never staged), and the result carries the count.
+    assert result.inserted_count == 6
+    assert result.dropped_count == len(_WIDE_ROUTE_KEYS) - 6
     dropped_keys = {(dropped.method, dropped.path) for dropped in result.dropped_ops}
     # The mutating routes the finding calls out are among the dropped set.
     assert ("DELETE", "/api/v1/tenants/{tenant_id}") in dropped_keys
     assert ("POST", "/api/v1/fleet/import") in dropped_keys
     # DELETE on a run item stays dropped even though the run-read GETs are kept.
     assert ("DELETE", "/api/v1/runs/{run_id}") in dropped_keys
-    # None of the five allowlisted ops were dropped.
+    # The run-node SKIP write is human-only in the add-on: it is dropped before
+    # persistence, while its resume sibling is kept (#3707). The allowlist keys
+    # on (method, path), so the two share a method but not a path.
+    assert ("POST", _SKIP) in dropped_keys
+    assert ("POST", _RESUME) not in dropped_keys
+    # None of the six allowlisted ops were dropped.
     assert dropped_keys.isdisjoint(
         {
             ("POST", _LAUNCH),
             ("POST", _VALIDATE),
             ("POST", _GATE),
+            ("POST", _RESUME),
             ("GET", "/api/v1/runs"),
             ("GET", "/api/v1/runs/{run_id}"),
         }
@@ -627,17 +648,18 @@ async def test_wide_spec_ingests_to_exactly_the_five_allowlisted_ops(
         f"POST:{_LAUNCH}",
         f"POST:{_VALIDATE}",
         f"POST:{_GATE}",
+        f"POST:{_RESUME}",
         "GET:/api/v1/runs",
         "GET:/api/v1/runs/{run_id}",
     }
     by_id = {row.op_id: row for row in rows}
-    # All five are staged/disabled (ingested) at ingest — the review gate stays
+    # All six are staged/disabled (ingested) at ingest — the review gate stays
     # the interlock.
     for row in rows:
         assert row.is_enabled is False
         assert row.source_kind == "ingested"
-    # The three write ops ride `caution`, no approval park.
-    for op_id in (f"POST:{_LAUNCH}", f"POST:{_VALIDATE}", f"POST:{_GATE}"):
+    # The four write ops ride `caution`, no approval park.
+    for op_id in (f"POST:{_LAUNCH}", f"POST:{_VALIDATE}", f"POST:{_GATE}", f"POST:{_RESUME}"):
         assert (by_id[op_id].safety_level, by_id[op_id].requires_approval) == ("caution", False)
     # The two run-read GETs ride `safe` (the generic verb heuristic; the floor
     # pins no key for them — reads sit below the caution write floor).
@@ -646,10 +668,10 @@ async def test_wide_spec_ingests_to_exactly_the_five_allowlisted_ops(
 
 
 @pytest.mark.asyncio
-async def test_reingest_of_the_wide_spec_stays_bounded_to_five(
+async def test_reingest_of_the_wide_spec_stays_bounded_to_six(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """Re-ingesting the wide spec keeps exactly five persisted ops — the
+    """Re-ingesting the wide spec keeps exactly six persisted ops — the
     allowlist bounds every register call, not just the first."""
     register_safety_floor()
     protos = parse_openapi("spec:wide", spec_source="spec:wide", content=_wide_spec())
@@ -664,7 +686,7 @@ async def test_reingest_of_the_wide_spec_stays_bounded_to_five(
         embedding_service=stub_embedding_service,
         register_shim=False,
     )
-    assert first.inserted_count == 5
+    assert first.inserted_count == 6
 
     second = await register_ingested_operations(
         product=_PRODUCT,
@@ -676,10 +698,10 @@ async def test_reingest_of_the_wide_spec_stays_bounded_to_five(
         embedding_service=stub_embedding_service,
         register_shim=False,
     )
-    # Idempotent re-ingest: the five unchanged ops skip, none inserted, and
+    # Idempotent re-ingest: the six unchanged ops skip, none inserted, and
     # the wide surface is still dropped (bounded on the re-ingest path too).
     assert second.inserted_count == 0
-    assert second.dropped_count == len(_WIDE_ROUTE_KEYS) - 5
+    assert second.dropped_count == len(_WIDE_ROUTE_KEYS) - 6
 
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -692,7 +714,7 @@ async def test_reingest_of_the_wide_spec_stays_bounded_to_five(
             .scalars()
             .all()
         )
-    assert count == 5
+    assert count == 6
 
 
 # ---------------------------------------------------------------------------

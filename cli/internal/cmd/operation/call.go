@@ -40,6 +40,8 @@ type CallResult struct {
 	OpID       string          `json:"op_id"`
 	Result     json.RawMessage `json:"result"`
 	Handle     json.RawMessage `json:"handle,omitempty"`
+	AuditID    *string         `json:"audit_id"`
+	Delivery   *string         `json:"delivery"`
 	Error      *string         `json:"error"`
 	Extras     json.RawMessage `json:"extras,omitempty"`
 	DurationMs float64         `json:"duration_ms"`
@@ -312,6 +314,20 @@ func printCallResult(w io.Writer, connectorID, opID string, r *CallResult) {
 				fmt.Fprintln(w, pretty)
 			} else {
 				fmt.Fprintln(w, string(r.Handle))
+			}
+		}
+		if r.AuditID != nil {
+			fmt.Fprintf(w, "audit receipt: %s\n", *r.AuditID)
+		}
+		if r.Delivery != nil {
+			fmt.Fprintf(w, "delivery: %s\n", *r.Delivery)
+		}
+		if r.Delivery != nil && (*r.Delivery == "unavailable" || *r.Delivery == "partial") {
+			fmt.Fprintln(w, "delivery incomplete: operation already executed; do not re-invoke it.")
+			if r.AuditID != nil {
+				fmt.Fprintln(w, "inspect the audit receipt or operation status.")
+			} else {
+				fmt.Fprintln(w, "inspect operation status; no committed audit receipt is available.")
 			}
 		}
 		return

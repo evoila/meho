@@ -181,8 +181,9 @@ class IngestJob:
     Terminal jobs carry one of ``status="succeeded"`` (with
     ``result`` populated), ``status="failed"`` (with ``error`` and
     ``error_class`` populated, no ``result`` — the pipeline raised), or
-    ``status="degraded"`` (the pipeline returned but its output was not
-    dispatchable: ``result`` *and* ``error`` / ``error_class`` are both
+    ``status="degraded"`` (a partial success — the pipeline returned but
+    its output was not dispatchable, or register committed while grouping
+    failed (#3685): ``result`` *and* ``error`` / ``error_class`` are both
     populated so the operator sees the counts that landed alongside the
     structured reason they're not usable). The route projects the right
     subset of fields per status into the polling response.
@@ -310,6 +311,12 @@ class IngestJobRegistry:
         machine-branchable and operator-readable) — a job that lied with
         a bare ``succeeded`` is the failure mode this state closes
         (claude-rdc-hetzner-dc#1136).
+
+        Also the terminal state for a *register-committed / grouping-failed*
+        run (``error_class="grouping_failed_after_register"``, #3685): register
+        durably committed but the grouping phase raised, so the connector is
+        dispatchable but its ingested ops went ungrouped — see
+        :func:`_reconcile_grouping_failure`.
 
         No-op when *job_id* was evicted between the background-task
         launch and this call — same eviction-during-run contract as

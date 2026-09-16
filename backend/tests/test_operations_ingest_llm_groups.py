@@ -42,15 +42,18 @@ from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
 import pytest
+import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGroup
 from meho_backplane.operations.ingest import (
     GroupingResult,
     GroupProposal,
+    IngestionPipelineService,
     LlmOutputInvalid,
     register_ingested_operations,
     run_llm_grouping,
@@ -71,6 +74,11 @@ from meho_backplane.operations.ingest._llm_grouping_internals import (
     strip_code_fences,
 )
 from meho_backplane.operations.ingest.llm_groups import _project_persisted_groups
+from meho_backplane.operations.ingest.pipeline import (
+    GroupingPhaseFailedError,
+    LlmClientUnavailable,
+)
+from meho_backplane.operations.ingest.register_ingested import IngestionResult
 from meho_backplane.settings import get_settings
 from tests.fixtures.llm_groups import medium_corpus, small_corpus
 
@@ -1035,6 +1043,94 @@ async def test_run_llm_grouping_reingest_groups_ungrouped_ops_with_hyphenated_ty
         )
         assert len(rows) == 5
         assert all(row.group_id == group.id for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_real_run_wraps_unexpected_grouping_error_passes_contract_errors_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin the pipeline seam: wrap unexpected grouping crashes, pass contract errors through.
+
+    ``_dispatch_real_run`` runs register (T2, committed) then grouping
+    (T3). This exercises the producer branch of the #3685 fix directly:
+
+    * an *unexpected* grouping exception is re-raised as
+      :class:`GroupingPhaseFailedError` carrying the durable register
+      :class:`IngestionResult` (so the async-job layer degrades rather than
+      flat-fails), and
+    * the operator-facing grouping-error contract passes through unwrapped
+      -- :class:`LlmClientUnavailable` (route -> 503) and
+      :class:`LlmOutputInvalid` (route -> 400) must NOT become
+      ``GroupingPhaseFailedError`` or their status mappings break.
+
+    Both phases are stubbed so the test pins exactly the wrapping seam in
+    :meth:`IngestionPipelineService._dispatch_real_run`, independent of the
+    DB / parser / LLM path.
+    """
+    operator = Operator(
+        sub="op-seam-test",
+        raw_jwt="jwt",
+        tenant_id=uuid.uuid4(),
+        tenant_role=TenantRole.TENANT_ADMIN,
+    )
+    service = IngestionPipelineService(operator)
+
+    aggregated = IngestionResult(
+        inserted_count=7,
+        updated_count=2,
+        skipped_count=1,
+        connector_registered=True,
+        operations_grouped=False,
+    )
+
+    async def _fake_register(**_kwargs: Any) -> IngestionResult:
+        return aggregated
+
+    monkeypatch.setattr(service, "_run_register_phase", _fake_register)
+
+    async def _dispatch() -> Any:
+        return await service._dispatch_real_run(
+            product="vmware",
+            version="9.0",
+            impl_id="vmware-rest",
+            specs=[],
+            base_url=None,
+            tenant_id=None,
+            connector_id="vmware-rest-9.0",
+            log=structlog.get_logger(__name__).bind(test=True),
+        )
+
+    # (a) A generic grouping crash is wrapped and carries the register counts.
+    async def _raise_runtime(**_kwargs: Any) -> GroupingResult:
+        raise RuntimeError("grouping blew up")
+
+    monkeypatch.setattr(service, "_run_grouping_phase", _raise_runtime)
+    with pytest.raises(GroupingPhaseFailedError) as wrapped:
+        await _dispatch()
+    assert wrapped.value.connector_id == "vmware-rest-9.0"
+    assert wrapped.value.ingestion is aggregated
+    assert wrapped.value.ingestion.inserted_count == 7
+    assert isinstance(wrapped.value.cause, RuntimeError)
+
+    # (b) LlmOutputInvalid propagates UNWRAPPED (the route maps it to 400).
+    async def _raise_llm_output(**_kwargs: Any) -> GroupingResult:
+        raise LlmOutputInvalid(
+            pass_name="propose_groups",
+            raw_output="not json",
+            parse_error=ValueError("bad"),
+        )
+
+    monkeypatch.setattr(service, "_run_grouping_phase", _raise_llm_output)
+    with pytest.raises(LlmOutputInvalid):
+        await _dispatch()
+
+    # (c) LlmClientUnavailable propagates UNWRAPPED (the route maps it to 503).
+    async def _raise_unavailable(**_kwargs: Any) -> GroupingResult:
+        raise LlmClientUnavailable("no anthropic key configured")
+
+    monkeypatch.setattr(service, "_run_grouping_phase", _raise_unavailable)
+    with pytest.raises(LlmClientUnavailable):
+        await _dispatch()
 
 
 # ---------------------------------------------------------------------------

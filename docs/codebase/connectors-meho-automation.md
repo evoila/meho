@@ -24,10 +24,12 @@ per-op MCP tool family:
   The add-on publishes its **full** API (~30 mutating routes: tenant / site /
   adoption / run DELETEs, fleet import, blueprint / environment / deployment
   CRUD), but this connector's op set is **closed** to exactly launch /
-  validate / gate — a declarative catalog op-allowlist enforces that closure
-  in code (see [Ingest op allowlist](#ingest-op-allowlist) below).
-- **No new agent tools.** The three curated ops ride `op_id` under
-  `call_operation`; the MCP working surface is unchanged.
+  validate / gate plus the two run-read GETs a governed launcher needs to
+  observe the run it created (#3699) — a declarative catalog op-allowlist
+  enforces that closure in code (see
+  [Ingest op allowlist](#ingest-op-allowlist) below).
+- **No new agent tools.** The five curated ops ride `op_id` under
+  `call_operation`; the MCP working surface is unchanged (no per-op tools).
 
 Dispatch triple: `(product="mehoauto", version="0.1.0",
 impl_id="mehoauto-rest")`. The product slug is **hyphen-free** on purpose:
@@ -57,16 +59,40 @@ eager-imported at boot like every other connector subpackage.
 | `POST:/api/v1/runs` | Launch a run | `caution` (no approval park) |
 | `POST:/api/v1/blueprints/{blueprint_id}/validate` | Validate a blueprint (read-side dry-run) | `caution` (no approval park) |
 | `POST:/api/v1/runs/{run_id}/gates/{node_id}/decision` | Decide an in-run gate | `caution` (no approval park) |
+| `GET:/api/v1/runs/{run_id}` | Read a single run (carries `awaiting_decision_nodes` + per-node states — the authoritative terminality / gate-readiness source) | `safe` |
+| `GET:/api/v1/runs` | List runs (set-shaped) | `safe` |
 
-The request body follows the add-on's run-launch schema; the backplane
-forwards it verbatim as the `call_operation` params, and the add-on validates
-it and rejects a body missing any field its schema requires. `params` /
-`target_ref` are advanced per-node overrides.
+The request body of the write ops follows the add-on's run-launch schema; the
+backplane forwards it verbatim as the `call_operation` params, and the add-on
+validates it and rejects a body missing any field its schema requires.
+`params` / `target_ref` are advanced per-node overrides.
+
+**Run reads (#3699).** The two GETs let a governed launcher observe the run it
+created through the same dispatch path, instead of inferring terminality from a
+second gate-decision call (a write used as a read). They are read-class, so the
+generic verb heuristic lands them `safe` — below the `caution` write floor — and
+the connector-owned safety floor pins no key for them (it only pins the three
+write ops; see [the pin](#safety-tiers-and-the-pin)). `GET:/api/v1/runs` is
+set-shaped: a large run list rides the backplane's result-handle / JSONFlux
+reducer path (v0.1-spec §4) automatically once the op is dispatchable — no agent
+ever sees a raw multi-megabyte list. At ingest these two reads populate the
+add-on's **Run Monitoring** operation group (LLM-proposed and operator-reviewed
+against the live `/openapi.json`; the group exists but is empty until the reads
+are allowlisted), so an agent discovers the read surface via
+`list_operation_groups` → `search_operations`.
+
+**`GET /api/v1/blueprints` (published-blueprint list) stays OUT of scope.**
+#3699 flagged it as a lower-priority "consider" for input-contract discovery (a
+launcher enumerating what it may launch). It is deliberately not allowlisted
+here: the task's proven gap is *observing a launched run*, and blueprint-catalog
+discovery is a separate concern that can be added under its own change if a
+governed launcher needs it. Keeping it out holds the op set to the minimum the
+lab proof exercised.
 
 ### Safety tiers and the pin
 
-All three routes are POSTs, so the generic ingest heuristic classifies each
-`caution` by default (#3563). The connector-owned floor
+The three **write** routes are POSTs, so the generic ingest heuristic
+classifies each `caution` by default (#3563). The connector-owned floor
 (`meho_automation_safety_floor`) **pins** the decided tiers so a spec
 re-ingest — or a future change to the verb heuristic — cannot silently drift
 them:
@@ -79,6 +105,13 @@ them:
   immediately with no approval park, so the tier is operationally identical
   to a lower one here; pinning it `caution` keeps the decided tier the same
   whether or not the floor registration is in force at ingest time.
+
+The two **run-read GETs** (#3699) are read-class: the same verb heuristic
+lands them `safe`, below the `caution` write floor, so the floor pins **no**
+key for them. A drift-guard test keeps this honest — the floor's pinned keys
+must be a subset of the catalog allowlist (a pinned op must be persistable),
+and the allowlist's only extra entries are exactly these two GET reads
+(`test_operations_ingest_catalog.py`).
 
 **Security note — launch executes without a backplane park.** Launch is a
 potentially destructive lifecycle operation, but this connector does **not**
@@ -212,20 +245,25 @@ so the value never transits an operator terminal or shell history.
 
    That OpenAPI document is the add-on's **full** API (~30 mutating routes),
    but the catalog op-allowlist (see below) drops every route except the
-   three curated ops **before persistence** regardless of how wide the
-   document is, so exactly three `EndpointDescriptor` rows land —
+   five curated ops **before persistence** regardless of how wide the
+   document is, so exactly five `EndpointDescriptor` rows land —
    `POST /api/v1/runs` (launch),
-   `POST /api/v1/blueprints/{blueprint_id}/validate` (validate), and
-   `POST /api/v1/runs/{run_id}/gates/{node_id}/decision` (gate) — **staged /
-   disabled** (`is_enabled=false`, `source_kind=ingested`) with the pinned
-   tiers above. The ingest result reports the dropped count + the dropped
-   `(method, path)` list. Because the ~27 mutating routes are never persisted
-   and never staged, the `enable` in the next step cannot cascade
-   `is_enabled=true` onto a tenant/run DELETE or a fleet import.
+   `POST /api/v1/blueprints/{blueprint_id}/validate` (validate),
+   `POST /api/v1/runs/{run_id}/gates/{node_id}/decision` (gate),
+   `GET /api/v1/runs/{run_id}` (single-run read), and
+   `GET /api/v1/runs` (run list) — **staged / disabled**
+   (`is_enabled=false`, `source_kind=ingested`) with the tiers above (the
+   three writes pinned `caution`, the two reads `safe`). The ingest result
+   reports the dropped count + the dropped `(method, path)` list. Because the
+   ~27 dropped mutating routes are never persisted and never staged, the
+   `enable` in the next step cannot cascade `is_enabled=true` onto a tenant/run
+   DELETE or a fleet import.
 
 3. **Review the LLM-proposed op groups + per-group hints**, then **enable**
    the connector (staged → enabled) once the surface looks right. Enable is
-   safe: only the three allowlisted ops exist to enable.
+   safe: only the five allowlisted ops exist to enable. The two run-read GETs
+   land in the **Run Monitoring** group — confirm its when-to-use hint reads
+   well before enabling.
 
    ```
    meho connector enable mehoauto-rest-0.1.0
@@ -264,17 +302,20 @@ so the value never transits an operator terminal or shell history.
 The add-on's `/openapi.json` publishes its full API — ~30 mutating routes
 across tenant / site / adoption / run (including DELETEs), fleet import, and
 blueprint / environment / deployment CRUD. This connector's design invariant
-is that its op set is **closed** to exactly three operations:
+is that its op set is **closed** to exactly five operations — three writes and
+the two run-read GETs (#3699):
 
 | op | `(method, path)` | tier |
 |---|---|---|
 | launch | `POST /api/v1/runs` | `caution` |
 | validate | `POST /api/v1/blueprints/{blueprint_id}/validate` | `caution` |
 | gate decision | `POST /api/v1/runs/{run_id}/gates/{node_id}/decision` | `caution` |
+| single-run read | `GET /api/v1/runs/{run_id}` | `safe` |
+| run list | `GET /api/v1/runs` | `safe` |
 
 That closure is enforced in code, declared in data. The catalog row
 (`operations/ingest/catalog.yaml`, product `mehoauto`) declares an
-`op_allowlist` naming exactly those three `(method, path)` pairs. On the
+`op_allowlist` naming exactly those five `(method, path)` pairs. On the
 ingest path — for both a first ingest and any re-ingest of a wider spec —
 `operations/ingest/op_allowlist.py` drops every parsed operation outside the
 allowlist **before persistence**: dropped ops are never written and never
@@ -285,11 +326,14 @@ drop.
 
 The allowlist `(method, path)` pairs are kept consistent with the
 connector-owned safety floor's pinned keys
-(`connectors/meho_automation/ingest_safety.py`) by a drift-guard test — the
-set of ops that may persist can never diverge from the set whose tiers are
-pinned. The allowlist is generic: any catalog product **may** declare an
-`op_allowlist`; absence keeps the historical behaviour (every parsed op is
-persisted).
+(`connectors/meho_automation/ingest_safety.py`) by a drift-guard test. The
+floor pins only the three write ops (`caution`); the two GET reads land `safe`
+naturally and need no floor entry. So the invariant the guard enforces is a
+**subset** relation, not equality: every floor-pinned key must be on the
+allowlist (a pinned op must be persistable), and the allowlist's only extra
+entries are exactly the two run-read GETs. The allowlist is generic: any
+catalog product **may** declare an `op_allowlist`; absence keeps the historical
+behaviour (every parsed op is persisted).
 
 ## Boot guards
 

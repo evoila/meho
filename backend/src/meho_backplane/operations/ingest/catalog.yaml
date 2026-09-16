@@ -400,24 +400,33 @@ entries:
       set on the target at registration — the add-on OpenAPI declares no
       servers block). Ops in scope: launch (POST /api/v1/runs), validate
       (POST /api/v1/blueprints/{blueprint_id}/validate), gate decision
-      (POST /api/v1/runs/{run_id}/gates/{node_id}/decision). Ingest at
-      registration from /openapi.json via `--spec`; NO spec is vendored
-      here. After ingest the connector-owned safety floor
-      (connectors/meho_automation/ingest_safety.py) pins all three at
-      `caution` (no backplane approval park — the add-on's own gate nodes
-      are the human control, operator decision); validate is a read-side
-      dry-run that still rides `caution` because an ingested POST never sits
-      below the caution floor. See docs/codebase/connectors-meho-automation.md.
+      (POST /api/v1/runs/{run_id}/gates/{node_id}/decision), plus the two
+      run-read GETs a governed launcher needs to observe the run it created
+      (GET /api/v1/runs/{run_id} — single-run read carrying
+      awaiting_decision_nodes + per-node states; GET /api/v1/runs — the
+      set-shaped run list, #3699). Ingest at registration from /openapi.json
+      via `--spec`; NO spec is vendored here. After ingest the connector-owned
+      safety floor (connectors/meho_automation/ingest_safety.py) pins the
+      three write ops at `caution` (no backplane approval park — the add-on's
+      own gate nodes are the human control, operator decision); validate is a
+      read-side dry-run that still rides `caution` because an ingested POST
+      never sits below the caution floor. The two GETs are reads: the generic
+      verb heuristic lands them `safe` (below the caution write floor), so the
+      floor pins no key for them. See
+      docs/codebase/connectors-meho-automation.md.
     # Ingest op allowlist (security review T3-F01). The add-on's real
     # /openapi.json publishes ~30 mutating routes (tenant/site/adoption/run
     # DELETEs, fleet import, blueprint/environment/deployment CRUD). This
-    # connector's op set is CLOSED to exactly launch / validate / gate, so the
-    # ingest path persists ONLY these three (method, path) pairs and DROPS
-    # every other parsed op before persistence — an operator who curls the
-    # full spec and `meho connector enable`s cannot cascade is_enabled onto a
-    # tenant DELETE. These pairs are kept consistent with the connector-owned
-    # safety floor's pinned keys (connectors/meho_automation/ingest_safety.py)
-    # by a drift-guard test (test_operations_ingest_catalog.py).
+    # connector's op set is CLOSED to exactly launch / validate / gate plus the
+    # two run-read GETs (#3699), so the ingest path persists ONLY these five
+    # (method, path) pairs and DROPS every other parsed op before persistence —
+    # an operator who curls the full spec and `meho connector enable`s cannot
+    # cascade is_enabled onto a tenant DELETE. The three write keys are kept
+    # consistent with the connector-owned safety floor's pinned keys
+    # (connectors/meho_automation/ingest_safety.py) by a drift-guard test
+    # (test_operations_ingest_catalog.py): the floor keys must be a subset of
+    # this allowlist (a pinned op must be persistable), and the extra entries
+    # are exactly the two GET reads, which need no floor (reads land `safe`).
     op_allowlist:
       - method: POST
         path: /api/v1/runs
@@ -425,3 +434,11 @@ entries:
         path: /api/v1/blueprints/{blueprint_id}/validate
       - method: POST
         path: /api/v1/runs/{run_id}/gates/{node_id}/decision
+      # Run-read GETs (#3699) — read-class, land `safe` (no floor entry). The
+      # single-run read carries awaiting_decision_nodes + per-node states (the
+      # authoritative terminality / gate-readiness source); the run list is
+      # set-shaped and rides the result-handle path once dispatchable.
+      - method: GET
+        path: /api/v1/runs/{run_id}
+      - method: GET
+        path: /api/v1/runs

@@ -18,6 +18,7 @@ read is issued.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID, uuid4
@@ -195,6 +196,168 @@ async def test_object_collect_reads_resourcepool_properties_and_missing() -> Non
     assert out["type"] == "ResourcePool"
     assert out["properties"]["runtime.memory.overallUsage"] == 2048
     assert out["missing"] == ["config.entity"]
+
+
+# ---------------------------------------------------------------------------
+# missingSet fault types — surface type names + counts, never fault text (#3708)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_object_collect_surfaces_missingset_fault_types_never_text() -> None:
+    """A recorded RetrievePropertiesEx answer whose objects carry propSet
+    entries AND missingSet entries with mixed fault types (one fault bearing
+    a message string and a nested payload) surfaces the fault *type names* and
+    counts, leaks no fault text/payload/property values, keeps every existing
+    field unchanged, and yields an empty summary for an empty missingSet."""
+    # Realistic VI-JSON RetrieveResult (9.x LocalizedMethodFault wrapper shape,
+    # ``_typeName``-annotated as on the wire): one readable boxed property, two
+    # NoPermission faults + one InvalidProperty fault, and one genuinely-unset
+    # property (no ``fault``). The InvalidProperty fault carries a message
+    # string and a nested faultMessage payload; the NoPermission faults carry
+    # a localized message and a nested privilege payload — none of which may
+    # appear in the returned envelope.
+    recorded = {
+        "objects": [
+            {
+                "_typeName": "ObjectContent",
+                "obj": {
+                    "_typeName": "ManagedObjectReference",
+                    "type": "HostSystem",
+                    "value": "host-42",
+                },
+                "propSet": [
+                    {
+                        "_typeName": "DynamicProperty",
+                        "name": "summary.overallStatus",
+                        "val": {"_typeName": "ManagedEntityStatus", "_value": "green"},
+                    }
+                ],
+                "missingSet": [
+                    {
+                        "_typeName": "MissingProperty",
+                        "path": "config.storageDevice",
+                        "fault": {
+                            "_typeName": "LocalizedMethodFault",
+                            "fault": {
+                                "_typeName": "NoPermission",
+                                "object": {
+                                    "_typeName": "ManagedObjectReference",
+                                    "type": "HostSystem",
+                                    "value": "host-42",
+                                },
+                                "privilegeId": "System.Read",
+                            },
+                            "localizedMessage": "Permission to perform this operation was denied.",
+                        },
+                    },
+                    {
+                        "_typeName": "MissingProperty",
+                        "path": "config.network.dnsConfig",
+                        "fault": {
+                            "_typeName": "LocalizedMethodFault",
+                            "fault": {
+                                "_typeName": "NoPermission",
+                                "privilegeId": "Host.Config.Network",
+                            },
+                            "localizedMessage": "Permission to perform this operation was denied.",
+                        },
+                    },
+                    {
+                        "_typeName": "MissingProperty",
+                        "path": "hardware.systemInfo.serialNumber",
+                        "fault": {
+                            "_typeName": "LocalizedMethodFault",
+                            "fault": {
+                                "_typeName": "InvalidProperty",
+                                "name": "hardware.systemInfo.serialNumber",
+                                "faultMessage": [
+                                    {
+                                        "_typeName": "LocalizableMessage",
+                                        "key": "com.vmware.vim.invalidProperty",
+                                        "message": "Invalid property: SECRET-SERIAL-9931",
+                                    }
+                                ],
+                            },
+                            "localizedMessage": "An invalid property was specified.",
+                        },
+                    },
+                    # No ``fault`` — property genuinely unset, not faulted.
+                    {"_typeName": "MissingProperty", "path": "config.product.build"},
+                ],
+            }
+        ]
+    }
+    conn = _FakeConnector(props_result=recorded)
+
+    out = await object_collect_impl(
+        conn,
+        _make_operator(),
+        _Target(),
+        {
+            "type": "HostSystem",
+            "moid": "host-42",
+            "properties": [
+                "summary.overallStatus",
+                "config.storageDevice",
+                "config.network.dnsConfig",
+                "hardware.systemInfo.serialNumber",
+                "config.product.build",
+            ],
+        },
+    )
+
+    # Fault type names + counts surfaced correctly.
+    assert out["missing_fault_summary"] == {"NoPermission": 2, "InvalidProperty": 1}
+    assert out["missing_properties"] == [
+        {"path": "config.storageDevice", "fault_type": "NoPermission"},
+        {"path": "config.network.dnsConfig", "fault_type": "NoPermission"},
+        {"path": "hardware.systemInfo.serialNumber", "fault_type": "InvalidProperty"},
+        # Genuinely-unset property: reported with no fault_type ("absent" vs "faulted").
+        {"path": "config.product.build"},
+    ]
+
+    # Existing fields are byte-identical to the pre-#3708 shape.
+    assert out["type"] == "HostSystem"
+    assert out["moid"] == "host-42"
+    assert out["properties"] == {"summary.overallStatus": "green"}
+    assert out["missing"] == [
+        "config.storageDevice",
+        "config.network.dnsConfig",
+        "hardware.systemInfo.serialNumber",
+        "config.product.build",
+    ]
+
+    # No fault message text, no fault payload field, no fault payload value
+    # anywhere in the returned envelope — names and counts only (#3708).
+    serialized = json.dumps(out)
+    for forbidden in (
+        "SECRET-SERIAL-9931",
+        "System.Read",
+        "Host.Config.Network",
+        "Permission to perform this operation was denied.",
+        "An invalid property was specified.",
+        "privilegeId",
+        "faultMessage",
+        "localizedMessage",
+        "faultstring",
+        "LocalizableMessage",
+    ):
+        assert forbidden not in serialized, f"fault content {forbidden!r} leaked into the envelope"
+
+    # An answer with an empty missingSet yields an empty summary / no entries.
+    empty = _FakeConnector(
+        props_result=_object_content("VirtualMachine", "vm-9", {"name": "web01"}, [])
+    )
+    out_empty = await object_collect_impl(
+        empty,
+        _make_operator(),
+        _Target(),
+        {"type": "VirtualMachine", "moid": "vm-9", "properties": ["name"]},
+    )
+    assert out_empty["missing"] == []
+    assert out_empty["missing_properties"] == []
+    assert out_empty["missing_fault_summary"] == {}
 
 
 # ---------------------------------------------------------------------------

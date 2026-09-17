@@ -42,6 +42,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.vmware_rest.session import VsphereTargetLike
 from meho_backplane.connectors.vmware_rest.typed_ops import VmwareTypedOp, _unwrap_value
 from meho_backplane.connectors.vmware_rest.vim_body import (
+    fault_type_name,
     retrieve_properties_body,
     unwrap_vim_value,
 )
@@ -101,8 +102,10 @@ def build_object_collect_retrieve_params(
     return retrieve_properties_body(mo_type, [moid], properties)
 
 
-def _extract_object_content(retrieve_result: Any) -> tuple[dict[str, Any], list[str]]:
-    """Flatten the first ``ObjectContent`` to (props, missing-paths).
+def _extract_object_content(
+    retrieve_result: Any,
+) -> tuple[dict[str, Any], list[str], list[dict[str, str]], dict[str, int]]:
+    """Flatten the first ``ObjectContent`` to props + missing detail.
 
     ``RetrievePropertiesEx`` returns a ``RetrieveResult`` whose ``objects``
     list carries one ``ObjectContent`` per queried object. For the single
@@ -110,6 +113,23 @@ def _extract_object_content(retrieve_result: Any) -> tuple[dict[str, Any], list[
     ``{name, val}`` pairs and its ``missingSet`` names the paths the
     collector could not read (permission / not-applicable). A bare list
     (legacy ``RetrieveProperties`` shape) is tolerated.
+
+    Returns ``(props, missing, missing_properties, fault_counts)``:
+
+    * ``missing`` -- the bare missing property paths (unchanged shape).
+    * ``missing_properties`` -- one ``{"path", "fault_type"?}`` entry per
+      ``missingSet`` member: the property ``path`` plus, when the collector
+      returned a per-property fault, its concrete vim fault **type name**
+      (:func:`fault_type_name` -- e.g. ``NoPermission`` / ``InvalidProperty``
+      / ``ManagedObjectNotFound``). An entry with **no** ``fault_type`` is a
+      genuinely-unset property, so an operator can tell "absent" from a
+      per-property permission/auth/invalid fault (#3708).
+    * ``fault_counts`` -- a per-fault-type count summary (``{"NoPermission":
+      12}``); a ``missingSet`` with no faulted entries yields ``{}``.
+
+    Type **names and counts only** -- never fault text (``faultstring`` /
+    ``faultMessage`` / ``localizedMessage``) or fault payload fields, which
+    can echo a property value or a private identifier (#3708).
     """
     payload = _unwrap_value(retrieve_result)
     if isinstance(payload, dict):
@@ -120,6 +140,8 @@ def _extract_object_content(retrieve_result: Any) -> tuple[dict[str, Any], list[
         objects = []
     props: dict[str, Any] = {}
     missing: list[str] = []
+    missing_properties: list[dict[str, str]] = []
+    fault_counts: dict[str, int] = {}
     for obj in objects:
         if not isinstance(obj, dict):
             continue
@@ -127,9 +149,17 @@ def _extract_object_content(retrieve_result: Any) -> tuple[dict[str, Any], list[
             if isinstance(prop, dict) and isinstance(prop.get("name"), str):
                 props[prop["name"]] = unwrap_vim_value(prop.get("val"))
         for miss in obj.get("missingSet", []) or []:
-            if isinstance(miss, dict) and isinstance(miss.get("path"), str):
-                missing.append(miss["path"])
-    return props, missing
+            if not isinstance(miss, dict) or not isinstance(miss.get("path"), str):
+                continue
+            path = miss["path"]
+            missing.append(path)
+            entry: dict[str, str] = {"path": path}
+            type_name = fault_type_name(miss.get("fault"))
+            if type_name is not None:
+                entry["fault_type"] = type_name
+                fault_counts[type_name] = fault_counts.get(type_name, 0) + 1
+            missing_properties.append(entry)
+    return props, missing, missing_properties, fault_counts
 
 
 async def object_collect_impl(
@@ -157,8 +187,13 @@ async def object_collect_impl(
     already within :data:`_MAX_PROPERTIES` / :data:`_MAX_PATH_DEPTH`.
 
     Returns ``{"type", "moid", "properties": {name: val, ...}, "missing":
-    [path, ...]}`` -- ``missing`` names any requested path the collector
-    could not read.
+    [path, ...], "missing_properties": [{path, fault_type?}, ...],
+    "missing_fault_summary": {fault_type: count}}`` -- ``missing`` names any
+    requested path the collector could not read; ``missing_properties`` adds
+    the per-property vim fault **type name** for each (names only, never
+    fault text) and ``missing_fault_summary`` counts them by type, so an
+    operator can tell a genuinely-unset property from a per-property
+    permission/auth/invalid fault (#3708).
     """
     mo_type = params["type"]
     moid = params["moid"]
@@ -171,7 +206,7 @@ async def object_collect_impl(
         json=build_object_collect_retrieve_params(mo_type, moid, properties),
         promote_managed_object_not_found=True,
     )
-    read_props, missing = _extract_object_content(result)
+    read_props, missing, missing_properties, fault_counts = _extract_object_content(result)
     _log.info(
         "vmware_object_collect_read",
         target=target.name,
@@ -180,8 +215,16 @@ async def object_collect_impl(
         requested=len(properties),
         returned=len(read_props),
         missing=len(missing),
+        missing_fault_types=sorted(fault_counts),
     )
-    return {"type": mo_type, "moid": moid, "properties": read_props, "missing": missing}
+    return {
+        "type": mo_type,
+        "moid": moid,
+        "properties": read_props,
+        "missing": missing,
+        "missing_properties": missing_properties,
+        "missing_fault_summary": fault_counts,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -251,8 +294,54 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
                 "not-applicable), from the ObjectContent ``missingSet``."
             ),
         },
+        "missing_properties": {
+            "type": "array",
+            "description": (
+                "Per-property detail for every ``missingSet`` entry: the "
+                "requested ``path`` plus, when the collector returned a "
+                "per-property fault, its vim fault ``fault_type`` (the "
+                "concrete fault class name only -- e.g. 'NoPermission', "
+                "'InvalidProperty', 'ManagedObjectNotFound', "
+                "'NotAuthenticated' -- never fault text, which can echo a "
+                "property value or a private identifier). An entry with no "
+                "``fault_type`` is a genuinely-unset property, distinguishing "
+                "'absent' from a permission/auth/invalid per-property fault."
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "The missing property path."},
+                    "fault_type": {
+                        "type": "string",
+                        "description": (
+                            "Concrete vim fault type name for this property "
+                            "(names only, no fault text); absent when the "
+                            "property is genuinely unset rather than faulted."
+                        ),
+                    },
+                },
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+        },
+        "missing_fault_summary": {
+            "type": "object",
+            "description": (
+                "Count of ``missingSet`` faults by vim fault type name (e.g. "
+                "{'NoPermission': 12}); empty when no missing property carried "
+                "a fault. Type names and counts only -- never fault text."
+            ),
+            "additionalProperties": {"type": "integer"},
+        },
     },
-    "required": ["type", "moid", "properties", "missing"],
+    "required": [
+        "type",
+        "moid",
+        "properties",
+        "missing",
+        "missing_properties",
+        "missing_fault_summary",
+    ],
 }
 
 #: Curated ``when_to_use`` blurb for the object-collect group.
@@ -310,7 +399,13 @@ VMWARE_OBJECT_COLLECT_OP = VmwareTypedOp(
         },
         "output_shape": (
             "{type, moid, properties: {path: raw_value, ...}, missing: "
-            "[path, ...]}. 'missing' names paths the collector could not read."
+            "[path, ...], missing_properties: [{path, fault_type?}, ...], "
+            "missing_fault_summary: {fault_type: count}}. 'missing' names "
+            "paths the collector could not read; 'missing_properties' adds "
+            "each one's vim fault type name (names only, no fault text) so a "
+            "permission/auth/invalid fault is distinguishable from a "
+            "genuinely-unset property, and 'missing_fault_summary' counts "
+            "them by type."
         ),
     },
 )

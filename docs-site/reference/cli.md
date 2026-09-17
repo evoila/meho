@@ -4113,6 +4113,80 @@ meho sensor results <sensor_id> [flags]
 - `--state` — filter by state: ok | degraded | critical | unknown | skip
 - `--to` — inclusive upper bound on evaluated_at (RFC 3339, e.g. 2026-08-02T00:00:00Z)
 
+## `meho service-principals`
+
+Manage service-principal operator surfaces
+
+```
+meho service-principals
+```
+
+### `meho service-principals grants`
+
+Manage service-principal permission grants (operator)
+
+```
+meho service-principals grants
+```
+
+#### `meho service-principals grants create`
+
+Create a service-principal grant (operator)
+
+```
+meho service-principals grants create [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--connector-id` — exact connector id; globs are refused (required)
+- `--expires` — optional ISO 8601 UTC expiry
+- `--json` — emit raw ServiceGrantRead JSON
+- `--op-id` — exact operation id; globs and delete-shaped ops are refused (required)
+- `--principal` — JWT sub of the service principal (required)
+- `--reason` — operator justification for this standing grant (required)
+- `--target` — target UUID (optional; targetless is not a wildcard)
+- `--target-name-pattern` — explicit fnmatch target-name selector (optional)
+- `--target-product` — exact target-product selector (optional)
+
+#### `meho service-principals grants list`
+
+List service-principal grants in your tenant (operator)
+
+```
+meho service-principals grants list [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--include-expired` — include expired grants (default: active grants only)
+- `--include-revoked` — include revoked grant history
+- `--json` — emit raw ServiceGrantListResponse JSON
+- `--limit` — max grants per page (1..500, server default 100)
+- `--offset` — page offset (default 0)
+- `--principal` — filter by service-principal JWT sub
+
+#### `meho service-principals grants revoke`
+
+Revoke a service-principal grant (operator)
+
+```
+meho service-principals grants revoke <grant-id> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--confirm` — confirm revocation
+- `--json` — emit a machine-readable result JSON
+
+#### `meho service-principals grants show`
+
+Show one service-principal grant (operator)
+
+```
+meho service-principals grants show <grant-id> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from `meho login`)
+- `--json` — emit raw ServiceGrantRead JSON
+
 ## `meho status`
 
 Show operator identity + backplane health; --watch streams live activity

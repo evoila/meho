@@ -9,8 +9,7 @@
     <div class="max-w-3xl space-y-1">
       <h1 class="text-2xl font-semibold">Permission grants</h1>
       <p class="text-sm opacity-70">
-        Review the explicit permissions that let agent and service principals
-        run governed operations without a new approval request.
+        Review the explicit permission rules for agent and service principals.
       </p>
     </div>
     {% if can_write %}
@@ -33,7 +32,11 @@
     </label>
     <label class="flex cursor-pointer items-center gap-2 pb-3 text-sm">
       <input class="checkbox checkbox-sm" type="checkbox" name="include_expired" value="true" {% if include_expired %}checked{% endif %} />
-      Show expired agent grants
+      Show expired grants
+    </label>
+    <label class="flex cursor-pointer items-center gap-2 pb-3 text-sm">
+      <input class="checkbox checkbox-sm" type="checkbox" name="include_revoked" value="true" {% if include_revoked %}checked{% endif %} />
+      Show revoked service grants
     </label>
     <button type="submit" class="btn btn-outline">Apply filters</button>
   </form>
@@ -41,7 +44,7 @@
   <section class="space-y-3" aria-labelledby="service-grants-heading">
     <div>
       <h2 id="service-grants-heading" class="text-lg font-semibold">Service-principal grants</h2>
-      <p class="text-sm opacity-70">Exact operation and connector grants. Revoked rows remain visible as history.</p>
+      <p class="text-sm opacity-70">Exact operation and connector grants. Include revoked history from the filter above when needed.</p>
     </div>
     <div class="overflow-x-auto rounded-box border border-base-300">
       <table class="table table-sm">
@@ -55,7 +58,7 @@
               <td class="max-w-sm break-all font-mono text-xs">{{ grant.op }}</td>
               <td class="max-w-xs break-all font-mono text-xs">{{ grant.connector }}</td>
               <td class="max-w-xs break-all text-xs">{{ grant.target }}</td>
-              <td><span class="badge badge-sm {% if grant.effect == 'revoked' %}badge-error{% else %}badge-success{% endif %}">{{ grant.effect }}</span></td>
+              <td><span class="badge badge-sm {% if grant.effect in ('revoked', 'expired') %}badge-error{% else %}badge-success{% endif %}">{{ grant.effect }}</span></td>
               <td class="whitespace-nowrap text-xs">{{ grant.expires_at or "permanent" }}</td>
               <td class="max-w-xs break-all text-xs">{{ grant.created_by }}</td>
               {% if can_write %}
@@ -74,7 +77,7 @@
     <section class="space-y-3" aria-labelledby="agent-grants-heading">
       <div>
         <h2 id="agent-grants-heading" class="text-lg font-semibold">Agent grants</h2>
-        <p class="text-sm opacity-70">Agent grants are tenant-admin governance data.</p>
+        <p class="text-sm opacity-70">Agent grants are tenant-admin governance data. Need a time-bounded change window? <a href="/ui/agents/grants/elevate" class="link link-primary">Elevate an agent grant</a>.</p>
       </div>
       <div class="overflow-x-auto rounded-box border border-base-300">
         <table class="table table-sm">

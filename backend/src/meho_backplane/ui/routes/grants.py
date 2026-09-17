@@ -114,8 +114,10 @@ async def _service_row(grant: ServiceGrantRead, tenant_id: UUID) -> dict[str, ob
     if grant.target_id:
         async with get_sessionmaker()() as db_session:
             target = await resolve_target_by_id(db_session, tenant_id, grant.target_id)
-    effect = "revoked" if grant.revoked_at is not None else "active"
-    if grant.expires_at is not None and grant.expires_at <= datetime.now(UTC):
+    effect = "active"
+    if grant.revoked_at is not None:
+        effect = "revoked"
+    elif grant.expires_at is not None and grant.expires_at <= datetime.now(UTC):
         effect = "expired"
     return {
         "id": str(grant.id),
@@ -138,6 +140,10 @@ async def _index(
     request: Request,
     principal: str | None = Query(default=None, max_length=512),
     include_expired: bool = Query(default=False),
+    include_revoked: bool = Query(default=False),
+    service_offset: int = Query(default=0, ge=0),
+    agent_offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
     session: UISessionContext = _session,
     operator: Operator = Depends(_operator),
 ) -> HTMLResponse:
@@ -146,7 +152,9 @@ async def _index(
         session.tenant_id,
         principal_sub=principal or None,
         include_expired=include_expired,
-        limit=500,
+        include_revoked=include_revoked,
+        limit=limit,
+        offset=service_offset,
     )
     agent_rows: list[dict[str, object]] = []
     if operator.tenant_role == TenantRole.TENANT_ADMIN:
@@ -154,7 +162,8 @@ async def _index(
             session.tenant_id,
             principal_sub=principal or None,
             include_expired=include_expired,
-            limit=500,
+            limit=limit,
+            offset=agent_offset,
         )
         agent_rows = [_agent_row(entry) for entry in agents]
     csrf_token = mint_csrf_token(str(session.session_id))
@@ -166,6 +175,10 @@ async def _index(
         "service_rows": [await _service_row(entry, session.tenant_id) for entry in service_grants],
         "principal": principal or "",
         "include_expired": include_expired,
+        "include_revoked": include_revoked,
+        "service_offset": service_offset,
+        "agent_offset": agent_offset,
+        "limit": limit,
         "csrf_token": csrf_token,
     }
     response = get_templates().TemplateResponse(request, "grants/index.html", context)

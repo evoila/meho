@@ -2386,8 +2386,8 @@ alongside it, all on the same connector:</p>
 </tr>
 <tr>
 <td><code>vmware.composite.vm.guest.file.read</code></td>
-<td>Read a guest file (content capped)</td>
-<td><code>safe</code></td>
+<td>Read a guest file (metadata; opt-in byte fetch via <code>fetch_content</code>, capped/refused over <code>max_inline_bytes</code>)</td>
+<td><code>caution</code> (byte fetch reads as the in-guest login; auto-parks for agents/service)</td>
 </tr>
 <tr>
 <td><code>vmware.composite.vm.guest.env.read</code></td>
@@ -2456,9 +2456,10 @@ parameter.</p>
 </div>
 <p>Capturing a program's output is a two-step compose, by design:
 <code>program.run</code> cannot capture stdout on its own, so redirect the output to
-a file in <code>arguments</code>, then read it back with <code>guest.file.read</code>. Keeping
-capture out of the single operation keeps its blast radius and audited
-surface small.</p>
+a file in <code>arguments</code>, then read it back with <code>guest.file.read</code>
+(<code>fetch_content=true</code> to pull the bytes inline; large output returns a
+<code>result_query</code> handle). Keeping capture out of the single operation keeps
+its blast radius and audited surface small.</p>
 <h2 id="honest-limits">Honest limits<a class="headerlink" href="#honest-limits" title="Permanent link">&para;</a></h2>
 <ul>
 <li><strong>No freeform SQL.</strong> <code>mssql</code> is a curated operation table, not a query

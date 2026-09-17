@@ -6260,6 +6260,84 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#meho-service-principals" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho service-principals
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="meho service-principals">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#meho-service-principals-grants" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho service-principals grants
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="meho service-principals grants">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#meho-service-principals-grants-create" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho service-principals grants create
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#meho-service-principals-grants-list" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho service-principals grants list
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#meho-service-principals-grants-revoke" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho service-principals grants revoke
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#meho-service-principals-grants-show" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho service-principals grants show
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#meho-status" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -12633,6 +12711,84 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#meho-service-principals" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho service-principals
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="meho service-principals">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#meho-service-principals-grants" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho service-principals grants
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="meho service-principals grants">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#meho-service-principals-grants-create" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho service-principals grants create
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#meho-service-principals-grants-list" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho service-principals grants list
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#meho-service-principals-grants-revoke" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho service-principals grants revoke
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#meho-service-principals-grants-show" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho service-principals grants show
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#meho-status" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -17369,6 +17525,60 @@
 <li><code>--limit</code> — max rows per page (1..500, server default 100 when omitted)</li>
 <li><code>--state</code> — filter by state: ok | degraded | critical | unknown | skip</li>
 <li><code>--to</code> — inclusive upper bound on evaluated_at (RFC 3339, e.g. 2026-08-02T00:00:00Z)</li>
+</ul>
+<h2 id="meho-service-principals"><code>meho service-principals</code><a class="headerlink" href="#meho-service-principals" title="Permanent link">&para;</a></h2>
+<p>Manage service-principal operator surfaces</p>
+<div class="highlight"><pre><span></span><code>meho service-principals
+</code></pre></div>
+<h3 id="meho-service-principals-grants"><code>meho service-principals grants</code><a class="headerlink" href="#meho-service-principals-grants" title="Permanent link">&para;</a></h3>
+<p>Manage service-principal permission grants (operator)</p>
+<div class="highlight"><pre><span></span><code>meho service-principals grants
+</code></pre></div>
+<h4 id="meho-service-principals-grants-create"><code>meho service-principals grants create</code><a class="headerlink" href="#meho-service-principals-grants-create" title="Permanent link">&para;</a></h4>
+<p>Create a service-principal grant (operator)</p>
+<div class="highlight"><pre><span></span><code>meho service-principals grants create [flags]
+</code></pre></div>
+<ul>
+<li><code>--backplane</code> — backplane URL (defaults to the URL from <code>meho login</code>)</li>
+<li><code>--connector-id</code> — exact connector id; globs are refused (required)</li>
+<li><code>--expires</code> — optional ISO 8601 UTC expiry</li>
+<li><code>--json</code> — emit raw ServiceGrantRead JSON</li>
+<li><code>--op-id</code> — exact operation id; globs and delete-shaped ops are refused (required)</li>
+<li><code>--principal</code> — JWT sub of the service principal (required)</li>
+<li><code>--reason</code> — operator justification for this standing grant (required)</li>
+<li><code>--target</code> — target UUID (optional; targetless is not a wildcard)</li>
+<li><code>--target-name-pattern</code> — explicit fnmatch target-name selector (optional)</li>
+<li><code>--target-product</code> — exact target-product selector (optional)</li>
+</ul>
+<h4 id="meho-service-principals-grants-list"><code>meho service-principals grants list</code><a class="headerlink" href="#meho-service-principals-grants-list" title="Permanent link">&para;</a></h4>
+<p>List service-principal grants in your tenant (operator)</p>
+<div class="highlight"><pre><span></span><code>meho service-principals grants list [flags]
+</code></pre></div>
+<ul>
+<li><code>--backplane</code> — backplane URL (defaults to the URL from <code>meho login</code>)</li>
+<li><code>--include-expired</code> — include expired grants (default: active grants only)</li>
+<li><code>--include-revoked</code> — include revoked grant history</li>
+<li><code>--json</code> — emit raw ServiceGrantListResponse JSON</li>
+<li><code>--limit</code> — max grants per page (1..500, server default 100)</li>
+<li><code>--offset</code> — page offset (default 0)</li>
+<li><code>--principal</code> — filter by service-principal JWT sub</li>
+</ul>
+<h4 id="meho-service-principals-grants-revoke"><code>meho service-principals grants revoke</code><a class="headerlink" href="#meho-service-principals-grants-revoke" title="Permanent link">&para;</a></h4>
+<p>Revoke a service-principal grant (operator)</p>
+<div class="highlight"><pre><span></span><code>meho service-principals grants revoke &lt;grant-id&gt; [flags]
+</code></pre></div>
+<ul>
+<li><code>--backplane</code> — backplane URL (defaults to the URL from <code>meho login</code>)</li>
+<li><code>--confirm</code> — confirm revocation</li>
+<li><code>--json</code> — emit a machine-readable result JSON</li>
+</ul>
+<h4 id="meho-service-principals-grants-show"><code>meho service-principals grants show</code><a class="headerlink" href="#meho-service-principals-grants-show" title="Permanent link">&para;</a></h4>
+<p>Show one service-principal grant (operator)</p>
+<div class="highlight"><pre><span></span><code>meho service-principals grants show &lt;grant-id&gt; [flags]
+</code></pre></div>
+<ul>
+<li><code>--backplane</code> — backplane URL (defaults to the URL from <code>meho login</code>)</li>
+<li><code>--json</code> — emit raw ServiceGrantRead JSON</li>
 </ul>
 <h2 id="meho-status"><code>meho status</code><a class="headerlink" href="#meho-status" title="Permanent link">&para;</a></h2>
 <p>Show operator identity + backplane health; --watch streams live activity</p>

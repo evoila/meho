@@ -165,6 +165,13 @@ _TRANSFER_ERROR_SNIPPET_BYTES = 4096
 #: this excerpt: enough to recognise a vendor error shape, small enough to keep
 #: the leak/abuse surface minimal.
 _TRANSFER_ERROR_MESSAGE_CHARS = 512
+#: Hard cap (chars) on the echoed ``Content-Encoding`` value in the transport-
+#: encoding refusal message. That value is an attacker-influenceable response
+#: header (the transfer host is off-target) that lands in the connector-error
+#: message + synchronous audit row, so it is control-stripped and clipped to
+#: this width before it is echoed -- a header token is short, so 64 chars is
+#: ample for a legitimate value while bounding a hostile one.
+_CONTENT_ENCODING_ECHO_CHARS = 64
 #: Matches any ``scheme://…`` run up to the next whitespace. Used to excise the
 #: one-time transfer URL (and any ``?token=``/``?api_key=`` ticket riding it)
 #: from a hostile error body before it reaches the refusal message -- a control
@@ -726,10 +733,24 @@ def _transfer_content_encoding_refused(content_encoding: str) -> RuntimeError:
     response (combined with the ``aiter_raw`` wire-byte budget) keeps
     ``raw == decoded`` so the decoded content the agent receives is bounded by
     ``max_inline_bytes`` and no amplification is possible.
+
+    The refused ``content_encoding`` is an attacker-influenceable response header
+    echoed into the message, so it is control-stripped and clipped to
+    :data:`_CONTENT_ENCODING_ECHO_CHARS` before being embedded (a header token
+    carries no secret vocabulary, so bound + clean suffices -- no redactor).
     """
+    # content_encoding is an attacker-influenceable response header (the transfer
+    # host is off-target) echoed into the connector-error message + audit row, so
+    # bound and clean it before embedding: strip control / non-printable chars so
+    # an escape sequence cannot reshape the audit line, and clip to a short cap so
+    # a long value cannot balloon the message. It is a header token (no secret
+    # vocabulary), so no redactor is needed -- just bound + clean.
+    cleaned = " ".join("".join(ch if ch.isprintable() else " " for ch in content_encoding).split())
+    if len(cleaned) > _CONTENT_ENCODING_ECHO_CHARS:
+        cleaned = cleaned[:_CONTENT_ENCODING_ECHO_CHARS].rstrip() + "…"
     return RuntimeError(
         f"guest.file.read: refusing a transfer response with "
-        f"Content-Encoding: {content_encoding!r}. Guest file transfers carry "
+        f"Content-Encoding: {cleaned!r}. Guest file transfers carry "
         f"identity-encoded bytes; a transport encoding on this response is "
         f"unexpected and is refused to bound decoded size against a "
         f"decompression bomb."

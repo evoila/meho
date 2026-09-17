@@ -28,9 +28,13 @@ Mixed safety posture
 
 The 9 read composites (T5 / #508 + the 4 guest-ops reads
 ``vm.guest.process.list`` / ``vm.guest.env.read`` / ``vm.guest.net.show``
-/ ``vm.guest.file.read`` / #3100) pass
+/ ``vm.guest.file.read`` / #3100) are read-only. 8 of them pass
 ``safety_level="safe"`` + ``requires_approval=False`` -- overrides of
-T4's ``dangerous`` / ``True`` defaults. (The former
+T4's ``dangerous`` / ``True`` defaults. The exception is
+``vm.guest.file.read``, promoted to ``caution`` in #3720 (it can fetch
+arbitrary guest bytes as the in-guest login), so it auto-parks for
+agent / service principals while a human seat still executes it
+immediately; see its caution row below. (The former
 ``host.network_uplinks`` and ``host.vsan_health`` reads were re-shipped
 as typed ops in #2258; see
 :mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) 23 of the 24
@@ -51,11 +55,12 @@ at the call site; the helper would default to those values anyway). The
 ``safety_level="destructive"`` op (still ``requires_approval=True``) — the
 governed-delete tier (decision
 ``docs/decisions/governed-delete-operations.md``).
-The #3505 governed-allocation writes add the first two ``caution`` rows —
-``resource_pool.create`` and the VM-Host affinity
+The #3505 governed-allocation writes add the first two ``caution`` write
+rows — ``resource_pool.create`` and the VM-Host affinity
 ``cluster.drs_vm_host_rule.create`` — plus one more ``dangerous`` row,
 ``resource_pool.delete`` (a reparent, not a destroy); all three still
-``requires_approval=True``.
+``requires_approval=True``. (The ``caution`` tier is not writes-only:
+``vm.guest.file.read`` above is a ``caution`` read / #3720.)
 Each :class:`_CompositeSpec` row carries its own ``safety_level`` +
 ``requires_approval`` so the policy posture is implied by the row,
 not by global state.
@@ -1393,7 +1398,8 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         requires_approval=True,
     ),
     # ----------------------------------------------------------------
-    # Guest-operations channel (#3100) -- 4 safe reads + 1 dangerous write.
+    # Guest-operations channel (#3100) -- 3 safe reads + 1 caution read
+    # (vm.guest.file.read, #3720) + 1 dangerous write.
     # Guest OS credentials resolve from the target's secret_ref, never
     # from params.
     # ----------------------------------------------------------------

@@ -26,8 +26,10 @@ Scope:
 
 * 9 read composites (G3.1-T5 / #508 + the 4 guest-ops reads
   ``vm.guest.process.list`` / ``env.read`` / ``net.show`` /
-  ``file.read`` / #3100) --
-  ``safety_level="safe"`` + ``requires_approval=False`` overrides.
+  ``file.read`` / #3100). 8 pin ``safety_level="safe"`` +
+  ``requires_approval=False`` overrides; ``file.read`` is ``caution``
+  (#3720) -- read-only, but it can fetch guest bytes as the in-guest
+  login, so it auto-parks for agent / service principals.
   (The former ``host.network_uplinks`` / ``host.vsan_health`` reads
   were re-shipped as ``source_kind="typed"`` ops in #2258; see
   :mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.)

@@ -916,6 +916,29 @@ async def test_file_read_fetch_refuses_content_encoded_response(creds: _CredReco
     assert conn.stream_state["yielded"] == 0
 
 
+def test_transfer_content_encoding_refusal_message_is_bounded_and_clean() -> None:
+    """A hostile Content-Encoding header yields a bounded, control-free message.
+
+    The value is an attacker-influenceable response header echoed into the
+    refusal message (which lands in the synchronous audit row), so it is
+    control-stripped and clipped: a long or escape-laden value cannot balloon
+    the message or reshape the audit line.
+    """
+    hostile = "gzip\x00\x1b" + "z" * 500 + "\r\ninjected"
+    message = str(_guest._transfer_content_encoding_refused(hostile))
+    # Still a clear, actionable refusal that names the header and the reason.
+    assert "Content-Encoding" in message
+    assert "decompression bomb" in message
+    # No control characters smuggled into the audit line.
+    for ctrl in ("\x00", "\x1b", "\r", "\n"):
+        assert ctrl not in message
+    # The echoed value is clipped to the cap: the 500-char filler is bounded.
+    assert message.count("z") <= _guest._CONTENT_ENCODING_ECHO_CHARS
+    assert "…" in message  # the over-cap value was clipped
+    # A normal value round-trips cleanly and readably.
+    assert "'gzip'" in str(_guest._transfer_content_encoding_refused("gzip"))
+
+
 # ---------------------------------------------------------------------------
 # file.write (the one gated write)
 # ---------------------------------------------------------------------------

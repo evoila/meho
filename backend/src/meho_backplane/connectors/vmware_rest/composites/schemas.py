@@ -27,8 +27,10 @@ Conventions
   tools (:mod:`meho_backplane.operations.meta_tools`) surface the
   schema verbatim on ``describe_operation`` calls.
 * The 9 read composites are read-only -- the registration call site
-  pins ``safety_level="safe"`` and ``requires_approval=False`` on
-  each. 23 of the 24 write composites inherit T4's
+  pins ``safety_level="safe"`` and ``requires_approval=False`` on 8 of
+  them; ``vm.guest.file.read`` is pinned ``caution`` (#3720), a read
+  that can fetch guest bytes as the in-guest login and so auto-parks for
+  agent / service principals. 23 of the 24 write composites inherit T4's
   ``safety_level="dangerous"`` + ``requires_approval=True`` defaults
   (G3.1-T6 / #509, single-VM ``vm.power`` / #2301, the mutating
   VI-JSON ``vm.disk.grow`` / #2893, the folder-template

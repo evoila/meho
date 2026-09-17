@@ -104,7 +104,10 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.profile_auth import SESSION_TOKEN_OBJECT_KEY
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
-from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
+from meho_backplane.connectors._shared.vault_creds import (
+    CredentialsReadError,
+    VaultCredentialsReadError,
+)
 from meho_backplane.connectors._shared.vcf_auth import (
     ConnectorAuthError,
     session_establish_auth_error,
@@ -2081,8 +2084,11 @@ class VmwareRestConnector(HttpConnector):
         sm_moid = self._esxi_session_manager_moids.get(cache_key)
         if sm_moid is None:
             # No cached SessionManager moid to read against — cannot assert
-            # liveness, so leave reachability to the establish that already ran.
-            return True
+            # liveness with an authenticated read, so fail closed (#3710: never
+            # report reachable without a live authenticated read). SessionManager
+            # is always present on a real endpoint, so this is a dead-in-practice
+            # edge.
+            return False
         try:
             (
                 read_props,
@@ -2092,7 +2098,7 @@ class VmwareRestConnector(HttpConnector):
             ) = await _collect_with_auth_health_reset(
                 self, operator, target, "SessionManager", sm_moid, ["currentSession"]
             )
-        except (ConnectorAuthError, httpx.HTTPError, OSError, RuntimeError):
+        except (ConnectorAuthError, CredentialsReadError, httpx.HTTPError, OSError, RuntimeError):
             return False
         return "currentSession" in read_props
 

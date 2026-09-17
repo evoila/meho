@@ -68,6 +68,7 @@ import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError
 from meho_backplane.connectors.schemas import AuthModel
@@ -1191,3 +1192,60 @@ async def test_fingerprint_stale_session_healed_by_reset_reports_reachable(
     assert result.version == _ABOUT_VERSION
     # The health-reset fired: a Logout + re-establish sits between the two reads.
     assert "Logout" in router.methods
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_credentials_read_error_during_liveness_degrades_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(#3773d/#3710, review 5237111080 F5) A VaultCredentialsReadError raised by
+    the liveness read's re-login (a coincident credential-read hiccup) must not
+    escape _esxi_session_is_live/fingerprint — it degrades to reachable=False
+    exactly like the transport/auth errors already in the except tuple, rather
+    than propagating out of the probe."""
+    monkeypatch.setattr(connector_module, "_SESSION_MAX_AGE_SECONDS", 0)
+
+    async def _raise_creds_error(*_args: Any, **_kwargs: Any) -> Any:
+        raise VaultCredentialsReadError(
+            "injected credential-read hiccup during the liveness re-login"
+        )
+
+    monkeypatch.setattr(
+        "meho_backplane.connectors.vmware_rest.typed_ops_object_collect."
+        "_collect_with_auth_health_reset",
+        _raise_creds_error,
+    )
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    router = _SdkRouter()
+    target = _esxi_fingerprinted()
+
+    async with respx.mock(base_url=_ESXI_BASE) as mock:
+        mock.post(_SDK).mock(side_effect=router)
+        mock.get("/api/about").respond(400)
+        # No exception escapes: the credential-read error is caught and mapped to
+        # the unreachable fingerprint, never propagated to the caller.
+        result = await connector.fingerprint(target, _make_operator())
+
+    assert result.reachable is False
+    assert result.product == "unknown"
+    assert "stale/void SOAP session" in result.extras["error"]
+    # Establish ran and cached the SessionManager moid, so the liveness read WAS
+    # attempted — the degrade is the except-tuple catch of the credential-read
+    # error, not the moid-absent short-circuit.
+    assert "Login" in router.methods
+    assert connector._esxi_session_manager_moids
+
+
+@pytest.mark.asyncio
+async def test_esxi_liveness_unreachable_when_session_manager_moid_absent() -> None:
+    """(#3773d/#3710, review 5237111080 F1) Fail closed: with no cached
+    SessionManager moid there is no object to run the authenticated liveness read
+    against, so _esxi_session_is_live reports not-live (which fingerprint maps to
+    reachable=False) rather than trusting the establish that already ran. Matches
+    the method docstring and connectors-vmware-rest.md."""
+    connector = _make_connector()
+    # No establish has run, so no SessionManager moid is cached for this target.
+    assert connector._esxi_session_manager_moids == {}
+    live = await connector._esxi_session_is_live(_esxi_fingerprinted(), _make_operator())
+    assert live is False

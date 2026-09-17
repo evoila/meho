@@ -92,6 +92,23 @@ connector-related release-notes line.
 
 ## [0.35.3] - 2026-09-17
 
+### Security
+
+- Classify every login-bearing vSphere guest composite (guest process list, environment read, file read; program run and file write already were) as `credential_write` so the flight recorder never records their bodies: captured request bodies of these safe-tier reads could retain the in-guest login password in the 30-day trace store. A registry-walking drift guard fails the suite for any new guest composite left unclassified. (#3717 / #3718)
+
+  **Operator upgrade note.** This classification is forward-only — guest-composite traces captured before this release retain their recorded request bodies until they age out of the 30-day trace store.
+
+### Added
+
+- `vmware.composite.vm.guest.file.read` gains `fetch_content=true`: the transfer ticket is fetched server-side over the connector's TLS client with a streamed size cap (1 MiB default, 8 MiB max), identity encoding only, and the content returned as utf-8 lines or whole-file base64 behind a result handle; `fetch_content=false` is unchanged. (#3719 / #3720)
+- `mehoauto` connector allowlists the run-node resume operation (`POST /api/v1/runs/{run_id}/nodes/{node_id}/resume`) at the caution tier (no approval park) so a governed launcher can nudge a failed node of the run it is driving to re-check or re-run; the sibling human-only skip route stays out of the catalog. (#3707 / #3709)
+
+### Changed
+
+- `vmware.composite.vm.guest.file.read` moves from `safe` to `caution`: agent and service principals now park for approval on every call (a standing grant cannot lift it), human seats execute as before. (#3719 / #3720)
+
+  **Operator upgrade note.** This tier change takes effect on upgrade — agent and service callers of `vmware.composite.vm.guest.file.read` will begin parking for approval; human seats are unaffected.
+
 ### Fixed
 
 - Keep completed operations successful when response formatting fails. `call_operation` now reports `delivery=unavailable`, includes a committed audit receipt when available, and tells callers not to repeat the operation. (#3636 / #3714)

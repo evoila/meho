@@ -10203,6 +10203,16 @@
             }
           },
           {
+            "name": "include_expired",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": true,
+              "title": "Include Expired"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,

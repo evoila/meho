@@ -35,7 +35,8 @@ func NewGrantsCmd() *cobra.Command {
 
 func newListCmd() *cobra.Command {
 	var principal, backplaneOverride string
-	var includeExpired, jsonOut bool
+	var includeExpired, includeRevoked, jsonOut bool
+	var limit, offset int
 	cmd := &cobra.Command{
 		Use: "list", Short: "List service-principal grants in your tenant (operator)", Args: cobra.NoArgs, SilenceUsage: true, SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -43,7 +44,7 @@ func newListCmd() *cobra.Command {
 			if err != nil {
 				return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 			}
-			resp, err := listGrants(cmd.Context(), url, grantListParams(principal, includeExpired))
+			resp, err := listGrants(cmd.Context(), url, grantListParams(principal, includeExpired, includeRevoked, limit, offset))
 			if err != nil {
 				return renderRequestError(cmd, url, err, jsonOut)
 			}
@@ -58,19 +59,31 @@ func newListCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&principal, "principal", "", "filter by service-principal JWT sub")
-	cmd.Flags().BoolVar(&includeExpired, "include-expired", false, "include expired or revoked grants")
+	cmd.Flags().BoolVar(&includeExpired, "include-expired", false, "include expired grants (default: active grants only)")
+	cmd.Flags().BoolVar(&includeRevoked, "include-revoked", false, "include revoked grant history")
+	cmd.Flags().IntVar(&limit, "limit", 0, "max grants per page (1..500, server default 100)")
+	cmd.Flags().IntVar(&offset, "offset", 0, "page offset (default 0)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw ServiceGrantListResponse JSON")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "", "backplane URL (defaults to the URL from `meho login`)")
 	return cmd
 }
 
-func grantListParams(principal string, includeExpired bool) *api.ListGrantsApiV1ServicePrincipalsGrantsGetParams {
+func grantListParams(principal string, includeExpired, includeRevoked bool, limit, offset int) *api.ListGrantsApiV1ServicePrincipalsGrantsGetParams {
 	params := &api.ListGrantsApiV1ServicePrincipalsGrantsGetParams{}
+	// Send false explicitly: the REST API defaults true for backwards
+	// compatibility, while the CLI default is active-only.
+	params.IncludeExpired = &includeExpired
 	if principal != "" {
 		params.PrincipalSub = &principal
 	}
-	if includeExpired {
-		params.IncludeRevoked = &includeExpired
+	if includeRevoked {
+		params.IncludeRevoked = &includeRevoked
+	}
+	if limit > 0 {
+		params.Limit = &limit
+	}
+	if offset > 0 {
+		params.Offset = &offset
 	}
 	return params
 }
@@ -128,11 +141,11 @@ func showGrant(ctx context.Context, url string, id uuid.UUID) (*api.ShowGrantApi
 }
 
 func newCreateCmd() *cobra.Command {
-	var principal, opID, connectorID, target, targetNamePattern, reason, expires, backplaneOverride string
+	var principal, opID, connectorID, target, targetProduct, targetNamePattern, reason, expires, backplaneOverride string
 	var jsonOut bool
 	cmd := &cobra.Command{Use: "create", Short: "Create a service-principal grant (operator)", Args: cobra.NoArgs, SilenceUsage: true, SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			body, err := buildGrantCreateBody(principal, opID, connectorID, target, targetNamePattern, reason, expires)
+			body, err := buildGrantCreateBody(principal, opID, connectorID, target, targetProduct, targetNamePattern, reason, expires)
 			if err != nil {
 				return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(err.Error()), jsonOut)
 			}
@@ -154,6 +167,7 @@ func newCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&opID, "op-id", "", "exact operation id; globs and delete-shaped ops are refused (required)")
 	cmd.Flags().StringVar(&connectorID, "connector-id", "", "exact connector id; globs are refused (required)")
 	cmd.Flags().StringVar(&target, "target", "", "target UUID (optional; targetless is not a wildcard)")
+	cmd.Flags().StringVar(&targetProduct, "target-product", "", "exact target-product selector (optional)")
 	cmd.Flags().StringVar(&targetNamePattern, "target-name-pattern", "", "explicit fnmatch target-name selector (optional)")
 	cmd.Flags().StringVar(&reason, "reason", "", "operator justification for this standing grant (required)")
 	cmd.Flags().StringVar(&expires, "expires", "", "optional ISO 8601 UTC expiry")
@@ -162,15 +176,15 @@ func newCreateCmd() *cobra.Command {
 	return cmd
 }
 
-func buildGrantCreateBody(principal, opID, connectorID, target, targetNamePattern, reason, expires string) (api.ServiceGrantCreate, error) {
+func buildGrantCreateBody(principal, opID, connectorID, target, targetProduct, targetNamePattern, reason, expires string) (api.ServiceGrantCreate, error) {
 	if principal == "" || opID == "" || connectorID == "" || reason == "" {
 		return api.ServiceGrantCreate{}, fmt.Errorf("--principal, --op-id, --connector-id, and --reason are required")
 	}
 	if hasGlob(principal) || hasGlob(opID) || hasGlob(connectorID) {
 		return api.ServiceGrantCreate{}, fmt.Errorf("--principal, --op-id, and --connector-id must be exact values; globs are not allowed")
 	}
-	if target != "" && targetNamePattern != "" {
-		return api.ServiceGrantCreate{}, fmt.Errorf("--target and --target-name-pattern are mutually exclusive")
+	if target != "" && (targetProduct != "" || targetNamePattern != "") {
+		return api.ServiceGrantCreate{}, fmt.Errorf("--target is mutually exclusive with --target-product and --target-name-pattern")
 	}
 	if isDeleteShaped(opID) {
 		return api.ServiceGrantCreate{}, fmt.Errorf("--op-id %q is delete-shaped and can never be granted", opID)
@@ -189,6 +203,9 @@ func buildGrantCreateBody(principal, opID, connectorID, target, targetNamePatter
 	if targetNamePattern != "" {
 		body.TargetNamePattern = &targetNamePattern
 	}
+	if targetProduct != "" {
+		body.TargetProduct = &targetProduct
+	}
 	if expires != "" {
 		parsed, err := time.Parse(time.RFC3339, expires)
 		if err != nil {
@@ -199,7 +216,10 @@ func buildGrantCreateBody(principal, opID, connectorID, target, targetNamePatter
 	return body, nil
 }
 
-func hasGlob(value string) bool { return strings.ContainsAny(value, "*?[") }
+// hasGlob rejects glob operators that cannot be part of an exact identifier.
+// A literal '?' is permitted: GET-style operation identifiers commonly carry
+// query strings and the server accepts it as an exact character.
+func hasGlob(value string) bool { return strings.ContainsAny(value, "*[") }
 
 func isAffirmative(answer string) bool {
 	answer = strings.ToLower(strings.TrimSpace(answer))

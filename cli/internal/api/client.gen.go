@@ -10206,6 +10206,7 @@ type ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState string
 type ListGrantsApiV1ServicePrincipalsGrantsGetParams struct {
 	PrincipalSub   *string `form:"principal_sub,omitempty" json:"principal_sub,omitempty"`
 	IncludeRevoked *bool   `form:"include_revoked,omitempty" json:"include_revoked,omitempty"`
+	IncludeExpired *bool   `form:"include_expired,omitempty" json:"include_expired,omitempty"`
 	Limit          *int    `form:"limit,omitempty" json:"limit,omitempty"`
 	Offset         *int    `form:"offset,omitempty" json:"offset,omitempty"`
 	Authorization  *string `json:"authorization,omitempty"`
@@ -30236,6 +30237,22 @@ func NewListGrantsApiV1ServicePrincipalsGrantsGetRequest(server string, params *
 		if params.IncludeRevoked != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "include_revoked", runtime.ParamLocationQuery, *params.IncludeRevoked); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.IncludeExpired != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "include_expired", runtime.ParamLocationQuery, *params.IncludeExpired); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

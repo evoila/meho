@@ -90,6 +90,12 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.35.5] - 2026-09-17
+
+### Fixed
+
+- Recover an expired standalone-ESXi SOAP session that still answers the unauthenticated service-content bootstrap but returns every requested property in `missingSet` under a per-property `NotAuthenticated` fault — no top-level SOAP fault fires, so the old re-login path never triggered and `vmware.object.collect` returned a silent all-missing "void" that no path recovered for the rest of the pod's lifetime: (a) a bounded per-target session max-age — env var `VMWARE_SOAP_SESSION_MAX_AGE_SECONDS`, default **1200 s** (20 min), `0` disables, and unset / invalid / negative fall back to the default — proactively re-establishes a warm session before it can exceed the host's 30-minute idle timeout, on every `vmware_rest` session path (ESXi and vCenter); (b) when an `object.collect` read resolves the object but **every** requested property comes back in `missingSet` under an auth-class fault (`NotAuthenticated`, or an all-object `NoPermission`), the connector invalidates the cached session and re-reads **once** on a fresh session — a legitimate partial per-field `NoPermission` never triggers it, and a persistent void returns the fault-annotated envelope and never loops; and (c) the ESXi probe/fingerprint now confirms reachability with one authenticated liveness read, so `reachable` reflects a live session — a missing `SessionManager`, a session that cannot be re-established, or a credential-read failure during the liveness re-login all degrade to `unreachable` instead of masking the outage or propagating. (#3773 / #3710 / #3776)
+
 ## [0.35.4] - 2026-09-17
 
 ### Security

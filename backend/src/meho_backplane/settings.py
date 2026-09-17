@@ -1354,6 +1354,7 @@ class Settings(BaseModel):
     checks_evidence_prune_interval_seconds: int = Field(default=604800, ge=60, le=604800)
     checks_evidence_prune_enabled: bool = True
     result_handle_max_spill_rows: int = Field(default=10000, gt=0)
+    result_handle_max_record_bytes: int = Field(default=16777216, gt=0)
     # Bounds captured-JSON catalog work before the reducer serializes or
     # profiles a detected collection. These are deliberately separate from
     # transport/decompression and lazy result-query output limits.
@@ -2323,6 +2324,9 @@ def get_settings() -> Settings:
         ),
         result_handle_max_spill_rows=int(
             os.environ.get("RESULT_HANDLE_MAX_SPILL_ROWS", "10000"),
+        ),
+        result_handle_max_record_bytes=int(
+            os.environ.get("RESULT_HANDLE_MAX_RECORD_BYTES", "16777216"),
         ),
         result_reduction_max_decoded_bytes=int(
             os.environ.get("RESULT_REDUCTION_MAX_DECODED_BYTES", "67108864"),

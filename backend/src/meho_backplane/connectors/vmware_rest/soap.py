@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: file-size -- already over the soft line limit on main (611
+# lines); #3708 adds only a one-line force-list entry + its rationale comment.
+# Splitting this cohesive SOAP codec is out of scope for this fix.
 
 """Hand-rolled SOAP 1.1 codec for the standalone-ESXi vmomi surface (#3363).
 
@@ -41,8 +44,10 @@ rule:
 3. **``xsi:type`` -> ``_typeName``:** the DataObject discriminator is
    preserved on every complex element that carries an ``xsi:type`` (the
    key consumers guard on -- ``VirtualDisk``, ``ArrayOf*`` containers).
-4. **Force-list local-names** ``{objects, propSet}`` -> always a
-   ``list``, even when singular (consumers iterate unconditionally).
+4. **Force-list local-names** ``{objects, propSet, missingSet}`` -> always
+   a ``list``, even when singular (consumers iterate unconditionally;
+   ``missingSet`` joined in #3708 so a lone unreadable property is not
+   parsed to a bare dict and dropped by ``object.collect``).
 5. **``ArrayOf*`` containers** -> children always a ``list`` ->
    ``{"_typeName": "ArrayOfX", "X": [...]}``, **including the
    single-element collapse**. Backstop: ``unwrap_vim_value`` already
@@ -139,8 +144,12 @@ SERVICE_INSTANCE_MOID: Final = "ServiceInstance"
 _ARRAY_OF_PREFIX: Final = "ArrayOf"
 
 #: Local-names whose children are *always* a list even when singular
-#: (codec rule 4) -- the RetrieveResult iteration seams.
-_FORCE_LIST_LOCALNAMES: Final = frozenset({"objects", "propSet"})
+#: (codec rule 4) -- the RetrieveResult iteration seams. ``missingSet``
+#: joined the set in #3708: a single-object read with exactly one
+#: unreadable property carries one ``missingSet`` element, which without
+#: the force-list parses to a bare dict and is silently dropped by the
+#: ``object.collect`` ``isinstance(miss, dict)`` iteration guard.
+_FORCE_LIST_LOCALNAMES: Final = frozenset({"objects", "propSet", "missingSet"})
 
 #: ``xsd`` primitive local-names coerced to :class:`int` (codec rule 8).
 _INT_XSD_TYPES: Final = frozenset(

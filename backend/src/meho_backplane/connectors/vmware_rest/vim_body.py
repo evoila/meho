@@ -56,6 +56,7 @@ __all__ = [
     "VIM_TYPE_NAME_KEY",
     "VIM_VALUE_KEY",
     "fault_message",
+    "fault_type_name",
     "retrieve_properties_body",
     "unwrap_vim_value",
     "vim_moref",
@@ -204,6 +205,35 @@ def _fault_type_name(fault: dict[str, Any]) -> str | None:
     """Return a fault DataObject's concrete ``_typeName`` when it is real text."""
     type_name = fault.get(VIM_TYPE_NAME_KEY)
     return type_name if isinstance(type_name, str) and type_name.strip() else None
+
+
+def fault_type_name(fault: Any) -> str | None:
+    """Concrete vim fault ``_typeName`` (class name only) of a per-property fault.
+
+    A ``MissingProperty.fault`` (``PropertyCollector`` ``missingSet``) and a
+    ``TaskInfo.error`` arrive in one of two VI-JSON shapes, depending on the
+    vCenter serializer -- the same split :func:`fault_message` handles:
+
+    * **9.x** -- a ``LocalizedMethodFault`` wrapper whose nested ``fault``
+      DataObject carries the concrete class ``_typeName`` (e.g.
+      ``NoPermission`` / ``InvalidProperty`` / ``ManagedObjectNotFound``);
+      the wrapper's own ``_typeName`` is the useless ``LocalizedMethodFault``.
+    * **8.0.x** -- the concrete fault DataObject flattened directly onto the
+      ``fault`` field (its own ``_typeName`` is the fault class).
+
+    Returns the concrete fault class **name only** -- never any fault text
+    (``faultstring`` / ``faultMessage`` / ``localizedMessage``) or payload
+    field, which can echo a property value or a private identifier (#3708).
+    ``None`` when *fault* is not a dict or carries no usable type name.
+    """
+    if not isinstance(fault, dict):
+        return None
+    nested = fault.get("fault")
+    if isinstance(nested, dict):
+        nested_name = _fault_type_name(nested)
+        if nested_name is not None:
+            return nested_name
+    return _fault_type_name(fault)
 
 
 def fault_message(error: Any) -> str | None:

@@ -438,7 +438,14 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     An oversized / malformed request fails `validate_params` in the
     dispatcher and returns a structured `invalid_params` result before
     any read is issued. Returns `{properties: {path: val}, missing:
-    [path]}`, surfacing the `ObjectContent.missingSet`.
+    [path]}`, surfacing the `ObjectContent.missingSet`. It additionally
+    surfaces the per-property `missingSet` fault **type names** —
+    `missing_properties: [{path, fault_type?}]` plus a
+    `missing_fault_summary: {fault_type: count}` roll-up (concrete vim
+    fault class names only, e.g. `NoPermission` / `InvalidProperty`,
+    **never** fault text, which can echo a property value) — so an
+    operator can tell a genuinely-unset property from a per-property
+    permission/auth/invalid fault (#3708).
   - **`vmware.tasks.recent`** (`typed_ops_tasks_recent.py`, handler
     `tasks_recent`) — recent vCenter Task objects for change-window
     monitoring (distinct from `event.tail`, which reads the *event*

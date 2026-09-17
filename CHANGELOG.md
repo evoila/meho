@@ -90,14 +90,24 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.35.4] - 2026-09-17
+
+### Security
+
+- `vmware.composite.vm.guest.file.read` server-side fetch hardening: the non-2xx transfer error is now built from response **metadata only** — the HTTP status, the allow-listed `Content-Type` media-type token, and the declared `Content-Length` — with no response-body byte read or echoed, and the `Content-Encoding` refusal echoes only allow-listed tokens (a hostile value collapses to a fixed label). Adds a registry-walking recorder drift guard and pins the registry-true composite counts (14 read composites including the caution `file.read`, 40 write composites = 54). (#3718 / #3720 / #3768)
+
 ### Added
 
-- Add service-principal grant CLI commands and a unified grants console for
-  operator visibility and tenant-admin grant management. (#3533)
+- `vmware.object.collect` now surfaces per-property `missingSet` fault type names and counts: each collected object gains `missing_properties` (`[{path, fault_type?}]` — the concrete vim fault class name, e.g. `NoPermission` / `InvalidProperty`, when the collector returned a per-property fault, and absent for a genuinely-unset property) and `missing_fault_summary` (a `{fault_type: count}` roll-up). Purely additive and **names/counts only** — never the fault message text or payload fields. The SOAP codec now force-lists `missingSet` so a single missing property on a standalone-ESXi read is no longer dropped. (#3708 / #3772)
+- Add service-principal grant CLI commands and a unified grants console for operator visibility and tenant-admin grant management. (#3533 / #3774)
 
 ### Changed
 
 - Stored result records now cap their entire encoded envelope at the configured **16 MiB** default, retaining the longest whole-row prefix that fits; the stored record marks `storage_coverage` complete or partial, and handles advertise the actual stored-row count. (#3632 / #3722)
+
+### Fixed
+
+- The v0.35.3 operator upgrade-notes row in `docs/deploying.md` now states the correct alembic head `0102` (unchanged since v0.35.2), correcting a stale `0101`. (#3771)
 
 ## [0.35.3] - 2026-09-17
 

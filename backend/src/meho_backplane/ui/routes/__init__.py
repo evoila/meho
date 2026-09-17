@@ -88,7 +88,6 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from meho_backplane.ui.routes.account import build_account_router
-from meho_backplane.ui.routes.grants import build_grants_router
 from meho_backplane.ui.routes.agents import build_agents_router
 from meho_backplane.ui.routes.agents.grants import build_agent_grants_router
 from meho_backplane.ui.routes.agents.runs import build_runs_router
@@ -102,6 +101,7 @@ from meho_backplane.ui.routes.conventions import build_conventions_router
 from meho_backplane.ui.routes.corpus import build_corpus_router
 from meho_backplane.ui.routes.dashboard import build_dashboard_router
 from meho_backplane.ui.routes.event_source import build_event_source_router
+from meho_backplane.ui.routes.grants import build_grants_router
 from meho_backplane.ui.routes.kb import build_kb_router
 from meho_backplane.ui.routes.keycloak import build_keycloak_router
 from meho_backplane.ui.routes.memory import build_memory_router

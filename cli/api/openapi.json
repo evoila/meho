@@ -15730,6 +15730,215 @@
         }
       }
     },
+    "/ui/grants": {
+      "get": {
+        "tags": [
+          "ui-grants"
+        ],
+        "summary": " Index",
+        "operationId": "_index_ui_grants_get",
+        "parameters": [
+          {
+            "name": "principal",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 512,
+              "nullable": true,
+              "title": "Principal"
+            }
+          },
+          {
+            "name": "include_expired",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Expired"
+            }
+          },
+          {
+            "name": "include_revoked",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Revoked"
+            }
+          },
+          {
+            "name": "service_offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Service Offset"
+            }
+          },
+          {
+            "name": "agent_offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Agent Offset"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/grants/create": {
+      "get": {
+        "tags": [
+          "ui-grants"
+        ],
+        "summary": " Create Modal",
+        "operationId": "_create_modal_ui_grants_create_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-grants"
+        ],
+        "summary": " Create",
+        "operationId": "_create_ui_grants_create_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body__create_ui_grants_create_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/grants/{kind}/{grant_id}/revoke": {
+      "post": {
+        "tags": [
+          "ui-grants"
+        ],
+        "summary": " Revoke",
+        "operationId": "_revoke_ui_grants__kind___grant_id__revoke_post",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Kind"
+            }
+          },
+          {
+            "name": "grant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Grant Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/agents/runs": {
       "get": {
         "tags": [
@@ -23337,6 +23546,67 @@
           "auth_strategy"
         ],
         "title": "Body__create_ui_event_sources_post"
+      },
+      "Body__create_ui_grants_create_post": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "title": "Kind",
+            "default": ""
+          },
+          "principal_sub": {
+            "type": "string",
+            "title": "Principal Sub",
+            "default": ""
+          },
+          "op": {
+            "type": "string",
+            "title": "Op",
+            "default": ""
+          },
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id",
+            "default": ""
+          },
+          "target_id": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Id"
+          },
+          "target_scope": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Scope"
+          },
+          "target_product": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Product"
+          },
+          "target_name_pattern": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Name Pattern"
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true,
+            "title": "Reason"
+          },
+          "verdict": {
+            "type": "string",
+            "title": "Verdict",
+            "default": "deny"
+          },
+          "expires_at": {
+            "type": "string",
+            "nullable": true,
+            "title": "Expires At"
+          }
+        },
+        "type": "object",
+        "title": "Body__create_ui_grants_create_post"
       },
       "Body__edit_ui_event_sources__slug__edit_post": {
         "properties": {

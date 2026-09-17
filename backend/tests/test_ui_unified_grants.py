@@ -7,11 +7,13 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
 
+import tests.test_ui_agent_grants as agent_grants_test
 from meho_backplane.agents.grants import AgentGrantService
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentPermission, ServicePrincipalGrant
@@ -32,10 +34,16 @@ from tests.test_ui_agent_grants import (
     _seed_tenant,
 )
 
-# Reuse the deliberately complete BFF test chassis fixture: it pins the
-# Keycloak settings, resets engine/template/JWKS caches, and provisions the
-# disposable SQLite schema used by the established grants UI suite.
-pytest_plugins = ("tests.test_ui_agent_grants",)
+
+@pytest.fixture(autouse=True)
+def _unified_grants_bff_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Reuse the BFF chassis reset only for this module's tests.
+
+    Loading ``test_ui_agent_grants`` as ``pytest_plugins`` would register its
+    autouse fixture for every collected test module.  Calling the wrapped
+    fixture here retains the established setup while containing that scope.
+    """
+    yield from agent_grants_test._bff_env.__wrapped__(monkeypatch)
 
 
 def _seed_service(

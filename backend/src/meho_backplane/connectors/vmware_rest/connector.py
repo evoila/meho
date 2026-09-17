@@ -88,6 +88,8 @@ fall back to v0.2 default" sentinel.
 from __future__ import annotations
 
 import asyncio
+import os
+import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
@@ -193,6 +195,49 @@ _SESSION_HEADER = "vmware-api-session-id"
 # shared :data:`SESSION_TOKEN_OBJECT_KEY` so the typed and profiled
 # (``session_login_basic``) extractors can't drift apart (#2047).
 _SESSION_TOKEN_OBJECT_KEY = SESSION_TOKEN_OBJECT_KEY
+
+#: #3773(a) — default bound (seconds) on how long a warm-cached vSphere/ESXi
+#: SOAP session is trusted before a proactive re-login. 1200s (20 min) sits
+#: SAFELY BELOW a standalone ESXi host's default SOAP idle timeout
+#: (``Config.HostAgent.vmacore.soap.sessionTimeout`` = 1800s / 30 min): the
+#: max-age is the belt to the (b) all-missing health-reset's suspenders, so it
+#: MUST stay below that idle timeout — never raise this default to >= 1800 or
+#: the belt trails the very expiry it guards. The value is an env override, not
+#: a chassis Setting, so the hot read path never has to construct the auth
+#: chassis just to read a session (see :func:`_resolve_session_max_age_seconds`).
+_DEFAULT_SESSION_MAX_AGE_SECONDS = 1200
+
+
+def _resolve_session_max_age_seconds() -> int:
+    """Resolve the SOAP session max-age, honouring the operator env override.
+
+    ``VMWARE_SOAP_SESSION_MAX_AGE_SECONDS`` (seconds) tunes how long a warm
+    session is trusted before :meth:`VmwareRestConnector._session_token`
+    proactively re-establishes it (#3773). ``0`` explicitly **disables** the
+    proactive re-login — the (b) all-missing health-reset still recovers a dead
+    session on the symptom. An unset, non-integer, or **negative** value falls
+    back to :data:`_DEFAULT_SESSION_MAX_AGE_SECONDS` so a typo never silently
+    changes the bound (the same defensive shape as
+    ``adapters.http._resolve_max_response_bytes``). Resolved once at import into
+    :data:`_SESSION_MAX_AGE_SECONDS`; the read path reads that module global by
+    name, so no ``os.environ`` parse happens per SOAP read.
+    """
+    raw = os.environ.get("VMWARE_SOAP_SESSION_MAX_AGE_SECONDS")
+    if raw is None:
+        return _DEFAULT_SESSION_MAX_AGE_SECONDS
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_SESSION_MAX_AGE_SECONDS
+    # 0 is the explicit "disabled" sentinel; a negative value is a typo -> default.
+    return value if value >= 0 else _DEFAULT_SESSION_MAX_AGE_SECONDS
+
+
+#: Resolved once at import; :meth:`VmwareRestConnector._session_max_age_exceeded`
+#: reads this module global by name at call time, so a test can rebind it
+#: (``monkeypatch.setattr(connector, "_SESSION_MAX_AGE_SECONDS", ...)``) to force
+#: or disable the proactive re-login without a per-read env parse.
+_SESSION_MAX_AGE_SECONDS = _resolve_session_max_age_seconds()
 
 
 def _retrieve_properties_resource_ids(body: dict[str, Any] | None) -> list[str]:
@@ -513,6 +558,16 @@ class VmwareRestConnector(HttpConnector):
         # (``target_cache_key``) so two same-named targets in different
         # tenants never share a cached session (#1642/#1672).
         self._session_tokens: dict[tuple[str, str], str] = {}
+        # #3773 — the monotonic clock reading captured when each cached session
+        # was established, keyed on the same tenant-unique tuple. Read by the
+        # bounded session max-age check in :meth:`_session_token` to proactively
+        # re-establish a session older than :data:`_SESSION_MAX_AGE_SECONDS`
+        # (``VMWARE_SOAP_SESSION_MAX_AGE_SECONDS``) before it is trusted for a
+        # read (defense-in-depth against a server-side-expired-but-locally-
+        # cached session). ``time.monotonic`` (not wall-clock) so the age is
+        # immune to system-clock steps. Dropped alongside the token on
+        # :meth:`invalidate_session` / :meth:`aclose`.
+        self._session_established_at: dict[tuple[str, str], float] = {}
         # Tracks which session endpoint minted each cached token so
         # :meth:`aclose` can DELETE against the same path. Production
         # vCenter serves both ``/api/session`` and the legacy
@@ -973,11 +1028,45 @@ class VmwareRestConnector(HttpConnector):
                 "cannot read per-target vendor credentials)"
             )
         cache_key = target_cache_key(target)
+        # #3773(a) — bounded session max-age (defense in depth). A warm session
+        # older than :data:`_SESSION_MAX_AGE_SECONDS`
+        # (``VMWARE_SOAP_SESSION_MAX_AGE_SECONDS``) is proactively invalidated +
+        # re-established BEFORE its next read, so a
+        # server-side-expired-but-locally-cached session can go undetected for at
+        # most one max-age window even if the (b) all-missing health-reset is
+        # somehow bypassed. Runs OUTSIDE ``self._session_lock`` because
+        # :meth:`invalidate_session` acquires that same (non-reentrant) lock; the
+        # subsequent cold-cache establish is serialised under it as usual. 0
+        # disables (health-reset alone). Applies to vCenter and ESXi alike (both
+        # cache under the same key) — a proactive cold re-login is safe for both.
+        if self._session_max_age_exceeded(cache_key):
+            await self.invalidate_session(target)
         async with self._session_lock:
             cached = self._session_tokens.get(cache_key)
             if cached is not None:
                 return cached
             return await self._establish_and_cache_session(target, operator, cache_key)
+
+    def _session_max_age_exceeded(self, cache_key: tuple[str, str]) -> bool:
+        """Return ``True`` iff *cache_key*'s cached session is past the max-age (#3773a).
+
+        Reads the module global :data:`_SESSION_MAX_AGE_SECONDS` (resolved once
+        from ``VMWARE_SOAP_SESSION_MAX_AGE_SECONDS`` at import — no per-read env
+        parse, and no auth-chassis ``Settings`` construction on the hot read
+        path). ``<= 0`` disables the check (``0`` is the operator disable
+        sentinel); a cold cache (no recorded establish time) is never "expired"
+        — it just re-establishes on the miss below. Compared against
+        ``time.monotonic`` (immune to wall-clock steps). A plain-dict read of
+        the establish time is atomic, so this needs no lock; a benign TOCTOU
+        race with a concurrent establish costs at most one redundant re-login.
+        """
+        max_age = _SESSION_MAX_AGE_SECONDS
+        if max_age <= 0:
+            return False
+        established_at = self._session_established_at.get(cache_key)
+        if established_at is None:
+            return False
+        return (time.monotonic() - established_at) > max_age
 
     async def _establish_and_cache_session(
         self,
@@ -1066,6 +1155,7 @@ class VmwareRestConnector(HttpConnector):
             ) from exc
         token = _extract_session_token(resp.json(), target.name)
         self._session_tokens[cache_key] = token
+        self._session_established_at[cache_key] = time.monotonic()  # #3773 max-age clock
         self._session_paths[cache_key] = established_path
         self._session_extensions[cache_key] = extensions
         _log.info(
@@ -1220,6 +1310,7 @@ class VmwareRestConnector(HttpConnector):
                 f"without a {_ESXI_SOAP_SESSION_COOKIE} cookie"
             )
         self._session_tokens[cache_key] = cookie
+        self._session_established_at[cache_key] = time.monotonic()  # #3773 max-age clock
         self._session_flavors[cache_key] = HOST_FLAVOR_ESXI
         self._session_extensions[cache_key] = extensions
         self._esxi_pc_moids[cache_key] = pc_moid
@@ -1781,6 +1872,7 @@ class VmwareRestConnector(HttpConnector):
         cache_key = target_cache_key(target)
         async with self._session_lock:
             token = self._session_tokens.pop(cache_key, None)
+            self._session_established_at.pop(cache_key, None)  # #3773 max-age clock
             flavor = self._session_flavors.pop(cache_key, None)
             self._session_paths.pop(cache_key, None)
             extensions = self._session_extensions.pop(cache_key, None)
@@ -1861,7 +1953,7 @@ class VmwareRestConnector(HttpConnector):
             # already cached rather than dead-ending unreachable on the
             # vAPI-only /api/about.
             if self._session_flavors.get(cache_key) == HOST_FLAVOR_ESXI:
-                return await self._fingerprint_esxi(target, probed_at)
+                return await self._fingerprint_esxi(target, eff_operator, probed_at)
             if exc.response.status_code == 404:
                 # vCenter serves no GET /api/about (#2765); a session
                 # was already established for the GET that 404'd, so
@@ -1875,7 +1967,7 @@ class VmwareRestConnector(HttpConnector):
             # for another reason: the host is reachable and authenticated, so
             # fingerprint it as ESXi rather than dead-ending unreachable.
             if self._session_flavors.get(cache_key) == HOST_FLAVOR_ESXI:
-                return await self._fingerprint_esxi(target, probed_at)
+                return await self._fingerprint_esxi(target, eff_operator, probed_at)
             # RuntimeError catches the session-establish failures from
             # :meth:`_session_token` so an unauthenticatable target
             # surfaces as a clean ``reachable=False`` fingerprint
@@ -1904,6 +1996,7 @@ class VmwareRestConnector(HttpConnector):
     async def _fingerprint_esxi(
         self,
         target: VsphereTargetLike,
+        operator: Operator,
         probed_at: datetime,
     ) -> FingerprintResult:
         """Fingerprint a standalone ESXi target reached over the SOAP session (#3363).
@@ -1918,11 +2011,29 @@ class VmwareRestConnector(HttpConnector):
         ``esxi`` (the same slug ``product_from_line_id`` maps ``embeddedEsx`` /
         ``esx`` to and ``classify_host_target`` keys off). ``probe_method``
         names the ``GET /api/about`` 400 → SOAP ``RetrieveServiceContent``
-        chain (``about.apiType == "HostAgent"``). A session established, so the
-        target is reachable by construction.
+        chain (``about.apiType == "HostAgent"``).
+
+        #3773(d)/#3710 — reachability is **confirmed with one lightweight
+        authenticated read** routed through the (b)-protected object.collect
+        path, not asserted from the cached ``about.version``. Pre-fix,
+        ``reachable=True`` was stamped purely from cache, so a
+        server-side-expired-but-locally-cached session (which still answers the
+        unauthenticated bootstrap) probed green while every real read came back
+        void. Now :meth:`_esxi_session_is_live` reads one property under the
+        auth health-reset: a stale session is either healed (re-login succeeds →
+        genuinely reachable) or, when it cannot re-login, surfaces here as
+        ``reachable=False`` instead of masking the outage.
         """
         cache_key = target_cache_key(target)
         version = self._about_versions.get(cache_key)
+        if not await self._esxi_session_is_live(target, operator):
+            return self._unreachable_fingerprint(
+                target,
+                probed_at,
+                _ESXI_SOAP_PROBE,
+                "authenticated liveness read returned no session (stale/void SOAP session)",
+                extras={"session_flavor": HOST_FLAVOR_ESXI, "version": version},
+            )
         return FingerprintResult(
             vendor="vmware",
             product=HOST_FLAVOR_ESXI,
@@ -1939,6 +2050,51 @@ class VmwareRestConnector(HttpConnector):
                 "session_flavor": HOST_FLAVOR_ESXI,
             },
         )
+
+    async def _esxi_session_is_live(self, target: VsphereTargetLike, operator: Operator) -> bool:
+        """Confirm the ESXi SOAP session is live with one authenticated read (#3773d/#3710).
+
+        Reads the single ``SessionManager.currentSession`` property off the
+        cached SessionManager moid, **through the (b)-protected object.collect
+        path** (:func:`._collect_with_auth_health_reset`) so a stale-but-live
+        session is transparently re-logged-in before the answer is judged. The
+        read is deliberately tiny (one property on the already-cached moid) so
+        the probe stays lightweight.
+
+        Returns ``True`` when ``currentSession`` comes back (the session is
+        live, or was healed by the reset); ``False`` when the moid is unknown,
+        the property is still missing after the reset (a genuinely dead session
+        the re-login could not recover), or the read raises (auth rejected /
+        transport / re-login failure). ``fingerprint`` maps ``False`` to a
+        ``reachable=False`` result — this is the whole of the #3710 masking
+        close, so a failure here must degrade to "unreachable", never propagate.
+        """
+        # Local import: connector.py is imported by the object.collect module's
+        # TYPE_CHECKING block only, so a module-level import here would risk an
+        # import cycle at package load; the call-time import is cost-free after
+        # the first probe and matches the dispatcher's call-time-import pattern.
+        from meho_backplane.connectors.vmware_rest.typed_ops_object_collect import (
+            _collect_with_auth_health_reset,
+        )
+
+        cache_key = target_cache_key(target)
+        sm_moid = self._esxi_session_manager_moids.get(cache_key)
+        if sm_moid is None:
+            # No cached SessionManager moid to read against — cannot assert
+            # liveness, so leave reachability to the establish that already ran.
+            return True
+        try:
+            (
+                read_props,
+                _missing,
+                _missing_properties,
+                _fault_counts,
+            ) = await _collect_with_auth_health_reset(
+                self, operator, target, "SessionManager", sm_moid, ["currentSession"]
+            )
+        except (ConnectorAuthError, httpx.HTTPError, OSError, RuntimeError):
+            return False
+        return "currentSession" in read_props
 
     async def _fingerprint_via_service_versions(
         self,
@@ -2376,6 +2532,7 @@ class VmwareRestConnector(HttpConnector):
             sm_moids = dict(self._esxi_session_manager_moids)
             extensions_by_key = dict(self._session_extensions)
             self._session_tokens.clear()
+            self._session_established_at.clear()  # #3773 max-age clock
             self._session_paths.clear()
             self._session_flavors.clear()
             self._session_extensions.clear()

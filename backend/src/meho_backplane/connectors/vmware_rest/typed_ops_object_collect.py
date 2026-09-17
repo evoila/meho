@@ -66,6 +66,18 @@ _log = structlog.get_logger(__name__)
 # mount_op_path.
 _RETRIEVE_PROPERTIES_PATH = "/PropertyCollector/propertyCollector/RetrievePropertiesEx"
 
+#: The per-property ``missingSet`` fault types that, when they cover EVERY
+#: requested property on a resolved object, mark a stale-but-live vSphere/ESXi
+#: SOAP session rather than a genuine read outcome (#3773). ``NotAuthenticated``
+#: is the classic server-side-expired-session symptom (the host still answers
+#: the unauthenticated ``RetrieveServiceContent`` on the dead cookie but faults
+#: every property read). ``NoPermission`` is included ONLY for the all-object
+#: case — a session whose principal lost its view faults every property alike;
+#: a *partial* per-field ``NoPermission`` (some properties readable) is a real
+#: permission outcome and is excluded structurally by the "no property came
+#: back" guard in :func:`_all_properties_missing_with_auth_fault`.
+_AUTH_CLASS_MISSING_FAULT_TYPES = frozenset({"NotAuthenticated", "NoPermission"})
+
 #: Maximum number of property paths accepted in one request. Caps the
 #: read size; enforced declaratively via ``parameter_schema.maxItems``.
 _MAX_PROPERTIES = 64
@@ -162,6 +174,107 @@ def _extract_object_content(
     return props, missing, missing_properties, fault_counts
 
 
+def _all_properties_missing_with_auth_fault(
+    requested: list[str],
+    read_props: dict[str, Any],
+    missing_properties: list[dict[str, str]],
+) -> bool:
+    """Return ``True`` iff a resolved object came back all-properties-missing with auth faults.
+
+    The stale-but-live session symptom (#3773): the object resolves (so this is
+    a well-formed ``RetrieveResult``, not a ``ManagedObjectNotFound`` — that is
+    promoted upstream) but **every requested property** landed in ``missingSet``
+    each carrying an **auth-class** fault
+    (:data:`_AUTH_CLASS_MISSING_FAULT_TYPES`). That is the signature of a
+    server-side-expired-but-locally-cached SOAP session, whatever killed it
+    (idle expiry, hostd restart, …); the caller invalidates + re-reads once to
+    recover it, exactly as a top-level auth fault already recovers.
+
+    ``True`` requires all three, so the fix never perturbs a legitimate read:
+
+    * **no property came back** (``read_props`` empty) — a partial read (at
+      least one property present, e.g. a per-field ``NoPermission`` on one path
+      of an otherwise-readable object) is a real outcome, not this symptom;
+    * **every requested path is missing** — the object is fully void, not
+      merely short a path or two;
+    * **every missing entry carries an auth-class fault type** — a
+      genuinely-unset property (no ``fault_type``) or a non-auth fault
+      (``InvalidProperty`` / ``ManagedObjectNotFound``) makes this ``False``, so
+      those still return the annotated envelope unchanged.
+    """
+    if read_props:
+        return False
+    if not missing_properties:
+        return False
+    missing_paths = {entry["path"] for entry in missing_properties}
+    if any(path not in missing_paths for path in requested):
+        return False
+    return all(
+        entry.get("fault_type") in _AUTH_CLASS_MISSING_FAULT_TYPES for entry in missing_properties
+    )
+
+
+async def _collect_with_auth_health_reset(
+    connector: VmwareRestConnector,
+    operator: Operator,
+    target: VsphereTargetLike,
+    mo_type: str,
+    moid: str,
+    properties: list[str],
+) -> tuple[dict[str, Any], list[str], list[dict[str, str]], dict[str, int]]:
+    """Read the object's properties, self-healing a stale-but-live session once (#3773b).
+
+    Issues the ``RetrievePropertiesEx`` read and flattens it. If the object
+    resolves but **every** requested property is missing under an auth-class
+    fault (:func:`_all_properties_missing_with_auth_fault`), the cached session
+    is a server-side-expired-but-locally-cached cookie: the host still answers
+    the unauthenticated bootstrap so no top-level SOAP ``<Fault>`` fires the
+    connector's existing re-login, and the read silently returns a "void".
+    Invalidate the session (the same recovery hook the dispatcher's #2067
+    mid-session-401 path uses: evict → the next read cold-re-logs-in) and
+    re-read **once** on the fresh session.
+
+    The reset happens at most once per dispatch — structurally, by re-reading
+    exactly once and returning whatever the retried read yields: recovered
+    properties, or, if it is STILL all-missing, the fault-annotated result
+    (status ok) that the caller turns into the normal envelope — never a second
+    reset, no loop. Independent of *why* the session died (idle expiry, hostd
+    restart, …) — it recovers on the symptom. A partial read (at least one
+    property back) or non-auth faults (``InvalidProperty`` /
+    ``ManagedObjectNotFound``) never trigger it and are returned unchanged.
+
+    Returns the ``(props, missing, missing_properties, fault_counts)`` tuple of
+    :func:`_extract_object_content` for the read that stands.
+    """
+    body = build_object_collect_retrieve_params(mo_type, moid, properties)
+
+    async def _read() -> Any:
+        return await connector._post_vmomi_json(
+            target,
+            _RETRIEVE_PROPERTIES_PATH,
+            operator=operator,
+            json=body,
+            promote_managed_object_not_found=True,
+        )
+
+    result = await _read()
+    read_props, missing, missing_properties, fault_counts = _extract_object_content(result)
+    if not _all_properties_missing_with_auth_fault(properties, read_props, missing_properties):
+        return read_props, missing, missing_properties, fault_counts
+
+    _log.info(
+        "vmware_object_collect_auth_reset",
+        target=target.name,
+        mo_type=mo_type,
+        moid=moid,
+        requested=len(properties),
+        missing_fault_types=sorted(fault_counts),
+    )
+    await connector.invalidate_session(target)
+    result = await _read()
+    return _extract_object_content(result)
+
+
 async def object_collect_impl(
     connector: VmwareRestConnector,
     operator: Operator,
@@ -182,6 +295,18 @@ async def object_collect_impl(
        (#2466). Load-bearing: a failure raises and the dispatcher records
        it as a ``connector_error``.
 
+    2. **Auth health-reset (#3773).** If that read comes back with the object
+       resolved but **every** requested property missing under an auth-class
+       fault (:func:`_all_properties_missing_with_auth_fault`), the cached
+       session is a server-side-expired-but-locally-cached cookie that answers
+       the unauthenticated bootstrap yet faults every property — a "void" no
+       top-level SOAP ``<Fault>`` would surface. Invalidate the session (the
+       same recovery hook the dispatcher's #2067 mid-session-401 path uses) and
+       re-read **once** on the fresh session. At most one reset per dispatch: a
+       retried read that is still all-missing returns the fault-annotated
+       envelope normally, never a second reset. A partial read or a non-auth
+       fault never triggers it.
+
     The size / depth bound is enforced upstream by ``parameter_schema``
     validation in the dispatcher, so by the time this runs ``params`` is
     already within :data:`_MAX_PROPERTIES` / :data:`_MAX_PATH_DEPTH`.
@@ -199,14 +324,10 @@ async def object_collect_impl(
     moid = params["moid"]
     properties: list[str] = list(params["properties"])
 
-    result = await connector._post_vmomi_json(
-        target,
-        _RETRIEVE_PROPERTIES_PATH,
-        operator=operator,
-        json=build_object_collect_retrieve_params(mo_type, moid, properties),
-        promote_managed_object_not_found=True,
+    read_props, missing, missing_properties, fault_counts = await _collect_with_auth_health_reset(
+        connector, operator, target, mo_type, moid, properties
     )
-    read_props, missing, missing_properties, fault_counts = _extract_object_content(result)
+
     _log.info(
         "vmware_object_collect_read",
         target=target.name,

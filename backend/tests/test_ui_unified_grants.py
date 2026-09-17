@@ -16,7 +16,7 @@ from sqlalchemy import select
 import tests.test_ui_agent_grants as agent_grants_test
 from meho_backplane.agents.grants import AgentGrantService
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AgentPermission, ServicePrincipalGrant
+from meho_backplane.db.models import AgentPermission, ServicePrincipalGrant, Target
 from tests.test_ui_agent_grants import (
     _OP_A,
     _TENANT_A,
@@ -77,6 +77,27 @@ def _seed_service(
     return grant_id
 
 
+def _seed_target(tenant_id: uuid.UUID, name: str) -> uuid.UUID:
+    target_id = uuid.uuid4()
+
+    async def _do() -> None:
+        async with get_sessionmaker()() as session, session.begin():
+            session.add(
+                Target(
+                    id=target_id,
+                    tenant_id=tenant_id,
+                    name=name,
+                    aliases=[],
+                    product="vmware",
+                    host=f"{name}.test",
+                    port=443,
+                )
+            )
+
+    asyncio.run(_do())
+    return target_id
+
+
 def _admin_client(*, csrf: bool = False):
     keypair, jwks = _make_keypair_and_jwks()
     session_id = _seed_session_sync(
@@ -87,9 +108,21 @@ def _admin_client(*, csrf: bool = False):
 
 def test_admin_lists_both_grant_kinds_with_agent_name_and_scope() -> None:
     _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_tenant(_TENANT_B, "tenant-b")
     _register_named_principal(_TENANT_A, "agent:recon", "Recon Scout")
+    local_target = _seed_target(_TENANT_A, "tenant-a-vcenter")
+    foreign_target = _seed_target(_TENANT_B, "tenant-b-vcenter")
     _seed_grant(
-        tenant_id=_TENANT_A, principal_sub="agent:recon", op_pattern="vault.kv.*", target_scope="*"
+        tenant_id=_TENANT_A,
+        principal_sub="agent:recon",
+        op_pattern="vault.kv.*",
+        target_scope=str(local_target),
+    )
+    _seed_grant(
+        tenant_id=_TENANT_A,
+        principal_sub="agent:recon",
+        op_pattern="foreign-target.*",
+        target_scope=str(foreign_target),
     )
     _seed_service(_TENANT_A)
     client, mock, _ = _admin_client()
@@ -100,7 +133,9 @@ def test_admin_lists_both_grant_kinds_with_agent_name_and_scope() -> None:
     assert response.status_code == 200, response.text
     assert "Recon Scout" in response.text
     assert "vault.kv.*" in response.text
-    assert ">*<" in response.text
+    assert "tenant-a-vcenter" in response.text
+    assert "tenant-b-vcenter" not in response.text
+    assert str(foreign_target) in response.text
     assert "service:inventory" in response.text
     assert "POST:/vcenter/vm?action=start" in response.text
     assert "vmware, esx-*" in response.text

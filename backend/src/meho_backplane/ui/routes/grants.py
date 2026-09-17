@@ -91,14 +91,26 @@ def _iso(raw: str | None) -> datetime | str | None:
         return raw.strip()
 
 
-def _agent_row(grant: AgentGrantRead) -> dict[str, object]:
+async def _target_label(target_id: UUID, tenant_id: UUID) -> str:
+    """Resolve a concrete target through the tenant-scoped resolver."""
+    async with get_sessionmaker()() as db_session:
+        target = await resolve_target_by_id(db_session, tenant_id, target_id)
+    return target.name if target else str(target_id)
+
+
+async def _agent_row(grant: AgentGrantRead, tenant_id: UUID) -> dict[str, object]:
+    target_scope = grant.target_scope
+    try:
+        target = await _target_label(UUID(target_scope), tenant_id) if target_scope else None
+    except ValueError:
+        target = target_scope
     return {
         "id": str(grant.id),
         "kind": "agent",
         "subject": subject_ref(grant.principal_sub, grant.principal_name),
         "op": grant.op_pattern,
         "connector": None,
-        "target": grant.target_scope or "any target",
+        "target": target or "any target",
         "effect": grant.verdict,
         "created_by": grant.created_by_sub,
         "expires_at": grant.expires_at,
@@ -109,10 +121,6 @@ async def _service_row(grant: ServiceGrantRead, tenant_id: UUID) -> dict[str, ob
     selector = ", ".join(
         value for value in (grant.target_product, grant.target_name_pattern) if value
     )
-    target = None
-    if grant.target_id:
-        async with get_sessionmaker()() as db_session:
-            target = await resolve_target_by_id(db_session, tenant_id, grant.target_id)
     effect = "active"
     if grant.revoked_at is not None:
         effect = "revoked"
@@ -125,9 +133,9 @@ async def _service_row(grant: ServiceGrantRead, tenant_id: UUID) -> dict[str, ob
         "op": grant.op_id,
         "connector": grant.connector_id,
         "target": (
-            target.name
-            if target
-            else (str(grant.target_id) if grant.target_id else (selector or "targetless"))
+            await _target_label(grant.target_id, tenant_id)
+            if grant.target_id
+            else (selector or "targetless")
         ),
         "effect": effect,
         "created_by": grant.created_by_sub,
@@ -165,7 +173,7 @@ async def _index(
             offset=agent_offset,
         )
         agent_has_next = len(agents) > limit
-        agent_rows = [_agent_row(entry) for entry in agents[:limit]]
+        agent_rows = [await _agent_row(entry, session.tenant_id) for entry in agents[:limit]]
     else:
         agent_has_next = False
     service_has_next = len(service_grants) > limit

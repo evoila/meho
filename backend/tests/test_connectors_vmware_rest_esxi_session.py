@@ -74,6 +74,9 @@ from meho_backplane.connectors.base import ConnectorResourceNotFoundError
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector, VsphereTargetLike
 from meho_backplane.connectors.vmware_rest import connector as connector_module
+from meho_backplane.connectors.vmware_rest import (
+    typed_ops_object_collect as object_collect_module,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops_host_storage_devices import (
     _extract_host_props,
     _map_scsi_lun,
@@ -1210,10 +1213,14 @@ async def test_fingerprint_credentials_read_error_during_liveness_degrades_unrea
             "injected credential-read hiccup during the liveness re-login"
         )
 
+    # Patch the real module object the production call-time import
+    # (``from ...typed_ops_object_collect import _collect_with_auth_health_reset``
+    # inside ``_esxi_session_is_live``) reads its attribute from. A dotted-string
+    # target would instead make pytest walk ``vmware_rest.typed_ops_object_collect``,
+    # which only resolves while the submodule stays bound as an attribute of the
+    # package — an assumption another test on the same xdist worker can void.
     monkeypatch.setattr(
-        "meho_backplane.connectors.vmware_rest.typed_ops_object_collect."
-        "_collect_with_auth_health_reset",
-        _raise_creds_error,
+        object_collect_module, "_collect_with_auth_health_reset", _raise_creds_error
     )
     connector = _make_connector()
     _patch_no_revoke_aclose(connector)

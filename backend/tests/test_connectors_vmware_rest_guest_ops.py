@@ -87,11 +87,13 @@ class _FakeStreamResponse:
 
     Mirrors the surface :func:`_guest._get_guest_file_bytes` uses on a streamed
     GET: ``status_code`` + ``is_success`` (the non-2xx clean-refusal branch), a
-    case-insensitive ``headers`` (the ``Content-Length`` fast-reject + the
+    case-insensitive ``headers`` (the ``Content-Type`` / ``Content-Length``
+    metadata the refusal echoes, the ``Content-Length`` fast-reject, and the
     ``Content-Encoding`` refusal), and a chunked ``aiter_raw`` (the running-total
-    byte-budget abort and the bounded error-snippet read). ``state`` accumulates
-    the raw bytes actually yielded, so a test can prove the read aborted mid-body
-    rather than draining the whole (possibly unbounded) payload.
+    byte-budget abort). ``state`` accumulates the raw bytes actually yielded, so
+    a test can prove the read aborted mid-body rather than draining the whole
+    (possibly unbounded) payload -- and, on the non-2xx path (which reads **no**
+    body byte), that ``state["yielded"]`` stays ``0``.
     """
 
     def __init__(
@@ -103,6 +105,7 @@ class _FakeStreamResponse:
         chunk_size: int,
         state: dict[str, int],
         content_encoding: str | None = None,
+        content_type: str | None = None,
     ) -> None:
         self.status_code = status
         self._body = body
@@ -114,6 +117,8 @@ class _FakeStreamResponse:
             headers["content-length"] = str(len(body))
         if content_encoding is not None:
             headers["content-encoding"] = content_encoding
+        if content_type is not None:
+            headers["content-type"] = content_type
         self.headers = httpx.Headers(headers)
 
     @property
@@ -162,6 +167,7 @@ class _FakeTransferClient:
         declare_content_length: bool = True,
         chunk_size: int = 65536,
         get_content_encoding: str | None = None,
+        get_content_type: str | None = None,
     ) -> None:
         self._put_calls = put_calls
         self._get_calls = get_calls
@@ -172,6 +178,7 @@ class _FakeTransferClient:
         self._declare_content_length = declare_content_length
         self._chunk_size = chunk_size
         self._get_content_encoding = get_content_encoding
+        self._get_content_type = get_content_type
 
     async def put(self, url: str, *, content: bytes | None = None) -> httpx.Response:
         self._put_calls.append({"url": url, "content": content})
@@ -192,6 +199,7 @@ class _FakeTransferClient:
                 chunk_size=self._chunk_size,
                 state=self._stream_state,
                 content_encoding=self._get_content_encoding,
+                content_type=self._get_content_type,
             )
         )
 
@@ -217,6 +225,7 @@ class _GuestRecordingConnector:
     declare_content_length: bool = True
     stream_chunk_size: int = 65536
     get_content_encoding: str | None = None
+    get_content_type: str | None = None
     vmomi_calls: list[dict[str, Any]] = field(default_factory=list)
     put_calls: list[dict[str, Any]] = field(default_factory=list)
     get_calls: list[dict[str, Any]] = field(default_factory=list)
@@ -245,6 +254,7 @@ class _GuestRecordingConnector:
             declare_content_length=self.declare_content_length,
             chunk_size=self.stream_chunk_size,
             get_content_encoding=self.get_content_encoding,
+            get_content_type=self.get_content_type,
         )
 
 
@@ -787,20 +797,26 @@ async def test_file_read_fetch_never_leaks_url_or_token(creds: _CredRecorder) ->
 async def test_file_read_fetch_get_failure_raises_clean_connector_error(
     creds: _CredRecorder,
 ) -> None:
-    """A non-2xx GET raises a CLEAN RuntimeError (status + snippet), never httpx.
+    """A non-2xx GET raises a CLEAN RuntimeError built from METADATA only, never httpx.
 
     The handler must not raise ``httpx.HTTPStatusError`` on a non-2xx transfer
     GET: that error carries an unread, then-closed streamed response whose
     ``__str__`` embeds the one-time transfer URL/token, and the dispatcher's
     downstream ``.text`` / ``.json`` enrichment would raise
     ``httpx.ResponseNotRead`` (B1-REGRESSION). Instead it raises a plain
-    ``RuntimeError`` naming the HTTP status and a bounded body snippet, with no
-    transfer URL / token and no chained ``HTTPStatusError``.
+    ``RuntimeError`` naming the HTTP status, the allow-listed ``Content-Type``
+    media-type token, and the declared ``Content-Length`` -- with no transfer
+    URL / token, no body byte, and no chained ``HTTPStatusError``.
     """
     info = _read_info(
         size=10, url="https://vc.example.test/guestFile?id=1&token=abc&api_key=SEKRIT"
     )
-    conn = _read_conn(info, get_status=500, get_body=b"transfer host exploded")
+    conn = _read_conn(
+        info,
+        get_status=500,
+        get_body=b"transfer host exploded",
+        get_content_type="application/json; charset=utf-8",
+    )
     with pytest.raises(RuntimeError) as excinfo:
         await _guest.guest_file_read_composite(
             operator=_operator(),
@@ -814,11 +830,94 @@ async def test_file_read_fetch_get_failure_raises_clean_connector_error(
     assert exc.__cause__ is None and exc.__context__ is None
     message = str(exc)
     assert "HTTP 500" in message
-    assert "transfer host exploded" in message  # the bounded body snippet
+    # Metadata only: the status, the cleaned media-type token, and the declared
+    # length -- the ``;``-parameter is stripped off the Content-Type.
+    assert "Content-Type: application/json" in message
+    assert "charset" not in message
+    assert f"Content-Length: {len(b'transfer host exploded')}" in message
+    assert "Re-read to mint a fresh transfer URL" in message
+    # The body is NEVER read, so none of it reaches the message -- and not a
+    # single body byte was drained off the stream.
+    assert "transfer host exploded" not in message
+    assert conn.stream_state["yielded"] == 0
     # The one-time ticket never leaks into the error message.
     assert "token=abc" not in message
     assert "SEKRIT" not in message
     assert "guestFile" not in message
+
+
+@pytest.mark.asyncio
+async def test_file_read_fetch_error_message_omits_the_entire_body(creds: _CredRecorder) -> None:
+    """An only-hostile non-2xx transfer body reaches the error message NOT AT ALL.
+
+    The transfer host is off-target and its error body is
+    server/attacker-controlled bytes. Rather than sanitise each echo shape, the
+    refusal is built from response metadata only and the body is never read --
+    so even a body that is *entirely* an attempt to smuggle the one-time ticket
+    back (a bare token, the ticketed transfer URL by hostname AND by IP, a JSON
+    ``"token":"…"`` envelope, a URL split across TAB/LF/CR, and an opaque ticket
+    sitting in a bare path segment) produces a message containing none of those
+    substrings. The message is the fixed metadata shape, its length is bounded,
+    a control-laden / hostile ``Content-Type`` collapses to ``"unknown"``, and
+    not one body byte is drained off the stream.
+    """
+    hostile = (
+        b"Bearer FAKEtoken0123456789abcdefNOTREAL "
+        b"https://vc.example.test/guestFile?id=9&token=ONE-TIME-TICKET-SECRET&api_key=LEAKKEY "
+        b"https://203.0.113.7:443/guestFile?token=ONE-TIME-TICKET-SECRET "
+        b'{"error":"denied","token":"JSONENVELOPETICKET42"} '
+        b"https://vc.example.test/guest\tFile?token=SPLIT\nTICKET\rVALUE "
+        b"/transfer/OPAQUETICKETPATHSEG9999/data "
+        b"password: hunter2superlongsecret\x00\x1b[31m\r\n" + b"A" * 4000
+    )
+    info = _read_info(
+        size=10, url="https://vc.example.test/guestFile?id=1&token=abc&api_key=SEKRIT"
+    )
+    conn = _read_conn(
+        info,
+        get_status=502,
+        get_body=hostile,
+        # A hostile, control-laden Content-Type with no valid media-type token
+        # must NOT be echoed: it fails the allow-list and collapses to "unknown".
+        get_content_type="\x1b[31mHOSTILE_CT_NOSLASH\x00OPAQUETICKETPATHSEG9999",
+    )
+    with pytest.raises(RuntimeError) as excinfo:
+        await _guest.guest_file_read_composite(
+            operator=_operator(),
+            target=_Target(),
+            params={"vm": "vm-42", "guest_path": "/etc/hostname", "fetch_content": True},
+            connector=conn,  # type: ignore[arg-type]
+        )
+    message = str(excinfo.value)
+    # The fixed metadata shape survives: status + a clear remediation.
+    assert "HTTP 502" in message
+    assert "Re-read to mint a fresh transfer URL" in message
+    # NONE of the body appears -- every ticket / secret echo shape is absent.
+    for leaked in (
+        "FAKEtoken0123456789abcdefNOTREAL",
+        "ONE-TIME-TICKET-SECRET",
+        "LEAKKEY",
+        "JSONENVELOPETICKET42",
+        "SPLIT",
+        "TICKET",
+        "VALUE",
+        "OPAQUETICKETPATHSEG9999",
+        "hunter2superlongsecret",
+        "203.0.113.7",
+        "https://",
+        "guestFile",
+        "HOSTILE_CT_NOSLASH",
+    ):
+        assert leaked not in message
+    # No control characters smuggled into the audit line.
+    for ctrl in ("\x00", "\x1b", "\r", "\n", "\t"):
+        assert ctrl not in message
+    # The hostile Content-Type failed the allow-list and collapsed to "unknown".
+    assert "Content-Type: unknown" in message
+    # The message is bounded (metadata-only -- it does not scale with the 4 KB body).
+    assert len(message) < 400
+    # The body was never read: not a single byte drained off the stream.
+    assert conn.stream_state["yielded"] == 0
 
 
 @pytest.mark.asyncio
@@ -862,6 +961,34 @@ async def test_file_read_fetch_refuses_content_encoded_response(creds: _CredReco
         )
     # Refused on the header: not a single body byte was drained/decoded.
     assert conn.stream_state["yielded"] == 0
+
+
+def test_transfer_content_encoding_refusal_echoes_only_allow_listed_tokens() -> None:
+    """A hostile Content-Encoding header is NOT echoed -- it collapses to a fixed label.
+
+    The value is an attacker-influenceable response header that lands in the
+    refusal message (which lands in the synchronous audit row). Rather than
+    clean-and-clip arbitrary bytes, the refusal echoes the encoding only when it
+    exactly matches a known transport-encoding token; anything else is reported
+    as ``"unrecognised encoding"``. So a long / escape-laden value cannot balloon
+    the message or reshape the audit line -- none of it appears at all.
+    """
+    hostile = "gzip\x00\x1b" + "z" * 500 + "\r\ninjected"
+    message = str(_guest._transfer_content_encoding_refused(hostile))
+    # Still a clear, actionable refusal that names the header and the reason.
+    assert "Content-Encoding" in message
+    assert "decompression bomb" in message
+    assert "unrecognised encoding" in message
+    # The hostile value is absent entirely -- no control chars, no filler.
+    for ctrl in ("\x00", "\x1b", "\r", "\n"):
+        assert ctrl not in message
+    assert "z" * 500 not in message
+    assert "injected" not in message
+    # Every known encoding token round-trips verbatim and readably.
+    for token in ("gzip", "deflate", "br", "compress", "x-gzip", "identity"):
+        assert f"Content-Encoding: {token}." in str(
+            _guest._transfer_content_encoding_refused(token)
+        )
 
 
 # ---------------------------------------------------------------------------

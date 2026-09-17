@@ -4,7 +4,7 @@
 # for every vmware-rest composite (one parameter + response schema per op);
 # the sibling handler modules (_read.py / _write.py) carry the same marker.
 
-"""JSON Schema 2020-12 parameter + response schemas for the 38 vmware-rest composites.
+"""JSON Schema 2020-12 parameter + response schemas for the 54 vmware-rest composites.
 
 Each schema is the operator-facing input contract; the dispatcher
 validates inbound ``params`` against the registered schema before
@@ -26,20 +26,28 @@ Conventions
   documentation lives on the schema's ``description`` keys; the meta-
   tools (:mod:`meho_backplane.operations.meta_tools`) surface the
   schema verbatim on ``describe_operation`` calls.
-* The 9 read composites are read-only -- the registration call site
-  pins ``safety_level="safe"`` and ``requires_approval=False`` on
-  each. 23 of the 24 write composites inherit T4's
-  ``safety_level="dangerous"`` + ``requires_approval=True`` defaults
-  (G3.1-T6 / #509, single-VM ``vm.power`` / #2301, the mutating
+* The 14 read composites are read-only -- the registration call site
+  pins ``safety_level="safe"`` and ``requires_approval=False`` on 13 of
+  them; ``vm.guest.file.read`` is pinned ``caution`` (#3720), a read
+  that can fetch guest bytes as the in-guest login and so auto-parks for
+  agent / service principals. The 40 write composites are all
+  ``requires_approval=True``: 31 inherit T4's ``safety_level="dangerous"``
+  default (G3.1-T6 / #509, single-VM ``vm.power`` / #2301, the mutating
   VI-JSON ``vm.disk.grow`` / #2893, the folder-template
   ``vm.clone_from_template`` / #2894, the vim cluster / inventory
   writes ``cluster.drs_rule.create`` + ``folder.create`` / #2895,
   the #2891 hardware writes ``vm.resize`` / ``vm.nic.repoint`` /
-  ``vm.device.cdrom``, and the two GOSC composites
-  ``guest.customization_spec.create`` / ``vm.customize`` / #2892). The 24th,
-  ``vm.destroy`` / #3198, is the first ``safety_level="destructive"``
-  composite (still ``requires_approval=True``) — the governed-delete tier.
-  The schema text reflects which side of that line
+  ``vm.device.cdrom``, the two GOSC composites
+  ``guest.customization_spec.create`` / ``vm.customize`` / #2892, and
+  the later host-domain / Supervisor / storage-policy / content-library
+  families), 6 are ``safety_level="caution"`` (the #3505
+  governed-allocation writes ``resource_pool.create`` +
+  ``cluster.drs_vm_host_rule.create``, plus ``namespace.create`` /
+  ``storage_policy.create`` / ``content_library.subscribed.create`` /
+  ``content_library.subscribed.sync``), and 3 are
+  ``safety_level="destructive"`` (``vm.destroy`` / #3198 — the first —
+  plus ``namespace.delete`` and ``storage_policy.delete``) — the
+  governed-delete tier. The schema text reflects which side of that line
   each composite sits on; the registration call site enforces the
   policy.
 """
@@ -4398,9 +4406,12 @@ HOST_SERVICE_CONTROL_RESPONSE_SCHEMA: dict[str, Any] = {
 #
 # Guest OS credentials are NEVER a parameter of these ops: they resolve
 # from the target's Vault ``secret_ref`` (the ``guest_username`` /
-# ``guest_password`` fields). The reads are ``safe``; ``guest.file.write``
-# (#3100) and ``guest.program.run`` (#3255) are the ``dangerous`` /
-# ``requires_approval`` writes.
+# ``guest_password`` fields). ``guest.process.list`` / ``guest.env.read`` /
+# ``guest.net.show`` are ``safe`` reads; ``guest.file.read`` is a ``caution``
+# read (#3720 -- its opt-in ``fetch_content=true`` returns arbitrary guest
+# bytes read as the in-guest login, so it auto-parks for agent / service
+# principals). ``guest.file.write`` (#3100) and ``guest.program.run`` (#3255)
+# are the ``dangerous`` / ``requires_approval`` writes.
 
 
 #: ``vmware.composite.vm.guest.process.list`` parameter schema.

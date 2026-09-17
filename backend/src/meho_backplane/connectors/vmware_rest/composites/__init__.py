@@ -24,14 +24,21 @@ Schema 2020-12 parameter + response contracts.
 
 Scope:
 
-* 9 read composites (G3.1-T5 / #508 + the 4 guest-ops reads
+* 14 read composites -- the five G3.1-T5 / #508 reads
+  (``cluster.drs_recommendations`` / ``event.tail`` /
+  ``performance.summary`` / ``datastore.usage`` /
+  ``network.portgroup.audit``), the 4 guest-ops reads
   ``vm.guest.process.list`` / ``env.read`` / ``net.show`` /
-  ``file.read`` / #3100) --
-  ``safety_level="safe"`` + ``requires_approval=False`` overrides.
+  ``file.read`` / #3100, and the Supervisor / namespace / storage-policy
+  / content-library ``status`` + ``list`` reads. 13 pin
+  ``safety_level="safe"`` + ``requires_approval=False`` overrides;
+  ``vm.guest.file.read`` is ``caution`` (#3720) -- read-only, but it can
+  fetch guest bytes as the in-guest login, so it auto-parks for agent /
+  service principals.
   (The former ``host.network_uplinks`` / ``host.vsan_health`` reads
   were re-shipped as ``source_kind="typed"`` ops in #2258; see
   :mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.)
-* 29 write composites (G3.1-T6 / #509, the guest-ops writes
+* 40 write composites (G3.1-T6 / #509, the guest-ops writes
   ``vm.guest.file.write`` / #3100 + ``vm.guest.program.run`` / #3255,
   single-VM ``vm.power`` /
   #2301, the mutating VI-JSON ``vm.disk.grow`` / #2893 + the WSFC/FCI
@@ -41,13 +48,21 @@ Scope:
   ``folder.create`` / #2895, the #2891 post-clone hardware
   reconfigure trio ``vm.resize`` / ``vm.nic.repoint`` /
   ``vm.device.cdrom``, the two GOSC composites / #2892, the OVF/OVA
-  content-library deploy ``vm.deploy_from_library`` / #2909, and the
+  content-library deploy ``vm.deploy_from_library`` / #2909 +
+  ``vm.import_from_library`` / #3229, the
   three host-domain writes ``host.datastore_mount_nfs`` /
-  ``host.disk_mark_flash`` / ``host.service_control`` / #3182) -- inherit
-  T4's ``safety_level="dangerous"`` +
-  ``requires_approval=True`` defaults. The 24th, the destructive-tier
-  ``vm.destroy`` / #3198, is the first ``safety_level="destructive"``
-  composite (still ``requires_approval=True``) — the governed-delete tier.
+  ``host.disk_mark_flash`` / ``host.service_control`` / #3182, and the
+  later Supervisor / #3281, storage-policy, content-library / #3495 and
+  resource-pool / #3505 write families). All are
+  ``requires_approval=True``; 31 are ``safety_level="dangerous"``, 6 are
+  ``safety_level="caution"`` (the #3505 governed-allocation writes
+  ``resource_pool.create`` + ``cluster.drs_vm_host_rule.create``, plus
+  ``namespace.create`` / ``storage_policy.create`` /
+  ``content_library.subscribed.create`` /
+  ``content_library.subscribed.sync``), and 3 are
+  ``safety_level="destructive"`` -- ``vm.destroy`` / #3198 (the first
+  destructive composite -- the governed-delete tier), ``namespace.delete``
+  and ``storage_policy.delete``.
   They cover every state-mutating workflow Goal #214 names as
   required for govc-wrapper retirement: ``vm.create``, ``vm.clone``,
   ``vm.clone_from_template`` (folder-template clone via CloneVM_Task,

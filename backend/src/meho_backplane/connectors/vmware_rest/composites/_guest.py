@@ -40,11 +40,15 @@ Design (see ``docs/codebase/connectors-vmware-rest-guest-ops.md``):
   carry them, so operators must not pass bare secrets there -- the same
   characteristic as ``file.write``'s ``content`` (see the guest-ops doc's
   safety model).
-* **Read/write split.** ``process.list`` / ``env.read`` / ``net.show`` /
-  ``file.read`` are ``safety_level="safe"`` reads; ``file.write`` and
-  ``program.run`` are the ``dangerous`` / ``requires_approval`` writes,
-  gated through the same #2254 :func:`enforce_subop_policy` seam the other
-  write composites use.
+* **Read/write split.** ``process.list`` / ``env.read`` / ``net.show``
+  are ``safety_level="safe"`` reads. ``file.read`` is a ``caution`` read
+  (#3720): its opt-in ``fetch_content=true`` returns arbitrary guest file
+  bytes read as the (often privileged) in-guest login with no allow-list,
+  so it **auto-parks for agent / service principals** while a human seat
+  executes it -- the registered ``safety_level`` is ``caution``, not
+  ``safe``. ``file.write`` and ``program.run`` are the ``dangerous`` /
+  ``requires_approval`` writes, gated through the same #2254
+  :func:`enforce_subop_policy` seam the other write composites use.
 
 Guest-operations manager MoRefs
 -------------------------------
@@ -65,10 +69,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import re
 import time
 from typing import TYPE_CHECKING, Any
-
-import httpx
 
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors._shared.vault_creds import load_basic_credentials
@@ -139,15 +142,25 @@ _DEFAULT_MAX_PROCESSES = 200
 #: clamp is defence-in-depth (a direct handler call / a schema drift).
 _FILE_READ_DEFAULT_MAX_BYTES = 1024 * 1024  # 1 MiB
 _FILE_READ_HARD_CAP_BYTES = 8 * 1024 * 1024  # 8 MiB
-#: Cap (bytes) on the transfer-host error body read into a non-2xx refusal
-#: message. A non-2xx transfer GET is refused with a *clean* connector error
-#: naming the status + a bounded snippet of the body -- never the raw
-#: :class:`httpx.HTTPStatusError` (whose ``__str__`` embeds the one-time
-#: transfer URL/token) and never an unread streamed response (which would make
-#: the dispatcher's downstream ``.text`` / ``.json`` raise
-#: :exc:`httpx.ResponseNotRead` and escape the never-raises contract). Read via
-#: ``aiter_raw`` so a lying/compressed error body cannot balloon past this cap.
-_TRANSFER_ERROR_SNIPPET_BYTES = 4096
+#: Transport ``Content-Encoding`` tokens a guest-transfer response could
+#: legitimately carry. The transport-encoding refusal echoes the response's
+#: encoding **only when it is one of these known tokens**; any other value is
+#: reported as ``"unrecognised encoding"`` rather than echoed, so an
+#: attacker-influenceable off-target response header cannot smuggle arbitrary
+#: bytes into the connector-error message + synchronous audit row. (``identity``
+#: is listed for completeness; the call site refuses only *non*-identity
+#: encodings, so ``identity`` never actually reaches the refusal.)
+_KNOWN_CONTENT_ENCODINGS: frozenset[str] = frozenset(
+    {"gzip", "deflate", "br", "compress", "x-gzip", "identity"}
+)
+#: A bare ``type/subtype`` media-type token (already lower-cased with any
+#: ``;``-separated parameters stripped). Used to allow-list the response
+#: ``Content-Type`` echoed into the non-2xx transfer-GET refusal message: a value
+#: matching this shape is a safe, bounded token to echo; anything else collapses
+#: to ``"unknown"``. The transfer host is off-target, so its ``Content-Type`` is
+#: attacker-influenceable -- the allow-list leaves no room for control
+#: characters, escape sequences, or smuggled bytes in the audit line.
+_MEDIA_TYPE_RE = re.compile(r"[a-z0-9][a-z0-9.+_-]*/[a-z0-9][a-z0-9.+_-]*")
 #: Chunk width (base64 characters per ``content_lines`` row) for binary content.
 #: Wider than RFC 2045's 76-char MIME wrap so a large binary spilling to a
 #: result handle produces far fewer rows to page (an 8 MiB file is ~2.7k rows
@@ -668,24 +681,72 @@ def _file_too_large(size_bytes: int, max_bytes: int) -> RuntimeError:
     )
 
 
-def _transfer_get_failed(status_code: int, snippet: str) -> RuntimeError:
-    """Build the non-2xx transfer-GET refusal -- names the status + a body snippet.
+def _media_type_token(raw: str | None) -> str:
+    """Reduce a response ``Content-Type`` header to a bare, safe media-type token.
 
-    Deliberately a **clean** :class:`RuntimeError` carrying only the HTTP status
-    and a bounded body snippet, never the raw :class:`httpx.HTTPStatusError`
-    (whose ``__str__`` embeds the one-time transfer URL including its
-    ``?token=`` ticket) and never the transfer URL itself. The dispatcher maps
-    a :class:`RuntimeError` to ``connector_error`` with the message intact and
-    writes the synchronous error-audit row, so the caller sees an actionable
-    status without the ticket leaking into the envelope, a log line, or a
-    traceback. It is raised outside any ``except`` block, so nothing chains an
-    ``HTTPStatusError`` (or its ticket-bearing ``__str__``) as ``__context__``.
+    The transfer host is off-target, so its ``Content-Type`` is
+    attacker-influenceable and lands (via :func:`_transfer_get_failed`) in the
+    connector-error message + synchronous audit row. Keep only the media type
+    (drop any ``;``-separated parameters), lower-case it, and echo it **only if
+    it matches a plain ``type/subtype`` token** (:data:`_MEDIA_TYPE_RE`) --
+    otherwise ``"unknown"``. That allow-list shape leaves no room for control
+    characters, escape sequences, or smuggled bytes in the audit line.
     """
-    detail = f" ({snippet})" if snippet else ""
+    if not raw:
+        return "unknown"
+    token = raw.split(";", 1)[0].strip().lower()
+    return token if _MEDIA_TYPE_RE.fullmatch(token) else "unknown"
+
+
+def _declared_length(raw: str | None) -> str:
+    """Return the declared ``Content-Length`` as a bare digit string, else ``"unknown"``.
+
+    Read from the header only -- the body is **never** read to measure it (a
+    hostile transfer host could otherwise make the error path stream an
+    unbounded body). A missing, non-integer, or negative value yields
+    ``"unknown"``; a valid one is a bounded digit run, safe to echo verbatim.
+    """
+    if raw is None:
+        return "unknown"
+    try:
+        length = int(raw)
+    except ValueError:
+        return "unknown"
+    return str(length) if length >= 0 else "unknown"
+
+
+def _transfer_get_failed(status_code: int, content_type: str, content_length: str) -> RuntimeError:
+    """Build the non-2xx transfer-GET refusal from response METADATA only.
+
+    Deliberately a **clean** :class:`RuntimeError` built entirely from the
+    response's status line and headers -- the HTTP status, the allow-listed
+    ``Content-Type`` media-type token (:func:`_media_type_token`, or
+    ``"unknown"``), and the declared ``Content-Length`` byte count
+    (:func:`_declared_length`, or ``"unknown"``) -- plus a fixed reason and the
+    standard remediation. **No body byte is ever read, stored, or embedded.**
+    The transfer host is off-target: a hostile / misbehaving one could otherwise
+    echo the one-time transfer ticket back in its error body (inside a URL, a
+    JSON ``"token":"…"`` envelope, a whitespace-split fragment, or a bare path
+    segment) and it would land verbatim in this message, which commits to the
+    synchronous audit row and returns to the calling agent. Building the message
+    from metadata only closes that entire echo class outright rather than
+    chasing each shape with a sanitiser.
+
+    Never the raw :class:`httpx.HTTPStatusError` (whose ``__str__`` embeds the
+    one-time transfer URL including its ``?token=`` ticket) and never the
+    transfer URL itself. The dispatcher maps a :class:`RuntimeError` to
+    ``connector_error`` with the message intact and writes the synchronous
+    error-audit row, so the caller sees an actionable status without the ticket
+    leaking into the envelope, a log line, or a traceback. It is raised outside
+    any ``except`` block, so nothing chains an ``HTTPStatusError`` (or its
+    ticket-bearing ``__str__``) as ``__context__``.
+    """
     return RuntimeError(
         f"guest.file.read: transfer host returned HTTP {status_code} for the "
-        f"one-time file-transfer GET{detail}. The one-time ticket may have "
-        f"expired or been consumed; re-read to mint a fresh transfer URL."
+        f"one-time file-transfer GET (Content-Type: {content_type}, "
+        f"Content-Length: {content_length}); the transfer host refused the "
+        f"request or the one-time ticket expired. Re-read to mint a fresh "
+        f"transfer URL."
     )
 
 
@@ -702,32 +763,26 @@ def _transfer_content_encoding_refused(content_encoding: str) -> RuntimeError:
     response (combined with the ``aiter_raw`` wire-byte budget) keeps
     ``raw == decoded`` so the decoded content the agent receives is bounded by
     ``max_inline_bytes`` and no amplification is possible.
+
+    The refused ``content_encoding`` is an attacker-influenceable response header,
+    so it is echoed **only when it exactly matches a known transport-encoding
+    token** (:data:`_KNOWN_CONTENT_ENCODINGS`); any other value is reported as
+    ``"unrecognised encoding"`` rather than embedded. That allow-list -- not a
+    clean-and-clip of arbitrary bytes -- is what keeps a hostile header out of
+    the connector-error message + synchronous audit row.
     """
+    token = (
+        content_encoding
+        if content_encoding in _KNOWN_CONTENT_ENCODINGS
+        else "unrecognised encoding"
+    )
     return RuntimeError(
         f"guest.file.read: refusing a transfer response with "
-        f"Content-Encoding: {content_encoding!r}. Guest file transfers carry "
+        f"Content-Encoding: {token}. Guest file transfers carry "
         f"identity-encoded bytes; a transport encoding on this response is "
         f"unexpected and is refused to bound decoded size against a "
         f"decompression bomb."
     )
-
-
-async def _bounded_error_snippet(response: httpx.Response) -> str:
-    """Read at most :data:`_TRANSFER_ERROR_SNIPPET_BYTES` of a non-2xx body.
-
-    Streams the raw wire bytes (``aiter_raw`` -- never a decoded/unbounded
-    ``aread``) and stops the instant the cap is reached, so a hostile transfer
-    host cannot make the error path buffer an unbounded body. Decoded lossily
-    (``errors="replace"``) for a diagnostic snippet; the body may be a vendor
-    HTML/JSON error page.
-    """
-    collected = bytearray()
-    async for chunk in response.aiter_raw():
-        collected.extend(chunk)
-        if len(collected) >= _TRANSFER_ERROR_SNIPPET_BYTES:
-            break
-    snippet = bytes(collected[:_TRANSFER_ERROR_SNIPPET_BYTES])
-    return snippet.decode("utf-8", errors="replace").strip()
 
 
 async def _get_guest_file_bytes(
@@ -770,26 +825,35 @@ async def _get_guest_file_bytes(
 
     A non-2xx transfer response (an expired / consumed one-time ticket ->
     404 / 403, a transfer-host 5xx, or a refused cross-origin 3xx) is turned
-    into a **clean** connector error (:func:`_transfer_get_failed`) carrying the
-    status and a bounded body snippet -- never the raw
+    into a **clean** connector error (:func:`_transfer_get_failed`) built from
+    the response METADATA only -- status + allow-listed ``Content-Type`` token +
+    declared ``Content-Length`` -- never the raw
     :class:`httpx.HTTPStatusError` with an unread, then-closed streamed response
     (which would make the dispatcher's downstream ``.text`` / ``.json`` raise
-    :exc:`httpx.ResponseNotRead` and escape the never-raises contract) and never
-    the transfer URL. The URL (and its ``api_key`` / token query) is never
-    logged.
+    :exc:`httpx.ResponseNotRead` and escape the never-raises contract), never the
+    transfer URL, and **never any body byte** (the body is not read, so a hostile
+    host cannot echo the one-time ticket back through it). The URL (and its
+    ``api_key`` / token query) is never logged.
     """
     resolved = _resolve_transfer_url(url, target)
     client = await connector._http_client(target)
     async with client.stream("GET", resolved, headers={"Accept-Encoding": "identity"}) as response:
         if not response.is_success:
-            # Read a BOUNDED error snippet off the still-unread stream and raise
-            # a clean connector error. Do NOT call response.raise_for_status()
-            # here: it would raise an httpx.HTTPStatusError carrying an unread,
-            # about-to-be-closed streamed body, and the dispatcher's downstream
-            # error enrichment (.text / .json) would then raise
-            # httpx.ResponseNotRead and escape -- no structured result, no
-            # error-audit row.
-            raise _transfer_get_failed(response.status_code, await _bounded_error_snippet(response))
+            # Build a clean connector error from response METADATA ONLY (status +
+            # allow-listed Content-Type + declared Content-Length). The body is
+            # never read, stored, or embedded, so a hostile / misbehaving
+            # off-target transfer host cannot smuggle the one-time ticket (in any
+            # echo shape) into the error message + synchronous audit row. Do NOT
+            # call response.raise_for_status() here: it would raise an
+            # httpx.HTTPStatusError carrying an unread, about-to-be-closed
+            # streamed body, and the dispatcher's downstream error enrichment
+            # (.text / .json) would then raise httpx.ResponseNotRead and escape --
+            # no structured result, no error-audit row.
+            raise _transfer_get_failed(
+                response.status_code,
+                _media_type_token(response.headers.get("content-type")),
+                _declared_length(response.headers.get("content-length")),
+            )
         # Refuse a transport Content-Encoding (see _transfer_content_encoding_refused):
         # with identity enforced, the aiter_raw wire budget below bounds exactly
         # what the agent receives, immune to a gzip decompression bomb.

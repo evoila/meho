@@ -26,15 +26,20 @@ the source_kind="composite" persistence.
 Mixed safety posture
 --------------------
 
-The 9 read composites (T5 / #508 + the 4 guest-ops reads
+The 14 read composites (the five T5 / #508 reads + the 4 guest-ops reads
 ``vm.guest.process.list`` / ``vm.guest.env.read`` / ``vm.guest.net.show``
-/ ``vm.guest.file.read`` / #3100) pass
-``safety_level="safe"`` + ``requires_approval=False`` -- overrides of
-T4's ``dangerous`` / ``True`` defaults. (The former
-``host.network_uplinks`` and ``host.vsan_health`` reads were re-shipped
-as typed ops in #2258; see
-:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) 23 of the 24
-write composites (T6 / #509, single-VM ``vm.power`` / #2301, the guest-ops
+/ ``vm.guest.file.read`` / #3100 + the Supervisor / namespace /
+storage-policy / content-library ``status`` + ``list`` reads) are
+read-only. 13 of them pass ``safety_level="safe"`` +
+``requires_approval=False`` -- overrides of T4's ``dangerous`` / ``True``
+defaults. The exception is ``vm.guest.file.read``, promoted to
+``caution`` in #3720 (it can fetch arbitrary guest bytes as the in-guest
+login), so it auto-parks for agent / service principals while a human
+seat still executes it immediately; see its caution row below. (The
+former ``host.network_uplinks`` and ``host.vsan_health`` reads were
+re-shipped as typed ops in #2258; see
+:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 40 write
+composites (T6 / #509, single-VM ``vm.power`` / #2301, the guest-ops
 write ``vm.guest.file.write`` / #3100, the mutating
 VI-JSON ``vm.disk.grow`` / #2893, the folder-template
 ``vm.clone_from_template`` / #2894, the vim cluster / inventory writes
@@ -42,20 +47,25 @@ VI-JSON ``vm.disk.grow`` / #2893, the folder-template
 hardware writes -- ``vm.resize`` / ``vm.nic.repoint`` /
 ``vm.device.cdrom``, the two GOSC composites
 ``guest.customization_spec.create`` / ``vm.customize`` / #2892, the
-OVF/OVA content-library deploy ``vm.deploy_from_library`` / #2909, and the
+OVF/OVA content-library deploy ``vm.deploy_from_library`` / #2909 +
+``vm.import_from_library`` / #3229, the
 three host-domain writes ``host.datastore_mount_nfs`` /
-``host.disk_mark_flash`` / ``host.service_control`` / #3182) inherit
-the T4 defaults explicitly (pass ``"dangerous"`` / ``True`` for clarity
-at the call site; the helper would default to those values anyway). The
-24th write composite, ``vm.destroy`` / #3198, is the first
-``safety_level="destructive"`` op (still ``requires_approval=True``) — the
-governed-delete tier (decision
-``docs/decisions/governed-delete-operations.md``).
-The #3505 governed-allocation writes add the first two ``caution`` rows —
-``resource_pool.create`` and the VM-Host affinity
-``cluster.drs_vm_host_rule.create`` — plus one more ``dangerous`` row,
-``resource_pool.delete`` (a reparent, not a destroy); all three still
-``requires_approval=True``.
+``host.disk_mark_flash`` / ``host.service_control`` / #3182, and the
+later Supervisor / #3281, storage-policy, content-library / #3495 and
+resource-pool / #3505 write families) are all ``requires_approval=True``.
+31 pin ``safety_level="dangerous"`` (T4's default, passed explicitly for
+clarity at the call site; the helper would default to it anyway). 6 pin
+``safety_level="caution"`` -- the #3505 governed-allocation writes
+``resource_pool.create`` + the VM-Host affinity
+``cluster.drs_vm_host_rule.create``, plus ``namespace.create`` /
+``storage_policy.create`` / ``content_library.subscribed.create`` /
+``content_library.subscribed.sync`` (``resource_pool.delete`` is a
+``dangerous`` reparent, not a destroy). 3 pin
+``safety_level="destructive"`` -- ``vm.destroy`` / #3198 (the first
+destructive op -- the governed-delete tier, decision
+``docs/decisions/governed-delete-operations.md``), ``namespace.delete``
+and ``storage_policy.delete``. (The ``caution`` tier is not writes-only:
+``vm.guest.file.read`` above is a ``caution`` read / #3720.)
 Each :class:`_CompositeSpec` row carries its own ``safety_level`` +
 ``requires_approval`` so the policy posture is implied by the row,
 not by global state.
@@ -1393,7 +1403,9 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         requires_approval=True,
     ),
     # ----------------------------------------------------------------
-    # Guest-operations channel (#3100) -- 4 safe reads + 1 dangerous write.
+    # Guest-operations channel (#3100 / #3255) -- 3 safe reads + 1 caution
+    # read (vm.guest.file.read, #3720) + 2 dangerous writes
+    # (vm.guest.file.write / #3100 + vm.guest.program.run / #3255).
     # Guest OS credentials resolve from the target's secret_ref, never
     # from params.
     # ----------------------------------------------------------------

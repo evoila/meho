@@ -27,6 +27,15 @@ Two read surfaces:
   404 page (the service returns ``None`` for both, mirroring the REST
   surface's existence-leak collapse).
 
+Timestamp posture: ``created_at`` / ``updated_at`` are
+``DateTime(timezone=True)`` columns that the SQLite driver hands back
+naive, so they are normalised through
+:func:`~meho_backplane.ui.routes.agents.runs.views.coerce_utc_aware`
+before reaching the templates. The templates render them with a "UTC"
+suffix (#349); without the coercion that suffix would be stamped onto
+an unzoned value and the ``<time datetime="...">`` attribute would
+carry an instant with no offset.
+
 RBAC posture: reads are operator-or-above (the service read path is
 not role-gated, and the route deps already required an authenticated
 session). The ``can_write`` flag projected into the template is the
@@ -51,6 +60,7 @@ from meho_backplane.ui.csrf import (
     mint_csrf_token,
     verify_csrf_token,
 )
+from meho_backplane.ui.routes.agents.runs.views import coerce_utc_aware
 from meho_backplane.ui.templating import get_templates
 
 __all__ = [
@@ -147,7 +157,7 @@ def _card_context(agent: AgentDefinitionRead) -> dict[str, object]:
         "identity_ref": agent.identity_ref,
         "turn_budget": agent.turn_budget,
         "created_by_sub": agent.created_by_sub,
-        "updated_at": agent.updated_at,
+        "updated_at": coerce_utc_aware(agent.updated_at),
         "system_prompt_summary": _system_prompt_summary(agent.system_prompt),
         "tool_count": _toolset_summary(agent.toolset),
     }
@@ -162,8 +172,8 @@ def _detail_context(agent: AgentDefinitionRead, *, can_write: bool) -> dict[str,
         "identity_ref": agent.identity_ref,
         "turn_budget": agent.turn_budget,
         "created_by_sub": agent.created_by_sub,
-        "created_at": agent.created_at,
-        "updated_at": agent.updated_at,
+        "created_at": coerce_utc_aware(agent.created_at),
+        "updated_at": coerce_utc_aware(agent.updated_at),
         "system_prompt": agent.system_prompt,
         "toolset_json": _pretty_json(agent.toolset),
         "output_schema_json": _pretty_json(agent.output_schema),

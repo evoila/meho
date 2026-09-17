@@ -31,7 +31,7 @@
 
 {%- macro error_for(field) -%}
   {%- if errors and field in errors -%}
-    <span class="label-text-alt text-error" role="alert" data-error-for="{{ field }}">
+    <span class="text-xs text-error" role="alert" data-error-for="{{ field }}">
       {{ errors[field] }}
     </span>
   {%- endif -%}
@@ -63,8 +63,8 @@
   </div>
 {%- endif -%}
 
-<label class="form-control">
-  <span class="label-text">Name</span>
+<label class="flex flex-col gap-1">
+  <span class="text-sm font-medium">Name</span>
   <input
     type="text"
     name="name"
@@ -74,13 +74,13 @@
     pattern="[A-Za-z0-9_\-\.]+"
     value="{{ field_value('name') }}"
     {% if mode == "edit" %}readonly{% endif %}
-    class="input input-bordered input-sm font-mono {{ error_class('name', 'input-error') }}"
+    class="input input-bordered input-sm font-mono w-full {{ error_class('name', 'input-error') }}"
     aria-label="Agent name"
     placeholder="incident-triage"
     {% if mode == "edit" %}aria-describedby="agent-name-immutable-hint"{% endif %}
   />
   {% if mode == "edit" %}
-    <span id="agent-name-immutable-hint" class="text-xs opacity-60 mt-1">
+    <span id="agent-name-immutable-hint" class="text-xs opacity-60">
       Name is immutable. To rename, delete and re-create the agent.
     </span>
   {% endif %}
@@ -88,12 +88,12 @@
 </label>
 
 <div class="grid gap-3 md:grid-cols-2">
-  <label class="form-control">
-    <span class="label-text">Model tier</span>
+  <label class="flex flex-col gap-1">
+    <span class="text-sm font-medium">Model tier</span>
     <select
       name="model_tier"
       required
-      class="select select-bordered select-sm {{ error_class('model_tier', 'select-error') }}"
+      class="select select-bordered select-sm w-full {{ error_class('model_tier', 'select-error') }}"
       aria-label="Model tier"
     >
       {%- set selected_tier = field_value('model_tier') or 'standard' -%}
@@ -106,8 +106,8 @@
     {{ error_for('model_tier') }}
   </label>
 
-  <label class="form-control">
-    <span class="label-text">Turn budget</span>
+  <label class="flex flex-col gap-1">
+    <span class="text-sm font-medium">Turn budget</span>
     <input
       type="number"
       name="turn_budget"
@@ -115,7 +115,7 @@
       min="1"
       max="1000"
       value="{{ field_value('turn_budget') }}"
-      class="input input-bordered input-sm {{ error_class('turn_budget', 'input-error') }}"
+      class="input input-bordered input-sm w-full {{ error_class('turn_budget', 'input-error') }}"
       aria-label="Turn budget"
       placeholder="1-1000"
     />
@@ -123,8 +123,8 @@
   </label>
 </div>
 
-<label class="form-control">
-  <span class="label-text">Identity ref</span>
+<label class="flex flex-col gap-1">
+  <span class="text-sm font-medium">Identity ref</span>
   <input
     type="text"
     name="identity_ref"
@@ -132,25 +132,25 @@
     minlength="1"
     maxlength="256"
     value="{{ field_value('identity_ref') }}"
-    class="input input-bordered input-sm font-mono {{ error_class('identity_ref', 'input-error') }}"
+    class="input input-bordered input-sm font-mono w-full {{ error_class('identity_ref', 'input-error') }}"
     aria-label="Identity reference"
     placeholder="agent-incident-triage"
     aria-describedby="agent-identity-ref-hint"
   />
-  <span id="agent-identity-ref-hint" class="text-xs opacity-60 mt-1">
+  <span id="agent-identity-ref-hint" class="text-xs opacity-60">
     Keycloak client id of a registered, non-revoked agent principal in
     this tenant.
   </span>
   {{ error_for('identity_ref') }}
 </label>
 
-<label class="form-control">
-  <span class="label-text">System prompt</span>
+<label class="flex flex-col gap-1">
+  <span class="text-sm font-medium">System prompt</span>
   <textarea
     name="system_prompt"
     required
     minlength="1"
-    class="textarea textarea-bordered min-h-[8rem] font-mono text-xs {{ error_class('system_prompt', 'textarea-error') }}"
+    class="textarea textarea-bordered min-h-[8rem] font-mono text-xs w-full {{ error_class('system_prompt', 'textarea-error') }}"
     aria-label="System prompt"
     placeholder="You are an incident-triage agent. ..."
   >{{ field_value('system_prompt') }}</textarea>
@@ -166,5 +166,5 @@
     class="checkbox checkbox-sm"
     aria-label="Enabled"
   />
-  <span class="label-text">Enabled</span>
+  <span class="text-sm font-medium">Enabled</span>
 </label>

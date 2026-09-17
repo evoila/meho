@@ -3285,4 +3285,9 @@ have no service-principal registry, so their stored subject is shown directly;
 concrete target UUIDs resolve through the tenant-scoped target resolver and
 unresolved or selector scopes remain explicit. All writes are CSRF-gated and
 call the existing grant services in-process, preserving their validation,
-tenant isolation, and audit behavior.
+tenant isolation, and audit behavior. Principal, expiry, and service-revoked
+history filters remain explicit; each table paginates independently so moving
+through service history never changes the agent cursor. The agent section
+opens the established human-only elevation modal, including its required
+time-bounded expiry. Service principals have no registry or stored display
+name, so their stored JWT subject intentionally remains the fail-open label.

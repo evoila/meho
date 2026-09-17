@@ -17,10 +17,11 @@ from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.db.models import EndpointDescriptor, ServicePrincipalGrant
 from meho_backplane.operations.service_grant_schemas import ServiceGrantCreate
 from meho_backplane.operations.service_grants import (
     GrantValidationError,
@@ -336,6 +337,38 @@ async def test_list_excludes_revoked_by_default() -> None:
     full = await svc.list_(_TENANT_ID, principal_sub=_PRINCIPAL, include_revoked=True)
     full_ids = {g.id for g in full}
     assert {live.id, gone.id} <= full_ids
+
+
+@pytest.mark.asyncio
+async def test_list_can_hide_expired_grants() -> None:
+    """The explicit expiry filter keeps old REST list behavior by default."""
+    svc = ServicePrincipalGrantService()
+    live = await svc.create(_TENANT_ID, _CREATOR, _payload(op_id="vmware.composite.vm.live"))
+    expired = await svc.create(
+        _TENANT_ID,
+        _CREATOR,
+        _payload(
+            op_id="vmware.composite.vm.expired",
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        ),
+    )
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as db_session, db_session.begin():
+        await db_session.execute(
+            update(ServicePrincipalGrant)
+            .where(ServicePrincipalGrant.id == expired.id)
+            .values(expires_at=datetime.now(UTC) - timedelta(hours=1))
+        )
+
+    historic = await svc.list_(_TENANT_ID, principal_sub=_PRINCIPAL)
+    active = await svc.list_(
+        _TENANT_ID,
+        principal_sub=_PRINCIPAL,
+        include_expired=False,
+    )
+    assert {live.id, expired.id} <= {entry.id for entry in historic}
+    assert live.id in {entry.id for entry in active}
+    assert expired.id not in {entry.id for entry in active}
 
 
 # ---------------------------------------------------------------------------

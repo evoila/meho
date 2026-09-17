@@ -88,6 +88,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from meho_backplane.ui.routes.account import build_account_router
+from meho_backplane.ui.routes.grants import build_grants_router
 from meho_backplane.ui.routes.agents import build_agents_router
 from meho_backplane.ui.routes.agents.grants import build_agent_grants_router
 from meho_backplane.ui.routes.agents.runs import build_runs_router
@@ -212,6 +213,7 @@ def build_router() -> APIRouter:
     # literal ``create`` / ``elevate`` routes register before the
     # ``{grant_id}`` detail route for the same reason (G10.8-T5 #1832).
     router.include_router(build_agent_grants_router())
+    router.include_router(build_grants_router())
     # Agent-runs read surface (G10.8-T3 #1830) before the agents-definition
     # router: ``/ui/agents/runs`` + ``/ui/agents/runs/{handle}`` are literal-
     # prefixed under ``/ui/agents`` and MUST win the first-match-wins lookup

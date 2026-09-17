@@ -90,6 +90,11 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added
+
+- Add service-principal grant CLI commands and a unified grants console for
+  operator visibility and tenant-admin grant management. (#3533)
+
 ### Changed
 
 - Stored result records now cap their entire encoded envelope at the configured **16 MiB** default, retaining the longest whole-row prefix that fits; the stored record marks `storage_coverage` complete or partial, and handles advertise the actual stored-row count. (#3632 / #3722)

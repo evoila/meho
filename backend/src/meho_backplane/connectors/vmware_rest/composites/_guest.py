@@ -40,11 +40,15 @@ Design (see ``docs/codebase/connectors-vmware-rest-guest-ops.md``):
   carry them, so operators must not pass bare secrets there -- the same
   characteristic as ``file.write``'s ``content`` (see the guest-ops doc's
   safety model).
-* **Read/write split.** ``process.list`` / ``env.read`` / ``net.show`` /
-  ``file.read`` are ``safety_level="safe"`` reads; ``file.write`` and
-  ``program.run`` are the ``dangerous`` / ``requires_approval`` writes,
-  gated through the same #2254 :func:`enforce_subop_policy` seam the other
-  write composites use.
+* **Read/write split.** ``process.list`` / ``env.read`` / ``net.show``
+  are ``safety_level="safe"`` reads. ``file.read`` is a ``caution`` read
+  (#3720): its opt-in ``fetch_content=true`` returns arbitrary guest file
+  bytes read as the (often privileged) in-guest login with no allow-list,
+  so it **auto-parks for agent / service principals** while a human seat
+  executes it -- the registered ``safety_level`` is ``caution``, not
+  ``safe``. ``file.write`` and ``program.run`` are the ``dangerous`` /
+  ``requires_approval`` writes, gated through the same #2254
+  :func:`enforce_subop_policy` seam the other write composites use.
 
 Guest-operations manager MoRefs
 -------------------------------
@@ -65,6 +69,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import re
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -78,6 +83,8 @@ from meho_backplane.connectors.vmware_rest.vim_body import (
     vim_moref,
 )
 from meho_backplane.operations.composite import enforce_subop_policy
+from meho_backplane.redaction.engine import redact
+from meho_backplane.redaction.resolver import get_default_policy
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -139,15 +146,32 @@ _DEFAULT_MAX_PROCESSES = 200
 #: clamp is defence-in-depth (a direct handler call / a schema drift).
 _FILE_READ_DEFAULT_MAX_BYTES = 1024 * 1024  # 1 MiB
 _FILE_READ_HARD_CAP_BYTES = 8 * 1024 * 1024  # 8 MiB
-#: Cap (bytes) on the transfer-host error body read into a non-2xx refusal
-#: message. A non-2xx transfer GET is refused with a *clean* connector error
-#: naming the status + a bounded snippet of the body -- never the raw
-#: :class:`httpx.HTTPStatusError` (whose ``__str__`` embeds the one-time
-#: transfer URL/token) and never an unread streamed response (which would make
-#: the dispatcher's downstream ``.text`` / ``.json`` raise
+#: Wire-read budget (bytes) for the transfer-host error body streamed into a
+#: non-2xx refusal message. A non-2xx transfer GET is refused with a *clean*
+#: connector error naming the status + a bounded, **sanitised** snippet of the
+#: body -- never the raw :class:`httpx.HTTPStatusError` (whose ``__str__``
+#: embeds the one-time transfer URL/token) and never an unread streamed response
+#: (which would make the dispatcher's downstream ``.text`` / ``.json`` raise
 #: :exc:`httpx.ResponseNotRead` and escape the never-raises contract). Read via
 #: ``aiter_raw`` so a lying/compressed error body cannot balloon past this cap.
+#: The bytes read here are the *upper bound scanned*; the sanitised text that
+#: actually reaches the error message is capped far tighter at
+#: :data:`_TRANSFER_ERROR_MESSAGE_CHARS`.
 _TRANSFER_ERROR_SNIPPET_BYTES = 4096
+#: Hard cap (chars) on the *sanitised* body excerpt that reaches the error
+#: message (and thus the audit row + the agent). The snippet is
+#: server/attacker-controlled bytes, so it is redacted, control-stripped, and
+#: URL-stripped (:func:`_sanitize_transfer_error_snippet`) and then clipped to
+#: this excerpt: enough to recognise a vendor error shape, small enough to keep
+#: the leak/abuse surface minimal.
+_TRANSFER_ERROR_MESSAGE_CHARS = 512
+#: Matches any ``scheme://…`` run up to the next whitespace. Used to excise the
+#: one-time transfer URL (and any ``?token=``/``?api_key=`` ticket riding it)
+#: from a hostile error body before it reaches the refusal message -- a control
+#: char embedded mid-URL is non-whitespace, so ``\S+`` still consumes the whole
+#: token rather than letting a split fragment survive. Runs *before* control
+#: normalisation for exactly that reason.
+_URL_LIKE_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://\S+")
 #: Chunk width (base64 characters per ``content_lines`` row) for binary content.
 #: Wider than RFC 2045's 76-char MIME wrap so a large binary spilling to a
 #: result handle produces far fewer rows to page (an 8 MiB file is ~2.7k rows
@@ -712,14 +736,60 @@ def _transfer_content_encoding_refused(content_encoding: str) -> RuntimeError:
     )
 
 
+def _sanitize_transfer_error_snippet(raw_text: str) -> str:
+    """Reduce a hostile transfer-error body to a safe, bounded excerpt.
+
+    The transfer host is off-target and its non-2xx body is
+    server/attacker-controlled bytes that would otherwise be echoed verbatim
+    into the ``connector_error`` message -- which lands in the synchronous audit
+    row and is handed back to the calling agent. This hardens that path in four
+    layers, in an order that closes the obvious evasions:
+
+    1. **Strip URL-shaped runs** (:data:`_URL_LIKE_RE`) *first*, so the one-time
+       transfer URL and any ``?token=`` / ``?api_key=`` ticket riding it are
+       excised whole. Done before control normalisation because a control byte
+       embedded mid-URL is non-whitespace -- ``\\S+`` still swallows the whole
+       token, where normalising it to a space first would let a split fragment
+       survive.
+    2. **Normalise control / non-printable characters to spaces** so ANSI /
+       NUL / newline injection cannot smuggle escape sequences or reshape the
+       audit line, and so the redactor's word-boundary patterns see clean text.
+    3. **Run the standard connector error-text redactor** (the packaged Tier-1
+       default policy -- the same credential vocabulary applied to upstream
+       messages in ``operations/_errors.py``) so a labelled secret (``Bearer
+       …``, ``token=…``, ``password: …``) in the body is replaced, not echoed.
+       Fail-closed: if redaction raises, the whole excerpt is dropped rather
+       than passed through -- this is a never-raises path and leaking is worse
+       than an empty snippet.
+    4. **Collapse whitespace and clip** to :data:`_TRANSFER_ERROR_MESSAGE_CHARS`
+       -- redaction runs before the clip so a secret is never truncated into a
+       fragment the patterns no longer match.
+    """
+    without_urls = _URL_LIKE_RE.sub(" ", raw_text)
+    printable = "".join(ch if ch.isprintable() else " " for ch in without_urls)
+    try:
+        redacted = redact(printable, get_default_policy()).redacted
+    except Exception:  # fail-closed: never leak, never raise on the error path
+        return ""
+    if not isinstance(redacted, str):  # pragma: no cover -- str in, str out
+        return ""
+    collapsed = " ".join(redacted.split())
+    if len(collapsed) > _TRANSFER_ERROR_MESSAGE_CHARS:
+        return collapsed[:_TRANSFER_ERROR_MESSAGE_CHARS].rstrip() + "…"
+    return collapsed
+
+
 async def _bounded_error_snippet(response: httpx.Response) -> str:
-    """Read at most :data:`_TRANSFER_ERROR_SNIPPET_BYTES` of a non-2xx body.
+    """Read + sanitise a bounded excerpt of a non-2xx transfer-error body.
 
     Streams the raw wire bytes (``aiter_raw`` -- never a decoded/unbounded
-    ``aread``) and stops the instant the cap is reached, so a hostile transfer
-    host cannot make the error path buffer an unbounded body. Decoded lossily
-    (``errors="replace"``) for a diagnostic snippet; the body may be a vendor
-    HTML/JSON error page.
+    ``aread``) and stops the instant :data:`_TRANSFER_ERROR_SNIPPET_BYTES` is
+    reached, so a hostile transfer host cannot make the error path buffer an
+    unbounded body. The read bytes are decoded lossily (``errors="replace"``)
+    and then handed to :func:`_sanitize_transfer_error_snippet`, which strips
+    any URL / one-time ticket, normalises control characters, redacts labelled
+    secrets, and clips the result to :data:`_TRANSFER_ERROR_MESSAGE_CHARS` --
+    the body may be a vendor HTML/JSON error page or outright hostile.
     """
     collected = bytearray()
     async for chunk in response.aiter_raw():
@@ -727,7 +797,7 @@ async def _bounded_error_snippet(response: httpx.Response) -> str:
         if len(collected) >= _TRANSFER_ERROR_SNIPPET_BYTES:
             break
     snippet = bytes(collected[:_TRANSFER_ERROR_SNIPPET_BYTES])
-    return snippet.decode("utf-8", errors="replace").strip()
+    return _sanitize_transfer_error_snippet(snippet.decode("utf-8", errors="replace"))
 
 
 async def _get_guest_file_bytes(

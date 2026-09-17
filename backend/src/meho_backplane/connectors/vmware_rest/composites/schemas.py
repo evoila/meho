@@ -4398,9 +4398,12 @@ HOST_SERVICE_CONTROL_RESPONSE_SCHEMA: dict[str, Any] = {
 #
 # Guest OS credentials are NEVER a parameter of these ops: they resolve
 # from the target's Vault ``secret_ref`` (the ``guest_username`` /
-# ``guest_password`` fields). The reads are ``safe``; ``guest.file.write``
-# (#3100) and ``guest.program.run`` (#3255) are the ``dangerous`` /
-# ``requires_approval`` writes.
+# ``guest_password`` fields). ``guest.process.list`` / ``guest.env.read`` /
+# ``guest.net.show`` are ``safe`` reads; ``guest.file.read`` is a ``caution``
+# read (#3720 -- its opt-in ``fetch_content=true`` returns arbitrary guest
+# bytes read as the in-guest login, so it auto-parks for agent / service
+# principals). ``guest.file.write`` (#3100) and ``guest.program.run`` (#3255)
+# are the ``dangerous`` / ``requires_approval`` writes.
 
 
 #: ``vmware.composite.vm.guest.process.list`` parameter schema.

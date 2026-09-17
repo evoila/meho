@@ -822,6 +822,58 @@ async def test_file_read_fetch_get_failure_raises_clean_connector_error(
 
 
 @pytest.mark.asyncio
+async def test_file_read_fetch_error_snippet_is_sanitized(creds: _CredRecorder) -> None:
+    """A hostile non-2xx transfer body is redacted, control-stripped, and clipped.
+
+    The transfer host is off-target and its error body is
+    server/attacker-controlled bytes echoed into the ``connector_error`` message
+    (which lands in the audit row + reaches the agent). A body carrying a fake
+    bearer token, a fake one-time transfer URL with a ticket + api_key query,
+    control characters, and an over-cap filler must yield an error whose message
+    contains none of them: the token is redacted, the URL/ticket is absent, the
+    control chars are stripped, and the excerpt is clipped to the tight cap --
+    while the HTTP status and a clear remediation survive.
+    """
+    hostile = (
+        b"Access denied\x00\x1b[31m by proxy. "
+        b"Authorization: Bearer FAKEtoken0123456789abcdefNOTREAL was rejected. "
+        b"See https://vc.example.test/guestFile?id=9&"
+        b"token=ONE-TIME-TICKET-SECRET&api_key=LEAKKEY for details. "
+        b"password: hunter2superlongsecret\r\n" + b"A" * 2000
+    )
+    info = _read_info(
+        size=10, url="https://vc.example.test/guestFile?id=1&token=abc&api_key=SEKRIT"
+    )
+    conn = _read_conn(info, get_status=502, get_body=hostile)
+    with pytest.raises(RuntimeError) as excinfo:
+        await _guest.guest_file_read_composite(
+            operator=_operator(),
+            target=_Target(),
+            params={"vm": "vm-42", "guest_path": "/etc/hostname", "fetch_content": True},
+            connector=conn,  # type: ignore[arg-type]
+        )
+    message = str(excinfo.value)
+    # Status + a clear remediation survive.
+    assert "HTTP 502" in message
+    assert "re-read to mint a fresh transfer URL" in message
+    # Token / secrets redacted; the URL + one-time ticket + api_key excised.
+    assert "FAKEtoken0123456789abcdefNOTREAL" not in message
+    assert "ONE-TIME-TICKET-SECRET" not in message
+    assert "LEAKKEY" not in message
+    assert "hunter2superlongsecret" not in message
+    assert "https://" not in message
+    assert "guestFile" not in message
+    # Control characters stripped (no NUL / ESC / CR / LF injected into audit).
+    assert "\x00" not in message
+    assert "\x1b" not in message
+    assert "\r" not in message and "\n" not in message
+    # The sanitised excerpt itself is bounded by the tight cap, not the wire read.
+    sanitized = _guest._sanitize_transfer_error_snippet(hostile.decode("utf-8", "replace"))
+    assert len(sanitized) <= _guest._TRANSFER_ERROR_MESSAGE_CHARS + 1  # +1 for the "…"
+    assert sanitized.endswith("…")  # the over-cap filler was clipped
+
+
+@pytest.mark.asyncio
 async def test_file_read_fetch_sends_accept_encoding_identity(creds: _CredRecorder) -> None:
     """The transfer GET requests identity encoding (decompression-bomb guard)."""
     info = _read_info(size=5)

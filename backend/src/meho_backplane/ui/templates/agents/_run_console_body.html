@@ -56,11 +56,11 @@
         </div>
       {% endif %}
 
-      <label class="form-control">
-        <span class="label-text font-medium">Prompt</span>
+      <label class="flex flex-col gap-1">
+        <span class="text-sm font-medium">Prompt</span>
         <textarea
           name="input"
-          class="textarea textarea-bordered min-h-28 font-mono text-sm"
+          class="textarea textarea-bordered min-h-28 font-mono text-sm w-full"
           placeholder="What should this agent do?"
           required
           {% if not enabled %}disabled{% endif %}
@@ -68,17 +68,17 @@
         ></textarea>
       </label>
 
-      <label class="form-control max-w-md">
-        <span class="label-text font-medium">Work ref <span class="opacity-60">(optional)</span></span>
+      <label class="flex flex-col gap-1 max-w-md">
+        <span class="text-sm font-medium">Work ref <span class="opacity-60 font-normal">(optional)</span></span>
         <input
           type="text"
           name="work_ref"
-          class="input input-bordered input-sm font-mono"
+          class="input input-bordered input-sm font-mono w-full"
           placeholder="gh:evoila/meho#123"
           {% if not enabled %}disabled{% endif %}
           aria-label="External change-ticket reference"
         />
-        <span class="label-text-alt opacity-60">
+        <span class="text-xs opacity-60">
           Stamps the run with an external change-ticket reference for later filtering.
         </span>
       </label>

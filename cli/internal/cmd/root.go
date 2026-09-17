@@ -47,6 +47,7 @@ import (
 	sddcmanager "github.com/evoila/meho/cli/internal/cmd/sddc-manager"
 	"github.com/evoila/meho/cli/internal/cmd/secret"
 	"github.com/evoila/meho/cli/internal/cmd/sensor"
+	serviceprincipal "github.com/evoila/meho/cli/internal/cmd/service-principal"
 	"github.com/evoila/meho/cli/internal/cmd/targets"
 	"github.com/evoila/meho/cli/internal/cmd/tenants"
 	"github.com/evoila/meho/cli/internal/cmd/topology"
@@ -271,6 +272,10 @@ func newRootCmd() *cobra.Command {
 	// registerDynamicSubcommands so the backplane manifest cannot shadow the
 	// built-in `runner-principal` parent.
 	root.AddCommand(runnerprincipal.NewRootCmd())
+
+	// #3533 — standing service-principal grant management. The generated
+	// client owns the REST schema; this command tree adds the operator UX.
+	root.AddCommand(serviceprincipal.NewRootCmd())
 
 	// G11.2-T5 (#818) -- approval surfacing channel verbs (list / show /
 	// approve / reject) for Initiative #803. Wraps the merged T4/T5 REST

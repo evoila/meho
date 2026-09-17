@@ -104,6 +104,104 @@ def _object_content(mo_type: str, moid: str, props: dict[str, Any], missing: lis
     }
 
 
+def _faulted_object_content(
+    mo_type: str,
+    moid: str,
+    props: dict[str, Any],
+    faulted: dict[str, str],
+) -> dict:
+    """A RetrieveResult whose ``missingSet`` entries carry per-property faults.
+
+    ``faulted`` maps a missing property path to the concrete vim fault type name
+    (e.g. ``NotAuthenticated`` / ``NoPermission`` / ``InvalidProperty``), wrapped
+    in the 9.x ``LocalizedMethodFault`` shape :func:`fault_type_name` reads.
+    ``props`` are the readable ``propSet`` pairs, if any.
+    """
+    return {
+        "objects": [
+            {
+                "obj": {"type": mo_type, "value": moid},
+                "propSet": [{"name": name, "val": val} for name, val in props.items()],
+                "missingSet": [
+                    {
+                        "path": path,
+                        "fault": {
+                            "_typeName": "LocalizedMethodFault",
+                            "fault": {"_typeName": fault_type},
+                        },
+                    }
+                    for path, fault_type in faulted.items()
+                ],
+            }
+        ]
+    }
+
+
+def _flattened_faulted_object_content(
+    mo_type: str,
+    moid: str,
+    props: dict[str, Any],
+    faulted: dict[str, str],
+) -> dict:
+    """A RetrieveResult in the vSphere **8.0.x flattened** per-property fault shape.
+
+    Unlike the 9.x ``LocalizedMethodFault`` wrapper (:func:`_faulted_object_content`,
+    whose concrete class sits in a nested ``fault``), the 8.0.x serializer
+    flattens the concrete fault DataObject **directly onto** the ``fault`` field —
+    no wrapper, no nested ``fault`` — so its own ``_typeName`` is the fault class.
+    :func:`fault_type_name` must read the class off both shapes, so the #3773
+    all-missing-auth reset fires the same on an 8.0.x host as on a 9.x one.
+    """
+    return {
+        "objects": [
+            {
+                "obj": {"type": mo_type, "value": moid},
+                "propSet": [{"name": name, "val": val} for name, val in props.items()],
+                "missingSet": [
+                    {"path": path, "fault": {"_typeName": fault_type}}
+                    for path, fault_type in faulted.items()
+                ],
+            }
+        ]
+    }
+
+
+class _SessionResettingConnector:
+    """Fake connector returning a scripted sequence of RetrievePropertiesEx
+    results and recording ``invalidate_session`` calls, to exercise the #3773
+    all-properties-missing auth health-reset.
+
+    ``_post_vmomi_json`` returns ``results[i]`` for the i-th call (clamping to
+    the last entry for any extra call, so a *runaway* re-read shows up as a call
+    count > 2 rather than an ``IndexError`` that could mask the assertion).
+    ``invalidate_session`` just tallies — the handler calls it between reads, so
+    the tally is the proof that a reset was (or was not) attempted.
+    """
+
+    def __init__(self, results: list[Any]) -> None:
+        self._results = list(results)
+        self.post_calls: list[str] = []
+        self.invalidate_calls = 0
+
+    async def _post_vmomi_json(
+        self,
+        target: Any,
+        path: str,
+        *,
+        operator: Operator,
+        json: dict[str, Any] | None = None,
+        promote_managed_object_not_found: bool = False,
+    ) -> Any:
+        del target, operator, json, promote_managed_object_not_found
+        idx = min(len(self.post_calls), len(self._results) - 1)
+        self.post_calls.append(path)
+        return self._results[idx]
+
+    async def invalidate_session(self, target: Any) -> None:
+        del target
+        self.invalidate_calls += 1
+
+
 # ---------------------------------------------------------------------------
 # Builder — single object, no traversal
 # ---------------------------------------------------------------------------
@@ -435,6 +533,315 @@ async def test_object_collect_surfaces_single_soap_missing_fault_type() -> None:
         "localizedMessage",
     ):
         assert forbidden not in serialized, f"fault content {forbidden!r} leaked into the envelope"
+
+
+# ---------------------------------------------------------------------------
+# All-properties-missing auth health-reset (#3773) — recover a stale-but-live
+# session on the symptom, at most once per dispatch, without looping.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_auth_void_resets_session_once_and_recovers() -> None:
+    """(#3773 c.1) All props missing w/ NotAuthenticated on the first read, real
+    props on the second: exactly ONE session re-establish and a populated result."""
+    void = _faulted_object_content(
+        "HostSystem",
+        "ha-host",
+        {},
+        {"summary.overallStatus": "NotAuthenticated", "runtime.powerState": "NotAuthenticated"},
+    )
+    recovered = _object_content(
+        "HostSystem",
+        "ha-host",
+        {"summary.overallStatus": "green", "runtime.powerState": "poweredOn"},
+        [],
+    )
+    conn = _SessionResettingConnector([void, recovered])
+
+    out = await object_collect_impl(
+        conn,
+        _make_operator(),
+        _Target(),
+        {
+            "type": "HostSystem",
+            "moid": "ha-host",
+            "properties": ["summary.overallStatus", "runtime.powerState"],
+        },
+    )
+
+    # Exactly one invalidate + exactly two reads (the original + one re-read).
+    assert conn.invalidate_calls == 1
+    assert len(conn.post_calls) == 2
+    # The recovered read is what's returned — fully populated, nothing missing.
+    assert out["properties"] == {
+        "summary.overallStatus": "green",
+        "runtime.powerState": "poweredOn",
+    }
+    assert out["missing"] == []
+    assert out["missing_fault_summary"] == {}
+
+
+@pytest.mark.asyncio
+async def test_auth_void_is_never_silently_returned_without_a_reset() -> None:
+    """(#3773 c.2) Regression guard on the pre-fix silent "void": an all-missing
+    NotAuthenticated answer must never come back as status-ok with an empty
+    ``properties`` dict on the first pass without a reset attempt.
+
+    Pre-fix, ``object.collect`` returned ``{properties: {}, missing: [...]}`` and
+    left the stale cookie in place (``invalidate_session`` never called). This
+    asserts the opposite: the first-pass void triggers a reset, so the empty
+    first-pass envelope is never what the caller receives."""
+    void = _faulted_object_content(
+        "HostSystem",
+        "ha-host",
+        {},
+        {"summary.overallStatus": "NotAuthenticated"},
+    )
+    recovered = _object_content("HostSystem", "ha-host", {"summary.overallStatus": "green"}, [])
+    conn = _SessionResettingConnector([void, recovered])
+
+    out = await object_collect_impl(
+        conn,
+        _make_operator(),
+        _Target(),
+        {"type": "HostSystem", "moid": "ha-host", "properties": ["summary.overallStatus"]},
+    )
+
+    # A reset was attempted (the void was not accepted as healthy) ...
+    assert conn.invalidate_calls == 1
+    # ... so the returned envelope is NOT the empty first-pass void.
+    assert out["properties"] != {}
+    assert out["properties"] == {"summary.overallStatus": "green"}
+
+
+@pytest.mark.asyncio
+async def test_auth_void_persisting_after_reset_returns_annotated_envelope_no_loop() -> None:
+    """(#3773 c.3) Loop safety: all-missing NotAuthenticated on BOTH reads → exactly
+    one reset, then the fault-annotated envelope is returned (no second raise/reset,
+    no infinite loop)."""
+    void = _faulted_object_content(
+        "HostSystem",
+        "ha-host",
+        {},
+        {"summary.overallStatus": "NotAuthenticated", "runtime.powerState": "NotAuthenticated"},
+    )
+    # Both reads return the same void; a runaway loop would push post_calls past 2.
+    conn = _SessionResettingConnector([void, void])
+
+    out = await object_collect_impl(
+        conn,
+        _make_operator(),
+        _Target(),
+        {
+            "type": "HostSystem",
+            "moid": "ha-host",
+            "properties": ["summary.overallStatus", "runtime.powerState"],
+        },
+    )
+
+    # Exactly one reset, exactly two reads — bounded, no loop.
+    assert conn.invalidate_calls == 1
+    assert len(conn.post_calls) == 2
+    # The annotated envelope is returned normally (status ok — no exception).
+    assert out["properties"] == {}
+    assert sorted(out["missing"]) == ["runtime.powerState", "summary.overallStatus"]
+    assert out["missing_fault_summary"] == {"NotAuthenticated": 2}
+    assert all(entry["fault_type"] == "NotAuthenticated" for entry in out["missing_properties"])
+
+
+@pytest.mark.asyncio
+async def test_all_object_nopermission_is_treated_as_auth_and_resets() -> None:
+    """(#3773) An all-properties NoPermission at the object (a session whose
+    principal lost its whole view) is auth-class → one reset + recovery."""
+    void = _faulted_object_content(
+        "HostSystem",
+        "ha-host",
+        {},
+        {"summary.overallStatus": "NoPermission", "runtime.powerState": "NoPermission"},
+    )
+    recovered = _object_content(
+        "HostSystem",
+        "ha-host",
+        {"summary.overallStatus": "green", "runtime.powerState": "poweredOn"},
+        [],
+    )
+    conn = _SessionResettingConnector([void, recovered])
+
+    out = await object_collect_impl(
+        conn,
+        _make_operator(),
+        _Target(),
+        {
+            "type": "HostSystem",
+            "moid": "ha-host",
+            "properties": ["summary.overallStatus", "runtime.powerState"],
+        },
+    )
+
+    assert conn.invalidate_calls == 1
+    assert out["properties"] == {
+        "summary.overallStatus": "green",
+        "runtime.powerState": "poweredOn",
+    }
+
+
+@pytest.mark.asyncio
+async def test_partial_per_field_nopermission_does_not_reset() -> None:
+    """(#3773 c.4) A partial per-field NoPermission (at least one property back) is a
+    real permission outcome, NOT a stale session → no reset, annotated envelope
+    returned unchanged."""
+    partial = _faulted_object_content(
+        "HostSystem",
+        "host-42",
+        {"summary.overallStatus": "green"},
+        {"config.storageDevice": "NoPermission"},
+    )
+    conn = _SessionResettingConnector([partial])
+
+    out = await object_collect_impl(
+        conn,
+        _make_operator(),
+        _Target(),
+        {
+            "type": "HostSystem",
+            "moid": "host-42",
+            "properties": ["summary.overallStatus", "config.storageDevice"],
+        },
+    )
+
+    # No reset, exactly one read — the annotated envelope stands.
+    assert conn.invalidate_calls == 0
+    assert len(conn.post_calls) == 1
+    assert out["properties"] == {"summary.overallStatus": "green"}
+    assert out["missing"] == ["config.storageDevice"]
+    assert out["missing_properties"] == [
+        {"path": "config.storageDevice", "fault_type": "NoPermission"}
+    ]
+    assert out["missing_fault_summary"] == {"NoPermission": 1}
+
+
+@pytest.mark.asyncio
+async def test_all_missing_non_auth_fault_does_not_reset() -> None:
+    """(#3773) All properties missing but under a NON-auth fault (InvalidProperty)
+    is a real read outcome, NOT a stale session → no reset, annotated envelope."""
+    invalid = _faulted_object_content(
+        "HostSystem",
+        "host-42",
+        {},
+        {"bogus.path.one": "InvalidProperty", "bogus.path.two": "InvalidProperty"},
+    )
+    conn = _SessionResettingConnector([invalid])
+
+    out = await object_collect_impl(
+        conn,
+        _make_operator(),
+        _Target(),
+        {
+            "type": "HostSystem",
+            "moid": "host-42",
+            "properties": ["bogus.path.one", "bogus.path.two"],
+        },
+    )
+
+    assert conn.invalidate_calls == 0
+    assert len(conn.post_calls) == 1
+    assert out["properties"] == {}
+    assert out["missing_fault_summary"] == {"InvalidProperty": 2}
+
+
+@pytest.mark.asyncio
+async def test_all_missing_without_any_fault_does_not_reset() -> None:
+    """(#3773) All properties missing but genuinely unset (no per-property fault at
+    all) is not an auth signal → no reset."""
+    unset = _object_content("HostSystem", "host-42", {}, ["a.b", "c.d"])
+    conn = _SessionResettingConnector([unset])
+
+    out = await object_collect_impl(
+        conn,
+        _make_operator(),
+        _Target(),
+        {"type": "HostSystem", "moid": "host-42", "properties": ["a.b", "c.d"]},
+    )
+
+    assert conn.invalidate_calls == 0
+    assert len(conn.post_calls) == 1
+    assert out["properties"] == {}
+    assert out["missing_fault_summary"] == {}
+
+
+@pytest.mark.asyncio
+async def test_flattened_8_0_x_all_missing_auth_fault_resets_and_recovers() -> None:
+    """(#3773) The vSphere 8.0.x **flattened** missingSet fault shape (concrete
+    fault on ``fault`` directly, no ``LocalizedMethodFault`` wrapper) is read by
+    :func:`fault_type_name` exactly like the 9.x nested shape: an all-missing
+    flattened NotAuthenticated is recognised as auth-class → one reset + recovery.
+    If fault_type_name did not read the flattened shape, the void would be
+    misclassified and no reset would fire."""
+    void = _flattened_faulted_object_content(
+        "HostSystem",
+        "ha-host",
+        {},
+        {"summary.overallStatus": "NotAuthenticated", "runtime.powerState": "NotAuthenticated"},
+    )
+    recovered = _object_content(
+        "HostSystem",
+        "ha-host",
+        {"summary.overallStatus": "green", "runtime.powerState": "poweredOn"},
+        [],
+    )
+    conn = _SessionResettingConnector([void, recovered])
+
+    out = await object_collect_impl(
+        conn,
+        _make_operator(),
+        _Target(),
+        {
+            "type": "HostSystem",
+            "moid": "ha-host",
+            "properties": ["summary.overallStatus", "runtime.powerState"],
+        },
+    )
+
+    assert conn.invalidate_calls == 1
+    assert len(conn.post_calls) == 2
+    assert out["properties"] == {
+        "summary.overallStatus": "green",
+        "runtime.powerState": "poweredOn",
+    }
+
+
+@pytest.mark.asyncio
+async def test_flattened_8_0_x_partial_fault_surfaces_type_without_reset() -> None:
+    """(#3773) A partial read whose one missing property carries a flattened 8.0.x
+    NoPermission surfaces the fault *type name* off the flattened shape and, being
+    a real permission outcome (a property came back), triggers no reset."""
+    partial = _flattened_faulted_object_content(
+        "HostSystem",
+        "host-42",
+        {"summary.overallStatus": "green"},
+        {"config.storageDevice": "NoPermission"},
+    )
+    conn = _SessionResettingConnector([partial])
+
+    out = await object_collect_impl(
+        conn,
+        _make_operator(),
+        _Target(),
+        {
+            "type": "HostSystem",
+            "moid": "host-42",
+            "properties": ["summary.overallStatus", "config.storageDevice"],
+        },
+    )
+
+    assert conn.invalidate_calls == 0
+    assert len(conn.post_calls) == 1
+    assert out["properties"] == {"summary.overallStatus": "green"}
+    assert out["missing_properties"] == [
+        {"path": "config.storageDevice", "fault_type": "NoPermission"}
+    ]
+    assert out["missing_fault_summary"] == {"NoPermission": 1}
 
 
 # ---------------------------------------------------------------------------

@@ -78,6 +78,7 @@ async def list_grants(
     operator: Operator = _require_operator,
     principal_sub: str | None = Query(default=None),
     include_revoked: bool = Query(default=False),
+    include_expired: bool = Query(default=True),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ) -> ServiceGrantListResponse:
@@ -96,6 +97,7 @@ async def list_grants(
         operator.tenant_id,
         principal_sub=principal_sub,
         include_revoked=include_revoked,
+        include_expired=include_expired,
         limit=limit,
         offset=offset,
     )

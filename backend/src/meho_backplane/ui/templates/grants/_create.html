@@ -1,18 +1,22 @@
+{% set values = values | default({}) %}
+{% set errors = errors | default({}) %}
 <dialog id="grants-create-modal" class="modal" aria-labelledby="grants-create-title">
   <div class="modal-box max-w-3xl">
     <h2 id="grants-create-title" class="text-lg font-semibold">Issue permission grant</h2>
     <p class="mt-1 text-sm opacity-70">Choose the principal kind first. The two grant systems have different scope and validation rules.</p>
-    <form class="mt-5 space-y-5" hx-post="/ui/grants/create" hx-target="#grants-modal" hx-swap="innerHTML" hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}' hx-disabled-elt="find button[type=submit]" x-data="{ kind: 'agent' }" aria-describedby="grant-kind-guidance">
+    <form class="mt-5 space-y-5" hx-post="/ui/grants/create" hx-target="#grants-modal-container" hx-swap="innerHTML" hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}' hx-disabled-elt="find button[type=submit]" x-data="{ kind: '{{ values.get('kind', 'agent') }}' }" aria-describedby="grant-kind-guidance">
+      {% if errors.get('__root__') %}<div class="alert alert-error" role="alert">{{ errors['__root__'] }}</div>{% endif %}
       <label class="block space-y-1">
         <span class="text-sm font-medium">Grant kind</span>
-        <select name="kind" class="select select-bordered w-full" x-model="kind"><option value="agent">Agent</option><option value="service">Service principal</option></select>
+        <select name="kind" class="select select-bordered w-full" x-model="kind"><option value="agent" {% if values.get('kind', 'agent') == 'agent' %}selected{% endif %}>Agent</option><option value="service" {% if values.get('kind') == 'service' %}selected{% endif %}>Service principal</option></select>
       </label>
       <p id="grant-kind-guidance" class="text-sm opacity-70" x-show="kind === 'agent'">Agent grants use an operation pattern and a verdict. The principal must be a registered agent.</p>
       <p class="text-sm opacity-70" x-show="kind === 'service'">Service grants permit one exact operation on one exact connector. A grant is the operator’s recorded review.</p>
 
       <label class="block space-y-1">
         <span class="text-sm font-medium">Principal sub</span>
-        <input type="text" name="principal_sub" required minlength="1" maxlength="512" class="input input-bordered w-full font-mono" placeholder="agent:incident-triage or service subject UUID" />
+        <input type="text" name="principal_sub" value="{{ values.get('principal_sub', '') }}" required minlength="1" maxlength="512" class="input input-bordered w-full font-mono {% if errors.get('principal_sub') %}input-error{% endif %}" placeholder="agent:incident-triage or service subject UUID" />
+        {% if errors.get('principal_sub') %}<span class="text-error text-xs">{{ errors['principal_sub'] }}</span>{% endif %}
         <span class="block text-xs opacity-60">The exact JWT subject the grant applies to.</span>
       </label>
 
@@ -20,42 +24,42 @@
         <legend class="px-1 text-sm font-semibold">Agent permission</legend>
         <label class="block space-y-1">
           <span class="text-sm font-medium">Op pattern</span>
-          <input type="text" name="op" class="input input-bordered w-full font-mono" :required="kind === 'agent'" maxlength="512" placeholder="vault.kv.*" />
+          <input type="text" name="op" value="{{ values.get('op', '') }}" class="input input-bordered w-full font-mono" :required="kind === 'agent'" maxlength="512" placeholder="vault.kv.*" />
           <span class="block text-xs opacity-60">An fnmatch pattern. Use a narrow pattern rather than <span class="font-mono">*</span>.</span>
         </label>
         <label class="block space-y-1">
           <span class="text-sm font-medium">Target scope</span>
-          <input type="text" name="target_scope" class="input input-bordered w-full font-mono" maxlength="64" placeholder="Target UUID, or leave blank for any target" />
+          <input type="text" name="target_scope" value="{{ values.get('target_scope', '') }}" class="input input-bordered w-full font-mono" maxlength="64" placeholder="Target UUID, or leave blank for any target" />
           <span class="block text-xs opacity-60">A target UUID or <span class="font-mono">*</span>; blank also means any target.</span>
         </label>
-        <label class="block space-y-1"><span class="text-sm font-medium">Verdict</span><select name="verdict" class="select select-bordered w-full">{% for verdict in verdicts %}<option value="{{ verdict }}">{{ verdict }}</option>{% endfor %}</select></label>
+        <label class="block space-y-1"><span class="text-sm font-medium">Verdict</span><select name="verdict" class="select select-bordered w-full">{% for verdict in verdicts %}<option value="{{ verdict }}" {% if values.get('verdict', 'deny') == verdict %}selected{% endif %}>{{ verdict }}</option>{% endfor %}</select></label>
       </fieldset>
 
       <fieldset x-show="kind === 'service'" :disabled="kind !== 'service'" class="space-y-4 rounded-box border border-base-300 p-4">
         <legend class="px-1 text-sm font-semibold">Service-principal standing grant</legend>
         <label class="block space-y-1">
           <span class="text-sm font-medium">Exact operation ID</span>
-          <input type="text" name="op" class="input input-bordered w-full font-mono" :required="kind === 'service'" maxlength="512" placeholder="POST:/vcenter/vm/{vm}/power?action=start" />
+          <input type="text" name="op" value="{{ values.get('op', '') }}" class="input input-bordered w-full font-mono" :required="kind === 'service'" maxlength="512" placeholder="POST:/vcenter/vm/{vm}/power?action=start" />
           <span class="block text-xs opacity-60">No globs. A literal <span class="font-mono">?key=value</span> action suffix is allowed.</span>
         </label>
         <label class="block space-y-1">
           <span class="text-sm font-medium">Exact connector ID</span>
-          <input type="text" name="connector_id" class="input input-bordered w-full font-mono" :required="kind === 'service'" maxlength="256" placeholder="vmware-rest-9.0" />
+          <input type="text" name="connector_id" value="{{ values.get('connector_id', '') }}" class="input input-bordered w-full font-mono" :required="kind === 'service'" maxlength="256" placeholder="vmware-rest-9.0" />
           <span class="block text-xs opacity-60">No globs. The connector and operation are reviewed as one exact pair.</span>
         </label>
         <div class="space-y-1"><p class="text-sm font-medium">Target scope</p><p class="text-xs opacity-60">Supply one target UUID, or a selector (product and/or name pattern), or leave every field blank for a targetless operation. A target UUID cannot be combined with a selector.</p></div>
-        <label class="block space-y-1"><span class="text-sm">Target UUID</span><input type="text" name="target_id" class="input input-bordered w-full font-mono" maxlength="64" placeholder="Target UUID" /></label>
+        <label class="block space-y-1"><span class="text-sm">Target UUID</span><input type="text" name="target_id" value="{{ values.get('target_id', '') }}" class="input input-bordered w-full font-mono {% if errors.get('target_id') %}input-error{% endif %}" maxlength="64" placeholder="Target UUID" />{% if errors.get('target_id') %}<span class="text-error text-xs">{{ errors['target_id'] }}</span>{% endif %}</label>
         <div class="grid gap-4 sm:grid-cols-2">
-          <label class="block space-y-1"><span class="text-sm">Target product selector</span><input type="text" name="target_product" class="input input-bordered w-full font-mono" maxlength="256" placeholder="vmware" /></label>
-          <label class="block space-y-1"><span class="text-sm">Target name pattern selector</span><input type="text" name="target_name_pattern" class="input input-bordered w-full font-mono" maxlength="512" placeholder="esx-dc*" /></label>
+          <label class="block space-y-1"><span class="text-sm">Target product selector</span><input type="text" name="target_product" value="{{ values.get('target_product', '') }}" class="input input-bordered w-full font-mono" maxlength="256" placeholder="vmware" /></label>
+          <label class="block space-y-1"><span class="text-sm">Target name pattern selector</span><input type="text" name="target_name_pattern" value="{{ values.get('target_name_pattern', '') }}" class="input input-bordered w-full font-mono" maxlength="512" placeholder="esx-dc*" /></label>
         </div>
-        <label class="block space-y-1"><span class="text-sm font-medium">Reason</span><textarea name="reason" class="textarea textarea-bordered w-full" :required="kind === 'service'" maxlength="2048" rows="3" placeholder="Why this service may run this operation unattended"></textarea></label>
+        <label class="block space-y-1"><span class="text-sm font-medium">Reason</span><textarea name="reason" class="textarea textarea-bordered w-full" :required="kind === 'service'" maxlength="2048" rows="3" placeholder="Why this service may run this operation unattended">{{ values.get('reason', '') }}</textarea></label>
         <div class="alert alert-warning text-sm"><span>Delete-shaped operations cannot be granted. Composite operations require a grant for each governed child operation.</span></div>
       </fieldset>
 
       <label class="block space-y-1">
         <span class="text-sm font-medium">Expiry (optional)</span>
-        <input type="text" name="expires_at" class="input input-bordered w-full font-mono" placeholder="2026-10-01T12:00:00Z" />
+        <input type="text" name="expires_at" value="{{ values.get('expires_at', '') }}" class="input input-bordered w-full font-mono" placeholder="2026-10-01T12:00:00Z" />
         <span class="block text-xs opacity-60">Leave blank for a standing grant. Use a future ISO-8601 timestamp with its UTC offset.</span>
       </label>
       <div class="modal-action"><button type="button" class="btn btn-ghost" onclick="document.getElementById('grants-create-modal').close()">Cancel</button><button type="submit" class="btn btn-primary">Issue grant</button></div>

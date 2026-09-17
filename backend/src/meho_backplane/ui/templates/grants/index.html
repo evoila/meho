@@ -1,5 +1,8 @@
 {% extends "base.html" %}
 {% from "_references.html" import subject %}
+{% macro page_url(service, agent) -%}
+/ui/grants?principal={{ principal | urlencode }}{% if include_expired %}&include_expired=true{% endif %}{% if include_revoked %}&include_revoked=true{% endif %}&limit={{ limit }}&service_offset={{ service }}&agent_offset={{ agent }}
+{%- endmacro %}
 
 {% block page_title %}Permission grants &middot; MEHO Operator Console{% endblock %}
 
@@ -13,7 +16,7 @@
       </p>
     </div>
     {% if can_write %}
-      <button type="button" class="btn btn-primary" hx-get="/ui/grants/create" hx-target="#grants-modal" hx-swap="innerHTML" aria-label="Issue a permission grant">
+      <button type="button" class="btn btn-primary" hx-get="/ui/grants/create" hx-target="#grants-modal-container" hx-swap="innerHTML" aria-label="Issue a permission grant">
         Issue grant
       </button>
     {% endif %}
@@ -71,14 +74,26 @@
         </tbody>
       </table>
     </div>
+    {% if service_offset > 0 or service_has_next %}
+      <nav class="flex justify-end gap-2" aria-label="Service grant pages">
+        {% if service_offset > 0 %}<a class="btn btn-sm" href="{{ page_url([service_offset - limit, 0] | max, agent_offset) }}">Previous</a>{% endif %}
+        {% if service_has_next %}<a class="btn btn-sm" href="{{ page_url(service_offset + limit, agent_offset) }}">Next</a>{% endif %}
+      </nav>
+    {% endif %}
   </section>
 
   {% if can_write %}
     <section class="space-y-3" aria-labelledby="agent-grants-heading">
       <div>
         <h2 id="agent-grants-heading" class="text-lg font-semibold">Agent grants</h2>
-        <p class="text-sm opacity-70">Agent grants are tenant-admin governance data. Need a time-bounded change window? <a href="/ui/agents/grants/elevate" class="link link-primary">Elevate an agent grant</a>.</p>
+        <p class="text-sm opacity-70">Agent grants are tenant-admin governance data. Need a time-bounded change window? <button type="button" class="link link-primary" hx-get="/ui/agents/grants/elevate" hx-target="#grants-modal-container" hx-swap="innerHTML" data-action="open-elevate-modal">Elevate an agent grant</button>.</p>
       </div>
+      {% if agent_offset > 0 or agent_has_next %}
+        <nav class="flex justify-end gap-2" aria-label="Agent grant pages">
+          {% if agent_offset > 0 %}<a class="btn btn-sm" href="{{ page_url(service_offset, [agent_offset - limit, 0] | max) }}">Previous</a>{% endif %}
+          {% if agent_has_next %}<a class="btn btn-sm" href="{{ page_url(service_offset, agent_offset + limit) }}">Next</a>{% endif %}
+        </nav>
+      {% endif %}
       <div class="overflow-x-auto rounded-box border border-base-300">
         <table class="table table-sm">
           <thead><tr><th>Principal</th><th>Op pattern</th><th>Target scope</th><th>Verdict</th><th>Expiry</th><th>Created by</th><th><span class="sr-only">Actions</span></th></tr></thead>
@@ -103,5 +118,5 @@
   {% endif %}
 </section>
 
-<div id="grants-modal"></div>
+<div id="grants-modal-container" hx-on::before-swap="if (event.detail.xhr.status === 422) { event.detail.shouldSwap = true; event.detail.isError = false; }"></div>
 {% endblock %}

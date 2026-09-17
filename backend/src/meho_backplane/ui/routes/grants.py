@@ -13,7 +13,6 @@ deliberate: agent-grant reads are tenant-admin-only at their backing service.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from html import escape
 from uuid import UUID
 
 import structlog
@@ -153,7 +152,7 @@ async def _index(
         principal_sub=principal or None,
         include_expired=include_expired,
         include_revoked=include_revoked,
-        limit=limit,
+        limit=limit + 1,
         offset=service_offset,
     )
     agent_rows: list[dict[str, object]] = []
@@ -162,23 +161,31 @@ async def _index(
             session.tenant_id,
             principal_sub=principal or None,
             include_expired=include_expired,
-            limit=limit,
+            limit=limit + 1,
             offset=agent_offset,
         )
-        agent_rows = [_agent_row(entry) for entry in agents]
+        agent_has_next = len(agents) > limit
+        agent_rows = [_agent_row(entry) for entry in agents[:limit]]
+    else:
+        agent_has_next = False
+    service_has_next = len(service_grants) > limit
     csrf_token = mint_csrf_token(str(session.session_id))
     context = {
         "page_title": "Permission grants",
         "active_surface": "grants",
         "can_write": operator.tenant_role == TenantRole.TENANT_ADMIN,
         "agent_rows": agent_rows,
-        "service_rows": [await _service_row(entry, session.tenant_id) for entry in service_grants],
+        "service_rows": [
+            await _service_row(entry, session.tenant_id) for entry in service_grants[:limit]
+        ],
         "principal": principal or "",
         "include_expired": include_expired,
         "include_revoked": include_revoked,
         "service_offset": service_offset,
         "agent_offset": agent_offset,
         "limit": limit,
+        "service_has_next": service_has_next,
+        "agent_has_next": agent_has_next,
         "csrf_token": csrf_token,
     }
     response = get_templates().TemplateResponse(request, "grants/index.html", context)
@@ -207,6 +214,7 @@ async def _create_modal(request: Request, session: UISessionContext = _session) 
 
 
 async def _create(
+    request: Request,
     kind: str = Form(default=""),
     principal_sub: str = Form(default=""),
     op: str = Form(default=""),
@@ -267,10 +275,40 @@ async def _create(
         ServiceGrantValidationError,
         ValueError,
     ) as exc:
-        return HTMLResponse(
-            f'<div class="alert alert-error">{escape(str(exc))}</div>',
+        form_kind = kind if kind in {"agent", "service"} else "agent"
+        errors = (
+            {
+                str(error.get("loc", ("__root__",))[0]): str(error.get("msg", "invalid value"))
+                for error in exc.errors()
+            }
+            if isinstance(exc, ValidationError)
+            else {"__root__": str(exc)}
+        )
+        response = get_templates().TemplateResponse(
+            request,
+            "grants/_create.html",
+            {
+                "csrf_token": mint_csrf_token(str(session.session_id)),
+                "verdicts": [v.value for v in GrantVerdict],
+                "errors": errors,
+                "values": {
+                    "kind": form_kind,
+                    "principal_sub": principal_sub,
+                    "op": op,
+                    "connector_id": connector_id,
+                    "target_id": target_id or "",
+                    "target_scope": target_scope or "",
+                    "target_product": target_product or "",
+                    "target_name_pattern": target_name_pattern or "",
+                    "reason": reason or "",
+                    "verdict": verdict,
+                    "expires_at": expires_at or "",
+                },
+            },
             status_code=422,
         )
+        _csrf(response, session)
+        return response
     return HTMLResponse(status_code=204, headers={"HX-Redirect": "/ui/grants"})
 
 

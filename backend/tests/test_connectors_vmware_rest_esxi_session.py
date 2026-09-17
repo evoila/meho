@@ -55,6 +55,7 @@ transport header, not part of the captured response body.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -67,16 +68,21 @@ import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector, VsphereTargetLike
 from meho_backplane.connectors.vmware_rest import connector as connector_module
+from meho_backplane.connectors.vmware_rest import (
+    typed_ops_object_collect as object_collect_module,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops_host_storage_devices import (
     _extract_host_props,
     _map_scsi_lun,
     build_host_storage_devices_retrieve_params,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_object_collect import object_collect_impl
 from meho_backplane.settings import get_settings
 
 _ESXI_HOST = "esxi-standalone.test.invalid"
@@ -163,6 +169,55 @@ _MANAGED_OBJECT_NOT_FOUND_FAULT_XML = _envelope(
 _JSONRPC_400_BODY: dict[str, Any] = json.loads(_live("api_session_400.json"))
 
 
+def _retrieve_ex(objects_inner: str) -> str:
+    """Wrap ``objects`` XML in a ``RetrievePropertiesExResponse`` SOAP envelope."""
+    return (
+        '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" '
+        'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
+        "<soapenv:Body>"
+        '<RetrievePropertiesExResponse xmlns="urn:vim25"><returnval>'
+        f"{objects_inner}"
+        "</returnval></RetrievePropertiesExResponse>"
+        "</soapenv:Body></soapenv:Envelope>"
+    )
+
+
+#: #3773 — a resolved HostSystem whose one requested property is missing under a
+#: per-property NotAuthenticated fault: the stale-but-live session symptom (HTTP
+#: 200, no top-level <Fault>, so pre-fix object.collect returned a silent void).
+_HOST_STATUS_NOTAUTH_XML = _retrieve_ex(
+    "<objects><obj type='HostSystem'>ha-host</obj>"
+    "<missingSet><path>summary.overallStatus</path>"
+    '<fault xsi:type="LocalizedMethodFault"><fault xsi:type="NotAuthenticated">'
+    "<object type='HostSystem'>ha-host</object></fault>"
+    "<localizedMessage>The session is not authenticated.</localizedMessage></fault>"
+    "</missingSet></objects>"
+)
+#: The same read after a successful re-login — the real property comes back.
+_HOST_STATUS_OK_XML = _retrieve_ex(
+    "<objects><obj type='HostSystem'>ha-host</obj>"
+    "<propSet><name>summary.overallStatus</name>"
+    '<val xsi:type="ManagedEntityStatus">green</val></propSet></objects>'
+)
+#: SessionManager.currentSession present -> the probe liveness read sees a live
+#: session (#3773d / #3710).
+_CURRENT_SESSION_OK_XML = _retrieve_ex(
+    "<objects><obj type='SessionManager'>ha-sessionmgr</obj>"
+    "<propSet><name>currentSession</name>"
+    '<val xsi:type="UserSession"><key>52aa</key><userName>svc-meho</userName></val>'
+    "</propSet></objects>"
+)
+#: SessionManager.currentSession missing under NotAuthenticated -> a void session
+#: the probe liveness read cannot confirm even after a reset (#3773d / #3710).
+_CURRENT_SESSION_NOTAUTH_XML = _retrieve_ex(
+    "<objects><obj type='SessionManager'>ha-sessionmgr</obj>"
+    "<missingSet><path>currentSession</path>"
+    '<fault xsi:type="LocalizedMethodFault"><fault xsi:type="NotAuthenticated">'
+    "<object type='SessionManager'>ha-sessionmgr</object></fault></fault>"
+    "</missingSet></objects>"
+)
+
+
 def _soap_method(body: str) -> str:
     """Return the vim method name in a SOAP request envelope body."""
     for method in (
@@ -189,12 +244,24 @@ class _SdkRouter:
     assertions.
     """
 
-    def __init__(self, *, login_fault: bool = False, retrieve_xml: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        login_fault: bool = False,
+        retrieve_xml: str | None = None,
+        retrieve_sequence: list[str] | None = None,
+    ) -> None:
         self.methods: list[str] = []
         self.bodies: list[str] = []
         self.soap_actions: list[str] = []
         self._login_fault = login_fault
         self._retrieve_xml = retrieve_xml
+        # #3773 — when set, each ``RetrievePropertiesEx`` returns the next entry
+        # (clamping to the last), so a stale-then-recovered read pair can be
+        # scripted across a health-reset re-login. Takes precedence over
+        # ``retrieve_xml`` when both are given.
+        self._retrieve_sequence = retrieve_sequence
+        self._retrieve_calls = 0
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         body = request.content.decode("utf-8")
@@ -215,6 +282,10 @@ class _SdkRouter:
         if method == "Logout":
             return httpx.Response(200, text=_LOGOUT_OK_XML)
         if method == "RetrievePropertiesEx":
+            if self._retrieve_sequence is not None:
+                idx = min(self._retrieve_calls, len(self._retrieve_sequence) - 1)
+                self._retrieve_calls += 1
+                return httpx.Response(200, text=self._retrieve_sequence[idx])
             return httpx.Response(200, text=self._retrieve_xml or _SCSI_LUN_RETRIEVE_XML)
         if method == "CreateNasDatastore":
             return httpx.Response(200, text=_CREATE_NAS_OK_XML)
@@ -723,7 +794,10 @@ async def test_fingerprint_standalone_esxi_reachable_product_esxi() -> None:
     """probe/fingerprint against a standalone ESXi 9.1 host → reachable=True, product=esxi."""
     connector = _make_connector()
     _patch_no_revoke_aclose(connector)
-    router = _SdkRouter()
+    # #3773(d)/#3710 — the fingerprint confirms reachability with a live
+    # SessionManager.currentSession read, so the /sdk RetrievePropertiesEx must
+    # answer with a live session rather than the default scsiLun envelope.
+    router = _SdkRouter(retrieve_xml=_CURRENT_SESSION_OK_XML)
 
     async with respx.mock(base_url=_ESXI_BASE) as mock:
         mock.post("/api/session").respond(400, json=_JSONRPC_400_BODY)
@@ -746,7 +820,8 @@ async def test_probe_standalone_esxi_ok_true() -> None:
     """probe() folds the reachable ESXi fingerprint into ok=True."""
     connector = _make_connector()
     _patch_no_revoke_aclose(connector)
-    router = _SdkRouter()
+    # #3773(d)/#3710 — reachability is confirmed by a live currentSession read.
+    router = _SdkRouter(retrieve_xml=_CURRENT_SESSION_OK_XML)
 
     async with respx.mock(base_url=_ESXI_BASE) as mock:
         mock.post(_SDK).mock(side_effect=router)
@@ -897,3 +972,287 @@ async def test_soap_post_never_hands_envelope_to_flight_recorder(
     blob = repr(recorded)
     assert "stub-password" not in blob
     assert "svc-meho" not in blob
+
+
+# ---------------------------------------------------------------------------
+# #3773(b) — stale-but-live SOAP session recovery through the real session layer
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_object_collect_recovers_stale_soap_session_via_relogin() -> None:
+    """(#3773b) End-to-end through the SOAP session layer: an all-missing
+    NotAuthenticated ``RetrievePropertiesEx`` (the stale-but-live symptom — HTTP
+    200, no top-level ``<Fault>``) triggers a real ``SessionManager.Logout`` +
+    ``RetrieveServiceContent``/``Login`` re-establish, and the single retried read
+    on the fresh session returns the property. This exercises the health-reset's
+    ``invalidate_session`` recovery hook against the actual ``/sdk`` transport,
+    not a fake connector."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    router = _SdkRouter(retrieve_sequence=[_HOST_STATUS_NOTAUTH_XML, _HOST_STATUS_OK_XML])
+    target = _esxi_fingerprinted()
+
+    async with respx.mock(base_url=_ESXI_BASE) as mock:
+        mock.post(_SDK).mock(side_effect=router)
+        out = await object_collect_impl(
+            connector,
+            _make_operator(),
+            target,
+            {"type": "HostSystem", "moid": "ha-host", "properties": ["summary.overallStatus"]},
+        )
+
+    # Full recovery: the property is back and nothing is missing.
+    assert out["properties"] == {"summary.overallStatus": "green"}
+    assert out["missing"] == []
+    assert out["missing_fault_summary"] == {}
+    # Exactly one reset: establish -> void read -> Logout -> re-establish -> ok read.
+    assert router.methods == [
+        "RetrieveServiceContent",
+        "Login",
+        "RetrievePropertiesEx",
+        "Logout",
+        "RetrieveServiceContent",
+        "Login",
+        "RetrievePropertiesEx",
+    ]
+
+
+# ---------------------------------------------------------------------------
+# #3773(a) — bounded session max-age (proactive re-login)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_session_within_max_age_is_reused_no_relogin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """(#3773a) A warm session younger than the max-age is trusted: the second
+    auth call reuses the cached cookie and never re-establishes."""
+    monkeypatch.setattr(connector_module, "_SESSION_MAX_AGE_SECONDS", 10_000)
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    router = _SdkRouter()
+    target = _esxi_fingerprinted()
+
+    async with respx.mock(base_url=_ESXI_BASE) as mock:
+        mock.post(_SDK).mock(side_effect=router)
+        await connector.auth_headers(target, _make_operator())  # establish #1
+        await connector.auth_headers(target, _make_operator())  # within max-age
+
+    # Exactly one establish — no proactive re-login, no Logout.
+    assert router.methods == ["RetrieveServiceContent", "Login"]
+
+
+@pytest.mark.asyncio
+async def test_session_past_max_age_is_proactively_re_established(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(#3773a) A warm session older than the max-age is proactively invalidated
+    (SOAP Logout) and re-established before its next use — the belt to the (b)
+    health-reset's suspenders."""
+    monkeypatch.setattr(connector_module, "_SESSION_MAX_AGE_SECONDS", 600)
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    router = _SdkRouter()
+    target = _esxi_fingerprinted()
+
+    async with respx.mock(base_url=_ESXI_BASE) as mock:
+        mock.post(_SDK).mock(side_effect=router)
+        await connector.auth_headers(target, _make_operator())  # establish #1
+        # Age the recorded establish time past the max-age window (monotonic
+        # clock, so subtract from a fresh reading — no sleep, no flakiness).
+        key = target_cache_key(target)
+        connector._session_established_at[key] = time.monotonic() - 5_000
+        await connector.auth_headers(target, _make_operator())  # past max-age -> re-login
+
+    # establish #1, then proactive Logout, then a cold re-establish.
+    assert router.methods == [
+        "RetrieveServiceContent",
+        "Login",
+        "Logout",
+        "RetrieveServiceContent",
+        "Login",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_max_age_zero_disables_proactive_relogin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """(#3773a) ``0`` disables the proactive re-login: even a long-aged session is
+    reused (the (b) health-reset remains the recovery on the symptom)."""
+    monkeypatch.setattr(connector_module, "_SESSION_MAX_AGE_SECONDS", 0)
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    router = _SdkRouter()
+    target = _esxi_fingerprinted()
+
+    async with respx.mock(base_url=_ESXI_BASE) as mock:
+        mock.post(_SDK).mock(side_effect=router)
+        await connector.auth_headers(target, _make_operator())
+        key = target_cache_key(target)
+        connector._session_established_at[key] = time.monotonic() - 1_000_000
+        await connector.auth_headers(target, _make_operator())
+
+    assert router.methods == ["RetrieveServiceContent", "Login"]
+
+
+# ---------------------------------------------------------------------------
+# #3773(a) — VMWARE_SOAP_SESSION_MAX_AGE_SECONDS resolver (env override, fail-safe)
+# ---------------------------------------------------------------------------
+
+
+def test_max_age_default_is_below_esxi_soap_idle_timeout() -> None:
+    """(#3773a guardrail) The default is 1200s and stays SAFELY below the ESXi SOAP
+    idle timeout (``Config.HostAgent.vmacore.soap.sessionTimeout`` = 1800s / 30 min)
+    so the max-age belt never trails the very expiry it guards."""
+    assert connector_module._DEFAULT_SESSION_MAX_AGE_SECONDS == 1200
+    assert connector_module._DEFAULT_SESSION_MAX_AGE_SECONDS < 1800
+
+
+def test_resolve_max_age_unset_returns_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("VMWARE_SOAP_SESSION_MAX_AGE_SECONDS", raising=False)
+    assert connector_module._resolve_session_max_age_seconds() == 1200
+
+
+def test_resolve_max_age_valid_override_is_honoured(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VMWARE_SOAP_SESSION_MAX_AGE_SECONDS", "600")
+    assert connector_module._resolve_session_max_age_seconds() == 600
+
+
+def test_resolve_max_age_zero_is_honoured_as_disable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VMWARE_SOAP_SESSION_MAX_AGE_SECONDS", "0")
+    assert connector_module._resolve_session_max_age_seconds() == 0
+
+
+def test_resolve_max_age_non_numeric_falls_back_to_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VMWARE_SOAP_SESSION_MAX_AGE_SECONDS", "twenty-minutes")
+    assert connector_module._resolve_session_max_age_seconds() == 1200
+
+
+def test_resolve_max_age_negative_falls_back_to_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VMWARE_SOAP_SESSION_MAX_AGE_SECONDS", "-42")
+    assert connector_module._resolve_session_max_age_seconds() == 1200
+
+
+# ---------------------------------------------------------------------------
+# #3773(d)/#3710 — probe/fingerprint reflects session liveness, not just cache
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_dead_session_reports_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(#3773d/#3710) A server-side-expired-but-locally-cached session still
+    answers the unauthenticated bootstrap (so about.version is cached), but the
+    liveness read of SessionManager.currentSession stays void even after the
+    health-reset re-login → reachable=False, not a green probe on a dead session."""
+    # Disable the proactive max-age so the liveness read is the only reset trigger.
+    monkeypatch.setattr(connector_module, "_SESSION_MAX_AGE_SECONDS", 0)
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    # currentSession missing under NotAuthenticated on BOTH the initial read and
+    # the post-reset re-read: the re-login cannot heal it.
+    router = _SdkRouter(
+        retrieve_sequence=[_CURRENT_SESSION_NOTAUTH_XML, _CURRENT_SESSION_NOTAUTH_XML]
+    )
+    target = _esxi_fingerprinted()
+
+    async with respx.mock(base_url=_ESXI_BASE) as mock:
+        mock.post(_SDK).mock(side_effect=router)
+        mock.get("/api/about").respond(400)
+        result = await connector.fingerprint(target, _make_operator())
+
+    assert result.reachable is False
+    assert result.product == "unknown"
+    # about.version WAS cached from the bootstrap, but reachability is judged by
+    # the liveness read, not the cache — the whole point of the #3710 close.
+    assert result.extras["version"] == _ABOUT_VERSION
+    assert "stale/void SOAP session" in result.extras["error"]
+    # The reset was attempted (Logout between the two currentSession reads).
+    assert "Logout" in router.methods
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_stale_session_healed_by_reset_reports_reachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(#3773d/#3710) A stale session whose currentSession read is void first but
+    live after the health-reset re-login probes reachable — the reset healed it."""
+    monkeypatch.setattr(connector_module, "_SESSION_MAX_AGE_SECONDS", 0)
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    router = _SdkRouter(retrieve_sequence=[_CURRENT_SESSION_NOTAUTH_XML, _CURRENT_SESSION_OK_XML])
+    target = _esxi_fingerprinted()
+
+    async with respx.mock(base_url=_ESXI_BASE) as mock:
+        mock.post(_SDK).mock(side_effect=router)
+        mock.get("/api/about").respond(400)
+        result = await connector.fingerprint(target, _make_operator())
+
+    assert result.reachable is True
+    assert result.product == "esxi"
+    assert result.version == _ABOUT_VERSION
+    # The health-reset fired: a Logout + re-establish sits between the two reads.
+    assert "Logout" in router.methods
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_credentials_read_error_during_liveness_degrades_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(#3773d/#3710, review 5237111080 F5) A VaultCredentialsReadError raised by
+    the liveness read's re-login (a coincident credential-read hiccup) must not
+    escape _esxi_session_is_live/fingerprint — it degrades to reachable=False
+    exactly like the transport/auth errors already in the except tuple, rather
+    than propagating out of the probe."""
+    monkeypatch.setattr(connector_module, "_SESSION_MAX_AGE_SECONDS", 0)
+
+    async def _raise_creds_error(*_args: Any, **_kwargs: Any) -> Any:
+        raise VaultCredentialsReadError(
+            "injected credential-read hiccup during the liveness re-login"
+        )
+
+    # Patch the real module object the production call-time import
+    # (``from ...typed_ops_object_collect import _collect_with_auth_health_reset``
+    # inside ``_esxi_session_is_live``) reads its attribute from. A dotted-string
+    # target would instead make pytest walk ``vmware_rest.typed_ops_object_collect``,
+    # which only resolves while the submodule stays bound as an attribute of the
+    # package — an assumption another test on the same xdist worker can void.
+    monkeypatch.setattr(
+        object_collect_module, "_collect_with_auth_health_reset", _raise_creds_error
+    )
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    router = _SdkRouter()
+    target = _esxi_fingerprinted()
+
+    async with respx.mock(base_url=_ESXI_BASE) as mock:
+        mock.post(_SDK).mock(side_effect=router)
+        mock.get("/api/about").respond(400)
+        # No exception escapes: the credential-read error is caught and mapped to
+        # the unreachable fingerprint, never propagated to the caller.
+        result = await connector.fingerprint(target, _make_operator())
+
+    assert result.reachable is False
+    assert result.product == "unknown"
+    assert "stale/void SOAP session" in result.extras["error"]
+    # Establish ran and cached the SessionManager moid, so the liveness read WAS
+    # attempted — the degrade is the except-tuple catch of the credential-read
+    # error, not the moid-absent short-circuit.
+    assert "Login" in router.methods
+    assert connector._esxi_session_manager_moids
+
+
+@pytest.mark.asyncio
+async def test_esxi_liveness_unreachable_when_session_manager_moid_absent() -> None:
+    """(#3773d/#3710, review 5237111080 F1) Fail closed: with no cached
+    SessionManager moid there is no object to run the authenticated liveness read
+    against, so _esxi_session_is_live reports not-live (which fingerprint maps to
+    reachable=False) rather than trusting the establish that already ran. Matches
+    the method docstring and connectors-vmware-rest.md."""
+    connector = _make_connector()
+    # No establish has run, so no SessionManager moid is cached for this target.
+    assert connector._esxi_session_manager_moids == {}
+    live = await connector._esxi_session_is_live(_esxi_fingerprinted(), _make_operator())
+    assert live is False

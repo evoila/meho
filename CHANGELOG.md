@@ -90,6 +90,10 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed
+
+- Stored result records now cap their entire encoded envelope at the configured **16 MiB** default, retaining the longest whole-row prefix that fits; the stored record marks `storage_coverage` complete or partial, and handles advertise the actual stored-row count. (#3632 / #3722)
+
 ## [0.35.3] - 2026-09-17
 
 ### Security
@@ -108,6 +112,8 @@ connector-related release-notes line.
 - `vmware.composite.vm.guest.file.read` moves from `safe` to `caution`: agent and service principals now park for approval on every call (a standing grant cannot lift it), human seats execute as before. (#3719 / #3720)
 
   **Operator upgrade note.** This tier change takes effect on upgrade — agent and service callers of `vmware.composite.vm.guest.file.read` will begin parking for approval; human seats are unaffected.
+
+- Result handles now expose an immutable catalog and schema of fields observed across captured raw rows, with an honest raw preview; collection payloads are bounded before encoding and return an unprofiled no-spill result when they cannot safely be admitted, without eagerly constructing the query engine. (#3631 / #3688)
 
 ### Fixed
 

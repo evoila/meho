@@ -101,7 +101,7 @@ connector-related release-notes line.
 ### Added
 
 - `vmware.composite.vm.guest.file.read` gains `fetch_content=true`: the transfer ticket is fetched server-side over the connector's TLS client with a streamed size cap (1 MiB default, 8 MiB max), identity encoding only, and the content returned as utf-8 lines or whole-file base64 behind a result handle; `fetch_content=false` is unchanged. (#3719 / #3720)
-- `mehoauto` connector allowlists the run-node resume operation (`POST /api/v1/runs/{run_id}/nodes/{node_id}/resume`) at the caution tier (no approval park) so a governed launcher can nudge a failed node of the run it is driving to re-check or re-run; the sibling human-only skip route stays out of the catalog. (#3707 / #3709)
+- `mehoauto` connector allowlists the run-node resume operation (`POST /api/v1/runs/{run_id}/nodes/{node_id}/resume`) at the caution tier (`requires_approval=False`: human seats execute, agent and service callers park as for every caution op) so a governed launcher can nudge a failed node of the run it is driving to re-check or re-run; the sibling human-only skip route stays out of the catalog. (#3707 / #3709)
 
 ### Changed
 

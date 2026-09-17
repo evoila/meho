@@ -1146,16 +1146,33 @@ def _http_upstream_message(response: httpx.Response) -> str | None:
     upstream text never reaches the envelope in cleartext. Shared by
     the 403 / 422 / auth-failed builders (the body shape is identical
     across GitHub's 4xx responses).
+
+    Defence in depth: a response raised from inside an ``httpx`` streaming
+    context before its body was read (e.g. ``raise_for_status()`` under a
+    ``client.stream(...)``) is **unread, then closed**, so ``.json()`` /
+    ``.text`` raise :exc:`httpx.ResponseNotRead` / :exc:`httpx.StreamClosed`
+    (subclasses of :exc:`httpx.StreamError`, a ``RuntimeError`` -- neither a
+    ``ValueError``/``UnicodeDecodeError`` nor an ``httpx.HTTPError``). Those
+    are caught here and treated as "no extractable body" (``None``) rather than
+    allowed to escape and break the dispatcher's never-raises contract. The
+    callers that reach an unread streamed response should still turn it into a
+    clean error before it gets here (the guest file-transfer GET does), but the
+    guard keeps this helper total for every arm that shares it.
     """
     try:
         body = response.json()
     except (ValueError, UnicodeDecodeError):
         body = None
+    except httpx.StreamError:
+        return None
     if isinstance(body, dict):
         message = body.get("message")
         if isinstance(message, str) and message.strip():
             return _sanitize_free_text(message)
-    text = (response.text or "").strip()
+    try:
+        text = (response.text or "").strip()
+    except httpx.StreamError:
+        return None
     if not text:
         return None
     return _sanitize_free_text(text)

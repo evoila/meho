@@ -254,7 +254,7 @@ alongside it, all on the same connector:
 | Operation | What it does | Tier |
 |---|---|---|
 | `vmware.composite.vm.guest.process.list` | List running guest processes | `safe` |
-| `vmware.composite.vm.guest.file.read` | Read a guest file (content capped) | `safe` |
+| `vmware.composite.vm.guest.file.read` | Read a guest file (metadata; opt-in byte fetch via `fetch_content`, capped/refused over `max_inline_bytes`) | `caution` (byte fetch reads as the in-guest login; auto-parks for agents/service) |
 | `vmware.composite.vm.guest.env.read` | Read a guest environment variable | `safe` |
 | `vmware.composite.vm.guest.net.show` | Guest NIC / IP state (Tools-reported, no guest login) | `safe` |
 | `vmware.composite.vm.guest.file.write` | Write a guest file | `dangerous` + approval |
@@ -308,9 +308,10 @@ meho operation call vmware-rest-9.0 vmware.composite.vm.guest.program.run \
 
 Capturing a program's output is a two-step compose, by design:
 `program.run` cannot capture stdout on its own, so redirect the output to
-a file in `arguments`, then read it back with `guest.file.read`. Keeping
-capture out of the single operation keeps its blast radius and audited
-surface small.
+a file in `arguments`, then read it back with `guest.file.read`
+(`fetch_content=true` to pull the bytes inline; large output returns a
+`result_query` handle). Keeping capture out of the single operation keeps
+its blast radius and audited surface small.
 
 ## Honest limits
 

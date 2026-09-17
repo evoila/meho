@@ -160,7 +160,12 @@ load-bearing-ness:
    content; `guest.program.run`: VM + program path + working directory +
    wait flag + argument *byte size* + env-var *names*, never the argument
    string or env values). The reads are `safety_level="safe"` / no
-   approval. Both writes gate *first* through the #2254
+   approval, **except `guest.file.read`, which is `caution`** (#3720): with
+   `fetch_content=true` it returns arbitrary guest file bytes read as the
+   (often privileged) in-guest login with no allow-list, so it auto-parks for
+   agent / service principals — a human operator's diagnostic read still
+   executes immediately (`requires_approval=False`; caution parks only
+   non-human principals). Both writes gate *first* through the #2254
    `enforce_subop_policy` seam: a parked / denied gate resolves no guest
    credential and starts / writes nothing.
 4. **`arguments` / `env` are kept off the governed decision surfaces —
@@ -212,15 +217,20 @@ load-bearing-ness:
    reads, a Vault-agent-templated env file), or use the guest's own
    credential store — the same discipline the guest OS credential itself
    follows (point 1, resolved from `secret_ref`, never a parameter).
-5. **Full audit of command + result + truncated output.** Every op
+5. **Full audit of command + result + bounded output.** Every op
    dispatches through the synchronous append-only audit path
    (v0.1-spec §6). The audit row names the op, the VM, and the outcome;
-   set-shaped and byte-shaped outputs are truncated (JSONFlux result
-   handle for the process list; a byte cap on file reads) so the audit
-   and the agent surface never carry an unbounded guest payload.
+   set-shaped outputs spill to a JSONFlux result handle (the process
+   list; the opt-in `file.read` content lines), and `file.read` refuses
+   a file over its inline-fetch cap rather than proxying an unbounded
+   payload, so the audit and the agent surface never carry an unbounded
+   guest payload.
 6. **Read/write split is explicit.** The four reads never mutate guest
    state; the two writes (`guest.file.write`, `guest.program.run`) are the
-   only mutating ops and the only ones that park.
+   only mutating ops, and the only ones that park *for a human* (their
+   `requires_approval=True` approval decision). `guest.file.read` mutates
+   nothing but is `caution`, so it parks for agent / service principals only
+   (never for a human seat) — a content-disclosure guard, not a mutation gate.
 
 ## The op family
 
@@ -236,7 +246,7 @@ carries full `parameter_schema` + `response_schema` (JSON Schema
 | `vmware.composite.vm.guest.process.list` | `GuestProcessManager.ListProcessesInGuest` | yes | safe | set → JSONFlux handle |
 | `vmware.composite.vm.guest.env.read` | `GuestProcessManager.ReadEnvironmentVariableInGuest` | yes | safe | set → JSONFlux handle |
 | `vmware.composite.vm.guest.net.show` | `PropertyCollector.RetrievePropertiesEx` on `guest.net` + `guest.ipStack` | **no** (Tools-reported) | safe | aggregate dict |
-| `vmware.composite.vm.guest.file.read` | `GuestFileManager.InitiateFileTransferFromGuest` + guest-transfer GET | yes | safe | truncated content + attrs |
+| `vmware.composite.vm.guest.file.read` | `GuestFileManager.InitiateFileTransferFromGuest` (+ opt-in guest-transfer GET via `fetch_content`) | yes | **caution** (auto-parks for agents/service; #3720) | metadata + attrs; opt-in `content_lines` → JSONFlux handle |
 | `vmware.composite.vm.guest.file.write` | `GuestFileManager.InitiateFileTransferToGuest` + guest-transfer PUT | yes | **dangerous / approval** | write report |
 | `vmware.composite.vm.guest.program.run` | `GuestProcessManager.StartProgramInGuest` (+ `ListProcessesInGuest` poll when `wait=true`) | yes | **dangerous / approval** | pid (+ exit code / times) |
 
@@ -251,13 +261,79 @@ Notes:
 - **File transfer is two-step by vim design.** `InitiateFileTransfer*`
   returns a one-time guest-transfer URL; the file bytes flow directly
   over that URL (GET for read, PUT for write), never through the vim
-  channel. The read caps returned content and the write echoes only
-  path + size to the reviewer.
+  channel. `file.read` returns the metadata + one-time URL by default;
+  `fetch_content=true` fetches the bytes server-side as `content_lines`
+  (utf-8 or base64), refuses files over `max_inline_bytes` (default
+  1 MiB, hard cap 8 MiB), JSONFlux-wraps large content into a
+  `result_query` handle, and never returns or logs the URL/token. The
+  write echoes only path + size to the reviewer.
 - **Set-shaped responses are JSONFlux-wrapped (postulate 6).** The
   process list and env list return arrays; the dispatcher wraps any
   response over the size threshold into a result handle, so the agent
   drills in via `result_query` rather than receiving an unbounded guest
   process table.
+
+### Inline file fetch (`fetch_content`)
+
+`file.read` is opt-in for the bytes. By default (`fetch_content=false`)
+it returns only the transfer metadata — `size_bytes`, `attributes`, and
+the one-time transfer `url` — with `content_fetch="deferred"`. Pass
+`fetch_content=true` to have MEHO fetch the bytes server-side:
+
+- **Same egress seam as the write.** The GET rides the connector's
+  pooled, TLS-configured client (the one `file.write` already uses for
+  its PUT), resolving a `*` placeholder host to the target's host. The
+  transfer ticket rides the URL, so no auth header is attached.
+- **Set-shaped, so it JSONFlux-wraps.** The bytes come back as
+  `content_lines`. `content_encoding="utf-8"` is used **only when the
+  whole file decodes cleanly as UTF-8**, and its lines are line-oriented,
+  not byte-reversible (the trailing newline is dropped and a CRLF file
+  keeps a dangling `\r`). Otherwise the file is base64
+  (`content_encoding="base64"`; reassemble byte-exactly with
+  `base64.b64decode("".join(content_lines))` — this is the exact/reversible
+  path). Each base64 row is a wide chunk (not RFC 2045's 76 chars) so a
+  large binary produces far fewer rows to page. Being a list, `content_lines`
+  spills to a result handle over the size threshold and the agent pages it
+  with `result_query`; the identifying/size scalars stay on the reduced
+  summary so the metadata envelope survives alongside the handle. **Note:**
+  the `attributes` dict does *not* ride the reduced summary on that
+  handle path (the summary preserves only scalar fields) — re-read with
+  `fetch_content=false` to obtain a large file's `attributes`.
+- **Refuse, don't truncate — with a bounded, streamed read.** A file
+  larger than `max_inline_bytes` (default 1 MiB, hard cap 8 MiB) is
+  refused with an error naming the size, never returned truncated. The
+  body is **streamed under a running byte budget over the raw wire bytes**
+  (`aiter_raw`, mirroring the shared transport's
+  `_read_capped_json_response`): a `Content-Length` over the cap is
+  fast-rejected before a byte is read, and the streamed running total
+  aborts the read the instant it exceeds the cap — so a guest / transfer
+  host that under-reports or omits the size (or omits `Content-Length`
+  entirely) can never make MEHO buffer an unbounded body into memory (the
+  memory-exhaustion guard, #3720). The GET sends `Accept-Encoding:
+  identity` and **refuses any response `Content-Encoding` other than
+  `identity`**: guest files are not transport-compressed, and httpx
+  auto-decodes regardless of the request header, so a `gzip` bomb could
+  otherwise balloon one decoded read past the cap before the running total
+  trips (counting `aiter_raw` wire bytes keeps `raw == decoded`, immune to
+  amplification). The pre-fetch guard still refuses before any GET when the
+  guest-reported size is known and over cap. Re-read without `fetch_content`
+  for the transfer handle, or raise `max_inline_bytes` up to the hard cap.
+- **A non-2xx transfer GET returns a clean structured error.** An expired /
+  consumed one-time ticket (404/403), a transfer-host 5xx, or a refused
+  cross-origin 3xx is turned into a `connector_error` naming the HTTP status
+  and a bounded (~4 KiB) body snippet — never the raw `httpx.HTTPStatusError`
+  with an unread streamed response (which would make the dispatcher's
+  downstream body-read enrichment raise `httpx.ResponseNotRead` and skip the
+  synchronous error-audit row) and never the transfer URL/token (#3720).
+- **URL/token never leak.** On the fetch path the one-time URL is
+  consumed by the GET and carries the transfer token, so the result
+  omits `url` entirely and the URL is never logged; flight-recorder
+  spans already strip the URL query, and the shared client's
+  cross-origin-redirect WARNING now logs scheme+host+path only (the
+  ticket in the query is stripped, #3720). Safety tier is `caution` —
+  the op returns arbitrary guest bytes read as the (often privileged)
+  in-guest login with no allow-list, so it auto-parks for agent /
+  service principals (a human diag read still executes).
 
 ### Why `guest.file.write` is the proving write (not `guest.net.set_mtu`)
 

@@ -4519,6 +4519,30 @@ GUEST_FILE_READ_PARAMETER_SCHEMA: dict[str, Any] = {
                 "MoId of the top-level GuestOperationsManager singleton (see process.list)."
             ),
         },
+        "fetch_content": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "When true, MEHO fetches the file bytes server-side over the "
+                "one-time transfer URL and returns them (see max_inline_bytes). "
+                "When false (default) only the transfer metadata + URL is "
+                "returned, exactly as before. The transfer URL and its token "
+                "are never returned or logged when the bytes are fetched."
+            ),
+        },
+        "max_inline_bytes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8388608,
+            "default": 1048576,
+            "description": (
+                "Byte ceiling for fetch_content (default 1048576 = 1 MiB, hard "
+                "cap 8388608 = 8 MiB). A file larger than this is refused with "
+                "an error naming its size -- re-read without fetch_content for "
+                "the transfer handle, or raise this value up to the hard cap. "
+                "Ignored when fetch_content is false."
+            ),
+        },
     },
     "required": ["vm", "guest_path"],
     "additionalProperties": False,
@@ -4679,8 +4703,9 @@ GUEST_FILE_READ_RESPONSE_SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "description": (
                 "One-time guest-transfer URL from InitiateFileTransferFromGuest. "
-                "Inline byte retrieval is a deferred follow-up (see the design "
-                "note); this increment returns the transfer handle."
+                "Returned when content_fetch='deferred' (fetch_content=false). "
+                "Omitted when content_fetch='inline' -- the one-time URL is "
+                "consumed by the server-side fetch and is never returned."
             ),
         },
         "size_bytes": {
@@ -4688,13 +4713,46 @@ GUEST_FILE_READ_RESPONSE_SCHEMA: dict[str, Any] = {
             "description": "File size in bytes as reported by the guest file manager.",
         },
         "attributes": {
-            "description": "GuestFileAttributes for the file (POSIX / Windows metadata).",
+            "description": (
+                "GuestFileAttributes for the file (POSIX / Windows metadata). "
+                "Present on a deferred read and on an inline read returned in "
+                "full; dropped from the reduced summary when a large inline file "
+                "spills content_lines to a result handle (the summary preserves "
+                "only scalar identifying/size fields, not this dict) -- re-read "
+                "with fetch_content=false to obtain the attributes for such a file."
+            ),
         },
         "content_fetch": {
             "type": "string",
-            "enum": ["deferred"],
+            "enum": ["deferred", "inline"],
             "description": (
-                "Marks that inline content retrieval is not performed in this increment."
+                "'deferred' -- only transfer metadata + URL returned (default); "
+                "'inline' -- file bytes were fetched and returned as content_lines."
+            ),
+        },
+        "content_encoding": {
+            "type": "string",
+            "enum": ["utf-8", "base64"],
+            "description": (
+                "Present only when content_fetch='inline'. 'utf-8' -- emitted "
+                "only when the whole file decodes cleanly as UTF-8; content_lines "
+                "are its text lines (line-oriented: a trailing newline is dropped "
+                "and a CRLF file keeps a dangling '\\r', so utf-8 lines are NOT "
+                "byte-reversible). 'base64' -- content_lines are base64 chunks "
+                "(used whenever the file is not clean UTF-8, e.g. binary); "
+                "concatenate then base64-decode for the exact, byte-reversible "
+                "content."
+            ),
+        },
+        "content_lines": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Present only when content_fetch='inline'. The file content as "
+                "a list of text lines (utf-8) or base64 chunks (binary). "
+                "content_encoding says which; use base64 for byte-exact content. "
+                "Set-shaped, so the dispatcher JSONFlux-wraps it into a result "
+                "handle over the size threshold; drill in via result_query."
             ),
         },
     },

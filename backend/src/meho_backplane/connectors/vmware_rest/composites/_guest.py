@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: file-size — pre-existing guest-operations channel module
+# (#3100 / #3255); one cohesive unit (auth + manager resolution + the six
+# guest.* handlers), already over the soft limit on main before this change.
 
 """Governed guest-operations channel handlers (``vmware.composite.vm.guest.*``, #3100 / #3255).
 
@@ -61,8 +64,11 @@ An operator whose deployment names the top manager differently overrides
 from __future__ import annotations
 
 import asyncio
+import base64
 import time
 from typing import TYPE_CHECKING, Any
+
+import httpx
 
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors._shared.vault_creds import load_basic_credentials
@@ -126,6 +132,34 @@ _PROP_GUEST_IP_STACK = "guest.ipStack"
 #: Cap on the number of processes returned inline before the list is
 #: JSONFlux-handled by the dispatcher.
 _DEFAULT_MAX_PROCESSES = 200
+
+#: ``file.read`` inline-fetch byte caps. A caller-supplied ``max_inline_bytes``
+#: is clamped into ``[1, _FILE_READ_HARD_CAP_BYTES]``; absent, the default
+#: budget applies. The schema also enforces these bounds declaratively, so the
+#: clamp is defence-in-depth (a direct handler call / a schema drift).
+_FILE_READ_DEFAULT_MAX_BYTES = 1024 * 1024  # 1 MiB
+_FILE_READ_HARD_CAP_BYTES = 8 * 1024 * 1024  # 8 MiB
+#: Cap (bytes) on the transfer-host error body read into a non-2xx refusal
+#: message. A non-2xx transfer GET is refused with a *clean* connector error
+#: naming the status + a bounded snippet of the body -- never the raw
+#: :class:`httpx.HTTPStatusError` (whose ``__str__`` embeds the one-time
+#: transfer URL/token) and never an unread streamed response (which would make
+#: the dispatcher's downstream ``.text`` / ``.json`` raise
+#: :exc:`httpx.ResponseNotRead` and escape the never-raises contract). Read via
+#: ``aiter_raw`` so a lying/compressed error body cannot balloon past this cap.
+_TRANSFER_ERROR_SNIPPET_BYTES = 4096
+#: Chunk width (base64 characters per ``content_lines`` row) for binary content.
+#: Wider than RFC 2045's 76-char MIME wrap so a large binary spilling to a
+#: result handle produces far fewer rows to page (an 8 MiB file is ~2.7k rows
+#: here vs ~147k at width 76) -- the rows are not independently meaningful (the
+#: agent concatenates them all before one b64decode), so a wide row is pure
+#: paging economy. Held under ~5000 so a default ``result_query`` page
+#: (``limit=50``) of a base64 handle stays comfortably inside the 256 KiB
+#: ``result_query_max_output_bytes`` budget (50 * 4096 ~= 205 KB + envelope),
+#: rather than tripping the recoverable output-too-large / lower-your-limit
+#: path on the very first default page. A multiple of 4 keeps each row a whole
+#: base64 quantum.
+_BASE64_LINE_WIDTH = 4096
 
 #: Default wall-clock ceiling (seconds) for the ``guest.program.run``
 #: exit-code poll. Matches VMware Tools' ~5-minute retention of a finished
@@ -386,15 +420,40 @@ async def guest_file_read_composite(
 
     Op-id: ``vmware.composite.vm.guest.file.read``. Returns the
     ``FileTransferInformation`` the guest file manager issues -- the file
-    ``size``, POSIX ``attributes``, and a one-time transfer ``url`` -- for
-    ``guest_path``. Inline content retrieval (a raw GET of ``url``) is a
-    deliberate follow-up (see the design note): the first increment returns
-    the transfer handle so the file's existence, size, and attributes are
-    known without MEHO proxying the bytes.
+    ``size``, POSIX/Windows ``attributes``, and a one-time transfer ``url`` --
+    for ``guest_path``.
+
+    ``fetch_content`` (default ``False``) selects the shape:
+
+    * **false** -- returns the transfer metadata + one-time ``url`` and
+      ``content_fetch="deferred"`` (byte-identical to the read's first
+      increment): existence + size + attributes without MEHO proxying bytes.
+    * **true** -- MEHO GETs the one-time transfer URL server-side over the
+      same pooled TLS client the write path uses (:func:`_get_guest_file_bytes`)
+      and returns the bytes as set-shaped ``content_lines`` (utf-8 text lines
+      when the whole file decodes cleanly, else wide base64 chunks for binary /
+      non-decodable content; flagged by ``content_encoding``). Large content is
+      JSONFlux-wrapped into a result handle by the dispatcher (drill in via
+      ``result_query``). A file larger than ``max_inline_bytes`` (default 1 MiB,
+      hard cap 8 MiB) is **refused** (not truncated) with an error naming the
+      size -- before any GET when the guest-reported size is known, and, when it
+      is not, by :func:`_get_guest_file_bytes`'s streamed running byte-budget
+      (which aborts the read mid-body rather than buffering an unbounded
+      payload). The one-time URL and its token are never returned or logged on
+      this path (the result omits ``url``).
+
+    Safety tier is ``caution`` (not ``safe``): with ``fetch_content=true`` the
+    op returns arbitrary guest file bytes read as the (often privileged)
+    in-guest login with no allow-list, so it auto-parks for agent / service
+    principals (a human seat still executes it immediately). The tier is
+    op-level, so a metadata-only ``fetch_content=false`` read parks for agents
+    too.
     """
     vm_moid = params["vm"]
     guest_path = params["guest_path"]
     top_moid = params.get("guest_ops_manager_moid", _DEFAULT_GUEST_OPS_MANAGER_MOID)
+    fetch_content = bool(params.get("fetch_content", False))
+    max_inline_bytes = _bounded_max_inline_bytes(params.get("max_inline_bytes"))
     auth = await _guest_auth(connector, target, operator)
     manager_moid = await _resolve_guest_manager_moid(
         connector, target, operator, top_moid=top_moid, property_name=_PROP_FILE_MANAGER
@@ -414,14 +473,39 @@ async def guest_file_read_composite(
     info = _unwrap_envelope(raw)
     info = info if isinstance(info, dict) else {}
     size = unwrap_vim_value(info.get("size"))
+    size_bytes = size if isinstance(size, int) and not isinstance(size, bool) else None
+
+    if not fetch_content:
+        return {
+            "vm": vm_moid,
+            "file_manager_moid": manager_moid,
+            "guest_path": guest_path,
+            "url": unwrap_vim_value(info.get("url")),
+            "size_bytes": size_bytes,
+            "attributes": unwrap_vim_value(info.get("attributes")),
+            "content_fetch": "deferred",
+        }
+
+    url = unwrap_vim_value(info.get("url"))
+    if not isinstance(url, str) or not url:
+        raise RuntimeError(
+            f"guest.file.read: {_OP_FILE_TRANSFER_FROM!r} returned no transfer URL "
+            f"for {guest_path!r} on vm {vm_moid!r}"
+        )
+    # Refuse before egress when the guest-reported size is known and over cap.
+    if size_bytes is not None and size_bytes > max_inline_bytes:
+        raise _file_too_large(size_bytes, max_inline_bytes)
+    content = await _get_guest_file_bytes(connector, target, url=url, max_bytes=max_inline_bytes)
+    encoding, content_lines = _shape_guest_file_content(content)
     return {
         "vm": vm_moid,
         "file_manager_moid": manager_moid,
         "guest_path": guest_path,
-        "url": unwrap_vim_value(info.get("url")),
-        "size_bytes": size if isinstance(size, int) and not isinstance(size, bool) else None,
+        "size_bytes": size_bytes,
         "attributes": unwrap_vim_value(info.get("attributes")),
-        "content_fetch": "deferred",
+        "content_fetch": "inline",
+        "content_encoding": encoding,
+        "content_lines": content_lines,
     }
 
 
@@ -551,6 +635,215 @@ async def _put_guest_file_bytes(
     client = await connector._http_client(target)
     response = await client.put(resolved, content=content)
     response.raise_for_status()
+
+
+def _bounded_max_inline_bytes(raw: Any) -> int:
+    """Validate + clamp the inline-fetch byte budget into ``[1, hard cap]``.
+
+    ``None`` selects the default budget. The schema already bounds the param
+    declaratively (``minimum:1`` / ``maximum:8388608``); this is defence in
+    depth for a direct handler call or a schema drift -- a sub-1 value is a
+    caller error (raise), an over-cap value clamps to the hard cap.
+    """
+    if raw is None:
+        return _FILE_READ_DEFAULT_MAX_BYTES
+    value = int(raw)
+    if value < 1:
+        raise ValueError("max_inline_bytes must be >= 1")
+    return min(value, _FILE_READ_HARD_CAP_BYTES)
+
+
+def _file_too_large(size_bytes: int, max_bytes: int) -> RuntimeError:
+    """Build the over-cap refusal error -- names the size + cap, never the URL.
+
+    The dispatcher maps a :class:`RuntimeError` to ``connector_error`` with the
+    message intact (as the other guest-handler guards do), so the caller sees
+    an actionable size + remediation.
+    """
+    return RuntimeError(
+        f"guest.file.read: file is {size_bytes} bytes, over the "
+        f"{max_bytes}-byte inline-fetch cap (max_inline_bytes; hard cap "
+        f"{_FILE_READ_HARD_CAP_BYTES}). Re-read without fetch_content for the "
+        f"transfer handle, or raise max_inline_bytes."
+    )
+
+
+def _transfer_get_failed(status_code: int, snippet: str) -> RuntimeError:
+    """Build the non-2xx transfer-GET refusal -- names the status + a body snippet.
+
+    Deliberately a **clean** :class:`RuntimeError` carrying only the HTTP status
+    and a bounded body snippet, never the raw :class:`httpx.HTTPStatusError`
+    (whose ``__str__`` embeds the one-time transfer URL including its
+    ``?token=`` ticket) and never the transfer URL itself. The dispatcher maps
+    a :class:`RuntimeError` to ``connector_error`` with the message intact and
+    writes the synchronous error-audit row, so the caller sees an actionable
+    status without the ticket leaking into the envelope, a log line, or a
+    traceback. It is raised outside any ``except`` block, so nothing chains an
+    ``HTTPStatusError`` (or its ticket-bearing ``__str__``) as ``__context__``.
+    """
+    detail = f" ({snippet})" if snippet else ""
+    return RuntimeError(
+        f"guest.file.read: transfer host returned HTTP {status_code} for the "
+        f"one-time file-transfer GET{detail}. The one-time ticket may have "
+        f"expired or been consumed; re-read to mint a fresh transfer URL."
+    )
+
+
+def _transfer_content_encoding_refused(content_encoding: str) -> RuntimeError:
+    """Build the refusal for a transfer response carrying a transport encoding.
+
+    Guest files come from vCenter / ESXi, which do not transport-compress the
+    bytes (the file *is* the payload), so any ``Content-Encoding`` other than
+    ``identity`` is unexpected and rejected. httpx auto-decodes on the response
+    ``Content-Encoding`` regardless of the request ``Accept-Encoding``, so a
+    single ``gzip`` network read could balloon its decoded output far past the
+    byte budget before the between-yields running total can trip -- a
+    decompression-bomb amplification. Refusing a content-encoded transfer
+    response (combined with the ``aiter_raw`` wire-byte budget) keeps
+    ``raw == decoded`` so the decoded content the agent receives is bounded by
+    ``max_inline_bytes`` and no amplification is possible.
+    """
+    return RuntimeError(
+        f"guest.file.read: refusing a transfer response with "
+        f"Content-Encoding: {content_encoding!r}. Guest file transfers carry "
+        f"identity-encoded bytes; a transport encoding on this response is "
+        f"unexpected and is refused to bound decoded size against a "
+        f"decompression bomb."
+    )
+
+
+async def _bounded_error_snippet(response: httpx.Response) -> str:
+    """Read at most :data:`_TRANSFER_ERROR_SNIPPET_BYTES` of a non-2xx body.
+
+    Streams the raw wire bytes (``aiter_raw`` -- never a decoded/unbounded
+    ``aread``) and stops the instant the cap is reached, so a hostile transfer
+    host cannot make the error path buffer an unbounded body. Decoded lossily
+    (``errors="replace"``) for a diagnostic snippet; the body may be a vendor
+    HTML/JSON error page.
+    """
+    collected = bytearray()
+    async for chunk in response.aiter_raw():
+        collected.extend(chunk)
+        if len(collected) >= _TRANSFER_ERROR_SNIPPET_BYTES:
+            break
+    snippet = bytes(collected[:_TRANSFER_ERROR_SNIPPET_BYTES])
+    return snippet.decode("utf-8", errors="replace").strip()
+
+
+async def _get_guest_file_bytes(
+    connector: VmwareRestConnector, target: Any, *, url: str, max_bytes: int
+) -> bytes:
+    """GET the guest-transfer ``url`` server-side on the pooled target client.
+
+    Symmetric to :func:`_put_guest_file_bytes`: resolves the ``*`` placeholder
+    host to the target's and uses the target's pooled, TLS-configured client
+    (the transfer ticket rides the URL, so no ``auth_headers`` are attached).
+
+    The body is read **streamed with a running byte budget over the raw wire
+    bytes** (the shape of the shared transport's
+    :func:`~meho_backplane.connectors.adapters.http._read_capped_json_response`),
+    so at most ``max_bytes`` (plus one trailing chunk) is ever held in memory:
+
+    * a ``Content-Length`` that already exceeds ``max_bytes`` is
+      **fast-rejected before a single body byte is read**, and
+    * the streamed running total over :meth:`~httpx.Response.aiter_raw` (the
+      *wire* bytes, same units as ``Content-Length``) **aborts the read the
+      instant** the accumulated bytes exceed ``max_bytes``.
+
+    The request sends ``Accept-Encoding: identity`` and the response is
+    **refused if it carries any transport ``Content-Encoding``** other than
+    ``identity``. Guest files come from vCenter / ESXi, which do not
+    transport-compress them, so a transport encoding is unexpected -- and httpx
+    auto-decodes on the response ``Content-Encoding`` regardless of the request
+    ``Accept-Encoding``, so a ``gzip`` bomb could balloon one decoded network
+    read past ``max_bytes`` before the between-yields running total could trip.
+    Refusing a content-encoded response and counting the budget over
+    ``aiter_raw`` keeps ``raw == decoded``, so the decoded content the agent
+    receives is bounded by ``max_bytes`` and no amplification is possible.
+
+    This bounds memory even when the transfer host / guest under-reports or
+    omits ``FileTransferInformation.size`` (the pre-fetch size guard cannot
+    bound egress then) *and* omits or understates ``Content-Length`` (a chunked
+    or lying transfer host) -- a non-streaming ``client.get`` would materialise
+    the whole body into memory first and could OOM the pod before the cap ever
+    fired.
+
+    A non-2xx transfer response (an expired / consumed one-time ticket ->
+    404 / 403, a transfer-host 5xx, or a refused cross-origin 3xx) is turned
+    into a **clean** connector error (:func:`_transfer_get_failed`) carrying the
+    status and a bounded body snippet -- never the raw
+    :class:`httpx.HTTPStatusError` with an unread, then-closed streamed response
+    (which would make the dispatcher's downstream ``.text`` / ``.json`` raise
+    :exc:`httpx.ResponseNotRead` and escape the never-raises contract) and never
+    the transfer URL. The URL (and its ``api_key`` / token query) is never
+    logged.
+    """
+    resolved = _resolve_transfer_url(url, target)
+    client = await connector._http_client(target)
+    async with client.stream("GET", resolved, headers={"Accept-Encoding": "identity"}) as response:
+        if not response.is_success:
+            # Read a BOUNDED error snippet off the still-unread stream and raise
+            # a clean connector error. Do NOT call response.raise_for_status()
+            # here: it would raise an httpx.HTTPStatusError carrying an unread,
+            # about-to-be-closed streamed body, and the dispatcher's downstream
+            # error enrichment (.text / .json) would then raise
+            # httpx.ResponseNotRead and escape -- no structured result, no
+            # error-audit row.
+            raise _transfer_get_failed(response.status_code, await _bounded_error_snippet(response))
+        # Refuse a transport Content-Encoding (see _transfer_content_encoding_refused):
+        # with identity enforced, the aiter_raw wire budget below bounds exactly
+        # what the agent receives, immune to a gzip decompression bomb.
+        content_encoding = response.headers.get("content-encoding", "").strip().lower()
+        if content_encoding and content_encoding != "identity":
+            raise _transfer_content_encoding_refused(content_encoding)
+        # Fast-reject an honest oversized body on its declared length, before
+        # reading a byte. A missing / malformed header falls through to the
+        # streaming running-total guard below (the real backstop against an
+        # absent or understated length).
+        declared = response.headers.get("content-length")
+        if declared is not None:
+            try:
+                length = int(declared)
+            except ValueError:
+                length = None
+            if length is not None and length > max_bytes:
+                raise _file_too_large(length, max_bytes)
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in response.aiter_raw():
+            total += len(chunk)
+            if total > max_bytes:
+                # Abort mid-read: the accumulated body already exceeds the cap,
+                # so exiting the stream context closes the connection without
+                # buffering the rest of the (possibly unbounded) body.
+                raise _file_too_large(total, max_bytes)
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+
+def _shape_guest_file_content(content: bytes) -> tuple[str, list[str]]:
+    """Return ``(encoding, lines)`` -- set-shaped so the reducer can spill.
+
+    UTF-8-decodable bytes decode and split on newline (the trailing empty token
+    dropped, exactly as ``k8s.logs`` shapes its ``lines``); ``encoding="utf-8"``.
+    That split is line-oriented, not byte-reversible: a trailing newline is
+    dropped and a CRLF file keeps a dangling ``\\r`` -- callers needing the exact
+    bytes use the base64 path. Non-decodable (binary) bytes base64-encode and
+    wrap at :data:`_BASE64_LINE_WIDTH` chars per row; ``encoding="base64"``,
+    reassembled byte-exactly as ``base64.b64decode("".join(lines))``. A strict
+    ``decode`` cleanly detects binary and routes it to base64 rather than lossily
+    rendering a binary file as replacement-char "text".
+    """
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        b64 = base64.b64encode(content).decode("ascii")
+        lines = [b64[i : i + _BASE64_LINE_WIDTH] for i in range(0, len(b64), _BASE64_LINE_WIDTH)]
+        return "base64", lines
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return "utf-8", lines
 
 
 async def guest_program_run_composite(

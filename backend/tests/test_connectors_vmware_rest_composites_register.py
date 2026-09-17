@@ -245,15 +245,26 @@ async def test_register_vmware_composite_operations_inserts_five_rows(
     assert stub_embedding_service.encode_one.call_count == len(_COMPOSITES)
 
 
+# Read-family rows that are ``caution`` rather than ``safe``. ``guest.file.read``
+# is caution (#3720): with ``fetch_content=true`` it returns arbitrary guest file
+# bytes read as the (often privileged) in-guest login with no allow-list, so it
+# must auto-park for agent / service principals. It keeps ``requires_approval=
+# False`` -- caution parks for non-human principals but executes immediately for a
+# human seat.
+_CAUTION_READ_OP_IDS: frozenset[str] = frozenset({"vmware.composite.vm.guest.file.read"})
+
+
 @pytest.mark.asyncio
-async def test_every_composite_row_uses_safe_no_approval_overrides(
+async def test_every_composite_row_uses_expected_tier_no_approval_overrides(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """Each row carries ``safety_level="safe"`` + ``requires_approval=False``.
+    """Each read row is ``safe`` (or ``caution`` for the content-disclosing
+    ``guest.file.read``), always ``requires_approval=False``.
 
-    Load-bearing override of T4's ``dangerous`` / ``True`` defaults --
-    every composite in this Task is read-only, so the policy gate
-    should not pop the approval queue.
+    Load-bearing override of T4's ``dangerous`` / ``True`` defaults -- every
+    composite in this Task is read-only, so the policy gate should not pop the
+    approval queue. ``guest.file.read`` is caution rather than safe so it
+    auto-parks for agents / service without popping approval for a human.
     """
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     sessionmaker = get_sessionmaker()
@@ -268,7 +279,10 @@ async def test_every_composite_row_uses_safe_no_approval_overrides(
             .all()
         )
     for row in rows:
-        assert row.safety_level == "safe", f"{row.op_id}: expected safe, got {row.safety_level!r}"
+        expected = "caution" if row.op_id in _CAUTION_READ_OP_IDS else "safe"
+        assert row.safety_level == expected, (
+            f"{row.op_id}: expected {expected}, got {row.safety_level!r}"
+        )
         assert row.requires_approval is False, (
             f"{row.op_id}: expected requires_approval=False, got {row.requires_approval!r}"
         )

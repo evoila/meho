@@ -73,6 +73,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
+from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.pinned_transport import _PinnedAsyncBackend
@@ -1894,6 +1895,73 @@ async def test_pooled_client_refuses_cross_origin_redirect_and_drops_creds() -> 
     assert reached[0].url.host == "nsx.example.com"
     # The attacker host was never contacted, so no secret crossed the origin.
     assert all(r.url.host == "nsx.example.com" for r in reached)
+
+
+@pytest.mark.asyncio
+async def test_cross_origin_redirect_warning_strips_url_query() -> None:
+    """The cross-origin-redirect WARNING logs scheme+host+path, never the query.
+
+    A guest-transfer / session URL carries a one-time ticket in its query
+    string. When such a URL draws a cross-origin 3xx, the refusal WARNING must
+    name the origin + path for diagnosis but never the ticket (the query),
+    otherwise the one-time transfer ticket lands in the log.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"Location": "https://attacker.example.com/steal"})
+
+    transport = httpx.MockTransport(handler)
+    async with _SameOriginRedirectClient(
+        base_url="https://vc.example.com",
+        transport=transport,
+    ) as client:
+        with capture_logs() as captured:
+            resp = await client.get("/guestFile?id=1&token=abc&api_key=SEKRIT")
+
+    assert resp.status_code == 302
+    warning = next(
+        e for e in captured if e["event"] == "connector_redirect_not_followed_cross_origin"
+    )
+    # The origin + path is preserved for diagnosis...
+    assert warning["from_url"] == "https://vc.example.com/guestFile"
+    # ...but the one-time ticket in the query never reaches the log.
+    assert "token=abc" not in warning["from_url"]
+    assert "SEKRIT" not in warning["from_url"]
+    assert "?" not in warning["from_url"]
+
+
+@pytest.mark.asyncio
+async def test_cross_origin_redirect_warning_strips_location_query() -> None:
+    """The refused (attacker-chosen) Location destination is logged scrubbed too.
+
+    The Location header names a host MEHO refuses to follow, but it could carry
+    a secret in its own query string, so the WARNING must log scheme+host+path
+    for that destination, never its query.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            302,
+            headers={"Location": "https://attacker.example.com/steal?leak=DEST_SECRET&x=1"},
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with _SameOriginRedirectClient(
+        base_url="https://vc.example.com",
+        transport=transport,
+    ) as client:
+        with capture_logs() as captured:
+            resp = await client.get("/guestFile?token=abc")
+
+    assert resp.status_code == 302
+    warning = next(
+        e for e in captured if e["event"] == "connector_redirect_not_followed_cross_origin"
+    )
+    # The destination origin + path is preserved for diagnosis...
+    assert warning["location"] == "https://attacker.example.com/steal"
+    # ...but any secret in the destination's own query never reaches the log.
+    assert "DEST_SECRET" not in warning["location"]
+    assert "?" not in warning["location"]
 
 
 @pytest.mark.asyncio

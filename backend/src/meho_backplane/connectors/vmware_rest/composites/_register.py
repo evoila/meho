@@ -1501,37 +1501,75 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     _CompositeSpec(
         op_id="vmware.composite.vm.guest.file.read",
         handler=guest_file_read_composite,
-        summary="Initiate a guest file read; returns size + attributes + transfer URL.",
+        summary="Read a guest file's metadata, or (opt-in) fetch its bytes inline.",
         description=(
             "Initiates a guest file read via the vim GuestFileManager "
             "InitiateFileTransferFromGuest, authenticating with the guest "
-            "credential from the target's secret_ref, and returns the "
-            "FileTransferInformation (file size, POSIX/Windows attributes, and a "
-            "one-time transfer URL) for guest_path. Inline byte retrieval is a "
-            "deferred follow-up; this increment returns the transfer handle so "
-            "existence + size + attributes are known without MEHO proxying the "
-            "bytes. Read-only. Requires VMware Tools in the guest."
+            "credential from the target's secret_ref, for guest_path. With "
+            "fetch_content=false (default) it returns the FileTransferInformation "
+            "(file size, POSIX/Windows attributes, and a one-time transfer URL) -- "
+            "existence + size + attributes without MEHO proxying the bytes. With "
+            "fetch_content=true MEHO fetches the bytes server-side over the "
+            "one-time transfer URL and returns them as content_lines (utf-8 text, "
+            "or wide base64 chunks for binary, flagged by content_encoding), "
+            "capped by max_inline_bytes (default 1 MiB, hard cap 8 MiB) and "
+            "JSONFlux-wrapped into a result handle when large; a file over the cap "
+            "is refused (not truncated) with an error naming its size, and the "
+            "transfer URL + token are never returned or logged. Reads run as the "
+            "in-guest login from the target's secret_ref (often root / "
+            "Administrator) with no path allow-list, so the op is caution-tier: "
+            "it auto-parks for agent / service principals (a human operator diag "
+            "read still executes immediately). Requires VMware Tools in the guest."
         ),
         parameter_schema=GUEST_FILE_READ_PARAMETER_SCHEMA,
         response_schema=GUEST_FILE_READ_RESPONSE_SCHEMA,
         group_key="guest_ops",
         tags=["composite", "read-only", "guest", "vi-json", "file"],
-        safety_level="safe",
+        # Caution, not safe (#3720): fetch_content=true returns arbitrary guest
+        # file bytes read as the in-guest login (often privileged) with no
+        # allow-list and no redaction, so the op must auto-park for agent /
+        # service principals. requires_approval stays False -- caution parks for
+        # non-human principals but executes immediately for a human seat, so an
+        # operator's diagnostic read is unaffected. The tier is op-level, so even
+        # a metadata-only fetch_content=false read parks for agents (the
+        # conservative posture chosen in review over per-param tiering).
+        safety_level="caution",
         requires_approval=False,
         llm_instructions={
             "when_to_use": (
                 "Confirm a file's existence / size / attributes in a guest OS, "
-                "or obtain a one-time transfer URL for it. Inline content bytes "
-                "are not returned in this increment."
+                "or obtain a one-time transfer URL for it. Set fetch_content=true "
+                "to get the bytes inline (as content_lines); large files return a "
+                "result handle to page with result_query. Files over "
+                "max_inline_bytes are refused, not truncated. Reads as the "
+                "in-guest user (often privileged) with no allow-list, so it can "
+                "disclose sensitive file contents; caution-tier -- auto-parks for "
+                "agent / service principals."
             ),
             "preconditions": (
                 "VMware Tools running; guest credential in the target's "
                 "secret_ref. Guest user must be able to read guest_path."
             ),
             "result_shape": (
-                "{vm, file_manager_moid, guest_path, url, size_bytes, "
-                "attributes, content_fetch='deferred'}."
+                "{vm, file_manager_moid, guest_path, size_bytes, attributes} plus, "
+                "when fetch_content=false: {url, content_fetch='deferred'}; when "
+                "fetch_content=true: {content_fetch='inline', content_encoding, "
+                "content_lines} (content_lines JSONFlux-wrapped when large; url "
+                "omitted)."
             ),
+            # Preserve the identifying/size scalars on the reduced summary when a
+            # large fetched file spills content_lines to a handle (#3084), so the
+            # metadata envelope survives alongside the handle.
+            "result_scalars": {
+                "keys": [
+                    "vm",
+                    "file_manager_moid",
+                    "guest_path",
+                    "size_bytes",
+                    "content_fetch",
+                    "content_encoding",
+                ]
+            },
         },
     ),
     _CompositeSpec(

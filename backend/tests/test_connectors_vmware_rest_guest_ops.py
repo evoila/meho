@@ -24,7 +24,9 @@ The real-DB approval-park proof for ``guest.file.write`` lives in
 
 from __future__ import annotations
 
+import base64
 import json
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -33,11 +35,30 @@ import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors import OperationResult
-from meho_backplane.connectors.vmware_rest.composites import _guest
+from meho_backplane.connectors.vmware_rest.composites import _guest, _register
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
+from meho_backplane.settings import get_settings
 
 # ---------------------------------------------------------------------------
 # Fixtures / doubles
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Pin the ``Settings`` fields the reducer reads (JSONFlux admission guard).
+
+    The ``file.read`` inline/large-spill tests pass their handler output through
+    the real :class:`JsonFluxReducer`, whose admission guard reads
+    ``result_reduction_*`` limits via :func:`get_settings`; per this suite's
+    convention every test file pins these env vars in its own fixture.
+    """
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 def _operator() -> Operator:
@@ -61,31 +82,145 @@ class _Target:
     verify_tls: bool = False
 
 
-class _FakePutClient:
-    """Pooled-client stand-in that records PUTs and returns 200."""
+class _FakeStreamResponse:
+    """A minimal streamed httpx-like response for the file.read fetch tests.
 
-    def __init__(self, calls: list[dict[str, Any]], *, status: int = 200) -> None:
-        self._calls = calls
-        self._status = status
+    Mirrors the surface :func:`_guest._get_guest_file_bytes` uses on a streamed
+    GET: ``status_code`` + ``is_success`` (the non-2xx clean-refusal branch), a
+    case-insensitive ``headers`` (the ``Content-Length`` fast-reject + the
+    ``Content-Encoding`` refusal), and a chunked ``aiter_raw`` (the running-total
+    byte-budget abort and the bounded error-snippet read). ``state`` accumulates
+    the raw bytes actually yielded, so a test can prove the read aborted mid-body
+    rather than draining the whole (possibly unbounded) payload.
+    """
+
+    def __init__(
+        self,
+        *,
+        status: int,
+        body: bytes,
+        declare_content_length: bool,
+        chunk_size: int,
+        state: dict[str, int],
+        content_encoding: str | None = None,
+    ) -> None:
+        self.status_code = status
+        self._body = body
+        self._chunk_size = chunk_size
+        self._state = state
+        self.request = httpx.Request("GET", "https://vc.example.test/guestFile")
+        headers: dict[str, str] = {}
+        if declare_content_length:
+            headers["content-length"] = str(len(body))
+        if content_encoding is not None:
+            headers["content-encoding"] = content_encoding
+        self.headers = httpx.Headers(headers)
+
+    @property
+    def is_success(self) -> bool:
+        return 200 <= self.status_code < 300
+
+    async def aiter_raw(self) -> AsyncIterator[bytes]:
+        for i in range(0, len(self._body), self._chunk_size):
+            chunk = self._body[i : i + self._chunk_size]
+            self._state["yielded"] += len(chunk)
+            yield chunk
+
+
+class _FakeStreamCtx:
+    """Async context manager returned by ``_FakeTransferClient.stream``."""
+
+    def __init__(self, response: _FakeStreamResponse) -> None:
+        self._response = response
+
+    async def __aenter__(self) -> _FakeStreamResponse:
+        return self._response
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+
+class _FakeTransferClient:
+    """Pooled-client stand-in that records PUTs and streamed GETs on the transfer URL.
+
+    ``put`` returns ``put_status`` and records the URL + content (the write
+    path); ``stream`` records the URL and yields a :class:`_FakeStreamResponse`
+    carrying ``get_body`` at ``get_status`` (the opt-in file.read inline fetch,
+    which streams the body under a byte budget). Both are the guest-transfer seam
+    the connector's pooled TLS client serves.
+    """
+
+    def __init__(
+        self,
+        put_calls: list[dict[str, Any]],
+        get_calls: list[dict[str, Any]],
+        stream_state: dict[str, int],
+        *,
+        put_status: int = 200,
+        get_status: int = 200,
+        get_body: bytes = b"",
+        declare_content_length: bool = True,
+        chunk_size: int = 65536,
+        get_content_encoding: str | None = None,
+    ) -> None:
+        self._put_calls = put_calls
+        self._get_calls = get_calls
+        self._stream_state = stream_state
+        self._put_status = put_status
+        self._get_status = get_status
+        self._get_body = get_body
+        self._declare_content_length = declare_content_length
+        self._chunk_size = chunk_size
+        self._get_content_encoding = get_content_encoding
 
     async def put(self, url: str, *, content: bytes | None = None) -> httpx.Response:
-        self._calls.append({"url": url, "content": content})
-        return httpx.Response(self._status, request=httpx.Request("PUT", url))
+        self._put_calls.append({"url": url, "content": content})
+        return httpx.Response(self._put_status, request=httpx.Request("PUT", url))
+
+    def stream(
+        self, method: str, url: str, *, headers: dict[str, str] | None = None
+    ) -> _FakeStreamCtx:
+        self._get_calls.append({"url": url})
+        # Stash the request headers so a test can assert Accept-Encoding: identity
+        # without perturbing the get_calls equality checks other tests make.
+        self._stream_state["request_headers"] = dict(headers or {})
+        return _FakeStreamCtx(
+            _FakeStreamResponse(
+                status=self._get_status,
+                body=self._get_body,
+                declare_content_length=self._declare_content_length,
+                chunk_size=self._chunk_size,
+                state=self._stream_state,
+                content_encoding=self._get_content_encoding,
+            )
+        )
 
 
 @dataclass
 class _GuestRecordingConnector:
-    """Records vmomi sub-calls + PUTs, serving canned VI-JSON responses.
+    """Records vmomi sub-calls + PUTs/streamed GETs, serving canned VI-JSON responses.
 
     ``vmomi`` is keyed by the RetrievePropertiesEx queried object type
     (``GuestOperationsManager`` / ``VirtualMachine``) and by the concrete
-    method path for the guest-ops methods.
+    method path for the guest-ops methods. ``get_status`` / ``get_body`` drive
+    the canned guest-transfer GET the opt-in file.read fetch streams;
+    ``declare_content_length`` toggles whether the response advertises a
+    ``Content-Length`` (off = a chunked / lying host, exercising the streamed
+    running-total abort); ``stream_state["yielded"]`` records how many body
+    bytes were actually drained.
     """
 
     vmomi: dict[str, Any] = field(default_factory=dict)
     put_status: int = 200
+    get_status: int = 200
+    get_body: bytes = b""
+    declare_content_length: bool = True
+    stream_chunk_size: int = 65536
+    get_content_encoding: str | None = None
     vmomi_calls: list[dict[str, Any]] = field(default_factory=list)
     put_calls: list[dict[str, Any]] = field(default_factory=list)
+    get_calls: list[dict[str, Any]] = field(default_factory=list)
+    stream_state: dict[str, int] = field(default_factory=lambda: {"yielded": 0})
 
     async def _post_vmomi_json(
         self, target: Any, path: str, *, operator: Operator, json: Any = None
@@ -99,8 +234,18 @@ class _GuestRecordingConnector:
             raise payload
         return payload
 
-    async def _http_client(self, target: Any) -> _FakePutClient:
-        return _FakePutClient(self.put_calls, status=self.put_status)
+    async def _http_client(self, target: Any) -> _FakeTransferClient:
+        return _FakeTransferClient(
+            self.put_calls,
+            self.get_calls,
+            self.stream_state,
+            put_status=self.put_status,
+            get_status=self.get_status,
+            get_body=self.get_body,
+            declare_content_length=self.declare_content_length,
+            chunk_size=self.stream_chunk_size,
+            get_content_encoding=self.get_content_encoding,
+        )
 
 
 class _CredRecorder:
@@ -361,36 +506,362 @@ async def test_net_show_needs_no_guest_credential(creds: _CredRecorder) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_file_read_returns_transfer_info(creds: _CredRecorder) -> None:
-    info = {
+def _read_info(**overrides: Any) -> dict[str, Any]:
+    """A canned FileTransferInformation for the file.read tests."""
+    info: dict[str, Any] = {
         "url": "https://vc.example.test/guestFile?id=1&token=abc",
         "size": 4096,
         "attributes": {"_typeName": "GuestPosixFileAttributes", "permissions": 420},
     }
-    conn = _GuestRecordingConnector(
+    info.update(overrides)
+    return info
+
+
+def _read_conn(info: dict[str, Any], **connector_kwargs: Any) -> _GuestRecordingConnector:
+    return _GuestRecordingConnector(
         vmomi={
             "GuestOperationsManager": _file_mgr(),
             "/GuestFileManager/fm-1/InitiateFileTransferFromGuest": info,
-        }
+        },
+        **connector_kwargs,
     )
+
+
+def _file_read_result_scalars() -> dict[str, Any]:
+    """The reducer context a dispatch of file.read carries -- lifted live.
+
+    Reads ``llm_instructions["result_scalars"]`` off the registered composite
+    tuple, exactly the dict ``dispatcher._result_scalars_from_descriptor``
+    forwards to the reducer, so the handle test asserts against what is really
+    registered (guards drift between the hint and the assertion).
+    """
+    spec = next(
+        s for s in _register._COMPOSITES if s.op_id == "vmware.composite.vm.guest.file.read"
+    )
+    assert spec.llm_instructions is not None
+    hint = spec.llm_instructions["result_scalars"]
+    return {"op_id": spec.op_id, "result_scalars": hint}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("params_extra", [{}, {"fetch_content": False}])
+async def test_file_read_fetch_off_is_byte_identical(
+    creds: _CredRecorder, params_extra: dict[str, Any]
+) -> None:
+    """Default (and explicit fetch_content=False) returns the deferred envelope.
+
+    No bytes are fetched and the result carries neither content key -- the
+    shape is byte-identical to the read's first increment.
+    """
+    info = _read_info()
+    conn = _read_conn(info)
     out = await _guest.guest_file_read_composite(
         operator=_operator(),
         target=_Target(),
-        params={"vm": "vm-42", "guest_path": "/etc/os-release"},
+        params={"vm": "vm-42", "guest_path": "/etc/os-release", **params_extra},
         connector=conn,  # type: ignore[arg-type]
     )
-    assert out["guest_path"] == "/etc/os-release"
-    assert out["file_manager_moid"] == "fm-1"
-    assert out["url"] == info["url"]
-    assert out["size_bytes"] == 4096
-    assert out["content_fetch"] == "deferred"
-    # No bytes were fetched (read returns the transfer handle only).
+    assert out == {
+        "vm": "vm-42",
+        "file_manager_moid": "fm-1",
+        "guest_path": "/etc/os-release",
+        "url": info["url"],
+        "size_bytes": 4096,
+        "attributes": {"_typeName": "GuestPosixFileAttributes", "permissions": 420},
+        "content_fetch": "deferred",
+    }
+    assert "content_lines" not in out
+    assert "content_encoding" not in out
+    # No bytes transited MEHO (read returns the transfer handle only).
+    assert conn.get_calls == []
     assert conn.put_calls == []
     # The FromGuest body carried the guest path + auth.
     body = conn.vmomi_calls[1]["json"]
     assert body["guestFilePath"] == "/etc/os-release"
     assert body["auth"]["password"] == "s3cr3t-pw"
+
+
+@pytest.mark.asyncio
+async def test_file_read_fetch_on_small_returns_inline_text(creds: _CredRecorder) -> None:
+    """fetch_content=true on a small text file returns utf-8 content_lines.
+
+    The metadata envelope is preserved, the transfer URL is omitted (consumed
+    by the fetch), and the guest credential never appears in the result. The
+    GET hit the resolved transfer URL.
+    """
+    info = _read_info(size=12)
+    conn = _read_conn(info, get_body=b"hello\nworld\n")
+    out = await _guest.guest_file_read_composite(
+        operator=_operator(),
+        target=_Target(),
+        params={"vm": "vm-42", "guest_path": "/etc/os-release", "fetch_content": True},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["content_fetch"] == "inline"
+    assert out["content_encoding"] == "utf-8"
+    assert out["content_lines"] == ["hello", "world"]
+    assert out["size_bytes"] == 12
+    assert out["attributes"] == {"_typeName": "GuestPosixFileAttributes", "permissions": 420}
+    assert "url" not in out
+    assert conn.get_calls == [{"url": info["url"]}]
+    assert conn.put_calls == []
+    assert "s3cr3t-pw" not in json.dumps(out)
+    # Under threshold: the real reducer leaves it inline (no handle).
+    reducer = JsonFluxReducer(sample_byte_budget=4096)
+    reduced, handle = await reducer.reduce(out, None, _file_read_result_scalars())
+    assert handle is None
+    assert reduced is out
+
+
+@pytest.mark.asyncio
+async def test_file_read_fetch_on_large_spills_to_handle(creds: _CredRecorder) -> None:
+    """A large fetched file JSONFlux-wraps content_lines; metadata survives.
+
+    Passing the handler output through the real reducer (with the op's
+    registered result_scalars context) materializes a handle with a
+    result_query drill-in, and the identifying/size scalars are preserved on
+    the reduced summary alongside the handle.
+    """
+    body = b"line\n" * 2000  # 10 KB, 2000 lines -> over both thresholds
+    info = _read_info(size=len(body))
+    conn = _read_conn(info, get_body=body)
+    out = await _guest.guest_file_read_composite(
+        operator=_operator(),
+        target=_Target(),
+        params={"vm": "vm-42", "guest_path": "/big.log", "fetch_content": True},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert len(out["content_lines"]) == 2000
+
+    reducer = JsonFluxReducer(sample_byte_budget=4096)
+    reduced, handle = await reducer.reduce(out, None, _file_read_result_scalars())
+    assert handle is not None
+    assert handle.total_rows == 2000
+    assert handle.fetch_more is not None  # result_query drill-in envelope
+    # The metadata envelope is preserved alongside the handle (#3084).
+    assert reduced["vm"] == "vm-42"
+    assert reduced["guest_path"] == "/big.log"
+    assert reduced["content_fetch"] == "inline"
+    assert reduced["content_encoding"] == "utf-8"
+    assert reduced["size_bytes"] == len(body)
+    # The reduced collection is not carried inline in full.
+    assert "content_lines" not in reduced
+
+
+@pytest.mark.asyncio
+async def test_file_read_over_cap_refuses_before_get(creds: _CredRecorder) -> None:
+    """A guest-reported size over max_inline_bytes is refused before any GET."""
+    info = _read_info(size=2_000_000)
+    conn = _read_conn(info, get_body=b"never fetched")
+    with pytest.raises(RuntimeError, match=r"2000000 bytes.*1000000-byte inline"):
+        await _guest.guest_file_read_composite(
+            operator=_operator(),
+            target=_Target(),
+            params={
+                "vm": "vm-42",
+                "guest_path": "/big.bin",
+                "fetch_content": True,
+                "max_inline_bytes": 1_000_000,
+            },
+            connector=conn,  # type: ignore[arg-type]
+        )
+    # Refused before egress: no GET was issued.
+    assert conn.get_calls == []
+
+
+@pytest.mark.asyncio
+async def test_file_read_over_cap_refuses_on_content_length(creds: _CredRecorder) -> None:
+    """A VIM-size-absent read is fast-rejected on the transfer Content-Length.
+
+    The guest omits ``FileTransferInformation.size`` so the pre-fetch guard
+    cannot bound egress, but an honest transfer host still advertises a
+    ``Content-Length``; the fetch fast-rejects on that declared length before
+    reading a single body byte.
+    """
+    # Omit ``size`` so the pre-fetch check cannot bound egress.
+    info = {
+        "url": "https://vc.example.test/guestFile?id=1&token=abc",
+        "attributes": {"_typeName": "GuestPosixFileAttributes", "permissions": 420},
+    }
+    body = b"x" * (2 * 1024 * 1024)  # 2 MiB, over the 1 MiB budget below
+    conn = _read_conn(info, get_body=body)
+    with pytest.raises(RuntimeError, match=r"2097152 bytes.*1048576-byte inline"):
+        await _guest.guest_file_read_composite(
+            operator=_operator(),
+            target=_Target(),
+            params={
+                "vm": "vm-42",
+                "guest_path": "/big.bin",
+                "fetch_content": True,
+                "max_inline_bytes": 1_048_576,
+            },
+            connector=conn,  # type: ignore[arg-type]
+        )
+    # The stream was opened (size was unknown), but the Content-Length fast-reject
+    # fired before a single body byte was drained.
+    assert conn.get_calls == [{"url": info["url"]}]
+    assert conn.stream_state["yielded"] == 0
+
+
+@pytest.mark.asyncio
+async def test_file_read_streaming_aborts_mid_body_without_content_length(
+    creds: _CredRecorder,
+) -> None:
+    """A chunked / lying host (no Content-Length) is bounded by the running total.
+
+    With neither a VIM ``size`` nor a ``Content-Length`` to bound egress, the
+    fetch must not buffer the whole body: it streams under a running byte budget
+    and aborts the instant the accumulated bytes exceed ``max_inline_bytes`` --
+    so only ~one chunk past the cap is ever drained, never the full payload.
+    This is the memory-exhaustion guard (B1): a non-streaming read would
+    materialize the entire body first.
+    """
+    info = {
+        "url": "https://vc.example.test/guestFile?id=1&token=abc",
+        "attributes": {"_typeName": "GuestPosixFileAttributes", "permissions": 420},
+    }
+    body = b"x" * (5 * 1024 * 1024)  # 5 MiB delivered in 64 KiB chunks
+    conn = _read_conn(
+        info,
+        get_body=body,
+        declare_content_length=False,  # chunked / size hidden
+        stream_chunk_size=64 * 1024,
+    )
+    with pytest.raises(RuntimeError, match=r"inline-fetch cap"):
+        await _guest.guest_file_read_composite(
+            operator=_operator(),
+            target=_Target(),
+            params={
+                "vm": "vm-42",
+                "guest_path": "/big.bin",
+                "fetch_content": True,
+                "max_inline_bytes": 1_048_576,
+            },
+            connector=conn,  # type: ignore[arg-type]
+        )
+    assert conn.get_calls == [{"url": info["url"]}]
+    # Aborted mid-read: at most the cap plus one trailing chunk was drained, far
+    # short of the full 5 MiB body.
+    assert conn.stream_state["yielded"] <= 1_048_576 + 64 * 1024
+    assert conn.stream_state["yielded"] < len(body)
+
+
+@pytest.mark.asyncio
+async def test_file_read_fetch_on_binary_returns_base64(creds: _CredRecorder) -> None:
+    """A non-decodable file returns base64 content_lines that round-trip."""
+    body = b"\xff\xfe\x00\x01BINARY\x80\x81"
+    info = _read_info(size=len(body))
+    conn = _read_conn(info, get_body=body)
+    out = await _guest.guest_file_read_composite(
+        operator=_operator(),
+        target=_Target(),
+        params={"vm": "vm-42", "guest_path": "/blob.bin", "fetch_content": True},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["content_fetch"] == "inline"
+    assert out["content_encoding"] == "base64"
+    assert base64.b64decode("".join(out["content_lines"])) == body
+
+
+@pytest.mark.asyncio
+async def test_file_read_fetch_never_leaks_url_or_token(creds: _CredRecorder) -> None:
+    """The one-time URL and its query token never reach the fetched result."""
+    info = _read_info(
+        size=3,
+        url="https://vc.example.test/guestFile?id=1&token=abc&api_key=SEKRIT",
+    )
+    conn = _read_conn(info, get_body=b"abc")
+    out = await _guest.guest_file_read_composite(
+        operator=_operator(),
+        target=_Target(),
+        params={"vm": "vm-42", "guest_path": "/etc/hostname", "fetch_content": True},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    serialized = json.dumps(out)
+    assert "url" not in out
+    assert "SEKRIT" not in serialized
+    assert "token=abc" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_file_read_fetch_get_failure_raises_clean_connector_error(
+    creds: _CredRecorder,
+) -> None:
+    """A non-2xx GET raises a CLEAN RuntimeError (status + snippet), never httpx.
+
+    The handler must not raise ``httpx.HTTPStatusError`` on a non-2xx transfer
+    GET: that error carries an unread, then-closed streamed response whose
+    ``__str__`` embeds the one-time transfer URL/token, and the dispatcher's
+    downstream ``.text`` / ``.json`` enrichment would raise
+    ``httpx.ResponseNotRead`` (B1-REGRESSION). Instead it raises a plain
+    ``RuntimeError`` naming the HTTP status and a bounded body snippet, with no
+    transfer URL / token and no chained ``HTTPStatusError``.
+    """
+    info = _read_info(
+        size=10, url="https://vc.example.test/guestFile?id=1&token=abc&api_key=SEKRIT"
+    )
+    conn = _read_conn(info, get_status=500, get_body=b"transfer host exploded")
+    with pytest.raises(RuntimeError) as excinfo:
+        await _guest.guest_file_read_composite(
+            operator=_operator(),
+            target=_Target(),
+            params={"vm": "vm-42", "guest_path": "/etc/hostname", "fetch_content": True},
+            connector=conn,  # type: ignore[arg-type]
+        )
+    exc = excinfo.value
+    # A clean RuntimeError, not an httpx error with an (unread) response attached.
+    assert not isinstance(exc, httpx.HTTPError)
+    assert exc.__cause__ is None and exc.__context__ is None
+    message = str(exc)
+    assert "HTTP 500" in message
+    assert "transfer host exploded" in message  # the bounded body snippet
+    # The one-time ticket never leaks into the error message.
+    assert "token=abc" not in message
+    assert "SEKRIT" not in message
+    assert "guestFile" not in message
+
+
+@pytest.mark.asyncio
+async def test_file_read_fetch_sends_accept_encoding_identity(creds: _CredRecorder) -> None:
+    """The transfer GET requests identity encoding (decompression-bomb guard)."""
+    info = _read_info(size=5)
+    conn = _read_conn(info, get_body=b"hello")
+    await _guest.guest_file_read_composite(
+        operator=_operator(),
+        target=_Target(),
+        params={"vm": "vm-42", "guest_path": "/etc/hostname", "fetch_content": True},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert conn.stream_state["request_headers"].get("Accept-Encoding") == "identity"
+
+
+@pytest.mark.asyncio
+async def test_file_read_fetch_refuses_content_encoded_response(creds: _CredRecorder) -> None:
+    """A transfer response carrying Content-Encoding: gzip is refused, not decoded.
+
+    httpx auto-decodes on the response Content-Encoding regardless of the
+    request Accept-Encoding, so a gzip bomb could balloon one decoded network
+    read past the cap. The fetch refuses any non-identity transport encoding
+    before draining the body, so no amplification is possible.
+    """
+    info = _read_info(size=20)
+    # A tiny compressed-looking body that, if decoded, could be far larger; the
+    # point is the refusal fires on the header before any body is drained.
+    conn = _read_conn(
+        info,
+        get_body=b"\x1f\x8b" + b"\x00" * 64,
+        get_content_encoding="gzip",
+        declare_content_length=False,
+    )
+    with pytest.raises(RuntimeError, match=r"Content-Encoding.*gzip"):
+        await _guest.guest_file_read_composite(
+            operator=_operator(),
+            target=_Target(),
+            params={"vm": "vm-42", "guest_path": "/blob.bin", "fetch_content": True},
+            connector=conn,  # type: ignore[arg-type]
+        )
+    # Refused on the header: not a single body byte was drained/decoded.
+    assert conn.stream_state["yielded"] == 0
 
 
 # ---------------------------------------------------------------------------

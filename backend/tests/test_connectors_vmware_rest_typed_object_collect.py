@@ -27,6 +27,7 @@ import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
+from meho_backplane.connectors.vmware_rest.soap import parse_retrieve_result
 from meho_backplane.connectors.vmware_rest.typed_ops import (
     VMWARE_TYPED_OPS,
     VMWARE_TYPED_WHEN_TO_USE_BY_GROUP,
@@ -358,6 +359,82 @@ async def test_object_collect_surfaces_missingset_fault_types_never_text() -> No
     assert out_empty["missing"] == []
     assert out_empty["missing_properties"] == []
     assert out_empty["missing_fault_summary"] == {}
+
+
+# A recorded standalone-ESXi RetrievePropertiesEx SOAP response with exactly
+# ONE object carrying exactly ONE unreadable property. The single ``missingSet``
+# element is the case the codec force-list (#3708) repairs: without it the codec
+# parses ``missingSet`` to a bare dict and object.collect's ``isinstance(miss,
+# dict)`` guard silently drops the lone missing property. The per-property fault
+# is a ``LocalizedMethodFault`` wrapping a concrete ``NoPermission`` (xsi:type),
+# carrying a localized message + a privilege payload that must NOT leak.
+_SOAP_SINGLE_MISSING_RETRIEVE = """<?xml version="1.0" encoding="UTF-8"?>
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
+  xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <soapenv:Body>
+    <RetrievePropertiesExResponse xmlns="urn:vim25">
+      <returnval>
+        <objects>
+          <obj type="HostSystem">ha-host</obj>
+          <propSet>
+            <name>summary.overallStatus</name>
+            <val xsi:type="ManagedEntityStatus">green</val>
+          </propSet>
+          <missingSet>
+            <path>config.storageDevice</path>
+            <fault xsi:type="LocalizedMethodFault">
+              <fault xsi:type="NoPermission">
+                <object type="HostSystem">ha-host</object>
+                <privilegeId>Host.Config.Storage</privilegeId>
+              </fault>
+              <localizedMessage>Permission to perform this operation was denied.</localizedMessage>
+            </fault>
+          </missingSet>
+        </objects>
+      </returnval>
+    </RetrievePropertiesExResponse>
+  </soapenv:Body>
+</soapenv:Envelope>"""
+
+
+@pytest.mark.asyncio
+async def test_object_collect_surfaces_single_soap_missing_fault_type() -> None:
+    """The standalone-ESXi SOAP path: a lone missing property (one ``missingSet``
+    element) is force-listed by the codec (#3708) so object.collect surfaces its
+    fault type name — not silently dropped — and no fault text/payload leaks."""
+    parsed = parse_retrieve_result(_SOAP_SINGLE_MISSING_RETRIEVE)
+
+    # The codec force-list keeps a single missingSet element list-shaped; without
+    # it this is a bare dict and the object.collect loop drops the property.
+    missing_set = parsed["objects"][0]["missingSet"]
+    assert isinstance(missing_set, list)
+    assert len(missing_set) == 1
+
+    # The SOAP transport returns the same parsed dict object.collect consumes.
+    conn = _FakeConnector(props_result=parsed)
+    out = await object_collect_impl(
+        conn,
+        _make_operator(),
+        _Target(),
+        {"type": "HostSystem", "moid": "ha-host", "properties": ["config.storageDevice"]},
+    )
+
+    assert out["missing"] == ["config.storageDevice"]
+    assert out["missing_properties"] == [
+        {"path": "config.storageDevice", "fault_type": "NoPermission"}
+    ]
+    assert out["missing_fault_summary"] == {"NoPermission": 1}
+    assert out["properties"] == {"summary.overallStatus": "green"}
+
+    serialized = json.dumps(out)
+    for forbidden in (
+        "Host.Config.Storage",
+        "Permission to perform this operation was denied.",
+        "privilegeId",
+        "localizedMessage",
+    ):
+        assert forbidden not in serialized, f"fault content {forbidden!r} leaked into the envelope"
 
 
 # ---------------------------------------------------------------------------

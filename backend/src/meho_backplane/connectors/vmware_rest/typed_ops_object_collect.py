@@ -334,14 +334,11 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
             "additionalProperties": {"type": "integer"},
         },
     },
-    "required": [
-        "type",
-        "moid",
-        "properties",
-        "missing",
-        "missing_properties",
-        "missing_fault_summary",
-    ],
+    # ``missing_properties`` / ``missing_fault_summary`` are deliberately NOT
+    # required: they are additive (#3708), always emitted by the current
+    # handler but kept optional so historically-captured / older-connector
+    # responses validate unchanged.
+    "required": ["type", "moid", "properties", "missing"],
 }
 
 #: Curated ``when_to_use`` blurb for the object-collect group.

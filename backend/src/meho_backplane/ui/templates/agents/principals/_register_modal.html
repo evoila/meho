@@ -58,8 +58,8 @@
       class="space-y-3 py-2"
       aria-labelledby="principals-register-modal-title"
     >
-      <label class="form-control">
-        <span class="label-text">Name</span>
+      <label class="flex flex-col gap-1">
+        <span class="text-sm font-medium">Name</span>
         <input
           type="text"
           name="name"
@@ -68,35 +68,35 @@
           maxlength="128"
           pattern="[A-Za-z0-9_\-\.]+"
           value="{{ values.name if values and values.name else '' }}"
-          class="input input-bordered input-sm font-mono {% if errors and 'name' in errors %}input-error{% endif %}"
+          class="input input-bordered input-sm font-mono w-full {% if errors and 'name' in errors %}input-error{% endif %}"
           aria-label="Principal name"
           placeholder="deploy-bot"
         />
         {% if errors and 'name' in errors %}
-          <span class="label-text-alt text-error" role="alert" data-error-for="name">
+          <span class="text-xs text-error" role="alert" data-error-for="name">
             {{ errors['name'] }}
           </span>
         {% endif %}
       </label>
 
-      <label class="form-control">
-        <span class="label-text">Owner (optional)</span>
+      <label class="flex flex-col gap-1">
+        <span class="text-sm font-medium">Owner <span class="opacity-60 font-normal">(optional)</span></span>
         <input
           type="text"
           name="owner_sub"
           maxlength="256"
           value="{{ values.owner_sub if values and values.owner_sub else '' }}"
-          class="input input-bordered input-sm font-mono {% if errors and 'owner_sub' in errors %}input-error{% endif %}"
+          class="input input-bordered input-sm font-mono w-full {% if errors and 'owner_sub' in errors %}input-error{% endif %}"
           aria-label="Owner sub"
           placeholder="defaults to you"
           aria-describedby="principal-owner-hint"
         />
-        <span id="principal-owner-hint" class="text-xs opacity-60 mt-1">
+        <span id="principal-owner-hint" class="text-xs opacity-60">
           Keycloak <span class="font-mono">sub</span> of the owning
           operator. Defaults to the registering operator if left blank.
         </span>
         {% if errors and 'owner_sub' in errors %}
-          <span class="label-text-alt text-error" role="alert" data-error-for="owner_sub">
+          <span class="text-xs text-error" role="alert" data-error-for="owner_sub">
             {{ errors['owner_sub'] }}
           </span>
         {% endif %}

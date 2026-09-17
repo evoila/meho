@@ -568,14 +568,17 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 41 `vmware.composite.*` rows with
-   `source_kind="composite"` (9 reads with `safety_level="safe"` +
-   `requires_approval=False`; 29 writes with `safety_level="dangerous"`
-   + `requires_approval=True`; the two #3505 governed-allocation writes
-   `resource_pool.create` + `cluster.drs_vm_host_rule.create` with
-   `safety_level="caution"` + `requires_approval=True`; and the
-   destructive-tier `vm.destroy` with `safety_level="destructive"` +
-   `requires_approval=True` / `#3198`),
+   queued registrar and upserts: the 54 `vmware.composite.*` rows with
+   `source_kind="composite"` — 14 reads (13 with `safety_level="safe"` +
+   `requires_approval=False`, plus `vm.guest.file.read` at
+   `safety_level="caution"` since `#3720`, which auto-parks for agent /
+   service principals), and 40 writes, all `requires_approval=True`
+   (31 `safety_level="dangerous"`; 6 `safety_level="caution"` —
+   `resource_pool.create` + `cluster.drs_vm_host_rule.create` / `#3505`,
+   `namespace.create`, `storage_policy.create`,
+   `content_library.subscribed.create` + `content_library.subscribed.sync`;
+   and 3 `safety_level="destructive"` — `vm.destroy` / `#3198`,
+   `namespace.delete`, `storage_policy.delete`) —
    plus the `vmware.host.usage` row with
    `source_kind="typed"` (`safety_level="safe"` + `requires_approval=False`).
    The typed row resolves and dispatches with **zero catalog ingest** —

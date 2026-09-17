@@ -92,6 +92,7 @@ SURFACE_FEATURE: dict[str, str] = {
     "keycloak": "auth_tenancy",
     "vault": "write_surfaces",
     "approvals": "approvals",
+    "grants": "approvals",
     "audit": "audit",
 }
 

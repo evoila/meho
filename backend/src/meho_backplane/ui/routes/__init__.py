@@ -101,6 +101,7 @@ from meho_backplane.ui.routes.conventions import build_conventions_router
 from meho_backplane.ui.routes.corpus import build_corpus_router
 from meho_backplane.ui.routes.dashboard import build_dashboard_router
 from meho_backplane.ui.routes.event_source import build_event_source_router
+from meho_backplane.ui.routes.grants import build_grants_router
 from meho_backplane.ui.routes.kb import build_kb_router
 from meho_backplane.ui.routes.keycloak import build_keycloak_router
 from meho_backplane.ui.routes.memory import build_memory_router
@@ -212,6 +213,7 @@ def build_router() -> APIRouter:
     # literal ``create`` / ``elevate`` routes register before the
     # ``{grant_id}`` detail route for the same reason (G10.8-T5 #1832).
     router.include_router(build_agent_grants_router())
+    router.include_router(build_grants_router())
     # Agent-runs read surface (G10.8-T3 #1830) before the agents-definition
     # router: ``/ui/agents/runs`` + ``/ui/agents/runs/{handle}`` are literal-
     # prefixed under ``/ui/agents`` and MUST win the first-match-wins lookup

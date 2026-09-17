@@ -1809,6 +1809,21 @@ type BodyCreateUiEventSourcesPost struct {
 	Status       *string `json:"status,omitempty"`
 }
 
+// BodyCreateUiGrantsCreatePost defines model for Body__create_ui_grants_create_post.
+type BodyCreateUiGrantsCreatePost struct {
+	ConnectorId       *string `json:"connector_id,omitempty"`
+	ExpiresAt         *string `json:"expires_at"`
+	Kind              *string `json:"kind,omitempty"`
+	Op                *string `json:"op,omitempty"`
+	PrincipalSub      *string `json:"principal_sub,omitempty"`
+	Reason            *string `json:"reason"`
+	TargetId          *string `json:"target_id"`
+	TargetNamePattern *string `json:"target_name_pattern"`
+	TargetProduct     *string `json:"target_product"`
+	TargetScope       *string `json:"target_scope"`
+	Verdict           *string `json:"verdict,omitempty"`
+}
+
 // BodyEditUiEventSourcesSlugEditPost defines model for Body__edit_ui_event_sources__slug__edit_post.
 type BodyEditUiEventSourcesSlugEditPost struct {
 	AuthStrategy string  `json:"auth_strategy"`
@@ -10206,6 +10221,7 @@ type ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState string
 type ListGrantsApiV1ServicePrincipalsGrantsGetParams struct {
 	PrincipalSub   *string `form:"principal_sub,omitempty" json:"principal_sub,omitempty"`
 	IncludeRevoked *bool   `form:"include_revoked,omitempty" json:"include_revoked,omitempty"`
+	IncludeExpired *bool   `form:"include_expired,omitempty" json:"include_expired,omitempty"`
 	Limit          *int    `form:"limit,omitempty" json:"limit,omitempty"`
 	Offset         *int    `form:"offset,omitempty" json:"offset,omitempty"`
 	Authorization  *string `json:"authorization,omitempty"`
@@ -10544,6 +10560,16 @@ type UiConnectorsDeleteSubmitUiConnectorsNameDeletePostParams struct {
 // UiConventionsListUiConventionsGetParams defines parameters for UiConventionsListUiConventionsGet.
 type UiConventionsListUiConventionsGetParams struct {
 	Kind *string `form:"kind,omitempty" json:"kind,omitempty"`
+}
+
+// IndexUiGrantsGetParams defines parameters for IndexUiGrantsGet.
+type IndexUiGrantsGetParams struct {
+	Principal      *string `form:"principal,omitempty" json:"principal,omitempty"`
+	IncludeExpired *bool   `form:"include_expired,omitempty" json:"include_expired,omitempty"`
+	IncludeRevoked *bool   `form:"include_revoked,omitempty" json:"include_revoked,omitempty"`
+	ServiceOffset  *int    `form:"service_offset,omitempty" json:"service_offset,omitempty"`
+	AgentOffset    *int    `form:"agent_offset,omitempty" json:"agent_offset,omitempty"`
+	Limit          *int    `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
 // KbIndexUiKbGetParams defines parameters for KbIndexUiKbGet.
@@ -11149,6 +11175,9 @@ type CreateUiEventSourcesPostFormdataRequestBody = BodyCreateUiEventSourcesPost
 
 // EditUiEventSourcesSlugEditPostFormdataRequestBody defines body for EditUiEventSourcesSlugEditPost for application/x-www-form-urlencoded ContentType.
 type EditUiEventSourcesSlugEditPostFormdataRequestBody = BodyEditUiEventSourcesSlugEditPost
+
+// CreateUiGrantsCreatePostFormdataRequestBody defines body for CreateUiGrantsCreatePost for application/x-www-form-urlencoded ContentType.
+type CreateUiGrantsCreatePostFormdataRequestBody = BodyCreateUiGrantsCreatePost
 
 // KbEditorPreviewUiKbEditorPreviewPostFormdataRequestBody defines body for KbEditorPreviewUiKbEditorPreviewPost for application/x-www-form-urlencoded ContentType.
 type KbEditorPreviewUiKbEditorPreviewPostFormdataRequestBody = BodyKbEditorPreviewUiKbEditorPreviewPost
@@ -13665,6 +13694,20 @@ type ClientInterface interface {
 	EditUiEventSourcesSlugEditPostWithBody(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	EditUiEventSourcesSlugEditPostWithFormdataBody(ctx context.Context, slug string, body EditUiEventSourcesSlugEditPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// IndexUiGrantsGet request
+	IndexUiGrantsGet(ctx context.Context, params *IndexUiGrantsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CreateModalUiGrantsCreateGet request
+	CreateModalUiGrantsCreateGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CreateUiGrantsCreatePostWithBody request with any body
+	CreateUiGrantsCreatePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	CreateUiGrantsCreatePostWithFormdataBody(ctx context.Context, body CreateUiGrantsCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RevokeUiGrantsKindGrantIdRevokePost request
+	RevokeUiGrantsKindGrantIdRevokePost(ctx context.Context, kind string, grantId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// KbIndexUiKbGet request
 	KbIndexUiKbGet(ctx context.Context, params *KbIndexUiKbGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -19076,6 +19119,66 @@ func (c *Client) EditUiEventSourcesSlugEditPostWithBody(ctx context.Context, slu
 
 func (c *Client) EditUiEventSourcesSlugEditPostWithFormdataBody(ctx context.Context, slug string, body EditUiEventSourcesSlugEditPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewEditUiEventSourcesSlugEditPostRequestWithFormdataBody(c.Server, slug, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) IndexUiGrantsGet(ctx context.Context, params *IndexUiGrantsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewIndexUiGrantsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateModalUiGrantsCreateGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateModalUiGrantsCreateGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateUiGrantsCreatePostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateUiGrantsCreatePostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateUiGrantsCreatePostWithFormdataBody(ctx context.Context, body CreateUiGrantsCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateUiGrantsCreatePostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RevokeUiGrantsKindGrantIdRevokePost(ctx context.Context, kind string, grantId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRevokeUiGrantsKindGrantIdRevokePostRequest(c.Server, kind, grantId)
 	if err != nil {
 		return nil, err
 	}
@@ -30249,6 +30352,22 @@ func NewListGrantsApiV1ServicePrincipalsGrantsGetRequest(server string, params *
 
 		}
 
+		if params.IncludeExpired != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "include_expired", runtime.ParamLocationQuery, *params.IncludeExpired); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		if params.Limit != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
@@ -37921,6 +38040,243 @@ func NewEditUiEventSourcesSlugEditPostRequestWithBody(server string, slug string
 	return req, nil
 }
 
+// NewIndexUiGrantsGetRequest generates requests for IndexUiGrantsGet
+func NewIndexUiGrantsGetRequest(server string, params *IndexUiGrantsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/grants")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Principal != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "principal", runtime.ParamLocationQuery, *params.Principal); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.IncludeExpired != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "include_expired", runtime.ParamLocationQuery, *params.IncludeExpired); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.IncludeRevoked != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "include_revoked", runtime.ParamLocationQuery, *params.IncludeRevoked); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.ServiceOffset != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "service_offset", runtime.ParamLocationQuery, *params.ServiceOffset); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.AgentOffset != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "agent_offset", runtime.ParamLocationQuery, *params.AgentOffset); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewCreateModalUiGrantsCreateGetRequest generates requests for CreateModalUiGrantsCreateGet
+func NewCreateModalUiGrantsCreateGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/grants/create")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewCreateUiGrantsCreatePostRequestWithFormdataBody calls the generic CreateUiGrantsCreatePost builder with application/x-www-form-urlencoded body
+func NewCreateUiGrantsCreatePostRequestWithFormdataBody(server string, body CreateUiGrantsCreatePostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewCreateUiGrantsCreatePostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewCreateUiGrantsCreatePostRequestWithBody generates requests for CreateUiGrantsCreatePost with any type of body
+func NewCreateUiGrantsCreatePostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/grants/create")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewRevokeUiGrantsKindGrantIdRevokePostRequest generates requests for RevokeUiGrantsKindGrantIdRevokePost
+func NewRevokeUiGrantsKindGrantIdRevokePostRequest(server string, kind string, grantId openapi_types.UUID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "kind", runtime.ParamLocationPath, kind)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "grant_id", runtime.ParamLocationPath, grantId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/grants/%s/%s/revoke", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewKbIndexUiKbGetRequest generates requests for KbIndexUiKbGet
 func NewKbIndexUiKbGetRequest(server string, params *KbIndexUiKbGetParams) (*http.Request, error) {
 	var err error
@@ -43872,6 +44228,20 @@ type ClientWithResponsesInterface interface {
 	EditUiEventSourcesSlugEditPostWithBodyWithResponse(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EditUiEventSourcesSlugEditPostResponse, error)
 
 	EditUiEventSourcesSlugEditPostWithFormdataBodyWithResponse(ctx context.Context, slug string, body EditUiEventSourcesSlugEditPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*EditUiEventSourcesSlugEditPostResponse, error)
+
+	// IndexUiGrantsGetWithResponse request
+	IndexUiGrantsGetWithResponse(ctx context.Context, params *IndexUiGrantsGetParams, reqEditors ...RequestEditorFn) (*IndexUiGrantsGetResponse, error)
+
+	// CreateModalUiGrantsCreateGetWithResponse request
+	CreateModalUiGrantsCreateGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*CreateModalUiGrantsCreateGetResponse, error)
+
+	// CreateUiGrantsCreatePostWithBodyWithResponse request with any body
+	CreateUiGrantsCreatePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateUiGrantsCreatePostResponse, error)
+
+	CreateUiGrantsCreatePostWithFormdataBodyWithResponse(ctx context.Context, body CreateUiGrantsCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*CreateUiGrantsCreatePostResponse, error)
+
+	// RevokeUiGrantsKindGrantIdRevokePostWithResponse request
+	RevokeUiGrantsKindGrantIdRevokePostWithResponse(ctx context.Context, kind string, grantId openapi_types.UUID, reqEditors ...RequestEditorFn) (*RevokeUiGrantsKindGrantIdRevokePostResponse, error)
 
 	// KbIndexUiKbGetWithResponse request
 	KbIndexUiKbGetWithResponse(ctx context.Context, params *KbIndexUiKbGetParams, reqEditors ...RequestEditorFn) (*KbIndexUiKbGetResponse, error)
@@ -50760,6 +51130,93 @@ func (r EditUiEventSourcesSlugEditPostResponse) StatusCode() int {
 	return 0
 }
 
+type IndexUiGrantsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r IndexUiGrantsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r IndexUiGrantsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type CreateModalUiGrantsCreateGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r CreateModalUiGrantsCreateGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CreateModalUiGrantsCreateGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type CreateUiGrantsCreatePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r CreateUiGrantsCreatePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CreateUiGrantsCreatePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RevokeUiGrantsKindGrantIdRevokePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RevokeUiGrantsKindGrantIdRevokePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RevokeUiGrantsKindGrantIdRevokePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type KbIndexUiKbGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -56514,6 +56971,50 @@ func (c *ClientWithResponses) EditUiEventSourcesSlugEditPostWithFormdataBodyWith
 		return nil, err
 	}
 	return ParseEditUiEventSourcesSlugEditPostResponse(rsp)
+}
+
+// IndexUiGrantsGetWithResponse request returning *IndexUiGrantsGetResponse
+func (c *ClientWithResponses) IndexUiGrantsGetWithResponse(ctx context.Context, params *IndexUiGrantsGetParams, reqEditors ...RequestEditorFn) (*IndexUiGrantsGetResponse, error) {
+	rsp, err := c.IndexUiGrantsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseIndexUiGrantsGetResponse(rsp)
+}
+
+// CreateModalUiGrantsCreateGetWithResponse request returning *CreateModalUiGrantsCreateGetResponse
+func (c *ClientWithResponses) CreateModalUiGrantsCreateGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*CreateModalUiGrantsCreateGetResponse, error) {
+	rsp, err := c.CreateModalUiGrantsCreateGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateModalUiGrantsCreateGetResponse(rsp)
+}
+
+// CreateUiGrantsCreatePostWithBodyWithResponse request with arbitrary body returning *CreateUiGrantsCreatePostResponse
+func (c *ClientWithResponses) CreateUiGrantsCreatePostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateUiGrantsCreatePostResponse, error) {
+	rsp, err := c.CreateUiGrantsCreatePostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateUiGrantsCreatePostResponse(rsp)
+}
+
+func (c *ClientWithResponses) CreateUiGrantsCreatePostWithFormdataBodyWithResponse(ctx context.Context, body CreateUiGrantsCreatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*CreateUiGrantsCreatePostResponse, error) {
+	rsp, err := c.CreateUiGrantsCreatePostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateUiGrantsCreatePostResponse(rsp)
+}
+
+// RevokeUiGrantsKindGrantIdRevokePostWithResponse request returning *RevokeUiGrantsKindGrantIdRevokePostResponse
+func (c *ClientWithResponses) RevokeUiGrantsKindGrantIdRevokePostWithResponse(ctx context.Context, kind string, grantId openapi_types.UUID, reqEditors ...RequestEditorFn) (*RevokeUiGrantsKindGrantIdRevokePostResponse, error) {
+	rsp, err := c.RevokeUiGrantsKindGrantIdRevokePost(ctx, kind, grantId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRevokeUiGrantsKindGrantIdRevokePostResponse(rsp)
 }
 
 // KbIndexUiKbGetWithResponse request returning *KbIndexUiKbGetResponse
@@ -66242,6 +66743,100 @@ func ParseEditUiEventSourcesSlugEditPostResponse(rsp *http.Response) (*EditUiEve
 		}
 		response.JSON200 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseIndexUiGrantsGetResponse parses an HTTP response from a IndexUiGrantsGetWithResponse call
+func ParseIndexUiGrantsGetResponse(rsp *http.Response) (*IndexUiGrantsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &IndexUiGrantsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseCreateModalUiGrantsCreateGetResponse parses an HTTP response from a CreateModalUiGrantsCreateGetWithResponse call
+func ParseCreateModalUiGrantsCreateGetResponse(rsp *http.Response) (*CreateModalUiGrantsCreateGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CreateModalUiGrantsCreateGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseCreateUiGrantsCreatePostResponse parses an HTTP response from a CreateUiGrantsCreatePostWithResponse call
+func ParseCreateUiGrantsCreatePostResponse(rsp *http.Response) (*CreateUiGrantsCreatePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CreateUiGrantsCreatePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRevokeUiGrantsKindGrantIdRevokePostResponse parses an HTTP response from a RevokeUiGrantsKindGrantIdRevokePostWithResponse call
+func ParseRevokeUiGrantsKindGrantIdRevokePostResponse(rsp *http.Response) (*RevokeUiGrantsKindGrantIdRevokePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RevokeUiGrantsKindGrantIdRevokePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {

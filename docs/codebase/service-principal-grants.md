@@ -285,8 +285,13 @@ The route surface (grants + `GET /api/v1/operations/governed-subops`) enters
 
 ## Scope boundaries (this PR)
 
-- **No UI console work** — the console can list grants via the REST surface
-  later; the audit ledger already surfaces grant uses under `method=APPROVAL`
+- **Console surface** — `/ui/grants` lists service-principal grants beside
+  agent grants. Operators see their tenant's service-grant rows read-only;
+  `tenant_admin` additionally sees agent-grant rows and may issue or revoke
+  either kind through the session BFF. Service principals have no registry or
+  stored display-name field, so their JWT `sub` is deliberately shown as the
+  fail-open identity; concrete target UUIDs resolve to a tenant-local target
+  name when available, while selector and targetless grants remain explicit.
   / `path=approval.decision`.
 - **No agent-path change** — `resolve_verdict` and the `AgentPermission`
   model are untouched; agents keep their own grant model.

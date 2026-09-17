@@ -476,14 +476,16 @@ class ServicePrincipalGrantService:
         *,
         principal_sub: str | None = None,
         include_revoked: bool = False,
+        include_expired: bool = True,
         limit: int = DEFAULT_LIST_LIMIT,
         offset: int = 0,
     ) -> list[ServiceGrantRead]:
         """Return up to *limit* grants for *tenant_id*, newest-first.
 
         ``include_revoked=False`` (default) hides soft-deleted rows;
-        ``True`` returns the full history (revoked rows included). Expired
-        rows are always returned (they are history, not deletions).
+        ``True`` returns the full history (revoked rows included).
+        ``include_expired=True`` preserves the historic list behavior;
+        ``False`` returns only rows that have not reached their expiry.
         """
         if limit < 0:
             raise ValueError(f"limit must be >= 0; got {limit}")
@@ -505,6 +507,14 @@ class ServicePrincipalGrantService:
                 stmt = stmt.where(ServicePrincipalGrant.principal_sub == principal_sub)
             if not include_revoked:
                 stmt = stmt.where(ServicePrincipalGrant.revoked_at.is_(None))
+            if not include_expired:
+                now = datetime.now(UTC)
+                stmt = stmt.where(
+                    or_(
+                        ServicePrincipalGrant.expires_at.is_(None),
+                        ServicePrincipalGrant.expires_at > now,
+                    )
+                )
             result = await session.execute(stmt)
             rows = result.scalars().all()
         return [ServiceGrantRead.model_validate(row) for row in rows]

@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% from "_references.html" import subject %}
+{% macro page_url(service, agent) -%}
+/ui/grants?principal={{ principal | urlencode }}{% if include_expired %}&include_expired=true{% endif %}{% if include_revoked %}&include_revoked=true{% endif %}&limit={{ limit }}&service_offset={{ service }}&agent_offset={{ agent }}
+{%- endmacro %}
+
+{% block page_title %}Permission grants &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-6" hx-headers='{"X-CSRF-Token": "{{ csrf_token | default('') }}"}'>
+  <header class="flex flex-wrap items-start justify-between gap-4">
+    <div class="max-w-3xl space-y-1">
+      <h1 class="text-2xl font-semibold">Permission grants</h1>
+      <p class="text-sm opacity-70">
+        Review the explicit permission rules for agent and service principals.
+      </p>
+    </div>
+    {% if can_write %}
+      <button type="button" class="btn btn-primary" hx-get="/ui/grants/create" hx-target="#grants-modal-container" hx-swap="innerHTML" aria-label="Issue a permission grant">
+        Issue grant
+      </button>
+    {% endif %}
+  </header>
+
+  {% if not can_write %}
+    <div class="alert alert-info" role="status">
+      <span>Read-only access. Issuing or revoking a grant requires the <span class="font-mono">tenant_admin</span> role.</span>
+    </div>
+  {% endif %}
+
+  <form method="get" class="flex flex-wrap items-end gap-3" aria-label="Filter grants">
+    <label class="block space-y-1">
+      <span class="text-sm font-medium">Principal sub</span>
+      <input type="search" name="principal" value="{{ principal }}" maxlength="512" class="input input-bordered w-full font-mono" placeholder="Exact JWT sub" />
+    </label>
+    <label class="flex cursor-pointer items-center gap-2 pb-3 text-sm">
+      <input class="checkbox checkbox-sm" type="checkbox" name="include_expired" value="true" {% if include_expired %}checked{% endif %} />
+      Show expired grants
+    </label>
+    <label class="flex cursor-pointer items-center gap-2 pb-3 text-sm">
+      <input class="checkbox checkbox-sm" type="checkbox" name="include_revoked" value="true" {% if include_revoked %}checked{% endif %} />
+      Show revoked service grants
+    </label>
+    <button type="submit" class="btn btn-outline">Apply filters</button>
+  </form>
+
+  <section class="space-y-3" aria-labelledby="service-grants-heading">
+    <div>
+      <h2 id="service-grants-heading" class="text-lg font-semibold">Service-principal grants</h2>
+      <p class="text-sm opacity-70">Exact operation and connector grants. Include revoked history from the filter above when needed.</p>
+    </div>
+    <div class="overflow-x-auto rounded-box border border-base-300">
+      <table class="table table-sm">
+        <thead><tr>
+          <th>Principal</th><th>Operation</th><th>Connector</th><th>Target scope</th><th>Status</th><th>Expiry</th><th>Created by</th>{% if can_write %}<th><span class="sr-only">Actions</span></th>{% endif %}
+        </tr></thead>
+        <tbody>
+          {% for grant in service_rows %}
+            <tr data-grant-id="{{ grant.id }}" data-grant-kind="service">
+              <td class="max-w-xs break-all text-xs">{{ subject(grant.subject) }}</td>
+              <td class="max-w-sm break-all font-mono text-xs">{{ grant.op }}</td>
+              <td class="max-w-xs break-all font-mono text-xs">{{ grant.connector }}</td>
+              <td class="max-w-xs break-all text-xs">{{ grant.target }}</td>
+              <td><span class="badge badge-sm {% if grant.effect in ('revoked', 'expired') %}badge-error{% else %}badge-success{% endif %}">{{ grant.effect }}</span></td>
+              <td class="whitespace-nowrap text-xs">{{ grant.expires_at or "permanent" }}</td>
+              <td class="max-w-xs break-all text-xs">{{ grant.created_by }}</td>
+              {% if can_write %}
+                <td class="text-right"><form hx-post="/ui/grants/service/{{ grant.id }}/revoke" hx-confirm="Revoke this service-principal grant?"><button type="submit" class="btn btn-error btn-xs">Revoke</button></form></td>
+              {% endif %}
+            </tr>
+          {% else %}
+            <tr><td colspan="{% if can_write %}8{% else %}7{% endif %}" class="py-8 text-center opacity-70">No service-principal grants match this filter.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if service_offset > 0 or service_has_next %}
+      <nav class="flex justify-end gap-2" aria-label="Service grant pages">
+        {% if service_offset > 0 %}<a class="btn btn-sm" href="{{ page_url([service_offset - limit, 0] | max, agent_offset) }}">Previous</a>{% endif %}
+        {% if service_has_next %}<a class="btn btn-sm" href="{{ page_url(service_offset + limit, agent_offset) }}">Next</a>{% endif %}
+      </nav>
+    {% endif %}
+  </section>
+
+  {% if can_write %}
+    <section class="space-y-3" aria-labelledby="agent-grants-heading">
+      <div>
+        <h2 id="agent-grants-heading" class="text-lg font-semibold">Agent grants</h2>
+        <p class="text-sm opacity-70">Agent grants are tenant-admin governance data. Need a time-bounded change window? <button type="button" class="link link-primary" hx-get="/ui/agents/grants/elevate" hx-target="#grants-modal-container" hx-swap="innerHTML" data-action="open-elevate-modal">Elevate an agent grant</button>.</p>
+      </div>
+      {% if agent_offset > 0 or agent_has_next %}
+        <nav class="flex justify-end gap-2" aria-label="Agent grant pages">
+          {% if agent_offset > 0 %}<a class="btn btn-sm" href="{{ page_url(service_offset, [agent_offset - limit, 0] | max) }}">Previous</a>{% endif %}
+          {% if agent_has_next %}<a class="btn btn-sm" href="{{ page_url(service_offset, agent_offset + limit) }}">Next</a>{% endif %}
+        </nav>
+      {% endif %}
+      <div class="overflow-x-auto rounded-box border border-base-300">
+        <table class="table table-sm">
+          <thead><tr><th>Principal</th><th>Op pattern</th><th>Target scope</th><th>Verdict</th><th>Expiry</th><th>Created by</th><th><span class="sr-only">Actions</span></th></tr></thead>
+          <tbody>
+            {% for grant in agent_rows %}
+              <tr data-grant-id="{{ grant.id }}" data-grant-kind="agent">
+                <td class="max-w-xs break-all text-xs">{{ subject(grant.subject) }}</td>
+                <td class="max-w-sm break-all font-mono text-xs">{{ grant.op }}</td>
+                <td class="max-w-xs break-all text-xs">{{ grant.target }}</td>
+                <td><span class="badge badge-sm badge-outline">{{ grant.effect }}</span></td>
+                <td class="whitespace-nowrap text-xs">{{ grant.expires_at or "permanent" }}</td>
+                <td class="max-w-xs break-all text-xs">{{ grant.created_by }}</td>
+                <td class="text-right"><form hx-post="/ui/grants/agent/{{ grant.id }}/revoke" hx-confirm="Revoke this agent grant?"><button type="submit" class="btn btn-error btn-xs">Revoke</button></form></td>
+              </tr>
+            {% else %}
+              <tr><td colspan="7" class="py-8 text-center opacity-70">No agent grants match this filter.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  {% endif %}
+</section>
+
+<div id="grants-modal-container" hx-on::before-swap="if (event.detail.xhr.status === 422) { event.detail.shouldSwap = true; event.detail.isError = false; }"></div>
+{% endblock %}

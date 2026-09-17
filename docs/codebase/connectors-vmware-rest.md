@@ -735,6 +735,48 @@ captured, scrubbed envelopes are committed as respx fixtures
 suites — so the units now replay real hardware bytes, the trap that let the
 disproven VI-JSON premise ship green under mocks.
 
+**Expired-session recovery (`#3773`).** A vSphere/ESXi SOAP session that has
+expired server-side but is still cached process-side keeps answering the
+unauthenticated `RetrieveServiceContent` on the dead cookie, yet
+`RetrievePropertiesEx` comes back **HTTP 200 with every requested property in
+`missingSet`, each carrying a per-property `NotAuthenticated` fault** — no
+top-level SOAP `<Fault>`, so the connector's existing re-login (which fires on a
+top-level auth fault) never triggers and `object.collect` returns a silent
+all-missing "void" for the rest of the pod lifetime. Two mechanisms recover it:
+
+- *(b) All-missing auth health-reset (load-bearing).* When an object resolves
+  but **every** requested property is missing under an auth-class fault
+  (`NotAuthenticated`, or an all-object `NoPermission` — never a *partial*
+  per-field `NoPermission`, which is a real permission outcome),
+  `_collect_with_auth_health_reset` invalidates the cached session (the same
+  `invalidate_session` recovery hook the dispatcher's `#2067` mid-session-401
+  path uses → evict → the next read cold-re-logs-in) and re-reads **once** on
+  the fresh session. At most one reset per dispatch — structurally, by
+  re-reading exactly once; a still-all-missing retry returns the fault-annotated
+  envelope normally, never a loop. Recovers on the *symptom*, independent of
+  *why* the session died (idle expiry, `hostd` restart, …), and reads both the
+  9.x nested `LocalizedMethodFault` and the 8.0.x flattened fault shapes via
+  `fault_type_name`.
+- *(a) Bounded session max-age (defense in depth).* A warm-cached session older
+  than `VMWARE_SOAP_SESSION_MAX_AGE_SECONDS` (**default `1200` s / 20 min**) is
+  proactively invalidated + re-established **before** its next read, so a
+  server-side-expired-but-locally-cached session goes undetected for at most one
+  max-age window even if (b) is somehow bypassed. The default sits **safely
+  below** a standalone ESXi host's default SOAP idle timeout
+  (`Config.HostAgent.vmacore.soap.sessionTimeout` = `1800` s / 30 min) — the
+  max-age is the belt to (b)'s suspenders, so it **must** stay below that idle
+  timeout; never raise the default to ≥ `1800`. `0` disables the proactive
+  re-login (leaving (b) the sole recovery); an unset / non-integer / negative
+  value falls back to the default and **never raises on the read path**
+  (`_resolve_session_max_age_seconds`, the
+  `adapters.http._resolve_max_response_bytes` precedent). Resolved **once** at
+  import into the module global `_SESSION_MAX_AGE_SECONDS` — an **env override,
+  not a chassis `Settings` field**, deliberately: a `Settings`-model field would
+  couple `get_settings()` to every vmware read on the hot path (and broke 30
+  unit tests when tried). Age is tracked with `time.monotonic` (immune to
+  wall-clock steps) in `_session_established_at`, dropped alongside the token on
+  `invalidate_session` / `aclose`.
+
 ### fingerprint() / probe()
 
 `fingerprint(target)` runs the #2765 probe chain. `GET /api/about`
@@ -782,6 +824,19 @@ pre-#2765 left every vCenter target permanently `reachable=False`.
    `RetrieveServiceContent` chain. So a standalone ESXi target now
    fingerprints reachable instead of dead-ending on the vAPI-only
    `/api/about`.
+   - **Liveness read (`#3773d` / `#3710`).** Reachability is **confirmed with
+     one lightweight authenticated read**, not asserted from the cached
+     `about.version`: `_esxi_session_is_live` reads the single
+     `SessionManager.currentSession` property off the cached SessionManager moid
+     **through the (b)-protected `object.collect` path**. Pre-fix, `reachable`
+     was stamped purely from cache, so a server-side-expired-but-locally-cached
+     session (which still answers the unauthenticated bootstrap) probed green
+     while every real read came back void. Now a stale session is either healed
+     (the health-reset re-login succeeds and `currentSession` comes back →
+     genuinely reachable) or, when the re-login cannot recover it, surfaces as
+     `reachable=False` ("stale/void SOAP session") instead of masking the
+     outage. A missing SessionManager moid or a read failure degrades to
+     unreachable, never propagates.
 
 `probe(target)` delegates to `fingerprint()` and folds the boolean
 reachable flag into a `ProbeResult`. Failure modes (TCP `ConnectError`,

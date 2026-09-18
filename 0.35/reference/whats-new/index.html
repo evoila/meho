@@ -1661,6 +1661,94 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#v0355-2026-09-17" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.5 — 2026-09-17
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0354-2026-09-17" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.4 — 2026-09-17
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0353-2026-09-17" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.3 — 2026-09-17
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0352-2026-09-16" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.2 — 2026-09-16
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0351-2026-09-15" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.1 — 2026-09-15
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0350-2026-09-14" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.0 — 2026-09-14
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0343-2026-09-12" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.34.3 — 2026-09-12
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0342-2026-09-10" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.34.2 — 2026-09-10
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#v0341-2026-09-09" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1941,6 +2029,94 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#v0355-2026-09-17" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.5 — 2026-09-17
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0354-2026-09-17" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.4 — 2026-09-17
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0353-2026-09-17" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.3 — 2026-09-17
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0352-2026-09-16" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.2 — 2026-09-16
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0351-2026-09-15" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.1 — 2026-09-15
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0350-2026-09-14" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.0 — 2026-09-14
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0343-2026-09-12" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.34.3 — 2026-09-12
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0342-2026-09-10" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.34.2 — 2026-09-10
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#v0341-2026-09-09" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2072,6 +2248,117 @@ which carries the full detail — every change, and the migration recipe
 for each breaking one.</p>
 <p>MEHO is under active development. Each release below links to its full
 notes.</p>
+<h2 id="v0355-2026-09-17"><a href="https://github.com/evoila/meho/releases/tag/v0.35.5">v0.35.5</a> — 2026-09-17<a class="headerlink" href="#v0355-2026-09-17" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>A standalone ESXi host that went quiet is recovered automatically.</strong> After
+  an idle period a standalone ESXi host could leave MEHO holding an expired
+  session that still answered the unauthenticated bootstrap but returned every
+  requested property as "missing" — so a read came back empty with no error and
+  never recovered for the life of the Pod. MEHO now refreshes a host session
+  before it can idle out (a bounded max-age, 20 minutes by default, tunable with
+  <code>VMWARE_SOAP_SESSION_MAX_AGE_SECONDS</code>), re-reads once on a fresh session when a
+  read comes back entirely missing under an auth fault, and confirms host
+  reachability with an authenticated liveness check — so an unreachable host is
+  reported as unreachable instead of silently empty.</li>
+</ul>
+<h2 id="v0354-2026-09-17"><a href="https://github.com/evoila/meho/releases/tag/v0.35.4">v0.35.4</a> — 2026-09-17<a class="headerlink" href="#v0354-2026-09-17" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Per-property detail on vSphere object reads.</strong> <code>vmware.object.collect</code> now
+  reports, per object, which requested properties came back missing and the
+  vSphere fault behind each (for example <code>NoPermission</code>) — names and counts
+  only, never the fault message or the payload — so a partial read is
+  diagnosable instead of opaque.</li>
+<li><strong>Service-principal grants get CLI commands and a console.</strong> Operators and
+  tenant admins can list, create, and manage service-principal grants from the
+  CLI and a unified grants console.</li>
+<li><strong>Stored large results are bounded by encoded size.</strong> A stored result handle
+  now caps its whole encoded record at a configured limit (16 MiB by default),
+  keeps the longest run of whole rows that fits, and tells the caller whether the
+  stored copy is complete or partial.</li>
+</ul>
+<h2 id="v0353-2026-09-17"><a href="https://github.com/evoila/meho/releases/tag/v0.35.3">v0.35.3</a> — 2026-09-17<a class="headerlink" href="#v0353-2026-09-17" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>A guest-composite read never keeps an in-guest password in the trace.</strong>
+  Every vSphere guest composite that carries a login — listing guest processes,
+  reading the guest environment or a guest file — is now classified so the
+  flight recorder does not record its request body, closing a path where a
+  safe-tier read could retain the guest login password in the 30-day trace
+  store. Forward-only: traces captured before this release keep their bodies
+  until they age out.</li>
+<li><strong>Reading a guest file can fetch its contents.</strong>
+  <code>vmware.composite.vm.guest.file.read</code> can now return the file itself, fetched
+  server-side with a size cap and returned behind a result handle; the operation
+  moves to the caution tier, so agent and service callers park for approval while
+  human operators run it as before.</li>
+</ul>
+<h2 id="v0352-2026-09-16"><a href="https://github.com/evoila/meho/releases/tag/v0.35.2">v0.35.2</a> — 2026-09-16<a class="headerlink" href="#v0352-2026-09-16" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>A parked secret value stays off approval screens.</strong> When an operation that
+  carries a credential parks for approval, its secret input is encrypted in a
+  one-time, tenant-bound hand-off, so the value never lands on the approval row
+  or any approval read surface. Operators configure the dedicated
+  <code>approvalHandoff</code> Secret reference in Helm values; approval rows written
+  before the upgrade are not backfilled.</li>
+<li><strong>Deploy request bodies redact OVF property values.</strong> Captured vendor deploy
+  bodies could retain OVF property values, which commonly carry appliance
+  credentials; the flight recorder now strips them structurally, on request and
+  response, for every connector. Forward-only.</li>
+<li><strong>Governed vSphere Supervisor namespaces.</strong> Create (approval-gated), delete
+  (approval-gated, with a blast-radius preview and a read-back), and status
+  composites for vSphere Supervisor namespaces, each on the governed dispatch
+  path.</li>
+</ul>
+<h2 id="v0351-2026-09-15"><a href="https://github.com/evoila/meho/releases/tag/v0.35.1">v0.35.1</a> — 2026-09-15<a class="headerlink" href="#v0351-2026-09-15" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Changing a built-in connector needs platform-admin.</strong> Enabling, disabling,
+  or editing a built-in (global) connector now requires the <code>platform_admin</code>
+  claim and answers a plain tenant admin with a clear <code>403</code> instead of the
+  misleading <code>404</code> an earlier path returned. Tenant-scoped connectors are
+  unaffected.</li>
+<li><strong>The operator console renders correctly again.</strong> A v0.35.0 build change left
+  the console without its compiled styles; the build now fails loudly if the
+  stylesheet comes out empty, and the scheduler's create-trigger form and
+  timestamps are back on the current layout.</li>
+</ul>
+<h2 id="v0350-2026-09-14"><a href="https://github.com/evoila/meho/releases/tag/v0.35.0">v0.35.0</a> — 2026-09-14<a class="headerlink" href="#v0350-2026-09-14" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>vSphere 8.0 and 9.0 side by side.</strong> A <code>vmware-rest-8.0</code> catalog is registered
+  next to <code>vmware-rest-9.0</code>, and MEHO picks the right one per target from its
+  fingerprint — an 8.0.x vCenter resolves to the 8.0 catalog, a 9.x vCenter to
+  the 9.0 one — so one estate spanning both is served correctly. An enabled 9.0
+  operation dispatched against an 8.0.x or otherwise unqualified target now fails
+  closed with a clear reason instead of a vendor error.</li>
+<li><strong>VMware VM writes ingest as approval-gated by default.</strong> Ingested VMware VM
+  hardware, create/delete, and power operations now carry the <code>dangerous</code> tier
+  and require approval out of the box; a re-ingest never weakens a stricter
+  reviewed posture.</li>
+<li><strong>Pin a host key through the backplane.</strong> <code>net.ssh_keyscan</code> reads a host's SSH
+  host keys (handshake only, no credentials offered) and returns ready-to-pin
+  <code>known_hosts</code> lines, so the pin the SSH connector's fail-closed verification
+  needs is minted through a governed operation instead of an out-of-band shell
+  step.</li>
+<li><strong>CLI parity for broadcast, and external token issuers.</strong> <code>meho broadcast
+  recent</code> / <code>announce</code> / <code>watch</code> reach the activity feed from the CLI, and the
+  declarative OAuth token-mint auth scheme can now mint a client-credentials
+  token at an external issuer.</li>
+</ul>
+<h2 id="v0343-2026-09-12"><a href="https://github.com/evoila/meho/releases/tag/v0.34.3">v0.34.3</a> — 2026-09-12<a class="headerlink" href="#v0343-2026-09-12" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Pass a secret into a remote script without leaving it on the host.</strong>
+  <code>linux.script.run</code> gains an optional <code>secret_env</code> map: the referenced secret is
+  resolved server-side under the caller's tenant scope and injected into the
+  script's environment at run time — never written to the approval request, the
+  audit parameters, the preview, or a log line. This retires the earlier
+  workaround that parked a live token on the target.</li>
+</ul>
+<h2 id="v0342-2026-09-10"><a href="https://github.com/evoila/meho/releases/tag/v0.34.2">v0.34.2</a> — 2026-09-10<a class="headerlink" href="#v0342-2026-09-10" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>A pfSense gateway delete recovers a transient non-persist.</strong> A pfSense
+  runtime race could leave a gateway delete uncommitted even though the command
+  exited cleanly, so a gateway that would otherwise delete was left in place and
+  the teardown hard-failed; the delete now re-applies once and re-verifies before
+  failing closed.</li>
+</ul>
 <h2 id="v0341-2026-09-09"><a href="https://github.com/evoila/meho/releases/tag/v0.34.1">v0.34.1</a> — 2026-09-09<a class="headerlink" href="#v0341-2026-09-09" title="Permanent link">&para;</a></h2>
 <p>A patch release that fixes a v0.34.0 regression and rolls up the governed
 connector and shared-instance work that landed since.</p>

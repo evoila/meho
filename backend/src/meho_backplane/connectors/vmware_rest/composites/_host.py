@@ -61,6 +61,13 @@ import httpx
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import OperationResult
+from meho_backplane.connectors.vmware_rest.composites._host_nfs_mount import (
+    build_mounted_result,
+    build_nas_volume_spec,
+    is_already_exists_fault,
+    read_mounted_nas_datastores,
+    resolve_mount_precheck,
+)
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _OP_LIST_HOSTS,
     _read_sub_op,
@@ -73,7 +80,6 @@ from meho_backplane.connectors.vmware_rest.host_target import (
     classify_host_target,
 )
 from meho_backplane.connectors.vmware_rest.vim_body import (
-    VIM_TYPE_NAME_KEY,
     retrieve_properties_body,
     unwrap_vim_value,
 )
@@ -146,11 +152,8 @@ _VIM_SUB_OPS_HOST_SERVICE_CONTROL: tuple[str, ...] = (
     _OP_UPDATE_SERVICE_POLICY,
 )
 
-# vim MO type + data-object ``_typeName`` discriminators (#3103: every
-# DataObject in a request body carries its tag). ``HostNasVolumeSpec`` is the
-# ``CreateNasDatastoreRequestType.spec`` data object.
+# vim MO type discriminator (#3103) for the config-manager property read.
 _HOST_SYSTEM_MO_TYPE: Final = "HostSystem"
-_HOST_NAS_VOLUME_SPEC_TYPE: Final = "HostNasVolumeSpec"
 
 # ``HostSystem.configManager`` sub-manager property paths (spec-verified
 # against ``HostConfigManager`` in the pinned ``vi-json.yaml``). Each read
@@ -346,64 +349,64 @@ async def datastore_mount_nfs_composite(
     """Mount an NFS export as a datastore on a host via ``CreateNasDatastore``.
 
     Op-id: ``vmware.composite.host.datastore_mount_nfs``. Resolves the host
-    (name/moref) → its ``HostDatastoreSystem`` (config-manager read), builds
-    a ``HostNasVolumeSpec`` and issues the **synchronous**
-    ``HostDatastoreSystem.CreateNasDatastore`` through the governed vmomi
-    write seam. The 200 body is the new Datastore MoRef directly (no task
-    poll), so the composite returns ``status="mounted"`` with the datastore
-    moid + a summary of the mount. A parked/denied gate returns the
-    :class:`OperationResult` verbatim and no mount fires. A vim fault
-    (``DuplicateName`` for an existing datastore, ``HostConfigFault`` for an
-    unreachable export) propagates as a transport error the dispatcher wraps
-    ``connector_error``.
+    (name/moref) → its ``HostDatastoreSystem`` (config-manager read), then is
+    **idempotent**: before any write it reads the host's mounted NAS datastores
+    and resolves (:func:`resolve_mount_precheck`) an already-mounted export to
+    ``status="already_mounted"`` or a name pointing at a different export to
+    ``status="name_conflict"`` — no write dispatched — so a re-run converges
+    instead of surfacing a raw vim ``DuplicateName``. Only a genuinely new
+    export reaches the **synchronous** ``CreateNasDatastore`` through the
+    governed vmomi write seam; its 200 body is the new Datastore MoRef (no task
+    poll), so the composite returns ``status="mounted"`` with the moid + a
+    summary. A parked/denied gate returns the :class:`OperationResult` verbatim.
+    A concurrent mount between the pre-check read and the write (vim
+    ``DuplicateName`` / ``AlreadyExists``) is recovered by re-reading; any other
+    fault propagates as the ``connector_error`` the dispatcher wraps.
     """
     host_moid, ds_system_moid, refusal = await _resolve_host_and_manager(
         connector, target, operator, host=params.get("host"), prop=_PROP_CM_DATASTORE_SYSTEM
     )
     if refusal is not None:
         return {**refusal, "datastore": None}
+    assert host_moid is not None  # refusal is None ⇒ host + config-manager resolved
 
-    nas_spec: dict[str, Any] = {
-        VIM_TYPE_NAME_KEY: _HOST_NAS_VOLUME_SPEC_TYPE,
-        "remoteHost": params["nfs_server"],
-        "remotePath": params["remote_path"],
-        "localPath": params["datastore_name"],
-        "accessMode": params.get("access_mode", "readWrite"),
-        "type": params.get("nfs_type", "NFS"),
-    }
-    gate, payload = await _write_vmomi_sub_op(
-        connector,
-        target,
-        operator,
-        op_id=_OP_CREATE_NAS_DATASTORE,
-        vmomi_path=f"/HostDatastoreSystem/{ds_system_moid}/CreateNasDatastore",
-        body={"spec": nas_spec},
-        params={
-            "host": host_moid,
-            "nfs_server": params["nfs_server"],
-            "remote_path": params["remote_path"],
-            "datastore_name": params["datastore_name"],
-        },
-    )
+    # Idempotence pre-check (read-before-write): resolve an already-mounted
+    # export / a name collision before CreateNasDatastore is ever issued.
+    existing = await read_mounted_nas_datastores(connector, target, operator, host_moid)
+    precheck = resolve_mount_precheck(existing, params=params, host_moid=host_moid)
+    if precheck is not None:
+        return precheck
+
+    nas_spec = build_nas_volume_spec(params)
+    try:
+        gate, payload = await _write_vmomi_sub_op(
+            connector,
+            target,
+            operator,
+            op_id=_OP_CREATE_NAS_DATASTORE,
+            vmomi_path=f"/HostDatastoreSystem/{ds_system_moid}/CreateNasDatastore",
+            body={"spec": nas_spec},
+            params={
+                "host": host_moid,
+                "nfs_server": params["nfs_server"],
+                "remote_path": params["remote_path"],
+                "datastore_name": params["datastore_name"],
+            },
+        )
+    except (httpx.HTTPError, RuntimeError) as exc:
+        # Race: mounted between the pre-check read and this write. Only the
+        # already-exists fault class is recovered (re-read + resolve); every
+        # other fault re-raises unchanged (→ dispatcher ``connector_error``).
+        if not is_already_exists_fault(exc):
+            raise
+        existing = await read_mounted_nas_datastores(connector, target, operator, host_moid)
+        resolved = resolve_mount_precheck(existing, params=params, host_moid=host_moid)
+        if resolved is None:
+            raise
+        return resolved
     if gate is not None:
         return gate
-
-    datastore = unwrap_vim_value(payload)
-    datastore_moid = datastore.get("value") if isinstance(datastore, dict) else None
-    return {
-        "status": "mounted",
-        "host": host_moid,
-        "datastore": datastore_moid,
-        "summary": {
-            "datastore": datastore_moid,
-            "name": params["datastore_name"],
-            "nfs_server": params["nfs_server"],
-            "remote_path": params["remote_path"],
-            "access_mode": nas_spec["accessMode"],
-            "type": nas_spec["type"],
-        },
-        "guidance": None,
-    }
+    return build_mounted_result(host_moid=host_moid, payload=payload, params=params, spec=nas_spec)
 
 
 # ===========================================================================

@@ -4064,9 +4064,11 @@ VM_IMPORT_FROM_LIBRARY_RESPONSE_SCHEMA: dict[str, Any] = {
 #:
 #: Mount an NFS export as a datastore on a host via the **synchronous** vim
 #: ``HostDatastoreSystem.CreateNasDatastore`` (builds a ``HostNasVolumeSpec``).
-#: The host is selected by display name or moref; ``access_mode`` /
-#: ``nfs_type`` map to the pinned spec's ``HostMountMode_enum`` /
-#: ``HostNasVolumeSpec.type``.
+#: **Idempotent**: it reads the host's mounted datastores first, so re-mounting
+#: an already-mounted export returns ``status="already_mounted"`` (no write, no
+#: fault) — safe to retry. The host is selected by display name or moref;
+#: ``access_mode`` / ``nfs_type`` map to the pinned spec's ``HostMountMode_enum``
+#: / ``HostNasVolumeSpec.type``.
 HOST_DATASTORE_MOUNT_NFS_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -4102,8 +4104,11 @@ HOST_DATASTORE_MOUNT_NFS_PARAMETER_SCHEMA: dict[str, Any] = {
             "minLength": 1,
             "description": (
                 "Local datastore name the mount is created under "
-                "(``HostNasVolumeSpec.localPath``). A name already in use on the "
-                "host faults vendor-side (``DuplicateName``)."
+                "(``HostNasVolumeSpec.localPath``). If this name is already in "
+                "use on the host for a **different** export the op returns "
+                "``status='name_conflict'`` (a structured refusal, no write); an "
+                "already-mounted export under any name returns "
+                "``status='already_mounted'``."
             ),
         },
         "access_mode": {
@@ -4237,6 +4242,8 @@ HOST_DATASTORE_MOUNT_NFS_RESPONSE_SCHEMA: dict[str, Any] = {
             "type": "string",
             "enum": [
                 "mounted",
+                "already_mounted",
+                "name_conflict",
                 "host_not_found",
                 "ambiguous_host",
                 "config_manager_unreadable",
@@ -4244,7 +4251,12 @@ HOST_DATASTORE_MOUNT_NFS_RESPONSE_SCHEMA: dict[str, Any] = {
                 "host_required",
             ],
             "description": (
-                "``'mounted'`` — the datastore was created; the refusal statuses "
+                "``'mounted'`` — the datastore was created. ``'already_mounted'`` "
+                "— the requested export ``(nfs_server, remote_path)`` is already "
+                "mounted on the host (idempotent success, no write dispatched); "
+                "``datastore`` is the existing moid. ``'name_conflict'`` — the "
+                "requested ``datastore_name`` is in use for a **different** export "
+                "(structured refusal, no write). The remaining refusal statuses "
                 "are reached before any write (host name/moref did not resolve "
                 "uniquely, the host's HostDatastoreSystem was unreadable, the "
                 "target is neither vCenter nor standalone ESXi "
@@ -4261,13 +4273,19 @@ HOST_DATASTORE_MOUNT_NFS_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "datastore": {
             "type": ["string", "null"],
-            "description": "New datastore moid; ``null`` on any non-``mounted`` status.",
+            "description": (
+                "Datastore moid: the new datastore on ``mounted``, the existing "
+                "datastore on ``already_mounted`` / ``name_conflict``; ``null`` on "
+                "the other refusal statuses."
+            ),
         },
         "summary": {
             "type": ["object", "null"],
             "description": (
-                "Datastore summary on success — datastore moid, name, and the "
-                "resolved mount coordinates; ``null`` on refusal."
+                "Datastore summary — datastore moid, name, and mount coordinates — "
+                "on ``mounted`` / ``already_mounted`` (and the conflicting "
+                "datastore's coordinates on ``name_conflict``); ``null`` on the "
+                "other refusals."
             ),
         },
         "candidate_hosts": {

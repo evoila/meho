@@ -252,7 +252,13 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   writes riding the **same** governed `_write._write_vmomi_sub_op` seam
   the `#2893` disk-grow write established (no `pyvmomi`): `datastore_`
   `mount_nfs` issues the synchronous `HostDatastoreSystem.CreateNasDatastore`
-  (returns the new Datastore MoRef directly, no poll); `disk_mark_flash`
+  (returns the new Datastore MoRef directly, no poll) — and is **idempotent**:
+  it reads the host's mounted datastores first
+  (`composites/_host_nfs_mount.py`), so a re-mount of an already-mounted export
+  (matched on `remoteHost` + `remotePath`) returns `already_mounted` with the
+  existing moid and no write, while a `datastore_name` taken by a different
+  export returns the structured `name_conflict` (never a raw vim
+  `DuplicateName`); `disk_mark_flash`
   fans out `HostStorageSystem.MarkAsSsd_Task` / `MarkAsNonSsd_Task`
   (the HDD direction is the same op keyed on the `mode` param — the real
   vim method is `MarkAsNonSsd_Task`, not the issue's `MarkAsHdd_Task`

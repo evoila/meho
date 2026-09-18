@@ -470,6 +470,12 @@ def test_register_modal_renders_for_admin() -> None:
     assert 'id="principals-register-modal"' in body
     assert 'name="name"' in body
     assert 'name="owner_sub"' in body
+    # #359: daisyUI v5 removed `form-control` / `label-text` /
+    # `label-text-alt` (zero compiled rules), so the labels collapsed
+    # inline and the inputs rendered short of the modal width.
+    assert "form-control" not in body
+    assert "label-text" not in body
+    assert body.count("input input-bordered input-sm font-mono w-full") == 2
 
 
 def test_register_persists_and_redirects(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -546,6 +552,10 @@ def test_register_duplicate_name_renders_409_inline(monkeypatch: pytest.MonkeyPa
     body = response.text
     assert 'data-error-for="name"' in body
     assert "already exists" in body
+    # #359: the inline field error was carrying the dead `label-text-alt`
+    # class, so it rendered unstyled. It must now ship the error colour.
+    assert '<span class="text-xs text-error" role="alert" data-error-for="name">' in body
+    assert "label-text" not in body
 
 
 def test_register_bad_name_renders_422_inline(monkeypatch: pytest.MonkeyPatch) -> None:

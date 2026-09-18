@@ -90,6 +90,12 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.35.6] - 2026-09-18
+
+### Fixed
+
+- `vmware.composite.host.datastore_mount_nfs` is now idempotent: re-running the mount step on a host where the export is already mounted converges instead of faulting. Previously a second call with the same params surfaced the host's already-exists vim fault (`DuplicateName` / `AlreadyExists`) as `connector_error`, so an automation pack that re-ran the step (a retry after a transient failure on a later host, an assisted-resume recheck) could never converge once the datastore was mounted. The composite now reads the host's mounted NAS datastores through the existing governed `RetrievePropertiesEx` seam before writing and matches on the export identity `(remoteHost, remotePath)` with normalisation (case-insensitive host, trailing-slash-insensitive path): a matching export returns `status="already_mounted"` with the existing datastore moid and dispatches **no write**; the requested name held by a **different** export returns a structured `status="name_conflict"` refusal with guidance and no write; and if the export is mounted concurrently between the pre-check read and the write, the vim already-exists fault (`DuplicateName` / `AlreadyExists`, across both the VI-JSON HTTP-500 and the ESXi-SOAP transports) is recovered by re-reading and resolving the same way. A fresh mount and every non-duplicate fault are unchanged. (#3784 / #3783)
+
 ## [0.35.5] - 2026-09-17
 
 ### Fixed

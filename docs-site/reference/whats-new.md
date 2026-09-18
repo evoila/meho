@@ -9,6 +9,117 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.35.5](https://github.com/evoila/meho/releases/tag/v0.35.5) — 2026-09-17
+
+- **A standalone ESXi host that went quiet is recovered automatically.** After
+  an idle period a standalone ESXi host could leave MEHO holding an expired
+  session that still answered the unauthenticated bootstrap but returned every
+  requested property as "missing" — so a read came back empty with no error and
+  never recovered for the life of the Pod. MEHO now refreshes a host session
+  before it can idle out (a bounded max-age, 20 minutes by default, tunable with
+  `VMWARE_SOAP_SESSION_MAX_AGE_SECONDS`), re-reads once on a fresh session when a
+  read comes back entirely missing under an auth fault, and confirms host
+  reachability with an authenticated liveness check — so an unreachable host is
+  reported as unreachable instead of silently empty.
+
+## [v0.35.4](https://github.com/evoila/meho/releases/tag/v0.35.4) — 2026-09-17
+
+- **Per-property detail on vSphere object reads.** `vmware.object.collect` now
+  reports, per object, which requested properties came back missing and the
+  vSphere fault behind each (for example `NoPermission`) — names and counts
+  only, never the fault message or the payload — so a partial read is
+  diagnosable instead of opaque.
+- **Service-principal grants get CLI commands and a console.** Operators and
+  tenant admins can list, create, and manage service-principal grants from the
+  CLI and a unified grants console.
+- **Stored large results are bounded by encoded size.** A stored result handle
+  now caps its whole encoded record at a configured limit (16 MiB by default),
+  keeps the longest run of whole rows that fits, and tells the caller whether the
+  stored copy is complete or partial.
+
+## [v0.35.3](https://github.com/evoila/meho/releases/tag/v0.35.3) — 2026-09-17
+
+- **A guest-composite read never keeps an in-guest password in the trace.**
+  Every vSphere guest composite that carries a login — listing guest processes,
+  reading the guest environment or a guest file — is now classified so the
+  flight recorder does not record its request body, closing a path where a
+  safe-tier read could retain the guest login password in the 30-day trace
+  store. Forward-only: traces captured before this release keep their bodies
+  until they age out.
+- **Reading a guest file can fetch its contents.**
+  `vmware.composite.vm.guest.file.read` can now return the file itself, fetched
+  server-side with a size cap and returned behind a result handle; the operation
+  moves to the caution tier, so agent and service callers park for approval while
+  human operators run it as before.
+
+## [v0.35.2](https://github.com/evoila/meho/releases/tag/v0.35.2) — 2026-09-16
+
+- **A parked secret value stays off approval screens.** When an operation that
+  carries a credential parks for approval, its secret input is encrypted in a
+  one-time, tenant-bound hand-off, so the value never lands on the approval row
+  or any approval read surface. Operators configure the dedicated
+  `approvalHandoff` Secret reference in Helm values; approval rows written
+  before the upgrade are not backfilled.
+- **Deploy request bodies redact OVF property values.** Captured vendor deploy
+  bodies could retain OVF property values, which commonly carry appliance
+  credentials; the flight recorder now strips them structurally, on request and
+  response, for every connector. Forward-only.
+- **Governed vSphere Supervisor namespaces.** Create (approval-gated), delete
+  (approval-gated, with a blast-radius preview and a read-back), and status
+  composites for vSphere Supervisor namespaces, each on the governed dispatch
+  path.
+
+## [v0.35.1](https://github.com/evoila/meho/releases/tag/v0.35.1) — 2026-09-15
+
+- **Changing a built-in connector needs platform-admin.** Enabling, disabling,
+  or editing a built-in (global) connector now requires the `platform_admin`
+  claim and answers a plain tenant admin with a clear `403` instead of the
+  misleading `404` an earlier path returned. Tenant-scoped connectors are
+  unaffected.
+- **The operator console renders correctly again.** A v0.35.0 build change left
+  the console without its compiled styles; the build now fails loudly if the
+  stylesheet comes out empty, and the scheduler's create-trigger form and
+  timestamps are back on the current layout.
+
+## [v0.35.0](https://github.com/evoila/meho/releases/tag/v0.35.0) — 2026-09-14
+
+- **vSphere 8.0 and 9.0 side by side.** A `vmware-rest-8.0` catalog is registered
+  next to `vmware-rest-9.0`, and MEHO picks the right one per target from its
+  fingerprint — an 8.0.x vCenter resolves to the 8.0 catalog, a 9.x vCenter to
+  the 9.0 one — so one estate spanning both is served correctly. An enabled 9.0
+  operation dispatched against an 8.0.x or otherwise unqualified target now fails
+  closed with a clear reason instead of a vendor error.
+- **VMware VM writes ingest as approval-gated by default.** Ingested VMware VM
+  hardware, create/delete, and power operations now carry the `dangerous` tier
+  and require approval out of the box; a re-ingest never weakens a stricter
+  reviewed posture.
+- **Pin a host key through the backplane.** `net.ssh_keyscan` reads a host's SSH
+  host keys (handshake only, no credentials offered) and returns ready-to-pin
+  `known_hosts` lines, so the pin the SSH connector's fail-closed verification
+  needs is minted through a governed operation instead of an out-of-band shell
+  step.
+- **CLI parity for broadcast, and external token issuers.** `meho broadcast
+  recent` / `announce` / `watch` reach the activity feed from the CLI, and the
+  declarative OAuth token-mint auth scheme can now mint a client-credentials
+  token at an external issuer.
+
+## [v0.34.3](https://github.com/evoila/meho/releases/tag/v0.34.3) — 2026-09-12
+
+- **Pass a secret into a remote script without leaving it on the host.**
+  `linux.script.run` gains an optional `secret_env` map: the referenced secret is
+  resolved server-side under the caller's tenant scope and injected into the
+  script's environment at run time — never written to the approval request, the
+  audit parameters, the preview, or a log line. This retires the earlier
+  workaround that parked a live token on the target.
+
+## [v0.34.2](https://github.com/evoila/meho/releases/tag/v0.34.2) — 2026-09-10
+
+- **A pfSense gateway delete recovers a transient non-persist.** A pfSense
+  runtime race could leave a gateway delete uncommitted even though the command
+  exited cleanly, so a gateway that would otherwise delete was left in place and
+  the teardown hard-failed; the delete now re-applies once and re-verifies before
+  failing closed.
+
 ## [v0.34.1](https://github.com/evoila/meho/releases/tag/v0.34.1) — 2026-09-09
 
 A patch release that fixes a v0.34.0 regression and rolls up the governed

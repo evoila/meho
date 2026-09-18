@@ -107,6 +107,7 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.host.detach_from_vds",
     "vmware.composite.network.portgroup.create",
     "vmware.composite.network.portgroup.security.set",
+    "vmware.composite.network.portgroup.vlan.set",
     "vmware.composite.cluster.patch",
     "vmware.composite.cluster.drs_rule.create",
     "vmware.composite.cluster.drs_vm_host_rule.create",
@@ -240,6 +241,10 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
         "meho_backplane.connectors.vmware_rest.composites._write."
         "network_portgroup_security_set_composite"
     ),
+    "vmware.composite.network.portgroup.vlan.set": (
+        "meho_backplane.connectors.vmware_rest.composites._write."
+        "network_portgroup_vlan_set_composite"
+    ),
     "vmware.composite.cluster.patch": (
         "meho_backplane.connectors.vmware_rest.composites._write.cluster_patch_composite"
     ),
@@ -333,6 +338,7 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.host.detach_from_vds": "host",
     "vmware.composite.network.portgroup.create": "networking",
     "vmware.composite.network.portgroup.security.set": "networking",
+    "vmware.composite.network.portgroup.vlan.set": "networking",
     "vmware.composite.cluster.patch": "cluster",
     "vmware.composite.cluster.drs_rule.create": "cluster",
     "vmware.composite.cluster.drs_vm_host_rule.create": "cluster",
@@ -602,7 +608,7 @@ async def test_write_composites_land_in_vm_host_cluster_groups(
     ``resource_pool.*`` allocation writes in ``cluster`` (5: patch,
     drs_rule.create, drs_vm_host_rule.create, resource_pool.create,
     resource_pool.delete), the GOSC + guest-ops writes in ``guest`` /
-    ``guest_ops``, and the two portgroup writes in ``networking``. Asserted
+    ``guest_ops``, and the three portgroup writes in ``networking``. Asserted
     per-op against :data:`_EXPECTED_GROUP_KEY_BY_OP`.
     """
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
@@ -773,6 +779,14 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
         "vmware.composite.network.portgroup.security.set": {
             "updated",
             "no_change_requested",
+            "timeout",
+        },
+        # vlan.set reconfigures an existing portgroup's VLAN; idempotent
+        # unchanged + a pre-write invalid_vlan_spec refusal + poll timeout.
+        "vmware.composite.network.portgroup.vlan.set": {
+            "set",
+            "unchanged",
+            "invalid_vlan_spec",
             "timeout",
         },
         "vmware.composite.cluster.patch": {"completed", "stopped"},

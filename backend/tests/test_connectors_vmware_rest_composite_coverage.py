@@ -21,6 +21,7 @@ _NO_PREVIEW = frozenset(
         "vmware.composite.vm.import_from_library",
         "vmware.composite.network.portgroup.create",
         "vmware.composite.network.portgroup.security.set",
+        "vmware.composite.network.portgroup.vlan.set",
     }
 )
 # Guest channel children are governed inline and therefore have no discoverable
@@ -54,6 +55,9 @@ _CLASSIFIER_OTHER = frozenset(
         "vmware.composite.host.evacuate",
         "vmware.composite.host.detach_from_vds",
         "vmware.composite.network.portgroup.security.set",
+        # vlan.set ends in ``.set`` (not a write suffix) -> the classifier's
+        # generic ``other`` branch, like security.set.
+        "vmware.composite.network.portgroup.vlan.set",
         "vmware.composite.vm.resize",
         "vmware.composite.vm.nic.repoint",
         "vmware.composite.vm.device.cdrom",

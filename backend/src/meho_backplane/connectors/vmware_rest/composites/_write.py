@@ -913,6 +913,13 @@ _VIM_SUB_OPS_NETWORK_PORTGROUP_SECURITY_SET: tuple[str, ...] = (
     _OP_RETRIEVE_PROPERTIES,
     _OP_RECONFIGURE_DVPORTGROUP_TASK,
 )
+#: vlan.set reads ``config.configVersion`` + the current VLAN spec first (the
+#: idempotence + ``before`` read), then posts ``ReconfigureDVPortgroup_Task``
+#: and reads the applied VLAN back -- the same seam + child ops as security.set.
+_VIM_SUB_OPS_NETWORK_PORTGROUP_VLAN_SET: tuple[str, ...] = (
+    _OP_RETRIEVE_PROPERTIES,
+    _OP_RECONFIGURE_DVPORTGROUP_TASK,
+)
 
 # Hardware write ops (#2891). Post-clone reconfigure of a VM's virtual
 # hardware, straight vSphere Automation REST. CPU/memory update and the
@@ -4620,6 +4627,281 @@ async def network_portgroup_security_set_composite(
         "requested": requested,
         "previous": previous,
         "observed": observed,
+        "task": outcome.task,
+        "guidance": None,
+    }
+
+
+def _normalize_trunk_ranges(ranges: list[dict[str, int]]) -> list[tuple[int, int]]:
+    """Sort + merge-adjacent a trunk ``NumericRange[]`` into a canonical form.
+
+    ``[{start,end}]`` pairs -> a sorted list of non-overlapping,
+    non-touching ``(start, end)`` tuples: ranges that overlap OR abut
+    (``next.start <= cur.end + 1``) collapse into one. This is the
+    canonical shape both the idempotence compare and the ``before`` /
+    ``after`` / ``requested`` envelope views are derived from, so
+    ``[{0,0},{1,4094}]`` and ``[{0,4094}]`` compare equal (the switch
+    reports the merged form, the operator may pass either).
+    """
+    pairs = sorted((int(rng["start"]), int(rng["end"])) for rng in ranges)
+    merged: list[tuple[int, int]] = []
+    for start, end in pairs:
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _requested_vlan_identity(
+    *, vlan_trunk_ranges: list[dict[str, int]] | None, vlan_id: int | None
+) -> tuple[str, Any]:
+    """Canonical identity of the *requested* VLAN spec (the compare key).
+
+    ``("trunk", [(start, end), ...])`` (sorted, merged) for trunk mode,
+    ``("access", vlan_id)`` for a single access VLAN. The caller enforces
+    exactly-one before calling, so exactly one branch fires.
+    """
+    if vlan_trunk_ranges is not None:
+        return ("trunk", _normalize_trunk_ranges(vlan_trunk_ranges))
+    return ("access", int(vlan_id))  # type: ignore[arg-type]
+
+
+def _observed_vlan_identity(raw_spec: Any) -> tuple[str, Any] | None:
+    """Canonical identity of a portgroup's *current* VI-JSON VLAN spec, or ``None``.
+
+    Reads the ``config.defaultPortConfig.vlan`` DataObject the switch
+    reports. A ``VmwareDistributedVirtualSwitchTrunkVlanSpec`` (or any spec
+    whose ``vlanId`` is a ``NumericRange[]``) -> ``("trunk", merged)``; a
+    ``VmwareDistributedVirtualSwitchVlanIdSpec`` (``vlanId`` an int) ->
+    ``("access", id)``. Anything else -- a PVLAN spec, an inherited/absent
+    VLAN, an unparseable shape -- returns ``None`` so the compare can never
+    call it "unchanged"; the reconfigure proceeds (fail-open to a write, not
+    to a silent no-op).
+    """
+    if not isinstance(raw_spec, dict):
+        return None
+    type_name = raw_spec.get(_VMOMI_TYPE_NAME_KEY)
+    vlan_id = raw_spec.get("vlanId")
+    if type_name == _TRUNK_VLAN_SPEC_TYPE or isinstance(vlan_id, list):
+        if not isinstance(vlan_id, list):
+            return None
+        ranges: list[dict[str, int]] = []
+        for rng in vlan_id:
+            if not isinstance(rng, dict) or "start" not in rng or "end" not in rng:
+                return None
+            ranges.append(rng)
+        return ("trunk", _normalize_trunk_ranges(ranges))
+    if type_name == _VLAN_ID_SPEC_TYPE or (
+        isinstance(vlan_id, int) and not isinstance(vlan_id, bool)
+    ):
+        return ("access", int(vlan_id)) if isinstance(vlan_id, int) else None
+    return None
+
+
+def _vlan_identity_view(identity: tuple[str, Any] | None) -> dict[str, Any] | None:
+    """Render a VLAN identity as the agent-facing ``before`` / ``after`` view.
+
+    ``{"mode": "trunk", "ranges": [{"start", "end"}, ...]}`` or
+    ``{"mode": "access", "vlan_id": id}``; ``None`` when the identity could
+    not be parsed (an inherited / PVLAN / unrecognised current spec).
+    """
+    if identity is None:
+        return None
+    mode, payload = identity
+    if mode == "trunk":
+        return {"mode": "trunk", "ranges": [{"start": s, "end": e} for s, e in payload]}
+    return {"mode": "access", "vlan_id": payload}
+
+
+async def network_portgroup_vlan_set_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
+    """Reconfigure an EXISTING distributed portgroup's VLAN via ReconfigureDVPortgroup_Task.
+
+    Op-id: ``vmware.composite.network.portgroup.vlan.set``. Sibling to
+    ``network.portgroup.create`` (which only sets the VLAN at create time) and
+    ``network.portgroup.security.set`` (the other existing-portgroup vim
+    write). Sets a portgroup's ``defaultPortConfig.vlan`` to a VLAN trunk
+    (``VmwareDistributedVirtualSwitchTrunkVlanSpec``, a ``NumericRange[]``) or
+    a single access VLAN (``VmwareDistributedVirtualSwitchVlanIdSpec``) through
+    vim ``DistributedVirtualPortgroup.ReconfigureDVPortgroup_Task`` -- the
+    pinned vcenter.yaml serves no VLAN write, so it rides the governed vmomi
+    seam like security.set.
+
+    The given spec **REPLACES** the current VLAN config -- there is no merge.
+    To add a VLAN to an existing trunk (e.g. add the untagged/native VLAN 0 to
+    a trunk that was created without it), pass the FULL desired range list
+    (e.g. ``[{start:0,end:0},{start:3251,end:3271}]``), not just the delta.
+
+    Idempotent: the current VLAN config is read first and normalised (ranges
+    sorted + merged-adjacent); when it already equals the requested spec the
+    op returns ``status='unchanged'`` with no write and no task. Otherwise the
+    spec's required ``configVersion`` is read (optimistic-concurrency echo),
+    the reconfigure is dispatched + polled, the applied VLAN is read back, and
+    the op returns ``status='set'`` with ``before`` / ``after`` VLAN views.
+    Both/neither VLAN mode (or ``replace=false``, which would need an
+    unsupported merge) refuses with ``status='invalid_vlan_spec'`` before any
+    read/write; a policy gate returns the ``OperationResult`` verbatim (no
+    write); a task fault raises (the dispatcher wraps ``connector_error``); a
+    poll timeout returns ``status='timeout'``.
+    """
+    portgroup_moid = params["portgroup"]
+    vlan_trunk_ranges = params.get("vlan_trunk_ranges")
+    vlan_id = params.get("vlan_id")
+    replace = params.get("replace", True)
+
+    if (vlan_trunk_ranges is not None) == (vlan_id is not None):
+        return {
+            "status": "invalid_vlan_spec",
+            "portgroup": portgroup_moid,
+            "requested": None,
+            "before": None,
+            "after": None,
+            "task": None,
+            "guidance": (
+                "pass exactly one of vlan_trunk_ranges (trunk mode) or vlan_id (a single "
+                "access VLAN) -- they are mutually exclusive port VLAN modes and one is required"
+            ),
+        }
+    if not replace:
+        return {
+            "status": "invalid_vlan_spec",
+            "portgroup": portgroup_moid,
+            "requested": None,
+            "before": None,
+            "after": None,
+            "task": None,
+            "guidance": (
+                "replace=false is not supported: this composite REPLACES the VLAN config, "
+                "there is no merge. Pass replace=true (the default) with the full desired "
+                "VLAN spec (for a trunk, the complete range list you want, not just the delta)"
+            ),
+        }
+
+    requested_identity = _requested_vlan_identity(
+        vlan_trunk_ranges=vlan_trunk_ranges, vlan_id=vlan_id
+    )
+    requested_view = _vlan_identity_view(requested_identity)
+
+    pre_read = await connector._post_vmomi_json(
+        target,
+        _VMOMI_RETRIEVE_PROPERTIES_PATH,
+        operator=operator,
+        json=retrieve_properties_body(
+            _DVPG_MO_TYPE,
+            [portgroup_moid],
+            [_PROP_DVPG_CONFIG_VERSION, _PROP_DVPG_DEFAULT_PORT_CONFIG],
+        ),
+    )
+    previous_port_setting = _extract_single_prop(pre_read, _PROP_DVPG_DEFAULT_PORT_CONFIG)
+    current_vlan = (
+        previous_port_setting.get("vlan") if isinstance(previous_port_setting, dict) else None
+    )
+    current_identity = _observed_vlan_identity(current_vlan)
+    before_view = _vlan_identity_view(current_identity)
+
+    if current_identity is not None and current_identity == requested_identity:
+        return {
+            "status": "unchanged",
+            "portgroup": portgroup_moid,
+            "requested": requested_view,
+            "before": before_view,
+            "after": before_view,
+            "task": None,
+            "guidance": (
+                "the portgroup's VLAN config already matches the requested spec; "
+                "no ReconfigureDVPortgroup_Task was issued"
+            ),
+        }
+
+    config_version = _extract_single_prop(pre_read, _PROP_DVPG_CONFIG_VERSION)
+    if not isinstance(config_version, str):
+        raise RuntimeError(
+            "network.portgroup.vlan.set: could not read config.configVersion off "
+            f"portgroup {portgroup_moid!r} (payload={pre_read!r})"
+        )
+
+    vlan_spec = _build_portgroup_vlan_spec(vlan_trunk_ranges=vlan_trunk_ranges, vlan_id=vlan_id)
+    gate, task_payload = await _write_vmomi_sub_op(
+        connector,
+        target,
+        operator,
+        op_id=_OP_RECONFIGURE_DVPORTGROUP_TASK,
+        vmomi_path=f"/{_DVPG_MO_TYPE}/{portgroup_moid}/ReconfigureDVPortgroup_Task",
+        body={
+            "spec": {
+                _VMOMI_TYPE_NAME_KEY: _DVPORTGROUP_CONFIG_SPEC_TYPE,
+                "configVersion": config_version,
+                "defaultPortConfig": {
+                    _VMOMI_TYPE_NAME_KEY: _VMWARE_DVS_PORT_SETTING_TYPE,
+                    "vlan": vlan_spec,
+                },
+            }
+        },
+        params={
+            "portgroup": portgroup_moid,
+            **(
+                {"vlan_trunk_ranges": vlan_trunk_ranges}
+                if vlan_trunk_ranges is not None
+                else {"vlan_id": vlan_id}
+            ),
+        },
+    )
+    if gate is not None:
+        return gate
+
+    outcome = await poll_vim_task(
+        connector,
+        target,
+        operator,
+        task=_unwrap_value(task_payload),
+        timeout_seconds=_NETWORK_PORTGROUP_TASK_TIMEOUT_SECONDS,
+    )
+    if outcome.state == TASK_STATE_ERROR:
+        raise RuntimeError(
+            "network.portgroup.vlan.set: ReconfigureDVPortgroup_Task on portgroup "
+            f"{portgroup_moid!r} faulted: {outcome.error_message or '<no fault reported>'}"
+        )
+    if outcome.timed_out:
+        return {
+            "status": "timeout",
+            "portgroup": portgroup_moid,
+            "requested": requested_view,
+            "before": before_view,
+            "after": None,
+            "task": outcome.task,
+            "guidance": (
+                f"ReconfigureDVPortgroup_Task {outcome.task} did not reach a terminal state "
+                f"within {int(_NETWORK_PORTGROUP_TASK_TIMEOUT_SECONDS)}s; poll the task or "
+                "re-read the portgroup's VLAN config -- the change may still complete "
+                "in the background"
+            ),
+        }
+
+    post_read = await connector._post_vmomi_json(
+        target,
+        _VMOMI_RETRIEVE_PROPERTIES_PATH,
+        operator=operator,
+        json=retrieve_properties_body(
+            _DVPG_MO_TYPE, [portgroup_moid], [_PROP_DVPG_DEFAULT_PORT_CONFIG]
+        ),
+    )
+    observed_port_setting = _extract_single_prop(post_read, _PROP_DVPG_DEFAULT_PORT_CONFIG)
+    observed_vlan = (
+        observed_port_setting.get("vlan") if isinstance(observed_port_setting, dict) else None
+    )
+    after_view = _vlan_identity_view(_observed_vlan_identity(observed_vlan))
+    return {
+        "status": "set",
+        "portgroup": portgroup_moid,
+        "requested": requested_view,
+        "before": before_view,
+        "after": after_view,
         "task": outcome.task,
         "guidance": None,
     }

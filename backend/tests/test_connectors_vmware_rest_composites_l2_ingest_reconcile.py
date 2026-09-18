@@ -949,6 +949,12 @@ _EXPECTED_3091_VIM_MANIFESTS: dict[str, set[str]] = {
         "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
         "POST:/DistributedVirtualPortgroup/{moId}/ReconfigureDVPortgroup_Task",
     },
+    # vlan.set reconfigures an existing portgroup's VLAN through the same seam
+    # + child ops as security.set (read config first, then ReconfigureDVPortgroup_Task).
+    "_VIM_SUB_OPS_NETWORK_PORTGROUP_VLAN_SET": {
+        "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+        "POST:/DistributedVirtualPortgroup/{moId}/ReconfigureDVPortgroup_Task",
+    },
 }
 
 

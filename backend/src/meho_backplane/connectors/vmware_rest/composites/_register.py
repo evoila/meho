@@ -131,6 +131,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     host_evacuate_composite,
     network_portgroup_create_composite,
     network_portgroup_security_set_composite,
+    network_portgroup_vlan_set_composite,
     resource_pool_create_composite,
     resource_pool_delete_composite,
     vm_clone_composite,
@@ -209,6 +210,8 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     NETWORK_PORTGROUP_CREATE_RESPONSE_SCHEMA,
     NETWORK_PORTGROUP_SECURITY_SET_PARAMETER_SCHEMA,
     NETWORK_PORTGROUP_SECURITY_SET_RESPONSE_SCHEMA,
+    NETWORK_PORTGROUP_VLAN_SET_PARAMETER_SCHEMA,
+    NETWORK_PORTGROUP_VLAN_SET_RESPONSE_SCHEMA,
     PERFORMANCE_SUMMARY_PARAMETER_SCHEMA,
     PERFORMANCE_SUMMARY_RESPONSE_SCHEMA,
     RESOURCE_POOL_CREATE_PARAMETER_SCHEMA,
@@ -1040,6 +1043,37 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         ),
         parameter_schema=NETWORK_PORTGROUP_SECURITY_SET_PARAMETER_SCHEMA,
         response_schema=NETWORK_PORTGROUP_SECURITY_SET_RESPONSE_SCHEMA,
+        group_key="networking",
+        tags=["composite", "write", "networking", "vi-json"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.network.portgroup.vlan.set",
+        handler=network_portgroup_vlan_set_composite,
+        summary="Reconfigure an existing distributed portgroup's VLAN (trunk ranges or access id).",
+        description=(
+            "Reconfigures an EXISTING distributed portgroup's VLAN config -- "
+            "portgroup.create only sets the VLAN at create time, and nothing "
+            "else could change it (an operator who created a trunk without the "
+            "native/untagged VLAN 0 had no governed way to add it). Sets "
+            "DVPortgroupConfigSpec.defaultPortConfig.vlan to either a VLAN trunk "
+            "(VmwareDistributedVirtualSwitchTrunkVlanSpec, a NumericRange[]) or a "
+            "single access VLAN (VmwareDistributedVirtualSwitchVlanIdSpec) through "
+            "vim DistributedVirtualPortgroup.ReconfigureDVPortgroup_Task -- there "
+            "is no REST VLAN write. The spec REPLACES the current VLAN config "
+            "(there is no merge): to add VLAN 0 to an existing trunk, pass the "
+            "full desired range list. Idempotent -- the current VLAN is read + "
+            "normalised first and a request that already matches returns "
+            "status='unchanged' with no write; otherwise the required "
+            "configVersion is echoed, the reconfigure is polled to terminal, and "
+            "the applied VLAN is read back (before/after in the envelope). "
+            "Both/neither VLAN mode (or replace=false) returns "
+            "status='invalid_vlan_spec' before any write. Equivalent of PowerCLI "
+            "'Set-VDPortgroup -VlanTrunkRange' / '-VlanId'."
+        ),
+        parameter_schema=NETWORK_PORTGROUP_VLAN_SET_PARAMETER_SCHEMA,
+        response_schema=NETWORK_PORTGROUP_VLAN_SET_RESPONSE_SCHEMA,
         group_key="networking",
         tags=["composite", "write", "networking", "vi-json"],
         safety_level="dangerous",

@@ -145,6 +145,16 @@ This is the step that keeps getting skipped. Do it in the
    `## [Unreleased]`. **Leave behind** any bullet whose commit is *not*
    in this tag (post-tag work stays in `[Unreleased]`).
 
+4. **Update the public "What's new" page.** In the same release-cutting
+   PR, add a `## [vX.Y.Z](release-link) — YYYY-MM-DD` section to
+   [`docs-site/reference/whats-new.md`](../docs-site/reference/whats-new.md) —
+   one plain-language, bold-lead bullet per notable change, in the page's
+   existing format, linking the GitHub release. The docs site publishes on
+   the `v*` tag via [`docs-site.yml`](../.github/workflows/docs-site.yml) (the
+   docs-site artefact above), so a release cut without this ships a stale
+   public "What's new" — it silently missed eight consecutive releases
+   (v0.34.2 through v0.35.5, backfilled in #3782).
+
 ### 3. Release-cutting PR → merge
 
 Open the PR (CHANGELOG roll + any release-only edits), get it reviewed,
@@ -462,7 +472,9 @@ and whenever the migration Job or the `db` probe changes:
 [ ] 1. Tasks merged; main CI GREEN on the tagged commit (cancelled ≠ green —
        re-run + wait for success); version picked
 [ ] 2. CHANGELOG: completeness audited, missing bullets backfilled,
-       [Unreleased] rolled to [X.Y.Z] (post-tag work left behind)
+       [Unreleased] rolled to [X.Y.Z] (post-tag work left behind);
+       docs-site/reference/whats-new.md section added for [X.Y.Z]
+       (publishes with the v* tag — skipping it ships a stale What's new)
 [ ] 3. Release-body path-freshness gate green
        (scripts/release/check_release_body_paths.py — sister to #928);
        upgrade-relevant change → deploying.md version-specific notes row

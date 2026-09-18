@@ -31,6 +31,7 @@ import uuid
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
+import httpx
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,6 +44,11 @@ from meho_backplane.connectors.vmware_rest.composites._host import (
     datastore_mount_nfs_composite,
     disk_mark_flash_composite,
     service_control_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._host_nfs_mount import (
+    NasDatastore,
+    is_already_exists_fault,
+    resolve_mount_precheck,
 )
 from meho_backplane.connectors.vmware_rest.composites._write_preview import (
     _host_datastore_mount_nfs_preview,
@@ -174,6 +180,27 @@ def gate(monkeypatch: pytest.MonkeyPatch) -> _GateRecorder:
     return recorder
 
 
+def _duplicate_name_error() -> httpx.HTTPStatusError:
+    """A vCenter VI-JSON ``DuplicateName`` write fault (HTTP 500, SOAP-shaped body).
+
+    The shape :meth:`VmwareRestConnector._post_vmomi_json` raises for a
+    CreateNasDatastore that collides with an existing mount — an HTTP 500 whose
+    body is a ``<soapenv:Fault>`` carrying the ``DuplicateName`` fault type.
+    """
+    body = (
+        '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" '
+        'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
+        "<soapenv:Body><soapenv:Fault>"
+        "<faultcode>ServerFaultCode</faultcode>"
+        "<faultstring>A datastore with that name already exists.</faultstring>"
+        '<detail><DuplicateName xsi:type="DuplicateName"/></detail>'
+        "</soapenv:Fault></soapenv:Body></soapenv:Envelope>"
+    )
+    request = httpx.Request("POST", "https://vcenter.test/sdk/vim25/9.0.0.0/CreateNasDatastore")
+    response = httpx.Response(500, text=body, request=request)
+    return httpx.HTTPStatusError("500 Server Error", request=request, response=response)
+
+
 class _HostRecordingConnector:
     """Recording connector double for the host-domain composite tests.
 
@@ -190,6 +217,8 @@ class _HostRecordingConnector:
         hosts: list[dict[str, str]] | None = None,
         config_managers: dict[str, tuple[str, str]] | None = None,
         fault_tasks: set[str] | None = None,
+        datastores: list[dict[str, Any]] | None = None,
+        create_nas_race: dict[str, Any] | None = None,
     ) -> None:
         self.hosts = hosts if hosts is not None else [{"host": "host-15", "name": "esxi-01"}]
         # None → the default all-resolvable map; {} → nothing resolves (unreadable).
@@ -197,6 +226,14 @@ class _HostRecordingConnector:
             _DEFAULT_CONFIG_MANAGERS if config_managers is None else config_managers
         )
         self._fault_tasks = fault_tasks or set()
+        # The host's mounted datastores the idempotence pre-check reads. Each is
+        # a dict {moid, name, remote_host?, remote_path?, type?}; a dict with no
+        # ``remote_host`` models a non-NAS datastore (VMFS) the matcher skips.
+        self.datastores: list[dict[str, Any]] = list(datastores or [])
+        # When set, the FIRST CreateNasDatastore write appends this datastore
+        # (a concurrent mount landing between the pre-check read and the write)
+        # then raises a DuplicateName vim fault — the race the composite recovers.
+        self._create_nas_race = create_nas_race
         self.writes: list[dict[str, Any]] = []
         # Records every GET:/vcenter/host listing so a standalone-ESXi test
         # can assert the vCenter listing was never issued (#3332).
@@ -231,6 +268,11 @@ class _HostRecordingConnector:
             return self._serve_retrieve(json)
         self.writes.append({"path": path, "json": json})
         if path.endswith("/CreateNasDatastore"):
+            if self._create_nas_race is not None:
+                race = self._create_nas_race
+                self._create_nas_race = None  # only the first write races
+                self.datastores.append(race)
+                raise _duplicate_name_error()
             return {
                 "_typeName": "ManagedObjectReference",
                 "type": "Datastore",
@@ -244,28 +286,13 @@ class _HostRecordingConnector:
     def _serve_retrieve(self, body: Any) -> dict[str, Any]:
         spec = body["specSet"][0]
         spec_type = spec["propSet"][0]["type"]
+        prop = spec["propSet"][0]["pathSet"][0]
+        if spec_type == "HostSystem" and prop == "datastore":
+            return self._serve_host_datastores()
         if spec_type == "HostSystem":
-            prop = spec["propSet"][0]["pathSet"][0]
-            resolved = self.config_managers.get(prop)
-            prop_set = (
-                []
-                if resolved is None
-                else [
-                    {
-                        "name": prop,
-                        "val": {
-                            "_typeName": "ManagedObjectReference",
-                            "type": resolved[0],
-                            "value": resolved[1],
-                        },
-                    }
-                ]
-            )
-            return {
-                "objects": [
-                    {"obj": {"type": "HostSystem", "value": "host-15"}, "propSet": prop_set}
-                ]
-            }
+            return self._serve_config_manager(prop)
+        if spec_type == "Datastore":
+            return self._serve_datastore_infos(spec)
         # Task.info poll.
         task_moid = spec["objectSet"][0]["obj"]["value"]
         info: dict[str, Any] = (
@@ -281,6 +308,74 @@ class _HostRecordingConnector:
                 }
             ]
         }
+
+    def _serve_config_manager(self, prop: str) -> dict[str, Any]:
+        resolved = self.config_managers.get(prop)
+        prop_set = (
+            []
+            if resolved is None
+            else [
+                {
+                    "name": prop,
+                    "val": {
+                        "_typeName": "ManagedObjectReference",
+                        "type": resolved[0],
+                        "value": resolved[1],
+                    },
+                }
+            ]
+        )
+        return {
+            "objects": [{"obj": {"type": "HostSystem", "value": "host-15"}, "propSet": prop_set}]
+        }
+
+    def _serve_host_datastores(self) -> dict[str, Any]:
+        refs = [
+            {"_typeName": "ManagedObjectReference", "type": "Datastore", "value": d["moid"]}
+            for d in self.datastores
+        ]
+        return {
+            "objects": [
+                {
+                    "obj": {"type": "HostSystem", "value": "host-15"},
+                    "propSet": [
+                        {
+                            "name": "datastore",
+                            "val": {"_typeName": "ArrayOfManagedObjectReference", "_value": refs},
+                        }
+                    ],
+                }
+            ]
+        }
+
+    def _serve_datastore_infos(self, spec: dict[str, Any]) -> dict[str, Any]:
+        objects: list[dict[str, Any]] = []
+        for obj_spec in spec["objectSet"]:
+            moid = obj_spec["obj"]["value"]
+            d = next((x for x in self.datastores if x["moid"] == moid), None)
+            if d is None:
+                continue
+            if "remote_host" in d:  # NAS datastore → NasDatastoreInfo with a nas volume
+                info: dict[str, Any] = {
+                    "_typeName": "NasDatastoreInfo",
+                    "name": d["name"],
+                    "nas": {
+                        "_typeName": "HostNasVolume",
+                        "name": d["name"],
+                        "remoteHost": d["remote_host"],
+                        "remotePath": d["remote_path"],
+                        "type": d.get("type", "NFS"),
+                    },
+                }
+            else:  # non-NAS datastore (VMFS) → no ``nas`` sub-object
+                info = {"_typeName": "VmfsDatastoreInfo", "name": d["name"]}
+            objects.append(
+                {
+                    "obj": {"type": "Datastore", "value": moid},
+                    "propSet": [{"name": "info", "val": info}],
+                }
+            )
+        return {"objects": objects}
 
 
 # ===========================================================================
@@ -415,6 +510,248 @@ async def test_datastore_mount_nfs_resolves_host_by_moref(gate: _GateRecorder) -
     )
     assert out["status"] == "mounted"  # type: ignore[index]
     assert out["host"] == "host-42"  # type: ignore[index]
+
+
+# ===========================================================================
+# datastore_mount_nfs — idempotence (already_mounted / name_conflict / race)
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_datastore_mount_nfs_already_mounted_skips_write(gate: _GateRecorder) -> None:
+    """A re-run against an already-mounted export returns already_mounted, no write."""
+    conn = _HostRecordingConnector(
+        datastores=[
+            {
+                "moid": "datastore-77",
+                "name": "ds-nfs-base",
+                "remote_host": "nfs-01.example.internal",
+                "remote_path": "/export/base",
+                "type": "NFS",
+            }
+        ]
+    )
+    out = await datastore_mount_nfs_composite(
+        operator=_operator(),
+        target=None,
+        params={
+            "host": "esxi-01",
+            "nfs_server": "nfs-01.example.internal",
+            "remote_path": "/export/base",
+            "datastore_name": "ds-nfs-base",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "already_mounted"
+    assert out["host"] == "host-15"
+    assert out["datastore"] == "datastore-77"
+    assert out["summary"]["datastore"] == "datastore-77"
+    assert out["summary"]["name"] == "ds-nfs-base"
+    assert out["guidance"]
+    # The idempotence pre-check short-circuits: no write, and the gate is never
+    # reached (nothing was dispatched, so no failed audit row and no host fault).
+    assert conn.writes == []
+    assert gate.calls == []
+
+
+@pytest.mark.asyncio
+async def test_datastore_mount_nfs_already_mounted_matches_normalized(gate: _GateRecorder) -> None:
+    """The export match normalises a trailing-slash path + case-insensitive host."""
+    conn = _HostRecordingConnector(
+        datastores=[
+            {
+                "moid": "datastore-77",
+                "name": "ds-nfs-base",
+                "remote_host": "NFS-01.example.internal",
+                "remote_path": "/export/base",
+                "type": "NFS",
+            }
+        ]
+    )
+    out = await datastore_mount_nfs_composite(
+        operator=_operator(),
+        target=None,
+        params={
+            "host": "esxi-01",
+            "nfs_server": "nfs-01.example.internal",
+            "remote_path": "/export/base/",
+            "datastore_name": "ds-elsewhere",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    # Export identity (host + path) wins over the differing requested name.
+    assert out["status"] == "already_mounted"  # type: ignore[index]
+    assert out["datastore"] == "datastore-77"  # type: ignore[index]
+    assert conn.writes == []
+
+
+@pytest.mark.asyncio
+async def test_datastore_mount_nfs_name_conflict_different_export(gate: _GateRecorder) -> None:
+    """The name is taken by a different export → name_conflict, no write."""
+    conn = _HostRecordingConnector(
+        datastores=[
+            {
+                "moid": "datastore-77",
+                "name": "ds-nfs-base",
+                "remote_host": "nfs-01.example.internal",
+                "remote_path": "/export/other",
+                "type": "NFS",
+            }
+        ]
+    )
+    out = await datastore_mount_nfs_composite(
+        operator=_operator(),
+        target=None,
+        params={
+            "host": "esxi-01",
+            "nfs_server": "nfs-01.example.internal",
+            "remote_path": "/export/base",
+            "datastore_name": "ds-nfs-base",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "name_conflict"
+    assert out["host"] == "host-15"
+    assert out["datastore"] == "datastore-77"
+    assert out["summary"]["remote_path"] == "/export/other"
+    assert out["guidance"]
+    assert conn.writes == []
+    assert gate.calls == []
+
+
+@pytest.mark.asyncio
+async def test_datastore_mount_nfs_ignores_non_nas_datastore(gate: _GateRecorder) -> None:
+    """A non-NAS datastore (VMFS) never matches; a genuinely new export still mounts."""
+    conn = _HostRecordingConnector(
+        datastores=[{"moid": "datastore-1", "name": "local-vmfs"}]  # no remote_host → VMFS
+    )
+    out = await datastore_mount_nfs_composite(
+        operator=_operator(),
+        target=None,
+        params={
+            "host": "esxi-01",
+            "nfs_server": "nfs-01.example.internal",
+            "remote_path": "/export/base",
+            "datastore_name": "ds-nfs-base",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "mounted"  # type: ignore[index]
+    assert out["datastore"] == "datastore-99"  # type: ignore[index]
+    assert len(conn.writes) == 1
+
+
+@pytest.mark.asyncio
+async def test_datastore_mount_nfs_race_recovers_to_already_mounted(gate: _GateRecorder) -> None:
+    """A concurrent mount between the pre-check read and the write recovers cleanly.
+
+    The pre-check reads no datastores, so the composite issues the write; the
+    write faults ``DuplicateName`` (the export was mounted in between) and the
+    connector appends it. The composite re-reads and resolves to
+    already_mounted instead of surfacing the raw fault.
+    """
+    conn = _HostRecordingConnector(
+        datastores=[],
+        create_nas_race={
+            "moid": "datastore-88",
+            "name": "ds-nfs-base",
+            "remote_host": "nfs-01.example.internal",
+            "remote_path": "/export/base",
+            "type": "NFS",
+        },
+    )
+    out = await datastore_mount_nfs_composite(
+        operator=_operator(),
+        target=None,
+        params={
+            "host": "esxi-01",
+            "nfs_server": "nfs-01.example.internal",
+            "remote_path": "/export/base",
+            "datastore_name": "ds-nfs-base",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "already_mounted"
+    assert out["datastore"] == "datastore-88"
+    # The write WAS attempted (and faulted) exactly once; the gate governed it.
+    assert len(conn.writes) == 1
+    assert conn.writes[0]["path"].endswith("/CreateNasDatastore")
+    assert gate.gated_op_ids == [_CREATE_NAS_OP_ID]
+
+
+@pytest.mark.asyncio
+async def test_datastore_mount_nfs_race_reraises_non_duplicate_fault(gate: _GateRecorder) -> None:
+    """A non-already-exists write fault keeps today's behaviour (re-raises)."""
+
+    class _FaultingConnector(_HostRecordingConnector):
+        async def _post_vmomi_json(self, target, path, *, operator, json=None):  # type: ignore[no-untyped-def]
+            if path.endswith("/CreateNasDatastore"):
+                raise RuntimeError(
+                    "vmware vim CreateNasDatastore failed: vim fault HostConfigFault"
+                )
+            return await super()._post_vmomi_json(target, path, operator=operator, json=json)
+
+    conn = _FaultingConnector(datastores=[])
+    with pytest.raises(RuntimeError, match="HostConfigFault"):
+        await datastore_mount_nfs_composite(
+            operator=_operator(),
+            target=None,
+            params={
+                "host": "esxi-01",
+                "nfs_server": "nfs-01.example.internal",
+                "remote_path": "/export/base",
+                "datastore_name": "ds-nfs-base",
+            },
+            connector=conn,  # type: ignore[arg-type]
+        )
+
+
+def test_resolve_mount_precheck_returns_none_when_no_match() -> None:
+    """No mounted export matches and no name clashes → proceed to the write."""
+    existing = [
+        NasDatastore(
+            moid="datastore-1",
+            name="other",
+            remote_host="nfs-02.example.internal",
+            remote_path="/export/iso",
+            nas_type="NFS",
+        )
+    ]
+    assert (
+        resolve_mount_precheck(
+            existing,
+            params={
+                "nfs_server": "nfs-01.example.internal",
+                "remote_path": "/export/base",
+                "datastore_name": "ds-nfs-base",
+            },
+            host_moid="host-15",
+        )
+        is None
+    )
+
+
+def test_is_already_exists_fault_across_transports() -> None:
+    """The fault detector recognises both transports' already-exists faults only."""
+    # vCenter VI-JSON: HTTP 500 SOAP-shaped DuplicateName body.
+    assert is_already_exists_fault(_duplicate_name_error()) is True
+    # Standalone ESXi SOAP: RuntimeError carrying the fault-type localName.
+    assert (
+        is_already_exists_fault(
+            RuntimeError("vmware vim CreateNasDatastore failed on 'h': vim fault AlreadyExists")
+        )
+        is True
+    )
+    # A different vim fault is NOT recovered (re-raises → connector_error).
+    assert (
+        is_already_exists_fault(RuntimeError("... vim fault HostConfigFault: export unreachable"))
+        is False
+    )
+    # A non-vim error is not recovered.
+    assert is_already_exists_fault(ValueError("boom")) is False
 
 
 # ===========================================================================

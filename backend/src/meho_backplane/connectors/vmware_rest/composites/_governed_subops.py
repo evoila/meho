@@ -72,6 +72,7 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.network.portgroup.security.set": (
         _write._VIM_SUB_OPS_NETWORK_PORTGROUP_SECURITY_SET
     ),
+    "vmware.composite.network.portgroup.vlan.set": (_write._VIM_SUB_OPS_NETWORK_PORTGROUP_VLAN_SET),
     "vmware.composite.cluster.patch": (
         _write._SUB_OPS_CLUSTER_PATCH + _write._VIM_SUB_OPS_CLUSTER_PATCH
     ),

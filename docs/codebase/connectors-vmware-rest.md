@@ -36,9 +36,11 @@ post-clone hardware reconfigure trio `vm.resize` / `vm.nic.repoint` /
 `guest.customization_spec.create` + `vm.customize` / `#2892`, the
 OVF/OVA content-library deploy `vm.deploy_from_library` / `#2909`, and
 the three host-domain writes `host.datastore_mount_nfs` /
-`host.disk_mark_flash` / `host.service_control` / `#3182`, the two vim
+`host.disk_mark_flash` / `host.service_control` / `#3182`, the three vim
 distributed-portgroup writes `network.portgroup.create` +
-`network.portgroup.security.set` / `#3091`, the content-library import
+`network.portgroup.security.set` / `#3091` +
+`network.portgroup.vlan.set` (VLAN reconfigure of an existing portgroup),
+the content-library import
 `vm.import_from_library` / `#3229`, the two governed
 guest-operations writes `vm.guest.file.write` / `#3100` +
 `vm.guest.program.run` / `#3255` (see
@@ -128,6 +130,7 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `host_evacuate_composite`, `host_detach_from_vds_composite`,
   `network_portgroup_create_composite`,
   `network_portgroup_security_set_composite`,
+  `network_portgroup_vlan_set_composite`,
   `cluster_patch_composite`, `guest_customization_spec_create_composite`,
   `vm_customize_composite`, and the `#3505` governed-allocation writes
   `resource_pool_create_composite` / `resource_pool_delete_composite` /
@@ -1092,6 +1095,7 @@ enum) are:
 | `folder.create` | `created`, `parent_not_found`, `ambiguous_parent` (synchronous `CreateFolder` — the resolution refusals are structured, not raw vim faults) |
 | `network.portgroup.create` | `created`, `invalid_vlan_spec`, `timeout` (vim `CreateDVPortgroup_Task` polled, #3091; `invalid_vlan_spec` refuses a trunk+access clash before any write; `timeout` when the poll gives up; a task *fault* — e.g. `DuplicateName` — raises `connector_error`. The `created` envelope carries a read-back `observed` = `{name, vlan}` off the new portgroup's `config`. The trunk / access VLAN specs are `InheritablePolicy` subtypes, so each wire body carries `inherited: false` — without it vCenter defaults `inherited: true` and drops the `vlanId`, silently creating an untagged (VLAN 0) portgroup, #3356) |
 | `network.portgroup.security.set` | `updated`, `no_change_requested`, `timeout` (vim `ReconfigureDVPortgroup_Task` polled, #3091; `no_change_requested` refuses when none of the three booleans is supplied, before any read/write; `timeout` when the poll gives up; a task *fault* raises `connector_error`. Carries `previous` (pre-write security triple) + `observed` (post-write triple) read-backs) |
+| `network.portgroup.vlan.set` | `set`, `unchanged`, `invalid_vlan_spec`, `timeout` (vim `ReconfigureDVPortgroup_Task` polled; reconfigures an **existing** portgroup's `defaultPortConfig.vlan` to a trunk `NumericRange[]` or a single access VLAN — the given spec **replaces** the current config, there is no merge. Idempotent: the current VLAN is read + normalised (ranges sorted + merged-adjacent) first and a request that already matches returns `unchanged` with no write / no task; `invalid_vlan_spec` refuses both/neither VLAN mode (or `replace=false`) before any write; `timeout` when the poll gives up; a task *fault* raises `connector_error`. Carries normalised `before` / `after` VLAN views) |
 | `vm.resize` | `resized`, `requires_power_off`, `no_change`, `partial` |
 | `vm.nic.repoint` | `repointed`, `not_found`, `ambiguous`, `invalid_request` |
 | `vm.device.cdrom` | `removed`, `updated`, `disconnected`, `invalid_request` |
@@ -1855,9 +1859,9 @@ mutating writes flow through the same `enforce_subop_policy` gate the REST
 and disk-grow writes do, so an agent principal without a grant is denied and
 a policy-parked write never reaches the wire.
 
-### vim distributed-portgroup writes (`network.portgroup.create` + `network.portgroup.security.set`, #3091)
+### vim distributed-portgroup writes (`network.portgroup.create` + `network.portgroup.security.set`, #3091; `network.portgroup.vlan.set`)
 
-Two vim-only distributed-portgroup writes for standing up an L2 substrate —
+Three vim-only distributed-portgroup writes for standing up an L2 substrate —
 the nested-hypervisor lab recipe. Neither surface has a REST write path
 (there is no portgroup-create Automation path, and the security policy lives
 in `DVPortgroupConfigSpec.defaultPortConfig.securityPolicy` with no REST
@@ -1899,9 +1903,32 @@ promiscuous mode makes the portgroup see all traffic on its VLANs, so
 `security.set` is a governance-sensitive write — it rides the same
 `dangerous` / `requires_approval=True` tier and the same `enforce_subop_policy`
 gate as every other write composite (there is no `caution` tier in this
-connector; only `vm.destroy` is `destructive`). Neither composite registers a
-park-time preview builder (matching `vm.import_from_library`); the read-back
-`previous` / `observed` rows in the response are the verification surface.
+connector; only `vm.destroy` is `destructive`).
+
+**`network.portgroup.vlan.set`** reconfigures an **existing** portgroup's
+`defaultPortConfig.vlan` — the sibling `portgroup.create` sets the VLAN only at
+create time, and nothing else could change it (an operator who created a trunk
+without the native/untagged VLAN 0 had no governed way to add it). It takes the
+same VLAN-spec choice as `create` — a trunk
+(`VmwareDistributedVirtualSwitchTrunkVlanSpec`, a `NumericRange[]`) **or** a
+single access VLAN (`VmwareDistributedVirtualSwitchVlanIdSpec`), rendered by the
+**shared** `_build_portgroup_vlan_spec` helper both ops call — and writes it
+through the same vim `ReconfigureDVPortgroup_Task` seam as `security.set` (the
+required `configVersion` is read + echoed first). The given spec **replaces**
+the current VLAN config; there is **no merge**, so to add VLAN 0 to an existing
+trunk the operator passes the full desired range list (e.g.
+`[{start:0,end:0},{start:3251,end:3271}]`) and `replace=false` is refused. It is
+**idempotent**: the current VLAN is read first and normalised (ranges sorted +
+merged-adjacent, so `[{0,0},{1,4094}]` and `[{0,4094}]` compare equal) and a
+request that already matches returns `status='unchanged'` with no
+`ReconfigureDVPortgroup_Task`; otherwise the reconfigure is polled to terminal
+and the applied VLAN is read back into the `before` / `after` normalised views.
+Both/neither VLAN mode refuses `status='invalid_vlan_spec'` before any write.
+
+None of the three composites registers a park-time preview builder (matching
+`vm.import_from_library`); the read-back rows in each response
+(`observed` for `create`, `previous` / `observed` for `security.set`,
+`before` / `after` for `vlan.set`) are the verification surface.
 
 ### Supervisor (WCP) namespace-management composites (`supervisor.enable` / `supervisor.disable` / `supervisor.status`, #3281)
 

@@ -64,6 +64,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     host_evacuate_composite,
     network_portgroup_create_composite,
     network_portgroup_security_set_composite,
+    network_portgroup_vlan_set_composite,
     resource_pool_create_composite,
     resource_pool_delete_composite,
     vm_clone_composite,
@@ -3707,6 +3708,329 @@ async def test_network_portgroup_security_set_task_fault_raises(gate: _GateRecor
             operator=_make_operator(),
             target=object(),
             params={"portgroup": "dvportgroup-42", "allow_promiscuous": True},
+            connector=conn,  # type: ignore[arg-type]
+        )
+
+
+# ===========================================================================
+# network.portgroup.vlan.set (VLAN reconfigure of an existing portgroup)
+# ===========================================================================
+
+
+def _trunk_vlan_spec(ranges: list[tuple[int, int]]) -> dict[str, Any]:
+    """A raw VI-JSON trunk VLAN spec as a portgroup's config.defaultPortConfig.vlan reads back."""
+    return {
+        "_typeName": "VmwareDistributedVirtualSwitchTrunkVlanSpec",
+        "inherited": False,
+        "vlanId": [
+            {"_typeName": "NumericRange", "start": start, "end": end} for start, end in ranges
+        ],
+    }
+
+
+def _access_vlan_spec(vlan_id: int) -> dict[str, Any]:
+    """A raw VI-JSON single-access VLAN spec as a portgroup's vlan reads back."""
+    return {
+        "_typeName": "VmwareDistributedVirtualSwitchVlanIdSpec",
+        "inherited": False,
+        "vlanId": vlan_id,
+    }
+
+
+@pytest.mark.asyncio
+async def test_network_portgroup_vlan_set_trunk_fresh_set(gate: _GateRecorder) -> None:
+    """Current trunk differs from requested -> ReconfigureDVPortgroup_Task with the new
+    trunk spec + echoed configVersion; status=set, before reflects the current VLAN."""
+    conn = _RecordingConnector(
+        {},
+        vmomi={
+            "/DistributedVirtualPortgroup/dvportgroup-100/ReconfigureDVPortgroup_Task": (
+                _task_moref("task-vlan-1")
+            ),
+            "Task": _task_info_result("task-vlan-1", "success"),
+            "DistributedVirtualPortgroup": _dvpg_multi_prop_result(
+                "dvportgroup-100",
+                {
+                    "config.configVersion": "4",
+                    "config.defaultPortConfig": {
+                        "_typeName": "VMwareDVSPortSetting",
+                        "vlan": _trunk_vlan_spec([(100, 110)]),
+                    },
+                },
+            ),
+        },
+    )
+    out = await network_portgroup_vlan_set_composite(
+        operator=_make_operator(),
+        target=object(),
+        # Adds the untagged VLAN 0 to an existing 100..110 band: the FULL desired
+        # range list (replace, not merge).
+        params={
+            "portgroup": "dvportgroup-100",
+            "vlan_trunk_ranges": [{"start": 0, "end": 0}, {"start": 100, "end": 110}],
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "set"
+    assert out["task"] == "task-vlan-1"
+    assert out["requested"] == {
+        "mode": "trunk",
+        "ranges": [{"start": 0, "end": 0}, {"start": 100, "end": 110}],
+    }
+    # before is the normalised current VLAN; the stub serves one portgroup
+    # payload for both the pre-read and the read-back, so after mirrors it
+    # (like security.set's previous == observed) -- the write body is the real
+    # proof the new spec was requested.
+    assert out["before"] == {"mode": "trunk", "ranges": [{"start": 100, "end": 110}]}
+    assert out["after"] == out["before"]
+    reconfig = next(b for p, b in conn.vmomi_calls if p.endswith("/ReconfigureDVPortgroup_Task"))
+    assert reconfig == {
+        "spec": {
+            "_typeName": "DVPortgroupConfigSpec",
+            "configVersion": "4",
+            "defaultPortConfig": {
+                "_typeName": "VMwareDVSPortSetting",
+                "vlan": {
+                    "_typeName": "VmwareDistributedVirtualSwitchTrunkVlanSpec",
+                    # InheritablePolicy subtype: inherited=false so vCenter keeps
+                    # the explicit ranges (omitting it -> untagged).
+                    "inherited": False,
+                    "vlanId": [
+                        {"_typeName": "NumericRange", "start": 0, "end": 0},
+                        {"_typeName": "NumericRange", "start": 100, "end": 110},
+                    ],
+                },
+            },
+        }
+    }
+    assert gate.gated_op_ids == [
+        "POST:/DistributedVirtualPortgroup/{moId}/ReconfigureDVPortgroup_Task"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_network_portgroup_vlan_set_access_vlan(gate: _GateRecorder) -> None:
+    """Access-mode set sends a single-VLAN VmwareDistributedVirtualSwitchVlanIdSpec."""
+    conn = _RecordingConnector(
+        {},
+        vmomi={
+            "/DistributedVirtualPortgroup/dvportgroup-100/ReconfigureDVPortgroup_Task": (
+                _task_moref("task-vlan-2")
+            ),
+            "Task": _task_info_result("task-vlan-2", "success"),
+            "DistributedVirtualPortgroup": _dvpg_multi_prop_result(
+                "dvportgroup-100",
+                {
+                    "config.configVersion": "9",
+                    "config.defaultPortConfig": {
+                        "_typeName": "VMwareDVSPortSetting",
+                        "vlan": _access_vlan_spec(10),
+                    },
+                },
+            ),
+        },
+    )
+    out = await network_portgroup_vlan_set_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"portgroup": "dvportgroup-100", "vlan_id": 20},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "set"
+    assert out["requested"] == {"mode": "access", "vlan_id": 20}
+    assert out["before"] == {"mode": "access", "vlan_id": 10}
+    reconfig = next(b for p, b in conn.vmomi_calls if p.endswith("/ReconfigureDVPortgroup_Task"))
+    assert reconfig["spec"]["defaultPortConfig"]["vlan"] == {
+        "_typeName": "VmwareDistributedVirtualSwitchVlanIdSpec",
+        "inherited": False,
+        "vlanId": 20,
+    }
+
+
+@pytest.mark.asyncio
+async def test_network_portgroup_vlan_set_unchanged_is_idempotent(gate: _GateRecorder) -> None:
+    """Current VLAN already equals the requested spec (after sort + merge-adjacent
+    normalisation) -> status=unchanged, no write, no gate, one read only."""
+    conn = _RecordingConnector(
+        {},
+        vmomi={
+            # Current trunk is the merged 100..110 band.
+            "DistributedVirtualPortgroup": _dvpg_multi_prop_result(
+                "dvportgroup-100",
+                {
+                    "config.configVersion": "4",
+                    "config.defaultPortConfig": {
+                        "_typeName": "VMwareDVSPortSetting",
+                        "vlan": _trunk_vlan_spec([(100, 110)]),
+                    },
+                },
+            ),
+        },
+    )
+    out = await network_portgroup_vlan_set_composite(
+        operator=_make_operator(),
+        target=object(),
+        # Two abutting ranges that normalise to the same 100..110 band.
+        params={
+            "portgroup": "dvportgroup-100",
+            "vlan_trunk_ranges": [{"start": 100, "end": 105}, {"start": 106, "end": 110}],
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "unchanged"
+    assert out["before"] == {"mode": "trunk", "ranges": [{"start": 100, "end": 110}]}
+    assert out["after"] == out["before"]
+    # Exactly one vmomi call (the pre-read); no ReconfigureDVPortgroup_Task, no gate.
+    assert [p for p, _ in conn.vmomi_calls] == [
+        "/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+    ]
+    assert gate.gated_op_ids == []
+
+
+@pytest.mark.asyncio
+async def test_network_portgroup_vlan_set_invalid_vlan_spec_refuses(gate: _GateRecorder) -> None:
+    """Both / neither VLAN mode -> status=invalid_vlan_spec, no read, no write, no gate."""
+    conn = _RecordingConnector({}, vmomi={})
+    both = await network_portgroup_vlan_set_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "portgroup": "dvportgroup-100",
+            "vlan_trunk_ranges": [{"start": 0, "end": 0}],
+            "vlan_id": 10,
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert both["status"] == "invalid_vlan_spec"
+    neither = await network_portgroup_vlan_set_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"portgroup": "dvportgroup-100"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert neither["status"] == "invalid_vlan_spec"
+    assert conn.vmomi_calls == []
+    assert gate.gated_op_ids == []
+
+
+@pytest.mark.asyncio
+async def test_network_portgroup_vlan_set_replace_false_refuses(gate: _GateRecorder) -> None:
+    """replace=false (an unsupported merge) -> invalid_vlan_spec before any read/write."""
+    conn = _RecordingConnector({}, vmomi={})
+    out = await network_portgroup_vlan_set_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "portgroup": "dvportgroup-100",
+            "vlan_trunk_ranges": [{"start": 0, "end": 0}],
+            "replace": False,
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "invalid_vlan_spec"
+    assert "replace=false" in out["guidance"]
+    assert conn.vmomi_calls == []
+    assert gate.gated_op_ids == []
+
+
+@pytest.mark.asyncio
+async def test_network_portgroup_vlan_set_gated_short_circuits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An awaiting-approval gate returns the OperationResult verbatim; no reconfigure fires."""
+    op_id = "POST:/DistributedVirtualPortgroup/{moId}/ReconfigureDVPortgroup_Task"
+    _install_gate(monkeypatch, _GateRecorder(gate_for={op_id: _awaiting(op_id)}))
+    conn = _RecordingConnector(
+        {},
+        vmomi={
+            "DistributedVirtualPortgroup": _dvpg_multi_prop_result(
+                "dvportgroup-100",
+                {
+                    "config.configVersion": "4",
+                    "config.defaultPortConfig": {
+                        "_typeName": "VMwareDVSPortSetting",
+                        "vlan": _access_vlan_spec(10),
+                    },
+                },
+            ),
+        },
+    )
+    out = await network_portgroup_vlan_set_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"portgroup": "dvportgroup-100", "vlan_id": 20},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, OperationResult)
+    assert out.status == "awaiting_approval"
+    assert not any(p.endswith("/ReconfigureDVPortgroup_Task") for p, _ in conn.vmomi_calls)
+
+
+@pytest.mark.asyncio
+async def test_network_portgroup_vlan_set_poll_timeout(
+    monkeypatch: pytest.MonkeyPatch, gate: _GateRecorder
+) -> None:
+    """A still-running task times out -> status=timeout with the task id, no read-back after."""
+    monkeypatch.setattr(_write, "_NETWORK_PORTGROUP_TASK_TIMEOUT_SECONDS", 0.0)
+    conn = _RecordingConnector(
+        {},
+        vmomi={
+            "/DistributedVirtualPortgroup/dvportgroup-100/ReconfigureDVPortgroup_Task": (
+                _task_moref("task-vlan-3")
+            ),
+            "Task": _task_info_result("task-vlan-3", "running"),
+            "DistributedVirtualPortgroup": _dvpg_multi_prop_result(
+                "dvportgroup-100",
+                {
+                    "config.configVersion": "4",
+                    "config.defaultPortConfig": {
+                        "_typeName": "VMwareDVSPortSetting",
+                        "vlan": _access_vlan_spec(10),
+                    },
+                },
+            ),
+        },
+    )
+    out = await network_portgroup_vlan_set_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"portgroup": "dvportgroup-100", "vlan_id": 20},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "timeout"
+    assert out["task"] == "task-vlan-3"
+    assert out["after"] is None
+    assert out["before"] == {"mode": "access", "vlan_id": 10}
+
+
+@pytest.mark.asyncio
+async def test_network_portgroup_vlan_set_task_fault_raises(gate: _GateRecorder) -> None:
+    """A ReconfigureDVPortgroup_Task fault raises (the dispatcher wraps connector_error)."""
+    conn = _RecordingConnector(
+        {},
+        vmomi={
+            "/DistributedVirtualPortgroup/dvportgroup-100/ReconfigureDVPortgroup_Task": (
+                _task_moref("task-vlan-4")
+            ),
+            "Task": _task_info_result("task-vlan-4", "error", "DvsFault"),
+            "DistributedVirtualPortgroup": _dvpg_multi_prop_result(
+                "dvportgroup-100",
+                {
+                    "config.configVersion": "4",
+                    "config.defaultPortConfig": {
+                        "_typeName": "VMwareDVSPortSetting",
+                        "vlan": _access_vlan_spec(10),
+                    },
+                },
+            ),
+        },
+    )
+    with pytest.raises(RuntimeError, match="ReconfigureDVPortgroup_Task"):
+        await network_portgroup_vlan_set_composite(
+            operator=_make_operator(),
+            target=object(),
+            params={"portgroup": "dvportgroup-100", "vlan_id": 20},
             connector=conn,  # type: ignore[arg-type]
         )
 

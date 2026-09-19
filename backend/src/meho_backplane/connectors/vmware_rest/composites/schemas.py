@@ -1854,6 +1854,77 @@ NETWORK_PORTGROUP_SECURITY_SET_PARAMETER_SCHEMA: dict[str, Any] = {
 }
 
 
+#: ``vmware.composite.network.portgroup.vlan.set`` parameter schema.
+#:
+#: Reconfigure an EXISTING distributed portgroup's VLAN config via the **vim**
+#: ``DistributedVirtualPortgroup.ReconfigureDVPortgroup_Task`` (the pinned
+#: vcenter.yaml serves no VLAN write). ``portgroup`` is the moid (obtain it
+#: from the networking group's ``portgroup.audit`` read), and exactly one VLAN
+#: mode -- ``vlan_trunk_ranges`` (a NumericRange[] trunk) XOR ``vlan_id`` (a
+#: single access VLAN). The spec **REPLACES** the current VLAN config; there is
+#: no merge, so to add the untagged/native VLAN 0 to an existing trunk band the
+#: operator passes the full desired range list (e.g.
+#: ``[{start:0,end:0},{start:3251,end:3271}]``). Idempotent -- a request that
+#: already equals the current config returns ``status='unchanged'`` without a
+#: write.
+NETWORK_PORTGROUP_VLAN_SET_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "portgroup": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "DistributedVirtualPortgroup moid whose VLAN config is set (e.g. "
+                "'dvportgroup-42'). Obtain it from the networking group's "
+                "portgroup.audit read."
+            ),
+        },
+        "vlan_trunk_ranges": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "start": {"type": "integer", "minimum": 0, "maximum": 4094},
+                    "end": {"type": "integer", "minimum": 0, "maximum": 4094},
+                },
+                "required": ["start", "end"],
+                "additionalProperties": False,
+            },
+            "minItems": 1,
+            "description": (
+                "Trunk-mode VLAN ranges (VmwareDistributedVirtualSwitchTrunkVlanSpec "
+                "-- a NumericRange[] of inclusive start..end pairs, each 0..4094). This "
+                "list REPLACES the current VLAN config (no merge): to add the untagged "
+                "VLAN 0 to an existing trunk, pass the full desired list including "
+                "{start:0,end:0}. Mutually exclusive with vlan_id."
+            ),
+        },
+        "vlan_id": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4094,
+            "description": (
+                "Single access VLAN id (VmwareDistributedVirtualSwitchVlanIdSpec); "
+                "0 means no/native VLAN. Replaces the current VLAN config. Mutually "
+                "exclusive with vlan_trunk_ranges."
+            ),
+        },
+        "replace": {
+            "type": "boolean",
+            "default": True,
+            "description": (
+                "The given spec REPLACES the current VLAN config -- there is no merge. "
+                "Defaults to true (the only supported mode); replace=false refuses with "
+                "status='invalid_vlan_spec' because a merge is not implemented (pass the "
+                "full desired range list instead)."
+            ),
+        },
+    },
+    "required": ["portgroup"],
+    "additionalProperties": False,
+}
+
+
 # ---------------------------------------------------------------------------
 # Write composites -- response schemas
 # ---------------------------------------------------------------------------
@@ -2895,6 +2966,59 @@ NETWORK_PORTGROUP_SECURITY_SET_RESPONSE_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["status", "portgroup", "requested"],
+}
+
+
+NETWORK_PORTGROUP_VLAN_SET_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["set", "unchanged", "invalid_vlan_spec", "timeout"],
+            "description": (
+                "``'set'`` -- the ReconfigureDVPortgroup_Task reached success and the "
+                "applied VLAN was read back; ``'unchanged'`` -- the current VLAN config "
+                "already equals the requested spec (normalised), so no task was issued; "
+                "``'invalid_vlan_spec'`` -- both/neither VLAN mode, or replace=false "
+                "(refused before any read/write); ``'timeout'`` -- the task did not reach "
+                "a terminal state within the poll bound. A task fault raises (the "
+                "dispatcher wraps it connector_error)."
+            ),
+        },
+        "portgroup": {"type": "string", "description": "The portgroup moid whose VLAN was set."},
+        "requested": {
+            "type": ["object", "null"],
+            "description": (
+                "The requested VLAN config as a normalised view "
+                "(``{mode:'trunk', ranges:[{start,end}]}`` or ``{mode:'access', vlan_id}``); "
+                "``null`` on an invalid-spec refusal."
+            ),
+        },
+        "before": {
+            "type": ["object", "null"],
+            "description": (
+                "Read-back of the portgroup's VLAN config BEFORE the change (the "
+                "four-eyes reviewer's before-state), normalised; ``null`` on a refusal or "
+                "when the current spec could not be parsed (inherited / PVLAN)."
+            ),
+        },
+        "after": {
+            "type": ["object", "null"],
+            "description": (
+                "Read-back of the VLAN config AFTER the change, normalised; equals "
+                "``before`` on ``'unchanged'``; ``null`` on a refusal / timeout."
+            ),
+        },
+        "task": {
+            "type": ["string", "null"],
+            "description": "The ReconfigureDVPortgroup_Task moid (present once the write fired).",
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": "Next-step hint on a non-``set`` status; ``null`` on success.",
+        },
+    },
+    "required": ["status", "portgroup"],
 }
 
 

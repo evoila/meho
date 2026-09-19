@@ -9,6 +9,22 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.35.7](https://github.com/evoila/meho/releases/tag/v0.35.7) — 2026-09-19
+
+- **Change the VLAN of a distributed portgroup that already exists.** MEHO could
+  set a portgroup's VLAN only when it was created; the new
+  `vmware.composite.network.portgroup.vlan.set` reconfigures the VLAN of an
+  existing distributed portgroup — for example to add the native/untagged VLAN 0
+  to a trunk that was created without it — on the governed, approval-gated write
+  path, replacing the current VLAN config and returning `unchanged` (no write)
+  when the VLAN already matches.
+- **A grown NFS datastore's free space becomes visible without SSH.** ESXi caches
+  a datastore's capacity and free space from mount time, so after an NFS export
+  grows a deploy precheck could still fail on stale "not enough free space"
+  numbers. The new `vmware.composite.datastore.refresh` asks the host to re-probe
+  the volume and reads the fresh summary back — a first-class governed operation
+  in place of dropping to SSH or govc.
+
 ## [v0.35.5](https://github.com/evoila/meho/releases/tag/v0.35.5) — 2026-09-17
 
 - **A standalone ESXi host that went quiet is recovered automatically.** After

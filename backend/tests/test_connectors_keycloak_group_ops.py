@@ -560,3 +560,139 @@ async def test_group_member_add_preview_shows_action_and_targets() -> None:
     assert preview["action"] == "add"
     assert preview["group_id"] == _GROUP_UUID
     assert preview["username"] == "operator-a"
+
+
+# ---------------------------------------------------------------------------
+# update_attributes park-time preview — before→after delta (B1)
+# ---------------------------------------------------------------------------
+
+
+def _update_attrs_ctx(
+    params: dict[str, Any],
+    *,
+    current: dict[str, Any] | None,
+    raises: bool = False,
+) -> PreviewContext:
+    """Build an update_attributes preview ctx with a connector that returns
+    *current* attributes from the group GET (or raises, for the fail-soft test).
+
+    ``current=None`` leaves ``connector_instance=None`` so the builder cannot
+    read the before-state (the unit-context degrade path).
+    """
+    connector: Any = None
+    if current is not None or raises:
+        connector = KeycloakConnector(credentials_loader=_stub_loader)
+
+        async def _fake_get_admin_json(
+            _target: Any, _path: str, *, operator: Any
+        ) -> dict[str, Any]:
+            if raises:
+                raise RuntimeError("keycloak unreachable")
+            return {"id": _GROUP_UUID, "name": "role-tenant", "attributes": current or {}}
+
+        connector._get_admin_json = _fake_get_admin_json  # type: ignore[method-assign]
+    return PreviewContext(
+        descriptor=_FakeDescriptor(op_id="keycloak.group.update_attributes"),  # type: ignore[arg-type]
+        connector_instance=connector,
+        operator=_OPERATOR,
+        target=_FakeTarget(extras={"managed_realm": _REALM}),
+        params=params,
+        connector_id="keycloak-1.x",
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_attributes_preview_merge_shows_before_and_added_no_removed() -> None:
+    """A merge surfaces the current keys + added key, and removes nothing."""
+    ctx = _update_attrs_ctx(
+        {"id": _GROUP_UUID, "attributes": {"tenant_role": ["admin"]}},
+        current={"tenant_id": ["t-1"], "keep": ["x"]},
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    preview = effect["preview"]
+    assert preview["current_attributes_available"] is True
+    assert preview["current_attribute_keys"] == ["keep", "tenant_id"]
+    assert preview["added_keys"] == ["tenant_role"]
+    assert preview["removed_keys"] == []  # a merge never drops a key
+    assert preview["resulting_attribute_keys"] == ["keep", "tenant_id", "tenant_role"]
+    assert "warning" not in preview
+
+
+@pytest.mark.asyncio
+async def test_update_attributes_preview_replace_surfaces_removed_tenant_claim_keys() -> None:
+    """The headline B1 case: a replace dropping tenant_id/tenant_role is loud."""
+    ctx = _update_attrs_ctx(
+        {"id": _GROUP_UUID, "attributes": {"other": ["y"]}, "replace": True},
+        current={"tenant_id": ["t-1"], "tenant_role": ["admin"]},
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    preview = effect["preview"]
+    assert preview["replace"] is True
+    assert preview["current_attributes_available"] is True
+    assert preview["removed_keys"] == ["tenant_id", "tenant_role"]
+    assert preview["added_keys"] == ["other"]
+    assert preview["resulting_attribute_keys"] == ["other"]
+    # An explicit warning names the dropped tenant-claim keys.
+    assert "warning" in preview
+    assert "tenant_id" in preview["warning"] and "tenant_role" in preview["warning"]
+
+
+@pytest.mark.asyncio
+async def test_update_attributes_preview_detects_changed_value() -> None:
+    """A key present before and after with a different value is a changed_key."""
+    ctx = _update_attrs_ctx(
+        {"id": _GROUP_UUID, "attributes": {"tenant_id": ["t-2"]}},
+        current={"tenant_id": ["t-1"]},
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    preview = effect["preview"]
+    assert preview["changed_keys"] == ["tenant_id"]
+    assert preview["added_keys"] == []
+    assert preview["removed_keys"] == []
+
+
+@pytest.mark.asyncio
+async def test_update_attributes_preview_scrubs_current_password_attribute() -> None:
+    """A stray password-keyed CURRENT attribute is scrubbed in the durable row."""
+    ctx = _update_attrs_ctx(
+        {"id": _GROUP_UUID, "attributes": {"tenant_id": ["t-2"]}},
+        current={"password": ["leak-me"], "tenant_id": ["t-1"]},
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    preview = effect["preview"]
+    assert preview["current_attributes"]["password"] == "***REDACTED***"
+    assert "leak-me" not in json.dumps(effect)
+
+
+@pytest.mark.asyncio
+async def test_update_attributes_preview_failsoft_when_current_unreadable() -> None:
+    """A fetch fault degrades to the incoming-only view — never blocks the park."""
+    ctx = _update_attrs_ctx(
+        {"id": _GROUP_UUID, "attributes": {"tenant_id": ["t-2"]}, "replace": True},
+        current=None,
+        raises=True,
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    preview = effect["preview"]
+    # Degraded: the before-state could not be read, but the preview still
+    # carries the incoming payload and marks the delta unavailable.
+    assert preview["current_attributes_available"] is False
+    assert preview["attribute_keys"] == ["tenant_id"]
+    assert "removed_keys" not in preview
+
+
+@pytest.mark.asyncio
+async def test_update_attributes_preview_no_connector_degrades() -> None:
+    """With no connector instance (unit context) the preview still returns."""
+    ctx = _update_attrs_ctx(
+        {"id": _GROUP_UUID, "attributes": {"tenant_id": ["t-2"]}},
+        current=None,
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    assert effect["preview"]["current_attributes_available"] is False

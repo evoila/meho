@@ -70,9 +70,15 @@ generic echo; the bespoke builder simply gives a cleaner resource view.
 Fail-soft
 =========
 
-Every builder is pure (no connector I/O) — it reads only ``ctx.params`` and
-echoes a scrubbed view — so it cannot fault on a network call. Should a
-malformed param shape raise anyway,
+Most builders here are pure (no connector I/O) — they read only
+``ctx.params`` and echo a scrubbed view, so they cannot fault on a network
+call. The one exception is ``_group_update_attributes_preview`` (#3280),
+which fetches the group's **current** attributes so the approver can see the
+before→after delta (a tenant-claim write must show what it removes). That
+fetch is the seam's sanctioned before/after builder I/O (the same shape
+``k8s.apply``'s dry-run uses) and is itself fail-soft: it catches every fault
+and degrades to the incoming-only view (``current_attributes_available:
+false``) rather than dropping the preview. Should any builder raise anyway,
 :func:`~meho_backplane.operations._preview.build_proposed_effect` swallows
 it into the explicit ``preview_unavailable`` marker (#1628) rather than
 blocking the park, matching the existing builder contract.
@@ -85,14 +91,17 @@ References
 * Builder seam: G11.7 #1437; generic params-echo default: #1856.
 * Keycloak read-op secret scrub (reused here): G3.13-T2 #1394.
 * Keycloak write ops: G3.13-T4 #1406.
+* Keycloak group-lifecycle write ops + the update_attributes before/after
+  preview: https://github.com/evoila/meho/issues/3280.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from meho_backplane.connectors.keycloak._paths import _GROUP_PATH, fill_path
 from meho_backplane.connectors.keycloak.redaction import redact_secret_fields
-from meho_backplane.connectors.keycloak.session import resolve_realm_config
+from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
 from meho_backplane.operations._preview import (
     PreviewContext,
     register_preview_builder,
@@ -244,23 +253,151 @@ async def _group_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     }
 
 
-async def _group_update_attributes_preview(ctx: PreviewContext) -> dict[str, Any] | None:
-    """Preview ``keycloak.group.update_attributes`` — target + merge/replace + keys.
+def _norm_attrs(raw: Any) -> dict[str, list[str]]:
+    """Coerce an attribute map to Keycloak's ``{key: [values]}`` shape for a diff.
 
-    Surfaces the group identity (``id`` and/or ``name``), the realm, whether
-    the change replaces or merges (``replace``), and the attribute keys being
-    applied. The attribute values are echoed scrubbed (same discipline as
-    ``group.create``).
+    Mirrors ``ops_write_groups._normalise_attributes`` (a plain string is
+    wrapped into a single-element list) so the before/after value comparison
+    in :func:`_group_update_attributes_preview` compares like for like.
     """
-    return {
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, list[str]] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str):
+            continue
+        if isinstance(value, list):
+            out[key] = [str(item) for item in value]
+        elif value is None:
+            out[key] = []
+        else:
+            out[key] = [str(value)]
+    return out
+
+
+async def _fetch_current_group_attributes(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Read the group's **current** attributes for the before/after preview.
+
+    Fail-soft, sanctioned builder I/O (the seam's before/after-spec contract,
+    the same shape ``k8s.apply``'s dry-run uses): resolves the group by ``id``
+    or by ``name`` (+ optional ``parent_id``) and GETs its representation via
+    the connector's admin-auth helper. Returns the current ``attributes`` map
+    (``{}`` when the group has none), or ``None`` when the current state
+    cannot be read — no connector instance / target (unit-context preview),
+    an unresolvable name, or any transport fault. A ``None`` degrades the
+    preview to the incoming-only view rather than blocking the park.
+    """
+    connector = ctx.connector_instance
+    target = ctx.target
+    if connector is None or target is None:
+        return None
+    # Lazy import: the operations package must not import a specific connector
+    # at module load, and this only runs at park time (all modules loaded).
+    from meho_backplane.connectors.keycloak.connector import KeycloakConnector
+
+    if not isinstance(connector, KeycloakConnector):
+        return None
+    try:
+        realm = resolve_realm_config(target).managed_realm
+        group_id = _opt_str(ctx.params.get("id"))
+        if group_id is None:
+            name = _opt_str(ctx.params.get("name"))
+            if name is None:
+                return None
+            parent_id = _opt_str(ctx.params.get("parent_id"))
+            row = await connector._find_group(target, realm, name, parent_id, operator=ctx.operator)
+            resolved = row.get("id") if isinstance(row, dict) else None
+            if not isinstance(resolved, str) or not resolved:
+                return None
+            group_id = resolved
+        current = await connector._get_admin_json(
+            target,
+            fill_path(_GROUP_PATH, {"realm": realm, "group-id": quote_segment(group_id)}),
+            operator=ctx.operator,
+        )
+    except Exception:
+        # Any resolution / transport fault degrades to the incoming-only view;
+        # the seam's own guard still covers a raise, but degrading here keeps
+        # the (safe, incoming) preview rather than dropping it wholesale.
+        return None
+    attrs = current.get("attributes") if isinstance(current, dict) else None
+    return attrs if isinstance(attrs, dict) else {}
+
+
+async def _group_update_attributes_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``keycloak.group.update_attributes`` — the before→after delta.
+
+    A group-attribute write is a **tenant-claim write** (F07: ``tenant_id`` /
+    ``tenant_role`` group attributes drive the membership-derived claims), so
+    the approver must see not just the incoming payload but what it *removes*
+    — a ``replace`` that drops ``tenant_id`` / ``tenant_role`` denies every
+    member their claims. This builder fetches the group's **current**
+    attributes (fail-soft, sanctioned builder I/O) and surfaces the delta:
+
+    * ``current_attribute_keys`` — keys on the group now (before).
+    * ``added_keys`` / ``removed_keys`` / ``changed_keys`` — the delta. A
+      merge never removes a key (``removed_keys`` is empty); a ``replace``
+      removes every current key absent from the payload.
+    * ``warning`` — an explicit line, present only when ``replace=true`` drops
+      keys, naming them (so a dropped ``tenant_id`` / ``tenant_role`` is
+      loud, not silent).
+
+    The diff is surfaced **keys-only** (``*_keys`` lists): the security signal
+    for a tenant-claim write is the *presence/absence* of a key — a member
+    fails closed the instant ``tenant_id`` disappears — and keys keep the
+    durable approval row bounded. The actual (non-secret) values remain
+    visible as scrubbed key→value maps: ``current_attributes`` (before) and
+    ``attributes`` (the incoming payload / after values), both through
+    ``redact_secret_fields`` so a stray ``password``-keyed attribute is
+    ``***REDACTED***``. When the current state cannot be read,
+    ``current_attributes_available`` is ``false`` and the preview degrades to
+    the incoming-only view.
+    """
+    replace = bool(ctx.params.get("replace", False))
+    incoming = _norm_attrs(ctx.params.get("attributes"))
+    preview: dict[str, Any] = {
         "resource": "group_attributes",
         "id": _opt_str(ctx.params.get("id")),
         "name": _opt_str(ctx.params.get("name")),
         "realm": _managed_realm(ctx),
-        "replace": bool(ctx.params.get("replace", False)),
+        "replace": replace,
         "attribute_keys": _attribute_keys(ctx),
         "attributes": redact_secret_fields(ctx.params.get("attributes") or {}),
     }
+
+    current = await _fetch_current_group_attributes(ctx)
+    if current is None:
+        preview["current_attributes_available"] = False
+        return preview
+
+    current_norm = _norm_attrs(current)
+    current_keys = set(current_norm)
+    incoming_keys = set(incoming)
+    added_keys = incoming_keys - current_keys
+    changed_keys = {k for k in incoming_keys & current_keys if current_norm[k] != incoming[k]}
+    if replace:
+        removed_keys = current_keys - incoming_keys
+        resulting_keys = incoming_keys
+    else:
+        # A merge only adds/overwrites — a current key never disappears.
+        removed_keys = set()
+        resulting_keys = current_keys | incoming_keys
+
+    preview["current_attributes_available"] = True
+    preview["current_attributes"] = redact_secret_fields(current)
+    preview["current_attribute_keys"] = sorted(current_keys)
+    preview["resulting_attribute_keys"] = sorted(resulting_keys)
+    preview["added_keys"] = sorted(added_keys)
+    preview["removed_keys"] = sorted(removed_keys)
+    preview["changed_keys"] = sorted(changed_keys)
+    if replace and removed_keys:
+        preview["warning"] = (
+            "replace=true will REMOVE these existing attribute keys not in the "
+            f"payload: {', '.join(sorted(removed_keys))}. If this includes "
+            "tenant_id / tenant_role, the group's members lose the "
+            "membership-derived tenant claims (F07)."
+        )
+    return preview
 
 
 def _group_membership_preview(action: str) -> Any:

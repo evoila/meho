@@ -90,6 +90,13 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.35.7] - 2026-09-19
+
+### Added
+
+- `vmware.composite.network.portgroup.vlan.set`: governed VLAN reconfigure of an **existing** distributed portgroup — the sibling write to `network.portgroup.create`, which set the VLAN only at create time — so an operator can add the native/untagged VLAN 0 to a trunk (or change a portgroup's access/trunk VLAN) without recreating it. Reads the current config, builds a `DVPortgroupConfigSpec` with the new `defaultPortConfig.vlan`, dispatches `ReconfigureDVPortgroup_Task` through the governed vmomi write seam (`dangerous` / `requires_approval`, `networking` group), and reads the VLAN back. The spec **replaces** the current VLAN config (no merge — pass the full desired range list); a request that already matches the current VLAN returns `status="unchanged"` with no write, and both/neither VLAN mode or `replace=false` returns `status="invalid_vlan_spec"` before any read/write. (#3787)
+- `vmware.composite.datastore.refresh`: governed re-probe of a datastore's cached capacity/free-space (`RefreshDatastore`, and `RefreshDatastoreStorageInfo` when `storage_info=true`, via the VI-JSON / standalone-ESXi SOAP seam), reading the fresh `Datastore.summary` back, so a grown NFS export becomes visible without SSH/govc. A `safe`, idempotent read; on a standalone ESXi target the moid is the `<server>:/<export>` NAS identifier, on vCenter a `datastore-NNN` moref. (#3789 / #3790, refs #3534)
+
 ## [0.35.6] - 2026-09-18
 
 ### Fixed

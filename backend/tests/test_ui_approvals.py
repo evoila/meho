@@ -21,7 +21,9 @@ Acceptance criteria on issue #1778:
   self-approve (403) unless ``APPROVAL_ALLOW_SELF_APPROVAL``; Deny stays
   allowed.
 * Tenant isolation: the bell + modal only surface the session tenant's
-  requests; a cross-tenant id is a 404.
+  requests; a cross-tenant id is a 404 on the read surfaces **and** on the
+  approve/reject decision POST, so an operator can only see and decide
+  requests in the tenant its session token carries.
 * No write goes to the Bearer ``/api/v1/approvals/*`` from the browser --
   the surface POSTs to the ``/ui/approvals`` BFF, which calls the service
   in-process.
@@ -760,6 +762,54 @@ def test_reject_through_bff_decides_without_redispatch() -> None:
     assert response.headers.get("HX-Trigger") == "meho:approval-decided"
     assert _request_status(rid) == ApprovalRequestStatus.REJECTED.value
     # A rejection never re-dispatches the parked op.
+    resume_mock.assert_not_awaited()
+
+
+def test_decide_cross_tenant_id_is_404_and_leaves_the_row_pending() -> None:
+    """A decision POST for another tenant's request is 404 and never decides it.
+
+    The read surfaces already 404 a cross-tenant id -- the bell count, the
+    panel, and the detail modal never render another tenant's request
+    (``test_badge_excludes_decided_and_cross_tenant`` /
+    ``test_panel_hides_cross_tenant_requests`` /
+    ``test_detail_modal_unknown_id_is_404``). This pins the **write** side:
+    a forged approve/reject POST for a request owned by another tenant --
+    bypassing the modal the operator could never open -- is refused 404 by
+    the same ``_load_for_tenant`` guard the service applies on
+    ``operator.tenant_id``, and the target row stays ``pending`` in its
+    owning tenant. This is the write side of the console's single-tenant
+    binding: an operator can only decide requests in the tenant its session
+    token carries, so opening the console under one tenant can never surface
+    or decide another tenant's approvals.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_tenant(_TENANT_B, "tenant-b")
+    # Pending request owned by tenant B; the tenant-A operator must not decide it.
+    rid = _seed_request(tenant_id=_TENANT_B, principal_sub=_REQUESTER_SUB)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+    resume_mock = AsyncMock(return_value=_dispatch_result())
+
+    for action in ("approve", "reject"):
+        with respx.mock(assert_all_called=False):
+            client = _authenticated_client(session_id)
+            client.cookies.set(CSRF_COOKIE_NAME, csrf)
+            with (
+                patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+                patch(_RESUME_DISPATCH, resume_mock),
+            ):
+                response = client.post(
+                    f"/ui/approvals/{rid}/{action}",
+                    data={"reason": "forged cross-tenant decision"},
+                    headers={CSRF_HEADER_NAME: csrf},
+                )
+
+        assert response.status_code == 404, (action, response.text)
+
+    # The request is untouched: still pending, in its owning tenant.
+    assert _request_status(rid) == ApprovalRequestStatus.PENDING.value
+    # No cross-tenant approve ever re-dispatched the parked op.
     resume_mock.assert_not_awaited()
 
 

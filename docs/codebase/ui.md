@@ -492,6 +492,23 @@ loads tenant slug + name in the same transaction as the session row
 Cross-tenant switching is a future Initiative — today the chip is a
 read-only label, not a selector.
 
+The chip is the visible face of a hard invariant: a console session is
+bound to exactly the tenant in its token's `tenant_id` claim, and every
+tenant-scoped surface filters on `session_ctx.tenant_id` — there is no
+query-param, referer, or instance-default tenant override anywhere in
+`/ui/*`. That includes the approvals view: both the reads (bell count,
+panel, history, detail modal) and the approve/reject **decision** POST
+scope on the session tenant, so a cross-tenant request id is a 404 on
+every one of them (`_load_for_tenant` in
+[`operations/approval_queue.py`](../../backend/src/meho_backplane/operations/approval_queue.py)
+maps a foreign id to `ApprovalNotFoundError` → 404, indistinguishable
+from a missing row). An operator who signs in under one tenant therefore
+cannot see or decide another tenant's approvals, and the header chip
+always names the one tenant the page renders. `test_ui_approvals.py`
+pins this end to end (read surfaces plus
+`test_decide_cross_tenant_id_is_404_and_leaves_the_row_pending` for the
+decision path).
+
 The cascade symptoms the v0.7.0 dogfood flagged (`/ui/memory` showing
 0 rows, `/ui/broadcast` empty despite live MCP activity) turned out
 to be unrelated to the chip: the Memory and Broadcast routes already

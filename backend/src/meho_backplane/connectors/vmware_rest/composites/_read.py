@@ -128,6 +128,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors.vmware_rest.typed_ops import _int_or_none
 from meho_backplane.connectors.vmware_rest.vim_body import (
     retrieve_properties_body,
     unwrap_vim_value,
@@ -140,6 +141,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "cluster_drs_recommendations_composite",
+    "datastore_refresh_composite",
     "datastore_usage_composite",
     "event_tail_composite",
     "network_portgroup_audit_composite",
@@ -168,6 +170,15 @@ _OP_POST_QUERY_AVAILABLE_PERF_METRIC = "POST:/PerformanceManager/{moId}/QueryAva
 _OP_POST_QUERY_PERF = "POST:/PerformanceManager/{moId}/QueryPerf"
 _OP_LIST_DATASTORES = "GET:/vcenter/datastore"
 _OP_GET_DATASTORE = "GET:/vcenter/datastore/{datastore}"
+# vim (VI-JSON) datastore cache-refresh methods (#3789). Both take only the
+# Datastore MoRef (moid rides the path) and return 204/void; the pinned
+# vi-json.yaml serves them as System.Read-privilege ops (a read-side refresh,
+# not a config write). The ingested REST binding for RefreshDatastore is routed
+# under ``/api`` and 400s on a standalone ESXi target (the #3534 class), so the
+# composite dispatches them through the VI-JSON / ESXi-SOAP seam like every
+# other vmomi read leg here.
+_OP_POST_REFRESH_DATASTORE = "POST:/Datastore/{moId}/RefreshDatastore"
+_OP_POST_REFRESH_DATASTORE_STORAGE_INFO = "POST:/Datastore/{moId}/RefreshDatastoreStorageInfo"
 _OP_LIST_VMS = "GET:/vcenter/vm"
 # There is NO distributed-switch list resource in the pinned REST spec at
 # all: the plural ``distributed-switches`` path #1602 repointed to exists
@@ -213,6 +224,13 @@ _PROP_DRS_RECOMMENDATION = "drsRecommendation"
 _VIRTUAL_MACHINE_MO_TYPE = "VirtualMachine"
 _PROP_VM_DATASTORE = "datastore"
 
+# vim constants for the datastore-refresh read-back. ``Datastore.summary`` is a
+# ``DatastoreSummary`` DataObject (name / url / capacity / freeSpace /
+# accessible / type / ...); the composite reads it back through the same
+# bounded PropertyCollector read after invoking RefreshDatastore.
+_DATASTORE_MO_TYPE = "Datastore"
+_PROP_DATASTORE_SUMMARY = "summary"
+
 # Per-composite sub-op-id tuples. Each tuple lists the raw-REST /
 # vi-json sub-ops the composite issues directly on the connector
 # session. Pre-#2253 these fed the L2 pre-flight check that guarded a
@@ -243,6 +261,11 @@ _SUB_OPS_DATASTORE_USAGE: tuple[str, ...] = (
 _SUB_OPS_NETWORK_PORTGROUP_AUDIT: tuple[str, ...] = (
     _OP_LIST_NETWORK,
     _OP_LIST_VMS,
+)
+_SUB_OPS_DATASTORE_REFRESH: tuple[str, ...] = (
+    _OP_POST_REFRESH_DATASTORE,
+    _OP_POST_REFRESH_DATASTORE_STORAGE_INFO,
+    _OP_RETRIEVE_PROPERTIES,
 )
 
 
@@ -502,6 +525,110 @@ async def event_tail_composite(
         "count": len(capped),
         "moId": mo_id,
         "max_events_applied": max_events,
+    }
+
+
+def _normalise_datastore_summary(summary: Any) -> dict[str, Any]:
+    """Project a raw ``DatastoreSummary`` DataObject to the composite's summary row.
+
+    *summary* is the unwrapped ``Datastore.summary`` value (a
+    ``DatastoreSummary`` dict, or ``{}`` when the read returned nothing).
+    ``capacity`` / ``freeSpace`` are ``xsd:long`` -- a JSON number on the
+    VI-JSON arm, a bare numeric string on the ESXi SOAP arm (soap rule 8) --
+    so both funnel through :func:`_int_or_none`; ``accessible`` is coerced to
+    a strict ``bool`` (``None`` when absent / non-bool). Absent string fields
+    map to ``None`` so the shape is stable regardless of transport.
+    """
+    ds = summary if isinstance(summary, dict) else {}
+    accessible = ds.get("accessible")
+    name = ds.get("name")
+    ds_type = ds.get("type")
+    url = ds.get("url")
+    return {
+        "name": name if isinstance(name, str) else None,
+        "capacity": _int_or_none(ds.get("capacity")),
+        "free_space": _int_or_none(ds.get("freeSpace")),
+        "accessible": accessible if isinstance(accessible, bool) else None,
+        "type": ds_type if isinstance(ds_type, str) else None,
+        "url": url if isinstance(url, str) else None,
+    }
+
+
+async def datastore_refresh_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any]:
+    """Refresh a datastore's cached capacity/free-space, then read the summary back.
+
+    Op-id: ``vmware.composite.datastore.refresh``.
+
+    ESXi caches an NFS datastore's capacity/freeSpace from mount time; after
+    the export grows, ``Datastore.summary`` keeps the stale numbers until the
+    host is told to re-probe. This composite issues that re-probe through the
+    vim ``Datastore.RefreshDatastore`` method (and, when ``storage_info=true``,
+    the deeper ``RefreshDatastoreStorageInfo``) and returns the freshly-read
+    ``Datastore.summary`` -- so a downstream deploy pre-check sees the grown
+    capacity without any SSH / govc. Read-side only: both methods are
+    ``System.Read``-privilege in the pinned spec and change no configuration.
+
+    Sub-ops read directly on the connector session, in order:
+
+    1. ``POST:/Datastore/{moId}/RefreshDatastore`` -- the base cache refresh
+       (void / 204). Load-bearing: a transport failure (e.g. a missing
+       datastore's ``NotFound`` vim fault, HTTP 500) propagates so the
+       dispatcher records it as ``connector_error``.
+    2. ``POST:/Datastore/{moId}/RefreshDatastoreStorageInfo`` -- only when
+       ``storage_info=true`` (void / 204).
+    3. ``POST:/PropertyCollector/{moId}/RetrievePropertiesEx`` -- reads the
+       refreshed ``Datastore.summary`` back (bounded single-object read, the
+       same seam ``datastore.usage`` and ``object.collect`` use).
+
+    Every POST leg routes through
+    :meth:`~...connector.VmwareRestConnector._post_vmomi_json`, which serves
+    VI-JSON on a vCenter target and hand-rolled SOAP on a standalone ESXi
+    target (where ``Datastore.summary`` -- and the moid, a ``server:/export``
+    NAS identifier -- ride the ``<_this type="Datastore">`` self-reference).
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{"datastore": <moid>, "refreshed": True, "storage_info_refreshed":
+        <bool>, "summary": {name, capacity, free_space, accessible, type,
+        url}}``. ``capacity`` / ``free_space`` are bytes; a summary field is
+        ``null`` only when the ``DatastoreSummary`` omitted it.
+    """
+    moid = params["datastore"]
+    storage_info = bool(params.get("storage_info", False))
+
+    await _read_sub_op(
+        connector, target, operator, _OP_POST_REFRESH_DATASTORE, path_params={"moId": moid}
+    )
+    if storage_info:
+        await _read_sub_op(
+            connector,
+            target,
+            operator,
+            _OP_POST_REFRESH_DATASTORE_STORAGE_INFO,
+            path_params={"moId": moid},
+        )
+
+    retrieve = await _read_sub_op(
+        connector,
+        target,
+        operator,
+        _OP_RETRIEVE_PROPERTIES,
+        path_params={"moId": _PROPERTY_COLLECTOR_MOID},
+        body=retrieve_properties_body(_DATASTORE_MO_TYPE, [moid], [_PROP_DATASTORE_SUMMARY]),
+    )
+    props = _extract_props_by_moid(retrieve).get(moid, {})
+    return {
+        "datastore": moid,
+        "refreshed": True,
+        "storage_info_refreshed": storage_info,
+        "summary": _normalise_datastore_summary(props.get(_PROP_DATASTORE_SUMMARY)),
     }
 
 

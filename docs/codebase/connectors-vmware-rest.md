@@ -380,9 +380,10 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `vcenter.yaml` by `test_connectors_vmware_rest_library_reconcile.py`.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 54
-  `_CompositeSpec` rows (14 read + 34 dangerous/destructive writes + 6
-  caution writes); each row carries its
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 55
+  `_CompositeSpec` rows (15 read — incl. the `#3789` datastore
+  cache-refresh read `datastore.refresh` — + 34 dangerous/destructive
+  writes + 6 caution writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. The derived registration-coverage guard uses explicit, closed exceptions only for write operations whose existing semantics intentionally omit a preview or governed-suboperation discovery entry; every other registry id must be represented. `test_reference_docs_drift.py` remains the single total-set drift gate for generated `docs-site/reference/connectors.md`; regenerate it with `cd backend && uv run python scripts/generate_reference_docs.py` when the registry changes. Idempotent on re-run via the body-hash skip path.
 - **Typed ops** (`typed_ops.py`, `#2257`) — the first vmware
@@ -684,8 +685,8 @@ literal into their `RetrievePropertiesEx` path; `_post_soap` substitutes the
 ServiceContent-provided PC moid **only** when the caller's moid equals that
 literal (a guarded substitution — any other PC moid is left untouched).
 
-*vim method map (all on `POST /sdk`, SOAP 1.1, `urn:vim25`).* Eight methods
-total — three session/bootstrap + five op methods, each with a builder +
+*vim method map (all on `POST /sdk`, SOAP 1.1, `urn:vim25`).* Ten methods
+total — three session/bootstrap + seven op methods, each with a builder +
 parser in `soap.py`; `_post_vmomi_json`'s esxi guard routes the op methods
 through `_post_soap`, whose parsers return the same VI-JSON dict shapes the
 unchanged consumers read:
@@ -699,6 +700,7 @@ unchanged consumers read:
 | storage_devices (best-effort) | `HostBootDeviceSystem.QueryBootDevices` | boot-device-system moid | `HostBootDeviceInfo` |
 | datastore_mount_nfs | `HostDatastoreSystem.CreateNasDatastore` | `configManager.datastoreSystem` moid | Datastore MoRef (synchronous) |
 | disk_mark_flash | `HostStorageSystem.MarkAsSsd_Task` / `MarkAsNonSsd_Task` | `configManager.storageSystem` moid | Task MoRef → poll `Task.info` |
+| datastore.refresh (`#3789`) | `Datastore.RefreshDatastore` / `RefreshDatastoreStorageInfo` | Datastore moid (`server:/export` on ESXi) | void (204 / empty) → summary read back via `RetrievePropertiesEx` |
 
 *Native primitive typing (the codec crux).* An **explicit** `xsi:type` is
 authoritative (`xsd:boolean` → `bool`, integer → `int`, float → `float`, any
@@ -2096,6 +2098,43 @@ refuse any populated-but-identical anomaly. The non-empty condition
 excludes the legitimate all-empty case (every datastore really has zero
 VMs), and the guard needs at least two enriched rows to compare, so a
 single-datastore result is never touched.
+
+### Datastore cache refresh (`datastore.refresh`, #3789)
+
+`vmware.composite.datastore.refresh` is a read composite (safety
+`safe` / no approval) that re-probes one datastore's cached
+capacity/free-space. ESXi caches an NFS datastore's `capacity`/`freeSpace`
+from mount time, so after the export grows `Datastore.summary` keeps the
+stale numbers until the host is told to re-probe — a vCenter deploy
+precheck then wrongly fails on "free space less than the minimum" though
+the export has hundreds of free GB. The ingested REST binding
+`POST:/Datastore/{moId}/RefreshDatastore` is routed under `/api` and 400s
+on a standalone ESXi target (the `#3534` class), and there was no typed
+composite, so operators dropped to SSH/`govc`. This composite closes that
+gap through the governed backplane.
+
+Layout — three vim (VI-JSON / ESXi-SOAP) legs on the connector session,
+all load-bearing:
+
+1. `POST:/Datastore/{moId}/RefreshDatastore` — the base free-space +
+   capacity refresh (void / 204).
+2. `POST:/Datastore/{moId}/RefreshDatastoreStorageInfo` — only when
+   `storage_info=true` (the deeper refresh incl. per-VM usage; void / 204).
+3. `POST:/PropertyCollector/{moId}/RetrievePropertiesEx` — reads the
+   refreshed `Datastore.summary` back (bounded single-object read, the same
+   seam `datastore.usage` / `object.collect` use), projected to
+   `{name, capacity, free_space, accessible, type, url}`.
+
+Both refresh methods are **`System.Read`-privilege** in the pinned
+`vi-json.yaml` and change no configuration — hence `safe`, not
+`caution`/`dangerous`, and it dispatches through the un-gated `_read_sub_op`
+seam like every other read composite (no `enforce_subop_policy` gate, no
+governed-subop grant, no proposed-effect preview). The moid is a
+`datastore-NNN` moref on vCenter and the `<server>:/<export>` NAS
+identifier on a standalone ESXi host, where `_post_vmomi_json`'s esxi guard
+carries it in the `<_this type="Datastore">` self-reference over SOAP. The
+two POST legs are reconciled against `vi-json.yaml` by
+`test_connectors_vmware_rest_composites_read_reconcile.py`.
 
 ### Per-entity capacity sensing (`filter_names`, #2758)
 

@@ -113,6 +113,8 @@ def test_read_sub_op_constants_are_the_reconciled_keys() -> None:
         "GET:/vcenter/vm",
     }
     assert vim == {
+        "POST:/Datastore/{moId}/RefreshDatastore",
+        "POST:/Datastore/{moId}/RefreshDatastoreStorageInfo",
         "POST:/EventManager/{moId}/QueryEvents",
         "POST:/PerformanceManager/{moId}/QueryAvailablePerfMetric",
         "POST:/PerformanceManager/{moId}/QueryPerf",

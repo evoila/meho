@@ -65,6 +65,8 @@ __all__ = [
     "CLUSTER_DRS_VM_HOST_RULE_CREATE_RESPONSE_SCHEMA",
     "CLUSTER_PATCH_PARAMETER_SCHEMA",
     "CLUSTER_PATCH_RESPONSE_SCHEMA",
+    "DATASTORE_REFRESH_PARAMETER_SCHEMA",
+    "DATASTORE_REFRESH_RESPONSE_SCHEMA",
     "DATASTORE_USAGE_MAX_VM_NAMES",
     "DATASTORE_USAGE_PARAMETER_SCHEMA",
     "DATASTORE_USAGE_RESPONSE_SCHEMA",
@@ -278,6 +280,111 @@ PERFORMANCE_SUMMARY_PARAMETER_SCHEMA: dict[str, Any] = {
 #: threshold, the whole ``{"datastores": [row]}`` collapses to a sampled
 #: envelope, and the assertion loses its selector (#2758). 20 leaves a
 #: single row well under 4096 bytes even at maximum VM-name length.
+#: ``vmware.composite.datastore.refresh`` parameter schema.
+#:
+#: Re-probes one datastore's backing volume and reads its refreshed
+#: ``Datastore.summary`` back. The vim ``Datastore.RefreshDatastore`` (and
+#: the deeper ``RefreshDatastoreStorageInfo``) take only the Datastore
+#: MoRef, so the only required param is the datastore moid; on a
+#: standalone ESXi host that moid is the ``server:/export`` NAS
+#: identifier, on vCenter it is a ``datastore-NNN`` moref.
+DATASTORE_REFRESH_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "datastore": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": (
+                "Managed-object ID of the datastore to refresh. On vCenter "
+                "this is a ``datastore-NNN`` moref (from datastore.usage / "
+                "list_targets); on a standalone ESXi host it is the NAS "
+                "identifier ``<server>:/<export>`` (e.g. "
+                "``nfs.example:/exports/vol``). The vim RefreshDatastore "
+                "method is invoked on this object directly."
+            ),
+        },
+        "storage_info": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "When true, also call the deeper "
+                "``Datastore.RefreshDatastoreStorageInfo`` (refreshes all "
+                "storage information incl. per-VM usage) after "
+                "``RefreshDatastore``. Default false runs only the base "
+                "free-space + capacity refresh, which is what a grown NFS "
+                "export needs to become visible."
+            ),
+        },
+    },
+    "required": ["datastore"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.datastore.refresh`` response schema.
+DATASTORE_REFRESH_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "datastore": {
+            "type": "string",
+            "description": "The datastore moid that was refreshed (echoed from params).",
+        },
+        "refreshed": {
+            "type": "boolean",
+            "description": (
+                "Always true when the composite returns normally: the "
+                "``Datastore.RefreshDatastore`` call completed. A failure "
+                "raises rather than returning ``refreshed=false``."
+            ),
+        },
+        "storage_info_refreshed": {
+            "type": "boolean",
+            "description": (
+                "True when ``storage_info=true`` was requested and "
+                "``RefreshDatastoreStorageInfo`` also completed; false "
+                "otherwise."
+            ),
+        },
+        "summary": {
+            "type": "object",
+            "description": (
+                "The refreshed ``Datastore.summary``, read back via a bounded "
+                "PropertyCollector read after the refresh. ``capacity`` / "
+                "``free_space`` are bytes; a field is null when the "
+                "``summary`` DataObject omitted it."
+            ),
+            "properties": {
+                "name": {"type": ["string", "null"], "description": "Datastore name."},
+                "capacity": {
+                    "type": ["integer", "null"],
+                    "description": "Total capacity in bytes after the refresh.",
+                },
+                "free_space": {
+                    "type": ["integer", "null"],
+                    "description": "Free space in bytes after the refresh.",
+                },
+                "accessible": {
+                    "type": ["boolean", "null"],
+                    "description": "Whether the datastore is currently accessible.",
+                },
+                "type": {
+                    "type": ["string", "null"],
+                    "description": "Datastore type (e.g. ``NFS``, ``NFS41``, ``VMFS``).",
+                },
+                "url": {
+                    "type": ["string", "null"],
+                    "description": "Datastore URL / mount path.",
+                },
+            },
+            "required": ["name", "capacity", "free_space", "accessible", "type", "url"],
+            "additionalProperties": True,
+        },
+    },
+    "required": ["datastore", "refreshed", "storage_info_refreshed", "summary"],
+}
+
+
 DATASTORE_USAGE_MAX_VM_NAMES = 20
 
 

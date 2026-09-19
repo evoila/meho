@@ -88,6 +88,7 @@ __all__ = [
     "SOAP_CONTENT_TYPE",
     "SoapFault",
     "build_create_nas_datastore_envelope",
+    "build_datastore_refresh_envelope",
     "build_login_envelope",
     "build_logout_envelope",
     "build_mark_ssd_envelope",
@@ -395,6 +396,25 @@ def build_mark_ssd_envelope(
         + f"<scsiDiskUuid>{_xml_escape(scsi_disk_uuid)}</scsiDiskUuid>"
     )
     return _envelope(method, _method(method, body))
+
+
+def build_datastore_refresh_envelope(datastore_moid: str, *, storage_info: bool) -> str:
+    """``Datastore.RefreshDatastore`` (``storage_info=False``) / ``RefreshDatastoreStorageInfo``.
+
+    Both are **synchronous, argument-less** ``Datastore`` methods that
+    re-probe the backing volume and refresh ``Datastore.summary`` /
+    ``Datastore.info`` (free-space + capacity); both return void (204 on
+    the VI-JSON arm / an empty ``{method}Response`` on this SOAP arm), so
+    the only body element is the ``<_this type="Datastore">`` self-
+    reference. On a standalone ESXi host the moid is the ``server:/export``
+    NAS identifier (``:`` and ``/`` are XML-safe, so they ride ``_this``
+    literally); :func:`_xml_escape` still covers any ``&`` / ``<`` / ``>``
+    defence-in-depth. ``storage_info`` selects the deeper
+    ``RefreshDatastoreStorageInfo`` (all storage info incl. per-VM usage)
+    over the base ``RefreshDatastore``.
+    """
+    method = "RefreshDatastoreStorageInfo" if storage_info else "RefreshDatastore"
+    return _envelope(method, _method(method, _this("Datastore", datastore_moid)))
 
 
 # --- Deserialiser core -----------------------------------------------------

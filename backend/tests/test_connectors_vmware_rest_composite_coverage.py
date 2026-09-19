@@ -39,6 +39,7 @@ _CLASSIFIER_OTHER = frozenset(
         "vmware.composite.cluster.drs_recommendations",
         "vmware.composite.event.tail",
         "vmware.composite.datastore.usage",
+        "vmware.composite.datastore.refresh",
         "vmware.composite.network.portgroup.audit",
         "vmware.composite.vm.clone",
         "vmware.composite.vm.deploy_from_library",

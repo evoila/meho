@@ -108,6 +108,7 @@ from meho_backplane.connectors.vmware_rest.composites._namespace import (
 )
 from meho_backplane.connectors.vmware_rest.composites._read import (
     cluster_drs_recommendations_composite,
+    datastore_refresh_composite,
     datastore_usage_composite,
     event_tail_composite,
     network_portgroup_audit_composite,
@@ -175,6 +176,7 @@ __all__ = [
     "content_library_subscribed_status_composite",
     "content_library_subscribed_sync_composite",
     "datastore_mount_nfs_composite",
+    "datastore_refresh_composite",
     "datastore_usage_composite",
     "disk_mark_flash_composite",
     "event_tail_composite",

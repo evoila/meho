@@ -143,6 +143,8 @@ _READ_OP_IDS: tuple[str, ...] = (
     "vmware.composite.event.tail",
     "vmware.composite.performance.summary",
     "vmware.composite.datastore.usage",
+    # Datastore cache refresh read (#3789).
+    "vmware.composite.datastore.refresh",
     "vmware.composite.network.portgroup.audit",
     # Guest-ops channel reads (#3100).
     "vmware.composite.vm.guest.process.list",

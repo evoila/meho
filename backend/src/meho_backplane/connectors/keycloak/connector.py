@@ -102,9 +102,12 @@ from meho_backplane.connectors.adapters.http import HttpConnector, _retryable
 from meho_backplane.connectors.keycloak._paths import (
     _ADMIN_REALM_PATH,
     _CLIENTS_PATH,
+    _GROUP_CHILDREN_PATH,
+    _GROUPS_PATH,
     _ROLE_PATH,
     _SERVERINFO_PATH,
     _TOKEN_PATH,
+    _USER_GROUPS_PATH,
     _USERS_PATH,
     fill_path,
 )
@@ -115,6 +118,7 @@ from meho_backplane.connectors.keycloak.session import (
     KeycloakTargetLike,
     RealmConfig,
     load_admin_credentials_from_vault,
+    quote_segment,
     resolve_realm_config,
 )
 from meho_backplane.connectors.schemas import (
@@ -144,7 +148,7 @@ _DEFAULT_TOKEN_TTL_SECONDS: float = 60.0
 #: inherited ``_IDEMPOTENT_METHODS`` so a write never rides the
 #: idempotent-GET retry decorator (re-firing a side effect on a transient
 #: 5xx is the bug that guard prevents).
-_MUTATING_METHODS: frozenset[str] = frozenset({"POST", "PUT"})
+_MUTATING_METHODS: frozenset[str] = frozenset({"POST", "PUT", "DELETE"})
 
 
 @dataclass(frozen=True)
@@ -669,7 +673,7 @@ class KeycloakConnector(HttpConnector):
         json: dict[str, Any] | None = None,
         idempotent_conflict: bool = True,
     ) -> KeycloakWriteResult:
-        """Issue an admin-auth mutating request (POST/PUT) — never retried.
+        """Issue an admin-auth mutating request (POST/PUT/DELETE) — never retried.
 
         Returns a :class:`KeycloakWriteResult` carrying the HTTP status,
         the ``Location`` header (Keycloak's create endpoints return the
@@ -796,6 +800,68 @@ class KeycloakConnector(HttpConnector):
             raise
         return role if isinstance(role, dict) else None
 
+    async def _find_group(
+        self,
+        target: KeycloakTargetLike,
+        managed_realm: str,
+        name: str,
+        parent_id: str | None,
+        *,
+        operator: Operator,
+    ) -> dict[str, Any] | None:
+        """Resolve a group by ``(parent, name)`` to its brief representation.
+
+        Keycloak addresses groups by an internal UUID, never their name, and
+        group names are unique only **within a level** — so a lookup is
+        scoped to the level: a top-level group (``parent_id is None``) is
+        matched among ``GET .../groups``; a subgroup is matched among the
+        parent's ``GET .../groups/{group-id}/children``. The vendor
+        ``search`` filter is a substring match, so the rows are re-filtered to
+        the **exact** name before returning. Returns the matching
+        GroupRepresentation (carrying ``id`` + ``path``) or ``None`` when no
+        group at that level carries the name — the id-resolution primitive
+        the create / update / membership handlers share.
+        """
+        if parent_id:
+            path = fill_path(
+                _GROUP_CHILDREN_PATH,
+                {"realm": managed_realm, "group-id": quote_segment(parent_id)},
+            )
+        else:
+            path = fill_path(_GROUPS_PATH, {"realm": managed_realm})
+        rows = await self._get_admin_list(target, path, operator=operator, params={"search": name})
+        for row in rows:
+            if isinstance(row, dict) and row.get("name") == name:
+                group_id = row.get("id")
+                if isinstance(group_id, str) and group_id:
+                    return row
+        return None
+
+    async def _user_in_group(
+        self,
+        target: KeycloakTargetLike,
+        managed_realm: str,
+        user_id: str,
+        group_id: str,
+        *,
+        operator: Operator,
+    ) -> bool:
+        """Return whether *user_id* is already a direct member of *group_id*.
+
+        Reads the user's group membership
+        (``GET .../users/{user-id}/groups``) and tests for *group_id*. Backs
+        the idempotency contract of the membership writes: an add whose user
+        is already a member — or a remove whose user is not — is reported
+        ``unchanged`` rather than re-issuing the mutation. Keycloak returns
+        the membership in its default first page (100 groups); a user in more
+        groups than that is an unrealistic edge for role-group membership.
+        """
+        path = fill_path(
+            _USER_GROUPS_PATH, {"realm": managed_realm, "user-id": quote_segment(user_id)}
+        )
+        rows = await self._get_admin_list(target, path, operator=operator)
+        return any(isinstance(row, dict) and row.get("id") == group_id for row in rows)
+
     # -- typed-op handler shims (G3.13-T2 #1394) ------------------------
 
     async def realm_get(
@@ -861,6 +927,22 @@ class KeycloakConnector(HttpConnector):
         from meho_backplane.connectors.keycloak.ops_read import keycloak_role_users
 
         return await keycloak_role_users(self, operator, target, params)
+
+    async def group_list(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for the ``keycloak.group.list`` op (#3280)."""
+        from meho_backplane.connectors.keycloak.ops_read import keycloak_group_list
+
+        return await keycloak_group_list(self, operator, target, params)
+
+    async def group_member_list(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for the ``keycloak.group.member.list`` op (#3280)."""
+        from meho_backplane.connectors.keycloak.ops_read import keycloak_group_member_list
+
+        return await keycloak_group_member_list(self, operator, target, params)
 
     # -- typed-op write handler shims (G3.13-T4 #1406) ------------------
 
@@ -935,6 +1017,40 @@ class KeycloakConnector(HttpConnector):
         from meho_backplane.connectors.keycloak.ops_write import keycloak_role_mapping_assign
 
         return await keycloak_role_mapping_assign(self, operator, target, params)
+
+    async def group_create(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.group.create`` (#3280)."""
+        from meho_backplane.connectors.keycloak.ops_write_groups import keycloak_group_create
+
+        return await keycloak_group_create(self, operator, target, params)
+
+    async def group_update_attributes(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.group.update_attributes`` (#3280)."""
+        from meho_backplane.connectors.keycloak.ops_write_groups import (
+            keycloak_group_update_attributes,
+        )
+
+        return await keycloak_group_update_attributes(self, operator, target, params)
+
+    async def group_member_add(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.group.member.add`` (#3280)."""
+        from meho_backplane.connectors.keycloak.ops_write_groups import keycloak_group_member_add
+
+        return await keycloak_group_member_add(self, operator, target, params)
+
+    async def group_member_remove(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.group.member.remove`` (#3280)."""
+        from meho_backplane.connectors.keycloak.ops_write_groups import keycloak_group_member_remove
+
+        return await keycloak_group_member_remove(self, operator, target, params)
 
     # -- typed-op registrar (G3.13-T2 #1394 fills the read-op walk) ------
 

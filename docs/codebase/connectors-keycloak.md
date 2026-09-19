@@ -16,6 +16,12 @@ creates + updates + reset-password) that retire the consumer's five
 Keycloak bootstrap scripts; `idp.create` is deferred (not exercised by
 those scripts). #2843 extends the read surface to **eight** by adding the
 `role` group (`role.list` + `role.users`) for realm-role access review.
+#3280 adds the **group-lifecycle surface**: two reads (`group.list` +
+`group.member.list`, taking the read surface to **ten**) and four
+approval-gated writes (`group.create` with attributes, `group.update_attributes`,
+`group.member.add`, `group.member.remove`, taking the write surface to
+**thirteen**) so a tenant's role groups — the backplane's tenant-claim
+primitive — can be bootstrapped governed.
 
 Registry v2 triple: `(product="keycloak", version="26.x",
 impl_id="keycloak-admin")`, plus the `(keycloak, "", "")` wildcard so a
@@ -28,14 +34,23 @@ fresh target with no asserted version still resolves.
   TTL-driven refresh and an injectable admin-credential loader. Exposes a
   thin bound-method shim per read op (`realm_get`, `client_list`,
   `client_get`, `client_scope_list`, `user_list`, `role_mapping_get`,
-  `role_list`, `role_users`) and
+  `role_list`, `role_users`, `group_list`, `group_member_list`) and
   per write op (`realm_create`/`realm_update`, `client_create`/
   `client_update`, `client_scope_create`, `protocol_mapper_create`,
-  `user_create`/`user_reset_password`, `role_mapping_assign`), the
-  `_get_admin_json` / `_get_admin_list` GET helpers (object vs array
-  responses), and the `_write_admin` mutating helper plus the
-  `_find_client_uuid` / `_find_user_uuid` / `_find_realm_role` name→UUID
-  resolvers.
+  `user_create`/`user_reset_password`, `role_mapping_assign`,
+  `group_create`, `group_update_attributes`, `group_member_add`,
+  `group_member_remove`), the `_get_admin_json` / `_get_admin_list` GET
+  helpers (object vs array responses), and the `_write_admin` mutating
+  helper (POST/PUT/**DELETE**) plus the `_find_client_uuid` /
+  `_find_user_uuid` / `_find_realm_role` / `_find_group` / `_user_in_group`
+  name→UUID + membership resolvers.
+- `GROUP_WRITE_OPS` + the group write handlers
+  (`connectors/keycloak/ops_write_groups.py`, metadata table in
+  `ops_write_groups_schemas.py`) — the four approval-gated group-lifecycle
+  ops (#3280). `group.create` treats HTTP 409 as an idempotent
+  `already_exists`; the membership ops pre-read `_user_in_group` for an
+  idempotent `unchanged` result. `KeycloakGroupNotFoundError` is raised
+  when a group name/UUID resolves to nothing.
 - `KeycloakOp` + `READ_OPS` (`connectors/keycloak/ops_read.py`) — the
   op-metadata dataclass and the eight-op read registration table (the bind9 /
   pfSense `ops`-table precedent). `WHEN_TO_USE_BY_GROUP` maps each op
@@ -156,10 +171,17 @@ rejects a whitespace-only secret rather than setting an empty password.
 - `_find_client_uuid` / `_find_user_uuid` / `_find_realm_role` — the
   name→UUID (and role-name→representation) resolvers the write handlers
   call before keying a mutation on the object's UUID.
+- `_find_group(target, realm, name, parent_id, *, operator)` — resolves a
+  group by `(parent, name)` to its brief representation (id + path), scoped
+  to the level (top-level vs a parent's children); backs `group.create`'s
+  409 id-resolution and the group write ops' name resolution.
+- `_user_in_group(target, realm, user_id, group_id, *, operator)` — reads
+  the user's group membership so the membership writes report an idempotent
+  `unchanged` result without re-issuing the mutation.
 
-## Read ops (G3.13-T2, extended by #2843)
+## Read ops (G3.13-T2, extended by #2843 + #3280)
 
-Eight `safety_level="safe"` / `requires_approval=False` read ops, all
+Ten `safety_level="safe"` / `requires_approval=False` read ops, all
 tagged `read-only`, all dispatching via the admin-auth path. The realm is
 the target's `managed_realm` (no per-op realm param):
 
@@ -173,6 +195,15 @@ the target's `managed_realm` (no per-op realm param):
 | `keycloak.role_mapping.get` | `GET .../users/{id}/role-mappings` | realm + client role mappings |
 | `keycloak.role.list` | `GET .../roles` | `{rows, total}` — realm role catalogue |
 | `keycloak.role.users` | `GET .../roles/{role-name}/users` | `{rows, total}`, no credentials — role members |
+| `keycloak.group.list` | `GET .../groups` (or `.../groups/{group-id}/children`) | `{rows, total}` — `brief=false` includes attributes |
+| `keycloak.group.member.list` | `GET .../groups/{group-id}/members` | `{rows, total}`, no credentials — group members |
+
+`keycloak.group.list` lists top-level groups, or a parent's children when
+`parent_id` is set. Keycloak's default group projection is **brief** and
+omits `attributes` — pass `brief=false` to include the `tenant_id` /
+`tenant_role` a role group carries (what an identity-bootstrap flow reads
+back to verify a group is attributed correctly). `group.member.list` keys
+on the group's internal UUID.
 
 `client.get` / `role_mapping.get` take the **internal UUID** (`id`), not
 the human `clientId` / `username` — discover it via the matching `.list`
@@ -202,10 +233,10 @@ synchronous `OperationResult` the caller receives.
 The write surface redacts secret *inputs* at the classification layer per
 the general posture (see "Write ops" below).
 
-## Write ops (G3.13-T4)
+## Write ops (G3.13-T4, extended by #3280)
 
-Nine approval-gated write ops (`requires_approval=True`), all dispatching
-via the admin-auth path, all keyed on the object's **UUID**:
+Thirteen approval-gated write ops (`requires_approval=True`), all
+dispatching via the admin-auth path, all keyed on the object's **UUID**:
 
 | op_id | safety | Admin REST API |
 |---|---|---|
@@ -218,8 +249,32 @@ via the admin-auth path, all keyed on the object's **UUID**:
 | `keycloak.user.create` | caution | `POST .../realms/{realm}/users` |
 | `keycloak.user.reset_password` | caution | `PUT .../users/{id}/reset-password` |
 | `keycloak.role_mapping.assign` | dangerous | `POST .../users/{id}/role-mappings/realm` |
+| `keycloak.group.create` | dangerous | `POST .../groups` (or `.../groups/{group-id}/children`) |
+| `keycloak.group.update_attributes` | dangerous | `PUT .../groups/{group-id}` |
+| `keycloak.group.member.add` | dangerous | `PUT .../users/{user-id}/groups/{groupId}` |
+| `keycloak.group.member.remove` | dangerous | `DELETE .../users/{user-id}/groups/{groupId}` |
 
-Three load-bearing properties:
+The group-lifecycle writes (#3280) are all `dangerous`: group attributes
++ membership drive the backplane's tenant claims (`tenant_id` /
+`tenant_role`), so creating an attributed role group and assigning
+membership is a tenant-access grant — the same blast-radius class as
+`role_mapping.assign`. `group.create` accepts an `attributes` map in
+Keycloak's `{key: [values]}` shape (a plain string is wrapped into a
+single-element list) and is idempotent by `(parent, name)` (a 409 returns
+`already_exists=True` with the existing id). `group.update_attributes`
+merges (default) or replaces (`replace=true`) attributes to fix a
+mis-attributed group without recreating it. The membership ops resolve a
+group by `group_id`/`group_name` and a user by `user_id`/`username`, and
+are idempotent (an existing member add / non-member remove returns
+`unchanged=True`). Note the membership sub-resource path uses Keycloak's
+camelCase `{groupId}` placeholder while the groups resource uses the
+hyphenated `{group-id}` — both byte-for-byte the pinned spec's names. The
+group writes classify as plain `write` on the broadcast feed (attributes
+are not secret material — see the flight-recorder classifier pin in
+`broadcast/events.py::_WRITE_OPS`).
+
+Three load-bearing properties (of the original nine; the group ops layer
+their own idempotency above):
 
 - **Name→UUID resolution.** `client.update` / `protocol_mapper.create`
   resolve `client_id` → UUID via `?clientId=`; `user.reset_password` /
@@ -243,7 +298,7 @@ Three load-bearing properties:
 
 ### Park-time approval preview (#1857)
 
-Three of the write ops register bespoke `proposed_effect` preview builders
+Seven of the write ops register bespoke `proposed_effect` preview builders
 in `connectors/keycloak/ops_write_preview.py`, wired onto the per-op hook
 (`operations/_preview.py`, #1437) by an import side-effect in the package
 `__init__`. They give the approval reviewer a resource-centric view at park
@@ -255,6 +310,14 @@ use:
 | `keycloak.realm.create` | `{resource, realm, representation}` |
 | `keycloak.user.create` | `{resource, username, realm, representation[, password_source, password_secret_ref]}` |
 | `keycloak.role_mapping.assign` | `{resource, username, id, realm, granted_roles}` |
+| `keycloak.group.create` | `{resource, name, parent_id, realm, attribute_keys, attributes}` |
+| `keycloak.group.update_attributes` | `{resource, id, name, realm, replace, attribute_keys, attributes}` |
+| `keycloak.group.member.add` / `.member.remove` | `{resource, action, user_id, username, group_id, group_name, realm}` |
+
+The group builders surface `attribute_keys` (which attributes change,
+e.g. `tenant_id` / `tenant_role`) and echo the attribute map scrubbed —
+attributes are not secrets, but a stray `password`-keyed attribute is
+redacted for defence in depth.
 
 `keycloak.user.create` classifies as `credential_write`, so the *generic*
 params-echo default (#1856) is suppressed for it — but a bespoke builder is
@@ -279,11 +342,14 @@ lives as a `_*_PATH` template constant in
 `backend/src/meho_backplane/connectors/keycloak/_paths.py` (hoisted out of
 inline f-strings by #2988); handlers fill a template via `fill_path`, whose
 placeholder names are byte-for-byte the pinned spec's own parameter names
-(`{realm}`, `{client-uuid}`, `{user-id}`, `{role-name}`). The lane
+(`{realm}`, `{client-uuid}`, `{user-id}`, `{role-name}`, `{group-id}` — and
+the camelCase `{groupId}` on the user-group membership sub-resource, a
+Keycloak spec quirk). The lane
 [`backend/tests/test_connectors_keycloak_spec_reconcile.py`](../../backend/tests/test_connectors_keycloak_spec_reconcile.py)
 (the #2980 harness; parse-only, runs in the required unit sweep, uniform
 skip when the shelf is unconfigured) introspects those live constants and
-asserts all 18 reconciled `METHOD:/path` op_ids are served by the pinned
+asserts all 29 reconciled `METHOD:/path` op_ids (19 at #2988, +10 group
+paths at #3280) are served by the pinned
 `keycloak-26.3` shelf spec (`keycloak-admin-openapi.json` — the vendor's
 Admin REST API OpenAPI at the lab's deployed 26.3.3, from Maven Central
 `org.keycloak:keycloak-api-docs-dist:26.3.3`, Apache-2.0). Two dispatched
@@ -328,8 +394,9 @@ Resolved through `resolve_realm_config`, which tolerates a missing
 - `keycloak.idp.create` (identity-provider federation) is deferred — not
   exercised by the bootstrap scripts (#1406). A future task can add it
   under the same registrar walk.
-- The write ops do **not** ship deletes — the bootstrap scripts only
-  create/update; a delete surface (client/user/scope removal) is a
+- The write ops ship no **object** deletes — no client/user/scope/group
+  removal. `keycloak.group.member.remove` is the one DELETE (it removes a
+  group *membership*, not the group), added by #3280; object deletion is a
   separate follow-up if an operator workflow needs it.
 - No logout-revoke on `aclose` — admin access tokens are short-lived;
   revoke-on-close is deferred (same posture as NSX / vRLI).
@@ -339,6 +406,7 @@ Resolved through `resolve_realm_config`, which tolerates a missing
 ## References
 
 - Issue: https://github.com/evoila/meho/issues/1393
+- Group-lifecycle write ops: https://github.com/evoila/meho/issues/3280
 - Credential whitespace strip + token error_description: https://github.com/evoila/meho/issues/1474
 - Parent initiative: https://github.com/evoila/meho/issues/1388
 - Keycloak token endpoint + client_credentials grant:

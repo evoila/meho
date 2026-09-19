@@ -122,6 +122,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newProtocolMapperCmd())
 	cmd.AddCommand(newUserCmd())
 	cmd.AddCommand(newRoleMappingCmd())
+	cmd.AddCommand(newGroupCmd())
 	return cmd
 }
 

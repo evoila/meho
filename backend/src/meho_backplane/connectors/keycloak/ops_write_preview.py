@@ -209,16 +209,99 @@ async def _role_mapping_assign_preview(ctx: PreviewContext) -> dict[str, Any] | 
     }
 
 
+def _attribute_keys(ctx: PreviewContext) -> list[str]:
+    """Sorted attribute keys the group write will set (never the values).
+
+    Reads ``ctx.params['attributes']`` (a ``Map<String, List<String>>``) and
+    surfaces only its **keys** so the reviewer sees *which* attributes change
+    (e.g. ``tenant_id`` / ``tenant_role``) without the durable row carrying a
+    value. A non-dict / absent map yields ``[]``.
+    """
+    attributes = ctx.params.get("attributes")
+    if not isinstance(attributes, dict):
+        return []
+    return sorted(str(key) for key in attributes)
+
+
+async def _group_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``keycloak.group.create`` — group name + parent + attribute keys.
+
+    Hoists the group name, the parent (if nested), and the target realm so
+    the reviewer reads "creating group ``role-tenant-2`` in realm ``meho``".
+    The full attribute map is echoed through
+    :func:`~meho_backplane.connectors.keycloak.redaction.redact_secret_fields`
+    (attributes are not secrets, but a stray ``password``-keyed attribute is
+    scrubbed for defence in depth), plus a keys-only ``attribute_keys`` list
+    for a quick read of which attributes are set.
+    """
+    return {
+        "resource": "group",
+        "name": _opt_str(ctx.params.get("name")),
+        "parent_id": _opt_str(ctx.params.get("parent_id")),
+        "realm": _managed_realm(ctx),
+        "attribute_keys": _attribute_keys(ctx),
+        "attributes": redact_secret_fields(ctx.params.get("attributes") or {}),
+    }
+
+
+async def _group_update_attributes_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``keycloak.group.update_attributes`` — target + merge/replace + keys.
+
+    Surfaces the group identity (``id`` and/or ``name``), the realm, whether
+    the change replaces or merges (``replace``), and the attribute keys being
+    applied. The attribute values are echoed scrubbed (same discipline as
+    ``group.create``).
+    """
+    return {
+        "resource": "group_attributes",
+        "id": _opt_str(ctx.params.get("id")),
+        "name": _opt_str(ctx.params.get("name")),
+        "realm": _managed_realm(ctx),
+        "replace": bool(ctx.params.get("replace", False)),
+        "attribute_keys": _attribute_keys(ctx),
+        "attributes": redact_secret_fields(ctx.params.get("attributes") or {}),
+    }
+
+
+def _group_membership_preview(action: str) -> Any:
+    """Build a membership preview builder for the add/remove op (shared shape).
+
+    A membership mutation's blast radius is *which user* joins/leaves *which
+    group* — a tenant-access change. The builder hoists the user identity
+    (``user_id`` and/or ``username``) and the group identity (``group_id``
+    and/or ``group_name``) plus the realm. No secret material is present.
+    """
+
+    async def _builder(ctx: PreviewContext) -> dict[str, Any] | None:
+        return {
+            "resource": "group_membership",
+            "action": action,
+            "user_id": _opt_str(ctx.params.get("user_id")),
+            "username": _opt_str(ctx.params.get("username")),
+            "group_id": _opt_str(ctx.params.get("group_id")),
+            "group_name": _opt_str(ctx.params.get("group_name")),
+            "realm": _managed_realm(ctx),
+        }
+
+    return _builder
+
+
 def _register_keycloak_preview_builders() -> None:
     """Wire the Keycloak park-time preview builders. Called at import time.
 
-    Only the three ops whose resource identity a reviewer most needs at
-    park time register a bespoke builder; the remaining write ops fall
-    through to the generic params-echo default (#1856).
+    The ops whose resource identity a reviewer most needs at park time
+    register a bespoke builder; the remaining write ops fall through to the
+    generic params-echo default (#1856). The group writes (#3280) each get a
+    resource-centric builder that hoists the group / user identity and the
+    attribute keys (values scrubbed).
     """
     register_preview_builder("keycloak.realm.create", _realm_create_preview)
     register_preview_builder("keycloak.user.create", _user_create_preview)
     register_preview_builder("keycloak.role_mapping.assign", _role_mapping_assign_preview)
+    register_preview_builder("keycloak.group.create", _group_create_preview)
+    register_preview_builder("keycloak.group.update_attributes", _group_update_attributes_preview)
+    register_preview_builder("keycloak.group.member.add", _group_membership_preview("add"))
+    register_preview_builder("keycloak.group.member.remove", _group_membership_preview("remove"))
 
 
 _register_keycloak_preview_builders()

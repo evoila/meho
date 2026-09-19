@@ -87,6 +87,8 @@ EXPECTED_OP_IDS: tuple[str, ...] = (
     "keycloak.role_mapping.get",
     "keycloak.role.list",
     "keycloak.role.users",
+    "keycloak.group.list",
+    "keycloak.group.member.list",
 )
 
 
@@ -287,10 +289,10 @@ async def keycloak_e2e() -> AsyncIterator[KeycloakConnector]:
 
 
 def test_keycloak_read_ops_registration_set() -> None:
-    """READ_OPS carries exactly the 8 curated read ops and no write op."""
+    """READ_OPS carries exactly the 10 curated read ops and no write op."""
     op_ids = {op.op_id for op in READ_OPS}
     assert op_ids == set(EXPECTED_OP_IDS)
-    assert len(READ_OPS) == 8
+    assert len(READ_OPS) == 10
 
 
 def test_keycloak_read_ops_all_safe_no_approval_read_only_tag() -> None:

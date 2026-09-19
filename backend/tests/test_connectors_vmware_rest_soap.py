@@ -37,6 +37,7 @@ from meho_backplane.connectors.vmware_rest.soap import (
     _coerce_leaf,
     _soap_val_to_json,
     build_create_nas_datastore_envelope,
+    build_datastore_refresh_envelope,
     build_login_envelope,
     build_logout_envelope,
     build_mark_ssd_envelope,
@@ -498,6 +499,47 @@ def test_build_mark_ssd_envelope_escapes_disk_uuid() -> None:
     assert "uuid&<danger>" not in envelope
     disk = next(c for c in fromstring(envelope)[0][0] if _local(c.tag) == "scsiDiskUuid")
     assert disk.text == "uuid&<danger>"
+
+
+def test_build_datastore_refresh_envelope_toggles_method() -> None:
+    """RefreshDatastore: storage_info=False -> RefreshDatastore, True -> ...StorageInfo.
+
+    Both are argument-less Datastore methods, so the only body element is the
+    ``<_this type="Datastore">`` self-reference (no extra args).
+    """
+    base_root = fromstring(build_datastore_refresh_envelope("datastore-42", storage_info=False))
+    deep_root = fromstring(build_datastore_refresh_envelope("datastore-42", storage_info=True))
+    base_method = base_root[0][0]
+    deep_method = deep_root[0][0]
+    assert _local(base_method.tag) == "RefreshDatastore"
+    assert _local(deep_method.tag) == "RefreshDatastoreStorageInfo"
+    this = next(c for c in base_method if _local(c.tag) == "_this")
+    assert this.get("type") == "Datastore"
+    assert this.text == "datastore-42"
+    # Argument-less: _this is the sole child element.
+    assert [_local(c.tag) for c in base_method] == ["_this"]
+    assert [_local(c.tag) for c in deep_method] == ["_this"]
+
+
+def test_build_datastore_refresh_envelope_esxi_nas_moid_rides_this_raw() -> None:
+    """RefreshDatastore: a standalone-ESXi ``server:/export`` moid rides _this literally.
+
+    ``:`` and ``/`` are XML-safe, so the NAS identifier appears verbatim in the
+    ``<_this type="Datastore">`` text (the ESXi SOAP arm the correction pins).
+    """
+    envelope = build_datastore_refresh_envelope("nfs.example:/exports/vol", storage_info=False)
+    this = next(c for c in fromstring(envelope)[0][0] if _local(c.tag) == "_this")
+    assert this.get("type") == "Datastore"
+    assert this.text == "nfs.example:/exports/vol"
+
+
+def test_build_datastore_refresh_envelope_escapes_moid() -> None:
+    """RefreshDatastore: a moid with XML metacharacters is escaped (defence-in-depth)."""
+    envelope = build_datastore_refresh_envelope("nas&<danger>:/exp", storage_info=False)
+    assert "&amp;" in envelope
+    assert "nas&<danger>" not in envelope
+    this = next(c for c in fromstring(envelope)[0][0] if _local(c.tag) == "_this")
+    assert this.text == "nas&<danger>:/exp"
 
 
 # ---------------------------------------------------------------------------

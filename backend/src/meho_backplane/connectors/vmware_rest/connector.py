@@ -143,6 +143,7 @@ from meho_backplane.connectors.vmware_rest.soap import (
     SOAP_CONTENT_TYPE,
     SoapFault,
     build_create_nas_datastore_envelope,
+    build_datastore_refresh_envelope,
     build_login_envelope,
     build_logout_envelope,
     build_mark_ssd_envelope,
@@ -1707,10 +1708,14 @@ class VmwareRestConnector(HttpConnector):
             return build_mark_ssd_envelope(
                 moid, str(body.get("scsiDiskUuid", "")), ssd=(method == "MarkAsSsd_Task")
             )
+        if method in ("RefreshDatastore", "RefreshDatastoreStorageInfo"):
+            return build_datastore_refresh_envelope(
+                moid, storage_info=(method == "RefreshDatastoreStorageInfo")
+            )
         raise RuntimeError(
             f"vmware vim method {method!r} has no SOAP builder — the standalone-ESXi "
             f"SOAP transport (#3363) implements RetrievePropertiesEx / QueryBootDevices "
-            f"/ CreateNasDatastore / MarkAs*_Task only"
+            f"/ CreateNasDatastore / MarkAs*_Task / RefreshDatastore(StorageInfo) only"
         )
 
     @staticmethod
@@ -1724,11 +1729,17 @@ class VmwareRestConnector(HttpConnector):
         the unchanged consumers (``_extract_host_props``, ``poll_vim_task``,
         the host composites) already read. A MoRef method with no
         ``returnval`` degrades to ``{}`` so the dict return contract holds.
+        ``RefreshDatastore`` / ``RefreshDatastoreStorageInfo`` are void
+        (204 on VI-JSON / an empty ``{method}Response`` here), so they map
+        to ``{}`` — the datastore-refresh composite reads the fresh
+        ``Datastore.summary`` back through a separate ``RetrievePropertiesEx``.
         """
         if method == "RetrievePropertiesEx":
             return parse_retrieve_result(xml)
         if method == "QueryBootDevices":
             return parse_boot_devices(xml)
+        if method in ("RefreshDatastore", "RefreshDatastoreStorageInfo"):
+            return {}
         # CreateNasDatastore / MarkAs*_Task -> a MoRef returnval.
         return parse_moref_result(xml, method) or {}
 

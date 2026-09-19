@@ -6,7 +6,7 @@
 # this change (~1490 lines); splitting the metadata table is out of scope for
 # the #3349 governed-subop wiring.
 
-"""``register_vmware_composite_operations`` -- registrar for the 54 composites.
+"""``register_vmware_composite_operations`` -- registrar for the 55 composites.
 
 Module-level async function called from the lifespan-driven
 :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
@@ -26,11 +26,12 @@ the source_kind="composite" persistence.
 Mixed safety posture
 --------------------
 
-The 14 read composites (the five T5 / #508 reads + the 4 guest-ops reads
+The 15 read composites (the five T5 / #508 reads + the datastore
+cache-refresh read ``datastore.refresh`` / #3789 + the 4 guest-ops reads
 ``vm.guest.process.list`` / ``vm.guest.env.read`` / ``vm.guest.net.show``
 / ``vm.guest.file.read`` / #3100 + the Supervisor / namespace /
 storage-policy / content-library ``status`` + ``list`` reads) are
-read-only. 13 of them pass ``safety_level="safe"`` +
+read-only. 14 of them pass ``safety_level="safe"`` +
 ``requires_approval=False`` -- overrides of T4's ``dangerous`` / ``True``
 defaults. The exception is ``vm.guest.file.read``, promoted to
 ``caution`` in #3720 (it can fetch arbitrary guest bytes as the in-guest
@@ -106,6 +107,7 @@ from meho_backplane.connectors.vmware_rest.composites._namespace import (
 )
 from meho_backplane.connectors.vmware_rest.composites._read import (
     cluster_drs_recommendations_composite,
+    datastore_refresh_composite,
     datastore_usage_composite,
     event_tail_composite,
     network_portgroup_audit_composite,
@@ -168,6 +170,8 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     CONTENT_LIBRARY_SUBSCRIBED_STATUS_RESPONSE_SCHEMA,
     CONTENT_LIBRARY_SUBSCRIBED_SYNC_PARAMETER_SCHEMA,
     CONTENT_LIBRARY_SUBSCRIBED_SYNC_RESPONSE_SCHEMA,
+    DATASTORE_REFRESH_PARAMETER_SCHEMA,
+    DATASTORE_REFRESH_RESPONSE_SCHEMA,
     DATASTORE_USAGE_PARAMETER_SCHEMA,
     DATASTORE_USAGE_RESPONSE_SCHEMA,
     EVENT_TAIL_PARAMETER_SCHEMA,
@@ -326,13 +330,18 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "snapshots."
     ),
     "storage": (
-        "Use for datastore usage and VM-to-datastore placement: "
-        "capacity / free space / type per datastore plus the "
-        "vm_count + vm_names enrichment via the placement filter. "
-        "Read-only. The right group for 'where is this VM stored?', "
-        "'which datastores are running low?', or 'how many VMs live "
-        "on this datastore?'. Pair with 'vm' when the question moves "
-        "from 'which datastore?' to acting on a specific VM."
+        "Use for datastore usage, VM-to-datastore placement, and "
+        "datastore cache refresh: capacity / free space / type per "
+        "datastore plus the vm_count + vm_names enrichment via the "
+        "placement filter (datastore.usage), and a read-side refresh of a "
+        "single datastore's cached capacity/free-space via "
+        "Datastore.RefreshDatastore (datastore.refresh) so a grown NFS "
+        "export becomes visible to a host without SSH/govc. Read-only. The "
+        "right group for 'where is this VM stored?', 'which datastores are "
+        "running low?', 'how many VMs live on this datastore?', or 'the "
+        "export grew but the datastore still shows the old free space'. "
+        "Pair with 'vm' when the question moves from 'which datastore?' to "
+        "acting on a specific VM."
     ),
     "networking": (
         "Use for distributed-switch and portgroup work: audit "
@@ -590,6 +599,60 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "read-only", "storage", "datastore"],
         safety_level="safe",
         requires_approval=False,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.datastore.refresh",
+        handler=datastore_refresh_composite,
+        summary="Refresh a datastore's cached capacity/free-space, then read the summary back.",
+        description=(
+            "Re-probes one datastore's backing volume via the vim "
+            "Datastore.RefreshDatastore method (and the deeper "
+            "RefreshDatastoreStorageInfo when storage_info=true), then reads "
+            "the refreshed Datastore.summary back. ESXi caches an NFS "
+            "datastore's capacity/freeSpace from mount time, so after an NFS "
+            "export grows the summary keeps the stale numbers until the host "
+            "re-probes -- a deploy pre-check then wrongly fails on free space. "
+            "This composite forces that re-probe without SSH/govc. Read-side "
+            "only: both methods are System.Read-privilege in the pinned spec "
+            "and change no configuration. The ingested REST binding for "
+            "RefreshDatastore is routed under /api and 400s on a standalone "
+            "ESXi target (the #3534 class), so the op dispatches through the "
+            "VI-JSON (vCenter) / hand-rolled-SOAP (standalone ESXi) vmomi "
+            "seam. On ESXi the datastore moid is the '<server>:/<export>' NAS "
+            "identifier; on vCenter it is a 'datastore-NNN' moref."
+        ),
+        parameter_schema=DATASTORE_REFRESH_PARAMETER_SCHEMA,
+        response_schema=DATASTORE_REFRESH_RESPONSE_SCHEMA,
+        group_key="storage",
+        tags=["composite", "read-only", "storage", "datastore", "vi-json"],
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions={
+            "when_to_use": (
+                "Call after growing an NFS export (or any datastore whose "
+                "backing volume changed size), before deploying VMs, when "
+                "Datastore.summary / a deploy pre-check reports stale free "
+                "space or capacity. Pass the datastore moid; set "
+                "storage_info=true for a deeper refresh that also recomputes "
+                "per-VM usage. Read-only -- it re-probes and reports, it never "
+                "changes datastore configuration."
+            ),
+            "parameter_hints": {
+                "datastore": (
+                    "Datastore moid: 'datastore-NNN' on vCenter (from "
+                    "datastore.usage / list_targets), or '<server>:/<export>' "
+                    "on a standalone ESXi target."
+                ),
+                "storage_info": (
+                    "Optional bool (default false); true also runs RefreshDatastoreStorageInfo."
+                ),
+            },
+            "output_shape": (
+                "{datastore, refreshed: true, storage_info_refreshed: bool, "
+                "summary: {name, capacity, free_space, accessible, type, url}}. "
+                "capacity / free_space are bytes read back AFTER the refresh."
+            ),
+        },
     ),
     _CompositeSpec(
         op_id="vmware.composite.network.portgroup.audit",
@@ -2067,7 +2130,8 @@ async def register_vmware_composite_operations(
     on every lifespan startup; the skip-re-embed branch keeps that
     cheap.
 
-    Scope: 54 composites total -- 14 read (T5 / #508 + the 4 guest-ops
+    Scope: 55 composites total -- 15 read (T5 / #508 + the datastore
+    cache-refresh read datastore.refresh / #3789 + the 4 guest-ops
     reads / #3100 + the supervisor status + the vSphere Namespace status
     (#3502) / storage-policy list / two SUBSCRIBED content-library reads) +
     40 write (T6 / #509 + the

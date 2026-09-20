@@ -22101,6 +22101,11 @@
             "$ref": "#/components/schemas/PermissionVerdict",
             "description": "One of auto-execute | needs-approval | deny."
           },
+          "principal_kind": {
+            "$ref": "#/components/schemas/GrantPrincipalKind",
+            "description": "What principal_sub names (#3795). 'agent' (default): a registered agent principal by its agent:<name> client id (creation rejected if unregistered). 'user-agent': the JWT sub of a human user authenticating with principal_kind=agent through a public client \u2014 the registry check is skipped and the raw sub is accepted.",
+            "default": "agent"
+          },
           "expires_at": {
             "type": "string",
             "format": "date-time",
@@ -22144,6 +22149,11 @@
           "verdict": {
             "$ref": "#/components/schemas/PermissionVerdict",
             "description": "One of auto-execute | needs-approval | deny."
+          },
+          "principal_kind": {
+            "$ref": "#/components/schemas/GrantPrincipalKind",
+            "description": "What principal_sub names (#3795). 'agent' (default): a registered agent principal by its agent:<name> client id (creation rejected if unregistered). 'user-agent': the JWT sub of a human user authenticating with principal_kind=agent through a public client \u2014 the registry check is skipped and the raw sub is accepted.",
+            "default": "agent"
           },
           "expires_at": {
             "type": "string",
@@ -28797,6 +28807,15 @@
         ],
         "title": "GovernedSubopsResponse",
         "description": "Response for ``GET /api/v1/operations/governed-subops`` (#3349)."
+      },
+      "GrantPrincipalKind": {
+        "type": "string",
+        "enum": [
+          "agent",
+          "user-agent"
+        ],
+        "title": "GrantPrincipalKind",
+        "description": "What kind of principal a grant's ``principal_sub`` names (#3795).\n\nSelects the create-time enforceability check applied by\n:meth:`~meho_backplane.agents.grants.AgentGrantService.grant`:\n\n* :attr:`AGENT` (default) \u2014 ``principal_sub`` must name a registered,\n  non-revoked :class:`~meho_backplane.db.models.AgentPrincipal` by its\n  ``keycloak_client_id`` (``agent:<name>``). This is the shipped\n  behaviour; the grant enforces against a registered agent client's\n  token (matched on the token's client identity, #3795).\n* :attr:`USER_AGENT` \u2014 ``principal_sub`` is the JWT ``sub`` of a **human\n  user** who authenticates with ``principal_kind=agent`` through a\n  public client. There is no ``AgentPrincipal`` row for such a sub (its\n  ``azp`` is the public client, not ``agent:<name>``), so the registry\n  check is skipped and the raw sub is accepted. Enforcement matches on\n  the token ``sub`` directly. Deliberately explicit \u2014 the caller opts\n  into keying a grant on a bare sub, which the default rejects to catch\n  typos.\n\nThe field is optional on the create surfaces and defaults to\n:attr:`AGENT`, so every existing caller is unaffected."
       },
       "GroupingResultModel": {
         "properties": {

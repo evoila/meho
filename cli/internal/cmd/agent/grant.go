@@ -250,6 +250,7 @@ func newGrantCreateCmd() *cobra.Command {
 		opPattern         string
 		verdict           string
 		targetScope       string
+		principalKind     string
 		expiresAt         string
 		jsonOut           bool
 		backplaneOverride string
@@ -261,7 +262,12 @@ func newGrantCreateCmd() *cobra.Command {
 			"permission grant. Specify --expires for a time-bounded " +
 			"elevation (ISO 8601 UTC, e.g. 2026-05-25T18:00:00Z). " +
 			"Omit --expires for a permanent grant. " +
-			"--verdict is one of: auto-execute | needs-approval | deny.",
+			"--verdict is one of: auto-execute | needs-approval | deny. " +
+			"--principal-kind is 'agent' (default; --principal must name a " +
+			"registered agent:<name> principal) or 'user-agent' (--principal " +
+			"is the sub of a human user authenticating with " +
+			"principal_kind=agent through a public client — skips the " +
+			"registry check).",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -270,7 +276,7 @@ func newGrantCreateCmd() *cobra.Command {
 				return output.RenderError(cmd.ErrOrStderr(),
 					output.Unexpected("--principal, --op, and --verdict are required"), jsonOut)
 			}
-			body, err := buildGrantCreateBody(principalSub, opPattern, verdict, targetScope, expiresAt)
+			body, err := buildGrantCreateBody(principalSub, opPattern, verdict, targetScope, principalKind, expiresAt)
 			if err != nil {
 				return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(err.Error()), jsonOut)
 			}
@@ -294,6 +300,8 @@ func newGrantCreateCmd() *cobra.Command {
 		"auto-execute | needs-approval | deny (required)")
 	cmd.Flags().StringVar(&targetScope, "target", "",
 		"target UUID or '*' for any target (default: any)")
+	cmd.Flags().StringVar(&principalKind, "principal-kind", "agent",
+		"principal kind: 'agent' (registered agent:<name>) or 'user-agent' (a human user's sub, skips the registry check)")
 	cmd.Flags().StringVar(&expiresAt, "expires", "",
 		"ISO 8601 UTC expiry for a time-bounded elevation, e.g. 2026-05-25T18:00:00Z")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw AgentGrantRead JSON")
@@ -473,14 +481,19 @@ func callGrantRevoke(ctx context.Context, backplaneURL string, grantID uuid.UUID
 // buildGrantCreateBody assembles the generated AgentGrantCreate body
 // for the /grants create endpoint. ExpiresAt is `*time.Time` (omit for
 // a permanent grant); a non-empty --expires must parse as RFC 3339 /
-// ISO 8601.
+// ISO 8601. principalKind must be "agent" (default) or "user-agent".
 func buildGrantCreateBody(
-	principalSub, opPattern, verdict, targetScope, expiresAt string,
+	principalSub, opPattern, verdict, targetScope, principalKind, expiresAt string,
 ) (api.AgentGrantCreate, error) {
+	kind, err := parseGrantPrincipalKind(principalKind)
+	if err != nil {
+		return api.AgentGrantCreate{}, err
+	}
 	body := api.AgentGrantCreate{
-		PrincipalSub: principalSub,
-		OpPattern:    opPattern,
-		Verdict:      api.PermissionVerdict(verdict),
+		PrincipalSub:  principalSub,
+		OpPattern:     opPattern,
+		Verdict:       api.PermissionVerdict(verdict),
+		PrincipalKind: kind,
 	}
 	if targetScope != "" {
 		scope := targetScope
@@ -494,6 +507,22 @@ func buildGrantCreateBody(
 		body.ExpiresAt = &parsed
 	}
 	return body, nil
+}
+
+// parseGrantPrincipalKind validates the --principal-kind flag and returns
+// the generated enum pointer (nil for the empty/default so the field is
+// omitted from the wire body — the server defaults it to "agent").
+func parseGrantPrincipalKind(principalKind string) (*api.GrantPrincipalKind, error) {
+	switch principalKind {
+	case "", string(api.GrantPrincipalKindAgent):
+		return nil, nil
+	case string(api.GrantPrincipalKindUserAgent):
+		k := api.GrantPrincipalKindUserAgent
+		return &k, nil
+	default:
+		return nil, fmt.Errorf(
+			"--principal-kind %q is invalid: use 'agent' (default) or 'user-agent'", principalKind)
+	}
 }
 
 // buildGrantElevateBody assembles the generated AgentElevationCreate

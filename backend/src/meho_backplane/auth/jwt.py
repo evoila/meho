@@ -886,28 +886,55 @@ def _is_client_credentials_token(claims: Any) -> bool:
     return not any(claims.get(name) is not None for name in _INTERACTIVE_SESSION_CLAIMS)
 
 
-def _extract_client_id(claims: Any, settings: Settings) -> str | None:
-    """Recover the OAuth ``clientId`` of a service-account (client-credentials) token.
+def _extract_client_id(
+    claims: Any,
+    settings: Settings,
+    principal_kind: PrincipalKind = PrincipalKind.USER,
+) -> str | None:
+    """Recover the OAuth ``clientId`` of a client-credentials / agent token.
 
-    Keycloak names a client's service-account user
-    ``service-account-<clientId>`` and stamps it on the username claim (the
-    same #3178 marker :func:`_is_service_account_token` keys on). Stripping the
-    configured prefix recovers the ``clientId``, which for a paired add-on
-    equals ``addon_pairing.keycloak_client_id`` — the seam the #3028 add-on
-    parent-linkage matches a dispatch's principal against.
+    Two recovery paths, tried in order:
 
-    Returns ``None`` for any token that is not a prefix-marked service account
-    (interactive users, agent / runner clients whose username lacks the marker,
-    or a realm with the marker disabled by an empty prefix). Reuses the exact
-    settings :func:`_is_service_account_token` uses so the derived value stays
-    consistent with the ``service`` classification.
+    1. **Service-account username marker (#3178).** Keycloak names a
+       client's service-account user ``service-account-<clientId>`` and stamps
+       it on the username claim (the same marker :func:`_is_service_account_token`
+       keys on). Stripping the configured prefix recovers the ``clientId``,
+       which for a paired add-on equals ``addon_pairing.keycloak_client_id`` —
+       the seam the #3028 add-on parent-linkage matches a dispatch's principal
+       against. This path is unchanged, so ``service`` principals keep their
+       exact prior value.
+
+    2. **Standard client-identity claim for agents (#3795).** A registered
+       agent client authenticates via ``client_credentials`` and carries **no**
+       ``preferred_username`` marker (it has no ``profile`` scope), so path 1
+       yields nothing and its ``clientId`` (``agent:<name>``) would otherwise be
+       lost. For ``principal_kind == agent`` only, fall back to the standard
+       ``azp`` (authorized party) / RFC 9068 ``client_id`` claim, which
+       Keycloak populates with the very ``clientId`` an ``agent_permission``
+       grant is keyed on (``AgentPrincipal.keycloak_client_id``). Surfacing it
+       is what lets :func:`~meho_backplane.auth.permissions.resolve_verdict`
+       match a grant to the token whose ``sub`` is the service-account UUID.
+
+    Returns ``None`` for an interactive user, a ``service`` / ``runner`` client
+    whose username lacks the #3178 marker, an agent token carrying neither
+    ``azp`` nor ``client_id``, or a realm with the marker disabled by an empty
+    prefix. The agent fallback is gated on ``principal_kind`` so no ``user`` /
+    ``service`` / ``runner`` token changes its ``client_id`` value.
     """
     prefix = settings.jwt_service_account_username_prefix
-    if not prefix:
-        return None
-    username = claims.get(settings.jwt_service_account_username_claim)
-    if isinstance(username, str) and username.startswith(prefix):
-        return username[len(prefix) :] or None
+    if prefix:
+        username = claims.get(settings.jwt_service_account_username_claim)
+        if isinstance(username, str) and username.startswith(prefix):
+            return username[len(prefix) :] or None
+    # Agent clients (client_credentials, no profile scope) carry the clientId
+    # only in the standard authorized-party / client_id claim, never in the
+    # #3178 username marker (#3795). Gate on the agent kind so service / user /
+    # runner tokens keep their prior ``client_id`` (None or the marker value).
+    if principal_kind is PrincipalKind.AGENT:
+        for claim_name in ("azp", "client_id"):
+            value = claims.get(claim_name)
+            if isinstance(value, str) and value:
+                return value
     return None
 
 
@@ -1322,7 +1349,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
     tenant_id = _extract_tenant_id(claims, settings)
     tenant_role = _extract_tenant_role(claims, settings)
     principal_kind = _extract_principal_kind(claims, settings)
-    client_id = _extract_client_id(claims, settings)
+    client_id = _extract_client_id(claims, settings, principal_kind)
     capabilities = _extract_capabilities(claims, settings)
     scopes = _extract_scopes(claims, settings)
     platform_admin = _extract_platform_admin(claims, settings)

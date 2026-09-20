@@ -90,6 +90,21 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.35.8] - 2026-09-20
+
+### Added
+
+- Governed Keycloak group lifecycle on the `keycloak-admin-26.x` connector: `keycloak.group.list` and `keycloak.group.member.list` (safe reads) plus the approval-gated writes `keycloak.group.create` (with an `attributes` map), `keycloak.group.update_attributes`, `keycloak.group.member.add`, and `keycloak.group.member.remove` (`dangerous` / `requires_approval`). Role groups — the backplane's tenant-claim primitive (`tenant_id` / `tenant_role` group attributes) — can now be bootstrapped end-to-end through the policy / audit / approval path, and the same surface ships as `meho keycloak group ...` CLI verbs. (#3793, closes #3280)
+
+### Fixed
+
+- Agent permission grants now enforce for live agent tokens: the resolver matches a grant's `principal_sub` against the token's `agent:<name>` client identity (the `azp` claim), not only its service-account `sub`, so a `deny` / `auto-execute` / `needs-approval` grant created via `agent grant create` finally applies to a client-credentials agent. `agent grant create` also accepts `--principal-kind user-agent` to grant a human who authenticates as an agent through a public client (keyed on the user sub). Ceilings are unchanged — `deny` beats everything and `destructive` stays non-grantable for agents. (#3796, closes #3795)
+
+### Docs
+
+- Pinned the operator console's single-tenant session-binding invariant on the approvals **decision** path: a regression test proves a forged approve/reject POST for another tenant's request is refused `404` (the target row stays `pending` in its owning tenant and never re-dispatches), and `docs/codebase/ui.md` now documents the invariant. Test + docs only — no behaviour change. (#3794)
+- Backfilled the missing **v0.35.6** section on the public "What's new" page, which the v0.35.6 roll predated. (#3792)
+
 ## [0.35.7] - 2026-09-19
 
 ### Added

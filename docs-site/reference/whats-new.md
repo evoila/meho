@@ -9,6 +9,28 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.35.8](https://github.com/evoila/meho/releases/tag/v0.35.8) — 2026-09-20
+
+- **Bootstrap a tenant's Keycloak role groups through the governed path.** The
+  backplane derives a tenant's claims (`tenant_id` / `tenant_role`) from Keycloak
+  group membership, but the Keycloak connector shipped no group operations — so
+  standing up a tenant's role group and adding its users was the one part of an
+  otherwise-governed identity bootstrap that had to escape to the Admin API,
+  outside policy, audit and approval. MEHO now ships governed `keycloak.group.*`
+  operations: list groups and members (safe reads), and create a group with
+  attributes, update its attributes, and add or remove members (approval-gated
+  writes) — also as `meho keycloak group ...` CLI verbs.
+- **Agent permission grants now actually apply to agent tokens.** A `deny`,
+  `auto-execute` or `needs-approval` grant created with `agent grant create` was
+  keyed on the agent's client identity but enforced only against the token's
+  service-account id, so no agent grant ever took effect. The resolver now also
+  matches the token's `agent:<name>` client identity (its `azp` claim), so — for
+  example — scoping an agent off a whole connector family with a `deny` grant
+  finally works; the new `--principal-kind user-agent` extends the same to a
+  human who signs in as an agent through a public client. Grant ceilings are
+  unchanged (`deny` still beats everything; destructive stays non-grantable for
+  agents).
+
 ## [v0.35.7](https://github.com/evoila/meho/releases/tag/v0.35.7) — 2026-09-19
 
 - **Change the VLAN of a distributed portgroup that already exists.** MEHO could

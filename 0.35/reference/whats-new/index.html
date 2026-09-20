@@ -1661,10 +1661,32 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#v0358-2026-09-20" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.8 — 2026-09-20
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#v0357-2026-09-19" class="md-nav__link">
     <span class="md-ellipsis">
       
         v0.35.7 — 2026-09-19
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0356-2026-09-18" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.6 — 2026-09-18
       
     </span>
   </a>
@@ -2040,10 +2062,32 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#v0358-2026-09-20" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.8 — 2026-09-20
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#v0357-2026-09-19" class="md-nav__link">
     <span class="md-ellipsis">
       
         v0.35.7 — 2026-09-19
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v0356-2026-09-18" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.6 — 2026-09-18
       
     </span>
   </a>
@@ -2270,6 +2314,28 @@ which carries the full detail — every change, and the migration recipe
 for each breaking one.</p>
 <p>MEHO is under active development. Each release below links to its full
 notes.</p>
+<h2 id="v0358-2026-09-20"><a href="https://github.com/evoila/meho/releases/tag/v0.35.8">v0.35.8</a> — 2026-09-20<a class="headerlink" href="#v0358-2026-09-20" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Bootstrap a tenant's Keycloak role groups through the governed path.</strong> The
+  backplane derives a tenant's claims (<code>tenant_id</code> / <code>tenant_role</code>) from Keycloak
+  group membership, but the Keycloak connector shipped no group operations — so
+  standing up a tenant's role group and adding its users was the one part of an
+  otherwise-governed identity bootstrap that had to escape to the Admin API,
+  outside policy, audit and approval. MEHO now ships governed <code>keycloak.group.*</code>
+  operations: list groups and members (safe reads), and create a group with
+  attributes, update its attributes, and add or remove members (approval-gated
+  writes) — also as <code>meho keycloak group ...</code> CLI verbs.</li>
+<li><strong>Agent permission grants now actually apply to agent tokens.</strong> A <code>deny</code>,
+  <code>auto-execute</code> or <code>needs-approval</code> grant created with <code>agent grant create</code> was
+  keyed on the agent's client identity but enforced only against the token's
+  service-account id, so no agent grant ever took effect. The resolver now also
+  matches the token's <code>agent:&lt;name&gt;</code> client identity (its <code>azp</code> claim), so — for
+  example — scoping an agent off a whole connector family with a <code>deny</code> grant
+  finally works; the new <code>--principal-kind user-agent</code> extends the same to a
+  human who signs in as an agent through a public client. Grant ceilings are
+  unchanged (<code>deny</code> still beats everything; destructive stays non-grantable for
+  agents).</li>
+</ul>
 <h2 id="v0357-2026-09-19"><a href="https://github.com/evoila/meho/releases/tag/v0.35.7">v0.35.7</a> — 2026-09-19<a class="headerlink" href="#v0357-2026-09-19" title="Permanent link">&para;</a></h2>
 <ul>
 <li><strong>Change the VLAN of a distributed portgroup that already exists.</strong> MEHO could
@@ -2285,6 +2351,23 @@ notes.</p>
   numbers. The new <code>vmware.composite.datastore.refresh</code> asks the host to re-probe
   the volume and reads the fresh summary back — a first-class governed operation
   in place of dropping to SSH or govc.</li>
+</ul>
+<h2 id="v0356-2026-09-18"><a href="https://github.com/evoila/meho/releases/tag/v0.35.6">v0.35.6</a> — 2026-09-18<a class="headerlink" href="#v0356-2026-09-18" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Re-mounting an NFS datastore that is already there no longer fails.</strong>
+  <code>vmware.composite.host.datastore_mount_nfs</code> is now idempotent: re-running the
+  mount on a host where the export is already mounted converges instead of
+  faulting. Previously a second call with the same parameters surfaced the
+  host's already-exists fault as a connector error, so an automation pack that
+  re-ran the step — a retry after a transient failure on a later host, or an
+  assisted-resume recheck — could never converge once the datastore was
+  mounted. The composite now reads the host's mounted datastores before writing
+  and matches on the export's identity (server and path, normalised for case and
+  a trailing slash): an export that is already mounted returns <code>already_mounted</code>
+  with no write, the requested name held by a different export returns a
+  <code>name_conflict</code> refusal with no write, and an export mounted concurrently
+  between the check and the write is recovered by re-reading. A fresh mount and
+  every other fault are unchanged.</li>
 </ul>
 <h2 id="v0355-2026-09-17"><a href="https://github.com/evoila/meho/releases/tag/v0.35.5">v0.35.5</a> — 2026-09-17<a class="headerlink" href="#v0355-2026-09-17" title="Permanent link">&para;</a></h2>
 <ul>

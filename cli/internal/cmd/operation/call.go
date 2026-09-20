@@ -183,7 +183,7 @@ func runCall(cmd *cobra.Command, opts callOptions) error {
 		w := cmd.OutOrStdout()
 		fmt.Fprintf(w, "%s %s — status=%s (%.0fms)\n",
 			opts.ConnectorID, opts.OpID, result.Status, result.DurationMs)
-		fmt.Fprintf(w, "  %s\n", dispatch.ParkedHint)
+		dispatch.WriteParkedHint(w, result.Extras)
 		return nil // parked, not failed — exit 0.
 	}
 	// Classify status BEFORE rendering. The backend

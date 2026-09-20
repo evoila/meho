@@ -692,6 +692,13 @@ func TestRunCallAwaitingApprovalRealPath(t *testing.T) {
 	if !strings.Contains(out.String(), "parked for human approval") {
 		t.Errorf("expected parked hint on stdout; got %q", out.String())
 	}
+	if strings.Contains(out.String(), "then re-dispatch") {
+		t.Errorf("parked hint must not tell the operator to re-dispatch after approval; got %q", out.String())
+	}
+	if !strings.Contains(out.String(), "ar-op-1") ||
+		!strings.Contains(out.String(), "meho approvals show ar-op-1") {
+		t.Errorf("expected approval id + `meho approvals show` hint on stdout; got %q", out.String())
+	}
 	if strings.Contains(errBuf.String(), "invalid OperationResult") {
 		t.Errorf("awaiting_approval was wrongly rejected as invalid status: %s", errBuf.String())
 	}

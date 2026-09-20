@@ -442,7 +442,10 @@ func TestRenderAwaitingApprovalParkedExitZero(t *testing.T) {
 	var out, errBuf bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errBuf)
-	r := &CallResult{Status: StatusAwaitingApproval, OpID: "argocd.app.sync", DurationMs: 5}
+	r := &CallResult{
+		Status: StatusAwaitingApproval, OpID: "argocd.app.sync", DurationMs: 5,
+		Extras: json.RawMessage(`{"approval_request_id":"ar-render-1"}`),
+	}
 	if err := c.Render(cmd, "argocd.app.sync", r, false, nil); err != nil {
 		t.Fatalf("parked dispatch must return nil (exit 0); got %v", err)
 	}
@@ -451,6 +454,17 @@ func TestRenderAwaitingApprovalParkedExitZero(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), ParkedHint) {
 		t.Errorf("expected parked hint; got %q", out.String())
+	}
+	// The hint must not steer the operator into a post-approval
+	// re-dispatch (double execution): approving executes the op.
+	if strings.Contains(out.String(), "then re-dispatch") {
+		t.Errorf("parked hint must not tell the operator to re-dispatch after approval; got %q", out.String())
+	}
+	// The approval id + inspect hint are surfaced on the human line so
+	// the operator does not have to hunt it via `meho approvals list`.
+	if !strings.Contains(out.String(), "ar-render-1") ||
+		!strings.Contains(out.String(), "meho approvals show ar-render-1") {
+		t.Errorf("expected approval id + `meho approvals show` hint; got %q", out.String())
 	}
 	if strings.Contains(errBuf.String(), "invalid OperationResult") {
 		t.Errorf("park must not be rejected as invalid status; stderr=%q", errBuf.String())

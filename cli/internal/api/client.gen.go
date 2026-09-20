@@ -331,6 +331,12 @@ const (
 	GatewayResultBodyOutcomeSucceeded GatewayResultBodyOutcome = "succeeded"
 )
 
+// Defines values for GrantPrincipalKind.
+const (
+	GrantPrincipalKindAgent     GrantPrincipalKind = "agent"
+	GrantPrincipalKindUserAgent GrantPrincipalKind = "user-agent"
+)
+
 // Defines values for IngestJobHandleStatus.
 const (
 	IngestJobHandleStatusDegraded  IngestJobHandleStatus = "degraded"
@@ -950,6 +956,29 @@ type AgentElevationCreate struct {
 	// OpPattern fnmatch glob matching operation IDs. '*' = all ops.
 	OpPattern string `json:"op_pattern"`
 
+	// PrincipalKind What kind of principal a grant's ``principal_sub`` names (#3795).
+	//
+	// Selects the create-time enforceability check applied by
+	// :meth:`~meho_backplane.agents.grants.AgentGrantService.grant`:
+	//
+	// * :attr:`AGENT` (default) — ``principal_sub`` must name a registered,
+	//   non-revoked :class:`~meho_backplane.db.models.AgentPrincipal` by its
+	//   ``keycloak_client_id`` (``agent:<name>``). This is the shipped
+	//   behaviour; the grant enforces against a registered agent client's
+	//   token (matched on the token's client identity, #3795).
+	// * :attr:`USER_AGENT` — ``principal_sub`` is the JWT ``sub`` of a **human
+	//   user** who authenticates with ``principal_kind=agent`` through a
+	//   public client. There is no ``AgentPrincipal`` row for such a sub (its
+	//   ``azp`` is the public client, not ``agent:<name>``), so the registry
+	//   check is skipped and the raw sub is accepted. Enforcement matches on
+	//   the token ``sub`` directly. Deliberately explicit — the caller opts
+	//   into keying a grant on a bare sub, which the default rejects to catch
+	//   typos.
+	//
+	// The field is optional on the create surfaces and defaults to
+	// :attr:`AGENT`, so every existing caller is unaffected.
+	PrincipalKind *GrantPrincipalKind `json:"principal_kind,omitempty"`
+
 	// PrincipalSub JWT sub of the principal being granted the permission.
 	PrincipalSub string `json:"principal_sub"`
 
@@ -981,6 +1010,29 @@ type AgentGrantCreate struct {
 
 	// OpPattern fnmatch glob matching operation IDs. '*' = all ops.
 	OpPattern string `json:"op_pattern"`
+
+	// PrincipalKind What kind of principal a grant's ``principal_sub`` names (#3795).
+	//
+	// Selects the create-time enforceability check applied by
+	// :meth:`~meho_backplane.agents.grants.AgentGrantService.grant`:
+	//
+	// * :attr:`AGENT` (default) — ``principal_sub`` must name a registered,
+	//   non-revoked :class:`~meho_backplane.db.models.AgentPrincipal` by its
+	//   ``keycloak_client_id`` (``agent:<name>``). This is the shipped
+	//   behaviour; the grant enforces against a registered agent client's
+	//   token (matched on the token's client identity, #3795).
+	// * :attr:`USER_AGENT` — ``principal_sub`` is the JWT ``sub`` of a **human
+	//   user** who authenticates with ``principal_kind=agent`` through a
+	//   public client. There is no ``AgentPrincipal`` row for such a sub (its
+	//   ``azp`` is the public client, not ``agent:<name>``), so the registry
+	//   check is skipped and the raw sub is accepted. Enforcement matches on
+	//   the token ``sub`` directly. Deliberately explicit — the caller opts
+	//   into keying a grant on a bare sub, which the default rejects to catch
+	//   typos.
+	//
+	// The field is optional on the create surfaces and defaults to
+	// :attr:`AGENT`, so every existing caller is unaffected.
+	PrincipalKind *GrantPrincipalKind `json:"principal_kind,omitempty"`
 
 	// PrincipalSub JWT sub of the principal being granted the permission.
 	PrincipalSub string `json:"principal_sub"`
@@ -5037,6 +5089,29 @@ type GovernedSubopsResponse struct {
 	GovernedSubops []GovernedSubop `json:"governed_subops"`
 	OpId           string          `json:"op_id"`
 }
+
+// GrantPrincipalKind What kind of principal a grant's “principal_sub“ names (#3795).
+//
+// Selects the create-time enforceability check applied by
+// :meth:`~meho_backplane.agents.grants.AgentGrantService.grant`:
+//
+//   - :attr:`AGENT` (default) — “principal_sub“ must name a registered,
+//     non-revoked :class:`~meho_backplane.db.models.AgentPrincipal` by its
+//     “keycloak_client_id“ (“agent:<name>“). This is the shipped
+//     behaviour; the grant enforces against a registered agent client's
+//     token (matched on the token's client identity, #3795).
+//   - :attr:`USER_AGENT` — “principal_sub“ is the JWT “sub“ of a **human
+//     user** who authenticates with “principal_kind=agent“ through a
+//     public client. There is no “AgentPrincipal“ row for such a sub (its
+//     “azp“ is the public client, not “agent:<name>“), so the registry
+//     check is skipped and the raw sub is accepted. Enforcement matches on
+//     the token “sub“ directly. Deliberately explicit — the caller opts
+//     into keying a grant on a bare sub, which the default rejects to catch
+//     typos.
+//
+// The field is optional on the create surfaces and defaults to
+// :attr:`AGENT`, so every existing caller is unaffected.
+type GrantPrincipalKind string
 
 // GroupingResultModel Pydantic projection of
 // :class:`~meho_backplane.operations.ingest.llm_groups.GroupingResult`.

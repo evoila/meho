@@ -85,13 +85,31 @@ evaluated — no token will authenticate under that sub with
 create/elevate time (matching `principal_sub` against
 `AgentPrincipal.keycloak_client_id`, tenant-scoped) so an unenforceable row is
 never written; the grant tool/REST/UI surfaces surface this as a validation
-error naming the `principal_kind=agent` enforcement scope.
+error naming the `principal_kind=agent` enforcement scope. The one relaxation
+is `principal_kind=user-agent` (#3795): for a human user authenticating with
+`principal_kind=agent` through a public client — whose `sub` is the user id and
+has no `AgentPrincipal` row — the registry check is skipped and the grant is
+keyed on the bare sub (a deliberate, explicit `tenant_admin` opt-in).
+
+### Enforcement identity: sub vs client id (#3795)
+
+A registered agent's access token carries the service-account **UUID** in
+`sub`, while a grant is keyed on the `agent:<name>` OAuth clientId. To bridge
+that gap the clientId is surfaced onto `Operator.client_id` from the token's
+`azp` / RFC 9068 `client_id` claim (agent kind only,
+`auth/jwt.py::_extract_client_id`), and the resolver loads rows for
+`principal_sub IN {operator.sub, operator.client_id}`. A `user-agent` grant is
+matched via `operator.sub` (its `azp` is a public client, not `agent:<name>`).
+The clientId is folded in **only** for `principal_kind == agent`, so
+`user` / `service` / `runner` principals are unaffected (a `service`
+principal's `client_id`, populated from the #3178 username marker for add-on
+linkage, is never matched against this table).
 
 ### Resolution algorithm (`auth/permissions.py::resolve_verdict`)
 
-1. **Load rows.** All `AgentPermission` rows for `(tenant_id, principal_sub)`,
-   ordered for stable logging. Expected cardinality is small (tens of rows per
-   principal, not thousands).
+1. **Load rows.** All `AgentPermission` rows for `(tenant_id, principal_sub ∈
+   {operator.sub, agent clientId})` (#3795), ordered for stable logging.
+   Expected cardinality is small (tens of rows per principal, not thousands).
 
 2. **Filter.** Keep rows whose `op_pattern` matches `op_id` via `fnmatch` **and**
    whose `target_scope` matches the target (`"*"` = any, exact UUID = exact
@@ -192,7 +210,9 @@ agree on the same `audit_id` rather than collapsing the 202 (a 2xx) to `ok`.
 ## References
 
 - Task #820 (G11.2-T3), Initiative #803; Task #2489 (create-time principal check)
+- #3795 — enforce grants on the token's client identity (`azp`); `principal_kind=user-agent` for user-sub agent principals
 - `backend/src/meho_backplane/auth/permissions.py`
+- `backend/src/meho_backplane/auth/jwt.py` — `_extract_client_id` (surfaces the agent clientId)
 - `backend/src/meho_backplane/operations/_validate.py`
 - `backend/src/meho_backplane/agents/grants.py` — `AgentGrantService.grant`
   create-time principal check (#2489)

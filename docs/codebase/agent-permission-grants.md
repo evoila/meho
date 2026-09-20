@@ -59,9 +59,14 @@ a hoisted column.** Unlike the audit / approvals surfaces (where the
 token `sub` names no principal row, so the name is hoisted at write
 time), a grant's `principal_sub` *is* a registered agent principal's
 `keycloak_client_id`: `AgentGrantService.grant` refuses a grant whose
-sub names no live `AgentPrincipal` in the tenant (#2489), and the
-permission resolver matches grants on that same `agent:<name>` client id
-(`auth/permissions.py`). So `_resolve_principal_names` joins
+sub names no live `AgentPrincipal` in the tenant (#2489). Enforcement
+matches on that same `agent:<name>` client id, but note the mechanism
+(#3795): an agent's access token carries the service-account **UUID** in
+`sub`, not the clientId, so `resolve_verdict` loads grant rows for
+`principal_sub IN {operator.sub, operator.client_id}`, where
+`operator.client_id` is the `agent:<name>` clientId surfaced from the
+token's `azp` claim (`auth/permissions.py`, `auth/jwt.py`). So
+`_resolve_principal_names` joins
 `AgentPrincipal.keycloak_client_id` → `AgentPrincipal.name` (the
 operator handle), tenant-scoped, at render time — no migration, no new
 identity lookup mechanism. `list_` resolves the whole page in one
@@ -178,8 +183,46 @@ All verbs require `tenant_admin`; `create` and `elevate` additionally require a
 - `expires_at` comparison uses Python-side `datetime.now(UTC)` which is close to (but not exactly) the tick start time. A row that expires mid-tick may be included or excluded depending on sub-second timing — acceptable for change-window use cases where minutes matter, not milliseconds.
 - The verdict resolver (G11.2-T3) is a parallel PR (#1052). Until it lands, `agent_permission` rows are inserted but the dispatcher still uses the default-allow `policy_gate` from v0.2.
 
+## Enforcement identity and principal kinds (#3795)
+
+A grant is only useful if the enforcing token can be matched to it. Two
+identifier shapes are matched, and one create-time knob selects which is
+expected:
+
+- **Registered agent principal (default, `principal_kind=agent`).** A grant's
+  `principal_sub` is the agent's `agent:<name>` OAuth clientId (the
+  `AgentPrincipal.keycloak_client_id`). At dispatch the agent's access token
+  carries the service-account **UUID** in `sub` — never the clientId — so the
+  resolver matches rows for `principal_sub IN {operator.sub,
+  operator.client_id}`. `operator.client_id` is the `agent:<name>` clientId,
+  surfaced onto `Operator` from the token's `azp` / RFC 9068 `client_id` claim
+  for the agent kind (`auth/jwt.py::_extract_client_id`). Create still requires
+  the sub to name a registered, non-revoked principal (#2489).
+- **User-agent principal (`principal_kind=user-agent`).** A human user can
+  authenticate with `principal_kind=agent` through a public client; their
+  token's `sub` is the user id and its `azp` is the public client, not
+  `agent:<name>`, so no `AgentPrincipal` row exists for the sub. Passing
+  `--principal-kind user-agent` (CLI) / `principal_kind: "user-agent"`
+  (REST/MCP body) skips the registry check and keys the grant on the bare sub;
+  enforcement then matches on `operator.sub` directly. This is a deliberate,
+  explicit `tenant_admin` + human opt-in, tenant-scoped like every grant. The
+  default (`agent`) rejects an unregistered sub to catch typos.
+
+Ceilings are unchanged by this matching: `deny` beats everything, `destructive`
+stays non-grantable for agents, and a granted `auto-execute` on a
+`caution` / `dangerous` op is still clamped to `needs-approval`. #3795 changes
+only **which rows match**, never the verdict math.
+
+To deny an agent a connector family (e.g. `vault.*`), an operator runs, for a
+registered agent principal `agent:<name>`:
+
+```
+meho agent grant create --principal agent:<name> --op 'vault.*' --verdict deny
+```
+
 ## References
 
+- #3795: enforce agent grants on the token's client identity (`azp`); allow user-sub agent principals via `principal_kind=user-agent`
 - G11.2-T3 (#820): per-agent permission model + resolver (parallel PR #1052)
 - G11.2-T6 (#819): this task (grant surface)
 - #3337 (Initiative #3301): display-name resolution alongside the sub on the grants console + CLI

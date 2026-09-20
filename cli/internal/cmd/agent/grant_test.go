@@ -14,7 +14,7 @@ import (
 )
 
 func TestBuildGrantCreateBodyMinimal(t *testing.T) {
-	body, err := buildGrantCreateBody("agent:scout", "*", "auto-execute", "", "")
+	body, err := buildGrantCreateBody("agent:scout", "*", "auto-execute", "", "", "")
 	if err != nil {
 		t.Fatalf("buildGrantCreateBody: %v", err)
 	}
@@ -30,12 +30,18 @@ func TestBuildGrantCreateBodyMinimal(t *testing.T) {
 	if body.TargetScope != nil {
 		t.Errorf("TargetScope should be nil when --target absent; got %+v", body.TargetScope)
 	}
+	// Default principal-kind ('agent') is omitted from the wire body so the
+	// server default applies — the field stays nil.
+	if body.PrincipalKind != nil {
+		t.Errorf("PrincipalKind should be nil for the default 'agent'; got %+v", body.PrincipalKind)
+	}
 }
 
 func TestBuildGrantCreateBodyWithTargetAndExpires(t *testing.T) {
 	body, err := buildGrantCreateBody(
 		"agent:scout", "vault.kv.*", "needs-approval",
 		"00000000-0000-0000-0000-000000000001",
+		"",
 		"2026-06-01T00:00:00Z",
 	)
 	if err != nil {
@@ -53,9 +59,40 @@ func TestBuildGrantCreateBodyWithTargetAndExpires(t *testing.T) {
 }
 
 func TestBuildGrantCreateBodyRejectsBadExpires(t *testing.T) {
-	_, err := buildGrantCreateBody("agent:scout", "*", "deny", "", "tomorrow")
+	_, err := buildGrantCreateBody("agent:scout", "*", "deny", "", "", "tomorrow")
 	if err == nil {
 		t.Fatalf("expected error for non-RFC3339 --expires")
+	}
+}
+
+func TestBuildGrantCreateBodyUserAgentKind(t *testing.T) {
+	// --principal-kind user-agent keys the grant on a raw user sub (#3795).
+	body, err := buildGrantCreateBody(
+		"11111111-1111-1111-1111-111111111111", "vault.*", "deny", "", "user-agent", "",
+	)
+	if err != nil {
+		t.Fatalf("buildGrantCreateBody: %v", err)
+	}
+	if body.PrincipalKind == nil || *body.PrincipalKind != api.GrantPrincipalKindUserAgent {
+		t.Errorf("PrincipalKind: want user-agent; got %+v", body.PrincipalKind)
+	}
+}
+
+func TestBuildGrantCreateBodyExplicitAgentKind(t *testing.T) {
+	// Explicit 'agent' is the default and is omitted from the wire body.
+	body, err := buildGrantCreateBody("agent:scout", "*", "deny", "", "agent", "")
+	if err != nil {
+		t.Fatalf("buildGrantCreateBody: %v", err)
+	}
+	if body.PrincipalKind != nil {
+		t.Errorf("PrincipalKind should be nil for explicit 'agent'; got %+v", body.PrincipalKind)
+	}
+}
+
+func TestBuildGrantCreateBodyRejectsBadPrincipalKind(t *testing.T) {
+	_, err := buildGrantCreateBody("agent:scout", "*", "deny", "", "human", "")
+	if err == nil {
+		t.Fatalf("expected error for an invalid --principal-kind")
 	}
 }
 

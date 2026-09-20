@@ -555,3 +555,92 @@ def test_extract_client_id_unit() -> None:
     assert _extract_client_id({}, settings) is None
     # A bare prefix with no clientId body resolves to None, not "".
     assert _extract_client_id({"preferred_username": "service-account-"}, settings) is None
+
+
+# ---------------------------------------------------------------------------
+# clientId recovery for agent grant enforcement (#3795)
+# ---------------------------------------------------------------------------
+#
+# A registered agent client authenticates via client_credentials and carries
+# no ``preferred_username`` marker (no ``profile`` scope), so its clientId
+# (``agent:<name>``) lives only in the standard ``azp`` / RFC 9068
+# ``client_id`` claim. Surfacing it on ``Operator.client_id`` for the AGENT
+# kind is what lets the permission resolver match a grant (keyed on
+# ``agent:<name>``) to the token whose ``sub`` is the service-account UUID.
+# The fallback is gated on ``principal_kind == agent`` so user / service /
+# runner tokens keep their prior ``client_id`` value.
+
+
+def test_agent_client_id_from_azp() -> None:
+    """An agent token's ``azp`` (``agent:<name>``) → ``Operator.client_id``."""
+    key = _make_key("kid-agent-azp")
+    token = _mint(key, principal_kind="agent", extra_claims={"azp": "agent:scout"})
+    assert _client_id(token, key) == "agent:scout"
+
+
+def test_agent_client_id_from_client_id_claim() -> None:
+    """An agent token with only the RFC 9068 ``client_id`` claim → ``client_id``."""
+    key = _make_key("kid-agent-cid")
+    token = _mint(key, principal_kind="agent", extra_claims={"client_id": "agent:scout"})
+    assert _client_id(token, key) == "agent:scout"
+
+
+def test_agent_without_client_identity_has_empty_client_id() -> None:
+    """An agent token carrying neither ``azp`` nor ``client_id`` → empty."""
+    key = _make_key("kid-agent-noazp")
+    token = _mint(key, principal_kind="agent")
+    assert _client_id(token, key) == ""
+
+
+def test_user_token_azp_does_not_populate_client_id() -> None:
+    """A human user's ``azp`` (the login client) never populates ``client_id``.
+
+    The agent fallback is gated on ``principal_kind == agent``, so an
+    interactive user token is unaffected — no behaviour change (the #3028
+    add-on-linkage seam still keys only on the service-account marker).
+    """
+    key = _make_key("kid-user-azp")
+    token = _mint(key, principal_kind="user", extra_claims={"azp": "meho-cli"})
+    assert _client_id(token, key) == ""
+
+
+def test_service_token_azp_does_not_populate_client_id_without_marker() -> None:
+    """A service token's ``azp`` alone does not populate ``client_id``.
+
+    The azp / client_id fallback is agent-only; a ``service`` principal's
+    ``client_id`` still comes solely from the #3178 username marker, so a
+    service token without the marker keeps ``client_id`` empty — the
+    add-on-linkage contract is unchanged.
+    """
+    key = _make_key("kid-svc-azp")
+    token = _mint(key, principal_kind="service", extra_claims={"azp": "deploy-bot"})
+    assert _client_id(token, key) == ""
+
+
+def test_extract_client_id_agent_azp_unit() -> None:
+    """``_extract_client_id`` reads ``azp`` / ``client_id`` only for the AGENT kind."""
+    from meho_backplane.auth.jwt import _extract_client_id
+
+    settings = get_settings()
+    # AGENT kind: azp is recovered; client_id claim is the fallback of the fallback.
+    assert (
+        _extract_client_id({"azp": "agent:scout"}, settings, PrincipalKind.AGENT) == "agent:scout"
+    )
+    assert (
+        _extract_client_id({"client_id": "agent:scout"}, settings, PrincipalKind.AGENT)
+        == "agent:scout"
+    )
+    # The #3178 username marker still wins when present, even for an agent.
+    assert (
+        _extract_client_id(
+            {"preferred_username": "service-account-agent:scout", "azp": "ignored"},
+            settings,
+            PrincipalKind.AGENT,
+        )
+        == "agent:scout"
+    )
+    # Non-agent kinds ignore azp / client_id entirely (gating).
+    for kind in (PrincipalKind.USER, PrincipalKind.SERVICE, PrincipalKind.RUNNER):
+        assert _extract_client_id({"azp": "agent:scout"}, settings, kind) is None
+    # An agent token with no client-identity claim resolves to None.
+    assert _extract_client_id({}, settings, PrincipalKind.AGENT) is None

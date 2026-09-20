@@ -36,6 +36,7 @@ rather than a pydantic-level one.
 from __future__ import annotations
 
 from datetime import datetime
+from enum import StrEnum
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -47,6 +48,7 @@ __all__ = [
     "AgentGrantCreate",
     "AgentGrantListResponse",
     "AgentGrantRead",
+    "GrantPrincipalKind",
     "GrantVerdict",
 ]
 
@@ -55,6 +57,34 @@ __all__ = [
 #: is retained as a re-export so the REST / MCP surface imports keep
 #: working without constructing raw string verdicts.
 GrantVerdict = PermissionVerdict
+
+
+class GrantPrincipalKind(StrEnum):
+    """What kind of principal a grant's ``principal_sub`` names (#3795).
+
+    Selects the create-time enforceability check applied by
+    :meth:`~meho_backplane.agents.grants.AgentGrantService.grant`:
+
+    * :attr:`AGENT` (default) — ``principal_sub`` must name a registered,
+      non-revoked :class:`~meho_backplane.db.models.AgentPrincipal` by its
+      ``keycloak_client_id`` (``agent:<name>``). This is the shipped
+      behaviour; the grant enforces against a registered agent client's
+      token (matched on the token's client identity, #3795).
+    * :attr:`USER_AGENT` — ``principal_sub`` is the JWT ``sub`` of a **human
+      user** who authenticates with ``principal_kind=agent`` through a
+      public client. There is no ``AgentPrincipal`` row for such a sub (its
+      ``azp`` is the public client, not ``agent:<name>``), so the registry
+      check is skipped and the raw sub is accepted. Enforcement matches on
+      the token ``sub`` directly. Deliberately explicit — the caller opts
+      into keying a grant on a bare sub, which the default rejects to catch
+      typos.
+
+    The field is optional on the create surfaces and defaults to
+    :attr:`AGENT`, so every existing caller is unaffected.
+    """
+
+    AGENT = "agent"
+    USER_AGENT = "user-agent"
 
 
 class AgentGrantCreate(BaseModel):
@@ -86,6 +116,17 @@ class AgentGrantCreate(BaseModel):
     )
     verdict: GrantVerdict = Field(
         description="One of auto-execute | needs-approval | deny.",
+    )
+    principal_kind: GrantPrincipalKind = Field(
+        default=GrantPrincipalKind.AGENT,
+        description=(
+            "What principal_sub names (#3795). 'agent' (default): a "
+            "registered agent principal by its agent:<name> client id "
+            "(creation rejected if unregistered). 'user-agent': the JWT sub "
+            "of a human user authenticating with principal_kind=agent "
+            "through a public client — the registry check is skipped and the "
+            "raw sub is accepted."
+        ),
     )
     expires_at: datetime | None = Field(
         default=None,

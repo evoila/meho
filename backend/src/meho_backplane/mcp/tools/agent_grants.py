@@ -62,6 +62,7 @@ from pydantic import ValidationError
 from meho_backplane.agents.grant_schemas import (
     AgentGrantCreate,
     AgentGrantRead,
+    GrantPrincipalKind,
     GrantVerdict,
 )
 from meho_backplane.agents.grants import AgentGrantService, GrantValidationError
@@ -263,7 +264,8 @@ register_mcp_tool(
             "principal_kind=agent claim (registered agent principals); "
             "human/service tokens are never gated by grants. principal_sub "
             "must name a registered, non-revoked agent principal "
-            "(its agent:<name> handle) or creation is rejected."
+            "(its agent:<name> handle) or creation is rejected — unless "
+            "principal_kind='user-agent' is passed for a human user's sub."
         ),
         inputSchema={
             "type": "object",
@@ -271,6 +273,18 @@ register_mcp_tool(
                 "principal_sub": {
                     "type": "string",
                     "description": "JWT sub of the agent principal receiving the grant.",
+                },
+                "principal_kind": {
+                    "type": "string",
+                    "enum": [k.value for k in GrantPrincipalKind],
+                    "default": GrantPrincipalKind.AGENT.value,
+                    "description": (
+                        "What principal_sub names. 'agent' (default): a "
+                        "registered agent:<name> principal (creation rejected "
+                        "if unregistered). 'user-agent': the sub of a human "
+                        "user authenticating with principal_kind=agent through "
+                        "a public client — skips the registry check."
+                    ),
                 },
                 "op_pattern": {
                     "type": "string",

@@ -102,7 +102,11 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.agents.grant_schemas import AgentGrantCreate, AgentGrantRead
+from meho_backplane.agents.grant_schemas import (
+    AgentGrantCreate,
+    AgentGrantRead,
+    GrantPrincipalKind,
+)
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentPermission, AgentPrincipal
 
@@ -328,7 +332,21 @@ class AgentGrantService:
         )
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
-            await _validate_principal_registered(session, tenant_id, payload.principal_sub)
+            if payload.principal_kind is GrantPrincipalKind.USER_AGENT:
+                # The sub is a human user authenticating with
+                # principal_kind=agent through a public client (#3795); no
+                # AgentPrincipal row is keyed on it, so skip the registry
+                # check. Enforcement matches on the token ``sub`` directly.
+                # This is a deliberate, explicit operator opt-in (the default
+                # AGENT path rejects an unregistered sub to catch typos).
+                self._log.info(
+                    "agent_grant_user_agent_principal",
+                    tenant_id=str(tenant_id),
+                    principal_sub=payload.principal_sub,
+                    created_by_sub=created_by_sub,
+                )
+            else:
+                await _validate_principal_registered(session, tenant_id, payload.principal_sub)
             session.add(row)
             try:
                 await session.flush()

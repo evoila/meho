@@ -102,6 +102,7 @@ References
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from datetime import UTC, datetime
 from fnmatch import fnmatch
 from typing import Any
@@ -110,7 +111,7 @@ import structlog
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.models import AgentPermission, PermissionVerdict
 
 __all__ = [
@@ -239,14 +240,20 @@ def _pattern_specificity(pattern: str) -> int:
 async def _load_rows(
     session: AsyncSession,
     tenant_id: uuid.UUID,
-    principal_sub: str,
+    principal_subs: Collection[str],
 ) -> list[AgentPermission]:
-    """Load all AgentPermission rows for *(tenant_id, principal_sub)*.
+    """Load all AgentPermission rows for *(tenant_id, principal_sub ∈ subs)*.
 
     The DB index ``agent_permission_tenant_principal_idx`` makes this
     query fast.  Pattern matching and target scoping are done in
     Python after loading; the result set for a single principal is
     expected to be small (tens of rows, not thousands).
+
+    *principal_subs* is a small set (#3795): an agent grant is keyed on the
+    agent client's ``clientId`` (``agent:<name>``) at create time but the
+    token's ``sub`` is the service-account UUID, so both identifiers are
+    matched here. For every other principal the set is the single
+    ``operator.sub``, preserving the original single-principal query.
 
     Expired time-bounded elevations (G11.2-T6 #819) are excluded here:
     a row with a non-null ``expires_at`` at or before *now* no longer
@@ -259,7 +266,7 @@ async def _load_rows(
         select(AgentPermission)
         .where(
             AgentPermission.tenant_id == tenant_id,
-            AgentPermission.principal_sub == principal_sub,
+            AgentPermission.principal_sub.in_(principal_subs),
             or_(
                 AgentPermission.expires_at.is_(None),
                 AgentPermission.expires_at > now,
@@ -274,9 +281,103 @@ async def _load_rows(
     return list(result.scalars().all())
 
 
+def _grant_principal_subs(operator: Operator) -> set[str]:
+    """Return the set of ``principal_sub`` values a grant may be keyed on.
+
+    Always includes the token ``sub``. For an **agent** principal (#3795)
+    it additionally includes the token's client identity
+    (:attr:`Operator.client_id`, the ``agent:<name>`` clientId recovered
+    from the ``azp`` / ``client_id`` claim) when present, because
+    ``AgentGrantService`` keys a grant on that clientId while the agent
+    token's ``sub`` is the service-account UUID. Matching on both aligns
+    the enforce side with the create side.
+
+    The clientId is added **only** for ``principal_kind == agent`` so a
+    ``service`` principal (whose ``client_id`` is populated from the #3178
+    username marker for the add-on-linkage seam) is unaffected — service
+    principals are gated by ``ServicePrincipalGrant``, never this table.
+    """
+    subs = {operator.sub}
+    if operator.principal_kind is PrincipalKind.AGENT and operator.client_id:
+        subs.add(operator.client_id)
+    return subs
+
+
+def _pick_raw_verdict(
+    matching: list[AgentPermission],
+    safety_level: str,
+) -> tuple[PermissionVerdict, str]:
+    """Pick the raw (pre-ceiling) verdict from *matching* rows.
+
+    Among matching rows, the most specific ``op_pattern`` wins. When
+    several rows tie on specificity (e.g. two catch-all ``"*"`` grants with
+    conflicting verdicts), fold to the **most restrictive** verdict —
+    fail-closed, and deterministic regardless of row order. A duplicate key
+    is prevented at the DB layer (``uq_agent_permission_grant``), but a
+    genuine tie across *different* equally-specific patterns can still
+    occur, so the tie-break must not depend on unordered ``select()`` order.
+    When no row matches, fall back to the ``safety_level`` default.
+
+    Returns ``(raw_verdict, source_string)``.
+    """
+    if not matching:
+        return (
+            _SAFETY_DEFAULT.get(safety_level, PermissionVerdict.DENY),
+            f"safety_level default ({safety_level})",
+        )
+    top_specificity = max(_pattern_specificity(r.op_pattern) for r in matching)
+    top_rows = [r for r in matching if _pattern_specificity(r.op_pattern) == top_specificity]
+    raw_verdict = PermissionVerdict(top_rows[0].verdict)
+    for r in top_rows[1:]:
+        raw_verdict = _more_restrictive(raw_verdict, PermissionVerdict(r.verdict))
+    patterns = ", ".join(sorted(r.op_pattern for r in top_rows))
+    source = (
+        f"permission row (pattern={top_rows[0].op_pattern!r})"
+        if len(top_rows) == 1
+        else f"most-restrictive of tied rows (patterns={patterns})"
+    )
+    return raw_verdict, source
+
+
 # ---------------------------------------------------------------------------
 # Main resolver
 # ---------------------------------------------------------------------------
+
+
+def _finalize_verdict(
+    *,
+    raw_verdict: PermissionVerdict,
+    safety_level: str,
+    role_ceil: PermissionVerdict | None,
+    tenant_role: TenantRole,
+    source: str,
+) -> tuple[PermissionVerdict, str]:
+    """Apply the safety_level + role ceilings and build the reason string.
+
+    The op-requirement (safety_level) ceiling is applied first, then the
+    operator's role ceiling; the final verdict is the most restrictive of
+    the three. The reason names each tightening step so an agent can
+    diagnose the refusal.
+    """
+    after_op_ceil = _apply_ceiling(raw_verdict, safety_level)
+
+    if role_ceil is not None:
+        final_verdict = _more_restrictive(after_op_ceil, role_ceil)
+        ceil_applied = after_op_ceil != final_verdict
+    else:
+        final_verdict = after_op_ceil
+        ceil_applied = False
+
+    reason_parts = [f"verdict={final_verdict.value}", f"source={source}"]
+    if after_op_ceil != raw_verdict:
+        reason_parts.append(
+            f"tightened by safety_level ceiling ({safety_level}→{after_op_ceil.value})"
+        )
+    if ceil_applied:
+        reason_parts.append(
+            f"tightened by role ceiling ({tenant_role.value}→{final_verdict.value})"
+        )
+    return final_verdict, "; ".join(reason_parts)
 
 
 async def resolve_verdict(
@@ -327,7 +428,11 @@ async def resolve_verdict(
     role_ceil = _role_ceiling(operator.tenant_role)
 
     # --- Gate 2: agent-permission rows --------------------------------
-    rows = await _load_rows(session, operator.tenant_id, operator.sub)
+    # Match on the token ``sub`` AND, for an agent principal, its client
+    # identity (``agent:<name>``) — the identifier a grant is keyed on
+    # (#3795). ``_grant_principal_subs`` encapsulates that fold.
+    principal_subs = _grant_principal_subs(operator)
+    rows = await _load_rows(session, operator.tenant_id, principal_subs)
 
     # Filter rows to those whose op_pattern and target_scope match.
     matching: list[AgentPermission] = []
@@ -344,53 +449,16 @@ async def resolve_verdict(
         matching.append(row)
 
     # --- Gate 3: pick verdict -----------------------------------------
-    if matching:
-        # Among matching rows, the most specific op_pattern wins. When
-        # several rows tie on specificity (e.g. two catch-all ``"*"``
-        # grants with conflicting verdicts), fold to the **most
-        # restrictive** verdict — fail-closed, and deterministic
-        # regardless of row order. A duplicate key is prevented at the DB
-        # layer (``uq_agent_permission_grant``), but a genuine tie across
-        # *different* equally-specific patterns can still occur, so the
-        # tie-break must not depend on unordered ``select()`` order.
-        top_specificity = max(_pattern_specificity(r.op_pattern) for r in matching)
-        top_rows = [r for r in matching if _pattern_specificity(r.op_pattern) == top_specificity]
-        raw_verdict = PermissionVerdict(top_rows[0].verdict)
-        for r in top_rows[1:]:
-            raw_verdict = _more_restrictive(raw_verdict, PermissionVerdict(r.verdict))
-        patterns = ", ".join(sorted(r.op_pattern for r in top_rows))
-        source = (
-            f"permission row (pattern={top_rows[0].op_pattern!r})"
-            if len(top_rows) == 1
-            else f"most-restrictive of tied rows (patterns={patterns})"
-        )
-    else:
-        # No matching row — use safety_level default.
-        raw_verdict = _SAFETY_DEFAULT.get(safety_level, PermissionVerdict.DENY)
-        source = f"safety_level default ({safety_level})"
+    raw_verdict, source = _pick_raw_verdict(matching, safety_level)
 
-    # Apply safety_level ceiling (op-requirement gate).
-    after_op_ceil = _apply_ceiling(raw_verdict, safety_level)
-
-    # Apply role ceiling.
-    if role_ceil is not None:
-        final_verdict = _more_restrictive(after_op_ceil, role_ceil)
-        ceil_applied = after_op_ceil != final_verdict
-    else:
-        final_verdict = after_op_ceil
-        ceil_applied = False
-
-    reason_parts = [f"verdict={final_verdict.value}", f"source={source}"]
-    if after_op_ceil != raw_verdict:
-        reason_parts.append(
-            f"tightened by safety_level ceiling ({safety_level}→{after_op_ceil.value})"
-        )
-    if ceil_applied:
-        reason_parts.append(
-            f"tightened by role ceiling ({operator.tenant_role.value}→{final_verdict.value})"
-        )
-
-    reason = "; ".join(reason_parts)
+    # Apply the safety_level + role ceilings and build the reason string.
+    final_verdict, reason = _finalize_verdict(
+        raw_verdict=raw_verdict,
+        safety_level=safety_level,
+        role_ceil=role_ceil,
+        tenant_role=operator.tenant_role,
+        source=source,
+    )
 
     _log.debug(
         "permission_resolved",

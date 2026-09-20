@@ -140,6 +140,7 @@ meho agent grant create [flags]
 - `--json` — emit raw AgentGrantRead JSON
 - `--op` — fnmatch op-pattern, e.g. '*' or 'vault.kv.*' (required)
 - `--principal` — JWT sub of the agent principal (required)
+- `--principal-kind` — principal kind: 'agent' (registered agent:<name>) or 'user-agent' (a human user's sub, skips the registry check)
 - `--target` — target UUID or '*' for any target (default: any)
 - `--verdict` — auto-execute | needs-approval | deny (required)
 

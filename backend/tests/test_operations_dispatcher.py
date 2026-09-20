@@ -69,7 +69,7 @@ from meho_backplane.connectors.vmware_rest.connector import (
     VmwareRestConnector,
 )
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, EndpointDescriptor
+from meho_backplane.db.models import AgentPermission, AuditLog, EndpointDescriptor, Tenant
 from meho_backplane.operations import (
     PassThroughReducer,
     dispatch,
@@ -153,12 +153,15 @@ def _make_operator(
     sub: str = "op-test",
     tenant_id: UUID | None = None,
     principal_kind: PrincipalKind = PrincipalKind.USER,
+    client_id: str | None = None,
 ) -> Operator:
     """Construct an :class:`Operator` directly -- no JWT round-trip.
 
     Defaults to a human (``PrincipalKind.USER``) so the v0.2 default-allow
     contract applies; pass ``principal_kind=PrincipalKind.AGENT`` to
     exercise the G11.2-T3 per-(principal, op, target) resolver path.
+    ``client_id`` mirrors the ``agent:<name>`` clientId surfaced from the
+    token's ``azp`` claim for an agent principal (#3795).
     """
     return Operator(
         sub=sub,
@@ -168,6 +171,7 @@ def _make_operator(
         tenant_id=tenant_id or UUID("00000000-0000-0000-0000-00000000a0a0"),
         tenant_role=TenantRole.OPERATOR,
         principal_kind=principal_kind,
+        client_id=client_id,
     )
 
 
@@ -2672,6 +2676,89 @@ async def test_dispatch_denies_dangerous_op_by_safety_level(
     assert rows[0].payload["result_status"] == "denied"
     assert rows[0].status_code == 403
 
+    assert len(captured_events) == 1
+    assert captured_events[0].result_status == "denied"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_agent_deny_grant_on_client_id_denies_safe_op(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A ``deny`` grant keyed on the agent clientId denies a safe op + audits it (#3795).
+
+    The agent token's ``sub`` is a service-account UUID while the grant is
+    keyed on the ``agent:<name>`` clientId (surfaced from ``azp``). Before
+    #3795 the grant never matched and the safe op auto-executed; now the
+    resolver matches on the clientId, the safe op is ``denied``, and the
+    synchronous audit row records ``denied``.
+    """
+    register_connector_v2(
+        product="vault",
+        version="",
+        impl_id="",
+        cls=_NoOpVaultConnector,
+    )
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.read",
+        handler=_module_handler_returning_dict,
+        summary="Read a KV secret.",
+        description="Safe read of a Vault KV secret.",
+        parameter_schema={"type": "object"},
+        safety_level="safe",
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+    tenant_id = UUID("00000000-0000-0000-0000-00000000d795")
+    client_id = "agent:deny-scout"
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as seed:
+        seed.add(Tenant(id=tenant_id, slug="t-3795", name="Tenant 3795"))
+        await seed.flush()
+        # Grant is keyed on the clientId — exactly what AgentGrantService stores.
+        seed.add(
+            AgentPermission(
+                tenant_id=tenant_id,
+                principal_sub=client_id,
+                op_pattern="vault.*",
+                verdict="deny",
+                target_scope="*",
+                created_by_sub="admin",
+            )
+        )
+        await seed.commit()
+
+    # Agent token: sub is the service-account UUID, client_id is agent:<name>.
+    operator = _make_operator(
+        sub="11111111-2222-3333-4444-555555555555",
+        tenant_id=tenant_id,
+        principal_kind=PrincipalKind.AGENT,
+        client_id=client_id,
+    )
+    target = _FakeTarget(product="vault")
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.read",
+        target=target,
+        params={},
+    )
+    assert result.status == "denied", result.error
+    assert result.extras["error_code"] == "denied"
+
+    async with sessionmaker() as fresh:
+        rows = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.path == "vault.kv.read")))
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    assert rows[0].payload["result_status"] == "denied"
+    assert rows[0].status_code == 403
     assert len(captured_events) == 1
     assert captured_events[0].result_status == "denied"
 

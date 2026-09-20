@@ -32,7 +32,11 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.agents.grant_schemas import AgentGrantCreate, GrantVerdict
+from meho_backplane.agents.grant_schemas import (
+    AgentGrantCreate,
+    GrantPrincipalKind,
+    GrantVerdict,
+)
 from meho_backplane.agents.grants import AgentGrantService, GrantValidationError
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentPermission, AgentPrincipal, Tenant
@@ -86,6 +90,7 @@ def _grant_body(
     verdict: GrantVerdict = GrantVerdict.AUTO_EXECUTE,
     target_scope: str | None = None,
     expires_at: datetime | None = None,
+    principal_kind: GrantPrincipalKind = GrantPrincipalKind.AGENT,
 ) -> AgentGrantCreate:
     return AgentGrantCreate(
         principal_sub=principal_sub,
@@ -93,6 +98,7 @@ def _grant_body(
         verdict=verdict,
         target_scope=target_scope,
         expires_at=expires_at,
+        principal_kind=principal_kind,
     )
 
 
@@ -606,6 +612,58 @@ async def test_revoked_principal_sub_rejected() -> None:
     service = AgentGrantService()
     body = _grant_body(principal_sub="agent:dead-bot", op_pattern="*")
     with pytest.raises(GrantValidationError, match="reason=revoked"):
+        await service.grant(tenant_id, "admin", body)
+
+
+# ---------------------------------------------------------------------------
+# user-agent principal — grant on a bare user sub (#3795)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_user_agent_principal_kind_skips_registry_check() -> None:
+    """``principal_kind=user-agent`` accepts an unregistered user sub (#3795).
+
+    A human user authenticating with ``principal_kind=agent`` through a public
+    client has no ``AgentPrincipal`` row, so the default (AGENT) registry
+    check would reject a grant keyed on their sub. The explicit user-agent
+    flag skips that check and stores the row on the bare sub.
+    """
+    async with get_sessionmaker()() as session:
+        tenant_id = await _seed_tenant(session, "user-agent-ok")
+    service = AgentGrantService()
+    user_sub = "abcdef00-0000-0000-0000-0000000000ff"
+    body = _grant_body(
+        principal_sub=user_sub,
+        op_pattern="vault.*",
+        verdict=GrantVerdict.DENY,
+        principal_kind=GrantPrincipalKind.USER_AGENT,
+    )
+    entry = await service.grant(tenant_id, "admin", body)
+    assert entry.principal_sub == user_sub
+    assert entry.verdict == GrantVerdict.DENY.value
+    # Visible on the tenant-scoped list, keyed on the raw sub.
+    listed = await service.list_(tenant_id, principal_sub=user_sub)
+    assert len(listed) == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_kind_default_still_requires_registration() -> None:
+    """The default (AGENT) path still rejects an unregistered sub (#2489 kept).
+
+    Only the explicit user-agent flag relaxes the registry check; the default
+    behaviour is unchanged, so a typo'd agent sub is still caught.
+    """
+    async with get_sessionmaker()() as session:
+        tenant_id = await _seed_tenant(session, "user-agent-default")
+    service = AgentGrantService()
+    body = _grant_body(
+        principal_sub="abcdef00-0000-0000-0000-0000000000ff",
+        op_pattern="vault.*",
+        verdict=GrantVerdict.DENY,
+        # principal_kind defaults to AGENT.
+    )
+    with pytest.raises(GrantValidationError, match="principal_kind=agent"):
         await service.grant(tenant_id, "admin", body)
 
 

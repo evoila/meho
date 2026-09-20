@@ -43,7 +43,7 @@ from typing import Any
 
 import pytest
 
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.auth.permissions import resolve_verdict
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentPermission, PermissionVerdict, Tenant
@@ -57,6 +57,11 @@ _TENANT_ID: uuid.UUID = uuid.UUID("10000000-0000-0000-0000-000000000001")
 _OTHER_TENANT_ID: uuid.UUID = uuid.UUID("20000000-0000-0000-0000-000000000002")
 _PRINCIPAL_SUB: str = "agent:resolver-test"
 _CREATED_BY: str = "admin:resolver-test"
+#: A realistic agent service-account token: ``sub`` is the service-account
+#: user UUID, ``client_id`` is the ``agent:<name>`` OAuth clientId (recovered
+#: from ``azp``). A grant is keyed on the clientId, never this UUID (#3795).
+_AGENT_SUB_UUID: str = "99999999-9999-9999-9999-999999999999"
+_AGENT_CLIENT_ID: str = "agent:resolver-test"
 
 
 @pytest.fixture(autouse=True)
@@ -80,6 +85,8 @@ def _make_operator(
     sub: str = _PRINCIPAL_SUB,
     tenant_id: uuid.UUID = _TENANT_ID,
     role: TenantRole = TenantRole.OPERATOR,
+    principal_kind: PrincipalKind = PrincipalKind.USER,
+    client_id: str | None = None,
 ) -> Operator:
     """Construct an :class:`Operator` for tests — no JWT round-trip."""
     return Operator(
@@ -89,6 +96,8 @@ def _make_operator(
         raw_jwt="<test-jwt>",
         tenant_id=tenant_id,
         tenant_role=role,
+        principal_kind=principal_kind,
+        client_id=client_id,
     )
 
 
@@ -129,12 +138,20 @@ async def _resolve(
     sub: str = _PRINCIPAL_SUB,
     tenant_id: uuid.UUID = _TENANT_ID,
     role: TenantRole = TenantRole.OPERATOR,
+    principal_kind: PrincipalKind = PrincipalKind.USER,
+    client_id: str | None = None,
     op_id: str = "vault.kv.read",
     safety_level: str = "safe",
     target_id: Any = None,
 ) -> tuple[PermissionVerdict, str]:
     """Run :func:`resolve_verdict` against the test DB."""
-    operator = _make_operator(sub=sub, tenant_id=tenant_id, role=role)
+    operator = _make_operator(
+        sub=sub,
+        tenant_id=tenant_id,
+        role=role,
+        principal_kind=principal_kind,
+        client_id=client_id,
+    )
     async with get_sessionmaker()() as session:
         return await resolve_verdict(
             session=session,
@@ -564,3 +581,174 @@ async def test_reason_names_row_pattern_source() -> None:
     _, reason = await _resolve(op_id="vault.kv.read", safety_level="safe")
     assert "permission row" in reason
     assert "vault.kv.read" in reason
+
+
+# ---------------------------------------------------------------------------
+# Agent grants enforce on the token's client identity (#3795)
+# ---------------------------------------------------------------------------
+#
+# A registered agent's token carries a service-account ``sub`` (a UUID) while
+# the grant is keyed on the ``agent:<name>`` clientId (surfaced on
+# ``Operator.client_id`` from the ``azp`` claim). The resolver matches a grant
+# whose ``principal_sub`` equals EITHER the token ``sub`` OR the agent's
+# clientId, so a grant created via the shipped path finally enforces.
+
+
+async def _resolve_agent(
+    *,
+    op_id: str = "vault.kv.read",
+    safety_level: str = "safe",
+    client_id: str | None = _AGENT_CLIENT_ID,
+    sub: str = _AGENT_SUB_UUID,
+    tenant_id: uuid.UUID = _TENANT_ID,
+) -> tuple[PermissionVerdict, str]:
+    """Resolve as a realistic agent token (UUID sub + agent:<name> clientId)."""
+    return await _resolve(
+        sub=sub,
+        tenant_id=tenant_id,
+        principal_kind=PrincipalKind.AGENT,
+        client_id=client_id,
+        op_id=op_id,
+        safety_level=safety_level,
+    )
+
+
+async def test_agent_deny_grant_on_client_id_applies_to_uuid_sub_token() -> None:
+    """A ``deny`` grant keyed on ``agent:<name>`` denies a UUID-sub agent token.
+
+    This is the load-bearing fix: the grant's ``principal_sub`` is the
+    clientId, the token's ``sub`` is the service-account UUID, and before
+    #3795 they never matched (the safe op auto-executed).
+    """
+    await _seed_tenant(_TENANT_ID, "t-agent-deny")
+    await _insert_permission(principal_sub=_AGENT_CLIENT_ID, op_pattern="vault.*", verdict="deny")
+    verdict, reason = await _resolve_agent(op_id="vault.kv.read", safety_level="safe")
+    assert verdict == PermissionVerdict.DENY
+    assert "permission row" in reason
+
+
+async def test_agent_needs_approval_grant_on_client_id_applies() -> None:
+    """A ``needs-approval`` grant keyed on the clientId is applied (not the safe default).
+
+    A safe op defaults to auto-execute; the row moving it to needs-approval
+    proves the grant matched via the clientId, not the safety default.
+    """
+    await _seed_tenant(_TENANT_ID, "t-agent-needs")
+    await _insert_permission(
+        principal_sub=_AGENT_CLIENT_ID, op_pattern="vault.kv.read", verdict="needs-approval"
+    )
+    verdict, reason = await _resolve_agent(op_id="vault.kv.read", safety_level="safe")
+    assert verdict == PermissionVerdict.NEEDS_APPROVAL
+    assert "permission row" in reason
+
+
+async def test_agent_auto_execute_grant_on_client_id_matches_row() -> None:
+    """An ``auto-execute`` grant keyed on the clientId matches (source = the row).
+
+    On a safe op the verdict equals the default, so the *reason* is asserted
+    to prove the row (not the safety default) is the source.
+    """
+    await _seed_tenant(_TENANT_ID, "t-agent-auto")
+    await _insert_permission(
+        principal_sub=_AGENT_CLIENT_ID, op_pattern="vault.kv.read", verdict="auto-execute"
+    )
+    verdict, reason = await _resolve_agent(op_id="vault.kv.read", safety_level="safe")
+    assert verdict == PermissionVerdict.AUTO_EXECUTE
+    assert "permission row" in reason
+
+
+async def test_agent_grant_on_sub_still_applies() -> None:
+    """A grant keyed on the token ``sub`` still matches (old behaviour preserved)."""
+    await _seed_tenant(_TENANT_ID, "t-agent-sub")
+    await _insert_permission(principal_sub=_AGENT_SUB_UUID, op_pattern="vault.*", verdict="deny")
+    verdict, _ = await _resolve_agent(op_id="vault.kv.read", safety_level="safe")
+    assert verdict == PermissionVerdict.DENY
+
+
+async def test_agent_token_without_azp_matches_sub_only() -> None:
+    """A token with no clientId (no ``azp``) keeps sub-only matching.
+
+    A grant keyed on the clientId does not fire (client_id is None), so the
+    safe op falls back to auto-execute — the pre-#3795 behaviour.
+    """
+    await _seed_tenant(_TENANT_ID, "t-agent-noazp")
+    await _insert_permission(principal_sub=_AGENT_CLIENT_ID, op_pattern="vault.*", verdict="deny")
+    verdict, reason = await _resolve_agent(
+        op_id="vault.kv.read", safety_level="safe", client_id=None
+    )
+    assert verdict == PermissionVerdict.AUTO_EXECUTE
+    assert "safety_level default" in reason
+
+
+async def test_agent_client_id_deny_ceiling_not_weakened_on_caution() -> None:
+    """An ``auto-execute`` grant matched via clientId is still clamped by the ceiling.
+
+    #3795 changes only which rows match, never the ceiling math: an
+    auto-execute grant on a ``caution`` op is still tightened to
+    needs-approval.
+    """
+    await _seed_tenant(_TENANT_ID, "t-agent-ceiling")
+    await _insert_permission(principal_sub=_AGENT_CLIENT_ID, op_pattern="*", verdict="auto-execute")
+    verdict, reason = await _resolve_agent(op_id="net.route.add", safety_level="caution")
+    assert verdict == PermissionVerdict.NEEDS_APPROVAL
+    assert "ceiling" in reason
+
+
+async def test_agent_client_id_grant_is_tenant_isolated() -> None:
+    """A grant for tenant A never matches a token of tenant B (same clientId)."""
+    await _seed_tenant(_TENANT_ID, "t-agent-iso-a")
+    await _seed_tenant(_OTHER_TENANT_ID, "t-agent-iso-b")
+    # Deny grant lives under tenant A, keyed on the shared clientId.
+    await _insert_permission(
+        tenant_id=_TENANT_ID,
+        principal_sub=_AGENT_CLIENT_ID,
+        op_pattern="vault.*",
+        verdict="deny",
+    )
+    # A tenant-B agent token carrying the same clientId must not match it.
+    verdict, reason = await _resolve_agent(
+        op_id="vault.kv.read", safety_level="safe", tenant_id=_OTHER_TENANT_ID
+    )
+    assert verdict == PermissionVerdict.AUTO_EXECUTE
+    assert "safety_level default" in reason
+
+
+async def test_non_agent_operator_ignores_client_id() -> None:
+    """A non-agent principal never matches a clientId-keyed grant (gating).
+
+    ``resolve_verdict`` folds the clientId into the match set only for
+    ``principal_kind == agent``. A service principal (whose ``client_id`` is
+    populated from the #3178 marker) resolving here would ignore it — so a
+    grant keyed on the clientId does not fire.
+    """
+    await _seed_tenant(_TENANT_ID, "t-nonagent-cid")
+    await _insert_permission(principal_sub=_AGENT_CLIENT_ID, op_pattern="vault.*", verdict="deny")
+    # SERVICE principal with a matching client_id but sub != any grant.
+    verdict, _ = await _resolve(
+        sub=_AGENT_SUB_UUID,
+        principal_kind=PrincipalKind.SERVICE,
+        client_id=_AGENT_CLIENT_ID,
+        op_id="vault.kv.read",
+        safety_level="safe",
+    )
+    assert verdict == PermissionVerdict.AUTO_EXECUTE
+
+
+async def test_user_agent_sub_grant_applies() -> None:
+    """A user-agent grant keyed on the user ``sub`` enforces for that token.
+
+    A human user authenticating with ``principal_kind=agent`` through a public
+    client has ``sub`` = the user id and ``client_id`` = the public client
+    (not ``agent:<name>``). A grant created with the user-agent flag is keyed
+    on that sub and matches on ``operator.sub``.
+    """
+    await _seed_tenant(_TENANT_ID, "t-user-agent")
+    user_sub = "abcdef00-0000-0000-0000-0000000000ff"
+    await _insert_permission(principal_sub=user_sub, op_pattern="vault.*", verdict="deny")
+    verdict, _ = await _resolve_agent(
+        op_id="vault.kv.read",
+        safety_level="safe",
+        sub=user_sub,
+        client_id="public-workstation",
+    )
+    assert verdict == PermissionVerdict.DENY

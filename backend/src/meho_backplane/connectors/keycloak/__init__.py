@@ -32,9 +32,12 @@ directly, keeping the resolver tie-break ladder unambiguous.
 
 # Import for the registration side-effect: at module load this wires the
 # park-time ``proposed_effect`` preview builders for ``keycloak.realm.create`` /
-# ``keycloak.user.create`` / ``keycloak.role_mapping.assign`` onto the #1437
-# dispatcher hook (#1857) so the reviewer sees the realm name / username /
-# granted roles -- secrets scrubbed -- in the approval queue before approving.
+# ``keycloak.user.create`` / ``keycloak.role_mapping.assign`` (#1857) and the
+# group-lifecycle writes ``keycloak.group.create`` / ``.update_attributes`` /
+# ``.member.add`` / ``.member.remove`` (#3280) onto the #1437 dispatcher hook,
+# so the reviewer sees the resource identity -- realm / username / granted
+# roles / group name + attribute keys -- secrets scrubbed -- in the approval
+# queue before approving.
 from meho_backplane.connectors.keycloak import ops_write_preview  # noqa: F401
 from meho_backplane.connectors.keycloak.connector import KeycloakConnector
 from meho_backplane.connectors.registry import register_connector_v2

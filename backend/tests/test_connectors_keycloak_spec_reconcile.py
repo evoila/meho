@@ -61,8 +61,9 @@ first armed run):
 Both exclusions are pinned by value below, and an armed test asserts
 they stay **unserved** — the day a newer pinned spec starts serving
 one, that test fails and the constant must be promoted into
-:data:`_METHODS_BY_CONSTANT`. All 18 reconciled op_ids were served on
-the first armed run; no path repoints were needed. Protocol:
+:data:`_METHODS_BY_CONSTANT`. All reconciled op_ids (19 at #2988, extended
+to 29 by the #3280 group-lifecycle ops) were served on the armed run; no
+path repoints were needed. Protocol:
 docs/decisions/spec-reconcile-guards-standard.md.
 """
 
@@ -100,6 +101,16 @@ _METHODS_BY_CONSTANT: dict[str, tuple[str, ...]] = {
     "_ROLES_PATH": ("GET",),
     "_ROLE_PATH": ("GET",),
     "_ROLE_USERS_PATH": ("GET",),
+    # Group-lifecycle ops (#3280). NB: the groups resource uses the
+    # hyphenated ``{group-id}`` placeholder while the user-group membership
+    # sub-resource uses the camelCase ``{groupId}`` — both byte-for-byte the
+    # pinned spec's own parameter names.
+    "_GROUPS_PATH": ("GET", "POST"),
+    "_GROUP_PATH": ("GET", "PUT"),
+    "_GROUP_CHILDREN_PATH": ("GET", "POST"),
+    "_GROUP_MEMBERS_PATH": ("GET",),
+    "_USER_GROUPS_PATH": ("GET",),
+    "_USER_GROUP_PATH": ("PUT", "DELETE"),
 }
 
 #: Dispatched constants deliberately outside the pinned Admin REST
@@ -154,24 +165,34 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
     (reconciled against the pinned spec in the armed test below).
     """
     assert sorted(_op_ids(_METHODS_BY_CONSTANT)) == [
+        "DELETE:/admin/realms/{realm}/users/{user-id}/groups/{groupId}",
         "GET:/admin/realms/{realm}",
         "GET:/admin/realms/{realm}/client-scopes",
         "GET:/admin/realms/{realm}/clients",
         "GET:/admin/realms/{realm}/clients/{client-uuid}",
         "GET:/admin/realms/{realm}/clients/{client-uuid}/client-secret",
+        "GET:/admin/realms/{realm}/groups",
+        "GET:/admin/realms/{realm}/groups/{group-id}",
+        "GET:/admin/realms/{realm}/groups/{group-id}/children",
+        "GET:/admin/realms/{realm}/groups/{group-id}/members",
         "GET:/admin/realms/{realm}/roles",
         "GET:/admin/realms/{realm}/roles/{role-name}",
         "GET:/admin/realms/{realm}/roles/{role-name}/users",
         "GET:/admin/realms/{realm}/users",
+        "GET:/admin/realms/{realm}/users/{user-id}/groups",
         "GET:/admin/realms/{realm}/users/{user-id}/role-mappings",
         "POST:/admin/realms",
         "POST:/admin/realms/{realm}/client-scopes",
         "POST:/admin/realms/{realm}/clients",
         "POST:/admin/realms/{realm}/clients/{client-uuid}/protocol-mappers/models",
+        "POST:/admin/realms/{realm}/groups",
+        "POST:/admin/realms/{realm}/groups/{group-id}/children",
         "POST:/admin/realms/{realm}/users",
         "POST:/admin/realms/{realm}/users/{user-id}/role-mappings/realm",
         "PUT:/admin/realms/{realm}",
         "PUT:/admin/realms/{realm}/clients/{client-uuid}",
+        "PUT:/admin/realms/{realm}/groups/{group-id}",
+        "PUT:/admin/realms/{realm}/users/{user-id}/groups/{groupId}",
         "PUT:/admin/realms/{realm}/users/{user-id}/reset-password",
     ]
     assert sorted(_op_ids(_EXCLUDED_METHODS_BY_CONSTANT)) == [

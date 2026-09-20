@@ -83,6 +83,9 @@ from meho_backplane.connectors.keycloak._paths import (
     _CLIENT_PATH,
     _CLIENT_SCOPES_PATH,
     _CLIENTS_PATH,
+    _GROUP_CHILDREN_PATH,
+    _GROUP_MEMBERS_PATH,
+    _GROUPS_PATH,
     _ROLE_USERS_PATH,
     _ROLES_PATH,
     _USER_ROLE_MAPPINGS_PATH,
@@ -104,6 +107,8 @@ __all__ = [
     "keycloak_client_get",
     "keycloak_client_list",
     "keycloak_client_scope_list",
+    "keycloak_group_list",
+    "keycloak_group_member_list",
     "keycloak_realm_get",
     "keycloak_role_list",
     "keycloak_role_mapping_get",
@@ -365,6 +370,83 @@ async def keycloak_role_users(
     return {"rows": scrubbed, "total": len(scrubbed)}
 
 
+async def keycloak_group_list(
+    self: KeycloakConnector,
+    operator: Operator,
+    target: KeycloakTargetLike,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """List realm groups (``GET /admin/realms/{realm}/groups``).
+
+    Op-id: ``keycloak.group.list``. Lists the top-level realm groups, or —
+    when ``parent_id`` is given — the direct children of that group
+    (``GET .../groups/{group-id}/children``). Optional ``search`` maps to
+    Keycloak's ``?search=`` substring filter; ``max`` caps the result count.
+    Keycloak's default group projection is **brief** and omits group
+    ``attributes`` — pass ``brief=false`` to include them
+    (``?briefRepresentation=false``), which is what an identity-bootstrap
+    flow needs to verify the ``tenant_id`` / ``tenant_role`` attributes a
+    role group carries. Returns ``{rows, total}``; the scrubber runs over
+    every row for defence-in-depth consistency with the sibling read ops
+    (a group representation carries no credential material).
+    """
+    realms = resolve_realm_config(target)
+    parent_id = params.get("parent_id")
+    query: dict[str, Any] = {}
+    search = params.get("search")
+    if isinstance(search, str) and search:
+        query["search"] = search
+    max_results = params.get("max")
+    if isinstance(max_results, int):
+        query["max"] = max_results
+    # Keycloak defaults briefRepresentation=true for the group list (attributes
+    # omitted); only send the flag when the caller opts into the full body.
+    if params.get("brief") is False:
+        query["briefRepresentation"] = "false"
+    if isinstance(parent_id, str) and parent_id:
+        path = fill_path(
+            _GROUP_CHILDREN_PATH,
+            {"realm": realms.managed_realm, "group-id": quote_segment(parent_id)},
+        )
+    else:
+        path = fill_path(_GROUPS_PATH, {"realm": realms.managed_realm})
+    rows = await self._get_admin_list(target, path, operator=operator, params=query or None)
+    scrubbed = [redact_secret_fields(row) for row in rows]
+    return {"rows": scrubbed, "total": len(scrubbed)}
+
+
+async def keycloak_group_member_list(
+    self: KeycloakConnector,
+    operator: Operator,
+    target: KeycloakTargetLike,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """List a group's members (``GET .../groups/{group-id}/members``).
+
+    Op-id: ``keycloak.group.member.list``. ``id`` is the group's internal
+    UUID (from ``keycloak.group.list``). Optional ``max`` caps the result
+    count. Returns ``{rows, total}``; each row is a UserRepresentation with
+    its ``credentials`` scrubbed — the same discipline ``keycloak.user.list``
+    applies, non-optional for any op returning UserRepresentation rows.
+    Keycloak returns the members in its default first page (100 users); a
+    very large group is capped at that page.
+    """
+    realms = resolve_realm_config(target)
+    group_uuid = quote_segment(params["id"])
+    query: dict[str, Any] = {}
+    max_results = params.get("max")
+    if isinstance(max_results, int):
+        query["max"] = max_results
+    rows = await self._get_admin_list(
+        target,
+        fill_path(_GROUP_MEMBERS_PATH, {"realm": realms.managed_realm, "group-id": group_uuid}),
+        operator=operator,
+        params=query or None,
+    )
+    scrubbed = [redact_secret_fields(row) for row in rows]
+    return {"rows": scrubbed, "total": len(scrubbed)}
+
+
 # ---------------------------------------------------------------------------
 # Curated when_to_use blurbs (one per op group)
 # ---------------------------------------------------------------------------
@@ -417,6 +499,20 @@ _WHEN_TO_USE_ROLE = (
     "reports that one user's roles."
 )
 
+_WHEN_TO_USE_GROUP = (
+    "Use for Keycloak group reads: list realm groups "
+    "(``keycloak.group.list`` — optionally filtered by ``search`` or scoped "
+    "to a parent's children via ``parent_id``; pass ``brief=false`` to "
+    "include group ``attributes``) or list a group's members "
+    "(``keycloak.group.member.list`` by the group's internal UUID). Groups "
+    "are the backplane's tenant-claim primitive: a role group carries "
+    "``tenant_id`` / ``tenant_role`` as group attributes that an aggregated "
+    "attribute mapper mints into the token, so list with ``brief=false`` to "
+    "verify a role group's attributes before assigning membership. Call "
+    "``keycloak.group.list`` to discover a group's internal ``id``, then "
+    "``keycloak.group.member.list`` to read who belongs to it."
+)
+
 #: Curated ``when_to_use`` blurb per op group, consumed by
 #: :meth:`KeycloakConnector.register_operations` (a group_key without an
 #: entry is a hard registration error). Co-located with the ops so the
@@ -427,6 +523,7 @@ WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "client_scope": _WHEN_TO_USE_CLIENT_SCOPE,
     "user": _WHEN_TO_USE_USER,
     "role": _WHEN_TO_USE_ROLE,
+    "group": _WHEN_TO_USE_GROUP,
 }
 
 #: UUID pattern used as a defence-in-depth constraint on every ``id``/``uuid``
@@ -761,6 +858,111 @@ READ_OPS: tuple[KeycloakOp, ...] = (
             "output_shape": (
                 "``{rows: [{<UserRepresentation, credentials redacted>}], "
                 "total: N}`` — the realm-role members."
+            ),
+        },
+    ),
+    KeycloakOp(
+        op_id="keycloak.group.list",
+        handler_attr="group_list",
+        summary="List Keycloak realm groups (optionally with attributes / by parent).",
+        description=(
+            "GETs ``/admin/realms/{realm}/groups`` (top-level groups) or — "
+            "when ``parent_id`` is set — ``.../groups/{group-id}/children`` "
+            "(that group's direct children), returning ``{rows, total}``. "
+            "Optional ``search`` maps to Keycloak's ``?search=`` substring "
+            "filter; ``max`` caps the count. Keycloak's default projection is "
+            "brief and omits group ``attributes`` — pass ``brief=false`` to "
+            "include them (the ``tenant_id`` / ``tenant_role`` a role group "
+            "carries). Dispatches via the admin-auth path."
+        ),
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "search": {
+                    "type": "string",
+                    "description": "Substring filter on the group name (Keycloak ?search=).",
+                },
+                "parent_id": {
+                    "type": "string",
+                    "pattern": _UUID_PATTERN,
+                    "description": "List this group's direct children instead of top-level groups.",
+                },
+                "brief": {
+                    "type": "boolean",
+                    "description": (
+                        "Default true (Keycloak's brief projection, no attributes). "
+                        "Pass false to include group attributes."
+                    ),
+                },
+                "max": {
+                    "type": "integer",
+                    "description": "Cap on the number of groups returned.",
+                },
+            },
+            "additionalProperties": False,
+        },
+        response_schema=_ROWS_SCHEMA,
+        group_key="group",
+        tags=("read-only", "group", "keycloak"),
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions={
+            "when_to_use": _WHEN_TO_USE_GROUP,
+            "parameter_hints": {
+                "search": "Filter by group name substring.",
+                "parent_id": "Pass the parent group's UUID to list its children.",
+                "brief": "Pass false to include the tenant_id / tenant_role attributes.",
+            },
+            "output_shape": (
+                "``{rows: [{<GroupRepresentation>}], total: N}``. Each row's "
+                "``id`` is the internal UUID for the membership ops; with "
+                "``brief=false`` each row carries ``attributes``."
+            ),
+        },
+    ),
+    KeycloakOp(
+        op_id="keycloak.group.member.list",
+        handler_attr="group_member_list",
+        summary="List the members of a Keycloak group by internal UUID (no credentials).",
+        description=(
+            "GETs ``/admin/realms/{realm}/groups/{group-id}/members`` where "
+            "``id`` is the group's internal UUID (from "
+            "``keycloak.group.list``) and returns the member users as "
+            "``{rows, total}``. Each row is a UserRepresentation with its "
+            "``credentials`` redacted — the op never surfaces credential "
+            "material. ``max`` caps the count; Keycloak returns its default "
+            "first page (100 users) otherwise. Dispatches via the admin-auth "
+            "path."
+        ),
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "pattern": _UUID_PATTERN,
+                    "description": "The group's internal UUID (from keycloak.group.list).",
+                },
+                "max": {
+                    "type": "integer",
+                    "description": "Cap on the number of members returned.",
+                },
+            },
+            "required": ["id"],
+            "additionalProperties": False,
+        },
+        response_schema=_ROWS_SCHEMA,
+        group_key="group",
+        tags=("read-only", "group", "keycloak"),
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions={
+            "when_to_use": _WHEN_TO_USE_GROUP,
+            "parameter_hints": {
+                "id": "The group's internal UUID, from keycloak.group.list.",
+            },
+            "output_shape": (
+                "``{rows: [{<UserRepresentation, credentials redacted>}], "
+                "total: N}`` — the group's members."
             ),
         },
     ),

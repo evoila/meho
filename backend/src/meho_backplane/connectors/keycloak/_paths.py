@@ -62,6 +62,16 @@ _USER_RESET_PASSWORD_PATH = "/admin/realms/{realm}/users/{user-id}/reset-passwor
 _ROLES_PATH = "/admin/realms/{realm}/roles"
 _ROLE_PATH = "/admin/realms/{realm}/roles/{role-name}"
 _ROLE_USERS_PATH = "/admin/realms/{realm}/roles/{role-name}/users"
+_GROUPS_PATH = "/admin/realms/{realm}/groups"
+_GROUP_PATH = "/admin/realms/{realm}/groups/{group-id}"
+_GROUP_CHILDREN_PATH = "/admin/realms/{realm}/groups/{group-id}/children"
+_GROUP_MEMBERS_PATH = "/admin/realms/{realm}/groups/{group-id}/members"
+_USER_GROUPS_PATH = "/admin/realms/{realm}/users/{user-id}/groups"
+# NB: the user-group membership sub-resource uses the camelCase ``{groupId}``
+# path-parameter name (a Keycloak spec quirk — the groups resource itself uses
+# the hyphenated ``{group-id}``); the placeholder is byte-for-byte the pinned
+# spec's own name so the #2988 reconcile lane resolves it.
+_USER_GROUP_PATH = "/admin/realms/{realm}/users/{user-id}/groups/{groupId}"
 
 # -- dispatched, but outside the Admin REST spec's scope (see docstring) ----
 

@@ -18,6 +18,10 @@ from __future__ import annotations
 from typing import Any
 
 from meho_backplane.connectors.keycloak.ops_read import _UUID_PATTERN, KeycloakOp
+from meho_backplane.connectors.keycloak.ops_write_groups_schemas import (
+    GROUP_WRITE_OPS,
+    WHEN_TO_USE_GROUP_WRITE,
+)
 
 __all__ = ["WHEN_TO_USE_WRITE_BY_GROUP", "WRITE_OPS"]
 
@@ -91,6 +95,7 @@ WHEN_TO_USE_WRITE_BY_GROUP: dict[str, str] = {
     "protocol_mapper_write": _WHEN_TO_USE_PROTOCOL_MAPPER_WRITE,
     "user_write": _WHEN_TO_USE_USER_WRITE,
     "role_mapping_write": _WHEN_TO_USE_ROLE_MAPPING_WRITE,
+    "group_write": WHEN_TO_USE_GROUP_WRITE,
 }
 
 # ---------------------------------------------------------------------------
@@ -483,4 +488,7 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
             "output_shape": "``{id, username, assigned_roles}``.",
         },
     ),
+    # Group-lifecycle write ops (#3280) — metadata table lives in the sibling
+    # ``ops_write_groups_schemas`` module (handlers in ``ops_write_groups``).
+    *GROUP_WRITE_OPS,
 )

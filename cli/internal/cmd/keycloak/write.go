@@ -88,6 +88,9 @@ var writeResultKeyOrder = []string{
 	"realm", "name", "client_id", "client_uuid", "id", "username",
 	"mapper_name", "created", "updated", "conflict", "password_reset",
 	"assigned_roles",
+	// group-lifecycle write confirmations (#3280)
+	"parent_id", "path", "already_exists", "user_id", "group_id",
+	"added", "removed", "unchanged", "attribute_keys", "replaced",
 }
 
 // decodeFlatObject decodes the write confirmation envelope — a flat JSON

@@ -2743,6 +2743,118 @@ meho keycloak client-scope list [flags]
 - `--json` — emit the full OperationResult envelope as JSON
 - `--target` — target slug to dispatch against (required)
 
+### `meho keycloak group`
+
+Keycloak group sub-verbs (list, create, update-attributes, member)
+
+```
+meho keycloak group
+```
+
+#### `meho keycloak group create`
+
+Create a realm group with attributes (approval-gated)
+
+```
+meho keycloak group create [flags]
+```
+
+- `--attribute` — group attribute as key=value (repeatable)
+- `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
+- `--json` — emit the full OperationResult envelope as JSON
+- `--name` — the group name (required)
+- `--parent-id` — parent group UUID to nest under (omit for top-level)
+- `--target` — target slug to dispatch against (required)
+
+#### `meho keycloak group list`
+
+List Keycloak realm groups (optionally with attributes / by parent)
+
+```
+meho keycloak group list [flags]
+```
+
+- `--attributes` — include group attributes (briefRepresentation=false)
+- `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
+- `--json` — emit the full OperationResult envelope as JSON
+- `--max` — cap on the number of groups returned (0 = no cap)
+- `--parent-id` — list this group's direct children instead of top-level
+- `--search` — filter by group name substring (Keycloak ?search=)
+- `--target` — target slug to dispatch against (required)
+
+#### `meho keycloak group member`
+
+Keycloak group membership sub-verbs (add, remove, list)
+
+```
+meho keycloak group member
+```
+
+##### `meho keycloak group member add`
+
+add a user to a realm group (approval-gated)
+
+```
+meho keycloak group member add [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
+- `--group-id` — the group's internal UUID
+- `--group-name` — the group name (resolved when --group-id is absent)
+- `--json` — emit the full OperationResult envelope as JSON
+- `--parent-id` — parent UUID to scope --group-name to a subgroup
+- `--target` — target slug to dispatch against (required)
+- `--user-id` — the user's internal UUID
+- `--username` — the username (resolved when --user-id is absent)
+
+##### `meho keycloak group member list`
+
+List the members of a Keycloak group by internal UUID (no credentials)
+
+```
+meho keycloak group member list [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
+- `--id` — the group's internal UUID (from `meho keycloak group list`) (required)
+- `--json` — emit the full OperationResult envelope as JSON
+- `--max` — cap on the number of members returned (0 = no cap)
+- `--target` — target slug to dispatch against (required)
+
+##### `meho keycloak group member remove`
+
+remove a user from a realm group (approval-gated)
+
+```
+meho keycloak group member remove [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
+- `--group-id` — the group's internal UUID
+- `--group-name` — the group name (resolved when --group-id is absent)
+- `--json` — emit the full OperationResult envelope as JSON
+- `--parent-id` — parent UUID to scope --group-name to a subgroup
+- `--target` — target slug to dispatch against (required)
+- `--user-id` — the user's internal UUID
+- `--username` — the username (resolved when --user-id is absent)
+
+#### `meho keycloak group update-attributes`
+
+Merge or replace a realm group's attributes (approval-gated)
+
+```
+meho keycloak group update-attributes [flags]
+```
+
+- `--attribute` — group attribute as key=value (repeatable)
+- `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
+- `--id` — the group's internal UUID (skips name resolution)
+- `--json` — emit the full OperationResult envelope as JSON
+- `--name` — the group name (resolved to UUID when --id is absent)
+- `--parent-id` — parent UUID to scope --name to a subgroup
+- `--replace` — replace the attribute map wholesale (default: merge)
+- `--target` — target slug to dispatch against (required)
+
 ### `meho keycloak protocol-mapper`
 
 Keycloak protocol-mapper sub-verbs (create)

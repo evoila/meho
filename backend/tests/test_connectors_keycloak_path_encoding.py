@@ -440,19 +440,26 @@ def test_quote_segment_imported_and_called_in_both_handler_modules() -> None:
     Uses exact call-site counts (not >=) so that any future addition or removal
     of a call site triggers an explicit review.  Current counts:
 
-    * ops_read: 3 sites — ``keycloak_client_get`` + ``keycloak_role_mapping_get``
-      + ``keycloak_role_users`` (role name → path segment, #2843).
+    * ops_read: 5 sites — ``keycloak_client_get`` + ``keycloak_role_mapping_get``
+      + ``keycloak_role_users`` (role name → path segment, #2843) +
+      ``keycloak_group_list`` (parent_id) + ``keycloak_group_member_list``
+      (group UUID) — the last two added by #3280.
     * ops_write: 4 sites — ``keycloak_client_update``, ``keycloak_protocol_mapper_create``,
       ``keycloak_user_password_reset``, ``keycloak_role_mapping_add``.
+    * ops_write_groups: 6 sites (#3280) — ``keycloak_group_create`` (parent_id),
+      ``keycloak_group_update_attributes`` (group UUID), and
+      ``keycloak_group_member_add`` / ``_remove`` (user UUID + group UUID each).
     """
     import inspect
 
     import meho_backplane.connectors.keycloak.ops_read as ops_read_mod
     import meho_backplane.connectors.keycloak.ops_write as ops_write_mod
+    import meho_backplane.connectors.keycloak.ops_write_groups as ops_write_groups_mod
 
     expected_counts = {
-        ops_read_mod: 3,
+        ops_read_mod: 5,
         ops_write_mod: 4,
+        ops_write_groups_mod: 6,
     }
     for mod, expected in expected_counts.items():
         source = inspect.getsource(mod)

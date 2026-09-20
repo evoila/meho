@@ -456,6 +456,16 @@ _WRITE_OPS: Final[frozenset[str]] = frozenset(
         "argocd.app.sync",
         "argocd.app.rollback",
         "argocd.app.refresh",
+        # keycloak group-lifecycle writes (#3280) whose op-id suffix is not
+        # one of _WRITE_SUFFIXES (``.update_attributes`` / ``.add`` /
+        # ``.remove``): pin them ``write`` so a group mutation shows as a
+        # mutation on the feed. Group attributes are not secret material, so
+        # these stay plain ``write`` (never ``credential_write``);
+        # ``keycloak.group.create`` already classifies write via its
+        # ``.create`` suffix. Same exact-pin idiom as the argocd entries.
+        "keycloak.group.update_attributes",
+        "keycloak.group.member.add",
+        "keycloak.group.member.remove",
     }
 )
 

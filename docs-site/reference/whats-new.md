@@ -25,6 +25,23 @@ notes.
   the volume and reads the fresh summary back — a first-class governed operation
   in place of dropping to SSH or govc.
 
+## [v0.35.6](https://github.com/evoila/meho/releases/tag/v0.35.6) — 2026-09-18
+
+- **Re-mounting an NFS datastore that is already there no longer fails.**
+  `vmware.composite.host.datastore_mount_nfs` is now idempotent: re-running the
+  mount on a host where the export is already mounted converges instead of
+  faulting. Previously a second call with the same parameters surfaced the
+  host's already-exists fault as a connector error, so an automation pack that
+  re-ran the step — a retry after a transient failure on a later host, or an
+  assisted-resume recheck — could never converge once the datastore was
+  mounted. The composite now reads the host's mounted datastores before writing
+  and matches on the export's identity (server and path, normalised for case and
+  a trailing slash): an export that is already mounted returns `already_mounted`
+  with no write, the requested name held by a different export returns a
+  `name_conflict` refusal with no write, and an export mounted concurrently
+  between the check and the write is recovered by re-reading. A fresh mount and
+  every other fault are unchanged.
+
 ## [v0.35.5](https://github.com/evoila/meho/releases/tag/v0.35.5) — 2026-09-17
 
 - **A standalone ESXi host that went quiet is recovered automatically.** After

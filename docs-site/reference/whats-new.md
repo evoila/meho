@@ -9,6 +9,19 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.35.11](https://github.com/evoila/meho/releases/tag/v0.35.11) — 2026-09-21
+
+- **A vSphere Supervisor that logs in without handing back a kubeconfig can be
+  reached again.** A Kubernetes (vSphere Supervisor) target that authenticates
+  through WCP-SSO gets back a session token and, on newer Supervisors, no
+  embedded kubeconfig at all — and MEHO used to reject that successful login as
+  malformed, so the target could never be probed. MEHO now treats the embedded
+  kubeconfig as optional (just as `kubectl vsphere login` does): when it is
+  absent it builds the connection from what it already knows — the login
+  host/port, the target's pinned CA and certificate name, and the returned
+  session token as the bearer — and the target's own TLS policy always wins over
+  anything an embedded config tried to set.
+
 ## [v0.35.10](https://github.com/evoila/meho/releases/tag/v0.35.10) — 2026-09-21
 
 - **The operator console can't be stranded on a stale stylesheet after a

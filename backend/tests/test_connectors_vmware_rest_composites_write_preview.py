@@ -337,6 +337,123 @@ def test_all_write_composites_register_a_preview_builder() -> None:
 
 
 # ===========================================================================
+# storage_policy.create preview — describe create vs adopt (#3826)
+# ===========================================================================
+
+
+class _StoragePolicyPreviewConnector:
+    """Bare-list REST double for the storage_policy.create preview resolve reads."""
+
+    def __init__(
+        self,
+        *,
+        categories: list[dict[str, Any]] | None = None,
+        tags: list[dict[str, Any]] | None = None,
+        policies: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self._categories = categories or []
+        self._tags = tags or []
+        self._policies = policies or []
+
+    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
+        return f"/api{path}"
+
+    async def adapt_op_query(
+        self, target: Any, query: dict[str, Any] | None, operator: Operator
+    ) -> dict[str, Any] | None:
+        del target, operator
+        return query
+
+    async def _get_json(
+        self, target: Any, path: str, *, operator: Operator, params: Any = None
+    ) -> Any:
+        if path.endswith("/vcenter/storage/policies"):
+            return list(self._policies)
+        if path.endswith("/cis/tagging/category"):
+            return [c["id"] for c in self._categories]
+        if "/cis/tagging/category/" in path:
+            cid = path.rsplit("/", 1)[-1]
+            return next((c for c in self._categories if c["id"] == cid), None)
+        if path.endswith("/cis/tagging/tag"):
+            return [t["id"] for t in self._tags]
+        if "/cis/tagging/tag/" in path:
+            tid = path.rsplit("/", 1)[-1]
+            return next((t for t in self._tags if t["id"] == tid), None)
+        raise AssertionError(f"unexpected GET {path!r}")
+
+
+_STORAGE_POLICY_PREVIEW_PARAMS = {
+    "policy_name": "NFS-Gold",
+    "category_name": "meho-storage",
+    "tag_name": "nfs-gold",
+    "datastore_names": ["nfs-ds"],
+}
+
+
+async def test_storage_policy_create_preview_static_plan_without_connector() -> None:
+    """No connector resolved: the preview still describes an all-create plan."""
+    out = await _write_preview._storage_policy_create_preview(
+        _make_preview_ctx(_STORAGE_POLICY_PREVIEW_PARAMS, connector_instance=None)
+    )
+    assert out is not None
+    preview = out["preview"]
+    assert preview["action"] == "create_tag_storage_policy"
+    assert preview["policy_name"] == "NFS-Gold"
+    assert {k: v["action"] for k, v in preview["plan"].items()} == {
+        "category": "create",
+        "tag": "create",
+        "policy": "create",
+    }
+
+
+async def test_storage_policy_create_preview_labels_adopt_from_live_state() -> None:
+    """Existing category/tag/policy are labelled adopt / adopt / exists, read-only."""
+    conn = _StoragePolicyPreviewConnector(
+        categories=[
+            {
+                "id": "cat-existing",
+                "name": "meho-storage",
+                "cardinality": "MULTIPLE",
+                "associable_types": ["Datastore"],
+            }
+        ],
+        tags=[{"id": "tag-existing", "name": "nfs-gold", "category_id": "cat-existing"}],
+        policies=[{"policy": "policy-existing", "name": "NFS-Gold"}],
+    )
+    out = await _write_preview._storage_policy_create_preview(
+        _make_preview_ctx(_STORAGE_POLICY_PREVIEW_PARAMS, connector_instance=conn)
+    )
+    assert out is not None
+    plan = out["preview"]["plan"]
+    assert plan["category"]["action"] == "adopt"
+    assert plan["category"]["category_id"] == "cat-existing"
+    assert plan["tag"]["action"] == "adopt"
+    assert plan["policy"]["action"] == "exists"
+    assert plan["policy"]["policy_id"] == "policy-existing"
+
+
+async def test_storage_policy_create_preview_flags_category_conflict() -> None:
+    """A same-named category with the wrong cardinality is labelled conflict."""
+    conn = _StoragePolicyPreviewConnector(
+        categories=[
+            {
+                "id": "cat-single",
+                "name": "meho-storage",
+                "cardinality": "SINGLE",
+                "associable_types": ["Datastore"],
+            }
+        ],
+    )
+    out = await _write_preview._storage_policy_create_preview(
+        _make_preview_ctx(_STORAGE_POLICY_PREVIEW_PARAMS, connector_instance=conn)
+    )
+    assert out is not None
+    category = out["preview"]["plan"]["category"]
+    assert category["action"] == "conflict"
+    assert "SINGLE" in category["reason"]
+
+
+# ===========================================================================
 # Live-read builders decline without a connector (structural guard)
 # ===========================================================================
 

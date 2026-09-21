@@ -167,6 +167,10 @@ from meho_backplane.connectors.vmware_rest.composites._namespace import (
 )
 from meho_backplane.connectors.vmware_rest.composites._storage_policy import (
     _OP_STORAGE_POLICIES_LIST,
+    _category_conflict_reason,
+    _resolve_category,
+    _resolve_policy_by_name,
+    _resolve_tag_in_category,
 )
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _GUEST_POWER_VERBS,
@@ -1329,23 +1333,105 @@ async def _supervisor_disable_preview(ctx: PreviewContext) -> dict[str, Any] | N
     return {"cluster": cluster, "irreversibility": "kubernetes-instance-destroyed"}
 
 
+async def _storage_policy_plan(
+    ctx: PreviewContext, *, category_name: str, tag_name: str, policy_name: str
+) -> dict[str, dict[str, Any]]:
+    """Resolve live state read-only and label each sub-step create vs adopt (#3826).
+
+    Mirrors the handler's resolve-before-create decisions over **REST reads
+    only** (no PBM SOAP, no writes) so the approver sees what the caution-tier
+    write would actually do: a category / tag that already exists is ``adopt``
+    (a category with an incompatible cardinality / associable-types is
+    ``conflict``); a policy of the same name is ``exists`` (the create will adopt
+    it if its rule set matches, else report ``policy_conflict``). Any read
+    failure degrades that step to the plain ``create`` label — the preview never
+    fails the approval flow.
+    """
+    plan: dict[str, dict[str, Any]] = {
+        "category": {"name": category_name, "action": "create"},
+        "tag": {"name": tag_name, "action": "create"},
+        "policy": {"name": policy_name, "action": "create"},
+    }
+    connector = ctx.connector_instance
+    if connector is None:
+        return plan
+    try:
+        existing_category = await _resolve_category(
+            connector,  # type: ignore[arg-type]
+            ctx.target,
+            ctx.operator,
+            category_name,
+        )
+        category_id: str | None = None
+        if existing_category is not None:
+            category_id, detail = existing_category
+            reason = _category_conflict_reason(detail)
+            plan["category"] = {
+                "name": category_name,
+                "action": "conflict" if reason is not None else "adopt",
+                "category_id": category_id,
+                **({"reason": reason} if reason is not None else {}),
+            }
+        if category_id is not None:
+            tag_id = await _resolve_tag_in_category(
+                connector,  # type: ignore[arg-type]
+                ctx.target,
+                ctx.operator,
+                tag_name,
+                category_id,
+            )
+            if tag_id is not None:
+                plan["tag"] = {"name": tag_name, "action": "adopt", "tag_id": tag_id}
+        existing_policy = await _resolve_policy_by_name(
+            connector,  # type: ignore[arg-type]
+            ctx.target,
+            ctx.operator,
+            policy_name,
+        )
+        if existing_policy is not None:
+            plan["policy"] = {
+                "name": policy_name,
+                "action": "exists",
+                "policy_id": existing_policy.get("policy"),
+            }
+    except httpx.HTTPError:
+        return plan
+    return plan
+
+
 async def _storage_policy_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
-    """Preview ``storage_policy.create`` — echo what the caution-tier write builds.
+    """Preview ``storage_policy.create`` — describe what the caution-tier write builds.
 
     Not destructive, so no mandatory blast_radius: a plain ``preview`` block
-    naming the policy / category / tag / datastores the approver is authorising
-    to be created. Params here are non-secret, so the echo is safe.
+    naming the policy / category / tag / datastores the approver is authorising.
+    Params here are non-secret, so the echo is safe. The ``plan`` sub-block
+    resolves live state read-only (:func:`_storage_policy_plan`) to label each
+    sub-step **create** vs **adopt** / **conflict** (#3826), degrading to the
+    plain create-plan when no connector resolved or a read fails.
     """
     params = ctx.params
-    return {
-        "preview": {
-            "action": "create_tag_storage_policy",
-            "policy_name": params.get("policy_name"),
-            "category_name": params.get("category_name"),
-            "tag_name": params.get("tag_name"),
-            "datastore_names": params.get("datastore_names"),
-        }
+    policy_name = params.get("policy_name")
+    category_name = params.get("category_name")
+    tag_name = params.get("tag_name")
+    preview: dict[str, Any] = {
+        "action": "create_tag_storage_policy",
+        "policy_name": policy_name,
+        "category_name": category_name,
+        "tag_name": tag_name,
+        "datastore_names": params.get("datastore_names"),
     }
+    if (
+        isinstance(category_name, str)
+        and isinstance(tag_name, str)
+        and isinstance(policy_name, str)
+    ):
+        preview["plan"] = await _storage_policy_plan(
+            ctx,
+            category_name=category_name,
+            tag_name=tag_name,
+            policy_name=policy_name,
+        )
+    return {"preview": preview}
 
 
 async def _storage_policy_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:

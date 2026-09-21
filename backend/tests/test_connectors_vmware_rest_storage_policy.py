@@ -33,6 +33,9 @@ from meho_backplane.connectors.vmware_rest.composites._storage_policy import (
     storage_policy_delete_composite,
     storage_policy_list_composite,
 )
+from meho_backplane.connectors.vmware_rest.soap_pbm import (
+    pbm_tag_property_id as _storage_policy_tag_property_id,
+)
 
 
 def _make_operator() -> Operator:
@@ -64,6 +67,9 @@ class _RecordingConnector:
         policies: list[dict[str, str]] | None = None,
         pbm_create_returns: str = "policy-guid-1",
         pbm_delete_outcomes: list[dict[str, Any]] | None = None,
+        existing_categories: list[dict[str, Any]] | None = None,
+        existing_tags: list[dict[str, Any]] | None = None,
+        pbm_tag_rules: dict[str, set[tuple[str, frozenset[str]]]] | None = None,
     ) -> None:
         self._datastores = datastores
         self._category_id = category_id
@@ -72,9 +78,17 @@ class _RecordingConnector:
         self.policies = list(policies or [])
         self._pbm_create_returns = pbm_create_returns
         self._pbm_delete_outcomes = pbm_delete_outcomes if pbm_delete_outcomes is not None else []
+        # #3826 adopt path: existing tag substrate the resolve-before-create reads
+        # discover. Each category/tag carries its full detail model (id + name +
+        # cardinality / associable_types / category_id); the list reads serve the
+        # ids, the per-id gets serve the detail.
+        self._existing_categories = list(existing_categories or [])
+        self._existing_tags = list(existing_tags or [])
+        self._pbm_tag_rules = dict(pbm_tag_rules or {})
         self.calls: list[dict[str, Any]] = []
         self.pbm_create_calls: list[dict[str, Any]] = []
         self.pbm_delete_calls: list[list[str]] = []
+        self.pbm_retrieve_rule_calls: list[list[str]] = []
 
     async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
         return f"/api{path}"
@@ -94,6 +108,16 @@ class _RecordingConnector:
             return [d for d in self._datastores if not names or d["name"] in names]
         if "/vcenter/storage/policies" in path:
             return list(self.policies)
+        if path.endswith("/cis/tagging/category"):
+            return [c["id"] for c in self._existing_categories]
+        if "/cis/tagging/category/" in path:
+            cid = path.rsplit("/", 1)[-1]
+            return next((c for c in self._existing_categories if c["id"] == cid), None)
+        if path.endswith("/cis/tagging/tag"):
+            return [t["id"] for t in self._existing_tags]
+        if "/cis/tagging/tag/" in path:
+            tid = path.rsplit("/", 1)[-1]
+            return next((t for t in self._existing_tags if t["id"] == tid), None)
         raise AssertionError(f"unexpected GET {path!r}")
 
     async def _post_json(
@@ -139,6 +163,12 @@ class _RecordingConnector:
         if not self._pbm_delete_outcomes:
             self.policies = [p for p in self.policies if p.get("policy") not in profile_ids]
         return self._pbm_delete_outcomes
+
+    async def pbm_retrieve_profile_tag_rules(
+        self, target: Any, operator: Operator, *, profile_ids: list[str]
+    ) -> dict[str, set[tuple[str, frozenset[str]]]]:
+        self.pbm_retrieve_rule_calls.append(list(profile_ids))
+        return {pid: self._pbm_tag_rules[pid] for pid in profile_ids if pid in self._pbm_tag_rules}
 
 
 class _GateRecorder:
@@ -206,7 +236,11 @@ async def test_create_happy_path_full_fan_out_and_readback(gate: _GateRecorder) 
     assert out["tag_id"] == "tag-1"
     assert out["datastores"] == [{"name": "nfs-ds", "moid": "datastore-1"}]
     assert out["listed"] is True
-    # Category -> tag -> attach -> PBM create, all gated in order.
+    # Fresh path unchanged (#3826): nothing adopted, no warnings.
+    assert out["adopted"] == {"category": False, "tag": False, "policy": False}
+    assert out["issues"] == []
+    # Category -> tag -> attach -> PBM create, all gated in order. The
+    # resolve-before-create reads carry no gate, so the gated set is unchanged.
     assert gate.gated_op_ids == [
         "POST:/cis/tagging/category",
         "POST:/cis/tagging/tag",
@@ -317,6 +351,208 @@ async def test_create_reports_created_artifacts_when_pbm_returns_no_id(gate: _Ga
     assert out["policy_id"] is None
     assert out["category_id"] == "cat-1"
     assert out["tag_id"] == "tag-1"
+    # #3812: a load-bearing failure carries an error-severity issue so the
+    # dispatcher surfaces it as a dispatch error, not a false ok/200.
+    assert any(i["severity"] == "error" for i in out["issues"])
+
+
+# --- adopt (idempotency, #3826) --------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_adopts_existing_category_and_tag(gate: _GateRecorder) -> None:
+    """A retry after a partial run reuses the existing category + tag."""
+    conn = _RecordingConnector(
+        datastores=[{"name": "nfs-ds", "datastore": "datastore-1"}],
+        existing_categories=[
+            {
+                "id": "cat-existing",
+                "name": "meho-storage",
+                "cardinality": "MULTIPLE",
+                "associable_types": ["Datastore"],
+            }
+        ],
+        existing_tags=[{"id": "tag-existing", "name": "nfs-gold", "category_id": "cat-existing"}],
+    )
+    out = await storage_policy_create_composite(
+        operator=_make_operator(),
+        target=_TARGET,
+        params={
+            "policy_name": "NFS-Gold",
+            "category_name": "meho-storage",
+            "tag_name": "nfs-gold",
+            "datastore_names": ["nfs-ds"],
+        },
+        connector=conn,
+    )
+    assert out["status"] == "created"
+    assert out["category_id"] == "cat-existing"
+    assert out["tag_id"] == "tag-existing"
+    assert out["policy_id"] == "policy-guid-1"
+    assert out["adopted"] == {"category": True, "tag": True, "policy": False}
+    # No category / tag CREATE POSTs — they were adopted, not re-created (the
+    # matching GET list/get reads still fire; only the writes are suppressed).
+    posts = [c for c in conn.calls if c["method"] == "POST"]
+    assert not any(c["path"] == "/api/cis/tagging/category" for c in posts)
+    assert not any(c["path"] == "/api/cis/tagging/tag" for c in posts)
+    # Only the still-needed writes were gated (adoption reads carry no gate).
+    assert gate.gated_op_ids == [
+        "POST:/cis/tagging/tag-association/{tagId}?action=attach",
+        "POST:/pbm/ProfileManager/PbmCreate",
+    ]
+    # Each adopted sub-step is reported as a warning issue.
+    warnings = [i for i in out["issues"] if i["severity"] == "warning"]
+    assert len(warnings) == 2
+
+
+@pytest.mark.asyncio
+async def test_create_conflicting_category_errors(gate: _GateRecorder) -> None:
+    """A same-named category with an incompatible cardinality is a terminal error."""
+    conn = _RecordingConnector(
+        datastores=[{"name": "nfs-ds", "datastore": "datastore-1"}],
+        existing_categories=[
+            {
+                "id": "cat-single",
+                "name": "meho-storage",
+                "cardinality": "SINGLE",
+                "associable_types": ["Datastore"],
+            }
+        ],
+    )
+    out = await storage_policy_create_composite(
+        operator=_make_operator(),
+        target=_TARGET,
+        params={
+            "policy_name": "NFS-Gold",
+            "category_name": "meho-storage",
+            "tag_name": "nfs-gold",
+            "datastore_names": ["nfs-ds"],
+        },
+        connector=conn,
+    )
+    assert out["status"] == "category_conflict"
+    assert out["policy_id"] is None
+    assert out["category_id"] == "cat-single"
+    errors = [i for i in out["issues"] if i["severity"] == "error"]
+    assert errors and "SINGLE" in errors[0]["message"]
+    # Fail-closed before any write: nothing gated, no PBM create, no POSTs.
+    assert gate.calls == []
+    assert conn.pbm_create_calls == []
+    assert not any(c["method"] != "GET" for c in conn.calls)
+
+
+@pytest.mark.asyncio
+async def test_create_pbm_fault_after_adoption_is_clear_error_without_orphans(
+    gate: _GateRecorder,
+) -> None:
+    """PbmCreate yielding no id after adoption is a clear error with no orphan narrative."""
+    conn = _RecordingConnector(
+        datastores=[{"name": "nfs-ds", "datastore": "datastore-1"}],
+        existing_categories=[
+            {
+                "id": "cat-existing",
+                "name": "meho-storage",
+                "cardinality": "MULTIPLE",
+                "associable_types": ["Datastore"],
+            }
+        ],
+        existing_tags=[{"id": "tag-existing", "name": "nfs-gold", "category_id": "cat-existing"}],
+        pbm_create_returns="",
+    )
+    out = await storage_policy_create_composite(
+        operator=_make_operator(),
+        target=_TARGET,
+        params={
+            "policy_name": "NFS-Gold",
+            "category_name": "meho-storage",
+            "tag_name": "nfs-gold",
+            "datastore_names": ["nfs-ds"],
+        },
+        connector=conn,
+    )
+    assert out["status"] == "policy_create_failed"
+    assert out["policy_id"] is None
+    assert out["adopted"] == {"category": True, "tag": True, "policy": False}
+    assert any(i["severity"] == "error" for i in out["issues"])
+    # No orphan-cleanup narrative — a retry adopts the substrate.
+    guidance = (out["guidance"] or "").lower()
+    assert "clean up" not in guidance
+    assert "retry" in guidance
+
+
+@pytest.mark.asyncio
+async def test_create_adopts_existing_policy_with_matching_rule_set(gate: _GateRecorder) -> None:
+    """A same-named policy whose rule set matches is adopted, not re-created."""
+    prop_id = _storage_policy_tag_property_id("meho-storage")
+    conn = _RecordingConnector(
+        datastores=[{"name": "nfs-ds", "datastore": "datastore-1"}],
+        existing_categories=[
+            {
+                "id": "cat-existing",
+                "name": "meho-storage",
+                "cardinality": "MULTIPLE",
+                "associable_types": ["Datastore"],
+            }
+        ],
+        existing_tags=[{"id": "tag-existing", "name": "nfs-gold", "category_id": "cat-existing"}],
+        policies=[{"policy": "policy-existing", "name": "NFS-Gold"}],
+        pbm_tag_rules={"policy-existing": {(prop_id, frozenset({"nfs-gold"}))}},
+    )
+    out = await storage_policy_create_composite(
+        operator=_make_operator(),
+        target=_TARGET,
+        params={
+            "policy_name": "NFS-Gold",
+            "category_name": "meho-storage",
+            "tag_name": "nfs-gold",
+            "datastore_names": ["nfs-ds"],
+        },
+        connector=conn,
+    )
+    assert out["status"] == "adopted"
+    assert out["policy_id"] == "policy-existing"
+    assert out["adopted"] == {"category": True, "tag": True, "policy": True}
+    # No PbmCreate — the existing policy was adopted after the rule-set compare.
+    assert conn.pbm_create_calls == []
+    assert conn.pbm_retrieve_rule_calls == [["policy-existing"]]
+
+
+@pytest.mark.asyncio
+async def test_create_policy_conflict_when_rule_set_differs(gate: _GateRecorder) -> None:
+    """A same-named policy with a different rule set is a terminal policy_conflict."""
+    conn = _RecordingConnector(
+        datastores=[{"name": "nfs-ds", "datastore": "datastore-1"}],
+        existing_categories=[
+            {
+                "id": "cat-existing",
+                "name": "meho-storage",
+                "cardinality": "MULTIPLE",
+                "associable_types": ["Datastore"],
+            }
+        ],
+        existing_tags=[{"id": "tag-existing", "name": "nfs-gold", "category_id": "cat-existing"}],
+        policies=[{"policy": "policy-existing", "name": "NFS-Gold"}],
+        pbm_tag_rules={
+            "policy-existing": {
+                (_storage_policy_tag_property_id("other-category"), frozenset({"gold"}))
+            }
+        },
+    )
+    out = await storage_policy_create_composite(
+        operator=_make_operator(),
+        target=_TARGET,
+        params={
+            "policy_name": "NFS-Gold",
+            "category_name": "meho-storage",
+            "tag_name": "nfs-gold",
+            "datastore_names": ["nfs-ds"],
+        },
+        connector=conn,
+    )
+    assert out["status"] == "policy_conflict"
+    assert out["policy_id"] == "policy-existing"
+    assert any(i["severity"] == "error" for i in out["issues"])
+    assert conn.pbm_create_calls == []
 
 
 # --- delete ----------------------------------------------------------------

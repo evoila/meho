@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: file-size — the three cohesive storage-policy composites
+# (list / create / delete) plus the #3826 resolve-before-create adopt machinery
+# (category / tag / policy resolution + conflict checks) that keeps the create
+# path idempotent. The adopt helpers are tightly coupled to the create handler's
+# envelope; splitting them into a sibling module would fragment one composite's
+# logic across two files for no readability gain. Sibling composite handlers
+# (_read.py, _write.py) take the same allow for the same reason.
 
 """Governed NFS tag-based SPBM storage-policy composites (#3494).
 
@@ -53,6 +60,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     _read_sub_op,
     _write_sub_op,
 )
+from meho_backplane.connectors.vmware_rest.soap_pbm import pbm_tag_property_id
 from meho_backplane.operations.composite import enforce_subop_policy
 
 if TYPE_CHECKING:
@@ -67,7 +75,11 @@ if TYPE_CHECKING:
 # shape the vim sub-ops use (e.g. POST:/VirtualMachine/{moId}/ReconfigVM_Task).
 
 _OP_CATEGORY_CREATE = "POST:/cis/tagging/category"
+_OP_CATEGORY_LIST = "GET:/cis/tagging/category"
+_OP_CATEGORY_GET = "GET:/cis/tagging/category/{categoryId}"
 _OP_TAG_CREATE = "POST:/cis/tagging/tag"
+_OP_TAG_LIST = "GET:/cis/tagging/tag"
+_OP_TAG_GET = "GET:/cis/tagging/tag/{tagId}"
 _OP_TAG_ATTACH = "POST:/cis/tagging/tag-association/{tagId}?action=attach"
 _OP_DATASTORE_LIST = "GET:/vcenter/datastore"
 _OP_STORAGE_POLICIES_LIST = "GET:/vcenter/storage/policies"
@@ -79,6 +91,19 @@ _OP_PBM_DELETE = "POST:/pbm/ProfileManager/PbmDelete"
 _TAG_CATEGORY_CARDINALITY = "MULTIPLE"
 #: The vim managed-object type a datastore tag-association DynamicID names.
 _DATASTORE_OBJECT_TYPE = "Datastore"
+
+
+def _issue(category: str, severity: str, message: str) -> dict[str, Any]:
+    """Build one structured ``issues[]`` entry (#3812 convention).
+
+    ``severity == "error"`` is the author-controlled marker that routes the
+    envelope through the dispatcher's error-audit path (#3809 /
+    :func:`~meho_backplane.operations.dispatcher._composite_terminal_error_code`)
+    instead of recording a failed mutation as ``ok``; ``warning`` / ``info``
+    stay on the success path (an adopted sub-step is a ``warning``, not a
+    failure).
+    """
+    return {"category": category, "severity": severity, "message": message}
 
 
 async def _gate_pbm_sub_op(
@@ -184,8 +209,19 @@ def _create_result(
     tag_id: str | None = None,
     listed: bool = False,
     guidance: str | None = None,
+    adopted: dict[str, bool] | None = None,
+    issues: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Build the ``storage_policy.create`` response envelope (one shape, all paths)."""
+    """Build the ``storage_policy.create`` response envelope (one shape, all paths).
+
+    ``adopted`` reports, per sub-step (``category`` / ``tag`` / ``policy``),
+    whether an existing object was reused rather than created — the
+    resolve-before-create idempotency of #3826. ``issues`` carries the #3812
+    structured entries: a ``warning`` per adopted sub-step on a success
+    envelope, or a single ``error`` on a terminal ``*_conflict`` /
+    ``policy_create_failed`` envelope (which the dispatcher then surfaces as a
+    dispatch error, not a false ``ok``).
+    """
     return {
         "status": status,
         "policy_id": policy_id,
@@ -196,26 +232,116 @@ def _create_result(
         "datastores": resolved,
         "listed": listed,
         "guidance": guidance,
+        "adopted": adopted or {"category": False, "tag": False, "policy": False},
+        "issues": list(issues or []),
     }
 
 
-async def _create_tag_substrate(
+async def _resolve_category(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    name: str,
+) -> tuple[str, dict[str, Any]] | None:
+    """Find an existing tag category by display *name* (#3826 resolve-before-create).
+
+    The tagging REST API is id-first: ``GET /cis/tagging/category`` lists ids
+    only, so each is fetched (``GET /cis/tagging/category/{categoryId}``) and
+    matched on ``name``. Returns ``(category_id, detail)`` for the first match —
+    ``detail`` carries ``cardinality`` / ``associable_types`` for the adopt
+    compatibility check — or ``None`` when no category of that name exists.
+    """
+    ids = await _read_sub_op(connector, target, operator, _OP_CATEGORY_LIST, {})
+    for category_id in ids or []:
+        if not isinstance(category_id, str):
+            continue
+        detail = await _read_sub_op(
+            connector, target, operator, _OP_CATEGORY_GET, {"categoryId": category_id}
+        )
+        if isinstance(detail, dict) and detail.get("name") == name:
+            return category_id, detail
+    return None
+
+
+def _category_conflict_reason(detail: dict[str, Any]) -> str | None:
+    """Why an existing category of the right name still cannot be adopted, else ``None``.
+
+    An adopt is only safe when the existing category can carry the datastore tag
+    the composite mints: its ``cardinality`` must match the ``MULTIPLE`` the
+    fresh path creates (a ``SINGLE`` category would cap a datastore at one policy
+    tag), and its ``associable_types`` must permit ``Datastore`` (an empty set
+    means "any type", so it is permissive). A mismatch is a terminal
+    ``category_conflict`` — the operator must pick a different category name or
+    reconcile the existing one by hand.
+    """
+    cardinality = detail.get("cardinality")
+    if cardinality != _TAG_CATEGORY_CARDINALITY:
+        return (
+            f"existing category cardinality {cardinality!r} != required "
+            f"{_TAG_CATEGORY_CARDINALITY!r}"
+        )
+    associable = detail.get("associable_types") or []
+    if associable and _DATASTORE_OBJECT_TYPE not in associable:
+        return (
+            f"existing category associable_types {sorted(associable)!r} does not "
+            f"permit {_DATASTORE_OBJECT_TYPE!r}"
+        )
+    return None
+
+
+async def _resolve_tag_in_category(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    tag_name: str,
+    category_id: str,
+) -> str | None:
+    """Find an existing tag by *tag_name* **within** *category_id* (#3826).
+
+    Same id-first walk as :func:`_resolve_category` over
+    ``GET /cis/tagging/tag`` + ``GET /cis/tagging/tag/{tagId}``, matched on both
+    ``name`` and ``category_id`` (a tag name is only unique inside its category).
+    Returns the tag id, or ``None`` when no such tag exists yet.
+    """
+    ids = await _read_sub_op(connector, target, operator, _OP_TAG_LIST, {})
+    for tag_id in ids or []:
+        if not isinstance(tag_id, str):
+            continue
+        detail = await _read_sub_op(connector, target, operator, _OP_TAG_GET, {"tagId": tag_id})
+        if (
+            isinstance(detail, dict)
+            and detail.get("name") == tag_name
+            and detail.get("category_id") == category_id
+        ):
+            return tag_id
+    return None
+
+
+async def _ensure_category(
     connector: VmwareRestConnector,
     target: Any,
     operator: Operator,
     *,
     category_name: str,
-    tag_name: str,
     description: str,
-    resolved: list[dict[str, str]],
-) -> tuple[OperationResult | None, str | None, str | None]:
-    """Create the tag category + tag and attach the tag to each datastore.
+) -> tuple[OperationResult | None, str | None, str | None, bool]:
+    """Adopt an existing tag category of *category_name*, or create it.
 
-    Returns ``(gate, category_id, tag_id)``: ``gate`` is a parked / denied
-    :class:`OperationResult` the caller bubbles verbatim (``category_id`` /
-    ``tag_id`` then ``None``); on success ``gate`` is ``None`` and both ids are
-    populated. Each write flows through the shared sub-op governance seam.
+    Returns ``(gate, conflict_reason, category_id, adopted)``. ``gate`` is a
+    parked / denied :class:`OperationResult` the caller bubbles verbatim (from
+    the create sub-op's governance seam); ``conflict_reason`` is set (with the
+    existing ``category_id``) when a same-named category cannot be adopted
+    (:func:`_category_conflict_reason`); otherwise ``category_id`` is the adopted
+    or freshly-created id and ``adopted`` says which. Adoption issues **no**
+    write, so it carries no gate.
     """
+    existing = await _resolve_category(connector, target, operator, category_name)
+    if existing is not None:
+        category_id, detail = existing
+        reason = _category_conflict_reason(detail)
+        if reason is not None:
+            return None, reason, category_id, False
+        return None, None, category_id, True
     gate, category_id = await _write_sub_op(
         connector,
         target,
@@ -229,7 +355,30 @@ async def _create_tag_substrate(
         },
     )
     if gate is not None:
-        return gate, None, None
+        return gate, None, None, False
+    return None, None, str(category_id), False
+
+
+async def _ensure_tag(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    tag_name: str,
+    category_id: str,
+    description: str,
+) -> tuple[OperationResult | None, str | None, bool]:
+    """Adopt an existing tag of *tag_name* in *category_id*, or create it.
+
+    Returns ``(gate, tag_id, adopted)`` — the tag counterpart of
+    :func:`_ensure_category`. Adoption issues no write (no gate); the create
+    flows through the shared sub-op governance seam.
+    """
+    existing_tag_id = await _resolve_tag_in_category(
+        connector, target, operator, tag_name, category_id
+    )
+    if existing_tag_id is not None:
+        return None, existing_tag_id, True
     gate, tag_id = await _write_sub_op(
         connector,
         target,
@@ -238,7 +387,27 @@ async def _create_tag_substrate(
         {"name": tag_name, "description": description, "category_id": category_id},
     )
     if gate is not None:
-        return gate, category_id, None
+        return gate, None, False
+    return None, str(tag_id), False
+
+
+async def _attach_tag_to_datastores(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    tag_id: str,
+    resolved: list[dict[str, str]],
+) -> OperationResult | None:
+    """Attach *tag_id* to every resolved datastore; ``None`` on success.
+
+    ``TagAssociation.attach`` is idempotent — re-attaching an already-attached
+    tag is a no-op that returns success, not an error (grounded on the vSphere
+    Automation API) — so this needs no read-before-write: a retry after a
+    partial run safely re-attaches. Returns a parked / denied
+    :class:`OperationResult` (the caller bubbles it) if a per-datastore gate does
+    not clear, else ``None``.
+    """
     for datastore in resolved:
         gate, _payload = await _write_sub_op(
             connector,
@@ -251,11 +420,31 @@ async def _create_tag_substrate(
             },
         )
         if gate is not None:
-            return gate, category_id, tag_id
-    return None, category_id, tag_id
+            return gate
+    return None
 
 
-async def _mint_pbm_policy(
+async def _resolve_policy_by_name(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    policy_name: str,
+) -> dict[str, Any] | None:
+    """Find an existing storage policy by display *name* via the REST list (#3826).
+
+    ``GET /vcenter/storage/policies`` returns ``{policy, name, ...}`` rows for
+    every visible policy (tag-based ones included), so a name lookup needs no
+    PBM round-trip. Returns the first matching row (carrying the ``policy`` id),
+    or ``None`` when no policy of that name exists.
+    """
+    rows = await _read_sub_op(connector, target, operator, _OP_STORAGE_POLICIES_LIST, {})
+    return next(
+        (r for r in (rows or []) if isinstance(r, dict) and r.get("name") == policy_name),
+        None,
+    )
+
+
+async def _create_pbm_policy(
     connector: VmwareRestConnector,
     target: Any,
     operator: Operator,
@@ -267,18 +456,18 @@ async def _mint_pbm_policy(
     tag_id: str,
     tag_name: str,
     resolved: list[dict[str, str]],
+    adopted: dict[str, bool],
+    issues: list[dict[str, Any]],
 ) -> dict[str, Any] | OperationResult:
-    """Gate + create the PBM policy for an already-created tag substrate, then verify.
-
-    Runs the PBM sub-op gate (bubbled verbatim on park / deny), issues
-    ``PbmCreate``, and read-backs ``GET /vcenter/storage/policies``. Returns the
-    ``policy_create_failed`` result when PbmCreate yields no id (reporting the
-    created category / tag for cleanup), else the ``created`` result.
+    """Gate + ``PbmCreate`` a fresh policy for an ensured tag substrate, then verify.
 
     The PBM tag rule references the category by its **display name**
     (``com.vmware.storage.tag.<category_name>.property``, per the govc / Ansible
-    reference), not the ``category_id`` the REST create returned — the id is
-    kept only for the response envelope + cleanup guidance.
+    reference), not the ``category_id`` the REST create returned. On a
+    ``PbmCreate`` that yields no id, returns a terminal ``policy_create_failed``
+    error envelope (#3812 ``error``-severity issue) whose guidance says to
+    **retry** — the ensured category / tag will simply be adopted, so there is
+    no orphan to clean up (#3826, the "no orphan narrative" contract).
     """
     gate = await _gate_pbm_sub_op(
         connector,
@@ -305,10 +494,20 @@ async def _mint_pbm_policy(
             resolved=resolved,
             category_id=category_id,
             tag_id=tag_id,
+            adopted=adopted,
+            issues=[
+                *issues,
+                _issue(
+                    "connector",
+                    "error",
+                    f"PbmCreate returned no policy id for {policy_name!r}",
+                ),
+            ],
             guidance=(
                 "PbmCreate returned no policy id after the tag substrate was "
-                f"created (category {category_id!r}, tag {tag_id!r}); no policy "
-                "exists — clean up the tag/category or retry"
+                f"ensured (category {category_id!r}, tag {tag_id!r}); no policy "
+                "exists — retry the same call: the existing category / tag are "
+                "adopted, so no manual cleanup is needed"
             ),
         )
     listed = await _storage_policy_listed(connector, target, operator, policy_id)
@@ -321,6 +520,8 @@ async def _mint_pbm_policy(
         category_id=category_id,
         tag_id=tag_id,
         listed=listed,
+        adopted=adopted,
+        issues=issues,
         guidance=(
             None
             if listed
@@ -333,6 +534,100 @@ async def _mint_pbm_policy(
     )
 
 
+async def _mint_or_adopt_pbm_policy(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    policy_name: str,
+    description: str,
+    category_name: str,
+    category_id: str,
+    tag_id: str,
+    tag_name: str,
+    resolved: list[dict[str, str]],
+    adopted: dict[str, bool],
+    issues: list[dict[str, Any]],
+) -> dict[str, Any] | OperationResult:
+    """Adopt an existing same-named policy with a matching rule set, else create it.
+
+    Resolve-before-create for the policy (#3826): if a policy of *policy_name*
+    already exists, compare its tag-rule signature
+    (:meth:`~VmwareRestConnector.pbm_retrieve_profile_tag_rules`) against the one
+    rule this op would mint — the category property constrained to ``[tag_name]``.
+    Equal → **adopt** (status ``adopted``, an ``issues[]`` warning, no
+    ``PbmCreate``); different → terminal ``policy_conflict`` (#3812
+    ``error``-severity issue). No same-named policy → :func:`_create_pbm_policy`.
+    """
+    intended = {(pbm_tag_property_id(category_name), frozenset({tag_name}))}
+    existing = await _resolve_policy_by_name(connector, target, operator, policy_name)
+    if existing is not None:
+        existing_id = str(existing.get("policy"))
+        signatures = await connector.pbm_retrieve_profile_tag_rules(
+            target, operator, profile_ids=[existing_id]
+        )
+        if signatures.get(existing_id) == intended:
+            adopted["policy"] = True
+            return _create_result(
+                status="adopted",
+                policy_name=policy_name,
+                tag_name=tag_name,
+                resolved=resolved,
+                policy_id=existing_id,
+                category_id=category_id,
+                tag_id=tag_id,
+                listed=True,
+                adopted=adopted,
+                issues=[
+                    *issues,
+                    _issue(
+                        "state",
+                        "warning",
+                        f"adopted existing storage policy {policy_name!r} "
+                        f"({existing_id}) with a matching tag rule set",
+                    ),
+                ],
+            )
+        return _create_result(
+            status="policy_conflict",
+            policy_name=policy_name,
+            tag_name=tag_name,
+            resolved=resolved,
+            policy_id=existing_id,
+            category_id=category_id,
+            tag_id=tag_id,
+            adopted=adopted,
+            issues=[
+                *issues,
+                _issue(
+                    "state",
+                    "error",
+                    f"storage policy {policy_name!r} already exists ({existing_id}) "
+                    "with a different rule set",
+                ),
+            ],
+            guidance=(
+                f"a storage policy named {policy_name!r} already exists but "
+                "constrains a different category / tag set; no policy was created "
+                "— pick a different policy name or delete the existing policy first"
+            ),
+        )
+    return await _create_pbm_policy(
+        connector,
+        target,
+        operator,
+        policy_name=policy_name,
+        description=description,
+        category_name=category_name,
+        category_id=category_id,
+        tag_id=tag_id,
+        tag_name=tag_name,
+        resolved=resolved,
+        adopted=adopted,
+        issues=issues,
+    )
+
+
 async def storage_policy_create_composite(
     *,
     operator: Operator,
@@ -340,19 +635,31 @@ async def storage_policy_create_composite(
     params: dict[str, Any],
     connector: VmwareRestConnector,
 ) -> dict[str, Any] | OperationResult:
-    """Create a tag-based NFS storage policy end to end (#3494).
+    """Create a tag-based NFS storage policy end to end, idempotently (#3494, #3826).
 
     Op-id ``vmware.composite.storage_policy.create``. ``safety_level="caution"``
     + ``requires_approval=True`` — the dispatcher parks it for a human before
     the handler runs; each child write flows through the shared sub-op gate.
-    Resolves datastore names to moids (fail-closed ``datastore_not_found``
-    before any write), creates the tag category + tag and attaches it to each
-    datastore (:func:`_create_tag_substrate`), then mints + verifies the PBM
-    policy whose one rule requires the tag (:func:`_mint_pbm_policy`).
+
+    **Resolve-before-create (#3826):** a partial run that created the tag
+    substrate then failed (e.g. a ``PbmCreate`` fault) used to make the retry
+    die at the category create with ``ALREADY_EXISTS``. Each sub-step now adopts
+    an existing object keyed by name — the tag **category**
+    (:func:`_ensure_category`, cardinality / associable-types checked, else a
+    terminal ``category_conflict``), the **tag** in it (:func:`_ensure_tag`),
+    the datastore **attachments** (idempotent ``attach``), and the **policy**
+    (:func:`_mint_or_adopt_pbm_policy`, same rule set → adopt, different →
+    ``policy_conflict``). Adopted sub-steps are reported in the ``adopted`` map
+    and as ``issues[]`` warnings; the fresh path is unchanged. Datastore names
+    resolve to moids first (fail-closed ``datastore_not_found`` before any
+    write).
     """
     policy_name = params["policy_name"]
+    category_name = params["category_name"]
     tag_name = params["tag_name"]
     description = params.get("description", "") or ""
+    adopted: dict[str, bool] = {"category": False, "tag": False, "policy": False}
+    issues: list[dict[str, Any]] = []
 
     resolved, missing = await _resolve_datastore_moids(
         connector, target, operator, list(params["datastore_names"])
@@ -363,6 +670,13 @@ async def storage_policy_create_composite(
             policy_name=policy_name,
             tag_name=tag_name,
             resolved=resolved,
+            issues=[
+                _issue(
+                    "input",
+                    "error",
+                    f"datastore {missing!r} resolved to zero or several datastores",
+                )
+            ],
             guidance=(
                 f"datastore {missing!r} resolved to zero or several datastores; "
                 "no tag substrate or policy was created — pass a name that "
@@ -370,29 +684,86 @@ async def storage_policy_create_composite(
             ),
         )
 
-    gate, category_id, tag_id = await _create_tag_substrate(
+    gate, conflict, category_id, cat_adopted = await _ensure_category(
         connector,
         target,
         operator,
-        category_name=params["category_name"],
-        tag_name=tag_name,
+        category_name=category_name,
         description=description,
-        resolved=resolved,
+    )
+    if gate is not None:
+        return gate
+    if conflict is not None:
+        return _create_result(
+            status="category_conflict",
+            policy_name=policy_name,
+            tag_name=tag_name,
+            resolved=resolved,
+            category_id=category_id,
+            adopted=adopted,
+            issues=[
+                _issue(
+                    "state",
+                    "error",
+                    f"tag category {category_name!r} exists but cannot be adopted: {conflict}",
+                )
+            ],
+            guidance=(
+                f"tag category {category_name!r} already exists with an "
+                f"incompatible shape ({conflict}); no tag substrate or policy "
+                "was created — pick a different category name or reconcile the "
+                "existing category"
+            ),
+        )
+    adopted["category"] = cat_adopted
+    if cat_adopted:
+        issues.append(
+            _issue(
+                "state",
+                "warning",
+                f"adopted existing tag category {category_name!r} ({category_id})",
+            )
+        )
+
+    gate, tag_id, tag_adopted = await _ensure_tag(
+        connector,
+        target,
+        operator,
+        tag_name=tag_name,
+        category_id=str(category_id),
+        description=description,
+    )
+    if gate is not None:
+        return gate
+    adopted["tag"] = tag_adopted
+    if tag_adopted:
+        issues.append(
+            _issue(
+                "state",
+                "warning",
+                f"adopted existing tag {tag_name!r} ({tag_id}) in category {category_name!r}",
+            )
+        )
+
+    gate = await _attach_tag_to_datastores(
+        connector, target, operator, tag_id=str(tag_id), resolved=resolved
     )
     if gate is not None:
         return gate
 
-    return await _mint_pbm_policy(
+    return await _mint_or_adopt_pbm_policy(
         connector,
         target,
         operator,
         policy_name=policy_name,
         description=description,
-        category_name=params["category_name"],
+        category_name=category_name,
         category_id=str(category_id),
         tag_id=str(tag_id),
         tag_name=tag_name,
         resolved=resolved,
+        adopted=adopted,
+        issues=issues,
     )
 
 

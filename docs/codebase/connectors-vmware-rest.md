@@ -1495,16 +1495,37 @@ have, so three composites (`group_key="storage"`) close the gap:
   — the first link in the Supervisor-enable chain. Fans out, each child
   gated through `enforce_subop_policy`: resolve every `datastore_names` entry
   to a moid (`GET /vcenter/datastore`, fail-closed `datastore_not_found`
-  before any write if one resolves to zero / many) → create the tag
-  **category** (`POST /cis/tagging/category`, MULTIPLE cardinality, associable
-  to `Datastore`) → create the **tag** in it (`POST /cis/tagging/tag`) →
-  **attach** the tag to each datastore
+  before any write if one resolves to zero / many) → ensure the tag
+  **category** (MULTIPLE cardinality, associable to `Datastore`) → ensure the
+  **tag** in it → **attach** the tag to each datastore
   (`POST /cis/tagging/tag-association/{tagId}?action=attach`, `object_id` =
-  `{id: <datastore-moid>, type: "Datastore"}`) → create the **PBM policy**
+  `{id: <datastore-moid>, type: "Datastore"}`) → mint the **PBM policy**
   whose one rule requires the tag → read-back `GET /vcenter/storage/policies`.
-  Returns the policy id (the vCenter `StoragePolicy` identifier). No implicit
-  rollback: a PBM create that returns no id reports the created category / tag
-  ids for cleanup (`policy_create_failed`).
+  Returns the policy id (the vCenter `StoragePolicy` identifier).
+  **Resolve-before-create idempotency (#3826):** each sub-step adopts an
+  existing object keyed by name instead of blindly creating (which used to make
+  a retry after a partial run die at `POST /cis/tagging/category` with
+  `ALREADY_EXISTS`). Category: `GET /cis/tagging/category` + per-id
+  `GET /cis/tagging/category/{categoryId}` matched on `name` — reused when its
+  cardinality / `associable_types` are compatible, else terminal
+  `category_conflict`. Tag: the same id-first walk over
+  `GET /cis/tagging/tag` + `/cis/tagging/tag/{tagId}`, matched on `name` **and**
+  `category_id`. Attach is idempotent (a re-attach is a no-op), so it needs no
+  read-before-write. Policy: an existing policy of the same name whose tag-rule
+  signature (`pbm_retrieve_profile_tag_rules`, an `error`-severity-free read of
+  `PbmRetrieveContent`) matches the one this op would mint is **adopted**
+  (`status="adopted"`, no `PbmCreate`); a different rule set is terminal
+  `policy_conflict`. Adopted sub-steps are reported in the response `adopted`
+  map (`{category, tag, policy}` booleans) and as `issues[]` `warning`s; the
+  fresh path (nothing pre-exists) is unchanged. The terminal
+  `category_conflict` / `policy_conflict` and the `PbmCreate`-returned-no-id
+  `policy_create_failed` all carry an `error`-severity `issues[]` entry so the
+  dispatcher surfaces them as dispatch errors (#3812) rather than a false `ok`;
+  `policy_create_failed` now says to **retry** (the ensured category / tag are
+  adopted — no orphan to clean up). The caution-tier park preview resolves the
+  same live state read-only and labels each sub-step `create` / `adopt` /
+  `conflict` (`exists` for the policy) so the approver sees what will actually
+  happen.
 - **`storage_policy.delete`** (`safety_level="destructive"`,
   `requires_approval=True`) — issues PBM `PbmDelete` for the id, then read-backs
   the policies list; a per-id `PbmDelete` fault (e.g. the policy is in use)

@@ -26,7 +26,7 @@ order follows the pbm-types.xsd sequences.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from typing import Any, Final
 
 from defusedxml.ElementTree import fromstring
@@ -286,3 +286,73 @@ def parse_pbm_profiles(xml: str) -> list[dict[str, Any]]:
     return [
         row for row in _parse_returnval_list(xml, "PbmRetrieveContent") if isinstance(row, dict)
     ]
+
+
+#: One tag rule reduced to its comparison signature: the property-instance id
+#: (``com.vmware.storage.tag.<category>.property``) and the frozenset of tag
+#: values it constrains. A profile's signature is the set of these.
+TagRuleSignature = set[tuple[str, frozenset[str]]]
+
+
+def _iter_descendants(element: Any, localname: str) -> Iterator[Any]:
+    """Yield every descendant of *element* whose local-name is *localname*."""
+    for child in element:
+        if _local(child.tag) == localname:
+            yield child
+        yield from _iter_descendants(child, localname)
+
+
+def _first_child_text(element: Any, localname: str) -> str | None:
+    """The stripped text of *element*'s first direct child named *localname*."""
+    child = _find_child(element, localname)
+    if child is None:
+        return None
+    text = (child.text or "").strip()
+    return text or None
+
+
+def parse_pbm_profile_tag_rules(xml: str) -> dict[str, TagRuleSignature]:
+    """Parse ``PbmRetrieveContentResponse`` -> per-profile tag-rule signatures.
+
+    For every returned profile, collect one ``(property_id, frozenset(values))``
+    tuple per tag rule — a ``propertyInstance`` whose ``value`` is a
+    ``PbmCapabilityDiscreteSet`` of tag strings (``values`` children) — keyed by
+    the profile's ``profileId.uniqueId``. The ``storage_policy.create`` composite
+    compares an existing same-named policy's signature against the one rule it
+    *would* mint (``{(pbm_tag_property_id(category), frozenset({tag}))}``) to
+    decide **adopt** (signatures equal) vs **policy_conflict** (they differ).
+
+    The comparison is order- and cardinality-insensitive by construction (sets
+    of frozensets), so it does not depend on how the server renders the profile
+    XML back — only on which category property is constrained to which tags.
+    """
+    root = fromstring(xml)
+    body = _find_body(root)
+    if body is None:
+        return {}
+    response = _find_child(body, "PbmRetrieveContentResponse")
+    if response is None:
+        response = next(iter(body), None)
+    if response is None:
+        return {}
+    out: dict[str, TagRuleSignature] = {}
+    for returnval in response:
+        if _local(returnval.tag) != "returnval":
+            continue
+        profile_id = _find_child(returnval, "profileId")
+        unique_id = _first_child_text(profile_id, "uniqueId") if profile_id is not None else None
+        if not unique_id:
+            continue
+        rules: TagRuleSignature = set()
+        for prop in _iter_descendants(returnval, "propertyInstance"):
+            prop_id = _first_child_text(prop, "id")
+            if not prop_id:
+                continue
+            values = frozenset(
+                (v.text or "").strip()
+                for v in _iter_descendants(prop, "values")
+                if (v.text or "").strip()
+            )
+            rules.add((prop_id, values))
+        out[unique_id] = rules
+    return out

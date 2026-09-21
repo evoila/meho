@@ -133,10 +133,11 @@ WCP_TOKEN_REFRESH_MARGIN_SECONDS: float = 60.0
 class WcpLoginError(RuntimeError):
     """The ``/wcp/login`` SSO exchange failed or returned an unusable body.
 
-    Raised on a non-200 status, a body missing ``session_id`` /
-    ``kube_config``, or a ``kube_config`` that does not parse to a
-    mapping. The message never echoes the SSO credentials or the response
-    body (which carries the token).
+    Raised on a non-200 status, a body missing ``session_id``, or a
+    ``kube_config`` that is present but does not parse to a mapping (a
+    ``null``/absent ``kube_config`` is accepted — the caller synthesises
+    the configuration from the target). The message never echoes the SSO
+    credentials or the response body (which carries the token).
     """
 
 
@@ -313,8 +314,19 @@ def _is_tls_verification_error(exc: BaseException) -> bool:
     return False
 
 
-def _coerce_kube_config(raw: object) -> dict[str, Any]:
-    """Normalise the response ``kube_config`` (YAML string or mapping) to a dict."""
+def _coerce_kube_config(raw: object) -> dict[str, Any] | None:
+    """Normalise the response ``kube_config`` (YAML string or mapping) to a dict.
+
+    Returns ``None`` when the field is absent or ``null``: a vSphere
+    Supervisor 9.x behind the Foundation load balancer answers with
+    ``kube_config: null`` and the ``session_id`` alone is the bearer
+    (``kubectl vsphere login`` treats the embedded kubeconfig as optional).
+    The caller synthesises the client configuration from the target in that
+    case. A genuinely malformed value (a non-dict, non-null scalar, or a
+    string that does not parse to a mapping) still raises.
+    """
+    if raw is None:
+        return None
     if isinstance(raw, dict):
         return raw
     if isinstance(raw, str):
@@ -329,6 +341,40 @@ def _coerce_kube_config(raw: object) -> dict[str, Any]:
     )
 
 
+def _synthesise_kube_config(
+    *, host: str, api_port: int, session_id: str, verify_tls: bool, ca_pem: str | None
+) -> dict[str, Any]:
+    """Reconstruct a kubeconfig mapping from the target when ``/wcp/login`` omits one.
+
+    A vSphere Supervisor 9.x behind the Foundation LB answers with
+    ``kube_config: null``; ``session_id`` alone is the bearer against the
+    kube-API on ``host:api_port`` — exactly what ``kubectl vsphere login``
+    does. We rebuild the mapping the connector would otherwise consume so
+    the single downstream build path in :func:`build_wcp_api_configuration`
+    is unchanged: ``server`` = the operator-reachable ``host:api_port``,
+    the CA = the target's pinned ``ca_pem`` (else ``insecure-skip-tls-verify``
+    when ``verify_tls`` is off, else the system trust store), and the user
+    token = ``session_id``. The host / TLS / bearer overrides that function
+    applies on top still run, so the target's pin and ``tls_server_name``
+    win exactly as they do for an embedded mapping.
+    """
+    cluster: dict[str, Any] = {"server": f"https://{host}:{api_port}"}
+    if ca_pem is not None:
+        cluster["certificate-authority-data"] = base64.standard_b64encode(ca_pem.encode()).decode(
+            "ascii"
+        )
+    elif not verify_tls:
+        cluster["insecure-skip-tls-verify"] = True
+    return {
+        "apiVersion": "v1",
+        "kind": "Config",
+        "clusters": [{"name": "wcp", "cluster": cluster}],
+        "users": [{"name": "wcp", "user": {"token": session_id}}],
+        "contexts": [{"name": "wcp", "context": {"cluster": "wcp", "user": "wcp"}}],
+        "current-context": "wcp",
+    }
+
+
 async def wcp_login(
     host: str,
     *,
@@ -341,7 +387,7 @@ async def wcp_login(
     timeout: float = DEFAULT_WCP_LOGIN_TIMEOUT_SECONDS,
     now_wall: float | None = None,
     now_monotonic: float | None = None,
-) -> tuple[WcpToken, dict[str, Any]]:
+) -> tuple[WcpToken, dict[str, Any] | None]:
     """Perform the ``POST /wcp/login`` SSO exchange for the Supervisor.
 
     Sends HTTP Basic ``{username, password}`` (the vSphere SSO
@@ -351,7 +397,10 @@ async def wcp_login(
     internal-VIP redirect the field note says to avoid). Returns the
     minted :class:`WcpToken` (expiry stamped from the JWT ``exp`` when
     present) and the response ``kube_config`` mapping (the source of the
-    Supervisor CA the caller builds TLS trust from).
+    Supervisor CA the caller builds TLS trust from), or ``None`` for that
+    mapping when the Supervisor omits it (``kube_config: null`` — Supervisor
+    9.x behind the Foundation LB); the caller then synthesises the
+    configuration from the target with ``session_id`` as the bearer.
     """
     tls = _wcp_tls(host=host, verify_tls=verify_tls, ca_pem=ca_pem, tls_server_name=tls_server_name)
     url = f"https://{host}:{login_port}{WCP_LOGIN_PATH}"
@@ -424,7 +473,14 @@ async def build_wcp_api_configuration(
     presented cert is verified against ``tls_server_name`` (falling back to
     ``host``) — the same SNI / cert-verify name the login leg uses — so a
     NAT-fronted Supervisor whose cert SANs an internal VIP verifies with
-    hostname checking on. The returned ``Configuration`` drives an ordinary
+    hostname checking on.
+
+    When the ``/wcp/login`` response omits the embedded kubeconfig
+    (``kube_config: null`` — Supervisor 9.x behind the Foundation LB), the
+    mapping is synthesised from the target via :func:`_synthesise_kube_config`
+    (``session_id`` is the bearer, ``host:api_port`` the server, the target's
+    pinned CA the trust anchor) so the rest of this build path is identical.
+    The returned ``Configuration`` drives an ordinary
     :class:`~kubernetes_asyncio.client.ApiClient` (read/inventory ops) or
     a :class:`~kubernetes_asyncio.stream.ws_client.WsApiClient` (exec).
     """
@@ -438,6 +494,17 @@ async def build_wcp_api_configuration(
         "timeout": timeout,
     }
     token, kube_config = await wcp_login(host, **login_kwargs)
+    if kube_config is None:
+        # Supervisor 9.x behind the Foundation LB returns no embedded
+        # kubeconfig; rebuild it from the target so the build path below is
+        # unchanged and session_id becomes the kube-API bearer.
+        kube_config = _synthesise_kube_config(
+            host=host,
+            api_port=api_port,
+            session_id=token.token,
+            verify_tls=verify_tls,
+            ca_pem=ca_pem,
+        )
 
     cfg: Configuration = type.__call__(Configuration)
     # Reuse the kubeconfig loader purely to lift the Supervisor CA (and
@@ -449,13 +516,16 @@ async def build_wcp_api_configuration(
     if not verify_tls:
         cfg.verify_ssl = False
     else:
-        # We dial the reachable alias, not the Supervisor cert's
-        # internal-VIP SAN, so verify the cert against tls_server_name
-        # (falling back to the dial host) rather than the alias — the same
-        # SNI / cert-verify name the login leg uses. kubernetes_asyncio's
-        # rest client maps ``tls_server_name`` onto the aiohttp
-        # ``server_hostname`` (SNI + cert hostname check), keeping the CA
-        # chain verified with hostname checking on.
+        # The target's verify_tls wins over anything the mapping embedded:
+        # force verification on even if the kube_config carried an
+        # ``insecure-skip-tls-verify`` flag. We dial the reachable alias,
+        # not the Supervisor cert's internal-VIP SAN, so verify the cert
+        # against tls_server_name (falling back to the dial host) rather
+        # than the alias — the same SNI / cert-verify name the login leg
+        # uses. kubernetes_asyncio's rest client maps ``tls_server_name``
+        # onto the aiohttp ``server_hostname`` (SNI + cert hostname check),
+        # keeping the CA chain verified with hostname checking on.
+        cfg.verify_ssl = True
         cfg.tls_server_name = _wcp_server_hostname(host, tls_server_name)
 
     _apply_bearer(cfg, token)

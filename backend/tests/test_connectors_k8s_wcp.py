@@ -22,10 +22,15 @@ runs in every CI lane regardless of a live Supervisor.
 from __future__ import annotations
 
 import base64
+import datetime
 import json
+import ssl
+import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
@@ -33,6 +38,10 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 import respx
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
@@ -87,6 +96,7 @@ class _StubTarget:
     secret_ref: str
     verify_tls: bool = True
     tls_ca_pin: str | None = None
+    tls_server_name: str | None = None
     # Tenant-unique cache key components (#1642, security F04).
     id: object = field(default_factory=uuid4)
     tenant_id: object = field(default_factory=lambda: UUID(int=0))
@@ -197,16 +207,34 @@ def test_token_expiry_falls_back_when_jwt_already_expired() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_login_tls_toggles_on_verify_tls_without_ca() -> None:
-    assert wcp._login_tls(True, None) is True
-    assert wcp._login_tls(False, None) is False
+def test_wcp_tls_toggles_on_verify_tls_without_ca() -> None:
+    on = wcp._wcp_tls(host="sup.test", verify_tls=True, ca_pem=None, tls_server_name=None)
+    assert on.verify is True
+    off = wcp._wcp_tls(host="sup.test", verify_tls=False, ca_pem=None, tls_server_name=None)
+    assert off.verify is False
 
 
-def test_login_tls_pins_ca_when_present() -> None:
+def test_wcp_tls_pins_ca_when_present() -> None:
     sentinel = object()
     with patch(f"{_WCP_MODULE}.ssl.create_default_context", return_value=sentinel) as ctx:
-        assert wcp._login_tls(True, "PEM-DATA") is sentinel
+        tls = wcp._wcp_tls(
+            host="sup.test", verify_tls=True, ca_pem="PEM-DATA", tls_server_name=None
+        )
+    assert tls.verify is sentinel
     ctx.assert_called_once_with(cadata="PEM-DATA")
+
+
+def test_wcp_tls_server_hostname_prefers_override_over_dial_host() -> None:
+    # tls_server_name set -> the cert-verify / SNI name is the override
+    # (the cert's SAN), not the NAT-alias dial host.
+    override = wcp._wcp_tls(
+        host="alias.test", verify_tls=True, ca_pem=None, tls_server_name="cert-san.test"
+    )
+    assert override.server_hostname == "cert-san.test"
+    # Unset -> falls back to the dial host (byte-identical to the old
+    # verify-the-host behaviour).
+    fallback = wcp._wcp_tls(host="alias.test", verify_tls=True, ca_pem=None, tls_server_name=None)
+    assert fallback.server_hostname == "alias.test"
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +276,35 @@ async def test_wcp_login_success_top_level_context() -> None:
     # No body -> the top-level Supervisor context, never a
     # guest_cluster_* per-workload sub-session (internal-VIP redirect).
     assert request.content == b""
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_wcp_login_threads_tls_server_name_as_sni_extension() -> None:
+    route = respx.route(method="POST").mock(
+        return_value=httpx.Response(200, json={"session_id": "sess", "kube_config": _kube_config()})
+    )
+    await wcp_login(
+        "alias.test",
+        username="u",
+        password="p",
+        verify_tls=True,
+        ca_pem=None,
+        tls_server_name="cert-san.test",
+    )
+    # The cert-verify / SNI name is the override, so a NAT-fronted
+    # Supervisor whose cert SANs the internal VIP verifies against it.
+    assert route.calls.last.request.extensions.get("sni_hostname") == "cert-san.test"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_wcp_login_sni_extension_defaults_to_dial_host() -> None:
+    route = respx.route(method="POST").mock(
+        return_value=httpx.Response(200, json={"session_id": "sess", "kube_config": _kube_config()})
+    )
+    await wcp_login("sup.test", username="u", password="p", verify_tls=True, ca_pem=None)
+    assert route.calls.last.request.extensions.get("sni_hostname") == "sup.test"
 
 
 @respx.mock
@@ -340,6 +397,181 @@ async def test_wcp_login_message_never_echoes_credentials() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Live TLS — the login leg verifies the cert against tls_server_name, not the
+# dial host, so a NAT-fronted Supervisor (host != cert SAN) works (#3832)
+# ---------------------------------------------------------------------------
+
+_NOW = datetime.datetime.now(datetime.UTC)
+
+
+def _new_key() -> rsa.RSAPrivateKey:
+    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+
+def _sign(
+    subject_cn: str,
+    subject_key: rsa.RSAPrivateKey,
+    issuer_name: x509.Name | None,
+    issuer_key: rsa.RSAPrivateKey,
+    *,
+    san_dns: list[str] | None = None,
+    is_ca: bool = False,
+) -> x509.Certificate:
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, subject_cn)])
+    builder = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer_name or subject)
+        .public_key(subject_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(_NOW - datetime.timedelta(days=1))
+        .not_valid_after(_NOW + datetime.timedelta(days=365))
+        # Subject/Authority Key Identifiers are required by OpenSSL's
+        # VERIFY_X509_STRICT (on by default in ssl.create_default_context on
+        # modern Python), which the code-under-test uses to verify the pin.
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(subject_key.public_key()), False)
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(issuer_key.public_key()), False
+        )
+    )
+    if is_ca:
+        builder = builder.add_extension(x509.BasicConstraints(ca=True, path_length=None), True)
+        builder = builder.add_extension(
+            x509.KeyUsage(
+                digital_signature=False,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=True,
+                crl_sign=True,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            True,
+        )
+    if san_dns:
+        builder = builder.add_extension(
+            x509.SubjectAlternativeName([x509.DNSName(n) for n in san_dns]), False
+        )
+    return builder.sign(issuer_key, hashes.SHA256())
+
+
+class _SilentTLSLoginServer(ThreadingHTTPServer):
+    """A loopback HTTPS server answering ``POST /wcp/login`` with a fixed body.
+
+    The listening socket is TLS-wrapped with a leaf whose SAN is a name that
+    is **not** the ``127.0.0.1`` dial host, so verifying the presented cert
+    against the dial host fails while verifying against that SAN
+    (``tls_server_name``) succeeds. ``handle_error`` is silenced: a client
+    that aborts the handshake on a hostname mismatch is the expected path in
+    one of the two regression tests, not a server fault.
+    """
+
+    daemon_threads = True
+
+    def __init__(self, tmp_path: Path, *, san: str, session_id: str) -> None:
+        root_key = _new_key()
+        root = _sign("WCP Test Root CA", root_key, None, root_key, is_ca=True)
+        leaf_key = _new_key()
+        leaf = _sign("wcp-leaf", leaf_key, root.subject, root_key, san_dns=[san])
+        cert_file = tmp_path / "leaf.pem"
+        key_file = tmp_path / "leaf.key"
+        cert_file.write_bytes(leaf.public_bytes(serialization.Encoding.PEM))
+        key_file.write_bytes(
+            leaf_key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.TraditionalOpenSSL,
+                serialization.NoEncryption(),
+            )
+        )
+        self.ca_pem = root.public_bytes(serialization.Encoding.PEM).decode("ascii")
+        self.session_id = session_id
+        self.kube_config = _kube_config()
+        super().__init__(("127.0.0.1", 0), _WcpLoginHandler)
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(str(cert_file), str(key_file))
+        self.socket = ctx.wrap_socket(self.socket, server_side=True)
+
+    def handle_error(self, request: object, client_address: object) -> None:
+        return None
+
+
+class _WcpLoginHandler(BaseHTTPRequestHandler):
+    def do_POST(self) -> None:
+        body = json.dumps(
+            {"session_id": self.server.session_id, "kube_config": self.server.kube_config}  # type: ignore[attr-defined]
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args: object) -> None:
+        return None
+
+
+def _serve(server: _SilentTLSLoginServer) -> threading.Thread:
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return thread
+
+
+@pytest.mark.asyncio
+async def test_wcp_login_over_live_tls_verifies_against_tls_server_name(tmp_path: Path) -> None:
+    # host = 127.0.0.1 (the NAT alias), cert SAN = sni.test. Pinned CA on,
+    # verification on. Setting tls_server_name to the SAN makes the login
+    # handshake verify against it, not the dial host -> success.
+    server = _SilentTLSLoginServer(tmp_path, san="sni.test", session_id="live-sess")
+    _serve(server)
+    try:
+        token, _kube = await wcp_login(
+            "127.0.0.1",
+            username="u",
+            password="p",
+            verify_tls=True,
+            ca_pem=server.ca_pem,
+            tls_server_name="sni.test",
+            login_port=server.server_address[1],
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert token.token == "live-sess"
+
+
+@pytest.mark.asyncio
+async def test_wcp_login_over_live_tls_fails_without_tls_server_name(tmp_path: Path) -> None:
+    # Same server, but no tls_server_name -> the login leg verifies the
+    # cert against the dial host (127.0.0.1), which the cert does not SAN,
+    # so verification fails and surfaces as a TLS-verification WcpLoginError
+    # (not a bare ConnectError). This is the exact NAT-fronted-Supervisor
+    # failure the fix removes.
+    server = _SilentTLSLoginServer(tmp_path, san="sni.test", session_id="live-sess")
+    _serve(server)
+    try:
+        with pytest.raises(WcpLoginError) as exc:
+            await wcp_login(
+                "127.0.0.1",
+                username="u",
+                password="p",
+                verify_tls=True,
+                ca_pem=server.ca_pem,
+                tls_server_name=None,
+                login_port=server.server_address[1],
+            )
+    finally:
+        server.shutdown()
+        server.server_close()
+    message = str(exc.value)
+    assert "TLS verification failed" in message
+    # server_name is the dial-host fallback here, never the cert SAN.
+    assert "127.0.0.1" in message
+    assert "sni.test" not in message
+
+
+# ---------------------------------------------------------------------------
 # build_wcp_api_configuration — self-refreshing Configuration
 # ---------------------------------------------------------------------------
 
@@ -391,12 +623,32 @@ async def test_build_configuration_tls_knobs() -> None:
             verify_tls=False,
             ca_pem=None,
         )
-    # verify_tls on: CA chain stays verified, hostname assertion off
-    # (we dial the alias, not the cert's internal-VIP SAN).
+    # verify_tls on: CA chain stays verified, and the cert is asserted
+    # against tls_server_name -> here unset, so the dial host.
     assert secure.verify_ssl is True
-    assert secure.assert_hostname is False
+    assert secure.tls_server_name == "alias.test"
     # verify_tls off: full insecure override.
     assert insecure.verify_ssl is False
+
+
+@pytest.mark.asyncio
+async def test_build_configuration_honours_tls_server_name_on_both_legs() -> None:
+    login = AsyncMock(return_value=(WcpToken("sess", time.monotonic() + 9000), _kube_config()))
+    with patch(f"{_WCP_MODULE}.wcp_login", login):
+        cfg = await build_wcp_api_configuration(
+            host="alias.test",
+            api_port=6443,
+            username="u",
+            password="p",
+            verify_tls=True,
+            ca_pem=None,
+            tls_server_name="cert-san.test",
+        )
+    # API leg: kubernetes_asyncio verifies the cert against this name
+    # (mapped onto the aiohttp server_hostname).
+    assert cfg.tls_server_name == "cert-san.test"
+    # Login leg (and the refresh re-mint) receives the same override.
+    assert login.await_args.kwargs["tls_server_name"] == "cert-san.test"
 
 
 @pytest.mark.asyncio
@@ -568,6 +820,29 @@ async def test_connector_defaults_port_and_forwards_tls_knobs() -> None:
     assert api_client.configuration.host == f"https://sup.test:{_DEFAULT_K8S_PORT}"
     assert login.await_args.kwargs["verify_tls"] is False
     assert login.await_args.kwargs["ca_pem"] == "CA-PEM"
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_connector_forwards_tls_server_name_from_target() -> None:
+    target = _StubTarget(
+        name="wcp",
+        host="sup-alias.test",  # the NAT alias
+        port=6443,
+        secret_ref="k8s/wcp",
+        verify_tls=True,
+        tls_ca_pin="CA-PEM",
+        tls_server_name="sup-vip.test",  # the cert SAN
+    )
+    connector = KubernetesConnector(
+        credential_loader=_wcp_loader(WcpSsoCredential(username="u", password="p"))
+    )
+    login = AsyncMock(return_value=(WcpToken("t", time.monotonic() + 9000), _kube_config()))
+    with patch(f"{_WCP_MODULE}.wcp_login", login):
+        api_client = await connector._get_api_client(target, _make_operator())
+    # Threaded onto the login leg and asserted on the API leg's config.
+    assert login.await_args.kwargs["tls_server_name"] == "sup-vip.test"
+    assert api_client.configuration.tls_server_name == "sup-vip.test"
     await connector.aclose()
 
 

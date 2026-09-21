@@ -1853,10 +1853,13 @@ class KubernetesConnector(Connector):
         Supervisor CA from the response, dials the operator-reachable
         ``target.host`` (never the internal-VIP ``server`` the login
         returns), and installs the token-refresh hook. The TLS knobs are
-        read defensively (``verify_tls`` defaults on, ``tls_ca_pin`` is
-        optional) so the narrow :class:`KubernetesTargetLike` Protocol
-        stays unchanged while the concrete ``Target`` model's fields are
-        honoured.
+        read defensively (``verify_tls`` defaults on, ``tls_ca_pin`` and
+        ``tls_server_name`` are optional) so the narrow
+        :class:`KubernetesTargetLike` Protocol stays unchanged while the
+        concrete ``Target`` model's fields are honoured;
+        ``tls_server_name`` names the cert's SAN when the Supervisor is
+        dialed through a NAT alias and is threaded onto both the login and
+        API legs.
         """
         port = target.port if target.port is not None else _DEFAULT_K8S_PORT
         return await build_wcp_api_configuration(
@@ -1866,6 +1869,7 @@ class KubernetesConnector(Connector):
             password=credential.password,
             verify_tls=bool(getattr(target, "verify_tls", True)),
             ca_pem=getattr(target, "tls_ca_pin", None),
+            tls_server_name=getattr(target, "tls_server_name", None),
         )
 
     async def _get_ws_api_client(

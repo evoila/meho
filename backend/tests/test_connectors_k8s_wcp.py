@@ -42,6 +42,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
+from kubernetes_asyncio import client as k8s_client
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
@@ -374,6 +375,50 @@ async def test_wcp_login_raises_on_unusable_kube_config() -> None:
 
 @respx.mock
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body", [{"session_id": "sess", "kube_config": None}, {"session_id": "sess"}]
+)
+async def test_wcp_login_accepts_null_or_absent_kube_config(body: dict[str, Any]) -> None:
+    # Supervisor 9.x behind the Foundation LB answers with kube_config:
+    # null (or omits it). session_id is a valid bearer, so the login
+    # succeeds and returns None for the mapping; the caller synthesises the
+    # config from the target.
+    respx.route(method="POST").mock(return_value=httpx.Response(200, json=body))
+    token, kube_config = await wcp_login(
+        "sup.test", username="u", password="p", verify_tls=False, ca_pem=None
+    )
+    assert token.token == "sess"
+    assert kube_config is None
+
+
+def test_coerce_kube_config_returns_none_for_null() -> None:
+    assert wcp._coerce_kube_config(None) is None
+
+
+def test_synthesise_kube_config_from_target_pins_ca_and_server() -> None:
+    cfg = wcp._synthesise_kube_config(
+        host="sup.test", api_port=6443, session_id="sess", verify_tls=True, ca_pem="CA-PEM"
+    )
+    cluster = cfg["clusters"][0]["cluster"]
+    assert cluster["server"] == "https://sup.test:6443"
+    # ca_pem is base64-encoded into certificate-authority-data (the shape
+    # load_kube_config_from_dict decodes) and there is no insecure skip.
+    assert base64.standard_b64decode(cluster["certificate-authority-data"]).decode() == "CA-PEM"
+    assert "insecure-skip-tls-verify" not in cluster
+    assert cfg["users"][0]["user"]["token"] == "sess"
+
+
+def test_synthesise_kube_config_insecure_without_ca() -> None:
+    cfg = wcp._synthesise_kube_config(
+        host="sup.test", api_port=6443, session_id="sess", verify_tls=False, ca_pem=None
+    )
+    cluster = cfg["clusters"][0]["cluster"]
+    assert cluster["insecure-skip-tls-verify"] is True
+    assert "certificate-authority-data" not in cluster
+
+
+@respx.mock
+@pytest.mark.asyncio
 async def test_wcp_login_wraps_transport_error() -> None:
     respx.route(method="POST").mock(side_effect=httpx.ConnectError("refused"))
     with pytest.raises(WcpLoginError, match="failed"):
@@ -457,20 +502,56 @@ def _sign(
     return builder.sign(issuer_key, hashes.SHA256())
 
 
+#: A minimal but valid ``/version`` body so a real
+#: ``kubernetes_asyncio`` ``VersionApi.get_code`` GET against the loopback
+#: server deserialises into a ``VersionInfo`` — the "subsequent API call"
+#: the null-``kube_config`` regression drives to prove the built config's
+#: bearer / CA / SNI reach the kube-API leg.
+_VERSION_INFO_JSON: dict[str, str] = {
+    "buildDate": "2024-01-04T15:00:00Z",
+    "compiler": "gc",
+    "gitCommit": "abc",
+    "gitTreeState": "clean",
+    "gitVersion": "v1.28.5+vmware.wcp.1",
+    "goVersion": "go1.20",
+    "major": "1",
+    "minor": "28",
+    "platform": "linux/amd64",
+}
+
+_UNSET_KUBE_CONFIG = object()
+
+
 class _SilentTLSLoginServer(ThreadingHTTPServer):
-    """A loopback HTTPS server answering ``POST /wcp/login`` with a fixed body.
+    """A loopback HTTPS server for the ``/wcp/login`` POST **and** a kube-API GET.
+
+    ``POST /wcp/login`` answers with the configured ``session_id`` /
+    ``kube_config`` (pass ``session_id=None`` to omit it, or
+    ``kube_config=None`` to answer ``kube_config: null`` — the Supervisor
+    9.x shape). Any ``GET`` answers ``_VERSION_INFO_JSON`` and records the
+    request's ``Authorization`` header on ``last_authorization``, so a
+    built :class:`Configuration` can be driven through a real
+    ``VersionApi.get_code`` to prove the bearer it carries.
 
     The listening socket is TLS-wrapped with a leaf whose SAN is a name that
     is **not** the ``127.0.0.1`` dial host, so verifying the presented cert
     against the dial host fails while verifying against that SAN
-    (``tls_server_name``) succeeds. ``handle_error`` is silenced: a client
-    that aborts the handshake on a hostname mismatch is the expected path in
-    one of the two regression tests, not a server fault.
+    (``tls_server_name``) succeeds; the SNI name each client presents is
+    recorded on ``last_sni``. ``handle_error`` is silenced: a client that
+    aborts the handshake on a hostname mismatch is the expected path in one
+    of the regression tests, not a server fault.
     """
 
     daemon_threads = True
 
-    def __init__(self, tmp_path: Path, *, san: str, session_id: str) -> None:
+    def __init__(
+        self,
+        tmp_path: Path,
+        *,
+        san: str,
+        session_id: str | None,
+        kube_config: object = _UNSET_KUBE_CONFIG,
+    ) -> None:
         root_key = _new_key()
         root = _sign("WCP Test Root CA", root_key, None, root_key, is_ca=True)
         leaf_key = _new_key()
@@ -487,10 +568,19 @@ class _SilentTLSLoginServer(ThreadingHTTPServer):
         )
         self.ca_pem = root.public_bytes(serialization.Encoding.PEM).decode("ascii")
         self.session_id = session_id
-        self.kube_config = _kube_config()
+        self.kube_config = _kube_config() if kube_config is _UNSET_KUBE_CONFIG else kube_config
+        self.last_authorization: str | None = None
+        self.last_sni: str | None = None
         super().__init__(("127.0.0.1", 0), _WcpLoginHandler)
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(str(cert_file), str(key_file))
+
+        def _record_sni(
+            sslobj: ssl.SSLObject, server_name: str | None, context: ssl.SSLContext
+        ) -> None:
+            self.last_sni = server_name
+
+        ctx.sni_callback = _record_sni
         self.socket = ctx.wrap_socket(self.socket, server_side=True)
 
     def handle_error(self, request: object, client_address: object) -> None:
@@ -499,9 +589,16 @@ class _SilentTLSLoginServer(ThreadingHTTPServer):
 
 class _WcpLoginHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
-        body = json.dumps(
-            {"session_id": self.server.session_id, "kube_config": self.server.kube_config}  # type: ignore[attr-defined]
-        ).encode()
+        payload: dict[str, Any] = {"kube_config": self.server.kube_config}  # type: ignore[attr-defined]
+        if self.server.session_id is not None:  # type: ignore[attr-defined]
+            payload["session_id"] = self.server.session_id  # type: ignore[attr-defined]
+        self._respond(json.dumps(payload).encode())
+
+    def do_GET(self) -> None:
+        self.server.last_authorization = self.headers.get("Authorization")  # type: ignore[attr-defined]
+        self._respond(json.dumps(_VERSION_INFO_JSON).encode())
+
+    def _respond(self, body: bytes) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -572,6 +669,116 @@ async def test_wcp_login_over_live_tls_fails_without_tls_server_name(tmp_path: P
 
 
 # ---------------------------------------------------------------------------
+# build_wcp_api_configuration over live TLS — a null/absent kube_config
+# synthesises the config from the target; session_id is the kube-API bearer
+# (#3835). login_port == api_port == the single loopback port.
+# ---------------------------------------------------------------------------
+
+
+async def _build_and_probe(
+    server: _SilentTLSLoginServer, *, tls_server_name: str | None
+) -> tuple[k8s_client.Configuration, Any]:
+    """Build a WCP Configuration against *server*, then drive a real
+    ``VersionApi.get_code`` GET over it so the server records the bearer /
+    SNI the built config actually presents to the kube-API leg."""
+    port = server.server_address[1]
+    cfg = await build_wcp_api_configuration(
+        host="127.0.0.1",
+        api_port=port,
+        username="u",
+        password="p",
+        verify_tls=True,
+        ca_pem=server.ca_pem,
+        tls_server_name=tls_server_name,
+        login_port=port,
+    )
+    api_client = k8s_client.ApiClient(configuration=cfg)
+    try:
+        version = await k8s_client.VersionApi(api_client).get_code()
+    finally:
+        await api_client.close()
+    return cfg, version
+
+
+@pytest.mark.asyncio
+async def test_build_configuration_over_live_tls_synthesises_when_kube_config_null(
+    tmp_path: Path,
+) -> None:
+    # Supervisor 9.x shape: /wcp/login returns session_id + kube_config:
+    # null. The config is synthesised from the target, and a subsequent
+    # kube-API GET carries session_id as the bearer to the reachable host
+    # over TLS verified with the pinned CA and the SNI / cert-verify name.
+    session = _make_jwt(exp=time.time() + 36_000)
+    server = _SilentTLSLoginServer(tmp_path, san="sni.test", session_id=session, kube_config=None)
+    port = server.server_address[1]
+    _serve(server)
+    try:
+        cfg, version = await _build_and_probe(server, tls_server_name="sni.test")
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert server.last_authorization == f"Bearer {session}"
+    assert server.last_sni == "sni.test"
+    assert cfg.host == f"https://127.0.0.1:{port}"
+    assert cfg.tls_server_name == "sni.test"
+    assert cfg.verify_ssl is True
+    # The pinned CA (not any embedded one) is the kube-API trust anchor.
+    assert Path(cfg.ssl_ca_cert).read_text().strip() == server.ca_pem.strip()
+    assert version.git_version == "v1.28.5+vmware.wcp.1"
+
+
+@pytest.mark.asyncio
+async def test_build_configuration_over_live_tls_uses_embedded_mapping_unchanged(
+    tmp_path: Path,
+) -> None:
+    # Mapping present -> today's path is unchanged: session_id is still the
+    # bearer, the host is still the reachable alias, TLS still verified via
+    # the SNI name.
+    session = _make_jwt(exp=time.time() + 36_000)
+    server = _SilentTLSLoginServer(tmp_path, san="sni.test", session_id=session)
+    server.kube_config = _kube_config(
+        ca_data=base64.standard_b64encode(server.ca_pem.encode()).decode()
+    )
+    port = server.server_address[1]
+    _serve(server)
+    try:
+        cfg, version = await _build_and_probe(server, tls_server_name="sni.test")
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert server.last_authorization == f"Bearer {session}"
+    assert server.last_sni == "sni.test"
+    assert cfg.host == f"https://127.0.0.1:{port}"
+    assert version.git_version == "v1.28.5+vmware.wcp.1"
+
+
+@pytest.mark.asyncio
+async def test_build_configuration_over_live_tls_errors_without_session_id(
+    tmp_path: Path,
+) -> None:
+    # No session_id in the /wcp/login body -> the existing error still wins,
+    # before any config is built (regardless of the null kube_config).
+    server = _SilentTLSLoginServer(tmp_path, san="sni.test", session_id=None, kube_config=None)
+    port = server.server_address[1]
+    _serve(server)
+    try:
+        with pytest.raises(WcpLoginError, match="no session_id"):
+            await build_wcp_api_configuration(
+                host="127.0.0.1",
+                api_port=port,
+                username="u",
+                password="p",
+                verify_tls=True,
+                ca_pem=server.ca_pem,
+                tls_server_name="sni.test",
+                login_port=port,
+            )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+# ---------------------------------------------------------------------------
 # build_wcp_api_configuration — self-refreshing Configuration
 # ---------------------------------------------------------------------------
 
@@ -629,6 +836,30 @@ async def test_build_configuration_tls_knobs() -> None:
     assert secure.tls_server_name == "alias.test"
     # verify_tls off: full insecure override.
     assert insecure.verify_ssl is False
+
+
+@pytest.mark.asyncio
+async def test_build_configuration_verify_tls_overrides_embedded_insecure_skip() -> None:
+    # A mapping that embeds insecure-skip-tls-verify must not weaken a
+    # target that sets verify_tls=True: the target's TLS policy wins.
+    async def _fake_lkcfd(*, config_dict: dict[str, Any], client_configuration: Any) -> None:
+        del config_dict
+        client_configuration.verify_ssl = False  # as if the mapping skipped verify
+
+    login = AsyncMock(return_value=(WcpToken("sess", time.monotonic() + 9000), _kube_config()))
+    with (
+        patch(f"{_WCP_MODULE}.wcp_login", login),
+        patch(f"{_WCP_MODULE}.load_kube_config_from_dict", _fake_lkcfd),
+    ):
+        cfg = await build_wcp_api_configuration(
+            host="alias.test",
+            api_port=6443,
+            username="u",
+            password="p",
+            verify_tls=True,
+            ca_pem=None,
+        )
+    assert cfg.verify_ssl is True
 
 
 @pytest.mark.asyncio

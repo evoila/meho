@@ -154,6 +154,14 @@ connector class would be the wrong altitude for an auth-only difference).
 `guest_cluster_*` per-workload sub-session), takes the Supervisor CA from
 the response's `kube_config`, and builds a
 `kubernetes_asyncio.client.Configuration` whose bearer refreshes itself.
+The **embedded `kube_config` is optional**: a Supervisor 9.x behind the
+Foundation LB answers with `kube_config: null`, and `session_id` alone is
+the bearer (what `kubectl vsphere login` uses). When it is absent, the
+mapping is synthesised from the target — server `https://{host}:{port}`,
+the target's pinned CA + `tls_server_name`, `session_id` as the token —
+so the rest of the build path is identical (#3835). The target's
+`verify_tls` / `tls_server_name` always win over anything an embedded
+mapping carried.
 The refresh rides `kubernetes_asyncio`'s async-capable
 `refresh_api_key_hook`: `Configuration.get_api_key_with_prefix` awaits it
 before reading `api_key["BearerToken"]` on **every** request, so the hook

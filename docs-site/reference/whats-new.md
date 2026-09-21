@@ -9,6 +9,27 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.35.9](https://github.com/evoila/meho/releases/tag/v0.35.9) — 2026-09-21
+
+- **Storage-policy writes to vCenter now authenticate.** Creating or deleting a
+  vSphere storage policy through the governed path reaches vCenter's Storage
+  Policy (PBM) endpoint, which authenticates by a SOAP session-cookie header the
+  connector was never sending — so the first live policy write faulted
+  `NotAuthenticated` even though every other call on the very same credential
+  succeeded. MEHO now carries the vim session cookie as the `vcSessionCookie`
+  header on every PBM request (and self-heals an expired session with a single
+  re-login), so `vmware.composite.storage_policy.create` / `delete` authenticate
+  like the rest of the connector.
+- **A composite operation that fails no longer reports success.** Some composite
+  operations signal a load-bearing failure by *returning* a structured error
+  envelope rather than raising, and the dispatch/audit boundary treated any
+  returned value as success — so a mutation that actually failed (for example a
+  content-library create that got a `500` back from vCenter) was recorded
+  `ok` / 200 in the audit log and in a parked-then-approved run's result. MEHO
+  now maps a composite's terminal-error envelope (one flagged with an
+  `error`-severity issue) to a first-class dispatch error with an `error` audit
+  row, while success-with-warnings envelopes stay `ok`.
+
 ## [v0.35.8](https://github.com/evoila/meho/releases/tag/v0.35.8) — 2026-09-20
 
 - **Bootstrap a tenant's Keycloak role groups through the governed path.** The

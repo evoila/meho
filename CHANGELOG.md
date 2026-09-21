@@ -90,6 +90,13 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.35.9] - 2026-09-21
+
+### Fixed
+
+- The vSphere PBM (Storage Policy) SOAP path now authenticates: every `/pbm` request carries the vim session cookie as a `vcSessionCookie` SOAP header (the value vCenter's PBM endpoint authenticates on, which the connector never sent), so governed storage-policy writes (`vmware.composite.storage_policy.create` / `delete`) succeed instead of faulting `NotAuthenticated`. A `NotAuthenticated` with the header present triggers a one-shot re-login self-heal; a fault that persists past a fresh login surfaces as a connector-side transport defect (do-not-restage), not a stale-credential error, while `InvalidLogin` / `NoPermission` stay genuine auth rejections. (#3811, closes #3810)
+- Composite operations that report a load-bearing failure by *returning* a structured terminal-error envelope (one carrying an `issues[]` entry with `severity == "error"`) now dispatch as a first-class error — `result_status="error"`, a synthetic HTTP 500, and a durable error audit row — instead of being recorded `ok` / 200 at the dispatch/audit boundary; the redacted envelope's `issues` detail is preserved for the caller and for a parked-then-approved run's resume result, and success-with-warnings envelopes stay `ok`. (#3812, closes #3809)
+
 ## [0.35.8] - 2026-09-20
 
 ### Added

@@ -1661,6 +1661,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#v03510-2026-09-21" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.10 — 2026-09-21
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#v0359-2026-09-21" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2073,6 +2084,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#v03510-2026-09-21" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.10 — 2026-09-21
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#v0359-2026-09-21" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2336,6 +2358,35 @@ which carries the full detail — every change, and the migration recipe
 for each breaking one.</p>
 <p>MEHO is under active development. Each release below links to its full
 notes.</p>
+<h2 id="v03510-2026-09-21"><a href="https://github.com/evoila/meho/releases/tag/v0.35.10">v0.35.10</a> — 2026-09-21<a class="headerlink" href="#v03510-2026-09-21" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>The operator console can't be stranded on a stale stylesheet after a
+  deploy.</strong> The console references its CSS, scripts and fonts at stable URLs
+  whose contents change every release, and the server sent them without a
+  <code>Cache-Control</code> header — so after a roll a returning browser could keep
+  serving the previous release's cached stylesheet and render the console
+  unstyled until someone hard-refreshed. MEHO now serves every console asset
+  <code>Cache-Control: no-cache</code>, which forces the browser to revalidate before
+  reuse (a cheap <code>304</code> when nothing changed), and a build-time gate refuses to
+  ship a stylesheet that is suspiciously small or missing the console's own
+  classes.</li>
+<li><strong>Re-running a storage-policy create now finishes instead of dead-ending.</strong>
+  Creating a vSphere storage policy through the governed path builds a tag
+  category, a tag and then the policy; if an earlier attempt failed partway it
+  left the category behind, and every retry died immediately with
+  <code>ALREADY_EXISTS</code>. The composite now adopts an existing category, tag or
+  matching policy instead of blindly re-creating it, so a retry converges; a
+  genuinely conflicting object (or a policy create that returns no id) is
+  reported as a clear, retryable error rather than a false success.</li>
+<li><strong>Supervisors reached through a NAT alias can be probed again.</strong> A Kubernetes
+  (vSphere Supervisor) target that logs in via WCP-SSO verified the server's
+  certificate against the address MEHO dialed, ignoring the target's configured
+  certificate name — so a Supervisor fronted by a NAT alias whose address isn't
+  in the certificate failed verification and couldn't be reached at all. The
+  login and the Kubernetes API legs now both honour the target's
+  <code>tls_server_name</code>, and a verification failure explains itself instead of
+  surfacing as a bare connection error.</li>
+</ul>
 <h2 id="v0359-2026-09-21"><a href="https://github.com/evoila/meho/releases/tag/v0.35.9">v0.35.9</a> — 2026-09-21<a class="headerlink" href="#v0359-2026-09-21" title="Permanent link">&para;</a></h2>
 <ul>
 <li><strong>Storage-policy writes to vCenter now authenticate.</strong> Creating or deleting a

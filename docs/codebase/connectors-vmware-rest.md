@@ -168,6 +168,32 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   approval queue on every dispatch — that top-level gate stays the single
   primary approval decision.
 
+  **Terminal-error envelopes dispatch as errors (`#3809`).** A composite
+  that hits a load-bearing sub-op failure *returns* a structured
+  envelope carrying an `issues[]` entry with `severity == "error"` (e.g.
+  `content_library.subscribed.create`'s `create_error` /
+  `datastore_not_found`, the OVF `deploy_failed` / `deploy_error`) rather
+  than raising. The dispatch/audit boundary
+  (`operations/dispatcher.py::_composite_terminal_error_code`, scoped to
+  `source_kind == "composite"`) maps any such envelope to a first-class
+  dispatch error: `OperationResult.status="error"`, `extras.error_code` =
+  the envelope's `status` sentinel, a synthetic 500, and a
+  `result_status="error"` audit row (the redacted envelope is preserved
+  in `result`, so a parked-then-approved run's decision result keeps the
+  `issues` detail). **The signal is the `error`-severity issue, not the
+  `status` sentinel** — the sentinel space is unbounded and mixes hard
+  failures with legitimate soft refusals / idempotency guards
+  (`rule_exists`, `not_powered_off`, `no_change_requested`, `ambiguous`,
+  …) that must stay `ok`, so a name-based partition would misfire;
+  success / warning envelopes therefore carry only `warning` / `info`
+  issues (a power-on that fails after a successful deploy is a `warning`
+  on the `deployed` envelope). The corollary is a **convention every
+  composite must follow to be covered**: a hard failure signalled only by
+  a bare `status` sentinel with no error-severity issue (`vm.create`'s
+  `rolled_back`, the `timeout` / `partial` / `aborted` writes) is *not*
+  auto-detected and still audits `ok` — those handlers must attach an
+  error-severity issue on their failure paths to be surfaced.
+
   **Preserving write governance on the direct path.** Because a direct
   session call bypasses the dispatcher, each mutating sub-call first
   routes through `operations.composite.enforce_subop_policy` (`#2254`)

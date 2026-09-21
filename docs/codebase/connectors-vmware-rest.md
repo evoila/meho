@@ -1495,11 +1495,31 @@ namespace `urn:pbm`). PBM is a distinct SOAP service from the vim25 `/sdk`
 codec: `soap_pbm.py` carries its envelope builders + parsers (reusing the
 vim25 codec's namespace-agnostic low-level helpers), and the connector's
 `_ensure_pbm` mints a **separate** vim SOAP session — a `SessionManager.Login`
-on `/sdk` for the `vmware_soap_session` cookie, then `PbmRetrieveServiceContent`
-on `/pbm` for the `profileManager` moid — because PBM authenticates with the
-vim SOAP cookie, not the vAPI `vmware-api-session-id` token the REST/VI-JSON
-path uses (`_soap_post` gained a `path` argument so the same span-recording,
-credential-free wire helper serves both `/sdk` and `/pbm`). The tag-rule
+on `/sdk` for the `vmware_soap_session` cookie value, then
+`PbmRetrieveServiceContent` on `/pbm` for the `profileManager` moid
+(`_soap_post` gained a `path` argument so the same span-recording,
+credential-free wire helper serves both `/sdk` and `/pbm`). **vCenter's PBM
+endpoint authenticates a request by the vim session cookie value carried in a
+`vcSessionCookie` SOAP `<Header>` element — NOT the HTTP `vmware_soap_session`
+cookie** (which `/pbm` ignores) and not the vAPI `vmware-api-session-id` token
+the REST/VI-JSON path uses. A request that presents only the HTTP cookie faults
+`NotAuthenticated` on any authenticated method (`#3810`, live-proven: the
+canonical pyvmomi/govmomi path sets this header —
+`GetRequestContext()["vcSessionCookie"]` / `soap.Client.Cookie` — and succeeds,
+while the same call without it faults). So every PBM envelope
+(`build_vc_session_cookie_header` in `soap_pbm.py`) carries the vim cookie value
+as that header, and every PBM method funnels through `_pbm_call`. With the
+header present, a `NotAuthenticated` fault means the underlying vim session
+expired server-side (the session-liveness signal the vim25 read path also
+recovers, `#3773` / `#3776`), so `_pbm_call` re-logs in for a fresh cookie
+(`_invalidate_pbm` + `_ensure_pbm`) and retries once against the fresh
+`profileManager` moid. An `InvalidLogin` / `NoPermission` fault is a genuine
+credential / privilege rejection and is **not** retried (`ConnectorAuthError`).
+If `/pbm` still rejects a request that carried a valid `vcSessionCookie` header
+after a fresh login, that is a connector-side PBM transport/auth defect, not a
+credential problem — surfaced as a `RuntimeError` (not a `ConnectorAuthError`)
+that says do-not-restage, because the same credential authenticates the
+target's vim25 and REST sessions. The tag-rule
 create-spec shape (namespace `http://www.vmware.com/storage/tag`, property id
 `com.vmware.storage.tag.<category>.property`, subprofile "Tag based placement",
 `category=REQUIREMENT`, `resourceType=STORAGE`, with the `xsi:type`

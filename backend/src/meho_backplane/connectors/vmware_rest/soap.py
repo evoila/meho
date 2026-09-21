@@ -238,13 +238,21 @@ def _this(mo_type: str, moid: str) -> str:
     return f'<_this type="{_xml_escape(mo_type)}">{_xml_escape(moid)}</_this>'
 
 
-def _envelope(method: str, inner: str) -> str:
-    """Wrap a method element (``inner`` is its full ``<method>…</method>``)."""
+def _envelope(method: str, inner: str, *, header: str = "") -> str:
+    """Wrap a method element (``inner`` is its full ``<method>…</method>``).
+
+    *header* is the inner XML of the SOAP ``<soapenv:Header>`` — empty (the
+    default) emits no header, matching every vim25 method. The PBM builders
+    pass the ``<vcSessionCookie>`` auth element the ``/pbm`` endpoint requires
+    (#3810).
+    """
+    header_xml = f"<soapenv:Header>{header}</soapenv:Header>" if header else ""
     return (
         "<soapenv:Envelope "
         f'xmlns:soapenv="{_SOAP_ENV_NS}" '
         f'xmlns:xsi="{_XSI_NS}" '
         f'xmlns:xsd="{_XSD_NS}">'
+        f"{header_xml}"
         "<soapenv:Body>"
         f"{inner}"
         "</soapenv:Body>"

@@ -90,9 +90,9 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Final
 
 import httpx
 import structlog
@@ -337,6 +337,15 @@ _VCENTER_PROPERTY_COLLECTOR_MOID = "propertyCollector"
 #: dispatcher's cold-re-login recovery), the SOAP analogue of a vCenter
 #: 401/403 at ``POST /api/session``.
 _SOAP_AUTH_FAULT_TYPES = frozenset({"InvalidLogin", "NoPermission", "NotAuthenticated"})
+#: The one vim ``detail`` fault localName a re-mint of the PBM SOAP session can
+#: recover (#3810). PBM authenticates by the ``vcSessionCookie`` SOAP header
+#: carrying the vim session cookie; once that header is present, a
+#: ``NotAuthenticated`` fault means the underlying vim session expired
+#: server-side (e.g. the 30-min idle timeout), so ``_pbm_call`` re-logs in for a
+#: fresh cookie and retries once. Unlike ``InvalidLogin`` (wrong credential) /
+#: ``NoPermission`` (principal lacks the privilege) — genuine rejections a fresh
+#: session cannot fix — a ``NotAuthenticated`` is a session-liveness signal.
+_PBM_REMINT_FAULT_TYPE: Final[str] = "NotAuthenticated"
 #: ``probe_method`` stamped on a standalone-ESXi fingerprint.
 _ESXI_SOAP_PROBE = "GET /api/about (400) -> soap-retrieveservicecontent"
 
@@ -1451,25 +1460,29 @@ class VmwareRestConnector(HttpConnector):
         """Establish (once, per target) a PBM SOAP session and return its handles.
 
         Storage-policy create/delete have no vCenter REST path, so they run
-        over the PBM SOAP service (``/pbm``, ``urn:pbm``). PBM authenticates
-        with a **vim** ``vmware_soap_session`` cookie — not the vAPI
-        ``vmware-api-session-id`` token the connector's REST/VI-JSON path uses
-        — so this mints a *separate* SOAP session on the pooled client:
+        over the PBM SOAP service (``/pbm``, ``urn:pbm``). PBM authenticates a
+        request by the **vim session cookie value carried in a
+        ``vcSessionCookie`` SOAP ``<Header>`` element** — not the vAPI
+        ``vmware-api-session-id`` token the REST/VI-JSON path uses, and **not**
+        the HTTP ``vmware_soap_session`` cookie (which ``/pbm`` ignores). So this
+        mints a *separate* vim SOAP session on the pooled client and hands its
+        cookie value to every PBM request as that header:
 
         1. unauthenticated ``RetrieveServiceContent`` on ``/sdk`` → the
            vCenter ``sessionManager`` moid (read from ServiceContent, not a
            hard-coded literal);
         2. ``SessionManager.Login`` on ``/sdk`` → a 200 sets the
-           ``vmware_soap_session`` cookie, which ``httpx`` keeps in the pooled
-           client's cookie jar (harmless to the REST path, which authenticates
-           by header, never by cookie);
-        3. ``PbmRetrieveServiceContent`` on ``/pbm`` → the
+           ``vmware_soap_session`` cookie; its value is what the
+           ``vcSessionCookie`` SOAP header carries on every ``/pbm`` request
+           (the same hand-off pyvmomi's ``GetRequestContext()["vcSessionCookie"]``
+           and govmomi's ``soap.Client.Cookie`` perform);
+        3. ``PbmRetrieveServiceContent`` on ``/pbm`` (carrying that header) → the
            ``PbmServiceInstanceContent.profileManager`` moid every PBM
-           create/delete/retrieve is invoked on. The Login cookie rides to
-           ``/pbm`` automatically (same host, same pooled jar), exactly as
-           govmomi's ``pbm.NewClient`` copies the vim session cookie.
+           create/delete/retrieve is invoked on.
 
-        Returns ``(cookie, profile_manager_moid)`` and caches both under the
+        Returns ``(cookie, profile_manager_moid)`` — ``cookie`` is the vim
+        session value the ``vcSessionCookie`` header carries — and caches both
+        under the
         tenant-unique ``target_cache_key``. Credentials never appear in logs,
         errors, results, or the flight-recorder span: the Login envelope is
         the only place the password lives (XML-escaped) and :meth:`_soap_post`
@@ -1537,9 +1550,16 @@ class VmwareRestConnector(HttpConnector):
                     f"SOAP SessionManager.Login returned HTTP {login_resp.status_code} "
                     f"without a {_ESXI_SOAP_SESSION_COOKIE} cookie"
                 )
-            # 3. PbmRetrieveServiceContent on /pbm → profileManager moid.
+            # httpx unquotes cookie values; strip any surviving quotes so the
+            # vcSessionCookie header carries the bare session key vCenter matches.
+            cookie = cookie.strip('"')
+            # 3. PbmRetrieveServiceContent on /pbm (carrying the vcSessionCookie
+            #    SOAP header, #3810) → profileManager moid.
             pbm_resp = await self._soap_post(
-                client, build_pbm_service_content_envelope(), extensions, path=PBM_PATH
+                client,
+                build_pbm_service_content_envelope(cookie),
+                extensions,
+                path=PBM_PATH,
             )
             pbm_fault = parse_soap_fault(pbm_resp.text)
             if pbm_fault is not None:
@@ -1564,29 +1584,117 @@ class VmwareRestConnector(HttpConnector):
             self._pbm_profile_managers[cache_key] = profile_manager
             return cookie, profile_manager
 
-    async def _post_pbm(
-        self, target: VsphereTargetLike, envelope: str, operator: Operator, *, method: str
-    ) -> str:
-        """POST one PBM SOAP *envelope* on ``/pbm``; return the response body.
+    def _invalidate_pbm(self, cache_key: tuple[str, str]) -> None:
+        """Evict the cached PBM SOAP session for *cache_key* (#3810).
 
-        The PBM twin of :meth:`_post_soap`: the fault parse (not the HTTP
-        status) is the authority, so :func:`.soap.parse_soap_fault` runs on the
-        body before ``raise_for_status`` — an ``InvalidLogin`` /
-        ``NoPermission`` fault becomes :class:`ConnectorAuthError` (the
-        dispatcher's cold re-login path), any other PBM fault a
-        :class:`RuntimeError` naming only the target and method. The caller
-        builds *envelope* with the profile-manager moid from :meth:`_ensure_pbm`.
+        The stand-alone PBM twin of :meth:`invalidate_session`'s PBM-eviction
+        leg, callable without a ``Target`` in scope so the mid-op self-heal in
+        :meth:`_pbm_call` can force a re-mint: the next :meth:`_ensure_pbm`
+        misses the cache and re-runs ``SessionManager.Login`` +
+        ``PbmRetrieveServiceContent`` from a clean state. A plain-dict ``pop``
+        is atomic, so no ``_pbm_lock`` is needed for the eviction (mirroring
+        the note on :meth:`invalidate_session`'s PBM eviction).
+        """
+        self._pbm_cookies.pop(cache_key, None)
+        self._pbm_profile_managers.pop(cache_key, None)
+
+    async def _post_pbm_once(
+        self, target: VsphereTargetLike, envelope: str, *, method: str
+    ) -> tuple[str, SoapFault | None]:
+        """POST one PBM SOAP *envelope* on ``/pbm``; return ``(body, fault)``.
+
+        The single-attempt PBM twin of :meth:`_post_soap`'s wire+fault leg: the
+        fault parse (not the HTTP status) is the authority, so
+        :func:`.soap.parse_soap_fault` runs on the body before
+        ``raise_for_status``. Returns ``(resp.text, None)`` on success and
+        ``(resp.text, fault)`` on a vim ``<Fault>`` so the caller
+        (:meth:`_pbm_call`) decides between a self-heal re-mint (a recoverable
+        ``NotAuthenticated``) and raising — the body is the fault XML in that
+        case and the caller ignores it. A genuinely non-fault 5xx still
+        propagates through ``raise_for_status``.
         """
         client = await self._http_client(target)
         extensions = self._request_extensions(target)
         resp = await self._soap_post(client, envelope, extensions, path=PBM_PATH)
         fault = parse_soap_fault(resp.text)
         if fault is not None:
+            return resp.text, fault
+        resp.raise_for_status()
+        return resp.text, None
+
+    async def _pbm_call(
+        self,
+        target: VsphereTargetLike,
+        operator: Operator,
+        *,
+        method: str,
+        build_envelope: Callable[[str, str], str],
+    ) -> str:
+        """Ensure the PBM session, POST one PBM method with the ``vcSessionCookie`` header (#3810).
+
+        Every PBM write/read (:meth:`pbm_create_tag_profile` /
+        :meth:`pbm_delete_profiles` / :meth:`pbm_retrieve_profiles`) funnels
+        through here so the auth + recovery lives in one place. *build_envelope*
+        takes ``(profileManager_moid, session_cookie)`` — the moid
+        :meth:`_ensure_pbm` resolved and the vim session cookie value that the
+        request's ``vcSessionCookie`` SOAP header carries — and returns the
+        method envelope. It is a callable, not a pre-built string, because a
+        re-login re-reads the ``profileManager`` moid **and** mints a fresh
+        cookie, and a retry must rebuild the envelope against both.
+
+        ``vcSessionCookie`` is how ``/pbm`` authenticates a request (the HTTP
+        ``vmware_soap_session`` cookie is ignored there); with the header present
+        a ``NotAuthenticated`` fault means the underlying vim session expired
+        server-side (the session-liveness signal the vim25 client also recovers,
+        #3773 / #3776), so on it this re-logs in (:meth:`_invalidate_pbm` +
+        :meth:`_ensure_pbm`, minting a fresh cookie) and retries the method
+        **once**. An ``InvalidLogin`` / ``NoPermission`` fault is a genuine
+        credential / privilege rejection a fresh session cannot fix, so it raises
+        immediately via :meth:`_soap_fault_error` (:class:`ConnectorAuthError`);
+        any other fault raises as the target+method-named :class:`RuntimeError`.
+
+        When the method still faults ``NotAuthenticated`` after a fresh login
+        with the ``vcSessionCookie`` header present, that is a connector-side PBM
+        transport/auth defect, not a credential problem: this raises a
+        :class:`RuntimeError` — deliberately **not** a :class:`ConnectorAuthError`
+        — that says so, so the operator is not sent down the restage-the-secret
+        path (the same credential authenticates the target's vim25 and REST
+        sessions).
+        """
+        cache_key = target_cache_key(target)
+        cookie, profile_manager = await self._ensure_pbm(target, operator)
+        body, fault = await self._post_pbm_once(
+            target, build_envelope(profile_manager, cookie), method=method
+        )
+        if fault is None:
+            return body
+        if fault.fault_type != _PBM_REMINT_FAULT_TYPE:
             raise self._soap_fault_error(
                 fault, target, message=f"vmware pbm {method} failed on target {target.name!r}"
             )
-        resp.raise_for_status()
-        return resp.text
+        # NotAuthenticated with the vcSessionCookie header present: the vim
+        # session behind it expired server-side. Re-log-in for a fresh cookie +
+        # profileManager and retry once (the vim25 session-liveness recovery,
+        # #3773 / #3776).
+        self._invalidate_pbm(cache_key)
+        cookie, profile_manager = await self._ensure_pbm(target, operator)
+        body, fault = await self._post_pbm_once(
+            target, build_envelope(profile_manager, cookie), method=method
+        )
+        if fault is None:
+            return body
+        if fault.fault_type != _PBM_REMINT_FAULT_TYPE:
+            raise self._soap_fault_error(
+                fault, target, message=f"vmware pbm {method} failed on target {target.name!r}"
+            )
+        raise RuntimeError(
+            f"vmware pbm {method} failed on target {target.name!r}: the request carried "
+            f"the vcSessionCookie SOAP header (the vim session cookie the /sdk Login "
+            f"minted) but /pbm still rejected it as NotAuthenticated after a fresh login. "
+            f"The same credential authenticates this target's vim25 and REST sessions, so "
+            f"this is a PBM transport/auth defect in the connector, not a stale or rotated "
+            f"credential -- do NOT restage the secret."
+        )
 
     async def pbm_create_tag_profile(
         self,
@@ -1602,21 +1710,22 @@ class VmwareRestConnector(HttpConnector):
 
         Post-gate raw dispatch (the composite runs the governance gate first):
         ensures the PBM session, POSTs ``PbmCreate`` with the tag-rule
-        create-spec, and returns the new ``PbmProfileId.uniqueId`` — which is
-        the identifier ``GET /vcenter/storage/policies`` lists the policy by.
+        create-spec and the ``vcSessionCookie`` auth header (#3810), and returns
+        the new ``PbmProfileId.uniqueId`` — which is the identifier
+        ``GET /vcenter/storage/policies`` lists the policy by.
         """
-        _cookie, profile_manager = await self._ensure_pbm(target, operator)
-        xml = await self._post_pbm(
+        xml = await self._pbm_call(
             target,
-            build_pbm_create_envelope(
+            operator,
+            method="PbmCreate",
+            build_envelope=lambda profile_manager, session_cookie: build_pbm_create_envelope(
                 profile_manager,
                 name=name,
                 description=description,
                 category_name=category_name,
                 tag_names=tag_names,
+                session_cookie=session_cookie,
             ),
-            operator,
-            method="PbmCreate",
         )
         policy_id = parse_pbm_profile_id(xml)
         if not policy_id:
@@ -1633,12 +1742,13 @@ class VmwareRestConnector(HttpConnector):
         An outcome carrying a ``fault`` means that id was not removed; an empty
         list means every id was removed without a reported per-id fault.
         """
-        _cookie, profile_manager = await self._ensure_pbm(target, operator)
-        xml = await self._post_pbm(
+        xml = await self._pbm_call(
             target,
-            build_pbm_delete_envelope(profile_manager, profile_ids),
             operator,
             method="PbmDelete",
+            build_envelope=lambda profile_manager, session_cookie: build_pbm_delete_envelope(
+                profile_manager, profile_ids, session_cookie=session_cookie
+            ),
         )
         return parse_pbm_delete_outcomes(xml)
 
@@ -1651,12 +1761,15 @@ class VmwareRestConnector(HttpConnector):
         ``constraints``) for the ids that still exist; an id absent from the
         result has been removed.
         """
-        _cookie, profile_manager = await self._ensure_pbm(target, operator)
-        xml = await self._post_pbm(
+        xml = await self._pbm_call(
             target,
-            build_pbm_retrieve_content_envelope(profile_manager, profile_ids),
             operator,
             method="PbmRetrieveContent",
+            build_envelope=lambda profile_manager, session_cookie: (
+                build_pbm_retrieve_content_envelope(
+                    profile_manager, profile_ids, session_cookie=session_cookie
+                )
+            ),
         )
         return parse_pbm_profiles(xml)
 
@@ -1899,12 +2012,11 @@ class VmwareRestConnector(HttpConnector):
             self._esxi_api_versions.pop(cache_key, None)
             sm_moid = self._esxi_session_manager_moids.pop(cache_key, None)
         # Drop any PBM SOAP session too (#3494): an expired vim cookie faults
-        # the next storage-policy op as ``InvalidLogin`` -> ConnectorAuthError
-        # -> this invalidate; evicting forces ``_ensure_pbm`` to re-login and
-        # re-read the profileManager. A plain dict ``pop`` is atomic, so no
-        # ``_pbm_lock`` is needed for the eviction.
-        self._pbm_cookies.pop(cache_key, None)
-        self._pbm_profile_managers.pop(cache_key, None)
+        # the next storage-policy op as ``NotAuthenticated`` -> the dispatcher's
+        # cold re-login -> this invalidate; evicting forces ``_ensure_pbm`` to
+        # re-login and re-read the profileManager (the same eviction the #3810
+        # mid-op self-heal in ``_pbm_call`` performs directly).
+        self._invalidate_pbm(cache_key)
         if flavor == HOST_FLAVOR_ESXI and token is not None:
             await self._esxi_logout_quiet(cache_key, sm_moid, extensions or {})
 

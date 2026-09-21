@@ -70,6 +70,7 @@ __all__ = [
     "DELETABLE_KINDS",
     "FIELD_MANAGER",
     "ApplyManifestError",
+    "ApplyNotPersistedError",
     "KubernetesSecretRefError",
     "UndeletableKindError",
     "k8s_apply",
@@ -108,6 +109,25 @@ class ApplyManifestError(ValueError):
     ``connector_error`` envelope tags
     ``extras.exception_class="ApplyManifestError"`` and the operator
     sees the parse/validation reason rather than an opaque YAML error.
+    """
+
+
+class ApplyNotPersistedError(ValueError):
+    """A real (non-dry-run) server-side apply returned an unpersisted object.
+
+    The Kubernetes API server always stamps a ``metadata.resourceVersion``
+    on an object it actually stores, so a **real** apply (``dry_run`` not
+    ``"server"``) that comes back with no ``resourceVersion`` did not
+    persist -- the request was accepted (HTTP 200) but nothing was written
+    (the response shape is indistinguishable from a ``dryRun=All``
+    preview). Left unchecked, ``k8s.apply`` would return ``ok`` for an
+    apply that created nothing -- a false-positive success that violates
+    the backplane's "success means it happened" contract (v0.1-spec §6).
+    Raising here turns that silent no-op into a loud, audited ``error``.
+
+    Subclasses :class:`ValueError` so the dispatcher's ``connector_error``
+    envelope tags ``extras.exception_class="ApplyNotPersistedError"``,
+    like the sibling manifest / kind / secret-ref errors above.
     """
 
 
@@ -201,13 +221,32 @@ async def _apply_one(
         **kwargs,
     )
     applied_meta = getattr(applied, "metadata", None)
+    resource_version = getattr(applied_meta, "resourceVersion", None)
+    uid = getattr(applied_meta, "uid", None)
+    # Persistence check (the false-positive-apply guard). A real apply must
+    # come back with a ``resourceVersion`` -- the API server stamps one on
+    # every object it stores. When the request was accepted (HTTP 200) but
+    # the response carries none, nothing was persisted: the response is
+    # shaped exactly like a ``dryRun=All`` preview (no resourceVersion, no
+    # uid). Without this check ``k8s.apply`` would report ``ok`` for an
+    # apply that created nothing -- a silent false positive. A dry-run
+    # (``dry_run=True``) legitimately returns no resourceVersion, so the
+    # guard is scoped to the real path.
+    if not dry_run and not resource_version:
+        raise ApplyNotPersistedError(
+            f"server-side apply of {api_version}/{kind} "
+            f"{namespace + '/' if namespace else ''}{name} was accepted but "
+            f"returned no resourceVersion -- the object was not persisted (the "
+            f"response is indistinguishable from a dry-run preview). Refusing to "
+            f"report success for an apply that created nothing."
+        )
     return {
         "api_version": api_version,
         "kind": kind,
         "name": name,
         "namespace": namespace,
-        "resource_version": getattr(applied_meta, "resourceVersion", None),
-        "uid": getattr(applied_meta, "uid", None),
+        "resource_version": resource_version,
+        "uid": uid,
     }
 
 

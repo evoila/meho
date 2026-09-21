@@ -81,12 +81,29 @@ def _pbm_method(name: str, body: str) -> str:
     return f'<{name} xmlns="{_PBM_NS}">{body}</{name}>'
 
 
-def build_pbm_service_content_envelope() -> str:
+def build_vc_session_cookie_header(session_cookie: str) -> str:
+    """The ``<vcSessionCookie>`` SOAP-header element PBM authenticates on (#3810).
+
+    vCenter's PBM endpoint authenticates a request by the vim session cookie
+    **value carried in a ``vcSessionCookie`` SOAP ``<Header>`` element**, NOT by
+    the HTTP ``vmware_soap_session`` cookie (which ``/pbm`` ignores — a request
+    that presents only the HTTP cookie faults ``NotAuthenticated`` on any
+    authenticated method). This is the same session hand-off pyvmomi performs
+    via ``VmomiSupport.GetRequestContext()["vcSessionCookie"]`` and govmomi via
+    ``soap.Client.Cookie``. *session_cookie* is the value of the
+    ``vmware_soap_session`` cookie the vim ``SessionManager.Login`` set on
+    ``/sdk``; it is XML-escaped here (the value is opaque, never the password).
+    """
+    return f"<vcSessionCookie>{_xml_escape(session_cookie)}</vcSessionCookie>"
+
+
+def build_pbm_service_content_envelope(session_cookie: str) -> str:
     """``PbmServiceInstance.PbmRetrieveServiceContent`` — the bootstrap read.
 
     Returns the ``PbmServiceInstanceContent`` whose ``profileManager`` MoRef
-    every create/delete/retrieve is invoked on. Authenticated by the
-    already-established ``vmware_soap_session`` cookie on the pooled client.
+    every create/delete/retrieve is invoked on. Carries the ``vcSessionCookie``
+    SOAP header (:func:`build_vc_session_cookie_header`) so ``/pbm`` authenticates
+    the request against the vim session the ``/sdk`` Login minted (#3810).
     """
     return _envelope(
         "PbmRetrieveServiceContent",
@@ -94,6 +111,7 @@ def build_pbm_service_content_envelope() -> str:
             "PbmRetrieveServiceContent",
             _this(PBM_SERVICE_INSTANCE_TYPE, PBM_SERVICE_INSTANCE_MOID),
         ),
+        header=build_vc_session_cookie_header(session_cookie),
     )
 
 
@@ -104,10 +122,14 @@ def build_pbm_create_envelope(
     description: str,
     category_name: str,
     tag_names: Sequence[str],
+    session_cookie: str,
 ) -> str:
     """``PbmProfileProfileManager.PbmCreate`` for a tag-based requirement policy.
 
-    Builds the ``PbmCapabilityProfileCreateSpec`` for a single tag rule: a
+    Carries the ``vcSessionCookie`` SOAP header
+    (:func:`build_vc_session_cookie_header`) so ``/pbm`` authenticates the write
+    against the vim session (#3810). Builds the
+    ``PbmCapabilityProfileCreateSpec`` for a single tag rule: a
     ``PbmCapabilitySubProfileConstraints`` (name "Tag based placement") whose
     one capability names the tag ``category`` (``PbmCapabilityMetadataUniqueId``
     ``{namespace, id=category}``) and constrains it to the given *tag_names*
@@ -151,27 +173,49 @@ def build_pbm_create_envelope(
         _this(PBM_PROFILE_MANAGER_TYPE, profile_manager_moid)
         + f"<createSpec>{create_spec}</createSpec>"
     )
-    return _envelope("PbmCreate", _pbm_method("PbmCreate", inner))
+    return _envelope(
+        "PbmCreate",
+        _pbm_method("PbmCreate", inner),
+        header=build_vc_session_cookie_header(session_cookie),
+    )
 
 
-def build_pbm_delete_envelope(profile_manager_moid: str, profile_ids: Sequence[str]) -> str:
-    """``PbmProfileProfileManager.PbmDelete`` — remove one or more policies by id."""
+def build_pbm_delete_envelope(
+    profile_manager_moid: str, profile_ids: Sequence[str], *, session_cookie: str
+) -> str:
+    """``PbmProfileProfileManager.PbmDelete`` — remove one or more policies by id.
+
+    Carries the ``vcSessionCookie`` SOAP header so ``/pbm`` authenticates the
+    delete against the vim session (#3810).
+    """
     ids_xml = "".join(
         f"<profileId><uniqueId>{_xml_escape(pid)}</uniqueId></profileId>" for pid in profile_ids
     )
     inner = _this(PBM_PROFILE_MANAGER_TYPE, profile_manager_moid) + ids_xml
-    return _envelope("PbmDelete", _pbm_method("PbmDelete", inner))
+    return _envelope(
+        "PbmDelete",
+        _pbm_method("PbmDelete", inner),
+        header=build_vc_session_cookie_header(session_cookie),
+    )
 
 
 def build_pbm_retrieve_content_envelope(
-    profile_manager_moid: str, profile_ids: Sequence[str]
+    profile_manager_moid: str, profile_ids: Sequence[str], *, session_cookie: str
 ) -> str:
-    """``PbmProfileProfileManager.PbmRetrieveContent`` — read policies by id (read-back)."""
+    """``PbmProfileProfileManager.PbmRetrieveContent`` — read policies by id (read-back).
+
+    Carries the ``vcSessionCookie`` SOAP header so ``/pbm`` authenticates the
+    read against the vim session (#3810).
+    """
     ids_xml = "".join(
         f"<profileIds><uniqueId>{_xml_escape(pid)}</uniqueId></profileIds>" for pid in profile_ids
     )
     inner = _this(PBM_PROFILE_MANAGER_TYPE, profile_manager_moid) + ids_xml
-    return _envelope("PbmRetrieveContent", _pbm_method("PbmRetrieveContent", inner))
+    return _envelope(
+        "PbmRetrieveContent",
+        _pbm_method("PbmRetrieveContent", inner),
+        header=build_vc_session_cookie_header(session_cookie),
+    )
 
 
 def _parse_returnval_list(xml: str, method: str) -> list[Any]:

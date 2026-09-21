@@ -45,10 +45,14 @@ def _body(inner: str) -> str:
 
 
 def test_service_content_envelope_is_well_formed_and_targets_pbm_service_instance() -> None:
-    env = build_pbm_service_content_envelope()
+    env = build_pbm_service_content_envelope("session-key-1")
     fromstring(env)  # raises on malformed XML
     assert '<PbmRetrieveServiceContent xmlns="urn:pbm">' in env
     assert '<_this type="PbmServiceInstance">ServiceInstance</_this>' in env
+    # Even the lenient bootstrap carries the vcSessionCookie auth header (#3810).
+    assert (
+        "<soapenv:Header><vcSessionCookie>session-key-1</vcSessionCookie></soapenv:Header>" in env
+    )
 
 
 def test_create_envelope_matches_the_tag_rule_reference_shape() -> None:
@@ -58,11 +62,16 @@ def test_create_envelope_matches_the_tag_rule_reference_shape() -> None:
         description="NFS tag policy",
         category_name="meho-storage",
         tag_names=["nfs-gold", "nfs-silver"],
+        session_cookie="session-key-1",
     )
     fromstring(env)
     # PbmCreate on the ProfileManager, urn:pbm.
     assert '<PbmCreate xmlns="urn:pbm">' in env
     assert '<_this type="PbmProfileProfileManager">pm-1</_this>' in env
+    # The vcSessionCookie SOAP header authenticates the write on /pbm (#3810).
+    assert (
+        "<soapenv:Header><vcSessionCookie>session-key-1</vcSessionCookie></soapenv:Header>" in env
+    )
     # Requirement storage policy.
     assert "<category>REQUIREMENT</category>" in env
     assert "<resourceType><resourceType>STORAGE</resourceType></resourceType>" in env
@@ -86,11 +95,14 @@ def test_create_envelope_xml_escapes_names() -> None:
         description="<desc>",
         category_name="c&c",
         tag_names=["t<1"],
+        session_cookie="cookie&<value>",
     )
     fromstring(env)
     assert "a&amp;b" in env
     assert "&lt;desc&gt;" in env
     assert "com.vmware.storage.tag.c&amp;c.property" in env
+    # The session cookie value is XML-escaped in the header, never raw.
+    assert "<vcSessionCookie>cookie&amp;&lt;value&gt;</vcSessionCookie>" in env
 
 
 def test_property_id_helper_matches_govc_convention() -> None:
@@ -98,16 +110,24 @@ def test_property_id_helper_matches_govc_convention() -> None:
 
 
 def test_delete_and_retrieve_envelopes_carry_profile_ids() -> None:
-    del_env = build_pbm_delete_envelope("pm-1", ["p-1", "p-2"])
+    del_env = build_pbm_delete_envelope("pm-1", ["p-1", "p-2"], session_cookie="session-key-1")
     fromstring(del_env)
     assert '<PbmDelete xmlns="urn:pbm">' in del_env
     assert "<profileId><uniqueId>p-1</uniqueId></profileId>" in del_env
     assert "<profileId><uniqueId>p-2</uniqueId></profileId>" in del_env
+    assert (
+        "<soapenv:Header><vcSessionCookie>session-key-1</vcSessionCookie></soapenv:Header>"
+        in del_env
+    )
 
-    ret_env = build_pbm_retrieve_content_envelope("pm-1", ["p-1"])
+    ret_env = build_pbm_retrieve_content_envelope("pm-1", ["p-1"], session_cookie="session-key-1")
     fromstring(ret_env)
     assert '<PbmRetrieveContent xmlns="urn:pbm">' in ret_env
     assert "<profileIds><uniqueId>p-1</uniqueId></profileIds>" in ret_env
+    assert (
+        "<soapenv:Header><vcSessionCookie>session-key-1</vcSessionCookie></soapenv:Header>"
+        in ret_env
+    )
 
 
 # --- Parsers ---------------------------------------------------------------

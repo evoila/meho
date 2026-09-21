@@ -41,10 +41,11 @@ Two field-note behaviours this module honours
   alias (a lab / operator-VPN norm). We take the CA from that
   ``kube_config`` but **override the host to the operator-reachable
   ``target.host``** (the top-level Supervisor kube-API context) and never
-  follow the internal-VIP workload-session redirects. Because we
-  deliberately dial the reachable alias rather than the cert's VIP SAN,
-  hostname assertion is disabled while the Supervisor CA chain stays
-  verified.
+  follow the internal-VIP workload-session redirects. When the reachable
+  alias differs from the cert's SAN, the target's ``tls_server_name``
+  names the address to verify the presented cert against, so the CA chain
+  **and** the hostname both stay checked — the same SNI / cert-verify name
+  is threaded onto both the login POST and the kube-API leg.
 * **Least privilege.** The SSO super-admin works but the recommended
   long-term credential is a scoped read-only vSphere SSO user granted a
   read-only vSphere-Namespace role. This module is credential-agnostic —
@@ -59,9 +60,12 @@ The login POST needs a trust anchor *before* the CA-bearing
 like the shared HTTP transport (``adapters/http.py``): a
 ``tls_ca_pin`` (the Supervisor CA, staged out-of-band) is verified
 against; otherwise ``verify_tls`` toggles system-CA verification on/off.
-A self-signed Supervisor therefore needs either the CA pinned on the
-target (recommended) or ``verify_tls=false`` (lab) — the same trust
-bootstrap ``kubectl vsphere login`` needs a thumbprint or
+The cert is asserted against ``tls_server_name`` (falling back to the
+dial ``host``) — so a NAT-fronted Supervisor whose cert SANs an internal
+VIP verifies with hostname checking on rather than failing the login
+handshake. A self-signed Supervisor therefore needs either the CA pinned
+on the target (recommended) or ``verify_tls=false`` (lab) — the same
+trust bootstrap ``kubectl vsphere login`` needs a thumbprint or
 ``--insecure-skip-tls-verify`` for.
 
 No secret material is ever logged: structlog events carry host / port /
@@ -242,19 +246,71 @@ def _token_expiry_monotonic(token: str, *, now_wall: float, now_monotonic: float
     return now_monotonic + DEFAULT_WCP_TOKEN_TTL_SECONDS
 
 
-def _login_tls(verify_tls: bool, ca_pem: str | None) -> ssl.SSLContext | bool:
-    """TLS setting for the login POST — ``tls_ca_pin`` wins, else ``verify_tls``.
+def _wcp_server_hostname(host: str, tls_server_name: str | None) -> str:
+    """The single SNI / cert-verify name **both** legs assert the cert against.
+
+    The operator's ``tls_server_name`` override, falling back to the dial
+    ``host``. Shared by the login POST (``sni_hostname`` extension) and the
+    kube-API leg (``Configuration.tls_server_name`` → aiohttp
+    ``server_hostname``) so the two can never drift: a NAT-fronted
+    Supervisor whose cert SANs an internal VIP (dial ``host`` ≠ SAN)
+    verifies precisely when ``tls_server_name`` names that SAN.
+    """
+    return tls_server_name or host
+
+
+@dataclass(frozen=True, slots=True)
+class _WcpTls:
+    """Resolved TLS policy for the login POST (httpx).
+
+    ``verify`` is the value handed to :class:`httpx.AsyncClient`'s
+    ``verify=`` — an :class:`ssl.SSLContext` when a CA is pinned, else the
+    ``verify_tls`` bool. ``server_hostname`` is the shared cert-verify name
+    from :func:`_wcp_server_hostname`. The API leg draws its trust anchor
+    from the ``/wcp/login`` response's ``kube_config`` (not ``ca_pem``), so
+    it consumes only ``server_hostname``, never this ``verify`` context.
+    """
+
+    verify: ssl.SSLContext | bool
+    server_hostname: str
+
+
+def _wcp_tls(
+    *, host: str, verify_tls: bool, ca_pem: str | None, tls_server_name: str | None
+) -> _WcpTls:
+    """Resolve the login POST's TLS policy — ``tls_ca_pin`` wins, else ``verify_tls``.
 
     Mirrors the shared HTTP transport's precedence
     (``adapters/http.py``): a pinned CA is verified against with hostname
     checking on; otherwise ``verify_tls`` toggles default system-CA
-    verification. Returned as an :class:`ssl.SSLContext` (pinned CA) or a
-    ``bool`` — both accepted by ``httpx``'s ``verify=``.
+    verification. The cert-verify / SNI name comes from
+    :func:`_wcp_server_hostname` so the login leg asserts the cert against
+    the same name the API leg does, instead of always asserting the dial
+    host.
     """
-    if ca_pem:
-        ctx = ssl.create_default_context(cadata=ca_pem)
-        return ctx
-    return verify_tls
+    verify: ssl.SSLContext | bool = (
+        ssl.create_default_context(cadata=ca_pem) if ca_pem else verify_tls
+    )
+    return _WcpTls(verify=verify, server_hostname=_wcp_server_hostname(host, tls_server_name))
+
+
+def _is_tls_verification_error(exc: BaseException) -> bool:
+    """True when *exc*'s cause/context chain carries an :class:`ssl.SSLError`.
+
+    ``httpx`` surfaces a handshake / certificate-verification failure as an
+    :class:`httpx.ConnectError` that wraps (via ``raise ... from``) the
+    underlying :class:`ssl.SSLError`. Walking the ``__cause__`` /
+    ``__context__`` chain lets a hostname or CA mismatch on the login leg
+    read as an actionable TLS failure rather than a bare connect error.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ssl.SSLError):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _coerce_kube_config(raw: object) -> dict[str, Any]:
@@ -280,6 +336,7 @@ async def wcp_login(
     password: str,
     verify_tls: bool,
     ca_pem: str | None,
+    tls_server_name: str | None = None,
     login_port: int = WCP_LOGIN_PORT,
     timeout: float = DEFAULT_WCP_LOGIN_TIMEOUT_SECONDS,
     now_wall: float | None = None,
@@ -296,16 +353,27 @@ async def wcp_login(
     present) and the response ``kube_config`` mapping (the source of the
     Supervisor CA the caller builds TLS trust from).
     """
-    verify = _login_tls(verify_tls, ca_pem)
+    tls = _wcp_tls(host=host, verify_tls=verify_tls, ca_pem=ca_pem, tls_server_name=tls_server_name)
     url = f"https://{host}:{login_port}{WCP_LOGIN_PATH}"
     try:
-        async with httpx.AsyncClient(verify=verify, timeout=timeout) as http:
+        async with httpx.AsyncClient(verify=tls.verify, timeout=timeout) as http:
             resp = await http.post(
                 url,
                 auth=(username, password),
                 headers={"Content-Type": "application/json", "Accept": "application/json"},
+                # Verify the presented cert against tls_server_name (SNI /
+                # cert-verify name), not the dial host, so a NAT-fronted
+                # Supervisor whose cert SANs an internal VIP still verifies.
+                extensions={"sni_hostname": tls.server_hostname},
             )
     except (httpx.HTTPError, ssl.SSLError, OSError) as exc:
+        if _is_tls_verification_error(exc):
+            raise WcpLoginError(
+                f"TLS verification failed for {host!r} "
+                f"(server_name {tls.server_hostname!r}): {type(exc).__name__} — "
+                "the pinned CA or the cert SAN does not match; "
+                "check tls_ca_pin / tls_server_name"
+            ) from exc
         raise WcpLoginError(
             f"/wcp/login exchange to {host!r} failed: {type(exc).__name__}"
         ) from exc
@@ -342,6 +410,7 @@ async def build_wcp_api_configuration(
     password: str,
     verify_tls: bool,
     ca_pem: str | None,
+    tls_server_name: str | None = None,
     login_port: int = WCP_LOGIN_PORT,
     timeout: float = DEFAULT_WCP_LOGIN_TIMEOUT_SECONDS,
 ) -> Configuration:
@@ -352,7 +421,10 @@ async def build_wcp_api_configuration(
     operator-reachable ``host:api_port``** (never the internal-VIP
     ``server`` in the kube_config) and installs an async
     ``refresh_api_key_hook`` that re-mints the token before expiry. The
-    returned ``Configuration`` drives an ordinary
+    presented cert is verified against ``tls_server_name`` (falling back to
+    ``host``) — the same SNI / cert-verify name the login leg uses — so a
+    NAT-fronted Supervisor whose cert SANs an internal VIP verifies with
+    hostname checking on. The returned ``Configuration`` drives an ordinary
     :class:`~kubernetes_asyncio.client.ApiClient` (read/inventory ops) or
     a :class:`~kubernetes_asyncio.stream.ws_client.WsApiClient` (exec).
     """
@@ -361,6 +433,7 @@ async def build_wcp_api_configuration(
         "password": password,
         "verify_tls": verify_tls,
         "ca_pem": ca_pem,
+        "tls_server_name": tls_server_name,
         "login_port": login_port,
         "timeout": timeout,
     }
@@ -376,10 +449,14 @@ async def build_wcp_api_configuration(
     if not verify_tls:
         cfg.verify_ssl = False
     else:
-        # We deliberately dial the reachable alias, not the Supervisor
-        # cert's internal-VIP SAN, so skip hostname assertion while
-        # keeping CA-chain verification (the field-note requirement).
-        cfg.assert_hostname = False
+        # We dial the reachable alias, not the Supervisor cert's
+        # internal-VIP SAN, so verify the cert against tls_server_name
+        # (falling back to the dial host) rather than the alias — the same
+        # SNI / cert-verify name the login leg uses. kubernetes_asyncio's
+        # rest client maps ``tls_server_name`` onto the aiohttp
+        # ``server_hostname`` (SNI + cert hostname check), keeping the CA
+        # chain verified with hostname checking on.
+        cfg.tls_server_name = _wcp_server_hostname(host, tls_server_name)
 
     _apply_bearer(cfg, token)
     cfg.refresh_api_key_hook = _WcpTokenRefresher(host, token, **login_kwargs)

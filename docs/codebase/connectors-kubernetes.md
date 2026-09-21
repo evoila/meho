@@ -175,8 +175,20 @@ connector keeps that CA but **overrides the host to the
 operator-reachable `target.host`** (the top-level Supervisor kube-API
 context) and never follows the internal-VIP workload-session redirects.
 Because it deliberately dials the alias rather than the cert's VIP SAN,
-hostname assertion is disabled while the Supervisor **CA chain stays
-verified**.
+the cert is verified against the target's **`tls_server_name`** (falling
+back to the dial host) so the Supervisor **CA chain stays verified with
+hostname checking on** — a NAT-fronted Supervisor whose cert SANs the
+internal VIP works with verification enabled when `tls_server_name` names
+that SAN.
+
+`tls_server_name` is threaded onto **both legs** — the `/wcp/login` POST
+(httpx `extensions={"sni_hostname": …}`) and the kube-API leg
+(`Configuration.tls_server_name`, which `kubernetes_asyncio` maps onto the
+aiohttp `server_hostname`) — via one shared TLS-policy builder, so the
+login exchange no longer fails hostname verification while the API leg
+succeeds (#3832). A hostname/CA mismatch on the login leg now surfaces as
+`WcpLoginError: TLS verification failed for '<host>' (server_name
+'<name>')…` rather than a bare `ConnectError`.
 
 TLS for the login POST itself follows the target's knobs exactly like the
 shared HTTP transport: a `tls_ca_pin` (the Supervisor CA, staged
@@ -194,7 +206,11 @@ Register the Supervisor as an ordinary k8s target (`product: k8s`,
 default 6443) and stage its `secret_ref` with **`username` + `password`**
 fields (vSphere SSO) instead of a `kubeconfig` field. Pin the Supervisor
 CA via the target's `tls_ca_pin` (recommended) or set `verify_tls=false`
-for a lab. **Least privilege:** the SSO super-admin works but the
+for a lab. When the Supervisor is reached through a NAT alias whose
+address is **not** in the cert's SAN, set `tls_server_name` to the address
+the cert SANs (the internal VIP) so both the login and API legs verify the
+cert against it with hostname checking on. **Least privilege:** the SSO
+super-admin works but the
 recommended long-term credential is a scoped read-only vSphere SSO user
 granted a read-only vSphere-Namespace role; the connector is
 credential-agnostic and uses whatever SSO pair is staged. Sibling

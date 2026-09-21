@@ -51,7 +51,6 @@ from typing import Final
 import structlog
 from fastapi import Depends, FastAPI, Response
 from fastapi.openapi.utils import get_openapi
-from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from meho_backplane import __version__
@@ -211,6 +210,7 @@ from meho_backplane.ui.csrf import CSRFMiddleware
 from meho_backplane.ui.paths import ensure_static_dist_dir, static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.ui.security_headers import UIFramingHeadersMiddleware
+from meho_backplane.ui.static_files import RevalidateStaticFiles
 from meho_backplane.version import router as version_router
 
 _APP_NAME: Final[str] = "meho-backplane"
@@ -1198,7 +1198,14 @@ app.include_router(mcp_router)
 #   stylesheet, materialised by ``ensure_static_dist_dir`` at
 #   startup). The ``UISessionMiddleware`` short-circuits on the
 #   ``/ui/static/`` prefix so unauthenticated browsers can load
-#   the styled login page assets.
+#   the styled login page assets. The mount is
+#   :class:`RevalidateStaticFiles`, not the bare ``StaticFiles``: the
+#   console references these assets at STABLE, unversioned URLs whose
+#   content changes every release, so a plain ``ETag``/``Last-Modified``
+#   response (no ``Cache-Control``) lets browsers heuristically serve a
+#   stale cached copy after a deploy -- the recurring "console lost its
+#   CSS after a roll" symptom. ``no-cache`` forces revalidation while
+#   keeping the cheap ``304`` fast-path (see ``ui/static_files.py``).
 # * UI auth router -- ``/ui/auth/{login,callback,logout}`` GET
 #   routes; reachable unauthenticated (the middleware exempts
 #   ``/ui/auth/``).
@@ -1207,7 +1214,7 @@ app.include_router(mcp_router)
 #   ``UISessionMiddleware`` redirects to login on miss.
 app.mount(
     "/ui/static",
-    StaticFiles(directory=str(static_root_dir()), check_dir=False),
+    RevalidateStaticFiles(directory=str(static_root_dir()), check_dir=False),
     name="ui_static",
 )
 app.include_router(build_ui_auth_router())

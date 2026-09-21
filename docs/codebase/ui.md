@@ -128,9 +128,14 @@ Two artifacts ship in the backend image:
    dot-directory automatic detection skips, and that detection is rooted
    at the CLI's cwd (the image `WORKDIR`), not at `styles.css`. Relying
    on it shipped a utilities-less bundle once the image stopped copying
-   the source tree to the build cwd (#3627). The Dockerfile step asserts
-   `grep -q '\.btn'` on the output so a scan that reaches no templates
-   fails the build loud. DaisyUI is loaded via
+   the source tree to the build cwd (#3627). The Dockerfile step then
+   asserts the compiled output clears a **60 KB size floor** (the #3647
+   empty bundle was ~35 KB, a healthy one ~150 KB) **and** carries
+   several distinct console selectors (`.btn`, `.card`, `.navbar`,
+   `bg-base`, `badge-error`) — the class checks, not the coarse floor,
+   are the load-bearing guard, since a scan that reaches no templates
+   emits zero of them (#3828). `grep`-ing a single class alone could not
+   catch a partial scan. DaisyUI is loaded via
    `@plugin "./vendor/daisyui.js"` in `styles.css` itself.
 
    `static/dist/` is `.gitignore`'d — only built artifacts live
@@ -659,7 +664,7 @@ T5 wires the chassis into the FastAPI app in
 [`backend/src/meho_backplane/main.py`](../../backend/src/meho_backplane/main.py).
 Five things land together:
 
-1. **`StaticFiles` mount** at `/ui/static` against the parent
+1. **`RevalidateStaticFiles` mount** at `/ui/static` against the parent
    `ui/static/` tree, so the URLs `/ui/static/src/vendor/htmx.min.js`
    and `/ui/static/dist/tailwind.css` (referenced by `base.html`)
    resolve to the same mount. `check_dir=False` keeps the mount
@@ -669,7 +674,20 @@ Five things land together:
    surfaced by this doc and by the lifespan log line. The lifespan
    startup also calls `ensure_static_dist_dir()` to create the
    directory so the mount construction never raises on a fresh
-   clone.
+   clone. `RevalidateStaticFiles`
+   ([`ui/static_files.py`](../../backend/src/meho_backplane/ui/static_files.py))
+   is a thin `StaticFiles` subclass that stamps `Cache-Control:
+   no-cache` on every asset: the console references these assets at
+   stable, unversioned URLs whose content changes each release, and bare
+   `StaticFiles` sends `ETag` + `Last-Modified` but no `Cache-Control`,
+   so a browser may heuristically serve a stale copy after a roll (the
+   "console lost its CSS after a deploy, a hard refresh fixes it"
+   symptom, #3828). `no-cache` keeps the asset cacheable but forces an
+   `If-None-Match` revalidation before reuse; the origin already answers
+   a matching validator with `304 Not Modified`, so the body is re-sent
+   only when it actually changed. HTML pages are already served
+   `Cache-Control: no-store` by the routers, so only the static mount
+   needed this.
 2. **UI auth router** -- `/ui/auth/{login,callback,logout}`. Mounted
    via `build_router()` from `meho_backplane.ui.auth`. Reachable
    unauthenticated.

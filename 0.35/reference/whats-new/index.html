@@ -1661,6 +1661,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#v03511-2026-09-21" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.11 — 2026-09-21
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#v03510-2026-09-21" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2084,6 +2095,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#v03511-2026-09-21" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.11 — 2026-09-21
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#v03510-2026-09-21" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2358,6 +2380,19 @@ which carries the full detail — every change, and the migration recipe
 for each breaking one.</p>
 <p>MEHO is under active development. Each release below links to its full
 notes.</p>
+<h2 id="v03511-2026-09-21"><a href="https://github.com/evoila/meho/releases/tag/v0.35.11">v0.35.11</a> — 2026-09-21<a class="headerlink" href="#v03511-2026-09-21" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>A vSphere Supervisor that logs in without handing back a kubeconfig can be
+  reached again.</strong> A Kubernetes (vSphere Supervisor) target that authenticates
+  through WCP-SSO gets back a session token and, on newer Supervisors, no
+  embedded kubeconfig at all — and MEHO used to reject that successful login as
+  malformed, so the target could never be probed. MEHO now treats the embedded
+  kubeconfig as optional (just as <code>kubectl vsphere login</code> does): when it is
+  absent it builds the connection from what it already knows — the login
+  host/port, the target's pinned CA and certificate name, and the returned
+  session token as the bearer — and the target's own TLS policy always wins over
+  anything an embedded config tried to set.</li>
+</ul>
 <h2 id="v03510-2026-09-21"><a href="https://github.com/evoila/meho/releases/tag/v0.35.10">v0.35.10</a> — 2026-09-21<a class="headerlink" href="#v03510-2026-09-21" title="Permanent link">&para;</a></h2>
 <ul>
 <li><strong>The operator console can't be stranded on a stale stylesheet after a

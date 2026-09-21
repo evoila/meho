@@ -1993,6 +1993,11 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
             "approval before any write; each child write flows through the "
             "governed sub-op seam (its own audit row + grant point). "
             "Fail-closed if a datastore name resolves to zero / many. "
+            "Idempotent (#3826): an existing category / tag / policy of the same "
+            "name is adopted (reported in 'adopted' + 'issues') so a retry after "
+            "a partial run succeeds instead of failing ALREADY_EXISTS; an "
+            "incompatible existing category or a same-named policy with a "
+            "different rule set is a terminal category_conflict / policy_conflict. "
             "Equivalent of the out-of-band 'New-SpbmStoragePolicy' / "
             "'govc storage.policy.create -category -tag', governed."
         ),

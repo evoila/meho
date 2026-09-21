@@ -806,9 +806,15 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
             "invalid_request",
         },
         # #3494: governed NFS tag-based SPBM storage-policy create/delete.
+        # #3826 adds the resolve-before-create idempotency statuses: adopted
+        # (same-named policy + matching rule set reused) and the two terminal
+        # conflicts (category / policy of the same name, incompatible shape).
         "vmware.composite.storage_policy.create": {
             "created",
+            "adopted",
             "datastore_not_found",
+            "category_conflict",
+            "policy_conflict",
             "policy_create_failed",
         },
         "vmware.composite.storage_policy.delete": {

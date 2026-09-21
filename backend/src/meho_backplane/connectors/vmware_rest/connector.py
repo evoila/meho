@@ -165,6 +165,7 @@ from meho_backplane.connectors.vmware_rest.soap_pbm import (
     build_pbm_service_content_envelope,
     parse_pbm_delete_outcomes,
     parse_pbm_profile_id,
+    parse_pbm_profile_tag_rules,
     parse_pbm_profiles,
     parse_pbm_service_content,
 )
@@ -1772,6 +1773,32 @@ class VmwareRestConnector(HttpConnector):
             ),
         )
         return parse_pbm_profiles(xml)
+
+    async def pbm_retrieve_profile_tag_rules(
+        self, target: VsphereTargetLike, operator: Operator, *, profile_ids: list[str]
+    ) -> dict[str, set[tuple[str, frozenset[str]]]]:
+        """Read the tag-rule signatures of storage policies by id.
+
+        The adopt-vs-conflict read for ``storage_policy.create`` (#3826): issues
+        the same ``PbmRetrieveContent`` call as :meth:`pbm_retrieve_profiles` but
+        reduces each returned profile to its comparable tag-rule signature (a set
+        of ``(property_id, frozenset(tag_values))`` tuples) rather than the raw
+        constraint dicts, so the composite can decide whether an existing
+        same-named policy has the **same** rule set (adopt) or a **different** one
+        (``policy_conflict``). Keyed by ``profileId.uniqueId``; an id absent from
+        the result does not exist.
+        """
+        xml = await self._pbm_call(
+            target,
+            operator,
+            method="PbmRetrieveContent",
+            build_envelope=lambda profile_manager, session_cookie: (
+                build_pbm_retrieve_content_envelope(
+                    profile_manager, profile_ids, session_cookie=session_cookie
+                )
+            ),
+        )
+        return parse_pbm_profile_tag_rules(xml)
 
     @staticmethod
     def _parse_vmomi_path(vmomi_path: str) -> tuple[str, str, str]:

@@ -32,9 +32,16 @@ from tests._spec_shelf import (
 )
 
 # The REST-Automation paths the composite hits (served by vcenter.yaml).
+# The GET list/get pairs on category / tag are the #3826 resolve-before-create
+# adopt reads (find an existing object by name so a retry reuses it instead of
+# dying at the create with ALREADY_EXISTS).
 _EXPECTED_REST_OP_IDS = {
     "POST:/cis/tagging/category",
+    "GET:/cis/tagging/category",
+    "GET:/cis/tagging/category/{categoryId}",
     "POST:/cis/tagging/tag",
+    "GET:/cis/tagging/tag",
+    "GET:/cis/tagging/tag/{tagId}",
     "POST:/cis/tagging/tag-association/{tagId}?action=attach",
     "GET:/vcenter/datastore",
     "GET:/vcenter/storage/policies",

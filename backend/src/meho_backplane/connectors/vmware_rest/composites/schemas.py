@@ -5552,10 +5552,13 @@ STORAGE_POLICY_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
 #: ``vmware.composite.storage_policy.create`` parameter schema.
 #:
 #: Mints a tag-based requirement storage policy for NFS-principal datastores
-#: (which have no default policy). Creates the tag category + tag, attaches the
-#: tag to each named datastore, then creates the PBM policy whose one rule
-#: requires that tag. Category / tag / policy names must be new (this is a
-#: create op; use storage_policy.delete for teardown).
+#: (which have no default policy). Ensures the tag category + tag, attaches the
+#: tag to each named datastore, then mints the PBM policy whose one rule
+#: requires that tag. Idempotent (#3826): an existing category / tag / policy of
+#: the same name is adopted (reported in ``adopted`` / ``issues``) so a retry
+#: after a partial run succeeds instead of failing at ``ALREADY_EXISTS``; an
+#: incompatible existing category or a same-named policy with a different rule
+#: set is a terminal ``category_conflict`` / ``policy_conflict``.
 STORAGE_POLICY_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -5611,25 +5614,41 @@ STORAGE_POLICY_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "type": "string",
             "enum": [
                 "created",
+                "adopted",
                 "datastore_not_found",
+                "category_conflict",
+                "policy_conflict",
                 "policy_create_failed",
             ],
             "description": (
-                "``created`` — policy minted and visible; "
-                "``datastore_not_found`` — a datastore name resolved to zero / "
-                "many datastores (no tag substrate created); "
-                "``policy_create_failed`` — the tag substrate was created but "
-                "PbmCreate did not return a policy id (created artifacts "
-                "reported for cleanup)."
+                "``created`` — policy minted and visible (category / tag may "
+                "have been adopted, see ``adopted``); ``adopted`` — a policy of "
+                "the same name and matching rule set already existed and was "
+                "reused (no PbmCreate); ``datastore_not_found`` — a datastore "
+                "name resolved to zero / many datastores (no tag substrate "
+                "created); ``category_conflict`` — a category of the same name "
+                "exists but with an incompatible cardinality / associable types "
+                "(no write); ``policy_conflict`` — a policy of the same name "
+                "exists but constrains a different rule set (no write); "
+                "``policy_create_failed`` — PbmCreate did not return a policy id "
+                "(retry: the tag substrate is adopted, no cleanup needed)."
             ),
         },
         "policy_id": {
             "type": ["string", "null"],
-            "description": "The created PBM policy id (the vCenter StoragePolicy identifier).",
+            "description": (
+                "The created or adopted PBM policy id (the vCenter StoragePolicy identifier)."
+            ),
         },
         "policy_name": {"type": "string"},
-        "category_id": {"type": ["string", "null"], "description": "The created tag category id."},
-        "tag_id": {"type": ["string", "null"], "description": "The created tag id."},
+        "category_id": {
+            "type": ["string", "null"],
+            "description": "The created or adopted tag category id.",
+        },
+        "tag_id": {
+            "type": ["string", "null"],
+            "description": "The created or adopted tag id.",
+        },
         "tag_name": {"type": "string"},
         "datastores": {
             "type": "array",
@@ -5647,6 +5666,38 @@ STORAGE_POLICY_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
         "listed": {
             "type": "boolean",
             "description": "Whether the read-back GET saw the new policy in the policies list.",
+        },
+        "adopted": {
+            "type": "object",
+            "description": (
+                "Per sub-step, whether an existing object was reused rather than "
+                "created (the #3826 resolve-before-create idempotency)."
+            ),
+            "properties": {
+                "category": {"type": "boolean"},
+                "tag": {"type": "boolean"},
+                "policy": {"type": "boolean"},
+            },
+            "required": ["category", "tag", "policy"],
+            "additionalProperties": False,
+        },
+        "issues": {
+            "type": "array",
+            "description": (
+                "Structured issue entries: a ``warning`` per adopted sub-step, "
+                "or an ``error`` on a terminal ``*_conflict`` / "
+                "``policy_create_failed`` envelope (dispatched as an error)."
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "category": {"type": "string"},
+                    "severity": {"type": "string", "enum": ["error", "warning", "info"]},
+                    "message": {"type": "string"},
+                },
+                "required": ["category", "severity", "message"],
+                "additionalProperties": False,
+            },
         },
         "guidance": {"type": ["string", "null"]},
     },

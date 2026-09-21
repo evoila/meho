@@ -24,6 +24,7 @@ from meho_backplane.connectors.vmware_rest.soap_pbm import (
     build_pbm_service_content_envelope,
     parse_pbm_delete_outcomes,
     parse_pbm_profile_id,
+    parse_pbm_profile_tag_rules,
     parse_pbm_profiles,
     parse_pbm_service_content,
     pbm_tag_property_id,
@@ -193,3 +194,59 @@ def test_parse_profiles_lists_content_rows() -> None:
     assert len(profiles) == 1
     assert profiles[0]["profileId"]["uniqueId"] == "abc-123-guid"
     assert profiles[0]["name"] == "NFS-Gold"
+
+
+def _profile_with_tag_rule(unique_id: str, category: str, *tags: str) -> str:
+    """A ``returnval`` carrying one tag rule constraining *category* to *tags*.
+
+    Mirrors the shape :func:`build_pbm_create_envelope` writes (subprofile
+    "Tag based placement", the ``com.vmware.storage.tag.<category>.property``
+    property id, a ``PbmCapabilityDiscreteSet`` of ``xsd:string`` values) so the
+    #3826 adopt-vs-conflict signature extraction is tested against the real wire
+    shape, not a convenient one.
+    """
+    values = "".join(f'<values xsi:type="xsd:string">{t}</values>' for t in tags)
+    return (
+        '<returnval xsi:type="PbmCapabilityProfile">'
+        f"<profileId><uniqueId>{unique_id}</uniqueId></profileId>"
+        f"<name>{unique_id}-name</name>"
+        '<constraints xsi:type="PbmCapabilitySubProfileConstraints">'
+        "<subProfiles><name>Tag based placement</name><capability>"
+        f"<id><namespace>http://www.vmware.com/storage/tag</namespace><id>{category}</id></id>"
+        "<constraint><propertyInstance>"
+        f"<id>{pbm_tag_property_id(category)}</id>"
+        f'<value xsi:type="PbmCapabilityDiscreteSet">{values}</value>'
+        "</propertyInstance></constraint>"
+        "</capability></subProfiles></constraints>"
+        "</returnval>"
+    )
+
+
+def test_parse_profile_tag_rules_extracts_per_profile_signatures() -> None:
+    xml = _body(
+        '<PbmRetrieveContentResponse xmlns="urn:pbm">'
+        + _profile_with_tag_rule("guid-1", "meho-storage", "nfs-gold")
+        + _profile_with_tag_rule("guid-2", "meho-storage", "nfs-gold", "nfs-silver")
+        + "</PbmRetrieveContentResponse>"
+    )
+    rules = parse_pbm_profile_tag_rules(xml)
+    assert rules == {
+        "guid-1": {(pbm_tag_property_id("meho-storage"), frozenset({"nfs-gold"}))},
+        "guid-2": {(pbm_tag_property_id("meho-storage"), frozenset({"nfs-gold", "nfs-silver"}))},
+    }
+
+
+def test_parse_profile_tag_rules_empty_for_profile_without_tag_rule() -> None:
+    xml = _body(
+        '<PbmRetrieveContentResponse xmlns="urn:pbm">'
+        '<returnval xsi:type="PbmCapabilityProfile">'
+        "<profileId><uniqueId>guid-3</uniqueId></profileId><name>bare</name>"
+        "</returnval>"
+        "</PbmRetrieveContentResponse>"
+    )
+    assert parse_pbm_profile_tag_rules(xml) == {"guid-3": set()}
+
+
+def test_parse_profile_tag_rules_empty_on_no_returnval() -> None:
+    xml = _body('<PbmRetrieveContentResponse xmlns="urn:pbm"/>')
+    assert parse_pbm_profile_tag_rules(xml) == {}

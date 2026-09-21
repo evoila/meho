@@ -164,9 +164,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # (the wheel-install refactor, #3627), automatic detection scanned
 # nothing and shipped a utilities-less bundle -- a non-empty ~35 KB file
 # of preflight + theme only, which passed `test -s` yet rendered the
-# console as unstyled HTML. The `grep -q '\.btn'` gate below fails the
-# build loud if the scan ever again reaches no templates; `test -s` alone
-# could not catch it.
+# console as unstyled HTML. The content gate below fails the build loud
+# if the scan ever again reaches no templates: `test -s` alone could not
+# catch the ~35 KB preflight-only bundle, so the gate asserts BOTH a size
+# floor (>= 60 KB; the empty bundle was 35 KB, a healthy one ~150 KB) AND
+# the presence of several distinct utility/component selectors the console
+# templates author (`.btn`, `.card`, `.navbar`, `bg-base`, `badge-error`).
+# The empty bundle carried zero of these, so the class checks -- not the
+# coarse size floor -- are the load-bearing guard.
 #
 # `static/dist/` is .gitignore'd; only built artifacts live there. Local dev
 # runs the same CLI in --watch mode against the source tree (see
@@ -200,9 +205,17 @@ RUN set -eux; \
       -i "${UI_SP}/static/src/styles.css" \
       -o "${UI_SP}/static/dist/tailwind.css" \
       --minify; \
-    test -s "${UI_SP}/static/dist/tailwind.css"; \
-    grep -q '\.btn' "${UI_SP}/static/dist/tailwind.css" \
-      || { echo "ERROR: compiled tailwind bundle carries no utility/component classes -- the @source content scan reached no templates. See evoila/meho#3627." >&2; exit 1; }
+    CSS="${UI_SP}/static/dist/tailwind.css"; \
+    test -s "${CSS}"; \
+    CSS_BYTES="$(wc -c < "${CSS}")"; \
+    if [ "${CSS_BYTES}" -lt 61440 ]; then \
+      echo "ERROR: compiled tailwind bundle is only ${CSS_BYTES} B (< 60 KB floor) -- the @source content scan reached (near) no templates and shipped a preflight-only bundle. See evoila/meho#3647." >&2; \
+      exit 1; \
+    fi; \
+    for cls in '\.btn' '\.card' '\.navbar' 'bg-base' 'badge-error'; do \
+      grep -q "${cls}" "${CSS}" \
+        || { echo "ERROR: compiled tailwind bundle is missing selector '${cls}' -- the @source content scan reached no templates. See evoila/meho#3647." >&2; exit 1; }; \
+    done
 
 # ---------- Runtime ----------------------------------------------------------
 FROM python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015 AS runtime

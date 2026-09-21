@@ -90,6 +90,12 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.35.11] - 2026-09-21
+
+### Fixed
+
+- A `k8s` target that authenticates via WCP-SSO (a vSphere Supervisor) whose `/wcp/login` succeeds (HTTP 200, non-empty `session_id`) but answers with `kube_config: null` — a Supervisor 9.x behind the Foundation load balancer — can now be probed instead of failing `WcpLoginError: … kube_config is not a kubeconfig mapping (got NoneType)`. `_coerce_kube_config` now treats a null/absent `kube_config` as an optional "no embedded config" signal (returning `None`) rather than a malformed mapping, and `build_wcp_api_configuration` synthesises the client configuration from what the connector already holds — API server `https://{host}:{api_port}`, the target's pinned CA + `tls_server_name` (already threaded by #3833), and `session_id` as the bearer — matching how `kubectl vsphere login` treats the embedded kubeconfig as optional. A genuinely malformed non-null `kube_config` still raises, and the target's `verify_tls` now also overrides any embedded `insecure-skip-tls-verify` so the target's TLS policy always wins. (#3836, closes #3835)
+
 ## [0.35.10] - 2026-09-21
 
 ### Fixed

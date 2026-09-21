@@ -59,6 +59,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     ApprovalRequest,
     ApprovalRequestStatus,
+    AuditLog,
     EndpointDescriptor,
     ServicePrincipalGrant,
 )
@@ -2804,3 +2805,149 @@ async def test_vm_create_multi_gate_resume_fails_closed_no_double_execute(
     async with get_sessionmaker()() as s:
         final_count = await s.scalar(select(func.count()).select_from(ApprovalRequest))
     assert final_count == 1
+
+
+# ===========================================================================
+# content_library.subscribed.create — a load-bearing sub-op 500 must surface
+# as a dispatch error, not an ok-looking envelope (#3809)
+# ===========================================================================
+#
+# The reported defect: the create composite catches ``httpx.HTTPError`` from
+# the ``POST:/content/subscribed-library`` sub-op and RETURNS a
+# ``{"status": "create_error", "library_id": None, "issues": [<severity=error>]}``
+# envelope. Before #3809 the dispatcher recorded any returned dict on the
+# success path, so the failed mutation audited as ``result_status='ok'`` / 200.
+# The fix maps a composite envelope carrying an ``error``-severity issue to a
+# first-class dispatch error at the dispatch/audit boundary — proven here
+# through the production ``dispatch`` entry point on both the direct path and
+# the parked → approved → resume path (the shape the bug was found on).
+
+_LIBRARY_CREATE_OP = "vmware.composite.content_library.subscribed.create"
+
+
+def _library_create_params() -> dict[str, Any]:
+    """A valid subscribed-library create spec (NONE auth, no secret)."""
+    return {
+        "datastore": "ds-primary",
+        "name": "kube-tkr",
+        "subscription_url": "https://wp-content.example.invalid/v2/latest/lib.json",
+    }
+
+
+@pytest.mark.asyncio
+async def test_content_library_subscribed_create_500_audits_error(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A 500 on the create sub-op dispatches as an error and audits as error (#3809).
+
+    Datastore resolution succeeds; the governed ``POST:/content/subscribed-library``
+    then 500s. The composite returns its ``create_error`` envelope, and the
+    dispatch boundary must surface ``status='error'`` + ``error_code='create_error'``
+    (upstream detail preserved) and write a ``result_status='error'`` audit row —
+    never the pre-#3809 ``ok`` / 200.
+    """
+    recorder = _RecordingVmwareConnector()
+    recorder.responses.update({"/vcenter/datastore": {"value": [{"datastore": "datastore-9"}]}})
+    recorder.failures["/content/subscribed-library"] = "500"
+    await _bootstrap(recorder, stub_embedding_service)
+    await _clear_requires_approval({_LIBRARY_CREATE_OP}, recorder)
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id=_CONNECTOR_ID,
+        op_id=_LIBRARY_CREATE_OP,
+        target=_FakeVmwareTarget(),
+        params=_library_create_params(),
+    )
+
+    # Dispatch error, not the ok-looking envelope.
+    assert result.status == "error", result.error
+    assert result.extras["error_code"] == "create_error"
+    # No library was created, and the upstream failure detail rides the payload.
+    assert isinstance(result.result, dict)
+    assert result.result["library_id"] is None
+    assert any(i["severity"] == "error" for i in result.result["issues"])
+    # The create sub-op was actually attempted (resolve GET then the failing POST).
+    assert ("POST", "/content/subscribed-library") in recorder.calls
+
+    # The durable DISPATCH audit row records the failure, not ``ok``.
+    async with get_sessionmaker()() as fresh:
+        row = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.path == _LIBRARY_CREATE_OP)))
+            .scalars()
+            .one()
+        )
+    assert row.payload["result_status"] == "error"
+    assert row.status_code == 500
+    assert row.payload["error"]["error_code"] == "create_error"
+
+
+@pytest.mark.asyncio
+async def test_content_library_subscribed_create_500_on_resume_reaches_approver(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A parked-then-approved create whose sub-op 500s returns an error on resume (#3809).
+
+    The exact shape the defect was found on: a USER parks the ``caution`` +
+    ``requires_approval=True`` create, a reviewer approves, and the resume
+    re-dispatch runs the create — which 500s. The resume's decision result must
+    be a first-class error (``error_code='create_error'``), so the approver sees
+    the failed mutation rather than a false success.
+    """
+    recorder = _RecordingVmwareConnector()
+    recorder.responses.update({"/vcenter/datastore": {"value": [{"datastore": "datastore-9"}]}})
+    recorder.failures["/content/subscribed-library"] = "500"
+    await _bootstrap(recorder, stub_embedding_service)
+
+    target_id = uuid.uuid4()
+    async with get_sessionmaker()() as s:
+        s.add(
+            TargetORM(
+                id=target_id,
+                tenant_id=_TENANT_ID,
+                name="prod-vcenter",
+                product="vmware",
+                host="vcenter.prod.invalid",
+                aliases=[],
+            )
+        )
+        await s.commit()
+
+    requester = _make_operator(sub="ops-human", principal_kind=PrincipalKind.USER)
+    target = _FakeVmwareTarget(target_id=target_id)
+    params = _library_create_params()
+
+    # Park at the top level; nothing runs.
+    result1 = await dispatch(
+        operator=requester,
+        connector_id=_CONNECTOR_ID,
+        op_id=_LIBRARY_CREATE_OP,
+        target=target,
+        params=params,
+    )
+    assert result1.status == "awaiting_approval", result1.error
+    assert recorder.calls == []
+    approval_request_id = UUID(result1.extras["approval_request_id"])
+
+    reviewer = _make_operator(sub="ops-reviewer", principal_kind=PrincipalKind.USER)
+    async with get_sessionmaker()() as s:
+        row = await approve_request(s, approval_request_id, operator=reviewer, params=params)
+        await s.commit()
+    assert row.status == ApprovalRequestStatus.APPROVED.value
+
+    # Resume re-dispatch executes the create -> 500 -> first-class error.
+    result2 = await dispatch(
+        operator=reviewer,
+        connector_id=_CONNECTOR_ID,
+        op_id=_LIBRARY_CREATE_OP,
+        target=target,
+        params=params,
+        _approved=True,
+    )
+    assert result2.status == "error", result2.error
+    assert result2.extras["error_code"] == "create_error"
+    assert ("POST", "/content/subscribed-library") in recorder.calls

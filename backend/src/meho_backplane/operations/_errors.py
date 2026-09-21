@@ -52,6 +52,7 @@ __all__ = [
     "result_ambiguous_target",
     "result_awaiting_approval",
     "result_composite_resume_multi_gate_unsupported",
+    "result_composite_terminal_error",
     "result_connector_auth_failed",
     "result_connector_error",
     "result_connector_http_403",
@@ -751,6 +752,44 @@ def result_already_resumed(
             "result_status": "already_resumed",
             "approval_request_id": str(approval_request_id),
         },
+    )
+
+
+def result_composite_terminal_error(
+    op_id: str,
+    *,
+    error_code: str,
+    envelope: dict[str, Any],
+    error_summary: str,
+    duration_ms: float,
+) -> OperationResult:
+    """A composite handler's terminal-error envelope mapped to a dispatch error (#3809).
+
+    A composite whose load-bearing sub-op fails **returns** a plain-dict
+    envelope carrying an ``issues[]`` entry with ``severity == "error"`` (e.g.
+    ``{"status": "create_error", "library_id": None, "issues": [...]}``) rather
+    than raising. Before #3809 the dispatcher recorded any returned dict on the
+    success path (``result_status='ok'`` / 200), so the failed mutation read as
+    success in the audit log and in a parked-then-approved run's decision
+    result. This builder turns that envelope into a first-class error:
+    ``status="error"`` (→ a synthetic 500 via :func:`status_code_for_result`),
+    ``extras.error_code`` set to the envelope's ``status`` sentinel (the caller's
+    single ``extras.error_code`` switch covers this alongside every other
+    dispatch error), and the already-redacted envelope preserved verbatim in
+    ``result`` so the caller keeps the ``issues`` / upstream-error detail.
+
+    *error_summary* is the ``"<sentinel>: <message>"`` line drawn from the first
+    error-severity issue; it is Tier-1-redacted + length-capped here as a second
+    line of defence even though the dispatcher's connector-boundary middleware
+    already redacted the envelope's string leaves.
+    """
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        result=envelope,
+        error=_sanitize_free_text(error_summary),
+        duration_ms=duration_ms,
+        extras={"error_code": error_code},
     )
 
 

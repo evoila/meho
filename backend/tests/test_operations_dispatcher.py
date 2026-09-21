@@ -279,6 +279,55 @@ async def _module_composite_handler_connector(
     return {"has_connector": connector is not None}
 
 
+async def _module_composite_handler_terminal_error(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Composite handler that RETURNS a terminal-error envelope (#3809).
+
+    Mirrors the shipped convention: a load-bearing sub-op failed, so the handler
+    returns an envelope carrying an ``error``-severity issue instead of raising.
+    The dispatcher must map this to ``result_status='error'`` / a synthetic 500,
+    not the success path that recorded it as ``ok`` before #3809.
+    """
+    return {
+        "status": "create_error",
+        "library_id": None,
+        "issues": [
+            {
+                "category": "connector",
+                "severity": "error",
+                "message": "create failed: 500 RESOURCE_INACCESSIBLE",
+            }
+        ],
+    }
+
+
+async def _module_composite_handler_warning_only(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Composite handler whose envelope carries only a ``warning`` issue (#3809).
+
+    Success-with-warnings (a deploy that succeeded but whose follow-on power-on
+    did not) must stay ``result_status='ok'`` -- only an ``error``-severity
+    issue flips a composite envelope to a dispatch error.
+    """
+    return {
+        "status": "deployed",
+        "vm_id": "vm-42",
+        "issues": [
+            {
+                "category": "power_on",
+                "severity": "warning",
+                "message": "deploy succeeded but power-on failed",
+            }
+        ],
+    }
+
+
 async def _module_handler_raises(
     operator: Operator,
     target: Any,
@@ -2297,6 +2346,148 @@ async def test_dispatch_composite_receives_dispatch_and_emits_child_row(
     # The parent row has no parent of its own.
     assert parent.parent_audit_id is None
     assert "parent_audit_id" not in parent.payload
+
+
+# ---------------------------------------------------------------------------
+# Composite terminal-error envelope -> dispatch error (#3809)
+# ---------------------------------------------------------------------------
+
+
+async def _register_module_composite(op_id: str, handler_ref: str, embedding: Any) -> None:
+    """Insert a ``source_kind='composite'`` descriptor pointing at a module handler.
+
+    T4's ``register_composite_operation`` helper emits typed rows only, so the
+    composite descriptor is inserted directly (the shape the audit-tree test
+    above already relies on).
+    """
+    from datetime import UTC, datetime
+
+    async with get_sessionmaker()() as s:
+        s.add(
+            EndpointDescriptor(
+                id=uuid.uuid4(),
+                tenant_id=None,
+                product="vault",
+                version="1.x",
+                impl_id="vault",
+                op_id=op_id,
+                source_kind="composite",
+                method=None,
+                path=None,
+                handler_ref=handler_ref,
+                summary="Composite terminal-error probe.",
+                description="Composite returning a structured envelope.",
+                tags=[],
+                parameter_schema={"type": "object"},
+                response_schema=None,
+                llm_instructions=None,
+                safety_level="safe",
+                requires_approval=False,
+                is_enabled=True,
+                embedding=embedding,
+                custom_description=None,
+                custom_notes=None,
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+        await s.commit()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_composite_terminal_error_envelope_audits_error(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A composite envelope with an ``error``-severity issue dispatches as an error (#3809).
+
+    Regression for the terminal-error-as-dict bug: before the fix the
+    dispatcher recorded any returned dict on the success path
+    (``result_status='ok'`` / 200), masking a failed mutation. The dispatch
+    boundary must now surface ``status='error'`` + ``extras.error_code`` =
+    the envelope's ``status`` sentinel, preserve the upstream detail in the
+    returned payload, and write an ``error`` audit row.
+    """
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await _register_module_composite(
+        "vault.composite.terminal_error",
+        "tests.test_operations_dispatcher._module_composite_handler_terminal_error",
+        stub_embedding_service.encode_one.return_value,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.composite.terminal_error",
+        target=_FakeTarget(product="vault"),
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.extras["error_code"] == "create_error"
+    # Upstream detail preserved in the caller-facing payload.
+    assert isinstance(result.result, dict)
+    assert result.result["issues"][0]["message"].endswith("RESOURCE_INACCESSIBLE")
+    assert "RESOURCE_INACCESSIBLE" in (result.error or "")
+
+    async with get_sessionmaker()() as fresh:
+        row = (
+            (
+                await fresh.execute(
+                    select(AuditLog).where(AuditLog.path == "vault.composite.terminal_error")
+                )
+            )
+            .scalars()
+            .one()
+        )
+    assert row.payload["result_status"] == "error"
+    assert row.status_code == 500
+    assert row.payload["error"]["error_code"] == "create_error"
+    # The broadcast frame carries the failed status, not a false ``ok``.
+    assert any(e.result_status == "error" for e in captured_events)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_composite_warning_only_envelope_stays_ok(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A composite envelope carrying only a ``warning`` issue stays ``ok`` (#3809).
+
+    Success-with-warnings must not be flipped to an error -- only an
+    ``error``-severity issue is the terminal-failure marker.
+    """
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await _register_module_composite(
+        "vault.composite.warning_only",
+        "tests.test_operations_dispatcher._module_composite_handler_warning_only",
+        stub_embedding_service.encode_one.return_value,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.composite.warning_only",
+        target=_FakeTarget(product="vault"),
+        params={},
+    )
+
+    assert result.status == "ok", result.error
+    assert isinstance(result.result, dict)
+    assert result.result["status"] == "deployed"
+
+    async with get_sessionmaker()() as fresh:
+        row = (
+            (
+                await fresh.execute(
+                    select(AuditLog).where(AuditLog.path == "vault.composite.warning_only")
+                )
+            )
+            .scalars()
+            .one()
+        )
+    assert row.payload["result_status"] == "ok"
+    assert row.status_code == 200
 
 
 # ---------------------------------------------------------------------------

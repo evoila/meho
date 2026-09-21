@@ -288,6 +288,7 @@ from meho_backplane.operations._errors import (
     result_announce_required,
     result_awaiting_approval,
     result_blast_radius_required,
+    result_composite_terminal_error,
     result_connector_auth_failed,
     result_connector_error,
     result_connector_http_403,
@@ -841,6 +842,37 @@ async def _execute_and_audit_inner(
             duration_ms=_elapsed_ms(started),
         )
 
+    # Step 7b -- composite terminal-error envelope (#3809). A composite handler
+    # signals a load-bearing failure by RETURNING an envelope with an
+    # ``error``-severity issue rather than raising; without this arm the
+    # dispatcher would record it as ``result_status='ok'`` / 200 below. Re-route
+    # it through the error-audit path so the failure is first-class: the durable
+    # DISPATCH row reads ``error``, the caller (and a parked-then-approved run's
+    # decision result + step events) sees ``status='error'`` + ``error_code``,
+    # and the redacted envelope's upstream detail is preserved on both surfaces.
+    terminal_error_code = _composite_terminal_error_code(descriptor, redaction.redacted)
+    if terminal_error_code is not None:
+        duration_ms = _elapsed_ms(started)
+        return await _audit_error_and_return(
+            result_composite_terminal_error(
+                op_id,
+                error_code=terminal_error_code,
+                envelope=redaction.redacted,
+                error_summary=_composite_error_summary(terminal_error_code, redaction.redacted),
+                duration_ms=duration_ms,
+            ),
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
+            raw_payload=redaction.raw,
+            redaction_manifest=manifest_to_audit_payload(redaction.manifest),
+            redaction_policy_id=redaction.policy_id,
+        )
+
     return await _reduce_and_audit_success(
         op_id=op_id,
         descriptor=descriptor,
@@ -853,6 +885,55 @@ async def _execute_and_audit_inner(
         started=started,
         scrub_response=scrub_response,
     )
+
+
+def _composite_terminal_error_code(descriptor: EndpointDescriptor, envelope: Any) -> str | None:
+    """The ``error_code`` when *envelope* is a composite terminal-error envelope, else ``None``.
+
+    #3809: a ``source_kind='composite'`` handler that hits a load-bearing sub-op
+    failure **returns** a plain-dict envelope carrying an ``issues[]`` entry with
+    ``severity == "error"`` (e.g. ``content_library.subscribed.create``'s
+    ``create_error`` / ``datastore_not_found`` / ``ambiguous_datastore``) instead
+    of raising. The dispatcher otherwise records that dict on the success path as
+    ``result_status='ok'`` / 200, so the failed mutation reads as success. This
+    predicate detects the marker so :func:`_execute_and_audit_inner` can re-route
+    the envelope through the error-audit path.
+
+    Rule (documented in ``docs/codebase/connectors-vmware-rest.md``): the signal
+    is an ``error``-severity issue, NOT the ``status`` sentinel. The sentinel
+    space is unbounded and mixes hard failures with legitimate soft refusals /
+    idempotency guards (``rule_exists``, ``not_powered_off``,
+    ``no_change_requested``) that must stay ``ok``, so a name-based partition
+    would misfire; the ``error``-severity issue is the disciplined,
+    author-controlled failure marker, and success / warning envelopes carry only
+    ``warning`` / ``info`` issues (a power-on that fails after a successful deploy
+    is a ``warning`` on the ``deployed`` envelope, not an ``error``). Scoped to
+    ``source_kind='composite'`` so an ingested / typed vendor payload that merely
+    contains an ``issues`` key is never reinterpreted. Returns the envelope's
+    ``status`` sentinel as the code, or ``"composite_error"`` when it carries none.
+    """
+    if descriptor.source_kind != "composite":
+        return None
+    if not isinstance(envelope, dict):
+        return None
+    issues = envelope.get("issues")
+    if not isinstance(issues, list):
+        return None
+    if not any(isinstance(item, dict) and item.get("severity") == "error" for item in issues):
+        return None
+    status = envelope.get("status")
+    return status if isinstance(status, str) and status else "composite_error"
+
+
+def _composite_error_summary(error_code: str, envelope: dict[str, Any]) -> str:
+    """``"<sentinel>: <first error message>"`` for the error result's ``error`` line."""
+    issues = envelope.get("issues")
+    for item in issues if isinstance(issues, list) else []:
+        if isinstance(item, dict) and item.get("severity") == "error":
+            message = item.get("message")
+            if isinstance(message, str) and message:
+                return f"{error_code}: {message}"
+    return error_code
 
 
 def _requires_durable_audit(descriptor: EndpointDescriptor) -> bool:

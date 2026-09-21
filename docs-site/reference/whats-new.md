@@ -9,6 +9,35 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.35.10](https://github.com/evoila/meho/releases/tag/v0.35.10) — 2026-09-21
+
+- **The operator console can't be stranded on a stale stylesheet after a
+  deploy.** The console references its CSS, scripts and fonts at stable URLs
+  whose contents change every release, and the server sent them without a
+  `Cache-Control` header — so after a roll a returning browser could keep
+  serving the previous release's cached stylesheet and render the console
+  unstyled until someone hard-refreshed. MEHO now serves every console asset
+  `Cache-Control: no-cache`, which forces the browser to revalidate before
+  reuse (a cheap `304` when nothing changed), and a build-time gate refuses to
+  ship a stylesheet that is suspiciously small or missing the console's own
+  classes.
+- **Re-running a storage-policy create now finishes instead of dead-ending.**
+  Creating a vSphere storage policy through the governed path builds a tag
+  category, a tag and then the policy; if an earlier attempt failed partway it
+  left the category behind, and every retry died immediately with
+  `ALREADY_EXISTS`. The composite now adopts an existing category, tag or
+  matching policy instead of blindly re-creating it, so a retry converges; a
+  genuinely conflicting object (or a policy create that returns no id) is
+  reported as a clear, retryable error rather than a false success.
+- **Supervisors reached through a NAT alias can be probed again.** A Kubernetes
+  (vSphere Supervisor) target that logs in via WCP-SSO verified the server's
+  certificate against the address MEHO dialed, ignoring the target's configured
+  certificate name — so a Supervisor fronted by a NAT alias whose address isn't
+  in the certificate failed verification and couldn't be reached at all. The
+  login and the Kubernetes API legs now both honour the target's
+  `tls_server_name`, and a verification failure explains itself instead of
+  surfacing as a bare connection error.
+
 ## [v0.35.9](https://github.com/evoila/meho/releases/tag/v0.35.9) — 2026-09-21
 
 - **Storage-policy writes to vCenter now authenticate.** Creating or deleting a

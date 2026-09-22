@@ -117,6 +117,26 @@ Choose the bump from what's in `[Unreleased]`:
   gh run rerun <run-id> --repo evoila/meho   # then re-check conclusion
   ```
 
+- [ ] **Security-advisory reconciliation (every rc and GA tag).** Every
+  `### Security` entry in `CHANGELOG.md` must have a row in the advisory
+  ledger, and at a GA tag no row may still be undecided:
+
+  ```bash
+  grep -cE "^### Security" CHANGELOG.md                                              # headings
+  grep -cE '^\| [0-9]+ \|' docs/security/advisory-ledger.md                          # ledger rows — must be equal
+  grep -cE '^\| [0-9]+ \|.*Owed — decision pending' docs/security/advisory-ledger.md # must be 0 at a GA tag
+  gh api /repos/evoila/meho/security-advisories --jq 'length'                        # published GHSAs — record in the ledger snapshot
+  ```
+
+  A heading without a row means a security fix shipped with no
+  disclosure decision: add the row (class + disposition) in the
+  release-cutting PR. A MEHO-code vulnerability row is closed either by
+  a published GitHub repository security advisory (GHSA) linked on the
+  row or by a dated, rationale-backed exemption — steps in
+  [`SECURITY.md`](../SECURITY.md#coordinated-disclosure-steps), ledger
+  at [`docs/security/advisory-ledger.md`](security/advisory-ledger.md).
+  This is v1.0 gate 2 (Goal #2661).
+
 - [ ] Pick `vX.Y.Z`.
 
 ### 2. Roll the CHANGELOG — the load-bearing step
@@ -582,28 +602,19 @@ candidate commit's `main` CI run; cancelled ≠ green). Then:
   VERSION=Unreleased   # instead of X.Y.Z; the awk + check_release_body_paths.py lines from step 3 are unchanged
   ```
 
-- [ ] **Advisory-ledger reconciliation** (#3380, 1.0 gate 2). For every
-  `### Security` bullet in `[Unreleased]`, confirm a row exists in the
-  published-advisory ledger
-  ([`docs/security/advisory-ledger.md`](security/advisory-ledger.md),
-  established by #3380) classifying it as upstream-dependency CVE
-  patch / MEHO-code vulnerability / non-vulnerability, with a one-line
-  disposition. Every MEHO-code row marked "advisory owed" must name
-  either the published GitHub repository security advisory (its GHSA
-  id) or a recorded, rationale-backed exemption. Cross-check the
-  published set against the ledger:
-
-  ```bash
-  awk '/^## \[Unreleased\]/{u=1;next} /^## \[/{u=0} u' CHANGELOG.md | grep -c '^### Security'   # entries in scope
-  gh api /repos/evoila/meho/security-advisories --jq '.[] | [.ghsa_id, .state, .summary] | @tsv'  # published GHSAs
-  ```
-
-  An **rc** may ship the fix for an advisory that is still a private
-  draft — the rc is how testers get the fix — as long as the ledger row
-  exists and says so. The **final** tag may not: every owed advisory
-  is published before promotion, and the dated gate-2 statement
-  ("advisories … published" / "no pending advisories as of
-  YYYY-MM-DD") is on #2661 (R8).
+- [ ] **Security-advisory reconciliation** (step 1, #3380, 1.0 gate 2)
+  — run the step-1 commands as written: `### Security` headings in
+  `CHANGELOG.md` == rows in
+  [`docs/security/advisory-ledger.md`](security/advisory-ledger.md), and
+  the published-GHSA count recorded in the ledger snapshot. The rc
+  difference is the third command: an **rc** may carry rows still at
+  "Owed — decision pending" (the rc is how testers get a fix whose
+  advisory is still a private draft, and the row records that), so a
+  non-zero count blocks nothing at an rc but must be listed on #2661;
+  at the **final** tag it must be `0` — every MEHO-code row closed by a
+  published GHSA or a dated, rationale-backed exemption — and the dated
+  gate-2 statement ("advisories … published" / "no pending advisories
+  as of YYYY-MM-DD") is on #2661 (R8).
 
 ### R4 — Tag + push, and what the rc tag publishes
 
@@ -800,6 +811,9 @@ follow-up task.
 ```
 [ ] 1. Tasks merged; main CI GREEN on the tagged commit (cancelled ≠ green —
        re-run + wait for success); version picked
+[ ] 1a. Advisory ledger reconciled: `### Security` headings == ledger rows;
+        GHSA count recorded; at a GA tag zero "Owed — decision pending"
+        rows (docs/security/advisory-ledger.md; SECURITY.md disclosure steps)
 [ ] 2. CHANGELOG: completeness audited, missing bullets backfilled,
        [Unreleased] rolled to [X.Y.Z] (post-tag work left behind);
        docs-site/reference/whats-new.md section added for [X.Y.Z]
@@ -826,8 +840,9 @@ follow-up task.
         commit + contract diff since the previous tag classified;
         [Unreleased] audited (PREV = last tag of any kind) but NOT rolled;
         path-freshness gate run against [Unreleased]; advisory ledger
-        reconciled (every MEHO-code Security entry -> published GHSA or
-        recorded exemption); tag the green main commit by SHA; Release
+        reconciled per 1a ("Owed — decision pending" rows allowed on an
+        rc, listed on #2661; zero at GA); tag the green main commit by
+        SHA; Release
         marked pre-release, image :vX.Y.Z-rc.N, chart X.Y.Z-rc.N; lab
         deploy pinned to exact chart version + promoted image digest,
         smoke-green; round-2 run (#3379) -> rc.N+1 on a fixed

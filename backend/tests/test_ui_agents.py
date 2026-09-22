@@ -622,6 +622,11 @@ def test_create_modal_renders_for_admin() -> None:
     assert 'name="system_prompt"' in body
     # A fresh (error-free) render carries no error summary banner.
     assert "data-form-error-summary" not in body
+    # #348: daisyUI v5 removed `form-control` / `label-text` /
+    # `label-text-alt` (zero compiled rules). Both dialogs render the
+    # same shared partial, so this guards the markup for each.
+    assert "form-control" not in body
+    assert "label-text" not in body
 
 
 def test_create_persists_and_redirects() -> None:
@@ -765,6 +770,33 @@ def test_edit_modal_requires_tenant_admin() -> None:
     finally:
         mock.stop()
     assert response.status_code == 403
+
+
+def test_edit_modal_renders_for_admin() -> None:
+    """A tenant_admin gets the edit modal, with Name locked and no dead classes.
+
+    #348: the edit dialog renders the same shared partial as create, so
+    this pins the ``mode == "edit"`` branch -- readonly Name plus its
+    immutability hint -- alongside the daisyUI v5 markup guard.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A, name="editable")
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _admin_session(keypair)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    client, mock, _csrf = _authenticated_client(session_id=session_id, jwks=jwks)
+    try:
+        response = client.get("/ui/agents/editable/edit")
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'name="system_prompt"' in body
+    # mode == "edit": the per-tenant natural key is not updatable.
+    assert "readonly" in body
+    assert 'id="agent-name-immutable-hint"' in body
+    assert "form-control" not in body
+    assert "label-text" not in body
 
 
 def test_edit_persists_and_redirects() -> None:

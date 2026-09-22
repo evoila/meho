@@ -1661,6 +1661,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#v03512-2026-09-22" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.12 — 2026-09-22
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#v03511-2026-09-21" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2095,6 +2106,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#v03512-2026-09-22" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.12 — 2026-09-22
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#v03511-2026-09-21" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2380,6 +2402,28 @@ which carries the full detail — every change, and the migration recipe
 for each breaking one.</p>
 <p>MEHO is under active development. Each release below links to its full
 notes.</p>
+<h2 id="v03512-2026-09-22"><a href="https://github.com/evoila/meho/releases/tag/v0.35.12">v0.35.12</a> — 2026-09-22<a class="headerlink" href="#v03512-2026-09-22" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>An approved Kubernetes apply that the server accepts but never saves now
+  fails instead of falsely reporting success.</strong> When an approved, high-risk
+  <code>k8s.apply</code> ran and the Kubernetes API server accepted the request and echoed
+  the object back but never actually persisted it, MEHO used to record the
+  operation as a success — indistinguishable from a real write, and a violation
+  of the rule that an operation only reports success when it actually happened.
+  MEHO now checks that the applied object came back with a real, persisted
+  revision; when it did not, the operation fails with a clear error instead of a
+  false success. Server dry-run previews, which legitimately return no revision,
+  are untouched.</li>
+<li><strong>Kubernetes targets whose kubeconfig points at an unreachable address can be
+  reached again.</strong> A Kubernetes target registered with a static kubeconfig used
+  to dial whatever server address was baked into that kubeconfig — which broke
+  when that address was an internal one the backplane cannot route to (for
+  example a guest cluster reached through a NAT alias whose kubeconfig names an
+  internal cluster VIP). MEHO now dials the operator-reachable host and port the
+  target was registered with and verifies the certificate against the target's
+  own server name, exactly as it already does for vSphere Supervisor targets,
+  while a cluster registered without a host keeps using the embedded address.</li>
+</ul>
 <h2 id="v03511-2026-09-21"><a href="https://github.com/evoila/meho/releases/tag/v0.35.11">v0.35.11</a> — 2026-09-21<a class="headerlink" href="#v03511-2026-09-21" title="Permanent link">&para;</a></h2>
 <ul>
 <li><strong>A vSphere Supervisor that logs in without handing back a kubeconfig can be

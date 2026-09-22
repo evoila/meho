@@ -90,6 +90,13 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.35.12] - 2026-09-22
+
+### Fixed
+
+- An approved, `dangerous` `k8s.apply` that the API server accepts (HTTP 200, echoing the object's identity) but does **not** persist is no longer recorded as a false-positive `ok`. A real server-side apply that persists always returns a populated `metadata.resourceVersion`; a request the API server accepts without persisting comes back with a null `resourceVersion` — byte-identical to a `dryRun=All` preview — so `_apply_one` was reporting success for a write that never happened, violating the backplane's "an operation does not return success unless it happened" contract. `_apply_one` now runs a persistence check on the **real-apply path only**: a missing `resourceVersion` raises `ApplyNotPersistedError` (a `ValueError` subclass, like the sibling manifest/kind/secret-ref errors) so the dispatcher records `error` instead of a false `ok`. A server dry-run legitimately returns no `resourceVersion`, so the guard is explicitly scoped off the dry-run path and approval-park previews are unaffected. (#3838, closes #3839)
+- A static-kubeconfig `k8s` target now dials the operator-reachable `target.host` / `port` and verifies TLS against `tls_server_name`, instead of the `server` embedded in the staged kubeconfig — so a target whose kubeconfig points at an address the backplane cannot route (e.g. a guest cluster behind a NAT alias whose kubeconfig names an internal workload-network VIP) no longer hangs on connect or raises `ClientConnectorError`. `_kubeconfig_dialing_target` rewrites the active context's cluster before the client factory consumes it — `server` → `https://{host}:{port}` (port default `6443`), `tls-server-name` → the target's `tls_server_name` when set, `insecure-skip-tls-verify` → `not verify_tls` — keeping the embedded CA and never mutating the credential's dict; both the REST and exec/websocket build paths go through the rewrite, and a host-less target keeps the embedded `server` so appliance clusters are unaffected. This brings the static-kubeconfig auth model to parity with the WCP-SSO (vSphere Supervisor) path, which already dials `target.host` and honours `tls_server_name`. (#3846, closes #3845)
+
 ## [0.35.11] - 2026-09-21
 
 ### Fixed

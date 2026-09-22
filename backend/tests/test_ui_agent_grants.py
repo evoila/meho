@@ -317,6 +317,76 @@ def test_create_modal_non_admin_is_forbidden() -> None:
     assert response.status_code == 403, response.text
 
 
+def _expires_at_tag(body: str) -> str:
+    """Return the opening tag of the ``expires_at`` input.
+
+    ``required`` also sits on ``principal_sub`` and ``op_pattern``, so a
+    bare ``"required" in body`` cannot tell the two modes apart -- the
+    mode-specific assertion has to look inside this one tag.
+    """
+    at = body.index('name="expires_at"')
+    return body[body.rindex("<", 0, at) : body.index(">", at)]
+
+
+def test_create_modal_renders_for_admin() -> None:
+    """The create modal renders the shared field set, unmigrated classes gone (#360).
+
+    The suite covered this modal's RBAC gate and its POST paths but never
+    rendered it, so the shared partial's markup was unguarded.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _admin_token(keypair)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    client, mock, _csrf = _authenticated_client(session_id=session_id, jwks=jwks)
+    try:
+        response = client.get("/ui/agents/grants/create", headers={"HX-Request": "true"})
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'name="principal_sub"' in body
+    assert 'name="verdict"' in body
+    # #360: daisyUI v5 removed `form-control` / `label-text` /
+    # `label-text-alt` (zero compiled rules).
+    assert "form-control" not in body
+    assert "label-text" not in body
+    # All five controls fill their wrapper, and the Target scope /
+    # Verdict pair still shares a two-column grid.
+    assert body.count("w-full") == 5
+    assert "grid gap-3 md:grid-cols-2" in body
+    # mode == "create": the elevation-only markers are absent.
+    assert "required" not in _expires_at_tag(body)
+    assert "(required)" not in body
+
+
+def test_elevate_modal_renders_for_admin() -> None:
+    """The elevate modal renders the same partial with its mode branches (#360).
+
+    Both modals include ``_grant_form_fields.html``; the only difference
+    is the ``mode == "elevate"`` handling of ``expires_at``, so that
+    branch is what this pins.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _admin_token(keypair)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    client, mock, _csrf = _authenticated_client(session_id=session_id, jwks=jwks)
+    try:
+        response = client.get("/ui/agents/grants/elevate", headers={"HX-Request": "true"})
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'name="principal_sub"' in body
+    assert "form-control" not in body
+    assert "label-text" not in body
+    assert body.count("w-full") == 5
+    # mode == "elevate": expiry is mandatory and flagged as such.
+    assert "required" in _expires_at_tag(body)
+    assert "(required)" in body
+
+
 # ---------------------------------------------------------------------------
 # List view
 # ---------------------------------------------------------------------------
@@ -672,7 +742,11 @@ def test_create_without_csrf_is_rejected() -> None:
 
 
 def test_elevate_requires_expires_at() -> None:
-    """An elevation with no expires_at re-renders inline with the field error."""
+    """An elevation with no expires_at re-renders inline with the field error.
+
+    #360 also pins the error span's styling here: the span only exists
+    when ``errors`` is populated, so no clean render can cover it.
+    """
     _seed_tenant(_TENANT_A, "tenant-a")
     keypair, jwks = _make_keypair_and_jwks()
     token = _admin_token(keypair)
@@ -694,6 +768,11 @@ def test_elevate_requires_expires_at() -> None:
         mock.stop()
     assert response.status_code == 422, response.text
     assert 'data-error-for="expires_at"' in response.text
+    assert (
+        '<span class="text-xs text-error" role="alert" data-error-for="expires_at">'
+        in response.text
+    )
+    assert "label-text" not in response.text
 
 
 def test_elevate_past_expiry_renders_inline_422() -> None:

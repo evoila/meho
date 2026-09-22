@@ -9,6 +9,28 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.35.12](https://github.com/evoila/meho/releases/tag/v0.35.12) — 2026-09-22
+
+- **An approved Kubernetes apply that the server accepts but never saves now
+  fails instead of falsely reporting success.** When an approved, high-risk
+  `k8s.apply` ran and the Kubernetes API server accepted the request and echoed
+  the object back but never actually persisted it, MEHO used to record the
+  operation as a success — indistinguishable from a real write, and a violation
+  of the rule that an operation only reports success when it actually happened.
+  MEHO now checks that the applied object came back with a real, persisted
+  revision; when it did not, the operation fails with a clear error instead of a
+  false success. Server dry-run previews, which legitimately return no revision,
+  are untouched.
+- **Kubernetes targets whose kubeconfig points at an unreachable address can be
+  reached again.** A Kubernetes target registered with a static kubeconfig used
+  to dial whatever server address was baked into that kubeconfig — which broke
+  when that address was an internal one the backplane cannot route to (for
+  example a guest cluster reached through a NAT alias whose kubeconfig names an
+  internal cluster VIP). MEHO now dials the operator-reachable host and port the
+  target was registered with and verifies the certificate against the target's
+  own server name, exactly as it already does for vSphere Supervisor targets,
+  while a cluster registered without a host keeps using the embedded address.
+
 ## [v0.35.11](https://github.com/evoila/meho/releases/tag/v0.35.11) — 2026-09-21
 
 - **A vSphere Supervisor that logs in without handing back a kubeconfig can be

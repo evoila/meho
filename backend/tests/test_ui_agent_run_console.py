@@ -335,6 +335,50 @@ def test_run_console_renders_form_and_budget() -> None:
     assert 'src="/ui/static/src/app/agent-run-console.js"' in body
     # No Stop affordance ships in this Task (T9 #1833 adds it).
     assert 'data-action="stop"' not in body.lower()
+    # #350: daisyUI v5 removed `form-control` / `label-text` /
+    # `label-text-alt` (zero compiled rules), so the run form's labels
+    # collapsed inline and its controls rendered narrow.
+    assert "form-control" not in body
+    assert "label-text" not in body
+    # Controls fill their wrapper; work_ref stays capped narrower than
+    # the prompt.
+    assert "textarea textarea-bordered min-h-28 font-mono text-sm w-full" in body
+    assert "input input-bordered input-sm font-mono w-full" in body
+    assert "flex flex-col gap-1 max-w-md" in body
+
+
+def test_run_console_disabled_agent_keeps_controls_disabled() -> None:
+    """A disabled agent's console warns and locks every control (#350).
+
+    The suite covered the disabled-agent *POST* (409) but never rendered
+    the disabled console, so the three ``{% if not enabled %}disabled``
+    guards -- two of which sit on the fields restructured for #350 --
+    were unpinned.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A, name="parked", enabled=False)
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _operator_token(keypair)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    client, mock, _csrf = _authenticated_client(session_id=session_id, jwks=jwks)
+    try:
+        response = client.get("/ui/agents/parked/run")
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'data-state="disabled"' in body  # the warning alert renders
+    # Prompt textarea, work_ref input, and the submit button are each
+    # locked. Asserted per-element rather than by counting "disabled"
+    # in the page: the warning copy contains that word as prose, and the
+    # app shell renders its own inputs/buttons ahead of the form, so
+    # neither a bare count nor a first-tag lookup proves anything.
+    for anchor in ('name="input"', 'name="work_ref"', 'data-action="run"'):
+        at = body.index(anchor)
+        tag = body[body.rindex("<", 0, at) : body.index(">", at)]
+        assert "disabled" in tag, f"control {anchor} not disabled: {tag}"
+    assert "form-control" not in body
+    assert "label-text" not in body
 
 
 def test_run_console_missing_agent_returns_404() -> None:

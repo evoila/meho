@@ -111,11 +111,15 @@
         </div>
         <div class="flex gap-2">
           <dt class="font-medium opacity-70">Created</dt>
-          <dd data-created-at="{{ agent.created_at.isoformat() }}">{{ agent.created_at.isoformat() }}</dd>
+          <dd data-created-at="{{ agent.created_at.isoformat() }}">
+            <time datetime="{{ agent.created_at.isoformat() }}">{{ agent.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</time>
+          </dd>
         </div>
         <div class="flex gap-2">
           <dt class="font-medium opacity-70">Updated</dt>
-          <dd data-updated-at="{{ agent.updated_at.isoformat() }}">{{ agent.updated_at.isoformat() }}</dd>
+          <dd data-updated-at="{{ agent.updated_at.isoformat() }}">
+            <time datetime="{{ agent.updated_at.isoformat() }}">{{ agent.updated_at.strftime("%Y-%m-%d %H:%M UTC") }}</time>
+          </dd>
         </div>
       </dl>
     </div>

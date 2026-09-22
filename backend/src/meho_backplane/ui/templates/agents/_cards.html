@@ -71,7 +71,7 @@
                 class="text-xs opacity-60"
                 data-updated-at="{{ agent.updated_at.isoformat() }}"
               >
-                updated {{ agent.updated_at.isoformat() }}
+                updated <time datetime="{{ agent.updated_at.isoformat() }}">{{ agent.updated_at.strftime("%Y-%m-%d %H:%M UTC") }}</time>
               </div>
 
               {# Card actions. The View link drives page-nav to the per-agent

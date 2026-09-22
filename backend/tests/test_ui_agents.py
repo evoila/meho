@@ -536,6 +536,16 @@ def test_detail_renders_full_definition() -> None:
     assert "Investigate the alert and propose a fix." in body
     assert "System prompt" in body
     assert "Toolset" in body
+    # #349: timestamps follow the console `<time>` convention -- the ISO
+    # instant stays machine-readable in the attribute, the visible text
+    # is `YYYY-MM-DD HH:MM UTC`. A bare `+00:00<` would mean the raw
+    # isoformat is still the element's text.
+    assert "<time datetime=" in body
+    assert "UTC</time>" in body
+    assert "+00:00<" not in body
+    # The existing hooks keep carrying the full ISO instant.
+    assert "data-created-at=" in body
+    assert "data-updated-at=" in body
 
 
 def test_detail_missing_agent_returns_404() -> None:

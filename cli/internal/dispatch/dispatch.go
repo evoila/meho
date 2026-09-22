@@ -122,7 +122,46 @@ const StatusAwaitingApproval = "awaiting_approval"
 // status header when a dispatch parks. Exported so the parallel
 // operation/call.go render path (a separate package that can't share
 // Render) emits the byte-identical hint.
-const ParkedHint = "parked for human approval — approve via the approval queue, then re-dispatch"
+//
+// It must NOT tell the operator to re-dispatch: approving a parked
+// request EXECUTES the operation — the approve endpoint re-hydrates the
+// target and re-dispatches internally with _approved=True (see
+// docs/codebase/approvals.md; #1503 / #3548). Re-running the command
+// after approval would create a second park / double execution.
+const ParkedHint = "parked for human approval — approving it executes the operation; do not re-dispatch"
+
+// ParkedApprovalID returns the approval_request_id the backend stamps on
+// a parked (awaiting_approval) envelope's extras blob, or "" when the
+// blob is absent, null, or does not carry the field. Best-effort: a
+// decode failure yields "" rather than an error, because the id is a
+// convenience hint on the human render path, never load-bearing (the
+// --json envelope always carries the full extras verbatim).
+func ParkedApprovalID(extras json.RawMessage) string {
+	if len(extras) == 0 || string(extras) == "null" {
+		return ""
+	}
+	var e struct {
+		ApprovalRequestID string `json:"approval_request_id"`
+	}
+	if err := json.Unmarshal(extras, &e); err != nil {
+		return ""
+	}
+	return e.ApprovalRequestID
+}
+
+// WriteParkedHint writes the operator-facing parked guidance every human
+// render path shares: the ParkedHint one-liner, then — when the parked
+// envelope carried extras.approval_request_id — the approval id plus a
+// `meho approvals show <id>` inspect hint so the operator never has to
+// hunt the request via `meho approvals list`. Centralised so the
+// dispatch.Render path and the parallel operation/call.go path stay
+// byte-identical.
+func WriteParkedHint(w io.Writer, extras json.RawMessage) {
+	fmt.Fprintf(w, "  %s\n", ParkedHint)
+	if id := ParkedApprovalID(extras); id != "" {
+		fmt.Fprintf(w, "  approval id: %s — inspect with: meho approvals show %s\n", id, id)
+	}
+}
 
 // APIResponseError wraps a non-2xx response from the backplane so
 // per-vendor renderRequestError can pick the right output category
@@ -408,7 +447,7 @@ func (c Connector) Render(
 		}
 		w := cmd.OutOrStdout()
 		fmt.Fprintf(w, "%s %s — status=%s (%.0fms)\n", c.ID, opID, r.Status, r.DurationMs)
-		fmt.Fprintf(w, "  %s\n", ParkedHint)
+		WriteParkedHint(w, r.Extras)
 		return nil // parked, not failed — exit 0.
 	}
 	switch r.Status {

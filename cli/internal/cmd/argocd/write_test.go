@@ -147,6 +147,13 @@ func TestAppSyncAwaitingApprovalRealPath(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("awaiting_approval must not be an error (parked, exit 0); got %v", err)
 	}
+	if strings.Contains(out.String(), "then re-dispatch") {
+		t.Errorf("parked hint must not tell the operator to re-dispatch after approval; got %q", out.String())
+	}
+	if !strings.Contains(out.String(), "ar-123") ||
+		!strings.Contains(out.String(), "meho approvals show ar-123") {
+		t.Errorf("expected approval id + `meho approvals show` hint; got %q", out.String())
+	}
 	if !strings.Contains(out.String(), "parked for human approval") {
 		t.Errorf("expected parked hint on stdout; got %q", out.String())
 	}

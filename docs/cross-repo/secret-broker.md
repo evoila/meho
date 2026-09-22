@@ -253,7 +253,8 @@ and no value ever rests in a durable artifact.
    The CLI surfaces `awaiting_approval` verbatim (rendered, **exit 0** —
    parked is not failed) rather than treating it as an error
    ([`move.go`](../../cli/internal/cmd/secret/move.go),
-   `renderMoveResult`); re-dispatch after approval.
+   `renderMoveResult`). Approving through the queue **executes** the
+   move; the operator does not re-dispatch.
 
 4. **Time-boxed grant + approval `expires_at`.** The scope is the
    existing
@@ -330,12 +331,15 @@ Both park first:
 
 ```text
 secret-broker-1.x secret.move — status=awaiting_approval (12ms)
-  parked for human approval — approve via the approval queue, then re-dispatch
+  parked for human approval — approving it executes the operation; do not re-dispatch
+  approval id: 3f8c… — inspect with: meho approvals show 3f8c…
 ```
 
-After a second operator approves the parked request
-(`POST /api/v1/approvals/{id}/decide`), re-run the same command. On
-success the CLI prints only the value-free confirmation:
+Approving the parked request **executes** the move — the approve
+endpoint re-hydrates the target and re-dispatches internally (see
+`docs/codebase/approvals.md`; #1503 / #3548). Do **not** re-run the
+command afterwards; that would create a second park / double execution.
+On a successful approved execution the value-free confirmation is:
 
 ```text
 secret-broker-1.x secret.move — status=moved (34ms)

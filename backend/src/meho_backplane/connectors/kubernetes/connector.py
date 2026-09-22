@@ -304,6 +304,95 @@ def _adapt_kubeconfig_loader(loader: KubeconfigLoader) -> CredentialLoader:
     return _wrapped
 
 
+def _active_cluster_name(config_dict: dict[str, Any]) -> str | None:
+    """Resolve the cluster the kubeconfig's ``current-context`` selects.
+
+    The connector never passes an explicit ``context`` to the loader, so
+    the active cluster is the one the ``current-context``'s context names.
+    Returns ``None`` for any kubeconfig that does not resolve cleanly
+    (missing / non-string ``current-context``, no matching context, no
+    ``cluster`` on the context) so the caller falls back to the embedded
+    server unchanged.
+    """
+    ctx_name = config_dict.get("current-context")
+    if not isinstance(ctx_name, str):
+        return None
+    for ctx in config_dict.get("contexts", []) or []:
+        if isinstance(ctx, dict) and ctx.get("name") == ctx_name:
+            inner = ctx.get("context")
+            if isinstance(inner, dict):
+                cluster = inner.get("cluster")
+                return cluster if isinstance(cluster, str) else None
+    return None
+
+
+def _kubeconfig_dialing_target(
+    config_dict: dict[str, Any], target: KubernetesTargetLike
+) -> dict[str, Any]:
+    """Return a kubeconfig copy whose active cluster dials the reachable target.
+
+    A static kubeconfig embeds the cluster's own ``server`` — for a guest
+    cluster that is a workload-network VIP the backplane cannot route, so
+    dialing it hangs / raises ``ClientConnectorError``. When the target
+    carries a routable ``host``, rewrite the active context's cluster so
+    the standard client factory
+    (:func:`~kubernetes_asyncio.config.new_client_from_config_dict` /
+    :func:`~kubernetes_asyncio.config.load_kube_config_from_dict`) dials
+    ``https://{host}:{port}`` instead, threading the target's TLS knobs
+    onto the same cluster fields ``kubectl`` uses so the resulting
+    :class:`Configuration` matches what the WCP path
+    (:func:`~meho_backplane.connectors.kubernetes.wcp.build_wcp_api_configuration`)
+    produces for a Supervisor:
+
+    * ``server`` -> ``https://{target.host}:{target.port}`` (port default
+      :data:`_DEFAULT_K8S_PORT`) — the operator-reachable address (e.g. a
+      NAT alias), never the embedded internal VIP.
+    * ``tls-server-name`` -> ``target.tls_server_name`` when set — the name
+      the presented cert is verified against, so an alias whose cert SANs
+      the internal VIP still verifies with hostname checking on. Left
+      untouched otherwise (verification falls back to the dial host).
+    * ``insecure-skip-tls-verify`` -> ``not target.verify_tls`` — the
+      target's ``verify_tls`` is authoritative, overriding whatever the
+      embedded cluster set (mirrors the WCP path's ``verify_tls`` wins).
+
+    The embedded ``certificate-authority-data`` / ``certificate-authority``
+    is left in place (the kubeconfig already carries the trust anchor).
+
+    When the target carries no ``host``, or the kubeconfig has no
+    resolvable active cluster, the mapping is returned unchanged — an
+    appliance cluster whose ``server`` is already reachable keeps working
+    exactly as before. The input dict is never mutated: only the touched
+    cluster entry is copied.
+    """
+    host = getattr(target, "host", None)
+    if not host:
+        return config_dict
+    cluster_name = _active_cluster_name(config_dict)
+    if cluster_name is None:
+        return config_dict
+
+    port = target.port if target.port is not None else _DEFAULT_K8S_PORT
+    verify_tls = bool(getattr(target, "verify_tls", True))
+    tls_server_name = getattr(target, "tls_server_name", None)
+
+    rewritten_clusters: list[Any] = []
+    found = False
+    for entry in config_dict.get("clusters", []) or []:
+        if isinstance(entry, dict) and entry.get("name") == cluster_name:
+            inner = dict(entry.get("cluster") or {})
+            inner["server"] = f"https://{host}:{port}"
+            inner["insecure-skip-tls-verify"] = not verify_tls
+            if tls_server_name:
+                inner["tls-server-name"] = tls_server_name
+            rewritten_clusters.append({**entry, "cluster": inner})
+            found = True
+        else:
+            rewritten_clusters.append(entry)
+    if not found:
+        return config_dict
+    return {**config_dict, "clusters": rewritten_clusters}
+
+
 class KubernetesConnector(Connector):
     """Kubernetes connector -- reads kubeconfig per target, caches the client."""
 
@@ -1831,7 +1920,9 @@ class KubernetesConnector(Connector):
                     configuration=await self._wcp_configuration(target, credential)
                 )
             else:
-                api_client = await config.new_client_from_config_dict(credential.config)
+                api_client = await config.new_client_from_config_dict(
+                    _kubeconfig_dialing_target(credential.config, target)
+                )
             self._api_clients[key] = api_client
             _log.info(
                 "kubernetes_api_client_built",
@@ -1919,7 +2010,7 @@ class KubernetesConnector(Connector):
             else:
                 ws_config = type.__call__(Configuration)
                 await load_kube_config_from_dict(
-                    config_dict=credential.config,
+                    config_dict=_kubeconfig_dialing_target(credential.config, target),
                     client_configuration=ws_config,
                 )
             ws_client = WsApiClient(configuration=ws_config)

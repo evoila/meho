@@ -316,12 +316,14 @@ async def vault_client_for_operator(
         Explicit Vault JWT role override. When ``None`` (the default) the
         role is resolved from settings — the ``vault_check_runner_role``
         dedicated role for the check-runner's synthetic dispatch operator
-        (#2757), the deployment-global ``vault_oidc_role`` otherwise. When
-        a caller passes a non-``None`` value it wins over both — this is
-        the per-target role the vault connector resolves off the dispatch
-        ``Target``'s ``extras["vault_role"]`` (#3274), so a governed
-        teardown's ``vault.kv.delete`` logs in under a dedicated narrow
-        role instead of the shared ``meho-mcp`` identity. This module is
+        (#2757); a per-tenant role from ``vault_oidc_role_by_tenant`` keyed
+        on ``operator.tenant_id`` (#3852); the deployment-global
+        ``vault_oidc_role`` otherwise. When a caller passes a non-``None``
+        value it wins over all three — this is the per-target role the
+        vault connector resolves off the dispatch ``Target``'s
+        ``extras["vault_role"]`` (#3274), so a governed teardown's
+        ``vault.kv.delete`` logs in under a dedicated narrow role instead
+        of the shared ``meho-mcp`` identity. This module is
         connector-agnostic: it only *applies* the role, it does not read
         the ``Target`` (:mod:`meho_backplane.connectors.vault.target_auth`
         owns that).

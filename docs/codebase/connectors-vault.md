@@ -57,8 +57,26 @@ whitespace / non-string value normalises to "no override"), and
 Every KV handler (`ops.py`) and auth handler (`ops_auth.py`,
 `ops_auth_write.py`) opens its client through that one helper, so a target
 naming a role governs its whole KV/auth dispatch. Role selection
-precedence at the login site is: **per-target override → check-runner
-role (#2757) → deployment-global `vault_oidc_role`**.
+precedence at the login site (`auth.vault._resolve_login_role`) is:
+**per-target override (#3274) → check-runner role (#2757) → per-tenant role
+(#3852) → deployment-global `vault_oidc_role`**.
+
+The **per-tenant tier (#3852)** consults `settings.vault_oidc_role_by_tenant`
+— a comma-separated `<tenant-uuid>=<role>` map (env `VAULT_OIDC_ROLE_BY_TENANT`,
+empty by default) — keyed on `operator.tenant_id`. It lets one fixed role stop
+spanning tenants on a shared multi-tenant instance (meho-internal#356): an
+operator of a sandbox tenant logs into a role whose `bound_claims` + Vault
+policy it satisfies, for **both** the target-less `vault.kv.*` family (which
+dispatches with `target=None`, so the per-target override never fires) and any
+target's `secret_ref` read (`_shared/vault_creds.py`, which passes `role=None`).
+It sits **below** the check-runner tier deliberately — the synthetic
+check-runner operator carries a `tenant_id` too, but its dedicated
+background-dispatch role (#2757) must keep winning. An empty map makes the tier
+inert (every tenant keeps `vault_oidc_role`). Malformed map entries fail the
+pod start (`Settings._vault_oidc_role_by_tenant_must_be_uuid_role_csv`) rather
+than silently misrouting a login. The setting only **selects** a role; the
+fail-closed isolation boundary is each role's policy + `bound_claims`,
+provisioned consumer-side.
 
 Guarantees:
 

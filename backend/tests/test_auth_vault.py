@@ -169,19 +169,29 @@ def _install_fake_client(
     return fake
 
 
-def _make_operator(jwt: str = "fake.jwt.value", *, check_runner_dispatch: bool = False) -> Operator:
+_DEFAULT_TEST_TENANT = "00000000-0000-0000-0000-00000000a0a0"
+
+
+def _make_operator(
+    jwt: str = "fake.jwt.value",
+    *,
+    check_runner_dispatch: bool = False,
+    tenant_id: str = _DEFAULT_TEST_TENANT,
+) -> Operator:
     """Build a minimal :class:`Operator` for the forward-auth tests.
 
     ``check_runner_dispatch`` models the in-process check-runner's synthetic
     dispatch operator (#2757) — the only operator whose Vault JWT login
     resolves ``vault_check_runner_role`` instead of ``vault_oidc_role``.
+    ``tenant_id`` lets the #3852 per-tenant-role tests place the operator in
+    a specific tenant.
     """
     return Operator(
         sub="op-1",
         name="Alice",
         email="alice@example.com",
         raw_jwt=jwt,
-        tenant_id="00000000-0000-0000-0000-00000000a0a0",
+        tenant_id=tenant_id,
         tenant_role="operator",
         check_runner_dispatch=check_runner_dispatch,
     )
@@ -664,6 +674,131 @@ async def test_check_runner_role_denial_fails_closed_without_falling_back(
 
     # Exactly one login attempt, against the dedicated role — no retry under
     # ``meho-mcp``.
+    assert fake.auth.jwt.login_calls == [
+        {"role": "meho-check-runner", "jwt": "runner-jwt", "path": "jwt"},
+    ]
+
+
+# ---------------------------------------------------------------------------
+# #3852 — per-tenant Vault JWT role selection (VAULT_OIDC_ROLE_BY_TENANT)
+# ---------------------------------------------------------------------------
+
+_TENANT_A = "aaaaaaaa-0000-4000-8000-00000000aaaa"
+_TENANT_B = "bbbbbbbb-0000-4000-8000-00000000bbbb"
+
+
+def test_resolve_role_for_tenant_matches_maps_and_skips_malformed() -> None:
+    """The CSV resolver matches by tenant UUID and tolerates junk entries.
+
+    Empty map ⇒ ``None`` (caller falls back to the global role). A matching
+    entry returns its role; an unmatched tenant returns ``None``. Malformed
+    chunks (no ``=``, bad UUID, blank) are skipped, never raised — a single
+    typo cannot break every login (the startup validator is the loud gate).
+    """
+    resolve = vault_module._resolve_role_for_tenant
+    from uuid import UUID
+
+    assert resolve("", UUID(_TENANT_A)) is None
+    assert resolve(f"{_TENANT_A}=meho-mcp-sandbox", UUID(_TENANT_A)) == "meho-mcp-sandbox"
+    assert resolve(f"{_TENANT_A}=meho-mcp-sandbox", UUID(_TENANT_B)) is None
+    # Whitespace + a leading malformed chunk are tolerated; the good one wins.
+    assert (
+        resolve(f" not-a-pair , {_TENANT_A} = meho-mcp-sandbox ", UUID(_TENANT_A))
+        == "meho-mcp-sandbox"
+    )
+
+
+async def test_operator_tenant_maps_to_dedicated_role_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operator whose tenant is in the map logs into that role (#3852).
+
+    This is the core: a sandbox-tenant operator's target-less ``vault.kv.*``
+    and ``secret_ref`` reads run under a role whose ``bound_claims`` + policy
+    it satisfies, so one fixed role stops spanning tenants (meho-internal#356).
+    """
+    monkeypatch.setenv("VAULT_OIDC_ROLE_BY_TENANT", f"{_TENANT_A}=meho-mcp-sandbox")
+    get_settings.cache_clear()
+    fake = _install_fake_client(monkeypatch)
+    operator = _make_operator(jwt="op-jwt", tenant_id=_TENANT_A)
+
+    async with vault_client_for_operator(operator):
+        pass
+
+    assert fake.auth.jwt.login_calls == [
+        {"role": "meho-mcp-sandbox", "jwt": "op-jwt", "path": "jwt"},
+    ]
+
+
+async def test_unmapped_tenant_keeps_oidc_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tenant absent from the map keeps ``vault_oidc_role`` (#3852)."""
+    monkeypatch.setenv("VAULT_OIDC_ROLE_BY_TENANT", f"{_TENANT_A}=meho-mcp-sandbox")
+    get_settings.cache_clear()
+    fake = _install_fake_client(monkeypatch)
+    operator = _make_operator(jwt="op-jwt", tenant_id=_TENANT_B)
+
+    async with vault_client_for_operator(operator):
+        pass
+
+    assert fake.auth.jwt.login_calls == [
+        {"role": "meho-mcp", "jwt": "op-jwt", "path": "jwt"},
+    ]
+
+
+async def test_empty_tenant_map_keeps_oidc_role_byte_for_byte(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset ``VAULT_OIDC_ROLE_BY_TENANT`` ⇒ today's single-role behaviour."""
+    monkeypatch.delenv("VAULT_OIDC_ROLE_BY_TENANT", raising=False)
+    get_settings.cache_clear()
+    fake = _install_fake_client(monkeypatch)
+    operator = _make_operator(jwt="op-jwt", tenant_id=_TENANT_A)
+
+    async with vault_client_for_operator(operator):
+        pass
+
+    assert fake.auth.jwt.login_calls == [
+        {"role": "meho-mcp", "jwt": "op-jwt", "path": "jwt"},
+    ]
+
+
+async def test_per_target_override_wins_over_tenant_map(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit per-target ``role`` (#3274) beats the tenant map (#3852)."""
+    monkeypatch.setenv("VAULT_OIDC_ROLE_BY_TENANT", f"{_TENANT_A}=meho-mcp-sandbox")
+    get_settings.cache_clear()
+    fake = _install_fake_client(monkeypatch)
+    operator = _make_operator(jwt="op-jwt", tenant_id=_TENANT_A)
+
+    async with vault_client_for_operator(operator, role="meho-teardown"):
+        pass
+
+    assert fake.auth.jwt.login_calls == [
+        {"role": "meho-teardown", "jwt": "op-jwt", "path": "jwt"},
+    ]
+
+
+async def test_check_runner_role_wins_over_tenant_map(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The check-runner role (#2757) outranks the tenant map (#3852).
+
+    The synthetic check-runner operator carries a ``tenant_id`` too, but its
+    dedicated background-dispatch role must keep winning even when that tenant
+    appears in ``VAULT_OIDC_ROLE_BY_TENANT``.
+    """
+    monkeypatch.setenv("VAULT_CHECK_RUNNER_ROLE", "meho-check-runner")
+    monkeypatch.setenv("VAULT_OIDC_ROLE_BY_TENANT", f"{_TENANT_A}=meho-mcp-sandbox")
+    get_settings.cache_clear()
+    fake = _install_fake_client(monkeypatch)
+    operator = _make_operator(jwt="runner-jwt", check_runner_dispatch=True, tenant_id=_TENANT_A)
+
+    async with vault_client_for_operator(operator):
+        pass
+
     assert fake.auth.jwt.login_calls == [
         {"role": "meho-check-runner", "jwt": "runner-jwt", "path": "jwt"},
     ]

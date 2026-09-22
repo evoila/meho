@@ -485,6 +485,51 @@ def test_agent_runs_disabled_tenants_rejects_non_uuid(raw: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# #3852 — VAULT_OIDC_ROLE_BY_TENANT <uuid>=<role> CSV validation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",  # default / "no per-tenant roles"
+        f"{_UUID_A}=meho-mcp-sandbox",
+        f"{_UUID_A}=meho-mcp-sandbox,{_UUID_B}=meho-mcp-other",
+        f"  {_UUID_A} = meho-mcp-sandbox  ",
+        f"{_UUID_A}=meho-mcp-sandbox,",
+        f",,{_UUID_A}=meho-mcp-sandbox,,",
+    ],
+)
+def test_vault_oidc_role_by_tenant_accepts_uuid_role_csv(raw: str) -> None:
+    """Valid ``<uuid>=<role>`` CSVs (including the empty default) construct."""
+    settings = Settings(
+        **_settings_kwargs("sqlite+aiosqlite:///:memory:"),  # type: ignore[arg-type]
+        vault_oidc_role_by_tenant=raw,
+    )
+    assert settings.vault_oidc_role_by_tenant == raw
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        f"{_UUID_A}",  # missing '=' + role
+        f"{_UUID_A}=",  # blank role
+        "not-a-uuid=meho-mcp-sandbox",  # bad UUID key
+        f"{_UUID_A}=meho-mcp-sandbox,bad=meho-mcp-other",  # one bad key
+    ],
+)
+def test_vault_oidc_role_by_tenant_rejects_malformed(raw: str) -> None:
+    """A malformed entry fails construction so a misrouted Vault login cannot
+    survive startup silently (the loud gate for the fail-closed setting)."""
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(
+            **_settings_kwargs("sqlite+aiosqlite:///:memory:"),  # type: ignore[arg-type]
+            vault_oidc_role_by_tenant=raw,
+        )
+    assert "VAULT_OIDC_ROLE_BY_TENANT" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
 # #1725 M2 — vault_kv_tenant_scope_prefix template validation at construction
 # ---------------------------------------------------------------------------
 

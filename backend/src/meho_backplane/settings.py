@@ -175,6 +175,16 @@ class Settings(BaseModel):
         forwards tokens against. Default ``meho-mcp`` matches Goal #11's
         requirement letter; operators provisioning a different Vault
         role can override per environment.
+    vault_oidc_role_by_tenant:
+        Optional per-tenant Vault JWT role map (#3852). Comma-separated
+        ``<tenant-uuid>=<role-name>`` pairs; an operator whose
+        ``tenant_id`` matches an entry logs into that role instead of
+        ``vault_oidc_role``. Empty (the default) means every operator
+        keeps ``vault_oidc_role`` -- today's single-role behaviour. Set
+        via ``VAULT_OIDC_ROLE_BY_TENANT``. Lets one fixed role stop
+        spanning tenants on a shared multi-tenant instance
+        (meho-internal#356); the fail-closed boundary is each role's
+        Vault policy + ``bound_claims``, provisioned consumer-side.
     vault_oidc_mount_path:
         Mount path of Vault's JWT/OIDC auth method, **without** the
         ``auth/`` prefix. Vault's recommended convention is to mount
@@ -1153,6 +1163,22 @@ class Settings(BaseModel):
     mcp_resource_uri: str = ""
     vault_addr: HttpUrl | None = Field(default=None)
     vault_oidc_role: str = Field(default="meho-mcp", min_length=1)
+    # #3852 -- optional per-tenant Vault JWT role selection. Comma-separated
+    # ``<tenant-uuid>=<role-name>`` pairs (case-insensitive UUID, whitespace
+    # ignored), the same CSV shape as ``agent_runs_disabled_tenants`` /
+    # ``operations.dispatch_limits.resolve_int_override`` but carrying a role
+    # name per tenant. An operator whose ``tenant_id`` matches an entry logs
+    # into that role instead of the deployment-global ``vault_oidc_role``;
+    # a tenant absent from the map falls back to ``vault_oidc_role``. Empty
+    # (the default) keeps the single-role behaviour byte-for-byte, so no
+    # existing deployment changes. Consulted in ``vault_client_for_operator``
+    # (:func:`~meho_backplane.auth.vault._resolve_login_role`) BELOW the
+    # per-target ``extras["vault_role"]`` override (#3274) and the
+    # check-runner role (#2757), ABOVE the global default -- so one fixed
+    # role stops spanning tenants on a shared instance (meho-internal#356).
+    # Enforcement stays Vault-side: the boundary is the policy + ``bound_claims``
+    # on each selected role; this setting only decides which role a login uses.
+    vault_oidc_role_by_tenant: str = Field(default="")
     vault_oidc_mount_path: str = Field(default="jwt", min_length=1)
     vault_namespace: str | None = None
     vault_timeout_seconds: float = Field(default=10.0, gt=0)
@@ -2103,6 +2129,43 @@ class Settings(BaseModel):
                 ) from exc
         return value
 
+    @field_validator("vault_oidc_role_by_tenant")
+    @classmethod
+    def _vault_oidc_role_by_tenant_must_be_uuid_role_csv(cls, value: str) -> str:
+        """Reject malformed ``VAULT_OIDC_ROLE_BY_TENANT`` entries at startup.
+
+        Same fail-closed-at-construction discipline as
+        :meth:`_agent_runs_disabled_tenants_must_be_uuid_csv`: a typo'd
+        env var must fail the pod start with an actionable message rather
+        than silently routing a tenant to the wrong Vault role (or to the
+        wide default) at login time -- a misrouted Vault login is a
+        silent isolation failure, the worst-case outcome here.
+
+        Each non-empty chunk must be ``<tenant-uuid>=<role>`` with a valid
+        UUID key and a non-empty role value. Empty values (the default,
+        "no per-tenant roles") and blank-separator artefacts (trailing /
+        double comma) are tolerated, mirroring the runtime resolver in
+        :func:`~meho_backplane.auth.vault._resolve_login_role`, so the
+        validator's accept-set is exactly the resolver's accept-set.
+        """
+        for chunk in (part.strip() for part in value.split(",")):
+            if not chunk:
+                continue
+            key, sep, role = chunk.partition("=")
+            if not sep or not role.strip():
+                raise ValueError(
+                    "VAULT_OIDC_ROLE_BY_TENANT entries must be "
+                    f"'<tenant-uuid>=<role>'; got {chunk!r}"
+                )
+            try:
+                UUID(key.strip())
+            except ValueError as exc:
+                raise ValueError(
+                    "VAULT_OIDC_ROLE_BY_TENANT keys must be tenant UUIDs; "
+                    f"got {key.strip()!r} in {chunk!r}"
+                ) from exc
+        return value
+
 
 # Flat env-var -> Settings constructor, one kwarg per field: the length is
 # the field count, not branching complexity (McCabe is trivial). Extracting
@@ -2195,6 +2258,9 @@ def get_settings() -> Settings:
         # actual Vault use raises VaultNotConfiguredError instead.
         vault_addr=os.environ.get("VAULT_ADDR") or None,  # type: ignore[arg-type]
         vault_oidc_role=os.environ.get("VAULT_OIDC_ROLE", "meho-mcp"),
+        # #3852 -- empty/blank keeps the single-role behaviour byte-for-byte
+        # (the resolver falls back to ``vault_oidc_role`` for every tenant).
+        vault_oidc_role_by_tenant=os.environ.get("VAULT_OIDC_ROLE_BY_TENANT", "").strip(),
         vault_oidc_mount_path=os.environ.get("VAULT_OIDC_MOUNT_PATH", "jwt"),
         # ``VAULT_NAMESPACE`` distinguishes "unset" (OSS deployment, no
         # header) from empty-string (operator misconfiguration); the

@@ -58,14 +58,18 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from typing import Any
+from uuid import UUID
 
 import hvac
 import hvac.exceptions
 import requests.exceptions
+import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.health import ProbeResult
 from meho_backplane.settings import Settings, get_settings
+
+_log = structlog.get_logger(__name__)
 
 __all__ = [
     "VaultClientError",
@@ -222,6 +226,41 @@ async def _to_thread_read_health(client: hvac.Client) -> Any:
     return await asyncio.to_thread(_do_read_health, client)
 
 
+def _resolve_role_for_tenant(overrides_csv: str, tenant_id: UUID) -> str | None:
+    """Resolve a per-tenant Vault JWT role from ``VAULT_OIDC_ROLE_BY_TENANT``.
+
+    *overrides_csv* is a comma-separated list of ``<tenant-uuid>=<role>``
+    pairs (case-insensitive UUID, whitespace ignored), the string analogue of
+    :func:`~meho_backplane.operations.dispatch_limits.resolve_int_override`.
+    Returns the role of the first entry whose UUID matches *tenant_id*, or
+    ``None`` when the map is empty or names no matching tenant (the caller
+    then falls back to the deployment-global ``vault_oidc_role``).
+
+    The setting is validated at construction
+    (:meth:`Settings._vault_oidc_role_by_tenant_must_be_uuid_role_csv`), so a
+    malformed entry cannot normally reach here; if one does it is skipped with
+    a warning rather than raising, so a single typo cannot break every login.
+    """
+    if not overrides_csv:
+        return None
+    for raw in overrides_csv.split(","):
+        entry = raw.strip()
+        if not entry:
+            continue
+        key, sep, role = entry.partition("=")
+        if not sep or not role.strip():
+            _log.warning("vault_oidc_role_by_tenant_malformed", entry=entry, reason="no '='")
+            continue
+        try:
+            entry_tenant = UUID(key.strip())
+        except ValueError:
+            _log.warning("vault_oidc_role_by_tenant_malformed", entry=entry, reason="bad uuid")
+            continue
+        if entry_tenant == tenant_id:
+            return role.strip()
+    return None
+
+
 def _resolve_login_role(operator: Operator, settings: Settings, override: str | None) -> str:
     """Select the Vault JWT role for a login. Precedence (highest first):
 
@@ -231,7 +270,16 @@ def _resolve_login_role(operator: Operator, settings: Settings, override: str | 
        dedicated narrow role instead of the shared ``meho-mcp`` identity;
     2. the check-runner's dedicated ``vault_check_runner_role`` (#2757),
        selected only for the synthetic background-dispatch operator;
-    3. the deployment-global ``vault_oidc_role`` — today's default.
+    3. a per-tenant role from ``vault_oidc_role_by_tenant`` (#3852), keyed on
+       ``operator.tenant_id`` — so an operator of a sandbox tenant logs into
+       a role whose ``bound_claims`` + policy it satisfies instead of the
+       shared identity, and one fixed role stops spanning tenants on a shared
+       instance (meho-internal#356). Empty map ⇒ this tier is inert;
+    4. the deployment-global ``vault_oidc_role`` — today's default.
+
+    The per-tenant tier sits *below* the check-runner tier deliberately: the
+    synthetic check-runner operator carries a ``tenant_id`` too, but its
+    dedicated role (#2757) must keep winning for background dispatch.
 
     No fallback on denial: the caller surfaces :class:`VaultRoleDeniedError`
     rather than silently widening back to ``vault_oidc_role`` (the #2757 rule,
@@ -241,6 +289,9 @@ def _resolve_login_role(operator: Operator, settings: Settings, override: str | 
         return override
     if operator.check_runner_dispatch:
         return settings.vault_check_runner_role or settings.vault_oidc_role
+    tenant_role = _resolve_role_for_tenant(settings.vault_oidc_role_by_tenant, operator.tenant_id)
+    if tenant_role is not None:
+        return tenant_role
     return settings.vault_oidc_role
 
 

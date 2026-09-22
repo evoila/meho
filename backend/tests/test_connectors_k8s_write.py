@@ -47,6 +47,7 @@ from meho_backplane.connectors.kubernetes import (
 from meho_backplane.connectors.kubernetes.ops_write import UnsupportedKindError
 from meho_backplane.connectors.kubernetes.ops_write_dangerous import (
     ApplyManifestError,
+    ApplyNotPersistedError,
     KubernetesSecretRefError,
     UndeletableKindError,
     secret_create_summary,
@@ -459,6 +460,21 @@ def _applied_obj(rv: str = "123", uid: str = "u-1") -> MagicMock:
     return obj
 
 
+def _unpersisted_obj() -> MagicMock:
+    """An apply response with no resourceVersion/uid (the not-persisted shape).
+
+    This is exactly what a vSphere Supervisor returned live when an
+    approved, non-dry-run ``k8s.apply`` of a CAPI ``Cluster`` CR was
+    accepted (HTTP 200) but wrote nothing: the response carried no
+    ``resourceVersion`` and no ``uid`` -- byte-identical to the dry-run
+    preview. A ``MagicMock`` auto-vivifies attributes, so pin both to
+    ``None`` explicitly.
+    """
+    obj = MagicMock()
+    obj.metadata = MagicMock(resourceVersion=None, uid=None)
+    return obj
+
+
 @pytest.mark.asyncio
 async def test_apply_persists_by_default() -> None:
     conn = _make_connector()
@@ -498,6 +514,62 @@ async def test_apply_server_dry_run_preview_no_mutation() -> None:
     # The operator-facing 'server' maps to the API's dryRun=All.
     assert dyn.server_side_apply.call_args.kwargs["dry_run"] == "All"
     assert result["applied"][0]["resource_version"] == "dry"
+
+
+@pytest.mark.asyncio
+async def test_apply_real_apply_without_resource_version_is_not_a_false_positive() -> None:
+    """A real apply the server accepted but did not persist must NOT return ok.
+
+    Regression guard for the live incident: an approved (``requires_approval``
+    → approve → resume), non-dry-run ``k8s.apply`` was re-dispatched with the
+    correct real params (``dry_run`` absent → ``dry_run=False`` on the wire,
+    no ``dryRun=All``), the API server answered HTTP 200, yet nothing was
+    persisted and the echoed object carried a null ``resourceVersion`` -- the
+    same shape as the dry-run preview. On the buggy path ``k8s.apply`` reported
+    ``ok`` for an apply that created nothing. The handler must instead treat a
+    missing ``resourceVersion`` on a real apply as a failed apply and raise, so
+    the dispatcher records ``error`` rather than a false-positive success.
+    """
+    conn = _make_connector()
+    dyn = MagicMock()
+    dyn.resources.get = AsyncMock(return_value=MagicMock())
+    dyn.server_side_apply = AsyncMock(return_value=_unpersisted_obj())
+    with _patch_kubeconfig(), _dyn_patch() as dyn_cls:
+        dyn_cls.return_value = _awaitable(dyn)
+        with pytest.raises(ApplyNotPersistedError):
+            # No dry_run key => real apply (is_dry_run=False), exactly the
+            # params the approval resume re-dispatched live.
+            await conn.k8s_apply(
+                operator=_make_operator(),
+                target=_TARGET,
+                params={"manifest": _SINGLE_MANIFEST},
+            )
+    # The real apply WAS attempted (not the dry-run variant): no dryRun on the wire.
+    assert "dry_run" not in dyn.server_side_apply.call_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_apply_dry_run_tolerates_missing_resource_version() -> None:
+    """A dry-run preview legitimately returns no resourceVersion -- do not raise.
+
+    The persistence guard is scoped to the real apply path. A server dry-run
+    (``dry_run="server"`` → ``dryRun=All``) never persists, so a null
+    ``resourceVersion`` is expected there and must still return the preview,
+    not error -- otherwise every approval-park preview would fail.
+    """
+    conn = _make_connector()
+    dyn = MagicMock()
+    dyn.resources.get = AsyncMock(return_value=MagicMock())
+    dyn.server_side_apply = AsyncMock(return_value=_unpersisted_obj())
+    with _patch_kubeconfig(), _dyn_patch() as dyn_cls:
+        dyn_cls.return_value = _awaitable(dyn)
+        result = await conn.k8s_apply(
+            operator=_make_operator(),
+            target=_TARGET,
+            params={"manifest": _SINGLE_MANIFEST, "dry_run": "server"},
+        )
+    assert result["dry_run"] is True
+    assert result["applied"][0]["resource_version"] is None
 
 
 @pytest.mark.asyncio

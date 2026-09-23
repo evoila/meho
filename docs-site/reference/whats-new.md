@@ -9,6 +9,29 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.35.13](https://github.com/evoila/meho/releases/tag/v0.35.13) — 2026-09-23
+
+- **Each tenant on a shared instance can log into Vault under its own role.**
+  MEHO used to log every operator into Vault under one deployment-wide role,
+  which made a strict per-tenant Vault policy impossible. A new, optional
+  setting maps each tenant to its own Vault login role; tenants not in the map
+  keep the deployment-wide role, and leaving the setting empty changes nothing.
+  A typo in the map stops MEHO from starting rather than silently sending a
+  login to the wrong role.
+- **The CLI no longer tells you to re-run an operation after approving it.**
+  When an operation parks for human approval, the CLI used to say "approve via
+  the approval queue, then re-dispatch" — but approving already runs the
+  operation, so re-running it created a second request for the same change. The
+  hint now says approval executes the operation, and it prints the approval id
+  with the command to inspect it.
+- **The console's agent, principal, and grant forms look right again.** The
+  create/edit agent form, the agent run console, the register-principal dialog,
+  and the new-grant / elevate dialogs used styling classes that no longer
+  existed, so their fields were laid out unevenly and validation errors showed
+  in plain text. They now use the same layout as the rest of the console, with
+  errors highlighted. Agent timestamps on the detail page and cards now read as
+  `YYYY-MM-DD HH:MM UTC` instead of raw machine timestamps.
+
 ## [v0.35.12](https://github.com/evoila/meho/releases/tag/v0.35.12) — 2026-09-22
 
 - **An approved Kubernetes apply that the server accepts but never saves now

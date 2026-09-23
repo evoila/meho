@@ -90,6 +90,18 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.35.13] - 2026-09-23
+
+### Added
+
+- An optional per-tenant Vault JWT login role map, so one fixed login role no longer has to span every tenant on a shared multi-tenant instance. The new setting `vault_oidc_role_by_tenant` (env `VAULT_OIDC_ROLE_BY_TENANT`, default empty) takes comma-separated `<tenant-uuid>=<role>` pairs and adds a precedence tier to `auth.vault._resolve_login_role`, keyed on the operator's `tenant_id`: per-target override (#3274) → check-runner role (#2757) → **per-tenant role** → deployment-global `vault_oidc_role`. It covers both the target-less `vault.kv.*` family (dispatched with `target=None`, where the per-target override never fires) and every target `secret_ref` read. The tier sits below the check-runner role so background dispatch keeps its dedicated role; an empty map is byte-for-byte the previous behaviour; and a malformed entry fails the pod start via a settings validator instead of silently misrouting a login. The setting only selects the role — the isolation boundary is each role's Vault policy and `bound_claims`, provisioned consumer-side. The setting reaches the pod via the chart's `extraEnv`. (#3852 / #3853)
+
+### Fixed
+
+- The CLI's parked-operation hint no longer tells operators to re-dispatch after approval. Approving a parked request **executes** the operation (the approve endpoint re-dispatches internally), so following the old `approve via the approval queue, then re-dispatch` hint produced a second park / double execution attempt. The human output now reads `parked for human approval — approving it executes the operation; do not re-dispatch` and, when the envelope carries `extras.approval_request_id`, prints `approval id: <id> — inspect with: meho approvals show <id>`, on both the shared `dispatch.Render` path (argocd / keycloak / secret-move write verbs) and `meho operation call`. `--json` parked output is unchanged. (#3801 / #3803)
+- The operator console's shared agent create/edit form, agent run console, "Register principal" dialog, and shared grant form ("New grant" / "Elevate") are restructured onto the current console form layout: the daisyUI v4 `form-control` / `label-text` / `label-text-alt` classes compiled to nothing under v5, so labels and controls rendered unstructured and per-field validation errors rendered in the unstyled default colour. Labels, full-width controls, and `text-xs text-error` inline errors now follow the established pattern, with every htmx / `data-*` / `aria-*` hook and mode-specific branch preserved. (evoila-bosnia/meho-internal#348 / #3723, evoila-bosnia/meho-internal#350 / #3769, evoila-bosnia/meho-internal#359 / #3770, evoila-bosnia/meho-internal#360 / #3781)
+- The agent detail page and agent list cards humanize their `created_at` / `updated_at` timestamps: the raw `isoformat()` output is replaced by a scannable `YYYY-MM-DD HH:MM UTC` in a `<time>` element (the ISO instant stays machine-readable in the `datetime` attribute), and the values are now coerced to timezone-aware UTC first, so a naive driver-returned timestamp can no longer be labelled "UTC" or emitted as an offset-less instant. (evoila-bosnia/meho-internal#349 / #3766)
+
 ## [0.35.12] - 2026-09-22
 
 ### Fixed

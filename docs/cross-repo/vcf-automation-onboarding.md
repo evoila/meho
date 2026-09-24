@@ -249,9 +249,12 @@ Dual-plane verb. `--plane` is **required** because the resource name
 "about" exists on both planes with different shapes:
 
 - **`--plane provider`** dispatches `vcfa.provider.health` (the typed
-  read; repointed off the ingested `GET:/cloudapi/1.0.0/site` op_id by
-  #2355) and renders site identity (`id`, `name`, `restName`,
-  `productVersion`).
+  read) and renders the structured health result: `provider_plane`
+  (`reachable`, `authenticated`, `check`, `org_count`) from an
+  authenticated `GET /cloudapi/1.0.0/orgs?pageSize=1`, plus
+  `latest_api_version` / `supported_apis` from the unauthenticated
+  `GET /iaas/api/about`. It no longer reads `GET /cloudapi/1.0.0/site`,
+  which answers 405 on VCFA 9.1 (#3865).
 - **`--plane tenant`** dispatches `vcfa.tenant.about` (the typed read;
   repointed off the ingested `GET:/iaas/api/about` op_id by #2355) and
   renders IaaS API self-describe (`latestApiVersion`,

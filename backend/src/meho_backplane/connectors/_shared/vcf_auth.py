@@ -469,6 +469,7 @@ class ConnectorAuthError(SessionLoginError):
         target_name: str | None = None,
         host: str | None = None,
         secret_ref: str | None = None,
+        remediation: str | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
@@ -476,6 +477,11 @@ class ConnectorAuthError(SessionLoginError):
         self.target_name = target_name
         self.host = host
         self.secret_ref = secret_ref
+        # Optional connector-specific fix, used by the dispatcher's
+        # ``connector_auth_failed`` builder in place of the generic
+        # "restage the stale credential" clause when the right fix is
+        # something else (e.g. VCFA 9.1's API-token field, #3865).
+        self.remediation = remediation
 
 
 def session_establish_auth_error(

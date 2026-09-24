@@ -269,9 +269,10 @@ def _token_from_body(
 def _refresh_token_remediation(target: VcfAutomationTargetLike) -> str:
     """The operator hint for a target whose tenant login needs an API token."""
     return (
-        f"store a VCF Automation API token (refresh token) as the "
-        f"{VCFA_REFRESH_TOKEN_FIELD!r} field of the target's secret "
-        f"(secret_ref={getattr(target, 'secret_ref', None)!r})"
+        f"Create an API token in VCF Automation and store it as "
+        f"{VCFA_REFRESH_TOKEN_FIELD!r} in the target's secret "
+        f"(secret_ref={getattr(target, 'secret_ref', None)!r}); VCF Automation "
+        "9.1 tenant login accepts only a refresh token."
     )
 
 
@@ -347,12 +348,13 @@ async def _csp_refresh_token(
             raise auth_error from exc
         if status in (400, 404):
             raise ConnectorAuthError(
-                f"{message}; {_refresh_token_remediation(target)}",
+                f"{message}. {_refresh_token_remediation(target)}",
                 status_code=status,
                 cause=f"session_establish_{status}",
                 target_name=target.name,
                 host=getattr(target, "host", None),
                 secret_ref=getattr(target, "secret_ref", None),
+                remediation=_refresh_token_remediation(target),
             ) from exc
         raise RuntimeError(message) from exc
     return _token_from_body(resp, "refresh_token", target, TENANT_CSP_SESSION_PATH)
@@ -387,12 +389,13 @@ async def _iaas_token_exchange(
         )
         if status in (400, 401, 403):
             raise ConnectorAuthError(
-                f"{message}; the refresh token was refused -- {_refresh_token_remediation(target)}",
+                f"{message}: the refresh token was refused. {_refresh_token_remediation(target)}",
                 status_code=status,
                 cause=f"session_establish_{status}",
                 target_name=target.name,
                 host=getattr(target, "host", None),
                 secret_ref=getattr(target, "secret_ref", None),
+                remediation=_refresh_token_remediation(target),
             ) from exc
         raise RuntimeError(message) from exc
     return _token_from_body(resp, "token", target, TENANT_SESSION_PATH)

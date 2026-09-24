@@ -182,18 +182,45 @@ func TestDecodeProviderListResultEmptyRaw(t *testing.T) {
 
 func TestPrintAboutProviderHumanFormat(t *testing.T) {
 	r := &CallResult{
-		Status:     "ok",
-		OpID:       "GET:/cloudapi/1.0.0/site",
-		Result:     json.RawMessage(`{"id":"site-1","name":"VCFA-Site","restName":"vcfa-rdc","productVersion":"9.0.0-12345"}`),
+		Status: "ok",
+		OpID:   "vcfa.provider.health",
+		Result: json.RawMessage(`{"provider_plane":{"reachable":true,"authenticated":true,` +
+			`"check":"GET /cloudapi/1.0.0/orgs","org_count":3},` +
+			`"api":{"reachable":true,"latestApiVersion":"2021-07-15","supportedApiVersions":["2021-07-15"]}}`),
 		DurationMs: 30,
 	}
 	var buf bytes.Buffer
 	printAbout(&buf, PlaneProvider, r)
 	out := buf.String()
-	for _, want := range []string{"status=ok", "vcfa-rest-9.0", "9.0.0-12345", "vcfa-rdc", "VCFA-Site"} {
+	for _, want := range []string{
+		"status=ok", "vcfa-rest-9.0", "authenticated=true", "GET /cloudapi/1.0.0/orgs",
+		"org_count:       3", "latest_api_version: 2021-07-15", "supported_apis",
+	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("printAbout provider missing %q in:\n%s", want, out)
 		}
+	}
+	if strings.Contains(out, "provider_plane\"") {
+		t.Errorf("printAbout provider fell back to raw JSON:\n%s", out)
+	}
+}
+
+func TestPrintAboutProviderAPIUnreachable(t *testing.T) {
+	r := &CallResult{
+		Status: "ok",
+		OpID:   "vcfa.provider.health",
+		Result: json.RawMessage(`{"provider_plane":{"reachable":true,"authenticated":true,` +
+			`"check":"GET /cloudapi/1.0.0/orgs","org_count":null},` +
+			`"api":{"reachable":false,"error":"HTTPStatusError"}}`),
+	}
+	var buf bytes.Buffer
+	printAbout(&buf, PlaneProvider, r)
+	out := buf.String()
+	if !strings.Contains(out, "api:             unreachable (HTTPStatusError)") {
+		t.Errorf("printAbout provider missing api-unreachable line in:\n%s", out)
+	}
+	if strings.Contains(out, "org_count") {
+		t.Errorf("printAbout provider rendered a null org_count:\n%s", out)
 	}
 }
 

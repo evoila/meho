@@ -218,6 +218,9 @@ async def test_fallback_csp_404_raises_structured_error_naming_refresh_token_fie
     assert "'refresh_token'" in message
     assert "'refreshToken' can not be null." in message
     assert "vcfa/login" in message
+    assert err.remediation is not None
+    assert err.remediation.startswith("Create an API token in VCF Automation")
+    assert "'refresh_token'" in err.remediation
     assert connector._tenant_tokens == {}
     await connector.aclose()
 
@@ -258,6 +261,8 @@ async def test_refused_refresh_token_raises_structured_error() -> None:
 
     assert exc_info.value.cause == "session_establish_400"
     assert "'refresh_token'" in str(exc_info.value)
+    assert exc_info.value.remediation is not None
+    assert "'refresh_token'" in exc_info.value.remediation
     await connector.aclose()
 
 
@@ -364,3 +369,45 @@ async def test_bearer_cached_per_target_across_calls() -> None:
     assert csp.call_count == 1
     assert login.call_count == 1
     await connector.aclose()
+
+
+def test_auth_failed_envelope_uses_connector_remediation_not_restage() -> None:
+    """The ``connector_auth_failed`` builder prefers the error's own remediation (#3865)."""
+    from meho_backplane.operations._errors import result_connector_auth_failed
+
+    request = httpx.Request("POST", f"{_BASE_URL}{_CSP}")
+    response = httpx.Response(404, text="Not Found", request=request)
+    cause = httpx.HTTPStatusError("404", request=request, response=response)
+    remediation = "Create an API token in VCF Automation and store it as 'refresh_token'."
+    try:
+        raise ConnectorAuthError(
+            "vcf-automation tenant session establish failed",
+            status_code=404,
+            cause="session_establish_404",
+            target_name="vcfa-login",
+            secret_ref="vcfa/login",
+            remediation=remediation,
+        ) from cause
+    except ConnectorAuthError as exc:
+        result = result_connector_auth_failed("vcfa.tenant.project.list", exc, _Target(), 1.0)
+
+    assert result.extras["error_code"] == "connector_auth_failed"
+    assert result.extras["remediation"] == remediation
+    assert remediation in (result.error or "")
+    assert "restage" not in (result.error or "").lower()
+
+
+def test_auth_failed_envelope_keeps_restage_remediation_by_default() -> None:
+    """Without a connector remediation the stale-credential restage text is unchanged."""
+    from meho_backplane.operations._errors import result_connector_auth_failed
+
+    exc = ConnectorAuthError(
+        "login rejected",
+        status_code=401,
+        cause="session_establish_401",
+        target_name="vcfa-login",
+        secret_ref="vcfa/login",
+    )
+    result = result_connector_auth_failed("vcfa.tenant.project.list", exc, _Target(), 1.0)
+    assert "refresh_token" not in result.extras["remediation"]
+    assert "vcfa/login" in result.extras["remediation"]

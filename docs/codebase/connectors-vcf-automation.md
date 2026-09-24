@@ -271,8 +271,10 @@ the consumer repo, validated 2026-05-17):
    When no shape works — the CSP login answers 400/404 (VCFA 9 appliances
    can 404 it), or the exchange refuses the refresh token — the connector
    raises `ConnectorAuthError` (`cause=session_establish_<status>` →
-   `connector_auth_failed`). The message quotes the upstream reject and
-   names the `refresh_token` secret field as the fix.
+   `connector_auth_failed`). The message quotes the upstream reject, and
+   the error's `remediation` (which the envelope uses in place of the
+   generic "restage the credential" text) says to create an API token in
+   VCF Automation and store it as `refresh_token` in the target's secret.
 5. The response body is `{"token": "..."}`. The token is cached under
    the tenant-unique `(tenant_id, target.id)` key. Missing / empty `token`
    field on a 2xx response surfaces as `RuntimeError`. A data-path 401

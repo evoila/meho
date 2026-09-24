@@ -440,6 +440,16 @@ def test_every_write_composite_sub_op_resolves_against_pinned_vcenter_spec() -> 
 # ``vi-json.yaml`` when the spec-shelf is configured.
 
 
+def test_vm_resource_allocation_set_reuses_the_disk_grow_vim_pair() -> None:
+    """#3880: allocation set rides the same reconciled RetrievePropertiesEx +
+    ReconfigVM_Task pair as vm.disk.grow -- no new vim op_id to reconcile."""
+    from meho_backplane.connectors.vmware_rest.composites import _vm_allocation
+
+    assert set(_vm_allocation._VIM_SUB_OPS_VM_RESOURCE_ALLOCATION_SET) == set(
+        _write._VIM_SUB_OPS_VM_DISK_GROW
+    )
+
+
 def test_vm_disk_grow_vi_json_sub_op_manifest_is_the_expected_pair() -> None:
     """Pin the disk-grow vi-json manifest so a drift can't shrink the reconcile."""
     assert set(_write._VIM_SUB_OPS_VM_DISK_GROW) == {

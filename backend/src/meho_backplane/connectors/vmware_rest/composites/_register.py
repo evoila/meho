@@ -6,7 +6,7 @@
 # this change (~1490 lines); splitting the metadata table is out of scope for
 # the #3349 governed-subop wiring.
 
-"""``register_vmware_composite_operations`` -- registrar for the 55 composites.
+"""``register_vmware_composite_operations`` -- registrar for the 58 composites.
 
 Module-level async function called from the lifespan-driven
 :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
@@ -26,12 +26,13 @@ the source_kind="composite" persistence.
 Mixed safety posture
 --------------------
 
-The 15 read composites (the five T5 / #508 reads + the datastore
-cache-refresh read ``datastore.refresh`` / #3789 + the 4 guest-ops reads
+The 16 read composites (the five T5 / #508 reads + the datastore
+cache-refresh read ``datastore.refresh`` / #3789 + the VM allocation read
+``vm.resource_allocation.show`` / #3880 + the 4 guest-ops reads
 ``vm.guest.process.list`` / ``vm.guest.env.read`` / ``vm.guest.net.show``
 / ``vm.guest.file.read`` / #3100 + the Supervisor / namespace /
 storage-policy / content-library ``status`` + ``list`` reads) are
-read-only. 14 of them pass ``safety_level="safe"`` +
+read-only. 15 of them pass ``safety_level="safe"`` +
 ``requires_approval=False`` -- overrides of T4's ``dangerous`` / ``True``
 defaults. The exception is ``vm.guest.file.read``, promoted to
 ``caution`` in #3720 (it can fetch arbitrary guest bytes as the in-guest
@@ -39,7 +40,7 @@ login), so it auto-parks for agent / service principals while a human
 seat still executes it immediately; see its caution row below. (The
 former ``host.network_uplinks`` and ``host.vsan_health`` reads were
 re-shipped as typed ops in #2258; see
-:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 40 write
+:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 42 write
 composites (T6 / #509, single-VM ``vm.power`` / #2301, the guest-ops
 write ``vm.guest.file.write`` / #3100, the mutating
 VI-JSON ``vm.disk.grow`` / #2893, the folder-template
@@ -54,9 +55,10 @@ three host-domain writes ``host.datastore_mount_nfs`` /
 ``host.disk_mark_flash`` / ``host.service_control`` / #3182, and the
 later Supervisor / #3281, storage-policy, content-library / #3495 and
 resource-pool / #3505 write families) are all ``requires_approval=True``.
-31 pin ``safety_level="dangerous"`` (T4's default, passed explicitly for
-clarity at the call site; the helper would default to it anyway). 6 pin
-``safety_level="caution"`` -- the #3505 governed-allocation writes
+32 pin ``safety_level="dangerous"`` (T4's default, passed explicitly for
+clarity at the call site; the helper would default to it anyway). 7 pin
+``safety_level="caution"`` -- the reversible VM allocation write
+``vm.resource_allocation.set`` / #3880, the #3505 governed-allocation writes
 ``resource_pool.create`` + the VM-Host affinity
 ``cluster.drs_vm_host_rule.create``, plus ``namespace.create`` /
 ``storage_policy.create`` / ``content_library.subscribed.create`` /
@@ -122,6 +124,10 @@ from meho_backplane.connectors.vmware_rest.composites._supervisor import (
     supervisor_disable_composite,
     supervisor_enable_composite,
     supervisor_status_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._vm_allocation import (
+    vm_resource_allocation_set_composite,
+    vm_resource_allocation_show_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites._write import (
     cluster_drs_rule_create_composite,
@@ -264,6 +270,10 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     VM_POWER_RESPONSE_SCHEMA,
     VM_RESIZE_PARAMETER_SCHEMA,
     VM_RESIZE_RESPONSE_SCHEMA,
+    VM_RESOURCE_ALLOCATION_SET_PARAMETER_SCHEMA,
+    VM_RESOURCE_ALLOCATION_SET_RESPONSE_SCHEMA,
+    VM_RESOURCE_ALLOCATION_SHOW_PARAMETER_SCHEMA,
+    VM_RESOURCE_ALLOCATION_SHOW_RESPONSE_SCHEMA,
     VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA,
     VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA,
 )
@@ -371,7 +381,9 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "migrate via DRS or explicit host, bulk power across a "
         "filter, or a single-VM power verb (on/off/reset plus a "
         "Tools-mediated guest_shutdown/guest_reboot for one-off "
-        "incident actions). Every op is dangerous / approval-required. The "
+        "incident actions), and a single VM's CPU / memory limit + "
+        "reservation (resource_allocation.show read, .set caution write). "
+        "Every other op is dangerous / approval-required. The "
         "right group for any operator workflow that would otherwise "
         "be a ``govc vm.*`` invocation orchestrating multiple raw "
         "REST calls. Pair with 'storage' / 'networking' / 'cluster' "
@@ -1342,6 +1354,103 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         safety_level="dangerous",
         requires_approval=True,
     ),
+    # ----------------------------------------------------------------
+    # VM resource allocation (#3880) -- CPU / memory limit + reservation.
+    # No REST expression; both ride the vim seam (the ingested
+    # ReconfigVM_Task binding 404s under /api, #3534).
+    # ----------------------------------------------------------------
+    _CompositeSpec(
+        op_id="vmware.composite.vm.resource_allocation.show",
+        handler=vm_resource_allocation_show_composite,
+        summary="Show a VM's CPU / memory limit, reservation and shares.",
+        description=(
+            "Reads one VM's config.cpuAllocation + config.memoryAllocation "
+            "(vim ResourceAllocationInfo) through a single "
+            "PropertyCollector.RetrievePropertiesEx and returns limit / "
+            "reservation / shares for CPU (MHz) and memory (MB); limit -1 = "
+            "unlimited. vmware.vm.info and the REST hardware/cpu + "
+            "hardware/memory reads do NOT expose limits or reservations, so "
+            "this is the read that answers 'is this VM CPU-capped?'. "
+            "Read-only. Equivalent of 'govc vm.info -r' resource fields."
+        ),
+        parameter_schema=VM_RESOURCE_ALLOCATION_SHOW_PARAMETER_SCHEMA,
+        response_schema=VM_RESOURCE_ALLOCATION_SHOW_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "read-only", "vm", "resource-allocation", "vi-json"],
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions={
+            "when_to_use": (
+                "Call to see whether a VM has a CPU or memory limit / "
+                "reservation (e.g. diagnosing CPU ready or throttling), and "
+                "to confirm the state before and after "
+                "vmware.composite.vm.resource_allocation.set. vmware.vm.info "
+                "and the REST CPU / memory reads do not expose these fields."
+            ),
+            "parameter_hints": {"vm": "VM moid, e.g. 'vm-42'."},
+            "output_shape": (
+                "{status: ok|vm_not_found, vm, name, cpu_allocation: {limit, "
+                "reservation, shares: {level, shares}}, memory_allocation: "
+                "{...}}. CPU values are MHz, memory values MB; limit -1 = "
+                "unlimited."
+            ),
+        },
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.vm.resource_allocation.set",
+        handler=vm_resource_allocation_set_composite,
+        summary="Set or clear a VM's CPU / memory limit and reservation.",
+        description=(
+            "Sets a single VM's CPU (MHz) and / or memory (MB) limit and "
+            "reservation through one vim VirtualMachine.ReconfigVM_Task "
+            "carrying VirtualMachineConfigSpec.cpuAllocation / "
+            "memoryAllocation with ONLY the fields passed (the rest stay "
+            "unchanged); -1 clears a limit (unlimited). There is no REST "
+            "write for these fields and the ingested ReconfigVM_Task binding "
+            "404s under /api, so the write rides the governed vim seam. Reads "
+            "the current allocation first; refuses an empty request, an "
+            "out-of-range value or a limit below the reservation "
+            "(status='invalid_request') and returns status='unchanged' for a "
+            "request that already matches, both before any write. Otherwise "
+            "polls the task and re-reads: before / after allocations, task "
+            "moid + terminal state; status='partial' if the re-read does not "
+            "match the request. A task fault raises (connector_error). A limit "
+            "of 0 is refused (use -1 to clear). Reversible "
+            "(re-run with the old values or -1). Takes effect live on a "
+            "powered-on VM. Equivalent of 'govc vm.change -cpu.limit / "
+            "-cpu.reservation / -mem.limit / -mem.reservation'."
+        ),
+        parameter_schema=VM_RESOURCE_ALLOCATION_SET_PARAMETER_SCHEMA,
+        response_schema=VM_RESOURCE_ALLOCATION_SET_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "resource-allocation", "vi-json"],
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions={
+            "when_to_use": (
+                "Call to cap a VM's CPU or memory (limit), guarantee it "
+                "capacity (reservation), or remove a cap (limit -1). Read the "
+                "current values first with "
+                "vmware.composite.vm.resource_allocation.show; pass only the "
+                "fields you want changed."
+            ),
+            "parameter_hints": {
+                "vm": "VM moid, e.g. 'vm-42'.",
+                "cpu_limit_mhz": "CPU limit in MHz (>= 1); -1 = unlimited (clears the cap).",
+                "cpu_reservation_mhz": "CPU reservation in MHz (>= 0).",
+                "memory_limit_mb": "Memory limit in MB (>= 1); -1 = unlimited.",
+                "memory_reservation_mb": "Memory reservation in MB (>= 0).",
+            },
+            "output_shape": (
+                "{status: set|unchanged|invalid_request|vm_not_found|"
+                "partial|timeout, vm, name, requested, before: "
+                "{cpu_allocation, memory_allocation}, after: {...}, task, "
+                "task_state, guidance}. A task fault is an error, not a "
+                "status. Each allocation is {limit, reservation, shares: "
+                "{level, shares}}."
+            ),
+        },
+    ),
     _CompositeSpec(
         op_id="vmware.composite.vm.device.cdrom",
         handler=vm_device_cdrom_composite,
@@ -2135,11 +2244,13 @@ async def register_vmware_composite_operations(
     on every lifespan startup; the skip-re-embed branch keeps that
     cheap.
 
-    Scope: 55 composites total -- 15 read (T5 / #508 + the datastore
-    cache-refresh read datastore.refresh / #3789 + the 4 guest-ops
+    Scope: 58 composites total -- 16 read (T5 / #508 + the datastore
+    cache-refresh read datastore.refresh / #3789 + the VM allocation read
+    vm.resource_allocation.show / #3880 + the 4 guest-ops
     reads / #3100 + the supervisor status + the vSphere Namespace status
     (#3502) / storage-policy list / two SUBSCRIBED content-library reads) +
-    40 write (T6 / #509 + the
+    42 write (T6 / #509 + the caution VM allocation write
+    ``vm.resource_allocation.set`` / #3880 + the
     destructive-tier ``vm.destroy`` / #3198, the governed vSphere Namespace
     create/delete ``namespace.create`` (caution) / ``namespace.delete``
     (destructive) / #3502, the governed resource-pool allocation writes

@@ -127,6 +127,10 @@ from meho_backplane.connectors.vmware_rest.composites._supervisor import (
     supervisor_enable_composite,
     supervisor_status_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._vm_allocation import (
+    vm_resource_allocation_set_composite,
+    vm_resource_allocation_show_composite,
+)
 from meho_backplane.connectors.vmware_rest.composites._write import (
     cluster_drs_rule_create_composite,
     cluster_patch_composite,
@@ -221,5 +225,7 @@ __all__ = [
     "vm_power_bulk_composite",
     "vm_power_composite",
     "vm_resize_composite",
+    "vm_resource_allocation_set_composite",
+    "vm_resource_allocation_show_composite",
     "vm_snapshot_revert_composite",
 ]

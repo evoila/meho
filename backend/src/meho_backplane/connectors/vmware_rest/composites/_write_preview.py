@@ -49,6 +49,8 @@ resolved VM + host group sets).
 ``vm.disk.grow``          live-read: vm, name, disk, disk_label,
                           current_capacity_bytes, requested_capacity_bytes,
                           delta_bytes
+``vm.resource_``          live-read: ``{vm, name, current, requested}`` --
+``allocation.set``        CPU / memory limit + reservation from->to (#3880)
 ``cluster.drs_rule.create`` live-read: cluster, cluster_name, rule_type,
                           rule_name, enabled, resolved, total_resolved
 ``folder.create``         echo: parent_folder, new_folder_name
@@ -172,6 +174,7 @@ from meho_backplane.connectors.vmware_rest.composites._storage_policy import (
     _resolve_policy_by_name,
     _resolve_tag_in_category,
 )
+from meho_backplane.connectors.vmware_rest.composites._vm_allocation import read_vm_allocation
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _GUEST_POWER_VERBS,
     _NIC_BACKING_DISTRIBUTED_PORTGROUP,
@@ -623,6 +626,53 @@ async def _vm_disk_grow_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "current_capacity_bytes": current_bytes,
         "requested_capacity_bytes": capacity_bytes,
         "delta_bytes": (capacity_bytes - current_bytes if current_bytes is not None else None),
+    }
+
+
+_ALLOCATION_PARAMS = (
+    "cpu_limit_mhz",
+    "cpu_reservation_mhz",
+    "memory_limit_mb",
+    "memory_reservation_mb",
+)
+
+
+async def _vm_resource_allocation_set_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``vm.resource_allocation.set`` -- live-read the current allocation.
+
+    The from->to delta is the decision: reads the VM's current CPU / memory
+    ``{limit, reservation, shares}`` via the handler's own read helper
+    (:func:`._vm_allocation.read_vm_allocation`, one ungated
+    ``RetrievePropertiesEx``) and echoes the requested fields (-1 limit =
+    unlimited). The ``ReconfigVM_Task`` never fires here. Declines (``None``)
+    without a resolved connector or on malformed params.
+    """
+    vm = ctx.params.get("vm")
+    if not isinstance(vm, str) or ctx.connector_instance is None:
+        return None
+    requested = {
+        key: ctx.params[key]
+        for key in _ALLOCATION_PARAMS
+        if isinstance(ctx.params.get(key), int) and not isinstance(ctx.params.get(key), bool)
+    }
+    current = await read_vm_allocation(
+        ctx.connector_instance,  # type: ignore[arg-type]
+        ctx.target,
+        ctx.operator,
+        vm=vm,
+    )
+    return {
+        "vm": vm,
+        "name": current.get("name") if current else None,
+        "current": (
+            {
+                "cpu_allocation": current.get("cpu_allocation"),
+                "memory_allocation": current.get("memory_allocation"),
+            }
+            if current
+            else None
+        ),
+        "requested": requested,
     }
 
 
@@ -1625,6 +1675,7 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "vmware.composite.vm.power.bulk": _vm_power_bulk_preview,
     "vmware.composite.vm.disk.grow": _vm_disk_grow_preview,
     "vmware.composite.vm.disk.attach": _vm_disk_attach_preview,
+    "vmware.composite.vm.resource_allocation.set": _vm_resource_allocation_set_preview,
     "vmware.composite.vm.resize": _vm_resize_preview,
     "vmware.composite.vm.nic.repoint": _vm_nic_repoint_preview,
     "vmware.composite.vm.device.cdrom": _vm_device_cdrom_preview,
@@ -1653,7 +1704,7 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
 
 
 def _register_vmware_write_preview_builders() -> None:
-    """Wire the 37 write-composite park-time preview builders. Import-time.
+    """Wire the 38 write-composite park-time preview builders. Import-time.
 
     The 13 read composites register no builder — they are
     ``requires_approval=False`` and never park, so a preview would be

@@ -134,6 +134,10 @@ __all__ = [
     "VM_POWER_RESPONSE_SCHEMA",
     "VM_RESIZE_PARAMETER_SCHEMA",
     "VM_RESIZE_RESPONSE_SCHEMA",
+    "VM_RESOURCE_ALLOCATION_SET_PARAMETER_SCHEMA",
+    "VM_RESOURCE_ALLOCATION_SET_RESPONSE_SCHEMA",
+    "VM_RESOURCE_ALLOCATION_SHOW_PARAMETER_SCHEMA",
+    "VM_RESOURCE_ALLOCATION_SHOW_RESPONSE_SCHEMA",
     "VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA",
     "VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA",
 ]
@@ -6455,4 +6459,164 @@ CONTENT_LIBRARY_SUBSCRIBED_ITEMS_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["library_id"],
+}
+
+
+# ---------------------------------------------------------------------------
+# vm.resource_allocation.show / .set (#3880) -- a VM's CPU + memory limit /
+# reservation (vim ``ResourceAllocationInfo``; no REST expression).
+# ---------------------------------------------------------------------------
+
+_VM_MOID_PARAM: dict[str, Any] = {
+    "type": "string",
+    "minLength": 1,
+    "description": "Managed-object ID of the VM (e.g. 'vm-42').",
+}
+
+#: One ``ResourceAllocationInfo`` projection as the two ops return it.
+_VM_ALLOCATION_VIEW_SCHEMA: dict[str, Any] = {
+    "type": ["object", "null"],
+    "properties": {
+        "limit": {
+            "type": ["integer", "null"],
+            "description": "Hard cap (CPU: MHz, memory: MB); -1 = unlimited.",
+        },
+        "reservation": {
+            "type": ["integer", "null"],
+            "description": "Guaranteed amount (CPU: MHz, memory: MB).",
+        },
+        "shares": {
+            "type": ["object", "null"],
+            "properties": {
+                "level": {
+                    "type": ["string", "null"],
+                    "description": "low / normal / high / custom.",
+                },
+                "shares": {"type": ["integer", "null"]},
+            },
+        },
+    },
+}
+
+#: ``{cpu_allocation, memory_allocation}`` pair (``before`` / ``after``).
+_VM_ALLOCATION_PAIR_SCHEMA: dict[str, Any] = {
+    "type": ["object", "null"],
+    "properties": {
+        "cpu_allocation": _VM_ALLOCATION_VIEW_SCHEMA,
+        "memory_allocation": _VM_ALLOCATION_VIEW_SCHEMA,
+    },
+}
+
+#: ``vmware.composite.vm.resource_allocation.show`` parameter schema.
+VM_RESOURCE_ALLOCATION_SHOW_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"vm": _VM_MOID_PARAM},
+    "required": ["vm"],
+    "additionalProperties": False,
+}
+
+#: ``vmware.composite.vm.resource_allocation.show`` response schema.
+VM_RESOURCE_ALLOCATION_SHOW_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["ok", "vm_not_found"],
+            "description": (
+                "``'ok'`` -- the allocation was read; ``'vm_not_found'`` -- no "
+                "readable allocation for the moid."
+            ),
+        },
+        "vm": {"type": "string"},
+        "name": {"type": ["string", "null"], "description": "VM display name."},
+        "cpu_allocation": _VM_ALLOCATION_VIEW_SCHEMA,
+        "memory_allocation": _VM_ALLOCATION_VIEW_SCHEMA,
+        "guidance": {"type": ["string", "null"]},
+    },
+    "required": ["status", "vm"],
+}
+
+#: ``vmware.composite.vm.resource_allocation.set`` parameter schema.
+#:
+#: At least one allocation field is required (the vm.resize at-least-one-of
+#: ``anyOf`` shape). Only the fields passed are sent; the rest stay as-is.
+VM_RESOURCE_ALLOCATION_SET_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": _VM_MOID_PARAM,
+        "cpu_limit_mhz": {
+            "type": "integer",
+            "minimum": -1,
+            "not": {"const": 0},
+            "description": "CPU limit in MHz (>= 1); -1 clears the limit (unlimited).",
+        },
+        "cpu_reservation_mhz": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "CPU reservation in MHz.",
+        },
+        "memory_limit_mb": {
+            "type": "integer",
+            "minimum": -1,
+            "not": {"const": 0},
+            "description": "Memory limit in MB (>= 1); -1 clears the limit (unlimited).",
+        },
+        "memory_reservation_mb": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Memory reservation in MB.",
+        },
+    },
+    "required": ["vm"],
+    "anyOf": [
+        {"required": ["cpu_limit_mhz"]},
+        {"required": ["cpu_reservation_mhz"]},
+        {"required": ["memory_limit_mb"]},
+        {"required": ["memory_reservation_mb"]},
+    ],
+    "additionalProperties": False,
+}
+
+#: ``vmware.composite.vm.resource_allocation.set`` response schema.
+VM_RESOURCE_ALLOCATION_SET_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "set",
+                "unchanged",
+                "invalid_request",
+                "vm_not_found",
+                "partial",
+                "timeout",
+            ],
+            "description": (
+                "``'set'`` -- ReconfigVM_Task succeeded (``after`` re-read); "
+                "``'unchanged'`` -- the request already matched, no task; "
+                "``'invalid_request'`` -- refused before any write (no field, "
+                "out of range, or a limit below the reservation); "
+                "``'vm_not_found'`` -- no readable allocation for the moid; "
+                "``'partial'`` -- the task succeeded but the re-read ``after`` "
+                "does not match every requested field; ``'timeout'`` -- the "
+                "task did not finish within the poll bound. A task fault is "
+                "not a status: it raises (``connector_error``)."
+            ),
+        },
+        "vm": {"type": "string"},
+        "name": {"type": ["string", "null"]},
+        "requested": {
+            "type": "object",
+            "description": "The allocation params that were passed (only those are sent).",
+        },
+        "before": _VM_ALLOCATION_PAIR_SCHEMA,
+        "after": _VM_ALLOCATION_PAIR_SCHEMA,
+        "task": {"type": ["string", "null"], "description": "ReconfigVM_Task moid."},
+        "task_state": {
+            "type": ["string", "null"],
+            "description": "success / error / timeout once the task was issued.",
+        },
+        "guidance": {"type": ["string", "null"]},
+    },
+    "required": ["status", "vm"],
 }

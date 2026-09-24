@@ -86,6 +86,8 @@ _WRITE_COMPOSITE_OP_IDS: frozenset[str] = frozenset(
         "vmware.composite.vm.resize",
         "vmware.composite.vm.nic.repoint",
         "vmware.composite.vm.device.cdrom",
+        # VM CPU / memory limit + reservation (#3880): live-read from->to.
+        "vmware.composite.vm.resource_allocation.set",
         "vmware.composite.host.evacuate",
         "vmware.composite.host.detach_from_vds",
         "vmware.composite.cluster.patch",

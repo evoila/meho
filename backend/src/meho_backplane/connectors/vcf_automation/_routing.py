@@ -24,6 +24,7 @@ __all__ = [
     "PROVIDER_TOKEN_HEADER",
     "PROVIDER_VERSION_PATH",
     "TENANT_ACCEPT",
+    "TENANT_CSP_SESSION_PATH",
     "TENANT_SESSION_PATH",
     "TENANT_VERSION_PATH",
     "Plane",
@@ -39,6 +40,15 @@ __all__ = [
 # (provider login: line 381; tenant login: line 439).
 PROVIDER_SESSION_PATH = "/cloudapi/1.0.0/sessions/provider"
 TENANT_SESSION_PATH = "/iaas/api/login"
+
+# Tenant-plane token-exchange step 1 (evoila/meho#3865). On VCF Automation
+# 9.1 ``POST /iaas/api/login`` validates only ``{"refreshToken": ...}`` and
+# 400s a username/password body, so a password-only secret first mints a
+# refresh token from the CSP identity service (``POST`` this path with the
+# valueless ``?access_token`` flag and ``{username, password, domain?}``),
+# then exchanges it at :data:`TENANT_SESSION_PATH`. Same two-step the
+# ``vra8`` connector runs against Aria Automation 8.x.
+TENANT_CSP_SESSION_PATH = "/csp/gateway/am/api/login"
 
 # Per-plane unauthenticated version probes. Verified against
 # scripts/vcf-automation.sh (provider: line 252 GET /api/versions XML;

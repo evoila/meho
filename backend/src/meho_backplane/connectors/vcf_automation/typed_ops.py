@@ -25,10 +25,11 @@ Provider plane (``/cloudapi/1.0.0/*`` — Basic-auth →
 
 * ``vcfa.provider.org.list`` — ``GET /cloudapi/1.0.0/orgs``
 * ``vcfa.provider.region.list`` — ``GET /cloudapi/vcf/regions``
-* ``vcfa.provider.health`` — ``GET /cloudapi/1.0.0/site`` (appliance
-  site identity + product version; the provider-plane health/probe
-  surface ``fingerprint`` and the operator use to confirm which VCFA
-  instance a target points at and that it answers)
+* ``vcfa.provider.health`` — authenticated ``GET /cloudapi/1.0.0/orgs``
+  (``pageSize=1``) plus the unauthenticated ``GET /iaas/api/about`` API
+  version read, returned as one structured health object. Both paths serve
+  GET on VCFA 9.0 and 9.1; the former ``GET /cloudapi/1.0.0/site`` answers
+  405 on 9.1 (evoila/meho#3865).
 
 Tenant plane (``/iaas/api/*`` — JSON-body login → ``{"token": …}``
 session):
@@ -76,7 +77,6 @@ from meho_backplane.connectors.vcf_automation._routing import Plane, plane_for_p
 __all__ = [
     "PROVIDER_ORGS_PATH",
     "PROVIDER_REGIONS_PATH",
-    "PROVIDER_SITE_PATH",
     "TENANT_ABOUT_PATH",
     "TENANT_DEPLOYMENTS_PATH",
     "TENANT_DEPLOYMENT_DETAIL_PATH",
@@ -100,7 +100,6 @@ PROVIDER_ORGS_PATH: Final[str] = "/cloudapi/1.0.0/orgs"
 #: serving (consumer kb ``vcf-automation-9.0-provider-object-model.md``,
 #: probes 2026-05-16 / 2026-07-21).
 PROVIDER_REGIONS_PATH: Final[str] = "/cloudapi/vcf/regions"
-PROVIDER_SITE_PATH: Final[str] = "/cloudapi/1.0.0/site"
 TENANT_PROJECTS_PATH: Final[str] = "/iaas/api/projects"
 TENANT_DEPLOYMENTS_PATH: Final[str] = "/iaas/api/deployments"
 #: Path template for the per-id deployment detail read. The ``{id}``
@@ -163,8 +162,8 @@ VCFA_TYPED_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
         "organizations on the appliance (vcfa.provider.org.list), list "
         "regions — the VCFA 9 evolution of the vCloud-Director provider "
         "VDC, each backing compute/network under an NSX domain "
-        "(vcfa.provider.region.list), or read appliance site identity + "
-        "product version as a health/probe before heavier reads "
+        "(vcfa.provider.region.list), or run a provider-plane health check "
+        "(authenticated reachability + API version) before heavier reads "
         "(vcfa.provider.health). Provider-plane ops authenticate with the "
         "admin@System (or equivalent) Basic-auth session and never "
         "succeed against a tenant token. For per-tenant project / "
@@ -318,16 +317,23 @@ _PROVIDER_HEALTH = VcfaTypedOp(
     op_id="vcfa.provider.health",
     handler_attr="provider_health",
     plane="provider",
-    path=PROVIDER_SITE_PATH,
-    summary="Read VCFA provider-plane appliance health/identity (site).",
+    # The authenticated leg rides the provider session on the org list --
+    # a path verified to serve GET on both VCFA 9.0 and 9.1. The former
+    # ``GET /cloudapi/1.0.0/site`` answers 405 on 9.1 (evoila/meho#3865).
+    path=PROVIDER_ORGS_PATH,
+    summary="Check VCFA provider-plane health: authenticated reachability + API version.",
     description=(
-        "Reads VCFA appliance site identity via GET /cloudapi/1.0.0/site on "
-        "the provider plane — the provider-plane health/probe surface. "
-        "Returns id, name, description, restName, and the product version "
-        "string identifying the appliance build. A 2xx here confirms the "
-        "provider plane is reachable and which VCFA instance the target "
-        "points at; it is the provider-plane analogue of the tenant-plane "
-        "vcfa.tenant.about probe. safety_level=safe, read-only."
+        "Provider-plane health check for a VCFA appliance. Establishes (or "
+        "reuses) the provider session and reads GET /cloudapi/1.0.0/orgs "
+        "with pageSize=1 to prove the provider plane answers an "
+        "authenticated request, then reads the unauthenticated "
+        "GET /iaas/api/about for the appliance's IaaS API versions. Returns "
+        "{provider_plane: {reachable, authenticated, check, org_count}, "
+        "api: {reachable, latestApiVersion, supportedApiVersions} or "
+        "{reachable: false, error}}. A provider-plane failure (bad "
+        "credential, appliance down) surfaces as the op's error; an about "
+        "failure is reported inside 'api' without failing the check. "
+        "safety_level=safe, read-only."
     ),
     parameter_schema={
         "type": "object",
@@ -337,10 +343,10 @@ _PROVIDER_HEALTH = VcfaTypedOp(
     response_schema={
         "type": "object",
         "properties": {
-            "id": {"type": ["string", "null"]},
-            "name": {"type": ["string", "null"]},
-            "productVersion": {"type": ["string", "null"]},
+            "provider_plane": {"type": "object"},
+            "api": {"type": "object"},
         },
+        "required": ["provider_plane", "api"],
         "additionalProperties": True,
     },
     group_key="vcfa-provider-reads",
@@ -350,16 +356,17 @@ _PROVIDER_HEALTH = VcfaTypedOp(
     llm_instructions={
         "when_to_call": (
             "Call as a pre-flight provider-plane probe: confirm the "
-            "appliance answers and read its product version before heavier "
-            "provider reads, or as a post-deploy health check."
+            "appliance answers an authenticated provider request and read "
+            "its API version before heavier provider reads, or as a "
+            "post-deploy health check."
         ),
         "output_shape": (
-            "{id, name, description, restName, productVersion}. The "
-            "productVersion string identifies the appliance build."
+            "{provider_plane: {reachable, authenticated, check, org_count}, "
+            "api: {reachable, latestApiVersion, supportedApiVersions}}."
         ),
         "next_step": (
-            "Confirm productVersion is in the supported range, then proceed "
-            "to vcfa.provider.org.list or vcfa.provider.region.list."
+            "Proceed to vcfa.provider.org.list or vcfa.provider.region.list; "
+            "use vcfa.tenant.about to check the tenant-plane session."
         ),
     },
 )

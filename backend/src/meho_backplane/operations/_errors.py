@@ -1675,6 +1675,9 @@ def result_connector_auth_failed(
             cause = f"dispatch_{status_code}"
     if stage == "after_relogin":
         remediation = _auth_scheme_remediation(target_name)
+    elif isinstance(exc, ConnectorAuthError) and exc.remediation:
+        # The connector named a more specific fix than "restage" (#3865).
+        remediation = exc.remediation
     else:
         remediation = _auth_restage_remediation(target_name, secret_ref)
     summary = _auth_failed_summary(

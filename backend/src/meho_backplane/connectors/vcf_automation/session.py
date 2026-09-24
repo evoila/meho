@@ -63,14 +63,28 @@ from collections.abc import Awaitable, Callable
 from typing import Protocol, runtime_checkable
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.vault_creds import load_basic_credentials
+from meho_backplane.connectors._shared.vault_creds import (
+    DEFAULT_BASIC_CREDENTIAL_FIELDS,
+    VaultCredentialsReadError,
+    load_vault_secret_data,
+    strip_credential_value,
+)
 
 __all__ = [
+    "VCFA_REFRESH_TOKEN_FIELD",
     "SessionCredentials",
     "VcfAutomationCredentialsLoader",
     "VcfAutomationTargetLike",
     "load_credentials_from_vault",
 ]
+
+
+#: Optional secret field carrying a VCF Automation API token (a refresh token).
+#: When present the tenant plane exchanges it at ``POST /iaas/api/login``
+#: directly -- the login shape VCFA 9.1 requires (evoila/meho#3865) -- instead
+#: of deriving a session from ``username`` / ``password``. The provider plane
+#: never reads it.
+VCFA_REFRESH_TOKEN_FIELD = "refresh_token"
 
 
 class SessionCredentials(Protocol):
@@ -173,6 +187,11 @@ async def load_credentials_from_vault(
 ) -> dict[str, str]:
     """Default credential loader -- live operator-context Vault KV-v2 read.
 
+    Returns ``{"username", "password"}`` plus ``refresh_token`` when the
+    secret carries that optional field (:data:`VCFA_REFRESH_TOKEN_FIELD`,
+    evoila/meho#3865). ``username`` / ``password`` stay required: the
+    provider plane always logs in with them.
+
     Reads ``target.secret_ref`` as a KV-v2 secret **under the operator's
     identity** (``operator.raw_jwt`` is forwarded to Vault's JWT/OIDC
     auth method) and returns the ``{"username": ..., "password": ...}``
@@ -206,4 +225,16 @@ async def load_credentials_from_vault(
     (tests do exactly that); this default is what production targets
     at rubric State 2 (``shared_service_account``) use.
     """
-    return await load_basic_credentials(target, operator)
+    secret_data = await load_vault_secret_data(target, operator)
+    credentials: dict[str, str] = {}
+    for field in DEFAULT_BASIC_CREDENTIAL_FIELDS:
+        if field not in secret_data:
+            raise VaultCredentialsReadError(
+                f"vault secret for target {target.name!r} "
+                f"(secret_ref={target.secret_ref!r}) is missing required field {field!r}"
+            )
+        credentials[field] = strip_credential_value(secret_data[field])
+    refresh_token = secret_data.get(VCFA_REFRESH_TOKEN_FIELD)
+    if refresh_token:
+        credentials[VCFA_REFRESH_TOKEN_FIELD] = strip_credential_value(refresh_token)
+    return credentials

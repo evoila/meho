@@ -37,7 +37,7 @@ VCFA 9.x runs two API planes on a single appliance:
 | Plane | Path family | Login flow | Token shape |
 | --- | --- | --- | --- |
 | **provider** | `/cloudapi/*` + `/api/*` (vCloud-Director lineage) | `POST /cloudapi/1.0.0/sessions/provider` with HTTP Basic | `X-VMWARE-VCLOUD-ACCESS-TOKEN` response **header** (a JWT) |
-| **tenant** | `/iaas/api/*` (Aria-IaaS lineage) | `POST /iaas/api/login` with JSON body | `{"token": "…"}` response **body** |
+| **tenant** | `/iaas/api/*` (Aria-IaaS lineage) | `POST /iaas/api/login`: `{username, password}` on 9.0; `{refreshToken}` on 9.1+ (see below) | `{"token": "…"}` response **body** |
 
 Both planes use `Authorization: Bearer <…>` on subsequent calls; the
 provider Accept media type is path-family-dependent
@@ -130,6 +130,12 @@ inlines into its reasoning context.
   unless `target.provider_username` /
   `target.provider_secret_ref` are set (the `admin@System` vs
   `svc-meho` split — see "Per-plane credential override" below).
+  On **VCFA 9.1** the tenant login accepts only a refresh token. The
+  connector tries to mint one from the username/password through
+  `POST /csp/gateway/am/api/login`. If the appliance does not serve that
+  exchange, create a VCF Automation API token for the account and store
+  it as the optional `refresh_token` field of the same secret. The
+  tenant plane then uses it directly (#3865).
 - **A registered VCFA target.** The CLI verbs take `--target <slug>`
   (e.g. `--target rdc-vcfa`). The target carries
   `product="vcfa"`, `host`, `port` (default 443), `fqdn`
@@ -243,9 +249,12 @@ Dual-plane verb. `--plane` is **required** because the resource name
 "about" exists on both planes with different shapes:
 
 - **`--plane provider`** dispatches `vcfa.provider.health` (the typed
-  read; repointed off the ingested `GET:/cloudapi/1.0.0/site` op_id by
-  #2355) and renders site identity (`id`, `name`, `restName`,
-  `productVersion`).
+  read) and renders the structured health result: `provider_plane`
+  (`reachable`, `authenticated`, `check`, `org_count`) from an
+  authenticated `GET /cloudapi/1.0.0/orgs?pageSize=1`, plus
+  `latest_api_version` / `supported_apis` from the unauthenticated
+  `GET /iaas/api/about`. It no longer reads `GET /cloudapi/1.0.0/site`,
+  which answers 405 on VCFA 9.1 (#3865).
 - **`--plane tenant`** dispatches `vcfa.tenant.about` (the typed read;
   repointed off the ingested `GET:/iaas/api/about` op_id by #2355) and
   renders IaaS API self-describe (`latestApiVersion`,
@@ -484,6 +493,7 @@ The fix:
 | `status=error connector_error: VcfAutomationConfigurationError` with `fqdn` in the message | IP-host target with no `fqdn`. | Set `fqdn:` in `targets.yaml`; re-import. See "The `--fqdn` checklist". |
 | `status=error connector_error: RuntimeError … HTTP 401` on provider plane | Provider account locked / wrong `provider_username`. | Verify the `provider_secret_ref` Vault secret; check VCFA UI for account lockout. |
 | `status=error connector_error: RuntimeError … HTTP 401` on tenant plane | Tenant account doesn't have access to the org. | Verify `target.domain` matches the tenant org; verify the credential has tenant-side roles. |
+| `status=error connector_auth_failed` on a tenant op, message names `'refresh_token'` | VCFA 9.1 tenant login needs a refresh token, and the username/password exchange was not available (CSP login 400/404) or the stored token was refused. | Create a VCF Automation API token and store it as `refresh_token` in the target's secret. |
 | `status=error connector_error: RuntimeError … vcf-automation provider session re-login failed` (HTTP 401 after refresh) | Provider credentials consistently rejected. | Update the provider Vault secret; restart the backplane to flush the in-process session caches. |
 | `status=error … unknown_op` | The 11 core ops are not registered/enabled. | Re-run `apply_vcfa_core_curation` against the VCFA connector; see [`g36-vcfa-canary.md`](./g36-vcfa-canary.md). |
 | `status=denied` | `read_only` role, or a tenant policy denied the dispatch. | Use an `operator`-role token. |

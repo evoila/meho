@@ -28,7 +28,7 @@ policy"**. An exemption needs a different, recorded rationale.
 
 | Class | Meaning |
 |---|---|
-| **vuln** — MEHO-code vulnerability | A defect in code, chart, or workflow that MEHO ships which let a principal exceed its authorisation, exposed a secret or credential to a party not entitled to it, or let an outside party subvert the backplane. |
+| **vuln** — MEHO-code vulnerability | A defect in code, chart, or workflow that MEHO ships which let a principal exceed its authorisation, exposed a secret or credential to a party not entitled to it, let an **unauthenticated remote party exhaust the backplane** (pre-auth resource amplification), or let an outside party subvert the backplane. |
 | **dep** — dependency / base-image CVE patch | Upstream CVE fixed by bumping a dependency or base-image package. The upstream project owns the advisory. |
 | **hardening** — no demonstrated vulnerability | A new or strengthened control (defence in depth, fail-closed correctness, prompt-injection envelopes, resource caps, retention, CI/supply-chain pinning) where the entry demonstrates no exploitable path of the *vuln* kind. |
 | **docs** — docs-only or non-vulnerability | Documentation-only entries, scanner false-positive clears, test-fixture prose. |
@@ -62,13 +62,12 @@ decisions defensible; the operator picks per row or per family:
    optional CVE request. Adopters who pin an old tag (see #2661's
    version-skew evidence) get a Dependabot / `gh` advisory signal that
    a CHANGELOG line does not give them.
-2. **Record an exemption** with the rationale "internally discovered,
-   fixed and publicly described in the CHANGELOG within the same
-   release cycle, no external report, no known exploitation, all known
-   deployments notified by the release" — acceptable only if the
-   operator also confirms the private `security@meho.ai` inbox holds no
-   open report matching the row (that check is an operator step; inbox
-   content never lands in this public file).
+2. **Record an exemption — only if the entry predates the disclosure policy** (`SECURITY.md`,
+   first published 2026-05-09; the oldest `### Security` entry is v0.3.0, 2026-05-20), with a dated
+   rationale on the row. Per Task #3380 this is the sole exemption ground. The snapshot above shows
+   it applies to **zero** rows, so every "Owed" row resolves to *Published* or stays pending — no
+   internal-discovery / no-known-exploitation route exists. A broader policy would first have to be
+   decided on #3380 and written into `SECURITY.md`; until then the ledger does not recognise it.
 
 Either way the decision is recorded on the row and the dated gate-2
 statement on #2661 cites this file's commit.
@@ -131,7 +130,7 @@ the private finding behind the fix.
 | 45 | 0.29.0 | 3711 | Base image util-linux family patched for CVE-2026-53615 via targeted `apt-get --only-upgrade` (PR #3053). | dep | N/A — upstream advisory |
 | 46 | 0.28.0 | 5404 | `aiohttp` 3.14.3 (CVE-2026-69244) and `cryptography` 50.0.0 (CVE-2026-69247) bumps; `cryptography` floor raised in `pyproject.toml` (#2798). | dep | N/A — upstream advisory |
 | 47 | 0.23.0 | 7161 | `meho.scheduler.create` MCP tool cross-tenant write IDOR: any `tenant_admin` could schedule into any tenant; now requires `platform_admin` via `authorize_tenant_scope` (#2571). | vuln | Owed — decision pending |
-| 48 | 0.23.0 | 7305 | Agent-principal register: a post-create Keycloak failure left a live, un-revocable orphan client; an over-long name registered into an unreachable kill switch (#2523). | vuln | Owed — decision pending |
+| 48 | 0.23.0 | 7305 | Agent-principal register: a post-create Keycloak failure left a live, un-revocable orphan client; an over-long name registered into an unreachable kill switch (#2523). | hardening | N/A — orphan client / unreachable kill switch is a lifecycle correctness defect; no principal exceeded authorisation and no secret was exposed (same clause as row 6) |
 | 49 | 0.23.0 | 7327 | gcloud docstring reworded to clear a permanently-open trivy `gcp-service-account` false positive (#2493). | docs | N/A — no vulnerability |
 | 50 | 0.23.0 | 7339 | Workflow token least-privilege: `runner-smoke.yml` `permissions: {}`; SonarCloud job moved to GitHub-hosted with `contents: read` (CodeQL alerts #36 / #109) (#2492). | hardening (CI) | N/A — hardening |
 | 51 | 0.23.0 | 7358 | Base-image digest unfrozen to a literal Dependabot-tracked pin; base pip uninstalled (CVE-2026-8643 et al.); trivy SARIF severity filter + `exit-code: 1` (#2491). | dep | N/A — upstream advisory |
@@ -149,7 +148,7 @@ the private finding behind the fix.
 | 63 | 0.20.0 | 9533 | Three bounded `holodeck-ssh` remediation write ops added behind four-eyes approval, retiring an un-audited hand-run root-SSH recovery path (#2169). | hardening | N/A — hardening (new gated feature) |
 | 64 | 0.20.0 | 9537 | `harbor.robot.create` (a `credential_mint`) shipped `requires_approval=False`, so a human `tenant_admin` minted robot credentials with no second operator (#2173). | vuln | Owed — decision pending |
 | 65 | 0.20.0 | 9541 | `bind9.config.apply_file` / `apply_views` (`dangerous`) shipped `requires_approval=False`, so a human `tenant_admin` could overwrite live DNS with no four-eyes step (#2126). | vuln | Owed — decision pending |
-| 66 | 0.20.0 | 9641 | JWT omitting `exp` was accepted as non-expiring; now `401 missing_exp` per RFC 9068 (#2057). | vuln | Owed — decision pending |
+| 66 | 0.20.0 | 9641 | JWT omitting `exp` was accepted as non-expiring; now `401 missing_exp` per RFC 9068 (#2057). | hardening | N/A — requires the trusted issuer to emit a malformed (exp-less) token; same shape as row 52, classed hardening by the same rule |
 | 67 | 0.20.0 | 9645 | `known_op_count` in the `unknown_op` error was not tenant-scoped — a cross-tenant connector-existence / op-count oracle (#2058). | vuln | Owed — decision pending |
 | 68 | 0.20.0 | 9649 | KB bulk ingest confined to `KB_INGEST_ROOT`; a `tenant_admin` could ingest any `.md` on the backplane host (path traversal / LFI) (#2059). | vuln | Owed — decision pending |
 | 69 | 0.20.0 | 9653 | `/ui/*` gained `Content-Security-Policy: frame-ancestors 'none'` and `X-Frame-Options: DENY`; the console shipped with no clickjacking protection (#2060). | vuln | Owed — decision pending |
@@ -166,16 +165,17 @@ the private finding behind the fix.
 
 | Class | Rows | Disposition today |
 |---|---|---|
-| vuln — MEHO-code vulnerability | **38** (rows 2–5, 7–9, 12, 15, 20, 21, 24–26, 30–33, 35, 37, 38, 40, 43, 47, 48, 59, 62, 64–69, 71, 73, 74, 76, 77; row 4 also carries a dependency bump) | 38 × Owed — decision pending; 0 published; 0 exempt |
+| vuln — MEHO-code vulnerability | **36** (rows 2–5, 7–9, 12, 15, 20, 21, 24–26, 30–33, 35, 37, 38, 40, 43, 47, 59, 62, 64, 65, 67–69, 71, 73, 74, 76, 77; row 4 also carries a dependency bump) | 36 × Owed — decision pending; 0 published; 0 exempt |
 | dep — dependency / base-image CVE patch | **5** (rows 34, 44, 45, 46, 51) | N/A — upstream advisory |
-| hardening — no demonstrated vulnerability | **30** (rows 1, 6, 10, 11, 13, 14, 16–18, 22, 23, 27–29, 36, 41, 42, 50, 52, 53, 55–58, 60, 61, 63, 70, 72, 75) | N/A — hardening |
+| hardening — no demonstrated vulnerability | **32** (rows 1, 6, 10, 11, 13, 14, 16–18, 22, 23, 27–29, 36, 41, 42, 48, 50, 52, 53, 55–58, 60, 61, 63, 66, 70, 72, 75) | N/A — hardening |
 | docs — docs-only or non-vulnerability | **4** (rows 19, 39, 49, 54) | N/A — no vulnerability |
 | **Total** | **77** | |
 
-**Gate 2 status at this snapshot: open.** 38 rows await a
-publish-or-exempt decision and `security-advisories` returns 0. The
-gate closes when every *Owed* row reads *Published* or *Exempt* and
-the dated statement is posted on #2661.
+**Gate 2 status at this snapshot: open.** 36 rows await **publication**
+(`security-advisories` returns 0). The only exemption ground the policy
+allows — the entry predates `SECURITY.md` (2026-05-09) — applies to none of
+them, so the gate closes when every *Owed* row reads *Published* and the
+dated statement is posted on #2661.
 
 ## Reconciling before an rc / GA tag
 

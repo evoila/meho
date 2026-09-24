@@ -49,7 +49,7 @@ own.
    affected versions and severity (CVSS 3.1), and adds the reporter
    as a collaborator so they can review the text.
 3. **Fix in a temporary private fork.** The draft's temporary private
-   fork holds the fix; it is reviewed and tested there so the patch
+   fork holds the fix; it is reviewed there (GitHub does not run CI or status checks inside a temporary private fork; test the fix on a private branch or locally) so the patch
    does not appear on `main` before the advisory is ready.
 4. **CVE request (optional).** For a vulnerability that adopters should
    track in their scanners, we request a CVE through the GHSA form;
@@ -62,7 +62,10 @@ own.
    in [`docs/security/advisory-ledger.md`](docs/security/advisory-ledger.md)
    recording its class and whether an advisory was published, is not
    applicable (upstream CVE, hardening with no vulnerability, docs), or
-   was exempted with a recorded rationale. The release runbook
+   was exempted — the **only** exemption ground is that the entry
+   predates this policy (first published 2026-05-09), recorded with a
+   dated rationale on the row; a MEHO-code vulnerability fixed after
+   that date is disclosed only by a published advisory. The release runbook
    ([`docs/RELEASING.md`](docs/RELEASING.md)) reconciles that ledger
    before each release-candidate and GA tag, so no security fix ships
    without a disclosure decision on record.

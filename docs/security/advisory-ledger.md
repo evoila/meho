@@ -20,9 +20,10 @@ rc-series release step reconciles against.
 | Externally reported vulnerabilities cited in CHANGELOG | 0 | every entry cites an internal tracker item, an internal review finding, or a scanner alert |
 | Age of `SECURITY.md` policy | since the first commit (`1684c8ca`, 2026-05-09) | `git log --diff-filter=A -- SECURITY.md` |
 
-Because the coordinated-disclosure policy predates every release
-(v0.3.0 is 2026-05-20), **no entry can be exempted as "predates the
-policy"**. An exemption needs a different, recorded rationale.
+The only exemption ground the policy recognises is that an entry
+predates `SECURITY.md` (2026-05-09). Because the policy predates every
+release (v0.3.0 is 2026-05-20), **no row below is exemptible**: every
+owed MEHO-code vulnerability closes by a published GHSA.
 
 ## Classes
 
@@ -37,13 +38,14 @@ policy"**. An exemption needs a different, recorded rationale.
 
 | Disposition | Applies to | Meaning |
 |---|---|---|
-| **Owed — decision pending** | vuln | Per `SECURITY.md`, one of two outcomes must be recorded before the v1.0 tag: **(a)** a published GHSA (linked here), or **(b)** an exemption with a written rationale (recorded here, dated). Until one is recorded the gate is open. |
+| **Owed — decision pending** | vuln | Per `SECURITY.md`, one of two outcomes must be recorded before the v1.0 tag: **(a)** a published GHSA (linked here), or **(b)** an exemption on the policy's sole ground — the entry predates `SECURITY.md` (2026-05-09) — recorded here with a dated rationale (applies to no current row). Until one is recorded the gate is open. |
 | **N/A — upstream advisory** | dep | The CVE's advisory is published by the upstream project; MEHO owes none. Out of scope per #3380. |
 | **N/A — hardening** | hardening | Nothing to disclose; no affected-version / fixed-version pair exists. |
 | **N/A — no vulnerability** | docs | Nothing to disclose. |
 
 A row's *Owed* disposition becomes **Published — GHSA-xxxx-xxxx-xxxx** or
-**Exempt — <dated rationale>** by editing this file in the same PR that
+**Exempt — predates the policy (<date of the entry>, <dated rationale>)** — the only
+admissible form — by editing this file in the same PR that
 records the decision. Rows are never deleted.
 
 ### How an "Owed" row is decided

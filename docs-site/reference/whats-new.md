@@ -9,6 +9,27 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.35.14](https://github.com/evoila/meho/releases/tag/v0.35.14) — 2026-09-24
+
+- **You can now read and change a VM's CPU and memory limits and reservations.**
+  Two new vCenter operations show a VM's current CPU and memory limit,
+  reservation, and shares, and change any of them. A change needs approval
+  first; the approval request shows the current values next to the requested
+  ones, and the result reports the before and after values. Only the fields you
+  ask for are changed, a request that already matches the VM changes nothing,
+  and setting a limit to `-1` removes it.
+- **MEHO can log into VCF Automation 9.1.** VCF Automation 9.1 changed how
+  logins work, so every tenant operation against a 9.1 appliance failed. MEHO
+  now supports both the old and the new login, and it can also use an API token
+  stored with the target's credentials. If no login works, the error says what
+  to add. The VCF Automation health check also works on 9.1 and now
+  reports whether the provider API is reachable and which API versions the
+  appliance supports.
+- **The release process now covers release candidates and security
+  advisories.** The maintainer release guide describes how v1.0 release
+  candidates are cut and promoted, and a new ledger records how every past
+  security fix is disclosed.
+
 ## [v0.35.13](https://github.com/evoila/meho/releases/tag/v0.35.13) — 2026-09-23
 
 - **Each tenant on a shared instance can log into Vault under its own role.**

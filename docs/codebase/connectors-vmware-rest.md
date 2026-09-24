@@ -1129,7 +1129,7 @@ enum) are:
 | `vm.resize` | `resized`, `requires_power_off`, `no_change`, `partial` |
 | `vm.nic.repoint` | `repointed`, `not_found`, `ambiguous`, `invalid_request` |
 | `vm.device.cdrom` | `removed`, `updated`, `disconnected`, `invalid_request` |
-| `vm.resource_allocation.set` | `set`, `unchanged`, `invalid_request`, `vm_not_found`, `task_failed`, `timeout` (vim `ReconfigVM_Task` polled, #3880; `invalid_request` refuses an empty request, an out-of-range value or a resulting limit below its reservation before any write; `unchanged` when the request already matches (no task); a task *fault* is returned as the structured `task_failed` with the vim fault in `error` — not raised. Carries `before` / `after` allocation views) |
+| `vm.resource_allocation.set` | `set`, `unchanged`, `invalid_request`, `vm_not_found`, `partial`, `timeout` (vim `ReconfigVM_Task` polled, #3880; `invalid_request` refuses an empty request, an out-of-range value (a limit of `0` included — `-1` clears) or a resulting limit below its reservation before any write; `unchanged` when the request already matches (no task); `partial` when the task succeeded but the re-read `after` does not match every requested field; `vm_not_found` on a promoted `ManagedObjectNotFound`; a task *fault* raises `connector_error` like `vm.disk.grow`. Carries `before` / `after` allocation views) |
 
 `vm.create` is the only composite that issues a compensating
 mutation (`DELETE:/vcenter/vm/{vm}`) on partial failure. The other
@@ -1369,14 +1369,15 @@ in `composites/_vm_allocation.py` and ride the `/sdk/vim25` seam:
 - **`vm.resource_allocation.set`** (`caution`, `requires_approval=True` — the
   `#3505` allocation-write posture; reversible, no guest or data impact) —
   params `vm` + at least one of `cpu_limit_mhz` / `cpu_reservation_mhz` /
-  `memory_limit_mb` / `memory_reservation_mb` (`-1` clears a limit). Reads the
+  `memory_limit_mb` / `memory_reservation_mb` (`-1` clears a limit; a limit
+  of `0` is refused). Reads the
   current allocation (`before`), refuses `invalid_request` / returns
   `unchanged` before any write, then issues one `ReconfigVM_Task` whose
   `VirtualMachineConfigSpec` carries **only** the requested
   `ResourceAllocationInfo` fields (unset fields are left unchanged by
   vSphere) through the shared `_write_vmomi_sub_op` gate, polls the task and
   re-reads (`after`). The response carries the task moid + terminal
-  `task_state`. The park-time preview live-reads the current allocation and
+  `task_state`; a task fault raises (`connector_error`, audited as failed). The park-time preview live-reads the current allocation and
   echoes the requested fields. The vim pair is the same
   `RetrievePropertiesEx` / `ReconfigVM_Task` `vm.disk.grow` reconciles, so no
   new vim op_id is introduced. vCenter targets only (the standalone-ESXi SOAP

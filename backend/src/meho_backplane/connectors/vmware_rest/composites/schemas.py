@@ -6547,7 +6547,8 @@ VM_RESOURCE_ALLOCATION_SET_PARAMETER_SCHEMA: dict[str, Any] = {
         "cpu_limit_mhz": {
             "type": "integer",
             "minimum": -1,
-            "description": "CPU limit in MHz; -1 clears the limit (unlimited).",
+            "not": {"const": 0},
+            "description": "CPU limit in MHz (>= 1); -1 clears the limit (unlimited).",
         },
         "cpu_reservation_mhz": {
             "type": "integer",
@@ -6557,7 +6558,8 @@ VM_RESOURCE_ALLOCATION_SET_PARAMETER_SCHEMA: dict[str, Any] = {
         "memory_limit_mb": {
             "type": "integer",
             "minimum": -1,
-            "description": "Memory limit in MB; -1 clears the limit (unlimited).",
+            "not": {"const": 0},
+            "description": "Memory limit in MB (>= 1); -1 clears the limit (unlimited).",
         },
         "memory_reservation_mb": {
             "type": "integer",
@@ -6586,7 +6588,7 @@ VM_RESOURCE_ALLOCATION_SET_RESPONSE_SCHEMA: dict[str, Any] = {
                 "unchanged",
                 "invalid_request",
                 "vm_not_found",
-                "task_failed",
+                "partial",
                 "timeout",
             ],
             "description": (
@@ -6595,9 +6597,10 @@ VM_RESOURCE_ALLOCATION_SET_RESPONSE_SCHEMA: dict[str, Any] = {
                 "``'invalid_request'`` -- refused before any write (no field, "
                 "out of range, or a limit below the reservation); "
                 "``'vm_not_found'`` -- no readable allocation for the moid; "
-                "``'task_failed'`` -- the task faulted (``error`` carries the "
-                "vim fault message); ``'timeout'`` -- the task did not finish "
-                "within the poll bound."
+                "``'partial'`` -- the task succeeded but the re-read ``after`` "
+                "does not match every requested field; ``'timeout'`` -- the "
+                "task did not finish within the poll bound. A task fault is "
+                "not a status: it raises (``connector_error``)."
             ),
         },
         "vm": {"type": "string"},
@@ -6613,7 +6616,6 @@ VM_RESOURCE_ALLOCATION_SET_RESPONSE_SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "description": "success / error / timeout once the task was issued.",
         },
-        "error": {"type": ["string", "null"], "description": "vim fault on task_failed."},
         "guidance": {"type": ["string", "null"]},
     },
     "required": ["status", "vm"],

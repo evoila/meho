@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Final
 
+from meho_backplane.connectors.base import ConnectorResourceNotFoundError
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _OP_RECONFIG_VM_TASK,
     _OP_RETRIEVE_PROPERTIES,
@@ -122,19 +123,24 @@ async def read_vm_allocation(
     """Read ``{name, cpu_allocation, memory_allocation}`` for one VM, or ``None``.
 
     One ungated ``RetrievePropertiesEx`` on the VI-JSON seam. ``None`` when
-    neither allocation came back (unknown moid / no readable config).
-    Transport faults propagate (the dispatcher wraps ``connector_error``).
+    vCenter reports ``ManagedObjectNotFound`` for the moid (promoted by the
+    connector) or neither allocation came back. Other transport faults
+    propagate (the dispatcher wraps ``connector_error``).
     """
-    result = await connector._post_vmomi_json(
-        target,
-        _VMOMI_RETRIEVE_PROPERTIES_PATH,
-        operator=operator,
-        json=retrieve_properties_body(
-            _VIRTUAL_MACHINE_MO_TYPE,
-            [vm],
-            [_PROP_NAME, _PROP_CPU_ALLOCATION, _PROP_MEMORY_ALLOCATION],
-        ),
-    )
+    try:
+        result = await connector._post_vmomi_json(
+            target,
+            _VMOMI_RETRIEVE_PROPERTIES_PATH,
+            operator=operator,
+            json=retrieve_properties_body(
+                _VIRTUAL_MACHINE_MO_TYPE,
+                [vm],
+                [_PROP_NAME, _PROP_CPU_ALLOCATION, _PROP_MEMORY_ALLOCATION],
+            ),
+            promote_managed_object_not_found=True,
+        )
+    except ConnectorResourceNotFoundError:
+        return None
     cpu = _allocation_view(_extract_single_prop(result, _PROP_CPU_ALLOCATION))
     memory = _allocation_view(_extract_single_prop(result, _PROP_MEMORY_ALLOCATION))
     if cpu is None and memory is None:
@@ -212,10 +218,11 @@ def _validation_error(
         )
     for param, value in requested.items():
         _, info_field = _PARAM_FIELDS[param]
-        floor = UNLIMITED if info_field == "limit" else 0
-        if value < floor:
+        # A limit of 0 would starve the VM entirely -- refuse it; -1 clears.
+        bad = (value < UNLIMITED or value == 0) if info_field == "limit" else value < 0
+        if bad:
             return (
-                f"{param}={value} is out of range (limits: -1 = unlimited or >= 0; "
+                f"{param}={value} is out of range (limits: -1 = unlimited or >= 1; "
                 "reservations: >= 0)"
             )
     for spec_field, unit in (("cpuAllocation", "MHz"), ("memoryAllocation", "MB")):
@@ -245,6 +252,17 @@ def _build_reconfig_body(requested: dict[str, int]) -> dict[str, Any]:
     return {"spec": spec}
 
 
+def _applied(requested: dict[str, int], after: dict[str, Any] | None) -> bool:
+    """``True`` iff every requested field reads back with the requested value."""
+    if after is None:
+        return False
+    return all(
+        (after.get(_ENVELOPE_KEY[spec_field]) or {}).get(info_field) == requested[param]
+        for param, (spec_field, info_field) in _PARAM_FIELDS.items()
+        if param in requested
+    )
+
+
 def _precheck(
     envelope: dict[str, Any],
     requested: dict[str, int],
@@ -266,12 +284,7 @@ def _precheck(
     problem = _validation_error(requested, _projected(current, requested))
     if problem is not None:
         return {**envelope, "status": "invalid_request", "guidance": problem}
-    already = all(
-        (current.get(_ENVELOPE_KEY[spec_field]) or {}).get(info_field) == requested[param]
-        for param, (spec_field, info_field) in _PARAM_FIELDS.items()
-        if param in requested
-    )
-    if already:
+    if _applied(requested, before):
         return {
             **envelope,
             "status": "unchanged",
@@ -282,18 +295,17 @@ def _precheck(
 
 
 def _task_outcome_envelope(envelope: dict[str, Any], outcome: Any) -> dict[str, Any] | None:
-    """Map a faulted / timed-out Task to its envelope; ``None`` on success."""
+    """Raise on a faulted Task; map a timeout to its envelope; ``None`` on success.
+
+    A task fault raises (the dispatcher wraps it ``connector_error`` and
+    audits the call as failed), mirroring ``vm.disk.grow``.
+    """
     envelope.update(task=outcome.task, task_state=outcome.state)
     if outcome.state == TASK_STATE_ERROR:
-        return {
-            **envelope,
-            "status": "task_failed",
-            "error": outcome.error_message or "<no fault reported>",
-            "guidance": (
-                f"ReconfigVM_Task {outcome.task} faulted; the allocation is unchanged -- "
-                "read the error, adjust the request, and retry"
-            ),
-        }
+        raise RuntimeError(
+            f"vm.resource_allocation.set: ReconfigVM_Task on vm {envelope['vm']!r} faulted: "
+            f"{outcome.error_message or '<no fault reported>'}"
+        )
     if outcome.timed_out:
         return {
             **envelope,
@@ -323,8 +335,9 @@ async def vm_resource_allocation_set_composite(
     (``unchanged``) before any write -> gated ``ReconfigVM_Task`` carrying
     only the requested fields -> poll to terminal -> re-read (``after``).
     A policy gate returns its :class:`OperationResult` verbatim (nothing on
-    the wire); a task fault returns ``status='task_failed'`` with the vim
-    fault message; a poll timeout returns ``status='timeout'``.
+    the wire); a task fault raises (``connector_error``); a poll timeout
+    returns ``status='timeout'``; an ``after`` read that does not match the
+    request returns ``status='partial'``.
     """
     vm = params["vm"]
     requested = _requested(params)
@@ -336,7 +349,6 @@ async def vm_resource_allocation_set_composite(
         "after": None,
         "task": None,
         "task_state": None,
-        "error": None,
         "guidance": None,
     }
     current = await read_vm_allocation(connector, target, operator, vm=vm) if requested else None
@@ -376,4 +388,14 @@ async def vm_resource_allocation_set_composite(
         if after_read is not None
         else None
     )
+    if not _applied(requested, after):
+        return {
+            **envelope,
+            "status": "partial",
+            "after": after,
+            "guidance": (
+                "ReconfigVM_Task succeeded but the re-read allocation does not match every "
+                "requested field; compare 'requested' with 'after'"
+            ),
+        }
     return {**envelope, "status": "set", "after": after}

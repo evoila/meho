@@ -1413,8 +1413,9 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
             "(status='invalid_request') and returns status='unchanged' for a "
             "request that already matches, both before any write. Otherwise "
             "polls the task and re-reads: before / after allocations, task "
-            "moid + terminal state. A task fault returns "
-            "status='task_failed' with the vim fault message. Reversible "
+            "moid + terminal state; status='partial' if the re-read does not "
+            "match the request. A task fault raises (connector_error). A limit "
+            "of 0 is refused (use -1 to clear). Reversible "
             "(re-run with the old values or -1). Takes effect live on a "
             "powered-on VM. Equivalent of 'govc vm.change -cpu.limit / "
             "-cpu.reservation / -mem.limit / -mem.reservation'."
@@ -1435,17 +1436,18 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
             ),
             "parameter_hints": {
                 "vm": "VM moid, e.g. 'vm-42'.",
-                "cpu_limit_mhz": "CPU limit in MHz; -1 = unlimited (clears the cap).",
+                "cpu_limit_mhz": "CPU limit in MHz (>= 1); -1 = unlimited (clears the cap).",
                 "cpu_reservation_mhz": "CPU reservation in MHz (>= 0).",
-                "memory_limit_mb": "Memory limit in MB; -1 = unlimited.",
+                "memory_limit_mb": "Memory limit in MB (>= 1); -1 = unlimited.",
                 "memory_reservation_mb": "Memory reservation in MB (>= 0).",
             },
             "output_shape": (
                 "{status: set|unchanged|invalid_request|vm_not_found|"
-                "task_failed|timeout, vm, name, requested, before: "
+                "partial|timeout, vm, name, requested, before: "
                 "{cpu_allocation, memory_allocation}, after: {...}, task, "
-                "task_state, error, guidance}. Each allocation is {limit, "
-                "reservation, shares: {level, shares}}."
+                "task_state, guidance}. A task fault is an error, not a "
+                "status. Each allocation is {limit, reservation, shares: "
+                "{level, shares}}."
             ),
         },
     ),

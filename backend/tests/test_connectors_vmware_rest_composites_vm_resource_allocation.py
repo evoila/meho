@@ -23,6 +23,7 @@ from jsonschema import Draft202012Validator, ValidationError
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors import OperationResult
+from meho_backplane.connectors.base import ConnectorResourceNotFoundError
 from meho_backplane.connectors.vmware_rest.composites import (
     _vm_allocation,
     _write,
@@ -74,19 +75,33 @@ class _VimFake:
         memory: dict[str, Any] | None,
         task_state: str = "success",
         task_error: str | None = None,
+        missing: bool = False,
+        apply_on_success: bool = True,
     ) -> None:
         self.cpu = cpu
         self.memory = memory
         self.task_state = task_state
         self.task_error = task_error
+        self.missing = missing
+        self.apply_on_success = apply_on_success
         self.vmomi_calls: list[tuple[str, Any]] = []
+        self.promote_flags: list[bool] = []
 
     async def _post_vmomi_json(
-        self, target: Any, path: str, *, operator: Operator, json: Any = None
+        self,
+        target: Any,
+        path: str,
+        *,
+        operator: Operator,
+        json: Any = None,
+        promote_managed_object_not_found: bool = False,
     ) -> Any:
         self.vmomi_calls.append((path, copy.deepcopy(json)))
+        self.promote_flags.append(promote_managed_object_not_found)
+        if self.missing and promote_managed_object_not_found:
+            raise ConnectorResourceNotFoundError(["vm-missing"], "not found")
         if path.endswith("/ReconfigVM_Task"):
-            if self.task_state == "success":
+            if self.task_state == "success" and self.apply_on_success:
                 self._apply(json["spec"])
             return {"_typeName": "ManagedObjectReference", "type": "Task", "value": "task-77"}
         spec_type = json["specSet"][0]["propSet"][0]["type"]
@@ -219,7 +234,6 @@ async def test_set_cpu_limit_reconfigures_only_that_field(gate: _GateRecorder) -
     assert out["after"]["memory_allocation"]["limit"] == -1
     assert out["task"] == "task-77"
     assert out["task_state"] == "success"
-    assert out["error"] is None
     _assert_set_schema(out)
 
     # The ConfigSpec carries ONLY cpuAllocation.limit (unset = unchanged).
@@ -338,21 +352,40 @@ async def test_set_gate_park_keeps_the_write_off_the_wire(
     assert conn.reconfig_bodies == []
 
 
-async def test_set_task_fault_is_a_structured_error(gate: _GateRecorder) -> None:
+async def test_set_task_fault_raises(gate: _GateRecorder) -> None:
+    """A faulted task raises (dispatcher -> connector_error, audited as failed)."""
     conn = _VimFake(
         cpu=_alloc(-1, 0),
         memory=_alloc(-1, 0),
         task_state="error",
         task_error="A specified parameter was not correct: spec.cpuAllocation.limit",
     )
+    with pytest.raises(RuntimeError, match=r"spec\.cpuAllocation\.limit"):
+        await _set(conn, cpu_limit_mhz=1000)
+
+
+async def test_set_read_back_mismatch_is_partial(gate: _GateRecorder) -> None:
+    conn = _VimFake(cpu=_alloc(-1, 0), memory=_alloc(-1, 0), apply_on_success=False)
     out = await _set(conn, cpu_limit_mhz=1000)
-    assert out["status"] == "task_failed"
-    assert out["task"] == "task-77"
-    assert out["task_state"] == "error"
-    assert "spec.cpuAllocation.limit" in out["error"]
-    assert out["before"]["cpu_allocation"]["limit"] == -1
-    assert out["after"] is None
+    assert out["status"] == "partial"
+    assert out["after"]["cpu_allocation"]["limit"] == -1
+    assert out["task_state"] == "success"
     _assert_set_schema(out)
+
+
+async def test_set_zero_limit_is_refused(gate: _GateRecorder) -> None:
+    conn = _VimFake(cpu=_alloc(-1, 0), memory=_alloc(-1, 0))
+    out = await _set(conn, cpu_limit_mhz=0)
+    assert out["status"] == "invalid_request"
+    assert conn.reconfig_bodies == []
+
+
+async def test_read_promotes_managed_object_not_found(gate: _GateRecorder) -> None:
+    conn = _VimFake(cpu=_alloc(-1, 0), memory=_alloc(-1, 0), missing=True)
+    out = await _set(conn, cpu_limit_mhz=1000)
+    assert out["status"] == "vm_not_found"
+    assert conn.promote_flags == [True]
+    assert conn.reconfig_bodies == []
 
 
 async def test_set_poll_timeout(monkeypatch: pytest.MonkeyPatch, gate: _GateRecorder) -> None:
@@ -375,6 +408,8 @@ async def test_set_poll_timeout(monkeypatch: pytest.MonkeyPatch, gate: _GateReco
     [
         {"vm": "vm-42"},
         {"vm": "vm-42", "cpu_limit_mhz": -2},
+        {"vm": "vm-42", "cpu_limit_mhz": 0},
+        {"vm": "vm-42", "memory_limit_mb": 0},
         {"vm": "vm-42", "cpu_reservation_mhz": -1},
         {"vm": "vm-42", "cpu_limit_mhz": 100, "cpu_shares": 10},
         {"cpu_limit_mhz": 100},

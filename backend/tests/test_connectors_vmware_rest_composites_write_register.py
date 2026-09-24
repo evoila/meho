@@ -774,13 +774,13 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
         "vmware.composite.vm.power": {"ok", "error", "tools_unavailable"},
         "vmware.composite.vm.disk.grow": {"grown", "invalid_shrink", "disk_not_found", "timeout"},
         # #3880: set / idempotent unchanged + pre-write refusals + a
-        # structured task fault + poll timeout.
+        # read-back mismatch + poll timeout (a task fault raises).
         "vmware.composite.vm.resource_allocation.set": {
             "set",
             "unchanged",
             "invalid_request",
             "vm_not_found",
-            "task_failed",
+            "partial",
             "timeout",
         },
         "vmware.composite.vm.disk.attach": {

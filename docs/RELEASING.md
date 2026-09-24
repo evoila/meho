@@ -132,7 +132,7 @@ Choose the bump from what's in `[Unreleased]`:
   disclosure decision: add the row (class + disposition) in the
   release-cutting PR. A MEHO-code vulnerability row is closed either by
   a published GitHub repository security advisory (GHSA) linked on the
-  row or by a dated, rationale-backed exemption — steps in
+  row or by an exemption on the policy's sole ground (the entry predates `SECURITY.md`, 2026-05-09 — applies to no current row) — steps in
   [`SECURITY.md`](../SECURITY.md#coordinated-disclosure-steps), ledger
   at [`docs/security/advisory-ledger.md`](security/advisory-ledger.md).
   This is v1.0 gate 2 (Goal #2661).
@@ -612,7 +612,7 @@ candidate commit's `main` CI run; cancelled ≠ green). Then:
   advisory is still a private draft, and the row records that), so a
   non-zero count blocks nothing at an rc but must be listed on #2661;
   at the **final** tag it must be `0` — every MEHO-code row closed by a
-  published GHSA or a dated, rationale-backed exemption — and the dated
+  published GHSA or an exemption on the policy's sole ground (the entry predates `SECURITY.md`, 2026-05-09 — applies to no current row) — and the dated
   gate-2 statement ("advisories … published" / "no pending advisories
   as of YYYY-MM-DD") is on #2661 (R8).
 

@@ -265,6 +265,29 @@ def test_create_duplicate_slug_rerenders_error_no_redirect() -> None:
     assert "data-write-error" in resp.text
 
 
+def test_new_form_renders_clean_with_no_field_errors() -> None:
+    """The New page renders when nothing has failed yet (#384).
+
+    The `error_for` / `error_class` macros read `errors` from the render
+    context, so a context that omits it raises `UndefinedError` and 500s
+    the page *before* any validation runs. The edit-mode test alone would
+    not have caught a create-only regression, so both GETs are pinned.
+    """
+    _seed_tenant()
+    session_id, jwks = _role_session(TenantRole.TENANT_ADMIN)
+    client, mock = _client(session_id, jwks)
+    try:
+        resp = client.get("/ui/event-sources/new")
+    finally:
+        mock.stop()
+    assert resp.status_code == 200, resp.text
+    body = resp.text
+    assert "New event source" in body
+    # A clean render carries neither the banner nor any field error.
+    assert "data-write-error" not in body
+    assert "data-error-for" not in body
+
+
 def test_create_bad_extras_json_names_the_extras_field() -> None:
     """Malformed Extras JSON is attributed to Extras, not just the banner (#384)."""
     _seed_tenant()

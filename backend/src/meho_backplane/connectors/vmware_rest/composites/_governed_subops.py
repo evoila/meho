@@ -36,6 +36,7 @@ from meho_backplane.connectors.vmware_rest.composites import (
     _namespace,
     _storage_policy,
     _supervisor,
+    _vm_allocation,
     _write,
 )
 
@@ -60,6 +61,9 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.vm.power.bulk": _write._SUB_OPS_VM_POWER_BULK,
     "vmware.composite.vm.power": _write._SUB_OPS_VM_POWER,
     "vmware.composite.vm.disk.grow": _write._VIM_SUB_OPS_VM_DISK_GROW,
+    "vmware.composite.vm.resource_allocation.set": (
+        _vm_allocation._VIM_SUB_OPS_VM_RESOURCE_ALLOCATION_SET
+    ),
     "vmware.composite.vm.disk.attach": _write._VIM_SUB_OPS_VM_DISK_ATTACH,
     "vmware.composite.vm.clone_from_template": _write._VIM_SUB_OPS_VM_CLONE_FROM_TEMPLATE,
     "vmware.composite.host.evacuate": (

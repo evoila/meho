@@ -103,6 +103,8 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.vm.resize",
     "vmware.composite.vm.nic.repoint",
     "vmware.composite.vm.device.cdrom",
+    # VM CPU / memory limit + reservation write (#3880) -- caution + approval.
+    "vmware.composite.vm.resource_allocation.set",
     "vmware.composite.host.evacuate",
     "vmware.composite.host.detach_from_vds",
     "vmware.composite.network.portgroup.create",
@@ -147,6 +149,8 @@ _READ_OP_IDS: tuple[str, ...] = (
     # Datastore cache refresh read (#3789).
     "vmware.composite.datastore.refresh",
     "vmware.composite.network.portgroup.audit",
+    # VM CPU / memory limit + reservation read (#3880).
+    "vmware.composite.vm.resource_allocation.show",
     # Guest-ops channel reads (#3100).
     "vmware.composite.vm.guest.process.list",
     "vmware.composite.vm.guest.env.read",
@@ -275,6 +279,10 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
     "vmware.composite.vm.device.cdrom": (
         "meho_backplane.connectors.vmware_rest.composites._write.vm_device_cdrom_composite"
     ),
+    "vmware.composite.vm.resource_allocation.set": (
+        "meho_backplane.connectors.vmware_rest.composites._vm_allocation."
+        "vm_resource_allocation_set_composite"
+    ),
     "vmware.composite.guest.customization_spec.create": (
         "meho_backplane.connectors.vmware_rest.composites._write."
         "guest_customization_spec_create_composite"
@@ -336,6 +344,7 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.vm.resize": "vm",
     "vmware.composite.vm.nic.repoint": "vm",
     "vmware.composite.vm.device.cdrom": "vm",
+    "vmware.composite.vm.resource_allocation.set": "vm",
     "vmware.composite.host.evacuate": "host",
     "vmware.composite.host.detach_from_vds": "host",
     "vmware.composite.network.portgroup.create": "networking",
@@ -528,6 +537,7 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
     # otherwise the loop is vacuous when the set is empty / partial.
     assert {row.op_id for row in rows} == set(_WRITE_OP_IDS)
     caution_ops = {
+        "vmware.composite.vm.resource_allocation.set",
         "vmware.composite.resource_pool.create",
         "vmware.composite.cluster.drs_vm_host_rule.create",
         "vmware.composite.storage_policy.create",
@@ -763,6 +773,16 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
         "vmware.composite.vm.migrate": {"migrated", "no_recommendation"},
         "vmware.composite.vm.power": {"ok", "error", "tools_unavailable"},
         "vmware.composite.vm.disk.grow": {"grown", "invalid_shrink", "disk_not_found", "timeout"},
+        # #3880: set / idempotent unchanged + pre-write refusals + a
+        # structured task fault + poll timeout.
+        "vmware.composite.vm.resource_allocation.set": {
+            "set",
+            "unchanged",
+            "invalid_request",
+            "vm_not_found",
+            "task_failed",
+            "timeout",
+        },
         "vmware.composite.vm.disk.attach": {
             "attached",
             "invalid_vmdk_path",

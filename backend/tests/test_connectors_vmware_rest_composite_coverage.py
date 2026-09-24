@@ -62,6 +62,9 @@ _CLASSIFIER_OTHER = frozenset(
         "vmware.composite.vm.resize",
         "vmware.composite.vm.nic.repoint",
         "vmware.composite.vm.device.cdrom",
+        # #3880: ``.show`` / ``.set`` are not classifier suffixes -> ``other``.
+        "vmware.composite.vm.resource_allocation.show",
+        "vmware.composite.vm.resource_allocation.set",
         "vmware.composite.vm.customize",
         "vmware.composite.host.datastore_mount_nfs",
         "vmware.composite.host.disk_mark_flash",

@@ -32,7 +32,9 @@ resource-pool allocation writes `resource_pool.create` (`caution`) +
 `resource_pool.delete` (`dangerous`) and the VM-Host affinity
 `cluster.drs_vm_host_rule.create` (`caution`) / `#3505`, the `#2891`
 post-clone hardware reconfigure trio `vm.resize` / `vm.nic.repoint` /
-`vm.device.cdrom`, the two guest-customization (GOSC) composites
+`vm.device.cdrom`, the VM CPU / memory limit + reservation write
+`vm.resource_allocation.set` (`caution`, with its safe read
+`vm.resource_allocation.show`) / `#3880`, the two guest-customization (GOSC) composites
 `guest.customization_spec.create` + `vm.customize` / `#2892`, the
 OVF/OVA content-library deploy `vm.deploy_from_library` / `#2909`, and
 the three host-domain writes `host.datastore_mount_nfs` /
@@ -1127,6 +1129,7 @@ enum) are:
 | `vm.resize` | `resized`, `requires_power_off`, `no_change`, `partial` |
 | `vm.nic.repoint` | `repointed`, `not_found`, `ambiguous`, `invalid_request` |
 | `vm.device.cdrom` | `removed`, `updated`, `disconnected`, `invalid_request` |
+| `vm.resource_allocation.set` | `set`, `unchanged`, `invalid_request`, `vm_not_found`, `task_failed`, `timeout` (vim `ReconfigVM_Task` polled, #3880; `invalid_request` refuses an empty request, an out-of-range value or a resulting limit below its reservation before any write; `unchanged` when the request already matches (no task); a task *fault* is returned as the structured `task_failed` with the vim fault in `error` — not raised. Carries `before` / `after` allocation views) |
 
 `vm.create` is the only composite that issues a compensating
 mutation (`DELETE:/vcenter/vm/{vm}`) on partial failure. The other
@@ -1348,6 +1351,36 @@ capacity diff (`{vm, name, disk, disk_label, current_capacity_bytes,
 requested_capacity_bytes, delta_bytes}`) — the delta is the decision the
 approver makes; a failing disk read parks with the #1628
 `preview_unavailable` marker (the delta is unknowable).
+
+### VM CPU / memory limit + reservation (`vm.resource_allocation.show` / `.set`, #3880)
+
+A VM's resource allocation (`VirtualMachineConfigInfo.cpuAllocation` /
+`memoryAllocation`, each a vim `ResourceAllocationInfo`: `limit` /
+`reservation` / `shares`) has no REST expression — the pinned `vcenter.yaml`
+`hardware/cpu` + `hardware/memory` resources carry the vCPU count and memory
+size only, and `vmware.vm.info` does not project it — and the ingested
+vim-object `ReconfigVM_Task` binding 404s under `/api` (#3534). Both ops live
+in `composites/_vm_allocation.py` and ride the `/sdk/vim25` seam:
+
+- **`vm.resource_allocation.show`** (`safe`) — one ungated
+  `RetrievePropertiesEx` of `name` + `config.cpuAllocation` +
+  `config.memoryAllocation`; returns `{limit, reservation, shares: {level,
+  shares}}` for CPU (MHz) and memory (MB). `limit = -1` means unlimited.
+- **`vm.resource_allocation.set`** (`caution`, `requires_approval=True` — the
+  `#3505` allocation-write posture; reversible, no guest or data impact) —
+  params `vm` + at least one of `cpu_limit_mhz` / `cpu_reservation_mhz` /
+  `memory_limit_mb` / `memory_reservation_mb` (`-1` clears a limit). Reads the
+  current allocation (`before`), refuses `invalid_request` / returns
+  `unchanged` before any write, then issues one `ReconfigVM_Task` whose
+  `VirtualMachineConfigSpec` carries **only** the requested
+  `ResourceAllocationInfo` fields (unset fields are left unchanged by
+  vSphere) through the shared `_write_vmomi_sub_op` gate, polls the task and
+  re-reads (`after`). The response carries the task moid + terminal
+  `task_state`. The park-time preview live-reads the current allocation and
+  echoes the requested fields. The vim pair is the same
+  `RetrievePropertiesEx` / `ReconfigVM_Task` `vm.disk.grow` reconciles, so no
+  new vim op_id is introduced. vCenter targets only (the standalone-ESXi SOAP
+  transport has no `ReconfigVM_Task` builder).
 
 ### Shared disks for WSFC/FCI — bus-sharing, eagerzeroedthick, shared-attach (#3256)
 
@@ -2308,6 +2341,7 @@ composite on the generic per-op hook (`register_preview_builder`,
 | `vm.resize` | `{vm, name, power_state, current, requested}` sizing from->to | live read (`GET:/vcenter/vm/{vm}`) |
 | `vm.nic.repoint` | `{vm, name, nic, mac_address, current_backing, requested_backing}` network from->to (`requested_backing` carries `backing_type`, so distributed and standard previews are identical) | live read (`ethernet/{nic}` + `GET:/vcenter/network`) |
 | `vm.device.cdrom` | `{vm, name, cdrom, action, current_backing, state}` (the host-local ISO path) | live read (`cdrom/{cdrom}`) |
+| `vm.resource_allocation.set` | `{vm, name, current: {cpu_allocation, memory_allocation}, requested}` limit / reservation from->to | live read (vim `RetrievePropertiesEx`) |
 | `vm.create` | creation-spec echo (name, guest_os, placement pins — folder_name, folder (#3115), resource_pool, datastore, host (#3096) — sizing, networks, disks_gb (#3117), nested_hv, power-on) | param echo, no I/O |
 | `vm.clone` | clone-coordinates echo | param echo, no I/O |
 | `vm.deploy_from_library` | deploy-coordinates echo (item ref, placement, network mappings, provisioning, `ovf_property_keys` — **ids only**, never values #1503, power-on) | param echo, no I/O |

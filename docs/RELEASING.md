@@ -555,6 +555,7 @@ and R4 tags exactly it:
 ```bash
 git fetch origin main
 RC_SHA=$(git rev-parse origin/main)   # the candidate; do not recompute it later
+RC_PREV=$(git describe --tags --abbrev=0 "$RC_SHA")   # previous tag of any kind, relative to the candidate (not to your checkout)
 git log -1 --format='%H %s' "$RC_SHA"
 gh run list --repo evoila/meho --commit "$RC_SHA" --branch main   # the CI run you are verifying
 ```
@@ -640,6 +641,9 @@ recomputed `main` tip:
 
 ```bash
 git fetch origin main
+[ -n "${RC_SHA:-}" ] || { echo "RC_SHA is unset — re-run the R3 pin block (a new shell since R3 loses it)"; exit 1; }
+git merge-base --is-ancestor "$RC_SHA" origin/main \
+  || { echo "$RC_SHA is no longer on main (force-push or revert) — repeat R3 for the current tip"; exit 1; }
 [ "$(git rev-parse origin/main)" = "$RC_SHA" ] \
   || echo "main moved past the verified candidate: tag $RC_SHA as verified, or repeat R3 for the new tip"
 git tag v1.0.0-rc.N "$RC_SHA"
@@ -859,8 +863,8 @@ follow-up task.
         [Unreleased] audited (PREV = last tag of any kind) but NOT rolled;
         path-freshness gate run against [Unreleased]; advisory ledger
         reconciled per 1a ("Owed — decision pending" rows allowed on an
-        rc, listed on #2661; zero at GA); tag the green main commit by
-        SHA; Release
+        rc, listed on #2661; zero at GA); RC_SHA pinned BEFORE the
+        checks and tagged unchanged (R4 aborts if it left main); Release
         marked pre-release, image :vX.Y.Z-rc.N, chart X.Y.Z-rc.N; lab
         deploy pinned to exact chart version + promoted image digest,
         smoke-green; round-2 run (#3379) -> rc.N+1 on a fixed
@@ -876,8 +880,10 @@ follow-up task.
   rolled, so v0.5.0's notes omitted ~24 PRs. Fixed retroactively; step 2
   prevents recurrence.
 - **Empty release notes:** `cli-release.yml` falls back to `[Unreleased]`
-  when no `## [X.Y.Z]` section exists at tag time. Always roll (step 2)
-  *before* tagging (step 4).
+  when no `## [X.Y.Z]` section exists at tag time. For a final tag,
+  always roll (step 2) *before* tagging (step 4); an rc deliberately does
+  not roll and rides this fallback (R3), so for an rc the audit of
+  `[Unreleased]` is the guard.
 - **Strict `current == head` readiness vs pre-upgrade migrations
   (v0.12.0, 2026-06-08, ~2.5h outage):** the migration Job committed
   `0037` before the Deployment rolled; the new release failed

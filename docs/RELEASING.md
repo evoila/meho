@@ -549,8 +549,24 @@ dot-separated numeric counter (`v1.0.0-rc.1`, `v1.0.0-rc.2`, …):
 
 ### R3 — Before cutting an rc (pre-flight deltas)
 
+Pin the candidate first — every check in R3 is bound to this one SHA,
+and R4 tags exactly it:
+
+```bash
+git fetch origin main
+RC_SHA=$(git rev-parse origin/main)   # the candidate; do not recompute it later
+git log -1 --format='%H %s' "$RC_SHA"
+gh run list --repo evoila/meho --commit "$RC_SHA" --branch main   # the CI run you are verifying
+```
+
+If `main` moves while you work through R3, you have two honest
+choices: tag `$RC_SHA` anyway (it is the commit the checks were run on),
+or restart R3 with the new tip. Never tag a SHA that did not receive the
+checks below — that is the moving-branch race the final-release
+procedure avoids by selecting its merge commit explicitly.
+
 Run step 1 as written (Tasks closed; **real** `success` on the
-candidate commit's `main` CI run; cancelled ≠ green). Then:
+`$RC_SHA` `main` CI run; cancelled ≠ green). Then:
 
 - [ ] **Contract gates green on the candidate commit.** Gate 4 of
   #2661 — "contract snapshots + compat gates green across the rc
@@ -578,7 +594,7 @@ candidate commit's `main` CI run; cancelled ≠ green). Then:
   hand and record the classification on #2661:
 
   ```bash
-  git diff "${RC_PREV}"..main -- cli/api/openapi.json docs-site/reference/cli.md docs-site/reference/maturity.md
+  git diff "${RC_PREV}".."${RC_SHA}" -- cli/api/openapi.json docs-site/reference/cli.md docs-site/reference/maturity.md
   ```
 
   Anything that is not additive — removed path / operation / field,
@@ -619,11 +635,13 @@ candidate commit's `main` CI run; cancelled ≠ green). Then:
 ### R4 — Tag + push, and what the rc tag publishes
 
 There is no release-cutting PR for an rc (nothing rolls). Tag the
-confirmed-green `main` commit from R3 directly, by SHA:
+candidate pinned at the top of R3 — `$RC_SHA`, unchanged — never a
+recomputed `main` tip:
 
 ```bash
-git checkout main && git pull
-RC_SHA=$(git rev-parse main)          # the commit whose CI run you confirmed in R3
+git fetch origin main
+[ "$(git rev-parse origin/main)" = "$RC_SHA" ] \
+  || echo "main moved past the verified candidate: tag $RC_SHA as verified, or repeat R3 for the new tip"
 git tag v1.0.0-rc.N "$RC_SHA"
 git push origin v1.0.0-rc.N
 ```

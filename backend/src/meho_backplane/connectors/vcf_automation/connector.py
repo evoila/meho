@@ -38,7 +38,11 @@ comment + login blocks, 2026-05-21):
 * **Tenant plane** (Aria-IaaS-derived): paths under ``/iaas/api/*``.
   Login is ``POST /iaas/api/login`` with a **JSON body**
   (``{"username": ..., "password": ...}`` plus optional ``domain``);
-  the response body is ``{"token": "..."}``. Subsequent ``/iaas/api/*``
+  the response body is ``{"token": "..."}``. VCFA 9.1 accepts only
+  ``{"refreshToken": ...}`` there, so the tenant login falls back to a
+  token exchange (the secret's optional ``refresh_token``, else a CSP
+  ``/csp/gateway/am/api/login`` mint) -- see :func:`._auth.tenant_login`
+  (evoila/meho#3865). Subsequent ``/iaas/api/*``
   calls carry ``Authorization: Bearer <token>`` and ``Accept:
   application/json``. Tokens are bespoke per plane; the provider
   JWT does NOT authenticate the tenant plane and vice versa.
@@ -138,7 +142,6 @@ from meho_backplane.connectors.vcf_automation.session import (
 from meho_backplane.connectors.vcf_automation.typed_ops import (
     PROVIDER_ORGS_PATH,
     PROVIDER_REGIONS_PATH,
-    PROVIDER_SITE_PATH,
     TENANT_ABOUT_PATH,
     TENANT_DEPLOYMENT_DETAIL_PATH,
     TENANT_DEPLOYMENTS_PATH,
@@ -783,9 +786,41 @@ class VcfAutomationConnector(HttpConnector):
         target: VcfAutomationTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
-        """``vcfa.provider.health`` — ``GET /cloudapi/1.0.0/site`` (provider plane)."""
+        """``vcfa.provider.health`` — structured provider-plane health (evoila/meho#3865).
+
+        Two legs, both served on VCFA 9.0 and 9.1:
+
+        * **Authenticated** -- ``GET /cloudapi/1.0.0/orgs?pageSize=1`` on the
+          provider session. Any failure here (login rejected, 5xx, second
+          401) propagates as the op's error, so a returned result always
+          means the provider plane answered an authenticated request.
+        * **Unauthenticated** -- ``GET /iaas/api/about`` (the fingerprint's
+          tenant probe) for the IaaS API versions. A failure is reported in
+          ``api`` rather than failing the check.
+
+        Replaces ``GET /cloudapi/1.0.0/site``, which answers 405 on 9.1.
+        """
         del params  # schema declares the param object empty
-        return await self._request_json(target, "GET", PROVIDER_SITE_PATH, operator=operator)
+        orgs = await self._request_json(
+            target, "GET", PROVIDER_ORGS_PATH, operator=operator, params={"pageSize": 1}
+        )
+        client = await self._http_client(target)
+        about_resp = await _try_probe(
+            client,
+            TENANT_VERSION_PATH,
+            accept=TENANT_ACCEPT,
+            headers=vhost_header(getattr(target, "fqdn", None), getattr(target, "port", None)),
+            extensions=self._request_extensions(target),
+        )
+        return {
+            "provider_plane": {
+                "reachable": True,
+                "authenticated": True,
+                "check": f"GET {PROVIDER_ORGS_PATH}",
+                "org_count": orgs.get("resultTotal"),
+            },
+            "api": _about_summary(about_resp),
+        }
 
     async def tenant_project_list(
         self,
@@ -955,6 +990,29 @@ async def _try_probe(
     except (httpx.HTTPError, OSError) as exc:
         return exc
     return resp
+
+
+def _about_summary(resp: httpx.Response | Exception) -> dict[str, Any]:
+    """Condense an unauthenticated ``/iaas/api/about`` probe into the health ``api`` block."""
+    if isinstance(resp, Exception):
+        return {"reachable": False, "error": type(resp).__name__}
+    try:
+        payload: Any = resp.json()
+    except ValueError:
+        payload = None
+    if not isinstance(payload, dict):
+        return {"reachable": True, "latestApiVersion": None, "supportedApiVersions": []}
+    supported = payload.get("supportedApis")
+    versions = [
+        entry.get("apiVersion")
+        for entry in (supported if isinstance(supported, list) else [])
+        if isinstance(entry, dict) and entry.get("apiVersion")
+    ]
+    return {
+        "reachable": True,
+        "latestApiVersion": payload.get("latestApiVersion"),
+        "supportedApiVersions": versions,
+    }
 
 
 def _provider_pagination_query(params: Mapping[str, Any]) -> dict[str, Any] | None:

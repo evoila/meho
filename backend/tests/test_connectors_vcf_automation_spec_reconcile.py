@@ -45,11 +45,12 @@ The declared set is introspected from the connector's live constants
 that hand-code a path:
 
 * :mod:`~meho_backplane.connectors.vcf_automation.typed_ops` — the
-  seven ``*_PATH`` op constants. Every typed handler dispatches through
+  six ``*_PATH`` op constants. Every typed handler dispatches through
   the connector's ``_request_json(target, "GET", ...)``, so each
   declares ``GET:``.
-* :mod:`~meho_backplane.connectors.vcf_automation._routing` — the two
-  ``*_SESSION_PATH`` login endpoints (both POSTed by ``._auth``) and
+* :mod:`~meho_backplane.connectors.vcf_automation._routing` — the three
+  ``*_SESSION_PATH`` login endpoints (all POSTed by ``._auth``; the CSP
+  token mint is the #3865 VCFA 9.1 fallback) and
   the two ``*_VERSION_PATH`` unauthenticated fingerprint probes (both
   GET). ``TENANT_VERSION_PATH`` collapses onto the typed
   ``GET:/iaas/api/about`` op_id by value.
@@ -145,7 +146,6 @@ def test_path_constant_names_are_pinned() -> None:
     assert sorted(_path_constants(_typed_ops_module)) == [
         "PROVIDER_ORGS_PATH",
         "PROVIDER_REGIONS_PATH",
-        "PROVIDER_SITE_PATH",
         "TENANT_ABOUT_PATH",
         "TENANT_DEPLOYMENTS_PATH",
         "TENANT_DEPLOYMENT_DETAIL_PATH",
@@ -154,6 +154,7 @@ def test_path_constant_names_are_pinned() -> None:
     assert sorted(_path_constants(_routing_module)) == [
         "PROVIDER_SESSION_PATH",
         "PROVIDER_VERSION_PATH",
+        "TENANT_CSP_SESSION_PATH",
         "TENANT_SESSION_PATH",
         "TENANT_VERSION_PATH",
     ]
@@ -188,13 +189,13 @@ def test_vcfa_hand_coded_op_id_manifest_is_pinned() -> None:
     assert _declared_op_ids() == {
         "GET:/api/versions",
         "GET:/cloudapi/1.0.0/orgs",
-        "GET:/cloudapi/1.0.0/site",
         "GET:/cloudapi/vcf/regions",
         "GET:/iaas/api/about",
         "GET:/iaas/api/deployments",
         "GET:/iaas/api/deployments/{id}",
         "GET:/iaas/api/projects",
         "POST:/cloudapi/1.0.0/sessions/provider",
+        "POST:/csp/gateway/am/api/login",
         "POST:/iaas/api/login",
     }
 

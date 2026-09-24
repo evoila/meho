@@ -296,8 +296,10 @@ split.
   ingest rejects these fragments), so a conversion would be a
   test-only artifact with no dispatch-fidelity value.
 - **Excluded (provider plane, 5 op_ids: `GET:/cloudapi/1.0.0/orgs`,
-  `GET:/cloudapi/vcf/regions`, `GET:/cloudapi/1.0.0/site`,
-  `POST:/cloudapi/1.0.0/sessions/provider`, `GET:/api/versions`).**
+  `GET:/cloudapi/vcf/regions`, `POST:/cloudapi/1.0.0/sessions/provider`,
+  `GET:/api/versions`, and the CSP token mint
+  `POST:/csp/gateway/am/api/login` — #3865; CSP identity sits outside
+  `vra-sdk-go`, the same exclusion the vra8 lane carries for it).**
   What was checked, per family: (1) **vendor-published artifacts** —
   no `automation/` directory in
   [`vmware/vcf-api-specs`](https://github.com/vmware/vcf-api-specs)
@@ -337,13 +339,12 @@ split.
   #499/#2006). **Mechanical repoint** to `GET:/cloudapi/vcf/regions`
   — same resource, same paged `values[]`/`resultTotal` envelope, same
   `Accept` (the cloudapi form; `provider_accept_for_path` keys on the
-  `/api/` prefix only), plane classification unchanged. One residual
-  the exclusion cannot discharge: `GET:/cloudapi/1.0.0/site`
-  (`vcfa.provider.health`) is unverifiable today — no spec serves it,
-  no live probe of the singular `/site` form is recorded (the plural
-  `/sites` 404s live, 2026-05-05), and vCD 10.5 serves the singular
-  form. Left as-is per "never invent a path"; the activation run
-  reconciles it.
+  `/api/` prefix only), plane classification unchanged. A residual left
+  by the first run, `GET:/cloudapi/1.0.0/site` (`vcfa.provider.health`),
+  was settled by a live finding (#3865): on VCFA 9.1 an authenticated
+  GET answers 405. The health op moved to the already-reconciled
+  `GET:/cloudapi/1.0.0/orgs` plus the armed `GET:/iaas/api/about`, and
+  `/site` left the manifest.
 
 ### vcd — fully excluded, all-typed (no pinnable spec) (#3057)
 

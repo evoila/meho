@@ -31,11 +31,19 @@ session with **zero catalog state**. Seven ops:
 |---|---|---|
 | `vcfa.provider.org.list` | provider | `GET /cloudapi/1.0.0/orgs` |
 | `vcfa.provider.region.list` | provider | `GET /cloudapi/vcf/regions` |
-| `vcfa.provider.health` | provider | `GET /cloudapi/1.0.0/site` |
+| `vcfa.provider.health` | provider | `GET /cloudapi/1.0.0/orgs?pageSize=1` (authenticated) + unauthenticated `GET /iaas/api/about` |
 | `vcfa.tenant.project.list` | tenant | `GET /iaas/api/projects` |
 | `vcfa.tenant.deployment.list` | tenant | `GET /iaas/api/deployments` |
 | `vcfa.tenant.deployment.get` | tenant | `GET /iaas/api/deployments/{id}` |
 | `vcfa.tenant.about` | tenant | `GET /iaas/api/about` |
+
+`vcfa.provider.health` returns a structured object —
+`{provider_plane: {reachable, authenticated, check, org_count}, api:
+{reachable, latestApiVersion, supportedApiVersions}}` — built from two
+paths that serve GET on both 9.0 and 9.1. It used to read
+`GET /cloudapi/1.0.0/site`, which answers 405 on 9.1 (#3865). A
+provider-leg failure is the op's error; an `about` failure is reported in
+`api` without failing the check.
 
 The region list rides the `vcf/` cloudapi prefix, not the classic
 `1.0.0/` one — VCFA 9.0 moved Region there and 404s the classic form
@@ -242,13 +250,33 @@ the consumer repo, validated 2026-05-17):
 2. The lock-protected token cache fast-paths a cached token.
 3. On cache miss: credentials are loaded from `target.secret_ref` (the
    tenant plane does NOT honour `provider_secret_ref`).
-4. `POST /iaas/api/login` with JSON body
-   `{"username": ..., "password": ..., "domain"?: ...}` (the `domain` key
-   is added when `target.domain` is set) and
-   `Accept: application/json` + `Content-Type: application/json`.
-5. The response body is `{"token": "..."}` — the token is cached under
-   `target.name`. Missing / empty `token` field on a 2xx response surfaces
-   as `RuntimeError`.
+4. `_auth.tenant_login` picks one of two wire shapes for
+   `POST /iaas/api/login` (#3865). First match wins:
+   1. The secret carries the optional `refresh_token` field (a VCFA API
+      token) → `POST /iaas/api/login` with `{"refreshToken": ...}`.
+   2. The target's resolved version (`resolve_target_version`: probed
+      fingerprint, else operator-asserted `version`) parses as `>= 9.1`
+      → **token exchange**: `POST /csp/gateway/am/api/login?access_token`
+      with `{username, password, domain?}` → `refresh_token`, then
+      `POST /iaas/api/login` with `{"refreshToken": ...}`.
+   3. Otherwise → **legacy (9.0)** body
+      `{"username", "password", "domain"?}`. A **400** (9.1 answers
+      `'refreshToken' can not be null.`) falls back to the token exchange;
+      a 401/403 is a stale credential and raises without falling back.
+
+   `domain` comes from `target.domain`, else `target.extras["domain"]`
+   (the persisted Target has no `domain` column). The fingerprint records
+   the IaaS *API* date (`2021-07-15`) as `version`, which is not a
+   release, so a probed target takes path 3 and pays one 400 per mint.
+   When no shape works — the CSP login answers 400/404 (VCFA 9 appliances
+   can 404 it), or the exchange refuses the refresh token — the connector
+   raises `ConnectorAuthError` (`cause=session_establish_<status>` →
+   `connector_auth_failed`). The message quotes the upstream reject and
+   names the `refresh_token` secret field as the fix.
+5. The response body is `{"token": "..."}`. The token is cached under
+   the tenant-unique `(tenant_id, target.id)` key. Missing / empty `token`
+   field on a 2xx response surfaces as `RuntimeError`. A data-path 401
+   evicts it and re-runs the whole chain once (see below).
 6. `auth_headers` returns `{"Authorization": f"Bearer {token}", "Accept": "application/json"}`.
 
 ### 401 → re-login + retry-once (per plane, independent)
@@ -362,7 +390,7 @@ for ingested breadth on connectors that *do* publish a convertible spec.
   status only and does not parse "latest non-deprecated version" out of it.
   Operators who need that string call the wrapper directly; the typed
   `vcfa.provider.health` / `vcfa.tenant.about` probes read the structured
-  `/cloudapi/*` and `/iaas/api/*` version surfaces instead.
+  `/iaas/api/about` version surface instead.
 - The VCFA tenant/consumption plane's only *vendor-published*
   machine-readable surface is the 8 **Swagger 2.0** fragments vendored
   under [`vmware/vra-sdk-go`

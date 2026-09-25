@@ -133,6 +133,17 @@ total.
    additionally logs
    `result_handle_spill_failed` with the underlying error string.
 
+## Non-dispatch reduce: `list_targets` (#3858)
+
+`list_targets` is a direct substrate query, not a dispatched operation,
+but it runs its page through the same `JsonFluxReducer` thresholds. Its
+handler builds the reducer context itself (the caller's `tenant_id` and
+`operator_sub`, `op_id="list_targets"`, a `pagination_hint`, and a
+`result_scalars` hint that keeps `next_cursor`), so an over-threshold
+page spills and reads back through `result_query` like a dispatched
+result. The spill is keyed to the caller even for a cross-tenant
+`platform_admin` listing. See [`targets.md`](targets.md).
+
 ## Diagnosis: the RDC cycle-8 `k8s.logs tail=300` finding (#1629)
 
 The consumer reported `k8s.logs tail=300` returning `row_count=300,

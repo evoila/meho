@@ -311,7 +311,9 @@ in prod**:
   first-class shapes (`awaiting_approval` parked writes,
   `status="unavailable"` previews, the `query_audit` `shape="tree"`
   replay envelope — the drift #2774 actually found, fixed by widening
-  that schema to a `oneOf` flat|replay union).
+  that schema to a `oneOf` flat|replay union). It also covers the
+  `list_targets` over-threshold page: a JSONFlux summary plus `handle`,
+  with no inline `targets` (#3858, see [`targets.md`](targets.md)).
 
 A tool that cannot honestly declare its output shape should drop the
 declaration (spec-legal — proven by the ~60 non-declaring tools)

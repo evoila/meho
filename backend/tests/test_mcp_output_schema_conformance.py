@@ -671,6 +671,20 @@ async def test_list_targets_conforms(
     assert payload["next_cursor"] is None
 
 
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+async def test_list_targets_reduced_page_conforms(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """An over-threshold page (summary + JSONFlux handle, #3858) still conforms."""
+    client, _op = client_with_operator
+    await _seed_tenant()
+    for i in range(60):
+        await _seed_target(f"t-{i:02d}", "vmware", f"t-{i:02d}.example")
+    payload = _assert_conforms("list_targets", _call(client, "list_targets", {}))
+    assert "targets" not in payload
+    assert payload["handle"]["total_rows"] == 60
+
+
 # ---------------------------------------------------------------------------
 # Automation family (paired-surface activation, #3029)
 # ---------------------------------------------------------------------------

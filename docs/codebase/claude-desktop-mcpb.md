@@ -71,9 +71,12 @@ records the launcher's contract and invariants.
 
 - Node `tls.setDefaultCACertificates()` (added v24.5.0 / v22.19.0) and
   `tls.getCACertificates()` (added v23.10.0 / v22.15.0). `mcp-remote`
-  0.1.38 fetches through the npm `undici` package, whose connector calls
-  `tls.connect()` without a `ca` option, so it uses the default CA list the
-  launcher set.
+  0.1.38 makes its requests through two HTTP clients. Its own OAuth
+  discovery probe and its SSE-fallback transport use the vendored npm
+  `undici`, whose connector calls `tls.connect()` without a `ca` option.
+  The bundled MCP SDK's Streamable HTTP transport and OAuth helpers use the
+  global `fetch` (Node's built-in undici). Both open TLS through `node:tls`
+  with no explicit `ca`, so both use the default CA list the launcher set.
 - `mcp-remote@0.1.38` (vendored).
 - The MCPB host's `user_config` substitution (`${user_config.KEY}` in
   `args` / `env`).

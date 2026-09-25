@@ -199,6 +199,29 @@ async def test_reduced_page_rows_read_back_through_result_query(
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+async def test_reduced_page_carries_cursor_and_listing_continues(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """A reduced page that is not the last one carries the keyset cursor."""
+    client, _op = client_with_operator
+    names = await _seed_targets(OPERATOR_TENANT_ID, "op-tenant", 120)
+
+    first, _ = _call(client, "list_targets", {})
+    assert "targets" not in first
+    assert first["next_cursor"] == names[99]
+    window, _ = _call(
+        client,
+        "result_query",
+        {"handle_id": first["handle"]["handle_id"], "offset": 0, "limit": 100},
+    )
+    assert [row["name"] for row in window["rows"]] == names[:100]
+
+    second, _ = _call(client, "list_targets", {"cursor": first["next_cursor"]})
+    assert [t["name"] for t in second["targets"]] == names[100:]
+    assert second["next_cursor"] is None
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
 @pytest.mark.parametrize(("seeded", "arguments"), [(10, {}), (_FIELD_TEST_TARGETS, {"limit": 10})])
 async def test_page_under_threshold_stays_inline(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811

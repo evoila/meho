@@ -90,6 +90,34 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Breaking changes — `list_targets` pages over the JSONFlux threshold return a result handle instead of inline `targets` (#3858)
+
+- The `list_targets` MCP tool used to return every row of a page inline.
+  On a tenant with 89 targets, the default call put about 30 KB on the
+  wire, because the payload is sent both as the text block and as
+  `structuredContent`. That was above the size at which CLAUDE.md
+  postulate 6 says a set-shaped result becomes a handle, and in field
+  test #3143 the call timed out from Claude Desktop. The page now goes
+  through the same JSONFlux reducer, with the same default thresholds,
+  that `call_operation` results use. A page of 50 rows or fewer that
+  serializes to 4 KB or less keeps the `{targets, next_cursor}` shape.
+  Above either bound, `targets` is **absent**. The response carries
+  `row_count` / `total` (rows on this page), `sample_rows_returned`,
+  `sample_bytes`, `source_key`, `next_cursor`, and a `handle`: the same
+  result handle `call_operation` returns, with a preview of up to 5 rows
+  in `handle.sample_rows`. The tool's `outputSchema` no longer lists
+  `targets` as required. The tool name, arguments, the default `limit`
+  of 100, `GET /api/v1/targets`, and `meho targets list` are unchanged.
+  The listing query also loads only the five projected columns now,
+  instead of whole rows. **BREAKING** for any MCP client that reads
+  `targets` unconditionally. **Migration:** branch on `handle`; when it
+  is present, read the page's rows with
+  `result_query(handle_id=<handle.handle_id>)`, by paging with
+  `offset` / `limit` or by passing a `query` such as
+  `{"select": ["name", "product"]}`. To keep receiving inline `targets`,
+  narrow the call with `connector_id` or pass a smaller `limit`.
+  `next_cursor` still continues the listing. (#3858)
+
 ## [0.35.14] - 2026-09-24
 
 ### Added

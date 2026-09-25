@@ -53,7 +53,7 @@ CLAUDE.md "What MEHO is NOT" bullet 2: CLI, MCP, and REST are sibling
 fronts on one backplane — none is a thin wrapper of another.
 ``query_topology`` calls the T4 :mod:`meho_backplane.topology.query`
 service functions directly; ``list_targets`` runs the same
-tenant-scoped ``select(TargetORM)`` the T5 REST route runs. This
+tenant-scoped query over ``targets`` the T5 REST route runs. This
 mirrors the established ``query_audit`` (#468) precedent which dispatches
 straight through the T1 audit substrate rather than the REST router.
 
@@ -120,6 +120,7 @@ from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mc
 from meho_backplane.mcp.server import McpInternalError, McpInvalidParamsError
 from meho_backplane.operations._lookup import parse_connector_id
 from meho_backplane.operations.dispatcher import dispatch
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.topology.query import (
     AmbiguousNodeError,
     find_dependencies,
@@ -1236,8 +1237,41 @@ _LIST_TARGETS_DESCRIPTION: Final[str] = (
     "operator's own tenant unless a `platform_admin` passes `tenant`.\n\n"
     "Returns `{targets: [{id, name, aliases, product, host}, ...], "
     "next_cursor: <name|null>}` ordered by name; `next_cursor` is the "
-    "last name on the page when more rows may exist, else null."
+    "last name on the page when more rows may exist, else null.\n\n"
+    "LARGE PAGES: a page over the JSONFlux threshold (more than 50 rows "
+    "or 4 KB) is not inlined. `targets` is then absent and the response "
+    "carries `row_count` (rows on this page), `next_cursor`, and a "
+    "`handle` (the same result handle `call_operation` returns, with a "
+    "short preview in `handle.sample_rows`). Read the page's rows with "
+    "`result_query` and `handle_id=<handle.handle_id>`, e.g. "
+    '`query={"select": ["name", "product"]}`. To get inline rows instead, '
+    "narrow with `connector_id` or pass a smaller `limit`."
 )
+
+#: Same reducer class and default thresholds (more than 50 rows or 4 KB)
+#: the dispatcher applies to every ``call_operation`` result (CLAUDE.md
+#: postulate 6, #3858).
+_LIST_TARGETS_REDUCER: Final[JsonFluxReducer] = JsonFluxReducer()
+
+#: ``fetch_more.native_pagination`` for a reduced page: how to re-call
+#: ``list_targets`` for an inline page or the next page.
+_LIST_TARGETS_PAGINATION_HINT: Final[dict[str, Any]] = {
+    "params": {
+        "connector_id": (
+            "Narrow to one connector's product (e.g. `vmware-rest-9.0`); "
+            "a page at or under the threshold comes back inline as `targets`."
+        ),
+        "limit": "Page size (1..500). A smaller page can come back inline.",
+        "cursor": (
+            "Pass the response's `next_cursor` to fetch the next page; "
+            "null means this page was the last."
+        ),
+    },
+    "example_next_call": {
+        "tool": _LIST_TARGETS_NAME,
+        "args": {"connector_id": "vmware-rest-9.0"},
+    },
+}
 
 
 async def _resolve_tenant_scope(operator: Operator, tenant_arg: str | None) -> Any:
@@ -1302,10 +1336,13 @@ async def _list_targets_handler(
 ) -> dict[str, Any]:
     """Enumerate targets for the resolved tenant, optionally product-filtered.
 
-    Runs the same tenant-scoped, name-keyset-paginated
-    ``select(TargetORM)`` the T5 REST ``GET /api/v1/targets`` route runs
-    — CLI / MCP / REST are sibling fronts on one backplane, so this is a
-    direct substrate query, not a REST-route wrapper. The optional
+    Runs the same tenant-scoped, name-keyset-paginated query over
+    ``targets`` the T5 REST ``GET /api/v1/targets`` route runs — CLI /
+    MCP / REST are sibling fronts on one backplane, so this is a direct
+    substrate query, not a REST-route wrapper. It selects only the five
+    projected columns: hydrating whole rows would decode every target's
+    ``fingerprint`` / ``extras`` JSON and CA pin just to discard them
+    (#3858). The optional
     ``connector_id`` is canonicalised through
     :func:`~meho_backplane.operations._lookup.parse_connector_id` and
     only its product component drives a ``TargetORM.product`` exact-match
@@ -1322,6 +1359,9 @@ async def _list_targets_handler(
     the field name on ``meho_connector_*`` / ``meho_scheduler_create``.
     ``tenant`` (v0.8.0 wire shape) is retained as a deprecated alias;
     the two are mutually exclusive (passing both rejects with -32602).
+
+    The page is returned through :func:`_reduce_target_page`, so a page
+    over the JSONFlux threshold comes back as a result handle.
     """
     tenant_id_arg = arguments.get("tenant_id")
     legacy_tenant_arg = arguments.get("tenant")
@@ -1333,7 +1373,13 @@ async def _list_targets_handler(
     tenant_arg = tenant_id_arg if tenant_id_arg is not None else legacy_tenant_arg
     scope_tenant_id = await _resolve_tenant_scope(operator, tenant_arg)
 
-    stmt = select(TargetORM).where(
+    stmt = select(
+        TargetORM.id,
+        TargetORM.name,
+        TargetORM.aliases,
+        TargetORM.product,
+        TargetORM.host,
+    ).where(
         TargetORM.tenant_id == scope_tenant_id,
         TargetORM.deleted_at.is_(None),
     )
@@ -1353,7 +1399,7 @@ async def _list_targets_handler(
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         result = await session.execute(stmt)
-        rows = list(result.scalars().all())
+        rows = result.all()
 
     targets = [
         {
@@ -1368,7 +1414,38 @@ async def _list_targets_handler(
     # A full page implies there *may* be more rows; surface the last
     # name as the keyset cursor. A short page is definitively the end.
     next_cursor = targets[-1]["name"] if len(targets) == limit else None
-    return {"targets": targets, "next_cursor": next_cursor}
+    return await _reduce_target_page(operator, {"targets": targets, "next_cursor": next_cursor})
+
+
+async def _reduce_target_page(operator: Operator, page: dict[str, Any]) -> dict[str, Any]:
+    """Return *page* unchanged, or its JSONFlux summary + ``handle`` above the threshold.
+
+    Below the threshold the reducer passes the page through and the
+    ``{targets, next_cursor}`` shape is unchanged. Above it, the page's
+    rows are spilled to the result-handle store and the response is the
+    reducer summary (``row_count`` / ``total`` / ``sample_rows_returned``
+    / ``sample_bytes`` / ``source_key``, plus ``next_cursor`` kept as a
+    preserved scalar) with the serialized ``handle`` beside it.
+
+    The spill is keyed to the *caller's* tenant and subject even when a
+    ``platform_admin`` listed another tenant: ``result_query`` reads a
+    handle back under the JWT's tenant + subject, so that is the only key
+    the caller can drill into.
+    """
+    summary, handle = await _LIST_TARGETS_REDUCER.reduce(
+        page,
+        None,
+        {
+            "op_id": _LIST_TARGETS_NAME,
+            "tenant_id": str(operator.tenant_id),
+            "operator_sub": operator.sub,
+            "pagination_hint": _LIST_TARGETS_PAGINATION_HINT,
+            "result_scalars": {"keys": ["next_cursor"]},
+        },
+    )
+    if handle is None:
+        return page
+    return {**summary, "handle": handle.model_dump(mode="json")}
 
 
 register_mcp_tool(
@@ -1386,6 +1463,10 @@ register_mcp_tool(
             "properties": {
                 "targets": {
                     "type": "array",
+                    "description": (
+                        "The page's rows, inline. Absent when the page was "
+                        "over the JSONFlux threshold; see `handle`."
+                    ),
                     "items": {
                         "type": "object",
                         "properties": {
@@ -1408,8 +1489,27 @@ register_mcp_tool(
                         "null when the page is the end of the set."
                     ),
                 },
+                "row_count": {
+                    "type": "integer",
+                    "description": (
+                        "Present when the page was reduced: rows on this "
+                        "page, all readable through `handle`."
+                    ),
+                },
+                "total": {"type": "integer"},
+                "sample_rows_returned": {"type": "integer"},
+                "sample_bytes": {"type": "integer"},
+                "source_key": {"type": "string"},
+                "handle": {
+                    "type": "object",
+                    "description": (
+                        "JSONFlux result handle, present when the page was "
+                        "over the threshold: read the rows with "
+                        "`result_query` and `handle_id`."
+                    ),
+                },
             },
-            "required": ["targets", "next_cursor"],
+            "required": ["next_cursor"],
         },
         required_role=TenantRole.OPERATOR,
         op_class="read",

@@ -160,8 +160,9 @@ register_mcp_tool(
         surface=ToolSurface.WORKING,
         description=(
             "Read rows back from a JSONFlux result handle. After "
-            "`call_operation` reduces a large list response, you get an "
-            "inline sample plus a handle (`result.handle.handle_id`); call "
+            "`call_operation` (or `list_targets`) reduces a large list "
+            "response, you get an inline sample plus a handle "
+            "(`result.handle.handle_id`); call "
             "this tool to read the FULL set beyond that sample, either by "
             "paging or by running a bounded server-side query. "
             "Paging: pass `handle_id` (required, the UUID from the reduced "

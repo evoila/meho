@@ -97,9 +97,16 @@ Claude Desktop's remote "Custom Connector" is brokered through Anthropic's cloud
 Every MEHO release attaches a **`meho-claude-desktop-<version>.mcpb`** file to its [GitHub Release](https://github.com/evoila/meho/releases), built from [`clients/claude-desktop-mcpb/`](../../clients/claude-desktop-mcpb/). Download it and open it in Claude Desktop: the install dialog appears and prompts for two values — no `claude_desktop_config.json` editing.
 
 1. **MEHO MCP endpoint** (required) — your backplane's `/mcp` URL, e.g. `https://meho.internal.example/mcp`, reachable over your VPN.
-2. **Internal CA bundle** (optional) — a PEM bundle for the internal CA that signs the backplane's TLS certificate. Leave it empty for public-CA deploys.
+2. **Internal CA bundle** (optional) — a PEM bundle for the internal CA that signs the backplane's TLS certificate. Leave it empty for public-CA deploys, or when you trust the root CA in the OS trust store instead (see below).
 
-The bundle wraps exactly the `npx -y mcp-remote <url>` invocation shown in the fallback below, and needs system Node.js / `npx` on `PATH` (the same prerequisite the raw config has). Distribution is the GitHub Release asset channel only — there is no public marketplace or registry, and the internal-only posture is unchanged because the shim still runs on your own VPN-connected machine.
+The bundle runs the same `mcp-remote` shim as the fallback below, vendored (`mcp-remote@0.1.38`) and run under Claude Desktop's own Node, so it needs no system Node.js or `npx` on `PATH`. Distribution is the GitHub Release asset channel only — there is no public marketplace or registry, and the internal-only posture is unchanged because the shim still runs on your own VPN-connected machine.
+
+**Internal-CA trust — two routes.** On an internal-CA deploy use either one:
+
+- **The CA field.** The launcher receives the file's path as an argument and appends its certificates to Node's default CA list in-process (`tls.setDefaultCACertificates()`) before `mcp-remote` starts, so every connection the shim makes trusts the CA. This replaces the earlier `NODE_EXTRA_CA_CERTS` delivery, which Claude Desktop 1.3109.0 strips from the extension's environment (#3143 F7).
+- **The OS trust store.** Leave the field empty and trust the root CA in the OS trust store — on macOS, `security add-trusted-cert -k ~/Library/Keychains/login.keychain-db internal-ca.pem`, then toggle the extension off and on. Current Claude Desktop runs its built-in Node with `NODE_USE_SYSTEM_CA=1`, so Node reads the OS store with no bundle configuration (verified on macOS; Windows not yet field-tested).
+
+Details: [`clients/claude-desktop-mcpb/README.md` § Internal-CA trust](../../clients/claude-desktop-mcpb/README.md#internal-ca-trust).
 
 #### Fallback: raw `claude_desktop_config.json`
 
@@ -117,7 +124,7 @@ If you would rather not use the bundle (or need to tweak the invocation), config
 }
 ```
 
-`mcp-remote` runs the OAuth 2.1 + PKCE flow against the internal Keycloak (or presents a Bearer token supplied out-of-band via `meho login --print-token`) and forwards Streamable-HTTP calls to `/mcp`. `NODE_EXTRA_CA_CERTS` is only needed when the deploy uses an internal CA (see [`deploy/values-examples/README.md` § Internal-CA trust bundle](../../deploy/values-examples/README.md#internal-ca-trust-bundle-extravolumes--extraenv)); omit the `env` block entirely for public-CA deploys. Because the shim runs on a machine already on the VPN, nothing about the backplane is publicly exposed.
+`mcp-remote` runs the OAuth 2.1 + PKCE flow against the internal Keycloak (or presents a Bearer token supplied out-of-band via `meho login --print-token`) and forwards Streamable-HTTP calls to `/mcp`. `NODE_EXTRA_CA_CERTS` is only needed when the deploy uses an internal CA (see [`deploy/values-examples/README.md` § Internal-CA trust bundle](../../deploy/values-examples/README.md#internal-ca-trust-bundle-extravolumes--extraenv)); omit the `env` block entirely for public-CA deploys. The OS-trust-store route works here too: trust the root CA in the OS trust store and set `"env": { "NODE_USE_SYSTEM_CA": "1" }` instead, which makes Node read the OS store (Node 22.19+ / 24.6+). Prefer it if the shim fails with `UNABLE_TO_VERIFY_LEAF_SIGNATURE` although `NODE_EXTRA_CA_CERTS` is set — Claude Desktop strips that variable from the `.mcpb` bundle's environment (#3143 F7), and the raw config has not been re-tested on current Desktop. Because the shim runs on a machine already on the VPN, nothing about the backplane is publicly exposed.
 
 ### Claude.ai / Claude Desktop remote Custom Connector — not applicable
 

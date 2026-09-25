@@ -29,16 +29,18 @@
 //
 // It adds two things over invoking mcp-remote directly:
 //
-//  1. Internal-CA trust. The optional `ca_cert` user_config is delivered as
-//     NODE_EXTRA_CA_CERTS by the manifest `env` block, which Claude Desktop
-//     applies to this process's environment *before Node boots*. That is
-//     the only workable delivery route: NODE_EXTRA_CA_CERTS is read once at
-//     Node startup and cannot be set from launcher code afterwards (proven
-//     in #3341's spike), and in-process there is no child env to export it
-//     to. When the field is left empty (the default fresh install) Node
-//     receives an empty NODE_EXTRA_CA_CERTS and treats it as "no extra
-//     certs" — the default trust store is untouched and public-CA deploys
-//     keep working.
+//  1. Internal-CA trust. The optional `ca_cert` user_config (a PEM file
+//     path) arrives as argv[3], and the launcher appends its certificates to
+//     Node's default CA list with tls.setDefaultCACertificates() before it
+//     imports mcp-remote, so every TLS connection mcp-remote opens (OAuth
+//     discovery, token exchange, /mcp) trusts the internal CA. It is an
+//     argument rather than NODE_EXTRA_CA_CERTS because current Claude
+//     Desktop strips NODE_EXTRA_CA_CERTS from the extension's environment
+//     (#3143 F7). The existing default list is kept, so the bundled roots
+//     and, when the host enables Node's system store (Desktop sets
+//     NODE_USE_SYSTEM_CA=1), roots trusted in the OS store still apply.
+//     On a Node without the API (before 22.19 / 24.5) the manifest's
+//     NODE_EXTRA_CA_CERTS delivery, read by Node at boot, is the fallback.
 //  2. The static OAuth client id: MEHO's Keycloak realm blocks anonymous
 //     RFC 7591 Dynamic Client Registration (default Trusted Hosts policy →
 //     403 "Host not trusted"), so a bare `mcp-remote` cannot complete
@@ -50,6 +52,7 @@
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
+import tls from "node:tls";
 import { pathToFileURL } from "node:url";
 
 const rawUrl = process.argv[2];
@@ -69,6 +72,41 @@ if (url.protocol !== "https:") {
     "meho-claude-desktop: the MEHO MCP endpoint must use https\n",
   );
   process.exit(1);
+}
+
+// The optional internal-CA bundle path. For an untouched optional field the
+// MCPB reference host code keeps an arg it has no value for as the literal
+// `${user_config.ca_cert}` placeholder, so an unsubstituted placeholder
+// means "no CA", the same as an empty or missing argument.
+const caArg = (process.argv[3] ?? "").trim();
+const caCertPath = /^\$\{[^}]*\}$/.test(caArg) ? "" : caArg;
+
+if (caCertPath && typeof tls.setDefaultCACertificates === "function") {
+  // Append, never replace: the bundled roots and any OS-store roots already
+  // in the default list must stay trusted. Must run before mcp-remote is
+  // imported; connections opened earlier would not see the new list.
+  try {
+    const certs =
+      readFileSync(caCertPath, "utf8").match(
+        /-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g,
+      ) ?? [];
+    if (certs.length === 0) {
+      throw new Error("no PEM certificate found");
+    }
+    tls.setDefaultCACertificates([...tls.getCACertificates("default"), ...certs]);
+  } catch (err) {
+    process.stderr.write(
+      `meho-claude-desktop: cannot load the internal CA bundle ${caCertPath}: ${err.message}\n`,
+    );
+    process.exit(1);
+  }
+} else if (caCertPath && !process.env.NODE_EXTRA_CA_CERTS) {
+  process.stderr.write(
+    `meho-claude-desktop: Node ${process.version} cannot add the internal CA ` +
+      "bundle in-process (needs Node 22.19+ or 24.5+) and NODE_EXTRA_CA_CERTS " +
+      "was not delivered; run the extension on a newer Node, or trust the " +
+      "root CA in the OS trust store\n",
+  );
 }
 
 // The pre-registered public OAuth client the shim presents to Keycloak.

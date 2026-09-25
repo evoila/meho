@@ -103,7 +103,7 @@ The bundle runs the same `mcp-remote` shim as the fallback below, vendored (`mcp
 
 **Internal-CA trust — two routes.** On an internal-CA deploy use either one:
 
-- **The CA field.** The launcher receives the file's path as an argument and appends its certificates to Node's default CA list in-process (`tls.setDefaultCACertificates()`) before `mcp-remote` starts, so every connection the shim makes trusts the CA. This replaces the earlier `NODE_EXTRA_CA_CERTS` delivery, which Claude Desktop 1.3109.0 strips from the extension's environment (#3143 F7).
+- **The CA field.** The launcher receives the file's path as an argument and appends its certificates to Node's default CA list in-process (`tls.setDefaultCACertificates()`) before `mcp-remote` starts, so every connection the shim makes trusts the CA. This supersedes the `NODE_EXTRA_CA_CERTS` delivery, which Claude Desktop 1.3109.0 strips from the extension's environment (#3143 F7); the manifest still sends that variable, only as the fallback for a Node older than 22.19 / 24.5.
 - **The OS trust store.** Leave the field empty and trust the root CA in the OS trust store — on macOS, `security add-trusted-cert -k ~/Library/Keychains/login.keychain-db internal-ca.pem`, then toggle the extension off and on. Current Claude Desktop runs its built-in Node with `NODE_USE_SYSTEM_CA=1`, so Node reads the OS store with no bundle configuration (verified on macOS; Windows not yet field-tested).
 
 Details: [`clients/claude-desktop-mcpb/README.md` § Internal-CA trust](../../clients/claude-desktop-mcpb/README.md#internal-ca-trust).

@@ -33,7 +33,7 @@ because the shim runs on a machine already on the VPN.
 | `manifest.json` | MCPB manifest (`manifest_version` 0.3). Committed with a `0.0.0` placeholder version; `build.sh` injects the real version at pack time. |
 | `server/index.mjs` | The bundle's entry point. A thin stdio launcher that runs the vendored `mcp-remote` in-process (imports its CLI entry — spawns nothing), and presents the pre-registered `meho-mcp` OAuth client. |
 | `package.json` + `package-lock.json` | Pin `mcp-remote@0.1.38` and its full, integrity-checked dependency tree. `build.sh` runs `npm ci --omit=dev` from the lock to vendor `node_modules` into the bundle. Never committed: `node_modules/`. |
-| `test/index.test.mjs` | Behavioral suite (`node --test`) for the launcher's in-process invocation contract and guards. Runs on every PR (`mcpb-bundle.yml`); not shipped in the bundle. |
+| `test/index.test.mjs` | Behavioral suite (`node --test`) for the launcher's in-process invocation contract, the in-process CA injection, and the guards. Runs on every PR (`mcpb-bundle.yml`); not shipped in the bundle. |
 | `build.sh` | Vendors dependencies, then validates + packs the bundle via the pinned `@anthropic-ai/mcpb` CLI. |
 
 ## Building locally
@@ -61,25 +61,26 @@ and [`.github/workflows/cli-release.yml`](../../.github/workflows/cli-release.ym
 ## How the launcher works
 
 The manifest's `mcp_config.command` is `node`, running `server/index.mjs`
-with the operator's backplane URL as its argument, the optional internal-CA
-path delivered as the `NODE_EXTRA_CA_CERTS` environment variable, the OAuth
-client id delivered as `MEHO_MCP_CLIENT_ID`, and the requested OAuth scopes
-delivered as `MEHO_MCP_SCOPES`. The launcher:
+with the operator's backplane URL and the optional internal-CA path as its
+arguments, the OAuth client id delivered as `MEHO_MCP_CLIENT_ID`, and the
+requested OAuth scopes delivered as `MEHO_MCP_SCOPES`. The launcher:
 
 1. Validates that the URL is a well-formed `https` URL.
-2. Resolves the OAuth client id from `MEHO_MCP_CLIENT_ID`, falling back to
+2. When an internal-CA path was given, appends its certificates to Node's
+   default CA list in-process — see [Internal-CA trust](#internal-ca-trust).
+3. Resolves the OAuth client id from `MEHO_MCP_CLIENT_ID`, falling back to
    `meho-mcp` when the host substitutes an empty value for the untouched
    optional `client_id` config — so an operator who never opens the
    advanced field still authenticates. The seam variable is scrubbed from
    the environment `mcp-remote` inherits.
-3. Resolves the requested OAuth scopes from `MEHO_MCP_SCOPES`, falling back
+4. Resolves the requested OAuth scopes from `MEHO_MCP_SCOPES`, falling back
    to the default working surface `mcp:read mcp:execute` when the host
    substitutes an empty/whitespace value for the untouched optional
    `scopes` config. Setting it to an elevated value (e.g.
    `mcp:read mcp:execute mcp:admin`) is the deliberate opt-in to
    [operator mode](#elevated-operator-mode-opt-in). The seam variable is
    scrubbed from the environment `mcp-remote` inherits.
-4. Sets `process.argv` to the `mcp-remote` invocation — the backplane URL,
+5. Sets `process.argv` to the `mcp-remote` invocation — the backplane URL,
    plus `--static-oauth-client-info '{"client_id": "…"}'` and
    `--static-oauth-client-metadata '{"scope": "<resolved scopes>"}'` — and
    **imports** the vendored `mcp-remote@0.1.38` CLI entry into this
@@ -108,21 +109,56 @@ lookup, and no per-platform shell. (The earlier `npx`-based launcher died
 with `spawn npx ENOENT` under Claude Desktop's UtilityProcess GUI PATH,
 fixed by #3144; F6 was the deeper failure that vendoring alone left.)
 
-Internal-CA trust is delivered as `NODE_EXTRA_CA_CERTS` by the manifest
-`env` block, which Claude Desktop applies to the launcher's environment
-*before Node boots*. That is the only workable route for the in-process
-launcher: `NODE_EXTRA_CA_CERTS` is read once at Node startup and cannot be
-set from launcher code afterwards, and there is no child environment to
-export it to. When the optional CA field is left empty (the default fresh
-install) the value is empty and Node treats it as "no extra certs" — the
-default trust store is untouched and public-CA deploys keep working; a
-non-empty path is added to the trust store `mcp-remote`'s `fetch` uses.
-
 The `meho-mcp` client (or whatever name `client_id` overrides it to) must
 already exist on the realm — see
 [`docs/cross-repo/mcp-client-setup.md`](../../docs/cross-repo/mcp-client-setup.md).
 No system Node or `npx` on `PATH` is required at run time — the bundle
 carries its dependencies and Claude Desktop supplies the runtime.
+
+## Internal-CA trust
+
+On an internal-CA deploy the shim must trust the CA that signs the
+backplane's and Keycloak's TLS certificates. There are two routes; either
+one is enough, and a public-CA deploy needs neither.
+
+1. **The "Internal CA bundle" field.** Pick the CA's PEM file in the
+   install dialog. Claude Desktop passes the path to the launcher as an
+   argument; the launcher reads the file and appends its certificates to
+   Node's default CA list with
+   [`tls.setDefaultCACertificates()`](https://nodejs.org/api/tls.html#tlssetdefaultcacertificatescerts)
+   before it imports `mcp-remote`, so every TLS connection `mcp-remote`
+   opens (OAuth discovery, token exchange, `/mcp`) trusts the CA. The
+   existing list — Node's bundled roots, plus the OS-store roots when the
+   OS route below is also in effect — is kept. A path that cannot be read,
+   or a file without a PEM certificate, stops the launcher with an error
+   naming the path instead of a TLS failure later.
+2. **The OS trust store.** Leave the field empty and trust the root CA in
+   the OS trust store. On macOS that is the login keychain:
+
+   ```bash
+   security add-trusted-cert -k ~/Library/Keychains/login.keychain-db internal-ca.pem
+   ```
+
+   then toggle the extension off and on. No bundle configuration is
+   involved: current Claude Desktop runs its built-in Node with
+   `NODE_USE_SYSTEM_CA=1`, which makes Node read the OS store. Verified on
+   Claude Desktop 1.3109.0 on macOS (#3143); Windows is not yet
+   field-tested.
+
+**Why an argument, not `NODE_EXTRA_CA_CERTS`.** Claude Desktop 1.3109.0
+strips `NODE_EXTRA_CA_CERTS` from the extension's environment while
+delivering the rest of the manifest `env` block (#3143 F7), so a CA sent
+that way never reached Node: the shim exited with
+`UNABLE_TO_VERIFY_LEAF_SIGNATURE` and Desktop reported an `initialize`
+timeout. The launcher cannot set the variable itself either — Node reads it
+once at startup. The manifest still delivers it as the fallback for a Node
+older than 22.19 / 24.5, which has no `tls.setDefaultCACertificates()`: a
+host that passes the variable through gets the CA loaded at boot, and if it
+does not, the launcher prints a warning naming the OS-trust-store route and
+starts anyway.
+
+An untouched optional field reaches the launcher as an empty value or as
+the unsubstituted `${user_config.ca_cert}` placeholder; both mean "no CA".
 
 ## First connect — the OAuth login race
 

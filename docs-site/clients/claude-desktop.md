@@ -46,7 +46,10 @@ that differ per deployment —
 - **MEHO MCP endpoint** — your backplane's `/mcp` URL (reachable over
   your VPN).
 - **Internal CA bundle** *(optional)* — the PEM for the CA that signs
-  the backplane's TLS certificate; leave it empty on a public-CA deploy.
+  the backplane's TLS certificate; the extension adds it to its own trust
+  store. Leave it empty on a public-CA deploy, or when you trust the root
+  CA in your OS trust store instead — see
+  [Trusting an internal CA](#trusting-an-internal-ca).
 
 Two advanced fields default to the working setup and rarely need
 changing: the OAuth **client id** (default `meho-mcp`) and the OAuth
@@ -56,8 +59,41 @@ operator planes, add `mcp:admin` to the scopes field — see
 
 The bundle still expects the realm's public `meho-mcp` client with the
 shim's loopback redirect URIs registered (below), and — on an
-internal-CA deploy — the CA you point it at. If you cannot install the
-bundle, wire the shim by hand with the rest of this page.
+internal-CA deploy — one of the two CA trust routes below. If you cannot
+install the bundle, wire the shim by hand with the rest of this page.
+
+## Trusting an internal CA
+
+On an internal-CA deploy the shim must trust the CA that signs the
+backplane's and Keycloak's certificates. Either route is enough; a
+public-CA deploy needs neither.
+
+- **The bundle's CA field.** Pick the CA's PEM file in the install
+  dialog. The bundle's launcher adds its certificates to Node's trust
+  store in-process before the shim starts, keeping the trust it already
+  has. A path it cannot read, or a file without a PEM certificate, stops
+  the extension with an error naming the file.
+- **Your OS trust store.** Leave the CA field empty and trust the root CA
+  in the OS trust store. On macOS that is the login keychain:
+
+    ```bash
+    security add-trusted-cert -k ~/Library/Keychains/login.keychain-db internal-ca.pem
+    ```
+
+    Then toggle the extension off and on. Current Claude Desktop runs
+    its built-in Node with `NODE_USE_SYSTEM_CA=1`, so Node reads the OS
+    store with nothing to configure in the bundle (verified on macOS;
+    Windows is not yet field-tested).
+
+!!! note "Why the CA is not passed as `NODE_EXTRA_CA_CERTS`"
+
+    Claude Desktop 1.3109.0 strips `NODE_EXTRA_CA_CERTS` from an
+    extension's environment, so a CA delivered that way never reaches
+    Node: the shim fails with `UNABLE_TO_VERIFY_LEAF_SIGNATURE` and
+    Desktop reports an `initialize` timeout
+    ([#3143](https://github.com/evoila/meho/issues/3143)). The bundle
+    therefore passes the CA path as an argument and injects it
+    in-process.
 
 ## Prerequisites
 
@@ -66,8 +102,10 @@ bundle, wire the shim by hand with the rest of this page.
 - The `meho` CLI installed and `meho login` working from the same
   machine ([The meho CLI](cli.md)) — it proves TLS trust and the realm
   before you add the shim's moving parts.
-- The deployment's CA in your OS trust store **and** as a PEM file you
-  can point `NODE_EXTRA_CA_CERTS` at (Node does not read the OS store).
+- On an internal-CA deploy, the deployment's CA in your OS trust store
+  (the `meho` CLI reads it), plus a way for the shim's Node to trust it —
+  Node ignores the OS store unless told otherwise: a PEM file for
+  `NODE_EXTRA_CA_CERTS`, or `NODE_USE_SYSTEM_CA=1` (below).
 - The realm's public **`meho-mcp`** OAuth client, with the shim's
   loopback redirect URIs registered (next section).
 
@@ -119,6 +157,12 @@ shape proven in the smoke test (`mcp-remote@0.1.38`):
   (which Keycloak's Trusted Hosts policy blocks anyway).
 - `NODE_EXTRA_CA_CERTS` is only needed on an internal-CA deploy; drop it
   if your backplane and Keycloak present publicly-trusted certificates.
+  The alternative is the OS route: with the root CA trusted in the OS
+  store, use `"env": { "NODE_USE_SYSTEM_CA": "1" }` instead (Node 22.19+
+  / 24.6+). Switch to it if the shim fails with
+  `UNABLE_TO_VERIFY_LEAF_SIGNATURE` although `NODE_EXTRA_CA_CERTS` is set
+  — current Desktop strips that variable from the bundle's environment,
+  and this manual shape has not been re-tested on current Desktop.
 
 Restart Claude Desktop. On first use the shim opens a browser, you
 complete OAuth 2.1 + PKCE against the internal Keycloak (a static

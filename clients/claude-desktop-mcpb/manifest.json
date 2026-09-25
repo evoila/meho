@@ -14,7 +14,11 @@
     "entry_point": "server/index.mjs",
     "mcp_config": {
       "command": "node",
-      "args": ["${__dirname}/server/index.mjs", "${user_config.backplane_url}"],
+      "args": [
+        "${__dirname}/server/index.mjs",
+        "${user_config.backplane_url}",
+        "${user_config.ca_cert}"
+      ],
       "env": {
         "NODE_EXTRA_CA_CERTS": "${user_config.ca_cert}",
         "MEHO_MCP_CLIENT_ID": "${user_config.client_id}",
@@ -32,7 +36,7 @@
     "ca_cert": {
       "type": "file",
       "title": "Internal CA bundle (optional)",
-      "description": "PEM bundle for the internal CA that signs the backplane's TLS certificate. Leave empty for public-CA deploys.",
+      "description": "PEM bundle for the internal CA that signs the backplane's TLS certificate; the extension adds it to its trust store. Alternatively leave this empty and trust the root CA in your OS trust store (on macOS, the login keychain): current Claude Desktop runs extensions with the OS trust store enabled. Leave empty for public-CA deploys.",
       "required": false
     },
     "client_id": {

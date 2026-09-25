@@ -102,7 +102,9 @@ rows about 165 bytes each):
 | 10 rows (`limit=10`) | 3.6 KB / 1.7 KB | unchanged (inline) |
 | 500 rows (`limit=500`) | 173 KB / 84 KB | 5.1 KB / 2.4 KB |
 
-Handler time was 10–25 ms warm at every size in both versions.
+End-to-end call time (warm median of 7 calls each, same setup) was
+about the same in both versions: about 6–8 ms for an 89-row page and
+about 12 ms for a 500-row page.
 
 ## Dependencies
 
@@ -133,8 +135,8 @@ result becomes a handle.
 - *Server-side latency was not the cause.* The suspected per-row
   fingerprint or probe joins do not exist. The MCP handler (and the
   REST route) ran one keyset SELECT; there was no N+1. Reproduced
-  locally, the 89-row default call completes in about 25 ms.
-  The handler did hydrate whole ORM rows, decoding each target's
+  locally, the old 89-row default call had a warm median of about 6 ms
+  (7 calls, in-process test app, SQLite). The handler did hydrate whole ORM rows, decoding each target's
   `fingerprint` / `extras` JSON and CA pin only to project five fields;
   that per-row decode is small but was the only per-row work on the
   path.

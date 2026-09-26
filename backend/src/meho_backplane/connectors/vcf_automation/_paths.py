@@ -27,11 +27,14 @@ from typing import Final
 __all__ = [
     "OAUTH_REGISTER_PATH",
     "OAUTH_TOKEN_PATH",
+    "ORG_SESSION_CURRENT_PATH",
     "ORG_SESSION_PATH",
     "PROVIDER_GLOBAL_ROLES_PATH",
+    "PROVIDER_GLOBAL_ROLE_PATH",
     "PROVIDER_GLOBAL_ROLE_PUBLISH_ALL_PATH",
     "PROVIDER_GLOBAL_ROLE_PUBLISH_PATH",
     "PROVIDER_GLOBAL_ROLE_RIGHTS_PATH",
+    "PROVIDER_GLOBAL_ROLE_TENANTS_PATH",
     "PROVIDER_RIGHTS_PATH",
     "PROVIDER_ROLES_PATH",
     "PROVIDER_TOKENS_PATH",
@@ -45,6 +48,10 @@ PROVIDER_RIGHTS_PATH: Final[str] = "/cloudapi/1.0.0/rights"
 #: Global roles -- the role surface tenants consume under
 #: ``ADVANCED_RIGHTS_BUNDLE_MODE`` (``GET`` list, ``POST`` create).
 PROVIDER_GLOBAL_ROLES_PATH: Final[str] = "/cloudapi/1.0.0/globalRoles"
+#: One global role (``DELETE`` -- rollback of a create whose rights PUT failed).
+PROVIDER_GLOBAL_ROLE_PATH: Final[str] = "/cloudapi/1.0.0/globalRoles/{id}"
+#: The orgs a global role is published to (``GET``).
+PROVIDER_GLOBAL_ROLE_TENANTS_PATH: Final[str] = "/cloudapi/1.0.0/globalRoles/{id}/tenants"
 #: A global role's rights (``GET`` list, ``PUT`` replace).
 PROVIDER_GLOBAL_ROLE_RIGHTS_PATH: Final[str] = "/cloudapi/1.0.0/globalRoles/{id}/rights"
 #: Publish a global role to named tenants (``POST`` ``{"values": [{name, id}]}``).
@@ -65,6 +72,9 @@ PROVIDER_TOKEN_PATH: Final[str] = "/cloudapi/1.0.0/tokens/{id}"
 #: Session create for a tenant-org user (HTTP Basic ``<user>@<org>``). The
 #: System org uses :data:`._routing.PROVIDER_SESSION_PATH` instead.
 ORG_SESSION_PATH: Final[str] = "/cloudapi/1.0.0/sessions"
+#: Log out the calling session (``DELETE``) -- closes the org-user session
+#: the API-token ops open.
+ORG_SESSION_CURRENT_PATH: Final[str] = "/cloudapi/1.0.0/sessions/current"
 #: OAuth client registration (``POST {"client_name"}``); ``{context}`` is
 #: ``provider`` for the System org or ``tenant/<org>`` for a tenant org.
 OAUTH_REGISTER_PATH: Final[str] = "/oauth/{context}/register"

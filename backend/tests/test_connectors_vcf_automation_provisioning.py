@@ -324,15 +324,133 @@ async def test_role_create_publish_all(vcfa: VcfAutomationConnector) -> None:
     assert publish_all.called
 
 
-async def test_role_create_unchanged_when_name_exists(vcfa: VcfAutomationConnector) -> None:
+_EXISTING_SEG = "urn%3Avcloud%3AglobalRole%3Ac"
+
+
+def _mount_existing_role_state(
+    mock: respx.MockRouter, *, rights: list[dict[str, Any]], tenants: list[dict[str, Any]]
+) -> dict[str, respx.Route]:
+    return {
+        "get_rights": mock.get(f"{_GLOBAL_ROLES}/{_EXISTING_SEG}/rights").respond(
+            200, json=page(rights)
+        ),
+        "tenants": mock.get(f"{_GLOBAL_ROLES}/{_EXISTING_SEG}/tenants").respond(
+            200, json=page(tenants)
+        ),
+        "put_rights": mock.put(f"{_GLOBAL_ROLES}/{_EXISTING_SEG}/rights").respond(
+            200, json=page([])
+        ),
+        "publish": mock.post(f"{_GLOBAL_ROLES}/{_EXISTING_SEG}/tenants/publish").respond(
+            200, json=page([])
+        ),
+        "create": mock.post(_GLOBAL_ROLES).respond(201, json={"id": "x"}),
+    }
+
+
+async def test_role_create_unchanged_when_complete(vcfa: VcfAutomationConnector) -> None:
     with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
         mount_logins(mock)
         _mount_role_reads(mock, existing=True)
-        create = mock.post(_GLOBAL_ROLES).respond(201, json={"id": "x"})
+        routes = _mount_existing_role_state(
+            mock, rights=_BASE_RIGHTS, tenants=[{"id": ORG["id"], "name": "example-org"}]
+        )
         result = await run("vcfa.provider.role.create", _ROLE_PARAMS)
-    assert result["result"]["status"] == "unchanged"
-    assert result["result"]["role"]["id"] == "urn:vcloud:globalRole:c"
-    assert not create.called
+    out = result["result"]
+    assert out["status"] == "unchanged", out
+    assert out["role"]["id"] == "urn:vcloud:globalRole:c"
+    assert out["reconciled"] == []
+    for name in ("create", "put_rights", "publish"):
+        assert not routes[name].called, name
+
+
+async def test_role_create_rerun_repairs_role_left_without_rights(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    """A re-run after a failed rights PUT fills the rights (and publishes) -- never 'unchanged'."""
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        _mount_role_reads(mock, existing=True)
+        mock.get(_RIGHTS).mock(
+            side_effect=by_filter(
+                {
+                    "name==API Tokens: Manage": [_TOKEN_RIGHT],
+                    "name==Extra Right": [{"id": "urn:vcloud:right:x", "name": "Extra Right"}],
+                }
+            )
+        )
+        routes = _mount_existing_role_state(mock, rights=[], tenants=[])
+        result = await run("vcfa.provider.role.create", _ROLE_PARAMS)
+    out = result["result"]
+    assert out["status"] == "updated", out
+    assert out["reconciled"] == ["rights", "publication"]
+    assert out["rights_count"] == 3
+    assert len(_body(routes["put_rights"])["values"]) == 3
+    assert _body(routes["publish"]) == {"values": [{"name": "example-org", "id": ORG["id"]}]}
+    assert not routes["create"].called
+
+
+async def test_role_create_rerun_publishes_role_left_unpublished(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    """A re-run after a failed publish applies only the missing publication."""
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        _mount_role_reads(mock, existing=True)
+        routes = _mount_existing_role_state(mock, rights=_BASE_RIGHTS, tenants=[])
+        result = await run("vcfa.provider.role.create", _ROLE_PARAMS)
+    out = result["result"]
+    assert out["status"] == "updated", out
+    assert out["reconciled"] == ["publication"]
+    assert routes["publish"].called
+    assert not routes["put_rights"].called
+
+
+async def test_role_create_deletes_new_role_when_rights_put_fails(
+    vcfa: VcfAutomationConnector,
+) -> None:
+    seg = "urn%3Avcloud%3AglobalRole%3Anew"
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        _mount_role_reads(mock)
+        mock.post(_GLOBAL_ROLES).respond(201, json={"id": "urn:vcloud:globalRole:new"})
+        mock.put(f"{_GLOBAL_ROLES}/{seg}/rights").respond(400, json={"message": "bad right"})
+        delete = mock.delete(f"{_GLOBAL_ROLES}/{seg}").respond(204)
+        publish = mock.post(f"{_GLOBAL_ROLES}/{seg}/tenants/publish").respond(200, json={})
+        result = await run(
+            "vcfa.provider.role.create",
+            {"name": "Custom Org Admin", "base_role": "Organization Administrator"},
+        )
+    assert result["status"] == "error"
+    assert result["extras"]["http_status"] == 400
+    assert delete.called
+    assert not publish.called
+
+
+def test_fiql_reserved_characters_force_a_full_scan() -> None:
+    assert lookups_module.fiql_safe("Custom Org Admin")
+    for name in ("Org Admin (API token)", "a,b", "a;b", "x*", "a=b", "it's"):
+        assert not lookups_module.fiql_safe(name), name
+
+
+async def test_role_lookup_with_parentheses_uses_full_scan(vcfa: VcfAutomationConnector) -> None:
+    name = "Custom Org Admin (API token)"
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mount_logins(mock)
+        listing = mock.get(_GLOBAL_ROLES).mock(side_effect=by_filter({}, default=[_BASE_ROLE]))
+        mock.get(f"{_GLOBAL_ROLES}/urn%3Avcloud%3AglobalRole%3Abase/rights").respond(
+            200, json=page(_BASE_RIGHTS)
+        )
+        mock.post(_GLOBAL_ROLES).respond(201, json={"id": "urn:vcloud:globalRole:new"})
+        mock.put(f"{_GLOBAL_ROLES}/urn%3Avcloud%3AglobalRole%3Anew/rights").respond(
+            200, json=page([])
+        )
+        result = await run(
+            "vcfa.provider.role.create", {"name": name, "base_role": "Organization Administrator"}
+        )
+    assert result["result"]["status"] == "created", result
+    sent = [call.request.url.params.get("filter") for call in listing.calls]
+    assert f"name=={name}" not in sent  # the reserved-character name never rides a filter
+    assert "name==Organization Administrator" in sent
 
 
 async def test_role_create_unknown_right_is_invalid_request(vcfa: VcfAutomationConnector) -> None:
@@ -594,6 +712,18 @@ async def test_login_test_success_does_not_cache_the_bearer(vcfa: VcfAutomationC
     assert login.call_count == 1
     assert vcfa._tenant_tokens == {}
     assert TENANT_TOKEN not in json.dumps(result)
+
+
+async def test_login_test_non_json_2xx_is_a_result(vcfa: VcfAutomationConnector) -> None:
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mock.post("/iaas/api/login").respond(200, text="<html>portal</html>")
+        mock.get("/iaas/api/about").respond(200, text="<html>portal</html>")
+        result = await run("vcfa.tenant.login.test", {})
+    assert result["status"] == "ok", result
+    out = result["result"]
+    assert out["authenticated"] is False
+    assert out["error"]["cause"] == "non_json_response"
+    assert out["api_version"] is None
 
 
 async def test_login_test_refused_refresh_token_is_a_result(

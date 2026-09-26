@@ -96,22 +96,29 @@ lookups in `_lookups.py`, paths in `_paths.py`, and park-time previews in
 | `vcfa.provider.right.list` | safe | `GET /cloudapi/1.0.0/rights` (`name_contains` → FIQL `name==*x*`) |
 | `vcfa.provider.role.list` | safe | `GET /cloudapi/1.0.0/globalRoles`; with `org`: `GET /cloudapi/1.0.0/roles` + tenant-context headers |
 | `vcfa.provider.org.create` | caution, approval | `POST /cloudapi/1.0.0/orgs` (`org_type=vm_apps` → `isClassicTenant: true`) |
-| `vcfa.provider.role.create` | caution, approval | `POST …/globalRoles`, `PUT …/{id}/rights`, `POST …/{id}/tenants/publish` or `…/publishAll` |
+| `vcfa.provider.role.create` | caution, approval | `POST …/globalRoles`, `PUT …/{id}/rights` (rollback `DELETE …/{id}` on failure), `POST …/{id}/tenants/publish` or `…/publishAll` |
 | `vcfa.provider.user.create` | caution, approval | `POST /cloudapi/1.0.0/users` + tenant-context headers |
-| `vcfa.provider.api_token.create` | dangerous, approval | user session → `POST /oauth/<tenant/<org>\|provider>/register` → jwt-bearer `POST …/token` → Vault |
-| `vcfa.provider.api_token.revoke` | dangerous, approval | user session → `DELETE /cloudapi/1.0.0/tokens/{id}` |
+| `vcfa.provider.api_token.create` | dangerous, approval | user session → `POST /oauth/<tenant/<org>\|provider>/register` → jwt-bearer `POST …/token` → Vault → `DELETE …/sessions/current` |
+| `vcfa.provider.api_token.revoke` | dangerous, approval | user session → `DELETE /cloudapi/1.0.0/tokens/{id}` → `DELETE …/sessions/current` |
 | `vcfa.tenant.project.create` | caution, approval | `POST /iaas/api/projects?apiVersion=2021-07-15` |
 | `vcfa.tenant.login.test` | safe | tenant login only (`POST /iaas/api/login`), no data call |
 
 - **Envelope.** Every write returns `{status, <resource>, guidance}`:
   `created`, `unchanged` (the name already exists — idempotent, nothing
   written) or `invalid_request` (a base role / right / org / role / password
-  did not resolve — checked before any write). Upstream 4xx/5xx raise and
+  did not resolve — checked before any write). `role.create` also
+  **self-repairs**: re-run against an existing role, it fills rights on a
+  role that has none and applies a requested publication that is missing
+  (`updated` + `reconciled: [...]`; rights already present are never
+  replaced), and a failed rights PUT right after the create deletes the new
+  role — so an interrupted run never leaves a half-built role that a re-run
+  calls `unchanged`. Upstream 4xx/5xx raise and
   the dispatcher maps them (`connector_error` / `connector_http_403` with
   `upstream_message`); a rejected login is `connector_auth_failed`.
 - **Name lookups** use the FIQL `filter` (`name==<v>`), compared
-  case-insensitively; a value containing `,` or `;` (which FIQL cannot
-  carry) is matched by paging the full list (the `go-vcloud-director`
+  case-insensitively; a value containing a FIQL-reserved character
+  (`,;()*=!<>` or a quote — e.g. "Org Admin (API token)") is matched by
+  paging the full list (the `go-vcloud-director`
   fallback). Org scoping uses the `X-VMWARE-VCLOUD-TENANT-CONTEXT` (org
   uuid) + `X-VMWARE-VCLOUD-AUTH-CONTEXT` (org name) header pair.
 - **Passwords** are never op params: `user.create` and the token ops read
@@ -119,22 +126,31 @@ lookups in `_lookups.py`, paths in `_paths.py`, and park-time previews in
   `password_secret_key`) under the operator's identity — the Keycloak
   user-write seam (`load_vault_secret_data`).
 - **API token no-transit.** `api_token.create` logs in *as the user*
-  (`/cloudapi/1.0.0/sessions`, or `…/sessions/provider` for `System`), mints
+  (`/cloudapi/1.0.0/sessions`, or `…/sessions/provider` for `System`) on a
+  private un-pooled client (`HttpConnector._ephemeral_http_client`: same SSRF
+  + TLS posture, own cookie jar), logs that session out when done, mints
   the refresh token and writes it to `store_secret_ref` / `store_field`
   (default `refresh_token`, the field the tenant login reads) through the
   governed `vault.kv.patch` handler (`vault.kv.put` when the path is new).
   The result carries only the Vault ref, version, SHA-256 and length, plus
   the OAuth `client_id` (the token id is `urn:vcloud:token:<client_id>`;
   results carry the bare id because the connector-boundary redaction reads
-  `token:<hex>` as a labelled secret). A failed Vault write revokes the
-  just-minted token before the error propagates. `api_token.create` is
+  `token:<hex>` as a labelled secret). Once the OAuth client is registered,
+  any failure before the Vault write lands (refused grant, failed write,
+  cancellation) revokes the token — shielded — before the error propagates;
+  if that revoke fails too, the error names the `client_id` and the
+  `api_token.revoke` call to run. The Vault write rides the `vault.kv.patch`
+  handler directly, so it is audited in the vcfa op's own audit row (its
+  params carry the store ref) and by Vault's audit device — no separate
+  `vault.kv.patch` audit/approval row is written. `api_token.create` is
   pinned `credential_mint`, `user.create` / `api_token.revoke`
   `credential_write` in `broadcast/events.py` — aggregate-only broadcast,
   no flight-recorder bodies.
 - **`vcfa.tenant.login.test`** answers whether the target secret's
   credential (normally its `refresh_token`) authenticates the tenant
   plane: `{authenticated, login_flow, api_version, error}`. The minted
-  bearer is discarded (not cached); a refused login is a result, not an op
+  bearer is discarded (not cached); a refused login — or a 2xx with a
+  non-JSON body (`error.cause = non_json_response`) — is a result, not an op
   failure. If `/iaas/api/login` refuses a tenant-org token too, the
   `/oauth/tenant/<org>/token` exchange is a follow-up, not implemented.
 

@@ -310,6 +310,13 @@ async def tenant_login_test(
         await tenant_login(client, creds, target, request_extensions=extensions)
     except ConnectorAuthError as exc:
         error = {"cause": exc.cause, "status_code": exc.status_code, "message": str(exc)}
+    except ValueError:
+        # A 2xx whose body is not JSON (a proxy page, a wrong vhost).
+        error = {
+            "cause": "non_json_response",
+            "status_code": None,
+            "message": "the tenant login answered 2xx with a non-JSON body",
+        }
     except (httpx.HTTPError, RuntimeError) as exc:
         error = {"cause": type(exc).__name__, "status_code": None, "message": str(exc)}
     api_version: str | None = None

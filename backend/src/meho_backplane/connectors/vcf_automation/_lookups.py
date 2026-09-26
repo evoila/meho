@@ -8,8 +8,9 @@ Used by the handlers (:mod:`._provisioning`, :mod:`._role_user`,
 (:mod:`._provisioning_preview`).
 
 Name lookups use the cloudapi FIQL ``filter`` (``name==<value>``). FIQL
-cannot carry a ``,`` or ``;`` in a value, so a name containing either is
-matched by paging the full list instead -- the same fallback
+cannot carry its reserved characters (``,;()*=!<>`` and quotes) in a
+value, so a name containing any of them is matched by paging the full
+list instead -- the same fallback
 ``go-vcloud-director``'s ``getRightByName`` uses. Matches compare
 case-insensitively (VCFA object names are case-insensitively unique).
 
@@ -52,6 +53,7 @@ __all__ = [
     "find_org",
     "find_org_user",
     "find_project",
+    "fiql_safe",
     "list_all",
     "password_missing_guidance",
     "password_ref",
@@ -88,9 +90,16 @@ def _uuid_of(urn: str) -> str:
     return urn.rsplit(":", 1)[-1]
 
 
-def _fiql_safe(value: str) -> bool:
-    """FIQL cannot carry ``,`` / ``;`` inside a value (see module docstring)."""
-    return "," not in value and ";" not in value
+#: Characters FIQL reserves (``,`` / ``;`` combine, ``(`` / ``)`` group, ``*``
+#: wildcards, ``=`` / ``!`` / ``<`` / ``>`` compare) or that would need quoting.
+#: A lookup value holding any of them is matched by a full-list scan instead
+#: of a ``filter`` -- e.g. a role named "Org Admin (API token)".
+_FIQL_RESERVED: Final = frozenset(",;()*=!<>'\"")
+
+
+def fiql_safe(value: str) -> bool:
+    """True when *value* can ride a FIQL ``filter`` literally (see module docstring)."""
+    return not _FIQL_RESERVED.intersection(value)
 
 
 def _values(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -140,7 +149,7 @@ async def find_by_field(
     headers: dict[str, str] | None = None,
 ) -> dict[str, Any] | None:
     """Return the one row of *path* whose *field* equals *value* (case-insensitive)."""
-    params = {"filter": f"{field}=={value}"} if _fiql_safe(value) else None
+    params = {"filter": f"{field}=={value}"} if fiql_safe(value) else None
     wanted = value.casefold()
     for row in await list_all(connector, target, operator, path, params=params, headers=headers):
         candidate = row.get(field)

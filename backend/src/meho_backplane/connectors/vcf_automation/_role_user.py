@@ -17,8 +17,12 @@ every name resolution runs before the first write.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Final
+
+import httpx
+import structlog
 
 from meho_backplane.connectors.vcf_automation._lookups import (
     entity_ref,
@@ -33,9 +37,11 @@ from meho_backplane.connectors.vcf_automation._lookups import (
     tenant_context_headers,
 )
 from meho_backplane.connectors.vcf_automation._paths import (
+    PROVIDER_GLOBAL_ROLE_PATH,
     PROVIDER_GLOBAL_ROLE_PUBLISH_ALL_PATH,
     PROVIDER_GLOBAL_ROLE_PUBLISH_PATH,
     PROVIDER_GLOBAL_ROLE_RIGHTS_PATH,
+    PROVIDER_GLOBAL_ROLE_TENANTS_PATH,
     PROVIDER_GLOBAL_ROLES_PATH,
     PROVIDER_RIGHTS_PATH,
     PROVIDER_ROLES_PATH,
@@ -48,6 +54,8 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vcf_automation.session import VcfAutomationTargetLike
 
 __all__ = ["provider_role_create", "provider_user_create"]
+
+_log = structlog.get_logger(__name__)
 
 #: ``bundleKey`` a custom (non-system) global role carries.
 _CUSTOM_ROLE_BUNDLE_KEY: Final = "com.vmware.vcloud.undefined.key"
@@ -127,6 +135,21 @@ async def _create_global_role(
     return str(role_id)
 
 
+async def _is_published_to(
+    connector: VcfAutomationConnector,
+    target: VcfAutomationTargetLike,
+    operator: Operator,
+    role: Mapping[str, Any],
+    org: Mapping[str, Any],
+) -> bool:
+    """Whether the existing *role* is already published to *org* (or to all orgs)."""
+    if role.get("publishAll") is True:
+        return True
+    path = PROVIDER_GLOBAL_ROLE_TENANTS_PATH.format(id=quote_segment(str(role.get("id"))))
+    tenants = await list_all(connector, target, operator, path)
+    return any(str(t.get("id")) == str(org.get("id")) for t in tenants)
+
+
 async def _publish_role(
     connector: VcfAutomationConnector,
     target: VcfAutomationTargetLike,
@@ -156,36 +179,133 @@ async def _publish_role(
     return []
 
 
+async def _delete_role_quietly(
+    connector: VcfAutomationConnector,
+    target: VcfAutomationTargetLike,
+    operator: Operator,
+    role_segment: str,
+) -> bool:
+    """Best-effort rollback of a just-created role; never raises."""
+    try:
+        await connector._post_json(
+            target,
+            PROVIDER_GLOBAL_ROLE_PATH.format(id=role_segment),
+            operator=operator,
+            verb="DELETE",
+        )
+    except (httpx.HTTPError, RuntimeError) as exc:
+        _log.warning("vcfa_role_rollback_failed", error=type(exc).__name__)
+        return False
+    return True
+
+
+async def _put_rights(
+    connector: VcfAutomationConnector,
+    target: VcfAutomationTargetLike,
+    operator: Operator,
+    role_segment: str,
+    rights: list[dict[str, Any]],
+) -> None:
+    await connector._post_json(
+        target,
+        PROVIDER_GLOBAL_ROLE_RIGHTS_PATH.format(id=role_segment),
+        operator=operator,
+        verb="PUT",
+        json={"values": rights},
+    )
+
+
+async def _converge_existing(
+    connector: VcfAutomationConnector,
+    target: VcfAutomationTargetLike,
+    operator: Operator,
+    params: Mapping[str, Any],
+    existing: Mapping[str, Any],
+    publish_org: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Repair an existing role toward the request instead of blindly answering ``unchanged``.
+
+    A role left half-built by an earlier run (rights PUT or publish failed)
+    must be repairable by re-running the op. So: a role that carries **no**
+    rights gets the requested rights; a requested publication that is not in
+    place yet is applied. Rights already present are never replaced (the op
+    creates roles; it does not edit a curated one). Answers ``updated`` with
+    the ``reconciled`` steps, or ``unchanged`` when nothing was needed.
+    """
+    segment = quote_segment(str(existing.get("id")))
+    current = await list_all(
+        connector, target, operator, PROVIDER_GLOBAL_ROLE_RIGHTS_PATH.format(id=segment)
+    )
+    rights: list[dict[str, Any]] = []
+    if not current and (params.get("base_role") or params.get("rights")):
+        rights, problem = await _resolve_role_rights(connector, target, operator, params)
+        if problem is not None:
+            return {
+                "status": "invalid_request",
+                "role": entity_ref(existing),
+                "rights_count": 0,
+                "published_to": [],
+                "reconciled": [],
+                "guidance": problem,
+            }
+    publish_all = bool(params.get("publish_all")) and existing.get("publishAll") is not True
+    org = publish_org
+    if (
+        org is not None
+        and not publish_all
+        and await _is_published_to(connector, target, operator, existing, org)
+    ):
+        org = None
+    reconciled: list[str] = []
+    if rights:
+        await _put_rights(connector, target, operator, segment, rights)
+        reconciled.append("rights")
+    published = await _publish_role(
+        connector, target, operator, segment, publish_all=publish_all, org=org
+    )
+    if published:
+        reconciled.append("publication")
+    name = existing.get("name")
+    return {
+        "status": "updated" if reconciled else "unchanged",
+        "role": entity_ref(existing),
+        "rights_count": len(rights) if rights else len(current),
+        "published_to": published,
+        "reconciled": reconciled,
+        "guidance": (
+            f"global role {name!r} already existed; completed: {', '.join(reconciled)}"
+            if reconciled
+            else f"global role {name!r} already exists with rights and the requested "
+            "publication; nothing was written"
+        ),
+    }
+
+
 async def provider_role_create(
     connector: VcfAutomationConnector,
     operator: Operator,
     target: VcfAutomationTargetLike,
     params: dict[str, Any],
 ) -> dict[str, Any]:
-    """``vcfa.provider.role.create`` — custom global role (idempotent on name).
+    """``vcfa.provider.role.create`` — custom global role (idempotent, self-repairing).
 
-    Flow: existing-name check (``unchanged``) → resolve the base role's
-    rights, each extra right name, and the ``publish_to_org`` org -- all
-    before any write (``invalid_request`` on a miss) → ``POST
-    /cloudapi/1.0.0/globalRoles`` → ``PUT …/{id}/rights`` → optional publish
-    (``…/tenants/publish`` with ``{"values": [{name, id}]}`` for one org, or
-    ``…/tenants/publishAll``).
+    Flow: resolve the ``publish_to_org`` org → if the role exists, converge
+    it (:func:`_converge_existing`: fill empty rights, apply a missing
+    publication → ``updated`` / ``unchanged``) → otherwise resolve the base
+    role's rights + each extra right name (``invalid_request`` on a miss,
+    nothing written) → ``POST /cloudapi/1.0.0/globalRoles`` → ``PUT
+    …/{id}/rights`` (on failure the new role is deleted so no rights-less
+    role is left behind) → optional publish (``…/tenants/publish`` with
+    ``{"values": [{name, id}]}`` for one org, or ``…/tenants/publishAll``).
+    A failed publish leaves a complete but unpublished role, which a re-run
+    publishes.
     """
-    envelope: dict[str, Any] = {"role": None, "rights_count": None, "published_to": []}
-    existing = await find_global_role(connector, target, operator, params["name"])
-    if existing is not None:
-        return {
-            **envelope,
-            "status": "unchanged",
-            "role": entity_ref(existing),
-            "guidance": (
-                f"a global role named {existing.get('name')!r} already exists; nothing was "
-                "written (its rights and publication were not changed)"
-            ),
-        }
-    rights, problem = await _resolve_role_rights(connector, target, operator, params)
-    if problem is not None:
-        return {**envelope, "status": "invalid_request", "guidance": problem}
+    envelope: dict[str, Any] = {
+        "role": None,
+        "rights_count": None,
+        "published_to": [],
+        "reconciled": [],
+    }
     publish_org: dict[str, Any] | None = None
     org_name = params.get("publish_to_org")
     if org_name:
@@ -196,16 +316,21 @@ async def provider_role_create(
                 "status": "invalid_request",
                 "guidance": f"publish_to_org {org_name!r} is not an org on this appliance",
             }
+    existing = await find_global_role(connector, target, operator, params["name"])
+    if existing is not None:
+        return await _converge_existing(connector, target, operator, params, existing, publish_org)
+    rights, problem = await _resolve_role_rights(connector, target, operator, params)
+    if problem is not None:
+        return {**envelope, "status": "invalid_request", "guidance": problem}
 
     role_id = await _create_global_role(connector, target, operator, params)
     segment = quote_segment(role_id)
-    await connector._post_json(
-        target,
-        PROVIDER_GLOBAL_ROLE_RIGHTS_PATH.format(id=segment),
-        operator=operator,
-        verb="PUT",
-        json={"values": rights},
-    )
+    try:
+        await _put_rights(connector, target, operator, segment, rights)
+    except BaseException:
+        deleted = await asyncio.shield(_delete_role_quietly(connector, target, operator, segment))
+        _log.warning("vcfa_role_rights_put_failed", role_deleted=deleted)
+        raise
     published = await _publish_role(
         connector,
         target,
@@ -215,6 +340,7 @@ async def provider_role_create(
         org=publish_org,
     )
     return {
+        **envelope,
         "status": "created",
         "role": {"id": role_id, "name": params["name"]},
         "rights_count": len(rights),

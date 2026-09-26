@@ -72,7 +72,9 @@ _PAGING: dict[str, Any] = {
 }
 _NAME_CONTAINS: dict[str, Any] = {
     "name_contains": {
-        **_FIQL_NAME,
+        **_NAME_FRAGMENT,
+        # Rides a FIQL wildcard literal: no FIQL-reserved characters.
+        "pattern": "^[^,;()*=!<>'\"]+$",
         "description": "Case-insensitive name substring filter (FIQL name==*value*).",
     }
 }
@@ -327,8 +329,11 @@ _ROLE_CREATE = VcfaTypedOp(
         "rights, and optionally publishes it to one org (publish_to_org) or all orgs "
         "(publish_all). Use it because the stock 'Organization Administrator' role is "
         "read-only and lacks 'API Tokens: Manage'. Every name is resolved before any "
-        f"write. {_STATUS_ENVELOPE_NOTE} Also returns rights_count and published_to. "
-        "An existing role is left untouched (rights and publication unchanged). "
+        f"write. {_STATUS_ENVELOPE_NOTE} Also returns rights_count, published_to and "
+        "reconciled. Re-running repairs a half-built role: an existing role with no "
+        "rights gets the requested rights and a requested publication that is missing "
+        "is applied ('updated'); rights already present are never replaced. A failed "
+        "rights update right after the create deletes the new role. "
         "safety_level=caution, requires approval."
     ),
     parameter_schema={
@@ -350,7 +355,7 @@ _ROLE_CREATE = VcfaTypedOp(
         "required": ["name"],
         "additionalProperties": False,
     },
-    response_schema=_write_response("role", _CREATE_STATUSES),
+    response_schema=_write_response("role", [*_CREATE_STATUSES, "updated"]),
     group_key="vcfa-provider-writes",
     tags=("write", "vcfa", "provider", "rbac"),
     safety_level="caution",
@@ -361,7 +366,10 @@ _ROLE_CREATE = VcfaTypedOp(
             "'Organization Administrator', rights=['API Tokens: Manage'], "
             "publish_to_org=<org>."
         ),
-        "output_shape": "{status, role: {id, name}, rights_count, published_to, guidance}.",
+        "output_shape": (
+            "{status: created|updated|unchanged|invalid_request, role: {id, name}, "
+            "rights_count, published_to, reconciled, guidance}."
+        ),
         "next_step": "vcfa.provider.user.create with role=<this role name>.",
         "parameter_hints": {
             "rights": "Exact names; resolve them with vcfa.provider.right.list first.",

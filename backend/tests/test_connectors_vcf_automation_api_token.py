@@ -151,7 +151,11 @@ def _mount_user_flow(
     )
     return {
         "session": mock.post(session_path).respond(
-            200, headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": USER_JWT}
+            200,
+            headers={
+                "X-VMWARE-VCLOUD-ACCESS-TOKEN": USER_JWT,
+                "Set-Cookie": "vcloud_session_id=user-cookie-sentinel; Path=/",
+            },
         ),
         "tokens": mock.get(_TOKENS).respond(200, json=page(tokens or [])),
         "register": mock.post(f"/oauth/{context}/register").respond(
@@ -167,6 +171,7 @@ def _mount_user_flow(
             },
         ),
         "delete": mock.delete(f"{_TOKENS}/{_TOKEN_SEG}").respond(204),
+        "logout": mock.delete("/cloudapi/1.0.0/sessions/current").respond(204),
     }
 
 
@@ -204,8 +209,15 @@ async def test_create_mints_as_the_user_and_stores_in_vault(
         "assertion": [USER_JWT],
         "client_id": [_CLIENT_ID],
     }
+    # The grant carries the session JWT as Bearer too (the proven live shape).
+    assert routes["grant"].calls.last.request.headers["Authorization"] == f"Bearer {USER_JWT}"
     token_filter = routes["tokens"].calls.last.request.url.params["filter"]
-    assert token_filter == "(name==meho-tenant;owner.name==org-admin;(type==PROXY,type==REFRESH))"
+    assert token_filter == "(name==meho-tenant;(type==PROXY,type==REFRESH))"
+    # The user session is logged out and never touched the pooled client's jar.
+    assert routes["logout"].called
+    assert routes["logout"].calls.last.request.headers["Authorization"] == f"Bearer {USER_JWT}"
+    pooled = await vcfa._http_client(await resolved_target())
+    assert "user-cookie-sentinel" not in str(pooled.cookies.jar)
     assert vault_writes == [
         (
             "patch",
@@ -285,9 +297,15 @@ async def test_create_system_org_uses_the_provider_endpoints(
 async def test_create_unchanged_when_token_name_exists(
     vcfa: VcfAutomationConnector, vault_writes: list[tuple[str, dict[str, Any]]]
 ) -> None:
-    existing = {"id": _TOKEN_URN, "name": "meho-tenant", "type": "REFRESH"}
+    existing = {
+        "id": _TOKEN_URN,
+        "name": "meho-tenant",
+        "type": "REFRESH",
+        "owner": {"name": "org-admin"},
+    }
+    someone_elses = {**existing, "id": "urn:vcloud:token:other", "owner": {"name": "other"}}
     with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
-        routes = _mount_user_flow(mock, tokens=[existing])
+        routes = _mount_user_flow(mock, tokens=[someone_elses, existing])
         result = await run("vcfa.provider.api_token.create", _CREATE_PARAMS)
     out = result["result"]
     assert out["status"] == "unchanged"
@@ -335,6 +353,61 @@ async def test_create_revokes_the_token_when_vault_write_fails(
     assert routes["delete"].calls.last.request.headers["Authorization"] == f"Bearer {USER_JWT}"
     assert "was revoked" in json.dumps(result)
     assert MINTED_TOKEN not in json.dumps(result)
+    assert routes["logout"].called
+
+
+async def test_create_names_the_recovery_when_store_and_revoke_both_fail(
+    vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _denied(_operator: Any, _target: Any, _params: dict[str, Any]) -> dict[str, Any]:
+        raise hvac.exceptions.Forbidden("permission denied")
+
+    monkeypatch.setattr(vault_ops_module, "vault_kv_patch", _denied)
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        routes = _mount_user_flow(mock)
+        routes["delete"].respond(500)
+        result = await run("vcfa.provider.api_token.create", _CREATE_PARAMS)
+    dumped = json.dumps(result)
+    assert result["status"] == "error"
+    assert "could NOT be revoked" in dumped
+    assert "vcfa.provider.api_token.revoke" in dumped
+    assert _CLIENT_ID in dumped  # the bare client id survives boundary redaction
+    assert MINTED_TOKEN not in dumped
+
+
+async def test_create_revokes_the_client_when_the_grant_fails(
+    vcfa: VcfAutomationConnector, vault_writes: list[tuple[str, dict[str, Any]]]
+) -> None:
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        routes = _mount_user_flow(mock)
+        routes["grant"].respond(500, json={"message": "grant exploded"})
+        result = await run("vcfa.provider.api_token.create", _CREATE_PARAMS)
+    assert result["status"] == "error"
+    assert result["extras"]["http_status"] == 500
+    assert routes["delete"].called  # no orphaned client for a re-run to call 'unchanged'
+    assert vault_writes == []
+    assert routes["logout"].called
+
+
+async def test_cancellation_between_mint_and_store_still_revokes(
+    vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    from meho_backplane.connectors.vcf_automation import _api_token
+
+    async def _cancelled(_operator: Any, _target: Any, _params: dict[str, Any]) -> dict[str, Any]:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(vault_ops_module, "vault_kv_patch", _cancelled)
+    connector = vcfa
+    target = await resolved_target()
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        routes = _mount_user_flow(mock)
+        with pytest.raises(asyncio.CancelledError):
+            await _api_token.provider_api_token_create(connector, OPERATOR, target, _CREATE_PARAMS)
+    assert routes["delete"].called
+    assert routes["logout"].called
 
 
 async def test_create_user_login_401_is_connector_auth_failed(
@@ -388,6 +461,7 @@ async def test_revoke_deletes_the_named_token(vcfa: VcfAutomationConnector) -> N
     with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
         routes = _mount_user_flow(mock, tokens=[existing])
         result = await run("vcfa.provider.api_token.revoke", _REVOKE_PARAMS)
+    assert routes["logout"].called
     out = result["result"]
     assert out["status"] == "revoked", result
     assert out["client_id"] == _CLIENT_ID

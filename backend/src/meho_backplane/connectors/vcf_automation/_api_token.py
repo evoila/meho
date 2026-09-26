@@ -14,9 +14,13 @@ session, never the connector's cached provider session:
    session JWT (``X-VMWARE-VCLOUD-ACCESS-TOKEN`` header). The password is
    read from the op's ``password_secret_ref`` under the operator's
    identity (:func:`._lookups.read_password`); it is never an op param.
+   The session runs on a private, un-pooled client (own cookie jar) and
+   is logged out (``DELETE /cloudapi/1.0.0/sessions/current``) when the
+   op finishes.
 2. create: ``POST /oauth/<tenant/<org>|provider>/register``
    ``{"client_name"}`` → ``client_id``; then the ``jwt-bearer`` grant at
-   ``POST /oauth/.../token`` → ``refresh_token`` (``go-vcloud-director``
+   ``POST /oauth/.../token`` (session JWT as ``assertion`` and as Bearer)
+   → ``refresh_token`` (``go-vcloud-director``
    ``CreateToken`` + ``GetInitialApiToken``). The token id is
    ``urn:vcloud:token:<client_id>``.
 3. revoke: ``DELETE /cloudapi/1.0.0/tokens/<id>`` (``Token.Delete``).
@@ -29,9 +33,13 @@ the governed ``vault.kv.patch`` handler (``vault.kv.put`` when the path
 does not exist yet), under the operator's own Vault identity, with the
 tenant-scope guard those handlers enforce. The result carries only the
 Vault ref, the written version, and a SHA-256 + length as provenance --
-the ``k8s.secret.read_to_ref`` no-transit shape (#3496). If the Vault
-write fails after the mint, the just-minted token is revoked before the
-error propagates, so no unrecoverable credential is left behind.
+the ``k8s.secret.read_to_ref`` no-transit shape (#3496). Once the OAuth
+client is registered, any failure before the Vault write lands -- a
+refused grant, a failed write, a cancellation -- revokes the token
+(shielded) before the error propagates, so no orphaned token is left for
+a re-run to report ``unchanged``. That write is audited inside this op's
+audit row (its params carry the store ref) and by Vault's own audit
+device; no separate ``vault.kv.patch`` row is written.
 
 ``vcfa.provider.api_token.create`` is pinned ``credential_mint`` in
 :data:`meho_backplane.broadcast.events._CREDENTIAL_MINT_OPS`, so its
@@ -42,6 +50,7 @@ records its bodies (the OAuth form carries the session JWT as the
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Final
@@ -60,6 +69,7 @@ from meho_backplane.connectors.vcf_automation._lookups import (
 from meho_backplane.connectors.vcf_automation._paths import (
     OAUTH_REGISTER_PATH,
     OAUTH_TOKEN_PATH,
+    ORG_SESSION_CURRENT_PATH,
     ORG_SESSION_PATH,
     PROVIDER_TOKEN_PATH,
     PROVIDER_TOKENS_PATH,
@@ -115,7 +125,15 @@ def _oauth_context(org: str) -> str:
 
 
 class _UserSession:
-    """Requests under one org user's own session JWT (not the cached provider session)."""
+    """One org user's own session on a private client (not the pooled provider session).
+
+    The client is un-pooled (:meth:`HttpConnector._ephemeral_http_client`:
+    same SSRF + TLS posture, **own cookie jar**), so nothing the user's
+    login sets can leak into the connector's shared provider-plane client.
+    Leaving the ``async with`` block logs the session out
+    (``DELETE /cloudapi/1.0.0/sessions/current``, best effort) and closes
+    the client.
+    """
 
     def __init__(
         self,
@@ -133,6 +151,20 @@ class _UserSession:
     def jwt(self) -> str:
         return self._jwt
 
+    async def __aenter__(self) -> _UserSession:
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        await asyncio.shield(self._close())
+
+    async def _close(self) -> None:
+        try:
+            await self.request("DELETE", ORG_SESSION_CURRENT_PATH)
+        except (httpx.HTTPError, RuntimeError) as exc:
+            _log.info("vcfa_user_session_logout_failed", error=type(exc).__name__)
+        finally:
+            await self._client.aclose()
+
     async def request(
         self,
         method: str,
@@ -141,24 +173,46 @@ class _UserSession:
         params: Mapping[str, Any] | None = None,
         json: Mapping[str, Any] | None = None,
         data: Mapping[str, str] | None = None,
-        bearer: bool = True,
     ) -> dict[str, Any]:
         accept = PROVIDER_CLOUDAPI_ACCEPT if path.startswith("/cloudapi/") else TENANT_ACCEPT
-        headers = {"Accept": accept, **self._vhost}
-        if bearer:
-            headers["Authorization"] = f"Bearer {self._jwt}"
         resp = await self._client.request(
             method,
             path,
             params=dict(params) if params is not None else None,
             json=dict(json) if json is not None else None,
             data=dict(data) if data is not None else None,
-            headers=headers,
+            headers={"Accept": accept, "Authorization": f"Bearer {self._jwt}", **self._vhost},
             extensions=self._extensions,
         )
         resp.raise_for_status()
         payload = json_payload_or_empty(resp)
         return payload if isinstance(payload, dict) else {}
+
+
+def _login_error(
+    target: VcfAutomationTargetLike, params: Mapping[str, Any], path: str, status: int
+) -> ConnectorAuthError:
+    """The structured error for a refused (401/403) user login."""
+    org, username = params["org"], params["username"]
+    message = (
+        f"vcf-automation user session for {username!r}@{org!r} on target "
+        f"{target.name!r}: POST {path} returned HTTP {status}"
+    )
+    secret_ref, mount, key = password_ref(params)
+    remediation = (
+        f"Check that user {username!r} exists and is enabled in org {org!r} and "
+        f"that password_secret_ref={secret_ref!r} (mount={mount!r}, key={key!r}) "
+        "holds its current password."
+    )
+    return ConnectorAuthError(
+        f"{message}. {remediation}",
+        status_code=status,
+        cause=f"session_establish_{status}",
+        target_name=target.name,
+        host=getattr(target, "host", None),
+        secret_ref=secret_ref,
+        remediation=remediation,
+    )
 
 
 async def _open_user_session(
@@ -167,14 +221,15 @@ async def _open_user_session(
     params: Mapping[str, Any],
     password: str,
 ) -> _UserSession:
-    """Log in as ``<username>@<org>`` and return the user's session.
+    """Log in as ``<username>@<org>`` on a private client and return the session.
 
     A 401/403 raises :class:`ConnectorAuthError` naming the password secret
-    ref as the remediation (the target's own secret is not involved).
+    ref as the remediation (the target's own secret is not involved). The
+    private client is closed on any login failure.
     """
     org, username = params["org"], params["username"]
     path = PROVIDER_SESSION_PATH if _is_system(org) else ORG_SESSION_PATH
-    client = await connector._http_client(target)
+    client = await connector._ephemeral_http_client(target)
     extensions = connector._request_extensions(target)
     try:
         resp = await client.post(
@@ -186,54 +241,52 @@ async def _open_user_session(
             },
             extensions=extensions,
         )
+        if resp.status_code in (401, 403):
+            raise _login_error(target, params, path, resp.status_code)
         resp.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        status = exc.response.status_code
-        message = (
-            f"vcf-automation user session for {username!r}@{org!r} on target "
-            f"{target.name!r}: POST {path} returned HTTP {status}"
-        )
-        if status in (401, 403):
-            secret_ref, mount, key = password_ref(params)
-            remediation = (
-                f"Check that user {username!r} exists and is enabled in org {org!r} and "
-                f"that password_secret_ref={secret_ref!r} (mount={mount!r}, key={key!r}) "
-                "holds its current password."
+        jwt = resp.headers.get(PROVIDER_TOKEN_HEADER)
+        if not jwt:
+            raise RuntimeError(
+                f"vcf-automation user session for {username!r}@{org!r} on target "
+                f"{target.name!r}: POST {path} returned 2xx with no {PROVIDER_TOKEN_HEADER} "
+                "header"
             )
-            raise ConnectorAuthError(
-                f"{message}. {remediation}",
-                status_code=status,
-                cause=f"session_establish_{status}",
-                target_name=target.name,
-                host=getattr(target, "host", None),
-                secret_ref=secret_ref,
-                remediation=remediation,
-            ) from exc
+    except BaseException:
+        await client.aclose()
         raise
-    jwt = resp.headers.get(PROVIDER_TOKEN_HEADER)
-    if not jwt:
-        raise RuntimeError(
-            f"vcf-automation user session for {username!r}@{org!r} on target "
-            f"{target.name!r}: POST {path} returned 2xx with no {PROVIDER_TOKEN_HEADER} header"
-        )
     return _UserSession(client, target, extensions, jwt)
+
+
+def _owner_name(token: Mapping[str, Any]) -> str | None:
+    owner = token.get("owner")
+    name = owner.get("name") if isinstance(owner, dict) else None
+    return name if isinstance(name, str) else None
 
 
 async def _find_token(
     session: _UserSession, token_name: str, username: str
 ) -> dict[str, Any] | None:
-    """The user's API token named *token_name*, or ``None`` (``GetTokenByNameAndUsername``)."""
+    """The user's API token named *token_name*, or ``None``.
+
+    Filters on the (pattern-restricted, FIQL-safe) token name and type only;
+    the owner is matched client-side so a username carrying FIQL-reserved
+    characters never reaches the filter. ``go-vcloud-director``'s
+    ``GetTokenByNameAndUsername`` shape, minus the ``owner.name`` term.
+    """
     payload = await session.request(
         "GET",
         PROVIDER_TOKENS_PATH,
         params={
-            "filter": f"(name=={token_name};owner.name=={username};(type==PROXY,type==REFRESH))",
+            "filter": f"(name=={token_name};(type==PROXY,type==REFRESH))",
             "pageSize": 128,
         },
     )
     values = payload.get("values")
     for row in values if isinstance(values, list) else []:
-        if isinstance(row, dict) and row.get("name") == token_name:
+        if not isinstance(row, dict) or row.get("name") != token_name:
+            continue
+        owner = _owner_name(row)
+        if owner is None or owner.casefold() == username.casefold():
             return row
     return None
 
@@ -261,8 +314,8 @@ def _store_params(params: Mapping[str, Any]) -> tuple[str, str, str]:
     )
 
 
-async def _mint(session: _UserSession, org: str, token_name: str) -> tuple[str, str]:
-    """Register the OAuth client and run the jwt-bearer grant → ``(client_id, refresh_token)``."""
+async def _register(session: _UserSession, org: str, token_name: str) -> str:
+    """Register the OAuth client (the token record) → ``client_id``."""
     context = _oauth_context(org)
     registered = await session.request(
         "POST", OAUTH_REGISTER_PATH.format(context=context), json={"client_name": token_name}
@@ -272,31 +325,92 @@ async def _mint(session: _UserSession, org: str, token_name: str) -> tuple[str, 
         raise RuntimeError(
             f"vcfa.provider.api_token.create: POST /oauth/{context}/register returned no client_id"
         )
+    return client_id
+
+
+async def _grant(session: _UserSession, org: str, client_id: str) -> str:
+    """The ``jwt-bearer`` grant → the refresh token.
+
+    Sends the session JWT both as the ``assertion`` and as the Bearer
+    header -- the request shape of the proven live provider-plane mint.
+    """
+    context = _oauth_context(org)
     granted = await session.request(
         "POST",
         OAUTH_TOKEN_PATH.format(context=context),
         data={"grant_type": _JWT_BEARER_GRANT, "assertion": session.jwt, "client_id": client_id},
-        bearer=False,
     )
     refresh_token = granted.get("refresh_token")
     if not isinstance(refresh_token, str) or not refresh_token:
-        await _revoke_quietly(session, client_id)
         raise RuntimeError(
-            f"vcfa.provider.api_token.create: POST /oauth/{context}/token returned no "
-            "refresh_token; the registered client was revoked"
+            f"vcfa.provider.api_token.create: POST /oauth/{context}/token returned no refresh_token"
         )
-    return client_id, refresh_token
+    return refresh_token
 
 
 async def _revoke_quietly(session: _UserSession, client_id: str) -> bool:
-    """Best-effort revoke of a just-minted token; never raises."""
+    """Best-effort revoke of a just-registered token; never raises."""
     token_id = f"{_TOKEN_URN_PREFIX}{client_id}"
     try:
         await session.request("DELETE", PROVIDER_TOKEN_PATH.format(id=quote_segment(token_id)))
     except (httpx.HTTPError, RuntimeError) as exc:
-        _log.warning("vcfa_api_token_cleanup_failed", token_id=token_id, error=type(exc).__name__)
+        _log.warning("vcfa_api_token_cleanup_failed", client_id=client_id, error=type(exc).__name__)
         return False
     return True
+
+
+class _VaultStoreError(RuntimeError):
+    """The minted token could not be written to Vault (message names no value)."""
+
+
+async def _mint_and_store(
+    session: _UserSession,
+    operator: Operator,
+    params: Mapping[str, Any],
+    client_id: str,
+) -> dict[str, Any]:
+    """Grant → Vault write → the value-free ``stored`` provenance block.
+
+    Any failure -- a refused grant, a failed Vault write, or a cancellation
+    in between -- revokes the just-registered token (shielded, so a
+    cancellation cannot skip the compensation) before the error propagates,
+    so a re-run never meets an orphaned token it would call ``unchanged``.
+    """
+    mount, store_path, field = _store_params(params)
+    try:
+        refresh_token = await _grant(session, params["org"], client_id)
+        try:
+            written = await _store_in_vault(operator, mount, store_path, field, refresh_token)
+        except Exception as exc:
+            raise _VaultStoreError(type(exc).__name__) from exc
+    except BaseException as exc:
+        revoked = await asyncio.shield(_revoke_quietly(session, client_id))
+        if isinstance(exc, _VaultStoreError):
+            outcome = (
+                "the token was revoked"
+                if revoked
+                else (
+                    f"the token (client_id {client_id}) could NOT be revoked -- run "
+                    "vcfa.provider.api_token.revoke with token_name="
+                    f"{params['token_name']!r}, username={params['username']!r}"
+                )
+            )
+            raise RuntimeError(
+                f"vcfa.provider.api_token.create: {outcome}; the minted token could not be "
+                f"written to Vault at {mount}/{store_path} ({exc})"
+            ) from exc.__cause__
+        _log.warning("vcfa_api_token_mint_aborted", client_id=client_id, revoked=revoked)
+        raise
+    digest = hashlib.sha256(refresh_token.encode("utf-8")).hexdigest()
+    stored: dict[str, Any] = {
+        "mount": mount,
+        "secret_ref": store_path,
+        "field": field,
+        "version": written.get("version"),
+        "value_sha256": digest,
+        "length": len(refresh_token),
+    }
+    return stored
 
 
 async def provider_api_token_create(
@@ -313,7 +427,6 @@ async def provider_api_token_create(
     docstring for the flow and the no-transit guarantee.
     """
     org, username, token_name = params["org"], params["username"], params["token_name"]
-    mount, store_path, field = _store_params(params)
     envelope: dict[str, Any] = {
         "org": org,
         "username": username,
@@ -328,43 +441,26 @@ async def provider_api_token_create(
             "status": "invalid_request",
             "guidance": password_missing_guidance(params),
         }
-    session = await _open_user_session(connector, target, params, password)
-    existing = await _find_token(session, token_name, username)
-    if existing is not None:
-        return {
-            **envelope,
-            "status": "unchanged",
-            "client_id": _client_id_of(existing),
-            "guidance": (
-                f"user {username!r} already has an API token named {token_name!r}; nothing was "
-                "minted (a token value is shown only once -- revoke it with "
-                "vcfa.provider.api_token.revoke to mint a new one)"
-            ),
-        }
-    client_id, refresh_token = await _mint(session, org, token_name)
-    token_id = f"{_TOKEN_URN_PREFIX}{client_id}"
-    try:
-        written = await _store_in_vault(operator, mount, store_path, field, refresh_token)
-    except Exception as exc:
-        revoked = await _revoke_quietly(session, client_id)
-        raise RuntimeError(
-            f"vcfa.provider.api_token.create: the minted token could not be written to Vault "
-            f"at {mount}/{store_path} ({type(exc).__name__}); the token "
-            + ("was revoked" if revoked else f"could NOT be revoked -- revoke {token_id}")
-        ) from exc
-    digest = hashlib.sha256(refresh_token.encode("utf-8")).hexdigest()
+    async with await _open_user_session(connector, target, params, password) as session:
+        existing = await _find_token(session, token_name, username)
+        if existing is not None:
+            return {
+                **envelope,
+                "status": "unchanged",
+                "client_id": _client_id_of(existing),
+                "guidance": (
+                    f"user {username!r} already has an API token named {token_name!r}; "
+                    "nothing was minted (a token value is shown only once -- revoke it with "
+                    "vcfa.provider.api_token.revoke to mint a new one)"
+                ),
+            }
+        client_id = await _register(session, org, token_name)
+        stored = await _mint_and_store(session, operator, params, client_id)
     return {
         **envelope,
         "status": "created",
         "client_id": client_id,
-        "stored": {
-            "mount": mount,
-            "secret_ref": store_path,
-            "field": field,
-            "version": written.get("version"),
-            "value_sha256": digest,
-            "length": len(refresh_token),
-        },
+        "stored": stored,
         "guidance": None,
     }
 
@@ -396,16 +492,17 @@ async def provider_api_token_revoke(
             "status": "invalid_request",
             "guidance": password_missing_guidance(params),
         }
-    session = await _open_user_session(connector, target, params, password)
-    existing = await _find_token(session, token_name, username)
-    if existing is None or not existing.get("id"):
-        return {
-            **envelope,
-            "status": "unchanged",
-            "guidance": f"user {username!r} has no API token named {token_name!r}",
-        }
-    token_id = str(existing["id"])
-    await session.request("DELETE", PROVIDER_TOKEN_PATH.format(id=quote_segment(token_id)))
+    async with await _open_user_session(connector, target, params, password) as session:
+        existing = await _find_token(session, token_name, username)
+        if existing is None or not existing.get("id"):
+            return {
+                **envelope,
+                "status": "unchanged",
+                "guidance": f"user {username!r} has no API token named {token_name!r}",
+            }
+        await session.request(
+            "DELETE", PROVIDER_TOKEN_PATH.format(id=quote_segment(str(existing["id"])))
+        )
     return {
         **envelope,
         "status": "revoked",

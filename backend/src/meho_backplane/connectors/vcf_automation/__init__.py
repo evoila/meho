@@ -36,10 +36,15 @@ profiled-dispatch breadth, enable-able through the generic review flow
 from typing import Final
 
 from meho_backplane.connectors.registry import register_connector_v2
+
+# Imported for its side effect: registers the park-time preview builders of
+# the provisioning writes (#3890), like the keycloak / vmware-rest previews.
+from meho_backplane.connectors.vcf_automation import _provisioning_preview  # noqa: F401
 from meho_backplane.connectors.vcf_automation.connector import (
     VcfAutomationConfigurationError,
     VcfAutomationConnector,
 )
+from meho_backplane.connectors.vcf_automation.provisioning_ops import VCFA_PROVISIONING_OPS
 from meho_backplane.connectors.vcf_automation.session import (
     SessionCredentials,
     VcfAutomationCredentialsLoader,
@@ -110,7 +115,8 @@ register_connector_v2(
 
 # Queue the typed-op upsert onto the lifespan-driven registrar list. The
 # runner (``run_typed_op_registrars``) iterates after
-# ``_eager_import_connectors`` so the seven typed read descriptors land
+# ``_eager_import_connectors`` so the typed descriptors (the seven reads +
+# the #3890 provisioning ops) land
 # before the first dispatch — no ingested catalog state required (VCFA
 # ships no vendor spec; typed conversion is the only working read path).
 register_typed_op_registrar(register_vcfa_typed_operations)
@@ -119,6 +125,7 @@ __all__ = [
     "VCFA_CONNECTOR_ID",
     "VCFA_IMPL_ID",
     "VCFA_PRODUCT",
+    "VCFA_PROVISIONING_OPS",
     "VCFA_TYPED_OPS",
     "VCFA_TYPED_WHEN_TO_USE_BY_GROUP",
     "VCFA_VERSION",

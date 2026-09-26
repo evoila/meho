@@ -402,7 +402,7 @@ async def test_typed_ops_register_as_source_kind_typed_with_zero_ingested_rows()
 def test_every_typed_op_declares_the_plane_its_path_rides() -> None:
     """Each op's declared ``plane`` matches ``plane_for_path(op.path)``.
 
-    The import-time ``_validate_typed_op_planes()`` already enforces this;
+    The import-time ``validate_typed_ops()`` already enforces this;
     pinning it as an explicit test documents the contract that a declared
     plane / path drift is a hard failure (it would otherwise surface as a
     misrouted HTTP 401 — both planes carry a Bearer header but reject the

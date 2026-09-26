@@ -65,6 +65,17 @@ var typedOpCLICoverage = map[string]string{
 	"vcfa.tenant.deployment.list": "deployment list",
 	"vcfa.tenant.deployment.get":  "deployment get",
 	"vcfa.tenant.about":           "about --plane tenant", // pinned by TestAboutVerbDispatchesPerPlane
+	// Provisioning surface (#3890): agent-surface-only, reached through
+	// `meho operation call` / MCP call_operation — no dedicated CLI verb.
+	"vcfa.provider.right.list":       "",
+	"vcfa.provider.role.list":        "",
+	"vcfa.provider.org.create":       "",
+	"vcfa.provider.role.create":      "",
+	"vcfa.provider.user.create":      "",
+	"vcfa.provider.api_token.create": "",
+	"vcfa.provider.api_token.revoke": "",
+	"vcfa.tenant.project.create":     "",
+	"vcfa.tenant.login.test":         "",
 }
 
 // TestRepointedVerbsDispatchTypedOpIDs pins that the repointed VCFA

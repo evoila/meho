@@ -14,10 +14,15 @@ curation. G3.6-T12 (#840) shipped the recorded-fixture E2E. The operator
 runbook lives at `docs/cross-repo/g36-vcfa-canary.md`.
 
 **Typed reads (T5 #2305; deployment list #2839; deployment get
-#2960).** VCFA ships **no
-vendor OpenAPI spec** (the provider plane publishes none; the tenant
-plane ships only Swagger 2.0 fragments the ingest parser rejects by
-decision #2090), so there is nothing to ingest — the hand-curated
+#2960).** The provider plane publishes **no machine-readable spec**
+(`/cloudapi/1.0.0/openapi*` → 404). The tenant plane differs by
+release: the vendor's public SDK ships only Swagger 2.0 fragments the
+ingest parser rejects by decision #2090, but a **9.1 appliance serves an
+OpenAPI 3.0.1 IaaS document** ("Aria Automation Assembler IaaS API",
+160 paths) unauthenticated at
+`/iaas-api/swagger/v3/api-docs/2021-07-15` (discovered from
+`GET /iaas/api/about` → `supportedApis[].documentationLink`). Nothing
+is ingested today either way — the hand-curated
 `core_ops` ingested-enable apparatus that once wrapped this gap was
 dispatch-inert on a real deploy and was **retired in #2362**. The
 **audited read set** (evoila/meho#2294: org/region list, provider
@@ -57,29 +62,87 @@ evidenced exclusion (no pinnable wire spec exists — see the
 `vcf-automation-9.0` entry in
 `docs/decisions/spec-reconcile-guards-standard.md`).
 
-Each op **declares the plane it rides**; `typed_ops._validate_typed_op_planes`
+Each op **declares the plane it rides**; `typed_ops.validate_typed_ops`
 asserts at import time that the declared `plane` matches
 `plane_for_path(op.path)`, so a drift fails the import rather than
 surfacing as a misrouted HTTP 401. The detail read's `{id}` path
 template is percent-encoded (empty safe set) by the handler at
 substitution time — OpenAPI `style: simple` semantics, matching the
-ingested dispatch path's `{var}` expansion. The `org create` write
-(`POST /cloudapi/1.0.0/orgs`) is deliberately out of scope — a first
-write on a read-only connector belongs in a G3.x-mold approval-gated
-write-surface initiative. Blueprint listing and the provider
-users list remain unconverted (initiative #2833 ranks them low tier) —
-not part of the
+ingested dispatch path's `{var}` expansion. Blueprint listing remains
+unconverted (initiative #2833 ranks it low tier) — not part of the
 "which deployments exist / which failed" answer this surface delivers.
+The tenant-bootstrap writes are the separate **provisioning** surface
+below.
 The hand-curated ingested-enable apparatus (`core_ops.py` / `_core_data`)
 those once lived under was retired in #2362; the wider ingested catalog
 would stay browsable through the generic `ReviewService.enable_reads`
-flow only where a convertible OpenAPI 3.x spec exists — which, for VCFA,
-it does not.
+flow only where a convertible OpenAPI 3.x spec is pinned — for VCFA only
+the 9.1 appliance-served IaaS document above would qualify, and none is
+pinned.
+
+**Provisioning ops (#3890).** An appliance whose only org is `System`
+cannot serve the tenant plane: `POST /iaas/api/login` exchanges only a
+**tenant-org** user's API token (the System-org token is refused with
+`invalid_grant`). The bootstrap sequence — org → custom global role
+carrying `API Tokens: Manage` (the stock *Organization Administrator*
+role is `readOnly` and lacks it) → local org user → API token → project
+— is governed by nine typed ops in `provisioning_ops.py` (metadata) with
+handlers in `_provisioning.py` / `_role_user.py` / `_api_token.py`,
+lookups in `_lookups.py`, paths in `_paths.py`, and park-time previews in
+`_provisioning_preview.py`:
+
+| op_id | tier / approval | wire |
+|---|---|---|
+| `vcfa.provider.right.list` | safe | `GET /cloudapi/1.0.0/rights` (`name_contains` → FIQL `name==*x*`) |
+| `vcfa.provider.role.list` | safe | `GET /cloudapi/1.0.0/globalRoles`; with `org`: `GET /cloudapi/1.0.0/roles` + tenant-context headers |
+| `vcfa.provider.org.create` | caution, approval | `POST /cloudapi/1.0.0/orgs` (`org_type=vm_apps` → `isClassicTenant: true`) |
+| `vcfa.provider.role.create` | caution, approval | `POST …/globalRoles`, `PUT …/{id}/rights`, `POST …/{id}/tenants/publish` or `…/publishAll` |
+| `vcfa.provider.user.create` | caution, approval | `POST /cloudapi/1.0.0/users` + tenant-context headers |
+| `vcfa.provider.api_token.create` | dangerous, approval | user session → `POST /oauth/<tenant/<org>\|provider>/register` → jwt-bearer `POST …/token` → Vault |
+| `vcfa.provider.api_token.revoke` | dangerous, approval | user session → `DELETE /cloudapi/1.0.0/tokens/{id}` |
+| `vcfa.tenant.project.create` | caution, approval | `POST /iaas/api/projects?apiVersion=2021-07-15` |
+| `vcfa.tenant.login.test` | safe | tenant login only (`POST /iaas/api/login`), no data call |
+
+- **Envelope.** Every write returns `{status, <resource>, guidance}`:
+  `created`, `unchanged` (the name already exists — idempotent, nothing
+  written) or `invalid_request` (a base role / right / org / role / password
+  did not resolve — checked before any write). Upstream 4xx/5xx raise and
+  the dispatcher maps them (`connector_error` / `connector_http_403` with
+  `upstream_message`); a rejected login is `connector_auth_failed`.
+- **Name lookups** use the FIQL `filter` (`name==<v>`), compared
+  case-insensitively; a value containing `,` or `;` (which FIQL cannot
+  carry) is matched by paging the full list (the `go-vcloud-director`
+  fallback). Org scoping uses the `X-VMWARE-VCLOUD-TENANT-CONTEXT` (org
+  uuid) + `X-VMWARE-VCLOUD-AUTH-CONTEXT` (org name) header pair.
+- **Passwords** are never op params: `user.create` and the token ops read
+  the user password from `password_secret_ref` (+ `password_secret_mount`,
+  `password_secret_key`) under the operator's identity — the Keycloak
+  user-write seam (`load_vault_secret_data`).
+- **API token no-transit.** `api_token.create` logs in *as the user*
+  (`/cloudapi/1.0.0/sessions`, or `…/sessions/provider` for `System`), mints
+  the refresh token and writes it to `store_secret_ref` / `store_field`
+  (default `refresh_token`, the field the tenant login reads) through the
+  governed `vault.kv.patch` handler (`vault.kv.put` when the path is new).
+  The result carries only the Vault ref, version, SHA-256 and length, plus
+  the OAuth `client_id` (the token id is `urn:vcloud:token:<client_id>`;
+  results carry the bare id because the connector-boundary redaction reads
+  `token:<hex>` as a labelled secret). A failed Vault write revokes the
+  just-minted token before the error propagates. `api_token.create` is
+  pinned `credential_mint`, `user.create` / `api_token.revoke`
+  `credential_write` in `broadcast/events.py` — aggregate-only broadcast,
+  no flight-recorder bodies.
+- **`vcfa.tenant.login.test`** answers whether the target secret's
+  credential (normally its `refresh_token`) authenticates the tenant
+  plane: `{authenticated, login_flow, api_version, error}`. The minted
+  bearer is discarded (not cached); a refused login is a result, not an op
+  failure. If `/iaas/api/login` refuses a tenant-org token too, the
+  `/oauth/tenant/<org>/token` exchange is a follow-up, not implemented.
 
 `register_typed_operations` (a classmethod on the connector, queued onto
 the lifespan registrar list via `register_vcfa_typed_operations` in
-`__init__.py`) upserts the seven descriptors on startup — the same
-argocd / bind9 / Kubernetes typed-registrar shape.
+`__init__.py`) upserts the seven read descriptors plus the nine
+provisioning descriptors on startup — the same argocd / bind9 /
+Kubernetes typed-registrar shape.
 
 Source: `backend/src/meho_backplane/connectors/vcf_automation/`.
 
@@ -128,10 +191,13 @@ domains.
   `connectors/vmware_rest/`.
 - **`VCFA_TYPED_OPS` / `VcfaTypedOp` / `VCFA_TYPED_WHEN_TO_USE_BY_GROUP`**
   (`typed_ops.py`) — the seven typed read ops (T5 #2305; tenant
-  deployment list #2839; tenant deployment get #2960) and their two
-  per-plane groups (`vcfa-provider-reads`,
-  `vcfa-tenant-reads`). Each `VcfaTypedOp` carries a `plane` + `path`;
-  the module's `_validate_typed_op_planes()` cross-checks them at import
+  deployment list #2839; tenant deployment get #2960) and the four
+  per-plane groups (`vcfa-provider-reads`, `vcfa-tenant-reads`, and the
+  #3890 `vcfa-provider-writes`, `vcfa-tenant-writes`).
+- **`VCFA_PROVISIONING_OPS`** (`provisioning_ops.py`) — the nine #3890
+  provisioning ops (see **Provisioning ops** above), validated by the
+  same `validate_typed_ops()`. Each `VcfaTypedOp` carries a `plane` + `path`;
+  the module's `validate_typed_ops()` cross-checks them at import
   so a declared-plane / path drift fails the import rather than
   surfacing as a misrouted 401.
 - **`VCFA_PRODUCT` / `VCFA_VERSION` / `VCFA_IMPL_ID` /
@@ -159,8 +225,10 @@ domains.
    idempotency check (in `ensure_connector_class_registered`) no-ops on
    subsequent ingests against the same triple.
 4. `run_typed_op_registrars()` (lifespan) invokes the registrar, which
-   upserts the seven `typed_ops.VCFA_TYPED_OPS` descriptors — no ingest
-   needed, so the audited read surface works on a fresh boot.
+   upserts the seven `typed_ops.VCFA_TYPED_OPS` descriptors plus the nine
+   `provisioning_ops.VCFA_PROVISIONING_OPS` (#3890) — no ingest needed, so
+   the audited read surface and the provisioning writes work on a fresh
+   boot.
 
 ### Vhost routing (load-bearing, #2863)
 

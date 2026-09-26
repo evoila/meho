@@ -880,13 +880,121 @@ class VcfAutomationConnector(HttpConnector):
         del params  # schema declares the param object empty
         return await self._request_json(target, "GET", TENANT_ABOUT_PATH, operator=operator)
 
+    # ------------------------------------------------------------------
+    # Provisioning ops (evoila/meho#3890) -- thin shims over the impl
+    # modules (``_provisioning`` / ``_role_user`` / ``_api_token``), lazily
+    # imported so this module stays within its size budget. Metadata lives
+    # in :mod:`.provisioning_ops`.
+    # ------------------------------------------------------------------
+
+    async def provider_right_list(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.right.list`` — see :mod:`._provisioning`."""
+        from meho_backplane.connectors.vcf_automation._provisioning import provider_right_list
+
+        return await provider_right_list(self, operator, target, params)
+
+    async def provider_role_list(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.role.list`` — see :mod:`._provisioning`."""
+        from meho_backplane.connectors.vcf_automation._provisioning import provider_role_list
+
+        return await provider_role_list(self, operator, target, params)
+
+    async def provider_org_create(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.org.create`` — see :mod:`._provisioning`."""
+        from meho_backplane.connectors.vcf_automation._provisioning import provider_org_create
+
+        return await provider_org_create(self, operator, target, params)
+
+    async def provider_role_create(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.role.create`` — see :mod:`._role_user`."""
+        from meho_backplane.connectors.vcf_automation._role_user import provider_role_create
+
+        return await provider_role_create(self, operator, target, params)
+
+    async def provider_user_create(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.user.create`` — see :mod:`._role_user`."""
+        from meho_backplane.connectors.vcf_automation._role_user import provider_user_create
+
+        return await provider_user_create(self, operator, target, params)
+
+    async def provider_api_token_create(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.api_token.create`` — see :mod:`._api_token`."""
+        from meho_backplane.connectors.vcf_automation._api_token import provider_api_token_create
+
+        return await provider_api_token_create(self, operator, target, params)
+
+    async def provider_api_token_revoke(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.api_token.revoke`` — see :mod:`._api_token`."""
+        from meho_backplane.connectors.vcf_automation._api_token import provider_api_token_revoke
+
+        return await provider_api_token_revoke(self, operator, target, params)
+
+    async def tenant_project_create(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.project.create`` — see :mod:`._provisioning`."""
+        from meho_backplane.connectors.vcf_automation._provisioning import tenant_project_create
+
+        return await tenant_project_create(self, operator, target, params)
+
+    async def tenant_login_test(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.login.test`` — see :mod:`._provisioning`."""
+        from meho_backplane.connectors.vcf_automation._provisioning import tenant_login_test
+
+        return await tenant_login_test(self, operator, target, params)
+
     @classmethod
     async def register_typed_operations(cls) -> None:
-        """Upsert every op in :data:`VCFA_TYPED_OPS` into ``endpoint_descriptor``.
+        """Upsert every typed op (reads + provisioning ops) into ``endpoint_descriptor``.
 
         Called from the application lifespan via the registrar queued in
         :mod:`meho_backplane.connectors.vcf_automation.__init__`. Walks
-        :data:`~meho_backplane.connectors.vcf_automation.typed_ops.VCFA_TYPED_OPS`,
+        :data:`~meho_backplane.connectors.vcf_automation.typed_ops.VCFA_TYPED_OPS`
+        plus
+        :data:`~meho_backplane.connectors.vcf_automation.provisioning_ops.VCFA_PROVISIONING_OPS`,
         resolves each op's ``handler_attr`` to the bound method, looks the
         group's curated ``when_to_use`` up in
         :data:`~meho_backplane.connectors.vcf_automation.typed_ops.VCFA_TYPED_WHEN_TO_USE_BY_GROUP`,
@@ -900,13 +1008,17 @@ class VcfAutomationConnector(HttpConnector):
         # Lazy import: the operations package pulls in the embedding
         # pipeline (ONNX runtime + model) which pure fingerprint/probe unit
         # tests should not pay. Lifespan callers have it warmed by now.
+        from meho_backplane.connectors.vcf_automation.provisioning_ops import (
+            VCFA_PROVISIONING_OPS,
+        )
         from meho_backplane.connectors.vcf_automation.typed_ops import (
             VCFA_TYPED_OPS,
             VCFA_TYPED_WHEN_TO_USE_BY_GROUP,
         )
         from meho_backplane.operations.typed_register import register_typed_operation
 
-        for op in VCFA_TYPED_OPS:
+        all_ops = (*VCFA_TYPED_OPS, *VCFA_PROVISIONING_OPS)
+        for op in all_ops:
             handler = getattr(cls, op.handler_attr, None)
             if handler is None:
                 raise AttributeError(
@@ -939,7 +1051,7 @@ class VcfAutomationConnector(HttpConnector):
             )
         _log.info(
             "vcfa_typed_operations_registered",
-            count=len(VCFA_TYPED_OPS),
+            count=len(all_ops),
             product=cls.product,
             version=cls.version,
             impl_id=cls.impl_id,

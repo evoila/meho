@@ -134,6 +134,14 @@ _CREDENTIAL_MINT_OPS: Final[frozenset[str]] = frozenset(
         # full params/detail. Pinning to ``credential_mint`` collapses the
         # broadcast to aggregate-only as defence-in-depth for the op class.
         "rke2.token.rotate",
+        # #3890 — the VCF Automation API-token mint. It logs in as the org
+        # user and mints a long-lived refresh token; the handler writes the
+        # token straight to Vault and returns only a Vault pointer + SHA-256,
+        # so nothing sensitive is in the response. The pin (``rke2.token.rotate``
+        # precedent) collapses the broadcast to aggregate-only and makes the
+        # flight recorder drop its bodies (the OAuth form carries the session
+        # JWT as the ``assertion``; the token response carries the token).
+        "vcfa.provider.api_token.create",
     }
 )
 
@@ -320,6 +328,19 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # auth method / sync mode). The sibling reads (status / items.list) and
         # the sync write carry no credential and are NOT pinned.
         "vmware.composite.content_library.subscribed.create",
+        # #3890 — the VCF Automation local org-user create. Like
+        # ``keycloak.user.create`` its params carry only a Vault *path*
+        # (``password_secret_ref``); the password is read in-process and sent
+        # in the ``POST /cloudapi/1.0.0/users`` request BODY. Pinning it sets
+        # body_recorded=false for its flight-recorder spans and collapses the
+        # broadcast to aggregate-only as defence-in-depth.
+        "vcfa.provider.user.create",
+        # #3890 — the API-token revoke logs in as the token's owner with the
+        # password read from ``password_secret_ref`` (declared secret-shaped
+        # params, so the classifier-coverage lint requires a pin; ``.revoke``
+        # would otherwise fall through to ``other`` and broadcast in full).
+        # Same posture as its ``vcfa.provider.api_token.create`` sibling.
+        "vcfa.provider.api_token.revoke",
     }
 )
 

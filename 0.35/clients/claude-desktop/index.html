@@ -970,6 +970,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#trusting-an-internal-ca" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Trusting an internal CA
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#prerequisites" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1947,6 +1958,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#trusting-an-internal-ca" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Trusting an internal CA
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#prerequisites" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2098,7 +2120,10 @@ that differ per deployment —</p>
 <li><strong>MEHO MCP endpoint</strong> — your backplane's <code>/mcp</code> URL (reachable over
   your VPN).</li>
 <li><strong>Internal CA bundle</strong> <em>(optional)</em> — the PEM for the CA that signs
-  the backplane's TLS certificate; leave it empty on a public-CA deploy.</li>
+  the backplane's TLS certificate; the extension adds it to its own trust
+  store. Leave it empty on a public-CA deploy, or when you trust the root
+  CA in your OS trust store instead — see
+  <a href="#trusting-an-internal-ca">Trusting an internal CA</a>.</li>
 </ul>
 <p>Two advanced fields default to the working setup and rarely need
 changing: the OAuth <strong>client id</strong> (default <code>meho-mcp</code>) and the OAuth
@@ -2107,8 +2132,39 @@ operator planes, add <code>mcp:admin</code> to the scopes field — see
 <a href="../mcp-surface-and-scopes/#how-a-client-requests-elevation">MCP surface and scopes</a>.</p>
 <p>The bundle still expects the realm's public <code>meho-mcp</code> client with the
 shim's loopback redirect URIs registered (below), and — on an
-internal-CA deploy — the CA you point it at. If you cannot install the
-bundle, wire the shim by hand with the rest of this page.</p>
+internal-CA deploy — one of the two CA trust routes below. If you cannot
+install the bundle, wire the shim by hand with the rest of this page.</p>
+<h2 id="trusting-an-internal-ca">Trusting an internal CA<a class="headerlink" href="#trusting-an-internal-ca" title="Permanent link">&para;</a></h2>
+<p>On an internal-CA deploy the shim must trust the CA that signs the
+backplane's and Keycloak's certificates. Either route is enough; a
+public-CA deploy needs neither.</p>
+<ul>
+<li><strong>The bundle's CA field.</strong> Pick the CA's PEM file in the install
+  dialog. The bundle's launcher adds its certificates to Node's trust
+  store in-process before the shim starts, keeping the trust it already
+  has. A path it cannot read, or a file without a PEM certificate, stops
+  the extension with an error naming the file.</li>
+<li>
+<p><strong>Your OS trust store.</strong> Leave the CA field empty and trust the root CA
+  in the OS trust store. On macOS that is the login keychain:</p>
+<div class="highlight"><pre><span></span><code>security<span class="w"> </span>add-trusted-cert<span class="w"> </span>-k<span class="w"> </span>~/Library/Keychains/login.keychain-db<span class="w"> </span>internal-ca.pem
+</code></pre></div>
+<p>Then toggle the extension off and on. Current Claude Desktop runs
+its built-in Node with <code>NODE_USE_SYSTEM_CA=1</code>, so Node reads the OS
+store with nothing to configure in the bundle (verified on macOS;
+Windows is not yet field-tested).</p>
+</li>
+</ul>
+<div class="admonition note">
+<p class="admonition-title">Why the CA is not passed as <code>NODE_EXTRA_CA_CERTS</code></p>
+<p>Claude Desktop 1.3109.0 strips <code>NODE_EXTRA_CA_CERTS</code> from an
+extension's environment, so a CA delivered that way never reaches
+Node: the shim fails with <code>UNABLE_TO_VERIFY_LEAF_SIGNATURE</code> and
+Desktop reports an <code>initialize</code> timeout
+(<a href="https://github.com/evoila/meho/issues/3143">#3143</a>). The bundle
+therefore passes the CA path as an argument and injects it
+in-process.</p>
+</div>
 <h2 id="prerequisites">Prerequisites<a class="headerlink" href="#prerequisites" title="Permanent link">&para;</a></h2>
 <ul>
 <li>Claude Desktop on a machine <strong>on the internal network / VPN</strong>.</li>
@@ -2116,8 +2172,10 @@ bundle, wire the shim by hand with the rest of this page.</p>
 <li>The <code>meho</code> CLI installed and <code>meho login</code> working from the same
   machine (<a href="../cli/">The meho CLI</a>) — it proves TLS trust and the realm
   before you add the shim's moving parts.</li>
-<li>The deployment's CA in your OS trust store <strong>and</strong> as a PEM file you
-  can point <code>NODE_EXTRA_CA_CERTS</code> at (Node does not read the OS store).</li>
+<li>On an internal-CA deploy, the deployment's CA in your OS trust store
+  (the <code>meho</code> CLI reads it), plus a way for the shim's Node to trust it —
+  Node ignores the OS store unless told otherwise: a PEM file for
+  <code>NODE_EXTRA_CA_CERTS</code>, or <code>NODE_USE_SYSTEM_CA=1</code> (below).</li>
 <li>The realm's public <strong><code>meho-mcp</code></strong> OAuth client, with the shim's
   loopback redirect URIs registered (next section).</li>
 </ul>
@@ -2160,7 +2218,13 @@ shape proven in the smoke test (<code>mcp-remote@0.1.38</code>):</p>
   <code>meho-mcp</code> client so the shim skips Dynamic Client Registration
   (which Keycloak's Trusted Hosts policy blocks anyway).</li>
 <li><code>NODE_EXTRA_CA_CERTS</code> is only needed on an internal-CA deploy; drop it
-  if your backplane and Keycloak present publicly-trusted certificates.</li>
+  if your backplane and Keycloak present publicly-trusted certificates.
+  The alternative is the OS route: with the root CA trusted in the OS
+  store, use <code>"env": { "NODE_USE_SYSTEM_CA": "1" }</code> instead (Node 22.19+
+  / 24.6+). Switch to it if the shim fails with
+  <code>UNABLE_TO_VERIFY_LEAF_SIGNATURE</code> although <code>NODE_EXTRA_CA_CERTS</code> is set
+  — current Desktop strips that variable from the bundle's environment,
+  and this manual shape has not been re-tested on current Desktop.</li>
 </ul>
 <p>Restart Claude Desktop. On first use the shim opens a browser, you
 complete OAuth 2.1 + PKCE against the internal Keycloak (a static

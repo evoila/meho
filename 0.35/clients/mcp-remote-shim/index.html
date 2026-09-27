@@ -2009,9 +2009,11 @@ this static-token stopgap as unsuitable for shared or multi-user
 workstations.</p>
 <p>The backplane is HTTPS, so no <code>--allow-http</code> is needed. Set
 <code>NODE_EXTRA_CA_CERTS=/path/to/internal-ca.pem</code> in the client's
-environment for an internal-CA deploy — Node does not read the OS trust
-store. Because the header carries the token, <code>mcp-remote</code> performs no
-OAuth flow and needs no redirect URI on the realm.</p>
+environment for an internal-CA deploy — by default Node does not read the
+OS trust store. If the root CA is already trusted there, setting
+<code>NODE_USE_SYSTEM_CA=1</code> instead makes Node read it (Node 22.19+ / 24.6+).
+Because the header carries the token, <code>mcp-remote</code> performs no OAuth flow
+and needs no redirect URI on the realm.</p>
 <h2 id="verify">Verify<a class="headerlink" href="#verify" title="Permanent link">&para;</a></h2>
 <p>Once the client attaches the toolset, run <strong><code>meho_status</code></strong> and
 <strong><code>list_targets</code></strong> — the same two-call check as every other client.

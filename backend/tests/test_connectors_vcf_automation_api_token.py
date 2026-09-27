@@ -32,17 +32,27 @@ import pytest
 import respx
 from sqlalchemy import select
 
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors.vault import ops as vault_ops_module
-from meho_backplane.connectors.vcf_automation import VcfAutomationConnector
+from meho_backplane.connectors.vault.ops import register_vault_typed_operations
+from meho_backplane.connectors.vcf_automation import VCFA_CONNECTOR_ID, VcfAutomationConnector
 from meho_backplane.connectors.vcf_automation import _lookups as lookups_module
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import ApprovalRequest, AuditLog, Target
+from meho_backplane.db.models import (
+    AgentPermission,
+    ApprovalRequest,
+    AuditLog,
+    ServicePrincipalGrant,
+    Target,
+)
 from meho_backplane.operations import (
     PassThroughReducer,
+    dispatch,
     reset_dispatcher_caches,
     set_default_reducer,
 )
+from meho_backplane.operations._audit import policy_decision_var
 from meho_backplane.operations._handler_resolve import reset_handler_cache
 from meho_backplane.operations._preview import PreviewContext, build_proposed_effect
 from meho_backplane.redaction.flight_recorder import classify_body_exclusion
@@ -170,6 +180,7 @@ def vault_writes(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, A
 async def vcfa() -> AsyncIterator[VcfAutomationConnector]:
     set_default_reducer(PassThroughReducer())
     await VcfAutomationConnector.register_typed_operations()
+    await register_vault_typed_operations()  # the policy gate reads vault.kv.patch/put
     await seed_target()
     await _seed_vault_target()
     connector = wire_connector()
@@ -493,6 +504,159 @@ async def test_vault_target_resolution_keeps_the_audit_target_binding() -> None:
     assert (bound["target_id"], bound["target_name"]) == ("vcfa-row", TARGET_NAME)
 
 
+# ---------------------------------------------------------------------------
+# Policy gate for the Vault write on the named target (#3895 review M1)
+# ---------------------------------------------------------------------------
+
+
+async def _vault_target_id() -> Any:
+    async with get_sessionmaker()() as session:
+        row = (
+            await session.execute(select(Target).where(Target.name == _VAULT_TARGET))
+        ).scalar_one()
+    return row.id
+
+
+def _principal(kind: PrincipalKind, sub: str) -> Operator:
+    return Operator(
+        sub=sub,
+        name=sub,
+        email=None,
+        raw_jwt="<vcfa-prov-raw-jwt>",
+        tenant_id=TENANT_ID,
+        tenant_role=TenantRole.OPERATOR,
+        principal_kind=kind,
+        client_id=sub if kind is PrincipalKind.AGENT else None,
+    )
+
+
+async def _dispatch_as(operator: Operator, *, approved: bool) -> dict[str, Any]:
+    result = await dispatch(
+        operator=operator,
+        connector_id=VCFA_CONNECTOR_ID,
+        op_id="vcfa.provider.api_token.create",
+        target=await resolved_target(),
+        params=_CREATE_PARAMS,
+        _approved=approved,
+    )
+    dumped: dict[str, Any] = result.model_dump(mode="json")
+    return dumped
+
+
+async def _seed_service_grant(sub: str, op_id: str, connector_id: str, target_id: Any) -> None:
+    async with get_sessionmaker()() as session:
+        session.add(
+            ServicePrincipalGrant(
+                tenant_id=TENANT_ID,
+                principal_sub=sub,
+                op_id=op_id,
+                connector_id=connector_id,
+                target_id=target_id,
+                reason="unattended tenant bootstrap",
+                created_by_sub="op-admin",
+            )
+        )
+        await session.commit()
+
+
+async def _seed_service_op_grant(sub: str) -> None:
+    """A standing grant for the vcfa op itself: the dispatch auto-executes."""
+    await _seed_service_grant(
+        sub,
+        "vcfa.provider.api_token.create",
+        VCFA_CONNECTOR_ID,
+        (await resolved_target()).id,
+    )
+
+
+async def test_service_grant_on_the_op_alone_does_not_confer_the_vault_write(
+    vcfa: VcfAutomationConnector, vault_writes: list[tuple[str, dict[str, Any]]]
+) -> None:
+    sub = "svc-bootstrap-no-vault-grant"
+    await _seed_service_op_grant(sub)
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        routes = _mount_user_flow(mock)
+        result = await _dispatch_as(_principal(PrincipalKind.SERVICE, sub), approved=False)
+    assert result["status"] == "ok", result  # auto-executed by the standing grant
+    out = result["result"]
+    assert out["status"] == "invalid_request"
+    assert out["guidance"].startswith("policy_denied: vault.kv.patch")
+    assert f"Vault target '{_VAULT_TARGET}'" in out["guidance"]
+    assert "needs approval" in out["guidance"]
+    assert not any(route.called for route in routes.values())  # nothing minted
+    assert vault_writes == []
+
+
+async def test_service_grant_covering_the_vault_write_proceeds(
+    vcfa: VcfAutomationConnector, vault_writes: list[tuple[str, dict[str, Any]]]
+) -> None:
+    sub = "svc-bootstrap-with-vault-grant"
+    await _seed_service_op_grant(sub)
+    vault_id = await _vault_target_id()
+    for op_id in ("vault.kv.patch", "vault.kv.put"):
+        await _seed_service_grant(sub, op_id, "vault-1.x", vault_id)
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        routes = _mount_user_flow(mock)
+        result = await _dispatch_as(_principal(PrincipalKind.SERVICE, sub), approved=False)
+    assert result["result"]["status"] == "created", result
+    assert routes["grant"].called
+    assert [kind for kind, _ in vault_writes] == ["patch"]
+
+
+async def test_agent_denied_vault_write_is_refused_before_mint(
+    vcfa: VcfAutomationConnector, vault_writes: list[tuple[str, dict[str, Any]]]
+) -> None:
+    sub = "agent:tenant-bootstrap"
+    async with get_sessionmaker()() as session:
+        session.add(
+            AgentPermission(
+                tenant_id=TENANT_ID,
+                principal_sub=sub,
+                op_pattern="vault.kv.patch",
+                target_scope=str(await _vault_target_id()),
+                verdict="deny",
+                created_by_sub="op-admin",
+            )
+        )
+        await session.commit()
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        routes = _mount_user_flow(mock)
+        # Even on the approved re-dispatch of this op, a deny on the write refuses.
+        result = await _dispatch_as(_principal(PrincipalKind.AGENT, sub), approved=True)
+    out = result["result"]
+    assert out["status"] == "invalid_request", result
+    assert out["guidance"].startswith("policy_denied: vault.kv.patch")
+    assert _VAULT_TARGET in out["guidance"]
+    assert not any(route.called for route in routes.values())
+    assert vault_writes == []
+
+
+async def test_agent_needs_approval_on_the_write_is_satisfied_by_the_ops_park(
+    vcfa: VcfAutomationConnector, vault_writes: list[tuple[str, dict[str, Any]]]
+) -> None:
+    agent = _principal(PrincipalKind.AGENT, "agent:tenant-bootstrap-default")
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        routes = _mount_user_flow(mock)
+        result = await _dispatch_as(agent, approved=True)
+    assert result["result"]["status"] == "created", result
+    assert routes["grant"].called
+
+
+async def test_handler_outside_an_approved_dispatch_is_refused(
+    vcfa: VcfAutomationConnector, vault_writes: list[tuple[str, dict[str, Any]]]
+) -> None:
+    from meho_backplane.connectors.vcf_automation import _api_token
+
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        routes = _mount_user_flow(mock)
+        out = await _api_token.provider_api_token_create(
+            vcfa, OPERATOR, await resolved_target(), _CREATE_PARAMS
+        )
+    assert out["status"] == "invalid_request"
+    assert "needs approval" in out["guidance"]
+    assert not any(route.called for route in routes.values())
+
+
 async def test_create_names_the_recovery_when_store_and_revoke_both_fail(
     vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -539,10 +703,16 @@ async def test_cancellation_between_mint_and_store_still_revokes(
     monkeypatch.setattr(vault_ops_module, "vault_kv_patch", _cancelled)
     connector = vcfa
     target = await resolved_target()
-    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
-        routes = _mount_user_flow(mock)
-        with pytest.raises(asyncio.CancelledError):
-            await _api_token.provider_api_token_create(connector, OPERATOR, target, _CREATE_PARAMS)
+    token = policy_decision_var.set("needs-approval")  # the approved re-dispatch
+    try:
+        with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+            routes = _mount_user_flow(mock)
+            with pytest.raises(asyncio.CancelledError):
+                await _api_token.provider_api_token_create(
+                    connector, OPERATOR, target, _CREATE_PARAMS
+                )
+    finally:
+        policy_decision_var.reset(token)
     assert routes["delete"].called
     assert routes["logout"].called
 
@@ -733,6 +903,29 @@ async def test_park_card_preflight_passes_when_the_target_role_may_write(
     effect = await _parked_effect()
     assert effect["permission_preflight"]["will_be_denied"] is False
     assert "write_capability_warning" not in effect
+
+
+async def test_park_card_reports_a_failed_probe(
+    vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _RoleRefusedError(Exception):
+        pass
+
+    class _Ctx:
+        async def __aenter__(self) -> Any:
+            raise _RoleRefusedError("role login refused")
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+    monkeypatch.setattr(vault_ops_module, "vault_client_for_target", lambda _o, _t: _Ctx())
+    await run("vcfa.provider.api_token.create", _CREATE_PARAMS, approved=False)
+    effect = await _parked_effect()
+    preflight = effect["permission_preflight"]
+    assert preflight["will_be_denied"] is True
+    assert preflight["reason"] == "probe_failed:_RoleRefusedError"
+    assert preflight["vault_target"] == _VAULT_TARGET
+    assert effect["write_capability_warning"] == "connector_identity_may_lack_write"
 
 
 async def test_park_card_flags_a_non_vault_target(

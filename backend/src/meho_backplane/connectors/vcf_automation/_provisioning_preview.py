@@ -156,7 +156,9 @@ async def _api_token_create_preflight(ctx: PreviewContext) -> dict[str, Any] | N
     the store path, so the approver sees ``will_be_denied`` before
     approving. An unresolvable / non-Vault ``vault_target`` is reported as
     ``will_be_denied`` with the reason (the dispatch would answer
-    ``invalid_request``).
+    ``invalid_request``). A probe that itself fails (e.g. the target's
+    role refuses the login) is reported ``will_be_denied`` with
+    ``reason: probe_failed:<class>`` rather than omitted.
     """
     from meho_backplane.connectors.vault.ops import vault_kv_write_capability_preflight
     from meho_backplane.connectors.vcf_automation._api_token import (
@@ -178,7 +180,11 @@ async def _api_token_create_preflight(ctx: PreviewContext) -> dict[str, Any] | N
         }
     mount, path, _field = store_params(p)
     result = await vault_kv_write_capability_preflight(
-        ctx.operator, "vault.kv.patch", {"mount": mount, "path": path}, target=vault_target
+        ctx.operator,
+        "vault.kv.patch",
+        {"mount": mount, "path": path},
+        target=vault_target,
+        report_probe_failure=True,
     )
     return None if result is None else {**result, "vault_target": vault_target.name}
 

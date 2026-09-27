@@ -438,7 +438,10 @@ _API_TOKEN_CREATE = VcfaTypedOp(
         "Vault role performs the write, exactly as vault.kv.patch on that target would -- "
         "and is NEVER returned: the result carries only the Vault target and ref, "
         "version, SHA-256 and length. The park card carries a permission_preflight "
-        "(will_be_denied) for that write. The user's role needs 'API Tokens: Manage'. "
+        "(will_be_denied) for that write. Before any appliance call your MEHO policy for "
+        "vault.kv.patch/put on vault_target is evaluated: deny refuses; needs-approval is "
+        "satisfied by this op's own approval park (an auto-executed dispatch is refused). "
+        "The user's role needs 'API Tokens: Manage'. "
         "Returns {status: 'created' | 'unchanged' | 'invalid_request', client_id, stored, "
         "guidance} (the token's id is urn:vcloud:token:<client_id>); 'unchanged' = a token "
         "with that name exists (nothing minted). "
@@ -512,8 +515,11 @@ _API_TOKEN_CREATE = VcfaTypedOp(
         ),
         "parameter_hints": {
             "vault_target": (
-                "Target NAME of a Vault-connector target; the write runs under its Vault "
-                "role, not your own identity."
+                "Target NAME of a Vault-connector target that carries its own "
+                "extras.vault_role with create+update on the path; the write runs under that "
+                "role. A Vault target WITHOUT a vault_role falls back to your own identity's "
+                "role, which typically cannot write the path. Your policy for vault.kv.patch "
+                "on that target must not deny."
             ),
         },
         "next_step": "vcfa.tenant.login.test on a target whose secret holds the token.",

@@ -40,7 +40,10 @@ operator's own OIDC-mapped role, which typically can read but not write
 the estate subtree (evoila/meho#3895). The park card carries the same
 ``sys/capabilities-self`` ``permission_preflight`` the Vault write ops
 show, probed under that target's role, so a write Vault would deny is
-visible before approval. The result carries only the
+visible before approval. Before any appliance call the MEHO policy gate
+for ``vault.kv.patch`` / ``vault.kv.put`` on that target is evaluated for
+the caller (:func:`vault_write_policy_refusal`); a ``needs-approval`` there
+is satisfied by this op's own approval park, a ``deny`` refuses. The result carries only the
 Vault ref, the written version, and a SHA-256 + length as provenance --
 the ``k8s.secret.read_to_ref`` no-transit shape (#3496). Once the OAuth
 client is registered, any failure before the Vault write lands -- a
@@ -103,6 +106,7 @@ __all__ = [
     "provider_api_token_revoke",
     "resolve_store_vault_target",
     "store_params",
+    "vault_write_policy_refusal",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -347,6 +351,74 @@ async def resolve_store_vault_target(operator: Operator, name: object) -> tuple[
     return target, None
 
 
+#: The Vault connector the token write rides (``parse_connector_id`` →
+#: ``("vault", "1.x", "vault")``) and the two KV ops it may use.
+_VAULT_CONNECTOR_ID: Final = "vault-1.x"
+_VAULT_WRITE_OPS: Final = ("vault.kv.patch", "vault.kv.put")
+
+
+async def vault_write_policy_refusal(operator: Operator, vault_target: Any) -> str | None:
+    """Run the policy gate for the token's Vault write on *vault_target*; ``None`` = allowed.
+
+    The write calls the ``vault.kv.patch`` handler (``vault.kv.put`` for a
+    new path) directly, so without this check the per-(principal, op,
+    target) policy a dispatched ``vault.kv.patch`` on that target gets --
+    agent ``AgentPermission`` rows, service-principal standing grants --
+    would be skipped, and a grant on this op would confer a write under
+    any in-tenant Vault target's role. Both ops are evaluated through the
+    dispatcher's own :func:`~meho_backplane.operations._validate.policy_gate`
+    with the Vault target, **before any appliance call**:
+
+    * ``deny`` → refused (fail closed).
+    * ``auto-execute`` → allowed.
+    * ``needs-approval`` → satisfied by **this op's own approval park**:
+      allowed only when this dispatch is the approved re-dispatch (the
+      dispatcher binds ``policy_decision_var`` to ``needs-approval`` on the
+      approval resume path). A dispatch that auto-executed -- e.g. a
+      service principal whose standing grant covers this op but not the
+      Vault write on that target -- is refused, so no write under the
+      target's role happens without an approval or a grant naming it.
+
+    Returns the refusal reason (naming the Vault target), or ``None``.
+    """
+    from meho_backplane.db.models import PermissionVerdict
+    from meho_backplane.operations._audit import policy_decision_var
+    from meho_backplane.operations._lookup import lookup_descriptor, parse_connector_id
+    from meho_backplane.operations._validate import policy_gate
+
+    product, version, impl_id = parse_connector_id(_VAULT_CONNECTOR_ID)
+    approved = policy_decision_var.get() == PermissionVerdict.NEEDS_APPROVAL.value
+    for op_id in _VAULT_WRITE_OPS:
+        descriptor = await lookup_descriptor(
+            tenant_id=operator.tenant_id,
+            product=product,
+            version=version,
+            impl_id=impl_id,
+            op_id=op_id,
+        )
+        where = f"{op_id} on Vault target {vault_target.name!r}"
+        if descriptor is None:
+            return f"policy_denied: {where}: op not registered, its policy cannot be evaluated"
+        verdict, reason = await policy_gate(
+            operator=operator,
+            descriptor=descriptor,
+            target=vault_target,
+            connector_id=_VAULT_CONNECTOR_ID,
+        )
+        if verdict is PermissionVerdict.AUTO_EXECUTE:
+            continue
+        if verdict is PermissionVerdict.NEEDS_APPROVAL and approved:
+            continue  # satisfied by this op's own approval park
+        if verdict is PermissionVerdict.NEEDS_APPROVAL:
+            return (
+                f"policy_denied: {where} needs approval ({reason}), but this dispatch was "
+                "not approved -- dispatch it so it parks for approval, or grant that write "
+                "on the Vault target"
+            )
+        return f"policy_denied: {where}: {reason or 'denied'}"
+    return None
+
+
 async def _store_in_vault(
     operator: Operator, vault_target: Any, mount: str, path: str, field: str, value: str
 ) -> dict[str, Any]:
@@ -505,6 +577,9 @@ async def provider_api_token_create(
     vault_target, problem = await resolve_store_vault_target(operator, params.get("vault_target"))
     if vault_target is None:
         return {**envelope, "status": "invalid_request", "guidance": problem}
+    refusal = await vault_write_policy_refusal(operator, vault_target)
+    if refusal is not None:
+        return {**envelope, "status": "invalid_request", "guidance": refusal}
     password = await read_password(operator, target, params)
     if password is None:
         return {

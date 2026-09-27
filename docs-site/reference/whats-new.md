@@ -9,6 +9,26 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.35.15](https://github.com/evoila/meho/releases/tag/v0.35.15) — 2026-09-27
+
+- **You can now set up a VCF Automation 9.1 tenant through MEHO.** New
+  operations create an organization, a custom role, a local user, an API
+  token and a project, and test whether a tenant login works. Every change
+  needs approval first, and running one again for something that already
+  exists changes nothing. A new API token is written straight into Vault
+  at a path you name. It is never shown in the result, the audit log or the
+  activity feed. Passwords are read from Vault too.
+- **Breaking for MCP clients: large `list_targets` pages now return a result
+  handle.** A page of more than 50 targets, or more than 4 KB, used to come
+  back inline and could time out in Claude Desktop. It now comes back like any
+  other large result: a short preview plus a handle you read with
+  `result_query`. Smaller pages are unchanged. The release notes carry the
+  migration recipe.
+- **The Claude Desktop extension works with an internal CA again.** A recent
+  Claude Desktop update stopped passing the extension's "Internal CA bundle"
+  setting through, so connecting to a backplane with an internal certificate
+  timed out. The extension now loads the CA itself.
+
 ## [v0.35.14](https://github.com/evoila/meho/releases/tag/v0.35.14) — 2026-09-24
 
 - **You can now read and change a VM's CPU and memory limits and reservations.**

@@ -90,7 +90,9 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
-### Breaking changes — `list_targets` pages over the JSONFlux threshold return a result handle instead of inline `targets` (#3858)
+## [0.35.15] - 2026-09-27
+
+### Breaking changes — `list_targets` pages over the JSONFlux threshold return a result handle instead of inline `targets` (#3858 / #3888)
 
 - The `list_targets` MCP tool used to return every row of a page inline.
   On a tenant with 89 targets, the default call put about 30 KB on the
@@ -116,7 +118,15 @@ connector-related release-notes line.
   `offset` / `limit` or by passing a `query` such as
   `{"select": ["name", "product"]}`. To keep receiving inline `targets`,
   narrow the call with `connector_id` or pass a smaller `limit`.
-  `next_cursor` still continues the listing. (#3858)
+  `next_cursor` still continues the listing. (#3858 / #3888)
+
+### Added
+
+- Nine typed ops on the VCF Automation 9.1 connector (`vcfa-rest-9.0`, which previously carried only safe reads) give a governed path for bootstrapping a tenant: organization, custom role, local user, API token, project. `vcfa.provider.right.list` and `vcfa.provider.role.list` (`safe`) read the provider's rights and roles. `vcfa.provider.org.create`, `vcfa.provider.role.create`, `vcfa.provider.user.create` and `vcfa.tenant.project.create` (`caution`, `requires_approval=True`) create an organization, a global role (rights taken from a base role or an explicit list, optionally published to one org or to all), a local user in an org, and an IaaS project. Each resolves every name before its first write and is idempotent by name: an existing object answers `unchanged`, except that `role.create` fills in missing rights or a missing publication on an existing role (`updated` + `reconciled`) and never replaces rights that are already there. `vcfa.provider.api_token.create` and `vcfa.provider.api_token.revoke` (`dangerous`, `requires_approval=True`) mint and revoke a user's API token. The minted refresh token is written straight to a caller-named Vault path (`store_secret_ref` / `store_field`, default field `refresh_token`, the field the tenant login reads) under the operator's Vault identity and tenant-scope guard, and is never returned, audited, broadcast or recorded: the result carries only the Vault mount, path, field, version, SHA-256 and length, plus the OAuth `client_id`. An existing token of the same name for the same user answers `unchanged` without minting, and a failure or cancellation after the mint revokes the new token. User passwords are read from a Vault path named by `password_secret_ref` and are never op params. `vcfa.tenant.login.test` (`safe`) reports whether a tenant login succeeds and neither caches nor returns the bearer. Every write has a park-time preview that shows what would be created, with Vault references only. Live auth model: `shared_service_account` (the connector's only one). Tested against recorded wire shapes; not yet exercised against a live appliance. (#3890 / #3891)
+
+### Fixed
+
+- The Claude Desktop extension (`.mcpb`) trusts the internal CA again. Claude Desktop 1.3109.0 removes `NODE_EXTRA_CA_CERTS` from an extension's environment, so the bundle's "Internal CA bundle" field never reached Node and the shim failed with `UNABLE_TO_VERIFY_LEAF_SIGNATURE`, which Desktop reported as an initialize timeout. The manifest now also passes the CA path to the launcher, which appends its certificates to Node's default CA list (`tls.setDefaultCACertificates()`) before loading `mcp-remote`, keeping the bundled and OS-trusted roots. An empty field means no CA; an unreadable path or a file with no valid PEM certificate stops the launcher with an error naming the file. On a Node without that API (before 22.19 / 24.5) the `NODE_EXTRA_CA_CERTS` route stays the fallback, with a warning when the variable is absent. (#3855 / #3887)
 
 ## [0.35.14] - 2026-09-24
 

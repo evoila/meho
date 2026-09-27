@@ -3,10 +3,12 @@
 
 """Typed VCFA read ops on the dual-plane session (T5 #2305).
 
-VCF Automation ships **no vendor OpenAPI spec at all** — the provider
-(management) plane publishes no machine-readable artifact and the tenant
-plane ships only Swagger 2.0 fragments the ingest parser rejects by
-decision (#2090). The now-retired G3.6 curated core (#2358) therefore
+The provider (management) plane publishes no machine-readable spec at
+all; for the tenant plane the vendor's public SDK ships only Swagger 2.0
+fragments the ingest parser rejects by decision (#2090) -- a 9.1
+appliance does serve an OpenAPI 3.0.1 IaaS document at
+``/iaas-api/swagger/v3/api-docs/2021-07-15``, but no such artifact is
+pinned here. The now-retired G3.6 curated core (#2358) therefore
 described ``is_enabled`` curation over ingested rows that, absent an
 ingest, never actually exist: those curated op ids were dispatch-inert
 on a real deploy. Typed conversion is the only path to a *working* VCFA
@@ -44,7 +46,7 @@ The declaration is not merely documentation: the plane a request
 authenticates on is chosen at transport time by
 :func:`~meho_backplane.connectors.vcf_automation._routing.plane_for_path`
 applied to the op's path (``/iaas/api/*`` → tenant, everything else →
-provider). :func:`_validate_typed_op_planes` asserts at import time that
+provider). :func:`validate_typed_ops` asserts at import time that
 each op's declared ``plane`` matches ``plane_for_path(op.path)`` — a
 drift (e.g. a provider op pointed at ``/iaas/…``) fails the import
 rather than surfacing as a misrouted HTTP 401 in production, since both
@@ -65,6 +67,12 @@ references: the cloudapi provider family at
 https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-0/administration-sdks-cli-and-tools/about-the-vcf-automation-api.html
 and the tenant IaaS family at
 https://developer.broadcom.com/xapis/vm-apps-org-provisioning-service/latest/.
+
+The tenant-bootstrap **provisioning** ops (org / role / user / API token /
+project writes, the right + role reads, the tenant login test,
+evoila/meho#3890) reuse :class:`VcfaTypedOp`, the group blurbs below and
+:func:`validate_typed_ops`, but live in :mod:`.provisioning_ops` so this
+module stays the read surface.
 """
 
 from __future__ import annotations
@@ -84,6 +92,7 @@ __all__ = [
     "VCFA_TYPED_OPS",
     "VCFA_TYPED_WHEN_TO_USE_BY_GROUP",
     "VcfaTypedOp",
+    "validate_typed_ops",
 ]
 
 
@@ -126,7 +135,7 @@ class VcfaTypedOp:
 
     ``plane`` records the auth plane the op rides (``"provider"`` /
     ``"tenant"``); ``path`` is the request path. The two are cross-checked
-    at import time by :func:`_validate_typed_op_planes` against
+    at import time by :func:`validate_typed_ops` against
     :func:`~meho_backplane.connectors.vcf_automation._routing.plane_for_path`
     so a declared-plane / path drift fails the import.
     """
@@ -164,7 +173,9 @@ VCFA_TYPED_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
         "VDC, each backing compute/network under an NSX domain "
         "(vcfa.provider.region.list), or run a provider-plane health check "
         "(authenticated reachability + API version) before heavier reads "
-        "(vcfa.provider.health). Provider-plane ops authenticate with the "
+        "(vcfa.provider.health), or look up rights (vcfa.provider.right.list) "
+        "and global / per-org roles (vcfa.provider.role.list) before building a "
+        "custom role or a user. Provider-plane ops authenticate with the "
         "admin@System (or equivalent) Basic-auth session and never "
         "succeed against a tenant token. For per-tenant project / "
         "deployment reads switch to the tenant-plane group."
@@ -179,10 +190,28 @@ VCFA_TYPED_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
         "id (vcfa.tenant.deployment.get), or read "
         "the IaaS API self-describe surface — supported API versions + "
         "latest version — as a tenant-plane reachability/version probe "
-        "(vcfa.tenant.about). Tenant-plane ops authenticate with the "
+        "(vcfa.tenant.about), or test only the tenant login -- does the "
+        "target's API token authenticate? -- with no data call "
+        "(vcfa.tenant.login.test). Tenant-plane ops authenticate with the "
         "tenant org login (POST /iaas/api/login) and never succeed "
         "against the provider JWT. For the cross-tenant org/region view "
         "switch to the provider-plane group."
+    ),
+    "vcfa-provider-writes": (
+        "Use on the VCFA **provider plane** to bootstrap a tenant: create a "
+        "tenant organization (vcfa.provider.org.create), a custom global role "
+        "from a base role plus extra rights and publish it to the org "
+        "(vcfa.provider.role.create), a local org user holding that role with "
+        "its password read from Vault (vcfa.provider.user.create), and mint "
+        "that user's API token straight into Vault -- never returned -- "
+        "(vcfa.provider.api_token.create) or revoke it "
+        "(vcfa.provider.api_token.revoke). All approval-gated; creates are "
+        "idempotent on name and answer 'unchanged' when the object exists."
+    ),
+    "vcfa-tenant-writes": (
+        "Use on the VCFA **tenant plane** to create a project in the tenant "
+        "organization (vcfa.tenant.project.create), authenticated by the "
+        "target's tenant login. Approval-gated; idempotent on name."
     ),
 }
 
@@ -652,7 +681,7 @@ VCFA_TYPED_OPS: Final[tuple[VcfaTypedOp, ...]] = (
 )
 
 
-def _validate_typed_op_planes() -> None:
+def validate_typed_ops(ops: tuple[VcfaTypedOp, ...]) -> None:
     """Assert every op's declared ``plane`` matches ``plane_for_path(op.path)``.
 
     Load-bearing: the auth plane a request rides is picked at transport
@@ -662,9 +691,10 @@ def _validate_typed_op_planes() -> None:
     provider op accidentally pointed at ``/iaas/…`` (or vice versa) fails
     the import rather than surfacing as a misrouted HTTP 401 at dispatch.
     Also asserts each op references a group with a curated
-    ``when_to_use`` blurb.
+    ``when_to_use`` blurb. Run at import for :data:`VCFA_TYPED_OPS` here and
+    for the provisioning ops in :mod:`.provisioning_ops`.
     """
-    for op in VCFA_TYPED_OPS:
+    for op in ops:
         derived = plane_for_path(op.path)
         if derived != op.plane:
             raise AssertionError(
@@ -678,4 +708,4 @@ def _validate_typed_op_planes() -> None:
             )
 
 
-_validate_typed_op_planes()
+validate_typed_ops(VCFA_TYPED_OPS)

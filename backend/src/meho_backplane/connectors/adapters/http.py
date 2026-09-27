@@ -764,80 +764,104 @@ class HttpConnector(Connector):
         except TargetDestinationBlockedError as exc:
             raise SsrfBlockedError(str(exc)) from exc
         cache_key = self._client_cache_key(target)
-        verify_tls = bool(getattr(target, "verify_tls", True))
-        ca_pin = getattr(target, "tls_ca_pin", None)
         async with self._lock:
             if cache_key not in self._clients:
-                # Resolve the TLS-trust argument for the pinned transport.
-                # ``True`` keeps httpx's default ``verify=True`` + the
-                # global ``SSL_CERT_FILE`` path (evoila/meho#209)
-                # byte-identical to a connector with no TLS config at all;
-                # a CA-pin or the insecure opt-out supersedes it below.
-                # The transport (not the client) carries this context now,
-                # because the client is handed an explicit ``transport=``.
-                verify_arg: ssl.SSLContext | bool = True
-                if ca_pin:
-                    # Secure supersession (evoila/meho#1784): trust the
-                    # pinned CA while keeping CERT_REQUIRED + hostname
-                    # verification on. Built per pool entry (not module-
-                    # cached like the insecure context) because the PEM is
-                    # per-target; the pool key carries the pin digest so the
-                    # context is rebuilt only when the pin actually changes,
-                    # not per request. Logged at INFO (not WARN): unlike the
-                    # insecure opt-out, a CA-pin keeps the channel verified,
-                    # so it is the recommended state, not a footgun.
-                    logger.info(
-                        "connector_tls_ca_pinned",
-                        target=getattr(target, "name", None),
-                        host=getattr(target, "host", None),
-                        ca_pin_digest=_ca_pin_digest(ca_pin),
-                    )
-                    verify_arg = _build_ca_pinned_ssl_context(ca_pin)
-                elif not verify_tls:
-                    # Per-target, audited last resort (evoila/meho#1774):
-                    # the dispatch forwards a Vault-resolved credential over
-                    # an unverified channel, so make it loud and queryable.
-                    # The audit row is written on target create/update
-                    # (T1 #1780); this WARN marks the actual insecure
-                    # dispatch construction.
-                    logger.warning(
-                        "connector_tls_verification_disabled",
-                        target=getattr(target, "name", None),
-                        host=getattr(target, "host", None),
-                    )
-                    verify_arg = _insecure_ssl_context()
-                # Pin the connection to a guard-validated address at the
-                # socket boundary (evoila-bosnia/meho-internal#275). The
-                # ``_http_client`` pre-check above screens the stored name
-                # on every acquisition; this transport re-screens inside
-                # ``connect_tcp`` and dials only an address from that same
-                # resolution, so a resolver that changes its answer between
-                # the screen and the connect cannot steer the socket at a
-                # blocked destination the guard never saw. It preserves the
-                # original hostname for TLS SNI + cert verification and the
-                # ``Host:`` header (only the TCP target is rewritten). A
-                # blocked answer surfaces as ``SsrfBlockedError`` via
-                # ``_pin_target_addresses``, reaching the dispatcher's
-                # ``ConnectError`` arm and staying out of the retry policy.
-                transport = build_pinned_async_transport(_pin_target_addresses, verify=verify_arg)
-                self._clients[cache_key] = _SameOriginRedirectClient(
-                    base_url=self._base_url(target),
-                    timeout=httpx.Timeout(connect=5.0, read=30.0, write=30.0, pool=5.0),
-                    # Same-origin-only redirect following (see
-                    # ``_SameOriginRedirectClient``). Vendor REST surfaces
-                    # routinely canonicalise to a trailing slash with a
-                    # ``301`` (the govmomi/vcsim legacy ``/rest`` mount does
-                    # this; some real appliances do too behind a normalising
-                    # reverse proxy) — those benign single-origin hops are
-                    # still followed, so no vendor flow regresses. A
-                    # *cross-origin* ``3xx`` is refused: ``httpx``'s default
-                    # ``follow_redirects=True`` would replay the request off
-                    # origin and forward NSX's ``X-XSRF-TOKEN`` and the
-                    # login body to an attacker-controlled ``Location``
-                    # (open-redirect SSRF, evoila/meho-internal#101 row L11).
-                    transport=transport,
-                )
+                self._clients[cache_key] = self._build_http_client(target)
             return self._clients[cache_key]
+
+    def _build_http_client(self, target: Target) -> httpx.AsyncClient:
+        """Construct a new pinned-transport client for *target* (no SSRF pre-check).
+
+        The construction half of :meth:`_http_client` (TLS trust + the
+        destination-pinned transport + same-origin redirects), split out so a
+        connector that needs a **short-lived** client with its own cookie jar
+        -- e.g. a login as a different principal than the pooled session --
+        builds it identically via :meth:`_ephemeral_http_client`. Callers own
+        the SSRF pre-check.
+        """
+        verify_tls = bool(getattr(target, "verify_tls", True))
+        ca_pin = getattr(target, "tls_ca_pin", None)
+        # Resolve the TLS-trust argument for the pinned transport.
+        # ``True`` keeps httpx's default ``verify=True`` + the
+        # global ``SSL_CERT_FILE`` path (evoila/meho#209)
+        # byte-identical to a connector with no TLS config at all;
+        # a CA-pin or the insecure opt-out supersedes it below.
+        # The transport (not the client) carries this context now,
+        # because the client is handed an explicit ``transport=``.
+        verify_arg: ssl.SSLContext | bool = True
+        if ca_pin:
+            # Secure supersession (evoila/meho#1784): trust the
+            # pinned CA while keeping CERT_REQUIRED + hostname
+            # verification on. Built per pool entry (not module-
+            # cached like the insecure context) because the PEM is
+            # per-target; the pool key carries the pin digest so the
+            # context is rebuilt only when the pin actually changes,
+            # not per request. Logged at INFO (not WARN): unlike the
+            # insecure opt-out, a CA-pin keeps the channel verified,
+            # so it is the recommended state, not a footgun.
+            logger.info(
+                "connector_tls_ca_pinned",
+                target=getattr(target, "name", None),
+                host=getattr(target, "host", None),
+                ca_pin_digest=_ca_pin_digest(ca_pin),
+            )
+            verify_arg = _build_ca_pinned_ssl_context(ca_pin)
+        elif not verify_tls:
+            # Per-target, audited last resort (evoila/meho#1774):
+            # the dispatch forwards a Vault-resolved credential over
+            # an unverified channel, so make it loud and queryable.
+            # The audit row is written on target create/update
+            # (T1 #1780); this WARN marks the actual insecure
+            # dispatch construction.
+            logger.warning(
+                "connector_tls_verification_disabled",
+                target=getattr(target, "name", None),
+                host=getattr(target, "host", None),
+            )
+            verify_arg = _insecure_ssl_context()
+        # Pin the connection to a guard-validated address at the
+        # socket boundary (evoila-bosnia/meho-internal#275). The
+        # ``_http_client`` pre-check above screens the stored name
+        # on every acquisition; this transport re-screens inside
+        # ``connect_tcp`` and dials only an address from that same
+        # resolution, so a resolver that changes its answer between
+        # the screen and the connect cannot steer the socket at a
+        # blocked destination the guard never saw. It preserves the
+        # original hostname for TLS SNI + cert verification and the
+        # ``Host:`` header (only the TCP target is rewritten). A
+        # blocked answer surfaces as ``SsrfBlockedError`` via
+        # ``_pin_target_addresses``, reaching the dispatcher's
+        # ``ConnectError`` arm and staying out of the retry policy.
+        transport = build_pinned_async_transport(_pin_target_addresses, verify=verify_arg)
+        return _SameOriginRedirectClient(
+            base_url=self._base_url(target),
+            timeout=httpx.Timeout(connect=5.0, read=30.0, write=30.0, pool=5.0),
+            # Same-origin-only redirect following (see
+            # ``_SameOriginRedirectClient``). Vendor REST surfaces
+            # routinely canonicalise to a trailing slash with a
+            # ``301`` (the govmomi/vcsim legacy ``/rest`` mount does
+            # this; some real appliances do too behind a normalising
+            # reverse proxy) — those benign single-origin hops are
+            # still followed, so no vendor flow regresses. A
+            # *cross-origin* ``3xx`` is refused: ``httpx``'s default
+            # ``follow_redirects=True`` would replay the request off
+            # origin and forward NSX's ``X-XSRF-TOKEN`` and the
+            # login body to an attacker-controlled ``Location``
+            # (open-redirect SSRF, evoila/meho-internal#101 row L11).
+            transport=transport,
+        )
+
+    async def _ephemeral_http_client(self, target: Target) -> httpx.AsyncClient:
+        """A new, un-pooled client for *target* -- same SSRF + TLS posture, own cookie jar.
+
+        The caller owns it and must ``aclose()`` it. Used for a session that
+        must not share the pooled client's cookie jar (evoila/meho#3890).
+        """
+        try:
+            await assert_public_destination_async(str(target.host))
+        except TargetDestinationBlockedError as exc:
+            raise SsrfBlockedError(str(exc)) from exc
+        return self._build_http_client(target)
 
     async def mount_op_path(self, target: Target, path: str, operator: Operator) -> str:
         """Map an ingested-descriptor *path* onto the wire path for *target*.

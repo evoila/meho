@@ -367,10 +367,13 @@ write workflows stay in the wrapper.
 What `scripts/vcf-automation.sh` did that `meho vcf-automation`
 deliberately does **not** do (out of scope for v0.5):
 
-- **Write / mutate ops** — catalog deployment, blueprint create,
-  IaaS machine lifecycle (delete / power / resize). v0.5 is
-  read-only; write ops land in v0.5.next pending policy + approval
-  workflow.
+- **Workload write / mutate ops** — catalog deployment, blueprint
+  create, IaaS machine lifecycle (delete / power / resize) are not
+  implemented. The only writes are the approval-gated tenant-bootstrap
+  ops (#3890: org, custom global role, org user, API token into Vault,
+  project; plus `vcfa.tenant.login.test`), reached through
+  `meho operation call vcfa-rest-9.0 <op_id>` / MCP `call_operation` —
+  see `docs/codebase/connectors-vcf-automation.md` § Provisioning ops.
 - **Per-org tenant-context switching** — the wrapper supports
   `--org <name>` to switch the tenant context per call; the
   connector's `target.domain` is the per-target setting (one tenant

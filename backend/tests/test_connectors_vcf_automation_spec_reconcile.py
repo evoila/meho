@@ -45,9 +45,15 @@ The declared set is introspected from the connector's live constants
 that hand-code a path:
 
 * :mod:`~meho_backplane.connectors.vcf_automation.typed_ops` — the
-  six ``*_PATH`` op constants. Every typed handler dispatches through
+  six ``*_PATH`` read-op constants. Every typed read dispatches through
   the connector's ``_request_json(target, "GET", ...)``, so each
-  declares ``GET:``.
+  declares ``GET:``; the org and project constants are also POSTed
+  by the #3890 creates (:data:`_TYPED_OPS_EXTRA_METHODS`).
+* :mod:`~meho_backplane.connectors.vcf_automation._paths` — the #3890
+  provisioning paths, each mapped to its method(s) in
+  :data:`_PATHS_METHODS`. The ``/oauth/*`` token endpoints are
+  provider-plane by :func:`plane_for_path`, so they sit in the
+  evidenced exclusion with the rest of the provider plane.
 * :mod:`~meho_backplane.connectors.vcf_automation._routing` — the three
   ``*_SESSION_PATH`` login endpoints (all POSTed by ``._auth``; the CSP
   token mint is the #3865 VCFA 9.1 fallback) and
@@ -72,9 +78,11 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from meho_backplane.connectors.vcf_automation import _paths as _paths_module
 from meho_backplane.connectors.vcf_automation import _routing as _routing_module
 from meho_backplane.connectors.vcf_automation import typed_ops as _typed_ops_module
 from meho_backplane.connectors.vcf_automation._routing import plane_for_path
+from meho_backplane.connectors.vcf_automation.provisioning_ops import VCFA_PROVISIONING_OPS
 from meho_backplane.connectors.vcf_automation.typed_ops import VCFA_TYPED_OPS
 from tests._spec_shelf import assert_op_ids_served, require_shelf_spec
 
@@ -102,6 +110,37 @@ _ROUTING_METHOD_BY_SUFFIX = {
 }
 
 
+#: HTTP method(s) per ``_paths`` constant -- the provisioning surface
+#: (#3890). Several paths serve both a lookup ``GET`` and a write. A new
+#: ``_paths`` constant missing here fails the sweep loudly so its method is
+#: mapped consciously (same contract as :data:`_ROUTING_METHOD_BY_SUFFIX`).
+_PATHS_METHODS: dict[str, frozenset[str]] = {
+    "OAUTH_REGISTER_PATH": frozenset({"POST"}),
+    "OAUTH_TOKEN_PATH": frozenset({"POST"}),
+    "ORG_SESSION_CURRENT_PATH": frozenset({"DELETE"}),
+    "ORG_SESSION_PATH": frozenset({"POST"}),
+    "PROVIDER_GLOBAL_ROLES_PATH": frozenset({"GET", "POST"}),
+    "PROVIDER_GLOBAL_ROLE_PATH": frozenset({"DELETE"}),
+    "PROVIDER_GLOBAL_ROLE_PUBLISH_ALL_PATH": frozenset({"POST"}),
+    "PROVIDER_GLOBAL_ROLE_PUBLISH_PATH": frozenset({"POST"}),
+    "PROVIDER_GLOBAL_ROLE_RIGHTS_PATH": frozenset({"GET", "PUT"}),
+    "PROVIDER_GLOBAL_ROLE_TENANTS_PATH": frozenset({"GET"}),
+    "PROVIDER_RIGHTS_PATH": frozenset({"GET"}),
+    "PROVIDER_ROLES_PATH": frozenset({"GET"}),
+    "PROVIDER_TOKENS_PATH": frozenset({"GET"}),
+    "PROVIDER_TOKEN_PATH": frozenset({"DELETE"}),
+    "PROVIDER_USERS_PATH": frozenset({"GET", "POST"}),
+}
+
+#: ``typed_ops`` read-path constants the provisioning writes also ``POST``
+#: to (org create, project create) -- on top of the ``GET`` every
+#: ``typed_ops`` constant declares.
+_TYPED_OPS_EXTRA_METHODS: dict[str, frozenset[str]] = {
+    "PROVIDER_ORGS_PATH": frozenset({"POST"}),
+    "TENANT_PROJECTS_PATH": frozenset({"POST"}),
+}
+
+
 def _path_constants(module: object) -> dict[str, str]:
     """The live ``*_PATH`` string constants of *module*, by constant name."""
     return {
@@ -120,7 +159,18 @@ def _declared_op_ids() -> set[str]:
     constants map to their method by name suffix
     (:data:`_ROUTING_METHOD_BY_SUFFIX`).
     """
-    declared = {f"GET:{path}" for path in _path_constants(_typed_ops_module).values()}
+    typed_paths = _path_constants(_typed_ops_module)
+    declared = {f"GET:{path}" for path in typed_paths.values()}
+    for name, methods in _TYPED_OPS_EXTRA_METHODS.items():
+        declared.update(f"{method}:{typed_paths[name]}" for method in methods)
+    for name, path in _path_constants(_paths_module).items():
+        if name not in _PATHS_METHODS:
+            raise AssertionError(
+                f"_paths.{name} has no entry in _PATHS_METHODS — map the new "
+                "constant's HTTP method(s) there consciously so the reconcile "
+                "keeps covering it."
+            )
+        declared.update(f"{method}:{path}" for method in _PATHS_METHODS[name])
     for name, path in _path_constants(_routing_module).items():
         for suffix, method in _ROUTING_METHOD_BY_SUFFIX.items():
             if name.endswith(suffix):
@@ -151,6 +201,7 @@ def test_path_constant_names_are_pinned() -> None:
         "TENANT_DEPLOYMENT_DETAIL_PATH",
         "TENANT_PROJECTS_PATH",
     ]
+    assert sorted(_path_constants(_paths_module)) == sorted(_PATHS_METHODS)
     assert sorted(_path_constants(_routing_module)) == [
         "PROVIDER_SESSION_PATH",
         "PROVIDER_VERSION_PATH",
@@ -168,8 +219,16 @@ def test_typed_op_paths_are_covered_by_the_swept_constants() -> None:
     literal (skipping the shared-constant convention the module
     documents) would otherwise dodge the reconcile.
     """
-    swept = set(_path_constants(_typed_ops_module).values())
-    unswept = {op.op_id: op.path for op in VCFA_TYPED_OPS if op.path not in swept}
+    swept = {
+        *_path_constants(_typed_ops_module).values(),
+        *_path_constants(_paths_module).values(),
+        *_path_constants(_routing_module).values(),
+    }
+    unswept = {
+        op.op_id: op.path
+        for op in (*VCFA_TYPED_OPS, *VCFA_PROVISIONING_OPS)
+        if op.path not in swept
+    }
     assert not unswept, (
         f"typed ops with paths outside the swept *_PATH constants: {unswept} — "
         "route the path through a module-level *_PATH constant so the "
@@ -197,6 +256,27 @@ def test_vcfa_hand_coded_op_id_manifest_is_pinned() -> None:
         "POST:/cloudapi/1.0.0/sessions/provider",
         "POST:/csp/gateway/am/api/login",
         "POST:/iaas/api/login",
+        # Provisioning surface (#3890).
+        "DELETE:/cloudapi/1.0.0/globalRoles/{id}",
+        "DELETE:/cloudapi/1.0.0/sessions/current",
+        "DELETE:/cloudapi/1.0.0/tokens/{id}",
+        "GET:/cloudapi/1.0.0/globalRoles/{id}/tenants",
+        "GET:/cloudapi/1.0.0/globalRoles",
+        "GET:/cloudapi/1.0.0/globalRoles/{id}/rights",
+        "GET:/cloudapi/1.0.0/rights",
+        "GET:/cloudapi/1.0.0/roles",
+        "GET:/cloudapi/1.0.0/tokens",
+        "GET:/cloudapi/1.0.0/users",
+        "POST:/cloudapi/1.0.0/globalRoles",
+        "POST:/cloudapi/1.0.0/globalRoles/{id}/tenants/publish",
+        "POST:/cloudapi/1.0.0/globalRoles/{id}/tenants/publishAll",
+        "POST:/cloudapi/1.0.0/orgs",
+        "POST:/cloudapi/1.0.0/sessions",
+        "POST:/cloudapi/1.0.0/users",
+        "POST:/iaas/api/projects",
+        "POST:/oauth/{context}/register",
+        "POST:/oauth/{context}/token",
+        "PUT:/cloudapi/1.0.0/globalRoles/{id}/rights",
     }
 
 

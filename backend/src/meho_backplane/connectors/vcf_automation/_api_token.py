@@ -30,8 +30,17 @@ The refresh token is **never returned**
 
 It is written straight to the caller-named Vault KV path/field through
 the governed ``vault.kv.patch`` handler (``vault.kv.put`` when the path
-does not exist yet), under the operator's own Vault identity, with the
-tenant-scope guard those handlers enforce. The result carries only the
+does not exist yet) **dispatched on the caller-named Vault target**
+(``vault_target``, resolved tenant-scoped by name like any target). The
+write therefore runs under that target's Vault role
+(:func:`~meho_backplane.connectors.vault.target_auth.vault_client_for_target`),
+exactly as a governed ``vault.kv.patch`` on that target would, with the
+tenant-scope guard those handlers enforce -- not under the calling
+operator's own OIDC-mapped role, which typically can read but not write
+the estate subtree (evoila/meho#3895). The park card carries the same
+``sys/capabilities-self`` ``permission_preflight`` the Vault write ops
+show, probed under that target's role, so a write Vault would deny is
+visible before approval. The result carries only the
 Vault ref, the written version, and a SHA-256 + length as provenance --
 the ``k8s.secret.read_to_ref`` no-transit shape (#3496). Once the OAuth
 client is registered, any failure before the Vault write lands -- a
@@ -92,6 +101,8 @@ __all__ = [
     "DEFAULT_STORE_MOUNT",
     "provider_api_token_create",
     "provider_api_token_revoke",
+    "resolve_store_vault_target",
+    "store_params",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -291,22 +302,73 @@ async def _find_token(
     return None
 
 
+_CONTEXT_TARGET_KEYS: Final = ("target_id", "target_name")
+
+
+async def resolve_store_vault_target(operator: Operator, name: object) -> tuple[Any, str | None]:
+    """Resolve ``vault_target`` → ``(target, None)``, or ``(None, reason)``.
+
+    Tenant-scoped name-or-alias resolution (:func:`~meho_backplane.targets.resolver.resolve_target`,
+    the dispatcher's own lookup); the target must be a Vault-connector
+    target. The resolver binds ``target_id`` / ``target_name`` into the
+    structlog contextvars for the audit middleware; those are restored
+    afterwards so this op's audit rows stay attributed to the VCFA target.
+    """
+    from meho_backplane.connectors.vault.target_auth import is_vault_target
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.targets.resolver import (
+        AmbiguousTargetError,
+        TargetNotFoundError,
+        resolve_target,
+    )
+
+    if not isinstance(name, str) or not name.strip():
+        return None, (
+            "vault_target is required: name the Vault-connector target whose Vault role "
+            "writes store_secret_ref (list_targets)"
+        )
+    bound = structlog.contextvars.get_contextvars()
+    saved = {k: bound[k] for k in _CONTEXT_TARGET_KEYS if k in bound}
+    try:
+        async with get_sessionmaker()() as session:
+            target = await resolve_target(session, operator.tenant_id, name.strip())
+    except TargetNotFoundError:
+        return None, f"vault_target {name!r}: no such target in your tenant (list_targets)"
+    except AmbiguousTargetError:
+        return None, f"vault_target {name!r} is ambiguous (an alias shared by several targets)"
+    finally:
+        structlog.contextvars.unbind_contextvars(*_CONTEXT_TARGET_KEYS)
+        structlog.contextvars.bind_contextvars(**saved)
+    if not is_vault_target(target):
+        return None, (
+            f"vault_target {name!r} is a {getattr(target, 'product', None)!r} target, "
+            "not a Vault-connector target"
+        )
+    return target, None
+
+
 async def _store_in_vault(
-    operator: Operator, mount: str, path: str, field: str, value: str
+    operator: Operator, vault_target: Any, mount: str, path: str, field: str, value: str
 ) -> dict[str, Any]:
-    """Write ``{field: value}`` to Vault via the governed KV handlers (patch, else put)."""
+    """Write ``{field: value}`` via the governed KV handlers on *vault_target* (patch, else put).
+
+    The same handler call a governed ``vault.kv.patch`` / ``vault.kv.put``
+    dispatched on *vault_target* makes, so the write runs under that
+    target's Vault role.
+    """
     import hvac.exceptions
 
     from meho_backplane.connectors.vault.ops import vault_kv_patch, vault_kv_put
 
     kv_params = {"mount": mount, "path": path, "data": {field: value}}
     try:
-        return await vault_kv_patch(operator, None, kv_params)
+        return await vault_kv_patch(operator, vault_target, kv_params)
     except hvac.exceptions.InvalidPath:
-        return await vault_kv_put(operator, None, kv_params)
+        return await vault_kv_put(operator, vault_target, kv_params)
 
 
-def _store_params(params: Mapping[str, Any]) -> tuple[str, str, str]:
+def store_params(params: Mapping[str, Any]) -> tuple[str, str, str]:
+    """``(mount, secret_ref, field)`` of the token's Vault destination, defaults applied."""
     return (
         str(params.get("store_mount") or DEFAULT_STORE_MOUNT).strip(),
         str(params["store_secret_ref"]).strip(),
@@ -366,6 +428,7 @@ class _VaultStoreError(RuntimeError):
 async def _mint_and_store(
     session: _UserSession,
     operator: Operator,
+    vault_target: Any,
     params: Mapping[str, Any],
     client_id: str,
 ) -> dict[str, Any]:
@@ -376,11 +439,13 @@ async def _mint_and_store(
     cancellation cannot skip the compensation) before the error propagates,
     so a re-run never meets an orphaned token it would call ``unchanged``.
     """
-    mount, store_path, field = _store_params(params)
+    mount, store_path, field = store_params(params)
     try:
         refresh_token = await _grant(session, params["org"], client_id)
         try:
-            written = await _store_in_vault(operator, mount, store_path, field, refresh_token)
+            written = await _store_in_vault(
+                operator, vault_target, mount, store_path, field, refresh_token
+            )
         except Exception as exc:
             raise _VaultStoreError(type(exc).__name__) from exc
     except BaseException as exc:
@@ -397,12 +462,15 @@ async def _mint_and_store(
             )
             raise RuntimeError(
                 f"vcfa.provider.api_token.create: {outcome}; the minted token could not be "
-                f"written to Vault at {mount}/{store_path} ({exc})"
+                f"written to Vault at {mount}/{store_path} through Vault target "
+                f"{vault_target.name!r} ({exc}) -- check that target's Vault role grants "
+                "create+update there (the park card's permission_preflight)"
             ) from exc.__cause__
         _log.warning("vcfa_api_token_mint_aborted", client_id=client_id, revoked=revoked)
         raise
     digest = hashlib.sha256(refresh_token.encode("utf-8")).hexdigest()
     stored: dict[str, Any] = {
+        "vault_target": vault_target.name,
         "mount": mount,
         "secret_ref": store_path,
         "field": field,
@@ -434,6 +502,9 @@ async def provider_api_token_create(
         "client_id": None,
         "stored": None,
     }
+    vault_target, problem = await resolve_store_vault_target(operator, params.get("vault_target"))
+    if vault_target is None:
+        return {**envelope, "status": "invalid_request", "guidance": problem}
     password = await read_password(operator, target, params)
     if password is None:
         return {
@@ -455,7 +526,7 @@ async def provider_api_token_create(
                 ),
             }
         client_id = await _register(session, org, token_name)
-        stored = await _mint_and_store(session, operator, params, client_id)
+        stored = await _mint_and_store(session, operator, vault_target, params, client_id)
     return {
         **envelope,
         "status": "created",

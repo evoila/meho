@@ -11,6 +11,11 @@ the durable audit row, the broadcast event, the park-time
 (user session → OAuth register → jwt-bearer grant), idempotency on the
 token name, the System-org path, Vault patch→put fallback, revoke-on-
 store-failure, login failure mapping, and the revoke op.
+
+The Vault write runs on the caller-named ``vault_target`` (#3895): the KV
+handlers receive that resolved Vault target, so the write executes under
+its Vault role, and the park card carries a ``permission_preflight`` probed
+under the same role.
 """
 
 from __future__ import annotations
@@ -32,7 +37,7 @@ from meho_backplane.connectors.vault import ops as vault_ops_module
 from meho_backplane.connectors.vcf_automation import VcfAutomationConnector
 from meho_backplane.connectors.vcf_automation import _lookups as lookups_module
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog
+from meho_backplane.db.models import ApprovalRequest, AuditLog, Target
 from meho_backplane.operations import (
     PassThroughReducer,
     reset_dispatcher_caches,
@@ -47,6 +52,8 @@ from tests._vcfa_provisioning_support import (
     OPERATOR,
     ORG,
     PASSWORD,
+    TARGET_NAME,
+    TENANT_ID,
     USER_JWT,
     basic_user,
     by_filter,
@@ -63,14 +70,38 @@ _CLIENT_ID = "4c1e0a52-0000-4000-8000-00000000c11d"
 _TOKEN_URN = f"urn:vcloud:token:{_CLIENT_ID}"
 _TOKEN_SEG = "urn%3Avcloud%3Atoken%3A4c1e0a52-0000-4000-8000-00000000c11d"
 
+_VAULT_TARGET = "example-vault-writer"
 _CREATE_PARAMS = {
     "org": "example-org",
     "username": "org-admin",
     "token_name": "meho-tenant",
     "password_secret_ref": "example/vcfa-org-admin",
     "store_secret_ref": "example/vcfa-target",
+    "vault_target": _VAULT_TARGET,
 }
-_REVOKE_PARAMS = {k: v for k, v in _CREATE_PARAMS.items() if k != "store_secret_ref"}
+_REVOKE_PARAMS = {
+    k: v for k, v in _CREATE_PARAMS.items() if k not in ("store_secret_ref", "vault_target")
+}
+
+
+async def _seed_vault_target() -> None:
+    """A Vault-connector target whose (per-target) Vault role performs the write."""
+    async with get_sessionmaker()() as session:
+        session.add(
+            Target(
+                tenant_id=TENANT_ID,
+                name=_VAULT_TARGET,
+                aliases=[],
+                product="vault",
+                host="vault.test.invalid",
+                port=8200,
+                auth_model="shared_service_account",
+                vpn_required=False,
+                extras={"vault_role": "example-writer-role"},
+                notes="seeded by test_connectors_vcf_automation_api_token.py",
+            )
+        )
+        await session.commit()
 
 
 @pytest.fixture(autouse=True)
@@ -120,11 +151,13 @@ def vault_writes(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, A
     writes: list[tuple[str, dict[str, Any]]] = []
 
     async def _patch(_operator: Any, target: Any, params: dict[str, Any]) -> dict[str, Any]:
-        assert target is None  # the deployment Vault, under the operator's identity
+        # Dispatched on the named Vault target -> its Vault role, not the caller's.
+        assert (target.name, target.product) == (_VAULT_TARGET, "vault")
         writes.append(("patch", params))
         return {"version": 4}
 
-    async def _put(_operator: Any, _target: Any, params: dict[str, Any]) -> dict[str, Any]:
+    async def _put(_operator: Any, target: Any, params: dict[str, Any]) -> dict[str, Any]:
+        assert (target.name, target.product) == (_VAULT_TARGET, "vault")
         writes.append(("put", params))
         return {"version": 1}
 
@@ -138,6 +171,7 @@ async def vcfa() -> AsyncIterator[VcfAutomationConnector]:
     set_default_reducer(PassThroughReducer())
     await VcfAutomationConnector.register_typed_operations()
     await seed_target()
+    await _seed_vault_target()
     connector = wire_connector()
     yield connector
     await connector.aclose()
@@ -186,11 +220,12 @@ async def test_create_mints_as_the_user_and_stores_in_vault(
     with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
         routes = _mount_user_flow(mock)
         result = await run("vcfa.provider.api_token.create", _CREATE_PARAMS)
-    assert result["status"] == "ok", result
+    assert result["status"] == "ok", json.dumps(result)
     out = result["result"]
     assert out["status"] == "created"
     assert out["client_id"] == _CLIENT_ID
     assert out["stored"] == {
+        "vault_target": _VAULT_TARGET,
         "mount": "secret",
         "secret_ref": "example/vcfa-target",
         "field": "refresh_token",
@@ -352,8 +387,110 @@ async def test_create_revokes_the_token_when_vault_write_fails(
     assert routes["delete"].called
     assert routes["delete"].calls.last.request.headers["Authorization"] == f"Bearer {USER_JWT}"
     assert "was revoked" in json.dumps(result)
+    assert f"through Vault target '{_VAULT_TARGET}'" in json.dumps(result)
     assert MINTED_TOKEN not in json.dumps(result)
     assert routes["logout"].called
+
+
+async def test_create_writes_under_the_vault_targets_role(
+    vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The unstubbed KV handler logs in under the named target's Vault role."""
+    roles: list[str | None] = []
+
+    class _Client:
+        class secrets:  # noqa: N801 -- hvac client shape
+            class kv:  # noqa: N801
+                class v2:  # noqa: N801
+                    @staticmethod
+                    def patch(**_kw: Any) -> dict[str, Any]:
+                        return {"data": {"version": 7}}
+
+    class _Ctx:
+        async def __aenter__(self) -> Any:
+            return _Client()
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+    def _client_for_operator(_operator: Any, *, role: Any = None, mount_path: Any = None) -> Any:
+        roles.append(role)
+        return _Ctx()
+
+    import meho_backplane.auth.vault as auth_vault_module
+
+    monkeypatch.setattr(auth_vault_module, "vault_client_for_operator", _client_for_operator)
+    # The tenant-scope guard is the handler's own (tested with the Vault ops).
+    monkeypatch.setattr(vault_ops_module, "enforce_tenant_scope", lambda *_a, **_k: None)
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        _mount_user_flow(mock)
+        result = await run("vcfa.provider.api_token.create", _CREATE_PARAMS)
+    assert result["status"] == "ok", json.dumps(result)
+    assert result["result"]["status"] == "created", result
+    assert result["result"]["stored"]["version"] == 7
+    assert roles == ["example-writer-role"]
+
+
+@pytest.mark.parametrize(
+    ("vault_target", "reason"),
+    [
+        ("no-such-vault", "no such target"),
+        (TARGET_NAME, "not a Vault-connector target"),
+        ("   ", "vault_target is required"),
+    ],
+)
+async def test_create_bad_vault_target_is_invalid_request_before_the_appliance(
+    vcfa: VcfAutomationConnector,
+    vault_writes: list[tuple[str, dict[str, Any]]],
+    vault_target: str,
+    reason: str,
+) -> None:
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        routes = _mount_user_flow(mock)
+        result = await run(
+            "vcfa.provider.api_token.create", {**_CREATE_PARAMS, "vault_target": vault_target}
+        )
+    assert result["status"] == "ok", json.dumps(result)
+    assert result["result"]["status"] == "invalid_request"
+    assert reason in result["result"]["guidance"]
+    assert not any(route.called for route in routes.values())
+    assert vault_writes == []
+
+
+async def test_create_without_vault_target_is_refused_before_the_appliance(
+    vcfa: VcfAutomationConnector, vault_writes: list[tuple[str, dict[str, Any]]]
+) -> None:
+    from meho_backplane.connectors.vcf_automation import _api_token
+
+    params = {k: v for k, v in _CREATE_PARAMS.items() if k != "vault_target"}
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        routes = _mount_user_flow(mock)
+        dispatched = await run("vcfa.provider.api_token.create", params)
+        direct = await _api_token.provider_api_token_create(
+            vcfa, OPERATOR, await resolved_target(), params
+        )
+    assert dispatched["status"] != "ok"  # schema-required
+    assert direct["status"] == "invalid_request"
+    assert "vault_target is required" in direct["guidance"]
+    assert not any(route.called for route in routes.values())
+    assert vault_writes == []
+
+
+async def test_vault_target_resolution_keeps_the_audit_target_binding() -> None:
+    import structlog
+
+    from meho_backplane.connectors.vcf_automation._api_token import resolve_store_vault_target
+
+    await seed_target()
+    await _seed_vault_target()
+    structlog.contextvars.bind_contextvars(target_id="vcfa-row", target_name=TARGET_NAME)
+    try:
+        target, problem = await resolve_store_vault_target(OPERATOR, _VAULT_TARGET)
+        bound = structlog.contextvars.get_contextvars()
+    finally:
+        structlog.contextvars.unbind_contextvars("target_id", "target_name")
+    assert problem is None and target.name == _VAULT_TARGET
+    assert (bound["target_id"], bound["target_name"]) == ("vcfa-row", TARGET_NAME)
 
 
 async def test_create_names_the_recovery_when_store_and_revoke_both_fail(
@@ -482,8 +619,9 @@ async def test_revoke_unknown_token_is_unchanged(vcfa: VcfAutomationConnector) -
 
 
 async def test_unapproved_dispatch_parks_without_touching_the_appliance(
-    vcfa: VcfAutomationConnector,
+    vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _capabilities(monkeypatch, ["create", "update"])
     with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
         routes = _mount_user_flow(mock)
         result = await run("vcfa.provider.api_token.create", _CREATE_PARAMS, approved=False)
@@ -513,12 +651,112 @@ async def _preview(op_id: str, params: dict[str, Any], connector: Any) -> dict[s
     )
 
 
+def _capabilities(
+    monkeypatch: pytest.MonkeyPatch, granted: list[str]
+) -> list[tuple[Any, list[str]]]:
+    """Stub the Vault capability probe; record (target, paths) per probe."""
+    probes: list[tuple[Any, list[str]]] = []
+
+    class _Sys:
+        def __init__(self, target: Any) -> None:
+            self._target = target
+
+        def get_capabilities(self, *, paths: list[str]) -> dict[str, Any]:
+            probes.append((self._target, paths))
+            return {paths[0]: granted}
+
+    class _Ctx:
+        def __init__(self, target: Any) -> None:
+            self._target = target
+
+        async def __aenter__(self) -> Any:
+            client = type("_Client", (), {})()
+            client.sys = _Sys(self._target)
+            return client
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+    monkeypatch.setattr(
+        vault_ops_module, "vault_client_for_target", lambda _operator, target: _Ctx(target)
+    )
+    return probes
+
+
+async def _parked_effect() -> dict[str, Any]:
+    async with get_sessionmaker()() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(ApprovalRequest).where(
+                        ApprovalRequest.op_id == "vcfa.provider.api_token.create"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    return dict(rows[0].proposed_effect)
+
+
+async def test_park_card_carries_the_vault_write_preflight(
+    vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    probes = _capabilities(monkeypatch, ["read"])
+    with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        routes = _mount_user_flow(mock)
+        await run("vcfa.provider.api_token.create", _CREATE_PARAMS, approved=False)
+    assert not any(route.called for route in routes.values())
+    effect = await _parked_effect()
+    preflight = effect["permission_preflight"]
+    assert preflight["vault_target"] == _VAULT_TARGET
+    assert preflight["path"] == "secret/data/example/vcfa-target"
+    assert preflight["required"] == ["create", "update"]
+    assert preflight["will_be_denied"] is True
+    assert effect["write_capability_warning"] == "connector_identity_may_lack_write"
+    # Probed under the named Vault target (its role), not the caller's identity.
+    assert [(t.name, paths) for t, paths in probes] == [
+        (_VAULT_TARGET, ["secret/data/example/vcfa-target"])
+    ]
+    store = effect["preview"]["store"]
+    assert store["vault_target"] == _VAULT_TARGET
+    for secret in (MINTED_TOKEN, PASSWORD, USER_JWT):
+        assert secret not in json.dumps(effect)
+
+
+async def test_park_card_preflight_passes_when_the_target_role_may_write(
+    vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _capabilities(monkeypatch, ["create", "read", "update"])
+    await run("vcfa.provider.api_token.create", _CREATE_PARAMS, approved=False)
+    effect = await _parked_effect()
+    assert effect["permission_preflight"]["will_be_denied"] is False
+    assert "write_capability_warning" not in effect
+
+
+async def test_park_card_flags_a_non_vault_target(
+    vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    probes = _capabilities(monkeypatch, ["create", "update"])
+    await run(
+        "vcfa.provider.api_token.create",
+        {**_CREATE_PARAMS, "vault_target": TARGET_NAME},
+        approved=False,
+    )
+    preflight = (await _parked_effect())["permission_preflight"]
+    assert preflight["will_be_denied"] is True
+    assert "not a Vault-connector target" in preflight["reason"]
+    assert probes == []
+
+
 async def test_token_previews_echo_refs_only(vcfa: VcfAutomationConnector) -> None:
     effect = await _preview("vcfa.provider.api_token.create", _CREATE_PARAMS, None)
     assert effect is not None
     dumped = json.dumps(effect)
     assert "mint_api_token" in dumped
     assert "example/vcfa-target" in dumped
+    assert _VAULT_TARGET in dumped
     assert '"token_value_returned": false' in dumped
     assert PASSWORD not in dumped
     revoke = await _preview("vcfa.provider.api_token.revoke", _REVOKE_PARAMS, None)

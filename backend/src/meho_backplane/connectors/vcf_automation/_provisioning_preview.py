@@ -38,7 +38,11 @@ from meho_backplane.connectors.vcf_automation._lookups import (
     find_project,
     password_ref,
 )
-from meho_backplane.operations._preview import PreviewContext, register_preview_builder
+from meho_backplane.operations._preview import (
+    PreviewContext,
+    register_permission_preflight,
+    register_preview_builder,
+)
 
 __all__: list[str] = []
 
@@ -134,12 +138,49 @@ async def _api_token_create_preview(ctx: PreviewContext) -> dict[str, Any] | Non
         "action": "mint_api_token",
         **identity,
         "store": {
+            "vault_target": p.get("vault_target"),
             "mount": p.get("store_mount") or "secret",
             "secret_ref": p.get("store_secret_ref"),
             "field": p.get("store_field") or "refresh_token",
         },
         "token_value_returned": False,
     }
+
+
+async def _api_token_create_preflight(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Park-time ``permission_preflight`` for the token's Vault write (#3895).
+
+    Resolves ``vault_target`` exactly as the handler will and runs the
+    ``vault.kv.patch`` capability probe (``sys/capabilities-self`` under
+    that target's Vault role -- capability names only, never a value) on
+    the store path, so the approver sees ``will_be_denied`` before
+    approving. An unresolvable / non-Vault ``vault_target`` is reported as
+    ``will_be_denied`` with the reason (the dispatch would answer
+    ``invalid_request``).
+    """
+    from meho_backplane.connectors.vault.ops import vault_kv_write_capability_preflight
+    from meho_backplane.connectors.vcf_automation._api_token import (
+        resolve_store_vault_target,
+        store_params,
+    )
+
+    p = ctx.params
+    if not isinstance(p.get("store_secret_ref"), str):
+        return None
+    name = p.get("vault_target")
+    vault_target, problem = await resolve_store_vault_target(ctx.operator, name)
+    if vault_target is None:
+        return {
+            "check": "vault.target",
+            "vault_target": name,
+            "will_be_denied": True,
+            "reason": problem,
+        }
+    mount, path, _field = store_params(p)
+    result = await vault_kv_write_capability_preflight(
+        ctx.operator, "vault.kv.patch", {"mount": mount, "path": path}, target=vault_target
+    )
+    return None if result is None else {**result, "vault_target": vault_target.name}
 
 
 async def _api_token_revoke_preview(ctx: PreviewContext) -> dict[str, Any] | None:
@@ -174,3 +215,4 @@ _BUILDERS = {
 
 for _op_id, _builder in _BUILDERS.items():
     register_preview_builder(_op_id, _builder)
+register_permission_preflight("vcfa.provider.api_token.create", _api_token_create_preflight)

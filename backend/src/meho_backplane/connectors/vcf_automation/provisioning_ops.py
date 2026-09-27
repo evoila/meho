@@ -433,9 +433,12 @@ _API_TOKEN_CREATE = VcfaTypedOp(
         "OAuth client (POST /oauth/tenant/<org>/register, or /oauth/provider/... for "
         "System) and runs the jwt-bearer grant to mint the API (refresh) token. The token "
         "is written to Vault at store_secret_ref/store_field (default field "
-        "'refresh_token', the field the connector's tenant login reads) via the governed "
-        "KV write handlers and is NEVER returned: the result carries only the Vault ref, "
-        "version, SHA-256 and length. The user's role needs 'API Tokens: Manage'. "
+        "'refresh_token', the field the connector's tenant login reads) through the "
+        "governed KV write handlers on vault_target -- the Vault-connector target whose "
+        "Vault role performs the write, exactly as vault.kv.patch on that target would -- "
+        "and is NEVER returned: the result carries only the Vault target and ref, "
+        "version, SHA-256 and length. The park card carries a permission_preflight "
+        "(will_be_denied) for that write. The user's role needs 'API Tokens: Manage'. "
         "Returns {status: 'created' | 'unchanged' | 'invalid_request', client_id, stored, "
         "guidance} (the token's id is urn:vcloud:token:<client_id>); 'unchanged' = a token "
         "with that name exists (nothing minted). "
@@ -450,6 +453,16 @@ _API_TOKEN_CREATE = VcfaTypedOp(
                 "minLength": 1,
                 "description": "Vault KV-v2 path the token is written to (merged if it exists).",
             },
+            "vault_target": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255,
+                "description": (
+                    "Name of the Vault-connector target (list_targets) whose Vault role "
+                    "writes store_secret_ref -- the same target a vault.kv.patch of that "
+                    "path would be dispatched on."
+                ),
+            },
             "store_mount": {"type": "string", "minLength": 1, "description": "Default 'secret'."},
             "store_field": {
                 "type": "string",
@@ -457,7 +470,14 @@ _API_TOKEN_CREATE = VcfaTypedOp(
                 "description": "Field name (default 'refresh_token').",
             },
         },
-        "required": ["org", "username", "token_name", "password_secret_ref", "store_secret_ref"],
+        "required": [
+            "org",
+            "username",
+            "token_name",
+            "password_secret_ref",
+            "store_secret_ref",
+            "vault_target",
+        ],
         "additionalProperties": False,
     },
     response_schema={
@@ -481,12 +501,21 @@ _API_TOKEN_CREATE = VcfaTypedOp(
     llm_instructions={
         "when_to_call": (
             "Call to give the tenant plane a credential: mint the org user's API token "
-            "into the target's Vault secret (store_field='refresh_token')."
+            "into the target's Vault secret (store_field='refresh_token'). Pass "
+            "vault_target = the Vault target whose role may write store_secret_ref (the one "
+            "you would dispatch vault.kv.patch on); check the park card's "
+            "permission_preflight.will_be_denied before asking for approval."
         ),
         "output_shape": (
-            "{status, client_id, stored: {mount, secret_ref, field, version, value_sha256, "
-            "length}, guidance} -- the token value is never in the result."
+            "{status, client_id, stored: {vault_target, mount, secret_ref, field, version, "
+            "value_sha256, length}, guidance} -- the token value is never in the result."
         ),
+        "parameter_hints": {
+            "vault_target": (
+                "Target NAME of a Vault-connector target; the write runs under its Vault "
+                "role, not your own identity."
+            ),
+        },
         "next_step": "vcfa.tenant.login.test on a target whose secret holds the token.",
     },
 )

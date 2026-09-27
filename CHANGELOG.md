@@ -90,6 +90,45 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.35.16] - 2026-09-27
+
+### Breaking changes — `vcfa.provider.api_token.create` requires `vault_target` and writes the token under that target's Vault role (#3895 / #3896)
+
+- `vcfa.provider.api_token.create` (new in 0.35.15) wrote the minted
+  refresh token to Vault under the calling operator's own Vault
+  identity. In a typical deployment that identity can read the estate's
+  secret subtree but not write it, so Vault answered `Forbidden`, the op
+  revoked the just-minted token, and the approval was spent for nothing.
+  The op now takes a **required** `vault_target` param: the name of a
+  Vault-connector target in the caller's tenant (resolved by name or
+  alias, like any target). The token write runs under that target's
+  Vault role (`extras.vault_role`), through the same handler and the
+  same tenant-scope guard as a governed `vault.kv.patch` / `vault.kv.put`
+  dispatched on that target. Before the password read and before any
+  appliance call, the caller's MEHO policy for `vault.kv.patch` and
+  `vault.kv.put` on that target is evaluated: `deny` refuses with
+  `invalid_request` and nothing is minted; `needs-approval` is satisfied
+  only by this op's own approval park, so an auto-executed dispatch (for
+  example a service principal whose standing grant covers only this op)
+  is refused. An unknown, blank or non-Vault target is refused the same
+  way. The park card now carries a `permission_preflight` for the Vault
+  write (`will_be_denied`, plus `write_capability_warning` when it will
+  be denied), probed under the target's role; when the probe itself
+  fails, the preflight reports `will_be_denied: true` with
+  `reason: "probe_failed:<class>"`. The result's `stored` block and the
+  preview name the `vault_target`. **BREAKING** for any caller of this
+  op: a call without `vault_target` is refused by the op's parameter
+  schema. **Migration:** pass `vault_target=<name of the Vault target
+  that a vault.kv.patch of store_secret_ref would be dispatched on>`.
+  That target needs its own `extras.vault_role` with create + update on
+  the path (without one the write falls back to the caller's role, the
+  original failure), and the caller's policy for `vault.kv.patch` /
+  `put` on it must not deny. Read `permission_preflight.will_be_denied`
+  on the park card before approving. Live auth model:
+  `shared_service_account` (the connector's only one). Tested against
+  recorded wire shapes; not yet exercised against a live appliance.
+  (#3895 / #3896)
+
 ## [0.35.15] - 2026-09-27
 
 ### Breaking changes — `list_targets` pages over the JSONFlux threshold return a result handle instead of inline `targets` (#3858 / #3888)

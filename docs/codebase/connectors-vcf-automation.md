@@ -131,8 +131,30 @@ lookups in `_lookups.py`, paths in `_paths.py`, and park-time previews in
   + TLS posture, own cookie jar), logs that session out when done, mints
   the refresh token and writes it to `store_secret_ref` / `store_field`
   (default `refresh_token`, the field the tenant login reads) through the
-  governed `vault.kv.patch` handler (`vault.kv.put` when the path is new).
-  The result carries only the Vault ref, version, SHA-256 and length, plus
+  governed `vault.kv.patch` handler (`vault.kv.put` when the path is new)
+  **called on the required `vault_target`** — a Vault-connector target
+  resolved tenant-scoped by name — so the write runs under that target's
+  Vault role (`extras.vault_role`), exactly as a `vault.kv.patch` dispatched
+  on that target would, not under the caller's own OIDC-mapped role (which
+  typically may read but not write the estate subtree, #3895). A missing,
+  unknown or non-Vault `vault_target` answers `invalid_request` before any
+  appliance call. Also before any appliance call, the caller's MEHO policy
+  for `vault.kv.patch` and `vault.kv.put` **on that Vault target** is run
+  through the dispatcher's own `policy_gate` (agent grants, service-principal
+  standing grants): `deny` refuses (`policy_denied: …` naming the target);
+  `needs-approval` is satisfied only by this op's own approval park (the
+  approved re-dispatch), so a service principal whose standing grant covers
+  this op but not the Vault write is refused rather than writing under the
+  target's role. The target should carry its own `extras.vault_role` — one
+  without falls back to the caller's role, the #3895 failure. The park card
+  carries the Vault write ops'
+  `sys/capabilities-self` `permission_preflight` (`will_be_denied`, plus
+  `vault_target`), probed under that target's role — a probe that itself
+  fails (role login refused) shows `will_be_denied: true`,
+  `reason: probe_failed:<class>` instead of no block; the resolver's
+  `target_id` / `target_name` log binding is restored afterwards so audit
+  attribution stays on the VCFA target.
+  The result carries only the Vault target and ref, version, SHA-256 and length, plus
   the OAuth `client_id` (the token id is `urn:vcloud:token:<client_id>`;
   results carry the bare id because the connector-boundary redaction reads
   `token:<hex>` as a labelled secret). Once the OAuth client is registered,
@@ -141,7 +163,7 @@ lookups in `_lookups.py`, paths in `_paths.py`, and park-time previews in
   if that revoke fails too, the error names the `client_id` and the
   `api_token.revoke` call to run. The Vault write rides the `vault.kv.patch`
   handler directly, so it is audited in the vcfa op's own audit row (its
-  params carry the store ref) and by Vault's audit device — no separate
+  params carry `vault_target` and the store ref) and by Vault's audit device — no separate
   `vault.kv.patch` audit/approval row is written. `api_token.create` is
   pinned `credential_mint`, `user.create` / `api_token.revoke`
   `credential_write` in `broadcast/events.py` — aggregate-only broadcast,

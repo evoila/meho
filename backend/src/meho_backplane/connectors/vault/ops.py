@@ -1011,6 +1011,8 @@ async def vault_kv_write_capability_preflight(
     op_id: str,
     params: dict[str, Any],
     target: Any = None,
+    *,
+    report_probe_failure: bool = False,
 ) -> dict[str, Any] | None:
     """Check, via ``sys/capabilities-self``, whether a KV-v2 write will be denied.
 
@@ -1054,6 +1056,13 @@ async def vault_kv_write_capability_preflight(
     "principal_sub": <dispatching-operator-sub>}`` — where ``<auth-path>``
     is ``<mount>/delete/<path>`` for ``vault.kv.delete`` and
     ``<mount>/data/<path>`` for ``put`` / ``patch`` (#3274).
+
+    ``report_probe_failure=True`` (a caller-named-target seam, #3895)
+    replaces the fail-soft ``None`` with an explicit block --
+    ``will_be_denied: True``, ``reason: "probe_failed:<ExceptionClass>"`` --
+    so a role that refuses the login (the likeliest misconfiguration of a
+    caller-chosen target) is visible on the park card rather than
+    indistinguishable from "no preflight".
     """
     required = VAULT_KV_WRITE_CAPABILITIES.get(op_id)
     if required is None:
@@ -1066,7 +1075,7 @@ async def vault_kv_write_capability_preflight(
                 client.sys.get_capabilities,
                 paths=[auth_path],
             )
-    except Exception:
+    except Exception as exc:
         # Fail-soft: the park is the safety-relevant action; a probe that
         # cannot reach Vault (or whose role login transiently fails) must
         # not block it. The reviewer falls back to the identifier-only
@@ -1080,7 +1089,17 @@ async def vault_kv_write_capability_preflight(
             operator_sub=operator.sub,
             exc_info=True,
         )
-        return None
+        if not report_probe_failure:
+            return None
+        return {
+            "check": "vault.capabilities-self",
+            "path": auth_path,
+            "required": sorted(required),
+            "granted": [],
+            "will_be_denied": True,
+            "reason": f"probe_failed:{type(exc).__name__}",
+            "principal_sub": operator.sub,
+        }
 
     # ``sys/capabilities-self`` returns the per-path capability list under
     # the path key, with a top-level ``capabilities`` mirror for a single

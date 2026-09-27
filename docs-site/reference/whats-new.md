@@ -9,6 +9,17 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.35.16](https://github.com/evoila/meho/releases/tag/v0.35.16) — 2026-09-27
+
+- **Breaking: creating a VCF Automation API token now names the Vault
+  target that stores it.** In 0.35.15 the new token was written to Vault
+  with your own Vault identity, which usually may not write there, so
+  the call failed after approval. You now name a Vault target, and the
+  token is written with that target's Vault role, the same way a Vault
+  write on that target works. The approval card shows in advance whether
+  the Vault write will be allowed. Calls without the new `vault_target`
+  setting are refused.
+
 ## [v0.35.15](https://github.com/evoila/meho/releases/tag/v0.35.15) — 2026-09-27
 
 - **You can now set up a VCF Automation 9.1 tenant through MEHO.** New

@@ -205,6 +205,87 @@ def test_list_operator_hides_write_affordances() -> None:
     assert "New event source" not in resp.text
 
 
+def _form_markup(body: str) -> str:
+    """Return just the `<form>` element from a rendered page.
+
+    ``form.html`` extends ``base.html``, so the response carries the
+    whole app shell -- which contributes its own ``w-full`` and
+    ``disabled`` occurrences. Counting page-wide would couple these
+    assertions to unrelated nav markup, so scope them to the form.
+    """
+    start = body.index('<form method="post"')
+    return body[start : body.index("</form>", start)]
+
+
+def _named_control_tag(body: str, needle: str) -> str:
+    """Return the opening tag of the control matched by *needle*."""
+    at = body.index(needle)
+    return body[body.rindex("<", 0, at) : body.index(">", at)]
+
+
+def test_new_form_renders_editable_fields() -> None:
+    """The New page renders the form with the v5 markup (#383).
+
+    The suite covered the list, the POST paths, CSRF and RBAC but never
+    rendered this page, so the template's markup was unguarded.
+    """
+    _seed_tenant()
+    session_id, jwks = _role_session(TenantRole.TENANT_ADMIN)
+    client, mock = _client(session_id, jwks)
+    try:
+        resp = client.get("/ui/event-sources/new")
+    finally:
+        mock.stop()
+    assert resp.status_code == 200, resp.text
+    body = resp.text
+    assert "New event source" in body
+    # #383: daisyUI v5 removed `form-control` / `label-text` (zero
+    # compiled rules), collapsing every label onto its control.
+    assert "form-control" not in body
+    assert "label-text" not in body
+    # Seven controls render per page; Name and Slug have separate
+    # create/edit variants in the template but only one shows at a time.
+    form = _form_markup(body)
+    assert form.count("w-full") == 7
+    assert "grid gap-3 md:grid-cols-3" in form
+    # The plain-POST CSRF field is this form's only CSRF mechanism.
+    assert 'name="csrf_token"' in body
+    # mode == "create": the natural keys are editable.
+    assert "disabled" not in _named_control_tag(body, 'name="name"')
+    assert "disabled" not in _named_control_tag(body, 'name="slug"')
+
+
+def test_edit_form_renders_immutable_keys_disabled() -> None:
+    """The Edit page renders the same template with its mode branches (#383).
+
+    Both pages render ``form.html``; the difference is that ``mode ==
+    "edit"`` swaps Name and Slug for disabled inputs, so that branch is
+    what this pins alongside the markup guard.
+    """
+    _seed_tenant()
+    _seed_event_source(slug="prod-am")
+    session_id, jwks = _role_session(TenantRole.TENANT_ADMIN)
+    client, mock = _client(session_id, jwks)
+    try:
+        resp = client.get("/ui/event-sources/prod-am/edit")
+    finally:
+        mock.stop()
+    assert resp.status_code == 200, resp.text
+    body = resp.text
+    assert "Edit event source" in body
+    assert "form-control" not in body
+    assert "label-text" not in body
+    form = _form_markup(body)
+    assert form.count("w-full") == 7
+    assert 'name="csrf_token"' in form
+    # mode == "edit": Name and Slug are immutable, so they render as
+    # disabled inputs that drop their `name` attribute entirely -- which
+    # is also why they are never submitted.
+    assert form.count("disabled") == 2
+    assert 'name="slug"' not in form
+    assert 'name="name"' not in form
+
+
 def test_create_persists_and_redirects_with_secret_custody(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, str]] = []
 

@@ -503,7 +503,11 @@ Operator resources close that gap (Initiative #2884, #2885):
     log line names the collection, product and version
     (`docs/codebase/docs-search.md` § Per-call logs). `T` and `W` are
     `prometheusRule.docsScopedZeroHits.threshold` (default 5) and `.window`
-    (default `1h`).
+    (default `1h`). The counter counts backend searches, not calls: a local
+    `ask_docs` runs one search per expansion variant (up to 4), so one
+    scoped ask that finds nothing counts up to 4, and two such asks in the
+    window reach the default threshold. A `search_docs` call counts once;
+    an upstream ask (#3911) sends no filter and never counts.
 
   The rules are split into groups **by concern** (`meho.scrape`,
   `meho.broadcast`, `meho.loops`, `meho.docs`) so follow-up tasks extend

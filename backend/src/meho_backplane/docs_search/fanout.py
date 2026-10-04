@@ -319,7 +319,7 @@ async def search_docs_fanout(
         "docs_search_fanout_completed",
         operator_sub=operator.sub,
         collections=[c.collection_key for c in collections],
-        **hit_log_fields(merged),
+        **hit_log_fields(merged, with_collections=True),
     )
     return DocsSearchResult(chunks=merged)
 

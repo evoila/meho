@@ -28,6 +28,12 @@ and for the two face-level differences: the UI numbers its citation cards to
 match the upstream ``[k]`` markers and falls back to one plain search on an
 upstream failure, and MCP wraps the upstream answer text as untrusted.
 
+A successful answer on either path logs one ``docs_ask_completed`` record
+with the ids-only fields of
+:func:`~meho_backplane.docs_search.call_log.ask_log_fields` (#3915): the hit
+and cited chunk ids and normalised source refs, ``answer_source`` and, on the
+upstream path, the backend's timing. Never chunk, answer or query text.
+
 Mapping an upstream answer
 --------------------------
 
@@ -68,6 +74,7 @@ from meho_backplane.docs_search.answer_errors import (
     classify_answer_error,
 )
 from meho_backplane.docs_search.backends import BackendRef, resolve_backend_or_label
+from meho_backplane.docs_search.call_log import AnswerSource, ask_log_fields
 from meho_backplane.docs_search.citation_links import derive_chunk_title
 from meho_backplane.docs_search.expansion import expand_docs_query
 from meho_backplane.docs_search.fanout import retrieve_multi_query
@@ -93,9 +100,9 @@ __all__ = [
 _log = structlog.get_logger(__name__)
 
 #: ``answer_source`` of an answer composed by the backplane's own pipeline.
-ANSWER_SOURCE_LOCAL: Final[str] = "local"
+ANSWER_SOURCE_LOCAL: Final[AnswerSource] = "local"
 #: ``answer_source`` of an answer composed by the collection's backend.
-ANSWER_SOURCE_UPSTREAM: Final[str] = "upstream"
+ANSWER_SOURCE_UPSTREAM: Final[AnswerSource] = "upstream"
 
 #: An upstream ``[N]`` citation marker, with the horizontal whitespace before
 #: it (so a dropped marker takes its leading space along). The digit run is
@@ -136,7 +143,7 @@ class AskPipelineOutcome:
     answer: DocsAnswer | None = None
     error: AskDocsAnswerError | None = None
     retrieved_chunks: list[DocsChunk] = field(default_factory=list)
-    answer_source: str = ANSWER_SOURCE_LOCAL
+    answer_source: AnswerSource = ANSWER_SOURCE_LOCAL
     upstream_timing: UpstreamAnswerTiming | None = None
 
 
@@ -180,16 +187,21 @@ async def answer_docs_question(
             operator, query, scope=scope, collection=collection, limit=limit
         )
     if outcome.answer is not None:
+        # The ids-only ask fields (#3915), the same keys on both paths: the
+        # hit and cited chunk ids and normalised source refs, never chunk,
+        # answer or query text. The backend timing is set upstream only.
         timing = outcome.upstream_timing
         _log.info(
             "docs_ask_completed",
             operator_sub=operator.sub,
             collection_key=scope.collection_key,
-            answer_source=outcome.answer_source,
-            hit_count=len(outcome.retrieved_chunks),
-            citation_count=len(outcome.answer.citations),
-            upstream_total_ms=timing.total_ms if timing is not None else None,
-            upstream_llm_ms=timing.llm_ms if timing is not None else None,
+            **ask_log_fields(
+                answer_source=outcome.answer_source,
+                hits=outcome.retrieved_chunks,
+                citations=outcome.answer.citations,
+                upstream_total_ms=timing.total_ms if timing is not None else None,
+                upstream_llm_ms=timing.llm_ms if timing is not None else None,
+            ),
         )
     return outcome
 

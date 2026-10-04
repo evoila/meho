@@ -6,9 +6,11 @@
 Every docs call logs the hit and cited chunk ids, never content; query text
 is logged only behind ``DOCS_DEBUG_LOG_QUERY_TEXT``; a search that set a
 product or version filter and found nothing warns and counts. These tests
-run the real search / expand / retrieve / synthesize primitives with the
-corpus transport and the model stubbed (no network, no LLM), and capture
-every docs module's log records through private loggers.
+run the real search / expand / retrieve / synthesize primitives and the
+``ask_docs`` answer seam (both the local pipeline and the upstream answer
+path of #3911) with the corpus transports and the model stubbed (no
+network, no LLM), and capture every docs module's log records through
+private loggers.
 
 Capture shape: each module's ``_log`` (and ``call_log._query_text_log``) is
 swapped for a private logger bound to one :class:`structlog.testing.LogCapture`
@@ -34,12 +36,13 @@ import structlog
 import structlog.testing
 from prometheus_client import REGISTRY
 
+import meho_backplane.docs_search.answer as answer_mod
 import meho_backplane.docs_search.call_log as call_log_mod
 import meho_backplane.docs_search.expansion as expansion_mod
 import meho_backplane.docs_search.fanout as fanout_mod
 import meho_backplane.docs_search.service as service_mod
 import meho_backplane.docs_search.synthesis as synthesis_mod
-from meho_backplane.auth.corpus import CorpusChunk, CorpusSearchResponse
+from meho_backplane.auth.corpus import CorpusChunk, CorpusSearchResponse, UpstreamAnswer
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.docs_collections import DocCollection
 from meho_backplane.docs_search import (
@@ -51,6 +54,7 @@ from meho_backplane.docs_search import (
     search_docs_fanout,
     synthesize_docs_answer,
 )
+from meho_backplane.docs_search.answer import answer_docs_question
 from meho_backplane.docs_search.call_log import (
     MAX_LOGGED_IDS,
     ask_log_fields,
@@ -61,6 +65,15 @@ from meho_backplane.settings import get_settings
 
 #: The corpus-http backend's transport seam.
 _CORPUS_SEAM = "meho_backplane.docs_search.backends.corpus_http.search_corpus"
+#: The corpus-http backend's answer transport seam (#3911).
+_ASK_SEAM = "meho_backplane.docs_search.backends.corpus_http.ask_corpus"
+_BUILD_EXPAND_CLIENT = "meho_backplane.docs_search.expansion.build_anthropic_ingest_llm_client"
+_BUILD_SYNTH_CLIENT = "meho_backplane.docs_search.synthesis.build_anthropic_ingest_llm_client"
+#: A collection opted in to its backend's answer endpoint.
+_UPSTREAM_BACKEND: dict[str, Any] = {
+    "type": "corpus-http",
+    "ref": {"endpoint": "https://corpus.test/search", "answer": "upstream"},
+}
 
 # Sentinel strings: none of them may reach a log record unless the opt-in
 # flag is on (and then only the query strings, only at debug level).
@@ -132,7 +145,7 @@ def records(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
         processors=[capture],
         wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG),
     )
-    for module in (service_mod, fanout_mod, expansion_mod, synthesis_mod, call_log_mod):
+    for module in (service_mod, fanout_mod, expansion_mod, synthesis_mod, answer_mod, call_log_mod):
         monkeypatch.setattr(module, "_log", private)
     monkeypatch.setattr(call_log_mod, "_query_text_log", private)
     return capture.entries
@@ -160,7 +173,9 @@ def _operator() -> Operator:
     )
 
 
-def _collection(collection_key: str = "vmware") -> DocCollection:
+def _collection(
+    collection_key: str = "vmware", backend: dict[str, Any] | None = None
+) -> DocCollection:
     now = datetime.now(UTC)
     return DocCollection(
         id=uuid4(),
@@ -170,7 +185,7 @@ def _collection(collection_key: str = "vmware") -> DocCollection:
         products=("vsphere",),
         description="VMware docs.",
         when_to_use="Vendor product questions.",
-        backend={"type": "corpus-http"},
+        backend=backend if backend is not None else {"type": "corpus-http"},
         status="ready",
         last_ingested_at=None,
         doc_count=None,
@@ -309,11 +324,25 @@ async def test_fanout_search_logs_fused_hit_ids(records: list[dict[str, Any]]) -
     completed = _one(records, "docs_search_fanout_completed")
     assert completed["hit_count"] == 2
     assert completed["hit_chunk_ids"] == ["chunk-docs-1", "chunk-docs-1"]
-    assert sorted(completed["hit_source_refs"]) == [
-        "meho://docs/other/chunk-docs-1",
-        "meho://docs/vmware/chunk-docs-1",
-    ]
+    # The same chunk id from two collections: hit_collections tells them
+    # apart, position by position with the refs.
+    assert sorted(completed["hit_collections"]) == ["other", "vmware"]
+    assert [
+        ref.removeprefix(f"meho://docs/{key}/")
+        for key, ref in zip(completed["hit_collections"], completed["hit_source_refs"], strict=True)
+    ] == ["chunk-docs-1", "chunk-docs-1"]
     _assert_no_content(records, _QUERY, _CHUNK_TEXT_A, "gs://")
+
+
+async def test_single_collection_events_do_not_list_hit_collections(
+    records: list[dict[str, Any]],
+) -> None:
+    with patch(_CORPUS_SEAM, new=_fake_corpus(_CHUNK_DOCS)):
+        await search_docs(
+            _operator(), _QUERY, scope=build_docs_scope("vmware"), collection=_collection()
+        )
+
+    assert "hit_collections" not in _one(records, "docs_search_completed")
 
 
 async def test_local_ask_logs_hit_and_cited_ids_only(records: list[dict[str, Any]]) -> None:
@@ -344,6 +373,126 @@ async def test_local_ask_with_no_hits_logs_empty_id_lists(records: list[dict[str
     assert no_grounding["hit_chunk_ids"] == []
     assert no_grounding["cited_chunk_ids"] == []
     assert _events(records, "docs_ask_synthesized") == []
+
+
+def _upstream_hit(chunk_id: str, *, text: str, source_uri: str) -> dict[str, Any]:
+    """An upstream ``/ask?include=hits`` hit (the backend's search-hit shape)."""
+    return {
+        "chunk_id": chunk_id,
+        "document_id": "",
+        "chunk_index": 0,
+        "text": text,
+        "source_uri": source_uri,
+        "score": 0.3,
+        "filename": f"{chunk_id}.html",
+        "heading_path": ["Snapshots"],
+    }
+
+
+def _upstream_body() -> dict[str, Any]:
+    """An upstream answer over two hits that cites the second one.
+
+    The hits carry raw ``gs://`` storage paths, as the backend sends them;
+    the answer, the echoed query and the quote carry sentinel text.
+    """
+    return {
+        "query": _QUERY,
+        "answer": f"{_ANSWER} [0].",
+        "citations": [{"chunk_index": 0, "chunk_id": "up-kb-2", "quote": _CHUNK_TEXT_B}],
+        "hits": [
+            _upstream_hit("up-docs-1", text=_CHUNK_TEXT_A, source_uri=_CHUNK_DOCS.source_url),
+            _upstream_hit("up-kb-2", text=_CHUNK_TEXT_B, source_uri=_CHUNK_KB.source_url),
+        ],
+        "timing": {"total_ms": 2790.6, "llm_ms": 1688.2, "knn_ms": 912.4},
+    }
+
+
+def _fake_ask(body: dict[str, Any]) -> Any:
+    async def _ask(operator: Any, query: str, **kwargs: Any) -> UpstreamAnswer:
+        return UpstreamAnswer.model_validate(body)
+
+    return _ask
+
+
+@pytest.mark.parametrize("query_text_flag", [False, True])
+async def test_upstream_ask_completion_logs_hit_and_cited_ids_only(
+    records: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch, query_text_flag: bool
+) -> None:
+    """The upstream answer path's emitted ``docs_ask_completed`` record (#3911).
+
+    It carries the ids-only ask fields with ``answer_source="upstream"`` and
+    the backend's timing, never the query, the answer or a chunk's text, and
+    never a ``gs://`` path. The upstream path logs no query text even with
+    the flag on: the backend does not return its rewritten query yet
+    (evoila-bosnia/MEHO.Knowledge#513).
+    """
+    if query_text_flag:
+        _enable_query_text_flag(monkeypatch)
+    search_calls: list[str] = []
+
+    async def _no_search(operator: Any, query: str, **kwargs: Any) -> CorpusSearchResponse:
+        search_calls.append(query)
+        return CorpusSearchResponse(chunks=[])
+
+    with patch(_ASK_SEAM, new=_fake_ask(_upstream_body())), patch(_CORPUS_SEAM, new=_no_search):
+        outcome = await answer_docs_question(
+            _operator(),
+            _QUERY,
+            scope=build_docs_scope("vmware"),
+            collection=_collection(backend=_UPSTREAM_BACKEND),
+            limit=10,
+        )
+
+    assert outcome.error is None
+    assert search_calls == []
+    completed = _one(records, "docs_ask_completed")
+    assert completed["log_level"] == "info"
+    assert completed["operator_sub"] == "op-42"
+    assert completed["collection_key"] == "vmware"
+    assert completed["answer_source"] == "upstream"
+    assert completed["hit_count"] == 2
+    assert completed["hit_chunk_ids"] == ["up-docs-1", "up-kb-2"]
+    assert completed["hit_source_refs"] == [
+        "meho://docs/vmware/up-docs-1",
+        "https://knowledge.broadcom.com/external/article/318828",
+    ]
+    assert completed["citation_count"] == 1
+    assert completed["cited_chunk_ids"] == ["up-kb-2"]
+    assert completed["upstream_total_ms"] == 2790.6
+    assert completed["upstream_llm_ms"] == 1688.2
+    assert _events(records, "docs_query_text") == []
+    _assert_no_content(records, _QUERY, _ANSWER, _CHUNK_TEXT_A, _CHUNK_TEXT_B, "gs://")
+
+
+async def test_local_ask_completion_carries_the_same_fields(
+    records: list[dict[str, Any]],
+) -> None:
+    """``docs_ask_completed`` has the same ids-only keys on the local path, no timing."""
+    expand = _StubLlmClient(json.dumps({"queries": [_VARIANT]}))
+    synth = _StubLlmClient(json.dumps({"answer": _ANSWER, "cited_chunk_ids": ["chunk-kb-2"]}))
+    with (
+        patch(_CORPUS_SEAM, new=_fake_corpus(_CHUNK_DOCS, _CHUNK_KB)),
+        patch(_BUILD_EXPAND_CLIENT, return_value=expand),
+        patch(_BUILD_SYNTH_CLIENT, return_value=synth),
+    ):
+        outcome = await answer_docs_question(
+            _operator(),
+            _QUERY,
+            scope=build_docs_scope("vmware"),
+            collection=_collection(),
+            limit=10,
+        )
+
+    assert outcome.error is None
+    completed = _one(records, "docs_ask_completed")
+    synthesized = _one(records, "docs_ask_synthesized")
+    assert completed["answer_source"] == "local"
+    for key in ("hit_count", "hit_chunk_ids", "hit_source_refs", "cited_chunk_ids"):
+        assert completed[key] == synthesized[key], key
+    assert completed["cited_chunk_ids"] == ["chunk-kb-2"]
+    assert "upstream_total_ms" not in completed
+    assert "upstream_llm_ms" not in completed
+    _assert_no_content(records, _QUERY, _VARIANT, _ANSWER, _CHUNK_TEXT_A, _CHUNK_TEXT_B, "gs://")
 
 
 # ---------------------------------------------------------------------------

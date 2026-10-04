@@ -488,9 +488,12 @@ A 4xx is a 502, not a 503: a rejected request is a contract or configuration
 fault, not an outage. `upstream_status` / `retry_after` appear on the
 envelope only for an upstream failure, so the local envelope is unchanged.
 
-**Logs.** Success logs one `docs_ask_completed` event with `collection_key`,
-`answer_source`, `hit_count`, `citation_count` and, upstream, the backend's
-`upstream_total_ms` / `upstream_llm_ms`. An upstream failure logs
+**Logs.** Success logs one `docs_ask_completed` event with `collection_key`
+and the ids-only ask fields of `ask_log_fields` (#3915; see
+[Per-call logs](#per-call-logs-3915)): `answer_source`, `hit_count`,
+`hit_chunk_ids`, `hit_source_refs`, `citation_count`, `cited_chunk_ids`
+and, upstream, the backend's `upstream_total_ms` / `upstream_llm_ms`. An
+upstream failure logs
 `docs_ask_upstream_failed` (leg, cause, `upstream_status`, `retry_after`).
 Never the query, chunk text or answer text. The `meho.docs.ask` audit row,
 its query hash and collection binding are unchanged.
@@ -981,6 +984,9 @@ uses the same keys:
   order. A `source_url` is normalised when the chunk is projected
   (`normalize_source_ref`, #132): a public URL such as a KB article, or an
   opaque `meho://docs/<collection>/<chunk_id>` ref, never a `gs://` path.
+  A fan-out over several collections also lists `hit_collections`, the
+  source collection of each listed hit: a chunk id is unique only within
+  its collection, so the same id can appear twice in one fused list.
 - On an ask: `answer_source` (`local` or `upstream`), `citation_count` and
   `cited_chunk_ids`; on the upstream answer path also `upstream_total_ms` /
   `upstream_llm_ms` when the backend reports them (`ask_log_fields`).
@@ -988,11 +994,12 @@ uses the same keys:
 | Event | Level | Emitted by | Fields |
 | --- | --- | --- | --- |
 | `docs_search_completed` | info | `search_docs` (every single-collection backend search: REST, MCP, UI Search mode, each `ask_docs` variant) | `collection_key`, `product`, `version`, hit fields |
-| `docs_search_fanout_completed` | info | `search_docs_fanout` | `collections`, hit fields of the fused list |
+| `docs_search_fanout_completed` | info | `search_docs_fanout` | `collections`, hit fields of the fused list, `hit_collections` |
 | `docs_search_multi_query_completed` | info | `retrieve_multi_query` | `collection_key`, `variant_count`, hit fields of the merged list |
 | `docs_ask_query_expanded` | info | `expand_docs_query` | `collection_key`, `variant_count` (no variant strings) |
 | `docs_ask_synthesized` | info | `synthesize_docs_answer` (local answer) | `answer_source="local"`, hit fields of the chunks the answer was composed over, `citation_count`, `cited_chunk_ids` |
 | `docs_ask_no_grounding` | info | `synthesize_docs_answer` (empty retrieval) | the same fields, all empty |
+| `docs_ask_completed` | info | `answer_docs_question` (every successful `ask_docs`, either path: REST, MCP, UI Ask mode) | `operator_sub`, `collection_key`, `answer_source` (`local` or `upstream`), hit fields of the chunks the answer was composed over, `citation_count`, `cited_chunk_ids`; upstream also `upstream_total_ms` / `upstream_llm_ms` |
 | `docs_search_scoped_zero_hits` | warning | `search_docs` | `operator_sub`, `collection_key`, `product`, `version` |
 | `docs_query_text` | debug | `log_query_text`, only with `DOCS_DEBUG_LOG_QUERY_TEXT=true` | `source`, `collection_key`, `queries` |
 
@@ -1004,23 +1011,28 @@ hashed into the audit row (SHA-256) and nowhere else.
 query string reaches the logs. When it is true, `expand_docs_query` writes
 one `docs_query_text` record with `source="expansion"` and the variants it
 retrieved on (the operator's question first). The upstream answer path
-(#3911) passes the rewritten query the backend reports (once the MEHO
-Knowledge service returns it, evoila-bosnia/MEHO.Knowledge#513) to the same
-helper with `source="upstream_rewrite"`. The record is debug severity, but
-the backplane's log floor is INFO (`configure_logging`), so it is written
-through a logger of its own with a DEBUG floor: the flag, not the process
-log level, decides whether it appears. Turn it on only while debugging
-retrieval, and off again afterwards.
+(#3911) does not log query text yet, even with the flag on: the backend
+does not return its rewritten query. Once the MEHO Knowledge service
+returns it (evoila-bosnia/MEHO.Knowledge#513), that query goes through the
+same helper with `source="upstream_rewrite"`. The record is debug
+severity, but the backplane's log floor is INFO (`configure_logging`), so
+it is written through a logger of its own with a DEBUG floor: the flag,
+not the process log level, decides whether it appears. Turn it on only
+while debugging retrieval, and off again afterwards.
 
 **Scoped zero hits.** A search that set `product` or `version` and returned
 no chunks logs the `docs_search_scoped_zero_hits` warning and increments
-`docs_search_scoped_zero_hits_total` (an `ask_docs` call counts once per
-variant). Once the corpus honours those filters, a run of them means the
-filter vocabulary callers send does not match the corpus's (`vcenter`
-against a corpus that stamps `vsphere`). The counter carries no labels,
-because `/metrics` can be unauthenticated; the warning line names the
-collection, product and version. The chart's optional PrometheusRule alerts
-on it (`MehoDocsScopedZeroHits`, `prometheusRule.docsScopedZeroHits`; see
+`docs_search_scoped_zero_hits_total`. It counts backend searches, not
+calls: a local `ask_docs` runs one search per expansion variant, and each
+variant search that finds nothing counts once. A scoped ask that finds
+nothing at all therefore counts up to 4 (`MAX_QUERY_VARIANTS`), and two
+such asks reach the alert's default threshold of 5. An upstream ask runs
+no search and sends no product or version, so it never counts. Once the
+corpus honours those filters, a run of them means the filter vocabulary
+callers send does not match the corpus's (`vcenter` against a corpus that
+stamps `vsphere`). The counter carries no labels, because `/metrics` can
+be unauthenticated; the warning line names the collection, product and
+version. The chart's optional PrometheusRule alerts on it (`MehoDocsScopedZeroHits`, `prometheusRule.docsScopedZeroHits`; see
 [devops.md](devops.md) § Metrics scrape wiring).
 
 ## Untrusted read-boundary guard (#304)

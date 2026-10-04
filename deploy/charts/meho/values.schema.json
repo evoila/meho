@@ -220,7 +220,7 @@
             "threshold": {
               "type": "integer",
               "minimum": 1,
-              "description": "How many scoped zero-hit docs searches within `window` trip the alert."
+              "description": "How many scoped zero-hit docs searches within `window` trip the alert. It counts backend searches, not calls: a local ask_docs counts once per expansion variant, up to 4."
             },
             "window": {
               "type": "string",

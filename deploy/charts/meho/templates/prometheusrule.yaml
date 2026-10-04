@@ -102,8 +102,10 @@ spec:
           # product or version filter and returned no chunks
           # (backend/src/meho_backplane/docs_search/call_log.py). Once the
           # corpus honours those filters, a run of them means the filter
-          # vocabulary does not match the corpus's. Summed over the release's
-          # pods, so the count does not depend on which replica served.
+          # vocabulary does not match the corpus's. It counts backend
+          # searches, not calls: a local ask_docs counts once per expansion
+          # variant (up to 4). Summed over the release's pods, so the count
+          # does not depend on which replica served.
           expr: 'sum(increase(docs_search_scoped_zero_hits_total{job="{{ include "meho.fullname" . }}", namespace="{{ .Release.Namespace }}"}[{{ .Values.prometheusRule.docsScopedZeroHits.window }}])) >= {{ .Values.prometheusRule.docsScopedZeroHits.threshold }}'
           for: {{ .Values.prometheusRule.docsScopedZeroHits.for }}
           labels:
@@ -113,7 +115,8 @@ spec:
             description: >-
               At least {{ .Values.prometheusRule.docsScopedZeroHits.threshold }}
               docs searches that set a product or version filter returned no
-              chunks in the last {{ .Values.prometheusRule.docsScopedZeroHits.window }}.
+              chunks in the last {{ .Values.prometheusRule.docsScopedZeroHits.window }}
+              (an ask_docs call counts once per expansion variant, up to 4).
               The filter values callers send probably do not match the
               collection's metadata vocabulary. The
               docs_search_scoped_zero_hits warning log lines name the

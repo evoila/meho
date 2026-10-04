@@ -19,11 +19,16 @@ What the fields carry
   is already normalised when the chunk is projected
   (:func:`~meho_backplane.docs_search.citation_links.normalize_source_ref`):
   a public URL or an opaque ``meho://docs/<collection>/<chunk_id>`` ref,
-  never a storage path such as ``gs://``.
+  never a storage path such as ``gs://``. A fan-out over several
+  collections also lists ``hit_collections``, the source collection of each
+  listed hit, because a chunk id is unique only within its collection.
 * :func:`ask_log_fields`: the hit fields plus ``citation_count``,
   ``cited_chunk_ids``, ``answer_source`` (``local`` or ``upstream``) and,
   when an upstream answer reports them, ``upstream_total_ms`` /
-  ``upstream_llm_ms``.
+  ``upstream_llm_ms``. Both ask paths log them on ``docs_ask_completed``
+  (:func:`~meho_backplane.docs_search.answer.answer_docs_question`); the
+  local pipeline's ``docs_ask_synthesized`` / ``docs_ask_no_grounding``
+  carry them too.
 
 None of them carries chunk text, answer text or query text.
 
@@ -31,10 +36,13 @@ Query text only behind a flag
 -----------------------------
 The question is never logged in the clear: the audit row stores its
 SHA-256. The query strings a call actually ran (the local expansion
-variants, or an upstream answer endpoint's rewritten query) are logged only
-when ``DOCS_DEBUG_LOG_QUERY_TEXT=true``, by :func:`log_query_text`, as one
-``docs_query_text`` record at debug severity. The backplane's log floor is
-INFO (:func:`~meho_backplane.logging.configure_logging`), so that record is
+variants) are logged only when ``DOCS_DEBUG_LOG_QUERY_TEXT=true``, by
+:func:`log_query_text`, as one ``docs_query_text`` record at debug severity.
+The upstream answer path logs no query text yet: the backend does not return
+its rewritten query until evoila-bosnia/MEHO.Knowledge#513, and then that
+query goes through the same helper with ``source="upstream_rewrite"``. The
+backplane's log floor is INFO
+(:func:`~meho_backplane.logging.configure_logging`), so that record is
 written through a logger of its own with a DEBUG floor: the flag, not the
 process log level, decides whether it appears. With the flag off (the
 default) nothing is written.
@@ -49,6 +57,9 @@ corpus that stamps ``vsphere``) looks exactly like that. The chart's
 optional PrometheusRule alerts on the counter (``MehoDocsScopedZeroHits``).
 The counter has no labels: ``/metrics`` can be unauthenticated, and the
 collection key, product and version are on the warning line instead.
+It counts backend searches, not calls: a local ``ask_docs`` runs one search
+per expansion variant, so a scoped ask that finds nothing counts up to four
+times.
 """
 
 from __future__ import annotations
@@ -88,8 +99,9 @@ AnswerSource = Literal["local", "upstream"]
 
 #: Which query strings a :func:`log_query_text` record carries:
 #: ``expansion`` is the local expansion variants (the operator's question
-#: first); ``upstream_rewrite`` is the rewritten query an upstream answer
-#: endpoint reports.
+#: first); ``upstream_rewrite`` is reserved for the rewritten query an
+#: upstream answer endpoint will report (not wired yet: it needs the backend
+#: to return it, evoila-bosnia/MEHO.Knowledge#513).
 QueryTextSource = Literal["expansion", "upstream_rewrite"]
 
 #: Docs searches that requested a ``product`` or ``version`` and returned no
@@ -119,14 +131,24 @@ def _query_text_logger() -> Any:
 _query_text_log = _query_text_logger()
 
 
-def hit_log_fields(chunks: Sequence[DocsChunk]) -> dict[str, Any]:
-    """Return the hit fields for a list of retrieved chunks, in rank order."""
+def hit_log_fields(
+    chunks: Sequence[DocsChunk], *, with_collections: bool = False
+) -> dict[str, Any]:
+    """Return the hit fields for a list of retrieved chunks, in rank order.
+
+    With *with_collections* (a fan-out over several collections) the fields
+    also list ``hit_collections``, each listed hit's source collection key,
+    so a chunk id two collections share stays unambiguous.
+    """
     logged = chunks[:MAX_LOGGED_IDS]
-    return {
+    fields: dict[str, Any] = {
         "hit_count": len(chunks),
         "hit_chunk_ids": [chunk.chunk_id for chunk in logged],
         "hit_source_refs": [chunk.source_url for chunk in logged],
     }
+    if with_collections:
+        fields["hit_collections"] = [chunk.collection for chunk in logged]
+    return fields
 
 
 def ask_log_fields(

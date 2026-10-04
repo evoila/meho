@@ -267,9 +267,13 @@ prometheusRule:
   # honours those filters, a run of them means the filter vocabulary does not
   # match the corpus's (an agent sends `vcenter`, the corpus stamps
   # `vsphere`). The `docs_search_scoped_zero_hits` warning log line names the
-  # collection, product and version.
+  # collection, product and version. The counter counts backend searches,
+  # not calls: a local `ask_docs` runs one search per expansion variant (up
+  # to 4), so one scoped ask that finds nothing counts up to 4 and two such
+  # asks reach the default threshold.
   docsScopedZeroHits:
-    # -- Scoped zero-hit docs searches within `window` that trip the alert.
+    # -- Scoped zero-hit docs searches (not calls: an `ask_docs` counts once
+    # per expansion variant, up to 4) within `window` that trip the alert.
     threshold: 5
     # -- Range the searches are counted over (Prometheus duration).
     window: 1h

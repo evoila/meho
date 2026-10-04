@@ -2064,8 +2064,9 @@ product; this page documents only how it attaches, not how to operate it.</p>
 over a team's own documents with a citation for every claim. The
 backplane does not ingest or store any of those documents — it <strong>attaches
 to and searches</strong> a MEHO Knowledge instance registered as a <em>doc
-collection</em>, and forwards the caller's identity so the search is
-authenticated and audited as that operator.</p>
+collection</em>. The backplane calls it with a deployment-configured service
+credential (the caller's own token is never forwarded to it), and records
+every query in its own audit log under the calling operator.</p>
 <p>When the capability is granted, an agent gets three meta-tools:</p>
 <table>
 <thead>
@@ -2081,7 +2082,7 @@ authenticated and audited as that operator.</p>
 </tr>
 <tr>
 <td><code>ask_docs</code></td>
-<td>one composed answer over the retrieved passages, with its sources</td>
+<td>one composed answer with its sources</td>
 </tr>
 <tr>
 <td><code>list_doc_collections</code></td>
@@ -2102,6 +2103,16 @@ authenticated and audited as that operator.</p>
   to a retrieved passage, and an empty retrieval returns a deterministic
   <em>"no grounded answer"</em> rather than a guess.</li>
 </ul>
+<p><strong>Where <code>ask_docs</code> answers come from.</strong> By default the backplane composes
+the answer itself: it retrieves passages from the collection and has its
+own model write an answer over them. A collection can instead be
+configured to take the answer from the attached service's own
+grounded-answer endpoint. The backplane then makes one call to that
+endpoint and returns its answer and sources in the same shape, with the
+same citation check, and with the answer itself marked as untrusted text
+for agents. The choice is per collection, off unless an administrator
+turns it on, and reversible with one collection update. With it on, the
+answer is written by the service's answer model, not the backplane's.</p>
 <p>The <a href="../memory-and-knowledge/">Memory and knowledge</a> guide covers how this
 attached-document search differs from MEHO's own memory and knowledge
 base, which live inside the backplane.</p>

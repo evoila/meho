@@ -262,15 +262,16 @@ prometheusRule:
     # -- `severity` label attached to the alert.
     severity: warning
   # `MehoDocsScopedZeroHits` (#3915): fires when at least `threshold` docs
-  # searches that set a `product` or `version` filter returned no chunks
-  # within `window` (`docs_search_scoped_zero_hits_total`). Once the corpus
-  # honours those filters, a run of them means the filter vocabulary does not
-  # match the corpus's (an agent sends `vcenter`, the corpus stamps
-  # `vsphere`). The `docs_search_scoped_zero_hits` warning log line names the
-  # collection, product and version. The counter counts backend searches,
-  # not calls: a local `ask_docs` runs one search per expansion variant (up
-  # to 4), so one scoped ask that finds nothing counts up to 4 and two such
-  # asks reach the default threshold.
+  # searches that requested a `product` or `version` returned no chunks
+  # within `window` (`docs_search_scoped_zero_hits_total`), whatever the
+  # collection's scope gates (#3912) did with them. Where they went out as
+  # hard filters (`scope_forwarded="filters"`), a run of them means the filter
+  # vocabulary does not match the corpus's (an agent sends `vcenter`, the
+  # corpus stamps `vsphere`). The `docs_search_scoped_zero_hits` warning log
+  # line names the collection, product, version and `scope_forwarded`. The
+  # counter counts backend searches, not calls: a local `ask_docs` runs one
+  # search per expansion variant (up to 4), so one scoped ask that finds
+  # nothing counts up to 4 and two such asks reach the default threshold.
   docsScopedZeroHits:
     # -- Scoped zero-hit docs searches (not calls: an `ask_docs` counts once
     # per expansion variant, up to 4) within `window` that trip the alert.

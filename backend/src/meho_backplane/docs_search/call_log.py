@@ -28,7 +28,13 @@ What the fields carry
   ``upstream_llm_ms``. Both ask paths log them on ``docs_ask_completed``
   (:func:`~meho_backplane.docs_search.answer.answer_docs_question`); the
   local pipeline's ``docs_ask_synthesized`` / ``docs_ask_no_grounding``
-  carry them too.
+  carry them too. An upstream answer whose citations fail to map logs the
+  hit fields on ``docs_ask_upstream_failed``.
+
+The records that carry the requested ``product`` / ``version``
+(``docs_search_completed``, ``docs_ask_completed`` and the scoped zero-hit
+warning) also carry ``scope_forwarded``: how the collection's scope gates
+sent them to the backend (``"soft"``, ``"filters"`` or ``"none"``, #3912).
 
 None of them carries chunk text, answer text or query text.
 
@@ -51,12 +57,16 @@ Scoped zero hits
 ----------------
 :func:`note_scoped_zero_hits` logs a ``docs_search_scoped_zero_hits``
 warning and increments ``docs_search_scoped_zero_hits_total`` when a search
-that asked for a ``product`` or ``version`` returned no chunks. Once the
-corpus honours those filters, a vocabulary mismatch (``vcenter`` sent to a
-corpus that stamps ``vsphere``) looks exactly like that. The chart's
+that asked for a ``product`` or ``version`` returned no chunks, whatever
+the collection's scope gates did with them. A vocabulary mismatch
+(``vcenter`` sent to a corpus that stamps ``vsphere``) looks exactly like
+that when the values went out as hard filters (``scope_forwarded`` is
+``"filters"``); with ``"soft"`` or ``"none"`` the backend did not filter on
+them, so the search found nothing for another reason. The chart's
 optional PrometheusRule alerts on the counter (``MehoDocsScopedZeroHits``).
 The counter has no labels: ``/metrics`` can be unauthenticated, and the
-collection key, product and version are on the warning line instead.
+collection key, product, version and ``scope_forwarded`` are on the
+warning line instead.
 It counts backend searches, not calls: a local ``ask_docs`` runs one search
 per expansion variant, so a scoped ask that finds nothing counts up to four
 times.
@@ -74,7 +84,7 @@ from prometheus_client import Counter
 from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
-    from meho_backplane.docs_search.service import DocsChunk, DocsScope
+    from meho_backplane.docs_search.service import DocsChunk, DocsScope, ScopeForwarding
 
 __all__ = [
     "DOCS_SEARCH_SCOPED_ZERO_HITS_TOTAL",
@@ -198,8 +208,18 @@ def log_query_text(
     )
 
 
-def note_scoped_zero_hits(*, operator_sub: str, scope: DocsScope, hit_count: int) -> None:
-    """Warn and count when a search that set ``product`` or ``version`` found nothing."""
+def note_scoped_zero_hits(
+    *,
+    operator_sub: str,
+    scope: DocsScope,
+    scope_forwarded: ScopeForwarding,
+    hit_count: int,
+) -> None:
+    """Warn and count when a search that set ``product`` or ``version`` found nothing.
+
+    *scope_forwarded* is how the search sent them (#3912); it rides the
+    warning line so a hard-filter miss can be told from an unfiltered one.
+    """
     if hit_count > 0 or (scope.product is None and scope.version is None):
         return
     DOCS_SEARCH_SCOPED_ZERO_HITS_TOTAL.inc()
@@ -209,4 +229,5 @@ def note_scoped_zero_hits(*, operator_sub: str, scope: DocsScope, hit_count: int
         collection_key=scope.collection_key,
         product=scope.product,
         version=scope.version,
+        scope_forwarded=scope_forwarded,
     )

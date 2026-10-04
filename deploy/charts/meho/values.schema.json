@@ -215,7 +215,7 @@
         "docsScopedZeroHits": {
           "type": "object",
           "additionalProperties": false,
-          "description": "Tuning for the `MehoDocsScopedZeroHits` alert (#3915): at least `threshold` docs searches that set a product or version filter returned no chunks within `window` (docs_search_scoped_zero_hits_total).",
+          "description": "Tuning for the `MehoDocsScopedZeroHits` alert (#3915): at least `threshold` docs searches that requested a product or version returned no chunks within `window` (docs_search_scoped_zero_hits_total).",
           "properties": {
             "threshold": {
               "type": "integer",

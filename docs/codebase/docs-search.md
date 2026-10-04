@@ -286,7 +286,8 @@ gates below), projects the backend's `CorpusChunk`s into MEHO's own
 or the projected response (the backend-agnostic contract). It logs
 `docs_search_completed` with the *requested* `product` / `version`,
 `scope_forwarded` (how they reached the backend: `"soft"`, `"filters"` or
-`"none"`) and `hit_count`.
+`"none"`) and the hit fields (`hit_count`, `hit_chunk_ids`,
+`hit_source_refs`; see [Per-call logs](#per-call-logs-3915)).
 
 ### Scope gates (`forwarded_scope`, `backend.ref.scope` / `backend.ref.scope_filters`, #3912)
 
@@ -370,8 +371,9 @@ form has no such fields, so it never sends either.
 `version`, whatever the gates. The `docs_search_completed` and
 `docs_ask_completed` logs keep them too, next to `scope_forwarded`
 (`"soft"`, `"filters"` or `"none"`: what was actually sent, so `"none"`
-also when nothing was requested); `docs_ask_upstream_failed` carries
-`scope_forwarded` as well.
+also when nothing was requested), and so does the
+`docs_search_scoped_zero_hits` warning; `docs_ask_upstream_failed`
+carries `scope_forwarded` as well.
 
 **Vocabulary.** The tool descriptions tell the agent to use the
 collection's own product tokens (`products` in `list_doc_collections`)
@@ -635,7 +637,9 @@ ask fields of `ask_log_fields` (#3915; see
 `hit_chunk_ids`, `hit_source_refs`, `citation_count`, `cited_chunk_ids`
 and, upstream, the backend's `upstream_total_ms` / `upstream_llm_ms`. An
 upstream failure logs `docs_ask_upstream_failed` (leg, cause,
-`scope_forwarded`, `upstream_status`, `retry_after`).
+`scope_forwarded`, `upstream_status`, `retry_after`), plus the hit fields
+when the backend returned hits that failed to map
+(`citation_resolution`).
 Never the query, chunk text or answer text. The `meho.docs.ask` audit row,
 its query hash and collection binding are unchanged.
 
@@ -1131,17 +1135,21 @@ uses the same keys:
 - On an ask: `answer_source` (`local` or `upstream`), `citation_count` and
   `cited_chunk_ids`; on the upstream answer path also `upstream_total_ms` /
   `upstream_llm_ms` when the backend reports them (`ask_log_fields`).
+- Next to the *requested* `product` / `version`: `scope_forwarded`, how
+  the collection's scope gates sent them to the backend (`"soft"`,
+  `"filters"` or `"none"`; see *Scope gates* above, #3912).
 
 | Event | Level | Emitted by | Fields |
 | --- | --- | --- | --- |
-| `docs_search_completed` | info | `search_docs` (every single-collection backend search: REST, MCP, UI Search mode, each `ask_docs` variant) | `collection_key`, `product`, `version`, hit fields |
+| `docs_search_completed` | info | `search_docs` (every single-collection backend search: REST, MCP, UI Search mode, each `ask_docs` variant) | `operator_sub`, `collection_key`, `product`, `version`, `scope_forwarded`, hit fields |
 | `docs_search_fanout_completed` | info | `search_docs_fanout` | `collections`, hit fields of the fused list, `hit_collections` |
 | `docs_search_multi_query_completed` | info | `retrieve_multi_query` | `collection_key`, `variant_count`, hit fields of the merged list |
 | `docs_ask_query_expanded` | info | `expand_docs_query` | `collection_key`, `variant_count` (no variant strings) |
 | `docs_ask_synthesized` | info | `synthesize_docs_answer` (local answer) | `answer_source="local"`, hit fields of the chunks the answer was composed over, `citation_count`, `cited_chunk_ids` |
 | `docs_ask_no_grounding` | info | `synthesize_docs_answer` (empty retrieval) | the same fields, all empty |
-| `docs_ask_completed` | info | `answer_docs_question` (every successful `ask_docs`, either path: REST, MCP, UI Ask mode) | `operator_sub`, `collection_key`, `answer_source` (`local` or `upstream`), hit fields of the chunks the answer was composed over, `citation_count`, `cited_chunk_ids`; upstream also `upstream_total_ms` / `upstream_llm_ms` |
-| `docs_search_scoped_zero_hits` | warning | `search_docs` | `operator_sub`, `collection_key`, `product`, `version` |
+| `docs_ask_completed` | info | `answer_docs_question` (every successful `ask_docs`, either path: REST, MCP, UI Ask mode) | `operator_sub`, `collection_key`, `product`, `version`, `scope_forwarded`, `answer_source` (`local` or `upstream`), hit fields of the chunks the answer was composed over, `citation_count`, `cited_chunk_ids`; upstream also `upstream_total_ms` / `upstream_llm_ms` |
+| `docs_ask_upstream_failed` | warning | `answer_docs_question` (a failed upstream answer) | `operator_sub`, `collection_key`, `answer_source="upstream"`, `scope_forwarded`, `leg`, `cause`, `upstream_status`, `retry_after`; hit fields only when the backend returned hits that failed to map (`citation_resolution`) |
+| `docs_search_scoped_zero_hits` | warning | `search_docs` | `operator_sub`, `collection_key`, `product`, `version`, `scope_forwarded` |
 | `docs_query_text` | debug | `log_query_text`, only with `DOCS_DEBUG_LOG_QUERY_TEXT=true` | `source`, `collection_key`, `queries` |
 
 **Never logged:** chunk text, answer text and query text. The question is
@@ -1161,19 +1169,22 @@ it is written through a logger of its own with a DEBUG floor: the flag,
 not the process log level, decides whether it appears. Turn it on only
 while debugging retrieval, and off again afterwards.
 
-**Scoped zero hits.** A search that set `product` or `version` and returned
-no chunks logs the `docs_search_scoped_zero_hits` warning and increments
-`docs_search_scoped_zero_hits_total`. It counts backend searches, not
+**Scoped zero hits.** A search that requested `product` or `version` and
+returned no chunks logs the `docs_search_scoped_zero_hits` warning and
+increments `docs_search_scoped_zero_hits_total`, whatever the collection's
+scope gates did with the values. It counts backend searches, not
 calls: a local `ask_docs` runs one search per expansion variant, and each
 variant search that finds nothing counts once. A scoped ask that finds
 nothing at all therefore counts up to 4 (`MAX_QUERY_VARIANTS`), and two
 such asks reach the alert's default threshold of 5. An upstream ask runs
-no search and sends no product or version, so it never counts. Once the
-corpus honours those filters, a run of them means the filter vocabulary
-callers send does not match the corpus's (`vcenter` against a corpus that
-stamps `vsphere`). The counter carries no labels, because `/metrics` can
-be unauthenticated; the warning line names the collection, product and
-version. The chart's optional PrometheusRule alerts on it (`MehoDocsScopedZeroHits`, `prometheusRule.docsScopedZeroHits`; see
+no search, so it never counts, even when the gates forward its product or
+version to the answer call. A run of them with `scope_forwarded="filters"`
+means the filter vocabulary callers send does not match the corpus's
+(`vcenter` against a corpus that stamps `vsphere`); with `"soft"` or
+`"none"` the backend did not filter on the values, so the search found
+nothing for another reason. The counter carries no labels, because
+`/metrics` can be unauthenticated; the warning line names the collection,
+product, version and `scope_forwarded`. The chart's optional PrometheusRule alerts on it (`MehoDocsScopedZeroHits`, `prometheusRule.docsScopedZeroHits`; see
 [devops.md](devops.md) § Metrics scrape wiring).
 
 ## Untrusted read-boundary guard (#304)

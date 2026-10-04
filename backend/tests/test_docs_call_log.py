@@ -4,8 +4,8 @@
 """Per-call docs log fields (#3915).
 
 Every docs call logs the hit and cited chunk ids, never content; query text
-is logged only behind ``DOCS_DEBUG_LOG_QUERY_TEXT``; a search that set a
-product or version filter and found nothing warns and counts. These tests
+is logged only behind ``DOCS_DEBUG_LOG_QUERY_TEXT``; a search that requested a
+product or version and found nothing warns and counts. These tests
 run the real search / expand / retrieve / synthesize primitives and the
 ``ask_docs`` answer seam (both the local pipeline and the upstream answer
 path of #3911) with the corpus transports and the model stubbed (no
@@ -42,7 +42,12 @@ import meho_backplane.docs_search.expansion as expansion_mod
 import meho_backplane.docs_search.fanout as fanout_mod
 import meho_backplane.docs_search.service as service_mod
 import meho_backplane.docs_search.synthesis as synthesis_mod
-from meho_backplane.auth.corpus import CorpusChunk, CorpusSearchResponse, UpstreamAnswer
+from meho_backplane.auth.corpus import (
+    CorpusChunk,
+    CorpusSearchResponse,
+    CorpusUnavailable,
+    UpstreamAnswer,
+)
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.docs_collections import DocCollection
 from meho_backplane.docs_search import (
@@ -312,6 +317,8 @@ async def test_search_logs_hit_ids_and_normalised_refs_only(records: list[dict[s
         "https://knowledge.broadcom.com/external/article/318828",
     ]
     assert (completed["product"], completed["version"]) == ("vsphere", "8.0")
+    # #3912's field rides the same record: no gate on, so nothing was sent.
+    assert completed["scope_forwarded"] == "none"
     _assert_no_content(records, _QUERY, _CHUNK_TEXT_A, _CHUNK_TEXT_B, "gs://")
 
 
@@ -495,6 +502,109 @@ async def test_local_ask_completion_carries_the_same_fields(
     _assert_no_content(records, _QUERY, _VARIANT, _ANSWER, _CHUNK_TEXT_A, _CHUNK_TEXT_B, "gs://")
 
 
+@pytest.mark.parametrize(
+    ("answer_source", "cited"), [("local", ["chunk-kb-2"]), ("upstream", ["up-kb-2"])]
+)
+async def test_ask_completion_carries_the_scope_fields_and_the_ids(
+    records: list[dict[str, Any]], answer_source: str, cited: list[str]
+) -> None:
+    """``docs_ask_completed`` keeps #3912's scope fields next to the ids (#3915).
+
+    The collection opts in to the soft scope, so ``scope_forwarded`` is
+    ``"soft"``; the requested ``product`` / ``version`` and the hit and cited
+    chunk ids ride the same record, on both answer paths.
+    """
+    ref: dict[str, Any] = {"endpoint": "https://corpus.test/search", "scope": "soft"}
+    if answer_source == "upstream":
+        ref["answer"] = "upstream"
+    expand = _StubLlmClient(json.dumps({"queries": [_VARIANT]}))
+    synth = _StubLlmClient(json.dumps({"answer": _ANSWER, "cited_chunk_ids": ["chunk-kb-2"]}))
+    with (
+        patch(_ASK_SEAM, new=_fake_ask(_upstream_body())),
+        patch(_CORPUS_SEAM, new=_fake_corpus(_CHUNK_DOCS, _CHUNK_KB)),
+        patch(_BUILD_EXPAND_CLIENT, return_value=expand),
+        patch(_BUILD_SYNTH_CLIENT, return_value=synth),
+    ):
+        outcome = await answer_docs_question(
+            _operator(),
+            _QUERY,
+            scope=build_docs_scope("vmware", product="vsphere", version="8.0"),
+            collection=_collection(backend={"type": "corpus-http", "ref": ref}),
+            limit=10,
+        )
+
+    assert outcome.error is None
+    completed = _one(records, "docs_ask_completed")
+    assert completed["answer_source"] == answer_source
+    assert (completed["product"], completed["version"]) == ("vsphere", "8.0")
+    assert completed["scope_forwarded"] == "soft"
+    assert completed["hit_count"] == 2
+    assert len(completed["hit_chunk_ids"]) == 2
+    assert len(completed["hit_source_refs"]) == 2
+    assert completed["citation_count"] == 1
+    assert completed["cited_chunk_ids"] == cited
+    _assert_no_content(records, _QUERY, _VARIANT, _ANSWER, _CHUNK_TEXT_A, _CHUNK_TEXT_B, "gs://")
+
+
+async def test_upstream_citation_failure_logs_the_hit_ids(
+    records: list[dict[str, Any]],
+) -> None:
+    """A ``citation_resolution`` failure logs the ids of the hits it had.
+
+    The backend answered, but a citation names no returned hit: the
+    ``docs_ask_upstream_failed`` record lists the hit ids and normalised
+    refs (the ids that failure is debugged with), still no content.
+    """
+    body = _upstream_body()
+    body["citations"] = [{"chunk_index": 0, "chunk_id": "not-a-hit", "quote": _CHUNK_TEXT_B}]
+    with patch(_ASK_SEAM, new=_fake_ask(body)):
+        outcome = await answer_docs_question(
+            _operator(),
+            _QUERY,
+            scope=build_docs_scope("vmware"),
+            collection=_collection(backend=_UPSTREAM_BACKEND),
+            limit=10,
+        )
+
+    assert outcome.error is not None
+    assert (outcome.error.leg, outcome.error.cause) == (
+        "synthesis_malformed",
+        "citation_resolution",
+    )
+    failed = _one(records, "docs_ask_upstream_failed")
+    assert failed["log_level"] == "warning"
+    assert failed["scope_forwarded"] == "none"
+    assert failed["hit_count"] == 2
+    assert failed["hit_chunk_ids"] == ["up-docs-1", "up-kb-2"]
+    assert failed["hit_source_refs"] == [
+        "meho://docs/vmware/up-docs-1",
+        "https://knowledge.broadcom.com/external/article/318828",
+    ]
+    assert "cited_chunk_ids" not in failed
+    assert _events(records, "docs_ask_completed") == []
+    _assert_no_content(records, _QUERY, _ANSWER, _CHUNK_TEXT_A, _CHUNK_TEXT_B, "gs://")
+
+
+async def test_upstream_call_failure_logs_no_hit_fields(records: list[dict[str, Any]]) -> None:
+    """A call that failed before the backend answered has no hits to list."""
+
+    async def _down(operator: Any, query: str, **kwargs: Any) -> UpstreamAnswer:
+        raise CorpusUnavailable("corpus unreachable: ConnectError")
+
+    with patch(_ASK_SEAM, new=_down):
+        outcome = await answer_docs_question(
+            _operator(),
+            _QUERY,
+            scope=build_docs_scope("vmware"),
+            collection=_collection(backend=_UPSTREAM_BACKEND),
+            limit=10,
+        )
+
+    assert outcome.error is not None
+    failed = _one(records, "docs_ask_upstream_failed")
+    assert not {"hit_count", "hit_chunk_ids", "hit_source_refs"} & failed.keys()
+
+
 # ---------------------------------------------------------------------------
 # Query text only behind DOCS_DEBUG_LOG_QUERY_TEXT
 # ---------------------------------------------------------------------------
@@ -561,21 +671,39 @@ def test_debug_flag_reads_the_env(
 # ---------------------------------------------------------------------------
 
 
-async def test_scoped_zero_hit_search_warns_and_counts(records: list[dict[str, Any]]) -> None:
+@pytest.mark.parametrize(
+    ("gates", "expected_mode"),
+    [
+        pytest.param({}, "none", id="off"),
+        pytest.param({"scope_filters": True}, "filters", id="filters"),
+        pytest.param({"scope": "soft"}, "soft", id="soft"),
+    ],
+)
+async def test_scoped_zero_hit_search_warns_and_counts(
+    records: list[dict[str, Any]], gates: dict[str, Any], expected_mode: str
+) -> None:
+    """It warns on the *requested* values, whatever the scope gates (#3912).
+
+    The warning names how they were sent (``scope_forwarded``): only a
+    ``"filters"`` miss can be a vocabulary mismatch.
+    """
     before = _zero_hits_count()
+    backend = {"type": "corpus-http", "ref": {"endpoint": "https://corpus.test/search", **gates}}
 
     with patch(_CORPUS_SEAM, new=_fake_corpus()):
         await search_docs(
             _operator(),
             _QUERY,
             scope=build_docs_scope("vmware", product="vcenter"),
-            collection=_collection(),
+            collection=_collection(backend=backend),
         )
 
     warning = _one(records, "docs_search_scoped_zero_hits")
     assert warning["log_level"] == "warning"
     assert warning["collection_key"] == "vmware"
     assert (warning["product"], warning["version"]) == ("vcenter", None)
+    assert warning["scope_forwarded"] == expected_mode
+    assert _one(records, "docs_search_completed")["scope_forwarded"] == expected_mode
     assert _zero_hits_count() == before + 1
     _assert_no_content(records, _QUERY)
 

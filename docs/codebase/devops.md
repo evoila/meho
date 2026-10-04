@@ -494,20 +494,22 @@ Operator resources close that gap (Initiative #2884, #2885):
     (`checks/watchdog.py`), which is unchanged.
   - `MehoDocsScopedZeroHits` (#3915) —
     `sum(increase(docs_search_scoped_zero_hits_total{job=<fullname>, namespace=<ns>}[W])) >= T`;
-    the docs search service counts every search that set a `product` or
-    `version` filter and returned no chunks
-    (`docs_search/call_log.py`). Once the corpus honours those filters, a
-    run of them means the filter vocabulary callers send does not match the
-    corpus's. The counter has no labels (`/metrics` can be
-    unauthenticated); the matching `docs_search_scoped_zero_hits` warning
-    log line names the collection, product and version
+    the docs search service counts every search that requested a `product`
+    or `version` and returned no chunks (`docs_search/call_log.py`),
+    whatever the collection's scope gates (#3912) did with them. Where they
+    went out as hard filters (`scope_forwarded="filters"`), a run of them
+    means the filter vocabulary callers send does not match the corpus's;
+    with `"soft"` or `"none"` the backend did not filter on them. The
+    counter has no labels (`/metrics` can be unauthenticated); the matching
+    `docs_search_scoped_zero_hits` warning log line names the collection,
+    product, version and `scope_forwarded`
     (`docs/codebase/docs-search.md` § Per-call logs). `T` and `W` are
     `prometheusRule.docsScopedZeroHits.threshold` (default 5) and `.window`
     (default `1h`). The counter counts backend searches, not calls: a local
     `ask_docs` runs one search per expansion variant (up to 4), so one
     scoped ask that finds nothing counts up to 4, and two such asks in the
     window reach the default threshold. A `search_docs` call counts once;
-    an upstream ask (#3911) sends no filter and never counts.
+    an upstream ask (#3911) runs no search and never counts.
 
   The rules are split into groups **by concern** (`meho.scrape`,
   `meho.broadcast`, `meho.loops`, `meho.docs`) so follow-up tasks extend

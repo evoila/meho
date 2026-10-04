@@ -446,8 +446,9 @@ async def search_docs(
     row. The ``docs_search_completed`` log records the *requested*
     product/version and, as ``scope_forwarded``, how they were sent
     (``"soft"``, ``"filters"`` or ``"none"``), and lists the hit chunk ids
-    and source refs (#3915). A search that set ``product`` or ``version``
-    but found nothing also logs ``docs_search_scoped_zero_hits``.
+    and source refs (#3915). A search that requested ``product`` or
+    ``version`` but found nothing also logs ``docs_search_scoped_zero_hits``,
+    with the same ``scope_forwarded``.
 
     *collection* is the **required** binary scope (T3 #1552): the caller
     (the REST route / MCP handler) has already resolved the
@@ -497,5 +498,10 @@ async def search_docs(
         scope_forwarded=forwarded.mode,
         **hit_log_fields(chunks),
     )
-    note_scoped_zero_hits(operator_sub=operator.sub, scope=scope, hit_count=len(chunks))
+    note_scoped_zero_hits(
+        operator_sub=operator.sub,
+        scope=scope,
+        scope_forwarded=forwarded.mode,
+        hit_count=len(chunks),
+    )
     return DocsSearchResult(chunks=chunks)

@@ -117,23 +117,26 @@ connector-related release-notes line.
   events and the `ask_docs` completion events carry `hit_chunk_ids` (in
   rank order, at most 50) and `hit_source_refs` (the normalised KB URL or
   `meho://` ref, never a storage path); the fan-out event also lists each
-  hit's `hit_collections`. The ask events (`docs_ask_completed` on both the
-  local and the upstream answer path, plus the local
+  hit's `hit_collections`. The ask events (`docs_ask_completed` on both
+  the local and the upstream answer path, plus the local
   `docs_ask_synthesized` / `docs_ask_no_grounding`) also carry
   `cited_chunk_ids` and `answer_source` (`local` or `upstream`), and
-  upstream the backend's timing. Query text stays out of the logs by
-  default. The new `DOCS_DEBUG_LOG_QUERY_TEXT=true` (default `false`)
-  writes the local `ask_docs` expansion variants as one debug-severity
-  `docs_query_text` record; the upstream answer path logs no query text
-  yet. The record is written even under the default INFO log level, so
-  turn the flag on only while debugging retrieval. A search that sets
-  `product` or `version` and returns no chunks logs the
-  `docs_search_scoped_zero_hits` warning and increments the new unlabelled
-  counter `docs_search_scoped_zero_hits_total`; a local `ask_docs` counts
-  once per expansion variant (up to 4). The optional starter
-  PrometheusRule gains a `meho.docs` group with `MehoDocsScopedZeroHits`,
-  which fires at 5 or more such searches in an hour (two scoped asks that
-  find nothing), tunable under `prometheusRule.docsScopedZeroHits`. See
+  upstream the backend's timing; an upstream answer whose citations fail
+  to resolve lists its hit ids on `docs_ask_upstream_failed`. Query text
+  stays out of the logs by default. The new
+  `DOCS_DEBUG_LOG_QUERY_TEXT=true` (default `false`) writes the local
+  `ask_docs` expansion variants as one debug-severity `docs_query_text`
+  record; the upstream answer path logs no query text yet. The record is
+  written even under the default INFO log level, so turn the flag on only
+  while debugging retrieval. A search that requests `product` or `version`
+  and returns no chunks logs the `docs_search_scoped_zero_hits` warning,
+  with `scope_forwarded` (#3912: only a `filters` miss can be a vocabulary
+  mismatch), and increments the new unlabelled counter
+  `docs_search_scoped_zero_hits_total`; a local `ask_docs` counts once per
+  expansion variant (up to 4). The optional starter PrometheusRule gains a
+  `meho.docs` group with `MehoDocsScopedZeroHits`, which fires at 5 or
+  more such searches in an hour (two scoped asks that find nothing),
+  tunable under `prometheusRule.docsScopedZeroHits`. See
   `docs/codebase/docs-search.md` § Per-call logs.
 
 ### Changed

@@ -651,7 +651,7 @@ ignored):
 |---|---|---|---|
 | `answer` | `str` | **yes** (non-empty) | The answer text, claims marked `[N]` with `N` the 0-based `chunk_index` of the cited chunk. meho rewrites each marker to its own 1-based citation number and drops a marker with no citation. |
 | `citations[].chunk_index` | `int` | **yes** | The `N` the answer's markers use. |
-| `citations[].chunk_id` | `str` | **yes** | Matched to a hit **by id** (never by position). A citation whose id is not in `hits` fails the answer (`synthesis_malformed` / `citation_resolution`). Repeats collapse. |
+| `citations[].chunk_id` | `str` | **yes** | Matched to a hit **by id** (never by position). A cited id must name exactly one hit: an id not in `hits`, a blank id, or an id several hits share fails the answer (`synthesis_malformed` / `citation_resolution`). Repeated citations collapse. |
 | `hits` | `list` | **yes** | The retrieved chunks (`include=hits`), in any order; each parsed with the search-hit shape above (`chunk_id`, `text`/`content`, `source_uri`/`source_url`, `document_id`, `score`, optional `title`). Empty `hits` (and no citations) is meho's "no grounded answer". |
 | `hits[].filename` / `breadcrumb` / `heading_path` | `str` / `str` / `list[str]` | optional | Page identity a citation title is derived from when no `title` is sent: the last heading, else the breadcrumb tail, else the humanised filename. |
 | `timing.total_ms` / `timing.llm_ms` | `float` | optional | Logged, never returned. |
@@ -663,7 +663,7 @@ for two codes only; the body is never echoed:
 |---|---|---|---|
 | transport error / timeout | `corpus_unavailable` / `corpus_unavailable` | 503 | -32603 |
 | 503 `llm_unavailable` | `model_unavailable` / `upstream_answer_unavailable` | 503 | -32603 |
-| 503 `llm_rate_limited` (or 429), `Retry-After` | `model_unavailable` / `upstream_rate_limited` | 503, `Retry-After` forwarded | -32603, `data.retry_after` |
+| 503 `llm_rate_limited` (or 429), `Retry-After` | `model_unavailable` / `upstream_rate_limited` | 503, `Retry-After` forwarded (capped at 3600 s; a garbled value is dropped) | -32603, `data.retry_after` |
 | other 5xx | `corpus_unavailable` / `upstream_error` | 503 | -32603 |
 | 4xx | `corpus_unavailable` / `upstream_rejected` (`upstream_status`) | 502 | -32603 |
 | 2xx, malformed body | `synthesis_malformed` / `parse` | 502 | -32603 |

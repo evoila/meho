@@ -585,25 +585,57 @@ def derive_answer_url(search_url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, f"{head}/ask", "", ""))
 
 
-def _retry_after_seconds(value: str | None) -> int | None:
-    """Parse a ``Retry-After`` header into whole non-negative seconds.
+#: Upper bound, in seconds, on the ``Retry-After`` the transport forwards. An
+#: upstream hint above it is clamped to it: the value is passed on verbatim as
+#: the REST ``Retry-After`` header and the MCP ``data.retry_after``, and a
+#: backend throttle longer than an hour is not a retry hint a caller can act
+#: on, so an absurd upstream number never reaches either face.
+_RETRY_AFTER_MAX_S: Final[int] = 3600
 
-    Accepts both RFC 9110 forms: delta-seconds and an HTTP-date (converted to
-    the seconds remaining, floored at 0). Anything unparseable is ``None``,
-    so a garbled header is dropped rather than forwarded.
+#: Longest delta-seconds digit run (leading zeros stripped) that is parsed
+#: with ``int()``. A longer run is far above :data:`_RETRY_AFTER_MAX_S` and
+#: clamps without a parse, so ``int()`` never meets a string near its
+#: 4300-digit conversion limit.
+_RETRY_AFTER_MAX_DIGITS: Final[int] = 9
+
+
+def _retry_after_seconds(value: str | None) -> int | None:
+    """Parse a ``Retry-After`` header into whole seconds in ``[0, 3600]``.
+
+    Accepts both RFC 9110 forms, which are ASCII by grammar:
+
+    * **delta-seconds** -- ASCII digits only. The value is clamped to
+      :data:`_RETRY_AFTER_MAX_S` (3600 s); a digit run too long to matter is
+      clamped without being parsed.
+    * **HTTP-date** -- converted to the seconds remaining, floored at 0 and
+      clamped to :data:`_RETRY_AFTER_MAX_S`.
+
+    Anything else is ``None`` -- a blank or signed value, a non-ASCII header
+    (httpx decodes a raw non-ASCII byte as Latin-1, e.g. ``0xB2`` as U+00B2
+    SUPERSCRIPT TWO, which ``str.isdigit()`` accepts but ``int()`` rejects),
+    or a date that does not parse or overflows -- so a garbled header is
+    dropped rather than forwarded, and never raises out of the error
+    classification (a raise there would turn the typed rate-limited error
+    into an unclassified 500 / ``-32603``).
     """
-    if value is None or not value.strip():
+    if value is None:
         return None
     raw = value.strip()
+    if not raw or not raw.isascii():
+        return None
     if raw.isdigit():
-        return int(raw)
+        digits = raw.lstrip("0") or "0"
+        if len(digits) > _RETRY_AFTER_MAX_DIGITS:
+            return _RETRY_AFTER_MAX_S
+        return min(int(digits), _RETRY_AFTER_MAX_S)
     try:
         when = parsedate_to_datetime(raw)
-    except (TypeError, ValueError):
+        if when.tzinfo is None:
+            return None
+        remaining = (when - datetime.now(UTC)).total_seconds()
+    except (TypeError, ValueError, OverflowError):
         return None
-    if when.tzinfo is None:
-        return None
-    return max(0, int((when - datetime.now(UTC)).total_seconds()))
+    return min(_RETRY_AFTER_MAX_S, max(0, int(remaining)))
 
 
 def _upstream_error_code(response: httpx.Response) -> str | None:

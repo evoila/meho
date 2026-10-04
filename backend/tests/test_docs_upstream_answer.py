@@ -36,6 +36,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
+import structlog
 import structlog.testing
 
 from meho_backplane.auth.corpus import (
@@ -45,6 +46,7 @@ from meho_backplane.auth.corpus import (
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.docs_collections import DocCollection
+from meho_backplane.docs_search import answer as answer_mod
 from meho_backplane.docs_search import build_docs_scope
 from meho_backplane.docs_search.answer import (
     ANSWER_SOURCE_LOCAL,
@@ -328,6 +330,60 @@ async def test_citation_outside_hits_is_citation_resolution() -> None:
     assert [c.chunk_id for c in outcome.retrieved_chunks] == ["chunk-present"]
 
 
+@pytest.mark.parametrize(
+    ("citations", "hits"),
+    [
+        # A blank cited id never resolves, even when a hit carries a blank id.
+        ([_citation(0, "")], [_hit(""), _hit("chunk-present")]),
+        ([_citation(0, "   ")], [_hit("   "), _hit("chunk-present")]),
+        # A cited id two hits share is ambiguous: never the first hit.
+        (
+            [_citation(0, "chunk-twice")],
+            [_hit("chunk-twice", text="First copy."), _hit("chunk-twice", text="Second copy.")],
+        ),
+        # One good citation does not rescue an ambiguous one.
+        (
+            [_citation(0, "chunk-present"), _citation(1, "chunk-twice")],
+            [_hit("chunk-present"), _hit("chunk-twice"), _hit("chunk-twice")],
+        ),
+    ],
+    ids=["blank", "whitespace", "shared", "shared-after-good"],
+)
+@pytest.mark.asyncio
+async def test_blank_or_shared_cited_chunk_id_fails_closed(
+    citations: list[dict[str, Any]], hits: list[dict[str, Any]]
+) -> None:
+    """A citation must resolve to exactly one hit; blank or shared ids fail closed."""
+    body = _body("Claim [0]. Other [1].", citations, hits)
+    outcome, _a, _s = await _ask(body)
+
+    assert outcome.answer is None
+    assert outcome.error is not None
+    assert outcome.error.leg == LEG_SYNTHESIS
+    assert outcome.error.cause == CAUSE_SYNTHESIS_CITATION_RESOLUTION
+    assert outcome.answer_source == ANSWER_SOURCE_UPSTREAM
+    assert len(outcome.retrieved_chunks) == len(hits)
+    # Counts only: no upstream-chosen id is echoed into the error message.
+    assert "chunk-twice" not in str(outcome.error)
+    assert "chunk-present" not in str(outcome.error)
+
+
+@pytest.mark.asyncio
+async def test_shared_id_on_an_uncited_hit_does_not_fail() -> None:
+    """Only cited ids must be unique: a duplicate among uncited hits is harmless."""
+    body = _body(
+        "Claim [0].",
+        [_citation(0, "chunk-cited")],
+        [_hit("chunk-cited"), _hit("chunk-extra"), _hit("chunk-extra"), _hit("")],
+    )
+    outcome, _a, _s = await _ask(body)
+
+    assert outcome.error is None
+    assert outcome.answer is not None
+    assert outcome.answer.answer == "Claim [1]."
+    assert [c.chunk_id for c in outcome.answer.citations] == ["chunk-cited"]
+
+
 @pytest.mark.asyncio
 async def test_zero_hits_is_no_grounded_answer() -> None:
     """No hits: the deterministic no-grounded-answer, as on the local path."""
@@ -402,11 +458,25 @@ async def test_title_from_metadata_and_filename_reach_the_citation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_completion_log_names_the_source_and_backend_timing() -> None:
-    """The completion log carries answer_source, counts and the backend timing only."""
+async def test_completion_log_names_the_source_and_backend_timing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The completion log carries answer_source, counts and the backend timing only.
+
+    Captured through a private :class:`structlog.testing.LogCapture` patched
+    onto ``answer._log`` (the ``docs/codebase/backend.md`` convention), never
+    a bare ``capture_logs``: production caches the module-level logger on
+    first use, so a bare capture comes back empty whenever an earlier module
+    on the same worker warmed ``answer._log`` and the app re-configured
+    structlog (e.g. after ``tests/test_mcp_tools_docs_ask.py``).
+    """
+    capture = structlog.testing.LogCapture()
+    monkeypatch.setattr(
+        answer_mod, "_log", structlog.wrap_logger(structlog.PrintLogger(), processors=[capture])
+    )
     body = _fixture_body()
-    with structlog.testing.capture_logs() as logs:
-        await _ask(body)
+    await _ask(body)
+    logs = capture.entries
     completed = [e for e in logs if e["event"] == "docs_ask_completed"]
     assert len(completed) == 1
     event = completed[0]

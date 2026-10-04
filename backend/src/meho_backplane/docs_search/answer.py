@@ -38,10 +38,12 @@ Mapping an upstream answer
   (:func:`~meho_backplane.docs_search.citation_links.derive_chunk_title`).
 * **Citations** are walked in response order, de-duplicated by
   ``chunk_id`` and matched to a hit **by** ``chunk_id`` -- never by position:
-  the backend returns its hits reordered to citation order. A citation with
-  no matching hit is a ``synthesis_malformed`` / ``citation_resolution``
-  failure, which keeps the "every citation resolves to a retrieved chunk"
-  invariant of the local path.
+  the backend returns its hits reordered to citation order. A citation that
+  does not resolve to **exactly one** hit -- no matching hit, a blank
+  ``chunk_id``, or a ``chunk_id`` several hits share -- is a
+  ``synthesis_malformed`` / ``citation_resolution`` failure, which keeps the
+  "every citation resolves to a retrieved chunk" invariant of the local path
+  and never guesses which of several hits a citation meant.
 * **Markers**: the backend marks claims ``[N]`` with ``N`` its 0-based
   ``chunk_index``. Each becomes ``[k]``, the 1-based position of that chunk
   in the returned ``citations``; a marker with no matching citation is
@@ -206,8 +208,9 @@ async def _answer_upstream(
     :func:`~meho_backplane.docs_search.classify_answer_error` (the transport's
     :class:`~meho_backplane.auth.corpus.CorpusUnavailable` /
     :class:`~meho_backplane.auth.corpus.CorpusAnswerError`). A citation that
-    does not resolve to a returned hit is the ``synthesis_malformed`` /
-    ``citation_resolution`` failure; the hits ride the outcome.
+    does not resolve to exactly one returned hit is the
+    ``synthesis_malformed`` / ``citation_resolution`` failure; the hits ride
+    the outcome.
     """
     try:
         upstream = await resolved.backend.answer(
@@ -266,35 +269,49 @@ def _map_upstream_answer(upstream: UpstreamAnswer, hits: list[DocsChunk]) -> Doc
     markers with no citation are dropped. No hits and no citations is the
     deterministic :data:`NO_GROUNDED_ANSWER`.
 
+    A citation resolves only to **exactly one** hit: a blank cited
+    ``chunk_id`` or one several hits share fails closed like an unknown one
+    rather than resolving to the first hit. Uncited hits are not checked.
+
     Raises:
-        DocsSynthesisError: a citation names a ``chunk_id`` the backend did
-            not return as a hit (``cause=citation_resolution``).
+        DocsSynthesisError: a citation does not resolve to exactly one
+            returned hit -- its ``chunk_id`` is not among the hits, is blank,
+            or is shared by several hits (``cause=citation_resolution``). The
+            message carries counts only, never an upstream-chosen id.
     """
     if not hits and not upstream.citations:
         return DocsAnswer(answer=NO_GROUNDED_ANSWER, citations=[])
 
-    by_id: dict[str, DocsChunk] = {}
+    hits_by_id: dict[str, list[DocsChunk]] = {}
     for hit in hits:
-        by_id.setdefault(hit.chunk_id, hit)
+        hits_by_id.setdefault(hit.chunk_id, []).append(hit)
 
     citations: list[DocsChunk] = []
     number_by_id: dict[str, int] = {}
     number_by_index: dict[int, int] = {}
-    unknown: list[str] = []
+    unknown = blank = shared = 0
     for citation in upstream.citations:
-        chunk = by_id.get(citation.chunk_id)
-        if chunk is None:
-            unknown.append(citation.chunk_id)
+        if not citation.chunk_id.strip():
+            blank += 1
+            continue
+        matches = hits_by_id.get(citation.chunk_id, [])
+        if len(matches) != 1:
+            if matches:
+                shared += 1
+            else:
+                unknown += 1
             continue
         number = number_by_id.get(citation.chunk_id)
         if number is None:
-            citations.append(chunk)
+            citations.append(matches[0])
             number = len(citations)
             number_by_id[citation.chunk_id] = number
         number_by_index.setdefault(citation.chunk_index, number)
-    if unknown:
+    if unknown or blank or shared:
         raise DocsSynthesisError(
-            f"upstream answer cited chunk id(s) not in its returned hits: {unknown}",
+            "upstream answer has citation(s) that do not resolve to exactly one "
+            f"returned hit: {unknown} not in the hits, {blank} with a blank chunk id, "
+            f"{shared} with a chunk id several hits share",
             cause=SYNTHESIS_CAUSE_CITATION_RESOLUTION,
         )
     return DocsAnswer(

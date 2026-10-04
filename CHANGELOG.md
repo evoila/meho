@@ -106,7 +106,10 @@ connector-related release-notes line.
   pipeline is gone). New setting `CORPUS_ANSWER_TIMEOUT_SECONDS` (default
   60) bounds the answer call. New error causes on the existing legs: a 4xx
   from the answer endpoint is a **502** `upstream_rejected`, a rate-limited
-  answer model a 503 `upstream_rate_limited` that forwards `Retry-After`.
+  answer model a 503 `upstream_rate_limited` that forwards `Retry-After`
+  (capped at 3600 s; an unparseable value is dropped). A citation must
+  resolve to exactly one returned hit: an unknown, blank or shared cited
+  chunk id fails the answer as `citation_resolution`.
   Changing only `answer` / `answer_endpoint` keeps a collection's
   readiness.
 

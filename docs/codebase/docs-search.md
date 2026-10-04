@@ -156,7 +156,11 @@ search; a response that is not a usable answer is `CorpusAnswerError` with a
 `llm_unavailable` code), `rate_limited` (503 with `llm_rate_limited`, or a
 429; carries the `Retry-After` in seconds), `server_error` (any other 5xx) or
 `malformed` (a 2xx body that does not parse). Only those two backend error
-codes are ever read from an error body.
+codes are ever read from an error body. `Retry-After` is read in either RFC
+9110 form (ASCII delta-seconds or an HTTP-date) and clamped to
+`_RETRY_AFTER_MAX_S` = 3600 s; anything else (blank, signed, non-ASCII, an
+unparseable or overflowing date) is dropped as `None`, never raised, so a
+garbled header cannot turn the typed rate-limited error into a 500.
 
 ### Backend-agnostic search router (`meho_backplane.docs_search.backends`, T2 #1551)
 
@@ -452,9 +456,12 @@ the backend's prompt. The opt-in is per collection and reversible with one
   last `>`), else the humanised `filename`.
 - **Citations** are walked in response order, de-duplicated by `chunk_id`,
   and matched to a hit **by `chunk_id`** — never by position, because the
-  backend returns its hits reordered to citation order. A citation with no
-  matching hit is `synthesis_malformed` / `citation_resolution`, the same
-  "every citation resolves to a retrieved chunk" invariant as the local path.
+  backend returns its hits reordered to citation order. A citation that does
+  not resolve to **exactly one** hit (no matching hit, a blank `chunk_id`, or
+  a `chunk_id` several hits share) is `synthesis_malformed` /
+  `citation_resolution`, the same "every citation resolves to a retrieved
+  chunk" invariant as the local path; it never guesses the first of several
+  hits. The error message carries counts, never an upstream-chosen id.
 - **Answer markers.** The backend marks claims `[N]`, `N` being the 0-based
   `chunk_index` of the chunk its model saw. Each becomes `[k]`, the 1-based
   position of that chunk in the returned `citations`; a marker with no
@@ -475,7 +482,7 @@ The REST status is chosen per (leg, cause):
 | Other 5xx | `corpus_unavailable` / `upstream_error` (`upstream_status`) | 503 | -32603 | banner + one search |
 | 4xx | `corpus_unavailable` / `upstream_rejected` (`upstream_status`) | **502** | -32603 | banner + one search |
 | 2xx, malformed body | `synthesis_malformed` / `parse` | 502 | -32603 | banner + one search |
-| Citation outside the hits | `synthesis_malformed` / `citation_resolution` | 502 | -32603 | banner + one search |
+| Citation outside the hits, blank, or shared by several hits | `synthesis_malformed` / `citation_resolution` | 502 | -32603 | banner + one search |
 
 A 4xx is a 502, not a 503: a rejected request is a contract or configuration
 fault, not an outage. `upstream_status` / `retry_after` appear on the
@@ -681,7 +688,8 @@ availability faults — the analogue of the MCP `-32603`) and **502** for
 `synthesis_malformed` (the upstream model answered, badly — a bad gateway,
 distinct from it being unreachable). On the upstream path the status is
 per (leg, cause): `upstream_rejected` (a 4xx from the backend) is **502**,
-and `upstream_rate_limited` forwards the backend's `Retry-After` header. The
+and `upstream_rate_limited` forwards the backend's `Retry-After` header
+(clamped to 3600 s). The
 structured `{detail, leg, cause, message}` envelope rides
 `HTTPException.detail` byte-identical to the MCP `error.data` member. The answer stays fail-closed
 end to end (an empty retrieval is a normal 200 "no grounded answer", not an

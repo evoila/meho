@@ -1057,16 +1057,33 @@ async def test_ask_corpus_non_2xx_is_typed_by_kind(
 
 @pytest.mark.asyncio
 async def test_ask_corpus_error_never_echoes_the_body(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Neither the upstream body nor an unknown error code reaches the error."""
+    """Neither the upstream body nor an unknown error code reaches the error.
+
+    Logs are captured through a private :class:`structlog.testing.LogCapture`
+    patched onto ``corpus._log`` (the #1254 pattern, see
+    ``test_operator_jwt_and_service_token_never_logged``), never a bare
+    ``capture_logs``, which misses a cached, orphaned module logger and would
+    let the absence check pass against an empty list.
+    """
     _pin_settings(monkeypatch)
     secret = "INTERNAL stack trace leaky-token-abc"
     response = httpx.Response(503, json={"error": {"code": secret, "message": secret}})
     _patch_async_client(monkeypatch, _transport_capturing([], response), [])
+    capture = structlog.testing.LogCapture()
+    private_log = structlog.wrap_logger(structlog.PrintLogger(), processors=[capture])
+    monkeypatch.setattr(corpus_mod, "_log", private_log)
 
-    with structlog.testing.capture_logs() as logs, pytest.raises(CorpusAnswerError) as exc:
+    with pytest.raises(CorpusAnswerError) as exc:
         await ask_corpus(_make_operator(), "q", answer_url=_ANSWER_URL)
+    logs = capture.entries
     assert secret not in str(exc.value)
     assert secret not in repr(logs)
+    # Canary: the failure is logged (by status + kind, not by body), so the
+    # absence check above cannot pass vacuously against an empty capture.
+    failed = [e for e in logs if e["event"] == "corpus_answer_request_failed"]
+    assert len(failed) == 1
+    assert failed[0]["status"] == 503
+    assert failed[0]["kind"] == CorpusAnswerError.KIND_SERVER_ERROR
 
 
 @pytest.mark.parametrize(
@@ -1102,3 +1119,88 @@ def test_retry_after_http_date_is_converted_to_seconds() -> None:
     assert corpus_mod._retry_after_seconds(past) == 0
     assert corpus_mod._retry_after_seconds("soon") is None
     assert corpus_mod._retry_after_seconds(None) is None
+
+
+def test_retry_after_http_date_is_capped() -> None:
+    """An HTTP-date far ahead clamps to the cap; one that overflows is ``None``."""
+    from datetime import UTC, datetime, timedelta
+    from email.utils import format_datetime
+
+    far = format_datetime(datetime.now(UTC) + timedelta(days=2), usegmt=True)
+    assert corpus_mod._retry_after_seconds(far) == corpus_mod._RETRY_AFTER_MAX_S == 3600
+    # A year beyond a C long overflows ``datetime``: dropped, never raised.
+    assert corpus_mod._retry_after_seconds("Mon, 01 Jan 99999999999999999999 00:00:00 GMT") is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("5", 5),
+        (" 7 ", 7),
+        ("0", 0),
+        ("3600", 3600),
+        ("3601", 3600),  # over the cap: clamped
+        ("9" * 4000, 3600),  # within int()'s digit limit, still clamped
+        ("9" * 5000, 3600),  # beyond int()'s 4300-digit limit: clamped, never raised
+        ("0" * 5000 + "5", 5),  # leading zeros are not magnitude
+        ("\u00b2", None),  # superscript two: isdigit() but not an int() digit
+        ("\uff11\uff12", None),  # fullwidth digits: not delta-seconds (ASCII by grammar)
+        ("-5", None),
+        ("+5", None),
+        ("1.5", None),
+        ("", None),
+        ("   ", None),
+    ],
+    ids=[
+        "five",
+        "padded",
+        "zero",
+        "at-cap",
+        "over-cap",
+        "4000-digits",
+        "5000-digits",
+        "leading-zeros",
+        "superscript-two",
+        "fullwidth",
+        "negative",
+        "signed",
+        "fraction",
+        "empty",
+        "blank",
+    ],
+)
+def test_retry_after_delta_seconds_is_ascii_bounded_and_capped(
+    raw: str, expected: int | None
+) -> None:
+    """delta-seconds: ASCII digits only, capped at 3600 s; anything else is ``None``."""
+    assert corpus_mod._retry_after_seconds(raw) == expected
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        (b"\xb2", None),  # httpx decodes the raw byte as Latin-1 U+00B2 (superscript two)
+        (b"9" * 5000, 3600),
+        (b"86400", 3600),
+    ],
+    ids=["raw-0xB2", "5000-digits", "over-cap"],
+)
+@pytest.mark.asyncio
+async def test_ask_corpus_garbled_retry_after_stays_typed_rate_limited(
+    monkeypatch: pytest.MonkeyPatch, header: bytes, expected: int | None
+) -> None:
+    """A garbled or huge ``Retry-After`` on a 429 keeps the typed rate-limited error.
+
+    The header is parsed inside the error classification, so a parse that
+    raised would surface as an unclassified 500 / ``-32603`` instead of the
+    typed 503 ``upstream_rate_limited``. It is dropped (``None``) or clamped.
+    """
+    _pin_settings(monkeypatch)
+    response = httpx.Response(429, text="slow down", headers=[(b"retry-after", header)])
+    _patch_async_client(monkeypatch, _transport_capturing([], response), [])
+
+    with pytest.raises(CorpusAnswerError) as exc:
+        await ask_corpus(_make_operator(), "q", answer_url=_ANSWER_URL)
+    assert exc.value.kind == CorpusAnswerError.KIND_RATE_LIMITED
+    assert exc.value.status == 429
+    assert exc.value.retry_after == expected

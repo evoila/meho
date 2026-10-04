@@ -58,6 +58,7 @@ from typing import TYPE_CHECKING, Final
 import structlog
 from pydantic import BaseModel, ConfigDict
 
+from meho_backplane.docs_search.call_log import hit_log_fields
 from meho_backplane.docs_search.service import (
     DocsChunk,
     DocsScope,
@@ -318,7 +319,7 @@ async def search_docs_fanout(
         "docs_search_fanout_completed",
         operator_sub=operator.sub,
         collections=[c.collection_key for c in collections],
-        hit_count=len(merged),
+        **hit_log_fields(merged),
     )
     return DocsSearchResult(chunks=merged)
 
@@ -396,7 +397,7 @@ async def retrieve_multi_query(
         operator_sub=operator.sub,
         collection_key=scope.collection_key,
         variant_count=len(queries),
-        hit_count=len(merged),
+        **hit_log_fields(merged),
     )
     return DocsSearchResult(chunks=merged)
 

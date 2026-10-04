@@ -90,6 +90,27 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added
+
+- Docs calls now log which chunks they returned and cited, never content
+  (#3915). `docs_search_completed`, the fan-out and multi-query retrieval
+  events and the local `ask_docs` completion events (`docs_ask_synthesized`,
+  `docs_ask_no_grounding`) carry `hit_chunk_ids` (in rank order, at most
+  50) and `hit_source_refs` (the normalised KB URL or `meho://` ref, never
+  a storage path). The ask events also carry `cited_chunk_ids` and
+  `answer_source`. Query text stays out of the logs by default. The new
+  `DOCS_DEBUG_LOG_QUERY_TEXT=true` (default `false`) writes the
+  `ask_docs` expansion variants as one debug-severity `docs_query_text`
+  record. It is written even under the default INFO log level, so turn the
+  flag on only while debugging retrieval. A search that sets `product` or
+  `version` and returns no chunks logs the `docs_search_scoped_zero_hits`
+  warning and increments the new unlabelled counter
+  `docs_search_scoped_zero_hits_total`. The optional starter PrometheusRule
+  gains a `meho.docs` group with `MehoDocsScopedZeroHits`, which fires at
+  5 or more such searches in an hour, tunable under
+  `prometheusRule.docsScopedZeroHits`. See
+  `docs/codebase/docs-search.md` § Per-call logs.
+
 ## [0.35.16] - 2026-09-27
 
 ### Breaking changes — `vcfa.provider.api_token.create` requires `vault_target` and writes the token under that target's Vault role (#3895 / #3896)

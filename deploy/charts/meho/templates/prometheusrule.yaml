@@ -12,6 +12,7 @@ a new alert lands as a new group rather than an edit to an existing one.
 Keep this shape. `meho.loops` (#2888) carries the background-loop liveness
 alert, thresholding the `background_loop_last_tick_timestamp_seconds` and
 `background_loop_interval_seconds` gauges every lifespan loop stamps.
+`meho.docs` (#3915) carries the scoped zero-hit docs-search alert.
 */ -}}
 {{- if .Values.prometheusRule.enabled }}
 apiVersion: monitoring.coreos.com/v1
@@ -94,4 +95,28 @@ spec:
               or dead, so the sweeps / drains it owns are silently not running.
               Check the pod logs for that loop's task and restart the replica
               if it does not recover.
+    - name: meho.docs
+      rules:
+        - alert: MehoDocsScopedZeroHits
+          # docs_search_scoped_zero_hits_total counts docs searches that set a
+          # product or version filter and returned no chunks
+          # (backend/src/meho_backplane/docs_search/call_log.py). Once the
+          # corpus honours those filters, a run of them means the filter
+          # vocabulary does not match the corpus's. Summed over the release's
+          # pods, so the count does not depend on which replica served.
+          expr: 'sum(increase(docs_search_scoped_zero_hits_total{job="{{ include "meho.fullname" . }}", namespace="{{ .Release.Namespace }}"}[{{ .Values.prometheusRule.docsScopedZeroHits.window }}])) >= {{ .Values.prometheusRule.docsScopedZeroHits.threshold }}'
+          for: {{ .Values.prometheusRule.docsScopedZeroHits.for }}
+          labels:
+            severity: {{ .Values.prometheusRule.docsScopedZeroHits.severity }}
+          annotations:
+            summary: MEHO docs searches with a product or version filter return no chunks
+            description: >-
+              At least {{ .Values.prometheusRule.docsScopedZeroHits.threshold }}
+              docs searches that set a product or version filter returned no
+              chunks in the last {{ .Values.prometheusRule.docsScopedZeroHits.window }}.
+              The filter values callers send probably do not match the
+              collection's metadata vocabulary. The
+              docs_search_scoped_zero_hits warning log lines name the
+              collection, product and version; compare them with the
+              collection's products and the corpus's stamped values.
 {{- end }}

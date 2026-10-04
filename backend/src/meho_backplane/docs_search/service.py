@@ -44,6 +44,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from meho_backplane.auth.corpus import CorpusChunk
 from meho_backplane.auth.operator import Operator
 from meho_backplane.docs_search.backends import resolve_backend
+from meho_backplane.docs_search.call_log import hit_log_fields, note_scoped_zero_hits
 from meho_backplane.docs_search.citation_links import normalize_source_ref
 
 if TYPE_CHECKING:
@@ -325,7 +326,9 @@ async def search_docs(
     product/version refinements), and the cited chunks are projected into
     MEHO's surface. The query itself is never logged here — only its
     presence is implied; the route binds the SHA-256 hash to the audit
-    row.
+    row. The ``docs_search_completed`` record lists the hit chunk ids and
+    source refs (#3915), and a search that set ``product`` or ``version``
+    but found nothing also logs ``docs_search_scoped_zero_hits``.
 
     *collection* is the **required** binary scope (T3 #1552): the caller
     (the REST route / MCP handler) has already resolved the
@@ -371,6 +374,7 @@ async def search_docs(
         collection_key=scope.collection_key,
         product=scope.product,
         version=scope.version,
-        hit_count=len(chunks),
+        **hit_log_fields(chunks),
     )
+    note_scoped_zero_hits(operator_sub=operator.sub, scope=scope, hit_count=len(chunks))
     return DocsSearchResult(chunks=chunks)

@@ -211,6 +211,33 @@
               "description": "`severity` label attached to the alert."
             }
           }
+        },
+        "docsScopedZeroHits": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Tuning for the `MehoDocsScopedZeroHits` alert (#3915): at least `threshold` docs searches that set a product or version filter returned no chunks within `window` (docs_search_scoped_zero_hits_total).",
+          "properties": {
+            "threshold": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "How many scoped zero-hit docs searches within `window` trip the alert."
+            },
+            "window": {
+              "type": "string",
+              "pattern": "^([0-9]+(ms|s|m|h|d|w|y))+$",
+              "description": "The range the scoped zero-hit searches are counted over (Prometheus duration)."
+            },
+            "for": {
+              "type": "string",
+              "pattern": "^([0-9]+(ms|s|m|h|d|w|y))+$",
+              "description": "How long the count must stay at or above `threshold` before firing (Prometheus duration)."
+            },
+            "severity": {
+              "type": "string",
+              "minLength": 1,
+              "description": "`severity` label attached to the alert."
+            }
+          }
         }
       }
     },

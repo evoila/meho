@@ -818,6 +818,61 @@ Because the divergence is invisible without help, every surface now emits an
   capability + identity, and `error.data` carries
   `{"reason": "not_entitled", "required_capability"}` for self-correction.
 
+## Per-call logs (#3915)
+
+Every docs call logs which chunks came back and which of them an answer
+cited, so a wrong answer can be reconstructed from the logs (did retrieval
+miss the right page, or did the answer leg find it too thin?). The fields
+are built in one place, `docs_search/call_log.py`, so every event below
+uses the same keys:
+
+- `hit_count`, `hit_chunk_ids` (rank order, capped at 50) and
+  `hit_source_refs`: the `source_url` of each listed hit, in the same
+  order. A `source_url` is normalised when the chunk is projected
+  (`normalize_source_ref`, #132): a public URL such as a KB article, or an
+  opaque `meho://docs/<collection>/<chunk_id>` ref, never a `gs://` path.
+- On an ask: `answer_source` (`local` or `upstream`), `citation_count` and
+  `cited_chunk_ids`; on the upstream answer path also `upstream_total_ms` /
+  `upstream_llm_ms` when the backend reports them (`ask_log_fields`).
+
+| Event | Level | Emitted by | Fields |
+| --- | --- | --- | --- |
+| `docs_search_completed` | info | `search_docs` (every single-collection backend search: REST, MCP, UI Search mode, each `ask_docs` variant) | `collection_key`, `product`, `version`, hit fields |
+| `docs_search_fanout_completed` | info | `search_docs_fanout` | `collections`, hit fields of the fused list |
+| `docs_search_multi_query_completed` | info | `retrieve_multi_query` | `collection_key`, `variant_count`, hit fields of the merged list |
+| `docs_ask_query_expanded` | info | `expand_docs_query` | `collection_key`, `variant_count` (no variant strings) |
+| `docs_ask_synthesized` | info | `synthesize_docs_answer` (local answer) | `answer_source="local"`, hit fields of the chunks the answer was composed over, `citation_count`, `cited_chunk_ids` |
+| `docs_ask_no_grounding` | info | `synthesize_docs_answer` (empty retrieval) | the same fields, all empty |
+| `docs_search_scoped_zero_hits` | warning | `search_docs` | `operator_sub`, `collection_key`, `product`, `version` |
+| `docs_query_text` | debug | `log_query_text`, only with `DOCS_DEBUG_LOG_QUERY_TEXT=true` | `source`, `collection_key`, `queries` |
+
+**Never logged:** chunk text, answer text and query text. The question is
+hashed into the audit row (SHA-256) and nowhere else.
+
+**Query text behind an opt-in flag.** `DOCS_DEBUG_LOG_QUERY_TEXT`
+(`settings.docs_debug_log_query_text`, default `false`) is the only way a
+query string reaches the logs. When it is true, `expand_docs_query` writes
+one `docs_query_text` record with `source="expansion"` and the variants it
+retrieved on (the operator's question first). The upstream answer path
+(#3911) passes the rewritten query the backend reports (once the MEHO
+Knowledge service returns it, evoila-bosnia/MEHO.Knowledge#513) to the same
+helper with `source="upstream_rewrite"`. The record is debug severity, but
+the backplane's log floor is INFO (`configure_logging`), so it is written
+through a logger of its own with a DEBUG floor: the flag, not the process
+log level, decides whether it appears. Turn it on only while debugging
+retrieval, and off again afterwards.
+
+**Scoped zero hits.** A search that set `product` or `version` and returned
+no chunks logs the `docs_search_scoped_zero_hits` warning and increments
+`docs_search_scoped_zero_hits_total` (an `ask_docs` call counts once per
+variant). Once the corpus honours those filters, a run of them means the
+filter vocabulary callers send does not match the corpus's (`vcenter`
+against a corpus that stamps `vsphere`). The counter carries no labels,
+because `/metrics` can be unauthenticated; the warning line names the
+collection, product and version. The chart's optional PrometheusRule alerts
+on it (`MehoDocsScopedZeroHits`, `prometheusRule.docsScopedZeroHits`; see
+[devops.md](devops.md) § Metrics scrape wiring).
+
 ## Untrusted read-boundary guard (#304)
 
 Corpus `chunk.content` is **federated, externally-controlled** text — a

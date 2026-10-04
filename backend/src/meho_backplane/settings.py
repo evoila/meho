@@ -1902,6 +1902,15 @@ class Settings(BaseModel):
     #: ``True`` — fail-closed scope discipline. Consumed by T3, not by the
     #: transport in this Task.
     corpus_require_filters: bool = True
+    #: Opt-in debug logging of docs query text (#3915). Off by default: the
+    #: docs surfaces log chunk ids and counts, never the question (the audit
+    #: row stores its SHA-256). When true, the query strings a docs call ran
+    #: (the ``ask_docs`` expansion variants, the operator's question first)
+    #: are written as one debug-severity ``docs_query_text`` record, even
+    #: under the INFO log floor
+    #: (:func:`~meho_backplane.docs_search.call_log.log_query_text`). Set via
+    #: ``DOCS_DEBUG_LOG_QUERY_TEXT``.
+    docs_debug_log_query_text: bool = False
     #: Application-layer tenant-scope guard for the agent-supplied
     #: ``vault.kv.*`` ops (#1643). A Python ``str.format`` template with a
     #: single ``{tenant_id}`` placeholder rendering the logical-path prefix
@@ -2656,6 +2665,9 @@ def get_settings() -> Settings:
         ),
         corpus_require_filters=parse_bool_env(
             os.environ.get("CORPUS_REQUIRE_FILTERS", "true"),
+        ),
+        docs_debug_log_query_text=parse_bool_env(
+            os.environ.get("DOCS_DEBUG_LOG_QUERY_TEXT"),
         ),
         vault_kv_tenant_scope_prefix=os.environ.get(
             "VAULT_KV_TENANT_SCOPE_PREFIX", "secret/tenants/{tenant_id}/"

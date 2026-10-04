@@ -57,6 +57,7 @@ from typing import Final, cast
 import structlog
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from meho_backplane.docs_search.call_log import ask_log_fields
 from meho_backplane.docs_search.service import (
     DocsChunk,
     DocsSearchResult,
@@ -415,7 +416,10 @@ async def synthesize_docs_answer(
     Returns:
         A :class:`DocsAnswer`. With no retrieved chunks, the answer is
         :data:`NO_GROUNDED_ANSWER` and ``citations`` is empty — produced
-        without calling the model.
+        without calling the model. Either way the completion record
+        (``docs_ask_synthesized``, or ``docs_ask_no_grounding`` on an empty
+        retrieval) carries the hit and cited chunk ids with
+        ``answer_source="local"`` (#3915), never the answer text.
 
     Raises:
         LlmClientUnavailable: when no synthesis model is configured
@@ -434,7 +438,10 @@ async def synthesize_docs_answer(
         # calling the model, precisely so it cannot hallucinate. The verdict
         # is the shared :func:`retrieval_is_grounded` seam (#133) so this
         # short-circuit and ``search_docs``'s ``grounded`` flag never diverge.
-        _log.info("docs_ask_no_grounding", hit_count=0)
+        _log.info(
+            "docs_ask_no_grounding",
+            **ask_log_fields(answer_source="local", hits=chunks, citations=[]),
+        )
         return DocsAnswer(answer=NO_GROUNDED_ANSWER, citations=[])
 
     # The factory is typed ``-> LlmClient`` (its grouping contract), but the
@@ -463,7 +470,6 @@ async def synthesize_docs_answer(
     citations = _resolve_citations(output.cited_chunk_ids, chunks)
     _log.info(
         "docs_ask_synthesized",
-        hit_count=len(chunks),
-        citation_count=len(citations),
+        **ask_log_fields(answer_source="local", hits=chunks, citations=citations),
     )
     return DocsAnswer(answer=output.answer, citations=citations)

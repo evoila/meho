@@ -37,6 +37,15 @@ readiness reporting fails loudly rather than silently claiming "ready";
 overrides it. The collection-probe route persists the result onto the
 ``doc_collections`` row **on success only**, the same write-back split
 ``probe_target`` + ``Target.fingerprint`` use.
+
+:meth:`answer` is the optional grounded-answer seam (#3911), added the way
+:meth:`probe` was: a backend whose service composes its own cited answer
+can serve ``ask_docs`` directly instead of the backplane rebuilding it from
+:meth:`search`. :meth:`supports_answer` gates it per collection and defaults
+to ``False``; the base :meth:`answer` raises :class:`NotImplementedError`. A
+backend without an answer endpoint keeps the backplane's own
+expand -> retrieve -> synthesize pipeline
+(:func:`~meho_backplane.docs_search.answer.answer_docs_question`).
 """
 
 from __future__ import annotations
@@ -48,7 +57,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from meho_backplane.auth.corpus import CorpusSearchResponse
+from meho_backplane.auth.corpus import CorpusSearchResponse, UpstreamAnswer
 from meho_backplane.auth.operator import Operator
 
 __all__ = ["BackendReadiness", "SearchBackend"]
@@ -197,6 +206,47 @@ class SearchBackend(ABC):
                 "ready". Concrete adapters override this.
         """
         raise NotImplementedError(f"{type(self).__name__} does not implement readiness probing")
+
+    def supports_answer(self, backend_ref: Mapping[str, Any] | None) -> bool:
+        """Whether :meth:`answer` serves ``ask_docs`` for *backend_ref* (#3911).
+
+        The per-collection opt-in for the backend's own grounded answer. The
+        base default is ``False``: every adapter keeps the backplane's local
+        expand -> retrieve -> synthesize pipeline unless it overrides both
+        this and :meth:`answer`. Synchronous and network-free: it reads the
+        collection's ``backend.ref`` only.
+        """
+        return False
+
+    async def answer(
+        self,
+        operator: Operator,
+        query: str,
+        *,
+        backend_ref: Mapping[str, Any] | None = None,
+        limit: int = 10,
+    ) -> UpstreamAnswer:
+        """Ask the backend for a grounded, cited answer to *query* (#3911).
+
+        Called only when :meth:`supports_answer` is ``True`` for the
+        collection's ``backend.ref``. Returns the backend's answer text, its
+        citations and the hits they resolve against, as an
+        :class:`~meho_backplane.auth.corpus.UpstreamAnswer`; the answer seam
+        maps that into the ``ask_docs`` response shape.
+
+        Args:
+            operator: The verified operator (scoping / logging; an adapter
+                authenticates with its own service credential).
+            query: The operator's question.
+            backend_ref: The collection's ``backend.ref``.
+            limit: The retrieval depth to request; the backend may cap it.
+
+        Raises:
+            NotImplementedError: the base default. An adapter that offers an
+                answer endpoint overrides this together with
+                :meth:`supports_answer`.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not implement answer()")
 
     def is_configured(self) -> bool:
         """Whether this backend has the minimum config to answer at all.

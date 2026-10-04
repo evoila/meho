@@ -35,6 +35,22 @@ A ``backend.ref`` that names neither (and a deploy whose legacy
 ``corpus_url`` is also empty) is **unconfigured** and fails closed with
 :class:`CorpusUnavailable` — the same 503 arm as today, no new taxonomy.
 
+Upstream grounded answer (#3911)
+--------------------------------
+
+A collection opts in to the corpus's own grounded-answer endpoint with
+``backend.ref["answer"] = "upstream"``; any other value, or no key, keeps the
+backplane's local answer pipeline. :meth:`CorpusHttpBackend.answer` then calls
+:func:`~meho_backplane.auth.corpus.ask_corpus` against:
+
+* ``backend.ref["answer_endpoint"]`` when set, else
+* the collection's search endpoint (``endpoint`` / ``url``, else the legacy
+  ``settings.corpus_url``) with its last path segment replaced by ``ask``
+  (:func:`~meho_backplane.auth.corpus.derive_answer_url`).
+
+Same transport posture as search (SSRF screen, service credential, body
+never echoed), with its own ``CORPUS_ANSWER_TIMEOUT_SECONDS`` bound.
+
 Readiness + per-project rebuild serialization (T6 #1555)
 -------------------------------------------------------
 
@@ -62,20 +78,28 @@ from typing import Any
 
 from meho_backplane.auth.corpus import (
     CorpusSearchResponse,
+    UpstreamAnswer,
+    ask_corpus,
     corpus_status,
+    derive_answer_url,
     search_corpus,
 )
 from meho_backplane.auth.operator import Operator
 from meho_backplane.docs_search.backends.base import BackendReadiness, SearchBackend
 from meho_backplane.settings import get_settings
 
-__all__ = ["CORPUS_HTTP_BACKEND_TYPE", "CorpusHttpBackend"]
+__all__ = ["ANSWER_UPSTREAM", "CORPUS_HTTP_BACKEND_TYPE", "CorpusHttpBackend"]
 
 #: The routing discriminator for the JWT-forward corpus client. A
 #: collection whose ``backend.type`` equals this string resolves to
 #: :class:`CorpusHttpBackend`. Named for the transport (operator-JWT-
 #: forward over HTTP), not for whatever the ops corpus proxies behind it.
 CORPUS_HTTP_BACKEND_TYPE = "corpus-http"
+
+#: The ``backend.ref["answer"]`` value that opts a collection in to the
+#: corpus's own grounded-answer endpoint (#3911). Exact match only; absent or
+#: any other value keeps the backplane's local answer pipeline.
+ANSWER_UPSTREAM = "upstream"
 
 
 class CorpusHttpBackend(SearchBackend):
@@ -124,6 +148,48 @@ class CorpusHttpBackend(SearchBackend):
             metadata_filters=metadata_filters,
             limit=limit,
             corpus_url=endpoint,
+            audience=audience,
+        )
+
+    def supports_answer(self, backend_ref: Mapping[str, Any] | None) -> bool:
+        """Whether this collection opted in to the corpus's answer endpoint.
+
+        ``True`` only for ``backend.ref["answer"] == "upstream"``: the opt-in
+        is per collection, and a ref without the key keeps today's local
+        answer pipeline.
+        """
+        if not backend_ref:
+            return False
+        return backend_ref.get("answer") == ANSWER_UPSTREAM
+
+    async def answer(
+        self,
+        operator: Operator,
+        query: str,
+        *,
+        backend_ref: Mapping[str, Any] | None = None,
+        limit: int = 10,
+    ) -> UpstreamAnswer:
+        """Ask this collection's corpus answer endpoint for a cited answer.
+
+        The endpoint is ``backend.ref["answer_endpoint"]`` when set, else the
+        resolved search endpoint (ref, else the legacy ``settings.corpus_url``)
+        with its last path segment replaced by ``ask``. The audience resolves
+        as on search. Delegates to
+        :func:`~meho_backplane.auth.corpus.ask_corpus`, which raises
+        :class:`~meho_backplane.auth.corpus.CorpusUnavailable` /
+        :class:`~meho_backplane.auth.corpus.CorpusAnswerError`.
+        """
+        endpoint, audience = _resolve_endpoint_audience(backend_ref)
+        answer_url = _str_or_none(backend_ref.get("answer_endpoint")) if backend_ref else None
+        if answer_url is None:
+            search_url = endpoint if endpoint is not None else get_settings().corpus_url
+            answer_url = derive_answer_url(search_url) if search_url else None
+        return await ask_corpus(
+            operator,
+            query,
+            limit=limit,
+            answer_url=answer_url,
             audience=audience,
         )
 

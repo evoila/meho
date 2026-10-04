@@ -95,6 +95,7 @@ from meho_backplane.docs_search import (
     CollectionNotReadyError,
     DocsAnswer,
     DocsChunk,
+    DocsScope,
     MissingDocsFilterError,
     UnknownCollectionError,
     build_docs_scope,
@@ -103,6 +104,7 @@ from meho_backplane.docs_search import (
     resolve_entitled_ready_collection,
     search_docs,
 )
+from meho_backplane.docs_search.answer import ANSWER_SOURCE_UPSTREAM
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.auth.refresh import (
@@ -532,7 +534,7 @@ def _internal_chunk_href(source_url: str | None) -> str | None:
     return f"/ui/corpus/chunks/{quote(collection, safe='')}/{quote(chunk_id, safe='/')}"
 
 
-def _cited_chunks(chunks: list[DocsChunk]) -> list[dict[str, object]]:
+def _cited_chunks(chunks: list[DocsChunk], *, numbered: bool = False) -> list[dict[str, object]]:
     """Pair each cited chunk with its resolved link + internal view-source href.
 
     Each chunk's ``source_url`` is, for the GCS-backed vendor corpus, a raw
@@ -556,17 +558,25 @@ def _cited_chunks(chunks: list[DocsChunk]) -> list[dict[str, object]]:
     path, the ask success path, and the ask fail-open path all call it -- so the
     Retrieve and Ask modes render the identical affordance for the identical
     doc (parity, #2462).
+
+    *numbered* adds a 1-based ``citation_number`` per entry: the ``[k]`` an
+    upstream-composed answer's markers point at (#3911), so each card carries
+    the number its claims cite. Off everywhere else, where the entries (and
+    the render) are unchanged.
     """
-    return [
-        {
+    entries: list[dict[str, object]] = []
+    for number, chunk in enumerate(chunks, start=1):
+        entry: dict[str, object] = {
             "chunk": chunk,
             "link": resolve_citation_link(
                 chunk.source_url, title=chunk.title, document_id=chunk.document_id
             ),
             "view_href": _internal_chunk_href(chunk.source_url),
         }
-        for chunk in chunks
-    ]
+        if numbered:
+            entry["citation_number"] = number
+        entries.append(entry)
+    return entries
 
 
 async def _render_corpus_search(
@@ -677,6 +687,14 @@ async def _ask_result_context(
       ungrounded synthesized answer.
     * **success** -> the grounded ``answer`` + its citation cards (the #1919
       cited-chunk shape).
+
+    The pipeline is the one answer seam (#3911): the collection backend's own
+    answer endpoint when the collection opted in, else the local pipeline. On
+    the upstream path two things differ. The citation cards are numbered to
+    match the answer's ``[k]`` markers. And because an upstream failure
+    retrieved nothing the operator can use, it fails open to **one** plain
+    ``search_docs`` call instead, rendered under the same leg banner (best
+    effort: if that search also fails, the banner stands alone).
     """
     # Validate the mandatory collection scope -- a missing / blank
     # ``collection`` is the same mandatory-scope 422 the search path renders
@@ -712,34 +730,75 @@ async def _ask_result_context(
         # already succeeded), so the operator keeps the usable grounding; a
         # *pre-retrieval* leg (``expand_failed`` / ``corpus_unavailable``) has
         # none, so the seam renders the banner alone.
+        upstream = outcome.answer_source == ANSWER_SOURCE_UPSTREAM
+        fallback_chunks = (
+            await _fallback_search_chunks(operator, query, docs_scope, collection)
+            if upstream
+            else outcome.retrieved_chunks
+        )
         log.warning(
             "ui_corpus_ask_pipeline_failed",
             operator_sub=operator.sub,
             collection=docs_scope.collection_key,
             leg=outcome.error.leg,
             cause=outcome.error.cause,
-            retrieved_chunk_count=len(outcome.retrieved_chunks),
+            retrieved_chunk_count=len(fallback_chunks),
         )
-        return corpus_ask_fallback_context(outcome.error, outcome.retrieved_chunks)
+        return corpus_ask_fallback_context(outcome.error, fallback_chunks)
 
     # No leg error -> the success outcome always carries a grounded answer
     # (the AskPipelineOutcome contract: exactly one of answer / error is set).
     assert outcome.answer is not None
-    return _ask_answer_context(outcome.answer)
+    return _ask_answer_context(
+        outcome.answer, numbered=outcome.answer_source == ANSWER_SOURCE_UPSTREAM
+    )
 
 
-def _ask_answer_context(answer: DocsAnswer) -> dict[str, object]:
+async def _fallback_search_chunks(
+    operator: Operator,
+    query: str,
+    docs_scope: DocsScope,
+    collection: DocCollection,
+) -> list[DocsChunk]:
+    """Run one plain ``search_docs`` call to fail open an upstream answer failure.
+
+    The upstream answer path returns no usable grounding when it fails, so the
+    Ask mode retrieves once (the Retrieve mode's own call) and renders those
+    chunks under the leg banner. Best effort: an unavailable backend returns
+    no chunks, and the banner is shown alone.
+    """
+    try:
+        result = await search_docs(
+            operator,
+            query,
+            scope=docs_scope,
+            collection=collection,
+            limit=_SEARCH_LIMIT,
+        )
+    except CorpusUnavailable as exc:
+        log.warning(
+            "ui_corpus_ask_fallback_search_unavailable",
+            operator_sub=operator.sub,
+            collection=docs_scope.collection_key,
+            corpus_status=exc.status,
+        )
+        return []
+    return list(result.chunks)
+
+
+def _ask_answer_context(answer: DocsAnswer, *, numbered: bool = False) -> dict[str, object]:
     """Build the success-path ask context: the grounded answer + citations.
 
     ``answer`` is the prose (or the deterministic "no grounded answer" string
     on an empty retrieval); ``cited`` is the cited-chunk subset paired with
     resolved navigable links (#1919) -- the SAME ``[{chunk, link}]`` shape the
     search path and the fail-open seam render, so ``_results.html`` reuses the
-    one citation card.
+    one citation card. *numbered* numbers the cards for an upstream-composed
+    answer, whose ``[k]`` markers point at them (#3911).
     """
     return {
         "answer": answer.answer,
-        "cited": _cited_chunks(answer.citations),
+        "cited": _cited_chunks(answer.citations, numbered=numbered),
     }
 
 

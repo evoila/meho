@@ -156,6 +156,28 @@ _MAX_SEARCH_LIMIT: Final[int] = 50
 _SEARCH_OP_ID: Final[str] = "meho.docs.search"
 _ASK_OP_ID: Final[str] = "meho.docs.ask"
 
+#: The ``product`` / ``version`` parameter guidance both tools share (#3912).
+#: A backend matches the refinements as exact values against the
+#: collection's own per-document metadata, so the examples are the tokens
+#: the shared ``vmware`` collection stamps (``vsphere``, never ``vcenter``)
+#: and versions are ``MAJOR.MINOR``. The values are data, not an enum: each
+#: collection lists its own ``products`` in ``list_doc_collections``.
+_PRODUCT_VOCABULARY: Final[str] = (
+    "in that collection's own product vocabulary (`products` in "
+    "`list_doc_collections`). For the shared 'vmware' collection, e.g. "
+    "'vsphere' (covers vCenter and ESXi), 'nsx', 'vsan', 'vcf' (covers "
+    "SDDC Manager), 'vcf-operations', 'vcf-automation', 'avi', 'hcx', "
+    "'vks', 'live-recovery'. A value the collection does not stamp matches "
+    "nothing. Omit it when unsure."
+)
+_VERSION_FORMAT: Final[str] = (
+    "as MAJOR.MINOR ('9.0', '8.0'; not '8.0.3' or '8.0 U3'). Omit it for "
+    "KB, error-message, CVE / security-advisory and build-number questions "
+    "and put the version in the query text instead: a version filter may "
+    "exclude version-less documents."
+)
+_SCOPE_FILTERS_NOTE: Final[str] = "ignored unless the collection enables scope filters."
+
 
 def _build_scope_or_invalid_params(tool: str, arguments: dict[str, Any]) -> DocsScope:
     """Build the binary scope from *arguments* or raise ``-32602``.
@@ -383,7 +405,7 @@ register_mcp_tool(
             "Search a vendor-document collection (product manuals, KB "
             "articles, design / reference guides) for an authoritative "
             "vendor fact — e.g. 'NSX config maximums for 9.0' or "
-            "'vCenter 8.0 supported snapshot depth'. "
+            "'vSphere 8.0 supported snapshot depth'. "
             "REQUIRES a collection scope: EITHER a single `collection` (the "
             "hard binary scope naming WHICH corpus to search and gating "
             "entitlement — pick it from `list_doc_collections`) OR a "
@@ -463,10 +485,9 @@ register_mcp_tool(
                     "minLength": 1,
                     "maxLength": 128,
                     "description": (
-                        "OPTIONAL vendor-product refinement within a SINGLE "
-                        "collection (e.g. 'nsx', 'vcenter'). Narrows the "
-                        "search; omit it to search the whole collection. "
-                        "Ignored on a cross-collection fan-out."
+                        "OPTIONAL refinement within ONE collection, "
+                        f"{_PRODUCT_VOCABULARY} Ignored on a cross-collection "
+                        f"fan-out, and {_SCOPE_FILTERS_NOTE}"
                     ),
                 },
                 "version": {
@@ -474,10 +495,9 @@ register_mcp_tool(
                     "minLength": 1,
                     "maxLength": 128,
                     "description": (
-                        "OPTIONAL product-version refinement (e.g. '9.0') "
-                        "within a SINGLE collection. Narrows the search "
-                        "alongside `product`; omit it to search the whole "
-                        "collection. Ignored on a cross-collection fan-out."
+                        "OPTIONAL version refinement within ONE collection, "
+                        f"{_VERSION_FORMAT} Ignored on a cross-collection "
+                        f"fan-out, and {_SCOPE_FILTERS_NOTE}"
                     ),
                 },
                 "limit": {
@@ -755,9 +775,8 @@ register_mcp_tool(
                     "minLength": 1,
                     "maxLength": 128,
                     "description": (
-                        "OPTIONAL vendor-product refinement within the "
-                        "collection (e.g. 'nsx', 'vcenter'). Narrows "
-                        "retrieval; omit it to ground on the whole collection."
+                        f"OPTIONAL refinement within the collection, {_PRODUCT_VOCABULARY} "
+                        f"It is {_SCOPE_FILTERS_NOTE}"
                     ),
                 },
                 "version": {
@@ -765,9 +784,8 @@ register_mcp_tool(
                     "minLength": 1,
                     "maxLength": 128,
                     "description": (
-                        "OPTIONAL product-version refinement (e.g. '9.0'). "
-                        "Narrows retrieval alongside `product`; omit it to "
-                        "ground on the whole collection."
+                        f"OPTIONAL version refinement within the collection, {_VERSION_FORMAT} "
+                        f"It is {_SCOPE_FILTERS_NOTE}"
                     ),
                 },
                 "limit": {

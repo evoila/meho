@@ -135,7 +135,7 @@ async def test_forwards_configured_service_token_and_posts_query(
                     "text": "vSphere 9.0 supervisor cluster setup.",
                     "source_uri": "https://docs.example/vsphere",
                     "score": 0.91,
-                    "metadata": {"product": "vmware", "version": "9.0"},
+                    "metadata": {"product": "vsphere", "version": "8.0"},
                 }
             ],
             "took_ms": 12,
@@ -154,7 +154,7 @@ async def test_forwards_configured_service_token_and_posts_query(
     # ``content`` / ``source_url`` names downstream callers read.
     assert result.chunks[0].content == "vSphere 9.0 supervisor cluster setup."
     assert result.chunks[0].source_url == "https://docs.example/vsphere"
-    assert result.chunks[0].metadata == {"product": "vmware", "version": "9.0"}
+    assert result.chunks[0].metadata == {"product": "vsphere", "version": "8.0"}
 
     sent = captured[0]
     assert sent.method == "POST"
@@ -246,13 +246,13 @@ async def test_metadata_filters_and_audience_forwarded(monkeypatch: pytest.Monke
     await search_corpus(
         _make_operator(),
         "q",
-        metadata_filters={"product": "vmware", "version": "9.0"},
+        metadata_filters={"product": "vsphere", "version": "8.0"},
     )
 
     import json
 
     body = json.loads(captured[0].content.decode())
-    assert body["metadata_filters"] == {"product": "vmware", "version": "9.0"}
+    assert body["metadata_filters"] == {"product": "vsphere", "version": "8.0"}
     assert body["audience"] == "meho-corpus"
 
 

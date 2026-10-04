@@ -94,6 +94,11 @@ _BUILD_EXPAND_CLIENT = "meho_backplane.docs_search.expansion.build_anthropic_ing
 #: ``corpus-http`` adapter actually calls.
 _CORPUS_SEAM = "meho_backplane.docs_search.backends.corpus_http.search_corpus"
 
+#: A ``corpus-http`` binding whose collection opts into forwarding the
+#: product/version refinements (#3912). The default seed has no ``ref``, so
+#: the gate is off.
+_SCOPE_FILTERS_ON: dict[str, Any] = {"type": "corpus-http", "ref": {"scope_filters": True}}
+
 
 def _seed_collection_sync(**kwargs: Any) -> None:
     """Run :func:`seed_doc_collection` to completion from a sync test."""
@@ -454,12 +459,13 @@ def test_tools_call_ask_docs_returns_grounded_cited_answer(
 
     Pins the full round-trip: retrieval routes to the ``vmware``
     collection's backend with the optional refinements as
-    ``metadata_filters``, the synthesis model composes an answer citing one
-    of the two retrieved chunks, and every returned citation resolves to a
-    retrieved chunk. The retrieved evidence reached the synthesis prompt.
+    ``metadata_filters`` (the collection enables scope filters, #3912), the
+    synthesis model composes an answer citing one of the two retrieved
+    chunks, and every returned citation resolves to a retrieved chunk. The
+    retrieved evidence reached the synthesis prompt.
     """
     client, op = docs_client
-    _seed_collection_sync()
+    _seed_collection_sync(backend=_SCOPE_FILTERS_ON)
     corpus = _fake_corpus(_SAMPLE_CHUNK, _SECOND_CHUNK)
     stub = _StubLlmClient(
         json.dumps(
@@ -513,6 +519,54 @@ def test_tools_call_ask_docs_returns_grounded_cited_answer(
     # The retrieved evidence was framed into the synthesis prompt.
     assert "nsx-9.0-maximums-0007" in stub.captured["user_prompt"]
     assert "10,000 logical switches" in stub.captured["user_prompt"]
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_ask_docs_scope_filters_off_sends_no_refinements(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """Gate off (#3912): ``ask_docs`` retrieval carries no product/version.
+
+    The seeded collection's ``backend.ref`` has no ``scope_filters``, so
+    every per-variant retrieval reaches the backend without
+    ``metadata_filters`` even though the call names both refinements.
+    """
+    client, _op = docs_client
+    _seed_collection_sync()
+    calls: list[dict[str, Any]] = []
+
+    async def _search(operator: Operator, query: str, **kwargs: Any) -> CorpusSearchResponse:
+        calls.append(kwargs)
+        return CorpusSearchResponse(chunks=[_SAMPLE_CHUNK])
+
+    stub = _StubLlmClient(
+        json.dumps(
+            {
+                "answer": "NSX 9.0 supports up to 10,000 logical switches per manager.",
+                "cited_chunk_ids": ["nsx-9.0-maximums-0007"],
+            }
+        )
+    )
+    with (
+        patch(_CORPUS_SEAM, new=_search),
+        patch(_BUILD_LLM_CLIENT, return_value=stub),
+    ):
+        response = post_mcp(
+            client,
+            _ask_call(
+                {
+                    "query": "How many logical switches does NSX 9.0 support?",
+                    "collection": "vmware",
+                    "product": "nsx",
+                    "version": "9.0",
+                },
+                call_id=6,
+            ),
+        )
+    assert response.status_code == 200
+    assert response.json()["result"]["isError"] is False
+    assert calls
+    assert all(call["metadata_filters"] is None for call in calls)
 
 
 @pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)

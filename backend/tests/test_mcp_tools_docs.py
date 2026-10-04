@@ -18,7 +18,9 @@ Covers the collection-scoped contract layered on the G4.5-T4 capability gate:
   403-class ``-32602`` even though the tool is visible; with it → the
   query routes to the collection's backend.
 * **Collection scope routing:** the query reaches the resolved backend
-  with the optional product/version refinements as ``metadata_filters``;
+  with the optional product/version refinements as ``metadata_filters``
+  when the collection enables scope filters, and without them when it
+  does not (#3912);
   an unknown collection → ``-32602``, a *transiently* not-ready
   (``provisioning`` / ``rebuilding``) collection → ``-32603`` (retryable),
   a ``disabled`` collection → ``-32602`` (terminal,
@@ -71,6 +73,11 @@ _ENTITLED = frozenset({_DOCS_CAPABILITY, _VMWARE_CAP})
 #: ``corpus-http`` adapter actually calls. Patching here exercises the
 #: full router → backend → transport path.
 _CORPUS_SEAM = "meho_backplane.docs_search.backends.corpus_http.search_corpus"
+
+#: A ``corpus-http`` binding whose collection opts into forwarding the
+#: product/version refinements (#3912). The default seed has no ``ref``, so
+#: the gate is off.
+_SCOPE_FILTERS_ON: dict[str, Any] = {"type": "corpus-http", "ref": {"scope_filters": True}}
 
 
 async def _mcp_audit_rows() -> list[AuditLog]:
@@ -239,6 +246,39 @@ def test_search_docs_description_names_collection_and_siblings(
     # Companion resource pointer now carries the collection segment.
     assert "meho://docs/{collection}/" in desc
     assert "resources/read" in desc
+    # #3912: the example names the stamped product family, not vCenter.
+    assert "vSphere 8.0" in desc
+    assert "vCenter 8.0" not in desc
+
+
+@pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
+@pytest.mark.parametrize("tool_name", ["search_docs", "ask_docs"])
+def test_refinement_descriptions_use_the_collection_vocabulary(
+    docs_client: tuple[TestClient, Operator],
+    tool_name: str,
+) -> None:
+    """``product`` / ``version`` describe the values the collection stamps (#3912).
+
+    The backend matches the refinements as exact values, so a ``vcenter``
+    example would steer agents to a value the shared collection never
+    stamps (it stamps ``vsphere``), and a patch version (``8.0.3``) matches
+    nothing. Both descriptions also say the refinements are ignored unless
+    the collection enables scope filters.
+    """
+    client, _op = docs_client
+    response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    tools_by_name = {t["name"]: t for t in response.json()["result"]["tools"]}
+    properties = tools_by_name[tool_name]["inputSchema"]["properties"]
+    product = properties["product"]["description"]
+    version = properties["version"]["description"]
+
+    assert "'vsphere'" in product
+    assert "list_doc_collections" in product
+    assert "MAJOR.MINOR" in version
+    assert "'8.0.3'" in version  # named as the form NOT to send
+    for description in (product, version):
+        assert "vcenter" not in description
+        assert "scope filters" in description
 
 
 def test_search_docs_hidden_from_provisioned_read_only_operator() -> None:
@@ -344,12 +384,12 @@ def test_tools_call_search_docs_routes_to_collection_backend(
     """An entitled operator's query routes to the collection's backend with refinements.
 
     The handler resolves the ``vmware`` collection, routes through the
-    ``corpus-http`` backend, and the optional product/version refinements
-    reach the transport as ``metadata_filters``. The backend id is absent
-    from the response.
+    ``corpus-http`` backend, and — the collection enabling scope filters
+    (#3912) — the optional product/version refinements reach the transport
+    as ``metadata_filters``. The backend id is absent from the response.
     """
     client, op = docs_client
-    _seed_collection_sync()
+    _seed_collection_sync(backend=_SCOPE_FILTERS_ON)
     fake = _fake_corpus(_SAMPLE_CHUNK)
     with patch(_CORPUS_SEAM, new=fake):
         response = post_mcp(
@@ -537,6 +577,42 @@ def test_tools_call_search_docs_collection_only_omits_refinements(
     assert response.status_code == 200
     assert response.json()["result"]["isError"] is False
     # No product/version → no metadata_filters forwarded.
+    assert fake.captured["metadata_filters"] is None  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_search_docs_scope_filters_off_sends_no_refinements(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """Gate off (#3912): product/version are accepted but never reach the backend.
+
+    The seeded collection's ``backend.ref`` has no ``scope_filters``, so a
+    call carrying both refinements still succeeds and the backend sees no
+    ``metadata_filters`` — the collection alone scopes the query.
+    """
+    client, _op = docs_client
+    _seed_collection_sync()
+    fake = _fake_corpus(_SAMPLE_CHUNK)
+    with patch(_CORPUS_SEAM, new=fake):
+        response = post_mcp(
+            client,
+            {
+                "jsonrpc": "2.0",
+                "id": 6,
+                "method": "tools/call",
+                "params": {
+                    "name": "search_docs",
+                    "arguments": {
+                        "query": "snapshot depth",
+                        "collection": "vmware",
+                        "product": "vsphere",
+                        "version": "8.0",
+                    },
+                },
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["result"]["isError"] is False
     assert fake.captured["metadata_filters"] is None  # type: ignore[attr-defined]
 
 

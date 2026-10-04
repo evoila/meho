@@ -23,7 +23,10 @@ Three things are proven here:
 The ``search_docs`` seam routing (``collection`` → ``resolve_backend`` →
 ``backend.search``) is covered at the bottom: a collection with a fake
 backend makes ``search_docs`` return that backend's chunks, and the
-backend id never appears in the projected result (AC3).
+backend id never appears in the projected result (AC3). The per-collection
+scope-filter gate (#3912) is covered there too: product/version reach the
+backend only when the collection's ``backend.ref["scope_filters"]`` is
+``true``, while the ``docs_search_completed`` log keeps the requested values.
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
+import structlog
 
 import meho_backplane.auth.corpus as corpus_mod
 from meho_backplane.auth.corpus import (
@@ -54,7 +58,7 @@ from meho_backplane.docs_search.backends import (
     register_backend,
 )
 from meho_backplane.docs_search.backends import registry as registry_mod
-from meho_backplane.docs_search.service import DocsScope
+from meho_backplane.docs_search.service import DocsScope, forwarded_scope_filters
 from meho_backplane.settings import Settings, get_settings
 
 _JWT = "header.payload.signature-secret"
@@ -428,23 +432,23 @@ async def test_search_docs_routes_through_resolved_backend(_restore_registry: No
     """
     fake = _FakeBackend()
     register_backend(_FakeBackend.backend_type, fake)
-    collection = _make_collection(
-        backend={"type": "fake-rag", "ref": {"endpoint": "https://fake.test"}},
-    )
+    ref = {"endpoint": "https://fake.test", "scope_filters": True}
+    collection = _make_collection(backend={"type": "fake-rag", "ref": ref})
 
     result = await search_docs(
         _make_operator(),
         "how do I configure NSX",
-        scope=DocsScope(collection_key="vmware", product="vmware", version="9.0"),
+        scope=DocsScope(collection_key="vmware", product="nsx", version="9.0"),
         limit=7,
         collection=collection,
     )
 
-    # Routed to the fake backend with the collection's ref + scope filters.
+    # Routed to the fake backend with the collection's ref + scope filters
+    # (the collection enables them, #3912).
     assert len(fake.calls) == 1
     call = fake.calls[0]
-    assert call["backend_ref"] == {"endpoint": "https://fake.test"}
-    assert call["metadata_filters"] == {"product": "vmware", "version": "9.0"}
+    assert call["backend_ref"] == ref
+    assert call["metadata_filters"] == {"product": "nsx", "version": "9.0"}
     assert call["limit"] == 7
 
     # The projected result carries the fake backend's chunk, and neither
@@ -483,3 +487,71 @@ async def test_search_docs_unroutable_collection_raises(_restore_registry: None)
             scope=DocsScope(collection_key="vmware", product="vmware", version="9.0"),
             collection=collection,
         )
+
+
+# ---------------------------------------------------------------------------
+# The per-collection scope-filter gate (#3912)
+# ---------------------------------------------------------------------------
+
+_SCOPE = DocsScope(collection_key="vmware", product="vsphere", version="8.0")
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        None,
+        {},
+        {"endpoint": "https://fake.test"},
+        {"scope_filters": False},
+        # Only the JSON boolean enables the gate; a truthy look-alike does not.
+        {"scope_filters": "true"},
+        {"scope_filters": 1},
+    ],
+)
+def test_forwarded_scope_filters_off_unless_ref_sets_true(ref: dict[str, Any] | None) -> None:
+    """Absent, false or non-boolean ``scope_filters`` forwards no refinements."""
+    assert forwarded_scope_filters(_SCOPE, ref) == {}
+
+
+def test_forwarded_scope_filters_on_forwards_refinements_unchanged() -> None:
+    """``scope_filters: true`` forwards ``as_filters()`` verbatim (no mapping)."""
+    ref = {"endpoint": "https://fake.test", "scope_filters": True}
+    assert forwarded_scope_filters(_SCOPE, ref) == {"product": "vsphere", "version": "8.0"}
+    # Nothing requested → nothing forwarded, gate on or off.
+    assert forwarded_scope_filters(DocsScope(collection_key="vmware"), ref) == {}
+
+
+@pytest.mark.parametrize(
+    ("ref", "expected_filters"),
+    [
+        ({"endpoint": "https://fake.test"}, None),
+        (
+            {"endpoint": "https://fake.test", "scope_filters": True},
+            {"product": "vsphere", "version": "8.0"},
+        ),
+    ],
+)
+async def test_search_docs_gate_controls_filters_and_log_keeps_request(
+    _restore_registry: None,
+    ref: dict[str, Any],
+    expected_filters: dict[str, str] | None,
+) -> None:
+    """The gate decides what reaches the backend; the log records the request.
+
+    Gate off: the backend gets no ``metadata_filters``. Gate on: it gets the
+    refinements unchanged. Either way ``docs_search_completed`` carries the
+    requested product/version, plus whether they were forwarded.
+    """
+    fake = _FakeBackend()
+    register_backend(_FakeBackend.backend_type, fake)
+    collection = _make_collection(backend={"type": "fake-rag", "ref": ref})
+
+    with structlog.testing.capture_logs() as logs:
+        await search_docs(_make_operator(), "q", scope=_SCOPE, collection=collection)
+
+    assert fake.calls[0]["metadata_filters"] == expected_filters
+    completed = [e for e in logs if e["event"] == "docs_search_completed"]
+    assert len(completed) == 1
+    assert completed[0]["product"] == "vsphere"
+    assert completed[0]["version"] == "8.0"
+    assert completed[0]["scope_filters_forwarded"] is (expected_filters is not None)

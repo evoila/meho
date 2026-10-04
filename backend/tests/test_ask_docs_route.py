@@ -140,8 +140,18 @@ def _isolated_jwks_cache() -> Iterator[None]:
 # ---------------------------------------------------------------------------
 
 
-async def _seed_global_collection(*, collection_key: str = "vmware", status: str = "ready") -> None:
-    """Insert a global (``tenant_id IS NULL``) collection for the route tests."""
+async def _seed_global_collection(
+    *,
+    collection_key: str = "vmware",
+    status: str = "ready",
+    backend: dict[str, Any] | None = None,
+) -> None:
+    """Insert a global (``tenant_id IS NULL``) collection for the route tests.
+
+    The default ``backend`` has no ``ref``, so the collection's scope-filter
+    gate (#3912) is off; pass :data:`_SCOPE_FILTERS_ON` to forward the
+    product/version refinements.
+    """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session, session.begin():
         session.add(
@@ -152,7 +162,7 @@ async def _seed_global_collection(*, collection_key: str = "vmware", status: str
                 products=["vsphere", "nsx"],
                 description="VMware vendor docs.",
                 when_to_use="VMware product questions.",
-                backend={"type": "corpus-http"},
+                backend=backend if backend is not None else {"type": "corpus-http"},
                 status=status,
             ),
         )
@@ -181,6 +191,11 @@ async def _seed_tenant_collection(
 def _seed_collection_sync(**kwargs: Any) -> None:
     """Seed a global collection from a sync test via a one-shot loop."""
     asyncio.run(_seed_global_collection(**kwargs))
+
+
+#: A ``corpus-http`` binding whose collection opts into forwarding the
+#: product/version refinements (#3912).
+_SCOPE_FILTERS_ON: dict[str, Any] = {"type": "corpus-http", "ref": {"scope_filters": True}}
 
 
 # ---------------------------------------------------------------------------
@@ -302,7 +317,7 @@ def test_compute_query_hash_matches_search_docs_contract() -> None:
 
 def test_ask_docs_returns_grounded_cited_answer(client: TestClient) -> None:
     """An entitled operator gets ``{answer, citations[]}`` with a resolved link."""
-    _seed_collection_sync()
+    _seed_collection_sync(backend=_SCOPE_FILTERS_ON)
     key = _make_rsa_keypair("kid-A")
     tenant_id = UUID("33333333-3333-3333-3333-333333333333")
     token = _token(key, sub="op-1", tenant_id=str(tenant_id))
@@ -344,7 +359,8 @@ def test_ask_docs_returns_grounded_cited_answer(client: TestClient) -> None:
     # the MCP ask_docs tool returns).
     assert citation["link"]["clickable"] is True
     assert citation["link"]["href"] == "https://docs.example.com/nsx/9.0/maximums"
-    # The refinements reached the backend; the operator identity was forwarded.
+    # The collection enables scope filters (#3912), so the refinements reached
+    # the backend; the operator identity was forwarded.
     assert corpus.captured["metadata_filters"] == {"product": "nsx", "version": "9.0"}  # type: ignore[attr-defined]
     assert corpus.captured["operator"].tenant_id == tenant_id  # type: ignore[attr-defined]
     # The retrieved evidence framed into the synthesis prompt.
@@ -849,7 +865,12 @@ def test_admin_role_returns_200(client: TestClient) -> None:
 
 @pytest.mark.asyncio
 async def test_audit_row_carries_ask_op_id_and_hash_not_raw_query(client: TestClient) -> None:
-    """One audit row: ``op_id=meho.docs.ask``, ``op_class=read``, hash not raw query."""
+    """One audit row: ``op_id=meho.docs.ask``, ``op_class=read``, hash not raw query.
+
+    The collection does not enable scope filters (#3912): the backend sees
+    no ``metadata_filters``, yet the row still records the requested
+    product and version.
+    """
     await _seed_global_collection()
     key = _make_rsa_keypair("kid-A")
     raw_query = "how do I expand a vsan disk group"
@@ -882,7 +903,9 @@ async def test_audit_row_carries_ask_op_id_and_hash_not_raw_query(client: TestCl
     assert payload["query_hash"] == _compute_query_hash(raw_query)
     assert payload["collection"] == "vmware"
     assert payload["product"] == "nsx"
+    assert payload["version"] == "9.0"
     assert raw_query not in json.dumps(payload)
+    assert corpus.captured["metadata_filters"] is None  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio

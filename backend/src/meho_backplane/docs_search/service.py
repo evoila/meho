@@ -12,12 +12,14 @@ tool (T4), and the CLI verb (T5):
    which the route renders HTTP 422 (fail-closed) and the MCP face renders
    ``-32602``. ``product`` / ``version`` demote to **optional refinements**
    within the chosen collection — present, they ride
-   :meth:`DocsScope.as_filters` as ``metadata_filters``; absent, the
-   collection alone scopes the query. The filters are scopes passed
-   verbatim to the backend, never ranking weights (#1178 / #1177). The
-   ``collection`` key is a **router / entitlement key**, not a metadata
-   filter — it is kept out of :meth:`DocsScope.as_filters` so it never
-   leaks into the backend's per-chunk ``metadata`` containment query.
+   :meth:`DocsScope.as_filters` as ``metadata_filters`` when the
+   collection enables scope filters (:func:`forwarded_scope_filters`,
+   #3912); absent, the collection alone scopes the query. The filters are
+   scopes passed verbatim to the backend, never ranking weights
+   (#1178 / #1177). The ``collection`` key is a **router / entitlement
+   key**, not a metadata filter — it is kept out of
+   :meth:`DocsScope.as_filters` so it never leaks into the backend's
+   per-chunk ``metadata`` containment query.
 
 2. :func:`search_docs` — call T2's :func:`~meho_backplane.auth.corpus.search_corpus`
    with the operator's forwarded JWT and the binary scope, then project
@@ -35,8 +37,8 @@ touches the raw query beyond forwarding it to the corpus.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from pydantic import BaseModel, ConfigDict, Field
@@ -55,6 +57,7 @@ __all__ = [
     "DocsSearchResult",
     "MissingDocsFilterError",
     "build_docs_scope",
+    "forwarded_scope_filters",
     "search_docs",
 ]
 
@@ -66,6 +69,12 @@ _log = structlog.get_logger(__name__)
 #: per-chunk ``metadata`` off these names.
 _PRODUCT_KEY = "product"
 _VERSION_KEY = "version"
+
+#: The ``backend.ref`` key that opts a collection into forwarding the
+#: product/version refinements to its backend (#3912). Only the JSON
+#: boolean ``true`` enables it; absent, ``false`` or any other value keeps
+#: the refinements out of the backend call.
+_SCOPE_FILTERS_REF_KEY = "scope_filters"
 
 #: The mandatory binary-scope key. ``collection`` is the router /
 #: entitlement key (T3 #1552) — required on every query, but **not** a
@@ -108,6 +117,8 @@ class DocsScope(BaseModel):
     the query, it is not a per-chunk metadata field. Only positively-set
     refinement keys are emitted, so a query with no product/version carries
     no spurious ``None`` values the backend would have to special-case.
+    Whether the refinements reach the backend at all is the collection's
+    choice: :func:`forwarded_scope_filters` (#3912).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -264,6 +275,38 @@ def build_docs_scope(
     )
 
 
+def forwarded_scope_filters(
+    scope: DocsScope,
+    backend_ref: Mapping[str, Any] | None,
+) -> dict[str, str]:
+    """Return the refinements to send to the collection's backend (#3912).
+
+    ``product`` / ``version`` are matched by the backend as exact values
+    against its own per-document metadata, so they only help when they are
+    in the collection's vocabulary and the backend applies them the way the
+    caller expects. Whether that holds is a property of the collection, so
+    each collection opts in through ``backend.ref["scope_filters"] = true``.
+    Absent, ``false`` or any value other than the JSON boolean ``true``
+    sends no refinements and the collection alone scopes the query.
+
+    The caller still records the *requested* ``product`` / ``version`` in
+    its log and audit row; only what reaches the backend is gated. This is
+    the one rule every backend call that carries refinements goes through.
+
+    Args:
+        scope: The validated scope from :func:`build_docs_scope`.
+        backend_ref: The collection's ``backend.ref`` as resolved by the
+            router (``None`` for a collection without one).
+
+    Returns:
+        :meth:`DocsScope.as_filters` when the collection enables scope
+        filters, else an empty dict.
+    """
+    if backend_ref is None or backend_ref.get(_SCOPE_FILTERS_REF_KEY) is not True:
+        return {}
+    return scope.as_filters()
+
+
 def _project_chunk(
     chunk: CorpusChunk,
     *,
@@ -321,11 +364,13 @@ async def search_docs(
     managed RAG and another on the JWT-forward corpus behind this one
     entrypoint, and the agent never sees which backend answered. The
     operator JWT is forwarded by the adapter (for the JWT-forward corpus
-    backend), the search is scoped by the collection (and the optional
-    product/version refinements), and the cited chunks are projected into
-    MEHO's surface. The query itself is never logged here — only its
-    presence is implied; the route binds the SHA-256 hash to the audit
-    row.
+    backend), the search is scoped by the collection (and, when the
+    collection enables scope filters, the optional product/version
+    refinements — :func:`forwarded_scope_filters`), and the cited chunks
+    are projected into MEHO's surface. The query itself is never logged
+    here — only its presence is implied; the route binds the SHA-256 hash
+    to the audit row. The ``docs_search_completed`` log records the
+    *requested* product/version and whether they were forwarded.
 
     *collection* is the **required** binary scope (T3 #1552): the caller
     (the REST route / MCP handler) has already resolved the
@@ -355,8 +400,8 @@ async def search_docs(
             or returns a non-2xx / malformed response. The route maps it
             to HTTP 503 (the backend id never appears in the 503).
     """
-    filters = scope.as_filters()
     resolved = resolve_backend(collection)
+    filters = forwarded_scope_filters(scope, resolved.ref)
     response = await resolved.backend.search(
         operator,
         query,
@@ -371,6 +416,7 @@ async def search_docs(
         collection_key=scope.collection_key,
         product=scope.product,
         version=scope.version,
+        scope_filters_forwarded=bool(filters),
         hit_count=len(chunks),
     )
     return DocsSearchResult(chunks=chunks)

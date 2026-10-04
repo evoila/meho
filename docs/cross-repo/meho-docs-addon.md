@@ -233,6 +233,20 @@ The **backend** record is `{type, ref}`:
   `audience`. A `corpus-http` collection with **no** `backend.ref`
   endpoint falls back to the legacy global settings below — the
   unmigrated single-collection deploy still routes.
+- `ref.scope_filters` (any backend type; default off) — set it to the JSON
+  boolean `true` to forward a query's `product` / `version` refinements
+  to the backend (`metadata_filters` on search). Absent or `false`, they
+  are accepted, logged and audited but never sent (#3912). Turn it on
+  only once the backend applies them usefully: they are an exact-match
+  pre-filter, so the values must be the ones the collection stamps (see
+  *Search* below). For the shared `vmware` collection that means after
+  the MEHO Knowledge release that honours `metadata_filters` and
+  normalises the values (evoila-bosnia/MEHO.Knowledge#496 + #509) is
+  deployed. A backend update replaces the whole record and resets the
+  collection to `provisioning`, so re-pass the existing `ref` keys and
+  run `probe` afterwards:
+  `meho docs collections update vmware --backend-type corpus-http --backend-ref '{"endpoint":"<current>","scope_filters":true}'`,
+  then `meho docs collections probe vmware`.
 
 The legacy global corpus settings remain as the `corpus-http` fallback
 (env vars in parentheses):
@@ -362,6 +376,15 @@ entitled to** (`meho-docs:<key>`), so every key shown is one
 - **`product` / `version` are optional refinements** within a single
   collection (a collection *is* a scoped corpus, so the anti-drown
   guarantee holds on `collection` alone). Omitting them still succeeds.
+  They reach the backend only when the collection sets
+  `backend.ref.scope_filters: true` (#3912); otherwise they are recorded
+  in the log and audit row and not sent. Use the collection's own product
+  tokens (its `products` in `list_doc_collections`; on the shared
+  `vmware` collection `vsphere` covers vCenter and ESXi, `vcf` covers
+  SDDC Manager) and `MAJOR.MINOR` versions (`8.0`, not `8.0.3` or
+  `8.0 U3`). Leave `version` out for KB, error-message, CVE / security
+  advisory and build-number questions: a version filter can exclude the
+  version-less documents that answer them.
 - **Entitlement** — searching a collection the tenant is not entitled to
   (`meho-docs:<key>` missing) → **403** / `-32602`, even though the tool
   stays visible via the base `meho-docs` gate.
@@ -500,7 +523,7 @@ Content-Type: application/json
 |---|---|---|---|
 | `query` | `str` | always | The free-text search query. |
 | `top_k` | `int` | always | Maximum chunks to return. meho sends **`top_k`** (the key MEHO.Knowledge honours, #1732) — **not** `limit` / `k` / `size`. A corpus that reads only some *other* key and ignores `top_k` silently caps at *its* default. Read `top_k`. |
-| `metadata_filters` | `{key: scalar}` | only when non-empty | Binary `{key: value}` narrowing (e.g. `{"product": "vmware"}`). Omitted entirely when meho has no filters — do not require the key. |
+| `metadata_filters` | `{key: scalar}` | only when non-empty and the collection sets `backend.ref.scope_filters: true` | Binary `{key: value}` narrowing (e.g. `{"product": "vsphere"}`), values passed through unchanged. Omitted entirely when meho has no filters to send — do not require the key. |
 | `audience` | `str` | only when configured | RFC 8707 resource indicator, forwarded **in the request body** here (contrast readiness below). Omitted when no audience is configured. |
 
 - **Auth.** `Authorization: Bearer <operator JWT>` — the **operator's** raw

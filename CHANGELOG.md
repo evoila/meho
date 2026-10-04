@@ -90,6 +90,24 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed
+
+- **Doc collections: `product` / `version` reach the backend only when the
+  collection opts in.** `search_docs` and `ask_docs` (MCP, REST, CLI and
+  the docs-chunk resource) now send the optional refinements to a
+  collection's backend only when its `backend.ref.scope_filters` is the
+  JSON boolean `true`. The default is off, which matches what the shared
+  corpus did with them until now (it ignored them). The requested values
+  are still audited and logged; `docs_search_completed` gains
+  `scope_filters_forwarded`. The `product` / `version` tool descriptions
+  now name the collection's own vocabulary (`vsphere` covers vCenter and
+  ESXi, `vcf` covers SDDC Manager; `MAJOR.MINOR` versions) and say to
+  leave `version` out for KB, CVE / security-advisory and build-number
+  questions. **Operators:** set the shared `vmware` collection's
+  `products` to the tokens it stamps, and turn `scope_filters` on only
+  after the corpus release that normalises the filters is deployed
+  (`docs/codebase/docs-search.md`, *Scope-filter gate*). (#3912)
+
 ## [0.35.16] - 2026-09-27
 
 ### Breaking changes — `vcfa.provider.api_token.create` requires `vault_target` and writes the token under that target's Vault role (#3895 / #3896)

@@ -41,7 +41,7 @@ The default agent surface. No elevation required.
 | `preview_operation` | ga | — | Preview an operation WITHOUT running it. |
 | `query_topology` | beta | — | Query the topology graph. |
 | `result_query` | ga | — | Read rows back from a JSONFlux result handle. |
-| `search_docs` | experimental | capability `meho-docs` | Search a vendor-document collection (product manuals, KB articles, design / reference guides) for an authoritative vendor fact — e.g. 'NSX config maximums for 9.0' or 'vCenter 8.0 supported snapshot depth'. |
+| `search_docs` | experimental | capability `meho-docs` | Search a vendor-document collection (product manuals, KB articles, design / reference guides) for an authoritative vendor fact — e.g. 'NSX config maximums for 9.0' or 'vSphere 8.0 supported snapshot depth'. |
 | `search_knowledge` | ga | — | Search the tenant's knowledge base for distilled operator knowledge: vendor API patterns, lab conventions, known-good runbooks, post-incident learnings. |
 | `search_memory` | ga | — | Search the operator's accessible memories (own user-scoped entries + tenant-shared + target-shared entries visible to this operator). |
 | `search_operations` | ga | — | Hybrid BM25 + cosine retrieval over a connector's enabled operations. |

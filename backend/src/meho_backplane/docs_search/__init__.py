@@ -83,6 +83,7 @@ from meho_backplane.docs_search.service import (
     DocsSearchResult,
     MissingDocsFilterError,
     build_docs_scope,
+    forwarded_scope_filters,
     retrieval_is_grounded,
     search_docs,
 )
@@ -124,6 +125,7 @@ __all__ = [
     "classify_answer_error",
     "collection_capability_key",
     "expand_docs_query",
+    "forwarded_scope_filters",
     "normalize_source_ref",
     "parse_collection_scope",
     "resolve_backend",

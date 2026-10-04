@@ -366,7 +366,7 @@ async def search_corpus(
             forwarded, #290).
         query: The free-text search query.
         metadata_filters: Optional binary ``{key: scalar}`` narrowing
-            (e.g. ``{"product": "vmware", "version": "9.0"}``). The
+            (e.g. ``{"product": "vsphere", "version": "8.0"}``). The
             mandatory product/version REQUIRE_FILTERS posture is enforced
             by the consuming route (T3, #1521), **not** here — this
             transport forwards whatever filters it is given.

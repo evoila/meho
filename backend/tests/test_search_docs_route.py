@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Iterator
+from typing import Any
 from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
@@ -115,8 +116,18 @@ def _isolated_jwks_cache() -> Iterator[None]:
 # ---------------------------------------------------------------------------
 
 
-async def _seed_global_collection(*, collection_key: str = "vmware", status: str = "ready") -> None:
-    """Insert a global (``tenant_id IS NULL``) collection for the route tests."""
+async def _seed_global_collection(
+    *,
+    collection_key: str = "vmware",
+    status: str = "ready",
+    backend: dict[str, Any] | None = None,
+) -> None:
+    """Insert a global (``tenant_id IS NULL``) collection for the route tests.
+
+    The default ``backend`` has no ``ref``, so the collection's scope-filter
+    gate (#3912) is off; pass :data:`_SCOPE_FILTERS_ON` to forward the
+    product/version refinements.
+    """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session, session.begin():
         session.add(
@@ -127,15 +138,20 @@ async def _seed_global_collection(*, collection_key: str = "vmware", status: str
                 products=["vsphere", "nsx"],
                 description="VMware vendor docs.",
                 when_to_use="VMware product questions.",
-                backend={"type": "corpus-http"},
+                backend=backend if backend is not None else {"type": "corpus-http"},
                 status=status,
             ),
         )
 
 
-def _seed_collection_sync(**kwargs: str) -> None:
+def _seed_collection_sync(**kwargs: Any) -> None:
     """Seed a global collection from a sync test via a one-shot loop."""
     asyncio.run(_seed_global_collection(**kwargs))
+
+
+#: A ``corpus-http`` binding whose collection opts into forwarding the
+#: product/version refinements (#3912).
+_SCOPE_FILTERS_ON: dict[str, Any] = {"type": "corpus-http", "ref": {"scope_filters": True}}
 
 
 # ---------------------------------------------------------------------------
@@ -389,10 +405,11 @@ def test_optional_refinements_forwarded_as_binary_filter_not_weight(
 
     The refinements are a binary containment filter (#1178 / #1177), so they
     must arrive on the backend's ``metadata_filters`` kwarg verbatim -- never
-    as a ``weight`` / boost parameter. ``collection`` is the router key and
-    must NOT appear in the metadata filters.
+    as a ``weight`` / boost parameter -- once the collection enables scope
+    filters (#3912). ``collection`` is the router key and must NOT appear in
+    the metadata filters.
     """
-    _seed_collection_sync()
+    _seed_collection_sync(backend=_SCOPE_FILTERS_ON)
     key = _make_rsa_keypair("kid-A")
     token = _mint_token(
         key, sub="op-2", tenant_role=TenantRole.OPERATOR.value, capabilities=_ENTITLED_CAPS
@@ -732,7 +749,9 @@ async def test_audit_row_carries_op_id_hash_and_collection_not_raw_query(
 
     The raw query MUST NOT appear anywhere in the payload -- only its
     SHA-256 digest. ``collection`` / ``product`` / ``version`` and
-    ``hit_count`` are recorded.
+    ``hit_count`` are recorded -- the requested product/version even though
+    the collection does not enable scope filters, so the backend saw none
+    (#3912).
     """
     await _seed_global_collection()
     key = _make_rsa_keypair("kid-A")
@@ -774,6 +793,7 @@ async def test_audit_row_carries_op_id_hash_and_collection_not_raw_query(
     assert payload["product"] == "vmware"
     assert payload["version"] == "9.0"
     assert payload["hit_count"] == 2
+    assert fake_corpus.await_args.kwargs["metadata_filters"] is None
 
     serialised = json.dumps(payload)
     assert raw_query not in serialised

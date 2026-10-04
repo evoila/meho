@@ -141,7 +141,7 @@ class SearchBackend(ABC):
                 the adapter's legacy / default configuration (the
                 single-collection deploy that predates the registry).
             metadata_filters: Optional binary ``{key: scalar}`` narrowing
-                (e.g. ``{"product": "vmware", "version": "9.0"}``). The
+                (e.g. ``{"product": "vsphere", "version": "8.0"}``). The
                 mandatory-filter posture is enforced by the caller, not
                 here — the adapter forwards whatever it is given.
             limit: Maximum number of chunks to request.

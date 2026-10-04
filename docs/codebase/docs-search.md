@@ -25,7 +25,9 @@ corpus directly) is what buys three properties in one place:
   fail-closed — and a tenant may only search collections it holds the
   `meho-docs:<collection>` capability for, so no caller can run an
   unscoped query or reach a collection it isn't entitled to. `product` /
-  `version` are optional refinements within the chosen collection.
+  `version` are optional refinements within the chosen collection, sent
+  to its backend only when the collection enables scope filters (see
+  *Scope-filter gate* below).
 
 The same `search_docs` service backs four consumers: the REST route
 (T3), the MCP tool `search_docs` (T4, #1523), the CLI verb
@@ -214,10 +216,85 @@ The shared service and the **router seam**. `collection` is now
 + readiness-checked it via `resolve_entitled_ready_collection`. It
 resolves the backend via `resolve_backend(collection)`, calls
 `backend.search(...)` with the optional product/version refinements as
-`metadata_filters`, projects the backend's `CorpusChunk`s into MEHO's own
+`metadata_filters` when the collection enables scope filters (the gate
+below), projects the backend's `CorpusChunk`s into MEHO's own
 `DocsChunk` surface (chunk text + source citation + score), and propagates
 `CorpusUnavailable` unchanged. The backend id never appears in the request
-or the projected response (the backend-agnostic contract).
+or the projected response (the backend-agnostic contract). It logs
+`docs_search_completed` with the *requested* `product` / `version`,
+`scope_filters_forwarded` (whether they reached the backend) and
+`hit_count`.
+
+### Scope-filter gate (`forwarded_scope_filters`, `backend.ref.scope_filters`, #3912)
+
+`product` / `version` reach a collection's backend only when the
+collection's `backend.ref["scope_filters"]` is the JSON boolean `true`.
+Absent, `false` or any other value (a string `"true"` included) sends no
+refinements: the collection alone scopes the query. The default is off.
+
+**Why a per-collection gate.** A backend that honours the refinements
+applies them as an **exact-match pre-filter** over its own per-document
+metadata, so the values must be the ones that collection stamps. On the
+shared `vmware` collection they mostly are not what an agent would guess:
+
+- vCenter and ESXi are stamped `vsphere`, SDDC Manager `vcf`, Aria
+  Operations `vcf-operations`, NSX ALB `avi`, SRM `live-recovery`. A
+  `product == "vcenter"` filter matches nothing.
+- Versions are stamped `MAJOR.MINOR`, `<major>.x` or `n/a`, and most
+  documents (every KB article and security advisory among them) carry no
+  version at all, so any `version` filter drops them. Patch forms
+  (`8.0.3`, `8.0 U3`) match nothing.
+
+The MEHO Knowledge service ignores the `metadata_filters` key today
+(evoila-bosnia/MEHO.Knowledge#496), so the refinements have been a silent
+no-op on that collection. The release that makes it honour the key also
+normalises the values (evoila-bosnia/MEHO.Knowledge#509: a version filter
+keeps version-less documents, `vcenter` → `vsphere`, patch versions →
+`MAJOR.MINOR`). The backplane must not depend on that release landing
+first, hence the gate: forwarding is switched on per collection once its
+backend applies the refinements usefully.
+
+**Where it applies.** `forwarded_scope_filters(scope, backend_ref)`
+(`docs_search/service.py`, exported from `docs_search`) is the one rule.
+`search_docs` applies it, so it covers every single-collection retrieval:
+the REST route, the MCP `search_docs` tool, the CLI verb, the per-variant
+retrieval of the local `ask_docs` pipeline and the docs-chunk resource's
+re-search. An upstream answer call (`filters` on the backend's answer
+endpoint, #3911) goes through the same helper. The cross-collection
+fan-out sends no refinements at all, gate or not.
+
+**What is still recorded.** The REST audit row keeps the requested
+`product` / `version`; the `docs_search_completed` log keeps them too,
+next to `scope_filters_forwarded`.
+
+**Vocabulary.** The tool descriptions tell the agent to use the
+collection's own product tokens (`products` in `list_doc_collections`)
+and `MAJOR.MINOR` versions, and to omit `version` for KB, error-message,
+CVE / security-advisory and build-number questions. For that list to be
+right, the shared `vmware` row's `products` must hold the stamped tokens
+(data, not code): `meho docs collections update vmware --product vsphere
+--product nsx --product vsan --product vcf --product vcf-operations
+--product vcf-automation --product vcf-operations-logs --product
+vcf-operations-networks --product avi --product hcx --product vks
+--product tkg --product live-recovery --product vdefend --product
+cloud-director --product photon`. A metadata-only update leaves the
+collection's status untouched.
+
+**When and how to flip it.** Turn it on for a collection only after its
+backend applies the refinements as described above; for the shared
+`vmware` collection, after the MEHO Knowledge release carrying
+evoila-bosnia/MEHO.Knowledge#496 + #509 is deployed behind it. The update
+replaces the whole backend record, so re-pass every key the `ref` already
+holds:
+
+```bash
+meho docs collections update vmware --backend-type corpus-http \
+  --backend-ref '{"endpoint": "<the current endpoint>", "scope_filters": true}'
+# A backend change resets the collection to `provisioning`:
+meho docs collections probe vmware
+```
+
+Rolling back is the same update without `scope_filters` (then a probe).
 
 ### Cross-collection fan-out (`meho_backplane.docs_search.fanout`, T5 #1554)
 
@@ -860,7 +937,8 @@ injection detection. See `docs/codebase/untrusted-text-envelope.md`.
 ## References
 
 - Route: `backend/src/meho_backplane/api/v1/search_docs.py`.
-- Service (router seam): `backend/src/meho_backplane/docs_search/service.py`.
+- Service (router seam + the scope-filter gate `forwarded_scope_filters`):
+  `backend/src/meho_backplane/docs_search/service.py`.
 - Collection-access gate (resolve + entitle + readiness, T3 #1552):
   `backend/src/meho_backplane/docs_search/collection_access.py`.
 - Doc-collections registry + resolver (T1 #1550):

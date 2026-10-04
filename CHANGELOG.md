@@ -157,6 +157,10 @@ connector-related release-notes line.
   after the corpus release that accepts `scope` is deployed; leave
   `scope_filters` off for it (`docs/codebase/docs-search.md`, *Scope
   gates*). (#3912)
+- `CONTRIBUTING.md` has a new section, *Write in plain English*. Many
+  people who work on MEHO read English as a second language, so issues,
+  pull requests, commit messages, code comments and docs should be easy to
+  understand on the first read. (#3922)
 
 ## [0.35.16] - 2026-09-27
 

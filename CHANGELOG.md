@@ -103,7 +103,7 @@ connector-related release-notes line.
   Debian source package inside the `RUN` and fails the build below it, so
   raising a floor is the edit that refreshes the cached layer, and a cached
   layer can never hold less than the floors it states. No new package
-  enters the image and the base digest is unchanged.
+  enters the image and the base digest is unchanged. (#3921)
 
 ### Added
 

@@ -95,8 +95,8 @@ _BUILD_EXPAND_CLIENT = "meho_backplane.docs_search.expansion.build_anthropic_ing
 _CORPUS_SEAM = "meho_backplane.docs_search.backends.corpus_http.search_corpus"
 
 #: A ``corpus-http`` binding whose collection opts into forwarding the
-#: product/version refinements (#3912). The default seed has no ``ref``, so
-#: the gate is off.
+#: product/version refinements as hard filters (#3912). The default seed
+#: has no ``ref``, so both gates are off.
 _SCOPE_FILTERS_ON: dict[str, Any] = {"type": "corpus-http", "ref": {"scope_filters": True}}
 
 
@@ -514,6 +514,7 @@ def test_tools_call_ask_docs_returns_grounded_cited_answer(
     # The optional refinements reached the backend and the operator identity
     # was forwarded.
     assert corpus.captured["metadata_filters"] == {"product": "nsx", "version": "9.0"}  # type: ignore[attr-defined]
+    assert corpus.captured["soft_scope"] is None  # type: ignore[attr-defined]
     assert corpus.captured["limit"] == 5  # type: ignore[attr-defined]
     assert corpus.captured["operator"].tenant_id == op.tenant_id  # type: ignore[attr-defined]
     # The retrieved evidence was framed into the synthesis prompt.
@@ -521,18 +522,41 @@ def test_tools_call_ask_docs_returns_grounded_cited_answer(
     assert "10,000 logical switches" in stub.captured["user_prompt"]
 
 
-@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
-def test_tools_call_ask_docs_scope_filters_off_sends_no_refinements(
-    docs_client: tuple[TestClient, Operator],
-) -> None:
-    """Gate off (#3912): ``ask_docs`` retrieval carries no product/version.
+_SOFT_NSX = {"product": "nsx", "version": "9.0.1", "source": "caller"}
 
-    The seeded collection's ``backend.ref`` has no ``scope_filters``, so
-    every per-variant retrieval reaches the backend without
-    ``metadata_filters`` even though the call names both refinements.
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+@pytest.mark.parametrize(
+    ("backend", "expected_filters", "expected_soft_scope"),
+    [
+        pytest.param(None, None, None, id="off"),
+        pytest.param({"type": "corpus-http", "ref": {"scope": "soft"}}, None, _SOFT_NSX, id="soft"),
+        pytest.param(
+            {"type": "corpus-http", "ref": {"scope": "soft", "scope_filters": True}},
+            None,
+            _SOFT_NSX,
+            id="both-soft-wins",
+        ),
+    ],
+)
+def test_tools_call_ask_docs_retrieval_follows_the_scope_gates(
+    docs_client: tuple[TestClient, Operator],
+    backend: dict[str, Any] | None,
+    expected_filters: dict[str, str] | None,
+    expected_soft_scope: dict[str, str] | None,
+) -> None:
+    """Every per-variant ``ask_docs`` retrieval follows the collection's gates (#3912).
+
+    Gate off: no ``metadata_filters`` and no soft scope, even though the
+    call names both refinements. Soft gate on (alone or with
+    ``scope_filters``): the soft scope with the release unchanged, and no
+    filters.
     """
     client, _op = docs_client
-    _seed_collection_sync()
+    if backend is None:
+        _seed_collection_sync()
+    else:
+        _seed_collection_sync(backend=backend)
     calls: list[dict[str, Any]] = []
 
     async def _search(operator: Operator, query: str, **kwargs: Any) -> CorpusSearchResponse:
@@ -558,7 +582,7 @@ def test_tools_call_ask_docs_scope_filters_off_sends_no_refinements(
                     "query": "How many logical switches does NSX 9.0 support?",
                     "collection": "vmware",
                     "product": "nsx",
-                    "version": "9.0",
+                    "version": "9.0.1",
                 },
                 call_id=6,
             ),
@@ -566,7 +590,8 @@ def test_tools_call_ask_docs_scope_filters_off_sends_no_refinements(
     assert response.status_code == 200
     assert response.json()["result"]["isError"] is False
     assert calls
-    assert all(call["metadata_filters"] is None for call in calls)
+    assert all(call["metadata_filters"] == expected_filters for call in calls)
+    assert all(call["soft_scope"] == expected_soft_scope for call in calls)
 
 
 @pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)

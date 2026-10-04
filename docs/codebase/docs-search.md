@@ -26,8 +26,8 @@ corpus directly) is what buys three properties in one place:
   `meho-docs:<collection>` capability for, so no caller can run an
   unscoped query or reach a collection it isn't entitled to. `product` /
   `version` are optional refinements within the chosen collection, sent
-  to its backend only when the collection enables scope filters (see
-  *Scope-filter gate* below).
+  to its backend only when the collection opts in, as a soft scope or as
+  filters (see *Scope gates* below).
 
 The same `search_docs` service backs four consumers: the REST route
 (T3), the MCP tool `search_docs` (T4, #1523), the CLI verb
@@ -129,9 +129,10 @@ registry (`connectors/registry.py`) **minus the version tie-break ladder**
 (a collection binds to exactly one backend by construction, #1548):
 
 - `SearchBackend` (`backends/base.py`) — the adapter ABC. One required
-  `async search(operator, query, *, backend_ref, metadata_filters, limit)
-  -> CorpusSearchResponse` (the same shape as the re-homed transport, so
-  the seam swap is behaviour-preserving) plus a `probe()` forward seam
+  `async search(operator, query, *, backend_ref, metadata_filters,
+  soft_scope, limit) -> CorpusSearchResponse` (the same shape as the
+  re-homed transport, so the seam swap is behaviour-preserving;
+  `soft_scope` is the #3912 soft scope) plus a `probe()` forward seam
   for the readiness probe (T6 #1555) that defaults to raising rather than
   claiming "ready". A class-level `backend_type` string is the routing
   discriminator.
@@ -167,13 +168,15 @@ raises `MissingDocsFilterError` (HTTP 422 at the route, `-32602` at the
 MCP face), **unconditionally** (it is no longer gated by
 `settings.corpus_require_filters`, which governed the old product+version
 gate). `product` / `version` demote to **optional refinements** within
-the chosen collection: present, they ride `as_filters()`; absent, the
+the chosen collection: present, they reach the backend only through the
+scope gates (below), as a soft scope or as `as_filters()`; absent, the
 collection alone scopes the query. Blank-after-strip values are treated
 as absent so `collection=" "` cannot smuggle past the gate. Returns a
 frozen `DocsScope` carrying `collection_key` plus the optional
 refinements; `as_filters()` renders **only** the refinements into the
 `{key: scalar}` `metadata_filters` shape — a **binary containment
-scope**, never a ranking weight (the #1178 / #1177 decision).
+scope**, never a ranking weight (the #1178 / #1177 decision). The soft
+scope (#3912) is the separate ranking form, built from the same values.
 `collection_key` is deliberately **excluded** from `as_filters()`: it is
 a router / entitlement key, not a per-chunk metadata field.
 
@@ -215,86 +218,126 @@ The shared service and the **router seam**. `collection` is now
 **required**: the caller (route / handler) has already resolved + entitled
 + readiness-checked it via `resolve_entitled_ready_collection`. It
 resolves the backend via `resolve_backend(collection)`, calls
-`backend.search(...)` with the optional product/version refinements as
-`metadata_filters` when the collection enables scope filters (the gate
-below), projects the backend's `CorpusChunk`s into MEHO's own
+`backend.search(...)` with the optional product/version refinements as a
+soft `scope` or as `metadata_filters` when the collection opts in (the
+gates below), projects the backend's `CorpusChunk`s into MEHO's own
 `DocsChunk` surface (chunk text + source citation + score), and propagates
 `CorpusUnavailable` unchanged. The backend id never appears in the request
 or the projected response (the backend-agnostic contract). It logs
 `docs_search_completed` with the *requested* `product` / `version`,
-`scope_filters_forwarded` (whether they reached the backend) and
-`hit_count`.
+`scope_forwarded` (how they reached the backend: `"soft"`, `"filters"` or
+`"none"`) and `hit_count`.
 
-### Scope-filter gate (`forwarded_scope_filters`, `backend.ref.scope_filters`, #3912)
+### Scope gates (`forwarded_scope`, `backend.ref.scope` / `backend.ref.scope_filters`, #3912)
 
 `product` / `version` reach a collection's backend only when the
-collection's `backend.ref["scope_filters"]` is the JSON boolean `true`.
-Absent, `false` or any other value (a string `"true"` included) sends no
-refinements: the collection alone scopes the query. The default is off.
+collection opts in. Its `backend.ref` holds two independent gates, both
+off by default:
 
-**Why a per-collection gate.** A backend that honours the refinements
-applies them as an **exact-match pre-filter** over its own per-document
-metadata, so the values must be the ones that collection stamps. On the
-shared `vmware` collection they mostly are not what an agent would guess:
+| `backend.ref` | What reaches the backend | Request key (search) |
+|---|---|---|
+| neither key (the default) | nothing: the collection alone scopes the query | — |
+| `"scope": "soft"` | a **soft scope**, `{"product": …, "version": …, "source": "caller"}`, with the values exactly as the agent gave them; a key the agent did not give is omitted | `scope` |
+| `"scope_filters": true`, no `scope` key | **hard filters**, `{"product": …, "version": …}`: an exact-match pre-filter | `metadata_filters` |
+| both | the soft scope wins: `scope` is sent and `metadata_filters` is not | `scope` |
 
-- vCenter and ESXi are stamped `vsphere`, SDDC Manager `vcf`, Aria
-  Operations `vcf-operations`, NSX ALB `avi`, SRM `live-recovery`. A
-  `product == "vcenter"` filter matches nothing.
-- Versions are stamped `MAJOR.MINOR`, `<major>.x` or `n/a`, and most
-  documents (every KB article and security advisory among them) carry no
-  version at all, so any `version` filter drops them. Patch forms
-  (`8.0.3`, `8.0 U3`) match nothing.
+Only the exact string `"soft"` turns the soft gate on, and only the JSON
+boolean `true` turns the filter gate on: `"SOFT"`, `"true"` or `1` count
+as off. When the agent gives neither `product` nor `version`, nothing is
+sent, whatever the gates. The cross-collection fan-out sends neither form.
 
-The MEHO Knowledge service ignores the `metadata_filters` key today
-(evoila-bosnia/MEHO.Knowledge#496), so the refinements have been a silent
-no-op on that collection. The release that makes it honour the key also
-normalises the values (evoila-bosnia/MEHO.Knowledge#509: a version filter
+**The soft scope (owner decision D1, 2026-10-04).** On the shared VMware
+collection, product and version are ranking signals, never default hard
+filters (evoila-bosnia/MEHO.Knowledge#512). A product + version filter
+derived from the question lost far more answers than it gained: many
+answers sit in version-agnostic articles, advisories and identifier pages
+that a filter drops, a strict filter can return nothing, and a
+`MAJOR.MINOR` filter cannot tell a maintenance release (`9.1.1`) from its
+sibling (`9.1.0`). The backend's soft `scope` ranks the asked release
+first and labels its answer, never filters, and normalises the values
+itself: product names (`vcenter` to its own token) and any release form
+(`9.1.1`, `8.0 U3`, `8.0.3.00400`). So MEHO sends the values unchanged
+and does no mapping of its own.
+
+**The hard filters.** A backend that honours `metadata_filters` applies
+them as an exact-match pre-filter over its own per-document metadata, so
+the values must be the ones the collection stamps. On the shared
+`vmware` collection they mostly are not what an agent would guess:
+vCenter and ESXi are stamped `vsphere`, SDDC Manager `vcf`, Aria
+Operations `vcf-operations`, NSX ALB `avi`, SRM `live-recovery`; versions
+are stamped `MAJOR.MINOR`, `<major>.x` or `n/a`, and most documents (every
+KB article and security advisory among them) carry no version at all.
+evoila-bosnia/MEHO.Knowledge#509 normalises the filters (a version filter
 keeps version-less documents, `vcenter` → `vsphere`, patch versions →
-`MAJOR.MINOR`). The backplane must not depend on that release landing
-first, hence the gate: forwarding is switched on per collection once its
-backend applies the refinements usefully.
+`MAJOR.MINOR`). The filter gate stays off for the shared collection; it
+is for a collection whose backend applies exact-match filters usefully.
 
-**Where it applies.** `forwarded_scope_filters(scope, backend_ref)`
+**Why gates at all.** The backend refuses unknown request keys
+(evoila-bosnia/MEHO.Knowledge#496), so `scope` must never reach a backend
+release that does not accept it. With the soft gate off, the request body
+is exactly what it was before the gate existed: `search_corpus` adds the
+`scope` key only when it has a soft scope to send. The backplane must not
+depend on the backend release landing first, so each collection opts in
+once its backend is ready.
+
+**Where it applies.** `forwarded_scope(scope, backend_ref)`
 (`docs_search/service.py`, exported from `docs_search`) is the one rule.
-`search_docs` applies it, so it covers every single-collection retrieval:
-the REST route, the MCP `search_docs` tool, the CLI verb, the per-variant
-retrieval of the local `ask_docs` pipeline and the docs-chunk resource's
-re-search. An upstream answer call (`filters` on the backend's answer
-endpoint, #3911) goes through the same helper. The cross-collection
-fan-out sends no refinements at all, gate or not.
+It returns a frozen `ForwardedScope(mode, filters, soft_scope)`: `mode` is
+`"soft"`, `"filters"` or `"none"`, and at most one of the two dicts is
+non-empty. `search_docs` applies it and passes
+`metadata_filters=forwarded.filters or None` and
+`soft_scope=forwarded.soft_scope or None` to `SearchBackend.search`;
+`CorpusHttpBackend` hands both to `search_corpus`, which sends the soft
+scope as the body's `scope` object. That covers every single-collection
+retrieval: the REST route, the MCP `search_docs` tool, the CLI verb, the
+per-variant retrieval of the local `ask_docs` pipeline, the docs-chunk
+resource's re-search and the UI corpus search. The cross-collection
+fan-out passes `metadata_filters=None` and `soft_scope=None`.
 
-**What is still recorded.** The REST audit row keeps the requested
-`product` / `version`; the `docs_search_completed` log keeps them too,
-next to `scope_filters_forwarded`.
+The upstream answer call (#3911: `filters` on the backend's answer
+endpoint) is not wired to this gate yet. It must use the same helper,
+`filters` for the filter gate and `scope` for the soft gate; whichever of
+#3911 / #3912 lands second wires it in. Until then it sends no
+product / version.
+
+**What is recorded.** The REST audit row keeps the requested `product` /
+`version`, whatever the gates. The `docs_search_completed` log keeps them
+too, next to `scope_forwarded` (`"soft"`, `"filters"` or `"none"`: what
+was actually sent, so `"none"` also when nothing was requested).
 
 **Vocabulary.** The tool descriptions tell the agent to use the
 collection's own product tokens (`products` in `list_doc_collections`)
-and `MAJOR.MINOR` versions, and to omit `version` for KB, error-message,
-CVE / security-advisory and build-number questions. For that list to be
-right, the shared `vmware` row's `products` must hold the stamped tokens
-(data, not code): `meho docs collections update vmware --product vsphere
---product nsx --product vsan --product vcf --product vcf-operations
---product vcf-automation --product vcf-operations-logs --product
-vcf-operations-networks --product avi --product hcx --product vks
---product tkg --product live-recovery --product vdefend --product
+and to give the release as precisely as it knows it (`9.1.1`, `8.0 U3`,
+`8.0.3.00400`). They no longer ask for `MAJOR.MINOR` only, nor to leave
+`version` out for KB, error-message, CVE / security-advisory and
+build-number questions: a soft scope excludes nothing. For the product
+list to be right, the shared `vmware` row's `products` must hold the
+stamped tokens (data, not code): `meho docs collections update vmware
+--product vsphere --product nsx --product vsan --product vcf --product
+vcf-operations --product vcf-automation --product vcf-operations-logs
+--product vcf-operations-networks --product avi --product hcx --product
+vks --product tkg --product live-recovery --product vdefend --product
 cloud-director --product photon`. A metadata-only update leaves the
 collection's status untouched.
 
-**When and how to flip it.** Turn it on for a collection only after its
-backend applies the refinements as described above; for the shared
-`vmware` collection, after the MEHO Knowledge release carrying
-evoila-bosnia/MEHO.Knowledge#496 + #509 is deployed behind it. The update
-replaces the whole backend record, so re-pass every key the `ref` already
-holds:
+**When and how to flip it.** Deploy this backplane release first: both
+gates are off, so nothing changes. Turn the soft gate on for the shared
+`vmware` collection only after the backend release that accepts `scope`
+(evoila-bosnia/MEHO.Knowledge#496 + #509 + #512) is deployed behind it;
+before that, the backend would refuse the request. Leave `scope_filters`
+off for it. The update replaces the whole backend record, so re-pass
+every key the `ref` already holds:
 
 ```bash
 meho docs collections update vmware --backend-type corpus-http \
-  --backend-ref '{"endpoint": "<the current endpoint>", "scope_filters": true}'
+  --backend-ref '{"endpoint": "<the current endpoint>", "scope": "soft"}'
 # A backend change resets the collection to `provisioning`:
 meho docs collections probe vmware
 ```
 
-Rolling back is the same update without `scope_filters` (then a probe).
+Rolling back is the same update without `scope` (then a probe). Another
+collection turns on `"scope_filters": true` the same way, once its
+backend applies exact-match filters usefully.
 
 ### Cross-collection fan-out (`meho_backplane.docs_search.fanout`, T5 #1554)
 
@@ -937,7 +980,7 @@ injection detection. See `docs/codebase/untrusted-text-envelope.md`.
 ## References
 
 - Route: `backend/src/meho_backplane/api/v1/search_docs.py`.
-- Service (router seam + the scope-filter gate `forwarded_scope_filters`):
+- Service (router seam + the scope gates `forwarded_scope`):
   `backend/src/meho_backplane/docs_search/service.py`.
 - Collection-access gate (resolve + entitle + readiness, T3 #1552):
   `backend/src/meho_backplane/docs_search/collection_access.py`.

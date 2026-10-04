@@ -109,19 +109,22 @@ class CorpusHttpBackend(SearchBackend):
         *,
         backend_ref: Mapping[str, Any] | None = None,
         metadata_filters: dict[str, Any] | None = None,
+        soft_scope: Mapping[str, str] | None = None,
         limit: int = 10,
     ) -> CorpusSearchResponse:
         """Federate the query to this collection's corpus as *operator*.
 
         Resolves the endpoint and audience from *backend_ref*, falling
         back to the legacy ``settings.corpus_url`` / ``corpus_audience``
-        globals when absent, then delegates to the shared transport.
+        globals when absent, then delegates to the shared transport, which
+        sends *soft_scope* as the request's ``scope`` object (#3912).
         """
         endpoint, audience = _resolve_endpoint_audience(backend_ref)
         return await search_corpus(
             operator,
             query,
             metadata_filters=metadata_filters,
+            soft_scope=soft_scope,
             limit=limit,
             corpus_url=endpoint,
             audience=audience,

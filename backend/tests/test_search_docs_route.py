@@ -150,8 +150,10 @@ def _seed_collection_sync(**kwargs: Any) -> None:
 
 
 #: A ``corpus-http`` binding whose collection opts into forwarding the
-#: product/version refinements (#3912).
+#: product/version refinements as hard filters (#3912).
 _SCOPE_FILTERS_ON: dict[str, Any] = {"type": "corpus-http", "ref": {"scope_filters": True}}
+#: A ``corpus-http`` binding whose collection opts into the soft scope (#3912).
+_SOFT_SCOPE_ON: dict[str, Any] = {"type": "corpus-http", "ref": {"scope": "soft"}}
 
 
 # ---------------------------------------------------------------------------
@@ -437,8 +439,50 @@ def test_optional_refinements_forwarded_as_binary_filter_not_weight(
     assert call_kwargs["metadata_filters"] == {"product": "vmware", "version": "8.0"}
     # The collection routes/entitles; it is not a metadata filter.
     assert "collection" not in call_kwargs["metadata_filters"]
+    assert call_kwargs["soft_scope"] is None
     assert "weight" not in call_kwargs
     assert "boost" not in call_kwargs
+
+
+def test_optional_refinements_forwarded_as_soft_scope_when_collection_opts_in(
+    client: TestClient,
+) -> None:
+    """With ``scope: "soft"`` the refinements travel as the soft scope (#3912).
+
+    The values are passed unchanged (a full release included), with
+    ``source: "caller"``, and no ``metadata_filters`` are sent.
+    """
+    _seed_collection_sync(backend=_SOFT_SCOPE_ON)
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(
+        key, sub="op-soft", tenant_role=TenantRole.OPERATOR.value, capabilities=_ENTITLED_CAPS
+    )
+
+    fake_corpus = _mock_corpus()
+    with (
+        respx.mock as mock_router,
+        patch(_CORPUS_SEAM, new=fake_corpus),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/search_docs",
+            json={
+                "query": "esxi upgrade",
+                "collection": "vmware",
+                "product": "vsphere",
+                "version": "8.0.3.00400",
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    call_kwargs = fake_corpus.await_args.kwargs
+    assert call_kwargs["metadata_filters"] is None
+    assert call_kwargs["soft_scope"] == {
+        "product": "vsphere",
+        "version": "8.0.3.00400",
+        "source": "caller",
+    }
 
 
 def test_collection_only_omits_metadata_filters(client: TestClient) -> None:
@@ -794,6 +838,7 @@ async def test_audit_row_carries_op_id_hash_and_collection_not_raw_query(
     assert payload["version"] == "9.0"
     assert payload["hit_count"] == 2
     assert fake_corpus.await_args.kwargs["metadata_filters"] is None
+    assert fake_corpus.await_args.kwargs["soft_scope"] is None
 
     serialised = json.dumps(payload)
     assert raw_query not in serialised

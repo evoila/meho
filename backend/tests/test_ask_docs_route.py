@@ -194,7 +194,7 @@ def _seed_collection_sync(**kwargs: Any) -> None:
 
 
 #: A ``corpus-http`` binding whose collection opts into forwarding the
-#: product/version refinements (#3912).
+#: product/version refinements as hard filters (#3912).
 _SCOPE_FILTERS_ON: dict[str, Any] = {"type": "corpus-http", "ref": {"scope_filters": True}}
 
 
@@ -362,6 +362,7 @@ def test_ask_docs_returns_grounded_cited_answer(client: TestClient) -> None:
     # The collection enables scope filters (#3912), so the refinements reached
     # the backend; the operator identity was forwarded.
     assert corpus.captured["metadata_filters"] == {"product": "nsx", "version": "9.0"}  # type: ignore[attr-defined]
+    assert corpus.captured["soft_scope"] is None  # type: ignore[attr-defined]
     assert corpus.captured["operator"].tenant_id == tenant_id  # type: ignore[attr-defined]
     # The retrieved evidence framed into the synthesis prompt.
     assert "10,000 logical switches" in synth.captured["user_prompt"]
@@ -906,6 +907,57 @@ async def test_audit_row_carries_ask_op_id_and_hash_not_raw_query(client: TestCl
     assert payload["version"] == "9.0"
     assert raw_query not in json.dumps(payload)
     assert corpus.captured["metadata_filters"] is None  # type: ignore[attr-defined]
+    assert corpus.captured["soft_scope"] is None  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_soft_scope_reaches_backend_and_audit_keeps_request(client: TestClient) -> None:
+    """With ``scope: "soft"`` retrieval sends the soft scope; the audit is unchanged (#3912).
+
+    The full release travels unchanged in the soft scope, with no
+    ``metadata_filters``, and the audit row records the requested values
+    exactly as it does with the gate off.
+    """
+    await _seed_global_collection(backend={"type": "corpus-http", "ref": {"scope": "soft"}})
+    key = _make_rsa_keypair("kid-A")
+    raw_query = "how do I expand a vsan disk group"
+    token = _token(key, sub="op-audit-soft")
+    corpus = _fake_corpus(_SAMPLE_CHUNK)
+    synth = _StubLlmClient(
+        json.dumps({"answer": "ok", "cited_chunk_ids": ["nsx-9.0-maximums-0007"]})
+    )
+    with (
+        respx.mock as mock_router,
+        patch(_CORPUS_SEAM, new=corpus),
+        patch(_BUILD_LLM_CLIENT, return_value=synth),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/ask_docs",
+            json={
+                "query": raw_query,
+                "collection": "vmware",
+                "product": "vsan",
+                "version": "8.0 U3",
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert response.status_code == 200
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await session.execute(select(AuditLog).where(AuditLog.path == "/api/v1/ask_docs"))
+        rows = result.scalars().all()
+    assert len(rows) == 1
+    payload = rows[0].payload
+    assert payload["product"] == "vsan"
+    assert payload["version"] == "8.0 U3"
+    assert corpus.captured["metadata_filters"] is None  # type: ignore[attr-defined]
+    assert corpus.captured["soft_scope"] == {  # type: ignore[attr-defined]
+        "product": "vsan",
+        "version": "8.0 U3",
+        "source": "caller",
+    }
 
 
 @pytest.mark.asyncio

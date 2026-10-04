@@ -38,19 +38,19 @@ time (:func:`~meho_backplane.mcp.handlers.handle_tools_call`) — so
 learning the name out-of-band cannot bypass it. This module only declares
 the gate; the registry + dispatcher own the enforcement.
 
-REQUIRE_FILTERS surfaces as an MCP error
-========================================
+A missing collection scope surfaces as an MCP error
+===================================================
 
-``product`` and ``version`` are a **mandatory binary scope**, not a hint.
-The handler calls :func:`~meho_backplane.docs_search.build_docs_scope`,
-which raises :class:`~meho_backplane.docs_search.MissingDocsFilterError`
-when the REQUIRE_FILTERS gate is on and either is blank. The route renders
-that as HTTP 422; here it maps to :class:`McpInvalidParamsError`
-(JSON-RPC ``-32602``) — the MCP analogue of a 422, since a missing
-mandatory scope is invalid params, not a server fault. The inputSchema
-already declares both as ``required``, so a well-behaved client never
-reaches the service-side check; the map exists for the gate-off →
-gate-on settings flip and for clients that skip schema validation.
+``collection`` is the **mandatory binary scope** (T3 #1552); ``product``
+and ``version`` are optional refinements that reach the backend only when
+the collection opts in, as a soft ``scope`` or as filters
+(:func:`~meho_backplane.docs_search.forwarded_scope`, #3912). The handler
+calls :func:`~meho_backplane.docs_search.build_docs_scope`, which raises
+:class:`~meho_backplane.docs_search.MissingDocsFilterError` when
+``collection`` is missing or blank. The route renders that as HTTP 422;
+here it maps to :class:`McpInvalidParamsError` (JSON-RPC ``-32602``) —
+the MCP analogue of a 422, since a missing mandatory scope is invalid
+params, not a server fault.
 
 Corpus-unavailable surfaces as an internal error
 ================================================
@@ -157,26 +157,32 @@ _SEARCH_OP_ID: Final[str] = "meho.docs.search"
 _ASK_OP_ID: Final[str] = "meho.docs.ask"
 
 #: The ``product`` / ``version`` parameter guidance both tools share (#3912).
-#: A backend matches the refinements as exact values against the
-#: collection's own per-document metadata, so the examples are the tokens
-#: the shared ``vmware`` collection stamps (``vsphere``, never ``vcenter``)
-#: and versions are ``MAJOR.MINOR``. The values are data, not an enum: each
-#: collection lists its own ``products`` in ``list_doc_collections``.
+#: A collection opts into receiving the refinements, as a soft ``scope``
+#: (a ranking signal the backend normalises) or as exact-match filters
+#: (:func:`~meho_backplane.docs_search.forwarded_scope`). Either way the
+#: collection's own tokens are the form that works everywhere, so the
+#: product examples are the ones the shared ``vmware`` collection stamps
+#: (``vsphere``, never ``vcenter``); the values are data, not an enum: each
+#: collection lists its own ``products`` in ``list_doc_collections``. The
+#: version is the release as precisely as the agent knows it: a soft scope
+#: ranks that release first and excludes nothing, so no class of question
+#: needs it left out.
 _PRODUCT_VOCABULARY: Final[str] = (
     "in that collection's own product vocabulary (`products` in "
     "`list_doc_collections`). For the shared 'vmware' collection, e.g. "
     "'vsphere' (covers vCenter and ESXi), 'nsx', 'vsan', 'vcf' (covers "
     "SDDC Manager), 'vcf-operations', 'vcf-automation', 'avi', 'hcx', "
-    "'vks', 'live-recovery'. A value the collection does not stamp matches "
+    "'vks', 'live-recovery'. The collection's own token is the recommended "
+    "form: a value the collection does not know cannot help and may match "
     "nothing. Omit it when unsure."
 )
-_VERSION_FORMAT: Final[str] = (
-    "as MAJOR.MINOR ('9.0', '8.0'; not '8.0.3' or '8.0 U3'). Omit it for "
-    "KB, error-message, CVE / security-advisory and build-number questions "
-    "and put the version in the query text instead: a version filter may "
-    "exclude version-less documents."
+_VERSION_RELEASE: Final[str] = (
+    "the release you are asking about, as precisely as you know it (e.g. "
+    "'9.1.1', '8.0 U3', '8.0.3.00400'). It ranks that release first; it "
+    "does not hide version-agnostic documents such as KB articles or "
+    "security advisories."
 )
-_SCOPE_FILTERS_NOTE: Final[str] = "ignored unless the collection enables scope filters."
+_SCOPE_FORWARDING_NOTE: Final[str] = "ignored unless the collection enables scope forwarding."
 
 
 def _build_scope_or_invalid_params(tool: str, arguments: dict[str, Any]) -> DocsScope:
@@ -418,7 +424,7 @@ register_mcp_tool(
             "cheaper and sharper). `collection` and `collections`/'all' are "
             "mutually exclusive. "
             "`product` and `version` are OPTIONAL refinements within a "
-            "single collection (ignored on a fan-out), not a ranking hint. "
+            "single collection (ignored on a fan-out). "
             "Use this for VENDOR REFERENCE — what the documentation says. "
             "Use `search_knowledge` instead for how THIS team does "
             "something (lab conventions, known-good runbooks, "
@@ -487,7 +493,7 @@ register_mcp_tool(
                     "description": (
                         "OPTIONAL refinement within ONE collection, "
                         f"{_PRODUCT_VOCABULARY} Ignored on a cross-collection "
-                        f"fan-out, and {_SCOPE_FILTERS_NOTE}"
+                        f"fan-out, and {_SCOPE_FORWARDING_NOTE}"
                     ),
                 },
                 "version": {
@@ -495,9 +501,9 @@ register_mcp_tool(
                     "minLength": 1,
                     "maxLength": 128,
                     "description": (
-                        "OPTIONAL version refinement within ONE collection, "
-                        f"{_VERSION_FORMAT} Ignored on a cross-collection "
-                        f"fan-out, and {_SCOPE_FILTERS_NOTE}"
+                        "OPTIONAL version refinement within ONE collection: "
+                        f"{_VERSION_RELEASE} Ignored on a cross-collection "
+                        f"fan-out, and {_SCOPE_FORWARDING_NOTE}"
                     ),
                 },
                 "limit": {
@@ -726,7 +732,7 @@ register_mcp_tool(
             "question is rejected without it), naming WHICH corpus to "
             "search and gating entitlement — pick it from "
             "`list_doc_collections`. `product` and `version` are OPTIONAL "
-            "refinements within that collection, not a ranking hint. "
+            "refinements within that collection. "
             "Use this for VENDOR REFERENCE when you want a composed answer "
             "rather than chunks to read yourself; use `search_docs` for the "
             "raw chunks, `search_knowledge` for how THIS team does "
@@ -776,7 +782,7 @@ register_mcp_tool(
                     "maxLength": 128,
                     "description": (
                         f"OPTIONAL refinement within the collection, {_PRODUCT_VOCABULARY} "
-                        f"It is {_SCOPE_FILTERS_NOTE}"
+                        f"It is {_SCOPE_FORWARDING_NOTE}"
                     ),
                 },
                 "version": {
@@ -784,8 +790,8 @@ register_mcp_tool(
                     "minLength": 1,
                     "maxLength": 128,
                     "description": (
-                        f"OPTIONAL version refinement within the collection, {_VERSION_FORMAT} "
-                        f"It is {_SCOPE_FILTERS_NOTE}"
+                        f"OPTIONAL version refinement within the collection: {_VERSION_RELEASE} "
+                        f"It is {_SCOPE_FORWARDING_NOTE}"
                     ),
                 },
                 "limit": {

@@ -24,9 +24,13 @@ The ``search_docs`` seam routing (``collection`` → ``resolve_backend`` →
 ``backend.search``) is covered at the bottom: a collection with a fake
 backend makes ``search_docs`` return that backend's chunks, and the
 backend id never appears in the projected result (AC3). The per-collection
-scope-filter gate (#3912) is covered there too: product/version reach the
-backend only when the collection's ``backend.ref["scope_filters"]`` is
-``true``, while the ``docs_search_completed`` log keeps the requested values.
+scope gates (#3912) are covered there too: product/version reach the
+backend as a soft ``scope`` only when the collection's
+``backend.ref["scope"]`` is ``"soft"``, as ``metadata_filters`` only when
+its ``backend.ref["scope_filters"]`` is ``true`` (the soft gate wins when
+both are set), and not at all otherwise, down to the exact corpus request
+body; the ``docs_search_completed`` log keeps the requested values and
+names how they were sent.
 """
 
 from __future__ import annotations
@@ -41,6 +45,7 @@ import pytest
 import structlog
 
 import meho_backplane.auth.corpus as corpus_mod
+import meho_backplane.docs_search.service as service_mod
 from meho_backplane.auth.corpus import (
     CorpusChunk,
     CorpusSearchResponse,
@@ -58,7 +63,7 @@ from meho_backplane.docs_search.backends import (
     register_backend,
 )
 from meho_backplane.docs_search.backends import registry as registry_mod
-from meho_backplane.docs_search.service import DocsScope, forwarded_scope_filters
+from meho_backplane.docs_search.service import DocsScope, ForwardedScope, forwarded_scope
 from meho_backplane.settings import Settings, get_settings
 
 _JWT = "header.payload.signature-secret"
@@ -203,6 +208,7 @@ class _FakeBackend(SearchBackend):
         *,
         backend_ref: Any = None,
         metadata_filters: dict[str, Any] | None = None,
+        soft_scope: dict[str, str] | None = None,
         limit: int = 10,
     ) -> CorpusSearchResponse:
         self.calls.append(
@@ -211,6 +217,7 @@ class _FakeBackend(SearchBackend):
                 "query": query,
                 "backend_ref": backend_ref,
                 "metadata_filters": metadata_filters,
+                "soft_scope": soft_scope,
                 "limit": limit,
             }
         )
@@ -449,6 +456,7 @@ async def test_search_docs_routes_through_resolved_backend(_restore_registry: No
     call = fake.calls[0]
     assert call["backend_ref"] == ref
     assert call["metadata_filters"] == {"product": "nsx", "version": "9.0"}
+    assert call["soft_scope"] is None
     assert call["limit"] == 7
 
     # The projected result carries the fake backend's chunk, and neither
@@ -490,10 +498,14 @@ async def test_search_docs_unroutable_collection_raises(_restore_registry: None)
 
 
 # ---------------------------------------------------------------------------
-# The per-collection scope-filter gate (#3912)
+# The per-collection scope gates (#3912)
 # ---------------------------------------------------------------------------
 
-_SCOPE = DocsScope(collection_key="vmware", product="vsphere", version="8.0")
+#: A full release, sent unchanged by both gates (normalising it is the
+#: backend's job).
+_SCOPE = DocsScope(collection_key="vmware", product="vsphere", version="8.0.3.00400")
+_REQUESTED = {"product": "vsphere", "version": "8.0.3.00400"}
+_SOFT = {"product": "vsphere", "version": "8.0.3.00400", "source": "caller"}
 
 
 @pytest.mark.parametrize(
@@ -503,45 +515,122 @@ _SCOPE = DocsScope(collection_key="vmware", product="vsphere", version="8.0")
         {},
         {"endpoint": "https://fake.test"},
         {"scope_filters": False},
-        # Only the JSON boolean enables the gate; a truthy look-alike does not.
+        # Only the JSON boolean enables the filter gate; a truthy look-alike does not.
         {"scope_filters": "true"},
         {"scope_filters": 1},
+        # Only the exact string "soft" enables the soft gate.
+        {"scope": "SOFT"},
+        {"scope": " soft"},
+        {"scope": "hard"},
+        {"scope": True},
+        {"scope": {"mode": "soft"}},
+        {"scope": None},
     ],
 )
-def test_forwarded_scope_filters_off_unless_ref_sets_true(ref: dict[str, Any] | None) -> None:
-    """Absent, false or non-boolean ``scope_filters`` forwards no refinements."""
-    assert forwarded_scope_filters(_SCOPE, ref) == {}
+def test_forwarded_scope_off_unless_a_gate_is_on(ref: dict[str, Any] | None) -> None:
+    """Absent or look-alike gate values forward nothing: neither scope nor filters."""
+    assert forwarded_scope(_SCOPE, ref) == ForwardedScope(mode="none", filters={}, soft_scope={})
 
 
-def test_forwarded_scope_filters_on_forwards_refinements_unchanged() -> None:
-    """``scope_filters: true`` forwards ``as_filters()`` verbatim (no mapping)."""
+def test_forwarded_scope_filters_gate_forwards_refinements_unchanged() -> None:
+    """``scope_filters: true`` (no ``scope`` key) forwards ``as_filters()`` verbatim."""
     ref = {"endpoint": "https://fake.test", "scope_filters": True}
-    assert forwarded_scope_filters(_SCOPE, ref) == {"product": "vsphere", "version": "8.0"}
-    # Nothing requested → nothing forwarded, gate on or off.
-    assert forwarded_scope_filters(DocsScope(collection_key="vmware"), ref) == {}
+    assert forwarded_scope(_SCOPE, ref) == ForwardedScope(mode="filters", filters=_REQUESTED)
+
+
+def test_forwarded_scope_soft_gate_sends_values_unchanged_and_no_filters() -> None:
+    """``scope: "soft"`` sends the scope object with the values as given, no filters."""
+    ref = {"endpoint": "https://fake.test", "scope": "soft"}
+    forwarded = forwarded_scope(_SCOPE, ref)
+    assert forwarded == ForwardedScope(mode="soft", soft_scope=_SOFT)
+    assert forwarded.filters == {}
+
+
+def test_forwarded_scope_soft_wins_when_both_gates_are_set() -> None:
+    """Both gates set: the soft scope is sent and the filters are not."""
+    ref = {"scope": "soft", "scope_filters": True}
+    assert forwarded_scope(_SCOPE, ref) == ForwardedScope(mode="soft", soft_scope=_SOFT)
 
 
 @pytest.mark.parametrize(
-    ("ref", "expected_filters"),
+    ("scope", "expected"),
     [
-        ({"endpoint": "https://fake.test"}, None),
         (
-            {"endpoint": "https://fake.test", "scope_filters": True},
-            {"product": "vsphere", "version": "8.0"},
+            DocsScope(collection_key="vmware", product="vsphere"),
+            {"product": "vsphere", "source": "caller"},
+        ),
+        (
+            DocsScope(collection_key="vmware", version="9.1.1"),
+            {"version": "9.1.1", "source": "caller"},
+        ),
+        (
+            DocsScope(collection_key="vmware", version="8.0 U3"),
+            {"version": "8.0 U3", "source": "caller"},
         ),
     ],
 )
-async def test_search_docs_gate_controls_filters_and_log_keeps_request(
+def test_forwarded_scope_soft_omits_keys_not_given(
+    scope: DocsScope, expected: dict[str, str]
+) -> None:
+    """The soft scope carries only the keys the caller gave, unchanged."""
+    assert forwarded_scope(scope, {"scope": "soft"}).soft_scope == expected
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [{"scope": "soft"}, {"scope_filters": True}, {"scope": "soft", "scope_filters": True}],
+)
+def test_forwarded_scope_nothing_requested_sends_nothing(ref: dict[str, Any]) -> None:
+    """No product/version requested → nothing forwarded, whatever the gates."""
+    assert forwarded_scope(DocsScope(collection_key="vmware"), ref) == ForwardedScope()
+
+
+_GATE_CASES = [
+    # (ref, expected metadata_filters, expected soft_scope, scope_forwarded)
+    pytest.param({"endpoint": "https://fake.test"}, None, None, "none", id="off"),
+    pytest.param(
+        {"endpoint": "https://fake.test", "scope_filters": True},
+        _REQUESTED,
+        None,
+        "filters",
+        id="filters",
+    ),
+    pytest.param(
+        {"endpoint": "https://fake.test", "scope": "soft"}, None, _SOFT, "soft", id="soft"
+    ),
+    pytest.param(
+        {"endpoint": "https://fake.test", "scope": "soft", "scope_filters": True},
+        None,
+        _SOFT,
+        "soft",
+        id="both-soft-wins",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("ref", "expected_filters", "expected_scope", "expected_mode"), _GATE_CASES
+)
+async def test_search_docs_gates_control_forwarding_and_log_keeps_request(
     _restore_registry: None,
+    monkeypatch: pytest.MonkeyPatch,
     ref: dict[str, Any],
     expected_filters: dict[str, str] | None,
+    expected_scope: dict[str, str] | None,
+    expected_mode: str,
 ) -> None:
-    """The gate decides what reaches the backend; the log records the request.
+    """The gates decide what reaches the backend; the log records the request.
 
-    Gate off: the backend gets no ``metadata_filters``. Gate on: it gets the
-    refinements unchanged. Either way ``docs_search_completed`` carries the
-    requested product/version, plus whether they were forwarded.
+    Gate off: the backend gets neither ``metadata_filters`` nor a soft
+    scope. ``scope_filters`` on: the refinements as filters. ``scope``
+    ``"soft"`` on (alone or with ``scope_filters``): the soft scope and no
+    filters. Either way ``docs_search_completed`` carries the requested
+    product/version, plus ``scope_forwarded`` naming how they were sent.
     """
+    # Rebind a fresh proxy so ``capture_logs`` sees the event whatever an
+    # earlier test in this worker did to the cached module logger (the
+    # ``cache_logger_on_first_use`` hazard; see test_operations_ingest_jobs).
+    monkeypatch.setattr(service_mod, "_log", structlog.get_logger(service_mod.__name__))
     fake = _FakeBackend()
     register_backend(_FakeBackend.backend_type, fake)
     collection = _make_collection(backend={"type": "fake-rag", "ref": ref})
@@ -550,8 +639,57 @@ async def test_search_docs_gate_controls_filters_and_log_keeps_request(
         await search_docs(_make_operator(), "q", scope=_SCOPE, collection=collection)
 
     assert fake.calls[0]["metadata_filters"] == expected_filters
+    assert fake.calls[0]["soft_scope"] == expected_scope
     completed = [e for e in logs if e["event"] == "docs_search_completed"]
     assert len(completed) == 1
     assert completed[0]["product"] == "vsphere"
-    assert completed[0]["version"] == "8.0"
-    assert completed[0]["scope_filters_forwarded"] is (expected_filters is not None)
+    assert completed[0]["version"] == "8.0.3.00400"
+    assert completed[0]["scope_forwarded"] == expected_mode
+    assert "scope_filters_forwarded" not in completed[0]
+
+
+@pytest.mark.parametrize(
+    ("ref_extra", "extra_body"),
+    [
+        pytest.param({}, {}, id="off"),
+        pytest.param({"scope_filters": True}, {"metadata_filters": _REQUESTED}, id="filters"),
+        pytest.param({"scope": "soft"}, {"scope": _SOFT}, id="soft"),
+        pytest.param(
+            {"scope": "soft", "scope_filters": True}, {"scope": _SOFT}, id="both-soft-wins"
+        ),
+    ],
+)
+async def test_search_docs_corpus_request_body_per_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    ref_extra: dict[str, Any],
+    extra_body: dict[str, Any],
+) -> None:
+    """The exact JSON body the ``corpus-http`` backend receives, per gate.
+
+    The corpus refuses unknown request keys, so with the soft gate off the
+    body must be byte-for-byte what it was before the gate existed: the
+    gate-off case pins it to ``{"query", "top_k"}``. With a gate on, the
+    one added key is ``metadata_filters`` or ``scope``, never both.
+    """
+    _pin_settings(monkeypatch, corpus_service_token=_SERVICE_TOKEN, corpus_audience="")
+    captured: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"results": []})
+
+    _patch_async_client(monkeypatch, httpx.MockTransport(_handler))
+    collection = _make_collection(
+        backend={"type": CORPUS_HTTP_BACKEND_TYPE, "ref": {"endpoint": _CORPUS_URL, **ref_extra}},
+    )
+
+    await search_docs(_make_operator(), "snapshot depth", scope=_SCOPE, collection=collection)
+
+    import json
+
+    assert len(captured) == 1
+    assert json.loads(captured[0].content.decode()) == {
+        "query": "snapshot depth",
+        "top_k": 10,
+        **extra_body,
+    }

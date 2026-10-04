@@ -257,6 +257,42 @@ async def test_metadata_filters_and_audience_forwarded(monkeypatch: pytest.Monke
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("soft_scope", "expected_body"),
+    [
+        # No soft scope (None or empty): the body is exactly what it was
+        # before the key existed — the corpus refuses unknown request keys.
+        (None, {"query": "q", "top_k": 10}),
+        ({}, {"query": "q", "top_k": 10}),
+        (
+            {"product": "vsphere", "version": "8.0.3.00400", "source": "caller"},
+            {
+                "query": "q",
+                "top_k": 10,
+                "scope": {"product": "vsphere", "version": "8.0.3.00400", "source": "caller"},
+            },
+        ),
+    ],
+)
+async def test_soft_scope_rides_the_body_as_scope_only_when_given(
+    monkeypatch: pytest.MonkeyPatch,
+    soft_scope: dict[str, str] | None,
+    expected_body: dict[str, object],
+) -> None:
+    """``soft_scope`` is sent as the ``scope`` object, unchanged (#3912)."""
+    _pin_settings(monkeypatch, corpus_url=_CORPUS_URL, corpus_audience="")
+    captured: list[httpx.Request] = []
+    transport = _transport_capturing(captured, httpx.Response(200, json={"chunks": []}))
+    _patch_async_client(monkeypatch, transport, [])
+
+    await search_corpus(_make_operator(), "q", soft_scope=soft_scope)
+
+    import json
+
+    assert json.loads(captured[0].content.decode()) == expected_body
+
+
+@pytest.mark.asyncio
 async def test_timeout_is_bounded_by_setting(monkeypatch: pytest.MonkeyPatch) -> None:
     """The AsyncClient is built with the configured corpus timeout."""
     _pin_settings(monkeypatch, corpus_url=_CORPUS_URL, corpus_timeout_seconds=3.5)

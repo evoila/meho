@@ -11,15 +11,16 @@ tool (T4), and the CLI verb (T5):
    scope: a missing or blank value raises :class:`MissingDocsFilterError`,
    which the route renders HTTP 422 (fail-closed) and the MCP face renders
    ``-32602``. ``product`` / ``version`` demote to **optional refinements**
-   within the chosen collection — present, they ride
-   :meth:`DocsScope.as_filters` as ``metadata_filters`` when the
-   collection enables scope filters (:func:`forwarded_scope_filters`,
-   #3912); absent, the collection alone scopes the query. The filters are
-   scopes passed verbatim to the backend, never ranking weights
-   (#1178 / #1177). The ``collection`` key is a **router / entitlement
-   key**, not a metadata filter — it is kept out of
-   :meth:`DocsScope.as_filters` so it never leaks into the backend's
-   per-chunk ``metadata`` containment query.
+   within the chosen collection. Whether and how they reach the backend
+   is the collection's choice (:func:`forwarded_scope`, #3912): as a soft
+   ``scope`` (a ranking signal, never a filter) when its
+   ``backend.ref["scope"]`` is ``"soft"``, as ``metadata_filters`` (an
+   exact-match pre-filter) when its ``backend.ref["scope_filters"]`` is
+   ``true``, otherwise not at all; absent, the collection alone scopes the
+   query. Either way the values are passed verbatim. The ``collection``
+   key is a **router / entitlement key**, not a metadata filter — it is
+   kept out of :meth:`DocsScope.as_filters` so it never leaks into the
+   backend's per-chunk ``metadata`` containment query.
 
 2. :func:`search_docs` — call T2's :func:`~meho_backplane.auth.corpus.search_corpus`
    with the operator's forwarded JWT and the binary scope, then project
@@ -38,7 +39,7 @@ touches the raw query beyond forwarding it to the corpus.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 from pydantic import BaseModel, ConfigDict, Field
@@ -55,26 +56,48 @@ __all__ = [
     "DocsChunk",
     "DocsScope",
     "DocsSearchResult",
+    "ForwardedScope",
     "MissingDocsFilterError",
+    "ScopeForwarding",
     "build_docs_scope",
-    "forwarded_scope_filters",
+    "forwarded_scope",
     "search_docs",
 ]
 
 _log = structlog.get_logger(__name__)
 
-#: The optional refinement keys forwarded to the backend as
-#: ``metadata_filters`` within the chosen collection. Both are optional
+#: The optional refinement keys within the chosen collection, sent to the
+#: backend as ``metadata_filters`` or inside the soft ``scope`` when the
+#: collection opts in (:func:`forwarded_scope`, #3912). Both are optional
 #: under the collection-scoped posture (T3 #1552); the backend keys its
 #: per-chunk ``metadata`` off these names.
 _PRODUCT_KEY = "product"
 _VERSION_KEY = "version"
 
+#: The ``backend.ref`` key that opts a collection into the **soft scope**
+#: (#3912): the refinements travel as a ``scope`` object the backend ranks
+#: with and never filters on. Only the exact string :data:`_SOFT_SCOPE`
+#: enables it; absent or any other value leaves it off.
+_SCOPE_REF_KEY = "scope"
+_SOFT_SCOPE = "soft"
+
 #: The ``backend.ref`` key that opts a collection into forwarding the
-#: product/version refinements to its backend (#3912). Only the JSON
+#: refinements as **hard** ``metadata_filters`` (#3912). Only the JSON
 #: boolean ``true`` enables it; absent, ``false`` or any other value keeps
-#: the refinements out of the backend call.
+#: them out. A collection that also sets ``scope: "soft"`` gets the soft
+#: scope instead (the soft gate wins).
 _SCOPE_FILTERS_REF_KEY = "scope_filters"
+
+#: The ``source`` the soft scope carries: the values came from the caller's
+#: own ``product`` / ``version`` arguments (a later default filled from a
+#: target fingerprint names itself ``"default"``, #3920).
+_SCOPE_SOURCE_KEY = "source"
+_SCOPE_SOURCE_CALLER = "caller"
+
+#: How a backend call carried the requested refinements: ``"soft"`` (the
+#: ``scope`` object), ``"filters"`` (``metadata_filters``) or ``"none"``
+#: (not sent: the collection opts into neither, or nothing was requested).
+ScopeForwarding = Literal["soft", "filters", "none"]
 
 #: The mandatory binary-scope key. ``collection`` is the router /
 #: entitlement key (T3 #1552) — required on every query, but **not** a
@@ -117,8 +140,8 @@ class DocsScope(BaseModel):
     the query, it is not a per-chunk metadata field. Only positively-set
     refinement keys are emitted, so a query with no product/version carries
     no spurious ``None`` values the backend would have to special-case.
-    Whether the refinements reach the backend at all is the collection's
-    choice: :func:`forwarded_scope_filters` (#3912).
+    Whether and how the refinements reach the backend is the collection's
+    choice: :func:`forwarded_scope` (#3912).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -243,9 +266,10 @@ def build_docs_scope(
     by ``settings.corpus_require_filters`` (the legacy product+version gate),
     because every collection-scoped query *must* name a collection to route
     and entitle on. ``product`` / ``version`` are **optional refinements**
-    within the chosen collection: whatever is provided rides
-    :meth:`DocsScope.as_filters` as ``metadata_filters``, whatever is absent
-    simply widens the search inside the collection. Blank-after-strip values
+    within the chosen collection: whatever is provided reaches the backend
+    when the collection opts in (:func:`forwarded_scope`, #3912), as a soft
+    ``scope`` or as ``metadata_filters``; whatever is absent simply widens
+    the search inside the collection. Blank-after-strip values
     are treated as absent so a ``collection=" "`` cannot smuggle past the
     mandatory gate.
 
@@ -275,19 +299,55 @@ def build_docs_scope(
     )
 
 
-def forwarded_scope_filters(
+class ForwardedScope(BaseModel):
+    """What one backend call carries for the requested refinements (#3912).
+
+    Built by :func:`forwarded_scope`. At most one of :attr:`filters` and
+    :attr:`soft_scope` is non-empty, and :attr:`mode` names which one.
+    Frozen so the decision cannot drift between the backend call and the
+    log line that reports it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    #: Which form reached the backend (``"none"`` when nothing did).
+    mode: ScopeForwarding = "none"
+    #: The hard ``{key: scalar}`` filters: ``metadata_filters`` on search
+    #: (and, once #3911 wires it, ``filters`` on the upstream answer call).
+    #: Empty unless :attr:`mode` is ``"filters"``.
+    filters: dict[str, str] = Field(default_factory=dict)
+    #: The soft ``scope`` object: the requested ``product`` / ``version``
+    #: unchanged, plus ``source``. Empty unless :attr:`mode` is ``"soft"``.
+    soft_scope: dict[str, str] = Field(default_factory=dict)
+
+
+def forwarded_scope(
     scope: DocsScope,
     backend_ref: Mapping[str, Any] | None,
-) -> dict[str, str]:
-    """Return the refinements to send to the collection's backend (#3912).
+) -> ForwardedScope:
+    """Decide how the refinements reach the collection's backend (#3912).
 
-    ``product`` / ``version`` are matched by the backend as exact values
-    against its own per-document metadata, so they only help when they are
-    in the collection's vocabulary and the backend applies them the way the
-    caller expects. Whether that holds is a property of the collection, so
-    each collection opts in through ``backend.ref["scope_filters"] = true``.
-    Absent, ``false`` or any value other than the JSON boolean ``true``
-    sends no refinements and the collection alone scopes the query.
+    Two independent per-collection gates, both off by default:
+
+    * ``backend.ref["scope"] == "soft"`` sends the requested ``product`` /
+      ``version`` as a soft ``scope`` object,
+      ``{"product": …, "version": …, "source": "caller"}``. The backend
+      uses it to rank the asked release first and to label its answer;
+      it never filters on it, so version-agnostic documents (KB articles,
+      advisories) stay reachable. The values are sent as given (a full
+      release such as ``8.0.3.00400`` included): normalising them is the
+      backend's job. A key the caller did not give is omitted.
+    * ``backend.ref["scope_filters"] is True`` sends them as hard
+      ``metadata_filters``: an exact-match pre-filter over the backend's
+      per-document metadata, so it only helps when the values are in the
+      collection's vocabulary.
+
+    When both are set the soft scope wins: the scope is sent and no
+    filters are. Any other value of either key (``"SOFT"``, the string
+    ``"true"``, ``1``) counts as off. With neither gate on, nothing is
+    sent and the collection alone scopes the query, which is what a
+    backend that refuses unknown request keys needs until it accepts
+    ``scope``. Nothing requested means nothing sent, whatever the gates.
 
     The caller still records the *requested* ``product`` / ``version`` in
     its log and audit row; only what reaches the backend is gated. This is
@@ -299,12 +359,19 @@ def forwarded_scope_filters(
             router (``None`` for a collection without one).
 
     Returns:
-        :meth:`DocsScope.as_filters` when the collection enables scope
-        filters, else an empty dict.
+        The :class:`ForwardedScope` for the backend call.
     """
-    if backend_ref is None or backend_ref.get(_SCOPE_FILTERS_REF_KEY) is not True:
-        return {}
-    return scope.as_filters()
+    requested = scope.as_filters()
+    if not requested or backend_ref is None:
+        return ForwardedScope()
+    if backend_ref.get(_SCOPE_REF_KEY) == _SOFT_SCOPE:
+        return ForwardedScope(
+            mode="soft",
+            soft_scope={**requested, _SCOPE_SOURCE_KEY: _SCOPE_SOURCE_CALLER},
+        )
+    if backend_ref.get(_SCOPE_FILTERS_REF_KEY) is True:
+        return ForwardedScope(mode="filters", filters=requested)
+    return ForwardedScope()
 
 
 def _project_chunk(
@@ -364,13 +431,15 @@ async def search_docs(
     managed RAG and another on the JWT-forward corpus behind this one
     entrypoint, and the agent never sees which backend answered. The
     operator JWT is forwarded by the adapter (for the JWT-forward corpus
-    backend), the search is scoped by the collection (and, when the
-    collection enables scope filters, the optional product/version
-    refinements — :func:`forwarded_scope_filters`), and the cited chunks
-    are projected into MEHO's surface. The query itself is never logged
-    here — only its presence is implied; the route binds the SHA-256 hash
-    to the audit row. The ``docs_search_completed`` log records the
-    *requested* product/version and whether they were forwarded.
+    backend), the search is scoped by the collection (the optional
+    product/version refinements ride along as a soft ``scope`` or as
+    ``metadata_filters`` only when the collection opts in —
+    :func:`forwarded_scope`), and the cited chunks are projected into
+    MEHO's surface. The query itself is never logged here — only its
+    presence is implied; the route binds the SHA-256 hash to the audit
+    row. The ``docs_search_completed`` log records the *requested*
+    product/version and, as ``scope_forwarded``, how they were sent
+    (``"soft"``, ``"filters"`` or ``"none"``).
 
     *collection* is the **required** binary scope (T3 #1552): the caller
     (the REST route / MCP handler) has already resolved the
@@ -401,12 +470,13 @@ async def search_docs(
             to HTTP 503 (the backend id never appears in the 503).
     """
     resolved = resolve_backend(collection)
-    filters = forwarded_scope_filters(scope, resolved.ref)
+    forwarded = forwarded_scope(scope, resolved.ref)
     response = await resolved.backend.search(
         operator,
         query,
         backend_ref=resolved.ref,
-        metadata_filters=filters or None,
+        metadata_filters=forwarded.filters or None,
+        soft_scope=forwarded.soft_scope or None,
         limit=limit,
     )
     chunks = [_project_chunk(c, collection_key=scope.collection_key) for c in response.chunks]
@@ -416,7 +486,7 @@ async def search_docs(
         collection_key=scope.collection_key,
         product=scope.product,
         version=scope.version,
-        scope_filters_forwarded=bool(filters),
+        scope_forwarded=forwarded.mode,
         hit_count=len(chunks),
     )
     return DocsSearchResult(chunks=chunks)

@@ -67,6 +67,7 @@ other consumer.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -342,6 +343,7 @@ async def search_corpus(
     query: str,
     *,
     metadata_filters: dict[str, Any] | None = None,
+    soft_scope: Mapping[str, str] | None = None,
     limit: int = 10,
     corpus_url: str | None = None,
     audience: str | None = None,
@@ -370,6 +372,12 @@ async def search_corpus(
             mandatory product/version REQUIRE_FILTERS posture is enforced
             by the consuming route (T3, #1521), **not** here — this
             transport forwards whatever filters it is given.
+        soft_scope: Optional soft scope sent as the request's ``scope``
+            object (#3912), e.g. ``{"product": "vsphere", "version":
+            "8.0.3", "source": "caller"}``: the corpus ranks with it and
+            never filters on it. Omitted from the body when ``None`` or
+            empty, so a corpus that refuses unknown request keys gets the
+            body it always got.
         limit: Maximum number of chunks to request.
         corpus_url: The corpus search endpoint. ``None`` falls back to
             ``settings.corpus_url`` — the single-collection deploy that
@@ -403,6 +411,8 @@ async def search_corpus(
     payload: dict[str, Any] = {"query": query, "top_k": limit}
     if metadata_filters:
         payload["metadata_filters"] = metadata_filters
+    if soft_scope:
+        payload["scope"] = dict(soft_scope)
     if resolved_audience:
         payload["audience"] = resolved_audience
 

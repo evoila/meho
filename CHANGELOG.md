@@ -93,20 +93,27 @@ connector-related release-notes line.
 ### Changed
 
 - **Doc collections: `product` / `version` reach the backend only when the
-  collection opts in.** `search_docs` and `ask_docs` (MCP, REST, CLI and
-  the docs-chunk resource) now send the optional refinements to a
-  collection's backend only when its `backend.ref.scope_filters` is the
-  JSON boolean `true`. The default is off, which matches what the shared
-  corpus did with them until now (it ignored them). The requested values
-  are still audited and logged; `docs_search_completed` gains
-  `scope_filters_forwarded`. The `product` / `version` tool descriptions
-  now name the collection's own vocabulary (`vsphere` covers vCenter and
-  ESXi, `vcf` covers SDDC Manager; `MAJOR.MINOR` versions) and say to
-  leave `version` out for KB, CVE / security-advisory and build-number
-  questions. **Operators:** set the shared `vmware` collection's
-  `products` to the tokens it stamps, and turn `scope_filters` on only
-  after the corpus release that normalises the filters is deployed
-  (`docs/codebase/docs-search.md`, *Scope-filter gate*). (#3912)
+  collection opts in, as a soft scope or as filters.** `search_docs` and
+  `ask_docs` (MCP, REST, CLI and the docs-chunk resource) now send the
+  optional refinements to a collection's backend only through one of two
+  per-collection gates in its `backend.ref`, both off by default:
+  `"scope": "soft"` sends them as a soft `scope` object
+  (`{"product", "version", "source": "caller"}`, values unchanged, a
+  ranking signal the backend never filters on), and `"scope_filters":
+  true` sends them as hard `metadata_filters`. With both set, the soft
+  scope wins. With neither, the request body is exactly what it was, which
+  matches what the shared corpus did with the refinements until now (it
+  ignored them). Fan-out sends neither. The requested values are still
+  audited and logged; `docs_search_completed` gains `scope_forwarded`
+  (`soft`, `filters` or `none`). The `product` / `version` tool
+  descriptions now name the collection's own product vocabulary
+  (`vsphere` covers vCenter and ESXi, `vcf` covers SDDC Manager) and ask
+  for the release as precisely as the agent knows it (`9.1.1`, `8.0 U3`,
+  `8.0.3.00400`). **Operators:** set the shared `vmware` collection's
+  `products` to the tokens it stamps, and set its `"scope": "soft"` only
+  after the corpus release that accepts `scope` is deployed; leave
+  `scope_filters` off for it (`docs/codebase/docs-search.md`, *Scope
+  gates*). (#3912)
 
 ## [0.35.16] - 2026-09-27
 

@@ -18,9 +18,10 @@ Covers the collection-scoped contract layered on the G4.5-T4 capability gate:
   403-class ``-32602`` even though the tool is visible; with it → the
   query routes to the collection's backend.
 * **Collection scope routing:** the query reaches the resolved backend
-  with the optional product/version refinements as ``metadata_filters``
-  when the collection enables scope filters, and without them when it
-  does not (#3912);
+  with the optional product/version refinements as a soft ``scope`` when
+  the collection's ``backend.ref["scope"]`` is ``"soft"``, as
+  ``metadata_filters`` when it enables ``scope_filters``, and without them
+  when it enables neither (#3912);
   an unknown collection → ``-32602``, a *transiently* not-ready
   (``provisioning`` / ``rebuilding``) collection → ``-32603`` (retryable),
   a ``disabled`` collection → ``-32602`` (terminal,
@@ -75,9 +76,11 @@ _ENTITLED = frozenset({_DOCS_CAPABILITY, _VMWARE_CAP})
 _CORPUS_SEAM = "meho_backplane.docs_search.backends.corpus_http.search_corpus"
 
 #: A ``corpus-http`` binding whose collection opts into forwarding the
-#: product/version refinements (#3912). The default seed has no ``ref``, so
-#: the gate is off.
+#: product/version refinements as hard filters (#3912). The default seed
+#: has no ``ref``, so both gates are off.
 _SCOPE_FILTERS_ON: dict[str, Any] = {"type": "corpus-http", "ref": {"scope_filters": True}}
+#: A ``corpus-http`` binding whose collection opts into the soft scope (#3912).
+_SOFT_SCOPE_ON: dict[str, Any] = {"type": "corpus-http", "ref": {"scope": "soft"}}
 
 
 async def _mcp_audit_rows() -> list[AuditLog]:
@@ -257,13 +260,14 @@ def test_refinement_descriptions_use_the_collection_vocabulary(
     docs_client: tuple[TestClient, Operator],
     tool_name: str,
 ) -> None:
-    """``product`` / ``version`` describe the values the collection stamps (#3912).
+    """``product`` / ``version`` guide the agent to values that work (#3912).
 
-    The backend matches the refinements as exact values, so a ``vcenter``
-    example would steer agents to a value the shared collection never
-    stamps (it stamps ``vsphere``), and a patch version (``8.0.3``) matches
-    nothing. Both descriptions also say the refinements are ignored unless
-    the collection enables scope filters.
+    ``product`` names the collection's own tokens (``vsphere``, never a
+    ``vcenter`` example). ``version`` asks for the release as precisely as
+    the agent knows it (a soft scope ranks it and excludes nothing), so it
+    no longer asks for ``MAJOR.MINOR`` only or says to leave it out for
+    KB / CVE / build-number questions. Both say the refinements are ignored
+    unless the collection enables scope forwarding.
     """
     client, _op = docs_client
     response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
@@ -274,11 +278,16 @@ def test_refinement_descriptions_use_the_collection_vocabulary(
 
     assert "'vsphere'" in product
     assert "list_doc_collections" in product
-    assert "MAJOR.MINOR" in version
-    assert "'8.0.3'" in version  # named as the form NOT to send
+    for release in ("'9.1.1'", "'8.0 U3'", "'8.0.3.00400'"):
+        assert release in version
+    assert "as precisely as you know it" in version
+    assert "MAJOR.MINOR" not in version
+    assert "Omit it for" not in version
     for description in (product, version):
         assert "vcenter" not in description
-        assert "scope filters" in description
+        assert "scope forwarding" in description
+    # The tool description no longer calls the refinements "not a ranking hint".
+    assert "ranking hint" not in tools_by_name[tool_name]["description"]
 
 
 def test_search_docs_hidden_from_provisioned_read_only_operator() -> None:
@@ -430,6 +439,7 @@ def test_tools_call_search_docs_routes_to_collection_backend(
     assert captured["query"] == "config maximums"
     assert captured["limit"] == 5
     assert captured["metadata_filters"] == {"product": "nsx", "version": "9.0"}
+    assert captured["soft_scope"] is None
     assert captured["operator"].tenant_id == op.tenant_id
 
 
@@ -614,6 +624,48 @@ def test_tools_call_search_docs_scope_filters_off_sends_no_refinements(
     assert response.status_code == 200
     assert response.json()["result"]["isError"] is False
     assert fake.captured["metadata_filters"] is None  # type: ignore[attr-defined]
+    assert fake.captured["soft_scope"] is None  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_search_docs_soft_scope_sends_release_unchanged(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """Soft gate on (#3912): the release travels as the soft scope, as given.
+
+    The collection's ``backend.ref`` sets ``scope: "soft"``, so the backend
+    gets ``{product, version, source: "caller"}`` with the full release
+    unchanged and no ``metadata_filters``.
+    """
+    client, _op = docs_client
+    _seed_collection_sync(backend=_SOFT_SCOPE_ON)
+    fake = _fake_corpus(_SAMPLE_CHUNK)
+    with patch(_CORPUS_SEAM, new=fake):
+        response = post_mcp(
+            client,
+            {
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": {
+                    "name": "search_docs",
+                    "arguments": {
+                        "query": "snapshot depth",
+                        "collection": "vmware",
+                        "product": "vsphere",
+                        "version": "8.0.3.00400",
+                    },
+                },
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["result"]["isError"] is False
+    assert fake.captured["metadata_filters"] is None  # type: ignore[attr-defined]
+    assert fake.captured["soft_scope"] == {  # type: ignore[attr-defined]
+        "product": "vsphere",
+        "version": "8.0.3.00400",
+        "source": "caller",
+    }
 
 
 # ---------------------------------------------------------------------------

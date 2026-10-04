@@ -124,6 +124,7 @@ class SearchBackend(ABC):
         *,
         backend_ref: Mapping[str, Any] | None = None,
         metadata_filters: dict[str, Any] | None = None,
+        soft_scope: Mapping[str, str] | None = None,
         limit: int = 10,
     ) -> CorpusSearchResponse:
         """Search this backend as *operator*, returning corpus-shaped chunks.
@@ -144,6 +145,13 @@ class SearchBackend(ABC):
                 (e.g. ``{"product": "vsphere", "version": "8.0"}``). The
                 mandatory-filter posture is enforced by the caller, not
                 here — the adapter forwards whatever it is given.
+            soft_scope: Optional soft scope (#3912), e.g.
+                ``{"product": "vsphere", "version": "8.0.3", "source":
+                "caller"}``: a ranking / labelling signal, never a filter.
+                The caller sends it only to a collection that opts in
+                (``backend.ref["scope"] == "soft"``); ``None`` sends
+                nothing, so a backend that refuses unknown request keys
+                sees the request it always saw.
             limit: Maximum number of chunks to request.
 
         Returns:

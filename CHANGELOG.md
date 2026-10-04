@@ -90,6 +90,21 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Security
+
+- Backplane image base-OS packages patched for the `image` workflow's
+  trivy CRITICAL/HIGH promotion gate: `openssl`, `libssl3t64` and
+  `openssl-provider-legacy` are raised to `3.5.7-1~deb13u3`
+  (CVE-2026-75804, CVE-2026-84782, both HIGH) and `libpcre2-8-0` to
+  `10.46-1~deb13u3` (CVE-2026-103111, HIGH). All four were already in the
+  runtime stage's targeted `apt-get --only-upgrade` layer, but CI's layer
+  cache kept serving that layer with the `~deb13u2` versions because its
+  `RUN` text had not changed. The layer now states a minimum version per
+  Debian source package inside the `RUN` and fails the build below it, so
+  raising a floor is the edit that refreshes the cached layer, and a cached
+  layer can never hold less than the floors it states. No new package
+  enters the image and the base digest is unchanged. (#3921)
+
 ### Added
 
 - `ask_docs` can take its answer from the collection backend's own

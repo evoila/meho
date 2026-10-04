@@ -90,6 +90,8 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.35.17] - 2026-10-04
+
 ### Security
 
 - Backplane image base-OS packages patched for the `image` workflow's
@@ -104,12 +106,18 @@ connector-related release-notes line.
   raising a floor is the edit that refreshes the cached layer, and a cached
   layer can never hold less than the floors it states. No new package
   enters the image and the base digest is unchanged. (#3921)
+- Python dependencies patched for the same trivy gate. PyJWT moves from
+  2.13.0 to 2.15.0 (CVE-2026-102268, CRITICAL; CVE-2026-102266,
+  CVE-2026-102267, CVE-2026-102271, CVE-2026-102272 and CVE-2026-102273,
+  HIGH; all fixed in 2.14.0) and urllib3 from 2.7.0 to 2.8.0
+  (CVE-2026-97687 and CVE-2026-97689, HIGH). Only `backend/uv.lock`
+  changes; no MEHO code changes. (#3910)
 
 ### Added
 
 - `ask_docs` can take its answer from the collection backend's own
-  grounded-answer endpoint (#3911). A `corpus-http` collection opts in
-  with `backend.ref["answer"] = "upstream"` (optionally
+  grounded-answer endpoint (#3911 / #3919). A `corpus-http` collection
+  opts in with `backend.ref["answer"] = "upstream"` (optionally
   `answer_endpoint`; by default the search URL with its last path segment
   replaced by `ask`). It is **off by default**: no collection changes on
   upgrade, and opting one in moves its answers from the backplane's model
@@ -128,7 +136,7 @@ connector-related release-notes line.
   Changing only `answer` / `answer_endpoint` keeps a collection's
   readiness.
 - Docs calls now log which chunks they returned and cited, never content
-  (#3915). `docs_search_completed`, the fan-out and multi-query retrieval
+  (#3915 / #3918). `docs_search_completed`, the fan-out and multi-query retrieval
   events and the `ask_docs` completion events carry `hit_chunk_ids` (in
   rank order, at most 50) and `hit_source_refs` (the normalised KB URL or
   `meho://` ref, never a storage path); the fan-out event also lists each
@@ -165,9 +173,11 @@ connector-related release-notes line.
   (`{"product", "version", "source": "caller"}`, values unchanged, a
   ranking signal the backend never filters on), and `"scope_filters": true` sends them as
   hard `metadata_filters`. With both set, the soft scope wins. With
-  neither, the request body is exactly what it was, which matches what the
-  shared corpus did with the refinements until now (it ignored them).
-  Fan-out sends neither. The upstream answer call of a collection with
+  neither, they are no longer sent. 0.35.16 sent them as
+  `metadata_filters`; the shared corpus ignored them, so its results do not
+  change, but a collection whose backend applied them as filters sets
+  `"scope_filters": true` to keep that. Fan-out sends neither. The
+  upstream answer call of a collection with
   `"answer": "upstream"` (#3911) follows the same gates: the soft scope as
   `scope`, the hard filters as `filters`, and with both gates off its body
   is unchanged. The requested values are still audited and logged;
@@ -182,11 +192,11 @@ connector-related release-notes line.
   `products` to the tokens it stamps, and set its `"scope": "soft"` only
   after the corpus release that accepts `scope` is deployed; leave
   `scope_filters` off for it (`docs/codebase/docs-search.md`, *Scope
-  gates*). (#3912)
+  gates*). (#3912 / #3917)
 - `CONTRIBUTING.md` has a new section, *Write in plain English*. Many
   people who work on MEHO read English as a second language, so issues,
   pull requests, commit messages, code comments and docs should be easy to
-  understand on the first read. (#3922)
+  understand on the first read. (#3922 / #3923)
 
 ## [0.35.16] - 2026-09-27
 

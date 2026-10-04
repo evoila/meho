@@ -9,6 +9,40 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.35.17](https://github.com/evoila/meho/releases/tag/v0.35.17) — 2026-10-04
+
+- **A documentation collection can now answer questions with its own
+  answer service.** `ask_docs` used to search a collection and then
+  write the answer with MEHO's own model. If a collection's
+  documentation service has its own answer endpoint, MEHO can now pass
+  the question to it and return that answer and its citations, in the
+  same response shape as before. This is off by default. An
+  administrator turns it on for one collection at a time and can turn
+  it off again with one command. The console's Ask mode, the REST API
+  and MCP now all answer through the same code.
+- **The product and version you ask about reach a documentation service
+  only when its collection is set up for them.** When you give
+  `search_docs` or `ask_docs` a product or version, MEHO now passes it
+  on only if the collection asks for it: as a hint that ranks the
+  matching release first, or as a strict filter. Both are off by
+  default. MEHO used to send these values as filters, and the shared
+  VMware documentation service ignored them, so its results do not
+  change. The tool descriptions now also say which product names and
+  version formats to use.
+- **Documentation answers are easier to trace in the logs.** Every
+  `search_docs` and `ask_docs` call now logs the IDs of the chunks it
+  found and the IDs of the chunks the answer cited, so you can see
+  whether a wrong answer came from the search or from the answer step.
+  The logs hold IDs and source references only, never the question or
+  the document text. A new setting can also log the question while you
+  debug; it is off by default. A new optional alert warns when searches
+  for a product or version keep finding nothing.
+- **Security fixes in the container image.** OpenSSL and PCRE2 in the
+  base image, and the PyJWT and urllib3 Python libraries, are updated to
+  versions that fix known vulnerabilities. The image build now checks a
+  minimum version for each security-patched system package and stops if
+  one is older.
+
 ## [v0.35.16](https://github.com/evoila/meho/releases/tag/v0.35.16) — 2026-09-27
 
 - **Breaking: creating a VCF Automation API token now names the Vault

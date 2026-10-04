@@ -12,10 +12,10 @@ rc-series release step reconciles against.
 
 | Measurement | Value | How measured |
 |---|---|---|
-| Date | 2026-09-22 | — |
-| CHANGELOG revision | `64d1ad28` (`main`, v0.35.12 + `[Unreleased]`) | `git log -1 --oneline` |
-| `### Security` headings | **77** | `grep -cE "^### Security" CHANGELOG.md` |
-| Ledger rows below | **77** | must equal the heading count |
+| Date | 2026-10-04 (row 78 added; rows 1–77 measured 2026-09-22) | — |
+| CHANGELOG revision | rows 1–77: `64d1ad28` (`main`, v0.35.12 + `[Unreleased]`); row 78: the v0.35.17 release-cutting PR (`[0.35.17]`) | `git log -1 --oneline` |
+| `### Security` headings | **78** | `grep -cE "^### Security" CHANGELOG.md` |
+| Ledger rows below | **78** | must equal the heading count |
 | Published GHSAs on `evoila/meho` | **0** | `gh api /repos/evoila/meho/security-advisories --jq 'length'` |
 | Externally reported vulnerabilities cited in CHANGELOG | 0 | every entry cites an internal tracker item, an internal review finding, or a scanner alert |
 | Age of `SECURITY.md` policy | since the first commit (`1684c8ca`, 2026-05-09) | `git log --diff-filter=A -- SECURITY.md` |
@@ -77,14 +77,18 @@ statement on #2661 cites this file's commit.
 ## Ledger
 
 Rows are in CHANGELOG order (newest first). *Line* is the heading's
-line number at revision `64d1ad28`; it drifts as the CHANGELOG grows,
-so the stable key is *(version, heading title / first bullet)*. Where
+line number at revision `64d1ad28` (for a row added later, at the
+release-cutting PR that added it); it drifts as the CHANGELOG grows,
+so the stable key is *(version, heading title / first bullet)*. A row
+added after the first snapshot takes the next free number and still
+goes in CHANGELOG order, so a row's number never changes. Where
 one heading carries several bullets the row covers all of them and the
 summary says so. Internal tracker references (`meho-internal#N`) are
 the private finding behind the fix.
 
 | # | Version | Line | Summary | Class | Disposition |
 |---|---|---|---|---|---|
+| 78 | 0.35.17 | 95 | Two bullets: base-image `openssl` / `libssl3t64` / `openssl-provider-legacy` raised to `3.5.7-1~deb13u3` (CVE-2026-75804, CVE-2026-84782) and `libpcre2-8-0` to `10.46-1~deb13u3` (CVE-2026-103111), with a build-time minimum version per Debian source package so the cached apt layer cannot keep older versions (#3921); PyJWT 2.15.0 (CVE-2026-102268 and five more) and urllib3 2.8.0 (CVE-2026-97687, CVE-2026-97689) (#3910). | dep | N/A — upstream advisory |
 | 1 | 0.35.4 | 157 | `vmware.composite.vm.guest.file.read` non-2xx error built from response metadata only; hostile `Content-Encoding` collapses to a fixed label; composite-count drift guard (#3718 / #3720 / #3768). | hardening | N/A — hardening |
 | 2 | 0.35.3 | 176 | Login-bearing vSphere guest composites reclassified `credential_write` so the flight recorder never records bodies — safe-tier reads could retain the in-guest login password in the 30-day trace store (#3717 / #3718). | vuln | Owed — decision pending |
 | 3 | 0.35.2 | 201 | Two bullets: parked `credential_write` secret values kept off approval rows and approval read surfaces via encrypted one-time hand-off (#3537 / #3664); OVF property values (appliance credentials) redacted from captured deploy bodies (#3698). | vuln | Owed — decision pending |
@@ -168,10 +172,10 @@ the private finding behind the fix.
 | Class | Rows | Disposition today |
 |---|---|---|
 | vuln — MEHO-code vulnerability | **36** (rows 2–5, 7–9, 12, 15, 20, 21, 24–26, 30–33, 35, 37, 38, 40, 43, 47, 59, 62, 64, 65, 67–69, 71, 73, 74, 76, 77; row 4 also carries a dependency bump) | 36 × Owed — decision pending; 0 published; 0 exempt |
-| dep — dependency / base-image CVE patch | **5** (rows 34, 44, 45, 46, 51) | N/A — upstream advisory |
+| dep — dependency / base-image CVE patch | **6** (rows 34, 44, 45, 46, 51, 78) | N/A — upstream advisory |
 | hardening — no demonstrated vulnerability | **32** (rows 1, 6, 10, 11, 13, 14, 16–18, 22, 23, 27–29, 36, 41, 42, 48, 50, 52, 53, 55–58, 60, 61, 63, 66, 70, 72, 75) | N/A — hardening |
 | docs — docs-only or non-vulnerability | **4** (rows 19, 39, 49, 54) | N/A — no vulnerability |
-| **Total** | **77** | |
+| **Total** | **78** | |
 
 **Gate 2 status at this snapshot: open.** 36 rows await **publication**
 (`security-advisories` returns 0). The only exemption ground the policy

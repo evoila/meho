@@ -1897,6 +1897,14 @@ class Settings(BaseModel):
     #: seconds. A slow corpus raises ``CorpusUnavailable`` rather than
     #: blocking the event loop.
     corpus_timeout_seconds: float = Field(default=10.0, gt=0)
+    #: Bound on the corpus **answer** request (connect / read / write), in
+    #: seconds (#3911). Separate from ``corpus_timeout_seconds`` because a
+    #: grounded answer runs retrieval plus one or more model calls on the
+    #: backend: a collection that opts in to the backend's answer endpoint
+    #: (``backend.ref["answer"] == "upstream"``) would time out at the 10 s
+    #: search bound. Keep it below any proxy read timeout in front of the
+    #: corpus, so the backplane gives up first and maps it to a typed 503.
+    corpus_answer_timeout_seconds: float = Field(default=60.0, gt=0)
     #: Whether the ``search_docs`` route (T3, #1521) must reject a query
     #: that carries no product/version filter (REQUIRE_FILTERS). Default
     #: ``True`` — fail-closed scope discipline. Consumed by T3, not by the
@@ -2653,6 +2661,9 @@ def get_settings() -> Settings:
         corpus_service_token=os.environ.get("CORPUS_SERVICE_TOKEN", "").strip(),
         corpus_timeout_seconds=float(
             os.environ.get("CORPUS_TIMEOUT_SECONDS", "10.0"),
+        ),
+        corpus_answer_timeout_seconds=float(
+            os.environ.get("CORPUS_ANSWER_TIMEOUT_SECONDS", "60.0"),
         ),
         corpus_require_filters=parse_bool_env(
             os.environ.get("CORPUS_REQUIRE_FILTERS", "true"),

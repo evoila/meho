@@ -18,7 +18,9 @@ to its generic catch.
 
 from __future__ import annotations
 
-from meho_backplane.auth.corpus import CorpusUnavailable
+import pytest
+
+from meho_backplane.auth.corpus import CorpusAnswerError, CorpusUnavailable
 from meho_backplane.docs_search.answer_errors import (
     ANSWER_ERROR_DETAIL,
     CAUSE_CLIENT_UNAVAILABLE,
@@ -27,6 +29,10 @@ from meho_backplane.docs_search.answer_errors import (
     CAUSE_SYNTHESIS_CITATION_RESOLUTION,
     CAUSE_SYNTHESIS_PARSE,
     CAUSE_SYNTHESIS_TRUNCATED,
+    CAUSE_UPSTREAM_ANSWER_UNAVAILABLE,
+    CAUSE_UPSTREAM_ERROR,
+    CAUSE_UPSTREAM_RATE_LIMITED,
+    CAUSE_UPSTREAM_REJECTED,
     LEG_CORPUS,
     LEG_EXPAND,
     LEG_MODEL,
@@ -169,3 +175,67 @@ def test_to_error_data_is_json_safe_envelope() -> None:
     assert all(isinstance(v, str) for v in data.values())
     # The family classifier is the stable snake_case token.
     assert data["detail"] == "ask_docs_failed"
+
+
+# ---------------------------------------------------------------------------
+# Upstream answer endpoint failures (#3911)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("kind", "status", "leg", "cause"),
+    [
+        (CorpusAnswerError.KIND_REJECTED, 422, LEG_CORPUS, CAUSE_UPSTREAM_REJECTED),
+        (CorpusAnswerError.KIND_SERVER_ERROR, 502, LEG_CORPUS, CAUSE_UPSTREAM_ERROR),
+        (
+            CorpusAnswerError.KIND_ANSWER_UNAVAILABLE,
+            503,
+            LEG_MODEL,
+            CAUSE_UPSTREAM_ANSWER_UNAVAILABLE,
+        ),
+        (CorpusAnswerError.KIND_RATE_LIMITED, 503, LEG_MODEL, CAUSE_UPSTREAM_RATE_LIMITED),
+        (CorpusAnswerError.KIND_MALFORMED, 200, LEG_SYNTHESIS, CAUSE_SYNTHESIS_PARSE),
+    ],
+)
+def test_upstream_answer_error_maps_to_leg_and_cause(
+    kind: str, status: int, leg: str, cause: str
+) -> None:
+    """Each upstream-answer failure kind lands in one existing leg with its own cause."""
+    err = classify_answer_error(CorpusAnswerError("upstream failed", kind=kind, status=status))
+    assert isinstance(err, AskDocsAnswerError)
+    assert (err.leg, err.cause) == (leg, cause)
+
+
+def test_upstream_rejection_carries_upstream_status() -> None:
+    """A 4xx names the upstream status on the envelope (no body)."""
+    err = classify_answer_error(
+        CorpusAnswerError("rejected", kind=CorpusAnswerError.KIND_REJECTED, status=404)
+    )
+    assert err is not None
+    data = err.to_error_data()
+    assert data["upstream_status"] == 404
+    assert "retry_after" not in data
+
+
+def test_upstream_rate_limit_carries_retry_after() -> None:
+    """A rate-limited upstream answer carries ``retry_after`` on the envelope."""
+    err = classify_answer_error(
+        CorpusAnswerError(
+            "rate limited",
+            kind=CorpusAnswerError.KIND_RATE_LIMITED,
+            status=503,
+            retry_after=7,
+        )
+    )
+    assert err is not None
+    assert err.retry_after == 7
+    data = err.to_error_data()
+    assert data["retry_after"] == 7
+    assert "upstream_status" not in data
+
+
+def test_local_envelope_has_no_upstream_fields() -> None:
+    """The local pipeline's envelope keeps exactly its four keys."""
+    err = classify_answer_error(CorpusUnavailable("corpus unreachable: ConnectError"))
+    assert err is not None
+    assert set(err.to_error_data()) == {"detail", "leg", "cause", "message"}

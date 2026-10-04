@@ -67,8 +67,9 @@ other consumer.
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
+from typing import Any, Final
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -90,13 +91,20 @@ from meho_backplane.targets.ssrf_guard import (
 )
 
 __all__ = [
+    "CorpusAnswerError",
     "CorpusChunk",
     "CorpusEndpointBlockedError",
     "CorpusSearchResponse",
     "CorpusStatusResponse",
     "CorpusUnavailable",
+    "UpstreamAnswer",
+    "UpstreamAnswerTiming",
+    "UpstreamCitation",
+    "UpstreamHit",
+    "ask_corpus",
     "corpus_endpoint_host",
     "corpus_status",
+    "derive_answer_url",
     "derive_status_url",
     "search_corpus",
 ]
@@ -119,6 +127,51 @@ class CorpusUnavailable(RuntimeError):  # noqa: N818 -- "Unavailable" reads bett
 
     def __init__(self, message: str, *, status: int | None = None) -> None:
         self.status = status
+        super().__init__(message)
+
+
+class CorpusAnswerError(RuntimeError):
+    """The corpus answer endpoint responded, but not with a usable answer (#3911).
+
+    :func:`ask_corpus` raises this for every outcome where the endpoint
+    *responded*: a non-2xx status, or a 2xx body that does not parse. The
+    answer seam can then name *how* it failed instead of collapsing every
+    cause into one "unavailable". A transport failure (unreachable, timeout,
+    an unconfigured or blocked endpoint) stays :class:`CorpusUnavailable`,
+    exactly as on the search path.
+
+    ``kind`` is one of the ``KIND_*`` constants; ``status`` is the upstream
+    HTTP status; ``retry_after`` is the upstream ``Retry-After`` in whole
+    seconds when a rate-limited answer sent one. The response body is
+    **never** attached, so an upstream error page cannot leak through the
+    error envelope.
+    """
+
+    #: A 4xx (or any other non-2xx below 500): the endpoint rejected the
+    #: request. A contract or configuration fault, not an outage.
+    KIND_REJECTED: Final[str] = "rejected"
+    #: A 503 carrying the backend's ``llm_unavailable`` code: the backend has
+    #: no answer model.
+    KIND_ANSWER_UNAVAILABLE: Final[str] = "answer_unavailable"
+    #: A 503 carrying the backend's ``llm_rate_limited`` code, or a 429: the
+    #: backend's answer model is throttled. Retryable.
+    KIND_RATE_LIMITED: Final[str] = "rate_limited"
+    #: Any other 5xx.
+    KIND_SERVER_ERROR: Final[str] = "server_error"
+    #: A 2xx whose body is not JSON or does not match :class:`UpstreamAnswer`.
+    KIND_MALFORMED: Final[str] = "malformed"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: str,
+        status: int,
+        retry_after: int | None = None,
+    ) -> None:
+        self.kind = kind
+        self.status = status
+        self.retry_after = retry_after
         super().__init__(message)
 
 
@@ -430,6 +483,280 @@ async def search_corpus(
         )
 
     return _parse_2xx_body(response, CorpusSearchResponse, event_prefix="corpus")
+
+
+class UpstreamHit(CorpusChunk):
+    """One retrieved chunk of an upstream answer (``POST /ask?include=hits``).
+
+    The search-hit shape (:class:`CorpusChunk`, with its ``text`` /
+    ``source_uri`` aliases) plus the page identity the answer endpoint sends
+    and the citation title is derived from (#3911): ``filename``,
+    ``breadcrumb`` and ``heading_path``. ``None`` / absent normalise to empty
+    so the title rule reads one shape.
+    """
+
+    filename: str = ""
+    breadcrumb: str = ""
+    heading_path: list[str] = Field(default_factory=list)
+
+    @field_validator("filename", "breadcrumb", mode="before")
+    @classmethod
+    def _none_to_empty_str(cls, value: object) -> object:
+        return "" if value is None else value
+
+    @field_validator("heading_path", mode="before")
+    @classmethod
+    def _none_to_empty_list(cls, value: object) -> object:
+        return [] if value is None else value
+
+
+class UpstreamCitation(BaseModel):
+    """One citation of an upstream answer: which hit backs which ``[N]`` marker.
+
+    ``chunk_index`` is the 0-based position of the cited chunk in the list
+    the backend's answer model saw -- the ``N`` of the ``[N]`` markers in the
+    answer text. It is **not** a position in the returned ``hits`` (those come
+    back reordered to citation order), so a citation is matched to its hit by
+    ``chunk_id`` only. The quote and the per-citation page fields are not
+    consumed.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="ignore")
+
+    chunk_index: int
+    chunk_id: str
+
+
+class UpstreamAnswerTiming(BaseModel):
+    """The backend's own timing for one answer, logged (never returned)."""
+
+    model_config = ConfigDict(frozen=True, extra="ignore")
+
+    total_ms: float | None = None
+    llm_ms: float | None = None
+
+
+class UpstreamAnswer(BaseModel):
+    """Parsed upstream grounded answer (``POST /ask?include=hits``, #3911).
+
+    The consumer-side adapter over the corpus's answer endpoint, consumed
+    only for a collection that opts in (``backend.ref["answer"] ==
+    "upstream"``). Pins the fields the backplane maps: the ``answer`` text
+    with its ``[N]`` markers, the ``citations`` (``chunk_index`` +
+    ``chunk_id``), the retrieved ``hits`` and the backend ``timing``.
+    ``extra="ignore"`` absorbs everything else (the echoed ``query``, quotes,
+    page numbers, ``score_kind``).
+
+    ``hits`` is **required**: the request always asks for ``include=hits``,
+    and a citation can only be resolved against the hits. A 2xx body without
+    them fails parse loudly (the #1732 posture) instead of reading back as an
+    unresolvable answer.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="ignore")
+
+    answer: str = Field(min_length=1)
+    citations: list[UpstreamCitation] = Field(default_factory=list)
+    hits: list[UpstreamHit]
+    timing: UpstreamAnswerTiming = Field(default_factory=UpstreamAnswerTiming)
+
+
+#: The answer endpoint's machine error codes the transport classifies on (the
+#: ``error.code`` of the backend's JSON error body). Only these two are read;
+#: any other body is treated as an unclassified error and never echoed.
+_UPSTREAM_CODE_ANSWER_UNAVAILABLE: Final[str] = "llm_unavailable"
+_UPSTREAM_CODE_RATE_LIMITED: Final[str] = "llm_rate_limited"
+
+
+def derive_answer_url(search_url: str) -> str:
+    """Derive the corpus answer URL from its *search_url* (#3911).
+
+    The answer endpoint sits beside the search endpoint, so its URL is the
+    search URL with the **last path segment** replaced by ``ask``
+    (``https://corpus/search`` -> ``https://corpus/ask``,
+    ``https://corpus/v1/search`` -> ``https://corpus/v1/ask``). A trailing
+    slash is ignored, and a search URL with no path maps to ``/ask``. Query
+    string and fragment are dropped: they are request shape, not endpoint
+    identity. A collection whose answer endpoint lives elsewhere names it
+    explicitly in ``backend.ref["answer_endpoint"]``.
+    """
+    parts = urlsplit(search_url)
+    head, _sep, _last = parts.path.rstrip("/").rpartition("/")
+    return urlunsplit((parts.scheme, parts.netloc, f"{head}/ask", "", ""))
+
+
+def _retry_after_seconds(value: str | None) -> int | None:
+    """Parse a ``Retry-After`` header into whole non-negative seconds.
+
+    Accepts both RFC 9110 forms: delta-seconds and an HTTP-date (converted to
+    the seconds remaining, floored at 0). Anything unparseable is ``None``,
+    so a garbled header is dropped rather than forwarded.
+    """
+    if value is None or not value.strip():
+        return None
+    raw = value.strip()
+    if raw.isdigit():
+        return int(raw)
+    try:
+        when = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        return None
+    return max(0, int((when - datetime.now(UTC)).total_seconds()))
+
+
+def _upstream_error_code(response: httpx.Response) -> str | None:
+    """Return the backend's ``error.code`` when it is one the transport reads.
+
+    The answer endpoint renders an error as ``{"error": {"code": ...}}``. Only
+    the two codes the error table classifies on are returned; anything else
+    (a proxy error page, another code, a non-JSON body) is ``None``, so no
+    upstream-chosen string reaches a log or an error envelope.
+    """
+    try:
+        body: Any = response.json()
+    except ValueError:
+        return None
+    error = body.get("error") if isinstance(body, dict) else None
+    code = error.get("code") if isinstance(error, dict) else None
+    if code in (_UPSTREAM_CODE_ANSWER_UNAVAILABLE, _UPSTREAM_CODE_RATE_LIMITED):
+        return str(code)
+    return None
+
+
+def _classify_answer_failure(response: httpx.Response) -> CorpusAnswerError:
+    """Map a non-2xx answer response onto a typed :class:`CorpusAnswerError`.
+
+    * 429, or a 503 with the ``llm_rate_limited`` code -> rate limited, with
+      the upstream ``Retry-After`` carried along;
+    * a 503 with the ``llm_unavailable`` code -> no answer model;
+    * any other 5xx -> server error;
+    * everything else (4xx, and the unexpected 1xx / 3xx) -> rejected.
+    """
+    status = response.status_code
+    code = _upstream_error_code(response) if status == 503 else None
+    if status == 429 or code == _UPSTREAM_CODE_RATE_LIMITED:
+        return CorpusAnswerError(
+            f"corpus answer model is rate limited (HTTP {status})",
+            kind=CorpusAnswerError.KIND_RATE_LIMITED,
+            status=status,
+            retry_after=_retry_after_seconds(response.headers.get("retry-after")),
+        )
+    if code == _UPSTREAM_CODE_ANSWER_UNAVAILABLE:
+        return CorpusAnswerError(
+            f"corpus answer endpoint has no answer model (HTTP {status})",
+            kind=CorpusAnswerError.KIND_ANSWER_UNAVAILABLE,
+            status=status,
+        )
+    if status >= 500:
+        return CorpusAnswerError(
+            f"corpus answer endpoint returned HTTP {status}",
+            kind=CorpusAnswerError.KIND_SERVER_ERROR,
+            status=status,
+        )
+    return CorpusAnswerError(
+        f"corpus answer endpoint rejected the request (HTTP {status})",
+        kind=CorpusAnswerError.KIND_REJECTED,
+        status=status,
+    )
+
+
+async def ask_corpus(
+    operator: Operator,
+    query: str,
+    *,
+    limit: int = 10,
+    answer_url: str | None,
+    audience: str | None = None,
+) -> UpstreamAnswer:
+    """Ask the corpus's grounded-answer endpoint, with its retrieved hits (#3911).
+
+    The answer-side sibling of :func:`search_corpus`, with the same transport
+    posture: the dial is screened (``https`` + a public host,
+    allowlist-aware), the deployment's corpus service credential is presented
+    (the operator JWT is **never** forwarded, #290), and the response body is
+    never echoed. It POSTs ``{query, top_k}`` (plus ``audience`` when set) to
+    *answer_url* with ``?include=hits``.
+
+    Deliberately **not** sent: ``with_rerank`` (ranking policy belongs to the
+    backend) and any scope filter (product / version forwarding is gated per
+    collection by a separate change; until then the answer call sends none,
+    which matches today's effective search behaviour).
+
+    The request has its own bound, ``settings.corpus_answer_timeout_seconds``
+    (default 60): a grounded answer runs retrieval plus one or more model
+    calls, so the 10 s search bound would cut it off.
+
+    Args:
+        operator: The verified operator. Kept for the backend seam and audit
+            context; never used to authenticate to the corpus.
+        query: The operator's question.
+        limit: The retrieval depth to request (``top_k``). The backend may
+            cap it lower.
+        answer_url: The answer endpoint. ``None`` / empty is unconfigured.
+        audience: The RFC 8707 resource indicator. ``None`` falls back to
+            ``settings.corpus_audience``; an empty string sends none.
+
+    Raises:
+        CorpusUnavailable: the endpoint is unconfigured, not an allowed
+            ``https`` public destination, unreachable, or timed out.
+        CorpusAnswerError: the endpoint responded with a non-2xx status or a
+            2xx body that does not match :class:`UpstreamAnswer` (``kind``
+            names which).
+    """
+    settings = get_settings()
+    if not answer_url:
+        raise CorpusUnavailable("corpus answer endpoint is not configured")
+    await _screen_corpus_dial(answer_url)
+    resolved_audience = audience if audience is not None else settings.corpus_audience
+
+    payload: dict[str, Any] = {"query": query, "top_k": limit}
+    if resolved_audience:
+        payload["audience"] = resolved_audience
+
+    headers = _corpus_auth_headers(settings)
+    timeout = httpx.Timeout(settings.corpus_answer_timeout_seconds)
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                answer_url,
+                json=payload,
+                headers=headers,
+                params={"include": "hits"},
+            )
+    except httpx.HTTPError as exc:
+        _log.warning("corpus_answer_unreachable", error=type(exc).__name__)
+        raise CorpusUnavailable(f"corpus unreachable: {type(exc).__name__}") from exc
+
+    if response.status_code // 100 != 2:
+        failure = _classify_answer_failure(response)
+        _log.warning(
+            "corpus_answer_request_failed",
+            status=response.status_code,
+            kind=failure.kind,
+        )
+        raise failure
+
+    try:
+        body: Any = response.json()
+    except ValueError as exc:
+        _log.warning("corpus_answer_response_not_json")
+        raise CorpusAnswerError(
+            "corpus answer endpoint returned a non-JSON body",
+            kind=CorpusAnswerError.KIND_MALFORMED,
+            status=response.status_code,
+        ) from exc
+    try:
+        return UpstreamAnswer.model_validate(body)
+    except ValueError as exc:
+        _log.warning("corpus_answer_response_invalid_schema")
+        raise CorpusAnswerError(
+            "corpus answer response did not match the expected schema",
+            kind=CorpusAnswerError.KIND_MALFORMED,
+            status=response.status_code,
+        ) from exc
 
 
 class CorpusStatusResponse(BaseModel):

@@ -18,7 +18,9 @@ Coverage matrix (Task #3601 acceptance criteria):
   intent wins); an identical backend is not treated as a change; a global row
   needs ``platform_admin``; a supplied backend runs the same ``backend.type``
   registry check + ``https`` / SSRF endpoint screen as create; ``ref={}``
-  clears the endpoint (falls back to ``settings.corpus_url``).
+  clears the endpoint (falls back to ``settings.corpus_url``). A change of
+  only the ``answer`` / ``answer_endpoint`` opt-in keys keeps readiness
+  (#3911), and an explicit ``answer_endpoint`` is screened like ``endpoint``.
 * **REST route** — ``PATCH /api/v1/doc_collections/{key}`` → 200 + audit row
   ``meho.docs.collections.update``; 422 on an unknown backend type / bad
   endpoint; 403 ``global_collection_update_forbidden`` for a global row
@@ -260,6 +262,102 @@ async def test_clear_ref_falls_back_to_global_corpus_url() -> None:
     assert row.status == STATUS_PROVISIONING
 
 
+@pytest.mark.asyncio
+async def test_answer_opt_in_keeps_ready_status_and_liveness() -> None:
+    """#3911: adding only ``answer`` to the ref is not a repoint.
+
+    The opt-in changes where ``ask_docs`` answers come from, not which corpus
+    the probe validated, so a ``ready`` collection stays ``ready`` with its
+    liveness intact.
+    """
+    collection = await _insert_collection(status=STATUS_READY)
+    new_backend = {"type": "corpus-http", "ref": {"endpoint": _CORPUS_URL, "answer": "upstream"}}
+    await _run_update(collection.id, _make_operator(), DocCollectionUpdate(backend=new_backend))
+
+    row = await _fetch_row("vmware")
+    assert row.backend == new_backend
+    assert row.status == STATUS_READY
+    assert row.readiness == {"reachable": True, "index_built": True}
+    assert row.doc_count == 42
+    assert row.last_ingested_at is not None
+
+
+@pytest.mark.asyncio
+async def test_answer_endpoint_only_change_keeps_readiness() -> None:
+    """#3911: changing / removing ``answer`` + ``answer_endpoint`` keeps readiness."""
+    collection = await _insert_collection(
+        status=STATUS_READY,
+        backend={"type": "corpus-http", "ref": {"endpoint": _CORPUS_URL, "answer": "upstream"}},
+    )
+    await _run_update(
+        collection.id,
+        _make_operator(),
+        DocCollectionUpdate(
+            backend={
+                "type": "corpus-http",
+                "ref": {
+                    "endpoint": _CORPUS_URL,
+                    "answer": "upstream",
+                    "answer_endpoint": "https://corpus.test/v1/ask",
+                },
+            }
+        ),
+    )
+    row = await _fetch_row("vmware")
+    assert row.backend["ref"]["answer_endpoint"] == "https://corpus.test/v1/ask"
+    assert row.status == STATUS_READY
+
+    # Opting back out (the documented rollback) keeps it ready too.
+    await _run_update(
+        collection.id,
+        _make_operator(),
+        DocCollectionUpdate(backend={"type": "corpus-http", "ref": {"endpoint": _CORPUS_URL}}),
+    )
+    row = await _fetch_row("vmware")
+    assert row.backend == {"type": "corpus-http", "ref": {"endpoint": _CORPUS_URL}}
+    assert row.status == STATUS_READY
+    assert row.readiness == {"reachable": True, "index_built": True}
+
+
+@pytest.mark.asyncio
+async def test_answer_opt_in_with_endpoint_change_still_resets() -> None:
+    """#3911: an endpoint change still resets readiness, opt-in or not."""
+    collection = await _insert_collection(status=STATUS_READY)
+    await _run_update(
+        collection.id,
+        _make_operator(),
+        DocCollectionUpdate(
+            backend={
+                "type": "corpus-http",
+                "ref": {"endpoint": _NEW_CORPUS_URL, "answer": "upstream"},
+            }
+        ),
+    )
+
+    row = await _fetch_row("vmware")
+    assert row.status == STATUS_PROVISIONING
+    assert row.readiness is None
+
+
+@pytest.mark.asyncio
+async def test_audience_change_still_resets() -> None:
+    """Only the answer keys are exempt: an audience change is still a repoint."""
+    collection = await _insert_collection(status=STATUS_READY)
+    await _run_update(
+        collection.id,
+        _make_operator(),
+        DocCollectionUpdate(
+            backend={
+                "type": "corpus-http",
+                "ref": {"endpoint": _CORPUS_URL, "audience": "corpus-api"},
+            }
+        ),
+    )
+
+    row = await _fetch_row("vmware")
+    assert row.status == STATUS_PROVISIONING
+
+
 # ---------------------------------------------------------------------------
 # Service: validation + SSRF screen (same as create)
 # ---------------------------------------------------------------------------
@@ -296,6 +394,39 @@ async def test_update_endpoint_screen_rejects_non_public(bad_endpoint: str) -> N
             collection.id,
             _make_operator(),
             DocCollectionUpdate(backend={"type": "corpus-http", "ref": {"endpoint": bad_endpoint}}),
+        )
+    row = await _fetch_row("vmware")
+    assert row.backend == {"type": "corpus-http", "ref": {"endpoint": _CORPUS_URL}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_answer_endpoint",
+    [
+        "http://corpus.test/v1/ask",  # plaintext scheme
+        "https://127.0.0.1/v1/ask",  # loopback
+        "https://169.254.169.254/latest/meta-data",  # cloud metadata
+    ],
+)
+async def test_update_answer_endpoint_screen_rejects_non_public(
+    bad_answer_endpoint: str,
+) -> None:
+    """#3911: an explicit ``answer_endpoint`` is a dialed URL, screened like ``endpoint``."""
+    collection = await _insert_collection()
+    with pytest.raises(DocCollectionEndpointError):
+        await _run_update(
+            collection.id,
+            _make_operator(),
+            DocCollectionUpdate(
+                backend={
+                    "type": "corpus-http",
+                    "ref": {
+                        "endpoint": _CORPUS_URL,
+                        "answer": "upstream",
+                        "answer_endpoint": bad_answer_endpoint,
+                    },
+                }
+            ),
         )
     row = await _fetch_row("vmware")
     assert row.backend == {"type": "corpus-http", "ref": {"endpoint": _CORPUS_URL}}

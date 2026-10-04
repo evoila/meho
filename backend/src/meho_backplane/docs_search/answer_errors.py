@@ -52,13 +52,27 @@ client, and the UI all parse it):
   the structured fields. Never carries a corpus response body or a raw LLM
   output (the typed leg exceptions already guarantee neither is attached),
   so nothing upstream leaks through the envelope.
+* ``upstream_status`` / ``retry_after`` — present **only** on a failure of
+  the backend's own answer endpoint (#3911), never on the local pipeline's
+  envelopes: the upstream HTTP status of a rejected / erroring answer call,
+  and the upstream ``Retry-After`` seconds of a rate-limited one.
+
+The backend answer endpoint (a collection opted in with
+``backend.ref["answer"] = "upstream"``) reuses the same four legs with its
+own ``cause`` values, so no new taxonomy: a transport failure is
+``corpus_unavailable`` / ``corpus_unavailable`` (as on search); a 4xx is
+``corpus_unavailable`` / ``upstream_rejected``; another 5xx is
+``corpus_unavailable`` / ``upstream_error``; a backend without an answer
+model is ``model_unavailable`` / ``upstream_answer_unavailable``; a
+rate-limited one ``model_unavailable`` / ``upstream_rate_limited``; and a
+malformed 2xx body ``synthesis_malformed`` / ``parse``.
 """
 
 from __future__ import annotations
 
 from typing import Any, Final
 
-from meho_backplane.auth.corpus import CorpusUnavailable
+from meho_backplane.auth.corpus import CorpusAnswerError, CorpusUnavailable
 from meho_backplane.docs_search.expansion import DocsQueryExpansionError
 from meho_backplane.docs_search.synthesis import DocsSynthesisError
 from meho_backplane.operations.ingest import LlmClientUnavailable
@@ -71,6 +85,10 @@ __all__ = [
     "CAUSE_SYNTHESIS_CITATION_RESOLUTION",
     "CAUSE_SYNTHESIS_PARSE",
     "CAUSE_SYNTHESIS_TRUNCATED",
+    "CAUSE_UPSTREAM_ANSWER_UNAVAILABLE",
+    "CAUSE_UPSTREAM_ERROR",
+    "CAUSE_UPSTREAM_RATE_LIMITED",
+    "CAUSE_UPSTREAM_REJECTED",
     "LEG_CORPUS",
     "LEG_EXPAND",
     "LEG_MODEL",
@@ -107,6 +125,16 @@ CAUSE_SYNTHESIS_PARSE: Final[str] = "parse"
 CAUSE_SYNTHESIS_TRUNCATED: Final[str] = "truncated"
 CAUSE_SYNTHESIS_CITATION_RESOLUTION: Final[str] = "citation_resolution"
 
+#: Sub-causes of a failed call to the backend's own answer endpoint (#3911).
+#: ``upstream_rejected`` (a 4xx) and ``upstream_error`` (another 5xx) sit on
+#: the corpus leg; ``upstream_answer_unavailable`` (the backend has no answer
+#: model) and ``upstream_rate_limited`` (its answer model is throttled) sit on
+#: the model leg.
+CAUSE_UPSTREAM_REJECTED: Final[str] = "upstream_rejected"
+CAUSE_UPSTREAM_ERROR: Final[str] = "upstream_error"
+CAUSE_UPSTREAM_ANSWER_UNAVAILABLE: Final[str] = "upstream_answer_unavailable"
+CAUSE_UPSTREAM_RATE_LIMITED: Final[str] = "upstream_rate_limited"
+
 
 class AskDocsAnswerError(RuntimeError):
     """A leg-named ``ask_docs`` failure carrying a structured envelope.
@@ -125,9 +153,19 @@ class AskDocsAnswerError(RuntimeError):
     scrubbed.
     """
 
-    def __init__(self, *, leg: str, cause: str, message: str) -> None:
+    def __init__(
+        self,
+        *,
+        leg: str,
+        cause: str,
+        message: str,
+        upstream_status: int | None = None,
+        retry_after: int | None = None,
+    ) -> None:
         self.leg = leg
         self.cause = cause
+        self.upstream_status = upstream_status
+        self.retry_after = retry_after
         super().__init__(message)
 
     def to_error_data(self) -> dict[str, Any]:
@@ -135,14 +173,21 @@ class AskDocsAnswerError(RuntimeError):
 
         Pure ``dict`` of primitives (no Pydantic models, UUIDs, datetimes)
         so it serialises identically on the MCP ``error.data`` member and
-        in a REST ``HTTPException.detail`` body.
+        in a REST ``HTTPException.detail`` body. ``upstream_status`` /
+        ``retry_after`` are added only when set (an upstream-answer
+        failure, #3911), so the local pipeline's envelope is unchanged.
         """
-        return {
+        data: dict[str, Any] = {
             "detail": ANSWER_ERROR_DETAIL,
             "leg": self.leg,
             "cause": self.cause,
             "message": str(self),
         }
+        if self.upstream_status is not None:
+            data["upstream_status"] = self.upstream_status
+        if self.retry_after is not None:
+            data["retry_after"] = self.retry_after
+        return data
 
 
 def classify_answer_error(
@@ -170,6 +215,10 @@ def classify_answer_error(
     (:class:`DocsQueryExpansionError`, :class:`DocsSynthesisError`) are
     checked first and are never affected by this hint.
     """
+    if isinstance(exc, CorpusAnswerError):
+        # The backend's own answer endpoint responded, but not with a usable
+        # answer (#3911). Its ``kind`` picks the leg + cause.
+        return _classify_upstream_answer_error(exc)
     if isinstance(exc, DocsQueryExpansionError):
         # The expand model ran but produced unusable output (non-JSON /
         # wrong shape). Distinct from the no-model case below.
@@ -207,3 +256,48 @@ def classify_answer_error(
             message=f"{leg_label} leg failed: {exc}",
         )
     return None
+
+
+def _classify_upstream_answer_error(exc: CorpusAnswerError) -> AskDocsAnswerError:
+    """Map a failed upstream answer call onto its ``(leg, cause)`` (#3911).
+
+    The error table: a 4xx is ``corpus_unavailable`` / ``upstream_rejected``
+    (the REST face renders it 502, not 503: a rejected request is a contract
+    or configuration fault, not an outage); another 5xx is
+    ``corpus_unavailable`` / ``upstream_error``; a backend without an answer
+    model is ``model_unavailable`` / ``upstream_answer_unavailable``; a
+    rate-limited answer model is ``model_unavailable`` /
+    ``upstream_rate_limited`` carrying ``retry_after``; a malformed 2xx body
+    is ``synthesis_malformed`` / ``parse``. The message is the transport's,
+    which never carries the upstream body.
+    """
+    if exc.kind == CorpusAnswerError.KIND_MALFORMED:
+        return AskDocsAnswerError(
+            leg=LEG_SYNTHESIS,
+            cause=CAUSE_SYNTHESIS_PARSE,
+            message=f"synthesis leg failed: {exc}",
+        )
+    if exc.kind == CorpusAnswerError.KIND_ANSWER_UNAVAILABLE:
+        return AskDocsAnswerError(
+            leg=LEG_MODEL,
+            cause=CAUSE_UPSTREAM_ANSWER_UNAVAILABLE,
+            message=f"model leg failed: {exc}",
+        )
+    if exc.kind == CorpusAnswerError.KIND_RATE_LIMITED:
+        return AskDocsAnswerError(
+            leg=LEG_MODEL,
+            cause=CAUSE_UPSTREAM_RATE_LIMITED,
+            message=f"model leg failed: {exc}",
+            retry_after=exc.retry_after,
+        )
+    cause = (
+        CAUSE_UPSTREAM_REJECTED
+        if exc.kind == CorpusAnswerError.KIND_REJECTED
+        else CAUSE_UPSTREAM_ERROR
+    )
+    return AskDocsAnswerError(
+        leg=LEG_CORPUS,
+        cause=cause,
+        message=f"corpus leg failed: {exc}",
+        upstream_status=exc.status,
+    )

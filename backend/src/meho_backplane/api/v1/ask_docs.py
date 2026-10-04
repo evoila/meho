@@ -40,6 +40,18 @@ retryable 409. A cross-tenant / absent collection is unknown to the
 tenant-scoped catalogue, so it resolves to the 422 unknown-collection arm
 (it never reaches a backend).
 
+Where the answer comes from (#3911)
+-----------------------------------
+
+The route composes its answer through the one answer seam,
+:func:`~meho_backplane.docs_search.answer.answer_docs_question`, shared with
+the ``/ui/corpus`` Ask mode and the MCP ``ask_docs`` tool. A collection whose
+backend offers its own grounded-answer endpoint and that opted in
+(``backend.ref["answer"] = "upstream"``) is answered by that endpoint, mapped
+into the same ``{answer, citations[]}`` shape; every other collection runs the
+backplane's expand -> retrieve -> synthesize pipeline. The response schema is
+the same either way; the source is logged, not returned.
+
 Answer-pipeline legs -> 5xx (the #1918 structured error model, REST-ready)
 --------------------------------------------------------------------------
 
@@ -63,6 +75,13 @@ chooses the HTTP status the model only names the leg:
   set) -> **502**: the upstream model returned an invalid response. Distinct
   from the 503s (model unreachable / unconfigured) so a client can tell "the
   model is missing" from "the model answered badly".
+* On the upstream-answer path (#3911) the status is chosen per
+  ``(leg, cause)``: a backend that **rejected** the answer call (a 4xx,
+  ``corpus_unavailable`` / ``upstream_rejected``) is **502** -- a contract or
+  configuration fault, not an outage -- while its other failures keep their
+  leg's status. A rate-limited backend answer model
+  (``model_unavailable`` / ``upstream_rate_limited``) is a 503 that forwards
+  the backend's ``Retry-After`` header.
 
 Fail-closed end to end: a leg failure is a 5xx error envelope, never a
 degraded / ungrounded answer. An empty retrieval is **not** an error -- the
@@ -84,7 +103,6 @@ still attributable.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
 from typing import Annotated, Any, NoReturn
 
 import structlog
@@ -106,18 +124,15 @@ from meho_backplane.docs_search import (
     CollectionForbiddenError,
     CollectionNotReadyError,
     DocsAnswer,
-    DocsChunk,
     DocsScope,
     MissingDocsFilterError,
     UnknownCollectionError,
     build_docs_scope,
     citation_link_payload,
-    classify_answer_error,
-    expand_docs_query,
     resolve_entitled_ready_collection,
-    retrieve_multi_query,
-    synthesize_docs_answer,
 )
+from meho_backplane.docs_search.answer import AskPipelineOutcome, answer_docs_question
+from meho_backplane.docs_search.answer_errors import CAUSE_UPSTREAM_REJECTED
 
 __all__ = [
     "AskPipelineOutcome",
@@ -272,118 +287,12 @@ async def _resolve_collection_or_http_error(
         ) from exc
 
 
-@dataclass(frozen=True)
-class AskPipelineOutcome:
-    """Outcome of an answer-pipeline run, with the chunks retrieval returned.
-
-    The structured (non-raising) return channel
-    :func:`run_ask_pipeline_capturing_retrieval` hands back so a caller can
-    fail **open to the retrieved chunks** on a *post-retrieval* leg failure
-    rather than dropping them on the floor. Exactly one of ``answer`` /
-    ``error`` is set:
-
-    * **success** -> ``answer`` is the grounded :class:`DocsAnswer`, ``error``
-      is ``None``, ``retrieved_chunks`` is the merged retrieval (the answer's
-      citations are the subset of these the model relied on).
-    * **leg failure** -> ``error`` is the classified
-      :class:`~meho_backplane.docs_search.AskDocsAnswerError`, ``answer`` is
-      ``None``. ``retrieved_chunks`` holds whatever retrieval returned
-      *before* the failing leg: the real chunks for a **post-retrieval** leg
-      (``synthesis_malformed`` / ``model_unavailable``), and **empty** for a
-      **pre-retrieval** leg (``expand_failed`` / ``corpus_unavailable``),
-      which failed before retrieval produced anything.
-
-    ``retrieved_chunks`` is an in-process Python channel only — it is **not**
-    part of the :class:`~meho_backplane.docs_search.AskDocsAnswerError` wire
-    envelope (the MCP ``error.data`` / REST 5xx ``detail`` shape stays small
-    and JSON-safe). It exists so the ``/ui/corpus`` Ask BFF can render the
-    raw grounding it already retrieved when synthesis fails, while the answer
-    stays fail-closed (never an ungrounded synthesized answer).
-    """
-
-    answer: DocsAnswer | None = None
-    error: AskDocsAnswerError | None = None
-    retrieved_chunks: list[DocsChunk] = field(default_factory=list)
-
-
-async def run_ask_pipeline_capturing_retrieval(
-    operator: Operator,
-    query: str,
-    *,
-    scope: DocsScope,
-    collection: DocCollection,
-    limit: int,
-) -> AskPipelineOutcome:
-    """Run expand -> retrieve -> synthesize, keeping the retrieved chunks.
-
-    The structured (non-raising) sibling of :func:`run_ask_pipeline`: it runs
-    the identical #1916 answer pipeline leg-by-leg but, instead of raising a
-    classified :class:`~meho_backplane.docs_search.AskDocsAnswerError` and
-    discarding the retrieval, returns an :class:`AskPipelineOutcome` that
-    carries the chunks retrieval returned alongside the classified error. The
-    ``/ui/corpus`` Ask BFF calls this so a **post-retrieval** leg failure
-    (``synthesis_malformed`` / ``model_unavailable``) can **fail open** to the
-    real retrieved chunks under the named-leg banner, rather than the
-    banner-only render dropping usable evidence.
-
-    Each leg is classified the same way :func:`run_ask_pipeline` does (via the
-    shared :func:`~meho_backplane.docs_search.classify_answer_error`), so the
-    ``(leg, cause)`` envelope is identical across both entrypoints; the one
-    ambiguous failure --
-    :class:`~meho_backplane.operations.ingest.LlmClientUnavailable` from the
-    shared #1386 client -- is pinned to ``expand_failed`` on the expand leg
-    and to the default ``model_unavailable`` on the synthesis leg.
-
-    The answer stays **fail-closed**: a leg failure never yields a
-    :class:`DocsAnswer`, only the structured error plus the (possibly empty)
-    retrieved chunks. An empty retrieval is **not** a failure -- the synthesis
-    helper short-circuits to the deterministic "no grounded answer" 200, which
-    this returns as a success outcome with no chunks.
-
-    Raises:
-        Exception: a non-leg (genuinely unexpected) exception propagates
-            unchanged via :func:`_classify_or_reraise`, exactly as
-            :func:`run_ask_pipeline` lets it -- so a real fault still surfaces
-            as a generic 500 / the UI's bare error rather than a mis-labelled
-            leg failure.
-    """
-    # 1. Expand: rewrite the question into corpus-aware variants. Both an
-    # unconfigured model (LlmClientUnavailable) and unusable output
-    # (DocsQueryExpansionError) name the ``expand_failed`` leg. This is a
-    # *pre-retrieval* leg: no chunks exist yet, so the outcome carries none.
-    try:
-        variants = await expand_docs_query(query, collection)
-    except Exception as exc:
-        return AskPipelineOutcome(error=_classify_or_reraise(exc, llm_unavailable_leg=LEG_EXPAND))
-
-    # 2. Retrieve per variant on the same backend and RRF-merge. A down /
-    # unconfigured backend (CorpusUnavailable) names the ``corpus_unavailable``
-    # leg -- also *pre-retrieval* for fail-open purposes: the retrieval call
-    # itself failed, so there are no chunks to surface.
-    try:
-        retrieval = await retrieve_multi_query(
-            operator, variants, scope=scope, collection=collection, limit=limit
-        )
-    except Exception as exc:
-        return AskPipelineOutcome(error=_classify_or_reraise(exc))
-
-    # 3. Synthesize over the merged chunks, answering the operator's
-    # *original* question. An unconfigured model names ``model_unavailable``;
-    # output breaking the grounding contract names ``synthesis_malformed``
-    # (with the parse / citation-resolution sub-cause). Both are
-    # *post-retrieval* legs: retrieval already succeeded, so the outcome
-    # carries the real ``retrieval.chunks`` for the BFF to fail open to. An
-    # empty retrieval short-circuits inside the helper to a deterministic "no
-    # grounded answer" without a model call -- a normal success, not a leg
-    # failure.
-    try:
-        answer = await synthesize_docs_answer(query, retrieval)
-    except Exception as exc:
-        return AskPipelineOutcome(
-            error=_classify_or_reraise(exc),
-            retrieved_chunks=list(retrieval.chunks),
-        )
-    return AskPipelineOutcome(answer=answer, retrieved_chunks=list(retrieval.chunks))
+#: The structured (non-raising) entrypoint the ``/ui/corpus`` Ask BFF calls:
+#: the one answer seam itself (#3911), kept under its established name. It
+#: returns an :class:`AskPipelineOutcome` -- the grounded answer, or the
+#: classified leg failure plus the chunks retrieved before it -- so the BFF can
+#: fail open to those chunks instead of dropping them.
+run_ask_pipeline_capturing_retrieval = answer_docs_question
 
 
 async def run_ask_pipeline(
@@ -394,76 +303,64 @@ async def run_ask_pipeline(
     collection: DocCollection,
     limit: int,
 ) -> DocsAnswer:
-    """Run expand -> retrieve -> synthesize, naming the failed leg on error.
+    """Answer through the one answer seam, naming the failed leg on error.
 
-    The raising in-process composition of the #1916 answer pipeline the REST
-    route below calls. A thin wrapper over
-    :func:`run_ask_pipeline_capturing_retrieval` that preserves the original
-    raise-on-leg-failure contract: it discards the captured chunks (the REST
-    5xx envelope never carries them) and re-raises the classified
+    The raising in-process entrypoint the REST route below calls. A thin
+    wrapper over :func:`run_ask_pipeline_capturing_retrieval` (the answer seam,
+    upstream or local, #3911) that preserves the raise-on-leg-failure
+    contract: it discards the captured chunks (the REST 5xx envelope never
+    carries them) and re-raises the classified
     :class:`~meho_backplane.docs_search.AskDocsAnswerError` so the route maps
     it to a 5xx ``HTTPException`` (:func:`_raise_pipeline_http_error`). The
     ``/ui/corpus`` Ask BFF calls the capturing variant directly so it can fail
     open to those chunks instead.
 
     Raises:
-        AskDocsAnswerError: a classified answer-pipeline leg failure
-            (expand / corpus / model / synthesis). The original exception
-            rides ``raise ... from`` so the structlog breadcrumb keeps the
-            traceback. An unexpected (non-leg) exception is re-raised
-            unchanged.
+        AskDocsAnswerError: a classified leg failure (expand / corpus / model
+            / synthesis). The original exception rides ``__cause__`` so the
+            structlog breadcrumb keeps the traceback. An unexpected (non-leg)
+            exception is re-raised unchanged.
     """
     outcome = await run_ask_pipeline_capturing_retrieval(
         operator, query, scope=scope, collection=collection, limit=limit
     )
     if outcome.error is not None:
-        # Re-raise the classified leg failure; ``__cause__`` (chained in
-        # :func:`_classify_or_reraise`) preserves the original traceback.
+        # Re-raise the classified leg failure; ``__cause__`` (chained by the
+        # answer seam) preserves the original traceback.
         raise outcome.error
     assert outcome.answer is not None  # success outcome always carries an answer
     return outcome.answer
 
 
-def _classify_or_reraise(
-    exc: Exception,
-    *,
-    llm_unavailable_leg: str | None = None,
-) -> AskDocsAnswerError:
-    """Classify *exc* as a leg-named :class:`AskDocsAnswerError`, or re-raise.
-
-    Classifies *exc* via the shared
-    :func:`~meho_backplane.docs_search.classify_answer_error`; a recognised
-    answer-pipeline leg failure is **returned** as an
-    :class:`AskDocsAnswerError` carrying the structured
-    ``{detail, leg, cause, message}`` envelope, with ``__cause__`` chained to
-    *exc* so the traceback is preserved when a caller re-raises it. Anything
-    else is **re-raised unchanged** so a genuinely unexpected fault still
-    propagates (and surfaces as a generic 500 / the UI's bare error) rather
-    than being mis-labelled a leg failure.
-    """
-    classified = (
-        classify_answer_error(exc, llm_unavailable_leg=llm_unavailable_leg)
-        if llm_unavailable_leg is not None
-        else classify_answer_error(exc)
-    )
-    if classified is None:
-        raise exc
-    classified.__cause__ = exc
-    return classified
-
-
 def _raise_pipeline_http_error(answer_error: AskDocsAnswerError) -> NoReturn:
     """Map a classified :class:`AskDocsAnswerError` to its 5xx ``HTTPException``.
 
-    The route layer chooses the status per leg (:data:`_LEG_STATUS`); the
-    structured envelope (``{detail, leg, cause, message}``) rides
+    The route layer chooses the status per ``(leg, cause)``: per leg
+    (:data:`_LEG_STATUS`), except that an upstream answer endpoint that
+    **rejected** the call (``upstream_rejected``, #3911) is a 502 -- a
+    contract / configuration fault, not the 503 "unavailable" of its leg. The
+    structured envelope (``{detail, leg, cause, message}`` plus, on an
+    upstream failure, ``upstream_status`` / ``retry_after``) rides
     ``HTTPException.detail`` byte-identical to the MCP ``error.data`` member,
-    so a client parses the same shape on either face. An unmapped leg (a
+    so a client parses the same shape on either face. A rate-limited upstream
+    answer forwards its ``Retry-After`` as a header too. An unmapped leg (a
     future leg added to the model but not here) defaults to 503 -- the
     conservative fail-closed status -- rather than leaking a 500.
     """
-    http_status = _LEG_STATUS.get(answer_error.leg, status.HTTP_503_SERVICE_UNAVAILABLE)
-    raise HTTPException(status_code=http_status, detail=answer_error.to_error_data())
+    if answer_error.cause == CAUSE_UPSTREAM_REJECTED:
+        http_status = status.HTTP_502_BAD_GATEWAY
+    else:
+        http_status = _LEG_STATUS.get(answer_error.leg, status.HTTP_503_SERVICE_UNAVAILABLE)
+    headers = (
+        {"Retry-After": str(answer_error.retry_after)}
+        if answer_error.retry_after is not None
+        else None
+    )
+    raise HTTPException(
+        status_code=http_status,
+        detail=answer_error.to_error_data(),
+        headers=headers,
+    )
 
 
 @router.post(
@@ -506,8 +403,11 @@ def _raise_pipeline_http_error(answer_error: AskDocsAnswerError) -> NoReturn:
                 "contract (non-JSON, wrong shape, or a citation outside the "
                 "retrieved set): ``detail.leg='synthesis_malformed'``. A "
                 "bad-gateway fault distinct from the model being unreachable "
-                "(503). The structured #1918 ``{detail, leg, cause, message}`` "
-                "envelope rides ``detail``."
+                "(503). Also returned when the collection's backend answer "
+                "endpoint rejected the call (``detail.cause="
+                "'upstream_rejected'``, with ``detail.upstream_status``). The "
+                "structured #1918 ``{detail, leg, cause, message}`` envelope "
+                "rides ``detail``."
             ),
         },
         503: {
@@ -518,7 +418,9 @@ def _raise_pipeline_http_error(answer_error: AskDocsAnswerError) -> NoReturn:
                 "the retrieval backend is unavailable "
                 "(``detail.leg='corpus_unavailable'``). Fail-closed; never an "
                 "ungrounded answer. The structured #1918 envelope rides "
-                "``detail``."
+                "``detail``. A rate-limited backend answer model "
+                "(``detail.cause='upstream_rate_limited'``) forwards the "
+                "backend's ``Retry-After`` header."
             ),
         },
     },
@@ -532,10 +434,11 @@ async def ask_docs_endpoint(
 
     The synthesis sibling of ``POST /api/v1/search_docs``: resolve + entitle
     + readiness-gate the mandatory ``collection`` (same 403 / 409 / 422 arms
-    as ``search_docs``), then run the #1916 answer pipeline
-    (expand -> retrieve-per-variant -> RRF-merge -> synthesize) in-process,
-    returning ``{answer, citations[]}`` with every citation carrying its
-    resolved navigable ``link`` (#1919).
+    as ``search_docs``), then answer through the one answer seam in-process
+    (the collection backend's own answer endpoint when the collection opted
+    in, else the #1916 expand -> retrieve-per-variant -> RRF-merge ->
+    synthesize pipeline), returning ``{answer, citations[]}`` with every
+    citation carrying its resolved navigable ``link`` (#1919).
 
     Single-collection only (no ``collections`` fan-out field). ``read_only``
     operators get 403 via :func:`require_role` before this handler. The

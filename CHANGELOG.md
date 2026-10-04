@@ -90,6 +90,26 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added
+
+- `ask_docs` can take its answer from the collection backend's own
+  grounded-answer endpoint (#3911). A `corpus-http` collection opts in
+  with `backend.ref["answer"] = "upstream"` (optionally
+  `answer_endpoint`; by default the search URL with its last path segment
+  replaced by `ask`). It is **off by default**: no collection changes on
+  upgrade, and opting one in moves its answers from the backplane's model
+  to the backend's answer model, reversibly, with one
+  `meho docs collections update`. The answer and citations are mapped into
+  the unchanged `ask_docs` response shape; on MCP the upstream answer is
+  wrapped as untrusted text. UI Ask mode, REST `POST /api/v1/ask_docs` and
+  MCP `ask_docs` now answer through one shared seam (the MCP copy of the
+  pipeline is gone). New setting `CORPUS_ANSWER_TIMEOUT_SECONDS` (default
+  60) bounds the answer call. New error causes on the existing legs: a 4xx
+  from the answer endpoint is a **502** `upstream_rejected`, a rate-limited
+  answer model a 503 `upstream_rate_limited` that forwards `Retry-After`.
+  Changing only `answer` / `answer_endpoint` keeps a collection's
+  readiness.
+
 ## [0.35.16] - 2026-09-27
 
 ### Breaking changes — `vcfa.provider.api_token.create` requires `vault_target` and writes the token under that target's Vault role (#3895 / #3896)

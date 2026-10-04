@@ -23,10 +23,14 @@ import structlog.testing
 
 import meho_backplane.auth.corpus as corpus_mod
 from meho_backplane.auth.corpus import (
+    CorpusAnswerError,
     CorpusSearchResponse,
     CorpusStatusResponse,
     CorpusUnavailable,
+    UpstreamAnswer,
+    ask_corpus,
     corpus_status,
+    derive_answer_url,
     derive_status_url,
     search_corpus,
 )
@@ -831,3 +835,270 @@ async def test_corpus_status_malformed_body_fails_closed(monkeypatch: pytest.Mon
 
     with pytest.raises(CorpusUnavailable):
         await corpus_status(_make_operator())
+
+
+# ---------------------------------------------------------------------------
+# ask_corpus (#3911 upstream grounded-answer transport)
+# ---------------------------------------------------------------------------
+
+_ANSWER_URL = "https://corpus.test/ask"
+
+#: A minimal valid ``POST /ask?include=hits`` body (synthetic text).
+_ANSWER_BODY: dict[str, object] = {
+    "query": "q",
+    "answer": "Widgets are pooled [0].",
+    "citations": [{"chunk_index": 0, "chunk_id": "c1", "quote": "pooled"}],
+    "timing": {"total_ms": 1200.0, "llm_ms": 800.0},
+    "hits": [
+        {
+            "chunk_id": "c1",
+            "document_id": "",
+            "chunk_index": 4,
+            "text": "Widgets are pooled per cluster.",
+            "source_uri": "gs://example-bucket/docs/widgets.html",
+            "filename": "widgets.html",
+            "score": 0.42,
+        }
+    ],
+}
+
+
+@pytest.mark.parametrize(
+    ("search_url", "expected"),
+    [
+        ("https://corpus.test/search", "https://corpus.test/ask"),
+        ("https://corpus.test/v1/search", "https://corpus.test/v1/ask"),
+        ("https://corpus.test/v1/search/", "https://corpus.test/v1/ask"),
+        ("https://corpus.test:9443/search?x=1", "https://corpus.test:9443/ask"),
+        ("https://corpus.test", "https://corpus.test/ask"),
+    ],
+)
+def test_derive_answer_url(search_url: str, expected: str) -> None:
+    """The answer URL replaces the search URL's last path segment with ``ask``."""
+    assert derive_answer_url(search_url) == expected
+
+
+@pytest.mark.asyncio
+async def test_ask_corpus_posts_query_and_top_k_with_include_hits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The answer call carries ``{query, top_k}`` + ``include=hits`` and the service token.
+
+    No ``with_rerank`` (ranking policy is the backend's) and no scope filter
+    (product / version forwarding is gated separately) ride the body; the
+    operator JWT is never forwarded.
+    """
+    _pin_settings(monkeypatch, corpus_service_token=_SERVICE_TOKEN)
+    captured: list[httpx.Request] = []
+    transport = _transport_capturing(captured, httpx.Response(200, json=_ANSWER_BODY))
+    _patch_async_client(monkeypatch, transport, [])
+
+    result = await ask_corpus(_make_operator(), "q", limit=7, answer_url=_ANSWER_URL)
+
+    assert isinstance(result, UpstreamAnswer)
+    assert result.citations[0].chunk_id == "c1"
+    assert result.hits[0].content == "Widgets are pooled per cluster."
+    assert result.hits[0].filename == "widgets.html"
+    assert result.timing.total_ms == 1200.0
+
+    (request,) = captured
+    assert request.method == "POST"
+    assert request.url.path == "/ask"
+    assert request.url.params.get("include") == "hits"
+    import json
+
+    body = json.loads(request.content.decode())
+    assert body == {"query": "q", "top_k": 7}
+    assert request.headers["authorization"] == f"Bearer {_SERVICE_TOKEN}"
+    assert _JWT not in str(request.headers)
+
+
+@pytest.mark.asyncio
+async def test_ask_corpus_forwards_audience(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A configured audience rides the body, as on search."""
+    _pin_settings(monkeypatch, corpus_audience="meho-corpus")
+    captured: list[httpx.Request] = []
+    transport = _transport_capturing(captured, httpx.Response(200, json=_ANSWER_BODY))
+    _patch_async_client(monkeypatch, transport, [])
+
+    await ask_corpus(_make_operator(), "q", answer_url=_ANSWER_URL)
+
+    import json
+
+    assert json.loads(captured[0].content.decode())["audience"] == "meho-corpus"
+
+
+def test_answer_timeout_setting_defaults_to_60(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``CORPUS_ANSWER_TIMEOUT_SECONDS`` defaults to 60 s, independent of search's 10 s."""
+    monkeypatch.delenv("CORPUS_ANSWER_TIMEOUT_SECONDS", raising=False)
+    get_settings.cache_clear()
+    settings = get_settings()
+    assert settings.corpus_answer_timeout_seconds == 60.0
+    assert settings.corpus_timeout_seconds == 10.0
+
+    monkeypatch.setenv("CORPUS_ANSWER_TIMEOUT_SECONDS", "45")
+    get_settings.cache_clear()
+    assert get_settings().corpus_answer_timeout_seconds == 45.0
+
+
+@pytest.mark.asyncio
+async def test_ask_corpus_timeout_is_the_answer_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The answer client is bounded by the answer timeout, not the search one."""
+    _pin_settings(monkeypatch, corpus_timeout_seconds=10.0, corpus_answer_timeout_seconds=42.0)
+    captured_timeout: list[httpx.Timeout] = []
+    transport = _transport_capturing([], httpx.Response(200, json=_ANSWER_BODY))
+    _patch_async_client(monkeypatch, transport, captured_timeout)
+
+    await ask_corpus(_make_operator(), "q", answer_url=_ANSWER_URL)
+
+    assert captured_timeout[0].read == 42.0
+    assert captured_timeout[0].connect == 42.0
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "http://corpus.test/ask",  # plaintext
+        "https://127.0.0.1/ask",  # loopback
+        "https://169.254.169.254/ask",  # cloud metadata
+    ],
+)
+@pytest.mark.asyncio
+async def test_ask_corpus_screens_endpoint_and_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, bad_url: str
+) -> None:
+    """The answer dial runs the same SSRF screen as search, before any request."""
+    monkeypatch.delenv("MEHO_TARGET_SSRF_ALLOWLIST", raising=False)
+    _pin_settings(monkeypatch)
+
+    with pytest.raises(CorpusUnavailable) as exc:
+        await ask_corpus(_make_operator(), "q", answer_url=bad_url)
+    assert "not an allowed https public destination" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_ask_corpus_unconfigured_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No answer URL is the unavailable arm, never an empty answer."""
+    _pin_settings(monkeypatch)
+    with pytest.raises(CorpusUnavailable):
+        await ask_corpus(_make_operator(), "q", answer_url=None)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ReadTimeout("too slow"),
+        httpx.ConnectError("connection refused"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_ask_corpus_transport_failure_is_corpus_unavailable(
+    monkeypatch: pytest.MonkeyPatch, error: httpx.HTTPError
+) -> None:
+    """A timeout or connect failure is the transport arm (``CorpusUnavailable``)."""
+    _pin_settings(monkeypatch)
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        raise error
+
+    _patch_async_client(monkeypatch, httpx.MockTransport(_handler), [])
+
+    with pytest.raises(CorpusUnavailable) as exc:
+        await ask_corpus(_make_operator(), "q", answer_url=_ANSWER_URL)
+    assert exc.value.status is None
+
+
+@pytest.mark.parametrize(
+    ("response", "kind", "retry_after"),
+    [
+        (
+            httpx.Response(503, json={"error": {"code": "llm_unavailable", "message": "x"}}),
+            CorpusAnswerError.KIND_ANSWER_UNAVAILABLE,
+            None,
+        ),
+        (
+            httpx.Response(
+                503,
+                json={"error": {"code": "llm_rate_limited", "message": "x"}},
+                headers={"Retry-After": "5"},
+            ),
+            CorpusAnswerError.KIND_RATE_LIMITED,
+            5,
+        ),
+        (
+            httpx.Response(429, text="slow down", headers={"Retry-After": "3"}),
+            CorpusAnswerError.KIND_RATE_LIMITED,
+            3,
+        ),
+        (httpx.Response(503, text="proxy unavailable"), CorpusAnswerError.KIND_SERVER_ERROR, None),
+        (httpx.Response(500, json={"detail": "boom"}), CorpusAnswerError.KIND_SERVER_ERROR, None),
+        (httpx.Response(422, json={"detail": "bad"}), CorpusAnswerError.KIND_REJECTED, None),
+        (httpx.Response(401, text="no"), CorpusAnswerError.KIND_REJECTED, None),
+        (httpx.Response(404, text="no such route"), CorpusAnswerError.KIND_REJECTED, None),
+    ],
+)
+@pytest.mark.asyncio
+async def test_ask_corpus_non_2xx_is_typed_by_kind(
+    monkeypatch: pytest.MonkeyPatch,
+    response: httpx.Response,
+    kind: str,
+    retry_after: int | None,
+) -> None:
+    """Each non-2xx outcome is a typed ``CorpusAnswerError`` with status + kind."""
+    _pin_settings(monkeypatch)
+    _patch_async_client(monkeypatch, _transport_capturing([], response), [])
+
+    with pytest.raises(CorpusAnswerError) as exc:
+        await ask_corpus(_make_operator(), "q", answer_url=_ANSWER_URL)
+    assert exc.value.kind == kind
+    assert exc.value.status == response.status_code
+    assert exc.value.retry_after == retry_after
+
+
+@pytest.mark.asyncio
+async def test_ask_corpus_error_never_echoes_the_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Neither the upstream body nor an unknown error code reaches the error."""
+    _pin_settings(monkeypatch)
+    secret = "INTERNAL stack trace leaky-token-abc"
+    response = httpx.Response(503, json={"error": {"code": secret, "message": secret}})
+    _patch_async_client(monkeypatch, _transport_capturing([], response), [])
+
+    with structlog.testing.capture_logs() as logs, pytest.raises(CorpusAnswerError) as exc:
+        await ask_corpus(_make_operator(), "q", answer_url=_ANSWER_URL)
+    assert secret not in str(exc.value)
+    assert secret not in repr(logs)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(200, text="<html>not json</html>"),
+        httpx.Response(200, json={"answer": "x", "citations": []}),  # no hits
+        httpx.Response(200, json={"answer": "", "citations": [], "hits": []}),  # blank answer
+        httpx.Response(200, json={"answer": "x", "hits": [{"chunk_id": "c"}]}),  # hit w/o text
+    ],
+)
+@pytest.mark.asyncio
+async def test_ask_corpus_malformed_2xx_is_typed_malformed(
+    monkeypatch: pytest.MonkeyPatch, response: httpx.Response
+) -> None:
+    """A 2xx body that does not match the answer shape is ``malformed``, not empty."""
+    _pin_settings(monkeypatch)
+    _patch_async_client(monkeypatch, _transport_capturing([], response), [])
+
+    with pytest.raises(CorpusAnswerError) as exc:
+        await ask_corpus(_make_operator(), "q", answer_url=_ANSWER_URL)
+    assert exc.value.kind == CorpusAnswerError.KIND_MALFORMED
+
+
+def test_retry_after_http_date_is_converted_to_seconds() -> None:
+    """An HTTP-date ``Retry-After`` becomes the seconds remaining (never negative)."""
+    from datetime import UTC, datetime, timedelta
+    from email.utils import format_datetime
+
+    future = format_datetime(datetime.now(UTC) + timedelta(seconds=120), usegmt=True)
+    past = format_datetime(datetime.now(UTC) - timedelta(seconds=120), usegmt=True)
+    assert 100 <= (corpus_mod._retry_after_seconds(future) or 0) <= 120
+    assert corpus_mod._retry_after_seconds(past) == 0
+    assert corpus_mod._retry_after_seconds("soon") is None
+    assert corpus_mod._retry_after_seconds(None) is None

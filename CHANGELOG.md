@@ -90,6 +90,8 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.35.17] - 2026-10-04
+
 ### Security
 
 - Backplane image base-OS packages patched for the `image` workflow's
@@ -104,12 +106,18 @@ connector-related release-notes line.
   raising a floor is the edit that refreshes the cached layer, and a cached
   layer can never hold less than the floors it states. No new package
   enters the image and the base digest is unchanged. (#3921)
+- Python dependencies patched for the same trivy gate. PyJWT moves from
+  2.13.0 to 2.15.0 (CVE-2026-102268, CRITICAL; CVE-2026-102266,
+  CVE-2026-102267, CVE-2026-102271, CVE-2026-102272 and CVE-2026-102273,
+  HIGH; all fixed in 2.14.0) and urllib3 from 2.7.0 to 2.8.0
+  (CVE-2026-97687 and CVE-2026-97689, HIGH). Only `backend/uv.lock`
+  changes; no MEHO code changes. (#3910)
 
 ### Added
 
 - `ask_docs` can take its answer from the collection backend's own
-  grounded-answer endpoint (#3911). A `corpus-http` collection opts in
-  with `backend.ref["answer"] = "upstream"` (optionally
+  grounded-answer endpoint (#3911 / #3919). A `corpus-http` collection
+  opts in with `backend.ref["answer"] = "upstream"` (optionally
   `answer_endpoint`; by default the search URL with its last path segment
   replaced by `ask`). It is **off by default**: no collection changes on
   upgrade, and opting one in moves its answers from the backplane's model
@@ -156,7 +164,7 @@ connector-related release-notes line.
   `products` to the tokens it stamps, and set its `"scope": "soft"` only
   after the corpus release that accepts `scope` is deployed; leave
   `scope_filters` off for it (`docs/codebase/docs-search.md`, *Scope
-  gates*). (#3912)
+  gates*). (#3912 / #3917)
 
 ## [0.35.16] - 2026-09-27
 

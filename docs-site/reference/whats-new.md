@@ -9,6 +9,32 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.35.17](https://github.com/evoila/meho/releases/tag/v0.35.17) — 2026-10-04
+
+- **A documentation collection can now answer questions with its own
+  answer service.** `ask_docs` used to search a collection and then
+  write the answer with MEHO's own model. If a collection's
+  documentation service has its own answer endpoint, MEHO can now pass
+  the question to it and return that answer and its citations, in the
+  same response shape as before. This is off by default. An
+  administrator turns it on for one collection at a time and can turn
+  it off again with one command. The console's Ask mode, the REST API
+  and MCP now all answer through the same code.
+- **The product and version you ask about reach a documentation service
+  only when its collection is set up for them.** When you give
+  `search_docs` or `ask_docs` a product or version, MEHO now passes it
+  on only if the collection asks for it: as a hint that ranks the
+  matching release first, or as a strict filter. Both are off by
+  default. MEHO used to send these values as filters, and the shared
+  VMware documentation service ignored them, so its results do not
+  change. The tool descriptions now also say which product names and
+  version formats to use.
+- **Security fixes in the container image.** OpenSSL and PCRE2 in the
+  base image, and the PyJWT and urllib3 Python libraries, are updated to
+  versions that fix known vulnerabilities. The image build now checks a
+  minimum version for each security-patched system package and stops if
+  one is older.
+
 ## [v0.35.16](https://github.com/evoila/meho/releases/tag/v0.35.16) — 2026-09-27
 
 - **Breaking: creating a VCF Automation API token now names the Vault

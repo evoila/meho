@@ -94,6 +94,11 @@ _BUILD_EXPAND_CLIENT = "meho_backplane.docs_search.expansion.build_anthropic_ing
 #: ``corpus-http`` adapter actually calls.
 _CORPUS_SEAM = "meho_backplane.docs_search.backends.corpus_http.search_corpus"
 
+#: A ``corpus-http`` binding whose collection opts into forwarding the
+#: product/version refinements as hard filters (#3912). The default seed
+#: has no ``ref``, so both gates are off.
+_SCOPE_FILTERS_ON: dict[str, Any] = {"type": "corpus-http", "ref": {"scope_filters": True}}
+
 
 def _seed_collection_sync(**kwargs: Any) -> None:
     """Run :func:`seed_doc_collection` to completion from a sync test."""
@@ -454,12 +459,13 @@ def test_tools_call_ask_docs_returns_grounded_cited_answer(
 
     Pins the full round-trip: retrieval routes to the ``vmware``
     collection's backend with the optional refinements as
-    ``metadata_filters``, the synthesis model composes an answer citing one
-    of the two retrieved chunks, and every returned citation resolves to a
-    retrieved chunk. The retrieved evidence reached the synthesis prompt.
+    ``metadata_filters`` (the collection enables scope filters, #3912), the
+    synthesis model composes an answer citing one of the two retrieved
+    chunks, and every returned citation resolves to a retrieved chunk. The
+    retrieved evidence reached the synthesis prompt.
     """
     client, op = docs_client
-    _seed_collection_sync()
+    _seed_collection_sync(backend=_SCOPE_FILTERS_ON)
     corpus = _fake_corpus(_SAMPLE_CHUNK, _SECOND_CHUNK)
     stub = _StubLlmClient(
         json.dumps(
@@ -508,11 +514,84 @@ def test_tools_call_ask_docs_returns_grounded_cited_answer(
     # The optional refinements reached the backend and the operator identity
     # was forwarded.
     assert corpus.captured["metadata_filters"] == {"product": "nsx", "version": "9.0"}  # type: ignore[attr-defined]
+    assert corpus.captured["soft_scope"] is None  # type: ignore[attr-defined]
     assert corpus.captured["limit"] == 5  # type: ignore[attr-defined]
     assert corpus.captured["operator"].tenant_id == op.tenant_id  # type: ignore[attr-defined]
     # The retrieved evidence was framed into the synthesis prompt.
     assert "nsx-9.0-maximums-0007" in stub.captured["user_prompt"]
     assert "10,000 logical switches" in stub.captured["user_prompt"]
+
+
+_SOFT_NSX = {"product": "nsx", "version": "9.0.1", "source": "caller"}
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+@pytest.mark.parametrize(
+    ("backend", "expected_filters", "expected_soft_scope"),
+    [
+        pytest.param(None, None, None, id="off"),
+        pytest.param({"type": "corpus-http", "ref": {"scope": "soft"}}, None, _SOFT_NSX, id="soft"),
+        pytest.param(
+            {"type": "corpus-http", "ref": {"scope": "soft", "scope_filters": True}},
+            None,
+            _SOFT_NSX,
+            id="both-soft-wins",
+        ),
+    ],
+)
+def test_tools_call_ask_docs_retrieval_follows_the_scope_gates(
+    docs_client: tuple[TestClient, Operator],
+    backend: dict[str, Any] | None,
+    expected_filters: dict[str, str] | None,
+    expected_soft_scope: dict[str, str] | None,
+) -> None:
+    """Every per-variant ``ask_docs`` retrieval follows the collection's gates (#3912).
+
+    Gate off: no ``metadata_filters`` and no soft scope, even though the
+    call names both refinements. Soft gate on (alone or with
+    ``scope_filters``): the soft scope with the release unchanged, and no
+    filters.
+    """
+    client, _op = docs_client
+    if backend is None:
+        _seed_collection_sync()
+    else:
+        _seed_collection_sync(backend=backend)
+    calls: list[dict[str, Any]] = []
+
+    async def _search(operator: Operator, query: str, **kwargs: Any) -> CorpusSearchResponse:
+        calls.append(kwargs)
+        return CorpusSearchResponse(chunks=[_SAMPLE_CHUNK])
+
+    stub = _StubLlmClient(
+        json.dumps(
+            {
+                "answer": "NSX 9.0 supports up to 10,000 logical switches per manager.",
+                "cited_chunk_ids": ["nsx-9.0-maximums-0007"],
+            }
+        )
+    )
+    with (
+        patch(_CORPUS_SEAM, new=_search),
+        patch(_BUILD_LLM_CLIENT, return_value=stub),
+    ):
+        response = post_mcp(
+            client,
+            _ask_call(
+                {
+                    "query": "How many logical switches does NSX 9.0 support?",
+                    "collection": "vmware",
+                    "product": "nsx",
+                    "version": "9.0.1",
+                },
+                call_id=6,
+            ),
+        )
+    assert response.status_code == 200
+    assert response.json()["result"]["isError"] is False
+    assert calls
+    assert all(call["metadata_filters"] == expected_filters for call in calls)
+    assert all(call["soft_scope"] == expected_soft_scope for call in calls)
 
 
 @pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)

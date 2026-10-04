@@ -16,6 +16,10 @@ collection:
   search call, and the backend's answer + citations are mapped into the
   ``ask_docs`` shape (:func:`_map_upstream_answer`). The backplane's own
   model is not called; the answer is composed by the backend's answer model.
+  The ``product`` / ``version`` refinements ride that call only as the
+  collection's scope gates decide
+  (:func:`~meho_backplane.docs_search.service.forwarded_scope`, #3912): a soft
+  ``scope``, hard ``filters``, or nothing -- the same rule as every search.
 * **Local** -- every other collection: the backplane's expand -> retrieve
   (one search per variant, RRF-merged) -> synthesize pipeline (#1916 /
   #1526), unchanged.
@@ -78,7 +82,13 @@ from meho_backplane.docs_search.call_log import AnswerSource, ask_log_fields
 from meho_backplane.docs_search.citation_links import derive_chunk_title
 from meho_backplane.docs_search.expansion import expand_docs_query
 from meho_backplane.docs_search.fanout import retrieve_multi_query
-from meho_backplane.docs_search.service import DocsChunk, DocsScope, _project_chunk
+from meho_backplane.docs_search.service import (
+    DocsChunk,
+    DocsScope,
+    ForwardedScope,
+    _project_chunk,
+    forwarded_scope,
+)
 from meho_backplane.docs_search.synthesis import (
     NO_GROUNDED_ANSWER,
     SYNTHESIS_CAUSE_CITATION_RESOLUTION,
@@ -164,6 +174,14 @@ async def answer_docs_question(
     unroutable collection takes the local path, which fails it on the
     ``corpus_unavailable`` leg exactly as before.
 
+    The ``product`` / ``version`` refinements reach the backend as the
+    collection's scope gates decide
+    (:func:`~meho_backplane.docs_search.service.forwarded_scope`, #3912), on
+    both paths: the upstream answer call carries the soft ``scope`` or the
+    hard ``filters`` (or neither), and each search of the local pipeline
+    applies the same rule. ``docs_ask_completed`` records the *requested*
+    values and ``scope_forwarded`` (``"soft"``, ``"filters"`` or ``"none"``).
+
     The caller has already resolved, entitled and readiness-checked
     *collection* and bound the audit row; this never touches either.
 
@@ -178,23 +196,29 @@ async def answer_docs_question(
             ``-32603`` rather than a mis-labelled leg failure.
     """
     resolved, _label, _message = resolve_backend_or_label(collection)
+    forwarded = forwarded_scope(scope, resolved.ref if resolved is not None else None)
     if resolved is not None and resolved.backend.supports_answer(resolved.ref):
         outcome = await _answer_upstream(
-            operator, query, resolved=resolved, scope=scope, limit=limit
+            operator, query, resolved=resolved, scope=scope, forwarded=forwarded, limit=limit
         )
     else:
         outcome = await _answer_locally(
             operator, query, scope=scope, collection=collection, limit=limit
         )
     if outcome.answer is not None:
-        # The ids-only ask fields (#3915), the same keys on both paths: the
-        # hit and cited chunk ids and normalised source refs, never chunk,
-        # answer or query text. The backend timing is set upstream only.
+        # The requested product / version and how they reached the backend
+        # (scope_forwarded, #3912), then the ids-only ask fields (#3915), the
+        # same keys on both paths: the hit and cited chunk ids and normalised
+        # source refs, never chunk, answer or query text. The backend timing
+        # is set upstream only.
         timing = outcome.upstream_timing
         _log.info(
             "docs_ask_completed",
             operator_sub=operator.sub,
             collection_key=scope.collection_key,
+            product=scope.product,
+            version=scope.version,
+            scope_forwarded=forwarded.mode,
             **ask_log_fields(
                 answer_source=outcome.answer_source,
                 hits=outcome.retrieved_chunks,
@@ -212,9 +236,13 @@ async def _answer_upstream(
     *,
     resolved: BackendRef,
     scope: DocsScope,
+    forwarded: ForwardedScope,
     limit: int,
 ) -> AskPipelineOutcome:
     """Run the upstream path: one backend answer call, mapped (#3911).
+
+    The call carries *forwarded* -- the collection's scope-gate decision
+    (#3912): the soft ``scope``, the hard ``filters``, or neither.
 
     A failed call is classified into its ``(leg, cause)`` by the shared
     :func:`~meho_backplane.docs_search.classify_answer_error` (the transport's
@@ -226,11 +254,16 @@ async def _answer_upstream(
     """
     try:
         upstream = await resolved.backend.answer(
-            operator, query, backend_ref=resolved.ref, limit=limit
+            operator,
+            query,
+            backend_ref=resolved.ref,
+            filters=forwarded.filters or None,
+            soft_scope=forwarded.soft_scope or None,
+            limit=limit,
         )
     except Exception as exc:
         error = _classify_or_reraise(exc)
-        _log_upstream_failure(operator, scope, error)
+        _log_upstream_failure(operator, scope, forwarded, error)
         return AskPipelineOutcome(error=error, answer_source=ANSWER_SOURCE_UPSTREAM)
 
     hits = [
@@ -240,7 +273,7 @@ async def _answer_upstream(
         answer = _map_upstream_answer(upstream, hits)
     except DocsSynthesisError as exc:
         error = _classify_or_reraise(exc)
-        _log_upstream_failure(operator, scope, error)
+        _log_upstream_failure(operator, scope, forwarded, error)
         return AskPipelineOutcome(
             error=error,
             retrieved_chunks=hits,
@@ -349,13 +382,19 @@ def _renumber_markers(text: str, number_by_index: dict[int, int]) -> str:
     return _UPSTREAM_MARKER_RE.sub(_replace, text)
 
 
-def _log_upstream_failure(operator: Operator, scope: DocsScope, error: AskDocsAnswerError) -> None:
+def _log_upstream_failure(
+    operator: Operator,
+    scope: DocsScope,
+    forwarded: ForwardedScope,
+    error: AskDocsAnswerError,
+) -> None:
     """Log a failed upstream answer by leg + cause (never the query or a body)."""
     _log.warning(
         "docs_ask_upstream_failed",
         operator_sub=operator.sub,
         collection_key=scope.collection_key,
         answer_source=ANSWER_SOURCE_UPSTREAM,
+        scope_forwarded=forwarded.mode,
         leg=error.leg,
         cause=error.cause,
         upstream_status=error.upstream_status,

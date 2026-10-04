@@ -49,7 +49,12 @@ backplane's local answer pipeline. :meth:`CorpusHttpBackend.answer` then calls
   (:func:`~meho_backplane.auth.corpus.derive_answer_url`).
 
 Same transport posture as search (SSRF screen, service credential, body
-never echoed), with its own ``CORPUS_ANSWER_TIMEOUT_SECONDS`` bound.
+never echoed), with its own ``CORPUS_ANSWER_TIMEOUT_SECONDS`` bound. The
+product / version refinements reach the answer call through the same
+per-collection gates as search
+(:func:`~meho_backplane.docs_search.forwarded_scope`, #3912): the soft scope
+as the body's ``scope``, the hard filters as its ``filters``; with both gates
+off the body carries neither.
 
 Readiness + per-project rebuild serialization (T6 #1555)
 -------------------------------------------------------
@@ -133,19 +138,22 @@ class CorpusHttpBackend(SearchBackend):
         *,
         backend_ref: Mapping[str, Any] | None = None,
         metadata_filters: dict[str, Any] | None = None,
+        soft_scope: Mapping[str, str] | None = None,
         limit: int = 10,
     ) -> CorpusSearchResponse:
         """Federate the query to this collection's corpus as *operator*.
 
         Resolves the endpoint and audience from *backend_ref*, falling
         back to the legacy ``settings.corpus_url`` / ``corpus_audience``
-        globals when absent, then delegates to the shared transport.
+        globals when absent, then delegates to the shared transport, which
+        sends *soft_scope* as the request's ``scope`` object (#3912).
         """
         endpoint, audience = _resolve_endpoint_audience(backend_ref)
         return await search_corpus(
             operator,
             query,
             metadata_filters=metadata_filters,
+            soft_scope=soft_scope,
             limit=limit,
             corpus_url=endpoint,
             audience=audience,
@@ -168,6 +176,8 @@ class CorpusHttpBackend(SearchBackend):
         query: str,
         *,
         backend_ref: Mapping[str, Any] | None = None,
+        filters: dict[str, Any] | None = None,
+        soft_scope: Mapping[str, str] | None = None,
         limit: int = 10,
     ) -> UpstreamAnswer:
         """Ask this collection's corpus answer endpoint for a cited answer.
@@ -175,7 +185,9 @@ class CorpusHttpBackend(SearchBackend):
         The endpoint is ``backend.ref["answer_endpoint"]`` when set, else the
         resolved search endpoint (ref, else the legacy ``settings.corpus_url``)
         with its last path segment replaced by ``ask``. The audience resolves
-        as on search. Delegates to
+        as on search. *filters* / *soft_scope* (already gated by the caller,
+        #3912) go to the transport, which sends them as the body's
+        ``filters`` / ``scope``. Delegates to
         :func:`~meho_backplane.auth.corpus.ask_corpus`, which raises
         :class:`~meho_backplane.auth.corpus.CorpusUnavailable` /
         :class:`~meho_backplane.auth.corpus.CorpusAnswerError`.
@@ -188,6 +200,8 @@ class CorpusHttpBackend(SearchBackend):
         return await ask_corpus(
             operator,
             query,
+            filters=filters,
+            soft_scope=soft_scope,
             limit=limit,
             answer_url=answer_url,
             audience=audience,

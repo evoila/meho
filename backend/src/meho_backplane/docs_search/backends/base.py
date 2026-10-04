@@ -133,6 +133,7 @@ class SearchBackend(ABC):
         *,
         backend_ref: Mapping[str, Any] | None = None,
         metadata_filters: dict[str, Any] | None = None,
+        soft_scope: Mapping[str, str] | None = None,
         limit: int = 10,
     ) -> CorpusSearchResponse:
         """Search this backend as *operator*, returning corpus-shaped chunks.
@@ -150,9 +151,16 @@ class SearchBackend(ABC):
                 the adapter's legacy / default configuration (the
                 single-collection deploy that predates the registry).
             metadata_filters: Optional binary ``{key: scalar}`` narrowing
-                (e.g. ``{"product": "vmware", "version": "9.0"}``). The
+                (e.g. ``{"product": "vsphere", "version": "8.0"}``). The
                 mandatory-filter posture is enforced by the caller, not
                 here — the adapter forwards whatever it is given.
+            soft_scope: Optional soft scope (#3912), e.g.
+                ``{"product": "vsphere", "version": "8.0.3", "source":
+                "caller"}``: a ranking / labelling signal, never a filter.
+                The caller sends it only to a collection that opts in
+                (``backend.ref["scope"] == "soft"``); ``None`` sends
+                nothing, so a backend that refuses unknown request keys
+                sees the request it always saw.
             limit: Maximum number of chunks to request.
 
         Returns:
@@ -224,6 +232,8 @@ class SearchBackend(ABC):
         query: str,
         *,
         backend_ref: Mapping[str, Any] | None = None,
+        filters: dict[str, Any] | None = None,
+        soft_scope: Mapping[str, str] | None = None,
         limit: int = 10,
     ) -> UpstreamAnswer:
         """Ask the backend for a grounded, cited answer to *query* (#3911).
@@ -239,6 +249,15 @@ class SearchBackend(ABC):
                 authenticates with its own service credential).
             query: The operator's question.
             backend_ref: The collection's ``backend.ref``.
+            filters: Optional hard ``{key: scalar}`` filters (#3912), as on
+                :meth:`search`. The caller passes them only for a collection
+                with ``backend.ref["scope_filters"] is True`` and no soft
+                scope; ``None`` sends none.
+            soft_scope: Optional soft scope (#3912), as on :meth:`search`:
+                a ranking / labelling signal, never a filter, passed only
+                for a collection with ``backend.ref["scope"] == "soft"``.
+                ``None`` sends none, so with both gates off the backend sees
+                the request it always saw.
             limit: The retrieval depth to request; the backend may cap it.
 
         Raises:

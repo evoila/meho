@@ -23,9 +23,13 @@ routes the query to a backend and gates entitlement, but it is a
 router / entitlement key, NOT a metadata filter (it never reaches the
 backend's per-chunk ``metadata`` containment query). ``product`` /
 ``version`` demote to **optional refinements** within the chosen
-collection -- present, they ride ``metadata_filters`` (binary
-containment, the #1178 / #1177 decision, never a ranking weight); absent,
-the collection alone scopes the query.
+collection. Present, they reach the backend only when the collection
+opts in (:func:`~meho_backplane.docs_search.forwarded_scope`, #3912): as
+a soft ``scope`` the backend ranks with and never filters on when its
+``backend.ref["scope"]`` is ``"soft"``, or as ``metadata_filters``
+(binary containment, the #1178 / #1177 decision) when its
+``backend.ref["scope_filters"]`` is ``true``; otherwise they are audited
+and not sent. Absent, the collection alone scopes the query.
 
 Per-collection entitlement + readiness
 --------------------------------------

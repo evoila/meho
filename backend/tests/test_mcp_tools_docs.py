@@ -18,7 +18,10 @@ Covers the collection-scoped contract layered on the G4.5-T4 capability gate:
   403-class ``-32602`` even though the tool is visible; with it → the
   query routes to the collection's backend.
 * **Collection scope routing:** the query reaches the resolved backend
-  with the optional product/version refinements as ``metadata_filters``;
+  with the optional product/version refinements as a soft ``scope`` when
+  the collection's ``backend.ref["scope"]`` is ``"soft"``, as
+  ``metadata_filters`` when it enables ``scope_filters``, and without them
+  when it enables neither (#3912);
   an unknown collection → ``-32602``, a *transiently* not-ready
   (``provisioning`` / ``rebuilding``) collection → ``-32603`` (retryable),
   a ``disabled`` collection → ``-32602`` (terminal,
@@ -71,6 +74,13 @@ _ENTITLED = frozenset({_DOCS_CAPABILITY, _VMWARE_CAP})
 #: ``corpus-http`` adapter actually calls. Patching here exercises the
 #: full router → backend → transport path.
 _CORPUS_SEAM = "meho_backplane.docs_search.backends.corpus_http.search_corpus"
+
+#: A ``corpus-http`` binding whose collection opts into forwarding the
+#: product/version refinements as hard filters (#3912). The default seed
+#: has no ``ref``, so both gates are off.
+_SCOPE_FILTERS_ON: dict[str, Any] = {"type": "corpus-http", "ref": {"scope_filters": True}}
+#: A ``corpus-http`` binding whose collection opts into the soft scope (#3912).
+_SOFT_SCOPE_ON: dict[str, Any] = {"type": "corpus-http", "ref": {"scope": "soft"}}
 
 
 async def _mcp_audit_rows() -> list[AuditLog]:
@@ -239,6 +249,48 @@ def test_search_docs_description_names_collection_and_siblings(
     # Companion resource pointer now carries the collection segment.
     assert "meho://docs/{collection}/" in desc
     assert "resources/read" in desc
+    # #3912: the example names the stamped product family, not vCenter.
+    assert "vSphere 8.0" in desc
+    assert "vCenter 8.0" not in desc
+
+
+@pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
+@pytest.mark.parametrize("tool_name", ["search_docs", "ask_docs"])
+def test_refinement_descriptions_use_the_collection_vocabulary(
+    docs_client: tuple[TestClient, Operator],
+    tool_name: str,
+) -> None:
+    """``product`` / ``version`` guide the agent to values that work (#3912).
+
+    ``product`` names the collection's own tokens (``vsphere``, never a
+    ``vcenter`` example). ``version`` asks for the release as precisely as
+    the agent knows it (a soft scope ranks it and excludes nothing), so it
+    no longer asks for ``MAJOR.MINOR`` only or says to leave it out for
+    KB / CVE / build-number questions; it carries the caveat that on a
+    ``scope_filters`` collection a precise release is an exact-match
+    filter. Both say the refinements are ignored unless the collection
+    enables scope forwarding.
+    """
+    client, _op = docs_client
+    response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    tools_by_name = {t["name"]: t for t in response.json()["result"]["tools"]}
+    properties = tools_by_name[tool_name]["inputSchema"]["properties"]
+    product = properties["product"]["description"]
+    version = properties["version"]["description"]
+
+    assert "'vsphere'" in product
+    assert "list_doc_collections" in product
+    for release in ("'9.1.1'", "'8.0 U3'", "'8.0.3.00400'"):
+        assert release in version
+    assert "as precisely as you know it" in version
+    assert "MAJOR.MINOR" not in version
+    assert "Omit it for" not in version
+    assert "exact-match filter" in version
+    for description in (product, version):
+        assert "vcenter" not in description
+        assert "scope forwarding" in description
+    # The tool description no longer calls the refinements "not a ranking hint".
+    assert "ranking hint" not in tools_by_name[tool_name]["description"]
 
 
 def test_search_docs_hidden_from_provisioned_read_only_operator() -> None:
@@ -344,12 +396,12 @@ def test_tools_call_search_docs_routes_to_collection_backend(
     """An entitled operator's query routes to the collection's backend with refinements.
 
     The handler resolves the ``vmware`` collection, routes through the
-    ``corpus-http`` backend, and the optional product/version refinements
-    reach the transport as ``metadata_filters``. The backend id is absent
-    from the response.
+    ``corpus-http`` backend, and — the collection enabling scope filters
+    (#3912) — the optional product/version refinements reach the transport
+    as ``metadata_filters``. The backend id is absent from the response.
     """
     client, op = docs_client
-    _seed_collection_sync()
+    _seed_collection_sync(backend=_SCOPE_FILTERS_ON)
     fake = _fake_corpus(_SAMPLE_CHUNK)
     with patch(_CORPUS_SEAM, new=fake):
         response = post_mcp(
@@ -390,6 +442,7 @@ def test_tools_call_search_docs_routes_to_collection_backend(
     assert captured["query"] == "config maximums"
     assert captured["limit"] == 5
     assert captured["metadata_filters"] == {"product": "nsx", "version": "9.0"}
+    assert captured["soft_scope"] is None
     assert captured["operator"].tenant_id == op.tenant_id
 
 
@@ -538,6 +591,84 @@ def test_tools_call_search_docs_collection_only_omits_refinements(
     assert response.json()["result"]["isError"] is False
     # No product/version → no metadata_filters forwarded.
     assert fake.captured["metadata_filters"] is None  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_search_docs_scope_filters_off_sends_no_refinements(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """Gate off (#3912): product/version are accepted but never reach the backend.
+
+    The seeded collection's ``backend.ref`` has no ``scope_filters``, so a
+    call carrying both refinements still succeeds and the backend sees no
+    ``metadata_filters`` — the collection alone scopes the query.
+    """
+    client, _op = docs_client
+    _seed_collection_sync()
+    fake = _fake_corpus(_SAMPLE_CHUNK)
+    with patch(_CORPUS_SEAM, new=fake):
+        response = post_mcp(
+            client,
+            {
+                "jsonrpc": "2.0",
+                "id": 6,
+                "method": "tools/call",
+                "params": {
+                    "name": "search_docs",
+                    "arguments": {
+                        "query": "snapshot depth",
+                        "collection": "vmware",
+                        "product": "vsphere",
+                        "version": "8.0",
+                    },
+                },
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["result"]["isError"] is False
+    assert fake.captured["metadata_filters"] is None  # type: ignore[attr-defined]
+    assert fake.captured["soft_scope"] is None  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_search_docs_soft_scope_sends_release_unchanged(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """Soft gate on (#3912): the release travels as the soft scope, as given.
+
+    The collection's ``backend.ref`` sets ``scope: "soft"``, so the backend
+    gets ``{product, version, source: "caller"}`` with the full release
+    unchanged and no ``metadata_filters``.
+    """
+    client, _op = docs_client
+    _seed_collection_sync(backend=_SOFT_SCOPE_ON)
+    fake = _fake_corpus(_SAMPLE_CHUNK)
+    with patch(_CORPUS_SEAM, new=fake):
+        response = post_mcp(
+            client,
+            {
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": {
+                    "name": "search_docs",
+                    "arguments": {
+                        "query": "snapshot depth",
+                        "collection": "vmware",
+                        "product": "vsphere",
+                        "version": "8.0.3.00400",
+                    },
+                },
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["result"]["isError"] is False
+    assert fake.captured["metadata_filters"] is None  # type: ignore[attr-defined]
+    assert fake.captured["soft_scope"] == {  # type: ignore[attr-defined]
+        "product": "vsphere",
+        "version": "8.0.3.00400",
+        "source": "caller",
+    }
 
 
 # ---------------------------------------------------------------------------

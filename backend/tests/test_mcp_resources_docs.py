@@ -250,10 +250,12 @@ def test_resources_read_docs_returns_matching_chunk_text(
     assert "NSX 9.0 supports" in chunk["content"]
     assert chunk["source_url"].endswith("/maximums")
 
-    # The optional product/version refinements reached the backend and the
-    # operator identity was forwarded.
+    # The seeded collection enables neither scope gate (#3912), so the URI's
+    # product/version segments do not reach the backend, as filters or as a
+    # soft scope; the operator identity was forwarded.
     captured = fake.captured  # type: ignore[attr-defined]
-    assert captured["metadata_filters"] == {"product": "nsx", "version": "9.0"}
+    assert captured["metadata_filters"] is None
+    assert captured["soft_scope"] is None
     assert captured["operator"].tenant_id == op.tenant_id
 
 

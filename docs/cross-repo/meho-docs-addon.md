@@ -246,6 +246,37 @@ The **backend** record is `{type, ref}`:
   moves its answers from the backplane's model to the corpus's answer
   model, an owner decision per collection, reversible with one
   `meho docs collections update`.
+- `ref.scope` and `ref.scope_filters` (any backend type; both default
+  off) — the two per-collection gates for a query's `product` / `version`
+  refinements (#3912). With neither, the refinements are accepted, logged
+  and audited but never sent.
+  - `"scope": "soft"` (exactly that string) sends them as a **soft scope**,
+    `{"product": …, "version": …, "source": "caller"}`, in the request's
+    `scope` key: the values unchanged (a full release such as
+    `8.0.3.00400` included), a key the agent did not give omitted. The
+    backend ranks with it and labels its answer, never filters on it, and
+    normalises the values itself (evoila-bosnia/MEHO.Knowledge#512).
+  - `"scope_filters": true` (the JSON boolean) sends them as **hard
+    filters**: `metadata_filters` on search, `filters` on the upstream
+    answer call. An exact-match pre-filter, so the values must be the
+    ones the collection stamps (see *Search* below).
+  - **Precedence:** with both set, `scope: "soft"` wins: `scope` is sent
+    and no filters are. Any other value of either key counts as off.
+  - **Both calls.** The same rule (`forwarded_scope`) decides the search
+    request and, for a collection with `"answer": "upstream"`, the answer
+    request (see *Answer* below). With neither gate on, both bodies are
+    exactly what they were before the gates existed.
+  - **When to flip.** The backend refuses unknown request keys
+    (evoila-bosnia/MEHO.Knowledge#496), so `scope` must never reach a
+    release that does not accept it. For the shared `vmware` collection,
+    set `"scope": "soft"` only after the MEHO Knowledge release that
+    accepts `scope` (evoila-bosnia/MEHO.Knowledge#496 +
+    evoila-bosnia/MEHO.Knowledge#509 + evoila-bosnia/MEHO.Knowledge#512) is
+    deployed; `scope_filters` stays off for it. A backend update replaces
+    the whole record and resets the collection to `provisioning`, so
+    re-pass the existing `ref` keys and run `probe` afterwards:
+    `meho docs collections update vmware --backend-type corpus-http --backend-ref '{"endpoint":"<current>","scope":"soft"}'`,
+    then `meho docs collections probe vmware`.
 
 The legacy global corpus settings remain as the `corpus-http` fallback
 (env vars in parentheses):
@@ -376,6 +407,16 @@ entitled to** (`meho-docs:<key>`), so every key shown is one
 - **`product` / `version` are optional refinements** within a single
   collection (a collection *is* a scoped corpus, so the anti-drown
   guarantee holds on `collection` alone). Omitting them still succeeds.
+  They reach the backend only when the collection opts in (#3912): as a
+  soft `scope` with `backend.ref.scope: "soft"`, as `metadata_filters`
+  with `backend.ref.scope_filters: true` (the soft gate wins when both
+  are set). Otherwise they are recorded in the log and audit row and not
+  sent. Use the collection's own product tokens (its `products` in
+  `list_doc_collections`; on the shared `vmware` collection `vsphere`
+  covers vCenter and ESXi, `vcf` covers SDDC Manager) and the release as
+  precisely as you know it (`9.1.1`, `8.0 U3`, `8.0.3.00400`): a soft
+  scope ranks that release first and excludes nothing, so there is no
+  need to leave `version` out for KB, CVE or build-number questions.
 - **Entitlement** — searching a collection the tenant is not entitled to
   (`meho-docs:<key>` missing) → **403** / `-32602`, even though the tool
   stays visible via the base `meho-docs` gate.
@@ -508,16 +549,22 @@ Content-Type: application/json
 {
   "query": "config maximums",
   "top_k": 10,
-  "metadata_filters": {"product": "nsx", "version": "9.0"},
+  "scope": {"product": "nsx", "version": "9.0.1", "source": "caller"},
   "audience": "https://corpus.example"
 }
 ```
+
+(A collection with `backend.ref.scope: "soft"`. A collection with
+`backend.ref.scope_filters: true` and no `scope` key sends
+`"metadata_filters": {"product": "nsx", "version": "9.0.1"}` in its place;
+a collection with neither sends neither key.)
 
 | Key | Type | Sent when | Notes |
 |---|---|---|---|
 | `query` | `str` | always | The free-text search query. |
 | `top_k` | `int` | always | Maximum chunks to return. meho sends **`top_k`** (the key MEHO.Knowledge honours, #1732) — **not** `limit` / `k` / `size`. A corpus that reads only some *other* key and ignores `top_k` silently caps at *its* default. Read `top_k`. |
-| `metadata_filters` | `{key: scalar}` | only when non-empty | Binary `{key: value}` narrowing (e.g. `{"product": "vmware"}`). Omitted entirely when meho has no filters — do not require the key. |
+| `metadata_filters` | `{key: scalar}` | only when non-empty, the collection sets `backend.ref.scope_filters: true` and does **not** set `backend.ref.scope: "soft"` | Binary `{key: value}` narrowing (e.g. `{"product": "vsphere"}`), values passed through unchanged. Omitted entirely when meho has no filters to send — do not require the key. |
+| `scope` | `{product?, version?, source}` | only when the agent gave `product` and/or `version` and the collection sets `backend.ref.scope: "soft"` (#3912) | The soft scope: a ranking / labelling signal, never a filter. Values as the agent gave them (normalising them is the corpus's job); `source` is `"caller"`. Never sent together with `metadata_filters`. A corpus that refuses unknown keys must accept `scope` before a collection turns the gate on. |
 | `audience` | `str` | only when configured | RFC 8707 resource indicator, forwarded **in the request body** here (contrast readiness below). Omitted when no audience is configured. |
 
 - **Auth.** `Authorization: Bearer <operator JWT>` — the **operator's** raw
@@ -638,11 +685,15 @@ with its last path segment replaced by `ask`. Same screen, credential and
 |---|---|---|
 | `query` | `str` | The operator's question, verbatim. |
 | `top_k` | `int` | The requested retrieval depth (`ask_docs` `limit`, default 10, cap 50). The corpus **may** cap it lower. |
+| `filters` | `{key: scalar}` | Only when the agent gave `product` and/or `version`, the collection sets `backend.ref.scope_filters: true` and does **not** set `backend.ref.scope: "soft"` (#3912). The answer endpoint's name for search's `metadata_filters`: an exact-match pre-filter, values passed through unchanged. |
+| `scope` | `{product?, version?, source}` | Only when the agent gave `product` and/or `version` and the collection sets `backend.ref.scope: "soft"` (#3912). The soft scope, as on search: a ranking / labelling signal, never a filter; `source` is `"caller"`. Never sent together with `filters`. |
 | `audience` | `str` | Only when an audience is configured, as on search. |
 
-meho sends **no** `with_rerank` (ranking policy is the corpus's) and **no**
-scope filter (`product` / `version` are not forwarded on this call until the
-per-collection scope-filter gate, #3912, lands).
+meho sends **no** `with_rerank` (ranking policy is the corpus's). With
+neither scope gate on, the body is exactly `{query, top_k}` (plus
+`audience`): the corpus refuses unknown request keys, so `scope` reaches
+only a corpus release that accepts it, once the collection turns its gate
+on.
 
 **Response** — `2xx` JSON. The fields meho consumes (everything else is
 ignored):

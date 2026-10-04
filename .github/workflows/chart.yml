@@ -515,6 +515,9 @@ jobs:
             || { echo "::error::PrometheusRule missing the release-scoped absent(up) scrape alert (#2885 regression)"; exit 1; }
           grep -Fq 'rate(broadcast_publish_errors_total[5m])' /tmp/rendered-obs.yaml \
             || { echo "::error::PrometheusRule missing the broadcast_publish_errors_total rate alert (#2885 regression)"; exit 1; }
+          # The #3915 docs alert, release-scoped like the scrape alert.
+          grep -Fq 'increase(docs_search_scoped_zero_hits_total{job="test-meho"' /tmp/rendered-obs.yaml \
+            || { echo "::error::PrometheusRule missing the release-scoped docs_search_scoped_zero_hits_total alert (#3915 regression)"; exit 1; }
 
           # Discovery label present on BOTH resources — a Prometheus
           # serviceMonitorSelector / ruleSelector only picks them up when

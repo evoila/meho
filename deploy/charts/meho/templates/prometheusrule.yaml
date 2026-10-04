@@ -12,6 +12,7 @@ a new alert lands as a new group rather than an edit to an existing one.
 Keep this shape. `meho.loops` (#2888) carries the background-loop liveness
 alert, thresholding the `background_loop_last_tick_timestamp_seconds` and
 `background_loop_interval_seconds` gauges every lifespan loop stamps.
+`meho.docs` (#3915) carries the scoped zero-hit docs-search alert.
 */ -}}
 {{- if .Values.prometheusRule.enabled }}
 apiVersion: monitoring.coreos.com/v1
@@ -94,4 +95,34 @@ spec:
               or dead, so the sweeps / drains it owns are silently not running.
               Check the pod logs for that loop's task and restart the replica
               if it does not recover.
+    - name: meho.docs
+      rules:
+        - alert: MehoDocsScopedZeroHits
+          # docs_search_scoped_zero_hits_total counts docs searches that
+          # requested a product or version and returned no chunks
+          # (backend/src/meho_backplane/docs_search/call_log.py), whatever the
+          # collection's scope gates (#3912) did with them. Where they went
+          # out as hard filters (scope_forwarded="filters" on the warning
+          # line), a run of them means the filter vocabulary does not match
+          # the corpus's. It counts backend searches, not calls: a local
+          # ask_docs counts once per expansion variant (up to 4). Summed over
+          # the release's pods, so the count does not depend on which replica
+          # served.
+          expr: 'sum(increase(docs_search_scoped_zero_hits_total{job="{{ include "meho.fullname" . }}", namespace="{{ .Release.Namespace }}"}[{{ .Values.prometheusRule.docsScopedZeroHits.window }}])) >= {{ .Values.prometheusRule.docsScopedZeroHits.threshold }}'
+          for: {{ .Values.prometheusRule.docsScopedZeroHits.for }}
+          labels:
+            severity: {{ .Values.prometheusRule.docsScopedZeroHits.severity }}
+          annotations:
+            summary: MEHO docs searches that request a product or version return no chunks
+            description: >-
+              At least {{ .Values.prometheusRule.docsScopedZeroHits.threshold }}
+              docs searches that requested a product or version returned no
+              chunks in the last {{ .Values.prometheusRule.docsScopedZeroHits.window }}
+              (an ask_docs call counts once per expansion variant, up to 4).
+              The docs_search_scoped_zero_hits warning log lines name the
+              collection, product, version and scope_forwarded. Where
+              scope_forwarded is "filters", the values callers send probably
+              do not match the collection's metadata vocabulary: compare them
+              with the collection's products and the corpus's stamped values.
+              With "soft" or "none" the backend did not filter on them.
 {{- end }}

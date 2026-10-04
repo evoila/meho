@@ -31,6 +31,7 @@ per-variant recorder.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -49,6 +50,21 @@ from meho_backplane.docs_search import (
     retrieve_multi_query,
 )
 from meho_backplane.operations.ingest.pipeline import LlmClientUnavailable
+from meho_backplane.settings import get_settings
+
+
+@pytest.fixture(autouse=True)
+def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Pin the env ``get_settings()`` needs.
+
+    The expand step reads the ``DOCS_DEBUG_LOG_QUERY_TEXT`` opt-in through
+    ``get_settings()`` (#3915), and ``Settings`` requires the Keycloak knobs.
+    """
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 class _StubLlmClient:

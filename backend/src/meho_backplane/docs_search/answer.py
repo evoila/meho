@@ -32,6 +32,16 @@ and for the two face-level differences: the UI numbers its citation cards to
 match the upstream ``[k]`` markers and falls back to one plain search on an
 upstream failure, and MCP wraps the upstream answer text as untrusted.
 
+A successful answer on either path logs one ``docs_ask_completed`` record
+with the requested ``product`` / ``version``, ``scope_forwarded`` (#3912)
+and the ids-only fields of
+:func:`~meho_backplane.docs_search.call_log.ask_log_fields` (#3915): the hit
+and cited chunk ids and normalised source refs, ``answer_source`` and, on the
+upstream path, the backend's timing. A failed upstream answer logs
+``docs_ask_upstream_failed``, with the hit fields when the backend returned
+hits that failed to map (``citation_resolution``). Never chunk, answer or
+query text.
+
 Mapping an upstream answer
 --------------------------
 
@@ -59,6 +69,7 @@ Mapping an upstream answer
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
 
@@ -72,6 +83,7 @@ from meho_backplane.docs_search.answer_errors import (
     classify_answer_error,
 )
 from meho_backplane.docs_search.backends import BackendRef, resolve_backend_or_label
+from meho_backplane.docs_search.call_log import AnswerSource, ask_log_fields, hit_log_fields
 from meho_backplane.docs_search.citation_links import derive_chunk_title
 from meho_backplane.docs_search.expansion import expand_docs_query
 from meho_backplane.docs_search.fanout import retrieve_multi_query
@@ -103,9 +115,9 @@ __all__ = [
 _log = structlog.get_logger(__name__)
 
 #: ``answer_source`` of an answer composed by the backplane's own pipeline.
-ANSWER_SOURCE_LOCAL: Final[str] = "local"
+ANSWER_SOURCE_LOCAL: Final[AnswerSource] = "local"
 #: ``answer_source`` of an answer composed by the collection's backend.
-ANSWER_SOURCE_UPSTREAM: Final[str] = "upstream"
+ANSWER_SOURCE_UPSTREAM: Final[AnswerSource] = "upstream"
 
 #: An upstream ``[N]`` citation marker, with the horizontal whitespace before
 #: it (so a dropped marker takes its leading space along). The digit run is
@@ -146,7 +158,7 @@ class AskPipelineOutcome:
     answer: DocsAnswer | None = None
     error: AskDocsAnswerError | None = None
     retrieved_chunks: list[DocsChunk] = field(default_factory=list)
-    answer_source: str = ANSWER_SOURCE_LOCAL
+    answer_source: AnswerSource = ANSWER_SOURCE_LOCAL
     upstream_timing: UpstreamAnswerTiming | None = None
 
 
@@ -199,19 +211,26 @@ async def answer_docs_question(
             operator, query, scope=scope, collection=collection, limit=limit
         )
     if outcome.answer is not None:
+        # The requested product / version and how they reached the backend
+        # (scope_forwarded, #3912), then the ids-only ask fields (#3915), the
+        # same keys on both paths: the hit and cited chunk ids and normalised
+        # source refs, never chunk, answer or query text. The backend timing
+        # is set upstream only.
         timing = outcome.upstream_timing
         _log.info(
             "docs_ask_completed",
             operator_sub=operator.sub,
             collection_key=scope.collection_key,
-            answer_source=outcome.answer_source,
             product=scope.product,
             version=scope.version,
             scope_forwarded=forwarded.mode,
-            hit_count=len(outcome.retrieved_chunks),
-            citation_count=len(outcome.answer.citations),
-            upstream_total_ms=timing.total_ms if timing is not None else None,
-            upstream_llm_ms=timing.llm_ms if timing is not None else None,
+            **ask_log_fields(
+                answer_source=outcome.answer_source,
+                hits=outcome.retrieved_chunks,
+                citations=outcome.answer.citations,
+                upstream_total_ms=timing.total_ms if timing is not None else None,
+                upstream_llm_ms=timing.llm_ms if timing is not None else None,
+            ),
         )
     return outcome
 
@@ -259,7 +278,7 @@ async def _answer_upstream(
         answer = _map_upstream_answer(upstream, hits)
     except DocsSynthesisError as exc:
         error = _classify_or_reraise(exc)
-        _log_upstream_failure(operator, scope, forwarded, error)
+        _log_upstream_failure(operator, scope, forwarded, error, hits=hits)
         return AskPipelineOutcome(
             error=error,
             retrieved_chunks=hits,
@@ -373,8 +392,17 @@ def _log_upstream_failure(
     scope: DocsScope,
     forwarded: ForwardedScope,
     error: AskDocsAnswerError,
+    *,
+    hits: Sequence[DocsChunk] | None = None,
 ) -> None:
-    """Log a failed upstream answer by leg + cause (never the query or a body)."""
+    """Log a failed upstream answer by leg + cause (never the query or a body).
+
+    *hits* are the projected hits of an answer the backend did return but
+    that failed to map (a ``citation_resolution`` failure): their ids-only
+    hit fields (#3915) are logged too, the ids that failure is debugged
+    with. A call that failed before the backend answered has none and logs
+    no hit fields.
+    """
     _log.warning(
         "docs_ask_upstream_failed",
         operator_sub=operator.sub,
@@ -385,6 +413,7 @@ def _log_upstream_failure(
         cause=error.cause,
         upstream_status=error.upstream_status,
         retry_after=error.retry_after,
+        **(hit_log_fields(hits) if hits is not None else {}),
     )
 
 

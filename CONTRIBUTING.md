@@ -133,6 +133,20 @@ locally with `pre-commit install --install-hooks` (and re-run them on
 the whole tree with `pre-commit run --all-files` if you need to
 verify a clean baseline).
 
+## Write in plain English
+
+Many people who work on MEHO read English as a second language. Write so
+that they understand you on the first read. This applies to issues, pull
+requests, commit messages, code comments and docs.
+
+- Use short sentences and common words.
+- Say what happens, not only the internal name of a thing. If you use a
+  technical term, explain it the first time.
+- Put the most important point first: what changes, why, and what the
+  reader must do.
+- Describe the outcome: what will be true when the work is done.
+- Use short lists instead of long paragraphs.
+
 ## Developer Certificate of Origin
 
 Every commit must carry a `Signed-off-by: Your Name <your@email>`

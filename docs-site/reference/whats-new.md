@@ -29,6 +29,14 @@ notes.
   VMware documentation service ignored them, so its results do not
   change. The tool descriptions now also say which product names and
   version formats to use.
+- **Documentation answers are easier to trace in the logs.** Every
+  `search_docs` and `ask_docs` call now logs the IDs of the chunks it
+  found and the IDs of the chunks the answer cited, so you can see
+  whether a wrong answer came from the search or from the answer step.
+  The logs hold IDs and source references only, never the question or
+  the document text. A new setting can also log the question while you
+  debug; it is off by default. A new optional alert warns when searches
+  for a product or version keep finding nothing.
 - **Security fixes in the container image.** OpenSSL and PCRE2 in the
   base image, and the PyJWT and urllib3 Python libraries, are updated to
   versions that fix known vulnerabilities. The image build now checks a

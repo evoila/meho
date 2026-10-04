@@ -122,17 +122,22 @@ connector-related release-notes line.
   per-collection gates in its `backend.ref`, both off by default:
   `"scope": "soft"` sends them as a soft `scope` object
   (`{"product", "version", "source": "caller"}`, values unchanged, a
-  ranking signal the backend never filters on), and `"scope_filters":
-  true` sends them as hard `metadata_filters`. With both set, the soft
-  scope wins. With neither, the request body is exactly what it was, which
-  matches what the shared corpus did with the refinements until now (it
-  ignored them). Fan-out sends neither. The requested values are still
-  audited and logged; `docs_search_completed` gains `scope_forwarded`
-  (`soft`, `filters` or `none`). The `product` / `version` tool
-  descriptions now name the collection's own product vocabulary
-  (`vsphere` covers vCenter and ESXi, `vcf` covers SDDC Manager) and ask
-  for the release as precisely as the agent knows it (`9.1.1`, `8.0 U3`,
-  `8.0.3.00400`). **Operators:** set the shared `vmware` collection's
+  ranking signal the backend never filters on), and `"scope_filters": true` sends them as
+  hard `metadata_filters`. With both set, the soft scope wins. With
+  neither, the request body is exactly what it was, which matches what the
+  shared corpus did with the refinements until now (it ignored them).
+  Fan-out sends neither. The upstream answer call of a collection with
+  `"answer": "upstream"` (#3911) follows the same gates: the soft scope as
+  `scope`, the hard filters as `filters`, and with both gates off its body
+  is unchanged. The requested values are still audited and logged;
+  `docs_search_completed` and `docs_ask_completed` gain `scope_forwarded`
+  (`soft`, `filters` or `none`), and `docs_ask_completed` the requested
+  `product` / `version`. The `product` / `version` tool descriptions now
+  name the collection's own product vocabulary (`vsphere` covers vCenter
+  and ESXi, `vcf` covers SDDC Manager) and ask for the release as
+  precisely as the agent knows it (`9.1.1`, `8.0 U3`, `8.0.3.00400`),
+  noting that on a `scope_filters` collection the version is an
+  exact-match filter. **Operators:** set the shared `vmware` collection's
   `products` to the tokens it stamps, and set its `"scope": "soft"` only
   after the corpus release that accepts `scope` is deployed; leave
   `scope_filters` off for it (`docs/codebase/docs-search.md`, *Scope

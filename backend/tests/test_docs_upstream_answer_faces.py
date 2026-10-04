@@ -17,6 +17,10 @@ through the one answer seam. For a collection that opted in
 * **MCP envelope** -- the upstream ``answer`` and every citation ``content``
   are wrapped as untrusted text.
 * **Audit** -- the REST ``meho.docs.ask`` row is unchanged.
+* **Scope gates** (#3912) -- the REST and MCP faces pass ``product`` /
+  ``version`` through, and the answer call carries the soft ``scope``, the
+  hard ``filters`` or neither, per the collection's gates. The UI Ask form
+  has no product / version fields, so it never sends either.
 """
 
 from __future__ import annotations
@@ -183,9 +187,11 @@ class _FakeAsk:
     def __init__(self, error: Exception | None = None) -> None:
         self._error = error
         self.calls = 0
+        self.kwargs: list[dict[str, Any]] = []
 
     async def __call__(self, operator: Operator, query: str, **kwargs: Any) -> UpstreamAnswer:
         self.calls += 1
+        self.kwargs.append(kwargs)
         if self._error is not None:
             raise self._error
         return UpstreamAnswer.model_validate(json.loads(_FIXTURE.read_text(encoding="utf-8")))
@@ -228,19 +234,19 @@ def _rest_app() -> FastAPI:
     return app
 
 
-def _rest_post(router: respx.MockRouter, query: str = _QUERY) -> httpx.Response:
+def _rest_post(router: respx.MockRouter, query: str = _QUERY, **refinements: str) -> httpx.Response:
     """POST ``/api/v1/ask_docs`` with a minted, entitled JWT (JWKS on *router*)."""
     key = make_rsa_keypair("kid-A")
     mock_discovery_and_jwks(router, public_jwks(key))
     token = mint_token(key, sub="op-rest", capabilities=sorted(_ENTITLED))
     return TestClient(_rest_app()).post(
         "/api/v1/ask_docs",
-        json={"query": query, "collection": "vmware"},
+        json={"query": query, "collection": "vmware", **refinements},
         headers={"Authorization": f"Bearer {token}"},
     )
 
 
-def _mcp_call() -> dict[str, Any]:
+def _mcp_call(**refinements: str) -> dict[str, Any]:
     """Call the MCP ``ask_docs`` tool as an entitled operator; return the JSON-RPC body."""
 
     async def _verify() -> Operator:
@@ -257,7 +263,7 @@ def _mcp_call() -> dict[str, Any]:
                     "method": "tools/call",
                     "params": {
                         "name": "ask_docs",
-                        "arguments": {"query": _QUERY, "collection": "vmware"},
+                        "arguments": {"query": _QUERY, "collection": "vmware", **refinements},
                     },
                 },
             )
@@ -594,3 +600,84 @@ def test_ui_upstream_failure_with_search_down_shows_banner_alone() -> None:
     assert CAUSE_UPSTREAM_REJECTED in html
     assert "Fallback chunk" not in html
     assert (fake_ask.calls, fake_search.calls) == (1, 1)
+
+
+# ---------------------------------------------------------------------------
+# Scope gates on the answer call, per face (#3912)
+# ---------------------------------------------------------------------------
+
+_REFINEMENTS: dict[str, str] = {"product": "vsphere", "version": "8.0.3.00400"}
+_SOFT: dict[str, str] = {**_REFINEMENTS, "source": "caller"}
+
+_FACE_GATE_CASES = [
+    # (ref gate keys, expected filters, expected soft scope)
+    pytest.param({}, None, None, id="off"),
+    pytest.param({"scope_filters": True}, _REFINEMENTS, None, id="filters"),
+    pytest.param({"scope": "soft"}, None, _SOFT, id="soft"),
+    pytest.param({"scope": "soft", "scope_filters": True}, None, _SOFT, id="both-soft-wins"),
+]
+
+
+def _gated_backend(gates: dict[str, Any]) -> dict[str, Any]:
+    return {"type": "corpus-http", "ref": {**_UPSTREAM_BACKEND["ref"], **gates}}
+
+
+@pytest.mark.parametrize(("gates", "expected_filters", "expected_scope"), _FACE_GATE_CASES)
+@pytest.mark.asyncio
+async def test_rest_answer_call_follows_the_scope_gates(
+    gates: dict[str, Any],
+    expected_filters: dict[str, str] | None,
+    expected_scope: dict[str, str] | None,
+) -> None:
+    """REST ``ask_docs`` with product/version: the answer call is gated; the audit is not."""
+    await _seed_async(_gated_backend(gates))
+    ask, search = _FakeAsk(), _FakeSearch()
+    with (
+        respx.mock(assert_all_called=False) as router,
+        patch(_ASK_SEAM, new=ask),
+        patch(_SEARCH_SEAM, new=search),
+    ):
+        response = _rest_post(router, **_REFINEMENTS)
+    assert response.status_code == 200, response.text
+    assert (ask.calls, search.calls) == (1, 0)
+    assert ask.kwargs[0]["filters"] == expected_filters
+    assert ask.kwargs[0]["soft_scope"] == expected_scope
+
+    async with get_sessionmaker()() as session:
+        rows = (
+            (await session.execute(select(AuditLog).where(AuditLog.path == "/api/v1/ask_docs")))
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    assert rows[0].payload["product"] == "vsphere"
+    assert rows[0].payload["version"] == "8.0.3.00400"
+
+
+@pytest.mark.parametrize(("gates", "expected_filters", "expected_scope"), _FACE_GATE_CASES)
+def test_mcp_answer_call_follows_the_scope_gates(
+    gates: dict[str, Any],
+    expected_filters: dict[str, str] | None,
+    expected_scope: dict[str, str] | None,
+) -> None:
+    """MCP ``ask_docs`` with product/version: the answer call is gated (#3912)."""
+    _seed(_gated_backend(gates))
+    ask, search = _FakeAsk(), _FakeSearch()
+    with patch(_ASK_SEAM, new=ask), patch(_SEARCH_SEAM, new=search):
+        body = _mcp_call(**_REFINEMENTS)
+    assert "result" in body, body
+    assert (ask.calls, search.calls) == (1, 0)
+    assert ask.kwargs[0]["filters"] == expected_filters
+    assert ask.kwargs[0]["soft_scope"] == expected_scope
+
+
+def test_ui_answer_call_sends_no_refinements_whatever_the_gates() -> None:
+    """The UI Ask form has no product / version, so nothing is forwarded (#3912)."""
+    _seed(_gated_backend({"scope": "soft", "scope_filters": True}))
+    ask, search = _FakeAsk(), _FakeSearch()
+    with patch(_ASK_SEAM, new=ask), patch(_SEARCH_SEAM, new=search):
+        html = _ui_post()
+    assert _EXPECTED_ANSWER in html
+    assert (ask.calls, search.calls) == (1, 0)
+    assert ask.kwargs[0]["filters"] is None
+    assert ask.kwargs[0]["soft_scope"] is None

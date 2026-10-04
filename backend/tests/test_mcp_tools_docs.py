@@ -266,8 +266,10 @@ def test_refinement_descriptions_use_the_collection_vocabulary(
     ``vcenter`` example). ``version`` asks for the release as precisely as
     the agent knows it (a soft scope ranks it and excludes nothing), so it
     no longer asks for ``MAJOR.MINOR`` only or says to leave it out for
-    KB / CVE / build-number questions. Both say the refinements are ignored
-    unless the collection enables scope forwarding.
+    KB / CVE / build-number questions; it carries the caveat that on a
+    ``scope_filters`` collection a precise release is an exact-match
+    filter. Both say the refinements are ignored unless the collection
+    enables scope forwarding.
     """
     client, _op = docs_client
     response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
@@ -283,6 +285,7 @@ def test_refinement_descriptions_use_the_collection_vocabulary(
     assert "as precisely as you know it" in version
     assert "MAJOR.MINOR" not in version
     assert "Omit it for" not in version
+    assert "exact-match filter" in version
     for description in (product, version):
         assert "vcenter" not in description
         assert "scope forwarding" in description

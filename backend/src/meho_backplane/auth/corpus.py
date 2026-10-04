@@ -708,6 +708,8 @@ async def ask_corpus(
     operator: Operator,
     query: str,
     *,
+    filters: Mapping[str, Any] | None = None,
+    soft_scope: Mapping[str, str] | None = None,
     limit: int = 10,
     answer_url: str | None,
     audience: str | None = None,
@@ -721,10 +723,14 @@ async def ask_corpus(
     never echoed. It POSTs ``{query, top_k}`` (plus ``audience`` when set) to
     *answer_url* with ``?include=hits``.
 
-    Deliberately **not** sent: ``with_rerank`` (ranking policy belongs to the
-    backend) and any scope filter (product / version forwarding is gated per
-    collection by a separate change; until then the answer call sends none,
-    which matches today's effective search behaviour).
+    The product / version refinements ride the body only when the caller
+    passes them, and the caller passes them only for a collection that opts
+    in (:func:`~meho_backplane.docs_search.forwarded_scope`, #3912): *filters*
+    as the answer endpoint's ``filters`` object, *soft_scope* as its
+    ``scope`` object. Each key is omitted when ``None`` or empty, so with
+    both gates off the body is exactly ``{query, top_k}`` (+ ``audience``),
+    which a backend that refuses unknown request keys needs. Deliberately
+    never sent: ``with_rerank`` (ranking policy belongs to the backend).
 
     The request has its own bound, ``settings.corpus_answer_timeout_seconds``
     (default 60): a grounded answer runs retrieval plus one or more model
@@ -734,6 +740,14 @@ async def ask_corpus(
         operator: The verified operator. Kept for the backend seam and audit
             context; never used to authenticate to the corpus.
         query: The operator's question.
+        filters: Optional hard ``{key: scalar}`` filters, sent as the body's
+            ``filters`` (the answer endpoint's name for the search side's
+            ``metadata_filters``), e.g. ``{"product": "vsphere", "version":
+            "8.0"}``. Forwarded as given.
+        soft_scope: Optional soft scope sent as the body's ``scope`` object,
+            e.g. ``{"product": "vsphere", "version": "8.0.3", "source":
+            "caller"}``: the backend ranks with it and labels its answer,
+            never filters on it.
         limit: The retrieval depth to request (``top_k``). The backend may
             cap it lower.
         answer_url: The answer endpoint. ``None`` / empty is unconfigured.
@@ -754,6 +768,10 @@ async def ask_corpus(
     resolved_audience = audience if audience is not None else settings.corpus_audience
 
     payload: dict[str, Any] = {"query": query, "top_k": limit}
+    if filters:
+        payload["filters"] = dict(filters)
+    if soft_scope:
+        payload["scope"] = dict(soft_scope)
     if resolved_audience:
         payload["audience"] = resolved_audience
 

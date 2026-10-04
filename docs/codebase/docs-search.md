@@ -140,9 +140,13 @@ set) to the answer endpoint with `?include=hits`, behind the same posture as
 `search_corpus`: the `https` + SSRF destination screen, the deployment's
 corpus service credential (never the operator JWT), and the response body
 never echoed. It deliberately sends **no** `with_rerank` (ranking policy is
-the backend's) and **no** scope filter (product / version forwarding is
-gated per collection by #3912; until then the answer call sends none, which
-matches today's effective search behaviour). Its own bound is
+the backend's). The product / version refinements ride the body only as the
+collection's scope gates decide (*Scope gates* below, #3912): the soft
+scope as `scope`, the hard filters as `filters` (the answer endpoint's name
+for search's `metadata_filters`). Each key is omitted when there is nothing
+to send, so with both gates off the body is exactly `{query, top_k}` (plus
+`audience`), the body the answer call sent before the gates were wired. Its
+own bound is
 `CORPUS_ANSWER_TIMEOUT_SECONDS` (default **60**; the search bound stays
 `CORPUS_TIMEOUT_SECONDS`, default 10), kept below any proxy read timeout in
 front of the corpus.
@@ -182,9 +186,10 @@ registry (`connectors/registry.py`) **minus the version tie-break ladder**
   claiming "ready". A class-level `backend_type` string is the routing
   discriminator. The optional **answer** seam (#3911) follows the `probe()`
   precedent: `supports_answer(backend_ref) -> bool` (default `False`) and
-  `async answer(operator, query, *, backend_ref, limit) -> UpstreamAnswer`
-  (default raises `NotImplementedError`). A backend without an answer
-  endpoint keeps the local answer pipeline.
+  `async answer(operator, query, *, backend_ref, filters, soft_scope, limit)
+  -> UpstreamAnswer` (default raises `NotImplementedError`; `filters` /
+  `soft_scope` are the #3912 gate's output, as on `search`). A backend
+  without an answer endpoint keeps the local answer pipeline.
 - `CorpusHttpBackend` (`backends/corpus_http.py`,
   `backend_type="corpus-http"`) — the **first** concrete adapter. It
   wraps `search_corpus` (the well-tested transport, not a copy of the
@@ -198,7 +203,8 @@ registry (`connectors/registry.py`) **minus the version tie-break ladder**
   (exact match). `answer()` calls `ask_corpus` against
   `backend.ref["answer_endpoint"]` when set, else the resolved search
   endpoint with its last path segment replaced by `ask`
-  (`…/search` → `…/ask`, `…/v1/search` → `…/v1/ask`; `derive_answer_url`).
+  (`…/search` → `…/ask`, `…/v1/search` → `…/v1/ask`; `derive_answer_url`),
+  handing it the gated `filters` / `soft_scope` unchanged.
 - the registry (`backends/registry.py`) — a `dict[str, SearchBackend]`
   with `register_backend(type, impl)` / `get_backend(type)` /
   `all_backends()`. Importing the package self-registers `corpus-http`.
@@ -288,12 +294,12 @@ or the projected response (the backend-agnostic contract). It logs
 collection opts in. Its `backend.ref` holds two independent gates, both
 off by default:
 
-| `backend.ref` | What reaches the backend | Request key (search) |
-|---|---|---|
-| neither key (the default) | nothing: the collection alone scopes the query | — |
-| `"scope": "soft"` | a **soft scope**, `{"product": …, "version": …, "source": "caller"}`, with the values exactly as the agent gave them; a key the agent did not give is omitted | `scope` |
-| `"scope_filters": true`, no `scope` key | **hard filters**, `{"product": …, "version": …}`: an exact-match pre-filter | `metadata_filters` |
-| both | the soft scope wins: `scope` is sent and `metadata_filters` is not | `scope` |
+| `backend.ref` | What reaches the backend | Request key (search) | Request key (upstream answer, #3911) |
+|---|---|---|---|
+| neither key (the default) | nothing: the collection alone scopes the query | — | — |
+| `"scope": "soft"` | a **soft scope**, `{"product": …, "version": …, "source": "caller"}`, with the values exactly as the agent gave them; a key the agent did not give is omitted | `scope` | `scope` |
+| `"scope_filters": true`, no `scope` key | **hard filters**, `{"product": …, "version": …}`: an exact-match pre-filter | `metadata_filters` | `filters` |
+| both | the soft scope wins: `scope` is sent and no filters are | `scope` | `scope` |
 
 Only the exact string `"soft"` turns the soft gate on, and only the JSON
 boolean `true` turns the filter gate on: `"SOFT"`, `"true"` or `1` count
@@ -348,16 +354,24 @@ per-variant retrieval of the local `ask_docs` pipeline, the docs-chunk
 resource's re-search and the UI corpus search. The cross-collection
 fan-out passes `metadata_filters=None` and `soft_scope=None`.
 
-The upstream answer call (#3911: `filters` on the backend's answer
-endpoint) is not wired to this gate yet. It must use the same helper,
-`filters` for the filter gate and `scope` for the soft gate; whichever of
-#3911 / #3912 lands second wires it in. Until then it sends no
-product / version.
+The **upstream answer call** (#3911) goes through the same helper.
+`answer_docs_question` applies `forwarded_scope` to the collection's
+`backend.ref` and passes `filters=forwarded.filters or None` and
+`soft_scope=forwarded.soft_scope or None` to `SearchBackend.answer`;
+`CorpusHttpBackend` hands both to `ask_corpus`, which sends the hard
+filters as the answer body's `filters` (the key the backend's answer
+endpoint reads) and the soft scope as its `scope`. Same precedence, same
+look-alike rule; with both gates off the answer body is byte-for-byte the
+#3911 body, `{query, top_k}` (plus `audience`). That covers the REST and
+MCP `ask_docs` faces, which pass `product` / `version` through; the UI Ask
+form has no such fields, so it never sends either.
 
 **What is recorded.** The REST audit row keeps the requested `product` /
-`version`, whatever the gates. The `docs_search_completed` log keeps them
-too, next to `scope_forwarded` (`"soft"`, `"filters"` or `"none"`: what
-was actually sent, so `"none"` also when nothing was requested).
+`version`, whatever the gates. The `docs_search_completed` and
+`docs_ask_completed` logs keep them too, next to `scope_forwarded`
+(`"soft"`, `"filters"` or `"none"`: what was actually sent, so `"none"`
+also when nothing was requested); `docs_ask_upstream_failed` carries
+`scope_forwarded` as well.
 
 **Vocabulary.** The tool descriptions tell the agent to use the
 collection's own product tokens (`products` in `list_doc_collections`)
@@ -377,7 +391,8 @@ collection's status untouched.
 **When and how to flip it.** Deploy this backplane release first: both
 gates are off, so nothing changes. Turn the soft gate on for the shared
 `vmware` collection only after the backend release that accepts `scope`
-(evoila-bosnia/MEHO.Knowledge#496 + #509 + #512) is deployed behind it;
+(evoila-bosnia/MEHO.Knowledge#496 + evoila-bosnia/MEHO.Knowledge#509 +
+evoila-bosnia/MEHO.Knowledge#512) is deployed behind it;
 before that, the backend would refuse the request. Leave `scope_filters`
 off for it. The update replaces the whole backend record, so re-pass
 every key the `ref` already holds:
@@ -608,10 +623,17 @@ A 4xx is a 502, not a 503: a rejected request is a contract or configuration
 fault, not an outage. `upstream_status` / `retry_after` appear on the
 envelope only for an upstream failure, so the local envelope is unchanged.
 
+**Scope gates.** The upstream answer call carries the collection's
+`forwarded_scope` decision (#3912): the soft `scope`, the hard `filters`,
+or neither (see *Scope gates* above). The local path's searches apply the
+same rule per variant.
+
 **Logs.** Success logs one `docs_ask_completed` event with `collection_key`,
-`answer_source`, `hit_count`, `citation_count` and, upstream, the backend's
+`answer_source`, the requested `product` / `version`, `scope_forwarded`,
+`hit_count`, `citation_count` and, upstream, the backend's
 `upstream_total_ms` / `upstream_llm_ms`. An upstream failure logs
-`docs_ask_upstream_failed` (leg, cause, `upstream_status`, `retry_after`).
+`docs_ask_upstream_failed` (leg, cause, `scope_forwarded`,
+`upstream_status`, `retry_after`).
 Never the query, chunk text or answer text. The `meho.docs.ask` audit row,
 its query hash and collection binding are unchanged.
 
@@ -1134,8 +1156,9 @@ injection detection. See `docs/codebase/untrusted-text-envelope.md`.
 - On an **upstream-answer** collection (#3911) the backend owns the answer:
   its model, prompt (answer length, language), retrieval depth (it may cap
   `limit`, e.g. at its own ask ceiling) and ranking. `product` / `version`
-  are not forwarded on the answer call until the per-collection scope-filter
-  gate (#3912) lands. Streaming (`/ask/stream`) is not used.
+  reach the answer call only through the per-collection scope gates
+  (#3912): a soft `scope` the backend ranks with, or hard `filters`.
+  Streaming (`/ask/stream`) is not used.
 
 ## References
 

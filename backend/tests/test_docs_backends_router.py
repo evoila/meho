@@ -649,13 +649,29 @@ async def test_search_docs_gates_control_forwarding_and_log_keeps_request(
 
 
 @pytest.mark.parametrize(
-    ("ref_extra", "extra_body"),
+    ("ref_extra", "extra_body", "raw_body"),
     [
-        pytest.param({}, {}, id="off"),
-        pytest.param({"scope_filters": True}, {"metadata_filters": _REQUESTED}, id="filters"),
-        pytest.param({"scope": "soft"}, {"scope": _SOFT}, id="soft"),
+        pytest.param({}, {}, b'{"query":"snapshot depth","top_k":10}', id="off"),
         pytest.param(
-            {"scope": "soft", "scope_filters": True}, {"scope": _SOFT}, id="both-soft-wins"
+            {"scope_filters": True},
+            {"metadata_filters": _REQUESTED},
+            b'{"query":"snapshot depth","top_k":10,'
+            b'"metadata_filters":{"product":"vsphere","version":"8.0.3.00400"}}',
+            id="filters",
+        ),
+        pytest.param(
+            {"scope": "soft"},
+            {"scope": _SOFT},
+            b'{"query":"snapshot depth","top_k":10,'
+            b'"scope":{"product":"vsphere","version":"8.0.3.00400","source":"caller"}}',
+            id="soft",
+        ),
+        pytest.param(
+            {"scope": "soft", "scope_filters": True},
+            {"scope": _SOFT},
+            b'{"query":"snapshot depth","top_k":10,'
+            b'"scope":{"product":"vsphere","version":"8.0.3.00400","source":"caller"}}',
+            id="both-soft-wins",
         ),
     ],
 )
@@ -663,13 +679,16 @@ async def test_search_docs_corpus_request_body_per_gate(
     monkeypatch: pytest.MonkeyPatch,
     ref_extra: dict[str, Any],
     extra_body: dict[str, Any],
+    raw_body: bytes,
 ) -> None:
-    """The exact JSON body the ``corpus-http`` backend receives, per gate.
+    """The exact body the ``corpus-http`` backend receives, per gate.
 
     The corpus refuses unknown request keys, so with the soft gate off the
     body must be byte-for-byte what it was before the gate existed: the
-    gate-off case pins it to ``{"query", "top_k"}``. With a gate on, the
-    one added key is ``metadata_filters`` or ``scope``, never both.
+    gate-off case pins the raw request bytes to ``{"query", "top_k"}`` as
+    httpx serialises them. With a gate on, the one added key is
+    ``metadata_filters`` or ``scope``, never both. Each case asserts the
+    parsed body and the raw bytes.
     """
     _pin_settings(monkeypatch, corpus_service_token=_SERVICE_TOKEN, corpus_audience="")
     captured: list[httpx.Request] = []
@@ -693,3 +712,4 @@ async def test_search_docs_corpus_request_body_per_gate(
         "top_k": 10,
         **extra_body,
     }
+    assert captured[0].content == raw_body

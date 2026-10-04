@@ -920,9 +920,9 @@ async def test_ask_corpus_posts_query_and_top_k_with_include_hits(
 ) -> None:
     """The answer call carries ``{query, top_k}`` + ``include=hits`` and the service token.
 
-    No ``with_rerank`` (ranking policy is the backend's) and no scope filter
-    (product / version forwarding is gated separately) ride the body; the
-    operator JWT is never forwarded.
+    No ``with_rerank`` (ranking policy is the backend's) and, when the caller
+    passes none, no ``filters`` / ``scope`` (the per-collection gates decide
+    those, #3912) ride the body; the operator JWT is never forwarded.
     """
     _pin_settings(monkeypatch, corpus_service_token=_SERVICE_TOKEN)
     captured: list[httpx.Request] = []
@@ -947,6 +947,60 @@ async def test_ask_corpus_posts_query_and_top_k_with_include_hits(
     assert body == {"query": "q", "top_k": 7}
     assert request.headers["authorization"] == f"Bearer {_SERVICE_TOKEN}"
     assert _JWT not in str(request.headers)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("filters", "soft_scope", "raw_body"),
+    [
+        # Both gates off (None or empty): byte-for-byte the #3911 body, so a
+        # backend that refuses unknown request keys sees what it always saw.
+        pytest.param(None, None, b'{"query":"q","top_k":7}', id="off"),
+        pytest.param({}, {}, b'{"query":"q","top_k":7}', id="off-empty"),
+        pytest.param(
+            {"product": "vsphere", "version": "8.0"},
+            None,
+            b'{"query":"q","top_k":7,"filters":{"product":"vsphere","version":"8.0"}}',
+            id="filters",
+        ),
+        pytest.param(
+            None,
+            {"product": "vsphere", "version": "8.0.3.00400", "source": "caller"},
+            b'{"query":"q","top_k":7,'
+            b'"scope":{"product":"vsphere","version":"8.0.3.00400","source":"caller"}}',
+            id="soft",
+        ),
+    ],
+)
+async def test_ask_corpus_sends_filters_and_soft_scope_only_when_given(
+    monkeypatch: pytest.MonkeyPatch,
+    filters: dict[str, str] | None,
+    soft_scope: dict[str, str] | None,
+    raw_body: bytes,
+) -> None:
+    """``filters`` / ``soft_scope`` ride the answer body as ``filters`` / ``scope`` (#3912).
+
+    Each is omitted when ``None`` or empty; the values are passed through
+    unchanged. The raw request bytes are pinned, so the gate-off body is
+    exactly the one the answer call sent before the gates were wired.
+    """
+    _pin_settings(monkeypatch, corpus_audience="")
+    captured: list[httpx.Request] = []
+    transport = _transport_capturing(captured, httpx.Response(200, json=_ANSWER_BODY))
+    _patch_async_client(monkeypatch, transport, [])
+
+    await ask_corpus(
+        _make_operator(),
+        "q",
+        filters=filters,
+        soft_scope=soft_scope,
+        limit=7,
+        answer_url=_ANSWER_URL,
+    )
+
+    (request,) = captured
+    assert request.content == raw_body
+    assert request.url.params.get("include") == "hits"
 
 
 @pytest.mark.asyncio

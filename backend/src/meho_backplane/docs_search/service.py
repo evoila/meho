@@ -312,9 +312,9 @@ class ForwardedScope(BaseModel):
 
     #: Which form reached the backend (``"none"`` when nothing did).
     mode: ScopeForwarding = "none"
-    #: The hard ``{key: scalar}`` filters: ``metadata_filters`` on search
-    #: (and, once #3911 wires it, ``filters`` on the upstream answer call).
-    #: Empty unless :attr:`mode` is ``"filters"``.
+    #: The hard ``{key: scalar}`` filters: ``metadata_filters`` on search,
+    #: ``filters`` on the upstream answer call (#3911). Empty unless
+    #: :attr:`mode` is ``"filters"``.
     filters: dict[str, str] = Field(default_factory=dict)
     #: The soft ``scope`` object: the requested ``product`` / ``version``
     #: unchanged, plus ``source``. Empty unless :attr:`mode` is ``"soft"``.
@@ -337,10 +337,11 @@ def forwarded_scope(
       advisories) stay reachable. The values are sent as given (a full
       release such as ``8.0.3.00400`` included): normalising them is the
       backend's job. A key the caller did not give is omitted.
-    * ``backend.ref["scope_filters"] is True`` sends them as hard
-      ``metadata_filters``: an exact-match pre-filter over the backend's
-      per-document metadata, so it only helps when the values are in the
-      collection's vocabulary.
+    * ``backend.ref["scope_filters"] is True`` sends them as hard filters
+      (``metadata_filters`` on search, ``filters`` on the upstream answer
+      call): an exact-match pre-filter over the backend's per-document
+      metadata, so it only helps when the values are in the collection's
+      vocabulary.
 
     When both are set the soft scope wins: the scope is sent and no
     filters are. Any other value of either key (``"SOFT"``, the string
@@ -351,7 +352,11 @@ def forwarded_scope(
 
     The caller still records the *requested* ``product`` / ``version`` in
     its log and audit row; only what reaches the backend is gated. This is
-    the one rule every backend call that carries refinements goes through.
+    the one rule every backend call that carries refinements goes through:
+    :func:`search_docs` (every single-collection search, including the
+    local ``ask_docs`` pipeline's per-variant retrieval) and the upstream
+    answer call (:func:`~meho_backplane.docs_search.answer.answer_docs_question`,
+    #3911).
 
     Args:
         scope: The validated scope from :func:`build_docs_scope`.

@@ -232,6 +232,8 @@ class SearchBackend(ABC):
         query: str,
         *,
         backend_ref: Mapping[str, Any] | None = None,
+        filters: dict[str, Any] | None = None,
+        soft_scope: Mapping[str, str] | None = None,
         limit: int = 10,
     ) -> UpstreamAnswer:
         """Ask the backend for a grounded, cited answer to *query* (#3911).
@@ -247,6 +249,15 @@ class SearchBackend(ABC):
                 authenticates with its own service credential).
             query: The operator's question.
             backend_ref: The collection's ``backend.ref``.
+            filters: Optional hard ``{key: scalar}`` filters (#3912), as on
+                :meth:`search`. The caller passes them only for a collection
+                with ``backend.ref["scope_filters"] is True`` and no soft
+                scope; ``None`` sends none.
+            soft_scope: Optional soft scope (#3912), as on :meth:`search`:
+                a ranking / labelling signal, never a filter, passed only
+                for a collection with ``backend.ref["scope"] == "soft"``.
+                ``None`` sends none, so with both gates off the backend sees
+                the request it always saw.
             limit: The retrieval depth to request; the backend may cap it.
 
         Raises:

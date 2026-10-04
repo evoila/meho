@@ -257,16 +257,21 @@ The **backend** record is `{type, ref}`:
     backend ranks with it and labels its answer, never filters on it, and
     normalises the values itself (evoila-bosnia/MEHO.Knowledge#512).
   - `"scope_filters": true` (the JSON boolean) sends them as **hard
-    filters** in `metadata_filters`: an exact-match pre-filter, so the
-    values must be the ones the collection stamps (see *Search* below).
+    filters**: `metadata_filters` on search, `filters` on the upstream
+    answer call. An exact-match pre-filter, so the values must be the
+    ones the collection stamps (see *Search* below).
   - **Precedence:** with both set, `scope: "soft"` wins: `scope` is sent
-    and `metadata_filters` is not. Any other value of either key counts as
-    off.
+    and no filters are. Any other value of either key counts as off.
+  - **Both calls.** The same rule (`forwarded_scope`) decides the search
+    request and, for a collection with `"answer": "upstream"`, the answer
+    request (see *Answer* below). With neither gate on, both bodies are
+    exactly what they were before the gates existed.
   - **When to flip.** The backend refuses unknown request keys
     (evoila-bosnia/MEHO.Knowledge#496), so `scope` must never reach a
     release that does not accept it. For the shared `vmware` collection,
     set `"scope": "soft"` only after the MEHO Knowledge release that
-    accepts `scope` (evoila-bosnia/MEHO.Knowledge#496 + #509 + #512) is
+    accepts `scope` (evoila-bosnia/MEHO.Knowledge#496 +
+    evoila-bosnia/MEHO.Knowledge#509 + evoila-bosnia/MEHO.Knowledge#512) is
     deployed; `scope_filters` stays off for it. A backend update replaces
     the whole record and resets the collection to `provisioning`, so
     re-pass the existing `ref` keys and run `probe` afterwards:
@@ -680,11 +685,15 @@ with its last path segment replaced by `ask`. Same screen, credential and
 |---|---|---|
 | `query` | `str` | The operator's question, verbatim. |
 | `top_k` | `int` | The requested retrieval depth (`ask_docs` `limit`, default 10, cap 50). The corpus **may** cap it lower. |
+| `filters` | `{key: scalar}` | Only when the agent gave `product` and/or `version`, the collection sets `backend.ref.scope_filters: true` and does **not** set `backend.ref.scope: "soft"` (#3912). The answer endpoint's name for search's `metadata_filters`: an exact-match pre-filter, values passed through unchanged. |
+| `scope` | `{product?, version?, source}` | Only when the agent gave `product` and/or `version` and the collection sets `backend.ref.scope: "soft"` (#3912). The soft scope, as on search: a ranking / labelling signal, never a filter; `source` is `"caller"`. Never sent together with `filters`. |
 | `audience` | `str` | Only when an audience is configured, as on search. |
 
-meho sends **no** `with_rerank` (ranking policy is the corpus's) and **no**
-scope filter (`product` / `version` are not forwarded on this call until the
-per-collection scope-filter gate, #3912, lands).
+meho sends **no** `with_rerank` (ranking policy is the corpus's). With
+neither scope gate on, the body is exactly `{query, top_k}` (plus
+`audience`): the corpus refuses unknown request keys, so `scope` reaches
+only a corpus release that accepts it, once the collection turns its gate
+on.
 
 **Response** — `2xx` JSON. The fields meho consumes (everything else is
 ignored):

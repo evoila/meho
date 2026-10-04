@@ -20,6 +20,10 @@ without any HTTP face (the faces are covered in
 * **Endpoint resolution** -- the default ``…/search`` -> ``…/ask`` derivation
   (including a prefixed path and the legacy global URL) and an explicit
   ``answer_endpoint``.
+* **Scope gates** (#3912) -- the answer call carries the soft ``scope``, the
+  hard ``filters`` or neither, decided by the same ``forwarded_scope`` rule
+  as search; with both gates off its request body is byte-for-byte the
+  #3911 body.
 
 The answer transport is replaced at the ``corpus-http`` adapter's seam
 (``...backends.corpus_http.ask_corpus``), so nothing touches the network.
@@ -35,10 +39,12 @@ from typing import Any
 from unittest.mock import patch
 from uuid import uuid4
 
+import httpx
 import pytest
 import structlog
 import structlog.testing
 
+from meho_backplane.auth import corpus as corpus_mod
 from meho_backplane.auth.corpus import (
     CorpusChunk,
     CorpusSearchResponse,
@@ -506,8 +512,11 @@ async def test_opt_in_makes_one_answer_call_and_no_search() -> None:
     call = fake_ask.calls[0]
     assert call["limit"] == 10
     assert call["answer_url"] == "https://corpus.test/ask"
-    # No product/version, no rerank flag: the transport signature has neither.
-    assert set(call) == {"query", "limit", "answer_url", "audience"}
+    # No rerank flag (the transport signature has none) and, with no
+    # product/version requested, no filters and no soft scope.
+    assert set(call) == {"query", "filters", "soft_scope", "limit", "answer_url", "audience"}
+    assert call["filters"] is None
+    assert call["soft_scope"] is None
     assert fake_search.calls == []
 
 
@@ -560,6 +569,7 @@ class _SearchOnlyBackend(SearchBackend):
         *,
         backend_ref: Mapping[str, Any] | None = None,
         metadata_filters: dict[str, Any] | None = None,
+        soft_scope: Mapping[str, str] | None = None,
         limit: int = 10,
     ) -> CorpusSearchResponse:
         return CorpusSearchResponse(chunks=[])
@@ -637,3 +647,167 @@ async def test_corpus_http_answer_endpoint_resolution(
     (call,) = fake_ask.calls
     assert call["answer_url"] == expected_url
     assert call["limit"] == 4
+
+
+# ---------------------------------------------------------------------------
+# Scope gates on the upstream answer call (#3912)
+# ---------------------------------------------------------------------------
+
+#: The requested refinements: a full release, which travels unchanged.
+_REQUESTED: dict[str, str] = {"product": "vsphere", "version": "8.0.3.00400"}
+_SOFT: dict[str, str] = {**_REQUESTED, "source": "caller"}
+
+_ANSWER_GATE_CASES = [
+    # (ref gate keys, expected filters, expected soft scope, scope_forwarded)
+    pytest.param({}, None, None, "none", id="off"),
+    pytest.param({"scope_filters": True}, _REQUESTED, None, "filters", id="filters"),
+    pytest.param({"scope": "soft"}, None, _SOFT, "soft", id="soft"),
+    pytest.param(
+        {"scope": "soft", "scope_filters": True}, None, _SOFT, "soft", id="both-soft-wins"
+    ),
+    # Look-alikes count as off, exactly as on search.
+    pytest.param({"scope": "SOFT", "scope_filters": "true"}, None, None, "none", id="look-alike"),
+]
+
+
+@pytest.mark.parametrize(
+    ("gates", "expected_filters", "expected_scope", "expected_mode"), _ANSWER_GATE_CASES
+)
+@pytest.mark.asyncio
+async def test_answer_call_carries_what_the_scope_gates_decide(
+    monkeypatch: pytest.MonkeyPatch,
+    gates: dict[str, Any],
+    expected_filters: dict[str, str] | None,
+    expected_scope: dict[str, str] | None,
+    expected_mode: str,
+) -> None:
+    """The upstream answer call is gated by the same rule as search (#3912).
+
+    Soft gate on: the soft scope, values unchanged, and no filters. Filter
+    gate on alone: the hard filters. Both: the soft scope wins. Neither (or
+    a look-alike value): nothing. ``docs_ask_completed`` records the
+    requested values and ``scope_forwarded``. The log is captured through a
+    private ``LogCapture`` patched onto ``answer._log`` (the repo convention).
+    """
+    capture = structlog.testing.LogCapture()
+    monkeypatch.setattr(
+        answer_mod, "_log", structlog.wrap_logger(structlog.PrintLogger(), processors=[capture])
+    )
+    fake_ask = _FakeAsk(_fixture_body())
+    fake_search = _FakeSearch()
+    backend = {"type": "corpus-http", "ref": {**_UPSTREAM_REF, **gates}}
+    with patch(_ASK_SEAM, new=fake_ask), patch(_SEARCH_SEAM, new=fake_search):
+        outcome = await answer_docs_question(
+            _operator(),
+            "question",
+            scope=build_docs_scope("vmware", "vsphere", "8.0.3.00400"),
+            collection=_collection(backend),
+            limit=10,
+        )
+
+    assert outcome.answer_source == ANSWER_SOURCE_UPSTREAM
+    assert outcome.answer is not None
+    (call,) = fake_ask.calls
+    assert call["filters"] == expected_filters
+    assert call["soft_scope"] == expected_scope
+    assert fake_search.calls == []
+    (completed,) = [e for e in capture.entries if e["event"] == "docs_ask_completed"]
+    assert completed["product"] == "vsphere"
+    assert completed["version"] == "8.0.3.00400"
+    assert completed["scope_forwarded"] == expected_mode
+
+
+@pytest.mark.asyncio
+async def test_failed_answer_call_logs_scope_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``docs_ask_upstream_failed`` names how the refinements were sent (#3912)."""
+    capture = structlog.testing.LogCapture()
+    monkeypatch.setattr(
+        answer_mod, "_log", structlog.wrap_logger(structlog.PrintLogger(), processors=[capture])
+    )
+
+    async def _down(operator: Operator, query: str, **kwargs: Any) -> UpstreamAnswer:
+        raise corpus_mod.CorpusUnavailable("corpus unreachable: ConnectError")
+
+    backend = {"type": "corpus-http", "ref": {**_UPSTREAM_REF, "scope": "soft"}}
+    with patch(_ASK_SEAM, new=_down):
+        outcome = await answer_docs_question(
+            _operator(),
+            "question",
+            scope=build_docs_scope("vmware", "vsphere", "8.0.3.00400"),
+            collection=_collection(backend),
+            limit=10,
+        )
+
+    assert outcome.error is not None
+    (failed,) = [e for e in capture.entries if e["event"] == "docs_ask_upstream_failed"]
+    assert failed["scope_forwarded"] == "soft"
+
+
+@pytest.mark.parametrize(
+    ("gates", "raw_body"),
+    [
+        # Both gates off: byte-for-byte the body #3911 sends.
+        pytest.param({}, b'{"query":"question","top_k":10}', id="off"),
+        pytest.param(
+            {"scope_filters": True},
+            b'{"query":"question","top_k":10,'
+            b'"filters":{"product":"vsphere","version":"8.0.3.00400"}}',
+            id="filters",
+        ),
+        pytest.param(
+            {"scope": "soft"},
+            b'{"query":"question","top_k":10,'
+            b'"scope":{"product":"vsphere","version":"8.0.3.00400","source":"caller"}}',
+            id="soft",
+        ),
+        pytest.param(
+            {"scope": "soft", "scope_filters": True},
+            b'{"query":"question","top_k":10,'
+            b'"scope":{"product":"vsphere","version":"8.0.3.00400","source":"caller"}}',
+            id="both-soft-wins",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_answer_request_body_per_gate_end_to_end(
+    monkeypatch: pytest.MonkeyPatch,
+    gates: dict[str, Any],
+    raw_body: bytes,
+) -> None:
+    """The raw ``POST /ask`` bytes the corpus receives, per gate (#3912).
+
+    Driven through the seam, the ``corpus-http`` adapter and the real
+    ``ask_corpus`` transport onto an ``httpx.MockTransport``. The backend
+    refuses unknown request keys, so the gate-off body must stay exactly
+    ``{query, top_k}``; a gate adds ``filters`` or ``scope``, never both.
+    """
+    monkeypatch.delenv("CORPUS_AUDIENCE", raising=False)
+    get_settings.cache_clear()
+    captured: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json=_fixture_body())
+
+    real_async_client = httpx.AsyncClient
+
+    def _factory(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+        kwargs["transport"] = httpx.MockTransport(_handler)
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(corpus_mod.httpx, "AsyncClient", _factory)
+    backend = {"type": "corpus-http", "ref": {**_UPSTREAM_REF, **gates}}
+
+    outcome = await answer_docs_question(
+        _operator(),
+        "question",
+        scope=build_docs_scope("vmware", "vsphere", "8.0.3.00400"),
+        collection=_collection(backend),
+        limit=10,
+    )
+
+    assert outcome.answer is not None
+    (request,) = captured
+    assert request.url.path == "/ask"
+    assert request.url.params.get("include") == "hits"
+    assert request.content == raw_body

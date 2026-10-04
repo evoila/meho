@@ -164,7 +164,9 @@ _ASK_OP_ID: Final[str] = "meho.docs.ask"
 #: collection lists its own ``products`` in ``list_doc_collections``. The
 #: version is the release as precisely as the agent knows it: a soft scope
 #: ranks that release first and excludes nothing, so no class of question
-#: needs it left out.
+#: needs it left out. The caveat names the one exception: on a collection
+#: with ``scope_filters`` (exact-match filters) a precise release is matched
+#: exactly, so there it can hide version-agnostic documents or match nothing.
 _PRODUCT_VOCABULARY: Final[str] = (
     "in that collection's own product vocabulary (`products` in "
     "`list_doc_collections`). For the shared 'vmware' collection, e.g. "
@@ -178,7 +180,9 @@ _VERSION_RELEASE: Final[str] = (
     "the release you are asking about, as precisely as you know it (e.g. "
     "'9.1.1', '8.0 U3', '8.0.3.00400'). It ranks that release first; it "
     "does not hide version-agnostic documents such as KB articles or "
-    "security advisories."
+    "security advisories. Caveat: on a collection that applies scope "
+    "filters instead, the version is an exact-match filter, so a precise "
+    "release there can hide those documents or match nothing."
 )
 _SCOPE_FORWARDING_NOTE: Final[str] = "ignored unless the collection enables scope forwarding."
 

@@ -52,7 +52,11 @@ namespace-management writes `supervisor.enable` + `supervisor.disable`
 subsection under Control flow), and the two SUBSCRIBED content-library
 caution writes `content_library.subscribed.create` +
 `content_library.subscribed.sync` / `#3495` (see the **Content-library
-SUBSCRIBED composites** subsection)). The
+SUBSCRIBED composites** subsection), and the seven teardown composites /
+`#3339` -- six destructive deletes `network.portgroup.delete`,
+`host.standard_portgroup.delete`, `folder.delete`, `datastore.file.delete`,
+`content_library.delete`, `content_library.item.delete`, plus the caution
+`datastore.dir.create` (see **Governed teardown deletes**)). The
 write composites cover every state-mutating operator workflow named
 in [#214](https://github.com/evoila/meho/issues/214) as required for
 govc-wrapper retirement.
@@ -1130,6 +1134,11 @@ enum) are:
 | `vm.nic.repoint` | `repointed`, `not_found`, `ambiguous`, `invalid_request` |
 | `vm.device.cdrom` | `removed`, `updated`, `disconnected`, `invalid_request` |
 | `vm.resource_allocation.set` | `set`, `unchanged`, `invalid_request`, `vm_not_found`, `partial`, `timeout` (vim `ReconfigVM_Task` polled, #3880; `invalid_request` refuses an empty request, an out-of-range value (a limit of `0` included — `-1` clears) or a resulting limit below its reservation before any write; `unchanged` when the request already matches (no task); `partial` when the task succeeded but the re-read `after` does not match every requested field; `vm_not_found` on a promoted `ManagedObjectNotFound`; a task *fault* raises `connector_error` like `vm.disk.grow`. Carries `before` / `after` allocation views) |
+| `network.portgroup.delete` / `folder.delete` | `deleted`, `unchanged`, `precondition_failed`, `still_present`, `timeout` (#3339; vim `Destroy_Task` polled; `precondition_failed` before any write when something still uses the object -- listed in `blockers`; a task *fault* raises `connector_error`) |
+| `host.standard_portgroup.delete` | `deleted`, `unchanged`, `invalid_request`, `precondition_failed`, `still_present` (#3339; synchronous `RemovePortGroup` -- a vim fault raises) |
+| `datastore.file.delete` | `deleted`, `unchanged`, `invalid_request`, `precondition_failed`, `still_present`, `timeout` (#3339; `DeleteDatastoreFile_Task` polled; a task fault raises) |
+| `datastore.dir.create` | `created`, `unchanged`, `invalid_request`, `precondition_failed`, `not_verified` (#3339; synchronous `MakeDirectory` -- a vim fault raises) |
+| `content_library.delete` / `content_library.item.delete` | `deleted`, `unchanged`, `invalid_request`, `precondition_failed`, `still_present` (#3339 / #3331; REST `DELETE` -- a REST fault raises) |
 
 `vm.create` is the only composite that issues a compensating
 mutation (`DELETE:/vcenter/vm/{vm}`) on partial failure. The other
@@ -1510,6 +1519,103 @@ snapshots via the vim snapshot read (`_read_vm_snapshots_best_effort` — a
 fault yields "no snapshots enumerated", never sinks the park). It declines
 (`None` → the park is refused `blast_radius_required`, fail-closed) when the
 VM cannot be read.
+
+### Governed teardown deletes (#3339)
+
+Seven composites let a teardown remove what the create-side composites and the
+deploy paths leave behind, without leaving the governed path. Six are deletes
+at the `destructive` level: a second person must always approve each call,
+after reading what will be deleted (the blast radius). The seventh,
+`datastore.dir.create`, is the matching create at the `caution` level.
+
+| op_id | What it removes | vSphere call | Refused before any change when |
+| --- | --- | --- | --- |
+| `network.portgroup.delete` | one distributed portgroup | vim `DistributedVirtualPortgroup.Destroy_Task` (polled) | a VM is on it, any other port is connected (VMkernel / host adapter, read with `FetchDVPorts`), or it is the uplink portgroup |
+| `host.standard_portgroup.delete` | one port group on one host's standard switch | vim `HostNetworkSystem.RemovePortGroup` (synchronous) | a VM registered on that host (also powered off) or a VMkernel adapter uses it |
+| `folder.delete` | one EMPTY folder | vim `Folder.Destroy_Task` (polled) | the folder has any content (vSphere would delete it too), or it is a root / datacenter system folder |
+| `datastore.file.delete` | one file, or one folder with all its files | vim `FileManager.DeleteDatastoreFile_Task` (polled) | the path is the root, leaves the root, has wildcards, starts in a hidden system folder (`.*`) or a content-library folder (`contentlib-*`), or is / contains a file of a registered VM |
+| `datastore.dir.create` | -- (creates one folder) | vim `FileManager.MakeDirectory` (synchronous) | a file has that name, or the parent is missing and `create_parents` is not true |
+| `content_library.delete` | one library (local or subscribed) | REST `DELETE /content/local-library/{id}` or `/content/subscribed-library/{id}` | another library on this vCenter subscribes to it, or it has items and `delete_items` is not true |
+| `content_library.item.delete` | one item of a local library | REST `DELETE /content/library/item/{id}` | the item belongs to a subscribed library |
+
+**One plan, used twice.** Each op has one read-only planning function
+(`_teardown.TeardownPlan`). It reads the object, decides if it exists, lists
+what goes with it and what blocks it, and decides a refusal. The park-time
+preview builder and the handler both call it. So the approver sees exactly the
+refusal the handler will apply, and the handler checks the live state again
+after approval. The builders return `None` when there is no connector, like
+`vm.destroy`'s: the egress-free `preview_operation` then binds only the params
+hash, and the live blast radius is built when the call parks.
+
+**Absent means `unchanged`.** When the object is already gone the handler
+writes nothing and returns `status="unchanged"`. The preview still returns a
+well-formed blast radius (`object.present = false`, irreversibility
+`none-object-already-absent`), so a second run of a finished teardown can park
+instead of failing with `blast_radius_required`.
+
+**Faults fail the call.** A task fault or a vim / REST fault raises, so the
+dispatcher records `connector_error` and audits the call as failed -- never as
+success (the #3881 review lesson). A poll that runs out of time returns
+`status="timeout"`.
+
+**Read-back.** After the write each op reads the object again (#3313 pattern):
+
+| op_id | Read-back | Absent means |
+| --- | --- | --- |
+| `network.portgroup.delete` | `RetrievePropertiesEx` of the portgroup | `ManagedObjectNotFound` (promoted) or an empty result |
+| `host.standard_portgroup.delete` | host `config.network.portgroup` | no entry with that `spec.name` |
+| `folder.delete` | `RetrievePropertiesEx` of the folder | `ManagedObjectNotFound` or empty result |
+| `datastore.file.delete` | `SearchDatastore_Task` on the parent folder | no exact name match, or the parent is gone (`FileNotFound`) |
+| `datastore.dir.create` | `SearchDatastore_Task` on the parent folder | -- (must find a `FolderFileInfo`) |
+| `content_library.delete` | `GET /content/library/{id}` | HTTP 404 |
+| `content_library.item.delete` | `GET /content/library/item/{id}` | HTTP 404 |
+
+**Why these calls work on vCenter 8.0.x.** The vim calls go through the
+documented `/sdk/vim25/{release}` VI-JSON base (`_post_vmomi_json`), the same
+path the `vm.destroy` vim arm, `vm.disk.grow` and the portgroup writes already
+use on 8.0.3. The ingested `/api` vim bindings are not used (they 404 on 8.0.x,
+#3534). The pinned REST spec has no delete for portgroups, folders or datastore
+files, so vim is the only option there. The content-library calls are REST on
+`/api`; vCenter 8.0 and 9.0 serve the same paths (only the path parameter names
+differ), and `vm.deploy_from_library` already uses the same find / item reads
+on 8.0.x. Composites are not affected by the per-catalog version guard (#3568),
+which applies to ingested ops only.
+
+**Datastore file details.** `datastore` is a moid and `path` is relative to the
+datastore root; the parameter schema and `_datastore_browse.path_problem` share
+one pattern (`schemas.DATASTORE_PATH_PATTERN`), so preview and call reject the
+same paths. The datacenter that `FileManager` needs is found by walking
+`Datastore.parent` up to the `Datacenter`. The VM file check reads
+`layoutEx.file` + `config.files.vmPathName` for every VM in `Datastore.vm`, 50
+VMs per read. The comparison ignores case, so it refuses more, never less. A VM
+without `layoutEx` blocks its whole home folder. A VM whose files cannot be read
+at all, or a paged answer (`token`), refuses the delete. Not detectable: VMs of
+another vCenter that share the datastore, and ISO files mounted in a VM's CD-ROM
+(vSphere locks the file of a running VM, so that delete fails and raises).
+`VimTaskResult.fault_type` (new) carries the vim fault class name so a browse of
+a missing folder (`FileNotFound`) reads as "absent". vCenter targets only.
+
+**Port group details.** Inputs are moids (`dvportgroup-N`, `host-N`) and the
+schemas pin that shape, so a display name is rejected at preview time (#3323).
+For a distributed portgroup the connected-port read (`FetchDVPorts`) only names
+users; if it fails, `object.port_check` says so and the delete continues,
+because vSphere itself refuses to delete a portgroup with connected ports
+(`ResourceInUse`, which raises). For a host standard port group the VM check is
+not best-effort: VMs of that host whose NICs use the port group's vCenter
+`Network` object block the delete, also when powered off (vSphere only refuses
+for live ports). A failing read there fails the call.
+
+**Content library details.** A library with items needs `delete_items=true`
+(the #3331 explicit-flag shape); the blast radius lists up to 50 items with
+their sizes, and `item_count` is always exact. Subscribers are found by reading
+every subscribed library on this vCenter and matching the library id in its
+`subscription_url`; subscribers on other vCenters cannot be seen.
+
+Code: `composites/_teardown.py` (shared plan helpers + `folder.delete`),
+`_teardown_network.py`, `_datastore_browse.py` + `_datastore_files.py`,
+`_library_delete.py`. Governed sub-op manifests are listed in
+`_governed_subops.py`; the vim paths are reconciled against the pinned
+`vi-json.yaml` and the REST paths against `vcenter.yaml`.
 
 ### Governed NFS tag-based SPBM storage policy (`storage_policy.*`, #3494)
 
@@ -2343,6 +2449,8 @@ composite on the generic per-op hook (`register_preview_builder`,
 | `vm.nic.repoint` | `{vm, name, nic, mac_address, current_backing, requested_backing}` network from->to (`requested_backing` carries `backing_type`, so distributed and standard previews are identical) | live read (`ethernet/{nic}` + `GET:/vcenter/network`) |
 | `vm.device.cdrom` | `{vm, name, cdrom, action, current_backing, state}` (the host-local ISO path) | live read (`cdrom/{cdrom}`) |
 | `vm.resource_allocation.set` | `{vm, name, current: {cpu_allocation, memory_allocation}, requested}` limit / reservation from->to | live read (vim `RetrievePropertiesEx`) |
+| `network.portgroup.delete` / `host.standard_portgroup.delete` / `folder.delete` / `datastore.file.delete` / `content_library.delete` / `content_library.item.delete` | mandatory `blast_radius`: `{object: {..., present}, children, irreversibility, blockers?, refusal?}` -- the handler's own plan (#3339) | live read (vim `RetrievePropertiesEx` / browse, or REST GET) |
+| `datastore.dir.create` | `{action, datastore, path, create_parents}` | param echo, no I/O |
 | `vm.create` | creation-spec echo (name, guest_os, placement pins — folder_name, folder (#3115), resource_pool, datastore, host (#3096) — sizing, networks, disks_gb (#3117), nested_hv, power-on) | param echo, no I/O |
 | `vm.clone` | clone-coordinates echo | param echo, no I/O |
 | `vm.deploy_from_library` | deploy-coordinates echo (item ref, placement, network mappings, provisioning, `ovf_property_keys` — **ids only**, never values #1503, power-on) | param echo, no I/O |

@@ -6,7 +6,7 @@
 # this change (~1490 lines); splitting the metadata table is out of scope for
 # the #3349 governed-subop wiring.
 
-"""``register_vmware_composite_operations`` -- registrar for the 58 composites.
+"""``register_vmware_composite_operations`` -- registrar for the 65 composites.
 
 Module-level async function called from the lifespan-driven
 :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
@@ -40,7 +40,7 @@ login), so it auto-parks for agent / service principals while a human
 seat still executes it immediately; see its caution row below. (The
 former ``host.network_uplinks`` and ``host.vsan_health`` reads were
 re-shipped as typed ops in #2258; see
-:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 42 write
+:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 49 write
 composites (T6 / #509, single-VM ``vm.power`` / #2301, the guest-ops
 write ``vm.guest.file.write`` / #3100, the mutating
 VI-JSON ``vm.disk.grow`` / #2893, the folder-template
@@ -54,20 +54,25 @@ OVF/OVA content-library deploy ``vm.deploy_from_library`` / #2909 +
 three host-domain writes ``host.datastore_mount_nfs`` /
 ``host.disk_mark_flash`` / ``host.service_control`` / #3182, and the
 later Supervisor / #3281, storage-policy, content-library / #3495 and
-resource-pool / #3505 write families) are all ``requires_approval=True``.
+resource-pool / #3505 write families, and the #3339 teardown deletes) are
+all ``requires_approval=True``.
 32 pin ``safety_level="dangerous"`` (T4's default, passed explicitly for
-clarity at the call site; the helper would default to it anyway). 7 pin
-``safety_level="caution"`` -- the reversible VM allocation write
+clarity at the call site; the helper would default to it anyway). 8 pin
+``safety_level="caution"`` -- the datastore directory create
+``datastore.dir.create`` / #3339, the reversible VM allocation write
 ``vm.resource_allocation.set`` / #3880, the #3505 governed-allocation writes
 ``resource_pool.create`` + the VM-Host affinity
 ``cluster.drs_vm_host_rule.create``, plus ``namespace.create`` /
 ``storage_policy.create`` / ``content_library.subscribed.create`` /
 ``content_library.subscribed.sync`` (``resource_pool.delete`` is a
-``dangerous`` reparent, not a destroy). 3 pin
+``dangerous`` reparent, not a destroy). 9 pin
 ``safety_level="destructive"`` -- ``vm.destroy`` / #3198 (the first
 destructive op -- the governed-delete tier, decision
-``docs/decisions/governed-delete-operations.md``), ``namespace.delete``
-and ``storage_policy.delete``. (The ``caution`` tier is not writes-only:
+``docs/decisions/governed-delete-operations.md``), ``namespace.delete``,
+``storage_policy.delete`` and the six #3339 teardown deletes
+(``network.portgroup.delete``, ``host.standard_portgroup.delete``,
+``folder.delete``, ``datastore.file.delete``, ``content_library.delete``,
+``content_library.item.delete``). (The ``caution`` tier is not writes-only:
 ``vm.guest.file.read`` above is a ``caution`` read / #3720.)
 Each :class:`_CompositeSpec` row carries its own ``safety_level`` +
 ``requires_approval`` so the policy posture is implied by the row,
@@ -80,6 +85,10 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Literal, NamedTuple
 
 from meho_backplane.connectors import OperationResult
+from meho_backplane.connectors.vmware_rest.composites._datastore_files import (
+    datastore_dir_create_composite,
+    datastore_file_delete_composite,
+)
 from meho_backplane.connectors.vmware_rest.composites._governed_subops import (
     register_vmware_governed_subops,
 )
@@ -101,6 +110,10 @@ from meho_backplane.connectors.vmware_rest.composites._library import (
     content_library_subscribed_items_list_composite,
     content_library_subscribed_status_composite,
     content_library_subscribed_sync_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._library_delete import (
+    content_library_delete_composite,
+    content_library_item_delete_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites._namespace import (
     namespace_create_composite,
@@ -124,6 +137,11 @@ from meho_backplane.connectors.vmware_rest.composites._supervisor import (
     supervisor_disable_composite,
     supervisor_enable_composite,
     supervisor_status_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._teardown import folder_delete_composite
+from meho_backplane.connectors.vmware_rest.composites._teardown_network import (
+    host_standard_portgroup_delete_composite,
+    network_portgroup_delete_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites._vm_allocation import (
     vm_resource_allocation_set_composite,
@@ -168,6 +186,10 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     CLUSTER_DRS_VM_HOST_RULE_CREATE_RESPONSE_SCHEMA,
     CLUSTER_PATCH_PARAMETER_SCHEMA,
     CLUSTER_PATCH_RESPONSE_SCHEMA,
+    CONTENT_LIBRARY_DELETE_PARAMETER_SCHEMA,
+    CONTENT_LIBRARY_DELETE_RESPONSE_SCHEMA,
+    CONTENT_LIBRARY_ITEM_DELETE_PARAMETER_SCHEMA,
+    CONTENT_LIBRARY_ITEM_DELETE_RESPONSE_SCHEMA,
     CONTENT_LIBRARY_SUBSCRIBED_CREATE_PARAMETER_SCHEMA,
     CONTENT_LIBRARY_SUBSCRIBED_CREATE_RESPONSE_SCHEMA,
     CONTENT_LIBRARY_SUBSCRIBED_ITEMS_LIST_PARAMETER_SCHEMA,
@@ -176,6 +198,10 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     CONTENT_LIBRARY_SUBSCRIBED_STATUS_RESPONSE_SCHEMA,
     CONTENT_LIBRARY_SUBSCRIBED_SYNC_PARAMETER_SCHEMA,
     CONTENT_LIBRARY_SUBSCRIBED_SYNC_RESPONSE_SCHEMA,
+    DATASTORE_DIR_CREATE_PARAMETER_SCHEMA,
+    DATASTORE_DIR_CREATE_RESPONSE_SCHEMA,
+    DATASTORE_FILE_DELETE_PARAMETER_SCHEMA,
+    DATASTORE_FILE_DELETE_RESPONSE_SCHEMA,
     DATASTORE_REFRESH_PARAMETER_SCHEMA,
     DATASTORE_REFRESH_RESPONSE_SCHEMA,
     DATASTORE_USAGE_PARAMETER_SCHEMA,
@@ -184,6 +210,8 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     EVENT_TAIL_RESPONSE_SCHEMA,
     FOLDER_CREATE_PARAMETER_SCHEMA,
     FOLDER_CREATE_RESPONSE_SCHEMA,
+    FOLDER_DELETE_PARAMETER_SCHEMA,
+    FOLDER_DELETE_RESPONSE_SCHEMA,
     GUEST_CUSTOMIZATION_SPEC_CREATE_PARAMETER_SCHEMA,
     GUEST_CUSTOMIZATION_SPEC_CREATE_RESPONSE_SCHEMA,
     GUEST_ENV_READ_PARAMETER_SCHEMA,
@@ -208,6 +236,8 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     HOST_EVACUATE_RESPONSE_SCHEMA,
     HOST_SERVICE_CONTROL_PARAMETER_SCHEMA,
     HOST_SERVICE_CONTROL_RESPONSE_SCHEMA,
+    HOST_STANDARD_PORTGROUP_DELETE_PARAMETER_SCHEMA,
+    HOST_STANDARD_PORTGROUP_DELETE_RESPONSE_SCHEMA,
     NAMESPACE_CREATE_PARAMETER_SCHEMA,
     NAMESPACE_CREATE_RESPONSE_SCHEMA,
     NAMESPACE_DELETE_PARAMETER_SCHEMA,
@@ -218,6 +248,8 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA,
     NETWORK_PORTGROUP_CREATE_PARAMETER_SCHEMA,
     NETWORK_PORTGROUP_CREATE_RESPONSE_SCHEMA,
+    NETWORK_PORTGROUP_DELETE_PARAMETER_SCHEMA,
+    NETWORK_PORTGROUP_DELETE_RESPONSE_SCHEMA,
     NETWORK_PORTGROUP_SECURITY_SET_PARAMETER_SCHEMA,
     NETWORK_PORTGROUP_SECURITY_SET_RESPONSE_SCHEMA,
     NETWORK_PORTGROUP_VLAN_SET_PARAMETER_SCHEMA,
@@ -346,10 +378,16 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "placement filter (datastore.usage), and a read-side refresh of a "
         "single datastore's cached capacity/free-space via "
         "Datastore.RefreshDatastore (datastore.refresh) so a grown NFS "
-        "export becomes visible to a host without SSH/govc. Read-only. The "
+        "export becomes visible to a host without SSH/govc. These reads change "
+        "nothing. The "
         "right group for 'where is this VM stored?', 'which datastores are "
         "running low?', 'how many VMs live on this datastore?', or 'the "
         "export grew but the datastore still shows the old free space'. "
+        "Also file writes on a datastore (#3339): delete a file or folder "
+        "(datastore.file.delete -- destructive, always needs approval; refused "
+        "for files of registered VMs and for system or content-library folders; "
+        "use it for VM folders left behind after vm.destroy) and create a folder "
+        "(datastore.dir.create, needs approval). "
         "Pair with 'vm' when the question moves from 'which datastore?' to "
         "acting on a specific VM."
     ),
@@ -364,8 +402,11 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "'what's connected to this portgroup?' / 'which DVS does "
         "this VM live on?' and 'create the trunk portgroup my nested "
         "ESXi attaches to'. The audit read surfaces the DVS / "
-        "portgroup moids the two writes take. Pair with 'vm' for the "
-        "post-audit drill-in into one VM's NICs, and with 'host' "
+        "portgroup moids the two writes take. Teardown (#3339; destructive, always "
+        "needs approval, refused while anything still uses the port group): delete "
+        "a distributed portgroup (network.portgroup.delete) or a port group on one "
+        "host's standard switch (host.standard_portgroup.delete). Pair with 'vm' "
+        "for the post-audit drill-in into one VM's NICs, and with 'host' "
         "before its host_detach_from_vds write."
     ),
     "vm": (
@@ -382,7 +423,9 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "filter, or a single-VM power verb (on/off/reset plus a "
         "Tools-mediated guest_shutdown/guest_reboot for one-off "
         "incident actions), and a single VM's CPU / memory limit + "
-        "reservation (resource_allocation.show read, .set caution write). "
+        "reservation (resource_allocation.show read, .set caution write), "
+        "and inventory folders (folder.create; folder.delete -- destructive, "
+        "only for empty folders). "
         "Every other op is dangerous / approval-required. The "
         "right group for any operator workflow that would otherwise "
         "be a ``govc vm.*`` invocation orchestrating multiple raw "
@@ -490,7 +533,12 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "library', or 'which TKr images are available?'. Distinct from the "
         "content-library *item* deploy/import (the 'vm' group's "
         "deploy_from_library / import_from_library) -- this group is the "
-        "library-container lifecycle, not the VM deploy."
+        "library-container lifecycle, not the VM deploy. Teardown (#3339 / "
+        "#3331; destructive, always needs approval): delete a whole local or "
+        "subscribed library (content_library.delete -- refused while another "
+        "library subscribes to it; a library with items needs "
+        "delete_items=true) or one item of a local library "
+        "(content_library.item.delete)."
     ),
 }
 
@@ -2228,6 +2276,310 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         safety_level="safe",
         requires_approval=False,
     ),
+    # ----------------------------------------------------------------
+    # Teardown deletes (#3339; content-library delete = the #3331 delete half)
+    # -- the governed inverses of the create-side composites. Destructive tier
+    # (+ the caution paired create datastore.dir.create). Each op first reads
+    # the object and refuses, before any change, while something still uses it.
+    # ----------------------------------------------------------------
+    _CompositeSpec(
+        op_id="vmware.composite.network.portgroup.delete",
+        handler=network_portgroup_delete_composite,
+        summary="Delete a distributed portgroup. Refused while a VM or adapter uses it.",
+        description=(
+            "Deletes one distributed portgroup (the opposite of "
+            "network.portgroup.create). First it reads the portgroup: its name, "
+            "switch, VLAN and the VMs on it. It also asks the switch which ports are "
+            "connected. If any VM, VMkernel adapter or other port still uses the "
+            "portgroup, or if it is the switch's uplink portgroup, nothing is changed "
+            "and the result is status='precondition_failed' with the users listed in "
+            "'blockers'. Otherwise it runs the vSphere Destroy_Task, waits for it and "
+            "reads the portgroup again: status='deleted' when it is gone. If the "
+            "portgroup does not exist, the result is status='unchanged'. If vSphere "
+            "reports an error, the call fails (it is not reported as success). "
+            "Destructive: a second person must always approve it, after seeing what "
+            "will be deleted. Like 'govc object.destroy' on a portgroup."
+        ),
+        parameter_schema=NETWORK_PORTGROUP_DELETE_PARAMETER_SCHEMA,
+        response_schema=NETWORK_PORTGROUP_DELETE_RESPONSE_SCHEMA,
+        group_key="networking",
+        tags=["composite", "write", "networking", "vi-json", "teardown", "destroy", "destructive"],
+        safety_level="destructive",
+        requires_approval=True,
+        llm_instructions={
+            "when_to_use": (
+                "Use it to remove a distributed portgroup that an environment created. "
+                "Move or remove every VM NIC and VMkernel adapter first. Get the moid "
+                "from vmware.composite.network.portgroup.audit."
+            ),
+            "parameter_hints": {"portgroup": "Distributed portgroup moid, e.g. 'dvportgroup-42'."},
+            "output_shape": (
+                "{status: deleted|unchanged|precondition_failed|still_present|timeout, "
+                "object: {kind, moid, name, dvs, vlan, num_ports, port_binding, uplink, "
+                "port_check}, blockers: [{kind: vm|port, ...}], task, task_state, guidance}. "
+                "A vSphere error makes the call fail; it is not a status."
+            ),
+        },
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.host.standard_portgroup.delete",
+        handler=host_standard_portgroup_delete_composite,
+        summary="Remove a port group from one host's standard switch. Refused while used.",
+        description=(
+            "Removes one port group from the standard virtual switch of one host. "
+            "First it reads the host: its port groups, its VMkernel adapters and the "
+            "VMs registered on it. If a VM on this host (also a powered-off VM) or a "
+            "VMkernel adapter uses the port group, nothing is changed and the result "
+            "is status='precondition_failed' with the users listed in 'blockers'. "
+            "Otherwise it calls vSphere HostNetworkSystem.RemovePortGroup and reads "
+            "the host again: status='deleted' when the port group is gone. If the "
+            "host has no port group with that name, the result is "
+            "status='unchanged'; an unknown host moid gives "
+            "status='invalid_request'. If vSphere reports an error, the call fails. "
+            "One host per call: a port group with the same name on other hosts is not "
+            "touched. Destructive: a second person must always approve it. Like "
+            "'govc host.portgroup.remove'."
+        ),
+        parameter_schema=HOST_STANDARD_PORTGROUP_DELETE_PARAMETER_SCHEMA,
+        response_schema=HOST_STANDARD_PORTGROUP_DELETE_RESPONSE_SCHEMA,
+        group_key="networking",
+        tags=[
+            "composite",
+            "write",
+            "networking",
+            "host",
+            "vi-json",
+            "teardown",
+            "destroy",
+            "destructive",
+        ],
+        safety_level="destructive",
+        requires_approval=True,
+        llm_instructions={
+            "when_to_use": (
+                "Use it once per host to remove a standard-switch port group that an "
+                "environment created (for example a trunk port group on each host). "
+                "Remove its VMs and VMkernel adapters first. For a distributed "
+                "portgroup use vmware.composite.network.portgroup.delete instead."
+            ),
+            "parameter_hints": {
+                "host": "HostSystem moid, e.g. 'host-21'.",
+                "portgroup_name": "Exact port group name on that host's standard switch.",
+            },
+            "output_shape": (
+                "{status: deleted|unchanged|invalid_request|precondition_failed|"
+                "still_present, object: {kind, host, host_name, name, vswitch, vlan, "
+                "active_ports}, blockers: [{kind: vm|vmkernel_adapter, ...}], guidance}."
+            ),
+        },
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.folder.delete",
+        handler=folder_delete_composite,
+        summary="Delete an EMPTY inventory folder. Folders with content are refused.",
+        description=(
+            "Deletes one inventory folder (the opposite of folder.create). The "
+            "vSphere delete would also delete everything inside the folder, VMs "
+            "included, so this op only deletes an EMPTY folder. A folder with any "
+            "content gives status='precondition_failed' with the content listed in "
+            "'blockers'. The top folders of vCenter and of a datacenter are refused "
+            "too. Otherwise it runs Folder.Destroy_Task, waits for it and reads the "
+            "folder again: status='deleted' when it is gone. A folder that does not "
+            "exist gives status='unchanged'. If vSphere reports an error, the call "
+            "fails. Destructive: a second person must always approve it. Like 'govc "
+            "object.destroy' on an empty folder."
+        ),
+        parameter_schema=FOLDER_DELETE_PARAMETER_SCHEMA,
+        response_schema=FOLDER_DELETE_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=[
+            "composite",
+            "write",
+            "vm",
+            "inventory",
+            "vi-json",
+            "teardown",
+            "destroy",
+            "destructive",
+        ],
+        safety_level="destructive",
+        requires_approval=True,
+        llm_instructions={
+            "when_to_use": (
+                "Use it to remove an inventory folder that an environment created, after "
+                "its VMs were deleted or moved."
+            ),
+            "parameter_hints": {"folder": "Folder moid, e.g. 'group-v1234'."},
+            "output_shape": (
+                "{status: deleted|unchanged|precondition_failed|still_present|timeout, "
+                "object: {kind, moid, name, parent, child_type, child_count}, blockers: "
+                "[{kind: <child type>, moid, name}], task, task_state, guidance}."
+            ),
+        },
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.datastore.file.delete",
+        handler=datastore_file_delete_composite,
+        summary="Delete a file or folder on a datastore. Refused for files of registered VMs.",
+        description=(
+            "Deletes one file, or one folder with everything in it, on a datastore. "
+            "Use it to clean up what a teardown leaves behind: the folder of a deleted "
+            "VM, an old ISO, an installer folder. The path is relative to the root of "
+            "the datastore. Refused before any change: the root itself, '..', "
+            "wildcards, hidden system folders ('.*') and content-library folders "
+            "('contentlib-*'); the input check rejects these already at preview. Also "
+            "refused (status='precondition_failed'): a path that is, or contains, a "
+            "file of any VM registered in this vCenter (disks, .vmx, snapshots, logs); "
+            "the VMs are listed in 'blockers'. A path that does not exist gives "
+            "status='unchanged'. Otherwise it runs FileManager.DeleteDatastoreFile_Task, "
+            "waits for it and checks again: status='deleted'. If vSphere reports an "
+            "error, the call fails. Destructive: a second person must always approve "
+            "it, after seeing the size and the files that will be deleted. vCenter "
+            "targets only. Like 'govc datastore.rm'."
+        ),
+        parameter_schema=DATASTORE_FILE_DELETE_PARAMETER_SCHEMA,
+        response_schema=DATASTORE_FILE_DELETE_RESPONSE_SCHEMA,
+        group_key="storage",
+        tags=[
+            "composite",
+            "write",
+            "storage",
+            "datastore",
+            "vi-json",
+            "teardown",
+            "destroy",
+            "destructive",
+        ],
+        safety_level="destructive",
+        requires_approval=True,
+        llm_instructions={
+            "when_to_use": (
+                "Use it to remove files a teardown leaves on a datastore (a deleted VM's "
+                "folder, an old ISO). To delete a registered VM, use "
+                "vmware.composite.vm.destroy -- its files are refused here."
+            ),
+            "parameter_hints": {
+                "datastore": "Datastore moid, e.g. 'datastore-17'.",
+                "path": "Relative path, e.g. 'old-appliance' or 'iso/stale.iso'.",
+            },
+            "output_shape": (
+                "{status: deleted|unchanged|invalid_request|precondition_failed|"
+                "still_present|timeout, object: {kind, datastore, datastore_name, path, "
+                "datastore_path, file_type, size_bytes}, blockers: [{kind: vm, moid, name, "
+                "files}], task, task_state, guidance}."
+            ),
+        },
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.datastore.dir.create",
+        handler=datastore_dir_create_composite,
+        summary="Create a folder on a datastore. Does nothing if it already exists.",
+        description=(
+            "Creates one folder on a datastore with vSphere FileManager.MakeDirectory "
+            "(the partner of datastore.file.delete). Same path rules as the delete. "
+            "If the folder already exists: status='unchanged'. If a file has that "
+            "name, or the parent folder is missing and create_parents is not true: "
+            "status='precondition_failed'. Both are decided before any change. Then "
+            "it checks again: status='created'. If vSphere reports an error, the call "
+            "fails. Needs approval (caution level). On vSAN and vVol datastores, "
+            "top-level folders need a different API and are not supported. Like "
+            "'govc datastore.mkdir [-p]'."
+        ),
+        parameter_schema=DATASTORE_DIR_CREATE_PARAMETER_SCHEMA,
+        response_schema=DATASTORE_DIR_CREATE_RESPONSE_SCHEMA,
+        group_key="storage",
+        tags=["composite", "write", "storage", "datastore", "vi-json"],
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions={
+            "when_to_use": "Use it to create a folder on a datastore (e.g. for ISO files).",
+            "parameter_hints": {
+                "datastore": "Datastore moid, e.g. 'datastore-17'.",
+                "path": "Relative path, e.g. 'iso' or 'stage/media'.",
+                "create_parents": "true to also create missing parent folders.",
+            },
+            "output_shape": (
+                "{status: created|unchanged|invalid_request|precondition_failed|"
+                "not_verified, object: {kind, datastore, datastore_name, path, "
+                "datastore_path}, blockers: [], guidance}."
+            ),
+        },
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.content_library.delete",
+        handler=content_library_delete_composite,
+        summary="Delete a content library (local or subscribed).",
+        description=(
+            "Deletes one content library, found by id or by name. It reads the "
+            "library type first and uses the matching vCenter call (DELETE "
+            "/content/local-library/{id} or /content/subscribed-library/{id}). "
+            "Refused before any change (status='precondition_failed'): another "
+            "library on this vCenter subscribes to it (the subscribers are listed in "
+            "'blockers'), or it still has items and delete_items is not true. A "
+            "library that does not exist gives status='unchanged'; a name that "
+            "matches more than one library gives status='invalid_request'. Then it "
+            "reads the library again: status='deleted'. Destructive: a second person "
+            "must always approve it, after seeing the number and size of the items "
+            "that will be deleted. Subscribers on other vCenters cannot be seen. Like "
+            "'govc library.rm'."
+        ),
+        parameter_schema=CONTENT_LIBRARY_DELETE_PARAMETER_SCHEMA,
+        response_schema=CONTENT_LIBRARY_DELETE_RESPONSE_SCHEMA,
+        group_key="content_library",
+        tags=["composite", "write", "content-library", "teardown", "destroy", "destructive"],
+        safety_level="destructive",
+        requires_approval=True,
+        llm_instructions={
+            "when_to_use": (
+                "Use it to remove a content library that an environment created. Delete "
+                "subscribed libraries before the library they subscribe to."
+            ),
+            "parameter_hints": {
+                "library_id": "Library id (preferred).",
+                "library_name": "Library name; a name that matches more than one is refused.",
+                "delete_items": "true to delete a library that still has items.",
+            },
+            "output_shape": (
+                "{status: deleted|unchanged|invalid_request|precondition_failed|"
+                "still_present, object: {kind, id, name, type, published, datastores, "
+                "item_count}, blockers: [{kind: subscribed_library, id, name}], guidance}."
+            ),
+        },
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.content_library.item.delete",
+        handler=content_library_item_delete_composite,
+        summary="Delete one item of a local content library.",
+        description=(
+            "Deletes one content-library item (DELETE /content/library/item/{id}), "
+            "found by id or by name inside a library. An item of a subscribed library "
+            "is refused (status='precondition_failed'), because its content comes "
+            "from the publishing library. An item that does not exist gives "
+            "status='unchanged'; a name that matches more than one item gives "
+            "status='invalid_request'. Then it reads the item again: "
+            "status='deleted'. Destructive: a second person must always approve it, "
+            "after seeing the item, its size and its files. Like 'govc library.rm' on "
+            "an item."
+        ),
+        parameter_schema=CONTENT_LIBRARY_ITEM_DELETE_PARAMETER_SCHEMA,
+        response_schema=CONTENT_LIBRARY_ITEM_DELETE_RESPONSE_SCHEMA,
+        group_key="content_library",
+        tags=["composite", "write", "content-library", "teardown", "destroy", "destructive"],
+        safety_level="destructive",
+        requires_approval=True,
+        llm_instructions={
+            "when_to_use": "Use it to remove one OVF, ISO or template item from a local library.",
+            "parameter_hints": {
+                "item_id": "Library item id (preferred).",
+                "item_name": "Item name; also give library_id or library_name.",
+            },
+            "output_shape": (
+                "{status: deleted|unchanged|invalid_request|precondition_failed|"
+                "still_present, object: {kind, id, name, type, size_bytes, library_id, "
+                "library_name, library_type}, blockers: [], guidance}."
+            ),
+        },
+    ),
 )
 
 
@@ -2244,12 +2596,14 @@ async def register_vmware_composite_operations(
     on every lifespan startup; the skip-re-embed branch keeps that
     cheap.
 
-    Scope: 58 composites total -- 16 read (T5 / #508 + the datastore
+    Scope: 65 composites total -- 16 read (T5 / #508 + the datastore
     cache-refresh read datastore.refresh / #3789 + the VM allocation read
     vm.resource_allocation.show / #3880 + the 4 guest-ops
     reads / #3100 + the supervisor status + the vSphere Namespace status
     (#3502) / storage-policy list / two SUBSCRIBED content-library reads) +
-    42 write (T6 / #509 + the caution VM allocation write
+    49 write (the seven #3339 teardown composites -- six destructive deletes
+    + the caution ``datastore.dir.create`` -- + T6 / #509 + the caution VM
+    allocation write
     ``vm.resource_allocation.set`` / #3880 + the
     destructive-tier ``vm.destroy`` / #3198, the governed vSphere Namespace
     create/delete ``namespace.create`` (caution) / ``namespace.delete``

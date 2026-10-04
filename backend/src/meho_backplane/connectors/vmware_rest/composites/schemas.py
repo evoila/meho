@@ -65,6 +65,15 @@ __all__ = [
     "CLUSTER_DRS_VM_HOST_RULE_CREATE_RESPONSE_SCHEMA",
     "CLUSTER_PATCH_PARAMETER_SCHEMA",
     "CLUSTER_PATCH_RESPONSE_SCHEMA",
+    "CONTENT_LIBRARY_DELETE_PARAMETER_SCHEMA",
+    "CONTENT_LIBRARY_DELETE_RESPONSE_SCHEMA",
+    "CONTENT_LIBRARY_ITEM_DELETE_PARAMETER_SCHEMA",
+    "CONTENT_LIBRARY_ITEM_DELETE_RESPONSE_SCHEMA",
+    "DATASTORE_DIR_CREATE_PARAMETER_SCHEMA",
+    "DATASTORE_DIR_CREATE_RESPONSE_SCHEMA",
+    "DATASTORE_FILE_DELETE_PARAMETER_SCHEMA",
+    "DATASTORE_FILE_DELETE_RESPONSE_SCHEMA",
+    "DATASTORE_PATH_PATTERN",
     "DATASTORE_REFRESH_PARAMETER_SCHEMA",
     "DATASTORE_REFRESH_RESPONSE_SCHEMA",
     "DATASTORE_USAGE_MAX_VM_NAMES",
@@ -74,6 +83,8 @@ __all__ = [
     "EVENT_TAIL_RESPONSE_SCHEMA",
     "FOLDER_CREATE_PARAMETER_SCHEMA",
     "FOLDER_CREATE_RESPONSE_SCHEMA",
+    "FOLDER_DELETE_PARAMETER_SCHEMA",
+    "FOLDER_DELETE_RESPONSE_SCHEMA",
     "GUEST_CUSTOMIZATION_SPEC_CREATE_PARAMETER_SCHEMA",
     "GUEST_CUSTOMIZATION_SPEC_CREATE_RESPONSE_SCHEMA",
     "GUEST_ENV_READ_PARAMETER_SCHEMA",
@@ -96,8 +107,12 @@ __all__ = [
     "HOST_EVACUATE_RESPONSE_SCHEMA",
     "HOST_SERVICE_CONTROL_PARAMETER_SCHEMA",
     "HOST_SERVICE_CONTROL_RESPONSE_SCHEMA",
+    "HOST_STANDARD_PORTGROUP_DELETE_PARAMETER_SCHEMA",
+    "HOST_STANDARD_PORTGROUP_DELETE_RESPONSE_SCHEMA",
     "NETWORK_PORTGROUP_AUDIT_PARAMETER_SCHEMA",
     "NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA",
+    "NETWORK_PORTGROUP_DELETE_PARAMETER_SCHEMA",
+    "NETWORK_PORTGROUP_DELETE_RESPONSE_SCHEMA",
     "PERFORMANCE_SUMMARY_PARAMETER_SCHEMA",
     "PERFORMANCE_SUMMARY_RESPONSE_SCHEMA",
     "RESOURCE_POOL_CREATE_PARAMETER_SCHEMA",
@@ -6620,3 +6635,259 @@ VM_RESOURCE_ALLOCATION_SET_RESPONSE_SCHEMA: dict[str, Any] = {
     },
     "required": ["status", "vm"],
 }
+
+
+# ---------------------------------------------------------------------------
+# Teardown deletes (#3339 / #3331 delete half) -- the governed inverses of the
+# create-side composites. One uniform response envelope:
+# ``{status, object, blockers, task, task_state, guidance}``.
+# ---------------------------------------------------------------------------
+
+#: The relative datastore-path contract shared by ``datastore.file.delete`` /
+#: ``datastore.dir.create`` (preview-time, here) and the handlers'
+#: ``_datastore_browse.path_problem`` (dispatch-time): non-empty, relative, no
+#: ``.`` / ``..`` segment, no wildcard / bracket / backslash / control character,
+#: and a top-level entry that is neither hidden (``.sdd.sf``, ``.vSphere-HA``,
+#: ``.dvsData``) nor a ``contentlib-`` content-library backing.
+_DATASTORE_PATH_SEGMENT = r"[^/\\\[\]*?\x00-\x1f\x7f]+"
+DATASTORE_PATH_PATTERN: str = (
+    r"^(?!\.)(?!contentlib-)(?!(?:.*/)?\.\.?(?:/|$))"
+    + _DATASTORE_PATH_SEGMENT
+    + r"(?:/"
+    + _DATASTORE_PATH_SEGMENT
+    + r")*$"
+)
+
+_TEARDOWN_OBJECT_SCHEMA: dict[str, Any] = {
+    "type": ["object", "null"],
+    "description": (
+        "Identity of the object acted on, as read live before any write: ``kind`` plus "
+        "kind-specific keys (moid / id / name / datastore path / VLAN / sizes / counts)."
+    ),
+}
+
+_TEARDOWN_BLOCKERS_SCHEMA: dict[str, Any] = {
+    "type": "array",
+    "items": {"type": "object"},
+    "description": (
+        "What prevents the delete (capped at 50): VMs / ports / vmkernel adapters using a "
+        "port group, a folder's children, VMs owning files under a datastore path, "
+        "libraries subscribed to a library. Empty when nothing blocks."
+    ),
+}
+
+
+def _teardown_response_schema(statuses: list[str], status_description: str) -> dict[str, Any]:
+    """The shared teardown response envelope with a per-op ``status`` enum."""
+    return {
+        "type": "object",
+        "properties": {
+            "status": {"type": "string", "enum": statuses, "description": status_description},
+            "object": _TEARDOWN_OBJECT_SCHEMA,
+            "blockers": _TEARDOWN_BLOCKERS_SCHEMA,
+            "task": {"type": ["string", "null"], "description": "vim Task moid, when one ran."},
+            "task_state": {
+                "type": ["string", "null"],
+                "description": "Terminal task state (success / timeout) when a task ran.",
+            },
+            "guidance": {"type": ["string", "null"]},
+        },
+        "required": ["status", "object", "blockers"],
+    }
+
+
+_DELETE_STATUS_COMMON = (
+    "``'deleted'`` -- the delete ran and the read-back found the object gone; "
+    "``'unchanged'`` -- the object was already absent, nothing was written; "
+    "``'precondition_failed'`` -- refused before any write (see ``blockers`` / "
+    "``guidance``); ``'still_present'`` -- the delete returned but the object still "
+    "reads back. A vSphere fault on the delete is not a status: it raises "
+    "(``connector_error``, audited as failed)."
+)
+
+#: ``vmware.composite.network.portgroup.delete`` parameter schema.
+NETWORK_PORTGROUP_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "portgroup": {
+            "type": "string",
+            "pattern": "^dvportgroup-[0-9]+$",
+            "description": (
+                "Distributed portgroup moid, e.g. 'dvportgroup-42' (display names are "
+                "not accepted -- resolve via vmware.composite.network.portgroup.audit)."
+            ),
+        },
+    },
+    "required": ["portgroup"],
+    "additionalProperties": False,
+}
+
+#: ``vmware.composite.network.portgroup.delete`` response schema.
+NETWORK_PORTGROUP_DELETE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_schema(
+    ["deleted", "unchanged", "precondition_failed", "still_present", "timeout"],
+    _DELETE_STATUS_COMMON + " ``'timeout'`` -- Destroy_Task outran the poll bound.",
+)
+
+#: ``vmware.composite.host.standard_portgroup.delete`` parameter schema.
+HOST_STANDARD_PORTGROUP_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "host": {
+            "type": "string",
+            "pattern": "^host-[0-9]+$",
+            "description": "HostSystem moid, e.g. 'host-21' (vCenter targets).",
+        },
+        "portgroup_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "description": "Exact name of the port group on the host's standard vSwitch.",
+        },
+    },
+    "required": ["host", "portgroup_name"],
+    "additionalProperties": False,
+}
+
+#: ``vmware.composite.host.standard_portgroup.delete`` response schema.
+HOST_STANDARD_PORTGROUP_DELETE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_schema(
+    ["deleted", "unchanged", "invalid_request", "precondition_failed", "still_present"],
+    _DELETE_STATUS_COMMON + " ``'invalid_request'`` -- the host moid does not exist.",
+)
+
+#: ``vmware.composite.folder.delete`` parameter schema.
+FOLDER_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "folder": {
+            "type": "string",
+            "pattern": "^group-[a-z][0-9]+$",
+            "description": "Folder moid, e.g. 'group-v1234' (as folder.create returns it).",
+        },
+    },
+    "required": ["folder"],
+    "additionalProperties": False,
+}
+
+#: ``vmware.composite.folder.delete`` response schema.
+FOLDER_DELETE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_schema(
+    ["deleted", "unchanged", "precondition_failed", "still_present", "timeout"],
+    _DELETE_STATUS_COMMON + " ``'timeout'`` -- Destroy_Task outran the poll bound.",
+)
+
+_DATASTORE_MOID_PARAM: dict[str, Any] = {
+    "type": "string",
+    "pattern": "^datastore-[0-9]+$",
+    "description": ("Datastore moid, e.g. 'datastore-17' (see vmware.composite.datastore.usage)."),
+}
+
+_DATASTORE_RELATIVE_PATH_PARAM: dict[str, Any] = {
+    "type": "string",
+    "minLength": 1,
+    "maxLength": 1024,
+    "pattern": DATASTORE_PATH_PATTERN,
+    "description": (
+        "Path relative to the datastore root, e.g. 'old-appliance' or 'iso/stale.iso'. "
+        "Never the root, never '/'-prefixed, no '.' / '..' segments or wildcards; the "
+        "top-level entry may not be hidden ('.*') or a 'contentlib-*' backing."
+    ),
+}
+
+#: ``vmware.composite.datastore.file.delete`` parameter schema.
+DATASTORE_FILE_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "datastore": _DATASTORE_MOID_PARAM,
+        "path": _DATASTORE_RELATIVE_PATH_PARAM,
+    },
+    "required": ["datastore", "path"],
+    "additionalProperties": False,
+}
+
+#: ``vmware.composite.datastore.file.delete`` response schema.
+DATASTORE_FILE_DELETE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_schema(
+    ["deleted", "unchanged", "invalid_request", "precondition_failed", "still_present", "timeout"],
+    _DELETE_STATUS_COMMON
+    + " ``'invalid_request'`` -- the path or datastore reference is unacceptable; "
+    "``'timeout'`` -- DeleteDatastoreFile_Task outran the poll bound.",
+)
+
+#: ``vmware.composite.datastore.dir.create`` parameter schema.
+DATASTORE_DIR_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "datastore": _DATASTORE_MOID_PARAM,
+        "path": _DATASTORE_RELATIVE_PATH_PARAM,
+        "create_parents": {
+            "type": "boolean",
+            "default": False,
+            "description": "Create missing intermediate directories (mkdir -p).",
+        },
+    },
+    "required": ["datastore", "path"],
+    "additionalProperties": False,
+}
+
+#: ``vmware.composite.datastore.dir.create`` response schema.
+DATASTORE_DIR_CREATE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_schema(
+    ["created", "unchanged", "invalid_request", "precondition_failed", "not_verified"],
+    (
+        "``'created'`` -- MakeDirectory ran and the directory reads back; ``'unchanged'`` "
+        "-- it already existed; ``'invalid_request'`` -- the path or datastore reference "
+        "is unacceptable; ``'precondition_failed'`` -- a file holds the name, or the "
+        "parent is missing without create_parents; ``'not_verified'`` -- MakeDirectory "
+        "returned but the directory does not read back. A vSphere fault raises."
+    ),
+)
+
+#: ``vmware.composite.content_library.delete`` parameter schema.
+CONTENT_LIBRARY_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "library_id": {"type": "string", "minLength": 1, "description": "Library id."},
+        "library_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Library name (resolved fail-closed; ambiguity is refused).",
+        },
+        "delete_items": {
+            "type": "boolean",
+            "default": False,
+            "description": "Required (true) to delete a library that still holds items.",
+        },
+    },
+    "anyOf": [{"required": ["library_id"]}, {"required": ["library_name"]}],
+    "additionalProperties": False,
+}
+
+#: ``vmware.composite.content_library.delete`` response schema.
+CONTENT_LIBRARY_DELETE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_schema(
+    ["deleted", "unchanged", "invalid_request", "precondition_failed", "still_present"],
+    _DELETE_STATUS_COMMON + " ``'invalid_request'`` -- an ambiguous library_name.",
+)
+
+#: ``vmware.composite.content_library.item.delete`` parameter schema.
+CONTENT_LIBRARY_ITEM_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "item_id": {"type": "string", "minLength": 1, "description": "Library item id."},
+        "item_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Item name; needs library_id or library_name.",
+        },
+        "library_id": {"type": "string", "minLength": 1},
+        "library_name": {"type": "string", "minLength": 1},
+    },
+    "anyOf": [
+        {"required": ["item_id"]},
+        {"required": ["item_name", "library_id"]},
+        {"required": ["item_name", "library_name"]},
+    ],
+    "additionalProperties": False,
+}
+
+#: ``vmware.composite.content_library.item.delete`` response schema.
+CONTENT_LIBRARY_ITEM_DELETE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_schema(
+    ["deleted", "unchanged", "invalid_request", "precondition_failed", "still_present"],
+    _DELETE_STATUS_COMMON + " ``'invalid_request'`` -- an ambiguous item or library name.",
+)

@@ -22,8 +22,10 @@ These tests pin:
 * the starter-alert contract (the alert names, the release-scoped
   ``absent(up)`` scrape alert, the ``broadcast_publish_errors_total``
   rate alert, the #2888 background-loop liveness alert in its own
-  ``meho.loops`` group, the by-concern group split, and the tunable
-  ``for`` / ``severity`` / ``missedTicks`` knobs).
+  ``meho.loops`` group, the #3915 scoped zero-hit docs-search alert in its
+  own ``meho.docs`` group, the by-concern group split, and the tunable
+  ``for`` / ``severity`` / ``missedTicks`` / ``threshold`` / ``window``
+  knobs).
 
 The authoritative chart gate is ``.github/workflows/chart.yml`` (lint +
 ``helm template`` + kubeconform + these render assertions). This test
@@ -256,6 +258,48 @@ def test_loop_liveness_alert_knobs_are_tunable() -> None:
     assert "(3 * background_loop_interval_seconds)" in alert["expr"]
     assert alert["for"] == "1m"
     assert alert["labels"]["severity"] == "critical"
+
+
+def test_prometheus_rule_renders_docs_scoped_zero_hits_alert() -> None:
+    """The #3915 docs alert lands as a NEW ``meho.docs`` group.
+
+    It sums the release's ``docs_search_scoped_zero_hits_total`` increase
+    over the window (release-scoped like the scrape alert, so another
+    release's pods never count) and compares it with the threshold.
+    """
+    pr = _render_show_only("templates/prometheusrule.yaml", "--set", "prometheusRule.enabled=true")
+    group_names = {g["name"] for g in pr["spec"]["groups"]}
+    assert "meho.docs" in group_names
+    assert {"meho.scrape", "meho.broadcast", "meho.loops"} <= group_names
+
+    alert = _alerts(pr)["MehoDocsScopedZeroHits"]
+    assert alert["expr"] == (
+        "sum(increase(docs_search_scoped_zero_hits_total"
+        '{job="test-meho", namespace="default"}[1h])) >= 5'
+    )
+    assert alert["for"] == "15m"
+    assert alert["labels"]["severity"] == "warning"
+
+
+def test_docs_scoped_zero_hits_alert_knobs_are_tunable() -> None:
+    """``threshold`` / ``window`` / ``for`` / ``severity`` flow through."""
+    pr = _render_show_only(
+        "templates/prometheusrule.yaml",
+        "--set",
+        "prometheusRule.enabled=true",
+        "--set",
+        "prometheusRule.docsScopedZeroHits.threshold=20",
+        "--set",
+        "prometheusRule.docsScopedZeroHits.window=6h",
+        "--set",
+        "prometheusRule.docsScopedZeroHits.for=1h",
+        "--set",
+        "prometheusRule.docsScopedZeroHits.severity=info",
+    )
+    alert = _alerts(pr)["MehoDocsScopedZeroHits"]
+    assert alert["expr"].endswith("[6h])) >= 20")
+    assert alert["for"] == "1h"
+    assert alert["labels"]["severity"] == "info"
 
 
 def test_service_monitor_and_prometheus_rule_are_independent() -> None:

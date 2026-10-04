@@ -466,7 +466,7 @@ Operator resources close that gap (Initiative #2884, #2885):
   The broadcast subchart's Service carries a different
   `app.kubernetes.io/name`, so it is not matched.
 - `prometheusRule` (`prometheusRule.enabled`, default `false`) renders a
-  starter `PrometheusRule` with three conservative alerts:
+  starter `PrometheusRule` with four conservative alerts:
   - `MehoMetricsScrapeAbsent` — `absent(up{job=<fullname>, namespace=<ns>})`;
     fires when Prometheus has **no** target series for this release at
     all (the ServiceMonitor was never picked up, the selector drifted, or
@@ -492,10 +492,29 @@ Operator resources close that gap (Initiative #2884, #2885):
     healthy siblings masking it. Complements — does not replace — the
     sensor-runner watchdog's faster in-process broadcast stall detection
     (`checks/watchdog.py`), which is unchanged.
+  - `MehoDocsScopedZeroHits` (#3915) —
+    `sum(increase(docs_search_scoped_zero_hits_total{job=<fullname>, namespace=<ns>}[W])) >= T`;
+    the docs search service counts every search that requested a `product`
+    or `version` and returned no chunks (`docs_search/call_log.py`),
+    whatever the collection's scope gates (#3912) did with them. Where they
+    went out as hard filters (`scope_forwarded="filters"`), a run of them
+    means the filter vocabulary callers send does not match the corpus's;
+    with `"soft"` or `"none"` the backend did not filter on them. The
+    counter has no labels (`/metrics` can be unauthenticated); the matching
+    `docs_search_scoped_zero_hits` warning log line names the collection,
+    product, version and `scope_forwarded`
+    (`docs/codebase/docs-search.md` § Per-call logs). `T` and `W` are
+    `prometheusRule.docsScopedZeroHits.threshold` (default 5) and `.window`
+    (default `1h`). The counter counts backend searches, not calls: a local
+    `ask_docs` runs one search per expansion variant (up to 4), so one
+    scoped ask that finds nothing counts up to 4, and two such asks in the
+    window reach the default threshold. A `search_docs` call counts once;
+    an upstream ask (#3911) runs no search and never counts.
 
   The rules are split into groups **by concern** (`meho.scrape`,
-  `meho.broadcast`, `meho.loops`) so follow-up tasks extend them cleanly —
-  a new alert lands as a new group, not an edit to an existing group.
+  `meho.broadcast`, `meho.loops`, `meho.docs`) so follow-up tasks extend
+  them cleanly — a new alert lands as a new group, not an edit to an
+  existing group.
 
 Both resources require the Prometheus Operator CRDs
 (`monitoring.coreos.com/v1`) to be installed in the cluster; a default
@@ -509,8 +528,9 @@ install that selector defaults to `release: <prometheus-release>`, so
 config / rules are silently never generated. The alert `for` durations
 and `severity` labels are operator-tunable under
 `prometheusRule.scrapeAbsent` / `prometheusRule.broadcastPublishErrors` /
-`prometheusRule.loopLiveness` — the last also exposes `missedTicks`, the
-per-loop staleness multiplier `N`.
+`prometheusRule.loopLiveness` / `prometheusRule.docsScopedZeroHits` —
+`loopLiveness` also exposes `missedTicks`, the per-loop staleness
+multiplier `N`, and `docsScopedZeroHits` its `threshold` and `window`.
 
 Render assertions live in `backend/tests/test_chart_observability_scrape.py`
 (unit layer, skips where `helm` is absent) and in the `chart.yml`

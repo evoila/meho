@@ -55,6 +55,7 @@ from meho_backplane.docs_search.answer_errors import (
 )
 from meho_backplane.operations.ingest import LlmJsonResult
 from meho_backplane.operations.ingest.pipeline import LlmClientUnavailable
+from meho_backplane.settings import get_settings
 
 #: The corpus-http backend's transport seam — the retrieval side.
 _CORPUS_SEAM = "meho_backplane.docs_search.backends.corpus_http.search_corpus"
@@ -84,6 +85,20 @@ class _StubLlmClient:
         response_format: Any | None = None,
     ) -> LlmJsonResult:
         return LlmJsonResult(text=self._raw, stop_reason="end_turn")
+
+
+@pytest.fixture(autouse=True)
+def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Pin the env ``get_settings()`` needs.
+
+    The expand step reads the ``DOCS_DEBUG_LOG_QUERY_TEXT`` opt-in through
+    ``get_settings()`` (#3915), and ``Settings`` requires the Keycloak knobs.
+    """
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 @pytest.fixture(autouse=True)

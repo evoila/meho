@@ -63,6 +63,7 @@ from typing import TYPE_CHECKING, Final
 import structlog
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from meho_backplane.docs_search.call_log import log_query_text
 from meho_backplane.operations.ingest import (
     LlmClient,
     build_anthropic_ingest_llm_client,
@@ -254,7 +255,10 @@ async def expand_docs_query(
 
     Args:
         query: The operator's free-text question (passed to the model;
-            never logged here — the dispatcher hashes it for the audit row).
+            the dispatcher hashes it for the audit row). It and the
+            variants are logged only under ``DOCS_DEBUG_LOG_QUERY_TEXT``
+            (:func:`~meho_backplane.docs_search.call_log.log_query_text`,
+            #3915); ``docs_ask_query_expanded`` carries the count alone.
         collection: The resolved doc collection whose manifest fields
             ground the expansion in domain terms.
         llm_client: Expansion client; defaults to the same fail-closed
@@ -295,5 +299,10 @@ async def expand_docs_query(
         "docs_ask_query_expanded",
         collection_key=collection.collection_key,
         variant_count=len(variants),
+    )
+    log_query_text(
+        source="expansion",
+        collection_key=collection.collection_key,
+        queries=variants,
     )
     return variants

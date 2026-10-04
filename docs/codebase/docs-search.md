@@ -33,10 +33,22 @@ The same `search_docs` service backs four consumers: the REST route
 #1526). They share one service so the REQUIRE_FILTERS gate and the
 cited-chunk shape are defined exactly once.
 
-`ask_docs` is the **answer pipeline**: where `search_docs` returns the raw
-cited chunks, `ask_docs` runs a corpus-aware **expand** step, retrieves per
+`ask_docs` returns one grounded, cited answer, `{answer, citations[]}`.
+**Where the answer comes from is chosen per collection** (#3911):
+
+- **Upstream.** A collection whose backend offers its own grounded-answer
+  endpoint, and that opts in with `backend.ref["answer"] = "upstream"`, is
+  answered by that endpoint (for MEHO Knowledge: `POST /ask?include=hits`).
+  One answer call, no search call; the answer and its citations are mapped
+  into the same response shape (see `answer_docs_question` under Key
+  types). The backplane's own model is not called for it.
+- **Local.** Every other collection runs the backplane's own pipeline,
+  described next. This is the default: no collection is switched by
+  shipping the code.
+
+The local pipeline runs a corpus-aware **expand** step, retrieves per
 expanded variant, RRF-merges the chunks, and then composes one grounded
-answer over them, returning `{answer, citations[]}`. The pipeline is
+answer over them. The pipeline is
 **expand → retrieve (per variant) → RRF-merge → synthesize** (#1916). The
 grounding contract is enforced in code, not just in the prompt — no claim
 survives without a citation that resolves to a retrieved chunk, an empty
@@ -46,20 +58,21 @@ degrading to an un-expanded / ungrounded answer. The expand step is the
 answer-pipeline's job only — `search_docs` (the raw-chunks tool) is
 unchanged.
 
-`ask_docs` is exposed over **three** faces, all composing the same
-in-process pipeline: the MCP `ask_docs` tool (T7, #1526), the REST
-`POST /api/v1/ask_docs` route (T2, #1917 — the synthesis sibling of
-`POST /api/v1/search_docs`), and the `/ui/corpus` **Ask mode** (T2, #1917 —
-a toggle alongside the original retrieve mode). The REST route + the UI BFF
-share one leg-by-leg composition in `meho_backplane.api.v1.ask_docs` so the
-pipeline structure and the #1918 per-leg error classification are defined
-once: the REST route calls `run_ask_pipeline` (raises the classified
-`AskDocsAnswerError`), and the UI BFF calls the structured sibling
-`run_ask_pipeline_capturing_retrieval` (returns an `AskPipelineOutcome`
-carrying the chunks retrieval returned alongside the error) so it can fail
-open to those chunks on a post-retrieval leg failure — `run_ask_pipeline` is
-the thin raising wrapper over it. `ask_docs` is single-collection only on
-every face (no `collections` fan-out field).
+`ask_docs` is exposed over **three** faces, all composing their answer
+through **one** in-process seam,
+`meho_backplane.docs_search.answer.answer_docs_question` (#3911): the MCP
+`ask_docs` tool (T7, #1526), the REST `POST /api/v1/ask_docs` route (T2,
+#1917 — the synthesis sibling of `POST /api/v1/search_docs`), and the
+`/ui/corpus` **Ask mode** (T2, #1917 — a toggle alongside the original
+retrieve mode). The seam returns an `AskPipelineOutcome` (the answer, or the
+classified #1918 `AskDocsAnswerError` plus the chunks retrieved before it,
+and the `answer_source`). The REST route calls `run_ask_pipeline` (the thin
+raising wrapper in `meho_backplane.api.v1.ask_docs`), the UI BFF calls
+`run_ask_pipeline_capturing_retrieval` (the seam under its established
+name) so it can fail open on a leg failure, and the MCP handler calls the
+seam directly — the MCP module no longer carries its own copy of the
+pipeline. `ask_docs` is single-collection only on every face (no
+`collections` fan-out field).
 
 ## Key types
 
@@ -117,6 +130,38 @@ read from a *tenant-configurable* `backend.ref`, so two controls stop a
   audit attributes the call to the service principal, not the operator;
   MEHO's central `audit_log` is unaffected.
 
+### `ask_corpus(...)` (`meho_backplane.auth.corpus`, #3911)
+
+The answer transport, used only for a collection that opted in to its
+backend's grounded answer. It POSTs `{query, top_k}` (plus `audience` when
+set) to the answer endpoint with `?include=hits`, behind the same posture as
+`search_corpus`: the `https` + SSRF destination screen, the deployment's
+corpus service credential (never the operator JWT), and the response body
+never echoed. It deliberately sends **no** `with_rerank` (ranking policy is
+the backend's) and **no** scope filter (product / version forwarding is
+gated per collection by #3912; until then the answer call sends none, which
+matches today's effective search behaviour). Its own bound is
+`CORPUS_ANSWER_TIMEOUT_SECONDS` (default **60**; the search bound stays
+`CORPUS_TIMEOUT_SECONDS`, default 10), kept below any proxy read timeout in
+front of the corpus.
+
+The response is parsed by `UpstreamAnswer`: the `answer` text, the
+`citations` (`chunk_index` + `chunk_id`), the `hits` (each an `UpstreamHit`
+— the `CorpusChunk` search-hit shape plus `filename` / `breadcrumb` /
+`heading_path`) and the backend `timing` (`total_ms` / `llm_ms`). `hits` is
+**required**, so a 2xx without them fails parse loudly. A transport failure
+(unconfigured, blocked, unreachable, timeout) is `CorpusUnavailable` as on
+search; a response that is not a usable answer is `CorpusAnswerError` with a
+`kind`: `rejected` (4xx), `answer_unavailable` (503 with the backend's
+`llm_unavailable` code), `rate_limited` (503 with `llm_rate_limited`, or a
+429; carries the `Retry-After` in seconds), `server_error` (any other 5xx) or
+`malformed` (a 2xx body that does not parse). Only those two backend error
+codes are ever read from an error body. `Retry-After` is read in either RFC
+9110 form (ASCII delta-seconds or an HTTP-date) and clamped to
+`_RETRY_AFTER_MAX_S` = 3600 s; anything else (blank, signed, non-ASCII, an
+unparseable or overflowing date) is dropped as `None`, never raised, so a
+garbled header cannot turn the typed rate-limited error into a 500.
+
 ### Backend-agnostic search router (`meho_backplane.docs_search.backends`, T2 #1551)
 
 The `collection → backend` router that keeps MEHO a backplane, not a
@@ -132,7 +177,11 @@ registry (`connectors/registry.py`) **minus the version tie-break ladder**
   the seam swap is behaviour-preserving) plus a `probe()` forward seam
   for the readiness probe (T6 #1555) that defaults to raising rather than
   claiming "ready". A class-level `backend_type` string is the routing
-  discriminator.
+  discriminator. The optional **answer** seam (#3911) follows the `probe()`
+  precedent: `supports_answer(backend_ref) -> bool` (default `False`) and
+  `async answer(operator, query, *, backend_ref, limit) -> UpstreamAnswer`
+  (default raises `NotImplementedError`). A backend without an answer
+  endpoint keeps the local answer pipeline.
 - `CorpusHttpBackend` (`backends/corpus_http.py`,
   `backend_type="corpus-http"`) — the **first** concrete adapter. It
   wraps `search_corpus` (the well-tested transport, not a copy of the
@@ -142,6 +191,11 @@ registry (`connectors/registry.py`) **minus the version tie-break ladder**
   an unmigrated single-collection deploy. It fronts whatever the ops
   corpus proxies; a direct managed-RAG adapter with its own
   service-account auth is a deliberate **later Task**, not built here.
+  `supports_answer` is true only for `backend.ref["answer"] == "upstream"`
+  (exact match). `answer()` calls `ask_corpus` against
+  `backend.ref["answer_endpoint"]` when set, else the resolved search
+  endpoint with its last path segment replaced by `ask`
+  (`…/search` → `…/ask`, `…/v1/search` → `…/v1/ask`; `derive_answer_url`).
 - the registry (`backends/registry.py`) — a `dict[str, SearchBackend]`
   with `register_backend(type, impl)` / `get_backend(type)` /
   `all_backends()`. Importing the package self-registers `corpus-http`.
@@ -371,6 +425,76 @@ The client is injectable so tests pin a deterministic stub; production
 reuses the spec-ingestion grouping pass's Anthropic key + model, so no new
 settings are introduced.
 
+### `answer_docs_question(operator, query, *, scope, collection, limit)` (`meho_backplane.docs_search.answer`, #3911)
+
+The one answer seam every `ask_docs` face calls. It resolves the collection's
+backend and takes the **upstream** path when
+`backend.supports_answer(ref)`, else the **local**
+expand → retrieve → synthesize pipeline (unchanged, moved here from the REST
+module; the MCP module's copy was deleted). It returns an
+`AskPipelineOutcome`: exactly one of `answer` / `error`, the
+`retrieved_chunks`, `answer_source` (`local` / `upstream`) and, on the
+upstream path, the backend's `upstream_timing`. These are in-process only;
+the REST and MCP response schemas are unchanged.
+
+**Consequence of opting in.** That collection's answers are composed by the
+backend's own answer model, not `AGENT_DEFAULT_MODEL`; the backplane's
+Anthropic client is not called for them, and answer style and length follow
+the backend's prompt. The opt-in is per collection and reversible with one
+`meho docs collections update` (which, for a change of only `answer` /
+`answer_endpoint`, keeps the collection's readiness — see
+[doc-collections.md](doc-collections.md)).
+
+**Mapping the upstream answer** (`_map_upstream_answer`):
+
+- **Hits** project through the same `_project_chunk` as `search_docs`, so
+  source refs are identical (a canonical public URL, else
+  `meho://docs/<collection>/<chunk_id>`; never `gs://`). They become the
+  outcome's `retrieved_chunks`. Each hit's title is derived from the page
+  identity the backend sends (`derive_chunk_title`): the backend's `title`,
+  else the last `heading_path` element, else the `breadcrumb` tail (after the
+  last `>`), else the humanised `filename`.
+- **Citations** are walked in response order, de-duplicated by `chunk_id`,
+  and matched to a hit **by `chunk_id`** — never by position, because the
+  backend returns its hits reordered to citation order. A citation that does
+  not resolve to **exactly one** hit (no matching hit, a blank `chunk_id`, or
+  a `chunk_id` several hits share) is `synthesis_malformed` /
+  `citation_resolution`, the same "every citation resolves to a retrieved
+  chunk" invariant as the local path; it never guesses the first of several
+  hits. The error message carries counts, never an upstream-chosen id.
+- **Answer markers.** The backend marks claims `[N]`, `N` being the 0-based
+  `chunk_index` of the chunk its model saw. Each becomes `[k]`, the 1-based
+  position of that chunk in the returned `citations`; a marker with no
+  matching citation is dropped (with the spaces before it). The UI numbers
+  its citation cards with the same `k`.
+- **No hits** (and no citations) is the deterministic `NO_GROUNDED_ANSWER`
+  with empty citations, as on the local path. Hits without citations keep
+  the backend's text (markers dropped) with no citations.
+
+**Errors** reuse the four legs with new `cause` values (no new taxonomy).
+The REST status is chosen per (leg, cause):
+
+| Upstream outcome | leg / cause | REST | MCP | UI Ask |
+|---|---|---|---|---|
+| Transport error / timeout | `corpus_unavailable` / `corpus_unavailable` | 503 | -32603 | banner + one search |
+| 503 `llm_unavailable` (no answer model) | `model_unavailable` / `upstream_answer_unavailable` | 503 | -32603 | banner + one search |
+| 503 `llm_rate_limited` (or 429) | `model_unavailable` / `upstream_rate_limited` | 503 + `Retry-After` forwarded, `detail.retry_after` | -32603, `data.retry_after` | banner + one search |
+| Other 5xx | `corpus_unavailable` / `upstream_error` (`upstream_status`) | 503 | -32603 | banner + one search |
+| 4xx | `corpus_unavailable` / `upstream_rejected` (`upstream_status`) | **502** | -32603 | banner + one search |
+| 2xx, malformed body | `synthesis_malformed` / `parse` | 502 | -32603 | banner + one search |
+| Citation outside the hits, blank, or shared by several hits | `synthesis_malformed` / `citation_resolution` | 502 | -32603 | banner + one search |
+
+A 4xx is a 502, not a 503: a rejected request is a contract or configuration
+fault, not an outage. `upstream_status` / `retry_after` appear on the
+envelope only for an upstream failure, so the local envelope is unchanged.
+
+**Logs.** Success logs one `docs_ask_completed` event with `collection_key`,
+`answer_source`, `hit_count`, `citation_count` and, upstream, the backend's
+`upstream_total_ms` / `upstream_llm_ms`. An upstream failure logs
+`docs_ask_upstream_failed` (leg, cause, `upstream_status`, `retry_after`).
+Never the query, chunk text or answer text. The `meho.docs.ask` audit row,
+its query hash and collection binding are unchanged.
+
 ### `classify_answer_error(exc, *, llm_unavailable_leg=LEG_MODEL)` (`meho_backplane.docs_search.answer_errors`, #1918)
 
 The `ask_docs` answer pipeline runs four legs — **expand**, **retrieve**
@@ -399,9 +523,16 @@ structured envelope naming *which* leg failed.
 - **The one ambiguous type needs a caller hint.** A bare
   `LlmClientUnavailable` is raised by the *same* #1386 client whether the
   expand leg or the synthesis leg reached it, so only the caller (which
-  knows the pipeline position) can place it. The MCP handler's
-  `_run_answer_pipeline` wraps each leg and passes `llm_unavailable_leg`
-  accordingly; the leg's own typed shapes are unaffected.
+  knows the pipeline position) can place it. The answer seam's local path
+  wraps each leg and passes `llm_unavailable_leg` accordingly; the leg's own
+  typed shapes are unaffected.
+- **Upstream answer failures** (#3911) are classified from the transport's
+  `CorpusAnswerError.kind` into the existing legs: `rejected` →
+  `corpus_unavailable` / `upstream_rejected`, `server_error` →
+  `corpus_unavailable` / `upstream_error`, `answer_unavailable` →
+  `model_unavailable` / `upstream_answer_unavailable`, `rate_limited` →
+  `model_unavailable` / `upstream_rate_limited`, `malformed` →
+  `synthesis_malformed` / `parse` (table above).
 - **One envelope, every face.**
   `AskDocsAnswerError.to_error_data()` renders a JSON-safe
   `{detail: "ask_docs_failed", leg, cause, message}` dict — the same shape
@@ -540,7 +671,8 @@ The REST face of the **answer** pipeline — the synthesis sibling of
 collection gate exactly (validate `collection` scope → 422; the shared
 `resolve_entitled_ready_collection` gate → unknown / cross-tenant / absent
 → 422, not entitled → 403, disabled → terminal 403, transiently not-ready →
-409), then runs `run_ask_pipeline` (the in-process
+409), then runs `run_ask_pipeline` (the raising wrapper over the one answer
+seam: the backend's answer for an opted-in collection, else the in-process
 expand → retrieve-per-variant → RRF-merge → synthesize composition) and
 returns `AskDocsResponse{answer, citations[]}`, each citation carrying the
 #1919 resolved `link` — the **same** citation shape the MCP tool returns.
@@ -554,9 +686,12 @@ classified by the shared `classify_answer_error`, raised as
 `model_unavailable` / `corpus_unavailable` (server-side config /
 availability faults — the analogue of the MCP `-32603`) and **502** for
 `synthesis_malformed` (the upstream model answered, badly — a bad gateway,
-distinct from it being unreachable). The structured
-`{detail, leg, cause, message}` envelope rides `HTTPException.detail`
-byte-identical to the MCP `error.data` member. The answer stays fail-closed
+distinct from it being unreachable). On the upstream path the status is
+per (leg, cause): `upstream_rejected` (a 4xx from the backend) is **502**,
+and `upstream_rate_limited` forwards the backend's `Retry-After` header
+(clamped to 3600 s). The
+structured `{detail, leg, cause, message}` envelope rides
+`HTTPException.detail` byte-identical to the MCP `error.data` member. The answer stays fail-closed
 end to end (an empty retrieval is a normal 200 "no grounded answer", not an
 error). Binds the canonical `meho.docs.ask` audit op_id + `read` class
 before the pipeline runs, so a leg failure is still attributable.
@@ -580,6 +715,12 @@ the synthesized answer was rejected; a **pre-retrieval** leg (`expand_failed`
 an ungrounded answer. Collection-access failures render the same typed
 403 / 409 / 422 error card as retrieve mode; an unrecognised `mode` degrades
 to retrieve. CSRF double-submit gated like the search fragment.
+
+On an **upstream-answer** collection (#3911) two things differ. A successful
+answer's citation cards carry their number (`[1]`, `[2]`, … — the `k` the
+answer's markers cite). An upstream failure shows the same leg banner and
+then runs **one** plain `search_docs` call, rendering its chunks under the
+banner (best effort: if that search also fails, the banner stands alone).
 
 ### `meho docs search` (`cli/internal/cmd/docs`, T5 / T3 #1552)
 
@@ -674,9 +815,18 @@ the same strict `inputSchema` (`additionalProperties: false`, required
 50). It is absent from `tools/list` and 403-class on `tools/call` for an
 unprovisioned tenant exactly like `search_docs`.
 
-The handler runs the **expand → retrieve-per-variant → RRF → synthesize**
-pipeline (#1916) and mirrors `search_docs`'s error arms plus the expand +
-synthesis arms: `build_docs_scope` + the shared gate enforce the collection
+The handler answers through the one answer seam (`answer_docs_question`,
+#3911) — the backend's answer for an opted-in collection, else the
+**expand → retrieve-per-variant → RRF → synthesize** pipeline (#1916); the
+module no longer carries its own copy of the pipeline. A leg failure is a
+structured `-32603` whose `error.data` is the #1918 envelope (plus
+`upstream_status` / `retry_after` on an upstream failure). On the upstream
+path the `answer` text itself is wrapped in the untrusted envelope too (it
+was composed by an external model over untrusted corpus text, and that
+model's prompt has no injection guard yet). The description says the answer
+is composed by the collection's backend when it offers an answer endpoint
+and that `limit` may be capped by the backend. It mirrors `search_docs`'s
+error arms plus the expand + synthesis arms: `build_docs_scope` + the shared gate enforce the collection
 scope (`MissingDocsFilterError` / unknown / not-entitled → `-32602`);
 `CorpusUnavailable` from retrieval and a not-ready collection bubble to
 `-32603`; and the LLM-leg failures (`LlmClientUnavailable` for an
@@ -768,8 +918,8 @@ just makes the op name canonical for `query_audit` filtering.
 - `meho_backplane.audit` (`AuditMiddleware`) — lifts the `audit_*`
   contextvars into the `audit_log` row.
 - `meho_backplane.settings` — `corpus_url` / `corpus_audience` /
-  `corpus_timeout_seconds` / `corpus_require_filters`
-  (`CORPUS_*` env vars).
+  `corpus_timeout_seconds` / `corpus_answer_timeout_seconds` (#3911) /
+  `corpus_require_filters` (`CORPUS_*` env vars).
 
 ## Cross-surface entitlement contract + diagnosability (T2 #1802)
 
@@ -829,6 +979,11 @@ memory surfaces (evoila-bosnia/meho-internal#154, extended here by #304):
 
 - `search_docs` payload — `_search_chunk_payload` (`mcp/tools/docs.py`).
 - `ask_docs` citations — `_citation_payload` (`mcp/tools/docs.py`).
+- `ask_docs` answer, **upstream path only** — `_ask_docs_handler`
+  (`mcp/tools/docs.py`, #3911): the answer was composed by the collection
+  backend's model over untrusted corpus text, outside the backplane's own
+  prompt guard, so it is framed as untrusted too. The local answer is not
+  wrapped (its synthesis prompt already carries the guard).
 - `ask_docs` synthesis prompt — `_render_chunks_for_prompt`
   (`docs_search/synthesis.py`); `_SYNTHESIS_SYSTEM_PROMPT` carries the
   matching provenance advisory.
@@ -856,6 +1011,11 @@ injection detection. See `docs/codebase/untrusted-text-envelope.md`.
   recall via bounded multi-query + RRF, but there is still no per-collection
   *weighting* or tunable ranking knob (binary scope + rank-based RRF only,
   per #1177 / #1178) — the LLM does the expansion, the merge is deterministic.
+- On an **upstream-answer** collection (#3911) the backend owns the answer:
+  its model, prompt (answer length, language), retrieval depth (it may cap
+  `limit`, e.g. at its own ask ceiling) and ranking. `product` / `version`
+  are not forwarded on the answer call until the per-collection scope-filter
+  gate (#3912) lands. Streaming (`/ask/stream`) is not used.
 
 ## References
 

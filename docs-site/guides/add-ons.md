@@ -84,15 +84,16 @@ product; this page documents only how it attaches, not how to operate it.
 over a team's own documents with a citation for every claim. The
 backplane does not ingest or store any of those documents — it **attaches
 to and searches** a MEHO Knowledge instance registered as a *doc
-collection*, and forwards the caller's identity so the search is
-authenticated and audited as that operator.
+collection*. The backplane calls it with a deployment-configured service
+credential (the caller's own token is never forwarded to it), and records
+every query in its own audit log under the calling operator.
 
 When the capability is granted, an agent gets three meta-tools:
 
 | Tool | What it returns |
 |---|---|
 | `search_docs` | ranked passages from an attached collection, each cited |
-| `ask_docs` | one composed answer over the retrieved passages, with its sources |
+| `ask_docs` | one composed answer with its sources |
 | `list_doc_collections` | the collections the caller is entitled to search |
 
 Two properties make this safe to expose to an agent:
@@ -107,6 +108,17 @@ Two properties make this safe to expose to an agent:
   not just in a prompt: no claim survives without a citation that resolves
   to a retrieved passage, and an empty retrieval returns a deterministic
   *"no grounded answer"* rather than a guess.
+
+**Where `ask_docs` answers come from.** By default the backplane composes
+the answer itself: it retrieves passages from the collection and has its
+own model write an answer over them. A collection can instead be
+configured to take the answer from the attached service's own
+grounded-answer endpoint. The backplane then makes one call to that
+endpoint and returns its answer and sources in the same shape, with the
+same citation check, and with the answer itself marked as untrusted text
+for agents. The choice is per collection, off unless an administrator
+turns it on, and reversible with one collection update. With it on, the
+answer is written by the service's answer model, not the backplane's.
 
 The [Memory and knowledge](memory-and-knowledge.md) guide covers how this
 attached-document search differs from MEHO's own memory and knowledge

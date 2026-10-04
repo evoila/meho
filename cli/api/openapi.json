@@ -509,7 +509,7 @@
           "docs"
         ],
         "summary": "Ask Docs Endpoint",
-        "description": "Compose a grounded, cited answer over a single vendor-document collection.\n\nThe synthesis sibling of ``POST /api/v1/search_docs``: resolve + entitle\n+ readiness-gate the mandatory ``collection`` (same 403 / 409 / 422 arms\nas ``search_docs``), then run the #1916 answer pipeline\n(expand -> retrieve-per-variant -> RRF-merge -> synthesize) in-process,\nreturning ``{answer, citations[]}`` with every citation carrying its\nresolved navigable ``link`` (#1919).\n\nSingle-collection only (no ``collections`` fan-out field). ``read_only``\noperators get 403 via :func:`require_role` before this handler. The\ncentral ``meho.docs.ask`` audit row is bound before the pipeline runs (so\na leg failure is still attributable); the raw query is never bound --\nonly its SHA-256 hash.",
+        "description": "Compose a grounded, cited answer over a single vendor-document collection.\n\nThe synthesis sibling of ``POST /api/v1/search_docs``: resolve + entitle\n+ readiness-gate the mandatory ``collection`` (same 403 / 409 / 422 arms\nas ``search_docs``), then answer through the one answer seam in-process\n(the collection backend's own answer endpoint when the collection opted\nin, else the #1916 expand -> retrieve-per-variant -> RRF-merge ->\nsynthesize pipeline), returning ``{answer, citations[]}`` with every\ncitation carrying its resolved navigable ``link`` (#1919).\n\nSingle-collection only (no ``collections`` fan-out field). ``read_only``\noperators get 403 via :func:`require_role` before this handler. The\ncentral ``meho.docs.ask`` audit row is bound before the pipeline runs (so\na leg failure is still attributable); the raw query is never bound --\nonly its SHA-256 hash.",
         "operationId": "ask_docs_endpoint_api_v1_ask_docs_post",
         "parameters": [
           {
@@ -554,10 +554,10 @@
             "description": "The mandatory ``collection`` scope is absent / blank, or names no collection visible to the tenant (an absent / cross-tenant key lands here -- it is unknown to the tenant-scoped catalogue). A grounded answer is never composed without a routable collection."
           },
           "502": {
-            "description": "The synthesis model ran but its output broke the grounding contract (non-JSON, wrong shape, or a citation outside the retrieved set): ``detail.leg='synthesis_malformed'``. A bad-gateway fault distinct from the model being unreachable (503). The structured #1918 ``{detail, leg, cause, message}`` envelope rides ``detail``."
+            "description": "The synthesis model ran but its output broke the grounding contract (non-JSON, wrong shape, or a citation outside the retrieved set): ``detail.leg='synthesis_malformed'``. A bad-gateway fault distinct from the model being unreachable (503). Also returned when the collection's backend answer endpoint rejected the call (``detail.cause='upstream_rejected'``, with ``detail.upstream_status``). The structured #1918 ``{detail, leg, cause, message}`` envelope rides ``detail``."
           },
           "503": {
-            "description": "An answer-pipeline leg failed closed: the expand or synthesis model is unconfigured / produced unusable expansion (``detail.leg`` ``expand_failed`` / ``model_unavailable``), or the retrieval backend is unavailable (``detail.leg='corpus_unavailable'``). Fail-closed; never an ungrounded answer. The structured #1918 envelope rides ``detail``."
+            "description": "An answer-pipeline leg failed closed: the expand or synthesis model is unconfigured / produced unusable expansion (``detail.leg`` ``expand_failed`` / ``model_unavailable``), or the retrieval backend is unavailable (``detail.leg='corpus_unavailable'``). Fail-closed; never an ungrounded answer. The structured #1918 envelope rides ``detail``. A rate-limited backend answer model (``detail.cause='upstream_rate_limited'``) forwards the backend's ``Retry-After`` header."
           }
         }
       }

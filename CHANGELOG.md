@@ -147,9 +147,11 @@ connector-related release-notes line.
   (`{"product", "version", "source": "caller"}`, values unchanged, a
   ranking signal the backend never filters on), and `"scope_filters": true` sends them as
   hard `metadata_filters`. With both set, the soft scope wins. With
-  neither, the request body is exactly what it was, which matches what the
-  shared corpus did with the refinements until now (it ignored them).
-  Fan-out sends neither. The upstream answer call of a collection with
+  neither, they are no longer sent. 0.35.16 sent them as
+  `metadata_filters`; the shared corpus ignored them, so its results do not
+  change, but a collection whose backend applied them as filters sets
+  `"scope_filters": true` to keep that. Fan-out sends neither. The
+  upstream answer call of a collection with
   `"answer": "upstream"` (#3911) follows the same gates: the soft scope as
   `scope`, the hard filters as `filters`, and with both gates off its body
   is unchanged. The requested values are still audited and logged;

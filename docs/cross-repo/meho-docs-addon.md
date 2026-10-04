@@ -233,6 +233,19 @@ The **backend** record is `{type, ref}`:
   `audience`. A `corpus-http` collection with **no** `backend.ref`
   endpoint falls back to the legacy global settings below — the
   unmigrated single-collection deploy still routes.
+- Two optional `corpus-http` ref keys choose where `ask_docs` answers come
+  from (#3911). `"answer": "upstream"` opts the collection in to the
+  corpus's own grounded-answer endpoint (the optional
+  [Answer](#answer--optional-post-askincludehits-3911) contract below);
+  absent, or any other value, keeps the backplane's own answer pipeline.
+  `"answer_endpoint"` names that endpoint explicitly; without it, the
+  search endpoint with its last path segment replaced by `ask` is used
+  (`…/search` → `…/ask`, `…/v1/search` → `…/v1/ask`). It is screened like
+  `endpoint`. Changing **only** these two keys keeps the collection's
+  readiness (no re-probe needed). **Default off:** opting a collection in
+  moves its answers from the backplane's model to the corpus's answer
+  model, an owner decision per collection, reversible with one
+  `meho docs collections update`.
 - `ref.scope` and `ref.scope_filters` (any backend type; both default
   off) — the two per-collection gates for a query's `product` / `version`
   refinements (#3912). With neither, the refinements are accepted, logged
@@ -268,6 +281,7 @@ The legacy global corpus settings remain as the `corpus-http` fallback
 | `corpus_url` (`CORPUS_URL`) | `""` | Fallback corpus search URL for a `corpus-http` collection without its own `backend.ref` endpoint. Empty **and** no per-collection endpoint → the backend is unconfigured: a query fails closed as `CorpusUnavailable` → 503 at the route / `-32603` at the MCP face. |
 | `corpus_audience` (`CORPUS_AUDIENCE`) | `""` | Optional RFC 8707 resource indicator (`aud`) the backend binds the forwarded token to. Empty forwards no audience. |
 | `corpus_timeout_seconds` (`CORPUS_TIMEOUT_SECONDS`) | `10.0` | Bound on the backend HTTP request. A slow backend raises `CorpusUnavailable` rather than blocking the event loop. |
+| `corpus_answer_timeout_seconds` (`CORPUS_ANSWER_TIMEOUT_SECONDS`) | `60.0` | Bound on the **answer** request of an opted-in collection (#3911): a grounded answer runs retrieval plus model calls on the corpus side. Keep it below any proxy read timeout in front of the corpus. |
 | `corpus_require_filters` (`CORPUS_REQUIRE_FILTERS`) | `true` | Legacy REQUIRE_FILTERS posture. Note: under the catalogue model the **mandatory** scope is `collection`; `product` / `version` are optional refinements within a collection, so the binary anti-drown guarantee now rides `collection`, not product/version. |
 
 ### 3. Bring the collection to readiness (probe → enable lifecycle)
@@ -457,11 +471,14 @@ pre-scoped corpus).
 
 ### `ask_docs` is single-collection only
 
-`ask_docs` runs the *same* retrieval as `search_docs` (so the collection
-scope, entitlement, backend routing, and forwarded-JWT audit are enforced
-in one place), then composes one grounded, cited answer over the retrieved
-chunks and returns `{answer, citations[]}` — no claim without a citation,
-and a "no grounded answer" rather than a guess on an empty retrieval.
+`ask_docs` enforces the same collection scope, entitlement, backend routing
+and audit as `search_docs`, and returns `{answer, citations[]}` — no claim
+without a citation, and a "no grounded answer" rather than a guess on an
+empty retrieval. The answer comes from the collection's corpus when the
+collection opted in (`backend.ref["answer"] = "upstream"`, #3911): one call
+to the corpus's answer endpoint, mapped into the same shape. Otherwise the
+backplane runs its own pipeline over `search_docs` retrievals (query
+expansion, one search per variant, a merge, and a synthesis call).
 `ask_docs` **requires** `collection` and is **permanently
 single-collection**: a fan-out attempt (`collections=[…]` or
 `collection="all"`) is rejected with `-32602` before any retrieval, so the
@@ -646,6 +663,56 @@ key** on `/search` (`corpus.py:267-268`) — a corpus that only reads
 `audience` from one of the two will mis-bind the token on the other path.
 Source: `derive_status_url` `corpus.py:337-350`; `CorpusStatusResponse`
 `:296-334`; audience-as-query-param `:396`.
+
+### Answer — optional (`POST /ask?include=hits`, #3911)
+
+A `corpus-http` backend **may** also serve a grounded answer. meho calls it
+only for a collection that opted in (`backend.ref["answer"] = "upstream"`);
+a corpus without one keeps working, answered by the backplane's own
+pipeline. The URL is `backend.ref["answer_endpoint"]`, else the search URL
+with its last path segment replaced by `ask`. Same screen, credential and
+"body never echoed" rules as search; bounded by
+`corpus_answer_timeout_seconds`.
+
+**Request** — `POST <answer_endpoint>?include=hits`, JSON body:
+
+| Key | Type | Notes |
+|---|---|---|
+| `query` | `str` | The operator's question, verbatim. |
+| `top_k` | `int` | The requested retrieval depth (`ask_docs` `limit`, default 10, cap 50). The corpus **may** cap it lower. |
+| `audience` | `str` | Only when an audience is configured, as on search. |
+
+meho sends **no** `with_rerank` (ranking policy is the corpus's) and **no**
+scope filter (`product` / `version` are not forwarded on this call until the
+per-collection scope-filter gate, #3912, lands).
+
+**Response** — `2xx` JSON. The fields meho consumes (everything else is
+ignored):
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `answer` | `str` | **yes** (non-empty) | The answer text, claims marked `[N]` with `N` the 0-based `chunk_index` of the cited chunk. meho rewrites each marker to its own 1-based citation number and drops a marker with no citation. |
+| `citations[].chunk_index` | `int` | **yes** | The `N` the answer's markers use. |
+| `citations[].chunk_id` | `str` | **yes** | Matched to a hit **by id** (never by position). A cited id must name exactly one hit: an id not in `hits`, a blank id, or an id several hits share fails the answer (`synthesis_malformed` / `citation_resolution`). Repeated citations collapse. |
+| `hits` | `list` | **yes** | The retrieved chunks (`include=hits`), in any order; each parsed with the search-hit shape above (`chunk_id`, `text`/`content`, `source_uri`/`source_url`, `document_id`, `score`, optional `title`). Empty `hits` (and no citations) is meho's "no grounded answer". |
+| `hits[].filename` / `breadcrumb` / `heading_path` | `str` / `str` / `list[str]` | optional | Page identity a citation title is derived from when no `title` is sent: the last heading, else the breadcrumb tail, else the humanised filename. |
+| `timing.total_ms` / `timing.llm_ms` | `float` | optional | Logged, never returned. |
+
+**Errors** — the corpus's JSON error body `{"error": {"code": …}}` is read
+for two codes only; the body is never echoed:
+
+| Corpus answers | meho leg / cause | REST | MCP |
+|---|---|---|---|
+| transport error / timeout | `corpus_unavailable` / `corpus_unavailable` | 503 | -32603 |
+| 503 `llm_unavailable` | `model_unavailable` / `upstream_answer_unavailable` | 503 | -32603 |
+| 503 `llm_rate_limited` (or 429), `Retry-After` | `model_unavailable` / `upstream_rate_limited` | 503, `Retry-After` forwarded (capped at 3600 s; a garbled value is dropped) | -32603, `data.retry_after` |
+| other 5xx | `corpus_unavailable` / `upstream_error` | 503 | -32603 |
+| 4xx | `corpus_unavailable` / `upstream_rejected` (`upstream_status`) | 502 | -32603 |
+| 2xx, malformed body | `synthesis_malformed` / `parse` | 502 | -32603 |
+
+Source: `ask_corpus` / `UpstreamAnswer` / `CorpusAnswerError` in
+[`auth/corpus.py`](../../backend/src/meho_backplane/auth/corpus.py); the
+mapping in [`docs_search/answer.py`](../../backend/src/meho_backplane/docs_search/answer.py).
 
 ### Fail-closed semantics meho enforces
 

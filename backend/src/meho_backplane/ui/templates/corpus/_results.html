@@ -29,7 +29,9 @@
                           is a CitationLink (label, href, kind, clickable). The raw
                           gs:// ``source_url`` is resolved to a canonical web URL
                           (KB / http(s)) or a non-clickable label -- never a broken
-                          gs:// href.
+                          gs:// href. An entry also carries ``citation_number``
+                          (its 1-based ``[k]``) when the answer was composed by
+                          the collection's backend and its markers cite the cards.
     searched           -- bool: whether a query actually ran
     error_status       -- int | unset: HTTP status of a search failure
     error_message      -- str | unset: human detail of the failure
@@ -57,6 +59,9 @@
           defensively under StrictUndefined and coerces a blank title to none, so
           the demotion below keys on a genuine title only. -#}
       {% set chunk_title = chunk.title | default(none, true) %}
+      {#- The citation's [k] when the answer was composed upstream and its
+          markers point at these cards (#3911); unset otherwise. -#}
+      {% set citation_number = entry.citation_number | default(none) %}
       <li class="card bg-base-100 border-base-300 border shadow-sm">
         <div class="card-body py-3 space-y-2">
           <div class="flex flex-wrap items-start justify-between gap-2">
@@ -71,6 +76,9 @@
                affordance -- both flow through ``_cited_chunks``. #}
             <div class="min-w-0">
               <h3 class="card-title text-sm font-semibold">
+                {% if citation_number is not none %}
+                  <span class="badge badge-neutral badge-sm font-mono" aria-label="Citation {{ citation_number }}">[{{ citation_number }}]</span>
+                {% endif %}
                 {% if link.clickable %}
                   <a
                     href="{{ link.href }}"

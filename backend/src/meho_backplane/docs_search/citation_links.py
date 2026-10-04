@@ -57,7 +57,7 @@ unknown resolve identically across surfaces:
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Final
@@ -66,6 +66,7 @@ from urllib.parse import urlsplit
 __all__ = [
     "CitationLink",
     "citation_link_payload",
+    "derive_chunk_title",
     "normalize_source_ref",
     "resolve_citation_link",
 ]
@@ -182,6 +183,37 @@ def _humanise_segment(segment: str) -> str:
     """
     stem = PurePosixPath(segment).stem
     return re.sub(r"[-_]+", " ", stem).strip()
+
+
+def derive_chunk_title(
+    *,
+    title: str | None,
+    heading_path: Sequence[str] = (),
+    breadcrumb: str = "",
+    filename: str = "",
+) -> str | None:
+    """Pick a human title for a chunk from the page identity the corpus sends.
+
+    The rule (#3911): the corpus's own ``title`` when it sends one; else the
+    last non-blank ``heading_path`` element; else the last ``>``-separated
+    segment of the ``breadcrumb``; else the humanised ``filename``
+    (``vsan-planning.html`` -> ``vsan planning``). ``None`` when none of them
+    yields text, so the citation-label chain falls through to its own
+    fallbacks.
+    """
+    if title and title.strip():
+        return title.strip()
+    for heading in reversed(heading_path):
+        if heading and heading.strip():
+            return heading.strip()
+    tail = breadcrumb.rsplit(">", 1)[-1].strip()
+    if tail:
+        return tail
+    if filename.strip():
+        humanised = _humanise_segment(PurePosixPath(filename.strip()).name)
+        if humanised:
+            return humanised
+    return None
 
 
 def _label_for(source: _Source, title: str | None, document_id: str | None) -> str:

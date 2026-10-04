@@ -36,7 +36,9 @@ meho probes + reflects).
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime
+from typing import Any, Final
 
 import structlog
 from sqlalchemy.exc import IntegrityError
@@ -232,7 +234,9 @@ async def _screen_backend_endpoint(backend: DocCollectionBackend) -> None:
     alias ``url``) and screens it with the shared target SSRF guard —
     ``https`` scheme + a public, allowlist-aware host — the same
     :func:`~meho_backplane.targets.ssrf_guard.assert_public_destination_async`
-    the connector target dial uses. Absent endpoint (the legacy global
+    the connector target dial uses. An explicit ``answer_endpoint`` (#3911,
+    the opted-in answer endpoint) is a dialed URL too and is screened the same
+    way. Absent endpoint (the legacy global
     ``settings.corpus_url`` deploy, or a deliberate ``ref={}`` repoint that
     falls back to it) is nothing to screen here; that global is
     deployment-owned and screened at dial time. Only ``corpus-http`` names a
@@ -242,15 +246,15 @@ async def _screen_backend_endpoint(backend: DocCollectionBackend) -> None:
     if backend.type != CORPUS_HTTP_BACKEND_TYPE:
         return
     ref = backend.ref
-    raw = ref.get("endpoint") or ref.get("url")
-    endpoint = raw.strip() if isinstance(raw, str) else None
-    if not endpoint:
-        return
-    try:
-        host = corpus_endpoint_host(endpoint)
-        await assert_public_destination_async(host)
-    except TargetDestinationBlockedError as exc:
-        raise DocCollectionEndpointError(endpoint, str(exc)) from exc
+    for raw in (ref.get("endpoint") or ref.get("url"), ref.get("answer_endpoint")):
+        endpoint = raw.strip() if isinstance(raw, str) else None
+        if not endpoint:
+            continue
+        try:
+            host = corpus_endpoint_host(endpoint)
+            await assert_public_destination_async(host)
+        except TargetDestinationBlockedError as exc:
+            raise DocCollectionEndpointError(endpoint, str(exc)) from exc
 
 
 async def create_doc_collection(
@@ -373,6 +377,31 @@ async def _apply_backend_repoint(
     return True
 
 
+#: ``backend.ref`` keys that select *how* ``ask_docs`` answers (#3911), not
+#: *which* corpus the collection reads: the upstream-answer opt-in and its
+#: explicit endpoint. Changing only these leaves the probed liveness valid.
+_ANSWER_REF_KEYS: Final[frozenset[str]] = frozenset({"answer", "answer_endpoint"})
+
+
+def _is_answer_only_change(previous: object, current: Mapping[str, Any]) -> bool:
+    """Whether a backend repoint changed only the answer opt-in keys (#3911).
+
+    ``True`` when the backend ``type`` is the same and every ``ref`` key that
+    differs is in :data:`_ANSWER_REF_KEYS`. Such an update toggles where
+    ``ask_docs`` answers come from, not the corpus the readiness probe
+    checked, so it must not reset the row to ``provisioning``. A change to
+    the type, endpoint, audience or any other ref key still does.
+    """
+    if not isinstance(previous, Mapping) or previous.get("type") != current.get("type"):
+        return False
+    previous_ref = previous.get("ref")
+    current_ref = current.get("ref")
+    old = previous_ref if isinstance(previous_ref, Mapping) else {}
+    new = current_ref if isinstance(current_ref, Mapping) else {}
+    changed = {key for key in old.keys() | new.keys() if old.get(key) != new.get(key)}
+    return bool(changed) and changed <= _ANSWER_REF_KEYS
+
+
 def _reset_readiness_after_repoint(collection: DocCollectionORM) -> None:
     """Clear the stale probe-written liveness and re-provision (unless disabled).
 
@@ -415,8 +444,9 @@ async def update_doc_collection(
     → 403 / ``-32602``) — the shared-catalogue platform seat — checked before
     any field validation. A supplied ``backend`` runs the create path's
     registry + endpoint screen (:func:`_apply_backend_repoint`) and, on an
-    actual change, resets readiness (:func:`_reset_readiness_after_repoint`);
-    a metadata-only change leaves ``status`` + liveness untouched. The caller
+    actual change, resets readiness (:func:`_reset_readiness_after_repoint`)
+    -- unless only the ``answer`` / ``answer_endpoint`` opt-in keys changed
+    (#3911), which keeps ``status`` + liveness like a metadata-only change. The caller
     owns the transaction (the route's ``session.begin()``); this flushes but
     does not commit, so a downstream failure rolls the update back.
     """
@@ -438,15 +468,20 @@ async def update_doc_collection(
     updates = body.model_dump(exclude_unset=True)
 
     backend_changed = False
+    readiness_reset = False
     if "backend" in updates and body.backend is not None:
+        previous_backend = collection.backend
         backend_changed = await _apply_backend_repoint(collection, body.backend)
+        readiness_reset = backend_changed and not _is_answer_only_change(
+            previous_backend, collection.backend
+        )
     if "description" in updates:
         collection.description = body.description
     if "when_to_use" in updates:
         collection.when_to_use = body.when_to_use
     if "products" in updates and body.products is not None:
         collection.products = list(body.products)
-    if backend_changed:
+    if readiness_reset:
         _reset_readiness_after_repoint(collection)
 
     collection.updated_at = datetime.now(UTC)
@@ -458,6 +493,7 @@ async def update_doc_collection(
         tenant_scope="tenant" if collection.tenant_id is not None else "global",
         fields=sorted(updates.keys()),
         backend_changed=backend_changed,
+        readiness_reset=readiness_reset,
         status=collection.status,
     )
     return collection

@@ -9,6 +9,18 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.35.18](https://github.com/evoila/meho/releases/tag/v0.35.18) — 2026-10-05
+
+- **You can now clean up vCenter objects through MEHO.** Six new vCenter
+  operations delete port groups, empty folders, files and folders on a
+  datastore, and content libraries and their items. A seventh creates a
+  folder on a datastore. Every delete waits for a second person's
+  approval, and the approval request shows what will be deleted. MEHO
+  refuses a delete while something still uses the object, for example
+  a VM on a port group or a disk file that a VM needs, and says what
+  blocks it. Running a delete again for an object that is already gone
+  changes nothing.
+
 ## [v0.35.17](https://github.com/evoila/meho/releases/tag/v0.35.17) — 2026-10-04
 
 - **A documentation collection can now answer questions with its own

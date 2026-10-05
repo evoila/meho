@@ -90,6 +90,50 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.35.18] - 2026-10-05
+
+### Added
+
+- Seven governed ops on the `vmware-rest-9.0` connector let a lab
+  teardown remove vCenter objects through the backplane, instead of
+  with local tools. Six of them delete. Every delete is `destructive`
+  with `requires_approval=True`, so it always waits for a second
+  person's approval: `vmware.composite.network.portgroup.delete` (a
+  distributed port group), `vmware.composite.host.standard_portgroup.delete`
+  (a port group on one host's standard switch),
+  `vmware.composite.folder.delete` (an empty inventory folder),
+  `vmware.composite.datastore.file.delete` (a file or folder on a VMFS
+  or NFS datastore), `vmware.composite.content_library.delete` (a local
+  or subscribed library) and
+  `vmware.composite.content_library.item.delete` (one item of a local
+  library). The seventh, `vmware.composite.datastore.dir.create`
+  (`caution`, `requires_approval=True`), creates a folder on a
+  datastore. Each op reads the object first. The approval preview and
+  the op use the same read, so the approver sees what will be deleted
+  and anything that blocks it, and the op reads again after approval.
+  The op refuses, before any change, an object that is still in use,
+  and lists the reason in `blockers`: for example a VM or a VMkernel
+  adapter on a port group, content in a folder, a file that a
+  registered VM uses (disk, `.vmx`, snapshot, log, or an ISO / floppy
+  image in a drive), a library that another library subscribes to, or
+  a library item in a VM's drive. Datastore paths must be relative to
+  the datastore root, with no hidden segments and no wildcards, and may
+  not start in a `contentlib-*`, `fcd` or `catalog` folder. vSAN and
+  vVol datastores are refused. If vCenter returns only part of an
+  answer, the op fails or refuses; it never reads a partial answer as
+  "not in use". An object that is already gone returns `unchanged`.
+  After a change the op reads the object again and returns `deleted`
+  only when it is gone, else `still_present` (the folder create returns
+  `created` or `not_verified`). A vSphere error fails the call with
+  `connector_error`, and a task that runs too long returns
+  `status="timeout"`. The ops use the `/sdk/vim25` VI-JSON calls and
+  the content-library REST paths that work on vCenter 8.0.x and 9.0.
+  Standalone ESXi targets are not supported. Known limit: vSphere has
+  no "delete only if empty" call, so anything moved into a folder
+  between the check and the delete is deleted with it. Tested against
+  fakes of the vSphere answers; not yet run against a live vCenter.
+  Part of #3331. (#3339 / #3925)
+
 ## [0.35.17] - 2026-10-04
 
 ### Security

@@ -205,6 +205,10 @@ def test_flattened_2973_bodies_are_served_flat_by_the_pinned_spec() -> None:
 # pinned ``vi-json.yaml``.
 
 from meho_backplane.connectors.vmware_rest import ovf_import_control  # noqa: E402
+from meho_backplane.connectors.vmware_rest.composites import (  # noqa: E402
+    _datastore_browse,
+    _teardown_network,
+)
 from meho_backplane.connectors.vmware_rest.vim_body import (  # noqa: E402
     MOREF_TYPE_NAME,
     retrieve_properties_body,
@@ -255,6 +259,11 @@ _EMITTED_VIM_TYPE_NAMES: set[str] = {
     _write._TRUNK_VLAN_SPEC_TYPE,
     _write._VLAN_ID_SPEC_TYPE,
     _write._NUMERIC_RANGE_TYPE,
+    # #3339 teardown reads: the FetchDVPorts criteria and the datastore browse
+    # search spec + its details flags.
+    _teardown_network._DVS_PORT_CRITERIA_TYPE,
+    _datastore_browse._SEARCH_SPEC_TYPE,
+    _datastore_browse._FILE_QUERY_FLAGS_TYPE,
 }
 
 

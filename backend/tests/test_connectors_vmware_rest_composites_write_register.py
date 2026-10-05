@@ -135,6 +135,15 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     # are special-cased in the tier assertion below (like storage_policy.*).
     "vmware.composite.namespace.create",
     "vmware.composite.namespace.delete",
+    # #3339 teardown: six destructive deletes + the caution paired
+    # datastore.dir.create; all special-cased in the tier assertion below.
+    "vmware.composite.network.portgroup.delete",
+    "vmware.composite.host.standard_portgroup.delete",
+    "vmware.composite.folder.delete",
+    "vmware.composite.datastore.file.delete",
+    "vmware.composite.datastore.dir.create",
+    "vmware.composite.content_library.delete",
+    "vmware.composite.content_library.item.delete",
 )
 
 # 5 reads (T5 / #508) -- carried over so the combined-count assertion
@@ -325,6 +334,33 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
     "vmware.composite.namespace.delete": (
         "meho_backplane.connectors.vmware_rest.composites._namespace.namespace_delete_composite"
     ),
+    "vmware.composite.network.portgroup.delete": (
+        "meho_backplane.connectors.vmware_rest.composites."
+        "_teardown_network.network_portgroup_delete_composite"
+    ),
+    "vmware.composite.host.standard_portgroup.delete": (
+        "meho_backplane.connectors.vmware_rest.composites."
+        "_teardown_network.host_standard_portgroup_delete_composite"
+    ),
+    "vmware.composite.folder.delete": (
+        "meho_backplane.connectors.vmware_rest.composites._teardown.folder_delete_composite"
+    ),
+    "vmware.composite.datastore.file.delete": (
+        "meho_backplane.connectors.vmware_rest.composites."
+        "_datastore_files.datastore_file_delete_composite"
+    ),
+    "vmware.composite.datastore.dir.create": (
+        "meho_backplane.connectors.vmware_rest.composites."
+        "_datastore_files.datastore_dir_create_composite"
+    ),
+    "vmware.composite.content_library.delete": (
+        "meho_backplane.connectors.vmware_rest.composites."
+        "_library_delete.content_library_delete_composite"
+    ),
+    "vmware.composite.content_library.item.delete": (
+        "meho_backplane.connectors.vmware_rest.composites."
+        "_library_delete.content_library_item_delete_composite"
+    ),
 }
 
 
@@ -369,6 +405,13 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.storage_policy.delete": "storage",
     "vmware.composite.namespace.create": "namespace_management",
     "vmware.composite.namespace.delete": "namespace_management",
+    "vmware.composite.network.portgroup.delete": "networking",
+    "vmware.composite.host.standard_portgroup.delete": "networking",
+    "vmware.composite.folder.delete": "vm",
+    "vmware.composite.datastore.file.delete": "storage",
+    "vmware.composite.datastore.dir.create": "storage",
+    "vmware.composite.content_library.delete": "content_library",
+    "vmware.composite.content_library.item.delete": "content_library",
 }
 
 
@@ -542,12 +585,20 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
         "vmware.composite.cluster.drs_vm_host_rule.create",
         "vmware.composite.storage_policy.create",
         "vmware.composite.namespace.create",
+        "vmware.composite.datastore.dir.create",
     }
     for row in rows:
         if row.op_id in (
             "vmware.composite.vm.destroy",
             "vmware.composite.storage_policy.delete",
             "vmware.composite.namespace.delete",
+            # #3339 teardown deletes.
+            "vmware.composite.network.portgroup.delete",
+            "vmware.composite.host.standard_portgroup.delete",
+            "vmware.composite.folder.delete",
+            "vmware.composite.datastore.file.delete",
+            "vmware.composite.content_library.delete",
+            "vmware.composite.content_library.item.delete",
         ):
             expected_level = "destructive"
         elif row.op_id in caution_ops:
@@ -847,6 +898,59 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
         "vmware.composite.namespace.delete": {
             "deleted",
             "removing",
+            "still_present",
+        },
+        # #3339 teardown: verified delete / already absent / refused before any
+        # write / still reads back (+ a task-poll timeout for the *_Task deletes,
+        # + invalid_request for a bad reference). A vSphere fault raises.
+        "vmware.composite.network.portgroup.delete": {
+            "deleted",
+            "unchanged",
+            "precondition_failed",
+            "still_present",
+            "timeout",
+        },
+        "vmware.composite.host.standard_portgroup.delete": {
+            "deleted",
+            "unchanged",
+            "invalid_request",
+            "precondition_failed",
+            "still_present",
+        },
+        "vmware.composite.folder.delete": {
+            "deleted",
+            "unchanged",
+            "precondition_failed",
+            "still_present",
+            "timeout",
+        },
+        "vmware.composite.datastore.file.delete": {
+            "deleted",
+            "unchanged",
+            "invalid_request",
+            "precondition_failed",
+            "still_present",
+            "timeout",
+        },
+        "vmware.composite.datastore.dir.create": {
+            "created",
+            "unchanged",
+            "invalid_request",
+            "precondition_failed",
+            "not_verified",
+        },
+        "vmware.composite.content_library.delete": {
+            "deleted",
+            "unchanged",
+            "invalid_request",
+            "precondition_failed",
+            "still_present",
+        },
+        "vmware.composite.content_library.item.delete": {
+            "deleted",
+            "unchanged",
+            "invalid_request",
+            "precondition_failed",
             "still_present",
         },
     }

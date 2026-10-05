@@ -116,6 +116,15 @@ _WRITE_COMPOSITE_OP_IDS: frozenset[str] = frozenset(
         # secret-hygienic — it never echoes the subscription password).
         "vmware.composite.content_library.subscribed.create",
         "vmware.composite.content_library.subscribed.sync",
+        # #3339 teardown: the six destructive deletes carry the mandatory
+        # blast_radius from the handler's own plan; dir.create echoes params.
+        "vmware.composite.network.portgroup.delete",
+        "vmware.composite.host.standard_portgroup.delete",
+        "vmware.composite.folder.delete",
+        "vmware.composite.datastore.file.delete",
+        "vmware.composite.datastore.dir.create",
+        "vmware.composite.content_library.delete",
+        "vmware.composite.content_library.item.delete",
     }
 )
 

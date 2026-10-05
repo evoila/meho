@@ -37,7 +37,7 @@ import httpx
 import pytest
 import respx
 
-from meho_backplane.connectors.vmware_rest.composites import _library
+from meho_backplane.connectors.vmware_rest.composites import _library, _library_delete
 from meho_backplane.operations.ingest import parse_openapi
 from tests.acceptance._vcenter_spec import VCENTER_SPEC_REASON, resolve_vcenter_yaml
 
@@ -51,12 +51,15 @@ _GETADDRINFO_PATCH = patch(
 
 
 def _required_sub_op_ids() -> set[str]:
-    """Union of every ``_SUB_OPS_*`` op_id across the subscribed-library composites."""
+    """Union of every ``_SUB_OPS_*`` op_id across the content-library composites.
+
+    Sweeps the SUBSCRIBED-library module and the #3339 / #3331 delete module.
+    """
     raw: set[str] = set()
-    for name in dir(_library):
-        if not name.startswith("_SUB_OPS_"):
-            continue
-        raw.update(getattr(_library, name))
+    for module in (_library, _library_delete):
+        for name in dir(module):
+            if name.startswith("_SUB_OPS_"):
+                raw.update(getattr(module, name))
     return raw
 
 
@@ -92,6 +95,38 @@ def test_library_sub_op_tuples_are_all_discovered() -> None:
         "_SUB_OPS_CONTENT_LIBRARY_SUBSCRIBED_STATUS",
         "_SUB_OPS_CONTENT_LIBRARY_SUBSCRIBED_SYNC",
     ]
+
+
+def test_library_delete_sub_op_tuples_are_all_discovered() -> None:
+    """Guard: the introspection finds both content-library delete tuples (#3339)."""
+    tuple_names = sorted(n for n in dir(_library_delete) if n.startswith("_SUB_OPS_"))
+    assert tuple_names == [
+        "_SUB_OPS_CONTENT_LIBRARY_DELETE",
+        "_SUB_OPS_CONTENT_LIBRARY_ITEM_DELETE",
+    ]
+
+
+def test_library_delete_manifests_are_expected() -> None:
+    """The delete composites' declared REST paths (reads + the two/one DELETEs)."""
+    assert set(_library_delete._SUB_OPS_CONTENT_LIBRARY_DELETE) == {
+        "POST:/content/library?action=find",
+        "GET:/content/library/{libraryId}",
+        "POST:/content/library/item?action=find",
+        "GET:/content/library/item/{libraryItemId}",
+        "GET:/content/subscribed-library",
+        "GET:/content/subscribed-library/{libraryId}",
+        "GET:/content/library/{library}/subscriptions",
+        "DELETE:/content/local-library/{libraryId}",
+        "DELETE:/content/subscribed-library/{libraryId}",
+    }
+    assert set(_library_delete._SUB_OPS_CONTENT_LIBRARY_ITEM_DELETE) == {
+        "POST:/content/library?action=find",
+        "POST:/content/library/item?action=find",
+        "GET:/content/library/item/{libraryItemId}",
+        "GET:/content/library/{libraryId}",
+        "GET:/content/library/item/{libraryItemId}/file",
+        "DELETE:/content/library/item/{libraryItemId}",
+    }
 
 
 def test_subscribed_library_manifests_are_expected() -> None:

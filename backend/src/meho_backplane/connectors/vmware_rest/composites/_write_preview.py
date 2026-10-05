@@ -66,6 +66,10 @@ resolved VM + host group sets).
                           domain-join credentials, #1503)
 ``vm.customize``          live-read: vm, name, power_state, spec_name,
                           applies_on (spec reference carries no secret)
+teardown deletes (#3339)  live-read: the mandatory ``blast_radius`` built from
+                          the handler's own plan (``_teardown.TeardownPlan``)
+                          -- object, children, blockers, refusal
+``datastore.dir.create``  echo: datastore, path, create_parents
 ========================  ====================================================
 
 GOSC secret hygiene (#1503) is the load-bearing property of the two
@@ -164,6 +168,14 @@ from typing import Any
 
 import httpx
 
+from meho_backplane.connectors.vmware_rest.composites._datastore_files import (
+    datastore_dir_create_preview,
+    datastore_file_delete_preview,
+)
+from meho_backplane.connectors.vmware_rest.composites._library_delete import (
+    content_library_delete_preview,
+    content_library_item_delete_preview,
+)
 from meho_backplane.connectors.vmware_rest.composites._namespace import (
     _OP_GET_NAMESPACE,
 )
@@ -173,6 +185,11 @@ from meho_backplane.connectors.vmware_rest.composites._storage_policy import (
     _resolve_category,
     _resolve_policy_by_name,
     _resolve_tag_in_category,
+)
+from meho_backplane.connectors.vmware_rest.composites._teardown import folder_delete_preview
+from meho_backplane.connectors.vmware_rest.composites._teardown_network import (
+    host_standard_portgroup_delete_preview,
+    network_portgroup_delete_preview,
 )
 from meho_backplane.connectors.vmware_rest.composites._vm_allocation import read_vm_allocation
 from meho_backplane.connectors.vmware_rest.composites._write import (
@@ -1700,11 +1717,22 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
         _content_library_subscribed_create_preview
     ),
     "vmware.composite.content_library.subscribed.sync": _content_library_subscribed_sync_preview,
+    # #3339 teardown: the destructive deletes register their handler's own
+    # plan as the mandatory blast radius (one planning function per op, so the
+    # approver reads exactly the refusal the handler applies); dir.create is a
+    # param echo.
+    "vmware.composite.network.portgroup.delete": network_portgroup_delete_preview,
+    "vmware.composite.host.standard_portgroup.delete": host_standard_portgroup_delete_preview,
+    "vmware.composite.folder.delete": folder_delete_preview,
+    "vmware.composite.datastore.file.delete": datastore_file_delete_preview,
+    "vmware.composite.datastore.dir.create": datastore_dir_create_preview,
+    "vmware.composite.content_library.delete": content_library_delete_preview,
+    "vmware.composite.content_library.item.delete": content_library_item_delete_preview,
 }
 
 
 def _register_vmware_write_preview_builders() -> None:
-    """Wire the 38 write-composite park-time preview builders. Import-time.
+    """Wire the 45 write-composite park-time preview builders. Import-time.
 
     The 13 read composites register no builder — they are
     ``requires_approval=False`` and never park, so a preview would be

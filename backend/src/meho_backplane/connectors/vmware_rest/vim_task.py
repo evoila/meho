@@ -60,7 +60,11 @@ from meho_backplane.connectors.vmware_rest.typed_ops import _int_or_none, _unwra
 from meho_backplane.connectors.vmware_rest.typed_ops_tasks_recent import (
     build_task_info_retrieve_params,
 )
-from meho_backplane.connectors.vmware_rest.vim_body import fault_message, unwrap_vim_value
+from meho_backplane.connectors.vmware_rest.vim_body import (
+    fault_message,
+    fault_type_name,
+    unwrap_vim_value,
+)
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -120,6 +124,12 @@ class VimTaskResult:
         progress: Last-observed ``TaskInfo.progress`` (0-100) -- present on
             a timeout so the caller can report how far the background task
             got.
+        fault_type: The concrete vim fault class name on error (e.g.
+            ``FileNotFound``) -- class name only, never fault text (#3708),
+            via :func:`vim_body.fault_type_name`, so a caller can branch on a
+            well-defined fault (a datastore search of a missing folder,
+            #3339) instead of matching localized message text. ``None``
+            otherwise.
     """
 
     task: str
@@ -127,6 +137,7 @@ class VimTaskResult:
     result: Any = None
     error_message: str | None = None
     progress: int | None = None
+    fault_type: str | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -280,6 +291,7 @@ async def poll_vim_task(
                 result=info.get("result") if succeeded else None,
                 error_message=None if succeeded else _fault_message(info),
                 progress=_progress(info),
+                fault_type=None if succeeded else fault_type_name(info.get("error")),
             )
         if time.monotonic() >= deadline:
             _log.warning(

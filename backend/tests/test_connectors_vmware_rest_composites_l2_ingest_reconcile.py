@@ -1225,3 +1225,109 @@ def test_host_vi_json_paths_exist_in_the_pinned_spec() -> None:
             f"{path!r} is not a POST path item in the pinned vi-json.yaml — a "
             "host-domain vi-json sub-op targets a path the spec does not serve"
         )
+
+
+# ---------------------------------------------------------------------------
+# #3339 teardown deletes -- distributed / host standard port group, folder,
+# datastore file delete + directory create. No REST surface exists for any of
+# them, so every sub-op is a vi-json method reconciled against the pinned
+# vi-json.yaml like the #3091 portgroup writes above.
+# ---------------------------------------------------------------------------
+
+from meho_backplane.connectors.vmware_rest.composites import (  # noqa: E402
+    _datastore_files,
+    _library_delete,
+    _teardown,
+    _teardown_network,
+)
+
+_EXPECTED_3339_VIM_MANIFESTS: dict[str, tuple[Any, set[str]]] = {
+    "_VIM_SUB_OPS_NETWORK_PORTGROUP_DELETE": (
+        _teardown_network,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/DistributedVirtualSwitch/{moId}/FetchDVPorts",
+            "POST:/DistributedVirtualPortgroup/{moId}/Destroy_Task",
+        },
+    ),
+    "_VIM_SUB_OPS_HOST_STANDARD_PORTGROUP_DELETE": (
+        _teardown_network,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/HostNetworkSystem/{moId}/RemovePortGroup",
+        },
+    ),
+    "_VIM_SUB_OPS_FOLDER_DELETE": (
+        _teardown,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/Folder/{moId}/Destroy_Task",
+        },
+    ),
+    "_VIM_SUB_OPS_DATASTORE_FILE_DELETE": (
+        _datastore_files,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/HostDatastoreBrowser/{moId}/SearchDatastore_Task",
+            "POST:/HostDatastoreBrowser/{moId}/SearchDatastoreSubFolders_Task",
+            "POST:/FileManager/{moId}/DeleteDatastoreFile_Task",
+        },
+    ),
+    "_VIM_SUB_OPS_DATASTORE_DIR_CREATE": (
+        _datastore_files,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/HostDatastoreBrowser/{moId}/SearchDatastore_Task",
+            "POST:/FileManager/{moId}/MakeDirectory",
+        },
+    ),
+    # The content-library deletes read Datastore.vm + the VMs' devices (vim)
+    # for the "a VM mounts this item" check.
+    "_VIM_SUB_OPS_CONTENT_LIBRARY_MEDIA_CHECK": (
+        _library_delete,
+        {"POST:/PropertyCollector/{moId}/RetrievePropertiesEx"},
+    ),
+}
+
+
+@pytest.mark.parametrize("manifest_name", sorted(_EXPECTED_3339_VIM_MANIFESTS))
+def test_3339_vim_sub_op_manifests_are_pinned(manifest_name: str) -> None:
+    """Pin each #3339 teardown vim manifest so a drift can't shrink the reconcile."""
+    module, expected = _EXPECTED_3339_VIM_MANIFESTS[manifest_name]
+    assert set(getattr(module, manifest_name)) == expected
+
+
+@pytest.mark.parametrize("manifest_name", sorted(_EXPECTED_3339_VIM_MANIFESTS))
+def test_3339_vim_sub_ops_round_trip_through_ingest(manifest_name: str) -> None:
+    """The #3339 vim op_ids are byte-for-byte what ``parse_openapi`` emits."""
+    module, _ = _EXPECTED_3339_VIM_MANIFESTS[manifest_name]
+    required = set(getattr(module, manifest_name))
+    spec_bytes = json.dumps(_build_vcenter_fixture(required)).encode()
+    spec_url = "https://specs.example.test/vi-json.yaml"
+    with _GETADDRINFO_PATCH, respx.mock(assert_all_called=False) as router:
+        router.get(spec_url).mock(
+            return_value=httpx.Response(
+                200, content=spec_bytes, headers={"content-type": "application/json"}
+            )
+        )
+        rows = parse_openapi(spec_url, spec_source="spec:vi-json.yaml")
+    assert required <= {row.op_id for row in rows}
+
+
+@pytest.mark.parametrize("manifest_name", sorted(_EXPECTED_3339_VIM_MANIFESTS))
+def test_3339_vim_paths_exist_in_the_pinned_spec(manifest_name: str) -> None:
+    """Each #3339 teardown vim path is a real POST path in the pinned vi-json.yaml.
+
+    Skips when the spec-shelf is not configured; CI is the operator-visible signal.
+    """
+    spec_path = resolve_vi_json_yaml()
+    if spec_path is None:
+        pytest.skip(VCENTER_SPEC_REASON)
+    spec_text = spec_path.read_text(encoding="utf-8")
+    module, _ = _EXPECTED_3339_VIM_MANIFESTS[manifest_name]
+    for op_id in getattr(module, manifest_name):
+        _, _, path = op_id.partition(":")
+        assert _vi_json_path_item_has_post(spec_text, path), (
+            f"{path!r} is not a POST path item in the pinned vi-json.yaml -- the "
+            f"{manifest_name} vim sub-op targets a path the spec does not serve"
+        )

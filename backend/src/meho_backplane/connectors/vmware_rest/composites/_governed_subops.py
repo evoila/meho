@@ -31,11 +31,15 @@ from __future__ import annotations
 from typing import Final
 
 from meho_backplane.connectors.vmware_rest.composites import (
+    _datastore_files,
     _host,
     _library,
+    _library_delete,
     _namespace,
     _storage_policy,
     _supervisor,
+    _teardown,
+    _teardown_network,
     _vm_allocation,
     _write,
 )
@@ -115,6 +119,26 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     ),
     "vmware.composite.content_library.subscribed.sync": (
         _library._SUB_OPS_CONTENT_LIBRARY_SUBSCRIBED_SYNC
+    ),
+    # #3339 teardown deletes (+ the paired datastore.dir.create). The Destroy /
+    # RemovePortGroup / DeleteDatastoreFile / DELETE children are delete-shaped,
+    # so the discovery surface flags them un-grantable -- a human always decides.
+    "vmware.composite.network.portgroup.delete": (
+        _teardown_network._VIM_SUB_OPS_NETWORK_PORTGROUP_DELETE
+    ),
+    "vmware.composite.host.standard_portgroup.delete": (
+        _teardown_network._VIM_SUB_OPS_HOST_STANDARD_PORTGROUP_DELETE
+    ),
+    "vmware.composite.folder.delete": _teardown._VIM_SUB_OPS_FOLDER_DELETE,
+    "vmware.composite.datastore.file.delete": (_datastore_files._VIM_SUB_OPS_DATASTORE_FILE_DELETE),
+    "vmware.composite.datastore.dir.create": _datastore_files._VIM_SUB_OPS_DATASTORE_DIR_CREATE,
+    "vmware.composite.content_library.delete": (
+        _library_delete._SUB_OPS_CONTENT_LIBRARY_DELETE
+        + _library_delete._VIM_SUB_OPS_CONTENT_LIBRARY_MEDIA_CHECK
+    ),
+    "vmware.composite.content_library.item.delete": (
+        _library_delete._SUB_OPS_CONTENT_LIBRARY_ITEM_DELETE
+        + _library_delete._VIM_SUB_OPS_CONTENT_LIBRARY_MEDIA_CHECK
     ),
 }
 

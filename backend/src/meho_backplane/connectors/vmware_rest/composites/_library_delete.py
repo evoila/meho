@@ -13,26 +13,23 @@
 The delete half of #3331 (create / upload stay there) and the item delete of
 #3339. Both are plain vCenter REST: the content-library ``/api`` surface is
 served by vCenter 8.0 and 9.0 alike (the same find / item reads
-``vm.deploy_from_library`` already runs on 8.0.x), so no VI-JSON is needed.
-Reads go through the un-gated ``_read_sub_op`` / find seam, the DELETE
-through ``_write_sub_op`` (the #2254 sub-op gate). Both are
-``safety_level="destructive"`` + ``requires_approval=True`` and follow the
-plan-then-act seam of :mod:`._teardown` (absent -> ``unchanged``, blockers ->
-``precondition_failed`` before any write, read-back -> ``deleted`` /
-``still_present``; a REST fault raises -> ``connector_error``).
+``vm.deploy_from_library`` already runs on 8.0.x). Reads go through the
+un-gated ``_read_sub_op`` / find seam, the DELETE through ``_write_sub_op``
+(the #2254 sub-op gate). Both are ``safety_level="destructive"`` +
+``requires_approval=True`` and follow the plan-then-act seam of
+:mod:`._teardown` (absent -> ``unchanged``, blockers -> ``precondition_failed``
+before any write, read-back -> ``deleted`` / ``still_present``; a REST fault
+raises -> ``connector_error``).
 
-Refusals (before any write):
+Refusals (before any write; checks in :mod:`._library_checks`):
 
-* library: another library **on this vCenter** subscribes to it (a SUBSCRIBED
-  library whose ``subscription_url`` names this library's id) -- delete the
-  subscribers first; a non-empty library unless ``delete_items=true``
-  (#3331's explicit-flag shape; the items are listed in the blast radius);
-* item: the item belongs to a SUBSCRIBED library (its content is the
-  publisher's -- delete / evict through the subscribed library instead).
-
-Not detectable through the vCenter API, so not checked: subscribers on
-*other* vCenters, and a VM CD-ROM mounting an ISO item (vSphere's own file
-lock refuses that delete while the VM runs; the fault raises).
+* any library / item id that is not a UUID (so no id can point a REST path
+  at another object);
+* library: another library subscribes to it (on this vCenter, or known to the
+  publisher); a VM mounts one of its items; it holds items and
+  ``delete_items`` is not true (#3331's explicit-flag shape);
+* item: its library cannot be read back as a LOCAL library on this vCenter
+  (a SUBSCRIBED library's content belongs to the publisher); a VM mounts it.
 """
 
 from __future__ import annotations
@@ -42,6 +39,19 @@ from typing import TYPE_CHECKING, Any, Final
 import httpx
 
 from meho_backplane.connectors import OperationResult
+from meho_backplane.connectors.vmware_rest.composites._library_checks import (
+    OP_GET_LIBRARY,
+    OP_GET_LIBRARY_ITEM,
+    OP_GET_SUBSCRIBED_LIBRARY,
+    OP_LIST_LIBRARY_SUBSCRIPTIONS,
+    OP_LIST_SUBSCRIBED_LIBRARIES,
+    get_or_none,
+    id_problem,
+    int_or_none,
+    media_check,
+    resolve_library_id,
+    subscribers,
+)
 from meho_backplane.connectors.vmware_rest.composites._teardown import (
     STATUS_DELETED,
     STATUS_INVALID_REQUEST,
@@ -56,6 +66,7 @@ from meho_backplane.connectors.vmware_rest.composites._teardown import (
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _OP_FIND_LIBRARY,
     _OP_FIND_LIBRARY_ITEM,
+    _OP_RETRIEVE_PROPERTIES,
     _find_content_library_ids,
     _read_sub_op,
     _unwrap_value,
@@ -74,36 +85,35 @@ __all__ = [
     "content_library_item_delete_preview",
 ]
 
-_OP_GET_LIBRARY: Final = "GET:/content/library/{libraryId}"
-_OP_LIST_SUBSCRIBED_LIBRARIES: Final = "GET:/content/subscribed-library"
-_OP_GET_SUBSCRIBED_LIBRARY: Final = "GET:/content/subscribed-library/{libraryId}"
 _OP_DELETE_LOCAL_LIBRARY: Final = "DELETE:/content/local-library/{libraryId}"
 _OP_DELETE_SUBSCRIBED_LIBRARY: Final = "DELETE:/content/subscribed-library/{libraryId}"
-_OP_GET_LIBRARY_ITEM: Final = "GET:/content/library/item/{libraryItemId}"
 _OP_LIST_ITEM_FILES: Final = "GET:/content/library/item/{libraryItemId}/file"
 _OP_DELETE_LIBRARY_ITEM: Final = "DELETE:/content/library/item/{libraryItemId}"
 
-#: Sub-op manifests (reconciled against the pinned vcenter.yaml; also the
+#: REST sub-op manifests (reconciled against the pinned vcenter.yaml; also the
 #: governed-subop discovery source -- the DELETE children are delete-shaped,
 #: so the discovery surface flags them un-grantable).
 _SUB_OPS_CONTENT_LIBRARY_DELETE: Final[tuple[str, ...]] = (
     _OP_FIND_LIBRARY,
-    _OP_GET_LIBRARY,
+    OP_GET_LIBRARY,
     _OP_FIND_LIBRARY_ITEM,
-    _OP_GET_LIBRARY_ITEM,
-    _OP_LIST_SUBSCRIBED_LIBRARIES,
-    _OP_GET_SUBSCRIBED_LIBRARY,
+    OP_GET_LIBRARY_ITEM,
+    OP_LIST_SUBSCRIBED_LIBRARIES,
+    OP_GET_SUBSCRIBED_LIBRARY,
+    OP_LIST_LIBRARY_SUBSCRIPTIONS,
     _OP_DELETE_LOCAL_LIBRARY,
     _OP_DELETE_SUBSCRIBED_LIBRARY,
 )
 _SUB_OPS_CONTENT_LIBRARY_ITEM_DELETE: Final[tuple[str, ...]] = (
     _OP_FIND_LIBRARY,
     _OP_FIND_LIBRARY_ITEM,
-    _OP_GET_LIBRARY_ITEM,
-    _OP_GET_LIBRARY,
+    OP_GET_LIBRARY_ITEM,
+    OP_GET_LIBRARY,
     _OP_LIST_ITEM_FILES,
     _OP_DELETE_LIBRARY_ITEM,
 )
+#: The mounted-item check reads ``Datastore.vm`` + the VMs' devices (vim).
+_VIM_SUB_OPS_CONTENT_LIBRARY_MEDIA_CHECK: Final[tuple[str, ...]] = (_OP_RETRIEVE_PROPERTIES,)
 
 _LOCAL: Final = "LOCAL"
 _SUBSCRIBED: Final = "SUBSCRIBED"
@@ -116,76 +126,13 @@ _DELETE_OP_BY_TYPE: Final[dict[str, str]] = {
 _ITEM_DETAIL_CAP: Final = 50
 
 
-async def _get_or_none(
-    connector: VmwareRestConnector,
-    target: Any,
-    operator: Operator,
-    op_id: str,
-    params: dict[str, Any],
-) -> dict[str, Any] | None:
-    """One un-gated GET; ``None`` on HTTP 404 (absent). Other faults raise."""
-    try:
-        payload = await _read_sub_op(connector, target, operator, op_id, params)
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code == 404:
-            return None
-        raise
-    model = _unwrap_value(payload)
-    return model if isinstance(model, dict) else None
-
-
-async def _resolve_library_id(
-    connector: VmwareRestConnector, target: Any, operator: Operator, params: dict[str, Any]
-) -> tuple[str | None, tuple[str, str] | None]:
-    """``(id, None)``, ``(None, None)`` when the name matches nothing, or a refusal."""
-    library_id = params.get("library_id")
-    if isinstance(library_id, str) and library_id:
-        return library_id, None
-    name = params.get("library_name")
-    if not isinstance(name, str) or not name:
-        return None, (STATUS_INVALID_REQUEST, "pass library_id or library_name")
-    ids = await _find_content_library_ids(
-        connector, target, operator, op_id=_OP_FIND_LIBRARY, spec={"name": name}
-    )
-    if len(ids) > 1:
-        return None, (
-            STATUS_INVALID_REQUEST,
-            f"library_name {name!r} matched {len(ids)} libraries ({', '.join(ids)}); "
-            "pass library_id",
-        )
-    return (ids[0] if ids else None), None
-
-
-def _int_or_none(value: Any) -> int | None:
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
+def _names(rows: list[dict[str, Any]]) -> str:
+    return ", ".join(str(row.get("name") or row.get("id") or row.get("moid")) for row in rows[:10])
 
 
 # ===========================================================================
 # content_library.delete
 # ===========================================================================
-
-
-async def _local_subscribers(
-    connector: VmwareRestConnector, target: Any, operator: Operator, library_id: str
-) -> list[dict[str, Any]]:
-    """SUBSCRIBED libraries on this vCenter whose subscription URL names *library_id*."""
-    listing = _unwrap_value(
-        await _read_sub_op(connector, target, operator, _OP_LIST_SUBSCRIBED_LIBRARIES)
-    )
-    rows: list[dict[str, Any]] = []
-    for sub_id in listing if isinstance(listing, list) else []:
-        if not isinstance(sub_id, str) or sub_id == library_id:
-            continue
-        model = await _get_or_none(
-            connector, target, operator, _OP_GET_SUBSCRIBED_LIBRARY, {"libraryId": sub_id}
-        )
-        if model is None:
-            continue
-        info = model.get("subscription_info")
-        url = info.get("subscription_url") if isinstance(info, dict) else None
-        if isinstance(url, str) and library_id in url:
-            rows.append({"kind": "subscribed_library", "id": sub_id, "name": model.get("name")})
-    return rows
 
 
 async def _item_rows(
@@ -195,10 +142,12 @@ async def _item_rows(
     rows: list[dict[str, Any]] = []
     total = 0
     for item_id in item_ids[:_ITEM_DETAIL_CAP]:
-        model = await _get_or_none(
-            connector, target, operator, _OP_GET_LIBRARY_ITEM, {"libraryItemId": item_id}
+        if id_problem(item_id, "item id") is not None:
+            continue
+        model = await get_or_none(
+            connector, target, operator, OP_GET_LIBRARY_ITEM, {"libraryItemId": item_id}
         )
-        size = _int_or_none(model.get("size")) if model else None
+        size = int_or_none(model.get("size")) if model else None
         total += size or 0
         rows.append(
             {
@@ -212,30 +161,49 @@ async def _item_rows(
     return rows, total
 
 
-def _library_refusal(
-    plan: TeardownPlan, *, library_id: str, library_type: Any, delete_items: bool
-) -> tuple[str, str] | None:
-    if library_type not in _DELETE_OP_BY_TYPE:
-        return (
+async def _library_blockers(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    plan: TeardownPlan,
+    model: dict[str, Any],
+    item_ids: list[str],
+    delete_items: bool,
+) -> None:
+    """Fill ``plan.blockers`` / ``plan.refusal`` for a library delete."""
+    library_id = plan.context["library_id"]
+    if plan.object["type"] not in _DELETE_OP_BY_TYPE:
+        detail = f"library {library_id!r} has unsupported type {plan.object['type']!r}"
+        plan.refusal = (STATUS_PRECONDITION_FAILED, detail)
+        return
+    subs: list[dict[str, Any]] = []
+    if plan.object["type"] == _LOCAL and plan.object["published"]:
+        subs = await subscribers(connector, target, operator, library_id)
+    mounts, problem = await media_check(
+        connector, target, operator, library=model, item_ids=item_ids
+    )
+    plan.blockers = capped(subs + mounts)
+    if subs:
+        plan.refusal = (
             STATUS_PRECONDITION_FAILED,
-            f"library {library_id!r} has unsupported type {library_type!r}",
+            f"{len(subs)} library(ies) subscribe to library {library_id!r} [{_names(subs)}]; "
+            "delete the subscribers first (see 'blockers')",
         )
-    if plan.blockers:
-        names = ", ".join(str(row.get("name") or row["id"]) for row in plan.blockers[:10])
-        return (
+    elif mounts:
+        plan.refusal = (
             STATUS_PRECONDITION_FAILED,
-            f"library {library_id!r} is published to {len(plan.blockers)} subscribed "
-            f"library(ies) on this vCenter [{names}]; delete the subscribers first "
-            "(see 'blockers')",
+            f"{len(mounts)} VM(s) mount an item of library {library_id!r} [{_names(mounts)}]; "
+            "unmount it first (see 'blockers')",
         )
-    count = plan.object.get("item_count") or 0
-    if count and not delete_items:
-        return (
+    elif problem is not None:
+        plan.refusal = (STATUS_PRECONDITION_FAILED, problem)
+    elif item_ids and not delete_items:
+        plan.refusal = (
             STATUS_PRECONDITION_FAILED,
-            f"library {library_id!r} holds {count} item(s); pass delete_items=true to delete "
-            "the library together with its items (the blast radius lists them)",
+            f"library {library_id!r} holds {len(item_ids)} item(s); pass delete_items=true to "
+            "delete the library together with its items (the preview lists them)",
         )
-    return None
 
 
 async def plan_content_library_delete(
@@ -252,11 +220,11 @@ async def plan_content_library_delete(
         "id": params.get("library_id"),
         "name": params.get("library_name"),
     }
-    library_id, refusal = await _resolve_library_id(connector, target, operator, params)
+    library_id, refusal = await resolve_library_id(connector, target, operator, params)
     if refusal is not None or library_id is None:
         return TeardownPlan(obj, False, refusal=refusal)
-    model = await _get_or_none(
-        connector, target, operator, _OP_GET_LIBRARY, {"libraryId": library_id}
+    model = await get_or_none(
+        connector, target, operator, OP_GET_LIBRARY, {"libraryId": library_id}
     )
     if model is None:
         return TeardownPlan({**obj, "id": library_id}, False)
@@ -282,12 +250,13 @@ async def plan_content_library_delete(
         plan.children, obj["total_size_bytes"] = await _item_rows(
             connector, target, operator, item_ids
         )
-    if obj["type"] == _LOCAL and obj["published"]:
-        plan.blockers = capped(await _local_subscribers(connector, target, operator, library_id))
-    plan.refusal = _library_refusal(
-        plan,
-        library_id=library_id,
-        library_type=obj["type"],
+    await _library_blockers(
+        connector,
+        target,
+        operator,
+        plan=plan,
+        model=model,
+        item_ids=item_ids,
         delete_items=bool(params.get("delete_items", False)),
     )
     return plan
@@ -322,8 +291,8 @@ async def content_library_delete_composite(
     )
     if gate is not None:
         return gate
-    after = await _get_or_none(
-        connector, target, operator, _OP_GET_LIBRARY, {"libraryId": library_id}
+    after = await get_or_none(
+        connector, target, operator, OP_GET_LIBRARY, {"libraryId": library_id}
     )
     if after is not None:
         return envelope(
@@ -357,13 +326,15 @@ async def _resolve_item_id(
     connector: VmwareRestConnector, target: Any, operator: Operator, params: dict[str, Any]
 ) -> tuple[str | None, tuple[str, str] | None]:
     """``(id, None)``, ``(None, None)`` when nothing matches, or a refusal."""
-    item_id = params.get("item_id")
-    if isinstance(item_id, str) and item_id:
-        return item_id, None
+    if params.get("item_id") is not None:
+        problem = id_problem(params.get("item_id"), "item_id")
+        if problem is not None:
+            return None, (STATUS_INVALID_REQUEST, problem)
+        return str(params["item_id"]), None
     item_name = params.get("item_name")
     if not isinstance(item_name, str) or not item_name:
         return None, (STATUS_INVALID_REQUEST, "pass item_id, or item_name with a library")
-    library_id, refusal = await _resolve_library_id(connector, target, operator, params)
+    library_id, refusal = await resolve_library_id(connector, target, operator, params)
     if refusal is not None or library_id is None:
         return None, refusal
     ids = await _find_content_library_ids(
@@ -378,6 +349,8 @@ async def _resolve_item_id(
             STATUS_INVALID_REQUEST,
             f"item_name {item_name!r} matched {len(ids)} items; pass item_id",
         )
+    if ids and id_problem(ids[0], "item id") is not None:
+        return None, (STATUS_INVALID_REQUEST, f"vCenter returned an unexpected id {ids[0]!r}")
     return (ids[0] if ids else None), None
 
 
@@ -394,11 +367,44 @@ async def _item_files(
     files = _unwrap_value(payload)
     return capped(
         [
-            {"kind": "file", "name": f.get("name"), "size_bytes": _int_or_none(f.get("size"))}
+            {"kind": "file", "name": f.get("name"), "size_bytes": int_or_none(f.get("size"))}
             for f in (files if isinstance(files, list) else [])
             if isinstance(f, dict)
         ]
     )
+
+
+async def _item_library_refusal(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    plan: TeardownPlan,
+    library: dict[str, Any] | None,
+) -> None:
+    """Refuse unless the item's library reads back LOCAL and no VM mounts the item."""
+    item_id = plan.context["item_id"]
+    if library is None or plan.object["library_type"] != _LOCAL:
+        plan.refusal = (
+            STATUS_PRECONDITION_FAILED,
+            f"item {item_id!r} is not in a local library that MEHO could read back on this "
+            f"vCenter (library {plan.object['library_id']!r}, type "
+            f"{plan.object['library_type']!r}). A subscribed library's items come from the "
+            "publisher: delete the item there, or delete the subscribed library",
+        )
+        return
+    mounts, problem = await media_check(
+        connector, target, operator, library=library, item_ids=[item_id]
+    )
+    plan.blockers = capped(mounts)
+    if mounts:
+        plan.refusal = (
+            STATUS_PRECONDITION_FAILED,
+            f"{len(mounts)} VM(s) mount item {item_id!r} [{_names(mounts)}]; unmount it first "
+            "(see 'blockers')",
+        )
+    elif problem is not None:
+        plan.refusal = (STATUS_PRECONDITION_FAILED, problem)
 
 
 async def plan_content_library_item_delete(
@@ -418,22 +424,22 @@ async def plan_content_library_item_delete(
     item_id, refusal = await _resolve_item_id(connector, target, operator, params)
     if refusal is not None or item_id is None:
         return TeardownPlan(obj, False, refusal=refusal)
-    model = await _get_or_none(
-        connector, target, operator, _OP_GET_LIBRARY_ITEM, {"libraryItemId": item_id}
+    model = await get_or_none(
+        connector, target, operator, OP_GET_LIBRARY_ITEM, {"libraryItemId": item_id}
     )
     if model is None:
         return TeardownPlan({**obj, "id": item_id}, False)
     library_id = model.get("library_id")
     library = (
-        await _get_or_none(connector, target, operator, _OP_GET_LIBRARY, {"libraryId": library_id})
-        if isinstance(library_id, str)
+        await get_or_none(connector, target, operator, OP_GET_LIBRARY, {"libraryId": library_id})
+        if id_problem(library_id, "library id") is None
         else None
     )
     obj.update(
         id=item_id,
         name=model.get("name"),
         type=model.get("type"),
-        size_bytes=_int_or_none(model.get("size")),
+        size_bytes=int_or_none(model.get("size")),
         library_id=library_id,
         library_name=library.get("name") if library else None,
         library_type=library.get("type") if library else None,
@@ -441,13 +447,7 @@ async def plan_content_library_item_delete(
     plan = TeardownPlan(obj, True, context={"item_id": item_id})
     if enumerate_files:
         plan.children = await _item_files(connector, target, operator, item_id)
-    if obj["library_type"] == _SUBSCRIBED:
-        plan.refusal = (
-            STATUS_PRECONDITION_FAILED,
-            f"item {item_id!r} belongs to SUBSCRIBED library {library_id!r}; its content is "
-            "synchronised from the publisher -- delete the item at the publisher or delete "
-            "the subscribed library (vmware.composite.content_library.delete)",
-        )
+    await _item_library_refusal(connector, target, operator, plan=plan, library=library)
     return plan
 
 
@@ -474,8 +474,8 @@ async def content_library_item_delete_composite(
     )
     if gate is not None:
         return gate
-    after = await _get_or_none(
-        connector, target, operator, _OP_GET_LIBRARY_ITEM, {"libraryItemId": item_id}
+    after = await get_or_none(
+        connector, target, operator, OP_GET_LIBRARY_ITEM, {"libraryItemId": item_id}
     )
     if after is not None:
         return envelope(

@@ -1236,6 +1236,7 @@ def test_host_vi_json_paths_exist_in_the_pinned_spec() -> None:
 
 from meho_backplane.connectors.vmware_rest.composites import (  # noqa: E402
     _datastore_files,
+    _library_delete,
     _teardown,
     _teardown_network,
 )
@@ -1279,6 +1280,12 @@ _EXPECTED_3339_VIM_MANIFESTS: dict[str, tuple[Any, set[str]]] = {
             "POST:/HostDatastoreBrowser/{moId}/SearchDatastore_Task",
             "POST:/FileManager/{moId}/MakeDirectory",
         },
+    ),
+    # The content-library deletes read Datastore.vm + the VMs' devices (vim)
+    # for the "a VM mounts this item" check.
+    "_VIM_SUB_OPS_CONTENT_LIBRARY_MEDIA_CHECK": (
+        _library_delete,
+        {"POST:/PropertyCollector/{moId}/RetrievePropertiesEx"},
     ),
 }
 

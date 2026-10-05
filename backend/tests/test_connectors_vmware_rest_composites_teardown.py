@@ -559,3 +559,128 @@ def test_folder_schema_requires_a_moid() -> None:
     with pytest.raises(ValidationError):
         Draft202012Validator(FOLDER_DELETE_PARAMETER_SCHEMA).validate({"folder": "example-folder"})
     Draft202012Validator(FOLDER_DELETE_PARAMETER_SCHEMA).validate({"folder": "group-v100"})
+
+
+# ===========================================================================
+# #3925 review fixes
+# ===========================================================================
+
+
+async def test_portgroup_delete_refuses_nsx_backed(gate: GateRecorder) -> None:
+    conn = VimFake()
+    _dvpg(conn)
+    conn.objects[("DistributedVirtualPortgroup", "dvportgroup-42")]["config"]["backingType"] = "nsx"
+    out = await _call(
+        _teardown_network.network_portgroup_delete_composite, conn, portgroup="dvportgroup-42"
+    )
+    assert out["status"] == "precondition_failed"
+    assert out["object"]["backing_type"] == "nsx"
+    assert "NSX" in out["guidance"]
+    assert gate.calls == []
+
+
+async def test_portgroup_unreadable_vm_list_fails_before_any_write(gate: GateRecorder) -> None:
+    """vCenter could not read 'vm' -> never read as 'no VMs'."""
+    conn = VimFake()
+    _dvpg(conn)
+    conn.unreadable[("DistributedVirtualPortgroup", "dvportgroup-42")] = {"vm"}
+    with pytest.raises(Exception, match="could not read vm"):
+        await _call(
+            _teardown_network.network_portgroup_delete_composite, conn, portgroup="dvportgroup-42"
+        )
+    assert gate.calls == []
+
+
+@pytest.mark.parametrize(
+    ("handler", "params"),
+    [
+        (
+            _teardown_network.network_portgroup_delete_composite,
+            {"portgroup": "../VirtualMachine/vm-42"},
+        ),
+        (
+            _teardown_network.host_standard_portgroup_delete_composite,
+            {"host": "../VirtualMachine/vm-42", "portgroup_name": "x"},
+        ),
+        (_teardown.folder_delete_composite, {"folder": "../VirtualMachine/vm-42"}),
+    ],
+)
+async def test_moid_shape_is_checked_before_any_io(
+    gate: GateRecorder, handler: Any, params: dict[str, Any]
+) -> None:
+    conn = VimFake()
+    out = await _call(handler, conn, **params)
+    assert out["status"] == "invalid_request"
+    assert conn.calls == []
+
+
+async def test_standard_portgroup_partial_network_answer_fails(gate: GateRecorder) -> None:
+    conn = VimFake()
+    _host(conn)
+    conn.omitted.add("network-5")
+    with pytest.raises(Exception, match="only part"):
+        await _call(
+            _teardown_network.host_standard_portgroup_delete_composite,
+            conn,
+            host="host-21",
+            portgroup_name="example-trunk",
+        )
+    assert gate.calls == []
+
+
+async def test_standard_portgroup_unreadable_vnic_list_fails(gate: GateRecorder) -> None:
+    conn = VimFake()
+    _host(conn)
+    conn.unreadable[("HostSystem", "host-21")] = {"config.network.vnic"}
+    with pytest.raises(Exception, match="could not read"):
+        await _call(
+            _teardown_network.host_standard_portgroup_delete_composite,
+            conn,
+            host="host-21",
+            portgroup_name="example-trunk",
+        )
+    assert gate.calls == []
+
+
+async def test_standard_portgroup_host_without_network_system(gate: GateRecorder) -> None:
+    conn = VimFake()
+    _host(conn)
+    del conn.objects[("HostSystem", "host-21")]["configManager.networkSystem"]
+    out = await _call(
+        _teardown_network.host_standard_portgroup_delete_composite,
+        conn,
+        host="host-21",
+        portgroup_name="example-trunk",
+    )
+    assert out["status"] == "precondition_failed"
+    assert "networkSystem" in out["guidance"]
+    assert gate.calls == []
+
+
+async def test_folder_delete_refuses_root_folder(gate: GateRecorder) -> None:
+    conn = VimFake()
+    _folder(conn)
+    del conn.objects[("Folder", "group-v100")]["parent"]
+    out = await _call(_teardown.folder_delete_composite, conn, folder="group-v100")
+    assert out["status"] == "precondition_failed"
+    assert "root" in out["guidance"]
+    assert gate.calls == []
+
+
+async def test_folder_delete_refuses_datastore_cluster(gate: GateRecorder) -> None:
+    conn = VimFake()
+    out = await _call(_teardown.folder_delete_composite, conn, folder="group-p12")
+    assert out["status"] == "invalid_request"
+    assert "datastore cluster" in out["guidance"]
+    assert conn.calls == []
+    with pytest.raises(ValidationError):
+        Draft202012Validator(FOLDER_DELETE_PARAMETER_SCHEMA).validate({"folder": "group-p12"})
+
+
+async def test_folder_unreadable_children_fails(gate: GateRecorder) -> None:
+    conn = VimFake()
+    _folder(conn)
+    conn.unreadable[("Folder", "group-v100")] = {"childEntity"}
+    with pytest.raises(Exception, match="could not read childEntity"):
+        await _call(_teardown.folder_delete_composite, conn, folder="group-v100")
+    assert gate.calls == []

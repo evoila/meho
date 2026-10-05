@@ -87,6 +87,10 @@ class VimFake:
         #: Answer a missing object with a JSON ``VimFault`` HTTP 500 body
         #: instead of the connector-promoted not-found error.
         self.not_found_as_json = False
+        #: ``(type, moid) -> property paths`` vCenter "could not read" (missingSet).
+        self.unreadable: dict[tuple[str, str], set[str]] = {}
+        #: Objects left out of a multi-object answer (a partial answer).
+        self.omitted: set[str] = set()
         self._tasks: dict[str, dict[str, Any]] = {}
 
     # -- store helpers ---------------------------------------------------
@@ -147,6 +151,8 @@ class VimFake:
             }
         objects = []
         for moid in moids:
+            if moid in self.omitted:
+                continue
             props = self.objects.get((mo_type, moid))
             if props is None:
                 if self.not_found_as_json:
@@ -159,14 +165,21 @@ class VimFake:
                 if promote:
                     raise ConnectorResourceNotFoundError([moid], f"{moid} not found")
                 raise RuntimeError(f"ManagedObjectNotFound: {mo_type} {moid}")
-            objects.append(
-                {
-                    "obj": {"type": mo_type, "value": moid},
-                    "propSet": [
-                        {"name": p, "val": copy.deepcopy(props[p])} for p in path_set if p in props
-                    ],
-                }
-            )
+            unreadable = self.unreadable.get((mo_type, moid), set())
+            entry: dict[str, Any] = {
+                "obj": {"type": mo_type, "value": moid},
+                "propSet": [
+                    {"name": p, "val": copy.deepcopy(props[p])}
+                    for p in path_set
+                    if p in props and p not in unreadable
+                ],
+            }
+            missing = [p for p in path_set if p in unreadable]
+            if missing:
+                entry["missingSet"] = [
+                    {"path": p, "fault": {"_typeName": "NoPermission"}} for p in missing
+                ]
+            objects.append(entry)
         result: dict[str, Any] = {"objects": objects}
         if self.page_token and mo_type == "VirtualMachine":
             result["token"] = "more"

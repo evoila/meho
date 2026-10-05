@@ -4,12 +4,18 @@
 """Datastore browse + resolution helpers for the datastore file ops (#3339).
 
 Read-only seam shared by ``datastore.file.delete`` and ``datastore.dir.create``
-(:mod:`._datastore_files`): the relative-path contract, datastore -> name /
-browser / datacenter resolution (walking ``Datastore.parent`` to the
-``Datacenter``), ``HostDatastoreBrowser.SearchDatastore_Task`` /
-``SearchDatastoreSubFolders_Task`` browsing, and the registered-VM file-claims
-check. Every call here is a read (un-gated); a browse of a missing folder
-(``FileNotFound`` task fault) reads as "absent", any other fault raises.
+(:mod:`._datastore_files`): the relative-path rules, datastore -> name /
+type / browser / datacenter resolution (walking ``Datastore.parent`` to the
+``Datacenter``), and ``HostDatastoreBrowser.SearchDatastore_Task`` /
+``SearchDatastoreSubFolders_Task`` browsing. Every call here is a read
+(un-gated); a browse of a missing folder (``FileNotFound`` task fault) reads
+as "absent", any other fault raises. The registered-VM file check lives in
+:mod:`._datastore_claims`.
+
+Only VMFS and NFS datastores are supported. On vSAN and vVol datastores
+vCenter lists VM files by a folder UUID, while people use the friendly folder
+name, so the VM file check could not match them; those datastores (and any
+other or unknown type) are refused.
 """
 
 from __future__ import annotations
@@ -18,25 +24,27 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
-from meho_backplane.connectors.vmware_rest.composites._read import _extract_props_by_moid
 from meho_backplane.connectors.vmware_rest.composites._teardown import (
     STATUS_INVALID_REQUEST,
     TeardownPlan,
     capped,
+)
+from meho_backplane.connectors.vmware_rest.composites._teardown_reads import (
+    moid_problem,
     moref_values,
     read_object,
 )
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _DATASTORE_MO_TYPE,
-    _VIRTUAL_MACHINE_MO_TYPE,
-    _VMOMI_RETRIEVE_PROPERTIES_PATH,
     _moref_value,
     _unwrap_value,
 )
-from meho_backplane.connectors.vmware_rest.composites.schemas import DATASTORE_PATH_PATTERN
+from meho_backplane.connectors.vmware_rest.composites.schemas import (
+    DATASTORE_MOID_PATTERN,
+    DATASTORE_PATH_PATTERN,
+)
 from meho_backplane.connectors.vmware_rest.vim_body import (
     VIM_TYPE_NAME_KEY,
-    retrieve_properties_body,
     unwrap_vim_value,
 )
 from meho_backplane.connectors.vmware_rest.vim_task import TASK_STATE_ERROR, poll_vim_task
@@ -57,7 +65,6 @@ __all__ = [
     "search",
     "stat_path",
     "tree",
-    "vm_claims",
 ]
 
 #: Read-only browse methods (``Datastore.Browse``); un-gated like the
@@ -81,8 +88,9 @@ _SEARCH_TASK_TIMEOUT_SECONDS = 120.0
 
 #: Max ``Datastore.parent`` hops to the Datacenter (folders / a storage pod).
 _MAX_PARENT_HOPS: Final = 12
-#: VMs per claims ``RetrievePropertiesEx`` -- small enough never to page.
-_VM_CLAIM_CHUNK: Final = 50
+#: ``Datastore.summary.type`` values these ops support. vSAN / vVol (and any
+#: other or unknown type) are refused -- see the module docstring.
+_SUPPORTED_TYPES: Final = frozenset({"VMFS", "NFS", "NFS41"})
 
 _PATH_RE: Final = re.compile(DATASTORE_PATH_PATTERN)
 
@@ -93,10 +101,12 @@ def path_problem(path: Any) -> str | None:
         return "path is required (relative to the datastore root; the root itself is refused)"
     if _PATH_RE.fullmatch(path) is None:
         return (
-            f"path {path!r} is not a plain relative datastore path: it must not be the root, "
-            "start with '/', contain '.' / '..' segments, wildcards, brackets, backslashes or "
-            "control characters, or start in a hidden system area ('.*') or a content-library "
-            "backing ('contentlib-*' -- use the content_library delete ops)"
+            f"path {path!r} is not allowed. Use a plain path relative to the datastore root. "
+            "Not allowed: the root itself, a leading '/', empty segments, spaces at the start "
+            "or end of a segment, names starting with '.' (hidden or system files, at any "
+            "depth), wildcards, brackets, backslashes, control characters, and the top-level "
+            "folders 'contentlib-*' (use the content_library delete ops), 'fcd' and "
+            "'catalog' (first-class disks and their index)"
         )
     return None
 
@@ -107,6 +117,7 @@ class Datastore:
 
     moid: str
     name: str
+    type: str
     browser: str
     datacenter: str
     vm_moids: list[str]
@@ -151,11 +162,12 @@ async def resolve_datastore(
         operator,
         mo_type=_DATASTORE_MO_TYPE,
         moid=datastore,
-        props=["name", "browser", "parent", "vm"],
+        props=["name", "summary.type", "browser", "parent", "vm"],
     )
     if props is None:
         return None
     name = props.get("name")
+    ds_type = props.get("summary.type")
     browser = _moref_value(unwrap_vim_value(props.get("browser")))
     datacenter = await resolve_datacenter(connector, target, operator, props.get("parent"))
     if not isinstance(name, str) or browser is None or datacenter is None:
@@ -163,7 +175,8 @@ async def resolve_datastore(
             f"datastore {datastore!r}: could not resolve its name / browser / datacenter"
         )
     vm_moids = [moid for _type, moid in moref_values(props.get("vm"))]
-    return Datastore(datastore, name, browser, datacenter, vm_moids)
+    type_name = ds_type if isinstance(ds_type, str) else ""
+    return Datastore(datastore, name, type_name, browser, datacenter, vm_moids)
 
 
 async def search(
@@ -220,8 +233,14 @@ async def search(
 
 async def stat_path(
     connector: VmwareRestConnector, target: Any, operator: Operator, ds: Datastore, path: str
-) -> dict[str, Any] | None:
-    """The ``FileInfo`` of *path* (exact name match in its parent), else ``None``."""
+) -> tuple[dict[str, Any], str] | None:
+    """``(FileInfo, path as vSphere resolved it)`` for *path*, or ``None`` if absent.
+
+    Browses the parent folder for an exact name match. The returned path is
+    built from vSphere's own answer (the result's ``folderPath`` + the entry
+    name), so every later check and the delete itself use the object vSphere
+    actually found, never the raw input text.
+    """
     parent, _, base = path.rpartition("/")
     rows = await search(
         connector, target, operator, ds, folder=parent, pattern=base, recursive=False
@@ -229,7 +248,13 @@ async def stat_path(
     for row in rows or []:
         for entry in row.get("file") or []:
             if isinstance(entry, dict) and entry.get("path") == base:
-                return entry
+                folder = ds.relative(str(row.get("folderPath") or ""))
+                if folder is None:
+                    raise RuntimeError(
+                        f"browse of {ds.path_of(parent)!r} answered with a folder on another "
+                        f"datastore ({row.get('folderPath')!r}); refusing"
+                    )
+                return entry, f"{folder}/{base}" if folder else base
     return None
 
 
@@ -258,89 +283,6 @@ async def tree(
     return capped(files), len(files), total
 
 
-_VM_CLAIM_PROPS: Final = [
-    "name",
-    "layoutEx.file",
-    "config.files.vmPathName",
-    "summary.config.vmPathName",
-]
-
-
-def _vm_files(props: dict[str, Any]) -> tuple[list[str], str | None]:
-    """A VM's ``layoutEx`` file names + its ``.vmx`` path (either may be missing)."""
-    layout = unwrap_vim_value(props.get("layoutEx.file"))
-    names = [
-        entry["name"]
-        for entry in (layout if isinstance(layout, list) else [])
-        if isinstance(entry, dict) and isinstance(entry.get("name"), str)
-    ]
-    vmx = props.get("config.files.vmPathName") or props.get("summary.config.vmPathName")
-    return names, vmx if isinstance(vmx, str) else None
-
-
-def _within(child: str, parent: str) -> bool:
-    """``True`` when *child* is *parent* or lies below it (case-insensitive)."""
-    child, parent = child.casefold(), parent.casefold()
-    return child == parent or child.startswith(parent + "/")
-
-
-def _claim_hits(ds: Datastore, props: dict[str, Any], path: str) -> list[str] | None:
-    """The VM's files on *ds* a delete of *path* would remove; ``None`` = unknowable.
-
-    Known file list (``layoutEx``): a file conflicts when it is *path* or lies
-    below it. Without ``layoutEx`` (e.g. an inaccessible VM) the whole VM home
-    directory is claimed, so *path* also conflicts when it lies inside that
-    home. A VM with neither is unknowable -- the caller refuses.
-    """
-    names, vmx = _vm_files(props)
-    rels = [rel for name in [*names, *([vmx] if vmx else [])] if (rel := ds.relative(name))]
-    hits = {rel for rel in rels if _within(rel, path)}
-    if not names:
-        if vmx is None:
-            return None
-        if vmx.startswith(f"[{ds.name}]"):
-            home = (ds.relative(vmx) or "").rpartition("/")[0]
-            if home and _within(path, home):
-                hits.add(home + "/")
-    return sorted(hits)
-
-
-async def vm_claims(
-    connector: VmwareRestConnector, target: Any, operator: Operator, ds: Datastore, path: str
-) -> tuple[list[dict[str, Any]], bool]:
-    """Registered VMs owning a file a delete of *path* would remove: ``(rows, complete)``.
-
-    Case-insensitive (refuses more, never less). ``complete`` is ``False`` when
-    vCenter paged an answer or a VM's files were unreadable -- the caller then
-    refuses rather than guess.
-    """
-    rows: list[dict[str, Any]] = []
-    complete = True
-    for start in range(0, len(ds.vm_moids), _VM_CLAIM_CHUNK):
-        chunk = ds.vm_moids[start : start + _VM_CLAIM_CHUNK]
-        result = await connector._post_vmomi_json(
-            target,
-            _VMOMI_RETRIEVE_PROPERTIES_PATH,
-            operator=operator,
-            json=retrieve_properties_body(_VIRTUAL_MACHINE_MO_TYPE, chunk, _VM_CLAIM_PROPS),
-        )
-        payload = _unwrap_value(result)
-        if isinstance(payload, dict) and payload.get("token"):
-            complete = False
-        by_moid = _extract_props_by_moid(result)
-        if set(chunk) - set(by_moid):
-            complete = False
-        for moid, props in by_moid.items():
-            hits = _claim_hits(ds, props, path)
-            if hits is None:
-                complete = False
-            elif hits:
-                rows.append(
-                    {"kind": "vm", "moid": moid, "name": props.get("name"), "files": hits[:10]}
-                )
-    return rows, complete
-
-
 async def resolve_for_path(
     connector: VmwareRestConnector,
     target: Any,
@@ -348,8 +290,9 @@ async def resolve_for_path(
     params: dict[str, Any],
     obj: dict[str, Any],
 ) -> tuple[Datastore | None, TeardownPlan | None]:
-    """Static path check + datastore resolution shared by both ops."""
-    problem = path_problem(params.get("path"))
+    """Path rules + datastore resolution shared by both ops (refusal plan or datastore)."""
+    problem = moid_problem(params.get("datastore"), DATASTORE_MOID_PATTERN, "datastore")
+    problem = problem or path_problem(params.get("path"))
     if problem is not None:
         return None, TeardownPlan(obj, False, refusal=(STATUS_INVALID_REQUEST, problem))
     ds = await resolve_datastore(connector, target, operator, params["datastore"])
@@ -360,5 +303,17 @@ async def resolve_for_path(
             "(e.g. from vmware.composite.datastore.usage)",
         )
         return None, TeardownPlan(obj, False, refusal=refusal)
-    obj.update(datastore_name=ds.name, datastore_path=ds.path_of(params["path"]))
+    obj.update(
+        datastore_name=ds.name,
+        datastore_type=ds.type,
+        datastore_path=ds.path_of(params["path"]),
+    )
+    if ds.type.upper() not in _SUPPORTED_TYPES:
+        refusal = (
+            STATUS_INVALID_REQUEST,
+            f"datastore {ds.name!r} has type {ds.type or 'unknown'!r}. Only VMFS and NFS "
+            "datastores are supported: on vSAN and vVol datastores vCenter lists VM files by "
+            "folder UUID, so the check for files of registered VMs could not be trusted",
+        )
+        return None, TeardownPlan(obj, False, refusal=refusal)
     return ds, None

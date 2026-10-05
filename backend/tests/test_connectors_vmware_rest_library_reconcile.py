@@ -115,6 +115,7 @@ def test_library_delete_manifests_are_expected() -> None:
         "GET:/content/library/item/{libraryItemId}",
         "GET:/content/subscribed-library",
         "GET:/content/subscribed-library/{libraryId}",
+        "GET:/content/library/{library}/subscriptions",
         "DELETE:/content/local-library/{libraryId}",
         "DELETE:/content/subscribed-library/{libraryId}",
     }

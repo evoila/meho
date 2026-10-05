@@ -2291,7 +2291,8 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
             "network.portgroup.create). First it reads the portgroup: its name, "
             "switch, VLAN and the VMs on it. It also asks the switch which ports are "
             "connected. If any VM, VMkernel adapter or other port still uses the "
-            "portgroup, or if it is the switch's uplink portgroup, nothing is changed "
+            "portgroup, if it is the switch's uplink portgroup, or if it is backed by an "
+            "NSX segment, nothing is changed "
             "and the result is status='precondition_failed' with the users listed in "
             "'blockers'. Otherwise it runs the vSphere Destroy_Task, waits for it and "
             "reads the portgroup again: status='deleted' when it is gone. If the "
@@ -2316,7 +2317,8 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
             "output_shape": (
                 "{status: deleted|unchanged|precondition_failed|still_present|timeout, "
                 "object: {kind, moid, name, dvs, vlan, num_ports, port_binding, uplink, "
-                "port_check}, blockers: [{kind: vm|port, ...}], task, task_state, guidance}. "
+                "backing_type, port_check}, blockers: [{kind: vm|port, ...}], task, "
+                "task_state, guidance}. "
                 "A vSphere error makes the call fail; it is not a status."
             ),
         },
@@ -2383,7 +2385,8 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
             "included, so this op only deletes an EMPTY folder. A folder with any "
             "content gives status='precondition_failed' with the content listed in "
             "'blockers'. The top folders of vCenter and of a datacenter are refused "
-            "too. Otherwise it runs Folder.Destroy_Task, waits for it and reads the "
+            "too, and a datastore cluster ('group-p...') is not accepted. Otherwise it "
+            "runs Folder.Destroy_Task, waits for it and reads the "
             "folder again: status='deleted' when it is gone. A folder that does not "
             "exist gives status='unchanged'. If vSphere reports an error, the call "
             "fails. Destructive: a second person must always approve it. Like 'govc "
@@ -2425,12 +2428,17 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
             "Deletes one file, or one folder with everything in it, on a datastore. "
             "Use it to clean up what a teardown leaves behind: the folder of a deleted "
             "VM, an old ISO, an installer folder. The path is relative to the root of "
-            "the datastore. Refused before any change: the root itself, '..', "
-            "wildcards, hidden system folders ('.*') and content-library folders "
-            "('contentlib-*'); the input check rejects these already at preview. Also "
+            "the datastore. Refused before any change (the input check rejects these "
+            "already at preview): the root itself, '..', names starting with '.' at any "
+            "depth (hidden and lock files), spaces at the start or end of a name, "
+            "wildcards, and the top-level folders 'contentlib-*' (content library), "
+            "'fcd' and 'catalog' (first-class disks such as Kubernetes volumes). Only "
+            "VMFS and NFS datastores are supported (vSAN and vVol are refused). Also "
             "refused (status='precondition_failed'): a path that is, or contains, a "
-            "file of any VM registered in this vCenter (disks, .vmx, snapshots, logs); "
-            "the VMs are listed in 'blockers'. A path that does not exist gives "
+            "file a VM registered in this vCenter uses (disks, .vmx, snapshots, logs, "
+            "or an ISO / floppy image in its drive, also when the VM is powered off); "
+            "the VMs are listed in 'blockers'. If vCenter answers only part of that "
+            "question, the delete is refused too. A path that does not exist gives "
             "status='unchanged'. Otherwise it runs FileManager.DeleteDatastoreFile_Task, "
             "waits for it and checks again: status='deleted'. If vSphere reports an "
             "error, the call fails. Destructive: a second person must always approve "
@@ -2476,13 +2484,13 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         summary="Create a folder on a datastore. Does nothing if it already exists.",
         description=(
             "Creates one folder on a datastore with vSphere FileManager.MakeDirectory "
-            "(the partner of datastore.file.delete). Same path rules as the delete. "
+            "(the partner of datastore.file.delete). Same path rules as the delete, "
+            "and only on VMFS and NFS datastores. "
             "If the folder already exists: status='unchanged'. If a file has that "
             "name, or the parent folder is missing and create_parents is not true: "
             "status='precondition_failed'. Both are decided before any change. Then "
             "it checks again: status='created'. If vSphere reports an error, the call "
-            "fails. Needs approval (caution level). On vSAN and vVol datastores, "
-            "top-level folders need a different API and are not supported. Like "
+            "fails. Needs approval (caution level). Like "
             "'govc datastore.mkdir [-p]'."
         ),
         parameter_schema=DATASTORE_DIR_CREATE_PARAMETER_SCHEMA,
@@ -2513,14 +2521,16 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
             "Deletes one content library, found by id or by name. It reads the "
             "library type first and uses the matching vCenter call (DELETE "
             "/content/local-library/{id} or /content/subscribed-library/{id}). "
-            "Refused before any change (status='precondition_failed'): another "
-            "library on this vCenter subscribes to it (the subscribers are listed in "
-            "'blockers'), or it still has items and delete_items is not true. A "
+            "Ids must be vCenter UUIDs. Refused before any change "
+            "(status='precondition_failed'): another library subscribes to it (on "
+            "this vCenter, or a subscription the library itself knows of on another "
+            "vCenter; listed in 'blockers'), a VM has one of its items in a CD-ROM or "
+            "floppy drive, or it still has items and delete_items is not true. A "
             "library that does not exist gives status='unchanged'; a name that "
             "matches more than one library gives status='invalid_request'. Then it "
             "reads the library again: status='deleted'. Destructive: a second person "
             "must always approve it, after seeing the number and size of the items "
-            "that will be deleted. Subscribers on other vCenters cannot be seen. Like "
+            "that will be deleted. Like "
             "'govc library.rm'."
         ),
         parameter_schema=CONTENT_LIBRARY_DELETE_PARAMETER_SCHEMA,
@@ -2535,7 +2545,7 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
                 "subscribed libraries before the library they subscribe to."
             ),
             "parameter_hints": {
-                "library_id": "Library id (preferred).",
+                "library_id": "Library id, a UUID (preferred).",
                 "library_name": "Library name; a name that matches more than one is refused.",
                 "delete_items": "true to delete a library that still has items.",
             },
@@ -2552,9 +2562,11 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         summary="Delete one item of a local content library.",
         description=(
             "Deletes one content-library item (DELETE /content/library/item/{id}), "
-            "found by id or by name inside a library. An item of a subscribed library "
-            "is refused (status='precondition_failed'), because its content comes "
-            "from the publishing library. An item that does not exist gives "
+            "found by id (a vCenter UUID) or by name inside a library. Refused "
+            "(status='precondition_failed') unless the item's library reads back as a "
+            "local library on this vCenter (a subscribed library's items come from the "
+            "publisher), and while a VM has the item in a CD-ROM or floppy drive. An "
+            "item that does not exist gives "
             "status='unchanged'; a name that matches more than one item gives "
             "status='invalid_request'. Then it reads the item again: "
             "status='deleted'. Destructive: a second person must always approve it, "
@@ -2570,7 +2582,7 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         llm_instructions={
             "when_to_use": "Use it to remove one OVF, ISO or template item from a local library.",
             "parameter_hints": {
-                "item_id": "Library item id (preferred).",
+                "item_id": "Library item id, a UUID (preferred).",
                 "item_name": "Item name; also give library_id or library_name.",
             },
             "output_shape": (

@@ -1530,13 +1530,13 @@ after reading what will be deleted (the blast radius). The seventh,
 
 | op_id | What it removes | vSphere call | Refused before any change when |
 | --- | --- | --- | --- |
-| `network.portgroup.delete` | one distributed portgroup | vim `DistributedVirtualPortgroup.Destroy_Task` (polled) | a VM is on it, any other port is connected (VMkernel / host adapter, read with `FetchDVPorts`), or it is the uplink portgroup |
-| `host.standard_portgroup.delete` | one port group on one host's standard switch | vim `HostNetworkSystem.RemovePortGroup` (synchronous) | a VM registered on that host (also powered off) or a VMkernel adapter uses it |
-| `folder.delete` | one EMPTY folder | vim `Folder.Destroy_Task` (polled) | the folder has any content (vSphere would delete it too), or it is a root / datacenter system folder |
-| `datastore.file.delete` | one file, or one folder with all its files | vim `FileManager.DeleteDatastoreFile_Task` (polled) | the path is the root, leaves the root, has wildcards, starts in a hidden system folder (`.*`) or a content-library folder (`contentlib-*`), or is / contains a file of a registered VM |
-| `datastore.dir.create` | -- (creates one folder) | vim `FileManager.MakeDirectory` (synchronous) | a file has that name, or the parent is missing and `create_parents` is not true |
-| `content_library.delete` | one library (local or subscribed) | REST `DELETE /content/local-library/{id}` or `/content/subscribed-library/{id}` | another library on this vCenter subscribes to it, or it has items and `delete_items` is not true |
-| `content_library.item.delete` | one item of a local library | REST `DELETE /content/library/item/{id}` | the item belongs to a subscribed library |
+| `network.portgroup.delete` | one distributed portgroup | vim `DistributedVirtualPortgroup.Destroy_Task` (polled) | a VM is on it; any other port is connected (VMkernel / host adapter, read with `FetchDVPorts`); it is the uplink portgroup; it is backed by an NSX segment |
+| `host.standard_portgroup.delete` | one port group on one host's standard switch | vim `HostNetworkSystem.RemovePortGroup` (synchronous) | a VM registered on that host (also powered off) or a VMkernel adapter uses it; the host has no network config manager |
+| `folder.delete` | one EMPTY folder | vim `Folder.Destroy_Task` (polled) | the folder has any content (vSphere would delete it too); it is a root / datacenter top folder; it is a datastore cluster (`group-p`) |
+| `datastore.file.delete` | one file, or one folder with all its files | vim `FileManager.DeleteDatastoreFile_Task` (polled) | the path breaks the path rules below; the datastore is not VMFS or NFS; the path is, or contains, a file a registered VM uses |
+| `datastore.dir.create` | -- (creates one folder) | vim `FileManager.MakeDirectory` (synchronous) | the path rules; not VMFS / NFS; a file has that name; the parent is missing and `create_parents` is not true |
+| `content_library.delete` | one library (local or subscribed) | REST `DELETE /content/local-library/{id}` or `/content/subscribed-library/{id}` | the id is not a UUID; another library subscribes to it; a VM mounts one of its items; it has items and `delete_items` is not true |
+| `content_library.item.delete` | one item of a local library | REST `DELETE /content/library/item/{id}` | the id is not a UUID; its library does not read back as LOCAL on this vCenter; a VM mounts the item |
 
 **One plan, used twice.** Each op has one read-only planning function
 (`_teardown.TeardownPlan`). It reads the object, decides if it exists, lists
@@ -1558,13 +1558,31 @@ dispatcher records `connector_error` and audits the call as failed -- never as
 success (the #3881 review lesson). A poll that runs out of time returns
 `status="timeout"`.
 
+**Strict inputs.** Every moid or id that goes into a URL path is shape-checked
+in the parameter schema (preview time) and again in the handler, before any
+request: `dvportgroup-N`, `host-N`, `group-xN` (not `group-p`), `datastore-N`,
+and UUIDs for content-library and item ids. So no input can point a request at
+another object (httpx removes `..` path segments before it sends a request).
+The patterns live once in `schemas.py`.
+
+**Partial answers refuse.** `_teardown_reads` never reads an incomplete
+vCenter answer as "nothing uses it". A property vCenter could not read (a
+`missingSet` entry, e.g. missing permission) on the object to delete fails the
+call before any write. For the "who uses it" reads of many objects (VMs on a
+datastore, network objects of a host, VMs that mount library items) a paged
+answer (`token`), a left-out object or an unreadable property refuses the
+delete. Only the distributed-portgroup port list (`FetchDVPorts`) is best
+effort: it only names users, `object.port_check` shows when it failed, and
+vSphere itself refuses to delete a portgroup with connected ports
+(`ResourceInUse`, which raises).
+
 **Read-back.** After the write each op reads the object again (#3313 pattern):
 
 | op_id | Read-back | Absent means |
 | --- | --- | --- |
-| `network.portgroup.delete` | `RetrievePropertiesEx` of the portgroup | `ManagedObjectNotFound` (promoted) or an empty result |
+| `network.portgroup.delete` | `RetrievePropertiesEx` of the portgroup | `ManagedObjectNotFound` (SOAP- or JSON-shaped) or an empty result |
 | `host.standard_portgroup.delete` | host `config.network.portgroup` | no entry with that `spec.name` |
-| `folder.delete` | `RetrievePropertiesEx` of the folder | `ManagedObjectNotFound` or empty result |
+| `folder.delete` | `RetrievePropertiesEx` of the folder | `ManagedObjectNotFound` or an empty result |
 | `datastore.file.delete` | `SearchDatastore_Task` on the parent folder | no exact name match, or the parent is gone (`FileNotFound`) |
 | `datastore.dir.create` | `SearchDatastore_Task` on the parent folder | -- (must find a `FolderFileInfo`) |
 | `content_library.delete` | `GET /content/library/{id}` | HTTP 404 |
@@ -1581,41 +1599,68 @@ differ), and `vm.deploy_from_library` already uses the same find / item reads
 on 8.0.x. Composites are not affected by the per-catalog version guard (#3568),
 which applies to ingested ops only.
 
-**Datastore file details.** `datastore` is a moid and `path` is relative to the
-datastore root; the parameter schema and `_datastore_browse.path_problem` share
-one pattern (`schemas.DATASTORE_PATH_PATTERN`), so preview and call reject the
-same paths. The datacenter that `FileManager` needs is found by walking
-`Datastore.parent` up to the `Datacenter`. The VM file check reads
-`layoutEx.file` + `config.files.vmPathName` for every VM in `Datastore.vm`, 50
-VMs per read. The comparison ignores case, so it refuses more, never less. A VM
-without `layoutEx` blocks its whole home folder. A VM whose files cannot be read
-at all, or a paged answer (`token`), refuses the delete. Not detectable: VMs of
-another vCenter that share the datastore, and ISO files mounted in a VM's CD-ROM
-(vSphere locks the file of a running VM, so that delete fails and raises).
-`VimTaskResult.fault_type` (new) carries the vim fault class name so a browse of
-a missing folder (`FileNotFound`) reads as "absent". vCenter targets only.
+**Datastore path rules.** `datastore` is a moid and `path` is relative to the
+datastore root. The parameter schema and `_datastore_browse.path_problem`
+share one pattern (`schemas.DATASTORE_PATH_PATTERN`), so preview and call
+reject the same paths: no root, no leading `/`, no empty segment, no segment
+that starts with `.` (hidden and lock files at any depth, and so no `.` / `..`)
+or starts or ends with whitespace, no wildcards, brackets, backslashes or
+control characters. The top-level folder may not be `contentlib-*`, `fcd` or
+`catalog` (ignoring case): content-library folders are deleted through the
+library ops, and `fcd` / `catalog` hold first-class disks (for example
+Kubernetes volumes that no VM lists) and their index.
 
-**Port group details.** Inputs are moids (`dvportgroup-N`, `host-N`) and the
-schemas pin that shape, so a display name is rejected at preview time (#3323).
-For a distributed portgroup the connected-port read (`FetchDVPorts`) only names
-users; if it fails, `object.port_check` says so and the delete continues,
-because vSphere itself refuses to delete a portgroup with connected ports
-(`ResourceInUse`, which raises). For a host standard port group the VM check is
-not best-effort: VMs of that host whose NICs use the port group's vCenter
-`Network` object block the delete, also when powered off (vSphere only refuses
-for live ports). A failing read there fails the call.
+**Datastore file details.** Only `VMFS`, `NFS` and `NFS41` datastores
+(`summary.type`) are supported. On vSAN and vVol vCenter lists VM files by a
+folder UUID while people use the friendly folder name, so the VM file check
+could not match them; these and unknown types are refused. The browse answer
+gives the path vSphere resolved (`folderPath` + entry name); the VM file check,
+the delete call and the read-back all use that path, never the raw input. The
+VM file check (`_datastore_claims.vm_claims`) reads every VM in `Datastore.vm`:
+`layoutEx.file`, the `fileName` of every device backing (disks, and the ISO /
+floppy images and serial-port files `layoutEx` does not list, also on powered-off
+VMs and templates) and the `.vmx`. A VM without `layoutEx` blocks its whole
+home folder; a VM whose files cannot be known refuses the delete. The
+comparison ignores case, so it refuses more, never less. Not detectable: VMs
+of another vCenter that share the datastore. `VimTaskResult.fault_type` (new)
+carries the vim fault class so a browse of a missing folder (`FileNotFound`)
+reads as "absent". vCenter targets only.
 
-**Content library details.** A library with items needs `delete_items=true`
-(the #3331 explicit-flag shape); the blast radius lists up to 50 items with
-their sizes, and `item_count` is always exact. Subscribers are found by reading
-every subscribed library on this vCenter and matching the library id in its
-`subscription_url`; subscribers on other vCenters cannot be seen.
+**Port group details.** For a host standard port group, VMs registered on that
+host whose NICs use the port group's vCenter `Network` object block the delete,
+also when powered off (vSphere only refuses for live ports). A distributed
+portgroup backed by NSX (`config.backingType == "nsx"`) is refused: delete the
+NSX segment instead.
+
+**Folder details.** vSphere has no "delete only if empty" call. Something
+moved into the folder in the moment between the check and `Destroy_Task` would
+be deleted with it. This short race is accepted.
+
+**Content library details.** Library and item ids must be UUIDs
+(`schemas.CONTENT_LIBRARY_ID_PATTERN`), checked in the schema and the handler
+(`_library_checks.id_problem`), also for ids vCenter returns for a name. A
+library with items needs `delete_items=true` (the #3331 explicit-flag shape);
+the blast radius lists up to 50 items with their sizes, and `item_count` is
+always exact. Subscribers are subscribed libraries on this vCenter whose
+`subscription_url` names the library id, plus the subscriptions the published
+library itself knows (`GET /content/library/{library}/subscriptions`, which
+also lists other vCenters). Subscribers on other vCenters that the publisher
+does not know of cannot be seen. A VM mounts an item when a CD-ROM or floppy
+backing `fileName` contains `/<item id>/`; the VMs are read through the
+library's datastores (`Datastore.vm`). A library not stored only on datastores
+(with items) is refused, because the check cannot run. The item delete refuses
+unless the item's `library_id` is a UUID that reads back as a LOCAL library.
 
 Code: `composites/_teardown.py` (shared plan helpers + `folder.delete`),
-`_teardown_network.py`, `_datastore_browse.py` + `_datastore_files.py`,
-`_library_delete.py`. Governed sub-op manifests are listed in
-`_governed_subops.py`; the vim paths are reconciled against the pinned
-`vi-json.yaml` and the REST paths against `vcenter.yaml`.
+`_teardown_reads.py` (strict reads), `_teardown_network.py`,
+`_datastore_browse.py` + `_datastore_claims.py` + `_datastore_files.py`,
+`_library_checks.py` + `_library_delete.py`. Governed sub-op manifests are
+listed in `_governed_subops.py`; the vim paths are reconciled against the
+pinned `vi-json.yaml` and the REST paths against `vcenter.yaml`.
+
+Follow-up (not in #3339): `_write._split_sub_op` puts path values into URLs
+without percent-encoding. The new ops validate every id first; the older
+library ops (`content_library.subscribed.status` / `.sync`) do not yet.
 
 ### Governed NFS tag-based SPBM storage policy (`storage_policy.*`, #3494)
 

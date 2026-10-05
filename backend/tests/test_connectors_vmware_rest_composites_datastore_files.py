@@ -49,13 +49,14 @@ def gate(monkeypatch: pytest.MonkeyPatch) -> GateRecorder:
     return recorder
 
 
-def _estate(*, vms: dict[str, dict[str, Any]] | None = None) -> VimFake:
+def _estate(*, vms: dict[str, dict[str, Any]] | None = None, ds_type: str = "NFS") -> VimFake:
     """One datastore ``demo-ds`` under a datastore folder under ``datacenter-2``."""
     conn = VimFake()
     conn.add(
         "Datastore",
         "datastore-17",
         name="demo-ds",
+        **{"summary.type": ds_type},
         browser=moref("HostDatastoreBrowser", "datastoreBrowser-datastore-17"),
         parent=moref("Folder", "group-s5"),
         vm=[moref("VirtualMachine", moid) for moid in (vms or {})],
@@ -177,7 +178,7 @@ async def test_delete_refuses_when_vm_files_are_unknowable(gate: GateRecorder) -
     conn = _estate(vms={"vm-6": {"name": "broken-vm"}})
     out = await _delete(conn, "iso/stale.iso")
     assert out["status"] == "precondition_failed"
-    assert "could not enumerate" in out["guidance"]
+    assert "only part" in out["guidance"]
     assert gate.calls == []
 
 
@@ -214,6 +215,21 @@ _BAD_PATHS = [
     "a//b",
     "trailing/",
     "bad\x01name",
+    # #3925 review: spaces at a segment's start / end, hidden names at any
+    # depth, first-class disks + their index, any-case content-library folders.
+    " /live-vm",
+    " /live-vm/live-vm.vmdk",
+    "live-vm/ /x",
+    "live-vm ",
+    " live-vm",
+    "x/.lck-1",
+    "live-vm/.lck-0000000000000001",
+    "fcd",
+    "fcd/disk-1.vmdk",
+    "FCD/x",
+    "catalog",
+    "Catalog/vclock",
+    "CONTENTLIB-1234/item",
 ]
 
 
@@ -236,7 +252,9 @@ def test_schema_and_handler_agree_on_bad_paths(path: str) -> None:
         )
 
 
-@pytest.mark.parametrize("path", ["old-appliance", "iso/stale.iso", "a b/c.d-e_f", "x/.lck-1"])
+@pytest.mark.parametrize(
+    "path", ["old-appliance", "iso/stale.iso", "a b/c.d-e_f", "fcdx/a", "catalogue", "a."]
+)
 def test_schema_and_handler_accept_good_paths(path: str) -> None:
     assert path_problem(path) is None
     Draft202012Validator(DATASTORE_FILE_DELETE_PARAMETER_SCHEMA).validate(
@@ -394,3 +412,124 @@ async def test_dir_create_preview_is_a_param_echo() -> None:
         "path": "iso",
         "create_parents": False,
     }
+
+
+# ---------------------------------------------------------------------------
+# #3925 review fixes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("ds_type", ["vsan", "VVOL", "vsanD", "PMEM", ""])
+async def test_unsupported_datastore_types_are_refused(gate: GateRecorder, ds_type: str) -> None:
+    """vSAN / vVol list VM files by folder UUID, so the VM file check is not trusted there."""
+    conn = _estate(ds_type=ds_type)
+    out = await _delete(conn, "iso/stale.iso")
+    assert out["status"] == "invalid_request"
+    assert "Only VMFS and NFS" in out["guidance"]
+    assert "SearchDatastore_Task" not in conn.methods()
+    assert gate.calls == []
+    created = await _mkdir(conn, "new")
+    assert created["status"] == "invalid_request"
+
+
+@pytest.mark.parametrize("ds_type", ["VMFS", "NFS", "NFS41"])
+async def test_supported_datastore_types(gate: GateRecorder, ds_type: str) -> None:
+    out = await _delete(_estate(ds_type=ds_type), "iso/stale.iso")
+    assert out["status"] == "deleted"
+    assert out["object"]["datastore_type"] == ds_type
+
+
+async def test_checks_and_delete_use_the_path_vsphere_resolved(gate: GateRecorder) -> None:
+    """The claim check and the delete use folderPath + name from the browse answer."""
+    conn = _estate(vms=_live_vm())
+    conn.files["demo-ds"]["Live-VM"] = None
+    conn.files["demo-ds"]["Live-VM/live-vm.vmx"] = 1
+    out = await _delete(conn, "Live-VM/live-vm.vmx")
+    # The VM claims "live-vm/live-vm.vmx"; the compare ignores case -> refused.
+    assert out["status"] == "precondition_failed"
+    out = await _delete(conn, "iso/stale.iso")
+    assert out["object"]["resolved_path"] == "[demo-ds] iso/stale.iso"
+    assert conn.calls_to("DeleteDatastoreFile_Task")[0][1]["name"] == "[demo-ds] iso/stale.iso"
+
+
+async def test_delete_refuses_an_iso_mounted_by_a_powered_off_vm(gate: GateRecorder) -> None:
+    """A CD-ROM image is not in layoutEx; the device backing still claims it."""
+    vm = {
+        "name": "template-vm",
+        "layoutEx.file": [{"name": "[other-ds] template-vm/template-vm.vmx"}],
+        "config.files.vmPathName": "[other-ds] template-vm/template-vm.vmx",
+        "config.hardware.device": [
+            {
+                "_typeName": "VirtualCdrom",
+                "key": 3000,
+                "backing": {
+                    "_typeName": "VirtualCdromIsoBackingInfo",
+                    "fileName": "[demo-ds] iso/stale.iso",
+                },
+            }
+        ],
+    }
+    conn = _estate(vms={"vm-8": vm})
+    out = await _delete(conn, "iso")
+    assert out["status"] == "precondition_failed"
+    assert out["blockers"] == [
+        {"kind": "vm", "moid": "vm-8", "name": "template-vm", "files": ["iso/stale.iso"]}
+    ]
+    assert gate.calls == []
+
+
+async def test_vm_without_layout_and_home_elsewhere_is_unknowable(gate: GateRecorder) -> None:
+    """In Datastore.vm, no layoutEx, no devices, .vmx elsewhere -> refuse (not 'nothing')."""
+    vm = {"name": "odd-vm", "config.files.vmPathName": "[other-ds] odd-vm/odd-vm.vmx"}
+    conn = _estate(vms={"vm-9": vm})
+    out = await _delete(conn, "iso/stale.iso")
+    assert out["status"] == "precondition_failed"
+    assert "only part" in out["guidance"]
+
+
+async def test_vm_left_out_of_the_answer_refuses(gate: GateRecorder) -> None:
+    conn = _estate(vms=_live_vm())
+    conn.omitted.add("vm-5")
+    out = await _delete(conn, "iso/stale.iso")
+    assert out["status"] == "precondition_failed"
+    assert gate.calls == []
+
+
+async def test_unreadable_vm_property_refuses(gate: GateRecorder) -> None:
+    conn = _estate(vms=_live_vm())
+    conn.unreadable[("VirtualMachine", "vm-5")] = {"layoutEx.file"}
+    out = await _delete(conn, "iso/stale.iso")
+    assert out["status"] == "precondition_failed"
+    assert gate.calls == []
+
+
+async def test_unreadable_datastore_vm_list_fails_the_call(gate: GateRecorder) -> None:
+    """A partial read of the datastore itself fails before any write."""
+    conn = _estate()
+    conn.unreadable[("Datastore", "datastore-17")] = {"vm"}
+    with pytest.raises(Exception, match="could not read vm"):
+        await _delete(conn, "iso/stale.iso")
+    assert gate.calls == []
+
+
+@pytest.mark.parametrize("datastore", ["../Folder/group-v1", "demo-ds", "datastore-"])
+async def test_datastore_moid_shape_is_checked_before_any_io(
+    gate: GateRecorder, datastore: str
+) -> None:
+    conn = _estate()
+    out = await _datastore_files.datastore_file_delete_composite(
+        operator=operator(),
+        target=object(),
+        params={"datastore": datastore, "path": "iso"},
+        connector=conn,
+    )
+    assert out["status"] == "invalid_request"
+    assert conn.calls == []
+
+
+async def test_dir_create_park_keeps_write_off_the_wire(monkeypatch: pytest.MonkeyPatch) -> None:
+    verdict = parked(_MKDIR_OP)
+    monkeypatch.setattr(_write, "enforce_subop_policy", GateRecorder(verdict))
+    conn = _estate()
+    assert await _mkdir(conn, "fresh") is verdict
+    assert "MakeDirectory" not in conn.methods()

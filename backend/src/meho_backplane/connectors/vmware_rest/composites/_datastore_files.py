@@ -23,17 +23,22 @@ transport has no builder for these methods).
 Guards (before any write; the parameter schema rejects the static ones at
 preview time too):
 
-* the path must be relative, non-empty, free of ``.`` / ``..`` segments,
-  wildcards, brackets, backslashes and control characters -- so it can never
-  name the datastore root or leave it;
-* its top-level entry must not be hidden (``.sdd.sf``, ``.vSphere-HA``,
-  ``.dvsData`` -- datastore system areas) or a ``contentlib-*`` content-library
-  backing (delete those through ``content_library.*.delete``);
-* ``file.delete`` refuses any path that is -- or contains -- a file of a VM
-  registered in this vCenter (``VirtualMachine.layoutEx.file`` +
-  ``config.files.vmPathName`` for every VM in ``Datastore.vm``, i.e. live disks,
-  snapshots, ``.vmx``, logs), naming the VMs. The VM read is chunked and
-  fail-closed: a paged (incomplete) answer refuses rather than guessing.
+* the path must be relative and plain: no root, no leading ``/``, no empty
+  segment, no segment that starts with ``.`` (hidden / system files at any
+  depth, and so no ``.`` / ``..``) or starts or ends with a space, no
+  wildcards, brackets, backslashes or control characters;
+* the top-level folder may not be ``contentlib-*`` (content-library backing --
+  use the ``content_library`` delete ops), ``fcd`` or ``catalog`` (first-class
+  disks, e.g. Kubernetes volumes, and their index), ignoring case;
+* only VMFS and NFS datastores (on vSAN / vVol vCenter lists VM files by folder
+  UUID, so the VM file check below could not be trusted);
+* ``file.delete`` refuses a path that is -- or contains -- a file a registered
+  VM uses (:mod:`._datastore_claims`: ``layoutEx.file``, device backings such
+  as a mounted ISO, the ``.vmx``), naming the VMs. A partial answer from
+  vCenter refuses rather than guessing.
+
+Every check, the delete call and the read-back use the path as vSphere
+resolved it while browsing, never the raw input text.
 """
 
 from __future__ import annotations
@@ -51,8 +56,8 @@ from meho_backplane.connectors.vmware_rest.composites._datastore_browse import (
     search,
     stat_path,
     tree,
-    vm_claims,
 )
+from meho_backplane.connectors.vmware_rest.composites._datastore_claims import vm_claims
 from meho_backplane.connectors.vmware_rest.composites._teardown import (
     STATUS_DELETED,
     STATUS_PRECONDITION_FAILED,
@@ -124,42 +129,48 @@ async def plan_datastore_file_delete(
     *,
     enumerate_tree: bool,
 ) -> TeardownPlan:
-    """Plan a datastore file / directory delete (read-only)."""
+    """Plan a datastore file / folder delete (read-only).
+
+    Every check and the delete itself use the path as vSphere resolved it
+    (``context["path"]``), not the raw input.
+    """
     obj: dict[str, Any] = {
         "kind": "datastore_path",
-        "datastore": params["datastore"],
+        "datastore": params.get("datastore"),
         "path": params.get("path"),
     }
     ds, early = await resolve_for_path(connector, target, operator, params, obj)
     if early is not None or ds is None:
         return early or TeardownPlan(obj, False)
-    path = str(params["path"])  # validated by resolve_for_path
-    entry = await stat_path(connector, target, operator, ds, path)
-    if entry is None:
+    found = await stat_path(connector, target, operator, ds, str(params["path"]))
+    if found is None:
         return TeardownPlan(obj, False)
+    entry, path = found
     folder = is_folder(entry)
     obj.update(
         kind="datastore_directory" if folder else "datastore_file",
+        resolved_path=ds.path_of(path),
         file_type=entry.get(VIM_TYPE_NAME_KEY),
         size_bytes=entry.get("fileSize"),
         modified=entry.get("modification"),
     )
-    plan = TeardownPlan(obj, True, context={"ds": ds})
+    plan = TeardownPlan(obj, True, context={"ds": ds, "path": path})
     claims, complete = await vm_claims(connector, target, operator, ds, path)
     plan.blockers = capped(claims)
     if claims:
         names = ", ".join(str(row.get("name") or row["moid"]) for row in claims[:10])
         plan.refusal = (
             STATUS_PRECONDITION_FAILED,
-            f"{ds.path_of(path)!r} holds files of {len(claims)} registered VM(s) [{names}] "
-            "(live disks / .vmx / snapshots). Destroy or unregister the VM first "
-            "(vmware.composite.vm.destroy); see 'blockers'",
+            f"{ds.path_of(path)!r} holds files that {len(claims)} registered VM(s) use "
+            f"[{names}] (disks, .vmx, snapshots, logs, or a mounted ISO / floppy image). "
+            "Delete or unregister the VM, or unmount the image, first; see 'blockers'",
         )
     elif not complete:
         plan.refusal = (
             STATUS_PRECONDITION_FAILED,
-            "could not enumerate every registered VM's files on this datastore (paged "
-            "PropertyCollector answer); refusing rather than risk a live VM file",
+            "vCenter answered only part of the question 'which VMs use files here?' (a "
+            "paged or unreadable answer, or a VM whose files cannot be read). Refusing rather "
+            "than risk deleting a file a VM uses",
         )
     if folder and enumerate_tree:
         plan.children, obj["file_count"], obj["total_bytes"] = await tree(
@@ -189,7 +200,7 @@ async def datastore_file_delete_composite(
     if early is not None:
         return early
     ds: Datastore = plan.context["ds"]
-    path = params["path"]
+    path: str = plan.context["path"]
     gate, task_payload = await _write_vmomi_sub_op(
         connector,
         target,
@@ -259,7 +270,7 @@ async def _plan_dir_create(
     """Plan a directory create; ``present`` means it already exists (-> unchanged)."""
     obj: dict[str, Any] = {
         "kind": "datastore_directory",
-        "datastore": params["datastore"],
+        "datastore": params.get("datastore"),
         "path": params.get("path"),
     }
     ds, early = await resolve_for_path(connector, target, operator, params, obj)
@@ -328,8 +339,8 @@ async def datastore_dir_create_composite(
     )
     if gate is not None:
         return gate
-    entry = await stat_path(connector, target, operator, ds, path)
-    if entry is not None and is_folder(entry):
+    found = await stat_path(connector, target, operator, ds, path)
+    if found is not None and is_folder(found[0]):
         return envelope(plan, STATUS_CREATED)
     return envelope(
         plan,

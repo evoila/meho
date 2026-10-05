@@ -25,7 +25,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.connectors import OperationResult
-from meho_backplane.connectors.vmware_rest.composites._read import _extract_props_by_moid
 from meho_backplane.connectors.vmware_rest.composites._teardown import (
     STATUS_DELETED,
     STATUS_INVALID_REQUEST,
@@ -37,26 +36,33 @@ from meho_backplane.connectors.vmware_rest.composites._teardown import (
     destroy_outcome,
     destroy_task,
     envelope,
-    moref_values,
     pre_write_outcome,
-    read_object,
     timeout_envelope,
     vm_rows,
+)
+from meho_backplane.connectors.vmware_rest.composites._teardown_reads import (
+    IncompleteAnswerError,
+    moid_problem,
+    moref_values,
+    read_many,
+    read_object,
 )
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _DVPG_MO_TYPE,
     _HOST_SYSTEM_MO_TYPE,
     _OP_RETRIEVE_PROPERTIES,
-    _VMOMI_RETRIEVE_PROPERTIES_PATH,
     _moref_value,
     _observed_vlan_identity,
     _unwrap_value,
     _vlan_identity_view,
     _write_vmomi_sub_op,
 )
+from meho_backplane.connectors.vmware_rest.composites.schemas import (
+    HOST_MOID_PATTERN,
+    PORTGROUP_MOID_PATTERN,
+)
 from meho_backplane.connectors.vmware_rest.vim_body import (
     VIM_TYPE_NAME_KEY,
-    retrieve_properties_body,
     unwrap_vim_value,
 )
 
@@ -97,6 +103,8 @@ _VMWARE_DVS_MO_TYPE: Final = "VmwareDistributedVirtualSwitch"
 _NETWORK_MO_TYPE: Final = "Network"
 #: ``_typeName`` of the ``FetchDVPorts`` criteria DataObject (#3103 annotation).
 _DVS_PORT_CRITERIA_TYPE: Final = "DistributedVirtualSwitchPortCriteria"
+#: ``DVPortgroupConfigInfo.backingType`` of an NSX-backed portgroup.
+_NSX_BACKING: Final = "nsx"
 
 # ===========================================================================
 # network.portgroup.delete -- DistributedVirtualPortgroup.Destroy_Task
@@ -167,6 +175,7 @@ def _dvpg_identity(
         "num_ports": config.get("numPorts"),
         "port_binding": config.get("type"),
         "uplink": config.get("uplink") is True,
+        "backing_type": config.get("backingType"),
     }
     return obj, (str(dvs_type or ""), dvs_moid) if dvs_moid is not None else None
 
@@ -214,13 +223,15 @@ async def plan_network_portgroup_delete(
 ) -> TeardownPlan:
     """Plan a distributed-portgroup delete (read-only)."""
     portgroup = params["portgroup"]
+    obj: dict[str, Any] = {"kind": "distributed_portgroup", "moid": portgroup}
+    problem = moid_problem(portgroup, PORTGROUP_MOID_PATTERN, "portgroup")
+    if problem is not None:
+        return TeardownPlan(obj, False, refusal=(STATUS_INVALID_REQUEST, problem))
     props = await read_object(
         connector, target, operator, mo_type=_DVPG_MO_TYPE, moid=portgroup, props=_PG_PROPS
     )
     if props is None:
-        return TeardownPlan(
-            object={"kind": "distributed_portgroup", "moid": portgroup}, present=False
-        )
+        return TeardownPlan(object=obj, present=False)
     obj, dvs = _dvpg_identity(portgroup, props)
     plan = TeardownPlan(object=obj, present=True)
     if obj["uplink"]:
@@ -228,6 +239,13 @@ async def plan_network_portgroup_delete(
             STATUS_PRECONDITION_FAILED,
             f"portgroup {portgroup!r} is the switch's uplink portgroup; it is managed with "
             "the distributed switch and cannot be deleted on its own",
+        )
+        return plan
+    if obj["backing_type"] == _NSX_BACKING:
+        plan.refusal = (
+            STATUS_PRECONDITION_FAILED,
+            f"portgroup {portgroup!r} is backed by an NSX segment; delete the segment in NSX "
+            "instead, so NSX and vCenter stay in step",
         )
         return plan
     vm_moids = [moid for _type, moid in moref_values(props.get("vm"))]
@@ -370,16 +388,18 @@ async def _host_vms_on_network(
     ]
     if not networks:
         return []
-    result = await connector._post_vmomi_json(
-        target,
-        _VMOMI_RETRIEVE_PROPERTIES_PATH,
-        operator=operator,
-        json=retrieve_properties_body(_NETWORK_MO_TYPE, networks, ["name", "vm"]),
+    by_moid, complete = await read_many(
+        connector, target, operator, mo_type=_NETWORK_MO_TYPE, moids=networks, props=["name", "vm"]
     )
+    if not complete:
+        raise IncompleteAnswerError(
+            "vCenter answered only part of the host's network objects; refusing to decide "
+            "which VMs use the port group on a partial answer"
+        )
     host_vms = {moid for _type, moid in moref_values(host_props.get("vm"))}
     attached = {
         moid
-        for props in _extract_props_by_moid(result).values()
+        for props in by_moid.values()
         if props.get("name") == portgroup_name
         for _type, moid in moref_values(props.get("vm"))
         if moid in host_vms
@@ -407,6 +427,9 @@ async def plan_host_standard_portgroup_delete(
     host = params["host"]
     name = params["portgroup_name"]
     obj: dict[str, Any] = {"kind": "host_standard_portgroup", "host": host, "name": name}
+    problem = moid_problem(host, HOST_MOID_PATTERN, "host")
+    if problem is not None:
+        return TeardownPlan(obj, False, refusal=(STATUS_INVALID_REQUEST, problem))
     props = await read_object(
         connector, target, operator, mo_type=_HOST_SYSTEM_MO_TYPE, moid=host, props=_HOST_PG_PROPS
     )

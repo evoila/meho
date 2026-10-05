@@ -67,12 +67,14 @@ __all__ = [
     "CLUSTER_PATCH_RESPONSE_SCHEMA",
     "CONTENT_LIBRARY_DELETE_PARAMETER_SCHEMA",
     "CONTENT_LIBRARY_DELETE_RESPONSE_SCHEMA",
+    "CONTENT_LIBRARY_ID_PATTERN",
     "CONTENT_LIBRARY_ITEM_DELETE_PARAMETER_SCHEMA",
     "CONTENT_LIBRARY_ITEM_DELETE_RESPONSE_SCHEMA",
     "DATASTORE_DIR_CREATE_PARAMETER_SCHEMA",
     "DATASTORE_DIR_CREATE_RESPONSE_SCHEMA",
     "DATASTORE_FILE_DELETE_PARAMETER_SCHEMA",
     "DATASTORE_FILE_DELETE_RESPONSE_SCHEMA",
+    "DATASTORE_MOID_PATTERN",
     "DATASTORE_PATH_PATTERN",
     "DATASTORE_REFRESH_PARAMETER_SCHEMA",
     "DATASTORE_REFRESH_RESPONSE_SCHEMA",
@@ -85,6 +87,7 @@ __all__ = [
     "FOLDER_CREATE_RESPONSE_SCHEMA",
     "FOLDER_DELETE_PARAMETER_SCHEMA",
     "FOLDER_DELETE_RESPONSE_SCHEMA",
+    "FOLDER_MOID_PATTERN",
     "GUEST_CUSTOMIZATION_SPEC_CREATE_PARAMETER_SCHEMA",
     "GUEST_CUSTOMIZATION_SPEC_CREATE_RESPONSE_SCHEMA",
     "GUEST_ENV_READ_PARAMETER_SCHEMA",
@@ -105,6 +108,7 @@ __all__ = [
     "HOST_DISK_MARK_FLASH_RESPONSE_SCHEMA",
     "HOST_EVACUATE_PARAMETER_SCHEMA",
     "HOST_EVACUATE_RESPONSE_SCHEMA",
+    "HOST_MOID_PATTERN",
     "HOST_SERVICE_CONTROL_PARAMETER_SCHEMA",
     "HOST_SERVICE_CONTROL_RESPONSE_SCHEMA",
     "HOST_STANDARD_PORTGROUP_DELETE_PARAMETER_SCHEMA",
@@ -115,6 +119,7 @@ __all__ = [
     "NETWORK_PORTGROUP_DELETE_RESPONSE_SCHEMA",
     "PERFORMANCE_SUMMARY_PARAMETER_SCHEMA",
     "PERFORMANCE_SUMMARY_RESPONSE_SCHEMA",
+    "PORTGROUP_MOID_PATTERN",
     "RESOURCE_POOL_CREATE_PARAMETER_SCHEMA",
     "RESOURCE_POOL_CREATE_RESPONSE_SCHEMA",
     "RESOURCE_POOL_DELETE_PARAMETER_SCHEMA",
@@ -6643,19 +6648,36 @@ VM_RESOURCE_ALLOCATION_SET_RESPONSE_SCHEMA: dict[str, Any] = {
 # ``{status, object, blockers, task, task_state, guidance}``.
 # ---------------------------------------------------------------------------
 
-#: The relative datastore-path contract shared by ``datastore.file.delete`` /
-#: ``datastore.dir.create`` (preview-time, here) and the handlers'
-#: ``_datastore_browse.path_problem`` (dispatch-time): non-empty, relative, no
-#: ``.`` / ``..`` segment, no wildcard / bracket / backslash / control character,
-#: and a top-level entry that is neither hidden (``.sdd.sf``, ``.vSphere-HA``,
-#: ``.dvsData``) nor a ``contentlib-`` content-library backing.
-_DATASTORE_PATH_SEGMENT = r"[^/\\\[\]*?\x00-\x1f\x7f]+"
+#: The relative datastore-path rules shared by ``datastore.file.delete`` /
+#: ``datastore.dir.create`` (preview time, here) and the handlers'
+#: ``_datastore_browse.path_problem`` (dispatch time). Segments are separated
+#: by ``/``; no segment may be empty, start with ``.`` (hidden / system files
+#: at any depth, and so no ``.`` / ``..``), start or end with whitespace, or
+#: contain wildcards, brackets, backslashes or control characters. The
+#: top-level entry may not be ``contentlib-*`` (content-library backing),
+#: ``fcd`` or ``catalog`` (first-class disks and their index), ignoring case.
+_PATH_MID = r"[^/\\\[\]*?\x00-\x1f\x7f]"
+_PATH_FIRST = r"[^./\\\[\]*?\s\x00-\x1f\x7f]"
+_PATH_LAST = r"[^/\\\[\]*?\s\x00-\x1f\x7f]"
+_PATH_SEGMENT = _PATH_FIRST + "(?:" + _PATH_MID + "*" + _PATH_LAST + ")?"
 DATASTORE_PATH_PATTERN: str = (
-    r"^(?!\.)(?!contentlib-)(?!(?:.*/)?\.\.?(?:/|$))"
-    + _DATASTORE_PATH_SEGMENT
-    + r"(?:/"
-    + _DATASTORE_PATH_SEGMENT
-    + r")*$"
+    r"^(?![cC][oO][nN][tT][eE][nN][tT][lL][iI][bB]-)"
+    r"(?![fF][cC][dD](?:/|$))"
+    r"(?![cC][aA][tT][aA][lL][oO][gG](?:/|$))" + _PATH_SEGMENT + "(?:/" + _PATH_SEGMENT + ")*$"
+)
+
+#: Moid / id shapes shared by the teardown schemas and their handlers.
+DATASTORE_MOID_PATTERN: str = r"^datastore-[0-9]+$"
+PORTGROUP_MOID_PATTERN: str = r"^dvportgroup-[0-9]+$"
+HOST_MOID_PATTERN: str = r"^host-[0-9]+$"
+#: Folder moids (``group-v`` VM, ``group-h`` host, ``group-s`` datastore,
+#: ``group-n`` network, ``group-d`` datacenter folders). ``group-p`` is a
+#: datastore cluster and is not accepted.
+FOLDER_MOID_PATTERN: str = r"^group-[a-oq-z][0-9]+$"
+#: vCenter content-library and item ids are UUIDs. Nothing else is accepted,
+#: so an id can never point a REST path at another object.
+CONTENT_LIBRARY_ID_PATTERN: str = (
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
 
 _TEARDOWN_OBJECT_SCHEMA: dict[str, Any] = {
@@ -6711,7 +6733,7 @@ NETWORK_PORTGROUP_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {
         "portgroup": {
             "type": "string",
-            "pattern": "^dvportgroup-[0-9]+$",
+            "pattern": PORTGROUP_MOID_PATTERN,
             "description": (
                 "Distributed portgroup moid, e.g. 'dvportgroup-42' (display names are "
                 "not accepted -- resolve via vmware.composite.network.portgroup.audit)."
@@ -6734,7 +6756,7 @@ HOST_STANDARD_PORTGROUP_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {
         "host": {
             "type": "string",
-            "pattern": "^host-[0-9]+$",
+            "pattern": HOST_MOID_PATTERN,
             "description": "HostSystem moid, e.g. 'host-21' (vCenter targets).",
         },
         "portgroup_name": {
@@ -6760,8 +6782,11 @@ FOLDER_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
     "properties": {
         "folder": {
             "type": "string",
-            "pattern": "^group-[a-z][0-9]+$",
-            "description": "Folder moid, e.g. 'group-v1234' (as folder.create returns it).",
+            "pattern": FOLDER_MOID_PATTERN,
+            "description": (
+                "Folder moid, e.g. 'group-v1234' (as folder.create returns it). A datastore "
+                "cluster ('group-p...') is not accepted."
+            ),
         },
     },
     "required": ["folder"],
@@ -6776,7 +6801,7 @@ FOLDER_DELETE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_schema(
 
 _DATASTORE_MOID_PARAM: dict[str, Any] = {
     "type": "string",
-    "pattern": "^datastore-[0-9]+$",
+    "pattern": DATASTORE_MOID_PATTERN,
     "description": ("Datastore moid, e.g. 'datastore-17' (see vmware.composite.datastore.usage)."),
 }
 
@@ -6787,8 +6812,9 @@ _DATASTORE_RELATIVE_PATH_PARAM: dict[str, Any] = {
     "pattern": DATASTORE_PATH_PATTERN,
     "description": (
         "Path relative to the datastore root, e.g. 'old-appliance' or 'iso/stale.iso'. "
-        "Never the root, never '/'-prefixed, no '.' / '..' segments or wildcards; the "
-        "top-level entry may not be hidden ('.*') or a 'contentlib-*' backing."
+        "Not the root and no leading '/'. No segment may be empty, start with '.', or start "
+        "or end with a space; no wildcards, brackets or backslashes. The top-level folder "
+        "may not be 'contentlib-*', 'fcd' or 'catalog'."
     ),
 }
 
@@ -6843,11 +6869,15 @@ DATASTORE_DIR_CREATE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_schema
 CONTENT_LIBRARY_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "library_id": {"type": "string", "minLength": 1, "description": "Library id."},
+        "library_id": {
+            "type": "string",
+            "pattern": CONTENT_LIBRARY_ID_PATTERN,
+            "description": "Library id (a UUID).",
+        },
         "library_name": {
             "type": "string",
             "minLength": 1,
-            "description": "Library name (resolved fail-closed; ambiguity is refused).",
+            "description": "Library name (a name that matches more than one library is refused).",
         },
         "delete_items": {
             "type": "boolean",
@@ -6869,13 +6899,17 @@ CONTENT_LIBRARY_DELETE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_sche
 CONTENT_LIBRARY_ITEM_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "item_id": {"type": "string", "minLength": 1, "description": "Library item id."},
+        "item_id": {
+            "type": "string",
+            "pattern": CONTENT_LIBRARY_ID_PATTERN,
+            "description": "Library item id (a UUID).",
+        },
         "item_name": {
             "type": "string",
             "minLength": 1,
             "description": "Item name; needs library_id or library_name.",
         },
-        "library_id": {"type": "string", "minLength": 1},
+        "library_id": {"type": "string", "pattern": CONTENT_LIBRARY_ID_PATTERN},
         "library_name": {"type": "string", "minLength": 1},
     },
     "anyOf": [

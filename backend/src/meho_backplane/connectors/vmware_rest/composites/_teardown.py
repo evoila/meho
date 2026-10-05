@@ -55,24 +55,23 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Final
 
-import httpx
-
 from meho_backplane.connectors import OperationResult
-from meho_backplane.connectors.base import ConnectorResourceNotFoundError
-from meho_backplane.connectors.vmware_rest.composites._read import _extract_props_by_moid
+from meho_backplane.connectors.vmware_rest.composites._teardown_reads import (
+    moid_problem,
+    moref_values,
+    read_names,
+    read_object,
+)
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _FOLDER_MO_TYPE,
     _OP_RETRIEVE_PROPERTIES,
     _VIRTUAL_MACHINE_MO_TYPE,
-    _VMOMI_RETRIEVE_PROPERTIES_PATH,
     _moref_value,
     _unwrap_value,
     _write_vmomi_sub_op,
 )
-from meho_backplane.connectors.vmware_rest.vim_body import (
-    retrieve_properties_body,
-    unwrap_vim_value,
-)
+from meho_backplane.connectors.vmware_rest.composites.schemas import FOLDER_MOID_PATTERN
+from meho_backplane.connectors.vmware_rest.vim_body import unwrap_vim_value
 from meho_backplane.connectors.vmware_rest.vim_task import TASK_STATE_ERROR, poll_vim_task
 
 if TYPE_CHECKING:
@@ -90,8 +89,6 @@ __all__ = [
     "folder_delete_composite",
     "folder_delete_preview",
     "pre_write_outcome",
-    "read_names",
-    "read_object",
     "timeout_envelope",
     "vm_rows",
 ]
@@ -106,7 +103,6 @@ _VIM_SUB_OPS_FOLDER_DELETE: Final[tuple[str, ...]] = (
 )
 
 _DATACENTER_MO_TYPE: Final = "Datacenter"
-_MO_NOT_FOUND_FAULT: Final = "ManagedObjectNotFound"
 
 #: Wall-clock bound for the ``Destroy_Task`` polls -- the 600 s convention;
 #: module-global so tests can zero it.
@@ -207,93 +203,6 @@ def capped(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return rows[:LIST_CAP]
 
 
-def moref_values(raw: Any) -> list[tuple[str, str]]:
-    """``[(type, moid), ...]`` from a vim ``ManagedObjectReference[]`` value."""
-    refs = unwrap_vim_value(raw)
-    if not isinstance(refs, list):
-        return []
-    out: list[tuple[str, str]] = []
-    for ref in refs:
-        if isinstance(ref, dict) and isinstance(ref.get("value"), str):
-            out.append((str(ref.get("type") or ""), ref["value"]))
-    return out
-
-
-async def read_object(
-    connector: VmwareRestConnector,
-    target: Any,
-    operator: Operator,
-    *,
-    mo_type: str,
-    moid: str,
-    props: list[str],
-) -> dict[str, Any] | None:
-    """Read *props* of one managed object; ``None`` when it does not exist.
-
-    One un-gated ``RetrievePropertiesEx``. A ``ManagedObjectNotFound`` fault
-    or an empty result means absent. The fault is accepted in both body
-    shapes: the SOAP-shaped one the connector promotes, and the JSON
-    ``VimFault`` (``{"_typeName": "ManagedObjectNotFound", ...}``) the pinned
-    ``vi-json.yaml`` documents for HTTP 500. An object whose requested
-    properties are all unset still reads as ``{}`` (present). Other faults
-    propagate -- a failing pre-write read never proceeds.
-    """
-    try:
-        result = await connector._post_vmomi_json(
-            target,
-            _VMOMI_RETRIEVE_PROPERTIES_PATH,
-            operator=operator,
-            json=retrieve_properties_body(mo_type, [moid], props),
-            promote_managed_object_not_found=True,
-        )
-    except ConnectorResourceNotFoundError:
-        return None
-    except httpx.HTTPStatusError as exc:
-        if _json_fault_type(exc) == _MO_NOT_FOUND_FAULT:
-            return None
-        raise
-    return _extract_props_by_moid(result).get(moid)
-
-
-def _json_fault_type(exc: httpx.HTTPStatusError) -> str | None:
-    """The ``_typeName`` of a JSON ``VimFault`` HTTP 500 body, else ``None``."""
-    if exc.response.status_code != 500:
-        return None
-    try:
-        body = exc.response.json()
-    except ValueError:
-        return None
-    type_name = body.get("_typeName") if isinstance(body, dict) else None
-    return type_name if isinstance(type_name, str) else None
-
-
-async def read_names(
-    connector: VmwareRestConnector,
-    target: Any,
-    operator: Operator,
-    *,
-    mo_type: str,
-    moids: list[str],
-) -> dict[str, str]:
-    """Best-effort ``{moid: name}`` for display; any failure yields ``{}``."""
-    if not moids:
-        return {}
-    try:
-        result = await connector._post_vmomi_json(
-            target,
-            _VMOMI_RETRIEVE_PROPERTIES_PATH,
-            operator=operator,
-            json=retrieve_properties_body(mo_type, moids, ["name"]),
-        )
-    except Exception:
-        return {}
-    return {
-        moid: props["name"]
-        for moid, props in _extract_props_by_moid(result).items()
-        if isinstance(props.get("name"), str)
-    }
-
-
 async def vm_rows(
     connector: VmwareRestConnector,
     target: Any,
@@ -387,6 +296,8 @@ def timeout_envelope(
 # ===========================================================================
 
 _FOLDER_PROPS: Final = ["name", "childEntity", "childType", "parent"]
+#: A datastore cluster (``StoragePod``) is a kind of folder; refused.
+_STORAGE_POD_PREFIX: Final = "group-p"
 
 
 async def plan_folder_delete(
@@ -400,24 +311,36 @@ async def plan_folder_delete(
     ``Folder.Destroy_Task`` deletes a folder's *contents* recursively (VMs
     included), so a non-empty folder is always refused -- naming every child --
     and so is a root / datacenter system folder (``vm`` / ``host`` /
-    ``datastore`` / ``network``).
+    ``datastore`` / ``network``) and a datastore cluster (``group-p``).
+
+    Known, accepted gap: vSphere has no "delete only if empty" call. Something
+    moved into the folder in the moment between this check and the
+    ``Destroy_Task`` would be deleted with it.
     """
     folder = params["folder"]
+    obj: dict[str, Any] = {"kind": "folder", "moid": folder}
+    if isinstance(folder, str) and folder.startswith(_STORAGE_POD_PREFIX):
+        detail = (
+            f"{folder!r} is a datastore cluster (storage pod), not an inventory folder; "
+            "this op does not delete datastore clusters"
+        )
+        return TeardownPlan(obj, False, refusal=(STATUS_INVALID_REQUEST, detail))
+    problem = moid_problem(folder, FOLDER_MOID_PATTERN, "folder")
+    if problem is not None:
+        return TeardownPlan(obj, False, refusal=(STATUS_INVALID_REQUEST, problem))
     props = await read_object(
         connector, target, operator, mo_type=_FOLDER_MO_TYPE, moid=folder, props=_FOLDER_PROPS
     )
     if props is None:
-        return TeardownPlan(object={"kind": "folder", "moid": folder}, present=False)
+        return TeardownPlan(object=obj, present=False)
     parent = unwrap_vim_value(props.get("parent"))
     parent_type = parent.get("type") if isinstance(parent, dict) else None
     child_type = unwrap_vim_value(props.get("childType"))
-    obj: dict[str, Any] = {
-        "kind": "folder",
-        "moid": folder,
-        "name": props.get("name"),
-        "parent": _moref_value(parent),
-        "child_type": child_type if isinstance(child_type, list) else [],
-    }
+    obj.update(
+        name=props.get("name"),
+        parent=_moref_value(parent),
+        child_type=child_type if isinstance(child_type, list) else [],
+    )
     children = moref_values(props.get("childEntity"))
     obj["child_count"] = len(children)
     plan = TeardownPlan(object=obj, present=True)

@@ -132,9 +132,13 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.folder.delete": _teardown._VIM_SUB_OPS_FOLDER_DELETE,
     "vmware.composite.datastore.file.delete": (_datastore_files._VIM_SUB_OPS_DATASTORE_FILE_DELETE),
     "vmware.composite.datastore.dir.create": _datastore_files._VIM_SUB_OPS_DATASTORE_DIR_CREATE,
-    "vmware.composite.content_library.delete": _library_delete._SUB_OPS_CONTENT_LIBRARY_DELETE,
+    "vmware.composite.content_library.delete": (
+        _library_delete._SUB_OPS_CONTENT_LIBRARY_DELETE
+        + _library_delete._VIM_SUB_OPS_CONTENT_LIBRARY_MEDIA_CHECK
+    ),
     "vmware.composite.content_library.item.delete": (
         _library_delete._SUB_OPS_CONTENT_LIBRARY_ITEM_DELETE
+        + _library_delete._VIM_SUB_OPS_CONTENT_LIBRARY_MEDIA_CHECK
     ),
 }
 

@@ -13,16 +13,22 @@ Coverage:
 * each kind of secret is removed (known names, name patterns, value shapes);
 * normal content is unchanged byte for byte;
 * a base64-wrapped private key is caught, also line-wrapped and deflated;
-* CDATA, attributes and comments are handled;
+* CDATA is handled; every attribute value and comment is replaced;
 * an unknown element whose value is a private key is caught by its shape;
-* the fail-closed path never returns the raw file;
+* the fail-closed path never returns the raw file, and its error never
+  quotes the file;
 * ``redacted_count`` is correct;
 * the handler returns the cleaned text, its length and the count.
+
+The rules added after review (ACME, package text fields, base64 text, URLs,
+DER keys, the allow-list, depth and timing) are in
+``test_connectors_pfsense_config_redaction_rules.py``.
 """
 
 from __future__ import annotations
 
 import base64
+import re
 import zlib
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -87,6 +93,8 @@ _FAKE_CERT_B64 = _b64(
     f"{_DASHES}BEGIN CERTIFICATE{_DASHES}\n{_JUNK_B64}\n{_DASHES}END CERTIFICATE{_DASHES}\n"
 )
 _FAKE_SSH_PUBKEY_B64 = _b64("ssh-ed25519 " + "A" * 68 + " test@example.invalid\n")
+#: A WireGuard-shaped public key: 32 fixed bytes, base64.
+_FAKE_WG_PUBKEY_B64 = base64.b64encode(bytes(range(100, 132))).decode()
 
 ALL_FAKE_SECRETS = (
     FAKE_PEM_KEY,
@@ -202,16 +210,17 @@ def test_ssh_host_key_backup_subtree_is_removed() -> None:
 # Normal content is unchanged byte for byte
 # ---------------------------------------------------------------------------
 
-#: A synthetic config with no secret in it: tabs, CRLF, an XML declaration,
-#: comments, CDATA with entities, self-closing and empty elements, attributes,
-#: a public certificate, an SSH public key, and settings whose names look a
-#: bit like secrets but are not (IPsec hash choices, LAGG hash, the hash
-#: algorithm name, a ``bypass`` flag, a plain ``username``).
+#: A synthetic config with no secret in it, written the way pfSense writes
+#: (no comments, no attributes): tabs, CRLF, an XML declaration, CDATA with
+#: entities, self-closing and empty elements, a public certificate, an SSH
+#: public key, a WireGuard public key, a plain URL, and settings whose names
+#: look a bit like secrets but are not (IPsec hash choices, LAGG hash, the
+#: hash algorithm name, a ``bypass`` flag, a plain ``username``, a Wi-Fi
+#: rekey interval, a dashboard widget id, FRR route-map settings).
 _CLEAN_CONFIG = (
     '<?xml version="1.0" encoding="UTF-8"?>\r\n'
     "<pfsense>\r\n"
     "\t<version>23.3</version>\r\n"
-    "\t<!-- a comment that stays -->\r\n"
     "\t<system>\r\n"
     "\t\t<hostname>fw-example</hostname>\r\n"
     "\t\t<domain>example.invalid</domain>\r\n"
@@ -236,11 +245,17 @@ _CLEAN_CONFIG = (
     "\t\t\t<defaultgw/>\r\n"
     "\t\t</gateway_item>\r\n"
     "\t</gateways>\r\n"
-    '\t<filter><rule id="" kind="pass"><type>pass</type>'
+    "\t<filter><rule><type>pass</type>"
     "<tracker>1000000101</tracker></rule></filter>\r\n"
     "\t<cert><refid>5f00aa</refid><descr><![CDATA[web cert]]></descr>"
     f"<crt>{_FAKE_CERT_B64}</crt></cert>\r\n"
     "\t<unbound><custom_options></custom_options></unbound>\r\n"
+    "\t<wireless><wpa><wpa_group_rekey>60</wpa_group_rekey></wpa></wireless>\r\n"
+    f"\t<wireguard><peer><publickey>{_FAKE_WG_PUBKEY_B64}</publickey></peer></wireguard>\r\n"
+    "\t<widgets><widgetkey>gateways-0</widgetkey></widgets>\r\n"
+    "\t<frr><routemap_in>RM-IN</routemap_in><community_set>65000:100</community_set></frr>\r\n"
+    "\t<aliases><alias><name>feed</name>"
+    "<url>https://lists.example.invalid/feed.txt?format=plain&amp;v=2</url></alias></aliases>\r\n"
     "</pfsense>\r\n"
 )
 
@@ -341,21 +356,32 @@ def test_cdata_entity_encoded_crypt_hash_is_caught() -> None:
     assert count == 1
 
 
-def test_attributes_are_checked() -> None:
+def test_every_attribute_value_is_replaced() -> None:
+    """pfSense never writes attributes, so any attribute value goes, whatever it holds."""
     xml = _wrap(
-        f'\t<item password="{FAKE_PASSWORD}" blob=\'{FAKE_PEM_KEY_B64}\' name="kept" />\n'
+        f'\t<item password="{FAKE_PASSWORD}" blob=\'{FAKE_PEM_KEY_B64}\' name="plain" id="" />\n'
         f'\t<prv format="pem">{FAKE_PEM_KEY_B64}</prv>'
     )
     redacted, count = redact_config_xml(xml)
-    assert f'<item password="{REDACTED}" blob=\'{REDACTED}\' name="kept" />' in redacted
+    expected_item = f'<item password="{REDACTED}" blob=\'{REDACTED}\' name="{REDACTED}" id="" />'
+    assert expected_item in redacted
     assert f'<prv format="{REDACTED}">{REDACTED}</prv>' in redacted
-    assert count == 4
+    assert count == 5  # three filled attributes on <item>, one on <prv>, the <prv> text
 
 
-def test_comment_with_key_material_is_redacted() -> None:
-    redacted, count = redact_config_xml(_wrap(f"\t<!-- old key: {FAKE_PEM_KEY} -->"))
+def test_every_comment_is_replaced() -> None:
+    """pfSense never writes comments, so any comment goes, whatever it holds."""
+    xml = _wrap(
+        f"\t<!-- old key: {FAKE_PEM_KEY} -->\n"
+        f"\t<!-- password: {FAKE_PASSWORD} -->\n"
+        "\t<!-- just a note -->\n"
+        "\t<!---->"
+    )
+    redacted, count = redact_config_xml(xml)
     assert f"<!-- {REDACTED}\n -->" in redacted
-    assert count == 1
+    assert redacted.count(f"<!-- {REDACTED} -->") == 2
+    assert "<!---->" in redacted  # an empty comment has nothing to replace
+    assert count == 3
 
 
 def test_empty_and_whitespace_values_are_not_counted() -> None:
@@ -397,8 +423,21 @@ def test_redacted_count_counts_every_replaced_value() -> None:
         "influx_pass",
         "auth_token",
         "ns:secret_value",
+        "password:x",  # a namespace prefix counts too
         "dns_cloudflarekey",
         "rwcommunity",
+        "tcpsigpw",
+        "rootpw",
+        "simpin",
+        "tlskey",
+        "client_key",
+        "access_key",
+        "token_value",
+        "dns_selectelsl_pswd",
+        "dns_efficientipefficientip_creds",
+        "dns_kaskas_authdata",
+        "upsd_users",
+        "telegraf_raw_config",
     ],
 )
 def test_secret_names(name: str) -> None:
@@ -422,6 +461,12 @@ def test_secret_names(name: str) -> None:
         "keylen",
         "ddnsdomainkeyname",
         "priv",
+        "routemap_in",
+        "pubkey",
+        "widgetkey",
+        "wpa_group_rekey",
+        "prefetchkey",
+        "tlsauth_keydir",
     ],
 )
 def test_non_secret_names(name: str) -> None:
@@ -458,8 +503,11 @@ def test_public_material_does_not_look_secret() -> None:
     ids=["doctype", "truncated", "mismatched", "open-cdata", "open-comment", "broken-tag", "pi"],
 )
 def test_unsure_scan_raises(xml: str) -> None:
-    with pytest.raises(ConfigRedactionError):
+    with pytest.raises(ConfigRedactionError) as excinfo:
         redact_config_xml(xml)
+    # The message is a fixed reason plus an offset; it never quotes the file.
+    assert re.fullmatch(r"[a-z ]+( at offset \d+)?", str(excinfo.value))
+    assert not any(secret in str(excinfo.value) for secret in ALL_FAKE_SECRETS)
 
 
 # ---------------------------------------------------------------------------
@@ -538,7 +586,9 @@ async def test_handler_fails_closed_on_unsure_scan() -> None:
     assert result["config_xml"] is None
     assert result["length"] == 0
     assert result["redacted_count"] == 0
-    assert "not returned" in result["error"]
+    assert result["error"] == (
+        "secret removal failed (unclosed element at end of file); the config was not returned"
+    )
     _assert_no_fake_secret(result)
 
 

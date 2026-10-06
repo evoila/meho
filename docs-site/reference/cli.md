@@ -3407,7 +3407,7 @@ meho pfsense config
 
 #### `meho pfsense config show`
 
-Return the full pfSense configuration as XML (/cf/conf/config.xml)
+Return the pfSense configuration as XML with known secrets removed (/cf/conf/config.xml)
 
 ```
 meho pfsense config show [flags]

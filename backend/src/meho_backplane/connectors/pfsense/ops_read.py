@@ -14,9 +14,9 @@ Adds the following typed ops to :class:`PfSenseConnector`:
 * ``pfsense.gateway.list`` -- ``/cf/conf/config.xml`` ``<gateways>``
   block parsed, merged with live ``dpinger`` health (up/RTT/loss) from
   ``pfSsh.php playback gatewaystatus``.
-* ``pfsense.config.show`` -- ``/cf/conf/config.xml`` content with every
-  secret value replaced (see :mod:`.redaction`), returned as a structured
-  envelope.
+* ``pfsense.config.show`` -- ``/cf/conf/config.xml`` content with known
+  secret fields and known secret shapes replaced (see :mod:`.redaction`),
+  returned as a structured envelope.
 * ``pfsense.dhcp.leases`` (#2849) -- ``cat
   /var/dhcpd/var/db/dhcpd.leases`` (the ISC dhcpd lease database under
   pfSense's dhcpd chroot) parsed into de-duplicated lease rows;
@@ -65,6 +65,7 @@ References
 
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -971,23 +972,28 @@ async def pfsense_config_show(
     params: dict[str, Any],
     operator: Operator | None = None,
 ) -> dict[str, Any]:
-    """Return the pfSense configuration from ``/cf/conf/config.xml``, secrets removed.
+    """Return the pfSense configuration from ``/cf/conf/config.xml``, known secrets removed.
 
     Op-id: ``pfsense.config.show``. Returns the XML content of the live
-    pfSense configuration file with every secret value (password hashes,
-    private keys, VPN keys, pre-shared keys, service passwords, API keys)
-    replaced by :data:`~meho_backplane.connectors.pfsense.redaction.REDACTED`,
-    plus the character length of the returned text and ``redacted_count``,
-    the number of values replaced. Every other byte is unchanged, so callers
-    can still search for specific sections. Does not parse the XML tree (the
-    pfSense config schema is large and version-variable); use
-    ``pfsense.gateway.list`` for structured gateway data.
+    pfSense configuration file with known secret fields and known secret
+    shapes (password hashes, private keys, VPN keys, pre-shared keys,
+    service passwords, API keys) replaced by
+    :data:`~meho_backplane.connectors.pfsense.redaction.REDACTED`, plus the
+    character length of the returned text and ``redacted_count``, the number
+    of values replaced. Free-text fields (descriptions, notes, cron or shell
+    commands, custom config text, URLs) can still hold secrets that someone
+    typed in. Every other byte is unchanged, so callers can still search for
+    specific sections. Does not parse the XML tree (the pfSense config
+    schema is large and version-variable); use ``pfsense.gateway.list`` for
+    structured gateway data.
 
     The secrets are removed here, before the result leaves the handler, so
     the audit row's ``raw_payload``, the flight-recorder trace, a stored
-    result and the broadcast feed only ever see the cleaned text. Fail
-    closed: if the removal step raises for any reason, the result carries
-    ``config_xml: None`` and an error -- never the raw file.
+    result and the broadcast feed only ever see the cleaned text. The scan
+    runs in a worker thread, so a large file never blocks the event loop.
+    Fail closed: if the removal step raises for any reason, the result
+    carries ``config_xml: None`` and an error with a fixed reason -- never
+    the raw file.
     """
     del params  # declared empty; intentionally ignored
     proc = await self._run_command(target, "cat /cf/conf/config.xml", operator=operator)
@@ -1001,11 +1007,14 @@ async def pfsense_config_show(
             "error": f"cat /cf/conf/config.xml exit {proc.exit_status}",
         }
     try:
-        redacted, redacted_count = redact_config_xml(content)
+        # In a worker thread: a large file must not block the event loop.
+        redacted, redacted_count = await asyncio.to_thread(redact_config_xml, content)
     except Exception as exc:  # fail closed: any fault withholds the whole file
-        # Only the exception type is logged: a message could quote content.
-        _log.warning("pfsense_config_redaction_failed", error_type=type(exc).__name__)
+        # A ConfigRedactionError message is a fixed reason plus an offset. Any
+        # other exception is reported by its type only: its message could
+        # quote the file.
         reason = str(exc) if isinstance(exc, ConfigRedactionError) else type(exc).__name__
+        _log.warning("pfsense_config_redaction_failed", reason=reason)
         return {
             "config_xml": None,
             "length": 0,
@@ -1091,13 +1100,16 @@ _WHEN_TO_USE_NETWORK = (
 #: Curated ``when_to_use`` for the ``config`` group.
 _WHEN_TO_USE_CONFIG = (
     "Use for pfSense configuration operations: reading the pfSense "
-    "configuration with its secret values removed (``pfsense.config.show``) "
+    "configuration with its known secrets removed (``pfsense.config.show``) "
     "or getting a structured version summary (``pfsense.version``). Call "
     "``pfsense.config.show`` when the operator needs to inspect the "
-    "pfSense config.xml; every secret value (password hashes, private "
-    "keys, VPN keys, pre-shared keys, service passwords, API keys) comes "
-    f"back as ``{REDACTED}``, so the output is not a restorable backup. "
-    "Call ``pfsense.version`` when a structured version output is needed "
+    "pfSense config.xml; known secret fields and known secret shapes "
+    "(password hashes, private keys, VPN keys, pre-shared keys, service "
+    f"passwords, API keys) come back as ``{REDACTED}``, so the output is "
+    "not a restorable backup. Free-text fields (descriptions, notes, cron "
+    "or shell commands, custom config text, URLs) can still hold secrets "
+    "that someone typed in, so treat the output as sensitive. Call "
+    "``pfsense.version`` when a structured version output is needed "
     "without the full FingerprintResult envelope."
 )
 
@@ -1434,14 +1446,17 @@ READ_OPS: tuple[PfSenseOp, ...] = (
     PfSenseOp(
         op_id="pfsense.config.show",
         handler_attr="config_show",
-        summary="Return the pfSense configuration as XML, with secrets removed.",
+        summary="Return the pfSense configuration as XML, with known secrets removed.",
         description=(
             "Reads ``/cf/conf/config.xml`` over SSH and returns its XML "
-            "content with every secret value replaced by "
-            f"``{REDACTED}``: user password hashes, certificate and CA "
-            "private keys, OpenVPN keys, IPsec pre-shared keys, RADIUS / "
-            "LDAP / sync / service passwords and API keys. Everything else "
-            "is returned unchanged, with the character length and "
+            "content with known secret fields and known secret shapes "
+            f"replaced by ``{REDACTED}``: user password hashes, certificate "
+            "and CA private keys, OpenVPN keys, IPsec pre-shared keys, "
+            "RADIUS / LDAP / sync / service passwords and API keys. "
+            "Free-text fields (descriptions, notes, cron or shell commands, "
+            "custom config text, URLs) can still hold secrets that someone "
+            "typed in. Everything else is returned unchanged, with the "
+            "character length and "
             "``redacted_count`` (how many values were replaced). If secret "
             "removal fails, no XML is returned. The output is not a "
             "restorable backup. Use when the operator needs to inspect "
@@ -1470,10 +1485,13 @@ READ_OPS: tuple[PfSenseOp, ...] = (
             "output_shape": (
                 "``{config_xml: '<string>', length: N, redacted_count: N}``. "
                 "``config_xml`` is the pfSense ``config.xml`` content as a "
-                "string, with every secret value (password hashes, private "
-                "keys, VPN keys, pre-shared keys, service passwords, API "
-                f"keys) replaced by ``{REDACTED}``; all other content is "
-                "unchanged. ``redacted_count`` is how many values were "
+                "string, with known secret fields and known secret shapes "
+                "(password hashes, private keys, VPN keys, pre-shared keys, "
+                f"service passwords, API keys) replaced by ``{REDACTED}``; "
+                "free-text fields (descriptions, notes, cron or shell "
+                "commands, custom config text, URLs) can still hold secrets "
+                "that someone typed in. All other content is unchanged. "
+                "``redacted_count`` is how many values were "
                 "replaced. ``length`` is the character count of the returned "
                 "text. ``error`` is set (and ``config_xml`` is null) when the "
                 "command failed or secret removal failed -- the raw file is "

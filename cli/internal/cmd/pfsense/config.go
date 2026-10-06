@@ -27,8 +27,10 @@ func newConfigCmd() *cobra.Command {
 // newConfigShowCmd returns the `meho pfsense config show` command.
 //
 // Maps to op_id `pfsense.config.show`. Reads `/cf/conf/config.xml`
-// over SSH and returns the XML content with every secret value replaced
-// by ***REDACTED***, its character length and redacted_count.
+// over SSH and returns the XML content with known secret fields and known
+// secret shapes replaced by ***REDACTED***, its character length and
+// redacted_count. Free-text fields can still hold secrets that someone
+// typed in.
 // For structured gateway data, prefer `meho pfsense network gateway`.
 func newConfigShowCmd() *cobra.Command {
 	var (
@@ -38,12 +40,15 @@ func newConfigShowCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "show",
-		Short: "Return the full pfSense configuration as XML (/cf/conf/config.xml)",
+		Short: "Return the pfSense configuration as XML with known secrets removed (/cf/conf/config.xml)",
 		Long: "show dispatches pfsense.config.show and returns the\n" +
-			"config.xml content and its character length. Every secret\n" +
-			"value (password hashes, private keys, VPN keys, pre-shared\n" +
-			"keys, service passwords, API keys) is replaced by\n" +
-			"***REDACTED***, so the output is not a restorable backup.\n" +
+			"config.xml content and its character length. Known secret\n" +
+			"fields and known secret shapes (password hashes, private\n" +
+			"keys, VPN keys, pre-shared keys, service passwords, API keys)\n" +
+			"are replaced by ***REDACTED***, so the output is not a\n" +
+			"restorable backup. Free-text fields (descriptions, notes,\n" +
+			"cron or shell commands, custom config text, URLs) can still\n" +
+			"hold secrets that someone typed in.\n" +
 			"Use when the operator needs to inspect the pfSense\n" +
 			"configuration. For structured gateway data, prefer:\n" +
 			"  meho pfsense network gateway\n\n" +

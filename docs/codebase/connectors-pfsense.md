@@ -109,12 +109,13 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
   - Handler functions: `pfsense_version`, `pfsense_firewall_rules`,
     `pfsense_firewall_state`, `pfsense_nat_rules`, `pfsense_interface_list`,
     `pfsense_gateway_list`, `pfsense_config_show`, `pfsense_dhcp_leases`.
-- **Config secret removal** (`redaction.py`) — `redact_config_xml` (returns
-  the cleaned text and `redacted_count`), the name rule `is_secret_name`, the
-  value-shape rule `looks_like_secret`, the known-name set
-  `SECRET_ELEMENT_NAMES`, the marker `REDACTED` (`***REDACTED***`) and
-  `ConfigRedactionError`. Used only by `pfsense_config_show`; see
-  "`pfsense.config.show` — secret removal" below.
+- **Config secret removal** (`redaction.py`, with `redaction_names.py` and
+  `redaction_shapes.py`) — `redact_config_xml` (returns the cleaned text and
+  `redacted_count`), the name rule `is_secret_name` and its lists
+  (`redaction_names.py`), the value-shape rule `looks_like_secret`
+  (`redaction_shapes.py`), the marker `REDACTED` (`***REDACTED***`), the
+  depth limit `MAX_DEPTH` and `ConfigRedactionError`. Used only by
+  `pfsense_config_show`; see "`pfsense.config.show` — secret removal" below.
 
 ## Control flow
 
@@ -227,7 +228,7 @@ Two-phase registration, identical to the bind9 pattern:
 | `pfsense.nat.rules` | `pfctl -sn` | `nat` | `safe` |
 | `pfsense.interface.list` | `ifconfig -a` | `network` | `safe` |
 | `pfsense.gateway.list` | `cat /cf/conf/config.xml` (gateways block) + `pfSsh.php playback gatewaystatus` (live dpinger status) | `network` | `safe` |
-| `pfsense.config.show` | `cat /cf/conf/config.xml` (full file, every secret value replaced) | `config` | `safe` |
+| `pfsense.config.show` | `cat /cf/conf/config.xml` (full file, known secret fields and shapes replaced) | `config` | `safe` |
 | `pfsense.dhcp.leases` | `cat /var/dhcpd/var/db/dhcpd.leases` (ISC dhcpd lease DB) | `dhcp` | `safe` |
 | `pfsense.gateway.add` | `cat /cf/conf/config.xml` guard + `pfSsh.php playback` fragment (append `gateway_item` + `write_config()`) | `routing` | `caution` |
 | `pfsense.route.static.add` | `cat /cf/conf/config.xml` guard + `pfSsh.php playback` fragment (append `staticroutes/route` + `write_config()` + `system_routing_configure()`) | `routing` | `caution` |
@@ -292,46 +293,109 @@ fields `null`; a failure of the status command degrades the whole set to
 password hashes, certificate and CA private keys (`<prv>`), OpenVPN shared and
 TLS keys, IPsec pre-shared keys, RADIUS / LDAP / sync passwords, notification
 tokens and package secrets. The op is `safe` with no approval, so the handler
-removes every secret value **before** the result leaves it
-(`redaction.redact_config_xml`). The audit row's `raw_payload`, the
+replaces **known secret fields and known secret shapes** **before** the result
+leaves it (`redaction.redact_config_xml`). The audit row's `raw_payload`, the
 flight-recorder trace, a stored result and the broadcast feed therefore only
-ever see the cleaned text.
+see the cleaned text.
 
-- **What is removed.** A value goes when any of three rules fires:
+- **The limit.** This is a list of known fields and known shapes, not a proof.
+  Free-text fields (descriptions, notes, cron or shell commands, custom config
+  text, URLs) can still hold secrets that someone typed in. The Notes package
+  `notes` field is one of them: it is free text, so only a secret shape or a
+  secret word inside it (see rule 5) removes it.
+- **What is removed.** A value goes when any of these rules fires:
   1. *Known names* (`SECRET_ELEMENT_NAMES`), checked against the pfSense 2.7.2
-     source: pfSense's own "sanitized config" list (`$filtered_tags` in
-     `status_output.inc`) minus `authorizedkeys`, plus `keydata`, `omapi_key`,
-     `trapstring`, `vouchersyncpass`, `apikey`, `userkey`, `api`,
-     `radiuskey*` and the `sshdata` block (backed-up SSH host keys). One
-     context rule: `<username>` below `<pppoes>` (PPPoE server users with
-     base64 passwords).
-  2. *Name patterns* (`is_secret_name`): names containing `password`,
-     `passwd`, `passphrase`, `secret`, `psk`, `bindpw`, `prv`, `shared_key`,
-     `api_key`, `private_key`, `credential` or `community`; a `-hash` /
-     `_hash` suffix; names ending in `pass` (not `bypass`), `pwd`, `token` or
-     `authkey`; the ACME `dns_*key|password|secret|token|pwd|pw` fields. A bare
-     "contains hash" rule is deliberately not used: it would hide the IPsec
-     `hash-algorithm` choices, the LAGG `lagghash` policy and the `pwhash`
-     algorithm name, which are settings, not secrets.
-  3. *Value shapes* (`looks_like_secret`), checked on every text value, CDATA
-     section, attribute value and comment: a PEM private key, an OpenVPN key,
-     base64 that decodes (or decodes and inflates) to one of those, and crypt
-     password hashes (`$1$`, `$2a$`/`$2b$`/`$2y$`, `$5$`, `$6$`, ...).
+     source and the pfSense package sources: pfSense's own "sanitized config"
+     list (`$filtered_tags` in `status_output.inc`) minus `authorizedkeys`,
+     plus `keydata`, `omapi_key`, `trapstring`, `vouchersyncpass`, `apikey`,
+     `userkey`, `api`, `radiuskey*`, `simpin` (SIM card PIN), the `sshdata`
+     block (backed-up SSH host keys), the generic `hash` and `pin`, and package
+     text fields that hold whole config files: NUT `upsd_users`, Telegraf
+     `telegraf_raw_config`, BIND `bind_custom_options`, Squid
+     `custom_options*_squid3`, Zabbix `userparams` / `advancedparams`, snmptt
+     `snmptt_configfile`, syslog-ng `objectparameters`.
+  2. *Context rules* (a name that is secret only below a given element):
+     `<username>` below `<pppoes>` (PPPoE users with base64 passwords);
+     `filedata` below `<dnsseckeys>` (BIND DNSSEC private key backups) and
+     below `<filer>`; `frr`, `frrrunning`, `zebra`, `bgpd`, `ospfd`, `ospf6d`,
+     `ripd`, `bfdd` below `<frrglobalraw>` (saved and running FRR configs);
+     `advanced`, `advanced_backend` and `content` below `<haproxy>`;
+     `custom_options` below `<netsnmp>` / `<netsnmptrapd>`; `custom_config`
+     below `<ntopng>`. Below `<acme>`, **every** `dns_*` element (the ACME
+     DNS-provider settings): many are API keys and passwords whose names do not
+     say so (`dns_ovhovh_as`, `dns_lala_sk`), so the few non-secret ones go
+     too.
+  3. *Name patterns* (`is_secret_name`): names containing `password`,
+     `passwd`, `passwort`, `passphrase`, `passcode`, `pswd`, `secret`, `psk`,
+     `bindpw`, `prv`, `shared_key`, `api_key`, `private_key`, `credential`,
+     `creds`, `authdata`, `community`, `token` or `bearer`; names ending in
+     `pass` (not `bypass`), `pwd`, `pw` or `key`; a `-hash` / `_hash` suffix;
+     the ACME `dns_*key|password|secret|token|pwd|pw` fields. Every part of a
+     namespaced name (`ns:name`) counts. A bare "contains hash" rule and a
+     `pin` ending are deliberately not used: they would hide the IPsec
+     `hash-algorithm` choices, the LAGG `lagghash` policy, the `pwhash`
+     algorithm name and the FRR `routemap_in` setting.
+  4. *Value shapes* (`looks_like_secret`), checked on every text value and
+     CDATA section: a PEM private key, an OpenVPN key, a DNSSEC private key file
+     (`Private-key-format:` / `PrivateKey:`), crypt password hashes (`$1$`,
+     `$2a$`/`$2b$`/`$2y$`, `$5$`, `$6$`, ...), a password in a URL
+     (`scheme://user:password@host`) or a query parameter whose name holds
+     `token`, `key`, `pass`, `pwd`, `secret` or `auth`, a run of 256 or more
+     hex digits (key size), and base64 that decodes (or decodes and inflates)
+     to a key or to a DER private key (PKCS#1, PKCS#8, SEC1, encrypted
+     PKCS#8). Base64 is checked as a whole value, as runs inside the text,
+     with the whitespace removed (any line width) and at all four alignments
+     (text glued in front). A compressed value that inflates to more than
+     4 KiB cannot be checked in full, so it is removed.
+  5. *Base64 text*: when a whole value is base64 that decodes to text, the
+     decoded text gets the shape checks above plus a secret-word check: the
+     name parts from rule 3, and words ending in `pw`, `pwd` or `pass` (not
+     the bare word `pass`, a firewall rule keyword). PEM blocks and long
+     base64 runs are dropped before the word check, so the random letters in
+     a public certificate cannot spell a word. On a hit, the whole value goes.
   Everything below a secret element is secret too.
-- **What stays.** Every other byte, unchanged: tags, attributes, comments,
-  whitespace, CDATA wrappers, entity references. Public certificates
-  (`<crt>`), CSRs and SSH public keys (`authorizedkeys`) stay.
+- **What stays.** Every other byte, unchanged: tags, whitespace, CDATA
+  wrappers, entity references. Public certificates (`<crt>`), CSRs, SSH public
+  keys (`authorizedkeys`) and WireGuard public keys stay. Plain free text is
+  not checked for words, so a description that says "password" stays.
+- **Names that only look secret** (`_NOT_SECRET_NAMES` in
+  `redaction_names.py`), checked against the package sources: the FRR
+  route-map settings `community_set` / `community_match` / `community_action`
+  / `community_additive`, FRR `password_type` and `passwordencrypt`, Suricata
+  `snortcommunityrules` and `eve_log_files_hash`, the OpenVPN client export
+  `usepass` / `usetoken` / `useproxypass`, WireGuard `hide_secrets`, sudo
+  `nopasswd`, pfBlockerNG `pfb_dnsvip_skew`, FreeRADIUS
+  `varsettingsmotptokenlength`, and, for the `key` ending, `publickey` /
+  `pubkey` / `public_key`, `widgetkey`, `eve_redis_key`, `prefetchkey`, the
+  Wi-Fi `wpa_*_rekey` settings, the IPsec `mobilekey` list (each entry's key is
+  still checked) and the OpenVPN wizard `dhkey`. A name we are not sure about
+  stays redacted. Below a secret element, these names are removed too.
+- **What pfSense never writes.** pfSense's own writer (`dump_xml_config` in
+  `xmlparse.inc`) writes a leading `<?xml version="1.0"?>`, then elements, each
+  value as one text or CDATA piece, and nothing else. So every attribute value
+  and every comment is replaced, whatever it holds, and the scan fails closed
+  on any other processing instruction, on text outside the root element and
+  on a value split into several text / CDATA pieces.
 - **No XML parser.** The file is scanned as text with regular expressions, so
   no entity is expanded and the output is the input with only the secret
   values swapped. `defusedxml` (already a dependency, used by
   `parse_gateways_xml`) was not used here because parsing and re-serialising
-  would not keep the rest of the file byte for byte (CDATA, comments,
-  attribute quoting, whitespace).
+  would not keep the rest of the file byte for byte (CDATA, attribute quoting,
+  whitespace).
 - **Fail closed.** The scan raises `ConfigRedactionError` on markup it does
   not recognise (for example a `<!DOCTYPE`, which pfSense never writes), a
-  mismatched or unclosed element, or a key / hash shape that survives in the
-  output. The handler turns any exception into `config_xml: null` plus an
-  `error`; the raw file is never returned.
+  mismatched or unclosed element, elements nested deeper than `MAX_DEPTH`
+  (64; a real file is about 10 deep), one of the "never written" cases above,
+  or a key / hash shape that survives in the output. The error message is a
+  fixed reason plus a character offset (for example
+  `mismatched end tag at offset 812`); it never quotes the file. The handler
+  turns any exception into `config_xml: null` plus an `error`, and logs only
+  that fixed reason; the raw file is never returned.
+- **Speed.** The scan runs in a worker thread (`asyncio.to_thread`), so a
+  large file never blocks the event loop. Every regular expression stays
+  linear, the open element names are kept in a running count (no per-tag
+  rebuild), and the depth limit stops a deeply nested file at once. A 600 KB
+  config takes about 0.1 s on a laptop.
 - **Result shape.** `{config_xml, length, redacted_count}`; `length` is the
   length of the returned (cleaned) text and `redacted_count` is the number of
   values replaced. The output is not a restorable backup.

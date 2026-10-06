@@ -563,6 +563,78 @@ def test_tools_call_search_docs_chunk_carries_upstream_title(
 
 
 @pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_search_docs_chunk_carries_identity_score_kind_and_link(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """The MCP hit carries the derived title, ``score_kind`` and upstream link (#3913).
+
+    A hit with page identity and no ``title`` gets a derived title; a ``gs://``
+    source takes the backend's ``upstream_url``; ``score_kind`` passes through
+    when sent and is ``null`` (never defaulted) when not; ``chunk_id`` is kept
+    for the ``meho://docs`` chunk resource. No ``gs://`` string is served.
+    """
+    client, _op = docs_client
+    _seed_collection_sync()
+    link = "https://docs.example.com/nsx/9.0/maximums.pdf#page=12"
+    identified = CorpusChunk.model_validate(
+        {
+            "chunk_id": "nsx-9.0-maximums-0007",
+            "text": "NSX 9.0 supports up to 10,000 logical switches per manager.",
+            "source_uri": "gs://example-bucket/docs/nsx/9.0/maximums.pdf",
+            "score": 0.42,
+            "score_kind": "distance",
+            "breadcrumb": "NSX 9.0 > Configuration Maximums > Logical switching",
+            "filename": "maximums.pdf",
+            "upstream_url": link,
+            "upstream_page": 12,
+        }
+    )
+    with patch(_CORPUS_SEAM, new=_fake_corpus(identified, _SAMPLE_CHUNK)):
+        response = post_mcp(
+            client,
+            {
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": {
+                    "name": "search_docs",
+                    "arguments": {"query": "config maximums", "collection": "vmware"},
+                },
+            },
+        )
+    assert response.status_code == 200
+    text = response.json()["result"]["content"][0]["text"]
+    first, second = json.loads(text)["chunks"]
+    assert first["chunk_id"] == "nsx-9.0-maximums-0007"
+    assert first["title"] == "Logical switching \u2014 maximums"
+    assert first["source_url"] == link
+    assert (first["upstream_url"], first["upstream_page"]) == (link, 12)
+    assert first["score_kind"] == "distance"
+    assert second["score_kind"] is None
+    assert (second["upstream_url"], second["upstream_page"]) == (None, None)
+    assert "gs://" not in text
+
+
+@pytest.mark.parametrize("docs_client", [frozenset({_DOCS_CAPABILITY})], indirect=True)
+def test_search_docs_description_explains_score_kind(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """The description tells the agent how to read ``score`` (#3913).
+
+    A ``distance`` score is lower-is-better; without the hint an agent can
+    read a distance as a similarity and rank the hits backwards.
+    """
+    client, _op = docs_client
+    response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    tools_by_name = {t["name"]: t for t in response.json()["result"]["tools"]}
+    desc = tools_by_name["search_docs"]["description"]
+
+    assert "`score_kind`" in desc
+    assert "`distance` means LOWER is better" in desc
+    assert "`upstream_page`" in desc
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
 def test_tools_call_search_docs_collection_only_omits_refinements(
     docs_client: tuple[TestClient, Operator],
 ) -> None:

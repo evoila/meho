@@ -242,9 +242,12 @@ async def test_recorded_upstream_body_parses_and_maps() -> None:
     assert [c.chunk_id for c in citations] == ["chunk-rn-2-1-1-0004", "chunk-upgrade-0011"]
     # Content comes from the hits, not the quotes.
     assert citations[0].content.startswith("Example Platform 2.1.1 adds pooled widget storage.")
-    # Titles from page identity: last heading, then the breadcrumb tail.
-    assert citations[0].title == "What's New"
-    assert citations[1].title == "Rolling upgrades"
+    # Titles from page identity (#3913): the section (last heading, else the
+    # breadcrumb tail) joined with the page name (the humanised filename).
+    assert citations[0].title == "What's New \u2014 example platform 2 1 1 release notes"
+    assert citations[1].title == "Rolling upgrades \u2014 upgrade guide"
+    # The backend's score direction rides every hit.
+    assert {c.score_kind for c in outcome.retrieved_chunks} == {"distance"}
     # Source refs project exactly as search_docs does: never a raw gs:// path.
     assert citations[0].source_url == "meho://docs/vmware/chunk-rn-2-1-1-0004"
     retrieved = outcome.retrieved_chunks
@@ -430,11 +433,41 @@ async def test_hits_without_citations_answer_without_citations() -> None:
         ({"heading_path": ["Guide", "Planning", ""], "breadcrumb": "A > B"}, "Planning"),
         ({"heading_path": [], "breadcrumb": "Guide > Planning > Limits"}, "Limits"),
         ({"breadcrumb": "", "filename": "vsan-planning-guide.html"}, "vsan planning guide"),
+        # #3913: the section is joined with the page name, so the title says
+        # which page (and release) a section like "What's New" is on.
+        (
+            {
+                "heading_path": ["Release Notes", "What's New"],
+                "breadcrumb": "A > B",
+                "filename": "widget-2-1-1-release-notes.html",
+            },
+            "What's New \u2014 widget 2 1 1 release notes",
+        ),
+        (
+            {"breadcrumb": "Guide > Planning > Limits", "filename": "planning.html"},
+            "Limits \u2014 planning",
+        ),
+        # The same words twice (case and punctuation ignored) are said once.
+        (
+            {
+                "heading_path": ["Widget 2.1 Release Notes"],
+                "filename": "widget-2-1-release-notes.pdf",
+            },
+            "Widget 2.1 Release Notes",
+        ),
+        # Only the file's own name is read: a full object path never leaks.
+        ({"filename": "gs://example-bucket/docs/upgrade-guide.html"}, "upgrade guide"),
+        # Whitespace runs in a heading collapse to one space.
+        ({"heading_path": ["What's\n  New"], "filename": "notes.md"}, "What's New \u2014 notes"),
         ({}, None),
     ],
 )
 def test_title_fallback_order(identity: dict[str, Any], expected: str | None) -> None:
-    """Title: the backend's title, last heading, breadcrumb tail, humanised filename."""
+    """Title: the backend's title, else section + page name, else ``None``.
+
+    The section is the last heading, else the breadcrumb tail; the page name
+    is the humanised filename (#3913).
+    """
     assert (
         derive_chunk_title(
             title=identity.get("title"),
@@ -461,6 +494,36 @@ async def test_title_from_metadata_and_filename_reach_the_citation() -> None:
 
     assert outcome.answer is not None
     assert [c.title for c in outcome.answer.citations] == ["Backend Title", "config maximums"]
+
+
+@pytest.mark.asyncio
+async def test_upstream_link_and_page_reach_hits_and_citations() -> None:
+    """``upstream_url`` / ``upstream_page`` ride every hit and citation (#3913).
+
+    A hit whose own source is a ``gs://`` path takes the backend's public link
+    as its ``source_url`` instead of the opaque ``meho://`` ref, and keeps its
+    ``chunk_id``. A hit without the fields keeps the ``meho://`` ref, and its
+    ``score_kind`` stays ``None``.
+    """
+    link = "https://docs.example.test/guides/widget-guide.pdf#page=693"
+    body = _body(
+        "Pools are capped [0]. Upgrades roll [1].",
+        [_citation(0, "chunk-pdf"), _citation(1, "chunk-plain")],
+        [
+            _hit("chunk-pdf", upstream_url=link, upstream_page=693, score_kind="distance"),
+            _hit("chunk-plain"),
+        ],
+    )
+    outcome, _a, _s = await _ask(body)
+
+    assert outcome.answer is not None
+    pdf, plain = outcome.answer.citations
+    assert (pdf.chunk_id, pdf.source_url) == ("chunk-pdf", link)
+    assert (pdf.upstream_url, pdf.upstream_page, pdf.score_kind) == (link, 693, "distance")
+    assert plain.source_url == "meho://docs/vmware/chunk-plain"
+    assert (plain.upstream_url, plain.upstream_page, plain.score_kind) == (None, None, None)
+    # A citation is the projected hit it names.
+    assert outcome.retrieved_chunks == [pdf, plain]
 
 
 @pytest.mark.asyncio

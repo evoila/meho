@@ -400,6 +400,71 @@ def test_search_docs_source_url_never_leaks_gs_backend(client: TestClient) -> No
     assert "gs://" not in json.dumps(response.json())
 
 
+def test_hits_carry_derived_title_score_kind_and_upstream_link(client: TestClient) -> None:
+    """Hits carry a derived title, ``score_kind`` and the upstream link (#3913).
+
+    The corpus sends page identity (``heading_path`` / ``filename``) and no
+    ``title``, so the title is derived: the section joined with the page
+    name. A hit whose own source is a ``gs://`` path takes the backend's
+    ``upstream_url`` as its ``source_url``. ``score_kind`` is passed through
+    when sent and is ``null`` (never defaulted) when not. No ``gs://``
+    string reaches the response.
+    """
+    _seed_collection_sync()
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(
+        key, sub="op-1", tenant_role=TenantRole.OPERATOR.value, capabilities=_ENTITLED_CAPS
+    )
+    link = "https://docs.vendor.test/guides/widget-guide.pdf#page=693"
+    pdf_hit = CorpusChunk.model_validate(
+        {
+            "chunk_id": "pdf-1",
+            "text": "Pools are capped at 64 per cluster.",
+            "source_uri": "gs://example-bucket/docs/widget/widget-guide-part02of05.pdf",
+            "score": 0.31,
+            "score_kind": "distance",
+            "heading_path": ["Planning", "Pool limits"],
+            "filename": "widget-guide-part02of05.pdf",
+            "upstream_url": link,
+            "upstream_page": 693,
+        }
+    )
+    bare_hit = CorpusChunk.model_validate(
+        {
+            "chunk_id": "bare-1",
+            "text": "A chunk with no page identity.",
+            "source_uri": "gs://example-bucket/misc/blob.bin",
+            "score": 0.9,
+        }
+    )
+    with (
+        respx.mock as mock_router,
+        patch(_CORPUS_SEAM, new=_mock_corpus(pdf_hit, bare_hit)),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/search_docs",
+            json={"query": "widget pool limits", "collection": "vmware"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200, response.text
+    first, second = response.json()["chunks"]
+    assert first["chunk_id"] == "pdf-1"
+    assert first["title"] == "Pool limits \u2014 widget guide part02of05"
+    assert first["source_url"] == link
+    assert first["upstream_url"] == link
+    assert first["upstream_page"] == 693
+    assert first["score_kind"] == "distance"
+    # No identity, no link: no title, the opaque ref, and nothing defaulted.
+    assert second["title"] is None
+    assert second["source_url"] == "meho://docs/vmware/bare-1"
+    assert second["score_kind"] is None
+    assert second["upstream_url"] is None
+    assert second["upstream_page"] is None
+    assert "gs://" not in response.text
+
+
 def test_optional_refinements_forwarded_as_binary_filter_not_weight(
     client: TestClient,
 ) -> None:

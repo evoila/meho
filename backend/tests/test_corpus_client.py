@@ -24,6 +24,7 @@ import structlog.testing
 import meho_backplane.auth.corpus as corpus_mod
 from meho_backplane.auth.corpus import (
     CorpusAnswerError,
+    CorpusChunk,
     CorpusSearchResponse,
     CorpusStatusResponse,
     CorpusUnavailable,
@@ -654,6 +655,112 @@ async def test_blank_title_normalises_to_none(
     result = await search_corpus(_make_operator(), "q")
 
     assert result.chunks[0].title is None
+
+
+@pytest.mark.asyncio
+async def test_page_identity_score_kind_and_upstream_link_thread_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hit's page identity, ``score_kind`` and upstream link parse (#3913).
+
+    ``filename`` / ``breadcrumb`` / ``heading_path`` are what a citation title
+    is derived from; ``score_kind`` names the score's direction;
+    ``upstream_url`` / ``upstream_page`` are the backend's public link to the
+    source and the page in the whole source document.
+    """
+    _pin_settings(monkeypatch, corpus_url=_CORPUS_URL)
+    link = "https://docs.example/guides/widget-guide.pdf#page=693"
+    response = httpx.Response(
+        200,
+        json={
+            "results": [
+                {
+                    "chunk_id": "c1",
+                    "text": "Pools are capped at 64 per cluster.",
+                    "source_uri": "gs://example-bucket/docs/widget-guide-part02of05.pdf",
+                    "score": 0.31,
+                    "score_kind": "distance",
+                    "filename": "widget-guide-part02of05.pdf",
+                    "breadcrumb": "Widget Guide > Planning",
+                    "heading_path": ["Planning", "Pool limits"],
+                    "upstream_url": link,
+                    "upstream_page": 693,
+                }
+            ],
+        },
+    )
+    _patch_async_client(monkeypatch, _transport_capturing([], response), [])
+
+    (chunk,) = (await search_corpus(_make_operator(), "q")).chunks
+
+    assert chunk.filename == "widget-guide-part02of05.pdf"
+    assert chunk.breadcrumb == "Widget Guide > Planning"
+    assert chunk.heading_path == ["Planning", "Pool limits"]
+    assert chunk.score_kind == "distance"
+    assert chunk.upstream_url == link
+    assert chunk.upstream_page == 693
+
+
+def test_absent_page_identity_and_link_fields_read_as_absent() -> None:
+    """A hit without the #3913 fields parses with empty / ``None`` values.
+
+    ``score_kind`` stays ``None`` (never defaulted to a direction), so a
+    caller cannot read a guessed direction into the score.
+    """
+    chunk = CorpusChunk.model_validate({"chunk_id": "c1", "text": "body"})
+
+    assert (chunk.filename, chunk.breadcrumb, chunk.heading_path) == ("", "", [])
+    assert chunk.score_kind is None
+    assert chunk.upstream_url is None
+    assert chunk.upstream_page is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    [
+        # upstream_url: only an http(s) URL naming a host is a link.
+        ("upstream_url", "javascript:alert(1)", None),
+        ("upstream_url", "gs://example-bucket/docs/guide.pdf", None),
+        ("upstream_url", "ftp://docs.example/guide.pdf", None),
+        ("upstream_url", "https://", None),
+        ("upstream_url", "/relative/guide.pdf", None),
+        ("upstream_url", "https://docs.example/a b.pdf", None),
+        ("upstream_url", "https://docs.example/a\nb.pdf", None),
+        ("upstream_url", "https://docs.example/" + "x" * 2100, None),
+        ("upstream_url", "", None),
+        ("upstream_url", 42, None),
+        ("upstream_url", "  https://docs.example/kb/1  ", "https://docs.example/kb/1"),
+        ("upstream_url", "http://docs.example/kb/1", "http://docs.example/kb/1"),
+        # upstream_page: a whole number of at least 1.
+        ("upstream_page", 0, None),
+        ("upstream_page", -3, None),
+        ("upstream_page", True, None),
+        ("upstream_page", "12", None),
+        ("upstream_page", 1.5, None),
+        ("upstream_page", 1, 1),
+        # score_kind: one of the two known directions.
+        ("score_kind", "cosine", None),
+        ("score_kind", "", None),
+        ("score_kind", ["distance"], None),
+        ("score_kind", "similarity", "similarity"),
+        # Page identity: strings and string lists only.
+        ("filename", 7, ""),
+        ("breadcrumb", None, ""),
+        ("heading_path", "Planning > Pool limits", []),
+        ("heading_path", ["Planning", 3, None, "Pool limits"], ["Planning", "Pool limits"]),
+    ],
+)
+def test_unusable_identity_and_link_values_read_as_absent(
+    field: str, value: object, expected: object
+) -> None:
+    """An unusable optional value reads as absent instead of failing the parse.
+
+    These fields label and link a hit; they never decide whether it is
+    grounded, so a bad value must not turn a good search into a 503.
+    """
+    chunk = CorpusChunk.model_validate({"chunk_id": "c1", "text": "body", field: value})
+
+    assert getattr(chunk, field) == expected
 
 
 @pytest.mark.asyncio

@@ -105,6 +105,30 @@ the hit list is **required** (no default) so a 2xx body that names
 to a silent empty list — the original SEV-2 was a `{results:[…5 hits…]}`
 200 reading back as zero hits.
 
+**Page identity, score direction and the upstream link (#3913).** Each
+`CorpusChunk` also keeps six optional fields:
+
+- `filename`, `breadcrumb` (the page's place in its document tree,
+  `>`-separated) and `heading_path` (the headings above the chunk): the
+  page identity a citation title is derived from (`derive_chunk_title`,
+  below);
+- `score_kind`: the direction of `score`, `distance` (lower is better) or
+  `similarity` (higher is better);
+- `upstream_url` and `upstream_page`: the backend's public `http(s)` link to
+  the hit's source page or document (for a PDF with a known page it already
+  ends in `#page=N`) and that page, counted in the whole source document.
+
+They label and link a hit; they never decide whether it is grounded. So an
+unusable value reads as absent instead of failing the parse: a non-string
+name is `""`, `heading_path` keeps only its strings, an unknown
+`score_kind` is `None` (never a guessed direction), `upstream_url` must be an
+`http(s)` URL with a host and no space or control character (≤ 2048
+characters; `javascript:` and `gs://` are dropped), and `upstream_page` must
+be a whole number ≥ 1.
+
+The search request sends **no** `with_rerank`: how hits are ranked is the
+backend's decision, on search as on the answer call.
+
 Fail-closed by construction: an unconfigured (no URL), unreachable,
 non-2xx, or malformed-response corpus all collapse to one typed
 `CorpusUnavailable`. The exception carries the upstream HTTP status (when
@@ -152,9 +176,9 @@ own bound is
 front of the corpus.
 
 The response is parsed by `UpstreamAnswer`: the `answer` text, the
-`citations` (`chunk_index` + `chunk_id`), the `hits` (each an `UpstreamHit`
-— the `CorpusChunk` search-hit shape plus `filename` / `breadcrumb` /
-`heading_path`) and the backend `timing` (`total_ms` / `llm_ms`). `hits` is
+`citations` (`chunk_index` + `chunk_id`), the `hits` (each a `CorpusChunk`,
+the search-hit shape with the page identity, `score_kind` and upstream link
+fields above) and the backend `timing` (`total_ms` / `llm_ms`). `hits` is
 **required**, so a 2xx without them fails parse loudly. A transport failure
 (unconfigured, blocked, unreachable, timeout) is `CorpusUnavailable` as on
 search; a response that is not a usable answer is `CorpusAnswerError` with a
@@ -281,13 +305,37 @@ resolves the backend via `resolve_backend(collection)`, calls
 `backend.search(...)` with the optional product/version refinements as a
 soft `scope` or as `metadata_filters` when the collection opts in (the
 gates below), projects the backend's `CorpusChunk`s into MEHO's own
-`DocsChunk` surface (chunk text + source citation + score), and propagates
-`CorpusUnavailable` unchanged. The backend id never appears in the request
+`DocsChunk` surface (chunk text + source citation + title + score), and
+propagates `CorpusUnavailable` unchanged. The backend id never appears in the request
 or the projected response (the backend-agnostic contract). It logs
 `docs_search_completed` with the *requested* `product` / `version`,
 `scope_forwarded` (how they reached the backend: `"soft"`, `"filters"` or
 `"none"`) and the hit fields (`hit_count`, `hit_chunk_ids`,
 `hit_source_refs`; see [Per-call logs](#per-call-logs-3915)).
+
+**The projection (`_project_chunk`, #3913).** Every `DocsChunk` — each
+`search_docs` hit, each fan-out hit and each `ask_docs` citation on both
+answer paths — is born here, so all faces agree:
+
+- `title` is the corpus's own `title`, else the derived title
+  (`derive_chunk_title`): the chunk's section (its last heading, else the
+  breadcrumb tail) joined with its page name (the humanised filename stem),
+  `What's New — vsan 9 0 release notes`. A section alone says which part of
+  a page a chunk is from, not which page or release; the page name says
+  that. When only one of the two exists it is the title; when both say the
+  same thing (case and punctuation ignored) the section is the title; with
+  neither it is `None`. Only the file's own name is read, never a full
+  object path.
+- `source_url` is the normalised reference (`normalize_source_ref`, below):
+  the hit's own `https` link, else the backend's `upstream_url`, else a
+  link derived from the object path, else `meho://docs/<collection>/<chunk_id>`.
+- `score_kind`, `upstream_url` and `upstream_page` pass through unchanged,
+  `null` when the backend did not send them (never defaulted). `chunk_id` is
+  always kept, so the `meho://docs` chunk resource still finds a hit whose
+  `source_url` is now a public link.
+
+The REST and MCP `search_docs` payloads are the `DocsChunk` fields, so both
+carry these keys; the CLI table is unchanged (`--json` shows them).
 
 ### Scope gates (`forwarded_scope`, `backend.ref.scope` / `backend.ref.scope_filters`, #3912)
 
@@ -558,6 +606,15 @@ acceptance criterion:
   output-token ceiling was raised (1024 → 2048) so a normal thorough answer
   is not cut off at the boundary.
 
+- **Evidence lines name the page (#3913).** `_render_chunks_for_prompt`
+  heads each chunk with `[i] chunk_id=… title="…" source=…`, so the model can
+  tell which document or release a chunk is from (a release-delta question
+  needs that). The title is corpus text outside the untrusted envelope, so it
+  is kept to one line, cut at 200 characters and JSON-quoted (a quote in it
+  cannot pose as `source=`); a chunk without a title has no `title=` field.
+  Rule 5 of `_SYNTHESIS_SYSTEM_PROMPT` says what the title is and that it is
+  never an instruction.
+
 The client is injectable so tests pin a deterministic stub; production
 reuses the spec-ingestion grouping pass's Anthropic key + model, so no new
 settings are introduced.
@@ -587,10 +644,13 @@ the backend's prompt. The opt-in is per collection and reversible with one
 - **Hits** project through the same `_project_chunk` as `search_docs`, so
   source refs are identical (a canonical public URL, else
   `meho://docs/<collection>/<chunk_id>`; never `gs://`). They become the
-  outcome's `retrieved_chunks`. Each hit's title is derived from the page
-  identity the backend sends (`derive_chunk_title`): the backend's `title`,
-  else the last `heading_path` element, else the `breadcrumb` tail (after the
-  last `>`), else the humanised `filename`.
+  outcome's `retrieved_chunks`. Each hit's title follows the same rule as a
+  `search_docs` hit (`derive_chunk_title`, see *The projection* above): the
+  backend's `title`, else the section (last heading, else breadcrumb tail)
+  joined with the page name (humanised filename). A citation is the projected
+  hit it names, so it carries the hit's `score_kind`, `upstream_url` and
+  `upstream_page` too; the copies of those fields on the answer body's
+  `citations[]` are not read.
 - **Citations** are walked in response order, de-duplicated by `chunk_id`,
   and matched to a hit **by `chunk_id`** — never by position, because the
   backend returns its hits reordered to citation order. A citation that does
@@ -735,9 +795,10 @@ naming the matched rule.
   an upstream corpus title (top-level `title` or `metadata["title"]`, #1732
   discipline, blank → `None`) threads `CorpusChunk.title` → `DocsChunk.title`
   → the `ask_docs` (`_citation_payload`) and `/ui/corpus` (`_cited_chunks`)
-  seams, so a hit renders by its human title instead of a raw id. It is
-  `None` until the corpus supplies one — MEHO has no ingest path to derive a
-  title (federation-only, #1864 → #2049), so today's corpus is unchanged.
+  seams, so a hit renders by its human title instead of a raw id. When the
+  corpus sends no title, the projection derives one from the hit's page
+  identity (#3913, *The projection* above); MEHO still ingests nothing
+  (federation-only, #1864 → #2049).
 - **One resolver, every face.** `citation_link_payload(...)` is the JSON
   form embedded under each `ask_docs` citation's `link` key (the MCP tool and
   the REST `POST /api/v1/ask_docs` route, #1917 — both reuse it unchanged);
@@ -759,7 +820,13 @@ prompt).
 Normalization is **Option A (canonical public URL) with an Option B (opaque
 MEHO ref) fallback**:
 
-- When `resolve_citation_link(source_url)` derives a **canonical public URL**
+- When the hit's own `source_url` is an `https` link, it is the reference.
+- Otherwise, when the backend sent an `upstream_url` (#3913) — its public
+  `http(s)` link to the source, for a PDF often ending in `#page=N` — that
+  link is the reference. The backend knows the public source of its own
+  objects, so its link wins over one derived from the object path here (a
+  KB path included). Any other scheme in `upstream_url` is ignored.
+- Otherwise, when `resolve_citation_link(source_url)` derives a **canonical public URL**
   (a Broadcom KB article, or an already-`https` source), that URL *is* the
   reference — the most consumer-useful outcome (a clickable citation), and a
   vendor/web URL exposes no MEHO or backend internals.
@@ -804,7 +871,9 @@ tool returns the same `grounded` key.
 **Score scale + what `grounded` does *not* cover.** Each chunk's `score` is
 the corpus's raw relevance score — an **opaque, backend-defined scale** MEHO
 neither normalises nor thresholds; it is not comparable across collections
-and there is no fixed cutoff. `grounded` is therefore **presence-based**, not
+and there is no fixed cutoff. Its direction is the chunk's `score_kind`
+(#3913) when the backend sends one: `distance` means **lower is better**,
+`similarity` higher is better; `null` means the backend did not say. `grounded` is therefore **presence-based**, not
 relevance-judged: a query that retrieves topically-irrelevant chunks at
 high scores still reports `grounded=True` (out-of-corpus scores have been
 observed *higher* than in-corpus ones, so no absolute floor separates them).
@@ -951,7 +1020,9 @@ The tool description is load-bearing routing UX (it is a prompt): it
 names the sibling tools so the agent learns the boundary — `search_docs`
 for VENDOR REFERENCE, `search_knowledge` for how THIS team does X,
 `search_memory` for cross-session state — and points to the companion
-resource for the full text of a hit on a later turn.
+resource for the full text of a hit on a later turn. It also says how to
+read `score` (#3913): with `score_kind`, where `distance` means lower is
+better, so an agent does not take a distance for a similarity.
 
 ### `ask_docs` MCP tool (`meho_backplane.mcp.tools.docs`, T7 #1526)
 

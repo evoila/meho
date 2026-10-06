@@ -260,3 +260,54 @@ def test_normalize_missing_collection_key_uses_placeholder_segment() -> None:
     assert normalize_source_ref(_COMMUNITY_GS, collection_key="  ", chunk_id="c1") == (
         "meho://docs/_/c1"
     )
+
+
+# ---------------------------------------------------------------------------
+# normalize_source_ref + upstream_url (#3913) — the backend's public link
+# ---------------------------------------------------------------------------
+
+_UPSTREAM_PDF = "https://docs.vendor.test/guides/widget-guide.pdf#page=693"
+
+
+@pytest.mark.parametrize(
+    "source_url",
+    [
+        pytest.param(_COMMUNITY_GS, id="community-gs"),
+        pytest.param("gs://bucket/x/y.bin", id="unknown-gs"),
+        pytest.param(None, id="no-source"),
+        pytest.param("http://docs.vendor.test/plain", id="plain-http"),
+        # The backend's own link wins over the link derived from a KB path.
+        pytest.param(_KB_GS, id="kb-gs"),
+    ],
+)
+def test_normalize_prefers_upstream_url_when_source_is_not_https(source_url: str | None) -> None:
+    """A source that is not an ``https`` link takes the backend's ``upstream_url``."""
+    ref = normalize_source_ref(
+        source_url, collection_key="vmware", chunk_id="c1", upstream_url=_UPSTREAM_PDF
+    )
+
+    assert ref == _UPSTREAM_PDF
+
+
+def test_normalize_keeps_an_https_source_over_upstream_url() -> None:
+    """An ``https`` source is already the hit's own public link; it is kept."""
+    own = "https://docs.vendor.test/vsan#disk-groups"
+
+    ref = normalize_source_ref(
+        own, collection_key="vmware", chunk_id="c1", upstream_url=_UPSTREAM_PDF
+    )
+
+    assert ref == own
+
+
+@pytest.mark.parametrize(
+    "upstream_url",
+    ["javascript:alert(1)", "gs://bucket/docs/guide.pdf", "https://", "   ", ""],
+)
+def test_normalize_ignores_an_upstream_url_that_is_not_a_web_link(upstream_url: str) -> None:
+    """Only an ``http(s)`` link naming a host replaces the opaque ``meho://`` ref."""
+    ref = normalize_source_ref(
+        _COMMUNITY_GS, collection_key="vmware", chunk_id="c-42", upstream_url=upstream_url
+    )
+
+    assert ref == "meho://docs/vmware/c-42"

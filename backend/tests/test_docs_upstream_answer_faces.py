@@ -182,10 +182,13 @@ def _seed(backend: dict[str, Any] | None = None) -> None:
 
 
 class _FakeAsk:
-    """A recording ``ask_corpus`` stand-in: the fixture body, or a raised error."""
+    """A recording ``ask_corpus`` stand-in: *body* (default: the fixture), or an error."""
 
-    def __init__(self, error: Exception | None = None) -> None:
+    def __init__(
+        self, error: Exception | None = None, *, body: dict[str, Any] | None = None
+    ) -> None:
         self._error = error
+        self._body = body
         self.calls = 0
         self.kwargs: list[dict[str, Any]] = []
 
@@ -194,7 +197,8 @@ class _FakeAsk:
         self.kwargs.append(kwargs)
         if self._error is not None:
             raise self._error
-        return UpstreamAnswer.model_validate(json.loads(_FIXTURE.read_text(encoding="utf-8")))
+        body = self._body or json.loads(_FIXTURE.read_text(encoding="utf-8"))
+        return UpstreamAnswer.model_validate(body)
 
 
 class _FakeSearch:
@@ -368,6 +372,59 @@ def test_three_faces_return_the_same_upstream_answer_and_citations() -> None:
     assert _ui_cited_ids(html) == _EXPECTED_CITATION_IDS
     assert 'aria-label="Citation 1">[1]</span>' in html
     assert 'aria-label="Citation 2">[2]</span>' in html
+
+
+_UPGRADE_LINK = "https://docs.example.test/guides/upgrade-guide.pdf#page=42"
+
+
+def _fixture_with_upstream_link() -> dict[str, Any]:
+    """The fixture body with a public link + page on the upgrade-guide hit and citation."""
+    body: dict[str, Any] = json.loads(_FIXTURE.read_text(encoding="utf-8"))
+    for entry in [*body["hits"], *body["citations"]]:
+        if entry["chunk_id"] == "chunk-upgrade-0011":
+            entry["upstream_url"] = _UPGRADE_LINK
+            entry["upstream_page"] = 42
+    return body
+
+
+def test_three_faces_link_an_upstream_citation_to_its_upstream_url() -> None:
+    """Every face links an upstream citation to the backend's public link (#3913).
+
+    REST and MCP citations carry ``upstream_url`` / ``upstream_page`` and use
+    the link as ``source_url`` and ``link.href``; the UI card links to it
+    instead of the internal cited-source view. The other citation keeps its
+    ``meho://`` reference, and no ``gs://`` string reaches any face.
+    """
+    _seed()
+    body = _fixture_with_upstream_link()
+
+    with (
+        respx.mock(assert_all_called=False) as router,
+        patch(_ASK_SEAM, new=_FakeAsk(body=body)),
+        patch(_SEARCH_SEAM, new=_FakeSearch()),
+    ):
+        rest = _rest_post(router)
+    assert rest.status_code == 200, rest.text
+
+    with patch(_ASK_SEAM, new=_FakeAsk(body=body)), patch(_SEARCH_SEAM, new=_FakeSearch()):
+        mcp_text = _mcp_call()["result"]["content"][0]["text"]
+
+    with patch(_ASK_SEAM, new=_FakeAsk(body=body)), patch(_SEARCH_SEAM, new=_FakeSearch()):
+        html = _ui_post()
+
+    for citations in (rest.json()["citations"], json.loads(mcp_text)["citations"]):
+        release_notes, upgrade = citations
+        assert upgrade["chunk_id"] == "chunk-upgrade-0011"
+        assert upgrade["source_url"] == _UPGRADE_LINK
+        assert (upgrade["upstream_url"], upgrade["upstream_page"]) == (_UPGRADE_LINK, 42)
+        assert upgrade["score_kind"] == "distance"
+        assert (upgrade["link"]["href"], upgrade["link"]["clickable"]) == (_UPGRADE_LINK, True)
+        assert release_notes["source_url"] == "meho://docs/vmware/chunk-rn-2-1-1-0004"
+        assert (release_notes["upstream_url"], release_notes["upstream_page"]) == (None, None)
+    assert f'href="{_UPGRADE_LINK}"' in html
+    assert _ui_cited_ids(html) == ["chunk-rn-2-1-1-0004"]
+    for served in (rest.text, mcp_text, html):
+        assert "gs://" not in served
 
 
 def test_local_collection_cards_are_not_numbered() -> None:

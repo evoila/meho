@@ -44,11 +44,11 @@ from typing import TYPE_CHECKING, Any, Literal
 import structlog
 from pydantic import BaseModel, ConfigDict, Field
 
-from meho_backplane.auth.corpus import CorpusChunk
+from meho_backplane.auth.corpus import CorpusChunk, ScoreKind
 from meho_backplane.auth.operator import Operator
 from meho_backplane.docs_search.backends import resolve_backend
 from meho_backplane.docs_search.call_log import hit_log_fields, note_scoped_zero_hits
-from meho_backplane.docs_search.citation_links import normalize_source_ref
+from meho_backplane.docs_search.citation_links import derive_chunk_title, normalize_source_ref
 
 if TYPE_CHECKING:
     from meho_backplane.docs_collections import DocCollection
@@ -185,12 +185,16 @@ class DocsChunk(BaseModel):
     optional owning-document id (``None`` when the corpus has no document
     concept for a chunk) and is only read as a citation-label fallback.
 
-    ``title`` is the **optional** human-legible chunk title (#2475), passed
-    through from the corpus (``CorpusChunk.title``). It is the *preferred*
-    citation label — every citation face (``ask_docs``, ``/ui/corpus``)
-    feeds it to the ``title -> document_id -> filename -> URL`` label chain
-    — and is ``None`` until the upstream corpus supplies one, so today's
-    corpus (which sends no title) sees no behaviour change.
+    ``title`` is the **optional** human-legible chunk title (#2475). It is
+    the corpus's own ``title`` when it sends one, else a title derived from
+    the hit's page identity (#3913): its section (last heading or breadcrumb
+    tail) joined with its page name (the humanised filename), by
+    :func:`~meho_backplane.docs_search.citation_links.derive_chunk_title`.
+    It is the *preferred* citation label — every citation face
+    (``ask_docs``, ``/ui/corpus``) feeds it to the ``title -> document_id ->
+    filename -> URL`` label chain — and the local synthesis prompt shows it
+    on each evidence line. ``None`` when the corpus sends neither a title
+    nor any page identity.
 
     ``source_url`` is the **backend-agnostic** citation reference (#132): a
     canonical public URL where one is derivable, else an opaque
@@ -199,6 +203,19 @@ class DocsChunk(BaseModel):
     normalizes it via
     :func:`~meho_backplane.docs_search.citation_links.normalize_source_ref`
     so no storage-backend scheme or internal bucket/layout reaches the wire.
+    When the hit's own source is not an ``https`` link and the backend sent
+    an ``upstream_url``, that public link is the ``source_url`` (#3913).
+
+    ``score_kind`` names the direction of ``score`` when the backend sends
+    it: ``distance`` means lower is better, ``similarity`` higher is better.
+    ``None`` when the backend does not say; it is never defaulted.
+
+    ``upstream_url`` / ``upstream_page`` are the backend's optional public
+    link to the hit's source (for a PDF with a known page, ending in
+    ``#page=N``) and that page, counted in the whole source document
+    (#3913). ``None`` when the backend does not send them. ``chunk_id`` is
+    kept either way, so the ``meho://docs`` chunk resource still finds the
+    hit.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -208,7 +225,10 @@ class DocsChunk(BaseModel):
     title: str | None = None
     content: str
     source_url: str | None = None
+    upstream_url: str | None = None
+    upstream_page: int | None = None
     score: float | None = None
+    score_kind: ScoreKind | None = None
     collection: str | None = None
 
 
@@ -402,20 +422,36 @@ def _project_chunk(
     born here) normalize through. *collection_key* is the routing collection
     that namespaces the opaque ref; it falls back to the *collection*
     provenance tag (set on the fan-out path).
+
+    The title is the corpus's ``title``, else one derived from the hit's page
+    identity (``heading_path`` / ``breadcrumb`` / ``filename``, #3913). A hit
+    whose own source is not an ``https`` link uses the backend's
+    ``upstream_url`` as its ``source_url`` when it sent one. ``score_kind``,
+    ``upstream_url`` and ``upstream_page`` pass through unchanged.
     """
+    title = derive_chunk_title(
+        title=chunk.title,
+        heading_path=chunk.heading_path,
+        breadcrumb=chunk.breadcrumb,
+        filename=chunk.filename,
+    )
     return DocsChunk(
         chunk_id=chunk.chunk_id,
         document_id=chunk.document_id,
-        title=chunk.title,
+        title=title,
         content=chunk.content,
         source_url=normalize_source_ref(
             chunk.source_url,
             collection_key=collection_key or collection,
             chunk_id=chunk.chunk_id,
-            title=chunk.title,
+            title=title,
             document_id=chunk.document_id,
+            upstream_url=chunk.upstream_url,
         ),
+        upstream_url=chunk.upstream_url,
+        upstream_page=chunk.upstream_page,
         score=chunk.score,
+        score_kind=chunk.score_kind,
         collection=collection,
     )
 

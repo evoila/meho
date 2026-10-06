@@ -58,7 +58,10 @@ non-LLM sinks like the CLI/REST faces):
   citations.
 * `docs_search/synthesis.py` — `_render_chunks_for_prompt` wraps each
   chunk before interpolating it into the `ask_docs` synthesis user
-  prompt; `_SYNTHESIS_SYSTEM_PROMPT` carries the matching advisory.
+  prompt; `_SYNTHESIS_SYSTEM_PROMPT` carries the matching advisory. The
+  chunk's title on its header line (#3913) stays outside the envelope, so
+  it is JSON-quoted, kept to one line and cut at 200 characters, and the
+  system prompt says it is never an instruction.
 * `mcp/resources/docs.py` — `_docs_chunk_handler` wraps the recovered
   chunk's `content` before returning it.
 

@@ -70,7 +70,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-from typing import Any, Final
+from typing import Any, Final, Literal, get_args
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -98,10 +98,10 @@ __all__ = [
     "CorpusSearchResponse",
     "CorpusStatusResponse",
     "CorpusUnavailable",
+    "ScoreKind",
     "UpstreamAnswer",
     "UpstreamAnswerTiming",
     "UpstreamCitation",
-    "UpstreamHit",
     "ask_corpus",
     "corpus_endpoint_host",
     "corpus_status",
@@ -268,6 +268,40 @@ def _parse_2xx_body[ModelT: BaseModel](
         raise CorpusUnavailable("corpus response did not match the expected schema") from exc
 
 
+#: The direction of a hit's ``score``, as the corpus names it: ``similarity``
+#: (higher is better) or ``distance`` (lower is better).
+ScoreKind = Literal["similarity", "distance"]
+
+_SCORE_KINDS: Final[frozenset[str]] = frozenset(get_args(ScoreKind))
+
+#: Longest ``upstream_url`` kept. A longer value is not a link a person
+#: follows, so it is dropped as unusable.
+_UPSTREAM_URL_MAX: Final[int] = 2048
+
+
+def _web_link_or_none(value: object) -> str | None:
+    """Return *value* stripped when it is a usable ``http(s)`` link, else ``None``.
+
+    ``upstream_url`` is shown to people and agents as a link, so only an
+    absolute ``http`` / ``https`` URL that names a host is kept. Anything
+    else reads as absent: another scheme (``javascript:``, ``gs://``), no
+    host, a space or a control character, more than
+    :data:`_UPSTREAM_URL_MAX` characters, or a value that is not a string.
+    """
+    if not isinstance(value, str):
+        return None
+    url = value.strip()
+    if not url or len(url) > _UPSTREAM_URL_MAX or " " in url or not url.isprintable():
+        return None
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return None
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return None
+    return url
+
+
 class CorpusChunk(BaseModel):
     """One cited chunk returned by the external corpus.
 
@@ -314,6 +348,30 @@ class CorpusChunk(BaseModel):
     ``metadata`` (``metadata["title"]``); the top-level key wins, the metadata
     key is the fallback. Blank-after-strip (or absent) normalises to ``None``
     (the #2004 pattern) so the label chain skips a cleanly-``None`` rung.
+
+    The **page identity** (#3913) is what a citation title is derived from when
+    the corpus sends no ``title``
+    (:func:`~meho_backplane.docs_search.citation_links.derive_chunk_title`):
+    ``filename`` (the source file's name), ``breadcrumb`` (the page's place in
+    its document tree, ``>``-separated) and ``heading_path`` (the headings
+    above the chunk, outermost first). ``score_kind`` names the direction of
+    ``score``: ``distance`` means lower is better, ``similarity`` higher is
+    better.
+
+    Two optional **link** fields name the public source of the hit:
+    ``upstream_url`` (an ``http(s)`` link to the source page or document; for
+    a PDF with a known page it already ends in ``#page=N``) and
+    ``upstream_page`` (that page, counted in the whole source document). The
+    projection prefers ``upstream_url`` over an opaque ``meho://`` reference
+    when the hit's own ``source_url`` is not an ``https`` link.
+
+    All six are optional, and an **unusable value reads as absent** rather
+    than failing the parse: they label and link a hit, they never decide
+    whether it is grounded. So a non-string ``filename`` / ``breadcrumb`` is
+    ``""``, ``heading_path`` keeps only its string items, an unknown
+    ``score_kind`` is ``None``, ``upstream_url`` must be an ``http(s)`` URL
+    with a host (see :func:`_web_link_or_none`), and ``upstream_page`` must be
+    a whole number of at least 1.
     """
 
     model_config = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
@@ -328,6 +386,46 @@ class CorpusChunk(BaseModel):
     )
     score: float | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    filename: str = ""
+    breadcrumb: str = ""
+    heading_path: list[str] = Field(default_factory=list)
+    score_kind: ScoreKind | None = None
+    upstream_url: str | None = None
+    upstream_page: int | None = None
+
+    @field_validator("filename", "breadcrumb", mode="before")
+    @classmethod
+    def _text_or_empty(cls, value: object) -> object:
+        """A missing or non-string ``filename`` / ``breadcrumb`` is ``""``."""
+        return value if isinstance(value, str) else ""
+
+    @field_validator("heading_path", mode="before")
+    @classmethod
+    def _string_headings(cls, value: object) -> object:
+        """Keep the string headings of a list; anything else is ``[]``."""
+        if not isinstance(value, list | tuple):
+            return []
+        return [heading for heading in value if isinstance(heading, str)]
+
+    @field_validator("score_kind", mode="before")
+    @classmethod
+    def _known_score_kind(cls, value: object) -> object:
+        """An unknown ``score_kind`` is ``None``, never a guessed direction."""
+        return value if isinstance(value, str) and value in _SCORE_KINDS else None
+
+    @field_validator("upstream_url", mode="before")
+    @classmethod
+    def _usable_upstream_url(cls, value: object) -> object:
+        """Keep ``upstream_url`` only when it is a usable ``http(s)`` link."""
+        return _web_link_or_none(value)
+
+    @field_validator("upstream_page", mode="before")
+    @classmethod
+    def _positive_page(cls, value: object) -> object:
+        """Keep ``upstream_page`` only when it is a whole number of at least 1."""
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+            return value
+        return None
 
     @field_validator("document_id", mode="before")
     @classmethod
@@ -460,7 +558,8 @@ async def search_corpus(
     # MEHO.Knowledge's ``/search`` reads ``top_k`` for the hit cap and
     # silently ignores ``limit`` (#1732) — sending ``limit`` let the
     # corpus fall back to its server-side default. Send the key the corpus
-    # actually honours so ``limit`` reaches it.
+    # actually honours so ``limit`` reaches it. No ``with_rerank`` is sent:
+    # how hits are ranked is the corpus's decision, not the backplane's.
     payload: dict[str, Any] = {"query": query, "top_k": limit}
     if metadata_filters:
         payload["metadata_filters"] = metadata_filters
@@ -495,31 +594,6 @@ async def search_corpus(
     return _parse_2xx_body(response, CorpusSearchResponse, event_prefix="corpus")
 
 
-class UpstreamHit(CorpusChunk):
-    """One retrieved chunk of an upstream answer (``POST /ask?include=hits``).
-
-    The search-hit shape (:class:`CorpusChunk`, with its ``text`` /
-    ``source_uri`` aliases) plus the page identity the answer endpoint sends
-    and the citation title is derived from (#3911): ``filename``,
-    ``breadcrumb`` and ``heading_path``. ``None`` / absent normalise to empty
-    so the title rule reads one shape.
-    """
-
-    filename: str = ""
-    breadcrumb: str = ""
-    heading_path: list[str] = Field(default_factory=list)
-
-    @field_validator("filename", "breadcrumb", mode="before")
-    @classmethod
-    def _none_to_empty_str(cls, value: object) -> object:
-        return "" if value is None else value
-
-    @field_validator("heading_path", mode="before")
-    @classmethod
-    def _none_to_empty_list(cls, value: object) -> object:
-        return [] if value is None else value
-
-
 class UpstreamCitation(BaseModel):
     """One citation of an upstream answer: which hit backs which ``[N]`` marker.
 
@@ -527,8 +601,9 @@ class UpstreamCitation(BaseModel):
     the backend's answer model saw -- the ``N`` of the ``[N]`` markers in the
     answer text. It is **not** a position in the returned ``hits`` (those come
     back reordered to citation order), so a citation is matched to its hit by
-    ``chunk_id`` only. The quote and the per-citation page fields are not
-    consumed.
+    ``chunk_id`` only. The quote and the per-citation page and link fields
+    (``upstream_url`` / ``upstream_page`` included) are not consumed: the
+    cited hit carries the same values.
     """
 
     model_config = ConfigDict(frozen=True, extra="ignore")
@@ -553,9 +628,10 @@ class UpstreamAnswer(BaseModel):
     only for a collection that opts in (``backend.ref["answer"] ==
     "upstream"``). Pins the fields the backplane maps: the ``answer`` text
     with its ``[N]`` markers, the ``citations`` (``chunk_index`` +
-    ``chunk_id``), the retrieved ``hits`` and the backend ``timing``.
-    ``extra="ignore"`` absorbs everything else (the echoed ``query``, quotes,
-    page numbers, ``score_kind``).
+    ``chunk_id``), the retrieved ``hits`` (each a :class:`CorpusChunk`: the
+    search-hit shape with its page identity and link fields) and the backend
+    ``timing``. ``extra="ignore"`` absorbs everything else (the echoed
+    ``query``, quotes, page numbers).
 
     ``hits`` is **required**: the request always asks for ``include=hits``,
     and a citation can only be resolved against the hits. A 2xx body without
@@ -567,7 +643,7 @@ class UpstreamAnswer(BaseModel):
 
     answer: str = Field(min_length=1)
     citations: list[UpstreamCitation] = Field(default_factory=list)
-    hits: list[UpstreamHit]
+    hits: list[CorpusChunk]
     timing: UpstreamAnswerTiming = Field(default_factory=UpstreamAnswerTiming)
 
 

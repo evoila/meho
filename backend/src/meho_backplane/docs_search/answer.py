@@ -47,9 +47,12 @@ Mapping an upstream answer
 
 * **Hits** project through the same
   :func:`~meho_backplane.docs_search.service._project_chunk` as
-  ``search_docs``, so source refs are identical. Their title comes from the
-  page identity the backend sends
-  (:func:`~meho_backplane.docs_search.citation_links.derive_chunk_title`).
+  ``search_docs``, so source refs, titles (derived from the page identity the
+  backend sends when it sends no ``title``,
+  :func:`~meho_backplane.docs_search.citation_links.derive_chunk_title`) and
+  the optional ``score_kind`` / ``upstream_url`` / ``upstream_page`` are
+  identical. A citation is the projected hit it names, so it carries them
+  too.
 * **Citations** are walked in response order, de-duplicated by
   ``chunk_id`` and matched to a hit **by** ``chunk_id`` -- never by position:
   the backend returns its hits reordered to citation order. A citation that
@@ -75,7 +78,7 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
-from meho_backplane.auth.corpus import UpstreamAnswer, UpstreamAnswerTiming, UpstreamHit
+from meho_backplane.auth.corpus import UpstreamAnswer, UpstreamAnswerTiming
 from meho_backplane.auth.operator import Operator
 from meho_backplane.docs_search.answer_errors import (
     LEG_EXPAND,
@@ -84,7 +87,6 @@ from meho_backplane.docs_search.answer_errors import (
 )
 from meho_backplane.docs_search.backends import BackendRef, resolve_backend_or_label
 from meho_backplane.docs_search.call_log import AnswerSource, ask_log_fields, hit_log_fields
-from meho_backplane.docs_search.citation_links import derive_chunk_title
 from meho_backplane.docs_search.expansion import expand_docs_query
 from meho_backplane.docs_search.fanout import retrieve_multi_query
 from meho_backplane.docs_search.service import (
@@ -271,9 +273,7 @@ async def _answer_upstream(
         _log_upstream_failure(operator, scope, forwarded, error)
         return AskPipelineOutcome(error=error, answer_source=ANSWER_SOURCE_UPSTREAM)
 
-    hits = [
-        _project_upstream_hit(hit, collection_key=scope.collection_key) for hit in upstream.hits
-    ]
+    hits = [_project_chunk(hit, collection_key=scope.collection_key) for hit in upstream.hits]
     try:
         answer = _map_upstream_answer(upstream, hits)
     except DocsSynthesisError as exc:
@@ -291,22 +291,6 @@ async def _answer_upstream(
         answer_source=ANSWER_SOURCE_UPSTREAM,
         upstream_timing=upstream.timing,
     )
-
-
-def _project_upstream_hit(hit: UpstreamHit, *, collection_key: str) -> DocsChunk:
-    """Project an upstream hit like a ``search_docs`` hit, with a derived title.
-
-    The title rule (:func:`~meho_backplane.docs_search.citation_links.derive_chunk_title`)
-    reads the page identity only the answer path carries today; the source
-    ref goes through the same ``_project_chunk`` as ``search_docs``.
-    """
-    title = derive_chunk_title(
-        title=hit.title,
-        heading_path=hit.heading_path,
-        breadcrumb=hit.breadcrumb,
-        filename=hit.filename,
-    )
-    return _project_chunk(hit.model_copy(update={"title": title}), collection_key=collection_key)
 
 
 def _map_upstream_answer(upstream: UpstreamAnswer, hits: list[DocsChunk]) -> DocsAnswer:

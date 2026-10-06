@@ -381,6 +381,45 @@ async def test_ssh_command_emits_typed_span_with_omitted_bodies() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ssh_span_never_keeps_raw_pfsense_config_stdout() -> None:
+    """``pfsense.config.show`` reads ``config.xml`` over SSH *before* its handler
+    removes the secrets, so the SSH transport span sees the raw file. That raw
+    stdout must never land in a trace: the plain-text body is dropped
+    fail-closed, and the handler's own result carries no secret either.
+    Synthetic values only (a fake bcrypt-shaped hash).
+    """
+    from meho_backplane.connectors.pfsense.connector import PfSenseConnector
+
+    fake_hash = "$2y$10$" + "q" * 53
+    stdout = (
+        '<?xml version="1.0"?>\n<pfsense><system><user><name>u1</name>'
+        f"<bcrypt-hash>{fake_hash}</bcrypt-hash></user></system></pfsense>\n"
+    )
+    conn = PfSenseConnector()
+    fake = _FakeConn(_FakeSshResult(stdout=stdout, exit_status=0))
+    conn._connect = AsyncMock(return_value=fake)  # type: ignore[method-assign]
+    op = _op_ctx(
+        op_id="pfsense.config.show",
+        connector_id="pfsense-ssh-2.7",
+        impl_id="pfsense-ssh",
+        product="pfsense",
+        tags=("read-only", "config", "pfsense"),
+    )
+    with _active_scope(op) as scope:
+        result = await conn.config_show(_Target("fw-test"), {})
+    assert fake.commands == ["cat /cf/conf/config.xml"]
+    (span,) = _typed_spans(scope)
+    assert span.attributes["transport"] == "ssh"
+    assert span.attributes["request_body"] == BODY_OMITTED_MARKER
+    assert span.attributes["response_body"] == BODY_OMITTED_MARKER
+    assert fake_hash not in repr(span.attributes)
+    assert scope.redaction_uncertain is True
+    # The handler removed the hash before returning.
+    assert fake_hash not in repr(result)
+    assert result["redacted_count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_ssh_span_failure_never_breaks_the_command() -> None:
     """A raising recorder never propagates into the SSH dispatch path (F7)."""
     conn = _StubSshConnector(_FakeSshResult(stdout="ok", exit_status=0))

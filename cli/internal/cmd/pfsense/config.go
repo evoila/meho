@@ -27,7 +27,8 @@ func newConfigCmd() *cobra.Command {
 // newConfigShowCmd returns the `meho pfsense config show` command.
 //
 // Maps to op_id `pfsense.config.show`. Reads `/cf/conf/config.xml`
-// over SSH and returns the raw XML content and its character length.
+// over SSH and returns the XML content with every secret value replaced
+// by ***REDACTED***, its character length and redacted_count.
 // For structured gateway data, prefer `meho pfsense network gateway`.
 func newConfigShowCmd() *cobra.Command {
 	var (
@@ -38,14 +39,17 @@ func newConfigShowCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "show",
 		Short: "Return the full pfSense configuration as XML (/cf/conf/config.xml)",
-		Long: "show dispatches pfsense.config.show and returns the raw\n" +
-			"config.xml content and its character length. Use when the\n" +
-			"operator needs to inspect or export the complete pfSense\n" +
+		Long: "show dispatches pfsense.config.show and returns the\n" +
+			"config.xml content and its character length. Every secret\n" +
+			"value (password hashes, private keys, VPN keys, pre-shared\n" +
+			"keys, service passwords, API keys) is replaced by\n" +
+			"***REDACTED***, so the output is not a restorable backup.\n" +
+			"Use when the operator needs to inspect the pfSense\n" +
 			"configuration. For structured gateway data, prefer:\n" +
 			"  meho pfsense network gateway\n\n" +
 			"The human render prints the first 40 lines of the XML and\n" +
 			"the total length. --json emits the full OperationResult\n" +
-			"envelope including the raw config_xml string.\n\n" +
+			"envelope including the config_xml string and redacted_count.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
 		Example: "  meho pfsense config show --target pfsense-hetzner-dc\n" +

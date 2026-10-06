@@ -38,7 +38,7 @@ working set operators use for daily firewall and network diagnostics:
 | `firewall` | `pfsense.firewall.rules`, `pfsense.firewall.state` | read-only |
 | `nat` | `pfsense.nat.rules` | read-only |
 | `network` | `pfsense.interface.list`, `pfsense.gateway.list` | read-only |
-| `config` | `pfsense.config.show` | read-only XML dump |
+| `config` | `pfsense.config.show` | read-only XML dump, secrets removed |
 
 Eight ops total. Every op dispatches through the same
 `POST /api/v1/operations/call` route the agent surface uses — auth,
@@ -226,13 +226,17 @@ When the JSONFlux reducer is configured with a row-count threshold, the
 dispatcher will produce a `ResultHandle` for large state tables (the
 agent can then page it with `result_query(handle_id, offset, limit)`).
 
-### config.xml contains sensitive data
+### config.xml secrets are removed
 
-`pfsense.config.show` returns the full `/cf/conf/config.xml` as a string
-field in the OperationResult. The config includes VPN keys, user password
-hashes, and pre-shared secrets. The CLI's human render caps at 40 lines;
-`--json` returns the full content. Treat the JSON output as sensitive and
-avoid persisting it in plain text.
+`/cf/conf/config.xml` holds the firewall's secrets: VPN keys, certificate
+private keys, user password hashes, pre-shared keys and service passwords.
+`pfsense.config.show` returns the file with every secret value replaced by
+`***REDACTED***` and reports how many values it replaced in
+`redacted_count`. Everything else is unchanged. If the secrets cannot be
+removed safely, the op returns no XML and an error instead. Because the
+secrets are gone, the output is **not** a restorable backup — use the
+pfSense backup page for that. The CLI's human render caps at 40 lines;
+`--json` returns the full (cleaned) content.
 
 ## The CLI verb surface
 
@@ -311,12 +315,13 @@ $ meho pfsense network gateway --target pfsense-hetzner-dc --json \
 # Print first 40 lines of config.xml with length summary
 $ meho pfsense config show --target pfsense-hetzner-dc
 
-# Extract full XML to a file
+# Extract the full XML (secret values removed) to a file
 $ meho pfsense config show --target pfsense-hetzner-dc --json \
-    | jq -r .result.config_xml > pfsense-backup-$(date +%Y%m%d).xml
+    | jq -r .result.config_xml > pfsense-config-$(date +%Y%m%d).xml
 ```
 
-Returns the raw `/cf/conf/config.xml` content and its character length.
+Returns the `/cf/conf/config.xml` content with every secret value replaced
+by `***REDACTED***`, its character length and `redacted_count`.
 For structured gateway data, prefer `meho pfsense network gateway`.
 
 ## The agent meta-tool path

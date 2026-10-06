@@ -109,6 +109,12 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
   - Handler functions: `pfsense_version`, `pfsense_firewall_rules`,
     `pfsense_firewall_state`, `pfsense_nat_rules`, `pfsense_interface_list`,
     `pfsense_gateway_list`, `pfsense_config_show`, `pfsense_dhcp_leases`.
+- **Config secret removal** (`redaction.py`) — `redact_config_xml` (returns
+  the cleaned text and `redacted_count`), the name rule `is_secret_name`, the
+  value-shape rule `looks_like_secret`, the known-name set
+  `SECRET_ELEMENT_NAMES`, the marker `REDACTED` (`***REDACTED***`) and
+  `ConfigRedactionError`. Used only by `pfsense_config_show`; see
+  "`pfsense.config.show` — secret removal" below.
 
 ## Control flow
 
@@ -221,7 +227,7 @@ Two-phase registration, identical to the bind9 pattern:
 | `pfsense.nat.rules` | `pfctl -sn` | `nat` | `safe` |
 | `pfsense.interface.list` | `ifconfig -a` | `network` | `safe` |
 | `pfsense.gateway.list` | `cat /cf/conf/config.xml` (gateways block) + `pfSsh.php playback gatewaystatus` (live dpinger status) | `network` | `safe` |
-| `pfsense.config.show` | `cat /cf/conf/config.xml` (full) | `config` | `safe` |
+| `pfsense.config.show` | `cat /cf/conf/config.xml` (full file, every secret value replaced) | `config` | `safe` |
 | `pfsense.dhcp.leases` | `cat /var/dhcpd/var/db/dhcpd.leases` (ISC dhcpd lease DB) | `dhcp` | `safe` |
 | `pfsense.gateway.add` | `cat /cf/conf/config.xml` guard + `pfSsh.php playback` fragment (append `gateway_item` + `write_config()`) | `routing` | `caution` |
 | `pfsense.route.static.add` | `cat /cf/conf/config.xml` guard + `pfSsh.php playback` fragment (append `staticroutes/route` + `write_config()` + `system_routing_configure()`) | `routing` | `caution` |
@@ -279,6 +285,61 @@ present in `config.xml` but absent from the live view (e.g. on a down
 interface `dpinger` is not monitoring) keeps its row with all five health
 fields `null`; a failure of the status command degrades the whole set to
 `null` health rather than failing the op.
+
+### `pfsense.config.show` — secret removal
+
+`config.xml` holds the firewall's secrets next to its normal settings: user
+password hashes, certificate and CA private keys (`<prv>`), OpenVPN shared and
+TLS keys, IPsec pre-shared keys, RADIUS / LDAP / sync passwords, notification
+tokens and package secrets. The op is `safe` with no approval, so the handler
+removes every secret value **before** the result leaves it
+(`redaction.redact_config_xml`). The audit row's `raw_payload`, the
+flight-recorder trace, a stored result and the broadcast feed therefore only
+ever see the cleaned text.
+
+- **What is removed.** A value goes when any of three rules fires:
+  1. *Known names* (`SECRET_ELEMENT_NAMES`), checked against the pfSense 2.7.2
+     source: pfSense's own "sanitized config" list (`$filtered_tags` in
+     `status_output.inc`) minus `authorizedkeys`, plus `keydata`, `omapi_key`,
+     `trapstring`, `vouchersyncpass`, `apikey`, `userkey`, `api`,
+     `radiuskey*` and the `sshdata` block (backed-up SSH host keys). One
+     context rule: `<username>` below `<pppoes>` (PPPoE server users with
+     base64 passwords).
+  2. *Name patterns* (`is_secret_name`): names containing `password`,
+     `passwd`, `passphrase`, `secret`, `psk`, `bindpw`, `prv`, `shared_key`,
+     `api_key`, `private_key`, `credential` or `community`; a `-hash` /
+     `_hash` suffix; names ending in `pass` (not `bypass`), `pwd`, `token` or
+     `authkey`; the ACME `dns_*key|password|secret|token|pwd|pw` fields. A bare
+     "contains hash" rule is deliberately not used: it would hide the IPsec
+     `hash-algorithm` choices, the LAGG `lagghash` policy and the `pwhash`
+     algorithm name, which are settings, not secrets.
+  3. *Value shapes* (`looks_like_secret`), checked on every text value, CDATA
+     section, attribute value and comment: a PEM private key, an OpenVPN key,
+     base64 that decodes (or decodes and inflates) to one of those, and crypt
+     password hashes (`$1$`, `$2a$`/`$2b$`/`$2y$`, `$5$`, `$6$`, ...).
+  Everything below a secret element is secret too.
+- **What stays.** Every other byte, unchanged: tags, attributes, comments,
+  whitespace, CDATA wrappers, entity references. Public certificates
+  (`<crt>`), CSRs and SSH public keys (`authorizedkeys`) stay.
+- **No XML parser.** The file is scanned as text with regular expressions, so
+  no entity is expanded and the output is the input with only the secret
+  values swapped. `defusedxml` (already a dependency, used by
+  `parse_gateways_xml`) was not used here because parsing and re-serialising
+  would not keep the rest of the file byte for byte (CDATA, comments,
+  attribute quoting, whitespace).
+- **Fail closed.** The scan raises `ConfigRedactionError` on markup it does
+  not recognise (for example a `<!DOCTYPE`, which pfSense never writes), a
+  mismatched or unclosed element, or a key / hash shape that survives in the
+  output. The handler turns any exception into `config_xml: null` plus an
+  `error`; the raw file is never returned.
+- **Result shape.** `{config_xml, length, redacted_count}`; `length` is the
+  length of the returned (cleaned) text and `redacted_count` is the number of
+  values replaced. The output is not a restorable backup.
+- **Traces.** The raw `cat` output still passes through the shared SSH
+  transport span (`SshConnector._run_command`), but that span hands it to the
+  flight-recorder redaction engine as plain text, which drops it
+  (`[MEHO-OMITTED:redaction-uncertain]`) — pinned by
+  `test_ssh_span_never_keeps_raw_pfsense_config_stdout`.
 
 ### `pfsense.mgmt_flow.summary` — management-plane flow classifier (meho-internal#252)
 

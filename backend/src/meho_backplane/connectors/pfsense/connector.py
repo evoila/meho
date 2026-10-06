@@ -206,11 +206,12 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "configuration from the pfSense config."
     ),
     "config": (
-        "Use for pfSense configuration operations: reading the full "
-        "pfSense configuration (``pfsense.config.show``) or getting a "
-        "structured version summary (``pfsense.version``). Call "
-        "``pfsense.config.show`` when the operator needs to inspect or "
-        "export the complete pfSense config.xml."
+        "Use for pfSense configuration operations: reading the pfSense "
+        "configuration with its secret values removed "
+        "(``pfsense.config.show``) or getting a structured version summary "
+        "(``pfsense.version``). Call ``pfsense.config.show`` when the "
+        "operator needs to inspect the pfSense config.xml; secret values "
+        "come back redacted, so the output is not a restorable backup."
     ),
     "dhcp": (
         "Use for pfSense DHCP lease-state operations: reading the live "

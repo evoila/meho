@@ -50,6 +50,7 @@ Fixture responses reproduce realistic but minimal pfSense 2.7 output:
 from __future__ import annotations
 
 import asyncio
+import json
 import types
 import uuid
 from collections.abc import AsyncIterator, Iterator
@@ -695,6 +696,57 @@ async def test_pfsense_e2e_config_show_dispatches_ok(
     config_xml = result["result"].get("config_xml", "")
     assert "pfsense" in config_xml.lower() or "WAN_DHCP" in config_xml
     assert result["result"].get("length", 0) > 0
+
+
+@pytest.mark.asyncio
+async def test_pfsense_e2e_config_show_keeps_secrets_out_of_result_and_audit_row(
+    pfsense_e2e: _PfsenseE2EBundle,
+    captured_events: list[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The handler removes secrets before the result leaves it, so neither the
+    caller, the audit row (``raw_payload`` included) nor the broadcast event
+    ever holds them. Synthetic values only.
+    """
+    fake_hash = "$2y$10$" + "e" * 53
+    fake_psk = "fake-e2e-pre-shared-key"
+    config = _FIXTURE_CONFIG_XML.replace(
+        "</pfsense>",
+        f"  <system><user><name>u1</name><bcrypt-hash>{fake_hash}</bcrypt-hash></user></system>\n"
+        f"  <ipsec><phase1><pre-shared-key>{fake_psk}</pre-shared-key></phase1></ipsec>\n"
+        "</pfsense>",
+    )
+    monkeypatch.setitem(_FIXTURE_RESPONSES, "cat /cf/conf/config.xml", config)
+
+    result = await call_operation(
+        _OPERATOR,
+        {
+            "connector_id": "pfsense-ssh-2.7",
+            "op_id": "pfsense.config.show",
+            "target": {"name": _TARGET_NAME},
+            "params": {},
+        },
+    )
+    assert result["status"] == "ok", f"pfsense.config.show failed: {result.get('error')}"
+    body = result["result"]
+    assert body["redacted_count"] == 2
+    assert "WAN_DHCP" in body["config_xml"]  # normal content still there
+    secrets = (fake_hash, fake_psk)
+    assert not any(secret in json.dumps(result, default=str) for secret in secrets)
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        db_result = await session.execute(
+            select(AuditLog)
+            .where(AuditLog.method == "DISPATCH", AuditLog.path == "pfsense.config.show")
+            .order_by(AuditLog.occurred_at.desc())
+            .limit(1)
+        )
+        row = db_result.scalar_one()
+    stored = json.dumps([row.payload, row.raw_payload, row.redaction_manifest], default=str)
+    assert not any(secret in stored for secret in secrets)
+    assert "***REDACTED***" in json.dumps(row.raw_payload, default=str)
+    assert not any(secret in repr(event) for event in captured_events for secret in secrets)
 
 
 # ---------------------------------------------------------------------------

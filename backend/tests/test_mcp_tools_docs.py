@@ -575,15 +575,15 @@ def test_tools_call_search_docs_chunk_carries_identity_score_kind_and_link(
     """
     client, _op = docs_client
     _seed_collection_sync()
-    link = "https://docs.example.com/nsx/9.0/maximums.pdf#page=12"
+    link = "https://docs.example.com/product/2.1/maximums.pdf#page=12"
     identified = CorpusChunk.model_validate(
         {
-            "chunk_id": "nsx-9.0-maximums-0007",
-            "text": "NSX 9.0 supports up to 10,000 logical switches per manager.",
-            "source_uri": "gs://example-bucket/docs/nsx/9.0/maximums.pdf",
+            "chunk_id": "product-2.1-maximums-0007",
+            "text": "Product 2.1 supports up to 10,000 widgets per manager.",
+            "source_uri": "gs://example-bucket/docs/product/2.1/maximums.pdf",
             "score": 0.42,
             "score_kind": "distance",
-            "breadcrumb": "NSX 9.0 > Configuration Maximums > Logical switching",
+            "breadcrumb": "Product 2.1 > Configuration Maximums > Widgets",
             "filename": "maximums.pdf",
             "upstream_url": link,
             "upstream_page": 12,
@@ -605,8 +605,8 @@ def test_tools_call_search_docs_chunk_carries_identity_score_kind_and_link(
     assert response.status_code == 200
     text = response.json()["result"]["content"][0]["text"]
     first, second = json.loads(text)["chunks"]
-    assert first["chunk_id"] == "nsx-9.0-maximums-0007"
-    assert first["title"] == "Logical switching \u2014 maximums"
+    assert first["chunk_id"] == "product-2.1-maximums-0007"
+    assert first["title"] == "Widgets \u2014 maximums"
     assert first["source_url"] == link
     assert (first["upstream_url"], first["upstream_page"]) == (link, 12)
     assert first["score_kind"] == "distance"

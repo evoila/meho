@@ -108,6 +108,7 @@ __all__ = [
     "derive_answer_url",
     "derive_status_url",
     "search_corpus",
+    "web_link_or_none",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -278,15 +279,27 @@ _SCORE_KINDS: Final[frozenset[str]] = frozenset(get_args(ScoreKind))
 #: follows, so it is dropped as unusable.
 _UPSTREAM_URL_MAX: Final[int] = 2048
 
+#: Highest ``upstream_page`` kept. No real document has more pages; a larger
+#: number is unusable, and a huge one would not fit the CLI's integer type
+#: and would break decoding the whole response there.
+_UPSTREAM_PAGE_MAX: Final[int] = 1_000_000
 
-def _web_link_or_none(value: object) -> str | None:
+
+def web_link_or_none(value: object) -> str | None:
     """Return *value* stripped when it is a usable ``http(s)`` link, else ``None``.
 
     ``upstream_url`` is shown to people and agents as a link, so only an
     absolute ``http`` / ``https`` URL that names a host is kept. Anything
     else reads as absent: another scheme (``javascript:``, ``gs://``), no
-    host, a space or a control character, more than
-    :data:`_UPSTREAM_URL_MAX` characters, or a value that is not a string.
+    host, a space, a control or bidi character (``str.isprintable`` is false
+    for both), more than :data:`_UPSTREAM_URL_MAX` characters, a URL
+    ``urlsplit`` cannot parse (for example a broken ``[`` IPv6 host), or a
+    value that is not a string. It never raises.
+
+    The one rule for an ``upstream_url``: the corpus parse
+    (:class:`CorpusChunk`) and the citation reference
+    (:func:`~meho_backplane.docs_search.citation_links.normalize_source_ref`)
+    both use it.
     """
     if not isinstance(value, str):
         return None
@@ -370,8 +383,8 @@ class CorpusChunk(BaseModel):
     whether it is grounded. So a non-string ``filename`` / ``breadcrumb`` is
     ``""``, ``heading_path`` keeps only its string items, an unknown
     ``score_kind`` is ``None``, ``upstream_url`` must be an ``http(s)`` URL
-    with a host (see :func:`_web_link_or_none`), and ``upstream_page`` must be
-    a whole number of at least 1.
+    with a host (see :func:`web_link_or_none`), and ``upstream_page`` must be
+    a whole number from 1 to :data:`_UPSTREAM_PAGE_MAX`.
     """
 
     model_config = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
@@ -417,13 +430,22 @@ class CorpusChunk(BaseModel):
     @classmethod
     def _usable_upstream_url(cls, value: object) -> object:
         """Keep ``upstream_url`` only when it is a usable ``http(s)`` link."""
-        return _web_link_or_none(value)
+        return web_link_or_none(value)
 
     @field_validator("upstream_page", mode="before")
     @classmethod
     def _positive_page(cls, value: object) -> object:
-        """Keep ``upstream_page`` only when it is a whole number of at least 1."""
-        if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+        """Keep ``upstream_page`` only when it is a whole number from 1 to the cap.
+
+        A number above :data:`_UPSTREAM_PAGE_MAX` reads as absent like any
+        other unusable value: it is no real page, and a huge one would break
+        the CLI's decoding of the whole response.
+        """
+        if (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and 1 <= value <= _UPSTREAM_PAGE_MAX
+        ):
             return value
         return None
 

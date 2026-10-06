@@ -63,6 +63,8 @@ from pathlib import PurePosixPath
 from typing import Final
 from urllib.parse import urlsplit
 
+from meho_backplane.auth.corpus import web_link_or_none
+
 __all__ = [
     "CitationLink",
     "citation_link_payload",
@@ -215,8 +217,8 @@ def derive_chunk_title(
     2. else the chunk's **section** -- the last non-blank ``heading_path``
        element, or the last ``>``-separated segment of the ``breadcrumb``
        when there is no heading -- joined with the **page name**, the
-       humanised ``filename`` stem: ``What's New`` + ``vsan-9-0-release-notes.html``
-       -> ``What's New — vsan 9 0 release notes``. A section alone names a
+       humanised ``filename`` stem: ``What's New`` + ``product-2-1-release-notes.html``
+       -> ``What's New — product 2 1 release notes``. A section alone names a
        part of a page but not which page (or which release) it is on, so the
        page name rides along. When only one of the two exists, it is the
        title; when both say the same thing (ignoring case and punctuation),
@@ -430,15 +432,12 @@ def citation_link_payload(
     }
 
 
-def _web_url(value: str | None) -> str | None:
-    """Return *value* stripped when it is an ``http(s)`` URL naming a host."""
-    if value is None or not value.strip():
-        return None
-    raw = value.strip()
-    parts = urlsplit(raw)
-    if parts.scheme in ("http", "https") and parts.hostname:
-        return raw
-    return None
+def _scheme_of(value: str | None) -> str:
+    """Return the URL scheme of *value*, or ``""`` when it has none or is broken."""
+    try:
+        return urlsplit((value or "").strip()).scheme
+    except ValueError:
+        return ""
 
 
 def normalize_source_ref(
@@ -502,15 +501,18 @@ def normalize_source_ref(
             resolver; not part of the returned reference).
         upstream_url: Optional public ``http(s)`` link the backend sent for
             the chunk's source. Used when *source_url* is not an ``https``
-            link; any other scheme is ignored.
+            link. It is checked by the same rule as the corpus parse
+            (:func:`~meho_backplane.auth.corpus.web_link_or_none`): another
+            scheme, no host, a space, a control or bidi character, more than
+            2048 characters or a broken URL reads as absent, never raises.
 
     Returns:
         A non-empty, backend-agnostic reference string: a canonical
         ``http(s)`` URL, or an opaque ``meho://docs/<collection>/<chunk_id>``.
         Never a ``gs://`` (or other backend-scheme) path.
     """
-    upstream = _web_url(upstream_url)
-    if upstream is not None and urlsplit((source_url or "").strip()).scheme != "https":
+    upstream = web_link_or_none(upstream_url)
+    if upstream is not None and _scheme_of(source_url) != "https":
         return upstream
     link = resolve_citation_link(source_url, title=title, document_id=document_id)
     if link.href is not None:

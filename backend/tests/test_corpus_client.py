@@ -669,7 +669,7 @@ async def test_page_identity_score_kind_and_upstream_link_thread_through(
     source and the page in the whole source document.
     """
     _pin_settings(monkeypatch, corpus_url=_CORPUS_URL)
-    link = "https://docs.example/guides/widget-guide.pdf#page=693"
+    link = "https://docs.example/guides/guide.pdf#page=693"
     response = httpx.Response(
         200,
         json={
@@ -677,10 +677,10 @@ async def test_page_identity_score_kind_and_upstream_link_thread_through(
                 {
                     "chunk_id": "c1",
                     "text": "Pools are capped at 64 per cluster.",
-                    "source_uri": "gs://example-bucket/docs/widget-guide-part02of05.pdf",
+                    "source_uri": "gs://example-bucket/docs/guide-part02of03.pdf",
                     "score": 0.31,
                     "score_kind": "distance",
-                    "filename": "widget-guide-part02of05.pdf",
+                    "filename": "guide-part02of03.pdf",
                     "breadcrumb": "Widget Guide > Planning",
                     "heading_path": ["Planning", "Pool limits"],
                     "upstream_url": link,
@@ -693,12 +693,16 @@ async def test_page_identity_score_kind_and_upstream_link_thread_through(
 
     (chunk,) = (await search_corpus(_make_operator(), "q")).chunks
 
-    assert chunk.filename == "widget-guide-part02of05.pdf"
+    assert chunk.filename == "guide-part02of03.pdf"
     assert chunk.breadcrumb == "Widget Guide > Planning"
     assert chunk.heading_path == ["Planning", "Pool limits"]
     assert chunk.score_kind == "distance"
     assert chunk.upstream_url == link
     assert chunk.upstream_page == 693
+
+
+#: An ``upstream_url`` of exactly 2048 characters, the longest one kept.
+_URL_AT_CAP = "https://d.example/" + "x" * (2048 - len("https://d.example/"))
 
 
 def test_absent_page_identity_and_link_fields_read_as_absent() -> None:
@@ -726,18 +730,33 @@ def test_absent_page_identity_and_link_fields_read_as_absent() -> None:
         ("upstream_url", "/relative/guide.pdf", None),
         ("upstream_url", "https://docs.example/a b.pdf", None),
         ("upstream_url", "https://docs.example/a\nb.pdf", None),
+        ("upstream_url", "https://docs.example/a\tb.pdf", None),
+        ("upstream_url", "https://docs.example/a\u00a0b.pdf", None),
+        # A bidi control character could make the link read as another one.
+        ("upstream_url", "https://docs.example/a\u202eb.pdf", None),
+        ("upstream_url", "https://docs.example/a\u2066b.pdf", None),
+        # A URL urlsplit cannot parse reads as absent; it never raises.
+        ("upstream_url", "https://[::1/guide.pdf", None),
+        ("upstream_url", "https://[not-an-ip]/guide.pdf", None),
         ("upstream_url", "https://docs.example/" + "x" * 2100, None),
+        # Exactly 2048 characters is still a link.
+        ("upstream_url", _URL_AT_CAP, _URL_AT_CAP),
         ("upstream_url", "", None),
         ("upstream_url", 42, None),
         ("upstream_url", "  https://docs.example/kb/1  ", "https://docs.example/kb/1"),
         ("upstream_url", "http://docs.example/kb/1", "http://docs.example/kb/1"),
-        # upstream_page: a whole number of at least 1.
+        # upstream_page: a whole number from 1 to 1,000,000. A larger one is
+        # no real page, and a huge one would break the CLI's decoding.
         ("upstream_page", 0, None),
         ("upstream_page", -3, None),
         ("upstream_page", True, None),
         ("upstream_page", "12", None),
         ("upstream_page", 1.5, None),
         ("upstream_page", 1, 1),
+        ("upstream_page", 1_000_000, 1_000_000),
+        ("upstream_page", 1_000_001, None),
+        ("upstream_page", 2**63, None),
+        ("upstream_page", 10**30, None),
         # score_kind: one of the two known directions.
         ("score_kind", "cosine", None),
         ("score_kind", "", None),

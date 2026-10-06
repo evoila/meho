@@ -415,16 +415,16 @@ def test_hits_carry_derived_title_score_kind_and_upstream_link(client: TestClien
     token = _mint_token(
         key, sub="op-1", tenant_role=TenantRole.OPERATOR.value, capabilities=_ENTITLED_CAPS
     )
-    link = "https://docs.vendor.test/guides/widget-guide.pdf#page=693"
+    link = "https://docs.vendor.test/guides/guide.pdf#page=693"
     pdf_hit = CorpusChunk.model_validate(
         {
             "chunk_id": "pdf-1",
             "text": "Pools are capped at 64 per cluster.",
-            "source_uri": "gs://example-bucket/docs/widget/widget-guide-part02of05.pdf",
+            "source_uri": "gs://example-bucket/docs/guide/guide-part02of03.pdf",
             "score": 0.31,
             "score_kind": "distance",
             "heading_path": ["Planning", "Pool limits"],
-            "filename": "widget-guide-part02of05.pdf",
+            "filename": "guide-part02of03.pdf",
             "upstream_url": link,
             "upstream_page": 693,
         }
@@ -451,7 +451,7 @@ def test_hits_carry_derived_title_score_kind_and_upstream_link(client: TestClien
     assert response.status_code == 200, response.text
     first, second = response.json()["chunks"]
     assert first["chunk_id"] == "pdf-1"
-    assert first["title"] == "Pool limits \u2014 widget guide part02of05"
+    assert first["title"] == "Pool limits \u2014 guide part02of03"
     assert first["source_url"] == link
     assert first["upstream_url"] == link
     assert first["upstream_page"] == 693

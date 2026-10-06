@@ -827,16 +827,16 @@ def test_corpus_search_card_links_upstream_url_under_derived_title() -> None:
         tenant_id=_TENANT_A,
         capabilities=frozenset({"meho-docs", "meho-docs:vmware"}),
     )
-    link = "https://docs.vmware.test/guides/widget-guide.pdf#page=693"
+    link = "https://docs.vendor.test/guides/guide.pdf#page=693"
     hit = CorpusChunk.model_validate(
         {
             "chunk_id": "pdf-1",
             "text": "Pools are capped at 64 per cluster.",
-            "source_uri": "gs://example-bucket/docs/widget/widget-guide-part02of05.pdf",
+            "source_uri": "gs://example-bucket/docs/guide/guide-part02of03.pdf",
             "score": 0.31,
             "score_kind": "distance",
             "heading_path": ["Planning", "Pool limits"],
-            "filename": "widget-guide-part02of05.pdf",
+            "filename": "guide-part02of03.pdf",
             "upstream_url": link,
             "upstream_page": 693,
         }
@@ -860,7 +860,7 @@ def test_corpus_search_card_links_upstream_url_under_derived_title() -> None:
     body = response.text
     assert transport.await_count == 1
     assert f'href="{link}"' in body
-    assert "Pool limits \u2014 widget guide part02of05" in body
+    assert "Pool limits \u2014 guide part02of03" in body
     assert "gs://" not in body
     assert "/ui/corpus/chunks/vmware/pdf-1" not in body
 

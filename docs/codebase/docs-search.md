@@ -122,9 +122,12 @@ They label and link a hit; they never decide whether it is grounded. So an
 unusable value reads as absent instead of failing the parse: a non-string
 name is `""`, `heading_path` keeps only its strings, an unknown
 `score_kind` is `None` (never a guessed direction), `upstream_url` must be an
-`http(s)` URL with a host and no space or control character (≤ 2048
-characters; `javascript:` and `gs://` are dropped), and `upstream_page` must
-be a whole number ≥ 1.
+`http(s)` URL with a host and no space, control or bidi character (≤ 2048
+characters; `javascript:`, `gs://` and a URL that does not parse are
+dropped), and `upstream_page` must be a whole number from 1 to 1,000,000 (a
+larger number is no real page, and a huge one would break the CLI's decoding
+of the whole response). `upstream_url` has one rule, `web_link_or_none`:
+the parse and the citation reference (`normalize_source_ref`) both use it.
 
 The search request sends **no** `with_rerank`: how hits are ranked is the
 backend's decision, on search as on the answer call.
@@ -320,7 +323,7 @@ answer paths — is born here, so all faces agree:
 - `title` is the corpus's own `title`, else the derived title
   (`derive_chunk_title`): the chunk's section (its last heading, else the
   breadcrumb tail) joined with its page name (the humanised filename stem),
-  `What's New — vsan 9 0 release notes`. A section alone says which part of
+  `What's New — product 2 1 release notes`. A section alone says which part of
   a page a chunk is from, not which page or release; the page name says
   that. When only one of the two exists it is the title; when both say the
   same thing (case and punctuation ignored) the section is the title; with
@@ -825,7 +828,8 @@ MEHO ref) fallback**:
   `http(s)` link to the source, for a PDF often ending in `#page=N` — that
   link is the reference. The backend knows the public source of its own
   objects, so its link wins over one derived from the object path here (a
-  KB path included). Any other scheme in `upstream_url` is ignored.
+  KB path included). An `upstream_url` that fails `web_link_or_none` (the
+  parse rule above) is ignored, never an error.
 - Otherwise, when `resolve_citation_link(source_url)` derives a **canonical public URL**
   (a Broadcom KB article, or an already-`https` source), that URL *is* the
   reference — the most consumer-useful outcome (a clickable citation), and a

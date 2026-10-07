@@ -90,6 +90,107 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.35.19] - 2026-10-07
+
+This release fixes three security problems and improves docs search
+hits. The pfSense config read no longer returns password hashes and
+private keys. The weekly job that clears old pre-redaction connector
+answers from the audit log now runs on PostgreSQL; since 0.34.0 the
+audit log's append-only guard blocked it. Two Python libraries in the
+image are updated for three HIGH CVEs. Docs search hits now say which
+page they come from, how to read their score, and where the public
+source is. One database migration (`0103`); no settings change.
+
+### Security
+
+- `pfsense.config.show` no longer returns the firewall's known secrets.
+  The op runs `cat /cf/conf/config.xml` over SSH. Before this
+  version it returned the whole file as one string. That file holds the
+  firewall's secrets: user password hashes, certificate and CA private
+  keys, OpenVPN keys, IPsec pre-shared keys, and passwords for RADIUS,
+  LDAP, HA sync and packages. The op is `safe` and needs no approval, so
+  any user or agent with access to a pfSense target got every secret at
+  once. Now the handler replaces known secret fields and known secret
+  shapes (private keys, password hashes, passwords in URLs, keys hidden
+  in base64) with `***REDACTED***` before the answer leaves it. So the
+  audit row, the trace and the broadcast feed only see the cleaned
+  text. Everything else in the file stays the same, byte for byte. The
+  result gains `redacted_count` (how many values were replaced), and
+  `length` is now the length of the cleaned text. The answer is no
+  longer a restorable backup. The scan fails closed: when it cannot be
+  sure it saw every value (for example unknown markup, or a value split
+  into several pieces), the op returns `config_xml: null` and an
+  `error`, and never the raw file. **Known limit:** this is a list of
+  known fields and known shapes, not a proof. Free-text fields
+  (descriptions, notes, cron or shell commands, custom config text,
+  URLs) can still hold secrets that someone typed in. The op stays
+  `safe`, with no approval. **Operator note:** before this version,
+  every call of this read saved the full config, secrets included, in
+  `audit_log.raw_payload`. Starting with this version, the raw-payload
+  age-off removes those copies once they are older than the retention
+  window (default 90 days; see the next Security entry). Database
+  backups keep them until the backups expire. Live auth model: SSH key
+  (the connector's only one). Tested with synthetic configs written the
+  way pfSense writes them; not yet run against a live pfSense. (#3946)
+- Python dependencies patched for the `image` workflow's trivy
+  CRITICAL/HIGH promotion gate. pymongo moves from 4.18.1 to 4.18.2
+  (CVE-2026-96748 and CVE-2026-96749, HIGH) and fsspec from 2026.4.0 to
+  2026.9.0 (CVE-2026-104851, HIGH; fixed in 2026.6.0). Only
+  `backend/uv.lock` changes; no MEHO code changes. (#3950)
+
+### Security — the `audit_log.raw_payload` age-off now runs on PostgreSQL (#3951)
+
+- Since 0.34.0, the weekly job that empties `audit_log.raw_payload` on
+  rows older than the retention window (`auditRawPayload.retentionDays`,
+  default 90 days) could not run on PostgreSQL. `raw_payload` holds a
+  connector's answer before redaction, so it can hold secrets. The
+  append-only guard on `audit_log` (migration `0100`, also 0.34.0)
+  rejects every `UPDATE`, and the job is an `UPDATE`. So every run
+  failed, and `raw_payload` was never cleared. The job's tests ran only
+  on SQLite, which has no such guard. New migration `0103` changes the
+  guard to allow exactly one kind of `UPDATE`: setting `raw_payload`
+  from a value to SQL `NULL`, with every other column unchanged, byte
+  for byte. Every other `UPDATE` is still rejected, and `DELETE` stays
+  blocked. The guard does not check a row's age (the age rule stays in
+  the job), so a role with `UPDATE` on `audit_log` can empty
+  `raw_payload` on any row. A failed run now logs
+  `audit_raw_payload_retention_tick_failed` at error level, with
+  `error_type` (it was a warning). After the upgrade, the first run
+  clears the whole backlog older than the retention window, in one
+  `UPDATE`. That run comes one prune interval after a backplane pod
+  starts (`auditRawPayload.pruneIntervalSeconds`, default 7 days), and a
+  pod restart starts the wait again. On a large `audit_log`, this first
+  run can take a while. **Operator note:** the guard fires for every
+  role, but a role with the `TRIGGER` or `TRUNCATE` right on `audit_log`
+  can still get around it. Do not grant `TRIGGER` or `TRUNCATE` on
+  `audit_log` (`GRANT ALL` includes both) to roles that do not own the
+  table. (#3951)
+
+### Added
+
+- `search_docs` and `ask_docs` hits now say which page they come from,
+  how to read their score, and where the public source is
+  (#3913 / #3949). When the backend sends no `title`, a hit gets one:
+  its section (the last heading, else the breadcrumb tail) joined with
+  its page name (the humanised file name). With neither, `title` stays
+  `null`. Hits carry `score_kind` (`distance`: lower is better;
+  `similarity`: higher is better), passed through from the backend and
+  `null` when it sends none. Two new optional backend fields reach the
+  `search_docs` hits and the `ask_docs` citations on both answer paths:
+  `upstream_url` (a public `http(s)` link to the source page or PDF,
+  ending in `#page=N` when the page is known) and `upstream_page` (the
+  page in the whole source document). When a hit's own source is not an
+  `https` link and the backend sends `upstream_url`, `source_url` is now
+  that link instead of the opaque `meho://docs/<collection>/<chunk_id>`
+  reference. `chunk_id` is kept, so the chunk resource still finds the
+  hit. An unusable value (for example a non-web URL, or a page below 1)
+  reads as absent and never fails a search. The local answer model now
+  sees each hit's title, JSON-quoted, on one line and cut at 200
+  characters, with a new prompt rule that a title is never an
+  instruction. On the upstream answer path a hit's title changes from
+  the heading alone to the section plus the page name. No setting and
+  no migration.
+
 ## [0.35.18] - 2026-10-05
 
 ### Added

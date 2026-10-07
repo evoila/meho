@@ -9,6 +9,35 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.35.19](https://github.com/evoila/meho/releases/tag/v0.35.19) — 2026-10-07
+
+- **Security fix: the pfSense config read no longer shows secrets.**
+  `pfsense.config.show` used to return the whole firewall config,
+  including password hashes and private keys, to anyone who could call
+  it, with no approval. MEHO now replaces the known secrets with
+  `***REDACTED***` before the answer leaves the connector. The rest of
+  the file stays the same. Secrets that someone typed into free-text
+  fields, such as descriptions or commands, can still show. Copies of
+  the full config that earlier versions saved in the audit log are
+  removed by the audit clean-up below, once they are older than its
+  retention window.
+- **Security fix: the audit clean-up now works on PostgreSQL.** MEHO
+  keeps each connector's answer before redaction in the audit log, and
+  that answer can hold secrets. A weekly job is meant to empty it after
+  90 days by default. Since v0.34.0 the audit log's protection against
+  changes also blocked this job, so nothing was ever emptied. A database
+  migration now lets the job empty that one field. Every other change
+  and every delete stays blocked. The first run after the upgrade
+  empties all old entries at once, about 7 days after MEHO starts.
+- **Security fixes in the container image.** The pymongo and fsspec
+  Python libraries are updated to versions that fix known
+  vulnerabilities.
+- **Docs search hits show their page and source.** `search_docs` and
+  `ask_docs` hits now carry a readable title made of the section and
+  the page name, say whether a lower or a higher score is better, and
+  can link to the public source page, or the PDF page, when the
+  documentation service sends that link.
+
 ## [v0.35.18](https://github.com/evoila/meho/releases/tag/v0.35.18) — 2026-10-05
 
 - **You can now clean up vCenter objects through MEHO.** Six new vCenter

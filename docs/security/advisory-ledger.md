@@ -12,10 +12,10 @@ rc-series release step reconciles against.
 
 | Measurement | Value | How measured |
 |---|---|---|
-| Date | 2026-10-04 (row 78 added; rows 1–77 measured 2026-09-22) | — |
-| CHANGELOG revision | rows 1–77: `64d1ad28` (`main`, v0.35.12 + `[Unreleased]`); row 78: the v0.35.17 release-cutting PR (`[0.35.17]`) | `git log -1 --oneline` |
-| `### Security` headings | **78** | `grep -cE "^### Security" CHANGELOG.md` |
-| Ledger rows below | **78** | must equal the heading count |
+| Date | 2026-10-07 (rows 79–80 added; row 78 added 2026-10-04; rows 1–77 measured 2026-09-22) | — |
+| CHANGELOG revision | rows 1–77: `64d1ad28` (`main`, v0.35.12 + `[Unreleased]`); row 78: the v0.35.17 release-cutting PR (`[0.35.17]`); rows 79–80: the v0.35.19 release-cutting PR (`[0.35.19]`) | `git log -1 --oneline` |
+| `### Security` headings | **80** | `grep -cE "^### Security" CHANGELOG.md` |
+| Ledger rows below | **80** | must equal the heading count |
 | Published GHSAs on `evoila/meho` | **0** | `gh api /repos/evoila/meho/security-advisories --jq 'length'` |
 | Externally reported vulnerabilities cited in CHANGELOG | 0 | every entry cites an internal tracker item, an internal review finding, or a scanner alert |
 | Age of `SECURITY.md` policy | since the first commit (`1684c8ca`, 2026-05-09) | `git log --diff-filter=A -- SECURITY.md` |
@@ -88,6 +88,8 @@ the private finding behind the fix.
 
 | # | Version | Line | Summary | Class | Disposition |
 |---|---|---|---|---|---|
+| 79 | 0.35.19 | 104 | Two bullets: `pfsense.config.show`, a `safe` read with no approval, returned the whole pfSense `config.xml` (user password hashes, certificate and CA private keys, OpenVPN and IPsec keys, service passwords) to any caller with access to the target; known secret fields and shapes are now redacted in the handler, which fails closed (#3946) — *vuln*; pymongo 4.18.2 (CVE-2026-96748, CVE-2026-96749) and fsspec 2026.9.0 (CVE-2026-104851) (#3950) — *dep*. | vuln (+ dep) | Owed — decision pending (bullet 1); N/A — upstream advisory (bullet 2) |
+| 80 | 0.35.19 | 141 | The weekly `audit_log.raw_payload` age-off (0.34.0) could not run on PostgreSQL: the append-only trigger from migration `0100` rejected its `UPDATE`, so pre-redaction connector answers, which can hold secrets, stayed past the retention window; migration `0103` allows only the `raw_payload` → `NULL` update (#3951). | vuln | Owed — decision pending |
 | 78 | 0.35.17 | 95 | Two bullets: base-image `openssl` / `libssl3t64` / `openssl-provider-legacy` raised to `3.5.7-1~deb13u3` (CVE-2026-75804, CVE-2026-84782) and `libpcre2-8-0` to `10.46-1~deb13u3` (CVE-2026-103111), with a build-time minimum version per Debian source package so the cached apt layer cannot keep older versions (#3921); PyJWT 2.15.0 (CVE-2026-102268 and five more) and urllib3 2.8.0 (CVE-2026-97687, CVE-2026-97689) (#3910). | dep | N/A — upstream advisory |
 | 1 | 0.35.4 | 157 | `vmware.composite.vm.guest.file.read` non-2xx error built from response metadata only; hostile `Content-Encoding` collapses to a fixed label; composite-count drift guard (#3718 / #3720 / #3768). | hardening | N/A — hardening |
 | 2 | 0.35.3 | 176 | Login-bearing vSphere guest composites reclassified `credential_write` so the flight recorder never records bodies — safe-tier reads could retain the in-guest login password in the 30-day trace store (#3717 / #3718). | vuln | Owed — decision pending |
@@ -171,13 +173,13 @@ the private finding behind the fix.
 
 | Class | Rows | Disposition today |
 |---|---|---|
-| vuln — MEHO-code vulnerability | **36** (rows 2–5, 7–9, 12, 15, 20, 21, 24–26, 30–33, 35, 37, 38, 40, 43, 47, 59, 62, 64, 65, 67–69, 71, 73, 74, 76, 77; row 4 also carries a dependency bump) | 36 × Owed — decision pending; 0 published; 0 exempt |
+| vuln — MEHO-code vulnerability | **38** (rows 2–5, 7–9, 12, 15, 20, 21, 24–26, 30–33, 35, 37, 38, 40, 43, 47, 59, 62, 64, 65, 67–69, 71, 73, 74, 76, 77, 79, 80; rows 4 and 79 also carry a dependency bump) | 38 × Owed — decision pending; 0 published; 0 exempt |
 | dep — dependency / base-image CVE patch | **6** (rows 34, 44, 45, 46, 51, 78) | N/A — upstream advisory |
 | hardening — no demonstrated vulnerability | **32** (rows 1, 6, 10, 11, 13, 14, 16–18, 22, 23, 27–29, 36, 41, 42, 48, 50, 52, 53, 55–58, 60, 61, 63, 66, 70, 72, 75) | N/A — hardening |
 | docs — docs-only or non-vulnerability | **4** (rows 19, 39, 49, 54) | N/A — no vulnerability |
-| **Total** | **78** | |
+| **Total** | **80** | |
 
-**Gate 2 status at this snapshot: open.** 36 rows await **publication**
+**Gate 2 status at this snapshot: open.** 38 rows await **publication**
 (`security-advisories` returns 0). The only exemption ground the policy
 allows — the entry predates `SECURITY.md` (2026-05-09) — applies to none of
 them, so the gate closes when every *Owed* row reads *Published* and the

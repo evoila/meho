@@ -31,7 +31,10 @@ Tests run against the autouse ``_default_database_url`` SQLite-backed
 engine (``tests.conftest`` migrates a fresh per-test DB to head); rows are
 seeded directly through the sessionmaker. The bounded UPDATE rides the
 ``audit_log_occurred_at_idx`` btree on PG; the unit suite exercises the
-same SQLAlchemy 2.x ``update().where(...)`` statement on SQLite.
+same SQLAlchemy 2.x ``update().where(...)`` statement on SQLite. SQLite has
+no ``audit_log`` append-only trigger, so the PostgreSQL proof that the
+trigger lets this statement through lives in
+``tests/migrations/test_migration_0103_audit_log_raw_payload_ageoff.py``.
 """
 
 from __future__ import annotations
@@ -45,8 +48,10 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import structlog
 from pydantic import ValidationError
 from sqlalchemy import select
+from structlog.testing import capture_logs
 
 from meho_backplane import audit_retention
 from meho_backplane.audit_retention import (
@@ -410,18 +415,30 @@ async def test_loop_survives_tick_exception(monkeypatch: pytest.MonkeyPatch) -> 
         if sleep_calls >= 2:
             raise asyncio.CancelledError
 
+    # A fresh logger proxy: the module-level ``_log`` may already have cached
+    # its bound methods (``cache_logger_on_first_use=True``) in an earlier
+    # test on this worker, and a cached logger bypasses ``capture_logs``.
+    monkeypatch.setattr(audit_retention, "_log", structlog.get_logger(audit_retention.__name__))
+
     with (
         patch(
             "meho_backplane.audit_retention._run_one_prune_tick",
             new=_flaky_tick,
         ),
         patch("asyncio.sleep", new=_fake_sleep),
+        capture_logs() as captured,
         pytest.raises(asyncio.CancelledError),
     ):
         await audit_retention._prune_loop()
 
     assert tick_calls == 1
     assert sleep_calls == 2
+    # A failed tick leaves un-redacted bodies in place, so it must log at
+    # error level and name the error type (easy to find and alert on).
+    failed = [e for e in captured if e["event"] == "audit_raw_payload_retention_tick_failed"]
+    assert len(failed) == 1
+    assert failed[0]["log_level"] == "error"
+    assert failed[0]["error_type"] == "RuntimeError"
 
 
 @pytest.mark.asyncio

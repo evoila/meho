@@ -153,9 +153,62 @@ Migrations that INSERT, UPDATE, or DELETE rows. Rules:
 Some invariants belong at the datastore, not in application code — the load-bearing
 example is `audit_log` being **append-only** (CLAUDE.md postulate 7 / v0.1-spec
 section 6). Migration `0100` installs a `BEFORE UPDATE OR DELETE ... FOR EACH ROW`
-trigger that `RAISE`s, so a direct `UPDATE` / `DELETE` fails at the datastore under
-every role — including the app DB role and a superuser — while `INSERT` / `SELECT`
-stay untouched. Rules for this kind of migration:
+trigger (`audit_log_append_only`, calling `audit_log_reject_mutation()`) that
+`RAISE`s on a direct `UPDATE` / `DELETE`, while `INSERT` / `SELECT` stay untouched.
+
+What the trigger does and does not stop:
+
+- It fires for every role. It stops mistakes, and roles that have no ownership,
+  `TRIGGER` or `TRUNCATE` right on the table.
+- It does not stop the table owner or a superuser. They can disable the trigger,
+  replace the function, or `TRUNCATE` the table. In the default chart the app and
+  the migration job use the same database login, so the app role owns `audit_log`.
+- It does not stop a role with the `TRUNCATE` right (row triggers do not fire on
+  `TRUNCATE`), or a role with the `TRIGGER` right. Such a role can add its own
+  trigger, which can change a row after the guard has allowed the update, or run
+  code as the role that writes the next audit row.
+- So treat `TRIGGER` and `TRUNCATE` on `audit_log` like ownership: do not grant
+  them (`GRANT ALL` includes both). All of this was already true with `0100`.
+
+Migration `0103` replaces the function to allow **one** kind of `UPDATE`: the
+weekly `raw_payload` age-off (`meho_backplane.audit_retention`). What the guard
+accepts today:
+
+| Statement | Result |
+|---|---|
+| `INSERT`, `SELECT` | allowed (the trigger does not fire) |
+| `UPDATE` that sets `raw_payload` from a value to SQL `NULL` and leaves every other column value unchanged, byte for byte | allowed, on any row of any age, for any role with `UPDATE`. The same value written again is allowed too, even when the disk holds it in another form (for example with other compression) |
+| `UPDATE` that changes any other column, even together with `raw_payload = NULL`. This includes a value that only means the same (`json` key order or spaces, `1` vs `1.0`, SQL `NULL` vs JSON `null`) | rejected |
+| `UPDATE` that sets `raw_payload` to a value (including the JSON literal `'null'`), or touches a row whose `raw_payload` is already `NULL` | rejected |
+| `DELETE` | rejected, always |
+
+How the `0103` check works:
+
+- It compares `NEW` with `OLD` (with `raw_payload` set to `NULL`) using `*=`
+  (`record_image_eq`). That operator compares every column value byte for byte.
+- It never parses `json`. So a value that `jsonb` cannot hold (such as
+  `\u0000`) does not break the age-off.
+- A column added later is covered without a new migration. One exception: a
+  `STORED` generated column is still empty in `NEW` when a `BEFORE` trigger runs,
+  so it would make the age-off fail until the function is changed.
+- The function pins `search_path = pg_catalog, pg_temp` and writes its operators
+  as `OPERATOR(pg_catalog.=)` and `OPERATOR(pg_catalog.*=)`. So a caller cannot
+  change the check by putting its own functions or operators (for example a fake
+  `to_jsonb(audit_log)`) on its `search_path`.
+- At the end, `0103` checks that the trigger really calls the new function (the
+  new body and the pinned `search_path`). The `CREATE OR REPLACE FUNCTION` has no
+  schema name, so with an unexpected `search_path` it could make a second, unused
+  function in another schema. Then the migration fails instead of reporting
+  success.
+
+A rejected write raises the same text as before: `audit_log is append-only:
+<UPDATE|DELETE> is not permitted (governance invariant, v0.1-spec section 6)`.
+Before `0103`, the age-off `UPDATE` was rejected too, so `raw_payload` was never
+emptied on PostgreSQL. The testcontainers tests in
+`tests/migrations/test_migration_0103_audit_log_raw_payload_ageoff.py` run the real
+age-off tick on PostgreSQL and pin every row of this table.
+
+Rules for this kind of migration:
 
 1. **Postgres-only, dialect-guarded.** plpgsql trigger DDL is not portable to the
    SQLite dev/test lane. Guard the body with an early return so `upgrade()` and
@@ -167,15 +220,26 @@ stay untouched. Rules for this kind of migration:
        return
    ```
 
-   The unit lanes assert the app-level convention (no code path mutates the row);
+   The unit lanes assert the app-level convention (no code path mutates the row,
+   except the `raw_payload` age-off);
    the trigger is the production-datastore backstop, exercised by the
-   testcontainers slice in `tests/migrations/test_migration_rollback.py`.
+   testcontainers slices in `tests/migrations/test_migration_rollback.py` and
+   `tests/migrations/test_migration_0103_audit_log_raw_payload_ageoff.py`. A code
+   path that writes to a guarded table needs a test on PostgreSQL: the SQLite lane
+   has no trigger and passes even when the datastore would reject the write.
 2. **Additive and forward-compatible.** `CREATE TRIGGER` / `CREATE OR REPLACE
    FUNCTION` are not on the compat guard's banned list, and they keep the rollback
    contract: an older image against the newer schema only ever `INSERT`s the row it
    already knew how to write, so the trigger never fires on the hot path.
 3. **Reversible.** `downgrade()` drops the trigger then the function (reverse of
-   create order), also Postgres-guarded.
+   create order), also Postgres-guarded. A migration that only changes the function
+   (like `0103`) restores the previous function in `downgrade()` instead.
+   `CREATE OR REPLACE FUNCTION` resets every setting it does not name, so the
+   restored function also loses a pinned `search_path`.
+4. **Pin the function's `search_path`.** A trigger function that is not
+   `SECURITY DEFINER` runs with the caller's `search_path`. Add
+   `SET search_path = pg_catalog, pg_temp` and write operators and types with the
+   `pg_catalog` schema, so a caller cannot swap in its own functions or operators.
 
 ## Additive-only constraint
 

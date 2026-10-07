@@ -153,9 +153,32 @@ Migrations that INSERT, UPDATE, or DELETE rows. Rules:
 Some invariants belong at the datastore, not in application code — the load-bearing
 example is `audit_log` being **append-only** (CLAUDE.md postulate 7 / v0.1-spec
 section 6). Migration `0100` installs a `BEFORE UPDATE OR DELETE ... FOR EACH ROW`
-trigger that `RAISE`s, so a direct `UPDATE` / `DELETE` fails at the datastore under
-every role — including the app DB role and a superuser — while `INSERT` / `SELECT`
-stay untouched. Rules for this kind of migration:
+trigger (`audit_log_append_only`, calling `audit_log_reject_mutation()`) that
+`RAISE`s, so a direct `UPDATE` / `DELETE` fails at the datastore under every role —
+including the app DB role and a superuser — while `INSERT` / `SELECT` stay untouched.
+
+Migration `0103` replaces the function body to allow **one** kind of `UPDATE`: the
+weekly `raw_payload` age-off (`meho_backplane.audit_retention`). What the guard
+accepts today:
+
+| Statement | Result |
+|---|---|
+| `INSERT`, `SELECT` | allowed (the trigger does not fire) |
+| `UPDATE` that sets `raw_payload` from a value to SQL `NULL` and changes no other column | allowed |
+| `UPDATE` of any other column, even together with `raw_payload = NULL` | rejected |
+| `UPDATE` that sets `raw_payload` to a value (including the JSON literal `'null'`), or touches a row whose `raw_payload` is already `NULL` | rejected |
+| `DELETE` | rejected, always |
+
+"No other column" is checked as `to_jsonb(NEW) - 'raw_payload' = to_jsonb(OLD) -
+'raw_payload'`, so a column added later is covered without a new migration. A
+rejected write raises the same text as before: `audit_log is append-only: <UPDATE|DELETE>
+is not permitted (governance invariant, v0.1-spec section 6)`. Before `0103`, the
+age-off `UPDATE` was rejected too, so `raw_payload` was never emptied on PostgreSQL.
+The testcontainers tests in
+`tests/migrations/test_migration_0103_audit_log_raw_payload_ageoff.py` run the real
+age-off tick on PostgreSQL and pin every row of this table.
+
+Rules for this kind of migration:
 
 1. **Postgres-only, dialect-guarded.** plpgsql trigger DDL is not portable to the
    SQLite dev/test lane. Guard the body with an early return so `upgrade()` and
@@ -169,13 +192,17 @@ stay untouched. Rules for this kind of migration:
 
    The unit lanes assert the app-level convention (no code path mutates the row);
    the trigger is the production-datastore backstop, exercised by the
-   testcontainers slice in `tests/migrations/test_migration_rollback.py`.
+   testcontainers slices in `tests/migrations/test_migration_rollback.py` and
+   `tests/migrations/test_migration_0103_audit_log_raw_payload_ageoff.py`. A code
+   path that writes to a guarded table needs a test on PostgreSQL: the SQLite lane
+   has no trigger and passes even when the datastore would reject the write.
 2. **Additive and forward-compatible.** `CREATE TRIGGER` / `CREATE OR REPLACE
    FUNCTION` are not on the compat guard's banned list, and they keep the rollback
    contract: an older image against the newer schema only ever `INSERT`s the row it
    already knew how to write, so the trigger never fires on the hot path.
 3. **Reversible.** `downgrade()` drops the trigger then the function (reverse of
-   create order), also Postgres-guarded.
+   create order), also Postgres-guarded. A migration that only changes the function
+   body (like `0103`) restores the previous body in `downgrade()` instead.
 
 ## Additive-only constraint
 

@@ -249,6 +249,12 @@ const (
 	DashboardReadStateUnknown  DashboardReadState = "unknown"
 )
 
+// Defines values for DocsChunkScoreKind.
+const (
+	DocsChunkScoreKindDistance   DocsChunkScoreKind = "distance"
+	DocsChunkScoreKindSimilarity DocsChunkScoreKind = "similarity"
+)
+
 // Defines values for EditOpBodySafetyLevel.
 const (
 	EditOpBodySafetyLevelCaution     EditOpBodySafetyLevel = "caution"
@@ -4402,12 +4408,16 @@ type DocCollectionUpdate struct {
 // optional owning-document id (“None“ when the corpus has no document
 // concept for a chunk) and is only read as a citation-label fallback.
 //
-// “title“ is the **optional** human-legible chunk title (#2475), passed
-// through from the corpus (“CorpusChunk.title“). It is the *preferred*
-// citation label — every citation face (“ask_docs“, “/ui/corpus“)
-// feeds it to the “title -> document_id -> filename -> URL“ label chain
-// — and is “None“ until the upstream corpus supplies one, so today's
-// corpus (which sends no title) sees no behaviour change.
+// “title“ is the **optional** human-legible chunk title (#2475). It is
+// the corpus's own “title“ when it sends one, else a title derived from
+// the hit's page identity (#3913): its section (last heading or breadcrumb
+// tail) joined with its page name (the humanised filename), by
+// :func:`~meho_backplane.docs_search.citation_links.derive_chunk_title`.
+// It is the *preferred* citation label — every citation face
+// (“ask_docs“, “/ui/corpus“) feeds it to the “title -> document_id ->
+// filename -> URL“ label chain — and the local synthesis prompt shows it
+// on each evidence line. “None“ when the corpus sends neither a title
+// nor any page identity.
 //
 // “source_url“ is the **backend-agnostic** citation reference (#132): a
 // canonical public URL where one is derivable, else an opaque
@@ -4416,15 +4426,34 @@ type DocCollectionUpdate struct {
 // normalizes it via
 // :func:`~meho_backplane.docs_search.citation_links.normalize_source_ref`
 // so no storage-backend scheme or internal bucket/layout reaches the wire.
+// When the hit's own source is not an “https“ link and the backend sent
+// an “upstream_url“, that public link is the “source_url“ (#3913).
+//
+// “score_kind“ names the direction of “score“ when the backend sends
+// it: “distance“ means lower is better, “similarity“ higher is better.
+// “None“ when the backend does not say; it is never defaulted.
+//
+// “upstream_url“ / “upstream_page“ are the backend's optional public
+// link to the hit's source (for a PDF with a known page, ending in
+// “#page=N“) and that page, counted in the whole source document
+// (#3913). “None“ when the backend does not send them. “chunk_id“ is
+// kept either way, so the “meho://docs“ chunk resource still finds the
+// hit.
 type DocsChunk struct {
-	ChunkId    string   `json:"chunk_id"`
-	Collection *string  `json:"collection"`
-	Content    string   `json:"content"`
-	DocumentId *string  `json:"document_id"`
-	Score      *float32 `json:"score"`
-	SourceUrl  *string  `json:"source_url"`
-	Title      *string  `json:"title"`
+	ChunkId      string              `json:"chunk_id"`
+	Collection   *string             `json:"collection"`
+	Content      string              `json:"content"`
+	DocumentId   *string             `json:"document_id"`
+	Score        *float32            `json:"score"`
+	ScoreKind    *DocsChunkScoreKind `json:"score_kind"`
+	SourceUrl    *string             `json:"source_url"`
+	Title        *string             `json:"title"`
+	UpstreamPage *int                `json:"upstream_page"`
+	UpstreamUrl  *string             `json:"upstream_url"`
 }
+
+// DocsChunkScoreKind defines model for DocsChunk.ScoreKind.
+type DocsChunkScoreKind string
 
 // DraftTemplateRequest Request body for “meho_runbook_draft_template“ -- create a new draft.
 //

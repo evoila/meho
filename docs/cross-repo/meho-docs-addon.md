@@ -606,6 +606,10 @@ meho expects a `2xx` JSON body with a **top-level `results`** array, ranked
 | `text` | `str` | **yes** | The chunk text. Accepted under `text` **or** the legacy alias `content`; speak `text`. **Not** `body` / `snippet`. |
 | `source_uri` | `str` | optional | Citation URL. Accepted under `source_uri` **or** the legacy alias `source_url`; speak `source_uri`. **Not** `url`. |
 | `score` | `float` | optional | Rank score (meho keeps corpus order regardless). |
+| `score_kind` | `"distance"` / `"similarity"` | optional (#3913) | The direction of `score`: `distance` means lower is better, `similarity` higher is better. Passed through to the `search_docs` / `ask_docs` hits; `null` there when not sent (never defaulted). Any other value reads as not sent. |
+| `filename` / `breadcrumb` / `heading_path` | `str` / `str` / `list[str]` | optional (#3913) | Page identity. When no `title` is sent, meho derives one: the section (the last heading, else the `>`-separated breadcrumb tail) joined with the page name (the humanised filename), e.g. `What's New — product 2 1 release notes`. Only the file's own name is read. |
+| `upstream_url` | `str` or `null` | optional (#3913) | A public `http(s)` link to the hit's source page or document; for a PDF with a known page it already ends in `#page=N`. When `source_uri` is not an `https` link, meho shows this link as the hit's `source_url` instead of its opaque `meho://docs/<collection>/<chunk_id>` reference (the `chunk_id` is kept). Any other scheme, no host, a space, a control or bidi character, more than 2048 characters, or a URL that does not parse reads as not sent. |
+| `upstream_page` | `int` or `null` | optional (#3913) | The page in the whole source document. Passed through; anything but a whole number from 1 to 1,000,000 reads as not sent. |
 | `metadata` | `object` | optional | Per-chunk attributes (e.g. `product` / `version`); passed through. |
 
 meho reads the top-level **`results`** envelope and per-chunk **`text`** /
@@ -619,8 +623,12 @@ aliases (#1732): the envelope under `chunks`, the chunk text under
 required field (`chunk_id` / `text`) fails parse and is surfaced as
 `CorpusUnavailable` → 503. `document_id` is the lone exception (#2004): it
 is a citation-label fallback only, so a blank or omitted value normalises
-to `None` rather than failing parse. Source: `CorpusChunk` /
-`CorpusSearchResponse`, `corpus.py:118-204`.
+to `None` rather than failing parse. The #3913 fields (`score_kind`, the
+page identity, `upstream_url`, `upstream_page`) are optional too, and an
+unusable value reads as not sent rather than failing parse: they label and
+link a hit, never ground it. meho sends no `with_rerank` on search: ranking
+is the corpus's decision. Source: `CorpusChunk` / `CorpusSearchResponse` in
+`auth/corpus.py`.
 
 ### Readiness — request + response
 
@@ -704,7 +712,7 @@ ignored):
 | `citations[].chunk_index` | `int` | **yes** | The `N` the answer's markers use. |
 | `citations[].chunk_id` | `str` | **yes** | Matched to a hit **by id** (never by position). A cited id must name exactly one hit: an id not in `hits`, a blank id, or an id several hits share fails the answer (`synthesis_malformed` / `citation_resolution`). Repeated citations collapse. |
 | `hits` | `list` | **yes** | The retrieved chunks (`include=hits`), in any order; each parsed with the search-hit shape above (`chunk_id`, `text`/`content`, `source_uri`/`source_url`, `document_id`, `score`, optional `title`). Empty `hits` (and no citations) is meho's "no grounded answer". |
-| `hits[].filename` / `breadcrumb` / `heading_path` | `str` / `str` / `list[str]` | optional | Page identity a citation title is derived from when no `title` is sent: the last heading, else the breadcrumb tail, else the humanised filename. |
+| `hits[].filename` / `breadcrumb` / `heading_path`, `score_kind`, `upstream_url`, `upstream_page` | as on search | optional | Read exactly as on a search hit (#3913): the same derived title, score direction and public link. A citation is the hit it names, so it carries them too; the copies on `citations[]` are not read. |
 | `timing.total_ms` / `timing.llm_ms` | `float` | optional | Logged, never returned. |
 
 **Errors** — the corpus's JSON error body `{"error": {"code": …}}` is read

@@ -476,7 +476,10 @@ async def test_search_docs_routes_through_resolved_backend(_restore_registry: No
         "title",
         "content",
         "source_url",
+        "upstream_url",
+        "upstream_page",
         "score",
+        "score_kind",
         "collection",
     }
     # The single-collection path leaves the provenance tag unset (the

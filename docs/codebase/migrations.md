@@ -154,27 +154,47 @@ Some invariants belong at the datastore, not in application code — the load-be
 example is `audit_log` being **append-only** (CLAUDE.md postulate 7 / v0.1-spec
 section 6). Migration `0100` installs a `BEFORE UPDATE OR DELETE ... FOR EACH ROW`
 trigger (`audit_log_append_only`, calling `audit_log_reject_mutation()`) that
-`RAISE`s, so a direct `UPDATE` / `DELETE` fails at the datastore under every role —
-including the app DB role and a superuser — while `INSERT` / `SELECT` stay untouched.
+`RAISE`s on a direct `UPDATE` / `DELETE`, while `INSERT` / `SELECT` stay untouched.
 
-Migration `0103` replaces the function body to allow **one** kind of `UPDATE`: the
+What the trigger does and does not stop:
+
+- It fires for every role, so it stops mistakes and every role that does not own
+  the table.
+- It does not stop the table owner or a superuser. They can disable the trigger,
+  replace the function, or `TRUNCATE` the table. In the default chart the app and
+  the migration job use the same database login, so the app role owns `audit_log`.
+  This was already true with `0100`.
+
+Migration `0103` replaces the function to allow **one** kind of `UPDATE`: the
 weekly `raw_payload` age-off (`meho_backplane.audit_retention`). What the guard
 accepts today:
 
 | Statement | Result |
 |---|---|
 | `INSERT`, `SELECT` | allowed (the trigger does not fire) |
-| `UPDATE` that sets `raw_payload` from a value to SQL `NULL` and changes no other column | allowed |
-| `UPDATE` of any other column, even together with `raw_payload = NULL` | rejected |
+| `UPDATE` that sets `raw_payload` from a value to SQL `NULL` and leaves every other stored byte of the row unchanged | allowed, on any row of any age, for any role with `UPDATE` |
+| `UPDATE` that changes any other column, even together with `raw_payload = NULL`. This includes a change that only rewrites how a value is stored (`json` key order or spaces, `1` vs `1.0`, SQL `NULL` vs JSON `null`) | rejected |
 | `UPDATE` that sets `raw_payload` to a value (including the JSON literal `'null'`), or touches a row whose `raw_payload` is already `NULL` | rejected |
 | `DELETE` | rejected, always |
 
-"No other column" is checked as `to_jsonb(NEW) - 'raw_payload' = to_jsonb(OLD) -
-'raw_payload'`, so a column added later is covered without a new migration. A
-rejected write raises the same text as before: `audit_log is append-only: <UPDATE|DELETE>
-is not permitted (governance invariant, v0.1-spec section 6)`. Before `0103`, the
-age-off `UPDATE` was rejected too, so `raw_payload` was never emptied on PostgreSQL.
-The testcontainers tests in
+How the `0103` check works:
+
+- It compares `NEW` with `OLD` (with `raw_payload` set to `NULL`) using `*=`
+  (`record_image_eq`). That operator compares the stored bytes of every column.
+- It never parses `json`. So a value that `jsonb` cannot hold (such as
+  `\u0000`) does not break the age-off.
+- A column added later is covered without a new migration. One exception: a
+  `STORED` generated column is still empty in `NEW` when a `BEFORE` trigger runs,
+  so it would make the age-off fail until the function is changed.
+- The function pins `search_path = pg_catalog, pg_temp` and writes its operators
+  as `OPERATOR(pg_catalog.=)` and `OPERATOR(pg_catalog.*=)`. So a caller cannot
+  change the check by putting its own functions or operators (for example a fake
+  `to_jsonb(audit_log)`) on its `search_path`.
+
+A rejected write raises the same text as before: `audit_log is append-only:
+<UPDATE|DELETE> is not permitted (governance invariant, v0.1-spec section 6)`.
+Before `0103`, the age-off `UPDATE` was rejected too, so `raw_payload` was never
+emptied on PostgreSQL. The testcontainers tests in
 `tests/migrations/test_migration_0103_audit_log_raw_payload_ageoff.py` run the real
 age-off tick on PostgreSQL and pin every row of this table.
 
@@ -190,7 +210,8 @@ Rules for this kind of migration:
        return
    ```
 
-   The unit lanes assert the app-level convention (no code path mutates the row);
+   The unit lanes assert the app-level convention (no code path mutates the row,
+   except the `raw_payload` age-off);
    the trigger is the production-datastore backstop, exercised by the
    testcontainers slices in `tests/migrations/test_migration_rollback.py` and
    `tests/migrations/test_migration_0103_audit_log_raw_payload_ageoff.py`. A code
@@ -202,7 +223,13 @@ Rules for this kind of migration:
    already knew how to write, so the trigger never fires on the hot path.
 3. **Reversible.** `downgrade()` drops the trigger then the function (reverse of
    create order), also Postgres-guarded. A migration that only changes the function
-   body (like `0103`) restores the previous body in `downgrade()` instead.
+   (like `0103`) restores the previous function in `downgrade()` instead.
+   `CREATE OR REPLACE FUNCTION` resets every setting it does not name, so the
+   restored function also loses a pinned `search_path`.
+4. **Pin the function's `search_path`.** A trigger function that is not
+   `SECURITY DEFINER` runs with the caller's `search_path`. Add
+   `SET search_path = pg_catalog, pg_temp` and write operators and types with the
+   `pg_catalog` schema, so a caller cannot swap in its own functions or operators.
 
 ## Additive-only constraint
 

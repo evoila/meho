@@ -25,7 +25,9 @@ What they prove:
     spaces, a duplicate key, number format, SQL ``NULL`` vs JSON ``null``).
 (e) ``DELETE`` is rejected.
 (f) ``downgrade`` to ``0102`` puts back the exact strict ``0100`` function,
-    and ``upgrade`` brings the age-off path back.
+    and ``upgrade`` brings the age-off path back. If the new function would
+    land in another schema (so the trigger keeps the strict one), the
+    upgrade fails instead of reporting success.
 (g) A row whose ``json`` holds text that ``jsonb`` cannot hold (a
     ``\\u0000`` or a lone ``\\ud800`` escape) is still emptied by the tick,
     and does not break the run.
@@ -636,6 +638,50 @@ def test_downgrade_restores_strict_guard_and_upgrade_reapplies(pg: _Pg) -> None:
     assert asyncio.run(_trigger()) == [
         ("audit_log_append_only", "audit_log_reject_mutation", "O")
     ], "the trigger keeps its name, its function, and stays enabled"
+
+
+def test_upgrade_fails_when_the_trigger_would_keep_the_old_function(pg: _Pg) -> None:
+    """The 0103 self-check: a function made in the wrong schema fails the migration.
+
+    ``CREATE OR REPLACE FUNCTION`` has no schema name. A schema named after the
+    migration role comes first on the default ``search_path`` (``"$user",
+    public``). Without the self-check, 0103 would make a second, unused
+    function there, report success, and leave the strict function on the
+    trigger, so the age-off would keep failing every week.
+    """
+
+    async def _sql(statement: str) -> list[tuple[Any, ...]]:
+        engine = create_async_engine(pg.async_url)
+        try:
+            async with engine.begin() as conn:
+                result = await conn.exec_driver_sql(statement)
+                return [tuple(row) for row in result.all()] if result.returns_rows else []
+        finally:
+            await engine.dispose()
+
+    role_schema = asyncio.run(_sql("SELECT current_user"))[0][0]
+    try:
+        _alembic(pg.async_url, "downgrade", "0102")
+        asyncio.run(_sql("CREATE SCHEMA AUTHORIZATION CURRENT_USER"))
+        with pytest.raises(DBAPIError, match="migration 0103: trigger audit_log_append_only"):
+            _alembic(pg.async_url, "upgrade", "head")
+
+        # The whole upgrade is one transaction, so none of it stays behind.
+        strict_def, _, _ = asyncio.run(_guard_function(pg.async_url))
+        assert strict_def == pg.strict_function_def
+        assert asyncio.run(_sql("SELECT version_num FROM alembic_version")) == [("0102",)]
+        assert asyncio.run(
+            _sql("SELECT count(*) FROM pg_proc WHERE proname = 'audit_log_reject_mutation'")
+        ) == [(1,)]
+    finally:
+        asyncio.run(_sql(f'DROP SCHEMA IF EXISTS "{role_schema}" CASCADE'))
+        # Back to 0102 and up again, so even a failed run here leaves the
+        # real 0103 function on the trigger for the other tests.
+        _alembic(pg.async_url, "downgrade", "0102")
+        _alembic(pg.async_url, "upgrade", "head")
+
+    _, config, _ = asyncio.run(_guard_function(pg.async_url))
+    assert config == ["search_path=pg_catalog, pg_temp"]
 
 
 # ---------------------------------------------------------------------------

@@ -158,12 +158,17 @@ trigger (`audit_log_append_only`, calling `audit_log_reject_mutation()`) that
 
 What the trigger does and does not stop:
 
-- It fires for every role, so it stops mistakes and every role that does not own
-  the table.
+- It fires for every role. It stops mistakes, and roles that have no ownership,
+  `TRIGGER` or `TRUNCATE` right on the table.
 - It does not stop the table owner or a superuser. They can disable the trigger,
   replace the function, or `TRUNCATE` the table. In the default chart the app and
   the migration job use the same database login, so the app role owns `audit_log`.
-  This was already true with `0100`.
+- It does not stop a role with the `TRUNCATE` right (row triggers do not fire on
+  `TRUNCATE`), or a role with the `TRIGGER` right. Such a role can add its own
+  trigger, which can change a row after the guard has allowed the update, or run
+  code as the role that writes the next audit row.
+- So treat `TRIGGER` and `TRUNCATE` on `audit_log` like ownership: do not grant
+  them (`GRANT ALL` includes both). All of this was already true with `0100`.
 
 Migration `0103` replaces the function to allow **one** kind of `UPDATE`: the
 weekly `raw_payload` age-off (`meho_backplane.audit_retention`). What the guard
@@ -172,15 +177,15 @@ accepts today:
 | Statement | Result |
 |---|---|
 | `INSERT`, `SELECT` | allowed (the trigger does not fire) |
-| `UPDATE` that sets `raw_payload` from a value to SQL `NULL` and leaves every other stored byte of the row unchanged | allowed, on any row of any age, for any role with `UPDATE` |
-| `UPDATE` that changes any other column, even together with `raw_payload = NULL`. This includes a change that only rewrites how a value is stored (`json` key order or spaces, `1` vs `1.0`, SQL `NULL` vs JSON `null`) | rejected |
+| `UPDATE` that sets `raw_payload` from a value to SQL `NULL` and leaves every other column value unchanged, byte for byte | allowed, on any row of any age, for any role with `UPDATE`. The same value written again is allowed too, even when the disk holds it in another form (for example with other compression) |
+| `UPDATE` that changes any other column, even together with `raw_payload = NULL`. This includes a value that only means the same (`json` key order or spaces, `1` vs `1.0`, SQL `NULL` vs JSON `null`) | rejected |
 | `UPDATE` that sets `raw_payload` to a value (including the JSON literal `'null'`), or touches a row whose `raw_payload` is already `NULL` | rejected |
 | `DELETE` | rejected, always |
 
 How the `0103` check works:
 
 - It compares `NEW` with `OLD` (with `raw_payload` set to `NULL`) using `*=`
-  (`record_image_eq`). That operator compares the stored bytes of every column.
+  (`record_image_eq`). That operator compares every column value byte for byte.
 - It never parses `json`. So a value that `jsonb` cannot hold (such as
   `\u0000`) does not break the age-off.
 - A column added later is covered without a new migration. One exception: a
@@ -190,6 +195,11 @@ How the `0103` check works:
   as `OPERATOR(pg_catalog.=)` and `OPERATOR(pg_catalog.*=)`. So a caller cannot
   change the check by putting its own functions or operators (for example a fake
   `to_jsonb(audit_log)`) on its `search_path`.
+- At the end, `0103` checks that the trigger really calls the new function (the
+  new body and the pinned `search_path`). The `CREATE OR REPLACE FUNCTION` has no
+  schema name, so with an unexpected `search_path` it could make a second, unused
+  function in another schema. Then the migration fails instead of reporting
+  success.
 
 A rejected write raises the same text as before: `audit_log is append-only:
 <UPDATE|DELETE> is not permitted (governance invariant, v0.1-spec section 6)`.

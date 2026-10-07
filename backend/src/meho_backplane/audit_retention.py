@@ -60,13 +60,14 @@ The append-only guard on PostgreSQL
 On PostgreSQL the ``audit_log_append_only`` trigger (migration ``0100``)
 rejects ``UPDATE`` and ``DELETE`` on ``audit_log``. Migration ``0103``
 lets one kind of ``UPDATE`` through: one that sets ``raw_payload`` from a
-value to SQL NULL and leaves every other stored byte of the row unchanged.
-This sweeper's statement is of that kind. The trigger does not know which
-code runs the statement, so any role with ``UPDATE`` on ``audit_log`` can
-do the same on any row; it still cannot change anything else or delete a
-row. If this statement ever starts to change another column, the trigger
-rejects it and every tick fails with
-``audit_raw_payload_retention_tick_failed``. The Postgres tests in
+value to SQL NULL and leaves every other column value unchanged, byte for
+byte. This sweeper's statement is of that kind. The trigger does not know
+which code runs the statement, so any role with ``UPDATE`` on ``audit_log``
+can do the same on any row; it still cannot change anything else or delete a
+row, unless it also has the ``TRIGGER`` or ``TRUNCATE`` right on the table
+(treat both like ownership; see migration ``0103``). If this statement ever
+starts to change another column, the trigger rejects it and every tick fails
+with ``audit_raw_payload_retention_tick_failed``. The Postgres tests in
 ``tests/migrations/test_migration_0103_audit_log_raw_payload_ageoff.py``
 pin this.
 

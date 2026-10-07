@@ -32,24 +32,29 @@ It replaces the function ``audit_log_reject_mutation()``. The trigger itself
 
 * ``DELETE`` is still always rejected.
 * An ``UPDATE`` is allowed **only** when it sets ``raw_payload`` from a value
-  to SQL ``NULL`` and leaves every other stored byte of the row unchanged.
-  Every other ``UPDATE`` is rejected with the same error text as ``0100``.
+  to SQL ``NULL`` and leaves every other column value unchanged, byte for
+  byte. Every other ``UPDATE`` is rejected with the same error text as
+  ``0100``.
 
 This holds for any row of any age, and for any role that has ``UPDATE`` on
 ``audit_log``: such a role can empty ``raw_payload``, but it cannot change
-anything else in the row or delete it.
+anything else in the row or delete it (unless it also has one of the rights
+listed under "What this does not stop").
 
 How the check works
 -------------------
 
 The function builds ``expected``: the ``OLD`` row with only ``raw_payload``
 set to ``NULL``. It then compares ``NEW`` with ``expected`` using
-``*=`` (``record_image_eq``). That operator compares the stored bytes of
-every column, and treats two ``NULL`` values as equal. So:
+``*=`` (``record_image_eq``). That operator compares every column value
+byte for byte, and treats two ``NULL`` values as equal. So:
 
-* A value that means the same but is stored differently is a change and is
-  rejected. Examples: ``json`` key order, spaces, a duplicate key, ``1`` vs
-  ``1.000``, ``jsonb`` ``1.0`` vs ``1.00``, SQL ``NULL`` vs JSON ``null``.
+* A value that only means the same is a different value and is rejected.
+  Examples: ``json`` key order, spaces, a duplicate key, ``1`` vs ``1.000``,
+  ``jsonb`` ``1.0`` vs ``1.00``, SQL ``NULL`` vs JSON ``null``.
+* The same value written again is allowed, even when PostgreSQL stores it
+  in another form on disk (for example with other compression). The
+  compare looks at the value, not at how the disk holds it.
 * ``raw_payload`` is never parsed. A ``json`` value that ``jsonb`` cannot
   hold (for example ``\\u0000``) does not break the check or the weekly run.
 * A column added later is covered without changing this function. One
@@ -66,10 +71,33 @@ it is not ``SECURITY DEFINER``: it runs with the caller's rights.
 What this does not stop
 -----------------------
 
-A role that owns ``audit_log`` (or a superuser) can still disable the
-trigger, replace this function, or ``TRUNCATE`` the table. That was already
-true with ``0100``. The trigger stops mistakes and roles that do not own the
-table.
+The trigger fires for every role. It stops mistakes, and roles that have no
+ownership, ``TRIGGER`` or ``TRUNCATE`` right on ``audit_log``. It does not
+stop these:
+
+* A role that owns ``audit_log`` (or a superuser) can disable the trigger,
+  replace this function, or ``TRUNCATE`` the table.
+* A role with the ``TRUNCATE`` right can empty the table. Row triggers do
+  not fire on ``TRUNCATE``.
+* A role with the ``TRIGGER`` right can add its own trigger. Its trigger can
+  change a row after this guard has allowed the update, or rewrite new rows,
+  or run code as the role that writes the next audit row.
+
+So treat ``TRIGGER`` and ``TRUNCATE`` on ``audit_log`` like ownership: do not
+grant them (``GRANT ALL`` includes both). All of this was already true with
+``0100``.
+
+Self-check
+----------
+
+``CREATE OR REPLACE FUNCTION`` has no schema name, like ``0100``, so it lands
+in the first schema of the migration role's ``search_path``. If that is not
+the schema of the ``0100`` function (for example, a schema named after the
+role was created later), PostgreSQL makes a second function that nothing
+uses, and the trigger keeps the strict one. So at the end ``upgrade()``
+checks that the trigger ``audit_log_append_only`` really calls the new body
+with the pinned ``search_path``. If not, the migration fails instead of
+reporting success.
 
 Dialect guard
 -------------
@@ -100,6 +128,34 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
+#: The body of ``audit_log_reject_mutation()`` that ``upgrade()`` installs. The
+#: self-check at the end of ``upgrade()`` compares the trigger's function with it.
+_GUARD_BODY = """
+        DECLARE
+            expected pg_catalog.record;
+        BEGIN
+            -- Nested IF: NEW is only read on UPDATE (it is NULL on DELETE).
+            IF TG_OP OPERATOR(pg_catalog.=) 'UPDATE' THEN
+                IF OLD.raw_payload IS NOT NULL AND NEW.raw_payload IS NULL THEN
+                    -- The row as the age-off must leave it: OLD with only
+                    -- raw_payload emptied.
+                    expected := OLD;
+                    expected.raw_payload := NULL;
+                    -- *= compares every column value byte for byte (two
+                    -- NULLs are equal). It never parses json, and a value
+                    -- that only means the same counts as a change.
+                    IF NEW OPERATOR(pg_catalog.*=) expected THEN
+                        RETURN NEW;
+                    END IF;
+                END IF;
+            END IF;
+            RAISE EXCEPTION
+                'audit_log is append-only: % is not permitted '
+                '(governance invariant, v0.1-spec section 6)', TG_OP;
+        END;
+        """
+
+
 def upgrade() -> None:
     """Allow only the ``raw_payload`` -> NULL update through the guard."""
     bind = op.get_bind()
@@ -112,31 +168,36 @@ def upgrade() -> None:
         RETURNS trigger
         LANGUAGE plpgsql
         SET search_path = pg_catalog, pg_temp
-        AS $$
-        DECLARE
-            expected pg_catalog.record;
+        AS $$"""
+        + _GUARD_BODY
+        + "$$;"
+    )
+
+    # Self-check (see the module docstring): the trigger must call the body
+    # above, with the pinned search_path. Otherwise fail the migration.
+    op.execute(
+        """
+        DO $check$
         BEGIN
-            -- Nested IF: NEW is only read on UPDATE (it is NULL on DELETE).
-            IF TG_OP OPERATOR(pg_catalog.=) 'UPDATE' THEN
-                IF OLD.raw_payload IS NOT NULL AND NEW.raw_payload IS NULL THEN
-                    -- The row as the age-off must leave it: OLD with only
-                    -- raw_payload emptied.
-                    expected := OLD;
-                    expected.raw_payload := NULL;
-                    -- *= compares the stored bytes of every column (two
-                    -- NULLs are equal). It never parses json, and a value
-                    -- that means the same but is stored differently counts
-                    -- as a change.
-                    IF NEW OPERATOR(pg_catalog.*=) expected THEN
-                        RETURN NEW;
-                    END IF;
-                END IF;
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_catalog.pg_trigger t
+                JOIN pg_catalog.pg_proc p ON p.oid = t.tgfoid
+                WHERE t.tgrelid = 'audit_log'::regclass
+                  AND t.tgname = 'audit_log_append_only'
+                  AND p.proconfig = ARRAY['search_path=pg_catalog, pg_temp']
+                  AND p.prosrc = $body$"""
+        + _GUARD_BODY
+        + """$body$
+            ) THEN
+                RAISE EXCEPTION
+                    'migration 0103: trigger audit_log_append_only does not call '
+                    'the new audit_log_reject_mutation(). The function was probably '
+                    'created in another schema: check the search_path of the '
+                    'migration role.';
             END IF;
-            RAISE EXCEPTION
-                'audit_log is append-only: % is not permitted '
-                '(governance invariant, v0.1-spec section 6)', TG_OP;
-        END;
-        $$;
+        END
+        $check$;
         """
     )
 

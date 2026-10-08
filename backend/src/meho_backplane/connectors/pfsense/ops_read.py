@@ -1111,7 +1111,8 @@ _WHEN_TO_USE_CONFIG = (
     "that someone typed in, so treat the output as sensitive. To check "
     "local users or static routes, do not read the whole file: call "
     "``pfsense.user.list`` or ``pfsense.route.static.list``, which return "
-    "only safe fields. Call ``pfsense.version`` when a structured version "
+    "only a short list of fields and never read secret fields. Call "
+    "``pfsense.version`` when a structured version "
     "output is needed without the full FingerprintResult envelope."
 )
 
@@ -1465,8 +1466,9 @@ READ_OPS: tuple[PfSenseOp, ...] = (
             "the pfSense configuration. For structured gateway data, "
             "prefer ``pfsense.gateway.list``. To check local users or "
             "static routes, use ``pfsense.user.list`` or "
-            "``pfsense.route.static.list`` instead: they return only safe "
-            "fields. No params; safe to call on any healthy pfSense target."
+            "``pfsense.route.static.list`` instead: they return only a short "
+            "list of fields and never read secret fields. No params; safe to "
+            "call on any healthy pfSense target."
         ),
         parameter_schema=_EMPTY_PARAMS,
         response_schema={

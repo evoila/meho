@@ -17,21 +17,33 @@ short, fixed list of fields:
 With these, an operator or agent does not need ``pfsense.config.show`` (the
 whole file) just to check a VPN user or a static route.
 
-Allow-list, not redaction
--------------------------
+Allow-list, plus the secret-shape check
+---------------------------------------
 
 Each row is built from a fixed set of child elements. Nothing else in the
-user or route element is copied, so password hashes, the IPsec pre-shared
-key, SSH authorized keys, OTP data and certificate references never reach
-the result -- whatever new secret field a future pfSense version adds. The
-only free text in a row is ``descr``, which an admin types.
+user or route element is read: no other child, no attribute, no text of an
+element nested inside an allowed one. So secret fields (password hashes,
+the IPsec pre-shared key, SSH authorized keys, OTP data, certificate
+references, and any new secret field a future pfSense version adds) are
+never read.
+
+An allowed field can still hold a secret that someone put there, most
+likely in the free-text ``descr``. So every returned string goes through
+:func:`~meho_backplane.connectors.pfsense.redaction.looks_like_secret`, the
+same value-shape check ``pfsense.config.show`` uses. A value with a known
+secret shape (a private key, a crypt password hash, a password in a URL, a
+long hex run, base64 that hides one of these) is replaced with
+:data:`~meho_backplane.connectors.pfsense.redaction.REDACTED`. A secret
+typed in plain words can still show: the same limit as
+``pfsense.config.show``.
 
 Parsing
 -------
 
 The file is read with the same ``cat /cf/conf/config.xml`` the other
 config reads use (:func:`~meho_backplane.connectors.pfsense.ops_write._read_config_xml`)
-and parsed with ``defusedxml`` (no entity expansion), like
+and parsed with ``defusedxml`` (no entity expansion, and no DTD:
+``forbid_dtd=True``; pfSense never writes one), like
 :func:`~meho_backplane.connectors.pfsense.ops_read.parse_gateways_xml`.
 Unlike that parser, a file that is empty or cannot be parsed raises
 :class:`PfSenseConfigParseError` instead of returning an empty list, so a
@@ -51,6 +63,7 @@ from defusedxml.ElementTree import ParseError, fromstring
 from meho_backplane.connectors.pfsense.ops import PfSenseOp
 from meho_backplane.connectors.pfsense.ops_read import _xml_text
 from meho_backplane.connectors.pfsense.ops_write import _read_config_xml
+from meho_backplane.connectors.pfsense.redaction import REDACTED, looks_like_secret
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -86,13 +99,14 @@ def _parse_config_root(xml_text: str) -> Any:
 
     Raises :class:`PfSenseConfigParseError` when the text is empty, is not
     well-formed XML, holds markup ``defusedxml`` refuses (a DTD or an
-    entity), or has a root element other than ``<pfsense>``. The original
-    exception is not chained: its message can quote the file.
+    entity; ``forbid_dtd=True``), or has a root element other than
+    ``<pfsense>``. The original exception is not chained: its message can
+    quote the file.
     """
     if not xml_text.strip():
         raise PfSenseConfigParseError("config.xml is empty; no rows were returned")
     try:
-        root = fromstring(xml_text)
+        root = fromstring(xml_text, forbid_dtd=True)
     except (ParseError, ValueError) as exc:  # defusedxml's refusals are ValueErrors
         reason = type(exc).__name__
         raise PfSenseConfigParseError(
@@ -106,12 +120,21 @@ def _parse_config_root(xml_text: str) -> Any:
 
 
 def _text_or_none(element: Any, tag: str) -> str | None:
-    """Return the stripped text of the direct child *tag*, or ``None`` when empty."""
+    """Return the stripped text of the direct child *tag*, or ``None`` when empty.
+
+    Only the child's own text is read (``.text``): never its attributes and
+    never the text of elements nested inside it. A value with a known secret
+    shape (:func:`~meho_backplane.connectors.pfsense.redaction.looks_like_secret`)
+    comes back as :data:`~meho_backplane.connectors.pfsense.redaction.REDACTED`.
+    Every string the two reads return goes through here.
+    """
     value = _xml_text(element, tag)
     if value is None:
         return None
     value = value.strip()
-    return value or None
+    if not value:
+        return None
+    return REDACTED if looks_like_secret(value) else value
 
 
 def _group_names_by_uid(system: Any) -> dict[str, list[str]]:
@@ -155,7 +178,8 @@ def list_local_users(xml_text: str) -> list[dict[str, Any]]:
     date text, or ``None`` when empty. ``groups`` lists every group whose
     ``<member>`` list holds the user's uid, sorted (empty when the user has
     no uid). Other text fields are ``None`` when the element is missing or
-    empty. No other field of the user element is ever read.
+    empty. No other field of the user element is ever read. A value with a
+    known secret shape comes back as ``REDACTED`` (see :func:`_text_or_none`).
 
     Raises :class:`PfSenseConfigParseError` when the file is empty or cannot
     be parsed. A config without users returns ``[]``.
@@ -207,10 +231,13 @@ def list_static_routes(xml_text: str) -> list[dict[str, Any]]:
             "disabled": False,
         }
 
-    ``network`` is the stored destination; ``pfsense.route.static.delete``
-    finds a route by this value. ``gateway`` is the gateway name.
-    ``disabled`` is ``True`` when the route element has a ``<disabled>``
-    child. Text fields are ``None`` when the element is missing or empty.
+    ``network`` is the stored destination. For a CIDR destination,
+    ``pfsense.route.static.delete`` finds the route by this value; an alias
+    destination is rejected by the delete op. ``gateway`` is the gateway
+    name. ``disabled`` is ``True`` when the route element has a
+    ``<disabled>`` child. Text fields are ``None`` when the element is
+    missing or empty. A value with a known secret shape comes back as
+    ``REDACTED`` (see :func:`_text_or_none`).
 
     Raises :class:`PfSenseConfigParseError` when the file is empty or cannot
     be parsed. A config without static routes returns ``[]``.
@@ -291,9 +318,10 @@ async def pfsense_route_static_list(
 _WHEN_TO_USE_USERS = (
     "Use to check the local users of a pfSense firewall, for example a VPN "
     "user: whether the account exists, whether it is disabled, when it "
-    "expires, and which groups it is in (``pfsense.user.list``). It returns "
-    "only safe fields -- never password hashes, keys, the IPsec pre-shared "
-    "key, SSH authorized keys or certificate data. Prefer it over "
+    "expires, and which groups it is in (``pfsense.user.list``). It never "
+    "reads secret fields (password hashes, keys, the IPsec pre-shared key, "
+    "SSH authorized keys, certificate data), and a returned value with a "
+    f"known secret shape is replaced with ``{REDACTED}``. Prefer it over "
     "``pfsense.config.show`` for any question about users."
 )
 
@@ -303,9 +331,10 @@ _WHEN_TO_USE_ROUTES = (
     "(``pfsense.route.static.list``): each route's destination network, "
     "gateway name, description and disabled flag. Call it before "
     "``pfsense.route.static.add`` (to see what exists) or "
-    "``pfsense.route.static.delete`` (pass a row's ``network`` value). "
-    "Prefer it over ``pfsense.config.show`` for any question about static "
-    "routes."
+    "``pfsense.route.static.delete`` (pass a row's ``network`` value; this "
+    "works for a CIDR destination, an alias destination is rejected by the "
+    "delete op). Prefer it over ``pfsense.config.show`` for any question "
+    "about static routes."
 )
 
 _EMPTY_PARAMS: dict[str, Any] = {
@@ -384,12 +413,15 @@ CONFIG_READ_OPS: tuple[PfSenseOp, ...] = (
             "Reads ``/cf/conf/config.xml`` over SSH and returns one row per "
             "local user with these fields only: ``name``, ``descr`` (full "
             "name), ``scope``, ``disabled``, ``expires``, ``uid`` and "
-            "``groups`` (the groups the user is a member of). The op copies "
-            "only these fields, so password hashes, keys, the IPsec "
-            "pre-shared key, SSH authorized keys, OTP and certificate data "
-            "are never returned. Use it instead of ``pfsense.config.show`` "
-            "to check a user. Returns a ``{rows, total}`` envelope. No "
-            "params; safe to call on any healthy pfSense target."
+            "``groups`` (the groups the user is a member of). Secret fields "
+            "(password hashes, keys, the IPsec pre-shared key, SSH authorized "
+            "keys, OTP and certificate data) are never read. A returned value "
+            f"with a known secret shape is replaced with ``{REDACTED}``. A "
+            "secret typed in plain words into a text field such as ``descr`` "
+            "can still show: the same limit as ``pfsense.config.show``. Use "
+            "it instead of ``pfsense.config.show`` to check a user. Returns a "
+            "``{rows, total}`` envelope. No params; safe to call on any "
+            "healthy pfSense target."
         ),
         parameter_schema=_EMPTY_PARAMS,
         response_schema=_rows_schema(_USER_ROW_SCHEMA),
@@ -409,6 +441,10 @@ CONFIG_READ_OPS: tuple[PfSenseOp, ...] = (
                 "``uid`` is the numeric user id as a string. ``groups`` is a "
                 "sorted list of group names (it can include the built-in "
                 "``all`` group). ``descr`` is free text an admin typed. A "
+                "value with a known secret shape (private key, password hash, "
+                f"password in a URL) is replaced with ``{REDACTED}``; a "
+                "secret typed in plain words can still show, the same limit "
+                "as ``pfsense.config.show``. A "
                 "failed read or a file that cannot be parsed fails the call "
                 "with an error that holds no file content. A large list comes "
                 "back as a JSONFlux handle; read more rows with ``result_query``."
@@ -423,8 +459,12 @@ CONFIG_READ_OPS: tuple[PfSenseOp, ...] = (
             "Reads ``/cf/conf/config.xml`` over SSH and returns one row per "
             "static route with these fields only: ``network`` (the "
             "destination), ``gateway`` (the gateway name), ``descr`` and "
-            "``disabled``. Pass a row's ``network`` to "
-            "``pfsense.route.static.delete`` to delete that route. Use it "
+            "``disabled``. For a CIDR destination, pass a row's ``network`` "
+            "to ``pfsense.route.static.delete`` to delete that route; an "
+            "alias destination is rejected by the delete op. A returned "
+            f"value with a known secret shape is replaced with ``{REDACTED}``; "
+            "a secret typed in plain words into ``descr`` can still show, "
+            "the same limit as ``pfsense.config.show``. Use it "
             "instead of ``pfsense.config.show`` to check routes. Returns a "
             "``{rows, total}`` envelope. No params; safe to call on any "
             "healthy pfSense target."
@@ -441,10 +481,13 @@ CONFIG_READ_OPS: tuple[PfSenseOp, ...] = (
             "output_shape": (
                 "``{rows: [{network, gateway, descr, disabled}], total: N}``. "
                 "``network`` is the destination as stored (usually a CIDR "
-                "such as ``192.0.2.0/24``); it is the value "
-                "``pfsense.route.static.delete`` takes. ``gateway`` is the "
+                "such as ``192.0.2.0/24``, sometimes an alias name). For a "
+                "CIDR destination it is the value "
+                "``pfsense.route.static.delete`` takes; the delete op rejects "
+                "an alias destination. ``gateway`` is the "
                 "gateway name (see ``pfsense.gateway.list``). ``disabled`` is "
-                "true when the route is turned off. A failed read or a file "
+                "true when the route is turned off. A value with a known "
+                f"secret shape is replaced with ``{REDACTED}``. A failed read or a file "
                 "that cannot be parsed fails the call with an error that holds "
                 "no file content. A large list comes back as a JSONFlux "
                 "handle; read more rows with ``result_query``."

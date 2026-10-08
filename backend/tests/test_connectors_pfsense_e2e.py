@@ -75,6 +75,7 @@ from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.reducer import PassThroughReducer
+from tests.test_connectors_pfsense_config_redaction import FAKE_PEM_KEY
 
 # ---------------------------------------------------------------------------
 # Module-level key material (generated once per session)
@@ -827,6 +828,54 @@ async def test_pfsense_e2e_safe_reads_keep_secrets_out_of_result_and_audit_row(
             }
         ]
     secrets = (fake_hash, fake_psk, fake_route_secret)
+    assert not any(secret in json.dumps(result, default=str) for secret in secrets)
+
+    row = await _latest_dispatch_row(op_id)
+    stored = json.dumps([row.payload, row.raw_payload, row.redaction_manifest], default=str)
+    assert not any(secret in stored for secret in secrets)
+    assert not any(secret in repr(event) for event in captured_events for secret in secrets)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op_id", ["pfsense.user.list", "pfsense.route.static.list"])
+async def test_pfsense_e2e_safe_reads_redact_secret_shapes_in_text_fields(
+    pfsense_e2e: _PfsenseE2EBundle,
+    captured_events: list[Any],
+    monkeypatch: pytest.MonkeyPatch,
+    op_id: str,
+) -> None:
+    """A private key in a user ``descr`` and a password in a URL in a route
+    ``descr`` come back as ``***REDACTED***`` through the full dispatch path,
+    and reach neither the result, the audit row (``raw_payload`` included)
+    nor the broadcast event. Synthetic values only.
+    """
+    pem_body_line = FAKE_PEM_KEY.splitlines()[1]
+    url_password = "fake-e2e-url-pass-0042"
+    # Built from pieces, so the source never holds a literal URL with a password.
+    url = "".join(("https://", "admin", ":", url_password, "@", "198.51.100.7/api"))
+    config = _FIXTURE_CONFIG_XML.replace(
+        "</pfsense>",
+        "  <system><user><name>user-a</name>"
+        f"<descr>{FAKE_PEM_KEY}</descr><uid>2000</uid></user></system>\n"
+        "  <staticroutes><route><network>192.0.2.0/24</network>"
+        f"<gateway>WAN_DHCP</gateway><descr>{url}</descr></route></staticroutes>\n"
+        "</pfsense>",
+    )
+    monkeypatch.setitem(_FIXTURE_RESPONSES, "cat /cf/conf/config.xml", config)
+
+    result = await call_operation(
+        _OPERATOR,
+        {
+            "connector_id": "pfsense-ssh-2.7",
+            "op_id": op_id,
+            "target": {"name": _TARGET_NAME},
+            "params": {},
+        },
+    )
+    assert result["status"] == "ok", f"{op_id} failed: {result.get('error')}"
+    (row_out,) = result["result"]["rows"]
+    assert row_out["descr"] == "***REDACTED***"
+    secrets = (pem_body_line, url_password)
     assert not any(secret in json.dumps(result, default=str) for secret in secrets)
 
     row = await _latest_dispatch_row(op_id)

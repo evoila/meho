@@ -68,7 +68,8 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
 - **Allow-listed config reads** (`ops_config_reads.py`, #3954) — the pure
   parsers `list_local_users` and `list_static_routes`, the strict root parser
   `_parse_config_root` (raises `PfSenseConfigParseError` with a fixed message),
-  the handlers `pfsense_user_list` / `pfsense_route_static_list`, the row-key
+  the one text reader `_text_or_none` (own text only, then the
+  `looks_like_secret` shape check), the handlers `pfsense_user_list` / `pfsense_route_static_list`, the row-key
   allow-lists `USER_ROW_FIELDS` / `ROUTE_ROW_FIELDS`, and the `CONFIG_READ_OPS`
   tuple. See "`pfsense.user.list` and `pfsense.route.static.list`" below.
 
@@ -316,8 +317,9 @@ flight-recorder trace, a stored result and the broadcast feed therefore only
 see the cleaned text.
 
 - **Use the small reads first.** To check local users or static routes, call
-  `pfsense.user.list` or `pfsense.route.static.list`. They return only safe
-  fields. The op's description and `when_to_use` say this too.
+  `pfsense.user.list` or `pfsense.route.static.list`. They return only a
+  short list of fields and never read secret fields. The op's description and
+  `when_to_use` say this too.
 - **The limit.** This is a list of known fields and known shapes, not a proof.
   Free-text fields (descriptions, notes, cron or shell commands, custom config
   text, URLs) can still hold secrets that someone typed in. The Notes package
@@ -437,15 +439,33 @@ Two `safe` reads, with no approval. Each reads `config.xml` once and returns
   the group, not on the user. The built-in `all` group can appear.
 - **`pfsense.route.static.list`** returns one row per
   `<staticroutes><route>` with these keys only: `network`, `gateway` (the
-  gateway name), `descr` and `disabled`. `pfsense.route.static.delete` finds a
-  route by `network`, so an operator can list the routes and then delete one
-  with a row's `network` value. A route stored with host bits set still
-  matches, because the delete op compares the canonical network.
-- **Allow-list, not redaction.** Each row is built from a fixed set of child
-  elements. Nothing else is copied. So password hashes, the IPsec pre-shared
-  key, SSH authorized keys, OTP data and certificate references never reach
-  the result, also for secret fields a future pfSense version adds. The only
-  free text in a row is `descr`, which an admin types.
+  gateway name), `descr` and `disabled`.
+- **From list to delete.** This works for a route whose destination is a CIDR
+  network: `pfsense.route.static.delete` finds the route by `network`, so an
+  operator can list the routes and then delete one with a row's `network`
+  value. A route stored with host bits set still matches, because the delete
+  op compares the canonical network; IPv6 works too. pfSense also allows an
+  alias as the destination. The list shows the alias name, but the delete op
+  rejects it ("network must be a valid CIDR"). This limit is in the delete
+  op, not in the list.
+- **Secret fields are never read.** Each row is built from a fixed set of
+  child elements. Only each element's own text is read: no other child, no
+  attribute, and no text of an element nested inside an allowed one. So
+  password hashes, the IPsec pre-shared key, SSH authorized keys, OTP data and
+  certificate references are never read, also for secret fields a future
+  pfSense version adds.
+- **Secret shapes are replaced.** An allowed field can still hold a secret that
+  someone put there, most likely the free-text `descr`. So every returned
+  string (also `name`, `uid`, group names, `gateway` and `network`) goes
+  through `looks_like_secret()`, the same value-shape check
+  `pfsense.config.show` uses (`redaction_shapes.py`). A value with a known
+  secret shape (a private key, a crypt password hash, a password in a URL, a
+  long hex run, or base64 that hides one of these) comes back as
+  `***REDACTED***`. Normal names, dates, uids, gateway and alias names and
+  IPv4 / IPv6 networks never match.
+- **The limit.** A secret typed in plain words (for example a password written
+  into `descr`) can still show. This is the same limit as
+  `pfsense.config.show`.
 - **Flags.** `disabled` is `true` when a `<disabled>` child is there, whatever
   it holds (pfSense checks `isset`). `expires` is the stored date text
   (`MM/DD/YYYY`), or `null` when empty. Other text fields are `null` when the
@@ -454,7 +474,8 @@ Two `safe` reads, with no approval. Each reads `config.xml` once and returns
   from `<pfsense><staticroutes>`. A `<user>` or `<staticroutes>` inside a
   package section is not listed.
 - **Fail with a clear error.** The file is parsed with `defusedxml`, like
-  `parse_gateways_xml`. Unlike that parser, an empty file, a file that is not
+  `parse_gateways_xml`, with `forbid_dtd=True` (pfSense never writes a
+  DOCTYPE). Unlike that parser, an empty file, a file that is not
   well-formed, a file with a DTD or entity, or a root other than `<pfsense>`
   raises `PfSenseConfigParseError`. A failed `cat` raises `RuntimeError`. Both
   messages are fixed text: they never quote the file, and the parser's own

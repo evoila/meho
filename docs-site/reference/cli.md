@@ -3551,7 +3551,7 @@ meho pfsense user
 
 #### `meho pfsense user list`
 
-List pfSense local users (no password hashes or keys)
+List pfSense local users (secret fields are never read)
 
 ```
 meho pfsense user list [flags]

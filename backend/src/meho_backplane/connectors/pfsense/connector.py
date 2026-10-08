@@ -218,7 +218,8 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "cron or shell commands, custom config text, URLs) can still hold "
         "secrets that someone typed in. To check local users or static "
         "routes, do not read the whole file: call ``pfsense.user.list`` or "
-        "``pfsense.route.static.list``, which return only safe fields."
+        "``pfsense.route.static.list``, which return only a short list of "
+        "fields and never read secret fields."
     ),
     "dhcp": (
         "Use for pfSense DHCP lease-state operations: reading the live "
@@ -231,7 +232,8 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "routing": (
         "Use for pfSense static routes and routing-plane provisioning and "
         "teardown: listing the static routes (``pfsense.route.static.list``, "
-        "a ``safe`` read of network / gateway / descr / disabled), appending "
+        "a ``safe`` read of network / gateway / descr / disabled; for a CIDR "
+        "destination its ``network`` is what the delete op takes), appending "
         "a named gateway (``pfsense.gateway.add``) or a static route "
         "(``pfsense.route.static.add``) to ``config.xml``, or reversing "
         "either for a governed teardown -- ``pfsense.route.static.delete`` "
@@ -253,9 +255,12 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "whether an account (for example a VPN user) is disabled, when it "
         "expires, and which groups it is in. ``pfsense.user.list`` is a "
         "``safe`` read that returns only name / descr / scope / disabled / "
-        "expires / uid / groups -- never password hashes, keys, the IPsec "
-        "pre-shared key, SSH authorized keys or certificate data. Use it "
-        "instead of ``pfsense.config.show`` for any question about users."
+        "expires / uid / groups. It never reads secret fields (password "
+        "hashes, keys, the IPsec pre-shared key, SSH authorized keys, "
+        "certificate data), and a returned value with a known secret shape "
+        "is redacted; a secret typed in plain words into ``descr`` can still "
+        "show, the same limit as ``pfsense.config.show``. Use it instead of "
+        "``pfsense.config.show`` for any question about users."
     ),
 }
 

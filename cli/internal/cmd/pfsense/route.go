@@ -39,8 +39,11 @@ func newRouteListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List pfSense static routes (from config.xml)",
 		Long: "list dispatches pfsense.route.static.list and shows the static\n" +
-			"routes (network / gateway / disabled / descr). The NETWORK value\n" +
-			"is what pfsense.route.static.delete takes to delete a route.\n" +
+			"routes (network / gateway / disabled / descr). For a CIDR\n" +
+			"destination, the NETWORK value is what pfsense.route.static.delete\n" +
+			"takes to delete a route. The delete op rejects an alias\n" +
+			"destination. A value with a known secret shape comes back as\n" +
+			"***REDACTED***.\n" +
 			"--json emits the full OperationResult envelope.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",

@@ -12,12 +12,17 @@ Coverage:
 
 * no secrets: a config that holds every kind of secret field, in the user,
   group, route and system elements, returns none of the secret values, and
-  each row has exactly the allow-listed keys;
+  each row has exactly the allow-listed keys; attributes and the text of
+  elements nested inside an allowed element are never read;
+* secret shapes in allowed fields: a private key, a crypt hash, a password
+  in a URL or a long hex run in ``descr`` / ``name`` / ``uid`` / a group
+  name / ``gateway`` / ``network`` comes back as ``***REDACTED***``, while
+  normal names, dates, uids, gateways, aliases and networks stay unchanged;
 * the field mapping for users and routes;
 * the ``disabled`` and ``expires`` handling;
 * the group membership (from the ``<group><member>`` uid lists);
 * an empty config (no users, no routes);
-* a parse failure (malformed XML, a DTD / entity, a wrong root, an empty
+* a parse failure (malformed XML, a DTD, an entity, a wrong root, an empty
   file) raises an error that holds no file content; a failed read raises;
 * a listed route's ``network`` is what ``pfsense.route.static.delete``
   needs to find that route;
@@ -47,6 +52,7 @@ from meho_backplane.connectors.pfsense.ops_config_reads import (
 )
 from meho_backplane.connectors.pfsense.ops_delete import _match_static_routes_canonical
 from meho_backplane.connectors.pfsense.ops_write import _validate_network_cidr
+from meho_backplane.connectors.pfsense.redaction import REDACTED
 from meho_backplane.operations._errors import result_connector_error
 from meho_backplane.settings import get_settings
 from tests.test_connectors_pfsense_config_redaction import (
@@ -56,7 +62,9 @@ from tests.test_connectors_pfsense_config_redaction import (
     ALL_FAKE_SECRETS,
     FAKE_BCRYPT,
     FAKE_PEM_KEY,
+    FAKE_PEM_KEY_B64,
     FAKE_PSK,
+    FAKE_SHA512_CRYPT,
     FAKE_SSH_HOST_KEY_B64,
 )
 
@@ -102,6 +110,29 @@ def _proc(stdout: str = "", exit_status: int = 0) -> Any:
 
 def _op(op_id: str) -> Any:
     return next(op for op in PFSENSE_OPS if op.op_id == op_id)
+
+
+def _all_strings(value: Any) -> Iterator[str]:
+    """Yield every string (keys and values) in a result, at any depth.
+
+    Checking each string, not a ``json.dumps`` of the whole result, also
+    finds a multi-line secret (``json.dumps`` escapes the newlines).
+    """
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield from _all_strings(key)
+            yield from _all_strings(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _all_strings(item)
+
+
+def _leaks(result: Any, needles: tuple[str, ...]) -> list[str]:
+    """Return the needles found in any string of *result*."""
+    strings = list(_all_strings(result))
+    return [needle for needle in needles if any(needle in text for text in strings)]
 
 
 # ---------------------------------------------------------------------------
@@ -265,9 +296,219 @@ async def test_no_secret_value_appears_in_either_result(handler_attr: str) -> No
         mock_cmd.return_value = _proc(_secret_heavy_config())
         result = await getattr(connector, handler_attr)(_TARGET, {})
     assert result["total"] >= 1
+    assert _leaks(result, _ALL_SECRETS) == [], f"a secret value leaked into {handler_attr}"
     dumped = json.dumps(result) + repr(result)
     for secret in _ALL_SECRETS:
         assert secret not in dumped, f"a secret value leaked into {handler_attr}"
+
+
+#: A plain marker (no secret shape), so only the allow-list can keep it out.
+_PLAIN_MARKER = "FAKE-PLAIN-MARKER-4411"
+
+
+def test_attributes_are_never_copied() -> None:
+    """Attributes on ``<user>`` / ``<route>`` (and their children) are not read."""
+    xml = (
+        f'<pfsense><system><user psk="{_PLAIN_MARKER}" uid="{_PLAIN_MARKER}">'
+        f'<name note="{_PLAIN_MARKER}">user-a</name><uid>2000</uid></user></system>'
+        f'<staticroutes x="{_PLAIN_MARKER}"><route k="{_PLAIN_MARKER}">'
+        f'<network v="{_PLAIN_MARKER}">192.0.2.0/24</network></route></staticroutes>'
+        "</pfsense>"
+    )
+    users = list_local_users(xml)
+    routes = list_static_routes(xml)
+    assert [tuple(row) for row in users] == [USER_ROW_FIELDS]
+    assert [tuple(row) for row in routes] == [ROUTE_ROW_FIELDS]
+    assert users[0]["name"] == "user-a"
+    assert users[0]["uid"] == "2000"
+    assert routes[0]["network"] == "192.0.2.0/24"
+    assert _leaks([users, routes], (_PLAIN_MARKER,)) == []
+
+
+def test_text_of_nested_elements_is_never_included() -> None:
+    """Only an allowed element's own text is read, not the text of its children."""
+    xml = (
+        "<pfsense><system><user><name>user-a</name>"
+        f"<descr>Example User A<bcrypt-hash>{_PLAIN_MARKER}</bcrypt-hash>tail</descr>"
+        "</user></system>"
+        "<staticroutes><route><network>192.0.2.0/24</network>"
+        f"<descr>example route<secret_note>{_PLAIN_MARKER}</secret_note>tail</descr>"
+        "</route></staticroutes></pfsense>"
+    )
+    users = list_local_users(xml)
+    routes = list_static_routes(xml)
+    assert users[0]["descr"] == "Example User A"
+    assert routes[0]["descr"] == "example route"
+    assert _leaks([users, routes], (_PLAIN_MARKER,)) == []
+
+
+# ---------------------------------------------------------------------------
+# Secret shapes in allowed fields: replaced, like pfsense.config.show does
+# ---------------------------------------------------------------------------
+
+_URL_PASSWORD = "fake-url-pass-0042"
+# Built from pieces, so the source never holds a literal URL with a password.
+_FAKE_URL_WITH_PASSWORD = "".join(
+    ("https://", "admin", ":", _URL_PASSWORD, "@", "198.51.100.7/api")
+)
+_FAKE_HEX_KEY = "a1b2" * 64  # 256 hex digits: key size
+_PEM_BODY_LINE = FAKE_PEM_KEY.splitlines()[1]
+
+
+def _user_xml(inner: str, groups: str = "") -> str:
+    return f"<pfsense><system>{groups}<user>{inner}</user></system></pfsense>"
+
+
+def _route_xml(inner: str) -> str:
+    return f"<pfsense><staticroutes><route>{inner}</route></staticroutes></pfsense>"
+
+
+#: (case id, config, parser, row field, needles that must not appear)
+_SHAPE_CASES: list[tuple[str, str, Any, str, tuple[str, ...]]] = [
+    (
+        "pem-key-in-user-descr",
+        _user_xml(f"<name>user-a</name><descr>{FAKE_PEM_KEY}</descr>"),
+        list_local_users,
+        "descr",
+        (FAKE_PEM_KEY, _PEM_BODY_LINE),
+    ),
+    (
+        "pem-key-cdata-in-user-descr",
+        _user_xml(f"<name>user-a</name><descr><![CDATA[{FAKE_PEM_KEY}]]></descr>"),
+        list_local_users,
+        "descr",
+        (FAKE_PEM_KEY, _PEM_BODY_LINE),
+    ),
+    (
+        "base64-pem-key-in-user-descr",
+        _user_xml(f"<name>user-a</name><descr>{FAKE_PEM_KEY_B64}</descr>"),
+        list_local_users,
+        "descr",
+        (FAKE_PEM_KEY_B64,),
+    ),
+    (
+        "hex-key-in-user-descr",
+        _user_xml(f"<name>user-a</name><descr>{_FAKE_HEX_KEY}</descr>"),
+        list_local_users,
+        "descr",
+        (_FAKE_HEX_KEY,),
+    ),
+    (
+        "crypt-hash-in-user-name",
+        _user_xml(f"<name>{FAKE_BCRYPT}</name>"),
+        list_local_users,
+        "name",
+        (FAKE_BCRYPT,),
+    ),
+    (
+        "crypt-hash-in-user-uid",
+        _user_xml(f"<name>user-a</name><uid>{FAKE_SHA512_CRYPT}</uid>"),
+        list_local_users,
+        "uid",
+        (FAKE_SHA512_CRYPT,),
+    ),
+    (
+        "url-password-in-route-descr",
+        _route_xml(f"<network>192.0.2.0/24</network><descr>{_FAKE_URL_WITH_PASSWORD}</descr>"),
+        list_static_routes,
+        "descr",
+        (_URL_PASSWORD,),
+    ),
+    (
+        "crypt-hash-in-route-descr",
+        _route_xml(f"<network>192.0.2.0/24</network><descr>{FAKE_SHA512_CRYPT}</descr>"),
+        list_static_routes,
+        "descr",
+        (FAKE_SHA512_CRYPT,),
+    ),
+    (
+        "crypt-hash-in-route-gateway",
+        _route_xml(f"<network>192.0.2.0/24</network><gateway>{FAKE_BCRYPT}</gateway>"),
+        list_static_routes,
+        "gateway",
+        (FAKE_BCRYPT,),
+    ),
+    (
+        "crypt-hash-in-route-network",
+        _route_xml(f"<network>{FAKE_BCRYPT}</network>"),
+        list_static_routes,
+        "network",
+        (FAKE_BCRYPT,),
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("xml", "parser", "field", "needles"),
+    [case[1:] for case in _SHAPE_CASES],
+    ids=[case[0] for case in _SHAPE_CASES],
+)
+def test_secret_shape_in_an_allowed_field_is_redacted(
+    xml: str, parser: Any, field: str, needles: tuple[str, ...]
+) -> None:
+    rows = parser(xml)
+    assert rows[0][field] == REDACTED
+    assert _leaks(rows, needles) == []
+
+
+def test_secret_shape_in_a_group_name_is_redacted() -> None:
+    xml = _user_xml(
+        "<name>user-a</name><uid>2000</uid>",
+        groups=f"<group><name>{FAKE_BCRYPT}</name><member>2000</member></group>",
+    )
+    rows = list_local_users(xml)
+    assert rows[0]["groups"] == [REDACTED]
+    assert _leaks(rows, (FAKE_BCRYPT,)) == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("name", "admin"),
+        ("name", "user-a"),
+        ("name", "test"),
+        ("descr", "System Administrator"),
+        ("descr", "VPN user for the event"),
+        ("descr", "pass traffic to the backup site"),
+        ("descr", "https://example.invalid/docs"),
+        ("scope", "system"),
+        ("expires", "12/31/2026"),
+        ("uid", "0"),
+        ("uid", "65534"),
+    ],
+)
+def test_normal_user_values_stay_unchanged(field: str, value: str) -> None:
+    rows = list_local_users(_user_xml(f"<{field}>{value}</{field}>"))
+    assert rows[0][field] == value
+
+
+@pytest.mark.parametrize("group_name", ["all", "admins", "vpn-users", "ops_team"])
+def test_normal_group_names_stay_unchanged(group_name: str) -> None:
+    xml = _user_xml(
+        "<name>user-a</name><uid>2000</uid>",
+        groups=f"<group><name>{group_name}</name><member>2000</member></group>",
+    )
+    assert list_local_users(xml)[0]["groups"] == [group_name]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("network", "192.0.2.0/24"),
+        ("network", "203.0.113.5/24"),
+        ("network", "2001:db8::/32"),
+        ("network", "2001:DB8:0:0::/32"),
+        ("network", "BRANCH_NETS"),  # an alias destination
+        ("gateway", "GW_EXAMPLE"),
+        ("gateway", "WAN_DHCP"),
+        ("gateway", "LAN_GW"),
+        ("descr", "example route"),
+        ("descr", "route to the backup site via WAN"),
+    ],
+)
+def test_normal_route_values_stay_unchanged(field: str, value: str) -> None:
+    rows = list_static_routes(_route_xml(f"<{field}>{value}</{field}>"))
+    assert rows[0][field] == value
 
 
 def test_rows_hold_exactly_the_allow_listed_keys() -> None:
@@ -467,6 +708,16 @@ _BROKEN_INPUTS: list[tuple[str, str]] = [
     (
         "entity",
         f'<!DOCTYPE pfsense [<!ENTITY leak "{FAKE_PSK}">]><pfsense>&leak;</pfsense>',
+    ),
+    (
+        "doctype",
+        f"<!DOCTYPE pfsense><pfsense><system><user><name>{FAKE_PSK}</name></user>"
+        "</system></pfsense>",
+    ),
+    (
+        "external-dtd",
+        '<!DOCTYPE pfsense SYSTEM "config.dtd"><pfsense><system><user>'
+        f"<name>{FAKE_PSK}</name></user></system></pfsense>",
     ),
     ("wrong-root", f"<config><system><user><name>{FAKE_PSK}</name></user></system></config>"),
     ("empty", ""),

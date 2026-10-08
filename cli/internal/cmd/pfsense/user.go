@@ -28,8 +28,9 @@ func newUserCmd() *cobra.Command {
 // newUserListCmd returns the `meho pfsense user list` command.
 //
 // Maps to op_id `pfsense.user.list`. Reads `config.xml` over SSH and
-// returns one row per local user with safe fields only (name, descr,
-// scope, disabled, expires, uid, groups) — never hashes or keys.
+// returns one row per local user with a short list of fields (name,
+// descr, scope, disabled, expires, uid, groups). Secret fields are never
+// read; a value with a known secret shape comes back as ***REDACTED***.
 func newUserListCmd() *cobra.Command {
 	var (
 		targetName        string
@@ -38,10 +39,13 @@ func newUserListCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List pfSense local users (no password hashes or keys)",
+		Short: "List pfSense local users (secret fields are never read)",
 		Long: "list dispatches pfsense.user.list and shows the local users\n" +
-			"(name / disabled / expires / groups / full name). The op returns\n" +
-			"only safe fields: never password hashes, keys or certificate data.\n" +
+			"(name / disabled / expires / groups / full name). The op never\n" +
+			"reads secret fields such as password hashes, keys or certificate\n" +
+			"data. A value with a known secret shape comes back as\n" +
+			"***REDACTED***. A secret typed in plain words into the full name\n" +
+			"can still show: the same limit as `config show`.\n" +
 			"Use it instead of `config show` to check a user, for example a\n" +
 			"VPN user.\n" +
 			"--json emits the full OperationResult envelope.\n\n" +

@@ -12,7 +12,7 @@ Copyright (c) 2026 evoila Group
 > [`backend/src/meho_backplane/connectors/pfsense/`](../../backend/src/meho_backplane/connectors/pfsense/);
 > the engineering-facing companion is
 > [`docs/codebase/connectors-pfsense.md`](../codebase/connectors-pfsense.md)
-> (if present). This doc is the cookbook every RDC operator reads when
+> (if present). This doc is the cookbook every operator reads when
 > retiring the bash wrapper in favour of `meho pfsense …`.
 
 ## What this surface is
@@ -109,7 +109,7 @@ exposes the credential in the SSH handshake log and in `auth.log`.
 ### Generating the SSH key pair
 
 ```console
-$ ssh-keygen -t ed25519 -f ~/.ssh/meho-fw-01 -C "meho-pfsense@rdc-hetzner-dc" -N ""
+$ ssh-keygen -t ed25519 -f ~/.ssh/meho-fw-01 -C "meho-pfsense@fw-01" -N ""
 ```
 
 The public key (`~/.ssh/meho-fw-01.pub`) goes into
@@ -122,8 +122,8 @@ Use the tenant's KV-v2 path convention:
 `secret/<tenant>/pfsense/<host>`. Example via `meho vault kv put`:
 
 ```console
-$ meho vault kv put --target rdc-vault secret \
-    rdc-hetzner-dc/pfsense/pfsense-01 \
+$ meho vault kv put --target vault-01 secret \
+    example-tenant/pfsense/pfsense-01 \
     --data @pfsense_secret_ref.json
 ```
 
@@ -149,9 +149,9 @@ and OpenSSH-format PEM keys.
 targets:
   - name: fw-01
     product: pfsense
-    host: 10.5.1.1
+    host: 192.0.2.1
     port: 22
-    secret_ref: secret/rdc-hetzner-dc/pfsense/pfsense-01
+    secret_ref: secret/example-tenant/pfsense/pfsense-01
     auth_model: shared_service_account
 ```
 
@@ -375,7 +375,7 @@ over SSH with hard-coded credentials. Replace each invocation with the
 | `./scripts/pfsense.sh --gateways` | `meho pfsense network gateway --target fw-01` |
 | `./scripts/pfsense.sh --config-show` | `meho pfsense config show --target fw-01` |
 
-Once every calling site in `evoila-bosnia/claude-rdc-hetzner-dc` is
+Once every calling site in the consumer repo is
 migrated:
 
 1. Add the pfSense target with `meho targets import` (see above).

@@ -589,8 +589,8 @@ the target** (`secret_ref` stays `NULL`).
 #    `delete/` path is what authorizes a version soft-delete — NOT `data/`;
 #    see connector-vault-policy.md §6.1.)
 vault policy write meho-teardown - <<'HCL'
-path "secret/data/rdc/**"    { capabilities = ["read"] }
-path "secret/delete/rdc/**"  { capabilities = ["update"] }
+path "secret/data/ops/**"    { capabilities = ["read"] }
+path "secret/delete/ops/**"  { capabilities = ["update"] }
 path "secret/data/lab/**"    { capabilities = ["read"] }
 path "secret/delete/lab/**"  { capabilities = ["update"] }
 HCL

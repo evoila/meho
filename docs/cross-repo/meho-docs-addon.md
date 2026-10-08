@@ -526,7 +526,9 @@ meho docs read '<read_handle>' --collection vmware --cursor '<next>'
   `disclosure: "link"` and the link in `source_url`.
 - Every refusal is the same "docs source not found" (404 / `-32602`): an
   unknown or not-entitled collection, a collection without read, an
-  unknown handle.
+  unknown handle. The console page keeps the 404 / 403 of its `GET` view for
+  an unknown or not-entitled collection; every other refusal shows one
+  "not available" note there.
 - A handle expires: "search again" (409 / `-32602` with
   `data.reason="search_again"`) means run the search again and use the new
   handle.
@@ -848,11 +850,14 @@ will apply once they land.
 | 429 `rate_limited`, `Retry-After` | `-32000`, `data.retry_after_seconds` (capped at 3600) | 429, `Retry-After` forwarded (capped at 3600) |
 | 503 `read_unavailable`, any other non-2xx, transport error / timeout, malformed 2xx | `-32603` | 503 `{"error": "read_unavailable"}` |
 
-**The not-found rule.** meho gives the same "docs source not found" answer
-for every refusal on its side too: an unknown collection, a collection the
-caller is not entitled to, a disabled collection, a collection without read,
-and a corpus 404. So `read_docs` is no probe for which collections exist or
-what they hold.
+**The not-found rule.** On MCP, REST and the CLI, meho gives the same "docs
+source not found" answer for every refusal on its side too: an unknown
+collection, a collection the caller is not entitled to, a disabled
+collection, a collection without read, and a corpus 404. So `read_docs` is
+no probe for which collections exist or what they hold. The console's
+cited-source page checks the collection first, as its `GET` view on the same
+URL does: an unknown collection gets a 404 and a not-entitled one a 403. The
+refusals after that check show one "not available" note.
 
 Source: `read_corpus` / `UpstreamRead` / `CorpusReadError` / `read_caller_id`
 in [`auth/corpus.py`](../../backend/src/meho_backplane/auth/corpus.py); the

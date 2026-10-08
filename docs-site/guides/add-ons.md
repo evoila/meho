@@ -126,11 +126,13 @@ collection is configured to allow it, each passage and each source of an
 answer carries a short-lived read handle. `read_docs` (and `meho docs read`,
 and a button on the passage in the console) uses it to return the text
 before and after the passage, the whole page, or its section. Some files
-allow only their link; then the link is returned and no text. Every refusal
-gives the same "not found" answer, so a caller cannot use reads to learn
-which collections exist. Reads are limited per person; a caller that reads
-too much is told how long to wait. Like `ask_docs` from the service, this is
-off unless an administrator turns it on for a collection.
+allow only their link; then the link is returned and no text. In the tool,
+the API and the CLI, every refusal gives the same "not found" answer, so a
+caller cannot use reads to learn which collections exist. The console's
+source page still answers "not found" or "not allowed" for a collection, as
+it always has. Reads are limited per person; a caller that reads too much
+is told how long to wait. Like `ask_docs` from the service, this is off
+unless an administrator turns it on for a collection.
 
 The [Memory and knowledge](memory-and-knowledge.md) guide covers how this
 attached-document search differs from MEHO's own memory and knowledge

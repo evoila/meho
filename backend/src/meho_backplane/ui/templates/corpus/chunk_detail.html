@@ -23,7 +23,9 @@
   POSTs here for a collection that offers read. The page then also shows the
   text around the hit (escaped by autoescape, whitespace kept) and, when the
   backend has more, a "Show more" form that posts the same handle with the
-  ``next`` cursor. A read refusal shows one neutral note instead.
+  ``next`` cursor. The POST keeps the GET view's 404 / 403 for an unknown or
+  not-entitled collection; every other read refusal shows one neutral note
+  instead.
 
   Context contract (set by ``chunk_detail._gated_detail_context`` and, for
   the read POST, ``chunk_detail._render_chunk_read``):

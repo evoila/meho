@@ -62,13 +62,18 @@ a ``read_handle`` shows a "Read around this hit" form:
 * The handle travels in the POST body, never in the URL, so no access log,
   browser history or ``Referer`` header keeps it. The page logs nothing about
   it either.
-* Any read refusal renders the provenance page with one neutral note ("not
-  available"), the same for every refusal (no probe for what a collection
-  holds). A handle that is too old asks the operator to search again; a rate
-  limit says how long to wait.
+* The ``POST`` runs the page's own gate first, the same one as the ``GET``
+  view on the same URL: an unknown / cross-tenant collection gets a 404, and
+  a collection the person is not entitled to gets a 403 that names the
+  missing capability, the user's subject and the tenant. This shows nothing
+  new, because the ``GET`` already answers so.
+* Every read refusal after that gate (a disabled collection, a collection
+  without read, a handle the backend refuses, a malformed handle or cursor)
+  renders the provenance page with one neutral note ("not available"), the
+  same for each of them. A handle that is too old asks the operator to
+  search again; a rate limit says how long to wait.
 
-The ``GET`` view is unchanged: identity + provenance only. The ``POST`` runs
-the same tenant-first resolve and entitlement gate first (same 404 / 403).
+The ``GET`` view is unchanged: identity + provenance only.
 
 Route ordering
 --------------
@@ -138,7 +143,8 @@ _CHUNK_ID_MAX = 512
 #: the corpus parse and the other read faces keep.
 _READ_TOKEN_MAX = 8192
 
-#: The one note every read refusal shows (#3948): never which case it was.
+#: The one note every read refusal after the page gate shows (#3948): never
+#: which case it was. The gate's own 404 / 403 come first, as on the GET view.
 _READ_NOT_AVAILABLE = "The text around this hit is not available."
 _READ_SEARCH_AGAIN = (
     "This link to the text is too old, or the page has changed. "
@@ -189,9 +195,11 @@ async def _render_chunk_read(
 ) -> HTMLResponse:
     """Render the cited-source page plus the text around the hit (#3948).
 
-    Runs the same gate as the ``GET`` view (404 / 403), then reads around the
-    hit through :func:`~meho_backplane.docs_search.read_docs`. A read refusal
-    never fails the page: it renders the provenance with a neutral note.
+    Runs the same gate as the ``GET`` view first, so an unknown collection
+    still gets a 404 and a not-entitled one a 403 naming the missing
+    capability. Then it reads around the hit through
+    :func:`~meho_backplane.docs_search.read_docs`. A read refusal after the
+    gate never fails the page: it renders the provenance with a neutral note.
     """
     operator, context = await _gated_detail_context(
         collection_key=collection_key,
@@ -227,9 +235,10 @@ async def _read_context(
     """Read around the hit and build the template's ``read`` / ``read_note`` keys.
 
     Exactly one of ``read`` (a :class:`~meho_backplane.docs_search.DocsReadResult`)
-    and ``read_note`` (a short message) is set. Every refusal gives the same
-    note, so the page is no probe for what a collection holds. The handle and
-    cursor are checked for shape only, passed on unchanged and never logged.
+    and ``read_note`` (a short message) is set. It runs only after the page
+    gate passed. Every refusal from here on gives the same note, so the page
+    is no probe for what a collection holds. The handle and cursor are
+    checked for shape only, passed on unchanged and never logged.
     """
     context: dict[str, Any] = {
         "read_mode": True,

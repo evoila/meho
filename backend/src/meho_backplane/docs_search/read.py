@@ -33,6 +33,13 @@ foreign, or bound to other filters) all raise the same
 which collections exist or what they hold. :func:`resolve_readable_collection`
 folds the collection-access errors into it; :func:`read_docs` adds the rest.
 
+MCP, REST and the CLI show this one answer for every refusal. The console's
+cited-source page is the exception: its read ``POST`` runs the page's own
+gate first, the same as its ``GET`` view, so an unknown collection still gets
+a 404 and a not-entitled one a 403 that names the missing capability. Only
+the refusals after that gate reach this rule there; they show one neutral
+"not available" note.
+
 Two refusals are told apart because the caller can act on them and they leak
 nothing (the backend only answers them for a handle it signed):
 
@@ -51,8 +58,10 @@ What is never logged
 
 The read handle and the cursors carry a few words of the hit, so they are as
 sensitive as the hit text. No log line, error message or audit row carries
-them. The ``docs_read_completed`` record names the collection, the mode and
-the outcome only.
+them. The ``docs_read_completed`` / ``docs_read_refused`` records name the
+collection, the outcome and the ``operator_sub`` (as the search logs do),
+and a completed read also the mode; never the handle, the cursor or the
+caller id.
 """
 
 from __future__ import annotations
@@ -95,7 +104,7 @@ __all__ = [
 
 _log = structlog.get_logger(__name__)
 
-#: The one message every read refusal carries, on every face.
+#: The one message every read refusal carries on MCP, REST and the CLI.
 DOCS_SOURCE_NOT_FOUND: Final[str] = "docs source not found"
 
 #: The message of a read whose handle must be renewed by a new search.

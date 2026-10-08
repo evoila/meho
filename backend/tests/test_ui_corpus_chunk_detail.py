@@ -691,6 +691,7 @@ def test_read_post_requires_csrf() -> None:
 
 
 def test_read_post_keeps_the_entitlement_gate() -> None:
+    """A not-entitled person gets the GET view's 403, not the neutral note."""
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_collection(collection_key="vmware", backend=_READ_ON)
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
@@ -700,6 +701,51 @@ def test_read_post_keeps_the_entitlement_gate() -> None:
     response = _post_read(session_id, operator, fake, data={"read_handle": _HANDLE})
 
     assert response.status_code == 403
+    # The same 403 as the GET view on this URL: it names the missing
+    # capability (docs/codebase/docs-search.md, "The not-found rule").
+    assert response.json()["detail"]["required_capability"] == "meho-docs:vmware"
+    assert fake.calls == []
+
+
+def test_read_post_unknown_collection_keeps_the_page_404() -> None:
+    """An unknown collection gets the GET view's 404 before any read."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(
+        tenant_id=_TENANT_A,
+        capabilities=frozenset({"meho-docs", "meho-docs:ghost"}),
+    )
+    fake = _FakeRead(_READ_REPLY)
+    csrf = _csrf_token(session_id)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR_DETAIL, new_callable=AsyncMock, return_value=operator),
+            patch(_READ_SEAM, new=fake),
+        ):
+            response = client.post(
+                "/ui/corpus/chunks/ghost/c-9",
+                data={"read_handle": _HANDLE, "csrf_token": csrf},
+            )
+
+    assert response.status_code == 404, response.text
+    assert fake.calls == []
+
+
+def test_read_post_disabled_collection_shows_the_neutral_note() -> None:
+    """A refusal after the page gate (here: a disabled collection) is the one note."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_collection(collection_key="vmware", backend=_READ_ON, status_value="disabled")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, capabilities=_ENTITLED)
+    fake = _FakeRead(_READ_REPLY)
+
+    response = _post_read(session_id, operator, fake, data={"read_handle": _HANDLE})
+
+    assert response.status_code == 200, response.text
+    assert "The text around this hit is not available." in response.text
     assert fake.calls == []
 
 

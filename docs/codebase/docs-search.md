@@ -82,8 +82,10 @@ offers a read endpoint and opts in (`backend.ref["read"] = "upstream"`); such
 a collection's hits and citations carry an opaque `read_handle`. It has four
 faces (MCP `read_docs`, `POST /api/v1/read_docs`, `meho docs read`, and the
 console's cited-source page) over one service,
-`meho_backplane.docs_search.read.read_docs`. Every refusal is one "docs
-source not found" answer. See *Read around a hit* below.
+`meho_backplane.docs_search.read.read_docs`. On MCP, REST and the CLI,
+every refusal is one "docs source not found" answer. The console page keeps
+its own 404 / 403 for an unknown or not-entitled collection, as its `GET`
+view does. See *Read around a hit* below.
 
 ## Key types
 
@@ -796,12 +798,22 @@ disclosure, reason, located, truncated, next, up`); `source_url` is
 `upstream_url`, else a derivable public link, else `None`. Never a storage
 path.
 
-**The not-found rule.** An unknown collection, a collection the caller is
-not entitled to, a disabled collection, a collection without read and a
-handle the backend refuses (404) all give the same "docs source not found"
-answer, with no detail. So `read_docs` is no probe for which collections
-exist or what they hold. Two refusals are told apart because the caller can
-act on them and the backend only gives them for a handle it signed:
+**The not-found rule.** On MCP, REST and the CLI, an unknown collection, a
+collection the caller is not entitled to, a disabled collection, a
+collection without read and a handle the backend refuses (404) all give the
+same "docs source not found" answer, with no detail. So `read_docs` is no
+probe for which collections exist or what they hold.
+
+The console is the one exception. Its read `POST` first runs the page's own
+check, the same one as the `GET` view on the same URL: an unknown collection
+gets a 404, and a collection the person is not entitled to gets a 403 that
+names the missing capability, the user's subject and the tenant. This shows
+nothing new, because the `GET` already answers so. Every refusal after that
+check (a disabled collection, a collection without read, a handle the
+backend refuses) shows one "not available" note on the page.
+
+Two refusals are told apart on every face, because the caller can act on
+them and the backend only gives them for a handle it signed:
 `DocsReadSearchAgainError` (409: the handle is too old or the page changed;
 search again) and `DocsReadRateLimitedError` (429, with the wait in
 seconds). A known, entitled collection that is still rebuilding stays the
@@ -810,7 +822,7 @@ retryable not-ready error, and a backend outage stays `CorpusUnavailable`.
 | Case | MCP `read_docs` | REST `POST /api/v1/read_docs` | `meho docs read` | Console |
 |---|---|---|---|---|
 | Success | result, `text` wrapped as untrusted | 200 `DocsReadResult` | text + `next:` cursor | text (escaped) + "Show more" |
-| Any refusal | `-32602` "read_docs: docs source not found" | 404 `{"error": "not_found"}` | "docs source not found" (exit 4) | "not available" note |
+| Any refusal | `-32602` "read_docs: docs source not found" | 404 `{"error": "not_found"}` | "docs source not found" (exit 4) | unknown collection: 404; not entitled: 403, as on the `GET` view; every other refusal: "not available" note |
 | Handle too old | `-32602`, `data.reason="search_again"` | 409 `{"error": "search_again"}` | "run `meho docs search` again" | "search again" note |
 | Rate limited | `-32000`, `data.retry_after_seconds` | 429 + `Retry-After` | "wait N seconds" | "wait N seconds" note |
 | Not ready / backend down | `-32603` | 503 `collection_not_ready` / `read_unavailable` | "try again later" | "try again later" note |
@@ -840,11 +852,13 @@ retryable not-ready error, and a backend outage stays `CorpusUnavailable`.
 **Privacy.** The handle and the cursor carry a few words of the hit, so they
 are as sensitive as the hit text. They are never logged (the
 `docs_read_completed` / `docs_read_refused` records carry the collection,
-mode and outcome only), never bound to the audit row (REST binds
-`op_id="meho.docs.read"`, the collection and the mode; MCP stores only the
-arguments' hash), and never put on the broadcast feed: the tool registers
-`broadcast_omit_args={"read_handle", "cursor"}`, and the MCP dispatcher
-leaves those keys out of the full-detail broadcast params.
+the outcome and the `operator_sub`, as on search, and a completed read also
+the mode; never the handle, the cursor or the caller id), never bound to
+the audit row (REST binds `op_id="meho.docs.read"`, the collection and the
+mode; MCP stores only the arguments' hash), and never put on the broadcast
+feed: the tool registers `broadcast_omit_args={"read_handle", "cursor"}`,
+and the MCP dispatcher leaves those keys out of the full-detail broadcast
+params.
 
 **Size.** The backend caps each reply (about 40,000 characters, with a
 `next` cursor beyond it). MEHO adds no cap of its own until the delivery

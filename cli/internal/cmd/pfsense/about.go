@@ -44,8 +44,8 @@ func newAboutCmd() *cobra.Command {
 			"  - 2   auth_expired (run `meho login`)\n" +
 			"  - 3   unreachable (network / DNS / TLS)\n" +
 			"  - 4   unexpected response shape",
-		Example: "  meho pfsense about --target pfsense-hetzner-dc\n" +
-			"  meho pfsense about --target pfsense-hetzner-dc --json | jq .result",
+		Example: "  meho pfsense about --target fw-01\n" +
+			"  meho pfsense about --target fw-01 --json | jq .result",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

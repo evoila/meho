@@ -57,8 +57,8 @@ func newConfigShowCmd() *cobra.Command {
 			"envelope including the config_xml string and redacted_count.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example: "  meho pfsense config show --target pfsense-hetzner-dc\n" +
-			"  meho pfsense config show --target pfsense-hetzner-dc --json | jq -r .result.config_xml",
+		Example: "  meho pfsense config show --target fw-01\n" +
+			"  meho pfsense config show --target fw-01 --json | jq -r .result.config_xml",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

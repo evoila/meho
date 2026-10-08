@@ -8,8 +8,7 @@ Copyright (c) 2026 evoila Group
 > Producer-side spec for what an operator's Vault deployment must
 > provide before the MEHO backplane can run its federation chain
 > against it. The actual provisioning lives on the consumer side
-> ([`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc)
-> in the dogfood case); this doc is the contract the consumer reads
+> (in the operator's own runbook); this doc is the contract the consumer reads
 > to know what to build, and the verification commands either side
 > can run to prove the handshake works.
 
@@ -26,9 +25,7 @@ the contract on this page holds.
 ## What the backplane needs
 
 Six distinct Vault surfaces. The first four ship via Goal #11's
-cross-repo deps (consumer commitment #5 — see
-[`#261`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/issues/261)
-in the consumer repo). The fifth — the federation-proof test KV
+cross-repo deps. The fifth — the federation-proof test KV
 path — is the surface most easily missed during provisioning. The
 sixth — the **scheduler service token** — is a *separate* static-token
 identity (not the JWT-login role) that the scheduler uses to read and
@@ -70,8 +67,7 @@ side.
 > on `auth/oidc/`: a single mount cannot serve both an OIDC-login role
 > and the backplane's `role_type=jwt` role. A dedicated `jwt`-type
 > mount serves `role_type=jwt` with `oidc_discovery_url` for JWKS with
-> no conflict. (evoila/meho#553; consumer-side
-> [`evoila-bosnia/claude-rdc-hetzner-dc#524`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/issues/524).)
+> no conflict. (evoila/meho#553.)
 
 ### 2. Role `meho-mcp`
 
@@ -609,7 +605,7 @@ vault write auth/jwt-meho/role/meho-teardown \
 # 3. Register a backplane target that selects the role. secret_ref is NULL
 #    (JWT-federated); version may be null (resolves via the connector's
 #    wildcard registration). The role/mount ride the target's extras.
-meho targets register rdc-vault-teardown \
+meho targets register vault-teardown \
   --product vault --host <vault-host> \
   --extra vault_role=meho-teardown \
   --extra vault_mount=jwt-meho
@@ -626,9 +622,7 @@ Fail-closed: if the role is denied (mis-scoped policy, wrong `bound_*`), the
 dispatch surfaces `VaultRoleDeniedError` — it never silently widens back to
 `meho-mcp`. The park-time capability preflight runs under the resolved role
 too, so the approval banner reflects the role that will actually execute.
-Lab-verified end-to-end in
-[`evoila-bosnia/claude-rdc-hetzner-dc#2814`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/issues/2814)
-(PR [`#2815`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/pull/2815)):
+Verified end-to-end in a lab deployment:
 policy `meho-teardown` + role `auth/jwt-meho/role/meho-teardown` soft-deleted a
 scratch KV version through the connector, was denied outside its two subtrees,
 and left `meho-mcp` byte-identical.
@@ -699,6 +693,5 @@ everything it needs from Vault.
 - Backplane settings (env-var contract): [`backend/src/meho_backplane/settings.py`](../../backend/src/meho_backplane/settings.py)
 - Cross-repo handshake (cluster-side): [`./rke2-infra-coordination.md`](./rke2-infra-coordination.md)
 - Smoke leg #4 contract: [`../acceptance/smoke.md`](../acceptance/smoke.md)
-- Consumer-side parent ticket: [`evoila-bosnia/claude-rdc-hetzner-dc#293`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/issues/293) — Vault OIDC federation to Keycloak (surfaces 1-4)
-- Dedicated-jwt-mount correction: [evoila/meho#553](https://github.com/evoila/meho/issues/553); consumer-side implementation [`evoila-bosnia/claude-rdc-hetzner-dc#524`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/issues/524)
+- Dedicated-jwt-mount correction: [evoila/meho#553](https://github.com/evoila/meho/issues/553)
 - Vault JWT/OIDC auth docs: <https://developer.hashicorp.com/vault/docs/auth/jwt> (note: the **JWT** method — `role_type=jwt` — is distinct from OIDC-login mode on the same backend)

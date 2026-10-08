@@ -1422,7 +1422,7 @@ meho docs collections update <collection-key> [flags]
 Read the text around a docs hit (mandatory --collection)
 
 ```
-meho docs read <read-handle> [flags]
+meho docs read <read-handle|-> [flags]
 ```
 
 - `--after` — chunks to read after the hit, for --mode around (0..3)

@@ -5,12 +5,14 @@ package docs
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/output"
@@ -205,6 +207,54 @@ func TestRunReadRejectsBadFlagsBeforeTheCall(t *testing.T) {
 	}
 }
 
+func TestRunReadRejectsOverLongHandleOrCursorBeforeTheCall(t *testing.T) {
+	// A distinct marker, so the test can tell whether the value was echoed.
+	tooLong := "hit-words-" + strings.Repeat("x", readTokenMax)
+	cases := []struct {
+		name       string
+		handleArg  string
+		cursorFlag string
+		stdin      string
+		want       string
+	}{
+		{"handle argument", tooLong, "", "", "<read-handle> is longer than 8192 characters"},
+		{"cursor flag", testReadHandle, tooLong, "", "--cursor is longer than 8192 characters"},
+		{"handle from stdin", "-", "", tooLong + "\n", "<read-handle> is longer than 8192 characters"},
+		{"cursor from stdin", testReadHandle, "-", tooLong + "\n", "--cursor is longer than 8192 characters"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd, _, stderr := newRunCmd(t)
+			cmd.SetIn(strings.NewReader(tc.stdin))
+			// No server: an over-long value must fail before any network call.
+			err := runRead(cmd, readOptions{
+				ReadHandle: tc.handleArg, Cursor: tc.cursorFlag, Collection: "vmware",
+				Mode: "around", Before: 1, After: 1, BackplaneOverride: "http://127.0.0.1:1",
+			})
+			if got := exitCodeOf(t, err); got != output.ExitUnexpected {
+				t.Errorf("expected exit %d; got %d", output.ExitUnexpected, got)
+			}
+			if !strings.Contains(stderr.String(), tc.want) {
+				t.Errorf("expected %q in stderr; got %q", tc.want, stderr.String())
+			}
+			if strings.Contains(stderr.String(), "hit-words-") || strings.Contains(stderr.String(), testReadHandle) {
+				t.Errorf("the handle and the cursor must never be echoed; got %q", stderr.String())
+			}
+		})
+	}
+}
+
+func TestValidateReadOptionsAcceptsTokensAtTheLimit(t *testing.T) {
+	atLimit := strings.Repeat("x", readTokenMax)
+	msg := validateReadOptions(readOptions{
+		ReadHandle: atLimit, Cursor: atLimit, Collection: "vmware",
+		Mode: "around", Before: 1, After: 1,
+	})
+	if msg != "" {
+		t.Errorf("expected a handle and a cursor of exactly %d characters to pass; got %q", readTokenMax, msg)
+	}
+}
+
 func TestRunReadMapsStatuses(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -342,6 +392,38 @@ func TestRunReadTakesHandleAndCursorFromStdin(t *testing.T) {
 				t.Errorf("expected cursor %q; got %+v", tc.wantCursor, bodyOnWire.Cursor)
 			}
 		})
+	}
+}
+
+func TestReadCmdTakesDashThroughArgumentParsing(t *testing.T) {
+	var bodyOnWire api.ReadDocsRequest
+	srv := readServer(t, func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		readJSONBodyOf(t, raw, &bodyOnWire)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(api.DocsReadResult{
+			Mode: api.DocsReadResultModeAround, Text: ptrStr("text from the hit"),
+			Disclosure: api.DocsReadResultDisclosureFull,
+		})
+	})
+
+	cmd := newReadCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetIn(strings.NewReader(testReadHandle + "\n"))
+	// A lone "-" is a positional argument for cobra, not a flag.
+	cmd.SetArgs([]string{"-", "--collection", "vmware", "--backplane", srv.URL})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		t.Fatalf("Execute: %v; stderr=%s", err, stderr.String())
+	}
+	if bodyOnWire.ReadHandle != testReadHandle {
+		t.Errorf("expected the handle from stdin on the wire; got %q", bodyOnWire.ReadHandle)
+	}
+	if !strings.Contains(stdout.String(), "text from the hit") {
+		t.Errorf("expected the read text on stdout; got %q", stdout.String())
 	}
 }
 

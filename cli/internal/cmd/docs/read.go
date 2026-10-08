@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -31,7 +32,8 @@ const readDefaultAround = 1
 // shell history and the process list.
 const readStdinMarker = "-"
 
-// readTokenMax mirrors the backplane's bound on a read_handle / cursor.
+// readTokenMax mirrors the backplane's bound on a read_handle / cursor, in
+// characters (the route's max_length counts characters, not bytes).
 const readTokenMax = 8192
 
 // readStdinCap bounds what standard input may hold: a handle and a cursor,
@@ -42,7 +44,7 @@ const readStdinCap = 2*readTokenMax + 16
 //
 // CLI shape:
 //
-//	meho docs read <read-handle> --collection <c> \
+//	meho docs read <read-handle|-> --collection <c> \
 //	  [--mode around|page|section] [--before N] [--after N] \
 //	  [--cursor <next>] [--product <p>] [--version <v>] [--json]
 //
@@ -65,7 +67,7 @@ const readStdinCap = 2*readTokenMax + 16
 func newReadCmd() *cobra.Command {
 	var opts readOptions
 	cmd := &cobra.Command{
-		Use:   "read <read-handle>",
+		Use:   "read <read-handle|->",
 		Short: "Read the text around a docs hit (mandatory --collection)",
 		Long: "read calls POST /api/v1/read_docs and prints the text around " +
 			"a docs hit: the chunks before and after it (--mode around, the " +
@@ -220,11 +222,16 @@ func readTokensFromStdin(in io.Reader, opts readOptions) (readOptions, string) {
 
 // validateReadOptions fails fast on the constraints the route would 422 on.
 // It returns "" when the options are valid. The read handle and the cursor
-// are never echoed: they carry a few words of the hit.
+// are never echoed: they carry a few words of the hit. So the length
+// messages are fixed text that names only the limit.
 func validateReadOptions(opts readOptions) string {
 	switch {
 	case strings.TrimSpace(opts.ReadHandle) == "":
 		return "read requires a non-empty <read-handle> argument"
+	case utf8.RuneCountInString(opts.ReadHandle) > readTokenMax:
+		return fmt.Sprintf("<read-handle> is longer than %d characters", readTokenMax)
+	case utf8.RuneCountInString(opts.Cursor) > readTokenMax:
+		return fmt.Sprintf("--cursor is longer than %d characters", readTokenMax)
 	case strings.TrimSpace(opts.Collection) == "":
 		return "read requires --collection (the collection the hit came from)"
 	case validReadModes[opts.Mode] == "":

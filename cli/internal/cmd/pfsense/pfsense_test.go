@@ -318,6 +318,8 @@ func TestAllOpsUseCanonicalOpIDs(t *testing.T) {
 		"pfsense.gateway.list",
 		"pfsense.config.show",
 		"pfsense.dhcp.leases",
+		"pfsense.user.list",
+		"pfsense.route.static.list",
 	}
 
 	// Build a mock server that records which op_ids were dispatched.
@@ -362,6 +364,8 @@ func TestNewRootCmdHasExpectedSubcommands(t *testing.T) {
 		"network":  false,
 		"config":   false,
 		"dhcp":     false,
+		"user":     false,
+		"route":    false,
 	}
 	for _, sub := range root.Commands() {
 		want[sub.Name()] = true
@@ -436,6 +440,72 @@ func TestDhcpHasLeases(t *testing.T) {
 	}
 	if !subs["leases"] {
 		t.Errorf("dhcp is missing sub-verb 'leases'")
+	}
+}
+
+// TestUserHasList — the `user` sub-command must have a `list` sub-verb.
+func TestUserHasList(t *testing.T) {
+	user := newUserCmd()
+	subs := make(map[string]bool)
+	for _, s := range user.Commands() {
+		subs[s.Name()] = true
+	}
+	if !subs["list"] {
+		t.Errorf("user is missing sub-verb 'list'")
+	}
+}
+
+// TestRouteHasList — the `route` sub-command must have a `list` sub-verb.
+func TestRouteHasList(t *testing.T) {
+	route := newRouteCmd()
+	subs := make(map[string]bool)
+	for _, s := range route.Commands() {
+		subs[s.Name()] = true
+	}
+	if !subs["list"] {
+		t.Errorf("route is missing sub-verb 'list'")
+	}
+}
+
+// TestPrintUserListRendersTable — printUserList writes the header row,
+// the disabled flag, the expiry date and the joined group names.
+func TestPrintUserListRendersTable(t *testing.T) {
+	r := &CallResult{
+		Status: "ok",
+		OpID:   "pfsense.user.list",
+		Result: json.RawMessage(`{"rows":[` +
+			`{"name":"user-a","descr":"Example User A","scope":"user","disabled":false,"expires":"12/31/2026","uid":"2000","groups":["all","vpn-users"]},` +
+			`{"name":"user-b","descr":null,"scope":"user","disabled":true,"expires":null,"uid":"2001","groups":[]}` +
+			`],"total":2}`),
+	}
+	var buf bytes.Buffer
+	printUserList(&buf, r)
+	out := buf.String()
+	for _, want := range []string{"NAME", "user-a", "12/31/2026", "all,vpn-users", "user-b", "YES", "(2 users)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printUserList output missing %q; got:\n%s", want, out)
+		}
+	}
+}
+
+// TestPrintRouteListRendersTable — printRouteList writes the header row,
+// the network, the gateway name and the disabled flag.
+func TestPrintRouteListRendersTable(t *testing.T) {
+	r := &CallResult{
+		Status: "ok",
+		OpID:   "pfsense.route.static.list",
+		Result: json.RawMessage(`{"rows":[` +
+			`{"network":"192.0.2.0/24","gateway":"GW_EXAMPLE","descr":"example route","disabled":false},` +
+			`{"network":"198.51.100.0/24","gateway":"GW_OTHER","descr":null,"disabled":true}` +
+			`],"total":2}`),
+	}
+	var buf bytes.Buffer
+	printRouteList(&buf, r)
+	out := buf.String()
+	for _, want := range []string{"NETWORK", "192.0.2.0/24", "GW_EXAMPLE", "example route", "YES", "(2 routes)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printRouteList output missing %q; got:\n%s", want, out)
+		}
 	}
 }
 

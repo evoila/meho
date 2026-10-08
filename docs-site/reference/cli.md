@@ -3521,6 +3521,46 @@ meho pfsense network interface [flags]
 - `--json` — emit the full OperationResult envelope as JSON
 - `--target` — target slug to dispatch against (required)
 
+### `meho pfsense route`
+
+pfSense static-route sub-verbs (list)
+
+```
+meho pfsense route
+```
+
+#### `meho pfsense route list`
+
+List pfSense static routes (from config.xml)
+
+```
+meho pfsense route list [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
+- `--json` — emit the full OperationResult envelope as JSON
+- `--target` — target slug to dispatch against (required)
+
+### `meho pfsense user`
+
+pfSense local-user sub-verbs (list)
+
+```
+meho pfsense user
+```
+
+#### `meho pfsense user list`
+
+List pfSense local users (no password hashes or keys)
+
+```
+meho pfsense user list [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
+- `--json` — emit the full OperationResult envelope as JSON
+- `--target` — target slug to dispatch against (required)
+
 ### `meho pfsense version`
 
 Show pfSense version / build / kernel for a target

@@ -1108,9 +1108,11 @@ _WHEN_TO_USE_CONFIG = (
     f"passwords, API keys) come back as ``{REDACTED}``, so the output is "
     "not a restorable backup. Free-text fields (descriptions, notes, cron "
     "or shell commands, custom config text, URLs) can still hold secrets "
-    "that someone typed in, so treat the output as sensitive. Call "
-    "``pfsense.version`` when a structured version output is needed "
-    "without the full FingerprintResult envelope."
+    "that someone typed in, so treat the output as sensitive. To check "
+    "local users or static routes, do not read the whole file: call "
+    "``pfsense.user.list`` or ``pfsense.route.static.list``, which return "
+    "only safe fields. Call ``pfsense.version`` when a structured version "
+    "output is needed without the full FingerprintResult envelope."
 )
 
 #: Curated ``when_to_use`` for the ``dhcp`` group.
@@ -1461,8 +1463,10 @@ READ_OPS: tuple[PfSenseOp, ...] = (
             "removal fails, no XML is returned. The output is not a "
             "restorable backup. Use when the operator needs to inspect "
             "the pfSense configuration. For structured gateway data, "
-            "prefer ``pfsense.gateway.list``. No params; safe to call on "
-            "any healthy pfSense target."
+            "prefer ``pfsense.gateway.list``. To check local users or "
+            "static routes, use ``pfsense.user.list`` or "
+            "``pfsense.route.static.list`` instead: they return only safe "
+            "fields. No params; safe to call on any healthy pfSense target."
         ),
         parameter_schema=_EMPTY_PARAMS,
         response_schema={

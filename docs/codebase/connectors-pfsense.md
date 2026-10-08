@@ -24,7 +24,10 @@ on the governed-delete tier (`docs/decisions/governed-delete-operations.md`).
 (`pfsense.route.static.delete`, `pfsense.gateway.delete`,
 `pfsense.alias.member.remove`) that reverse a governed bring-up — retire a
 static route, retire a gateway (fail-closed on any live referrer), and trim
-ONE member out of a *shared* alias without deleting it.
+ONE member out of a *shared* alias without deleting it. #3954 adds two safe
+reads, `pfsense.user.list` and `pfsense.route.static.list`. They return only a
+short list of fields, so nobody needs `pfsense.config.show` (the whole file)
+just to check a user or a static route.
 
 Source: `backend/src/meho_backplane/connectors/pfsense/`.
 
@@ -36,9 +39,10 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
   adapter; overrides `_auth_config` to reject password auth, plus `fingerprint`,
   `probe`, `execute`, `about`, the read-op bound-method shims (the 7 T2 ops
   plus `dhcp_leases`, #2849), the write-op bound-method shims (`gateway_add`,
-  `route_static_add`, #3090), and the destructive-delete bound-method shims
+  `route_static_add`, #3090), the destructive-delete bound-method shims
   (`nat_delete`, `alias_delete`, #3232; `route_static_delete`, `gateway_delete`,
-  `alias_member_remove`, #3313).
+  `alias_member_remove`, #3313), and the allow-listed config-read shims
+  (`user_list`, `route_static_list`, #3954).
 
 - **`_auth_config()` override** — the load-bearing auth constraint. Requires
   `ssh_private_key` in the target's **Vault secret** (`target.secret_ref` is a
@@ -51,13 +55,22 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
   REPL) instead of a POSIX shell, causing any subsequent command to hang.
 
 - **Op metadata** (`ops.py`) — the `PfSenseOp` dataclass, the `_pfsense_ops()`
-  composition function, and the `PFSENSE_OPS` tuple (17 ops total). T1 shipped
+  composition function, and the `PFSENSE_OPS` tuple (19 ops total). T1 shipped
   `pfsense.about`; T2 (#847) adds 7 read ops via the `ops_read` module; #2849
   appends `pfsense.dhcp.leases`; #3090 appends the two write ops via the
   `ops_write` module; #3232 appends the first two destructive deletes and #3313
   the three teardown-inverse deletes, both via the `ops_delete` module;
   meho-internal#252 appends the parameterized management-plane flow classifier
-  `pfsense.mgmt_flow.summary` via the `ops_mgmt_flow` module.
+  `pfsense.mgmt_flow.summary` via the `ops_mgmt_flow` module; #3954 appends
+  `pfsense.user.list` and `pfsense.route.static.list` via the
+  `ops_config_reads` module.
+
+- **Allow-listed config reads** (`ops_config_reads.py`, #3954) — the pure
+  parsers `list_local_users` and `list_static_routes`, the strict root parser
+  `_parse_config_root` (raises `PfSenseConfigParseError` with a fixed message),
+  the handlers `pfsense_user_list` / `pfsense_route_static_list`, the row-key
+  allow-lists `USER_ROW_FIELDS` / `ROUTE_ROW_FIELDS`, and the `CONFIG_READ_OPS`
+  tuple. See "`pfsense.user.list` and `pfsense.route.static.list`" below.
 
 - **Destructive-delete handlers** (`ops_delete.py`, #3232 + #3313) — the
   connector's `safety_level="destructive"` ops. Config parsers
@@ -216,7 +229,7 @@ Two-phase registration, identical to the bind9 pattern:
   (`connectors/registry.py`, `operations/typed_register.py`) — registration
   infrastructure.
 
-## Op surface (17 ops)
+## Op surface (19 ops)
 
 | Op ID | Command | Group | Safety |
 |---|---|---|---|
@@ -230,6 +243,8 @@ Two-phase registration, identical to the bind9 pattern:
 | `pfsense.gateway.list` | `cat /cf/conf/config.xml` (gateways block) + `pfSsh.php playback gatewaystatus` (live dpinger status) | `network` | `safe` |
 | `pfsense.config.show` | `cat /cf/conf/config.xml` (full file, known secret fields and shapes replaced) | `config` | `safe` |
 | `pfsense.dhcp.leases` | `cat /var/dhcpd/var/db/dhcpd.leases` (ISC dhcpd lease DB) | `dhcp` | `safe` |
+| `pfsense.user.list` | `cat /cf/conf/config.xml` (`<system><user>` + `<system><group>`, allow-listed fields only) | `users` | `safe` |
+| `pfsense.route.static.list` | `cat /cf/conf/config.xml` (`<staticroutes><route>`, allow-listed fields only) | `routing` | `safe` |
 | `pfsense.gateway.add` | `cat /cf/conf/config.xml` guard + `pfSsh.php playback` fragment (append `gateway_item` + `write_config()`) | `routing` | `caution` |
 | `pfsense.route.static.add` | `cat /cf/conf/config.xml` guard + `pfSsh.php playback` fragment (append `staticroutes/route` + `write_config()` + `system_routing_configure()`) | `routing` | `caution` |
 | `pfsense.nat.delete` | `cat /cf/conf/config.xml` guard (match one `<nat><rule>` by `<tracker>`) + `pfSsh.php playback` fragment (delete-by-tracker + `write_config()` + `filter_configure()`) + read-back verify | `nat` | `destructive` |
@@ -238,7 +253,7 @@ Two-phase registration, identical to the bind9 pattern:
 | `pfsense.gateway.delete` | `cat /cf/conf/config.xml` guard (match one `<gateways><gateway_item>` by name + fail-closed reference scan) + `pfSsh.php playback` fragment (delete-by-name + `write_config()` + `system_routing_configure()`) + read-back verify | `routing` | `destructive` |
 | `pfsense.alias.member.remove` | `cat /cf/conf/config.xml` guard (match one `<aliases><alias>` by name + locate the member token) + `pfSsh.php playback` fragment (read-modify-write `<address>`/`<detail>` + `write_config()` + `filter_configure()`) + read-back verify | `alias` | `destructive` |
 
-The 9 read / identity ops plus the `pfsense.mgmt_flow.summary` classifier are
+The 11 read / identity ops plus the `pfsense.mgmt_flow.summary` classifier are
 `safety_level="safe"`; the 2 write ops (#3090)
 are `safety_level="caution"` / `requires_approval=False` — the same posture
 `bind9.record.add` / `windns.record.add` carry for an additive, recoverable,
@@ -263,7 +278,9 @@ and the residual members survive.
 
 `pfsense.firewall.state` and `pfsense.dhcp.leases` both return `{rows, total}`
 and are the JSONFlux reduction candidates: connection-state tables and busy
-DHCP pools can each carry many rows. The reducer (key `pfsense_firewall_state`
+DHCP pools can each carry many rows. `pfsense.user.list` and
+`pfsense.route.static.list` return `{rows, total}` too, so a long user or
+route list also comes back as a handle. The reducer (key `pfsense_firewall_state`
 / `pfsense_dhcp_leases`) wraps the payload in a `ResultHandle` when `total`
 exceeds its threshold; smaller payloads pass through inline. Handle-vs-inline
 is the reducer's job, not the connector's — every handler returns rows inline.
@@ -298,6 +315,9 @@ leaves it (`redaction.redact_config_xml`). The audit row's `raw_payload`, the
 flight-recorder trace, a stored result and the broadcast feed therefore only
 see the cleaned text.
 
+- **Use the small reads first.** To check local users or static routes, call
+  `pfsense.user.list` or `pfsense.route.static.list`. They return only safe
+  fields. The op's description and `when_to_use` say this too.
 - **The limit.** This is a list of known fields and known shapes, not a proof.
   Free-text fields (descriptions, notes, cron or shell commands, custom config
   text, URLs) can still hold secrets that someone typed in. The Notes package
@@ -404,6 +424,43 @@ see the cleaned text.
   flight-recorder redaction engine as plain text, which drops it
   (`[MEHO-OMITTED:redaction-uncertain]`) — pinned by
   `test_ssh_span_never_keeps_raw_pfsense_config_stdout`.
+
+### `pfsense.user.list` and `pfsense.route.static.list` — safe reads with an allow-list (#3954)
+
+Two `safe` reads, with no approval. Each reads `config.xml` once and returns
+`{rows, total}`.
+
+- **`pfsense.user.list`** returns one row per `<system><user>` with these keys
+  only: `name`, `descr` (full name), `scope`, `disabled`, `expires`, `uid` and
+  `groups`. `groups` lists the names of every `<system><group>` whose
+  `<member>` list holds the user's uid, sorted. pfSense keeps membership on
+  the group, not on the user. The built-in `all` group can appear.
+- **`pfsense.route.static.list`** returns one row per
+  `<staticroutes><route>` with these keys only: `network`, `gateway` (the
+  gateway name), `descr` and `disabled`. `pfsense.route.static.delete` finds a
+  route by `network`, so an operator can list the routes and then delete one
+  with a row's `network` value. A route stored with host bits set still
+  matches, because the delete op compares the canonical network.
+- **Allow-list, not redaction.** Each row is built from a fixed set of child
+  elements. Nothing else is copied. So password hashes, the IPsec pre-shared
+  key, SSH authorized keys, OTP data and certificate references never reach
+  the result, also for secret fields a future pfSense version adds. The only
+  free text in a row is `descr`, which an admin types.
+- **Flags.** `disabled` is `true` when a `<disabled>` child is there, whatever
+  it holds (pfSense checks `isset`). `expires` is the stored date text
+  (`MM/DD/YYYY`), or `null` when empty. Other text fields are `null` when the
+  element is missing or empty.
+- **Only direct children.** Users are read from `<pfsense><system>` and routes
+  from `<pfsense><staticroutes>`. A `<user>` or `<staticroutes>` inside a
+  package section is not listed.
+- **Fail with a clear error.** The file is parsed with `defusedxml`, like
+  `parse_gateways_xml`. Unlike that parser, an empty file, a file that is not
+  well-formed, a file with a DTD or entity, or a root other than `<pfsense>`
+  raises `PfSenseConfigParseError`. A failed `cat` raises `RuntimeError`. Both
+  messages are fixed text: they never quote the file, and the parser's own
+  exception is not chained. The call then fails with `connector_error`, so a
+  broken read never looks like "no users".
+- **CLI.** `meho pfsense user list` and `meho pfsense route list`.
 
 ### `pfsense.mgmt_flow.summary` — management-plane flow classifier (meho-internal#252)
 
@@ -544,6 +601,9 @@ applies nothing — a pre-staged gateway is inert config until referenced.
   any static route / gateway group / default-gateway setting still uses the
   gateway; `alias.member.remove` refuses `last_member` so a shared alias is
   never emptied into deletion.
+- Task #3954: `pfsense.user.list` + `pfsense.route.static.list` — safe reads
+  with an allow-list of fields, so nobody needs `pfsense.config.show` to check
+  a user or a static route.
 - Parent initiative: #370 (G3.7 tier-3 standalone connectors).
 - Bind9 connector (canonical typed-SSH reference): `docs/codebase/connectors-bind9.md`.
 - `SshConnector` adapter: `backend/src/meho_backplane/connectors/adapters/ssh.py`.

@@ -30896,13 +30896,15 @@
             "type": "string",
             "maxLength": 128,
             "nullable": true,
-            "title": "Product"
+            "title": "Product",
+            "description": "The `product` you searched with. Needed only on a collection that applies scope filters; otherwise ignored. Pass it only when the hit came from a single-collection search that used it. Leave it out for a hit from a cross-collection search (`collections` or `collection='all'`; such a hit carries its own `collection`): that search ignores `product`, so its handle has none."
           },
           "version": {
             "type": "string",
             "maxLength": 128,
             "nullable": true,
-            "title": "Version"
+            "title": "Version",
+            "description": "The `version` you searched with. Needed only on a collection that applies scope filters; otherwise ignored. Pass it only when the hit came from a single-collection search that used it. Leave it out for a hit from a cross-collection search (`collections` or `collection='all'`; such a hit carries its own `collection`): that search ignores `version`, so its handle has none."
           }
         },
         "additionalProperties": false,
@@ -30911,7 +30913,7 @@
           "read_handle"
         ],
         "title": "ReadDocsRequest",
-        "description": "POST body for ``/api/v1/read_docs``, the same fields as the MCP tool.\n\n``collection`` is typed optional so a missing value gets the docs\nsurfaces' own 422 naming the mandatory scope. ``product`` / ``version``\nare needed only on a collection whose scope gates send hard filters: the\nhandle is bound to the filters of the hit's search. ``extra=\"forbid\"``\nrejects unknown fields."
+        "description": "POST body for ``/api/v1/read_docs``, the same fields as the MCP tool.\n\n``collection`` is typed optional so a missing value gets the docs\nsurfaces' own 422 naming the mandatory scope. ``product`` / ``version``\nare needed only on a collection whose scope gates send hard filters: the\nhandle is bound to the filters of the hit's search. So a caller passes\nthem only for a hit from a single-collection search that used them, and\nleaves them out for a hit from a cross-collection search, which ignores\nthem. ``extra=\"forbid\"`` rejects unknown fields."
       },
       "ReassignRunRequest": {
         "properties": {

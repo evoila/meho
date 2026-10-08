@@ -946,7 +946,12 @@ register_mcp_tool(
                     "description": (
                         "OPTIONAL: the `product` you searched with. Needed only "
                         "on a collection that applies scope filters; otherwise "
-                        "ignored."
+                        "ignored. Pass it only when the hit came from a "
+                        "single-collection search that used it. Leave it out "
+                        "for a hit from a cross-collection search (`collections` "
+                        "or `collection='all'`; such a hit carries its own "
+                        "`collection`): that search ignores `product`, so its "
+                        "handle has none."
                     ),
                 },
                 "version": {
@@ -956,7 +961,12 @@ register_mcp_tool(
                     "description": (
                         "OPTIONAL: the `version` you searched with. Needed only "
                         "on a collection that applies scope filters; otherwise "
-                        "ignored."
+                        "ignored. Pass it only when the hit came from a "
+                        "single-collection search that used it. Leave it out "
+                        "for a hit from a cross-collection search (`collections` "
+                        "or `collection='all'`; such a hit carries its own "
+                        "`collection`): that search ignores `version`, so its "
+                        "handle has none."
                     ),
                 },
             },

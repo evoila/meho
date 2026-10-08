@@ -66,7 +66,11 @@ func newReadCmd() *cobra.Command {
 			"found\" error. A handle expires: on a \"search again\" error, run " +
 			"`meho docs search` again. --product / --version are needed only " +
 			"on a collection that applies scope filters: pass the values you " +
-			"searched with. --json emits the raw DocsReadResult.",
+			"searched with, and only when the hit came from a search of one " +
+			"collection. Leave them out for a hit from a cross-collection " +
+			"search (--collection all, or --collection given more than once): " +
+			"that search ignores --product / --version, so its handle has " +
+			"none. --json emits the raw DocsReadResult.",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -86,9 +90,11 @@ func newReadCmd() *cobra.Command {
 	cmd.Flags().StringVar(&opts.Cursor, "cursor", "",
 		"the `next` cursor of an earlier read, to read on")
 	cmd.Flags().StringVar(&opts.Product, "product", "",
-		"the product you searched with (only for a collection that applies scope filters)")
+		"the product you searched with (only for a collection that applies scope filters; "+
+			"leave it out for a hit from a cross-collection search)")
 	cmd.Flags().StringVar(&opts.Version, "version", "",
-		"the version you searched with (only for a collection that applies scope filters)")
+		"the version you searched with (only for a collection that applies scope filters; "+
+			"leave it out for a hit from a cross-collection search)")
 	cmd.Flags().BoolVar(&opts.JSONOut, "json", false,
 		"emit the raw DocsReadResult JSON")
 	cmd.Flags().StringVar(&opts.BackplaneOverride, "backplane", "",

@@ -1432,8 +1432,8 @@ meho docs read <read-handle> [flags]
 - `--cursor` — the `next` cursor of an earlier read, to read on
 - `--json` — emit the raw DocsReadResult JSON
 - `--mode` — what to read: around (default), page or section
-- `--product` — the product you searched with (only for a collection that applies scope filters)
-- `--version` — the version you searched with (only for a collection that applies scope filters)
+- `--product` — the product you searched with (only for a collection that applies scope filters; leave it out for a hit from a cross-collection search)
+- `--version` — the version you searched with (only for a collection that applies scope filters; leave it out for a hit from a cross-collection search)
 
 ### `meho docs search`
 

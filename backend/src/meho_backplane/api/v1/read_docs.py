@@ -74,6 +74,16 @@ _require_operator = Depends(require_role(TenantRole.OPERATOR))
 #: Longest ``read_handle`` / ``cursor`` accepted (the corpus parse's bound).
 _MAX_READ_TOKEN = 8192
 
+#: The help text of the optional ``product`` / ``version`` fields.
+_SCOPE_FIELD_HELP = (
+    "The `{field}` you searched with. Needed only on a collection that "
+    "applies scope filters; otherwise ignored. Pass it only when the hit came "
+    "from a single-collection search that used it. Leave it out for a hit "
+    "from a cross-collection search (`collections` or `collection='all'`; "
+    "such a hit carries its own `collection`): that search ignores "
+    "`{field}`, so its handle has none."
+)
+
 #: The one 404 body every read refusal returns.
 _NOT_FOUND_DETAIL: dict[str, str] = {"error": "not_found", "message": DOCS_SOURCE_NOT_FOUND}
 
@@ -86,8 +96,10 @@ class ReadDocsRequest(BaseModel):
     ``collection`` is typed optional so a missing value gets the docs
     surfaces' own 422 naming the mandatory scope. ``product`` / ``version``
     are needed only on a collection whose scope gates send hard filters: the
-    handle is bound to the filters of the hit's search. ``extra="forbid"``
-    rejects unknown fields.
+    handle is bound to the filters of the hit's search. So a caller passes
+    them only for a hit from a single-collection search that used them, and
+    leaves them out for a hit from a cross-collection search, which ignores
+    them. ``extra="forbid"`` rejects unknown fields.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -98,8 +110,16 @@ class ReadDocsRequest(BaseModel):
     before: int = Field(default=1, ge=0, le=READ_AROUND_MAX)
     after: int = Field(default=1, ge=0, le=READ_AROUND_MAX)
     cursor: str | None = Field(default=None, min_length=1, max_length=_MAX_READ_TOKEN)
-    product: str | None = Field(default=None, max_length=128)
-    version: str | None = Field(default=None, max_length=128)
+    product: str | None = Field(
+        default=None,
+        max_length=128,
+        description=_SCOPE_FIELD_HELP.format(field="product"),
+    )
+    version: str | None = Field(
+        default=None,
+        max_length=128,
+        description=_SCOPE_FIELD_HELP.format(field="version"),
+    )
 
 
 @router.post(

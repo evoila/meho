@@ -6587,17 +6587,23 @@ type QueryResult struct {
 // “collection“ is typed optional so a missing value gets the docs
 // surfaces' own 422 naming the mandatory scope. “product“ / “version“
 // are needed only on a collection whose scope gates send hard filters: the
-// handle is bound to the filters of the hit's search. “extra="forbid"“
-// rejects unknown fields.
+// handle is bound to the filters of the hit's search. So a caller passes
+// them only for a hit from a single-collection search that used them, and
+// leaves them out for a hit from a cross-collection search, which ignores
+// them. “extra="forbid"“ rejects unknown fields.
 type ReadDocsRequest struct {
 	After      *int                 `json:"after,omitempty"`
 	Before     *int                 `json:"before,omitempty"`
 	Collection *string              `json:"collection"`
 	Cursor     *string              `json:"cursor"`
 	Mode       *ReadDocsRequestMode `json:"mode,omitempty"`
-	Product    *string              `json:"product"`
-	ReadHandle string               `json:"read_handle"`
-	Version    *string              `json:"version"`
+
+	// Product The `product` you searched with. Needed only on a collection that applies scope filters; otherwise ignored. Pass it only when the hit came from a single-collection search that used it. Leave it out for a hit from a cross-collection search (`collections` or `collection='all'`; such a hit carries its own `collection`): that search ignores `product`, so its handle has none.
+	Product    *string `json:"product"`
+	ReadHandle string  `json:"read_handle"`
+
+	// Version The `version` you searched with. Needed only on a collection that applies scope filters; otherwise ignored. Pass it only when the hit came from a single-collection search that used it. Leave it out for a hit from a cross-collection search (`collections` or `collection='all'`; such a hit carries its own `collection`): that search ignores `version`, so its handle has none.
+	Version *string `json:"version"`
 }
 
 // ReadDocsRequestMode defines model for ReadDocsRequest.Mode.

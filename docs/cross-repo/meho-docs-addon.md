@@ -809,7 +809,7 @@ keys, so meho sends only these:
 | `mode` | `"around"` / `"page"` / `"section"` | What to read. meho always sends it (default `around`). |
 | `before` / `after` | `int` 0-3 | Chunks before / after the hit for `around`. meho always sends them (default 1). |
 | `cursor` | `str` | Only when reading on: the `next` (or `up`) cursor of an earlier reply. |
-| `filters` | `{key: scalar}` | Only for a collection with `scope_filters: true` and no soft scope, when the caller gives `product` / `version`: the same hard filters the hit's search sent, because the handle is bound to them. Never a soft `scope`. |
+| `filters` | `{key: scalar}` | Only for a collection with `scope_filters: true` and no soft scope, when the caller gives `product` / `version`: the same hard filters the hit's search sent, because the handle is bound to them. Never a soft `scope`. A cross-collection search sends no filters, so meho's help tells callers to leave `product` / `version` out for its hits. |
 
 No `audience` is sent on a read.
 

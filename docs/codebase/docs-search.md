@@ -834,7 +834,12 @@ retryable not-ready error, and a backend outage stays `CorpusUnavailable`.
   next to `search_docs` / `ask_docs` / `list_doc_collections`. Required
   `collection` + `read_handle`; optional `mode`, `before`, `after`, `cursor`,
   and `product` / `version` (needed only on a `scope_filters` collection).
-  The reply's `text` goes through `wrap_untrusted_text`.
+  The tool, REST field and CLI flag help say to pass `product` / `version`
+  only for a hit from a single-collection search that used them. A
+  cross-collection search (`collections` / `collection="all"`) ignores them,
+  so its hits' handles carry no filters, and sending filters with such a
+  handle gets "not found". The reply's `text` goes through
+  `wrap_untrusted_text`.
 - REST `POST /api/v1/read_docs` (`api/v1/read_docs.py`): the same body and
   result; `extra="forbid"`. The REST reply is not wrapped, like REST
   `search_docs`: the envelope is the MCP read boundary.

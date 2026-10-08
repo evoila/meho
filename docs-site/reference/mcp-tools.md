@@ -40,6 +40,7 @@ The default agent surface. No elevation required.
 | `meho_status` | — | — | Returns the operator's identity (sub, name, email, tenant_id, tenant_role) plus the MEHO backplane's dependency status: Vault federation chain (reachable + KV read OK?) and DB migration state. |
 | `preview_operation` | ga | — | Preview an operation WITHOUT running it. |
 | `query_topology` | beta | — | Query the topology graph. |
+| `read_docs` | experimental | capability `meho-docs` | Read more around a vendor-document hit: the text before and after it, the whole page, or the section it sits in. |
 | `result_query` | ga | — | Read rows back from a JSONFlux result handle. |
 | `search_docs` | experimental | capability `meho-docs` | Search a vendor-document collection (product manuals, KB articles, design / reference guides) for an authoritative vendor fact — e.g. 'NSX config maximums for 9.0' or 'vSphere 8.0 supported snapshot depth'. |
 | `search_knowledge` | ga | — | Search the tenant's knowledge base for distilled operator knowledge: vendor API patterns, lab conventions, known-good runbooks, post-incident learnings. |

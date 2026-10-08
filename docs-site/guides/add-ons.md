@@ -88,12 +88,13 @@ collection*. The backplane calls it with a deployment-configured service
 credential (the caller's own token is never forwarded to it), and records
 every query in its own audit log under the calling operator.
 
-When the capability is granted, an agent gets three meta-tools:
+When the capability is granted, an agent gets four meta-tools:
 
 | Tool | What it returns |
 |---|---|
 | `search_docs` | ranked passages from an attached collection, each cited |
 | `ask_docs` | one composed answer with its sources |
+| `read_docs` | the text around a passage, its whole page or its section |
 | `list_doc_collections` | the collections the caller is entitled to search |
 
 Two properties make this safe to expose to an agent:
@@ -119,6 +120,17 @@ same citation check, and with the answer itself marked as untrusted text
 for agents. The choice is per collection, off unless an administrator
 turns it on, and reversible with one collection update. With it on, the
 answer is written by the service's answer model, not the backplane's.
+
+**Reading around a passage.** A passage is one part of a page. When a
+collection is configured to allow it, each passage and each source of an
+answer carries a short-lived read handle. `read_docs` (and `meho docs read`,
+and a button on the passage in the console) uses it to return the text
+before and after the passage, the whole page, or its section. Some files
+allow only their link; then the link is returned and no text. Every refusal
+gives the same "not found" answer, so a caller cannot use reads to learn
+which collections exist. Reads are limited per person; a caller that reads
+too much is told how long to wait. Like `ask_docs` from the service, this is
+off unless an administrator turns it on for a collection.
 
 The [Memory and knowledge](memory-and-knowledge.md) guide covers how this
 attached-document search differs from MEHO's own memory and knowledge

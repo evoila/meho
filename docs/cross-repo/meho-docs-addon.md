@@ -246,6 +246,20 @@ The **backend** record is `{type, ref}`:
   moves its answers from the backplane's model to the corpus's answer
   model, an owner decision per collection, reversible with one
   `meho docs collections update`.
+- Two optional `corpus-http` ref keys turn on `read_docs` (#3948): reading
+  the text around a hit, its whole page or its section.
+  `"read": "upstream"` (exactly that string) opts the collection in to the
+  corpus's read endpoint (the optional
+  [Read](#read--optional-post-read-3948) contract below); absent, or any
+  other value, keeps read off and `read_docs` answers "not found".
+  `"read_endpoint"` names that endpoint explicitly; without it, the search
+  endpoint with its last path segment replaced by `read` is used
+  (`…/search` → `…/read`, `…/v1/search` → `…/v1/read`). It is screened like
+  `endpoint`. Changing **only** these two keys keeps the collection's
+  readiness. With read on, the collection's hits and citations carry an
+  opaque `read_handle`. **Default off.** The backend record is replaced as a
+  whole, so re-pass the existing ref keys:
+  `meho docs collections update vmware --backend-type corpus-http --backend-ref '{"endpoint":"<current>","scope":"soft","read":"upstream"}'`.
 - `ref.scope` and `ref.scope_filters` (any backend type; both default
   off) — the two per-collection gates for a query's `product` / `version`
   refinements (#3912). With neither, the refinements are accepted, logged
@@ -490,6 +504,40 @@ single-collection**: a fan-out attempt (`collections=[…]` or
 grounded-answer contract never has to reconcile chunks from divergent
 corpora.
 
+### `read_docs` — read more around a hit (#3948)
+
+A hit is one chunk of a page. When the hit's collection has read on, the
+hit (and an `ask_docs` citation) carries a `read_handle`. Pass it to
+`read_docs` with the same `collection` to read the text around the hit
+(`mode` `around`, with `before` / `after` 0-3 chunks), the whole `page`, or
+the hit's `section`. A long reply is cut; read on with `cursor` = the
+reply's `next`.
+
+```bash
+# Get the handle from the JSON hit, then read around it:
+meho docs search "config maximums" --collection vmware --json
+meho docs read '<read_handle>' --collection vmware
+meho docs read '<read_handle>' --collection vmware --mode page
+# Read on from the cursor the last read printed:
+meho docs read '<read_handle>' --collection vmware --cursor '<next>'
+```
+
+- A file whose owner allows only its link returns `text: null`,
+  `disclosure: "link"` and the link in `source_url`.
+- Every refusal is the same "docs source not found" (404 / `-32602`): an
+  unknown or not-entitled collection, a collection without read, an
+  unknown handle.
+- A handle expires: "search again" (409 / `-32602` with
+  `data.reason="search_again"`) means run the search again and use the new
+  handle.
+- Reads are limited per person: a rate limit (429 / `-32000`) says how many
+  seconds to wait.
+- The text is untrusted: the MCP tool wraps it in the
+  `<<UNTRUSTED_AGENT_TEXT` envelope; the console escapes it.
+
+The console offers the same read: a search or ask result card whose chunk
+carries a handle shows a "Read around this hit" button.
+
 ## Backend-agnostic routing
 
 `collection → backend{type, ref}` is resolved **server-side**. The agent
@@ -730,6 +778,85 @@ for two codes only; the body is never echoed:
 Source: `ask_corpus` / `UpstreamAnswer` / `CorpusAnswerError` in
 [`auth/corpus.py`](../../backend/src/meho_backplane/auth/corpus.py); the
 mapping in [`docs_search/answer.py`](../../backend/src/meho_backplane/docs_search/answer.py).
+
+### Read — optional (`POST /read`, #3948)
+
+A `corpus-http` backend **may** also serve the text around a hit. meho
+calls it only for a collection that opted in (`backend.ref["read"] =
+"upstream"`); for any other collection `read_docs` answers "not found" and
+everything else works as before. The URL is `backend.ref["read_endpoint"]`,
+else the search URL with its last path segment replaced by `read`. Same
+screen, service credential and "body never echoed" rules as search; bounded
+by `corpus_timeout_seconds`.
+
+**The handle.** For a collection with read on, the corpus puts a
+`read_handle` (a string, or `null`) on every search hit (`results[]`) and on
+every answer hit and citation. It is signed and expiring, and opaque to
+meho: meho passes it back unchanged. It carries a few words of the hit, so
+meho never logs it, never stores it on the audit row and never puts it on
+the broadcast feed; the logs name the `chunk_id`. A handle meho cannot use
+(not a non-empty ASCII string without spaces, or longer than 8,192
+characters) reads as `null`. A PDF hit carries `null`.
+
+**Request** — `POST <read_endpoint>`, JSON body. The corpus refuses unknown
+keys, so meho sends only these:
+
+| Key | Type | Notes |
+|---|---|---|
+| `read_handle` | `str` | **Required.** The hit's handle, unchanged. |
+| `mode` | `"around"` / `"page"` / `"section"` | What to read. meho always sends it (default `around`). |
+| `before` / `after` | `int` 0-3 | Chunks before / after the hit for `around`. meho always sends them (default 1). |
+| `cursor` | `str` | Only when reading on: the `next` (or `up`) cursor of an earlier reply. |
+| `filters` | `{key: scalar}` | Only for a collection with `scope_filters: true` and no soft scope, when the caller gives `product` / `version`: the same hard filters the hit's search sent, because the handle is bound to them. Never a soft `scope`. |
+
+No `audience` is sent on a read.
+
+**Caller header.** Every read carries `X-Meho-Caller: <caller id>`, so the
+corpus can limit reads per person instead of per backplane. The caller id is
+a keyed hash (HMAC-SHA256, 32 hex characters) of the signed-in user's
+subject. It is stable for one person and cannot be turned back into the
+user; the raw subject is never sent. The key is the deployment's
+`UI_SESSION_ENCRYPTION_KEY` under its own domain label; without it a read
+fails closed (503). On the corpus side, point its caller-header setting at
+`X-Meho-Caller`.
+
+**Response** — `2xx` JSON. The fields meho reads (everything else is
+ignored):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `mode` | `str` | The mode read. An unknown value fails the parse (503). |
+| `text` | `str` or `null` | The text. meho keeps it only when `disclosure` is `full`. |
+| `title` | `str` or `null` | The source's title. |
+| `source_uri` / `upstream_url` | `str` or `null` | The source. meho returns a public `http(s)` link only (an `https` `source_uri`, else `upstream_url`, else a derivable public link), never a storage path. |
+| `disclosure` | `"full"` / `"link"` | `link`: the content owner allows only the file's link, so meho returns no text, only the link. Any other or missing value reads as `link`. |
+| `reason` | `null` / `"link_only"` / `"pdf_not_supported"` / `"type_not_supported"` | Why there is no text. Another value reads as `null`. |
+| `located` | `bool` or `null` | Whether the corpus found the hit in the file. |
+| `truncated` | `bool` | Whether the reply was cut at the corpus's size cap. |
+| `next` / `up` | `str` or `null` | Opaque cursors to read on / read the enclosing part. |
+
+**Size.** The corpus caps each reply (about 40,000 characters, with a `next`
+cursor beyond it). meho passes the cap through; the delivery budgets of #3641
+will apply once they land.
+
+**Errors** — the body is never echoed:
+
+| Corpus answers | meho MCP `read_docs` | meho REST `POST /api/v1/read_docs` |
+|---|---|---|
+| 404 `not_found` (one body for every refusal) | `-32602` "docs source not found" | 404 `{"error": "not_found"}` |
+| 409 `search_again` | `-32602`, `data.reason = "search_again"` | 409 `{"error": "search_again"}` |
+| 429 `rate_limited`, `Retry-After` | `-32000`, `data.retry_after_seconds` (capped at 3600) | 429, `Retry-After` forwarded (capped at 3600) |
+| 503 `read_unavailable`, any other non-2xx, transport error / timeout, malformed 2xx | `-32603` | 503 `{"error": "read_unavailable"}` |
+
+**The not-found rule.** meho gives the same "docs source not found" answer
+for every refusal on its side too: an unknown collection, a collection the
+caller is not entitled to, a disabled collection, a collection without read,
+and a corpus 404. So `read_docs` is no probe for which collections exist or
+what they hold.
+
+Source: `read_corpus` / `UpstreamRead` / `CorpusReadError` / `read_caller_id`
+in [`auth/corpus.py`](../../backend/src/meho_backplane/auth/corpus.py); the
+service in [`docs_search/read.py`](../../backend/src/meho_backplane/docs_search/read.py).
 
 ### Fail-closed semantics meho enforces
 

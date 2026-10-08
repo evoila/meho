@@ -398,9 +398,9 @@ table can never silently drift from the code:
   reclassification or an un-pinned addition fails CI at the listing path
   a client actually observes.
 
-Counts: **25 working + 54 operator + 1 pairing-gated automation =
-80 registered tools**, plus the **3 human-only verbs** (below) that
-carry no MCP registration under any claim set. The 25 working and 54
+Counts: **26 working + 54 operator + 1 pairing-gated automation =
+81 registered tools**, plus the **3 human-only verbs** (below) that
+carry no MCP registration under any claim set. The 26 working and 54
 operator counts are the **unpaired baseline** — a session with every
 capability provisioned but no add-on paired — so they stay byte-identical
 to a build that never carried the automation family; the single
@@ -455,6 +455,7 @@ add-on-family gate.
 | `meho_status` | read_only | — | Return caller identity + backplane dependency status. |
 | `preview_operation` | operator | — | Preview an operation without running it. |
 | `query_topology` | operator | — | Query the topology graph (dependents, blast radius, timeline). |
+| `read_docs` | operator | `meho-docs` | Read the text around a docs hit, its whole page or its section, through the hit's `read_handle` (#3948). |
 | `result_query` | operator | — | Read rows back from a JSONFlux result handle: page a window, or run a bounded structured query (filter / project / group / aggregate) server-side. |
 | `search_docs` | operator | `meho-docs` | Search a vendor-document collection for an authoritative fact. |
 | `search_knowledge` | operator | — | Search the tenant knowledge base. |
@@ -582,7 +583,7 @@ default on the strength of its role.
 
 The surface gate **AND-composes** with the capability gate: an elevated
 session that has *not* provisioned `meho-docs` still does not see the docs
-tools (working or operator: the three working docs tools plus the two
+tools (working or operator: the four working docs tools plus the three
 operator-surface doc-collection lifecycle tools all stay hidden). The
 gates are independent axes.
 
@@ -611,7 +612,7 @@ synchronous, session-tagged row (`method='MCP'`,
 `path='/mcp/tools/call/<tool_name>'`, `agent_session_id` set when the
 client negotiated an `Mcp-Session-Id`). The check is: over a trailing
 window, is the **set of MCP-session-invoked tool names** a subset of the
-25-name working surface? Any name outside it is an operator-plane tool a
+26-name working surface? Any name outside it is an operator-plane tool a
 real session reached — an exception to record and disposition before
 cutover.
 
@@ -619,7 +620,7 @@ The query reuses the #3134 reflex-KPI seam conventions — the
 `MCP_TOOL_PATH_PREFIX = '/mcp/tools/call/'` filter, the
 `agent_session_id IS NOT NULL` "agent surface" split, and successful
 rows only (`status_code = 200`). The working-surface allowlist it checks
-against is the same 25 names the conformance suite pins, so the SQL and
+against is the same 26 names the conformance suite pins, so the SQL and
 the CI pin cannot drift.
 
 Authoritative SQL (Postgres, per tenant, trailing 30 days):
@@ -644,7 +645,8 @@ WHERE tool_name NOT IN (
   'meho_connector_list','meho_runbook_abort','meho_runbook_list_runs',
   'meho_runbook_list_templates','meho_runbook_next','meho_runbook_show_template',
   'meho_runbook_start','meho_status','preview_operation','query_topology',
-  'result_query','search_docs','search_knowledge','search_memory','search_operations'
+  'read_docs','result_query','search_docs','search_knowledge','search_memory',
+  'search_operations'
 )
 ORDER BY tool_name;
 ```
@@ -746,6 +748,16 @@ retrieval call. `write_mcp_audit_row` merges those into the row's
 operator, `query_hash`, `hit_count`) without carrying the query text.
 This mirrors the HTTP route's privacy posture documented in
 [`retrieval.md`](retrieval.md).
+
+**Tool arguments kept off the broadcast feed (#3948).** A `tools/call`
+whose broadcast detail is `full` copies the raw tool arguments into the
+event every co-tenant feed subscriber reads (the audit row itself stores
+only `params_hash`). A tool whose argument is as sensitive as data the
+caller alone is entitled to lists it in `ToolDefinition.broadcast_omit_args`;
+`handle_tools_call` leaves those keys out of the broadcast params (and the
+override-rule scope matching). `read_docs` uses it for `read_handle` and
+`cursor`, which carry a few words of a docs hit. Empty by default, and
+dropped from the wire shape like the other MEHO-internal fields.
 
 The redaction helper is `redacted_audit_uri(template)` in
 `mcp/registry.py`. New query-bearing resources reuse the same flag +

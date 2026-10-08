@@ -175,13 +175,15 @@ distinct from both stores above.
 
 **What it is.** The backplane does not ingest or store documents. It
 **attaches to and searches** an external retrieval service —
-**MEHO Knowledge** — registered as a *doc collection*. Three agent
+**MEHO Knowledge** — registered as a *doc collection*. Four agent
 tools sit on top of it:
 
 - `search_docs` — returns ranked passages, each with its source
   citation.
 - `ask_docs` — composes one answer over the retrieved passages and
   returns it with the sources it used.
+- `read_docs` — reads the text around a passage, its whole page or its
+  section, for a collection configured to allow it.
 - `list_doc_collections` — lists the collections the caller may search.
 
 **The grounding contract.** Every claim in an answer carries a citation

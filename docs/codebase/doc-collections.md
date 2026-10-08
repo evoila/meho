@@ -551,12 +551,13 @@ Two behaviours the service owns (one policy across all fronts):
    then re-runs `probe` to promote it back to `ready` — the same
    `create → probe → ready` flow. A metadata-only change leaves `status` +
    liveness untouched, and so does a backend change that touches **only**
-   the `answer` / `answer_endpoint` ref keys (#3911): those choose where
-   `ask_docs` answers come from (the backend's own answer endpoint, see
-   [docs-search.md](docs-search.md)), not which corpus the probe validated.
-   A type, endpoint, audience or other ref change still resets readiness.
-   An explicit `answer_endpoint` is a dialed URL and is screened like
-   `endpoint` on create and update.
+   the `answer` / `answer_endpoint` ref keys (#3911) or the `read` /
+   `read_endpoint` ref keys (#3948): those choose where `ask_docs` answers
+   come from (the backend's own answer endpoint) and whether `read_docs` may
+   read around a hit (see [docs-search.md](docs-search.md)), not which corpus
+   the probe validated. A type, endpoint, audience or other ref change still
+   resets readiness. An explicit `answer_endpoint` or `read_endpoint` is a
+   dialed URL and is screened like `endpoint` on create and update.
 
 This is the governed repair for the migration-seeded global `vmware` row
 ([Global-row manifest seed](#global-row-manifest-seed-1920) below): a

@@ -1,4 +1,4 @@
-# search_docs / ask_docs (the meho-docs add-on)
+# search_docs / ask_docs / read_docs (the meho-docs add-on)
 
 ## Overview
 
@@ -75,6 +75,15 @@ name) so it can fail open on a leg failure, and the MCP handler calls the
 seam directly — the MCP module no longer carries its own copy of the
 pipeline. `ask_docs` is single-collection only on every face (no
 `collections` fan-out field).
+
+`read_docs` (#3948) reads more around a hit: the text before and after it,
+the whole page, or its section. It works for a collection whose backend
+offers a read endpoint and opts in (`backend.ref["read"] = "upstream"`); such
+a collection's hits and citations carry an opaque `read_handle`. It has four
+faces (MCP `read_docs`, `POST /api/v1/read_docs`, `meho docs read`, and the
+console's cited-source page) over one service,
+`meho_backplane.docs_search.read.read_docs`. Every refusal is one "docs
+source not found" answer. See *Read around a hit* below.
 
 ## Key types
 
@@ -194,6 +203,47 @@ codes are ever read from an error body. `Retry-After` is read in either RFC
 `_RETRY_AFTER_MAX_S` = 3600 s; anything else (blank, signed, non-ASCII, an
 unparseable or overflowing date) is dropped as `None`, never raised, so a
 garbled header cannot turn the typed rate-limited error into a 500.
+
+### `read_corpus(...)` (`meho_backplane.auth.corpus`, #3948)
+
+The read transport, used only for a collection that opted in to its
+backend's read endpoint (`backend.ref["read"] = "upstream"`). It POSTs
+`{read_handle, mode, before, after}` to the read endpoint, plus `cursor` and
+`filters` only when given. Nothing else is sent: the backend refuses unknown
+request keys, so there is no `audience` and no `scope` on a read. Same
+posture as `search_corpus`: the `https` + SSRF destination screen, the
+deployment's corpus service credential (never the operator JWT), the
+`CORPUS_TIMEOUT_SECONDS` bound, and the response body never echoed.
+
+- **Caller header.** Every read carries `X-Meho-Caller` (`READ_CALLER_HEADER`)
+  with `read_caller_id(operator)`: HMAC-SHA256 of the operator's subject,
+  keyed with `UI_SESSION_ENCRYPTION_KEY` under its own domain label
+  (`meho-docs-read-caller-v1`), first 32 hex characters. It is stable per
+  person, so the backend can limit reads per person, and it cannot be turned
+  back into the subject. The raw subject is never sent. Without the key the
+  read fails closed (`CorpusUnavailable`) instead of sending an unkeyed hash
+  or no caller, which would put everyone behind one shared limit. Rotating
+  the key only resets the backend's read counters.
+- **Reply.** `UpstreamRead`: `mode`, `text`, `title`, `source_uri`,
+  `upstream_url`, `disclosure`, `reason`, `located`, `truncated`, `next`,
+  `up`. `text` is kept only when `disclosure` is `full`; any other or missing
+  disclosure reads as `link` and drops the text, so a link-only file never
+  returns text through MEHO. An unknown `reason`, a non-bool `located`, an
+  unusable `upstream_url` and an unusable cursor read as absent. An unknown
+  `mode` fails the parse (`CorpusUnavailable`).
+- **Errors.** 404 is `CorpusReadError(kind="not_found")`, 409 is
+  `kind="search_again"`, 429 is `kind="rate_limited"` with the bounded
+  `Retry-After` (the same `_retry_after_seconds` rule as the answer path).
+  Every other non-2xx (the backend's `503 read_unavailable`, a 422 for a
+  request MEHO built wrong, a 401) is `CorpusUnavailable` with the status.
+- **What is never logged.** The handle, the cursor and the caller id. The
+  failure log names only the status and the kind.
+
+`derive_read_url(search_url)` replaces the search URL's last path segment
+with `read` (`…/v1/search` → `…/v1/read`), unless the collection names
+`backend.ref["read_endpoint"]`. `CorpusChunk.read_handle` is the hit's opaque
+handle; `opaque_token_or_none` keeps it only when it is a non-empty ASCII
+string without spaces or control characters, at most 8,192 characters.
 
 ### Backend-agnostic search router (`meho_backplane.docs_search.backends`, T2 #1551)
 
@@ -705,6 +755,100 @@ when the backend returned hits that failed to map
 (`citation_resolution`).
 Never the query, chunk text or answer text. The `meho.docs.ask` audit row,
 its query hash and collection binding are unchanged.
+
+### Read around a hit: `read_docs` (`meho_backplane.docs_search.read`, #3948)
+
+A docs hit is one chunk of a page. `read_docs` reads more around it: the
+chunks before and after the hit (`mode="around"`, `before` / `after` 0-3,
+default 1), the whole page (`page`) or the hit's section (`section`). Long
+replies are cut by the backend; `next` is a cursor to read on, `up` reads the
+enclosing part.
+
+**Opt-in per collection.** `SearchBackend.supports_read(ref)` /
+`read(...)` are an optional pair, off by default, like `answer()`.
+`CorpusHttpBackend` reads only when `backend.ref["read"] == "upstream"` (exact
+match). The endpoint is `backend.ref["read_endpoint"]`, else the search URL
+with its last path segment replaced by `read`. An explicit `read_endpoint` is
+screened like `endpoint` on create / update, and a change to only `read` /
+`read_endpoint` keeps the collection's readiness (`_ANSWER_REF_KEYS` in
+`docs_collections/service.py`). `meho docs collections update` replaces the
+whole backend record, so re-pass every ref key you want to keep.
+
+**`read_handle` on hits.** `DocsChunk.read_handle` is set only when the
+backend sent one **and** the collection offers read (`_project_chunk(...,
+readable=...)`; the single search path, the fan-out and the upstream answer
+path all pass it). So a handle on the wire always leads to a working read; a
+PDF hit gets none from the backend. It rides `search_docs` hits and
+`ask_docs` citations on MCP and REST. The CLI search table does not show it
+(it is long); `--json` does. It is opaque and never logged: the per-call logs
+name the `chunk_id` (#3915).
+
+**The service.** `resolve_readable_collection(session, operator, key)` runs
+the shared gate and folds an unknown, not-entitled or disabled collection
+into `DocsReadNotFoundError`. `read_docs(operator, read_handle, *, scope,
+collection, mode, before, after, cursor)` refuses a collection without read
+(the same error), then calls the backend with the hard filters the
+collection's scope gates would send on search (`forwarded_scope`): the handle
+is bound to the hit's search filters. A soft `scope` is never sent on a read.
+The reply becomes a `DocsReadResult` (`mode, text, title, source_url,
+disclosure, reason, located, truncated, next, up`); `source_url` is
+`public_source_url(...)`: an `https` source, else the backend's
+`upstream_url`, else a derivable public link, else `None`. Never a storage
+path.
+
+**The not-found rule.** An unknown collection, a collection the caller is
+not entitled to, a disabled collection, a collection without read and a
+handle the backend refuses (404) all give the same "docs source not found"
+answer, with no detail. So `read_docs` is no probe for which collections
+exist or what they hold. Two refusals are told apart because the caller can
+act on them and the backend only gives them for a handle it signed:
+`DocsReadSearchAgainError` (409: the handle is too old or the page changed;
+search again) and `DocsReadRateLimitedError` (429, with the wait in
+seconds). A known, entitled collection that is still rebuilding stays the
+retryable not-ready error, and a backend outage stays `CorpusUnavailable`.
+
+| Case | MCP `read_docs` | REST `POST /api/v1/read_docs` | `meho docs read` | Console |
+|---|---|---|---|---|
+| Success | result, `text` wrapped as untrusted | 200 `DocsReadResult` | text + `next:` cursor | text (escaped) + "Show more" |
+| Any refusal | `-32602` "read_docs: docs source not found" | 404 `{"error": "not_found"}` | "docs source not found" (exit 4) | "not available" note |
+| Handle too old | `-32602`, `data.reason="search_again"` | 409 `{"error": "search_again"}` | "run `meho docs search` again" | "search again" note |
+| Rate limited | `-32000`, `data.retry_after_seconds` | 429 + `Retry-After` | "wait N seconds" | "wait N seconds" note |
+| Not ready / backend down | `-32603` | 503 `collection_not_ready` / `read_unavailable` | "try again later" | "try again later" note |
+
+**Faces.**
+
+- MCP `read_docs` (`mcp/tools/docs.py`): in the capability-gated docs add-on
+  (`required_capability="meho-docs"`, `ToolSurface.WORKING`, operator role),
+  next to `search_docs` / `ask_docs` / `list_doc_collections`. Required
+  `collection` + `read_handle`; optional `mode`, `before`, `after`, `cursor`,
+  and `product` / `version` (needed only on a `scope_filters` collection).
+  The reply's `text` goes through `wrap_untrusted_text`.
+- REST `POST /api/v1/read_docs` (`api/v1/read_docs.py`): the same body and
+  result; `extra="forbid"`. The REST reply is not wrapped, like REST
+  `search_docs`: the envelope is the MCP read boundary.
+- CLI `meho docs read <read-handle> --collection <key>` (`cli/internal/cmd/docs/read.go`):
+  `--mode`, `--before`, `--after`, `--cursor`, `--product`, `--version`,
+  `--json`; the 1 MiB response cap of every docs verb applies.
+- Console: a result card whose chunk carries a handle shows a "Read around
+  this hit" form. It POSTs to `/ui/corpus/chunks/{collection}/{chunk_id}`
+  with the handle in the **form body** (never the URL, so no access log,
+  browser history or `Referer` keeps it) and the CSRF token as the
+  `csrf_token` field. The cited-source page then shows the text around the
+  hit, HTML-escaped, with a "Show more" form for `next`. The `GET` view is
+  unchanged (provenance only).
+
+**Privacy.** The handle and the cursor carry a few words of the hit, so they
+are as sensitive as the hit text. They are never logged (the
+`docs_read_completed` / `docs_read_refused` records carry the collection,
+mode and outcome only), never bound to the audit row (REST binds
+`op_id="meho.docs.read"`, the collection and the mode; MCP stores only the
+arguments' hash), and never put on the broadcast feed: the tool registers
+`broadcast_omit_args={"read_handle", "cursor"}`, and the MCP dispatcher
+leaves those keys out of the full-detail broadcast params.
+
+**Size.** The backend caps each reply (about 40,000 characters, with a
+`next` cursor beyond it). MEHO adds no cap of its own until the delivery
+budgets of #3641 land; then a reply's text follows them.
 
 ### `classify_answer_error(exc, *, llm_unavailable_leg=LEG_MODEL)` (`meho_backplane.docs_search.answer_errors`, #1918)
 
@@ -1311,10 +1455,23 @@ injection detection. See `docs/codebase/untrusted-text-envelope.md`.
   reach the answer call only through the per-collection scope gates
   (#3912): a soft `scope` the backend ranks with, or hard `filters`.
   Streaming (`/ask/stream`) is not used.
+- `read_docs` (#3948) sends `product` / `version` as hard filters only on a
+  `scope_filters` collection, because the read handle is bound to the hit's
+  search filters. An agent that searched with refinements on such a
+  collection must pass the same values to `read_docs`, or the read is "not
+  found". On the default and the soft-scope collections no filters are sent.
+- The read caller id is keyed with `UI_SESSION_ENCRYPTION_KEY`. A deploy
+  without it cannot read (fails closed with 503 / `-32603`).
 
 ## References
 
 - Route: `backend/src/meho_backplane/api/v1/search_docs.py`.
+- Read around a hit (#3948): `backend/src/meho_backplane/docs_search/read.py`
+  (service), `backend/src/meho_backplane/api/v1/read_docs.py` (REST),
+  `read_docs` in `backend/src/meho_backplane/mcp/tools/docs.py` (MCP),
+  `read_corpus` in `backend/src/meho_backplane/auth/corpus.py` (transport),
+  `cli/internal/cmd/docs/read.go` (CLI),
+  `backend/src/meho_backplane/ui/routes/corpus/chunk_detail.py` (console).
 - Service (router seam + the scope gates `forwarded_scope`):
   `backend/src/meho_backplane/docs_search/service.py`.
 - Collection-access gate (resolve + entitle + readiness, T3 #1552):

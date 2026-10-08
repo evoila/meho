@@ -845,7 +845,10 @@ retryable not-ready error, and a backend outage stays `CorpusUnavailable`.
   `search_docs`: the envelope is the MCP read boundary.
 - CLI `meho docs read <read-handle> --collection <key>` (`cli/internal/cmd/docs/read.go`):
   `--mode`, `--before`, `--after`, `--cursor`, `--product`, `--version`,
-  `--json`; the 1 MiB response cap of every docs verb applies.
+  `--json`; the 1 MiB response cap of every docs verb applies. `-` as the
+  handle (or as `--cursor`) reads that value from standard input, so it
+  stays out of the shell history and the process list; with both, standard
+  input holds the handle, then the cursor (`readTokensFromStdin`).
 - Console: a result card whose chunk carries a handle shows a "Read around
   this hit" form. It POSTs to `/ui/corpus/chunks/{collection}/{chunk_id}`
   with the handle in the **form body** (never the URL, so no access log,

@@ -26,6 +26,18 @@ const readAroundMax = 3
 // readDefaultAround is the server's default for --before / --after.
 const readDefaultAround = 1
 
+// readStdinMarker is the <read-handle> or --cursor value that reads it from
+// standard input instead of the command line, so the value stays out of the
+// shell history and the process list.
+const readStdinMarker = "-"
+
+// readTokenMax mirrors the backplane's bound on a read_handle / cursor.
+const readTokenMax = 8192
+
+// readStdinCap bounds what standard input may hold: a handle and a cursor,
+// each at most readTokenMax characters, plus line ends.
+const readStdinCap = 2*readTokenMax + 16
+
 // newReadCmd returns the `meho docs read` command.
 //
 // CLI shape:
@@ -33,6 +45,9 @@ const readDefaultAround = 1
 //	meho docs read <read-handle> --collection <c> \
 //	  [--mode around|page|section] [--before N] [--after N] \
 //	  [--cursor <next>] [--product <p>] [--version <v>] [--json]
+//
+// `-` as <read-handle> (or as --cursor) reads that value from standard
+// input. With both, standard input holds the handle, then the cursor.
 //
 // Role: operator. Calls POST /api/v1/read_docs with the opaque
 // read_handle a `meho docs search --json` hit (or an ask_docs citation)
@@ -70,7 +85,11 @@ func newReadCmd() *cobra.Command {
 			"collection. Leave them out for a hit from a cross-collection " +
 			"search (--collection all, or --collection given more than once): " +
 			"that search ignores --product / --version, so its handle has " +
-			"none. --json emits the raw DocsReadResult.",
+			"none. Pass - as <read-handle> to read the handle from standard " +
+			"input, so it stays out of your shell history and the process " +
+			"list; --cursor - does the same for the cursor. With both, " +
+			"standard input holds the handle, then the cursor, one per line. " +
+			"--json emits the raw DocsReadResult.",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -88,7 +107,7 @@ func newReadCmd() *cobra.Command {
 	cmd.Flags().IntVar(&opts.After, "after", readDefaultAround,
 		"chunks to read after the hit, for --mode around (0..3)")
 	cmd.Flags().StringVar(&opts.Cursor, "cursor", "",
-		"the `next` cursor of an earlier read, to read on")
+		"the `next` cursor of an earlier read, to read on (- reads it from standard input)")
 	cmd.Flags().StringVar(&opts.Product, "product", "",
 		"the product you searched with (only for a collection that applies scope filters; "+
 			"leave it out for a hit from a cross-collection search)")
@@ -123,7 +142,11 @@ var validReadModes = map[string]api.ReadDocsRequestMode{
 }
 
 func runRead(cmd *cobra.Command, opts readOptions) error {
-	if msg := validateReadOptions(opts); msg != "" {
+	opts, msg := readTokensFromStdin(cmd.InOrStdin(), opts)
+	if msg == "" {
+		msg = validateReadOptions(opts)
+	}
+	if msg != "" {
 		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(msg), opts.JSONOut)
 	}
 	backplaneURL, err := backplane.Resolve(opts.BackplaneOverride)
@@ -152,6 +175,47 @@ func runRead(cmd *cobra.Command, opts readOptions) error {
 	}
 	printReadResult(cmd.OutOrStdout(), resp.JSON200)
 	return nil
+}
+
+// readTokensFromStdin replaces a `-` <read-handle> and / or a `-` --cursor
+// with the values on standard input: one value for one `-`, or the handle
+// then the cursor for two. Values are split on white space (a handle or a
+// cursor never holds any), so a trailing newline is fine. It returns a
+// message, never naming the values, when standard input does not hold
+// exactly the values asked for.
+func readTokensFromStdin(in io.Reader, opts readOptions) (readOptions, string) {
+	handleFromStdin := opts.ReadHandle == readStdinMarker
+	cursorFromStdin := opts.Cursor == readStdinMarker
+	if !handleFromStdin && !cursorFromStdin {
+		return opts, ""
+	}
+	blob, err := io.ReadAll(io.LimitReader(in, readStdinCap+1))
+	if err != nil {
+		return opts, fmt.Sprintf("could not read standard input: %v", err)
+	}
+	if len(blob) > readStdinCap {
+		return opts, fmt.Sprintf("standard input is longer than %d bytes", readStdinCap)
+	}
+	values := strings.Fields(string(blob))
+	switch {
+	case handleFromStdin && cursorFromStdin:
+		if len(values) != 2 {
+			return opts, "with - for both <read-handle> and --cursor, standard input " +
+				"must hold two lines: the read handle, then the cursor"
+		}
+		opts.ReadHandle, opts.Cursor = values[0], values[1]
+	case handleFromStdin:
+		if len(values) != 1 {
+			return opts, "with - as <read-handle>, standard input must hold the read handle and nothing else"
+		}
+		opts.ReadHandle = values[0]
+	default:
+		if len(values) != 1 {
+			return opts, "with --cursor -, standard input must hold the cursor and nothing else"
+		}
+		opts.Cursor = values[0]
+	}
+	return opts, ""
 }
 
 // validateReadOptions fails fast on the constraints the route would 422 on.

@@ -298,3 +298,85 @@ func TestReadCmdIsRegisteredWithDefaults(t *testing.T) {
 		t.Errorf("expected an error with no <read-handle> argument")
 	}
 }
+
+func TestRunReadTakesHandleAndCursorFromStdin(t *testing.T) {
+	cases := []struct {
+		name       string
+		handleArg  string
+		cursorFlag string
+		stdin      string
+		wantCursor string
+	}{
+		{"handle only", "-", "", testReadHandle + "\n", ""},
+		{"cursor only", testReadHandle, "-", "cursor-next-1\n", "cursor-next-1"},
+		{"handle then cursor", "-", "-", testReadHandle + "\r\ncursor-next-1\r\n", "cursor-next-1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var bodyOnWire api.ReadDocsRequest
+			srv := readServer(t, func(w http.ResponseWriter, r *http.Request) {
+				raw, _ := io.ReadAll(r.Body)
+				readJSONBodyOf(t, raw, &bodyOnWire)
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(api.DocsReadResult{
+					Mode: api.DocsReadResultModeAround, Text: ptrStr("text"),
+					Disclosure: api.DocsReadResultDisclosureFull,
+				})
+			})
+			cmd, _, stderr := newRunCmd(t)
+			cmd.SetIn(strings.NewReader(tc.stdin))
+			err := runRead(cmd, readOptions{
+				ReadHandle: tc.handleArg, Cursor: tc.cursorFlag, Collection: "vmware",
+				Mode: "around", Before: 1, After: 1, BackplaneOverride: srv.URL,
+			})
+			if err != nil {
+				t.Fatalf("runRead: %v; stderr=%s", err, stderr.String())
+			}
+			if bodyOnWire.ReadHandle != testReadHandle {
+				t.Errorf("expected the handle from stdin on the wire; got %q", bodyOnWire.ReadHandle)
+			}
+			switch {
+			case tc.wantCursor == "" && bodyOnWire.Cursor != nil:
+				t.Errorf("expected no cursor; got %q", *bodyOnWire.Cursor)
+			case tc.wantCursor != "" && (bodyOnWire.Cursor == nil || *bodyOnWire.Cursor != tc.wantCursor):
+				t.Errorf("expected cursor %q; got %+v", tc.wantCursor, bodyOnWire.Cursor)
+			}
+		})
+	}
+}
+
+func TestRunReadStdinRejectsTheWrongShapeBeforeTheCall(t *testing.T) {
+	cases := []struct {
+		name       string
+		handleArg  string
+		cursorFlag string
+		stdin      string
+		want       string
+	}{
+		{"empty for the handle", "-", "", "", "must hold the read handle and nothing else"},
+		{"two values for the handle", "-", "", testReadHandle + "\nextra\n", "must hold the read handle and nothing else"},
+		{"two values for the cursor", testReadHandle, "-", "c1 c2\n", "must hold the cursor and nothing else"},
+		{"one value for both", "-", "-", testReadHandle + "\n", "must hold two lines"},
+		{"too long", "-", "", strings.Repeat("a", readStdinCap+1), "longer than"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd, _, stderr := newRunCmd(t)
+			cmd.SetIn(strings.NewReader(tc.stdin))
+			// No server: a bad standard input must fail before any network call.
+			err := runRead(cmd, readOptions{
+				ReadHandle: tc.handleArg, Cursor: tc.cursorFlag, Collection: "vmware",
+				Mode: "around", Before: 1, After: 1, BackplaneOverride: "http://127.0.0.1:1",
+			})
+			if got := exitCodeOf(t, err); got != output.ExitUnexpected {
+				t.Errorf("expected exit %d; got %d", output.ExitUnexpected, got)
+			}
+			if !strings.Contains(stderr.String(), tc.want) {
+				t.Errorf("expected %q in stderr; got %q", tc.want, stderr.String())
+			}
+			if strings.Contains(stderr.String(), testReadHandle) {
+				t.Errorf("the read handle must never be echoed; got %q", stderr.String())
+			}
+		})
+	}
+}

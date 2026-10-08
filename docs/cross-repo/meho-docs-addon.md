@@ -520,6 +520,11 @@ meho docs read '<read_handle>' --collection vmware
 meho docs read '<read_handle>' --collection vmware --mode page
 # Read on from the cursor the last read printed:
 meho docs read '<read_handle>' --collection vmware --cursor '<next>'
+# Or pass - to read the handle from standard input, so it stays out of
+# the shell history and the process list (--cursor - does the same):
+meho docs search "config maximums" --collection vmware --json \
+  | jq -r '.chunks[0].read_handle' \
+  | meho docs read - --collection vmware
 ```
 
 - A file whose owner allows only its link returns `text: null`,

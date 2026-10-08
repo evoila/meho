@@ -481,6 +481,7 @@ async def test_search_docs_routes_through_resolved_backend(_restore_registry: No
         "score",
         "score_kind",
         "collection",
+        "read_handle",
     }
     # The single-collection path leaves the provenance tag unset (the
     # collection is already implied by the request scope); it is only

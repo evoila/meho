@@ -392,6 +392,15 @@ class ToolDefinition(BaseModel):
     surface, which the provisional #2664 table does not classify).
     Explicit ``None`` stays greppable for the #2678 drift guard.
     MEHO-internal: dropped from the wire shape like the RBAC fields.
+
+    ``broadcast_omit_args`` (#3948) names argument keys the dispatcher never
+    puts on the broadcast feed. A ``tools/call`` with full-detail broadcast
+    otherwise copies the raw arguments into the event every co-tenant
+    subscriber reads; a tool whose argument is as sensitive as data the caller
+    is entitled to (``read_docs``'s ``read_handle`` carries a few words of a
+    hit) lists it here. The audit row is unaffected (it stores only the
+    arguments' hash). Empty by default. MEHO-internal: dropped from the wire
+    shape like the RBAC fields.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -407,6 +416,7 @@ class ToolDefinition(BaseModel):
     op_class: str = "read"
     required_capability: str | None = None
     required_addon_family: str | None = None
+    broadcast_omit_args: frozenset[str] = frozenset()
 
     @field_validator("feature")
     @classmethod

@@ -264,7 +264,11 @@ async def _search_one(
             soft_scope=None,
             limit=limit,
         )
-    return [_project_chunk(c, collection=collection.collection_key) for c in response.chunks]
+    readable = resolved.backend.supports_read(resolved.ref)
+    return [
+        _project_chunk(c, collection=collection.collection_key, readable=readable)
+        for c in response.chunks
+    ]
 
 
 async def search_docs_fanout(

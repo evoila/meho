@@ -46,6 +46,14 @@ to ``False``; the base :meth:`answer` raises :class:`NotImplementedError`. A
 backend without an answer endpoint keeps the backplane's own
 expand -> retrieve -> synthesize pipeline
 (:func:`~meho_backplane.docs_search.answer.answer_docs_question`).
+
+:meth:`read` is the optional read seam (#3948), added the same way: a
+backend whose service can return the text around a hit (the chunks before
+and after it, the whole page, or its section) serves ``read_docs``.
+:meth:`supports_read` gates it per collection and defaults to ``False``; the
+base :meth:`read` raises :class:`NotImplementedError`. For a collection
+without read, ``read_docs`` answers "not found" and every other face works as
+before.
 """
 
 from __future__ import annotations
@@ -57,7 +65,12 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from meho_backplane.auth.corpus import CorpusSearchResponse, UpstreamAnswer
+from meho_backplane.auth.corpus import (
+    CorpusSearchResponse,
+    ReadMode,
+    UpstreamAnswer,
+    UpstreamRead,
+)
 from meho_backplane.auth.operator import Operator
 
 __all__ = ["BackendReadiness", "SearchBackend"]
@@ -266,6 +279,56 @@ class SearchBackend(ABC):
                 :meth:`supports_answer`.
         """
         raise NotImplementedError(f"{type(self).__name__} does not implement answer()")
+
+    def supports_read(self, backend_ref: Mapping[str, Any] | None) -> bool:
+        """Whether :meth:`read` serves ``read_docs`` for *backend_ref* (#3948).
+
+        The per-collection opt-in for reading around a hit. The base default
+        is ``False``: a collection reads only when its adapter overrides both
+        this and :meth:`read`. Synchronous and network-free: it reads the
+        collection's ``backend.ref`` only.
+        """
+        return False
+
+    async def read(
+        self,
+        operator: Operator,
+        read_handle: str,
+        *,
+        backend_ref: Mapping[str, Any] | None = None,
+        mode: ReadMode = "around",
+        before: int = 1,
+        after: int = 1,
+        cursor: str | None = None,
+        filters: dict[str, Any] | None = None,
+    ) -> UpstreamRead:
+        """Read more around a hit, named by its *read_handle* (#3948).
+
+        Called only when :meth:`supports_read` is ``True`` for the
+        collection's ``backend.ref``.
+
+        Args:
+            operator: The verified operator. The adapter derives the per-person
+                caller id from it; it authenticates with its own service
+                credential.
+            read_handle: The opaque handle a search hit or a citation carried.
+                Passed on unchanged and never logged.
+            backend_ref: The collection's ``backend.ref``.
+            mode: ``around`` (the chunks before and after the hit), ``page``
+                (the whole page) or ``section`` (the hit's section).
+            before: Chunks before the hit for ``around``, 0-3.
+            after: Chunks after the hit for ``around``, 0-3.
+            cursor: The opaque ``next`` / ``up`` cursor of an earlier reply,
+                to read on. ``None`` reads from the hit.
+            filters: The hard ``{key: scalar}`` filters the hit's search sent
+                (#3912); the handle is bound to them. ``None`` sends none.
+
+        Raises:
+            NotImplementedError: the base default. An adapter that offers a
+                read endpoint overrides this together with
+                :meth:`supports_read`.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not implement read()")
 
     def is_configured(self) -> bool:
         """Whether this backend has the minimum config to answer at all.

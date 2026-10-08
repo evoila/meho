@@ -56,6 +56,22 @@ per-collection gates as search
 as the body's ``scope``, the hard filters as its ``filters``; with both gates
 off the body carries neither.
 
+Read around a hit (#3948)
+------------------------
+
+A collection opts in to the corpus's read endpoint with
+``backend.ref["read"] = "upstream"``; any other value, or no key, keeps read
+off and ``read_docs`` answers "not found". :meth:`CorpusHttpBackend.read`
+then calls :func:`~meho_backplane.auth.corpus.read_corpus` against:
+
+* ``backend.ref["read_endpoint"]`` when set, else
+* the collection's search endpoint (``endpoint`` / ``url``, else the legacy
+  ``settings.corpus_url``) with its last path segment replaced by ``read``
+  (:func:`~meho_backplane.auth.corpus.derive_read_url`).
+
+Same transport posture as search (SSRF screen, service credential, body never
+echoed, ``CORPUS_TIMEOUT_SECONDS``), plus the per-person caller header.
+
 Readiness + per-project rebuild serialization (T6 #1555)
 -------------------------------------------------------
 
@@ -83,17 +99,21 @@ from typing import Any
 
 from meho_backplane.auth.corpus import (
     CorpusSearchResponse,
+    ReadMode,
     UpstreamAnswer,
+    UpstreamRead,
     ask_corpus,
     corpus_status,
     derive_answer_url,
+    derive_read_url,
+    read_corpus,
     search_corpus,
 )
 from meho_backplane.auth.operator import Operator
 from meho_backplane.docs_search.backends.base import BackendReadiness, SearchBackend
 from meho_backplane.settings import get_settings
 
-__all__ = ["ANSWER_UPSTREAM", "CORPUS_HTTP_BACKEND_TYPE", "CorpusHttpBackend"]
+__all__ = ["ANSWER_UPSTREAM", "CORPUS_HTTP_BACKEND_TYPE", "READ_UPSTREAM", "CorpusHttpBackend"]
 
 #: The routing discriminator for the JWT-forward corpus client. A
 #: collection whose ``backend.type`` equals this string resolves to
@@ -105,6 +125,11 @@ CORPUS_HTTP_BACKEND_TYPE = "corpus-http"
 #: corpus's own grounded-answer endpoint (#3911). Exact match only; absent or
 #: any other value keeps the backplane's local answer pipeline.
 ANSWER_UPSTREAM = "upstream"
+
+#: The ``backend.ref["read"]`` value that opts a collection in to the corpus's
+#: read endpoint (#3948). Exact match only; absent or any other value keeps
+#: read off.
+READ_UPSTREAM = "upstream"
 
 
 class CorpusHttpBackend(SearchBackend):
@@ -205,6 +230,52 @@ class CorpusHttpBackend(SearchBackend):
             limit=limit,
             answer_url=answer_url,
             audience=audience,
+        )
+
+    def supports_read(self, backend_ref: Mapping[str, Any] | None) -> bool:
+        """Whether this collection opted in to the corpus's read endpoint (#3948).
+
+        ``True`` only for ``backend.ref["read"] == "upstream"``.
+        """
+        if not backend_ref:
+            return False
+        return backend_ref.get("read") == READ_UPSTREAM
+
+    async def read(
+        self,
+        operator: Operator,
+        read_handle: str,
+        *,
+        backend_ref: Mapping[str, Any] | None = None,
+        mode: ReadMode = "around",
+        before: int = 1,
+        after: int = 1,
+        cursor: str | None = None,
+        filters: dict[str, Any] | None = None,
+    ) -> UpstreamRead:
+        """Read around a hit from this collection's corpus read endpoint.
+
+        The endpoint is ``backend.ref["read_endpoint"]`` when set, else the
+        resolved search endpoint (ref, else the legacy ``settings.corpus_url``)
+        with its last path segment replaced by ``read``. Delegates to
+        :func:`~meho_backplane.auth.corpus.read_corpus`, which raises
+        :class:`~meho_backplane.auth.corpus.CorpusUnavailable` /
+        :class:`~meho_backplane.auth.corpus.CorpusReadError`.
+        """
+        endpoint, _audience = _resolve_endpoint_audience(backend_ref)
+        read_url = _str_or_none(backend_ref.get("read_endpoint")) if backend_ref else None
+        if read_url is None:
+            search_url = endpoint if endpoint is not None else get_settings().corpus_url
+            read_url = derive_read_url(search_url) if search_url else None
+        return await read_corpus(
+            operator,
+            read_handle,
+            mode=mode,
+            before=before,
+            after=after,
+            cursor=cursor,
+            filters=filters,
+            read_url=read_url,
         )
 
     async def probe(

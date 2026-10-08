@@ -31,7 +31,11 @@
                           (KB / http(s)) or a non-clickable label -- never a broken
                           gs:// href. An entry also carries ``citation_number``
                           (its 1-based ``[k]``) when the answer was composed by
-                          the collection's backend and its markers cite the cards.
+                          the collection's backend and its markers cite the cards,
+                          and ``read_href`` (the cited-source route its "read
+                          around this hit" form posts to) when the chunk carries
+                          a ``read_handle``.
+    csrf_token         -- str | unset: the double-submit token the read form posts.
     searched           -- bool: whether a query actually ran
     error_status       -- int | unset: HTTP status of a search failure
     error_message      -- str | unset: human detail of the failure
@@ -159,6 +163,23 @@
               <span x-show="expanded" x-cloak>Show less</span>
             </button>
           </div>
+          {#- Read around this hit (#3948): only when the chunk carries a read
+              handle, i.e. its collection offers read. A plain form POST to the
+              cited-source page: the opaque handle rides the form body, never
+              the URL, so no access log, browser history or Referer keeps it.
+              The CSRF token rides as the ``csrf_token`` form field. -#}
+          {% set read_href = entry.read_href | default(none, true) %}
+          {% if read_href %}
+            <form method="post" action="{{ read_href }}" class="self-start">
+              <input type="hidden" name="read_handle" value="{{ chunk.read_handle }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token | default('') }}">
+              <button
+                type="submit"
+                class="btn btn-ghost btn-xs px-1"
+                aria-label="Read the text around this hit"
+              >Read around this hit</button>
+            </form>
+          {% endif %}
         </div>
       </li>
     {% endfor %}

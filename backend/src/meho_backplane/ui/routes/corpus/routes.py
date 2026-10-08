@@ -337,6 +337,8 @@ def _resolve_search_csrf(request: Request, session_id: str) -> tuple[str, bool]:
 def corpus_ask_fallback_context(
     answer_error: AskDocsAnswerError,
     chunks: list[DocsChunk],
+    *,
+    collection_key: str | None = None,
 ) -> dict[str, object]:
     """Build the fail-open-to-chunks context when ``ask_docs`` synthesis fails.
 
@@ -368,12 +370,15 @@ def corpus_ask_fallback_context(
     synthesis leg to fail open from). It is added now so the answer-error
     model (#1918) and the UI render are wired together in one place rather
     than re-derived when #1917 lands the Ask toggle.
+
+    *collection_key* (#3948) lets a card whose chunk carries a ``read_handle``
+    offer the "read around this hit" form (:func:`_cited_chunks`).
     """
     return {
         "ask_fallback_leg": answer_error.leg,
         "ask_fallback_cause": answer_error.cause,
         "ask_fallback_message": str(answer_error),
-        "cited": _cited_chunks(chunks),
+        "cited": _cited_chunks(chunks, collection_key=collection_key),
     }
 
 
@@ -534,7 +539,25 @@ def _internal_chunk_href(source_url: str | None) -> str | None:
     return f"/ui/corpus/chunks/{quote(collection, safe='')}/{quote(chunk_id, safe='/')}"
 
 
-def _cited_chunks(chunks: list[DocsChunk], *, numbered: bool = False) -> list[dict[str, object]]:
+def _internal_read_href(collection_key: str | None, chunk: DocsChunk) -> str | None:
+    """The cited-source route a "read around this hit" form posts to (#3948).
+
+    Set only when the chunk carries a ``read_handle`` (the collection offers
+    read) and the collection key is known. The handle itself travels in the
+    form body, never in the URL, so it reaches no access log, browser history
+    or ``Referer`` header.
+    """
+    if not collection_key or not chunk.read_handle:
+        return None
+    return f"/ui/corpus/chunks/{quote(collection_key, safe='')}/{quote(chunk.chunk_id, safe='/')}"
+
+
+def _cited_chunks(
+    chunks: list[DocsChunk],
+    *,
+    numbered: bool = False,
+    collection_key: str | None = None,
+) -> list[dict[str, object]]:
     """Pair each cited chunk with its resolved link + internal view-source href.
 
     Each chunk's ``source_url`` is, for the GCS-backed vendor corpus, a raw
@@ -563,6 +586,11 @@ def _cited_chunks(chunks: list[DocsChunk], *, numbered: bool = False) -> list[di
     upstream-composed answer's markers point at (#3911), so each card carries
     the number its claims cite. Off everywhere else, where the entries (and
     the render) are unchanged.
+
+    *collection_key* (#3948) adds a ``read_href`` per entry whose chunk
+    carries a ``read_handle``: the cited-source route the card's "read around
+    this hit" form posts to (:func:`_internal_read_href`). ``read_href`` is
+    always a key (``None`` when not applicable).
     """
     entries: list[dict[str, object]] = []
     for number, chunk in enumerate(chunks, start=1):
@@ -572,6 +600,7 @@ def _cited_chunks(chunks: list[DocsChunk], *, numbered: bool = False) -> list[di
                 chunk.source_url, title=chunk.title, document_id=chunk.document_id
             ),
             "view_href": _internal_chunk_href(chunk.source_url),
+            "read_href": _internal_read_href(collection_key, chunk),
         }
         if numbered:
             entry["citation_number"] = number
@@ -652,7 +681,7 @@ async def _search_result_context(
         chunks = await _run_search(operator, query, collection_key)
     except HTTPException as exc:
         return _search_or_error_context(exc)
-    return {"cited": _cited_chunks(chunks)}
+    return {"cited": _cited_chunks(chunks, collection_key=collection_key)}
 
 
 async def _ask_result_context(
@@ -744,13 +773,17 @@ async def _ask_result_context(
             cause=outcome.error.cause,
             retrieved_chunk_count=len(fallback_chunks),
         )
-        return corpus_ask_fallback_context(outcome.error, fallback_chunks)
+        return corpus_ask_fallback_context(
+            outcome.error, fallback_chunks, collection_key=docs_scope.collection_key
+        )
 
     # No leg error -> the success outcome always carries a grounded answer
     # (the AskPipelineOutcome contract: exactly one of answer / error is set).
     assert outcome.answer is not None
     return _ask_answer_context(
-        outcome.answer, numbered=outcome.answer_source == ANSWER_SOURCE_UPSTREAM
+        outcome.answer,
+        numbered=outcome.answer_source == ANSWER_SOURCE_UPSTREAM,
+        collection_key=docs_scope.collection_key,
     )
 
 
@@ -786,7 +819,12 @@ async def _fallback_search_chunks(
     return list(result.chunks)
 
 
-def _ask_answer_context(answer: DocsAnswer, *, numbered: bool = False) -> dict[str, object]:
+def _ask_answer_context(
+    answer: DocsAnswer,
+    *,
+    numbered: bool = False,
+    collection_key: str | None = None,
+) -> dict[str, object]:
     """Build the success-path ask context: the grounded answer + citations.
 
     ``answer`` is the prose (or the deterministic "no grounded answer" string
@@ -798,7 +836,7 @@ def _ask_answer_context(answer: DocsAnswer, *, numbered: bool = False) -> dict[s
     """
     return {
         "answer": answer.answer,
-        "cited": _cited_chunks(answer.citations, numbered=numbered),
+        "cited": _cited_chunks(answer.citations, numbered=numbered, collection_key=collection_key),
     }
 
 

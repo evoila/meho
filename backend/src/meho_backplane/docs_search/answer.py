@@ -273,7 +273,11 @@ async def _answer_upstream(
         _log_upstream_failure(operator, scope, forwarded, error)
         return AskPipelineOutcome(error=error, answer_source=ANSWER_SOURCE_UPSTREAM)
 
-    hits = [_project_chunk(hit, collection_key=scope.collection_key) for hit in upstream.hits]
+    readable = resolved.backend.supports_read(resolved.ref)
+    hits = [
+        _project_chunk(hit, collection_key=scope.collection_key, readable=readable)
+        for hit in upstream.hits
+    ]
     try:
         answer = _map_upstream_answer(upstream, hits)
     except DocsSynthesisError as exc:

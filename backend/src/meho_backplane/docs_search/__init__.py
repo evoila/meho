@@ -77,6 +77,16 @@ from meho_backplane.docs_search.fanout import (
     rrf_merge,
     search_docs_fanout,
 )
+from meho_backplane.docs_search.read import (
+    DOCS_SOURCE_NOT_FOUND,
+    DocsReadError,
+    DocsReadNotFoundError,
+    DocsReadRateLimitedError,
+    DocsReadResult,
+    DocsReadSearchAgainError,
+    read_docs,
+    resolve_readable_collection,
+)
 from meho_backplane.docs_search.service import (
     DocsChunk,
     DocsScope,
@@ -98,6 +108,7 @@ from meho_backplane.docs_search.synthesis import (
 
 __all__ = [
     "ANSWER_ERROR_DETAIL",
+    "DOCS_SOURCE_NOT_FOUND",
     "LEG_CORPUS",
     "LEG_EXPAND",
     "LEG_MODEL",
@@ -115,6 +126,11 @@ __all__ = [
     "DocsAnswer",
     "DocsChunk",
     "DocsQueryExpansionError",
+    "DocsReadError",
+    "DocsReadNotFoundError",
+    "DocsReadRateLimitedError",
+    "DocsReadResult",
+    "DocsReadSearchAgainError",
     "DocsScope",
     "DocsSearchResult",
     "DocsSynthesisError",
@@ -132,11 +148,13 @@ __all__ = [
     "forwarded_scope",
     "normalize_source_ref",
     "parse_collection_scope",
+    "read_docs",
     "resolve_backend",
     "resolve_backend_or_label",
     "resolve_citation_link",
     "resolve_entitled_ready_collection",
     "resolve_entitled_ready_collections",
+    "resolve_readable_collection",
     "retrieval_is_grounded",
     "retrieve_multi_query",
     "rrf_merge",

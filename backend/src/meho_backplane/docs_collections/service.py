@@ -235,8 +235,9 @@ async def _screen_backend_endpoint(backend: DocCollectionBackend) -> None:
     ``https`` scheme + a public, allowlist-aware host — the same
     :func:`~meho_backplane.targets.ssrf_guard.assert_public_destination_async`
     the connector target dial uses. An explicit ``answer_endpoint`` (#3911,
-    the opted-in answer endpoint) is a dialed URL too and is screened the same
-    way. Absent endpoint (the legacy global
+    the opted-in answer endpoint) or ``read_endpoint`` (#3948, the opted-in
+    read endpoint) is a dialed URL too and is screened the same way. Absent
+    endpoint (the legacy global
     ``settings.corpus_url`` deploy, or a deliberate ``ref={}`` repoint that
     falls back to it) is nothing to screen here; that global is
     deployment-owned and screened at dial time. Only ``corpus-http`` names a
@@ -246,7 +247,12 @@ async def _screen_backend_endpoint(backend: DocCollectionBackend) -> None:
     if backend.type != CORPUS_HTTP_BACKEND_TYPE:
         return
     ref = backend.ref
-    for raw in (ref.get("endpoint") or ref.get("url"), ref.get("answer_endpoint")):
+    dialed = (
+        ref.get("endpoint") or ref.get("url"),
+        ref.get("answer_endpoint"),
+        ref.get("read_endpoint"),
+    )
+    for raw in dialed:
         endpoint = raw.strip() if isinstance(raw, str) else None
         if not endpoint:
             continue
@@ -377,19 +383,23 @@ async def _apply_backend_repoint(
     return True
 
 
-#: ``backend.ref`` keys that select *how* ``ask_docs`` answers (#3911), not
-#: *which* corpus the collection reads: the upstream-answer opt-in and its
-#: explicit endpoint. Changing only these leaves the probed liveness valid.
-_ANSWER_REF_KEYS: Final[frozenset[str]] = frozenset({"answer", "answer_endpoint"})
+#: ``backend.ref`` keys that turn on an optional backend method, not *which*
+#: corpus the collection reads: the upstream-answer opt-in and its explicit
+#: endpoint (#3911), and the read opt-in and its explicit endpoint (#3948).
+#: Changing only these leaves the probed liveness valid.
+_ANSWER_REF_KEYS: Final[frozenset[str]] = frozenset(
+    {"answer", "answer_endpoint", "read", "read_endpoint"}
+)
 
 
 def _is_answer_only_change(previous: object, current: Mapping[str, Any]) -> bool:
-    """Whether a backend repoint changed only the answer opt-in keys (#3911).
+    """Whether a backend repoint changed only the opt-in keys (#3911, #3948).
 
     ``True`` when the backend ``type`` is the same and every ``ref`` key that
     differs is in :data:`_ANSWER_REF_KEYS`. Such an update toggles where
-    ``ask_docs`` answers come from, not the corpus the readiness probe
-    checked, so it must not reset the row to ``provisioning``. A change to
+    ``ask_docs`` answers come from or whether ``read_docs`` may read, not the
+    corpus the readiness probe checked, so it must not reset the row to
+    ``provisioning``. A change to
     the type, endpoint, audience or any other ref key still does.
     """
     if not isinstance(previous, Mapping) or previous.get("type") != current.get("type"):
@@ -445,8 +455,9 @@ async def update_doc_collection(
     any field validation. A supplied ``backend`` runs the create path's
     registry + endpoint screen (:func:`_apply_backend_repoint`) and, on an
     actual change, resets readiness (:func:`_reset_readiness_after_repoint`)
-    -- unless only the ``answer`` / ``answer_endpoint`` opt-in keys changed
-    (#3911), which keeps ``status`` + liveness like a metadata-only change. The caller
+    -- unless only the ``answer`` / ``answer_endpoint`` (#3911) or ``read`` /
+    ``read_endpoint`` (#3948) opt-in keys changed, which keeps ``status`` +
+    liveness like a metadata-only change. The caller
     owns the transaction (the route's ``session.begin()``); this flushes but
     does not commit, so a downstream failure rolls the update back.
     """

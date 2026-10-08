@@ -70,6 +70,7 @@ __all__ = [
     "citation_link_payload",
     "derive_chunk_title",
     "normalize_source_ref",
+    "public_source_url",
     "resolve_citation_link",
 ]
 
@@ -511,11 +512,35 @@ def normalize_source_ref(
         ``http(s)`` URL, or an opaque ``meho://docs/<collection>/<chunk_id>``.
         Never a ``gs://`` (or other backend-scheme) path.
     """
+    public = public_source_url(
+        source_url, title=title, document_id=document_id, upstream_url=upstream_url
+    )
+    if public is not None:
+        return public
+    collection = (collection_key or "").strip() or _UNKNOWN_COLLECTION_SEGMENT
+    return f"{_MEHO_DOCS_REF_SCHEME}://docs/{collection}/{chunk_id}"
+
+
+def public_source_url(
+    source_url: str | None,
+    *,
+    title: str | None = None,
+    document_id: str | None = None,
+    upstream_url: str | None = None,
+) -> str | None:
+    """Return the public ``http(s)`` link for a source, or ``None``.
+
+    The public half of :func:`normalize_source_ref`, with the same order: an
+    ``https`` *source_url* as it is; else a usable *upstream_url*; else the
+    canonical URL :func:`resolve_citation_link` derives (a KB article, an
+    ``http(s)`` source). ``None`` when there is no public link. A storage path
+    (``gs://``) is never returned.
+
+    ``read_docs`` (#3948) uses it directly: a read reply has no chunk id to
+    build an opaque ``meho://`` reference from, so a source without a public
+    link is simply ``None`` there.
+    """
     upstream = web_link_or_none(upstream_url)
     if upstream is not None and _scheme_of(source_url) != "https":
         return upstream
-    link = resolve_citation_link(source_url, title=title, document_id=document_id)
-    if link.href is not None:
-        return link.href
-    collection = (collection_key or "").strip() or _UNKNOWN_COLLECTION_SEGMENT
-    return f"{_MEHO_DOCS_REF_SCHEME}://docs/{collection}/{chunk_id}"
+    return resolve_citation_link(source_url, title=title, document_id=document_id).href

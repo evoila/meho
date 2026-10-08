@@ -60,15 +60,17 @@ from tests.mcp_test_fixtures import (
 
 _DOCS_CAPABILITY = "meho-docs"
 
-#: The three working-surface docs tools — visible only to a session that
+#: The four working-surface docs tools — visible only to a session that
 #: ALSO holds the ``meho-docs`` capability. These are the docs entries that
 #: drop out of the *default* working surface when the capability is absent.
-_DOCS_WORKING_TOOLS: frozenset[str] = frozenset({"search_docs", "ask_docs", "list_doc_collections"})
+_DOCS_WORKING_TOOLS: frozenset[str] = frozenset(
+    {"search_docs", "ask_docs", "list_doc_collections", "read_docs"}
+)
 
-#: Every ``meho-docs``-capability-gated tool across BOTH surfaces: the three
+#: Every ``meho-docs``-capability-gated tool across BOTH surfaces: the four
 #: working docs tools plus the three operator-surface doc-collection lifecycle
 #: tools. These all drop out when the capability is absent, regardless of
-#: elevation — so an elevated session without ``meho-docs`` loses all six.
+#: elevation — so an elevated session without ``meho-docs`` loses all seven.
 _DOCS_CAP_GATED: frozenset[str] = _DOCS_WORKING_TOOLS | {
     "create_doc_collections",
     "delete_doc_collections",
@@ -114,6 +116,7 @@ _WORKING_SURFACE: frozenset[str] = frozenset(
         "meho_status",
         "preview_operation",
         "query_topology",
+        "read_docs",
         "result_query",
         "search_docs",
         "search_knowledge",
@@ -362,8 +365,8 @@ def test_docs_capability_composes_with_surface_when_elevated() -> None:
 
     Both gates apply independently: the ``mcp:admin`` scope opens the
     operator planes, but the ``meho-docs`` capability gate still hides
-    every docs tool across both surfaces (the three working docs tools
-    plus the two operator-surface doc-collection lifecycle tools).
+    every docs tool across both surfaces (the four working docs tools
+    plus the three operator-surface doc-collection lifecycle tools).
     """
     op = _operator(role=TenantRole.TENANT_ADMIN, scopes=frozenset({MCP_ADMIN_SCOPE}))
     names = {defn.name for defn in all_tools_for(op)}
@@ -375,7 +378,7 @@ def test_docs_capability_composes_with_surface_when_default() -> None:
     """AC3: a non-elevated session without ``meho-docs`` sees working minus docs.
 
     The operator-surface doc-collection lifecycle tools are already hidden
-    by the surface gate, so only the three working docs tools drop out.
+    by the surface gate, so only the four working docs tools drop out.
     """
     op = _operator(role=TenantRole.TENANT_ADMIN)
     names = {defn.name for defn in all_tools_for(op)}

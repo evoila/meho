@@ -102,6 +102,7 @@ from meho_backplane.api.v1.kb import router as api_v1_kb_router
 from meho_backplane.api.v1.memory import router as api_v1_memory_router
 from meho_backplane.api.v1.operation_runs import router as api_v1_operation_runs_router
 from meho_backplane.api.v1.operations import router as api_v1_operations_router
+from meho_backplane.api.v1.read_docs import router as api_v1_read_docs_router
 from meho_backplane.api.v1.retrieve import router as api_v1_retrieve_router
 from meho_backplane.api.v1.retrieve_eval import router as api_v1_retrieve_eval_router
 from meho_backplane.api.v1.retrieve_retire import router as api_v1_retrieve_retire_router
@@ -874,6 +875,12 @@ app.include_router(api_v1_search_docs_router)
 # `error.data`. Binds the central audit row under the canonical
 # `meho.docs.ask` op_id + `read` class.
 app.include_router(api_v1_ask_docs_router)
+# #3948 -- read more around a docs hit at `POST /api/v1/read_docs`: the text
+# before and after it, the whole page, or its section, through the opaque
+# `read_handle` a hit or citation carries. Same operator role and
+# per-collection gate as `search_docs`, but every refusal is one 404 (no
+# probe for which collections exist). Audited under `meho.docs.read`.
+app.include_router(api_v1_read_docs_router)
 # G4.6-T6 (#1555) — doc-collection readiness probe + lifecycle. Tenant-
 # admin-gated probe (success-only write-back of liveness onto the row,
 # mirroring probe_target → Target.fingerprint) + enable/disable

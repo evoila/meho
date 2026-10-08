@@ -150,6 +150,7 @@ def _seed_collection(
     status_value: str = "ready",
     tenant_id: uuid.UUID | None = None,
     vendor: str = "VMware by Broadcom",
+    backend: dict[str, object] | None = None,
 ) -> None:
     async def _do() -> None:
         sessionmaker = get_sessionmaker()
@@ -162,7 +163,7 @@ def _seed_collection(
                     products=["vsphere"],
                     description=f"{vendor} docs.",
                     when_to_use="Vendor product questions.",
-                    backend={"type": "corpus-http"},
+                    backend=backend if backend is not None else {"type": "corpus-http"},
                     status=status_value,
                 ),
             )
@@ -225,6 +226,7 @@ def _chunk(
     source_url: str | None = _MEHO_REF,
     score: float | None = 0.71,
     collection: str | None = None,
+    read_handle: str | None = None,
 ) -> DocsChunk:
     return DocsChunk(
         chunk_id=chunk_id,
@@ -233,6 +235,7 @@ def _chunk(
         source_url=source_url,
         score=score,
         collection=collection,
+        read_handle=read_handle,
     )
 
 
@@ -480,3 +483,288 @@ def test_chunk_detail_unauthenticated_redirects_to_login() -> None:
 
     assert response.status_code == 302
     assert response.headers["location"].startswith("/ui/auth/login?return_to=")
+
+
+# ---------------------------------------------------------------------------
+# Read around the hit (#3948)
+# ---------------------------------------------------------------------------
+
+#: The ``corpus-http`` adapter's read transport seam.
+_READ_SEAM = "meho_backplane.docs_search.backends.corpus_http.read_corpus"
+_READ_ON: dict[str, object] = {"type": "corpus-http", "ref": {"read": "upstream"}}
+_HANDLE = "eyJ2IjoxfQ.dWktaGFuZGxl"
+_ENTITLED = frozenset({"meho-docs", "meho-docs:vmware"})
+
+
+class _FakeRead:
+    """A recording ``read_corpus`` stand-in."""
+
+    def __init__(self, result: dict[str, object] | Exception) -> None:
+        self._result = result
+        self.calls: list[dict[str, object]] = []
+
+    async def __call__(self, operator: Operator, read_handle: str, **kwargs: object) -> object:
+        from meho_backplane.auth.corpus import UpstreamRead
+
+        self.calls.append({"read_handle": read_handle, **kwargs})
+        if isinstance(self._result, Exception):
+            raise self._result
+        return UpstreamRead.model_validate(self._result)
+
+
+_READ_REPLY: dict[str, object] = {
+    "mode": "around",
+    "text": "Before the hit.\n<script>alert(1)</script> The hit.\nAfter the hit.",
+    "title": "NSX overlay guide",
+    "source_uri": "gs://private-bucket/docs/nsx.html",
+    "upstream_url": "https://docs.vmware.test/nsx-overlay",
+    "disclosure": "full",
+    "truncated": True,
+    "next": "next-cursor-1",
+}
+
+
+def _post_read(
+    session_id: uuid.UUID,
+    operator: Operator,
+    fake: _FakeRead,
+    *,
+    data: dict[str, str],
+    with_csrf: bool = True,
+) -> object:
+    csrf = _csrf_token(session_id)
+    form = dict(data)
+    if with_csrf:
+        form["csrf_token"] = csrf
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR_DETAIL, new_callable=AsyncMock, return_value=operator),
+            patch(_READ_SEAM, new=fake),
+        ):
+            return client.post(_INTERNAL_HREF, data=form)
+
+
+def test_result_card_offers_read_form_only_with_a_read_handle() -> None:
+    """A card whose chunk carries a handle posts it in the form body, never the URL."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_collection(collection_key="vmware", backend=_READ_ON)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, capabilities=_ENTITLED)
+    body = _post_search(
+        session_id,
+        operator,
+        result=DocsSearchResult(
+            chunks=[
+                _chunk(chunk_id="c-2", read_handle=_HANDLE),
+                _chunk(chunk_id="c-3", source_url="https://docs.vmware.test/x"),
+            ]
+        ),
+    )
+    assert f'action="{_INTERNAL_HREF}"' in body
+    assert f'name="read_handle" value="{_HANDLE}"' in body
+    assert 'name="csrf_token"' in body
+    assert "Read around this hit" in body
+    # One form only: the chunk without a handle gets none.
+    assert body.count("Read around this hit</button>") == 1
+    # The handle appears once, in the hidden form field: never in a URL.
+    assert body.count(_HANDLE) == 1
+
+
+def test_read_post_shows_escaped_text_and_more_form() -> None:
+    """A read-enabled collection shows the text (escaped) and a "Show more" form."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_collection(collection_key="vmware", backend=_READ_ON)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, capabilities=_ENTITLED)
+    fake = _FakeRead(_READ_REPLY)
+
+    response = _post_read(session_id, operator, fake, data={"read_handle": _HANDLE})
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "Text around this hit" in body
+    assert "The hit." in body
+    # HTML-escaped, never rendered as markup.
+    assert "<script>alert(1)</script>" not in body
+    assert "&lt;script&gt;" in body
+    assert 'href="https://docs.vmware.test/nsx-overlay"' in body
+    assert "gs://" not in body
+    assert "cut at the size limit" in body
+    # "Show more" posts the same handle with the next cursor.
+    assert 'name="cursor" value="next-cursor-1"' in body
+    assert f'name="read_handle" value="{_HANDLE}"' in body
+    assert "Show more" in body
+    # Provenance stays on the page.
+    assert _MEHO_REF in body
+    (call,) = fake.calls
+    assert call["read_handle"] == _HANDLE
+    assert call["cursor"] is None
+
+
+def test_read_post_sends_the_cursor_for_show_more() -> None:
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_collection(collection_key="vmware", backend=_READ_ON)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, capabilities=_ENTITLED)
+    fake = _FakeRead({**_READ_REPLY, "next": None})
+
+    response = _post_read(
+        session_id, operator, fake, data={"read_handle": _HANDLE, "cursor": "next-cursor-1"}
+    )
+
+    assert response.status_code == 200, response.text
+    assert fake.calls[0]["cursor"] == "next-cursor-1"
+    assert "Show more" not in response.text
+
+
+def test_read_post_without_read_shows_provenance_and_a_neutral_note() -> None:
+    """A collection without read keeps today's provenance view, plus one note."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_collection(collection_key="vmware")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, capabilities=_ENTITLED)
+    fake = _FakeRead(_READ_REPLY)
+
+    response = _post_read(session_id, operator, fake, data={"read_handle": _HANDLE})
+
+    assert response.status_code == 200, response.text
+    assert "The text around this hit is not available." in response.text
+    assert _MEHO_REF in response.text
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize(
+    ("kind", "retry_after", "note"),
+    [
+        ("not_found", None, "The text around this hit is not available."),
+        ("search_again", None, "Run the search again"),
+        ("rate_limited", 5, "Wait 5 seconds and try again."),
+    ],
+)
+def test_read_post_refusals_show_plain_notes(kind: str, retry_after: int | None, note: str) -> None:
+    from meho_backplane.auth.corpus import CorpusReadError
+
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_collection(collection_key="vmware", backend=_READ_ON)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, capabilities=_ENTITLED)
+    fake = _FakeRead(CorpusReadError("x", kind=kind, status=400, retry_after=retry_after))
+
+    response = _post_read(session_id, operator, fake, data={"read_handle": _HANDLE})
+
+    assert response.status_code == 200, response.text
+    assert note in response.text
+
+
+def test_read_post_link_only_file_shows_only_the_link() -> None:
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_collection(collection_key="vmware", backend=_READ_ON)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, capabilities=_ENTITLED)
+    fake = _FakeRead(
+        {**_READ_REPLY, "disclosure": "link", "reason": "link_only", "text": "hidden words"}
+    )
+
+    response = _post_read(session_id, operator, fake, data={"read_handle": _HANDLE})
+
+    body = response.text
+    assert "allows only its link" in body
+    assert "hidden words" not in body
+    assert 'href="https://docs.vmware.test/nsx-overlay"' in body
+
+
+def test_read_post_requires_csrf() -> None:
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_collection(collection_key="vmware", backend=_READ_ON)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, capabilities=_ENTITLED)
+    fake = _FakeRead(_READ_REPLY)
+
+    response = _post_read(
+        session_id, operator, fake, data={"read_handle": _HANDLE}, with_csrf=False
+    )
+
+    assert response.status_code == 403
+    assert fake.calls == []
+
+
+def test_read_post_keeps_the_entitlement_gate() -> None:
+    """A not-entitled person gets the GET view's 403, not the neutral note."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_collection(collection_key="vmware", backend=_READ_ON)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, capabilities=frozenset({"meho-docs"}))
+    fake = _FakeRead(_READ_REPLY)
+
+    response = _post_read(session_id, operator, fake, data={"read_handle": _HANDLE})
+
+    assert response.status_code == 403
+    # The same 403 as the GET view on this URL: it names the missing
+    # capability (docs/codebase/docs-search.md, "The not-found rule").
+    assert response.json()["detail"]["required_capability"] == "meho-docs:vmware"
+    assert fake.calls == []
+
+
+def test_read_post_unknown_collection_keeps_the_page_404() -> None:
+    """An unknown collection gets the GET view's 404 before any read."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(
+        tenant_id=_TENANT_A,
+        capabilities=frozenset({"meho-docs", "meho-docs:ghost"}),
+    )
+    fake = _FakeRead(_READ_REPLY)
+    csrf = _csrf_token(session_id)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR_DETAIL, new_callable=AsyncMock, return_value=operator),
+            patch(_READ_SEAM, new=fake),
+        ):
+            response = client.post(
+                "/ui/corpus/chunks/ghost/c-9",
+                data={"read_handle": _HANDLE, "csrf_token": csrf},
+            )
+
+    assert response.status_code == 404, response.text
+    assert fake.calls == []
+
+
+def test_read_post_disabled_collection_shows_the_neutral_note() -> None:
+    """A refusal after the page gate (here: a disabled collection) is the one note."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_collection(collection_key="vmware", backend=_READ_ON, status_value="disabled")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, capabilities=_ENTITLED)
+    fake = _FakeRead(_READ_REPLY)
+
+    response = _post_read(session_id, operator, fake, data={"read_handle": _HANDLE})
+
+    assert response.status_code == 200, response.text
+    assert "The text around this hit is not available." in response.text
+    assert fake.calls == []
+
+
+def test_get_detail_stays_provenance_only_for_a_read_collection() -> None:
+    """The GET view does not read: today's provenance-only page."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_collection(collection_key="vmware", backend=_READ_ON)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, capabilities=_ENTITLED)
+    fake = _FakeRead(_READ_REPLY)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with (
+            patch(_RESOLVE_OPERATOR_DETAIL, new_callable=AsyncMock, return_value=operator),
+            patch(_READ_SEAM, new=fake),
+        ):
+            response = client.get(_INTERNAL_HREF)
+
+    assert response.status_code == 200
+    assert "Text around this hit" not in response.text
+    assert fake.calls == []

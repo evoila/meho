@@ -562,6 +562,65 @@
         }
       }
     },
+    "/api/v1/read_docs": {
+      "post": {
+        "tags": [
+          "docs"
+        ],
+        "summary": "Read Docs Endpoint",
+        "description": "Read the text around a docs hit, the whole page or the hit's section.",
+        "operationId": "read_docs_endpoint_api_v1_read_docs_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReadDocsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocsReadResult"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Every read refusal, with one fixed body: an unknown, not-entitled or disabled collection, a collection without read, or a read handle the backend refuses. The body never says which."
+          },
+          "409": {
+            "description": "The read handle is too old or the page changed (`detail.error = 'search_again'`). Search again and use the new handle."
+          },
+          "422": {
+            "description": "A malformed body, or no `collection`."
+          },
+          "429": {
+            "description": "Too many reads by this person (`detail.error = 'rate_limited'`). `Retry-After` gives the seconds to wait when known."
+          },
+          "503": {
+            "description": "The collection is still provisioning / rebuilding (`detail.error = 'collection_not_ready'`) or its backend is unavailable (`detail.error = 'read_unavailable'`). Retryable."
+          }
+        }
+      }
+    },
     "/api/v1/doc_collections": {
       "get": {
         "tags": [
@@ -17779,6 +17838,65 @@
             }
           }
         }
+      },
+      "post": {
+        "tags": [
+          "ui-corpus"
+        ],
+        "summary": "Ui Corpus Chunk Read",
+        "description": "``POST /ui/corpus/chunks/{collection_key}/{chunk_id}`` \u2014 read around the hit.",
+        "operationId": "ui_corpus_chunk_read_ui_corpus_chunks__collection_key___chunk_id__post",
+        "parameters": [
+          {
+            "name": "collection_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Collection Key"
+            }
+          },
+          {
+            "name": "chunk_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Chunk Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ui_corpus_chunk_read_ui_corpus_chunks__collection_key___chunk_id__post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/ui/corpus": {
@@ -24946,6 +25064,24 @@
         "type": "object",
         "title": "Body_ui_conventions_preview_ui_conventions_preview_post"
       },
+      "Body_ui_corpus_chunk_read_ui_corpus_chunks__collection_key___chunk_id__post": {
+        "properties": {
+          "read_handle": {
+            "type": "string",
+            "maxLength": 8192,
+            "title": "Read Handle",
+            "default": ""
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 8192,
+            "title": "Cursor",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_ui_corpus_chunk_read_ui_corpus_chunks__collection_key___chunk_id__post"
+      },
       "Body_ui_corpus_collections_register_submit_ui_corpus_collections_register_post": {
         "properties": {
           "collection_key": {
@@ -27770,6 +27906,11 @@
             "type": "string",
             "nullable": true,
             "title": "Collection"
+          },
+          "read_handle": {
+            "type": "string",
+            "nullable": true,
+            "title": "Read Handle"
           }
         },
         "type": "object",
@@ -27778,7 +27919,80 @@
           "content"
         ],
         "title": "DocsChunk",
-        "description": "One cited chunk in MEHO's ``search_docs`` response surface.\n\nA stable projection of the corpus's :class:`~meho_backplane.auth.corpus.CorpusChunk`\ninto the shape the MCP tool (T4) and CLI (T5) render: chunk text +\nsource citation + score. Decoupling MEHO's surface from the corpus's\nwire contract means a corpus field rename doesn't churn the public\n``search_docs`` response; the projection in :func:`_project_chunk` is\nthe one place that mapping lives.\n\n``collection`` is the **provenance** tag (G4.6-T5 #1554): which\ncollection the chunk came from. It is ``None`` on the single-collection\npath (the collection is already implied by the request scope) and set\nto the source collection key on the cross-collection fan-out path so an\nagent fusing hits from several collections can attribute each chunk.\n\n``document_id`` is ``str | None`` (#2004): it mirrors the corpus's own\noptional owning-document id (``None`` when the corpus has no document\nconcept for a chunk) and is only read as a citation-label fallback.\n\n``title`` is the **optional** human-legible chunk title (#2475). It is\nthe corpus's own ``title`` when it sends one, else a title derived from\nthe hit's page identity (#3913): its section (last heading or breadcrumb\ntail) joined with its page name (the humanised filename), by\n:func:`~meho_backplane.docs_search.citation_links.derive_chunk_title`.\nIt is the *preferred* citation label \u2014 every citation face\n(``ask_docs``, ``/ui/corpus``) feeds it to the ``title -> document_id ->\nfilename -> URL`` label chain \u2014 and the local synthesis prompt shows it\non each evidence line. ``None`` when the corpus sends neither a title\nnor any page identity.\n\n``source_url`` is the **backend-agnostic** citation reference (#132): a\ncanonical public URL where one is derivable, else an opaque\n``meho://docs/<collection>/<chunk_id>`` ref. It is **never** the corpus's\nraw ``gs://`` object path \u2014 the projection in :func:`_project_chunk`\nnormalizes it via\n:func:`~meho_backplane.docs_search.citation_links.normalize_source_ref`\nso no storage-backend scheme or internal bucket/layout reaches the wire.\nWhen the hit's own source is not an ``https`` link and the backend sent\nan ``upstream_url``, that public link is the ``source_url`` (#3913).\n\n``score_kind`` names the direction of ``score`` when the backend sends\nit: ``distance`` means lower is better, ``similarity`` higher is better.\n``None`` when the backend does not say; it is never defaulted.\n\n``upstream_url`` / ``upstream_page`` are the backend's optional public\nlink to the hit's source (for a PDF with a known page, ending in\n``#page=N``) and that page, counted in the whole source document\n(#3913). ``None`` when the backend does not send them. ``chunk_id`` is\nkept either way, so the ``meho://docs`` chunk resource still finds the\nhit."
+        "description": "One cited chunk in MEHO's ``search_docs`` response surface.\n\nA stable projection of the corpus's :class:`~meho_backplane.auth.corpus.CorpusChunk`\ninto the shape the MCP tool (T4) and CLI (T5) render: chunk text +\nsource citation + score. Decoupling MEHO's surface from the corpus's\nwire contract means a corpus field rename doesn't churn the public\n``search_docs`` response; the projection in :func:`_project_chunk` is\nthe one place that mapping lives.\n\n``collection`` is the **provenance** tag (G4.6-T5 #1554): which\ncollection the chunk came from. It is ``None`` on the single-collection\npath (the collection is already implied by the request scope) and set\nto the source collection key on the cross-collection fan-out path so an\nagent fusing hits from several collections can attribute each chunk.\n\n``document_id`` is ``str | None`` (#2004): it mirrors the corpus's own\noptional owning-document id (``None`` when the corpus has no document\nconcept for a chunk) and is only read as a citation-label fallback.\n\n``title`` is the **optional** human-legible chunk title (#2475). It is\nthe corpus's own ``title`` when it sends one, else a title derived from\nthe hit's page identity (#3913): its section (last heading or breadcrumb\ntail) joined with its page name (the humanised filename), by\n:func:`~meho_backplane.docs_search.citation_links.derive_chunk_title`.\nIt is the *preferred* citation label \u2014 every citation face\n(``ask_docs``, ``/ui/corpus``) feeds it to the ``title -> document_id ->\nfilename -> URL`` label chain \u2014 and the local synthesis prompt shows it\non each evidence line. ``None`` when the corpus sends neither a title\nnor any page identity.\n\n``source_url`` is the **backend-agnostic** citation reference (#132): a\ncanonical public URL where one is derivable, else an opaque\n``meho://docs/<collection>/<chunk_id>`` ref. It is **never** the corpus's\nraw ``gs://`` object path \u2014 the projection in :func:`_project_chunk`\nnormalizes it via\n:func:`~meho_backplane.docs_search.citation_links.normalize_source_ref`\nso no storage-backend scheme or internal bucket/layout reaches the wire.\nWhen the hit's own source is not an ``https`` link and the backend sent\nan ``upstream_url``, that public link is the ``source_url`` (#3913).\n\n``score_kind`` names the direction of ``score`` when the backend sends\nit: ``distance`` means lower is better, ``similarity`` higher is better.\n``None`` when the backend does not say; it is never defaulted.\n\n``upstream_url`` / ``upstream_page`` are the backend's optional public\nlink to the hit's source (for a PDF with a known page, ending in\n``#page=N``) and that page, counted in the whole source document\n(#3913). ``None`` when the backend does not send them. ``chunk_id`` is\nkept either way, so the ``meho://docs`` chunk resource still finds the\nhit.\n\n``read_handle`` (#3948) is the backend's opaque, signed handle for reading\nmore around the hit with ``read_docs``. It is set only when the backend\nsent one **and** the collection offers read\n(:meth:`~meho_backplane.docs_search.backends.base.SearchBackend.supports_read`),\nso a hit that carries it can always be read; otherwise it is ``None`` (a\nPDF hit gets none from the backend). It is passed through unchanged and\nnever logged: it carries a few words of the hit, so the logs name the\n``chunk_id`` instead."
+      },
+      "DocsReadResult": {
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "around",
+              "page",
+              "section"
+            ],
+            "title": "Mode"
+          },
+          "text": {
+            "type": "string",
+            "nullable": true,
+            "title": "Text"
+          },
+          "title": {
+            "type": "string",
+            "nullable": true,
+            "title": "Title"
+          },
+          "source_url": {
+            "type": "string",
+            "nullable": true,
+            "title": "Source Url"
+          },
+          "disclosure": {
+            "type": "string",
+            "enum": [
+              "full",
+              "link"
+            ],
+            "title": "Disclosure"
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "link_only",
+              "pdf_not_supported",
+              "type_not_supported"
+            ],
+            "nullable": true,
+            "title": "Reason"
+          },
+          "located": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Located"
+          },
+          "truncated": {
+            "type": "boolean",
+            "title": "Truncated",
+            "default": false
+          },
+          "next": {
+            "type": "string",
+            "nullable": true,
+            "title": "Next"
+          },
+          "up": {
+            "type": "string",
+            "nullable": true,
+            "title": "Up"
+          }
+        },
+        "type": "object",
+        "required": [
+          "mode",
+          "disclosure"
+        ],
+        "title": "DocsReadResult",
+        "description": "The result of one ``read_docs`` call, the same on every face.\n\n* ``mode`` -- what was read: ``around``, ``page`` or ``section``.\n* ``text`` -- the text, or ``None`` when there is none to return: the\n  file's owner allows only its link (``disclosure`` is ``link``), or the\n  backend cannot read the file's type (``reason`` says which).\n* ``title`` -- the source's title, when known.\n* ``source_url`` -- the public ``http(s)`` link to the source, when there\n  is one. Never a storage path.\n* ``disclosure`` -- ``full`` (text may be returned) or ``link`` (only the\n  link).\n* ``reason`` -- why ``text`` is ``None``: ``link_only``,\n  ``pdf_not_supported`` or ``type_not_supported``.\n* ``located`` -- whether the backend found the hit in the file (``None``\n  when it does not say).\n* ``truncated`` -- whether the backend cut the reply at its size cap.\n* ``next`` / ``up`` -- opaque cursors: pass one back as ``cursor`` (with\n  the same ``read_handle``) to read on, or ``None``.\n\nFrozen so a face cannot change it after the read."
       },
       "DraftTemplateRequest": {
         "properties": {
@@ -30632,6 +30846,74 @@
         ],
         "title": "QueryResult",
         "description": "Per-query eval row \u2014 what the runner produces for each corpus entry.\n\n``meho_hits`` is the surface-formatted top-``k`` slug list from\nMEHO retrieval; ``baseline_hits`` mirrors it for the baseline\nwhen configured. The per-query metrics (precision_at_5 / mrr /\ncoverage) are computed against ``meho_hits`` + the corpus's\nexpected ground truth; ``baseline_*`` mirrors are populated when\nthe baseline ran. Frozen so the runner can't accidentally mutate\na row while folding the surface aggregate."
+      },
+      "ReadDocsRequest": {
+        "properties": {
+          "collection": {
+            "type": "string",
+            "maxLength": 128,
+            "nullable": true,
+            "title": "Collection"
+          },
+          "read_handle": {
+            "type": "string",
+            "maxLength": 8192,
+            "minLength": 1,
+            "title": "Read Handle"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "around",
+              "page",
+              "section"
+            ],
+            "title": "Mode",
+            "default": "around"
+          },
+          "before": {
+            "type": "integer",
+            "maximum": 3.0,
+            "minimum": 0.0,
+            "title": "Before",
+            "default": 1
+          },
+          "after": {
+            "type": "integer",
+            "maximum": 3.0,
+            "minimum": 0.0,
+            "title": "After",
+            "default": 1
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 8192,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Cursor"
+          },
+          "product": {
+            "type": "string",
+            "maxLength": 128,
+            "nullable": true,
+            "title": "Product",
+            "description": "The `product` you searched with. Needed only on a collection that applies scope filters; otherwise ignored. Pass it only when the hit came from a single-collection search that used it. Leave it out for a hit from a cross-collection search (`collections` or `collection='all'`; such a hit carries its own `collection`): that search ignores `product`, so its handle has none."
+          },
+          "version": {
+            "type": "string",
+            "maxLength": 128,
+            "nullable": true,
+            "title": "Version",
+            "description": "The `version` you searched with. Needed only on a collection that applies scope filters; otherwise ignored. Pass it only when the hit came from a single-collection search that used it. Leave it out for a hit from a cross-collection search (`collections` or `collection='all'`; such a hit carries its own `collection`): that search ignores `version`, so its handle has none."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "read_handle"
+        ],
+        "title": "ReadDocsRequest",
+        "description": "POST body for ``/api/v1/read_docs``, the same fields as the MCP tool.\n\n``collection`` is typed optional so a missing value gets the docs\nsurfaces' own 422 naming the mandatory scope. ``product`` / ``version``\nare needed only on a collection whose scope gates send hard filters: the\nhandle is bound to the filters of the hit's search. So a caller passes\nthem only for a hit from a single-collection search that used them, and\nleaves them out for a hit from a cross-collection search, which ignores\nthem. ``extra=\"forbid\"`` rejects unknown fields."
       },
       "ReassignRunRequest": {
         "properties": {

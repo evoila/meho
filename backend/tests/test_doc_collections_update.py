@@ -432,6 +432,73 @@ async def test_update_answer_endpoint_screen_rejects_non_public(
     assert row.backend == {"type": "corpus-http", "ref": {"endpoint": _CORPUS_URL}}
 
 
+@pytest.mark.asyncio
+async def test_read_opt_in_only_change_keeps_readiness() -> None:
+    """#3948: turning read on / off (and its endpoint) keeps the probed readiness."""
+    collection = await _insert_collection(
+        status=STATUS_READY,
+        backend={"type": "corpus-http", "ref": {"endpoint": _CORPUS_URL}},
+    )
+    await _run_update(
+        collection.id,
+        _make_operator(),
+        DocCollectionUpdate(
+            backend={
+                "type": "corpus-http",
+                "ref": {
+                    "endpoint": _CORPUS_URL,
+                    "read": "upstream",
+                    "read_endpoint": "https://corpus.test/v1/read",
+                },
+            }
+        ),
+    )
+    row = await _fetch_row("vmware")
+    assert row.backend["ref"]["read"] == "upstream"
+    assert row.backend["ref"]["read_endpoint"] == "https://corpus.test/v1/read"
+    assert row.status == STATUS_READY
+
+    await _run_update(
+        collection.id,
+        _make_operator(),
+        DocCollectionUpdate(backend={"type": "corpus-http", "ref": {"endpoint": _CORPUS_URL}}),
+    )
+    row = await _fetch_row("vmware")
+    assert row.status == STATUS_READY
+    assert row.readiness == {"reachable": True, "index_built": True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_read_endpoint",
+    [
+        "http://corpus.test/v1/read",
+        "https://127.0.0.1/v1/read",
+        "https://169.254.169.254/latest/meta-data",
+    ],
+)
+async def test_update_read_endpoint_screen_rejects_non_public(bad_read_endpoint: str) -> None:
+    """#3948: an explicit ``read_endpoint`` is a dialed URL, screened like ``endpoint``."""
+    collection = await _insert_collection()
+    with pytest.raises(DocCollectionEndpointError):
+        await _run_update(
+            collection.id,
+            _make_operator(),
+            DocCollectionUpdate(
+                backend={
+                    "type": "corpus-http",
+                    "ref": {
+                        "endpoint": _CORPUS_URL,
+                        "read": "upstream",
+                        "read_endpoint": bad_read_endpoint,
+                    },
+                }
+            ),
+        )
+    row = await _fetch_row("vmware")
+    assert row.backend == {"type": "corpus-http", "ref": {"endpoint": _CORPUS_URL}}
+
+
 # ---------------------------------------------------------------------------
 # Service: global-row platform-seat gate
 # ---------------------------------------------------------------------------

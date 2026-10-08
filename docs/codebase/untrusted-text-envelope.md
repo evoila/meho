@@ -18,7 +18,7 @@ re-serves it verbatim to other agents:
 | Broadcast announcement `activity` / `scope` / `target` | `meho_broadcast_announce` → `publish_agent_announcement` | `meho_broadcast_recent`, `meho_broadcast_watch`, `meho://tenant/{tenant_id}/feed` |
 | kb entry `body` | `add_to_knowledge`, kb file walker, UI editor | `meho://kb/{slug}` |
 | memory entry `body` | `add_to_memory` | `meho://memory/{scope}/{slug}` |
-| Docs-corpus chunk `content` (federated, external — **not** agent-authored) | External `meho-docs` corpus (federated ingestion, outside MEHO) | `search_docs` payload, `ask_docs` citations + synthesis prompt, `meho://docs/{collection}/{product}/{version}/{chunk_id}` |
+| Docs-corpus chunk `content` (federated, external — **not** agent-authored) | External `meho-docs` corpus (federated ingestion, outside MEHO) | `search_docs` payload, `ask_docs` citations + synthesis prompt, `read_docs` text, `meho://docs/{collection}/{product}/{version}/{chunk_id}` |
 
 Without a guard, a compromised or adversarial session can plant
 instructions ("ignore previous instructions and …") that a later
@@ -55,7 +55,10 @@ non-LLM sinks like the CLI/REST faces):
 
 * `mcp/tools/docs.py` — `_search_chunk_payload(chunk)` wraps the
   `search_docs` payload; `_citation_payload(chunk)` wraps the `ask_docs`
-  citations.
+  citations; `_read_docs_handler` wraps the `read_docs` reply's `text`
+  (#3948; a link-only reply has no text to wrap). The REST
+  `POST /api/v1/read_docs` reply is not wrapped, like REST `search_docs`,
+  and the console escapes it.
 * `docs_search/synthesis.py` — `_render_chunks_for_prompt` wraps each
   chunk before interpolating it into the `ask_docs` synthesis user
   prompt; `_SYNTHESIS_SYSTEM_PROMPT` carries the matching advisory. The

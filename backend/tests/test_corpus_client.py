@@ -23,16 +23,22 @@ import structlog.testing
 
 import meho_backplane.auth.corpus as corpus_mod
 from meho_backplane.auth.corpus import (
+    READ_CALLER_HEADER,
     CorpusAnswerError,
     CorpusChunk,
+    CorpusReadError,
     CorpusSearchResponse,
     CorpusStatusResponse,
     CorpusUnavailable,
     UpstreamAnswer,
+    UpstreamRead,
     ask_corpus,
     corpus_status,
     derive_answer_url,
+    derive_read_url,
     derive_status_url,
+    read_caller_id,
+    read_corpus,
     search_corpus,
 )
 from meho_backplane.auth.operator import Operator
@@ -1420,3 +1426,371 @@ async def test_ask_corpus_garbled_retry_after_stays_typed_rate_limited(
     assert exc.value.kind == CorpusAnswerError.KIND_RATE_LIMITED
     assert exc.value.status == 429
     assert exc.value.retry_after == expected
+
+
+# ---------------------------------------------------------------------------
+# read_corpus (#3948): read around a hit
+# ---------------------------------------------------------------------------
+
+_READ_URL = "https://corpus.test/read"
+#: A fixed UI session key so the caller hash is reproducible in the tests.
+_CALLER_KEY = "test-ui-session-key-for-the-caller-hash"
+_HANDLE = "eyJ2IjoxLCJ0IjoiaCJ9.c2lnbmF0dXJlLWJ5dGVz"
+_READ_BODY = {
+    "mode": "around",
+    "text": "Before.\nThe hit.\nAfter.",
+    "title": "Widget limits",
+    "source_uri": "gs://example-bucket/docs/widgets.html",
+    "upstream_url": "https://docs.example/widgets",
+    "disclosure": "full",
+    "reason": None,
+    "located": True,
+    "truncated": False,
+    "next": "next-cursor",
+    "up": None,
+}
+
+
+def _expected_caller(sub: str, key: str = _CALLER_KEY) -> str:
+    import hashlib
+    import hmac
+
+    mac = hmac.new(
+        key.encode("utf-8"),
+        b"meho-docs-read-caller-v1\x00" + sub.encode("utf-8"),
+        hashlib.sha256,
+    )
+    return mac.hexdigest()[:32]
+
+
+@pytest.mark.parametrize(
+    ("search_url", "expected"),
+    [
+        ("https://corpus.test/search", "https://corpus.test/read"),
+        ("https://corpus.test/v1/search", "https://corpus.test/v1/read"),
+        ("https://corpus.test/v1/search/", "https://corpus.test/v1/read"),
+        ("https://corpus.test:9443/search?x=1#y", "https://corpus.test:9443/read"),
+        ("https://corpus.test", "https://corpus.test/read"),
+    ],
+)
+def test_derive_read_url(search_url: str, expected: str) -> None:
+    """The read URL replaces the search URL's last path segment with ``read``."""
+    assert derive_read_url(search_url) == expected
+
+
+@pytest.mark.asyncio
+async def test_read_corpus_posts_handle_with_service_token_and_hashed_caller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The read sends only the contract keys, the service token and a keyed caller hash.
+
+    The body is exactly ``{read_handle, mode, before, after}``: the backend
+    refuses unknown keys, so no ``audience`` rides it even when one is
+    configured. ``X-Meho-Caller`` is a keyed hash of the operator's subject,
+    never the subject itself, and the operator JWT is never forwarded.
+    """
+    _pin_settings(
+        monkeypatch,
+        corpus_service_token=_SERVICE_TOKEN,
+        corpus_audience="https://corpus.test",
+        ui_session_encryption_key=_CALLER_KEY,
+    )
+    captured: list[httpx.Request] = []
+    captured_timeout: list[httpx.Timeout] = []
+    transport = _transport_capturing(captured, httpx.Response(200, json=_READ_BODY))
+    _patch_async_client(monkeypatch, transport, captured_timeout)
+
+    result = await read_corpus(
+        _make_operator(), _HANDLE, mode="around", before=2, after=0, read_url=_READ_URL
+    )
+
+    assert isinstance(result, UpstreamRead)
+    assert result.text == "Before.\nThe hit.\nAfter."
+    assert result.upstream_url == "https://docs.example/widgets"
+    assert result.next == "next-cursor"
+    (request,) = captured
+    assert request.method == "POST"
+    assert str(request.url) == _READ_URL
+    import json
+
+    assert json.loads(request.content.decode()) == {
+        "read_handle": _HANDLE,
+        "mode": "around",
+        "before": 2,
+        "after": 0,
+    }
+    assert request.headers["authorization"] == f"Bearer {_SERVICE_TOKEN}"
+    caller = request.headers[READ_CALLER_HEADER]
+    assert caller == _expected_caller("op-1")
+    assert len(caller) == 32
+    assert "op-1" not in caller
+    assert _JWT not in str(request.headers)
+    # The search timeout bounds the read.
+    assert captured_timeout[0].read == get_settings().corpus_timeout_seconds
+
+
+@pytest.mark.asyncio
+async def test_read_corpus_sends_cursor_and_filters_only_when_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``cursor`` / ``filters`` ride the body only when set; ``scope`` never does."""
+    _pin_settings(monkeypatch, ui_session_encryption_key=_CALLER_KEY)
+    captured: list[httpx.Request] = []
+    _patch_async_client(
+        monkeypatch, _transport_capturing(captured, httpx.Response(200, json=_READ_BODY)), []
+    )
+
+    await read_corpus(
+        _make_operator(),
+        _HANDLE,
+        mode="page",
+        cursor="cursor-1",
+        filters={"product": "vsphere", "version": "8.0"},
+        read_url=_READ_URL,
+    )
+    import json
+
+    body = json.loads(captured[0].content.decode())
+    assert body == {
+        "read_handle": _HANDLE,
+        "mode": "page",
+        "before": 1,
+        "after": 1,
+        "cursor": "cursor-1",
+        "filters": {"product": "vsphere", "version": "8.0"},
+    }
+
+
+def test_read_caller_id_is_stable_per_person_and_keyed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same person, same id; another person or another key, another id."""
+    _pin_settings(monkeypatch, ui_session_encryption_key=_CALLER_KEY)
+    alice = read_caller_id(_make_operator())
+    assert alice == read_caller_id(_make_operator())
+    bob = Operator(
+        sub="op-2",
+        name="Bob",
+        email=None,
+        raw_jwt=_JWT,
+        tenant_id="00000000-0000-0000-0000-00000000a0a0",
+        tenant_role="operator",
+    )
+    assert read_caller_id(bob) != alice
+    _pin_settings(monkeypatch, ui_session_encryption_key="another-key")
+    assert read_caller_id(_make_operator()) != alice
+
+
+@pytest.mark.asyncio
+async def test_read_corpus_without_caller_key_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No caller key: the read fails closed, it never sends an unkeyed hash."""
+    _pin_settings(monkeypatch, ui_session_encryption_key="")
+    captured: list[httpx.Request] = []
+    _patch_async_client(
+        monkeypatch, _transport_capturing(captured, httpx.Response(200, json=_READ_BODY)), []
+    )
+    with pytest.raises(CorpusUnavailable):
+        await read_corpus(_make_operator(), _HANDLE, read_url=_READ_URL)
+    assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_read_corpus_unconfigured_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    _pin_settings(monkeypatch, ui_session_encryption_key=_CALLER_KEY)
+    with pytest.raises(CorpusUnavailable):
+        await read_corpus(_make_operator(), _HANDLE, read_url=None)
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    ["http://corpus.test/read", "https://127.0.0.1/read", "https://169.254.169.254/read"],
+)
+@pytest.mark.asyncio
+async def test_read_corpus_screens_endpoint_and_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, bad_url: str
+) -> None:
+    """A non-https / non-public read endpoint is refused before any dial."""
+    monkeypatch.delenv("MEHO_TARGET_SSRF_ALLOWLIST", raising=False)
+    _pin_settings(monkeypatch, ui_session_encryption_key=_CALLER_KEY)
+    with pytest.raises(CorpusUnavailable) as exc:
+        await read_corpus(_make_operator(), _HANDLE, read_url=bad_url)
+    assert "not an allowed https public destination" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    ("response", "kind", "retry_after"),
+    [
+        (httpx.Response(404, json={"error": {"code": "not_found"}}), "not_found", None),
+        (httpx.Response(409, json={"error": {"code": "search_again"}}), "search_again", None),
+        (
+            httpx.Response(429, json={"error": {}}, headers={"Retry-After": "12"}),
+            "rate_limited",
+            12,
+        ),
+        (httpx.Response(429, json={"error": {}}), "rate_limited", None),
+        (
+            httpx.Response(429, json={"error": {}}, headers={"Retry-After": "99999"}),
+            "rate_limited",
+            3600,
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_read_corpus_typed_refusals(
+    monkeypatch: pytest.MonkeyPatch,
+    response: httpx.Response,
+    kind: str,
+    retry_after: int | None,
+) -> None:
+    """404 / 409 / 429 are typed ``CorpusReadError``s; ``Retry-After`` is bounded."""
+    _pin_settings(monkeypatch, ui_session_encryption_key=_CALLER_KEY)
+    _patch_async_client(monkeypatch, _transport_capturing([], response), [])
+    with pytest.raises(CorpusReadError) as exc:
+        await read_corpus(_make_operator(), _HANDLE, read_url=_READ_URL)
+    assert exc.value.kind == kind
+    assert exc.value.status == response.status_code
+    assert exc.value.retry_after == retry_after
+
+
+@pytest.mark.parametrize("status", [503, 500, 422, 401, 400])
+@pytest.mark.asyncio
+async def test_read_corpus_other_failures_are_unavailable(
+    monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    """Every other non-2xx is ``CorpusUnavailable`` with the status."""
+    _pin_settings(monkeypatch, ui_session_encryption_key=_CALLER_KEY)
+    _patch_async_client(
+        monkeypatch, _transport_capturing([], httpx.Response(status, text="err page")), []
+    )
+    with pytest.raises(CorpusUnavailable) as exc:
+        await read_corpus(_make_operator(), _HANDLE, read_url=_READ_URL)
+    assert exc.value.status == status
+    assert "err page" not in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_read_corpus_transport_failure_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _pin_settings(monkeypatch, ui_session_encryption_key=_CALLER_KEY)
+
+    def _boom(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    _patch_async_client(monkeypatch, httpx.MockTransport(_boom), [])
+    with pytest.raises(CorpusUnavailable):
+        await read_corpus(_make_operator(), _HANDLE, read_url=_READ_URL)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(200, text="<html>not json</html>"),
+        httpx.Response(200, json={"text": "x"}),  # no mode
+        httpx.Response(200, json={**_READ_BODY, "mode": "everything"}),  # unknown mode
+    ],
+)
+@pytest.mark.asyncio
+async def test_read_corpus_malformed_2xx_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch, response: httpx.Response
+) -> None:
+    _pin_settings(monkeypatch, ui_session_encryption_key=_CALLER_KEY)
+    _patch_async_client(monkeypatch, _transport_capturing([], response), [])
+    with pytest.raises(CorpusUnavailable):
+        await read_corpus(_make_operator(), _HANDLE, read_url=_READ_URL)
+
+
+@pytest.mark.parametrize(
+    ("disclosure", "expected"),
+    [("link", "link"), (None, "link"), ("partial", "link"), ("full", "full")],
+)
+def test_upstream_read_keeps_text_only_for_full_disclosure(
+    disclosure: str | None, expected: str
+) -> None:
+    """A link-only (or unknown / missing) disclosure never keeps text."""
+    body = {**_READ_BODY, "disclosure": disclosure}
+    parsed = UpstreamRead.model_validate(body)
+    assert parsed.disclosure == expected
+    if expected == "full":
+        assert parsed.text == _READ_BODY["text"]
+    else:
+        assert parsed.text is None
+
+
+def test_upstream_read_unusable_optional_values_read_as_absent() -> None:
+    """An unknown reason, a non-bool located, unusable cursors and links are absent."""
+    parsed = UpstreamRead.model_validate(
+        {
+            "mode": "section",
+            "text": 42,
+            "title": "   ",
+            "upstream_url": "javascript:alert(1)",
+            "disclosure": "full",
+            "reason": "who_knows",
+            "located": "yes",
+            "next": "has space",
+            "up": "",
+        }
+    )
+    assert parsed.text is None
+    assert parsed.title is None
+    assert parsed.upstream_url is None
+    assert parsed.reason is None
+    assert parsed.located is None
+    assert parsed.next is None
+    assert parsed.up is None
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (_HANDLE, _HANDLE),
+        ("", None),
+        ("has space", None),
+        ("tab\there", None),
+        ("non-ascii-é", None),
+        ("x" * 8193, None),
+        (12345, None),
+        (None, None),
+    ],
+)
+def test_corpus_chunk_read_handle_is_kept_only_when_usable(
+    value: object, expected: str | None
+) -> None:
+    """A hit's ``read_handle`` is an opaque token; an unusable one reads as absent."""
+    chunk = CorpusChunk.model_validate({"chunk_id": "c1", "text": "t", "read_handle": value})
+    assert chunk.read_handle == expected
+
+
+@pytest.mark.asyncio
+async def test_read_handle_cursor_and_text_are_never_logged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Neither the handle, the cursor, the caller id nor the service token is logged.
+
+    Uses the private ``LogCapture`` on ``corpus._log`` (the #1254 pattern),
+    with a positive canary on the failure event so the absence checks
+    cannot pass against an empty capture.
+    """
+    _pin_settings(
+        monkeypatch,
+        corpus_service_token=_SERVICE_TOKEN,
+        ui_session_encryption_key=_CALLER_KEY,
+    )
+    capture = structlog.testing.LogCapture()
+    private_log = structlog.wrap_logger(structlog.PrintLogger(), processors=[capture])
+    monkeypatch.setattr(corpus_mod, "_log", private_log)
+
+    _patch_async_client(
+        monkeypatch, _transport_capturing([], httpx.Response(409, json={"error": {}})), []
+    )
+    with pytest.raises(CorpusReadError) as exc:
+        await read_corpus(_make_operator(), _HANDLE, cursor="secret-cursor", read_url=_READ_URL)
+
+    serialised = repr(capture.entries) + str(exc.value)
+    for secret in (_HANDLE, "secret-cursor", _expected_caller("op-1"), _SERVICE_TOKEN, "op-1"):
+        assert secret not in serialised
+    failed = [e for e in capture.entries if e["event"] == "corpus_read_request_failed"]
+    assert len(failed) == 1
+    assert failed[0]["status"] == 409
+    assert failed[0]["kind"] == "search_again"

@@ -39,7 +39,7 @@ The pinned snapshots are tied to the live registry by
 never drift from reality (a reclassification breaks the per-claim-shape
 pins; an unclassified addition breaks the partition guard). The
 authoritative human-readable enumeration of the same split — name +
-one-liner + surface + gating claim for all 79 tools — lives in
+one-liner + surface + gating claim for all 81 tools — lives in
 ``docs/codebase/mcp.md`` (the dual-surface inventory).
 """
 
@@ -66,14 +66,16 @@ from tests.mcp_test_fixtures import (
 
 _DOCS_CAPABILITY = "meho-docs"
 
-#: The three working-surface docs tools — visible only to a session that
+#: The four working-surface docs tools — visible only to a session that
 #: ALSO holds the ``meho-docs`` capability (mirrors #3154's set).
-_DOCS_WORKING_TOOLS: frozenset[str] = frozenset({"search_docs", "ask_docs", "list_doc_collections"})
+_DOCS_WORKING_TOOLS: frozenset[str] = frozenset(
+    {"search_docs", "ask_docs", "list_doc_collections", "read_docs"}
+)
 
 #: Every ``meho-docs``-capability-gated tool across BOTH surfaces: the
-#: three working docs tools plus the three operator-surface doc-collection
+#: four working docs tools plus the three operator-surface doc-collection
 #: lifecycle tools. All drop out when the capability is absent, so an
-#: elevated session without ``meho-docs`` loses all six.
+#: elevated session without ``meho-docs`` loses all seven.
 _DOCS_CAP_GATED: frozenset[str] = _DOCS_WORKING_TOOLS | {
     "create_doc_collections",
     "delete_doc_collections",
@@ -126,6 +128,7 @@ WORKING_SURFACE_SORTED: tuple[str, ...] = (
     "meho_status",
     "preview_operation",
     "query_topology",
+    "read_docs",
     "result_query",
     "search_docs",
     "search_knowledge",
@@ -355,12 +358,12 @@ async def test_elevated_session_wire_listing_is_full_surface() -> None:
     assert await _list_names(op) == list(FULL_SURFACE_SORTED)
 
 
-async def test_elevated_session_without_docs_drops_five_docs_tools() -> None:
+async def test_elevated_session_without_docs_drops_all_docs_tools() -> None:
     """The surface gate AND-composes with the capability gate on the wire path.
 
     An elevated session that has not provisioned ``meho-docs`` lists
-    everything except the five docs-capability-gated tools (three working
-    + two operator), proving the two gates are independent axes end to
+    everything except the seven docs-capability-gated tools (four working
+    + three operator), proving the two gates are independent axes end to
     end — the listing-path analogue of #3154's AC3 registry assertion.
     """
     op = _operator(scopes=frozenset({MCP_ADMIN_SCOPE}))

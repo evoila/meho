@@ -56,6 +56,15 @@ func newCollectionsUpdateCmd() *cobra.Command {
 			"resets the collection to `provisioning`, so run `meho docs " +
 			"collections probe <key>` afterwards to promote it back to " +
 			"`ready`.\n\n" +
+			"Optional backend ref keys turn on extra backend methods: " +
+			"\"answer\":\"upstream\" makes ask_docs use the backend's own " +
+			"answer endpoint (\"answer_endpoint\" names it), and " +
+			"\"read\":\"upstream\" lets read_docs and `meho docs read` read " +
+			"the text around a hit (\"read_endpoint\" names it; without it, " +
+			"the search URL with its last path segment replaced by \"read\"). " +
+			"The backend is replaced as a whole, so re-pass every ref key " +
+			"you want to keep. A change to only these keys keeps the " +
+			"collection `ready` (no probe needed).\n\n" +
 			"tenant_admin only; a global (platform-owned) collection " +
 			"additionally requires the platform_admin capability (403).",
 		Args:          cobra.ExactArgs(1),

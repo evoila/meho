@@ -216,6 +216,15 @@ class DocsChunk(BaseModel):
     (#3913). ``None`` when the backend does not send them. ``chunk_id`` is
     kept either way, so the ``meho://docs`` chunk resource still finds the
     hit.
+
+    ``read_handle`` (#3948) is the backend's opaque, signed handle for reading
+    more around the hit with ``read_docs``. It is set only when the backend
+    sent one **and** the collection offers read
+    (:meth:`~meho_backplane.docs_search.backends.base.SearchBackend.supports_read`),
+    so a hit that carries it can always be read; otherwise it is ``None`` (a
+    PDF hit gets none from the backend). It is passed through unchanged and
+    never logged: it carries a few words of the hit, so the logs name the
+    ``chunk_id`` instead.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -230,6 +239,7 @@ class DocsChunk(BaseModel):
     score: float | None = None
     score_kind: ScoreKind | None = None
     collection: str | None = None
+    read_handle: str | None = None
 
 
 class DocsSearchResult(BaseModel):
@@ -405,6 +415,7 @@ def _project_chunk(
     *,
     collection: str | None = None,
     collection_key: str | None = None,
+    readable: bool = False,
 ) -> DocsChunk:
     """Project a corpus chunk into MEHO's cited-chunk surface.
 
@@ -428,6 +439,10 @@ def _project_chunk(
     whose own source is not an ``https`` link uses the backend's
     ``upstream_url`` as its ``source_url`` when it sent one. ``score_kind``,
     ``upstream_url`` and ``upstream_page`` pass through unchanged.
+
+    *readable* is whether the chunk's collection offers read (#3948). Only
+    then is the backend's ``read_handle`` kept; otherwise it is dropped, so a
+    handle on the wire always leads to a working ``read_docs`` call.
     """
     title = derive_chunk_title(
         title=chunk.title,
@@ -453,6 +468,7 @@ def _project_chunk(
         score=chunk.score,
         score_kind=chunk.score_kind,
         collection=collection,
+        read_handle=chunk.read_handle if readable else None,
     )
 
 
@@ -524,7 +540,11 @@ async def search_docs(
         soft_scope=forwarded.soft_scope or None,
         limit=limit,
     )
-    chunks = [_project_chunk(c, collection_key=scope.collection_key) for c in response.chunks]
+    readable = resolved.backend.supports_read(resolved.ref)
+    chunks = [
+        _project_chunk(c, collection_key=scope.collection_key, readable=readable)
+        for c in response.chunks
+    ]
     _log.info(
         "docs_search_completed",
         operator_sub=operator.sub,

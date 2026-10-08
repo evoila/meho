@@ -1417,6 +1417,24 @@ meho docs collections update <collection-key> [flags]
 - `--product` — replacement product list (repeatable, e.g. --product vsphere --product nsx)
 - `--when-to-use` — replacement 'pick this collection when…' blurb surfaced to agents
 
+### `meho docs read`
+
+Read the text around a docs hit (mandatory --collection)
+
+```
+meho docs read <read-handle|-> [flags]
+```
+
+- `--after` — chunks to read after the hit, for --mode around (0..3)
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--before` — chunks to read before the hit, for --mode around (0..3)
+- `--collection` — collection key the hit came from (required; e.g. vmware)
+- `--cursor` — the `next` cursor of an earlier read, to read on (- reads it from standard input)
+- `--json` — emit the raw DocsReadResult JSON
+- `--mode` — what to read: around (default), page or section
+- `--product` — the product you searched with (only for a collection that applies scope filters; leave it out for a hit from a cross-collection search)
+- `--version` — the version you searched with (only for a collection that applies scope filters; leave it out for a hit from a cross-collection search)
+
 ### `meho docs search`
 
 Search vendor-document collection(s) (mandatory --collection)

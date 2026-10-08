@@ -313,6 +313,8 @@ async def handle_tools_call(
     }
     status_code = 500
     audit_name = name if isinstance(name, str) and name else "<empty>"
+    #: Argument keys the resolved tool keeps off the broadcast feed (#3948).
+    broadcast_omit_args: frozenset[str] = frozenset()
 
     try:
         if not isinstance(name, str) or not name:
@@ -341,6 +343,7 @@ async def handle_tools_call(
             raise McpInvalidParamsError(f"unknown tool: {name!r}")
         defn, handler = entry
         audit_payload["op_class"] = defn.op_class
+        broadcast_omit_args = defn.broadcast_omit_args
 
         # RBAC: the tool's required_role gates *invocation*, not just listing.
         # The list filter already hides tools the operator can't call, but
@@ -513,10 +516,14 @@ async def handle_tools_call(
         # arguments. Arguments win on key collision -- if a tool
         # happens to define an ``op_class`` argument, the operator
         # value would take precedence, but that overlap is a tool-
-        # naming bug T4's API layer can warn on later.
+        # naming bug T4's API layer can warn on later. The keys the tool
+        # lists in ``broadcast_omit_args`` (#3948, e.g. ``read_docs``'s
+        # ``read_handle``) are left out, so they never reach the feed.
         resolver_params: dict[str, Any] = dict(audit_payload)
         if isinstance(arguments, dict):
-            resolver_params.update(arguments)
+            resolver_params.update(
+                {key: value for key, value in arguments.items() if key not in broadcast_omit_args}
+            )
         # #93: ``call_operation`` is a wrapper tool — its name does not
         # carry any sensitivity signal, so ``classify_op("call_operation")``
         # falls through to ``"other"`` → ``"full"`` detail and ships raw

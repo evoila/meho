@@ -12,19 +12,33 @@
 
   Extends ``base.html`` so the chrome matches the console; sets
   ``active_surface="corpus"`` so the sidebar highlight stays on the corpus
-  surface. Read-only (a GET) -- no forms, no CSRF token.
+  surface. The GET view is read-only -- no forms, no CSRF token.
 
   Why not the chunk body: the retrieved chunk's content is already shown on
   the citation card, and the backend-agnostic search interface has no
-  fetch-by-id seam to re-load it here (see ``chunk_detail.py``). So this view
-  renders identity + provenance, not a re-fetched body.
+  fetch-by-id seam to re-load it here (see ``chunk_detail.py``). So the GET
+  view renders identity + provenance, not a re-fetched body.
 
-  Context contract (set by ``chunk_detail._render_chunk_detail``):
+  Read around the hit (#3948): a result card's "Read around this hit" form
+  POSTs here for a collection that offers read. The page then also shows the
+  text around the hit (escaped by autoescape, whitespace kept) and, when the
+  backend has more, a "Show more" form that posts the same handle with the
+  ``next`` cursor. The POST keeps the GET view's 404 / 403 for an unknown or
+  not-entitled collection; every other read refusal shows one neutral note
+  instead.
+
+  Context contract (set by ``chunk_detail._gated_detail_context`` and, for
+  the read POST, ``chunk_detail._render_chunk_read``):
     * ``collection`` -- dict: the projected collection summary (key / vendor /
       products / status / when_to_use / description).
     * ``chunk_id``   -- str: the cited chunk's stable id.
     * ``chunk_ref``  -- str: the stable ``meho://docs/<collection>/<chunk_id>``
       reference the citation carried.
+    * ``read_mode``  -- bool: true on the read POST.
+    * ``read``       -- DocsReadResult | None: the text read (read POST only).
+    * ``read_note``  -- str | None: why there is no text (read POST only).
+    * ``read_handle`` / ``read_action`` / ``csrf_token`` -- the "Show more"
+      form's handle, target and double-submit token (read POST only).
 -#}
 {% extends "base.html" %}
 
@@ -43,12 +57,69 @@
 
   <header>
     <h1 class="text-2xl font-semibold">Cited source</h1>
-    <p class="text-sm opacity-70">
-      This source was cited in a grounded answer but has no public URL, so it
-      opens here rather than as an outbound link. The internal reference below
-      identifies the exact chunk; MEHO resolves it to the underlying object.
-    </p>
+    {% if read_mode %}
+      <p class="text-sm opacity-70">
+        The text around a search hit, read from the collection's backend. The
+        internal reference below identifies the exact chunk.
+      </p>
+    {% else %}
+      <p class="text-sm opacity-70">
+        This source was cited in a grounded answer but has no public URL, so it
+        opens here rather than as an outbound link. The internal reference below
+        identifies the exact chunk; MEHO resolves it to the underlying object.
+      </p>
+    {% endif %}
   </header>
+
+  {% if read_mode %}
+    {# ---------- Text around the hit (#3948) ---------- #}
+    <article class="card bg-base-100 border-base-300 border shadow-sm" aria-label="Text around this hit">
+      <div class="card-body space-y-2">
+        <h2 class="card-title text-base">Text around this hit</h2>
+        {% if read_note %}
+          <div class="alert alert-warning" role="status">
+            <p class="text-sm">{{ read_note }}</p>
+          </div>
+        {% elif read %}
+          {% if read.title %}
+            <p class="text-sm font-semibold">{{ read.title }}</p>
+          {% endif %}
+          {% if read.source_url %}
+            <p class="text-xs">
+              <a
+                href="{{ read.source_url }}"
+                class="link link-primary"
+                target="_blank"
+                rel="noopener noreferrer"
+              >Open the source</a>
+            </p>
+          {% endif %}
+          {% if read.text is not none %}
+            <p class="text-sm whitespace-pre-wrap" data-testid="read-text">{{ read.text }}</p>
+          {% elif read.disclosure == "link" %}
+            <p class="text-sm opacity-70">
+              The owner of this file allows only its link. Open the source to read it.
+            </p>
+          {% else %}
+            <p class="text-sm opacity-70">
+              This file cannot be shown as text here. Open the source to read it.
+            </p>
+          {% endif %}
+          {% if read.truncated %}
+            <p class="text-xs opacity-60">The text was cut at the size limit.</p>
+          {% endif %}
+          {% if read.next %}
+            <form method="post" action="{{ read_action }}">
+              <input type="hidden" name="read_handle" value="{{ read_handle }}">
+              <input type="hidden" name="cursor" value="{{ read.next }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button type="submit" class="btn btn-ghost btn-xs px-1">Show more</button>
+            </form>
+          {% endif %}
+        {% endif %}
+      </div>
+    </article>
+  {% endif %}
 
   <article class="card bg-base-100 border-base-300 border shadow-sm" aria-label="Cited source properties">
     <div class="card-body space-y-2">

@@ -255,6 +255,26 @@ const (
 	DocsChunkScoreKindSimilarity DocsChunkScoreKind = "similarity"
 )
 
+// Defines values for DocsReadResultDisclosure.
+const (
+	DocsReadResultDisclosureFull DocsReadResultDisclosure = "full"
+	DocsReadResultDisclosureLink DocsReadResultDisclosure = "link"
+)
+
+// Defines values for DocsReadResultMode.
+const (
+	DocsReadResultModeAround  DocsReadResultMode = "around"
+	DocsReadResultModePage    DocsReadResultMode = "page"
+	DocsReadResultModeSection DocsReadResultMode = "section"
+)
+
+// Defines values for DocsReadResultReason.
+const (
+	DocsReadResultReasonLinkOnly         DocsReadResultReason = "link_only"
+	DocsReadResultReasonPdfNotSupported  DocsReadResultReason = "pdf_not_supported"
+	DocsReadResultReasonTypeNotSupported DocsReadResultReason = "type_not_supported"
+)
+
 // Defines values for EditOpBodySafetyLevel.
 const (
 	EditOpBodySafetyLevelCaution     EditOpBodySafetyLevel = "caution"
@@ -413,6 +433,13 @@ const (
 	PrincipalKindRunner  PrincipalKind = "runner"
 	PrincipalKindService PrincipalKind = "service"
 	PrincipalKindUser    PrincipalKind = "user"
+)
+
+// Defines values for ReadDocsRequestMode.
+const (
+	ReadDocsRequestModeAround  ReadDocsRequestMode = "around"
+	ReadDocsRequestModePage    ReadDocsRequestMode = "page"
+	ReadDocsRequestModeSection ReadDocsRequestMode = "section"
 )
 
 // Defines values for RetireChecklistReportOverallVerdict.
@@ -2638,6 +2665,12 @@ type BodyUiConventionsPreviewUiConventionsPreviewPost struct {
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
 }
 
+// BodyUiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPost defines model for Body_ui_corpus_chunk_read_ui_corpus_chunks__collection_key___chunk_id__post.
+type BodyUiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPost struct {
+	Cursor     *string `json:"cursor,omitempty"`
+	ReadHandle *string `json:"read_handle,omitempty"`
+}
+
 // BodyUiCorpusCollectionsRegisterSubmitUiCorpusCollectionsRegisterPost defines model for Body_ui_corpus_collections_register_submit_ui_corpus_collections_register_post.
 type BodyUiCorpusCollectionsRegisterSubmitUiCorpusCollectionsRegisterPost struct {
 	BackendRef    *string `json:"backend_ref"`
@@ -4439,11 +4472,21 @@ type DocCollectionUpdate struct {
 // (#3913). “None“ when the backend does not send them. “chunk_id“ is
 // kept either way, so the “meho://docs“ chunk resource still finds the
 // hit.
+//
+// “read_handle“ (#3948) is the backend's opaque, signed handle for reading
+// more around the hit with “read_docs“. It is set only when the backend
+// sent one **and** the collection offers read
+// (:meth:`~meho_backplane.docs_search.backends.base.SearchBackend.supports_read`),
+// so a hit that carries it can always be read; otherwise it is “None“ (a
+// PDF hit gets none from the backend). It is passed through unchanged and
+// never logged: it carries a few words of the hit, so the logs name the
+// “chunk_id“ instead.
 type DocsChunk struct {
 	ChunkId      string              `json:"chunk_id"`
 	Collection   *string             `json:"collection"`
 	Content      string              `json:"content"`
 	DocumentId   *string             `json:"document_id"`
+	ReadHandle   *string             `json:"read_handle"`
 	Score        *float32            `json:"score"`
 	ScoreKind    *DocsChunkScoreKind `json:"score_kind"`
 	SourceUrl    *string             `json:"source_url"`
@@ -4454,6 +4497,48 @@ type DocsChunk struct {
 
 // DocsChunkScoreKind defines model for DocsChunk.ScoreKind.
 type DocsChunkScoreKind string
+
+// DocsReadResult The result of one “read_docs“ call, the same on every face.
+//
+//   - “mode“ -- what was read: “around“, “page“ or “section“.
+//   - “text“ -- the text, or “None“ when there is none to return: the
+//     file's owner allows only its link (“disclosure“ is “link“), or the
+//     backend cannot read the file's type (“reason“ says which).
+//   - “title“ -- the source's title, when known.
+//   - “source_url“ -- the public “http(s)“ link to the source, when there
+//     is one. Never a storage path.
+//   - “disclosure“ -- “full“ (text may be returned) or “link“ (only the
+//     link).
+//   - “reason“ -- why “text“ is “None“: “link_only“,
+//     “pdf_not_supported“ or “type_not_supported“.
+//   - “located“ -- whether the backend found the hit in the file (“None“
+//     when it does not say).
+//   - “truncated“ -- whether the backend cut the reply at its size cap.
+//   - “next“ / “up“ -- opaque cursors: pass one back as “cursor“ (with
+//     the same “read_handle“) to read on, or “None“.
+//
+// Frozen so a face cannot change it after the read.
+type DocsReadResult struct {
+	Disclosure DocsReadResultDisclosure `json:"disclosure"`
+	Located    *bool                    `json:"located"`
+	Mode       DocsReadResultMode       `json:"mode"`
+	Next       *string                  `json:"next"`
+	Reason     *DocsReadResultReason    `json:"reason"`
+	SourceUrl  *string                  `json:"source_url"`
+	Text       *string                  `json:"text"`
+	Title      *string                  `json:"title"`
+	Truncated  *bool                    `json:"truncated,omitempty"`
+	Up         *string                  `json:"up"`
+}
+
+// DocsReadResultDisclosure defines model for DocsReadResult.Disclosure.
+type DocsReadResultDisclosure string
+
+// DocsReadResultMode defines model for DocsReadResult.Mode.
+type DocsReadResultMode string
+
+// DocsReadResultReason defines model for DocsReadResult.Reason.
+type DocsReadResultReason string
 
 // DraftTemplateRequest Request body for “meho_runbook_draft_template“ -- create a new draft.
 //
@@ -6496,6 +6581,33 @@ type QueryResult struct {
 	Query                  string    `json:"query"`
 	ReciprocalRank         float32   `json:"reciprocal_rank"`
 }
+
+// ReadDocsRequest POST body for “/api/v1/read_docs“, the same fields as the MCP tool.
+//
+// “collection“ is typed optional so a missing value gets the docs
+// surfaces' own 422 naming the mandatory scope. “product“ / “version“
+// are needed only on a collection whose scope gates send hard filters: the
+// handle is bound to the filters of the hit's search. So a caller passes
+// them only for a hit from a single-collection search that used them, and
+// leaves them out for a hit from a cross-collection search, which ignores
+// them. “extra="forbid"“ rejects unknown fields.
+type ReadDocsRequest struct {
+	After      *int                 `json:"after,omitempty"`
+	Before     *int                 `json:"before,omitempty"`
+	Collection *string              `json:"collection"`
+	Cursor     *string              `json:"cursor"`
+	Mode       *ReadDocsRequestMode `json:"mode,omitempty"`
+
+	// Product The `product` you searched with. Needed only on a collection that applies scope filters; otherwise ignored. Pass it only when the hit came from a single-collection search that used it. Leave it out for a hit from a cross-collection search (`collections` or `collection='all'`; such a hit carries its own `collection`): that search ignores `product`, so its handle has none.
+	Product    *string `json:"product"`
+	ReadHandle string  `json:"read_handle"`
+
+	// Version The `version` you searched with. Needed only on a collection that applies scope filters; otherwise ignored. Pass it only when the hit came from a single-collection search that used it. Leave it out for a hit from a cross-collection search (`collections` or `collection='all'`; such a hit carries its own `collection`): that search ignores `version`, so its handle has none.
+	Version *string `json:"version"`
+}
+
+// ReadDocsRequestMode defines model for ReadDocsRequest.Mode.
+type ReadDocsRequestMode string
 
 // ReassignRunRequest Request body for “meho_runbook_reassign“ -- transfer ownership of a run.
 //
@@ -10113,6 +10225,11 @@ type GetDescriptorApiV1OperationsDescriptorIdGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ReadDocsEndpointApiV1ReadDocsPostParams defines parameters for ReadDocsEndpointApiV1ReadDocsPost.
+type ReadDocsEndpointApiV1ReadDocsPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // RetrieveEndpointApiV1RetrievePostParams defines parameters for RetrieveEndpointApiV1RetrievePost.
 type RetrieveEndpointApiV1RetrievePostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -10977,6 +11094,9 @@ type PostPreviewApiV1OperationsPreviewPostJSONRequestBody = PreviewOperationBody
 // PostResultQueryApiV1OperationsResultQueryPostJSONRequestBody defines body for PostResultQueryApiV1OperationsResultQueryPost for application/json ContentType.
 type PostResultQueryApiV1OperationsResultQueryPostJSONRequestBody = ResultQueryBody
 
+// ReadDocsEndpointApiV1ReadDocsPostJSONRequestBody defines body for ReadDocsEndpointApiV1ReadDocsPost for application/json ContentType.
+type ReadDocsEndpointApiV1ReadDocsPostJSONRequestBody = ReadDocsRequest
+
 // RetrieveEndpointApiV1RetrievePostJSONRequestBody defines body for RetrieveEndpointApiV1RetrievePost for application/json ContentType.
 type RetrieveEndpointApiV1RetrievePostJSONRequestBody = RetrieveRequest
 
@@ -11246,6 +11366,9 @@ type UiConventionsEditModalUiConventionsSlugEditGetJSONRequestBody = UISessionCo
 
 // UiConventionsHistoryUiConventionsSlugHistoryGetJSONRequestBody defines body for UiConventionsHistoryUiConventionsSlugHistoryGet for application/json ContentType.
 type UiConventionsHistoryUiConventionsSlugHistoryGetJSONRequestBody = UISessionContext
+
+// UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostFormdataRequestBody defines body for UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPost for application/x-www-form-urlencoded ContentType.
+type UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostFormdataRequestBody = BodyUiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPost
 
 // UiCorpusCollectionsTableUiCorpusCollectionsGetJSONRequestBody defines body for UiCorpusCollectionsTableUiCorpusCollectionsGet for application/json ContentType.
 type UiCorpusCollectionsTableUiCorpusCollectionsGetJSONRequestBody = UISessionContext
@@ -13088,6 +13211,11 @@ type ClientInterface interface {
 	// GetDescriptorApiV1OperationsDescriptorIdGet request
 	GetDescriptorApiV1OperationsDescriptorIdGet(ctx context.Context, descriptorId openapi_types.UUID, params *GetDescriptorApiV1OperationsDescriptorIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ReadDocsEndpointApiV1ReadDocsPostWithBody request with any body
+	ReadDocsEndpointApiV1ReadDocsPostWithBody(ctx context.Context, params *ReadDocsEndpointApiV1ReadDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ReadDocsEndpointApiV1ReadDocsPost(ctx context.Context, params *ReadDocsEndpointApiV1ReadDocsPostParams, body ReadDocsEndpointApiV1ReadDocsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// RetrieveEndpointApiV1RetrievePostWithBody request with any body
 	RetrieveEndpointApiV1RetrievePostWithBody(ctx context.Context, params *RetrieveEndpointApiV1RetrievePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -13731,6 +13859,11 @@ type ClientInterface interface {
 
 	// UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGet request
 	UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGet(ctx context.Context, collectionKey string, chunkId string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostWithBody request with any body
+	UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostWithBody(ctx context.Context, collectionKey string, chunkId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostWithFormdataBody(ctx context.Context, collectionKey string, chunkId string, body UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiCorpusCollectionsTableUiCorpusCollectionsGetWithBody request with any body
 	UiCorpusCollectionsTableUiCorpusCollectionsGetWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -15983,6 +16116,30 @@ func (c *Client) GetSearchApiV1OperationsSearchGet(ctx context.Context, params *
 
 func (c *Client) GetDescriptorApiV1OperationsDescriptorIdGet(ctx context.Context, descriptorId openapi_types.UUID, params *GetDescriptorApiV1OperationsDescriptorIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetDescriptorApiV1OperationsDescriptorIdGetRequest(c.Server, descriptorId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ReadDocsEndpointApiV1ReadDocsPostWithBody(ctx context.Context, params *ReadDocsEndpointApiV1ReadDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewReadDocsEndpointApiV1ReadDocsPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ReadDocsEndpointApiV1ReadDocsPost(ctx context.Context, params *ReadDocsEndpointApiV1ReadDocsPostParams, body ReadDocsEndpointApiV1ReadDocsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewReadDocsEndpointApiV1ReadDocsPostRequest(c.Server, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -18911,6 +19068,30 @@ func (c *Client) CorpusIndexUiCorpusGet(ctx context.Context, reqEditors ...Reque
 
 func (c *Client) UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGet(ctx context.Context, collectionKey string, chunkId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetRequest(c.Server, collectionKey, chunkId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostWithBody(ctx context.Context, collectionKey string, chunkId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostRequestWithBody(c.Server, collectionKey, chunkId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostWithFormdataBody(ctx context.Context, collectionKey string, chunkId string, body UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostRequestWithFormdataBody(c.Server, collectionKey, chunkId, body)
 	if err != nil {
 		return nil, err
 	}
@@ -28187,6 +28368,61 @@ func NewGetDescriptorApiV1OperationsDescriptorIdGetRequest(server string, descri
 	if err != nil {
 		return nil, err
 	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewReadDocsEndpointApiV1ReadDocsPostRequest calls the generic ReadDocsEndpointApiV1ReadDocsPost builder with application/json body
+func NewReadDocsEndpointApiV1ReadDocsPostRequest(server string, params *ReadDocsEndpointApiV1ReadDocsPostParams, body ReadDocsEndpointApiV1ReadDocsPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewReadDocsEndpointApiV1ReadDocsPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewReadDocsEndpointApiV1ReadDocsPostRequestWithBody generates requests for ReadDocsEndpointApiV1ReadDocsPost with any type of body
+func NewReadDocsEndpointApiV1ReadDocsPostRequestWithBody(server string, params *ReadDocsEndpointApiV1ReadDocsPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/read_docs")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	if params != nil {
 
@@ -37540,6 +37776,60 @@ func NewUiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetRequest(server s
 	return req, nil
 }
 
+// NewUiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostRequestWithFormdataBody calls the generic UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPost builder with application/x-www-form-urlencoded body
+func NewUiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostRequestWithFormdataBody(server string, collectionKey string, chunkId string, body UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewUiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostRequestWithBody(server, collectionKey, chunkId, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewUiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostRequestWithBody generates requests for UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPost with any type of body
+func NewUiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostRequestWithBody(server string, collectionKey string, chunkId string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "collection_key", runtime.ParamLocationPath, collectionKey)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "chunk_id", runtime.ParamLocationPath, chunkId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/corpus/chunks/%s/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewUiCorpusCollectionsTableUiCorpusCollectionsGetRequest calls the generic UiCorpusCollectionsTableUiCorpusCollectionsGet builder with application/json body
 func NewUiCorpusCollectionsTableUiCorpusCollectionsGetRequest(server string, body UiCorpusCollectionsTableUiCorpusCollectionsGetJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -43622,6 +43912,11 @@ type ClientWithResponsesInterface interface {
 	// GetDescriptorApiV1OperationsDescriptorIdGetWithResponse request
 	GetDescriptorApiV1OperationsDescriptorIdGetWithResponse(ctx context.Context, descriptorId openapi_types.UUID, params *GetDescriptorApiV1OperationsDescriptorIdGetParams, reqEditors ...RequestEditorFn) (*GetDescriptorApiV1OperationsDescriptorIdGetResponse, error)
 
+	// ReadDocsEndpointApiV1ReadDocsPostWithBodyWithResponse request with any body
+	ReadDocsEndpointApiV1ReadDocsPostWithBodyWithResponse(ctx context.Context, params *ReadDocsEndpointApiV1ReadDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ReadDocsEndpointApiV1ReadDocsPostResponse, error)
+
+	ReadDocsEndpointApiV1ReadDocsPostWithResponse(ctx context.Context, params *ReadDocsEndpointApiV1ReadDocsPostParams, body ReadDocsEndpointApiV1ReadDocsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ReadDocsEndpointApiV1ReadDocsPostResponse, error)
+
 	// RetrieveEndpointApiV1RetrievePostWithBodyWithResponse request with any body
 	RetrieveEndpointApiV1RetrievePostWithBodyWithResponse(ctx context.Context, params *RetrieveEndpointApiV1RetrievePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RetrieveEndpointApiV1RetrievePostResponse, error)
 
@@ -44265,6 +44560,11 @@ type ClientWithResponsesInterface interface {
 
 	// UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetWithResponse request
 	UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetWithResponse(ctx context.Context, collectionKey string, chunkId string, reqEditors ...RequestEditorFn) (*UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse, error)
+
+	// UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostWithBodyWithResponse request with any body
+	UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostWithBodyWithResponse(ctx context.Context, collectionKey string, chunkId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostResponse, error)
+
+	UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostWithFormdataBodyWithResponse(ctx context.Context, collectionKey string, chunkId string, body UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostResponse, error)
 
 	// UiCorpusCollectionsTableUiCorpusCollectionsGetWithBodyWithResponse request with any body
 	UiCorpusCollectionsTableUiCorpusCollectionsGetWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiCorpusCollectionsTableUiCorpusCollectionsGetResponse, error)
@@ -47315,6 +47615,28 @@ func (r GetDescriptorApiV1OperationsDescriptorIdGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetDescriptorApiV1OperationsDescriptorIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ReadDocsEndpointApiV1ReadDocsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *DocsReadResult
+}
+
+// Status returns HTTPResponse.Status
+func (r ReadDocsEndpointApiV1ReadDocsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ReadDocsEndpointApiV1ReadDocsPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -50897,6 +51219,28 @@ func (r UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse) Status
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -54746,6 +55090,23 @@ func (c *ClientWithResponses) GetDescriptorApiV1OperationsDescriptorIdGetWithRes
 	return ParseGetDescriptorApiV1OperationsDescriptorIdGetResponse(rsp)
 }
 
+// ReadDocsEndpointApiV1ReadDocsPostWithBodyWithResponse request with arbitrary body returning *ReadDocsEndpointApiV1ReadDocsPostResponse
+func (c *ClientWithResponses) ReadDocsEndpointApiV1ReadDocsPostWithBodyWithResponse(ctx context.Context, params *ReadDocsEndpointApiV1ReadDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ReadDocsEndpointApiV1ReadDocsPostResponse, error) {
+	rsp, err := c.ReadDocsEndpointApiV1ReadDocsPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseReadDocsEndpointApiV1ReadDocsPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) ReadDocsEndpointApiV1ReadDocsPostWithResponse(ctx context.Context, params *ReadDocsEndpointApiV1ReadDocsPostParams, body ReadDocsEndpointApiV1ReadDocsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ReadDocsEndpointApiV1ReadDocsPostResponse, error) {
+	rsp, err := c.ReadDocsEndpointApiV1ReadDocsPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseReadDocsEndpointApiV1ReadDocsPostResponse(rsp)
+}
+
 // RetrieveEndpointApiV1RetrievePostWithBodyWithResponse request with arbitrary body returning *RetrieveEndpointApiV1RetrievePostResponse
 func (c *ClientWithResponses) RetrieveEndpointApiV1RetrievePostWithBodyWithResponse(ctx context.Context, params *RetrieveEndpointApiV1RetrievePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RetrieveEndpointApiV1RetrievePostResponse, error) {
 	rsp, err := c.RetrieveEndpointApiV1RetrievePostWithBody(ctx, params, contentType, body, reqEditors...)
@@ -56852,6 +57213,23 @@ func (c *ClientWithResponses) UiCorpusChunkDetailUiCorpusChunksCollectionKeyChun
 		return nil, err
 	}
 	return ParseUiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse(rsp)
+}
+
+// UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostWithBodyWithResponse request with arbitrary body returning *UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostResponse
+func (c *ClientWithResponses) UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostWithBodyWithResponse(ctx context.Context, collectionKey string, chunkId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostResponse, error) {
+	rsp, err := c.UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostWithBody(ctx, collectionKey, chunkId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostWithFormdataBodyWithResponse(ctx context.Context, collectionKey string, chunkId string, body UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostResponse, error) {
+	rsp, err := c.UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostWithFormdataBody(ctx, collectionKey, chunkId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostResponse(rsp)
 }
 
 // UiCorpusCollectionsTableUiCorpusCollectionsGetWithBodyWithResponse request with arbitrary body returning *UiCorpusCollectionsTableUiCorpusCollectionsGetResponse
@@ -61992,6 +62370,32 @@ func ParseGetDescriptorApiV1OperationsDescriptorIdGetResponse(rsp *http.Response
 	return response, nil
 }
 
+// ParseReadDocsEndpointApiV1ReadDocsPostResponse parses an HTTP response from a ReadDocsEndpointApiV1ReadDocsPostWithResponse call
+func ParseReadDocsEndpointApiV1ReadDocsPostResponse(rsp *http.Response) (*ReadDocsEndpointApiV1ReadDocsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ReadDocsEndpointApiV1ReadDocsPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest DocsReadResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseRetrieveEndpointApiV1RetrievePostResponse parses an HTTP response from a RetrieveEndpointApiV1RetrievePostWithResponse call
 func ParseRetrieveEndpointApiV1RetrievePostResponse(rsp *http.Response) (*RetrieveEndpointApiV1RetrievePostResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -66451,6 +66855,32 @@ func ParseUiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse(rsp *
 	}
 
 	response := &UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostResponse parses an HTTP response from a UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostWithResponse call
+func ParseUiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostResponse(rsp *http.Response) (*UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPostResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

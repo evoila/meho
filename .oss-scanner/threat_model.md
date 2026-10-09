@@ -25,8 +25,9 @@ agents, human operators and large vendor APIs.
 - Every vendor operation goes through one shared path in
   `operations/dispatcher.py`: login, permission check, approval when
   needed, credential lookup, the vendor call, redaction, result
-  reduction, audit and broadcast. The REST API, the MCP endpoint, the
-  CLI and the operator web console all use this path for operations.
+  reduction (MEHO shrinks a large result and stores it), audit and
+  broadcast. The REST API, the MCP endpoint, the CLI and the operator
+  web console all use this path for operations.
 - MEHO runs on Kubernetes (Helm chart in `deploy/charts/meho/`). It uses
   PostgreSQL with pgvector, Valkey, Keycloak for login (OIDC), and Vault
   or GCP Secret Manager for credentials.
@@ -88,12 +89,14 @@ Kubernetes cluster.
    - CSRF tokens (`ui/csrf.py`), safe login redirects, anti-framing
      headers (`ui/security_headers.py`), Jinja autoescape
      (`ui/templating.py`).
-   - Uploads: target YAML import (`ui/routes/connectors/import_router.py`)
-     and topology bulk import (`ui/routes/topology/batch_parse.py`).
+   - Uploads: target YAML import (`ui/routes/connectors/import_router.py`),
+     topology bulk import (`ui/routes/topology/batch_parse.py`) and
+     knowledge-base files (`ui/routes/kb/routes.py`).
 6. **API specs that become connectors** (OpenAPI 3.0 and 3.1 only):
    `operations/ingest/openapi.py`, `operations/ingest/refs.py`.
    - Size limit 20 MiB. A remote spec is fetched over https only, with
-     the SSRF check, a pinned address and re-checked redirects.
+     the SSRF check, a pinned address (MEHO connects only to the
+     address it checked) and re-checked redirects.
    - Safe YAML loading, a check against the OpenAPI metaschema, and
      local `$ref` only (`#/components/...`).
    - Spec text is also sent to an LLM to group operations
@@ -131,8 +134,9 @@ Kubernetes cluster.
     - PowerShell runs over SSH with `-EncodedCommand`, and values are
       single-quoted (`connectors/_shared/pwsh.py`). Used by the Windows,
       Active Directory, DNS, failover cluster and Hyper-V connectors.
-    - URL paths: path parameters are percent-encoded and dot segments are
-      refused (`_substitute_path` in `operations/_branches.py`).
+    - URL paths: path parameters are percent-encoded, and dot segments
+      (`.` or `..` in a path) are refused (`_substitute_path` in
+      `operations/_branches.py`).
     - SQL and database commands: Postgres sessions are read-only
       (`connectors/postgres/session.py`); MSSQL checks identifiers and
       binds parameters (`connectors/mssql/session.py`); MongoDB allows a
@@ -158,8 +162,8 @@ finding.
    - Tokens: RS256 only; issuer, audience, expiry and `sub` are checked
      (`auth/jwt.py`). `tenant_id` and `tenant_role` come only from the
      signed token.
-   - The MCP endpoint has its own audience, so a REST token does not
-     work on `/mcp`. Runner tokens only reach the runner gateway and
+   - The MCP endpoint accepts only tokens that carry its own audience
+     (`mcp/auth.py`). Runner tokens only reach the runner gateway and
      check paths (`RUNNER_ALLOWED_PATH_PREFIXES` in `middleware.py`).
 2. **Roles and grants decide what a caller can do.**
    - Roles: `read_only`, `operator`, `tenant_admin` (`auth/operator.py`,
@@ -175,10 +179,12 @@ finding.
      session that holds the `mcp:admin` scope (`mcp/registry.py`,
      `mcp/handlers.py`).
 3. **Risky operations wait until a second person approves.**
-   - Every destructive operation, and every operation flagged
-     `requires_approval`, waits for approval
-     (`operations/approval_queue.py`). A destructive operation also
-     needs the hash of an earlier preview.
+   - Operations wait until a second person approves, according to
+     their risk level and the tenant's policy (`policy_gate` in
+     `operations/_validate.py`, `operations/approval_queue.py`).
+   - A destructive operation always waits for a second person, and no
+     standing grant can skip that. It also needs the hash of an earlier
+     preview. (Agent principals cannot request one at all, see above.)
    - The person who asked cannot approve their own request
      (`_check_self_approval`). Self-approval is off by default.
    - Only a human principal can approve or reject. Agent, service and
@@ -194,10 +200,10 @@ finding.
      success unless its audit row is written (`operations/_audit.py`).
      MCP calls and approval decisions are audited the same way
      (`mcp/audit.py`, `operations/approval_queue.py`).
-   - The `audit_log` table rejects UPDATE and DELETE with a database
-     trigger (`backend/alembic/versions/0100_*`). The only allowed change
-     is the scheduled clearing of the raw payload column after its
-     retention period (`0103_*`, `audit_retention.py`).
+   - On PostgreSQL, a database trigger rejects UPDATE and DELETE on the
+     `audit_log` table (`backend/alembic/versions/0100_*`). MEHO's only
+     change to the table is the scheduled clearing of the raw payload
+     column after its retention period (`0103_*`, `audit_retention.py`).
 5. **Target credentials stay inside MEHO.**
    - A target stores only a reference to its secret (`secret_ref`).
      MEHO reads the secret at call time
@@ -271,8 +277,9 @@ Less important, but in scope:
 - Topology, retrieval, scheduler, checks and broadcast feeds.
 - The Go CLI (`cli/`) runs on the user's machine. Token storage and TLS
   handling matter there.
-- `clients/` holds two small launchers for the third-party
-  `mcp-remote` package.
+- `clients/` holds the Claude Code plugin (an `mcp-remote` launcher,
+  hook scripts and skills) and the Claude Desktop extension. Both run
+  on the user's machine and start the third-party `mcp-remote` package.
 - The Helm chart (`deploy/charts/meho/`): pod security settings,
   network policy, and how secrets reach the pods.
 
@@ -317,8 +324,12 @@ cd /src/cli && go test ./...
 ```
 
 - Tests that need Docker (PostgreSQL or Valkey containers) skip
-  themselves. `backend/tests/integration/` and
-  `backend/tests/migrations/` need Docker and do not run here.
+  themselves. The unit lane leaves out `backend/tests/integration/`
+  and `backend/tests/migrations/`. CI runs these folders in separate
+  jobs, and many of their tests need Docker.
+- The tests here use SQLite. The audit trigger exists only on
+  PostgreSQL, so tests on SQLite cannot check it. Do not report a
+  missing audit trigger on SQLite as a finding.
 - A few tests fail offline because they download the embedding model
   from the internet (for example `tests/test_checks_investigate.py`).
   You can ignore those failures.
@@ -391,8 +402,9 @@ cd /src/cli && go test ./...
   scripts in `scripts/` and `backend/scripts/` (CI and maintainer
   tools, not part of the product).
 - Settings an operator turns on by choice, such as the SSRF allowlist,
-  the self-approval break-glass setting, `known_hosts_insecure` or
-  `verify_tls: false` on a target.
+  the self-approval break-glass setting, `known_hosts_insecure`,
+  `verify_tls: false` or `extras.scheme: http` on a target, or an empty
+  `VAULT_KV_TENANT_SCOPE_PREFIX`.
 - Third-party dependencies, unless MEHO uses them in an unsafe way.
   Known CVEs in dependencies are tracked separately.
 

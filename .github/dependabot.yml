@@ -4,7 +4,8 @@
 # Dependabot configuration.
 #
 # Active ecosystems: GitHub Actions (workflows), uv (backend Python
-# deps), and docker (backend/Dockerfile base image). Pip / npm land
+# deps), and docker (the backend/Dockerfile and .oss-scanner/Dockerfile
+# base images). Pip / npm land
 # when their manifests do (a root pyproject.toml, a package.json).
 # Adding an ecosystem before its manifest exists silently no-ops but
 # invites confusion later — the schedule would already be running.
@@ -84,6 +85,25 @@ updates:
   # is why the Dockerfile inlines the pin on both FROM lines.
   - package-ecosystem: "docker"
     directory: "/backend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "docker"
+    commit-message:
+      prefix: "chore(deps)"
+
+  # The build file for the Anthropic OSS Scanner (.oss-scanner/Dockerfile)
+  # uses the same `FROM python:3.14-slim@sha256:…` base as backend/Dockerfile.
+  # This entry bumps that FROM line too, so the scanner image does not age.
+  # Dependabot does not track the `COPY --from=` pins (Go, uv) or the helm
+  # and spaCy checksums in that file: bump those by hand, together with
+  # cli/go.mod and backend/Dockerfile.
+  - package-ecosystem: "docker"
+    directory: "/.oss-scanner"
     schedule:
       interval: "weekly"
       day: "monday"

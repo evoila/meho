@@ -1658,22 +1658,29 @@ jobs:
         # the tree today.
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          # Tracks `cli/go.mod`'s `go 1.25.8` directive. golangci-lint
+          # Tracks `cli/go.mod`'s `go 1.26.9` directive. golangci-lint
           # invokes `go/packages` which honors the go.mod-required Go
           # version; running an older Go than go.mod requires fails with
           # `go.mod requires go >= X` (CI run 25680051917).
-          # Bumped from 1.23 → 1.25 because charm.land/huh/v2 v2.0.3's
-          # transitive deps raised the minimum to go 1.25.8 (PR #640).
-          go-version: '1.25'
+          # Bumped from 1.25 → 1.26 because Go 1.25 gets no more
+          # security fixes: nine standard-library CVEs (net/http,
+          # crypto/tls, net/textproto) need go1.26.9 or newer.
+          # '1.26' resolves the newest 1.26.x patch; go.mod's 1.26.9
+          # floor (with GOTOOLCHAIN=local, which setup-go sets) makes
+          # an older 1.26.x fail the build instead of shipping the CVEs.
+          go-version: '1.26'
           cache-dependency-path: cli/go.sum
 
       - name: golangci-lint
         # v9.2.0: cli/.golangci.yml was migrated from v1 to v2 schema in
         # PR #640 (alongside the go 1.25 bump) so the action major upgrade
-        # is now safe. golangci-lint v2.12.2 is compiled with Go 1.25,
-        # resolving the "go language version used to build golangci-lint
-        # is lower than the targeted Go version" failure that v1.64.8
-        # (built with Go 1.24) produced once go-version was bumped to 1.25.
+        # is now safe. golangci-lint must be built with a Go whose
+        # language version (1.26) is not lower than the targeted one, or
+        # it fails with "the Go language version used to build
+        # golangci-lint is lower than the targeted Go version" (as v1.64.8,
+        # built with Go 1.24, did once go-version was bumped to 1.25).
+        # The v2.12.2 release binary is built with go1.26.2, so it
+        # supports the Go 1.26 target without a bump.
         # golangci-lint-action v7+ refuses v1.x binaries; v9.2.0 requires
         # golangci-lint >= v2.x and fully supports the v2 config schema.
         # SHA pinned to v9.2.0 commit (devops_best_practices: pin to
@@ -1702,10 +1709,11 @@ jobs:
         # The tool version is pinned (same supply-chain rule as the
         # SHA-pinned actions above); Dependabot doesn't track
         # `go install` pins, so bump it deliberately alongside Go
-        # toolchain bumps.
+        # toolchain bumps. v1.8.0 is the first release whose go.mod
+        # targets Go 1.26 (bumped with the move to Go 1.26).
         working-directory: cli
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@v1.5.0
+          go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
           govulncheck ./...
 
       - name: Ensure C toolchain is available (for cgo race runtime)
@@ -1809,7 +1817,7 @@ jobs:
         # shape as the go-lint-test lane.
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          go-version: '1.25'
+          go-version: '1.26'
           cache-dependency-path: cli/go.sum
 
       - name: Ensure make is available

@@ -213,6 +213,13 @@ anthropic_capabilities: Final[BackendCapabilities] = BackendCapabilities(
     tool_format="anthropic",
 )
 
+#: Output-token cap for each Anthropic agent request. 4096 is the old
+#: pydantic-ai default. Since pydantic-ai 2.52, an unset ``max_tokens``
+#: means the model's maximum (128,000 for claude-sonnet-4-6), sent as a
+#: streamed request. We pin the old value so agent requests stay the same.
+#: Used by both Anthropic builders (here and ``run.default_model_factory``).
+_AGENT_MAX_OUTPUT_TOKENS: Final[int] = 4096
+
 
 #: Capability flags for ``pydantic_ai.models.bedrock.BedrockConverseModel``
 #: registered against an **Anthropic-family** model id (Claude 3.5+,
@@ -530,7 +537,7 @@ def anthropic_backend_builder() -> Model:
     doesn't load the ``anthropic`` package at all.
     """
     from anthropic import AsyncAnthropic
-    from pydantic_ai.models.anthropic import AnthropicModel
+    from pydantic_ai.models.anthropic import AnthropicModel, AnthropicModelSettings
     from pydantic_ai.providers.anthropic import AnthropicProvider
 
     # Imported lazily so this module doesn't form an import cycle with
@@ -553,7 +560,11 @@ def anthropic_backend_builder() -> Model:
     # Messages API verbatim and 404s on the ``anthropic:`` prefix, so pass
     # only the bare model id. A deploy-supplied bare id falls through unchanged.
     _, model_name = _split_model_id(settings.agent_default_model)
-    return AnthropicModel(model_name, provider=provider)
+    return AnthropicModel(
+        model_name,
+        provider=provider,
+        settings=AnthropicModelSettings(max_tokens=_AGENT_MAX_OUTPUT_TOKENS),
+    )
 
 
 def default_anthropic_backends() -> dict[str, tuple[BackendBuilder, BackendCapabilities, bool]]:

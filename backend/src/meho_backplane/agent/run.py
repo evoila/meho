@@ -694,12 +694,13 @@ def default_model_factory() -> Model:
     only, so the factory is intentionally single-provider.
     """
     from anthropic import AsyncAnthropic
-    from pydantic_ai.models.anthropic import AnthropicModel
+    from pydantic_ai.models.anthropic import AnthropicModel, AnthropicModelSettings
     from pydantic_ai.providers.anthropic import AnthropicProvider
 
     from meho_backplane.settings import get_settings
 
     from .invocation import _split_model_id
+    from .models import _AGENT_MAX_OUTPUT_TOKENS
 
     settings = get_settings()
     api_key = settings.anthropic_api_key
@@ -714,7 +715,11 @@ def default_model_factory() -> Model:
     # Messages API verbatim and 404s on the ``anthropic:`` prefix, so pass
     # only the bare model id. A deploy-supplied bare id falls through unchanged.
     _, model_name = _split_model_id(settings.agent_default_model)
-    return AnthropicModel(model_name, provider=provider)
+    return AnthropicModel(
+        model_name,
+        provider=provider,
+        settings=AnthropicModelSettings(max_tokens=_AGENT_MAX_OUTPUT_TOKENS),
+    )
 
 
 def _register_default_meta_tools(agent: Agent[Operator, Any]) -> None:

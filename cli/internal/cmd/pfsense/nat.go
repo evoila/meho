@@ -42,8 +42,8 @@ func newNatRulesCmd() *cobra.Command {
 			"--json emits the full OperationResult envelope.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example: "  meho pfsense nat rules --target pfsense-hetzner-dc\n" +
-			"  meho pfsense nat rules --target pfsense-hetzner-dc --json | jq '.result.rows[]'",
+		Example: "  meho pfsense nat rules --target fw-01\n" +
+			"  meho pfsense nat rules --target fw-01 --json | jq '.result.rows[]'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

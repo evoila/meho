@@ -31,8 +31,8 @@ func newVersionCmd() *cobra.Command {
 			"FingerprintResult envelope (vendor + product) is needed.\n\n" +
 			"Exit codes mirror meho operation call (0=ok, 1=error/denied,\n" +
 			"2=auth_expired, 3=unreachable, 4=unexpected).",
-		Example: "  meho pfsense version --target pfsense-hetzner-dc\n" +
-			"  meho pfsense version --target pfsense-hetzner-dc --json | jq .result.version",
+		Example: "  meho pfsense version --target fw-01\n" +
+			"  meho pfsense version --target fw-01 --json | jq .result.version",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

@@ -45,8 +45,8 @@ func newNetworkInterfaceCmd() *cobra.Command {
 			"--json emits the full OperationResult envelope.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example: "  meho pfsense network interface --target pfsense-hetzner-dc\n" +
-			"  meho pfsense network interface --target pfsense-hetzner-dc --json | jq '.result.rows[]'",
+		Example: "  meho pfsense network interface --target fw-01\n" +
+			"  meho pfsense network interface --target fw-01 --json | jq '.result.rows[]'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -137,8 +137,8 @@ func newNetworkGatewayCmd() *cobra.Command {
 			"--json emits the full OperationResult envelope.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example: "  meho pfsense network gateway --target pfsense-hetzner-dc\n" +
-			"  meho pfsense network gateway --target pfsense-hetzner-dc --json | jq '.result.rows[]'",
+		Example: "  meho pfsense network gateway --target fw-01\n" +
+			"  meho pfsense network gateway --target fw-01 --json | jq '.result.rows[]'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

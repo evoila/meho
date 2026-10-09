@@ -243,7 +243,7 @@ func TestDispatchOpBakesConnectorID(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	r, err := dispatchOp(context.Background(), srv.URL, "pfsense.about", "pfsense-hetzner-dc", nil)
+	r, err := dispatchOp(context.Background(), srv.URL, "pfsense.about", "fw-01", nil)
 	if err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestDispatchOpTargetSlugWrappedAsName(t *testing.T) {
 				return
 			}
 			tgt, _ := raw["target"].(map[string]any)
-			if tgt == nil || tgt["name"] != "pfsense-hetzner-dc" {
+			if tgt == nil || tgt["name"] != "fw-01" {
 				t.Errorf("target should wrap slug as {name: ...}; got %v", raw["target"])
 			}
 			writeJSON(t, w, 200, CallResult{Status: "ok", OpID: "pfsense.about"})
@@ -274,7 +274,7 @@ func TestDispatchOpTargetSlugWrappedAsName(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	if _, err := dispatchOp(context.Background(), srv.URL, "pfsense.about", "pfsense-hetzner-dc", nil); err != nil {
+	if _, err := dispatchOp(context.Background(), srv.URL, "pfsense.about", "fw-01", nil); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }

@@ -44,8 +44,8 @@ func newFirewallRulesCmd() *cobra.Command {
 			"--json emits the full OperationResult envelope.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example: "  meho pfsense firewall rules --target pfsense-hetzner-dc\n" +
-			"  meho pfsense firewall rules --target pfsense-hetzner-dc --json | jq '.result.rows[]'",
+		Example: "  meho pfsense firewall rules --target fw-01\n" +
+			"  meho pfsense firewall rules --target fw-01 --json | jq '.result.rows[]'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -131,8 +131,8 @@ func newFirewallStateCmd() *cobra.Command {
 			"with result_query(handle_id, offset, limit).\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
-		Example: "  meho pfsense firewall state --target pfsense-hetzner-dc\n" +
-			"  meho pfsense firewall state --target pfsense-hetzner-dc --json | jq '.result.rows | length'",
+		Example: "  meho pfsense firewall state --target fw-01\n" +
+			"  meho pfsense firewall state --target fw-01 --json | jq '.result.rows | length'",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

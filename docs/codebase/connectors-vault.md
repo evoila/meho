@@ -64,7 +64,7 @@ precedence at the login site (`auth.vault._resolve_login_role`) is:
 The **per-tenant tier (#3852)** consults `settings.vault_oidc_role_by_tenant`
 — a comma-separated `<tenant-uuid>=<role>` map (env `VAULT_OIDC_ROLE_BY_TENANT`,
 empty by default) — keyed on `operator.tenant_id`. It lets one fixed role stop
-spanning tenants on a shared multi-tenant instance (meho-internal#356): an
+spanning tenants on a shared multi-tenant instance: an
 operator of a sandbox tenant logs into a role whose `bound_claims` + Vault
 policy it satisfies, for **both** the target-less `vault.kv.*` family (which
 dispatches with `target=None`, so the per-target override never fires) and any
@@ -87,8 +87,8 @@ Guarantees:
 - **Fail-closed.** A resolved role Vault denies surfaces
   `VaultRoleDeniedError` from the login with **no** fallback to the wide
   role — the #2757 no-silent-widen rule, extended to the per-target role.
-- **Null-version safe.** The live `rdc-vault-teardown` target ships
-  `version=null`; it resolves to the connector via the wildcard
+- **Null-version safe.** A teardown target (for example `vault-teardown`)
+  may ship `version=null`; it resolves to the connector via the wildcard
   registration (G0.15-T6 #1215), and role resolution keys on `product` +
   `extras` alone, never `version`.
 - **Preflight-consistent.** The park-time write-capability preflight runs
@@ -101,10 +101,10 @@ evaluation fails closed to `unknown` (a `VaultRoleDeniedError`), which is a
 loud flag of a misconfigured sensor rather than a silent widen; pin
 monitoring sensors on the standard target, not the delete-scoped one.
 
-Consumer-side provisioning (the `meho-teardown` role + `rdc-vault-teardown`
+Consumer-side provisioning (the `meho-teardown` role + `vault-teardown`
 target registration) is documented in
 [`docs/cross-repo/vault-provisioning.md`](../cross-repo/vault-provisioning.md)
-§8; lab-verified in `claude-rdc-hetzner-dc#2814` (PR `#2815`).
+§8; verified end-to-end in a lab deployment.
 
 ## Key types
 
@@ -534,7 +534,7 @@ path that runs once a human approves.
 
 A `requires_approval` KV write parks for a four-eyes review. That review
 is **wasted** if the approved write then hits Vault `permission denied` —
-the consumer incident (`claude-rdc-hetzner-dc#864`) was exactly this: the
+a real consumer incident was exactly this: the
 `meho-mcp` role's templated policy granted `read` but no
 `create`/`update` on the write path, so every approved KV write failed
 post-approval.

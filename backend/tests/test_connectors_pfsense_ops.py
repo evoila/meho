@@ -1062,10 +1062,11 @@ async def test_pfsense_dhcp_leases_response_schema_matches_handler_rows() -> Non
 # ---------------------------------------------------------------------------
 
 
-def test_pfsense_ops_has_seventeen_entries() -> None:
+def test_pfsense_ops_has_nineteen_entries() -> None:
     """canary + 7 reads + dhcp.leases (#2849) + 2 writes (#3090) + 2 deletes (#3232)
-    + 3 teardown-inverse deletes (#3313) + mgmt_flow.summary (meho-internal#252) = 17."""
-    assert len(PFSENSE_OPS) == 17
+    + 3 teardown-inverse deletes (#3313) + mgmt_flow.summary
+    + user.list / route.static.list (#3954) = 19."""
+    assert len(PFSENSE_OPS) == 19
 
 
 def test_pfsense_ops_about_is_first() -> None:
@@ -1134,6 +1135,8 @@ def test_pfsense_ops_covers_expected_op_ids() -> None:
         "pfsense.gateway.list",
         "pfsense.config.show",
         "pfsense.dhcp.leases",
+        "pfsense.user.list",
+        "pfsense.route.static.list",
         "pfsense.gateway.add",
         "pfsense.route.static.add",
         "pfsense.nat.delete",
@@ -1156,6 +1159,7 @@ def test_pfsense_ops_group_keys_include_new_groups() -> None:
     assert "dhcp" in group_keys
     assert "routing" in group_keys
     assert "alias" in group_keys
+    assert "users" in group_keys
 
 
 def test_pfsense_ops_handler_attrs_exist_on_connector() -> None:

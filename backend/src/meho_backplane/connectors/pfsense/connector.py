@@ -43,7 +43,9 @@ G3.7-T2 (#847) adds 7 read ops (``pfctl``/config.xml reads) via
 :mod:`~meho_backplane.connectors.pfsense.ops_read`. Each op has a
 bound-method shim on :class:`PfSenseConnector` that delegates to the
 pure handler function in that module. The dispatcher shim does not
-change.
+change. #3954 adds the allow-listed config reads ``pfsense.user.list``
+and ``pfsense.route.static.list`` via
+:mod:`~meho_backplane.connectors.pfsense.ops_config_reads`.
 """
 
 from __future__ import annotations
@@ -214,7 +216,10 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "fields and known secret shapes come back redacted, so the output "
         "is not a restorable backup. Free-text fields (descriptions, notes, "
         "cron or shell commands, custom config text, URLs) can still hold "
-        "secrets that someone typed in."
+        "secrets that someone typed in. To check local users or static "
+        "routes, do not read the whole file: call ``pfsense.user.list`` or "
+        "``pfsense.route.static.list``, which return only a short list of "
+        "fields and never read secret fields."
     ),
     "dhcp": (
         "Use for pfSense DHCP lease-state operations: reading the live "
@@ -225,7 +230,10 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "lease start/end, and effective binding state."
     ),
     "routing": (
-        "Use for pfSense routing-plane provisioning and teardown: appending "
+        "Use for pfSense static routes and routing-plane provisioning and "
+        "teardown: listing the static routes (``pfsense.route.static.list``, "
+        "a ``safe`` read of network / gateway / descr / disabled; for a CIDR "
+        "destination its ``network`` is what the delete op takes), appending "
         "a named gateway (``pfsense.gateway.add``) or a static route "
         "(``pfsense.route.static.add``) to ``config.xml``, or reversing "
         "either for a governed teardown -- ``pfsense.route.static.delete`` "
@@ -240,7 +248,19 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "gateway / static-route config, never interfaces), so they are safe "
         "against a perimeter firewall carrying the operator's own access path. "
         "Read the current state first with ``pfsense.gateway.list`` / "
-        "``pfsense.config.show``."
+        "``pfsense.route.static.list``."
+    ),
+    "users": (
+        "Use for pfSense local-user questions: which local users exist, "
+        "whether an account (for example a VPN user) is disabled, when it "
+        "expires, and which groups it is in. ``pfsense.user.list`` is a "
+        "``safe`` read that returns only name / descr / scope / disabled / "
+        "expires / uid / groups. It never reads secret fields (password "
+        "hashes, keys, the IPsec pre-shared key, SSH authorized keys, "
+        "certificate data), and a returned value with a known secret shape "
+        "is redacted; a secret typed in plain words into ``descr`` can still "
+        "show, the same limit as ``pfsense.config.show``. Use it instead of "
+        "``pfsense.config.show`` for any question about users."
     ),
 }
 
@@ -664,6 +684,42 @@ class PfSenseConnector(SshConnector):
         )
 
         return await _pfsense_dhcp_leases(self, target, params, operator)
+
+    async def user_list(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.user.list`` (#3954).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_config_reads.pfsense_user_list`.
+        Returns allow-listed fields only -- never hashes, keys or certificates.
+        """
+        from meho_backplane.connectors.pfsense.ops_config_reads import (
+            pfsense_user_list as _pfsense_user_list,
+        )
+
+        return await _pfsense_user_list(self, target, params, operator)
+
+    async def route_static_list(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.route.static.list`` (#3954).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_config_reads.pfsense_route_static_list`.
+        Returns allow-listed fields only (network, gateway, descr, disabled).
+        """
+        from meho_backplane.connectors.pfsense.ops_config_reads import (
+            pfsense_route_static_list as _pfsense_route_static_list,
+        )
+
+        return await _pfsense_route_static_list(self, target, params, operator)
 
     async def mgmt_flow_summary(
         self,

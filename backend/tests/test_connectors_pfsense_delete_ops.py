@@ -503,8 +503,8 @@ def test_delete_ops_are_destructive_requires_approval_with_tag() -> None:
     assert seen == delete_ids
 
 
-def test_pfsense_op_count_is_seventeen() -> None:
-    assert len(PFSENSE_OPS) == 17
+def test_pfsense_op_count_is_nineteen() -> None:
+    assert len(PFSENSE_OPS) == 19
 
 
 def test_delete_ops_group_keys() -> None:

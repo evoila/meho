@@ -30,7 +30,9 @@ package.
 
 ## Run locally
 
-Requires [uv](https://docs.astral.sh/uv/) ≥ 0.4 and Python 3.12.
+Requires [uv](https://docs.astral.sh/uv/) and Python 3.14. The file
+`.python-version` pins 3.14, so `uv sync` uses an installed 3.14 or
+downloads one. CI uses the same Python and pins uv to a fixed version.
 
 ```bash
 cd backend/

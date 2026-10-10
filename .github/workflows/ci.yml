@@ -289,8 +289,19 @@ jobs:
         # uv is the project's canonical Python toolchain (pyproject.toml locks
         # a uv.lock). enable-cache keys the uv download cache on uv.lock, shared
         # with every sibling Python job.
+        #
+        # `version` pins uv itself. Without it, setup-uv installs the newest
+        # uv, so a uv release can break CI with no change on our side: uv
+        # 0.13.0 made Python 3.15 its default, and the sync below failed
+        # because onnxruntime has no 3.15 wheels yet. Raise this pin by hand,
+        # in every setup-uv step (ci.yml, eval-gate.yml, docs-site.yml).
+        #
+        # The Python version comes from backend/.python-version (3.14, the
+        # same as the image's python:3.14-slim). uv reads that file for every
+        # uv command in CI: they all run in backend/ or pass --project backend.
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
         with:
+          version: "0.13.0"
           enable-cache: true
 
       - name: Sync Python environment (locked)
@@ -587,11 +598,11 @@ jobs:
         # opts into the action's built-in cache for the uv download
         # cache directory, keyed by uv.lock — repeat installs on the
         # same lockfile are near-instant, so the three shards share one
-        # warm uv cache. version unset -> latest, which is fine because
-        # uv ships a strict resolver and the lockfile pins every
-        # transitive dep.
+        # warm uv cache. `version` pins uv; see the python-lint job for
+        # why, and for where the Python version comes from.
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
         with:
+          version: "0.13.0"
           enable-cache: true
 
       - name: Sync Python environment (locked)
@@ -1076,6 +1087,8 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
         with:
+          # Pinned uv; see the python-lint job for why.
+          version: "0.13.0"
           enable-cache: true
 
       - name: Sync Python environment (locked)
@@ -1271,6 +1284,8 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
         with:
+          # Pinned uv; see the python-lint job for why.
+          version: "0.13.0"
           enable-cache: true
 
       - name: Sync Python environment (locked)
@@ -1539,6 +1554,8 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
         with:
+          # Pinned uv; see the python-lint job for why.
+          version: "0.13.0"
           enable-cache: true
 
       - name: Sync Python environment (locked)
@@ -1633,6 +1650,8 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
         with:
+          # Pinned uv; see the python-lint job for why.
+          version: "0.13.0"
           enable-cache: true
 
       - name: Sync Python environment (locked)
@@ -1845,6 +1864,8 @@ jobs:
         # action + cache shape as the Python lanes.
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
         with:
+          # Pinned uv; see the python-lint job for why.
+          version: "0.13.0"
           enable-cache: true
 
       - name: Sync backend environment (locked)

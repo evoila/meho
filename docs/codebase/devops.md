@@ -1393,8 +1393,12 @@ the publish workflows use where the action overlaps
 `actions/upload-artifact`), so a single supply-chain audit covers all
 of CI. Two actions are unique to `ci.yml`:
 
-- `astral-sh/setup-uv@v8.1.0` — the uv installer, with
-  `enable-cache: true` keyed by `uv.lock`.
+- `astral-sh/setup-uv@v10.1.0` — the uv installer, with
+  `enable-cache: true` keyed by `uv.lock`. Every setup-uv step (also in
+  `eval-gate.yml` and `docs-site.yml`) pins uv itself with `version:`,
+  so a new uv release cannot change CI on its own. The Python version
+  comes from `backend/.python-version` (3.14, the same as the image's
+  `python:3.14-slim`). Raise the uv pin by hand, in all steps at once.
 - `golangci/golangci-lint-action@v6.5.2` — pinned to the **v6** major,
   not v7+/v8+, because the in-tree
   [`cli/.golangci.yml`](../../cli/.golangci.yml) is written in the

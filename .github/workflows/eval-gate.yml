@@ -77,8 +77,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Install uv
+        # Pinned uv, the same version as ci.yml (its python-lint job says
+        # why). Python comes from backend/.python-version.
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
         with:
+          version: "0.13.0"
           enable-cache: true
 
       - name: Sync Python environment (locked)

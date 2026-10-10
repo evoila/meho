@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.14"
 license = "Apache-2.0"
 dependencies = [
-    "fastapi>=0.141.1,<0.142",
+    "fastapi>=0.141.1,<0.143",
     "uvicorn[standard]>=0.52.3",
     "pydantic[email]>=2.13.4",
     "structlog>=26.1.0",

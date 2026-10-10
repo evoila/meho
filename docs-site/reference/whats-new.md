@@ -9,6 +9,27 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.35.20](https://github.com/evoila/meho/releases/tag/v0.35.20) — 2026-10-11
+
+- **Security fix: the CLI is built with a newer Go.** The `meho` CLI
+  binaries are now built with Go 1.26.9. This fixes nine known flaws in
+  the network and TLS code of Go's standard library, which the v0.35.19
+  CLI still had. Install the new CLI to get the fixes. These Go flaws
+  do not affect the container image or the Helm chart.
+- **Security fix in the container image.** The pydantic-ai library is
+  updated to a version that fixes a known vulnerability. Agent requests
+  stay the same.
+- **Read more around a docs hit.** The new `read_docs` tool, the
+  `meho docs read` command and a "Read around this hit" button in the
+  console show the text before and after a docs search hit, its whole
+  page, or its section. It is off until an operator turns it on for a
+  docs collection, and the documentation service must offer reads.
+- **Two safe pfSense reads.** `pfsense.user.list` lists the firewall's
+  local users, and `pfsense.route.static.list` lists its static routes.
+  They need no approval. They return only a fixed set of fields, so
+  password hashes and keys are never part of the answer. You no longer
+  need the whole config file to check a user or a route.
+
 ## [v0.35.19](https://github.com/evoila/meho/releases/tag/v0.35.19) — 2026-10-07
 
 - **Security fix: the pfSense config read no longer shows secrets.**

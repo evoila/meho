@@ -680,6 +680,16 @@ jobs:
           MEHO_REDACTION_SPACY_MODEL=en_core_web_sm \
             uv run python -c "from meho_backplane.redaction import get_engines; get_engines('en')"
 
+      - name: Install Helm
+        # The chart render tests (tests/test_chart_*.py) call `helm
+        # template`. Without helm they skip, so a broken chart test could
+        # stay hidden on main. Same pinned action and Helm version as
+        # chart.yml and the helm-lint-template job below. Every shard
+        # needs it: the file stride can put a chart test file in any shard.
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5.0.1
+        with:
+          version: v3.16.4
+
       - name: Pytest (unit shard ${{ matrix.shard }}/3)
         # `shell: bash` for `mapfile` + arrays (and the pipefail/-e the
         # default self-hosted shell does not enable — #2865). Under -e a
@@ -687,6 +697,9 @@ jobs:
         # perf-budget check below can never mask a red suite.
         shell: bash
         env:
+          # The chart render tests FAIL (not skip) when helm is missing,
+          # so losing the Install Helm step above cannot hide them again.
+          MEHO_REQUIRE_HELM: "1"
           # Pin Tier-2's spaCy model to the unit-lane choice so the
           # acceptance tests in test_redaction_presidio.py + the
           # tier2 path in test_redaction_middleware.py exercise the

@@ -72,7 +72,9 @@ Source: `backend/src/meho_backplane/connectors/hetzner_robot/`.
   for the onboarding firewall-verify step and classifies into `robot-networking`.
   The two writes (#3973) add servers to a vSwitch and remove them, both in
   `robot-networking`. Their `llm_instructions` tell the agent that the change
-  waits for a human approval (the requester cannot approve it), that Robot
+  waits for a human approval (the requester cannot approve it), that an agent
+  without an explicit permission is refused (`denied`) and should ask a human
+  instead of retrying, that Robot
   applies it in the background (poll `GET:/vswitch/{vswitch-id}` until the
   server is `ready`, or gone after a remove), that `409 VSWITCH_IN_PROCESS`
   means an earlier change is still running, that Robot allows 100 calls per

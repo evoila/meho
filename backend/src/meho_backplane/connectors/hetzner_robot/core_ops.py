@@ -356,6 +356,20 @@ ROBOT_CORE_GROUPS: Final[tuple[RobotCoreGroup, ...]] = (
 )
 
 
+#: What the agent gets back from a vSwitch membership write, per login kind
+#: (the safety floor in :mod:`.ingest_safety` makes both writes ``dangerous``
+#: + ``requires_approval``; ``auth/permissions.py`` refuses a ``dangerous`` op
+#: for an agent without an explicit permission).
+_VSWITCH_APPROVAL_NOTE: Final[str] = (
+    "This change WAITS FOR A HUMAN APPROVAL. A human or service login gets "
+    "status awaiting_approval, and a second person must approve: the person "
+    "who asked cannot approve it. An agent needs an explicit permission for "
+    "this op. Without it the call is refused (status denied): ask a human to "
+    "run it instead of retrying. With it the call also returns "
+    "awaiting_approval."
+)
+
+
 #: The 12 curated Hetzner Robot core ops: 10 reads and the 2 vSwitch
 #: membership writes. Each entry carries the op_id (``METHOD:/path`` form),
 #: the curated group assignment, and the operator-reviewed
@@ -533,11 +547,10 @@ ROBOT_CORE_OPS: Final[tuple[RobotCoreOp, ...]] = (
                 "vSwitch. Params: vswitch-id (from hetzner-robot.vswitch.list) "
                 "and body.server, a list of server numbers or main IPs, for "
                 'example {"vswitch-id": "4321", "body": {"server": [321]}}. '
-                "This change WAITS FOR A HUMAN APPROVAL: the call returns "
-                "awaiting_approval, and the person who asked cannot approve "
-                "it. Robot allows 100 calls per hour on this route, so do not "
-                "call it in a loop. This op only adds servers: it never renames "
-                "the vSwitch, changes its VLAN, or cancels it."
+                f"{_VSWITCH_APPROVAL_NOTE} Robot allows 100 calls per hour on "
+                "this route, so do not call it in a loop. This op only adds "
+                "servers: it never renames the vSwitch, changes its VLAN, or "
+                "cancels it."
             ),
             output_shape=(
                 "After approval Robot answers with no body, so the result is an "
@@ -564,11 +577,9 @@ ROBOT_CORE_OPS: Final[tuple[RobotCoreOp, ...]] = (
                 "Params: vswitch-id (from hetzner-robot.vswitch.list) and "
                 "body.server, a list of server numbers or main IPs, for example "
                 '{"vswitch-id": "4321", "body": {"server": [321]}}. The removed '
-                "servers lose this private network. This change WAITS FOR A "
-                "HUMAN APPROVAL: the call returns awaiting_approval, and the "
-                "person who asked cannot approve it. Robot allows 100 calls per "
-                "hour on this route. This op only removes servers: it never "
-                "cancels the vSwitch."
+                f"servers lose this private network. {_VSWITCH_APPROVAL_NOTE} "
+                "Robot allows 100 calls per hour on this route. This op only "
+                "removes servers: it never cancels the vSwitch."
             ),
             output_shape=(
                 "After approval Robot answers with no body, so the result is an "

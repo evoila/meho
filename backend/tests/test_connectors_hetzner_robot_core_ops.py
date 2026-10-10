@@ -222,11 +222,19 @@ def test_robot_core_ops_count_is_12() -> None:
 def test_membership_write_instructions_carry_the_approval_and_polling_guidance(
     op_id: str,
 ) -> None:
-    """The agent-facing guidance names the approval wait, polling, 409 and limits."""
+    """The agent-facing guidance names the approval wait, polling, 409 and limits.
+
+    It also tells an agent what it gets back: ``awaiting_approval`` for a human
+    or service login (or an agent with permission), and ``denied`` for an
+    agent without an explicit permission (the default).
+    """
     (op,) = [op for op in ROBOT_CORE_OPS if op.op_id == op_id]
     text = " ".join(str(value) for value in op.llm_instructions.values())
     assert "WAITS FOR A HUMAN APPROVAL" in text
     assert "cannot approve" in text
+    assert "awaiting_approval" in text
+    assert "explicit permission" in text
+    assert "status denied" in text
     assert "GET:/vswitch/{vswitch-id}" in text
     assert "VSWITCH_IN_PROCESS" in text
     assert "100 calls per hour" in text

@@ -35,14 +35,20 @@ tenacity retry predicate.  This connector adds an explicit 401-before-raise
 check in ``_request_robot`` so the failure is surfaced with a useful message
 before the HTTP status error propagates.
 
-Form-encoded helper
+Form-encoded writes
 -------------------
 
-The Robot Webservice API requires ``application/x-www-form-urlencoded``
-bodies for all write verbs — it rejects ``application/json``.  The
-``_post_form`` helper wraps httpx's ``data=`` parameter so callers never pass
-a raw ``json=`` arg against this API.  v0.2 read operations never POST, but
-the helper ships now for v0.2.next write readiness per the task body.
+The Robot Webservice API reads write bodies only as
+``application/x-www-form-urlencoded`` — it rejects ``application/json``.
+The dispatcher hands every ingested POST / PUT / PATCH / DELETE body to
+:meth:`HetznerRobotConnector._post_json` as ``json=``; this connector
+overrides that seam and sends the body as form fields instead
+(:func:`robot_form_fields`, #3973). Text and numbers go as they are,
+booleans as ``true`` / ``false``, and a list as repeated ``name[]`` fields
+(``server[]=1&server[]=2``). A nested object, or a list inside a list, has
+no form shape Robot reads, so it is refused before any HTTP call. The
+override keeps the base seam's no-retry rule, so a write is sent at most
+once. The older ``_post_form`` helper stays for direct callers.
 
 Fingerprint
 -----------
@@ -72,6 +78,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -97,7 +104,7 @@ from meho_backplane.connectors.schemas import (
     ProbeResult,
 )
 
-__all__ = ["HetznerRobotConnector"]
+__all__ = ["HetznerRobotConnector", "robot_form_fields"]
 
 _log = structlog.get_logger(__name__)
 
@@ -126,6 +133,42 @@ def _basic_auth_header(username: str, password: str) -> str:
     """Compute the ``Authorization: Basic`` header value for *username*:*password*."""
     encoded = base64.b64encode(f"{username}:{password}".encode()).decode()
     return f"Basic {encoded}"
+
+
+def _form_value(field: str, value: Any) -> str:
+    """Return one form value as text, or refuse a value Robot cannot read."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (str, int, float)):
+        return str(value)
+    raise ValueError(
+        f"Hetzner Robot reads write bodies only as form fields: field {field!r} "
+        f"holds a {type(value).__name__}, but a form field takes text, a number, "
+        "a boolean, or a flat list of those. Nothing was sent."
+    )
+
+
+def robot_form_fields(body: Any) -> dict[str, str | list[str]]:
+    """Turn a write body into the form fields Robot reads.
+
+    Text and numbers go as they are, booleans as ``true`` / ``false``, and a
+    list as repeated ``name[]`` fields (``{"server": [1, 2]}`` becomes
+    ``server[]=1&server[]=2`` on the wire). A nested object, a list inside a
+    list, or ``None`` raises :exc:`ValueError`, so the caller refuses the
+    write before any HTTP call.
+    """
+    if not isinstance(body, Mapping):
+        raise ValueError(
+            "Hetzner Robot reads write bodies only as form fields: the body must "
+            f"be an object of fields, not a {type(body).__name__}. Nothing was sent."
+        )
+    fields: dict[str, str | list[str]] = {}
+    for name, value in body.items():
+        if isinstance(value, (list, tuple)):
+            fields[f"{name}[]"] = [_form_value(name, item) for item in value]
+        else:
+            fields[name] = _form_value(name, value)
+    return fields
 
 
 class HetznerRobotConnector(HttpConnector):
@@ -282,8 +325,8 @@ class HetznerRobotConnector(HttpConnector):
         A 401 during a form POST is intercepted and raised as ``auth_failed``
         — same discipline as :meth:`_get_robot_json`.
 
-        v0.2 read operations never POST against the Robot API; this helper
-        ships for v0.2.next write readiness per the task body.
+        Dispatched writes do not use this helper; they go through the
+        :meth:`_post_json` override, which sends form fields the same way.
         """
         client = await self._http_client(target)
         headers = await self.auth_headers(target, synthesise_system_operator())
@@ -300,6 +343,45 @@ class HetznerRobotConnector(HttpConnector):
             raise RuntimeError(
                 f"Non-JSON response from {path}: {resp.status_code} {resp.text[:200]}"
             ) from exc
+
+    async def _post_json(
+        self,
+        target: Any,
+        path: str,
+        *,
+        operator: Operator,
+        verb: str = "POST",
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
+        timeout: Any = httpx.USE_CLIENT_DEFAULT,
+    ) -> dict[str, Any]:
+        """Send a Robot write body as form fields, never as JSON (#3973).
+
+        The dispatcher passes every ingested write body as ``json=``. Robot
+        rejects JSON, so this override turns it into form fields with
+        :func:`robot_form_fields` and calls the base seam with ``data=``.
+        A body Robot cannot read raises :exc:`ValueError` before any HTTP
+        call. Everything else is the base seam: the real verb (POST or
+        DELETE), no retry, an empty answer mapped to ``{}``, and a 401
+        raised as :exc:`httpx.HTTPStatusError` after exactly one request.
+        The dispatcher reports that 401 as ``connector_auth_failed``.
+        """
+        if json is not None:
+            if data is not None:
+                raise ValueError("_post_json accepts json= or data=, not both")
+            data = robot_form_fields(json)
+        return await super()._post_json(
+            target,
+            path,
+            operator=operator,
+            verb=verb,
+            params=params,
+            data=data,
+            extra_headers=extra_headers,
+            timeout=timeout,
+        )
 
     async def fingerprint(
         self,

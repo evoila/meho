@@ -21,11 +21,21 @@
 # acceptance criteria: list/get servers, vSwitch get + membership,
 # per-server firewall get/set, reverse DNS, and the server_addon order.
 # The read GETs (server list/get, vswitch list/get, firewall get, rdns)
-# are the ops the curated read-only core enables today
-# (connectors/hetzner_robot/core_ops.py, ROBOT_CORE_OPS); the write ops
-# (vSwitch membership POST/DELETE, firewall set, server_addon order) are
-# declared so the ingested corpus covers the full wrapper surface and the
-# G3.x write-surface curation has a descriptor to enable when it lands.
+# and the two vSwitch membership writes (POST/DELETE
+# /vswitch/{vswitch-id}/server, #3973) are the ops the curated core
+# enables (connectors/hetzner_robot/core_ops.py, ROBOT_CORE_OPS). The
+# other writes stay switched off: the vSwitch rename / VLAN change (POST
+# /vswitch/{vswitch-id}), the vSwitch cancel (DELETE /vswitch/{vswitch-id}),
+# the firewall set, and the server_addon order. The connector's safety
+# floor (connectors/hetzner_robot/ingest_safety.py) makes every vSwitch
+# write wait for a human approval.
+#
+# FORM FIELDS. Robot reads write bodies only as
+# application/x-www-form-urlencoded. The four vSwitch writes declare that
+# media type. HetznerRobotConnector sends every write body as form fields
+# (lists as repeated name[] fields) whatever media type a body declares;
+# the firewall set and server_addon bodies below keep their older
+# application/json declaration.
 #
 # WIRE PATHS. Robot's REST paths are flat (one resource per root segment)
 # and MUST be reproduced verbatim -- the dispatcher addresses the real
@@ -141,12 +151,14 @@ paths:
               schema:
                 $ref: "#/components/schemas/VswitchEnvelope"
     post:
-      operationId: addVswitchServers
-      summary: Add servers to a vSwitch
+      operationId: updateVswitch
+      summary: Rename a vSwitch or change its VLAN ID
       description: >-
-        Add one or more dedicated servers to a vSwitch's VLAN membership.
-        The Robot Webservice expects the server IPs as form fields; the body
-        below is the JSON-schema view of those fields.
+        Change the name or the VLAN ID of one vSwitch. A VLAN change affects
+        every member server: each server must use the new VLAN ID in its own
+        network setup, or it loses the private network. This op does not add
+        or remove servers; use POST or DELETE /vswitch/{vswitch-id}/server
+        for that. MEHO ships this op switched off.
       parameters:
         - name: vswitch-id
           in: path
@@ -157,22 +169,67 @@ paths:
       requestBody:
         required: true
         content:
-          application/json:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/VswitchUpdateRequest"
+      responses:
+        "200":
+          description: Change accepted. Robot sends no response body.
+    delete:
+      operationId: cancelVswitch
+      summary: Cancel a vSwitch
+      description: >-
+        Cancel the whole vSwitch, now or on a given date. This ends the
+        private network for every member server. It does not remove one
+        server; use DELETE /vswitch/{vswitch-id}/server for that. MEHO ships
+        this op switched off.
+      parameters:
+        - name: vswitch-id
+          in: path
+          required: true
+          description: The vSwitch numeric id.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/VswitchCancelRequest"
+      responses:
+        "200":
+          description: Cancellation accepted. Robot sends no response body.
+  /vswitch/{vswitch-id}/server:
+    post:
+      operationId: addVswitchServers
+      summary: Add servers to a vSwitch
+      description: >-
+        Add one or more dedicated servers to a vSwitch. Robot applies the
+        change in the background: GET /vswitch/{vswitch-id} shows each new
+        server as "in process" and then "ready".
+      parameters:
+        - name: vswitch-id
+          in: path
+          required: true
+          description: The vSwitch numeric id.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
             schema:
               $ref: "#/components/schemas/VswitchMembershipRequest"
       responses:
         "200":
-          description: Membership add accepted.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/VswitchEnvelope"
+          description: Change accepted. Robot sends no response body.
     delete:
       operationId: removeVswitchServers
       summary: Remove servers from a vSwitch
       description: >-
-        Remove one or more dedicated servers from a vSwitch's VLAN
-        membership.
+        Remove one or more dedicated servers from a vSwitch. Robot applies
+        the change in the background: the server stays in GET
+        /vswitch/{vswitch-id} until the removal is done.
       parameters:
         - name: vswitch-id
           in: path
@@ -183,16 +240,12 @@ paths:
       requestBody:
         required: true
         content:
-          application/json:
+          application/x-www-form-urlencoded:
             schema:
               $ref: "#/components/schemas/VswitchMembershipRequest"
       responses:
         "200":
-          description: Membership remove accepted.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/VswitchEnvelope"
+          description: Change accepted. Robot sends no response body.
   /firewall/{server-ip}:
     get:
       operationId: getFirewall
@@ -362,15 +415,43 @@ components:
           type: string
     VswitchMembershipRequest:
       type: object
-      description: The set of server IPs to add to or remove from a vSwitch.
+      description: >-
+        The servers to add to or remove from a vSwitch. Sent as repeated
+        server[] form fields.
       properties:
         server:
           type: array
-          description: The primary IPs of the servers to add or remove.
+          description: The servers to add or remove, each a server number or a main IP.
+          minItems: 1
           items:
-            type: string
+            oneOf:
+              - type: integer
+              - type: string
       required:
         - server
+      additionalProperties: false
+    VswitchUpdateRequest:
+      type: object
+      description: The new name or VLAN ID of a vSwitch.
+      minProperties: 1
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          description: The new vSwitch name.
+        vlan:
+          type: integer
+          description: The new VLAN ID. Every member server must use it.
+    VswitchCancelRequest:
+      type: object
+      description: When to cancel a vSwitch.
+      properties:
+        cancellation_date:
+          type: string
+          description: The cancellation date as yyyy-MM-dd, or "now" to cancel at once.
+      required:
+        - cancellation_date
+      additionalProperties: false
     FirewallEnvelope:
       type: object
       description: The Robot Webservice wraps the firewall under a ``firewall`` key.

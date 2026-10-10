@@ -9,9 +9,12 @@ v2 connector registry under
 
 Registration is synchronous (import-time) only. Operations arrive via
 G0.7 spec ingestion of the Robot Webservice OpenAPI spec into the
-``endpoint_descriptor`` table (G3.7-T8 #849). The curated read-only
-10-op core and its operator-review curation function live in
-:mod:`meho_backplane.connectors.hetzner_robot.core_ops`.
+``endpoint_descriptor`` table (G3.7-T8 #849). The curated core (10 reads
+plus the 2 vSwitch membership writes) and its operator-review curation
+function live in :mod:`meho_backplane.connectors.hetzner_robot.core_ops`.
+Importing the package also registers the vSwitch write safety floor in
+:mod:`meho_backplane.connectors.hetzner_robot.ingest_safety` (#3973), so
+every vSwitch write waits for a human approval after each ingest.
 
 The v1 :func:`~meho_backplane.connectors.registry.register_connector` entry
 point is deliberately **not** called.  The connector advertises an explicit
@@ -21,6 +24,9 @@ as ``("hetzner", "", "")`` and confuse
 ladder.  Same pattern :mod:`meho_backplane.connectors.harbor` established.
 """
 
+# Register the vSwitch write safety floor through the same package import
+# that registers the connector (mirrors connectors/vmware_rest/__init__.py).
+from meho_backplane.connectors.hetzner_robot import ingest_safety as _ingest_safety  # noqa: F401
 from meho_backplane.connectors.hetzner_robot.connector import HetznerRobotConnector
 from meho_backplane.connectors.hetzner_robot.core_ops import (
     ROBOT_CONNECTOR_ID,

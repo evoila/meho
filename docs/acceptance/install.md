@@ -12,7 +12,7 @@ Copyright (c) 2026 evoila Group
 >
 > This document codifies **what "passing" looks like** so that the RDC
 > operator running the cold-deploy on
-> [`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc)
+> `evoila-bosnia/claude-rdc-hetzner-dc`
 > and the maintainer reviewing the result are working from one shared
 > definition. The actual cold-deploy runs on the consumer side; the
 > acceptance contract lives here so the chart/image producer (this repo)
@@ -21,11 +21,11 @@ Copyright (c) 2026 evoila Group
 ## Tracking issue
 
 This contract closes
-[`evoila-bosnia/meho-internal#55`](https://github.com/evoila-bosnia/meho-internal/issues/55)
+`evoila-bosnia/meho-internal#55`
 (parent Initiative
-[#54](https://github.com/evoila-bosnia/meho-internal/issues/54),
+#54,
 parent Goal
-[#11](https://github.com/evoila-bosnia/meho-internal/issues/11)).
+#11).
 
 ## Why this lives in `evoila/meho`
 
@@ -39,7 +39,7 @@ consumer-side
 `claude-rdc-hetzner-dc/manifests/meho/{install.sh,values-rdc.yaml}`
 is environment-private (real CIDRs, real Keycloak realm, real Vault
 address) and lives on the consumer side per
-[Goal #11 cross-repo deps](https://github.com/evoila-bosnia/meho-internal/issues/11).
+Goal #11 cross-repo deps.
 
 Splitting the acceptance contract from the install script lets us
 audit two questions independently:
@@ -100,7 +100,7 @@ The budget does **not** cover:
   [cross-repo coordination](../cross-repo/rke2-infra-coordination.md)
   Section 4)
 - Operator-side device-code login (`meho login` is exercised by
-  [acceptance Task #56](https://github.com/evoila-bosnia/meho-internal/issues/56),
+  acceptance Task #56,
   the federation-chain smoke, not this one). The cold-deploy
   acceptance does **not** drive `meho login` end-to-end, but the
   realm-side prerequisites the CLI and MCP onramp share — a
@@ -159,7 +159,7 @@ encodes every one of them as a discrete check.
 | 3 | `GET https://<host>/healthz` returns 200 | `curl -sf --cacert <ca-bundle> https://<host>/healthz` | Liveness probe contract; the public ingress entry-point is reachable through TLS terminated at ingress-nginx and routed to the Service |
 | 4 | `GET https://<host>/version` returns JSON containing the deployed `git_sha`, and that SHA matches the `--tag` value passed to `install.sh` | `curl -sf https://<host>/version \| jq -e '.git_sha == "<expected>"'` | The image that's running is the one the operator asked for. Catches the `helm upgrade --install` no-op case (chart unchanged, image tag unchanged → no rollout, old version still serving) |
 | 5 | `GET https://<host>/api/v1/health` (no `Authorization` header) returns 401 | `curl -so /dev/null -w '%{http_code}' https://<host>/api/v1/health` returns `401` | Negative auth test. A 200 here means the federation chain (Keycloak JWT validation middleware) regressed open — the Goal #11 "no anonymous access to authenticated surfaces" invariant. A non-200/non-401 means something else broke (502 → backplane down behind ingress; 503 → readiness flipped after probe) |
-| 6 | The `audit_log` table exists in Postgres with the columns Task #29 stamped | A direct `psql` query is operator-cost; the verifier asserts the negative-auth path went through the audit middleware by checking the response carried a freshly-generated `X-Request-ID` header — surrogate for "the middleware chain ran" | Audit middleware reachability — the row write requires an authenticated request which lands in [Task #56](https://github.com/evoila-bosnia/meho-internal/issues/56). Surrogate keeps this verifier authentication-free |
+| 6 | The `audit_log` table exists in Postgres with the columns Task #29 stamped | A direct `psql` query is operator-cost; the verifier asserts the negative-auth path went through the audit middleware by checking the response carried a freshly-generated `X-Request-ID` header — surrogate for "the middleware chain ran" | Audit middleware reachability — the row write requires an authenticated request which lands in Task #56. Surrogate keeps this verifier authentication-free |
 | 7 | Wall-clock duration from `install.sh` start to verifier exit ≤ 300 seconds (5 minutes) | The verifier reads `INSTALL_START_TS` from env (set by the consumer's `install.sh` as the first action) and computes `now - INSTALL_START_TS` | The budget itself. Failing this assertion is a soft fail by default (warning) and a hard fail when the verifier is invoked with `--enforce-budget`. Under `--enforce-budget` the verifier also hard-fails when `INSTALL_START_TS` is unset or non-numeric — a Goal #11 closing run must prove the bar was met, and a missing timestamp can't |
 
 ### Optional (operator-asserted) — authenticated probes
@@ -261,7 +261,7 @@ pre-flight checks (VPN, Vault session) that are environment-specific.
 ## Acceptance criteria status
 
 The full set of acceptance criteria on
-[issue #55](https://github.com/evoila-bosnia/meho-internal/issues/55)
+issue #55
 and where each lands:
 
 | AC | Status at PR-time | Evidence path |
@@ -283,16 +283,16 @@ deploy + writes the closing artefact.
 ## References
 
 - Parent Goal:
-  [#11 — Deployable v0.1](https://github.com/evoila-bosnia/meho-internal/issues/11)
+  #11 — Deployable v0.1
   (DoD bullet 1)
 - Parent Initiative:
-  [#54 — G2.8 Acceptance / dogfood proof](https://github.com/evoila-bosnia/meho-internal/issues/54)
+  #54 — G2.8 Acceptance / dogfood proof
 - This task:
-  [#55 — install.sh cold-deploy → working MEHO at meho.evba.lab in <5 min](https://github.com/evoila-bosnia/meho-internal/issues/55)
+  #55 — install.sh cold-deploy → working MEHO at meho.evba.lab in <5 min
 - Sibling acceptance tasks:
-  [#56 — smoke.sh](https://github.com/evoila-bosnia/meho-internal/issues/56),
-  [#57 — helm rollback](https://github.com/evoila-bosnia/meho-internal/issues/57),
-  [#58 — 5-PR green counter](https://github.com/evoila-bosnia/meho-internal/issues/58)
+  #56 — smoke.sh,
+  #57 — helm rollback,
+  #58 — 5-PR green counter
 - Producer artefacts the cold-deploy uses:
   - Image: `ghcr.io/evoila/meho:<tag>` ([chart `Chart.yaml`](../../deploy/charts/meho/Chart.yaml))
   - Chart: `oci://ghcr.io/evoila/meho-chart:<version>` ([publish workflow](../../.github/workflows/chart.yml))

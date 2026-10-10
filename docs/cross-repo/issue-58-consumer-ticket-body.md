@@ -6,7 +6,7 @@ Copyright (c) 2026 evoila Group
 # Draft consumer-side issue body — Goal #11 DoD bullets 4 + 5
 
 > The maintainer files this as a single issue on
-> [`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc)
+> `evoila-bosnia/claude-rdc-hetzner-dc`
 > by copy-pasting **everything below the marker line** (`---` after
 > this paragraph) into `gh issue create`'s body. Same pattern as
 > the existing consumer-side coordination ticket filed for Task
@@ -53,7 +53,7 @@ on this repo.
 ### Context
 
 This issue is the consumer-side half of
-[`evoila-bosnia/meho-internal#58`](https://github.com/evoila-bosnia/meho-internal/issues/58),
+`evoila-bosnia/meho-internal#58`,
 which is the producer-side acceptance tracker. The producer-side
 issue carries the closing artefact (5 PR numbers, `targets.yaml`
 diff, successful probe transcript); this issue carries the
@@ -61,7 +61,7 @@ implementation work.
 
 Same pattern as the earlier consumer-side coordination ticket
 filed for
-[`#53 G2.7-T5`](https://github.com/evoila-bosnia/meho-internal/issues/53):
+`#53 G2.7-T5`:
 producer side ships the spec + a draft body; consumer files the
 issue with that body verbatim; both sides cross-link.
 
@@ -139,7 +139,7 @@ issue with that body verbatim; both sides cross-link.
 ### Producer-side artefacts to consume
 
 All landed on `evoila/meho` via the producer-side PR closing
-[`#58`](https://github.com/evoila-bosnia/meho-internal/issues/58):
+`#58`:
 
 | Artefact | Path on `evoila/meho` | What it gives this issue |
 | --- | --- | --- |
@@ -205,10 +205,10 @@ gh run list \
 
 ### References
 
-- Producer-side issue: [`evoila-bosnia/meho-internal#58`](https://github.com/evoila-bosnia/meho-internal/issues/58)
-- Producer-side parent Initiative: [`#54 — G2.8 Acceptance / dogfood proof`](https://github.com/evoila-bosnia/meho-internal/issues/54)
-- Producer-side parent Goal: [`#11 — Deployable v0.1`](https://github.com/evoila-bosnia/meho-internal/issues/11) — DoD bullets 4 + 5
-- Sibling consumer-side coordination ticket: filed under [`#53 G2.7-T5`](https://github.com/evoila-bosnia/meho-internal/issues/53)
+- Producer-side issue: `evoila-bosnia/meho-internal#58`
+- Producer-side parent Initiative: `#54 — G2.8 Acceptance / dogfood proof`
+- Producer-side parent Goal: `#11 — Deployable v0.1` — DoD bullets 4 + 5
+- Sibling consumer-side coordination ticket: filed under `#53 G2.7-T5`
 - Cross-repo handshake spec: [`evoila/meho/docs/cross-repo/rke2-infra-coordination.md`](https://github.com/evoila/meho/blob/main/docs/cross-repo/rke2-infra-coordination.md)
 - Green-counter contract: [`evoila/meho/docs/acceptance/green-counter.md`](https://github.com/evoila/meho/blob/main/docs/acceptance/green-counter.md)
 - `targets.yaml` schema + worked example: [`evoila/meho/docs/cross-repo/targets-yaml.md`](https://github.com/evoila/meho/blob/main/docs/cross-repo/targets-yaml.md)

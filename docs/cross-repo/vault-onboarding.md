@@ -294,9 +294,9 @@ is a future G6.3-class follow-up; v0.2 ships the conservative default.
 
 ## Migrating off the bash wrappers
 
-The consumer's [`scripts/_secret-read.sh`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/_secret-read.sh)
+The consumer's `scripts/_secret-read.sh`
 (sourced KV-read helper) and
-[`scripts/vault.sh`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/vault.sh)
+`scripts/vault.sh`
 (generic Vault HTTP wrapper) retire as follows. The wrappers built
 raw `/v1/<mount>/data/<rest>` paths and read `$HOME/.vault-token` by
 hand; the `meho vault` verbs take `<mount> <path>` and use the
@@ -358,5 +358,5 @@ pattern never had — that audit coverage is the point of migrating.
 - PII default (decision #3): [`docs/decisions/locked-decisions.md`](../decisions/locked-decisions.md); classifier [`backend/src/meho_backplane/broadcast/events.py`](../../backend/src/meho_backplane/broadcast/events.py).
 - Broadcast feed onboarding: [`broadcast-onboarding.md`](./broadcast-onboarding.md). Audit query: [`audit-query.md`](./audit-query.md).
 - Op handlers: [`backend/src/meho_backplane/connectors/vault/`](../../backend/src/meho_backplane/connectors/vault/) (`ops.py` KV, `ops_sys.py`, `ops_auth.py`). CLI verbs: [`cli/internal/cmd/vault/`](../../cli/internal/cmd/vault/).
-- Consumer wrappers retired: [`scripts/_secret-read.sh`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/_secret-read.sh), [`scripts/vault.sh`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/vault.sh).
+- Consumer wrappers retired: `scripts/_secret-read.sh`, `scripts/vault.sh`.
 - Vault HTTP API: <https://developer.hashicorp.com/vault/api-docs/secret/kv/kv-v2> (KV-v2), <https://developer.hashicorp.com/vault/api-docs/system> (sys), <https://developer.hashicorp.com/vault/api-docs/auth/userpass> (userpass), <https://developer.hashicorp.com/vault/api-docs/auth/approle> (approle).

@@ -12,7 +12,7 @@ behind the JWT auth chain:
   effective four-eyes / feature-gate posture of the deploy.
 
 On a shared ingress, unauthenticated, both leak production operational state to
-anyone who can reach the ingress — at a customer-facing event (meho-internal#320)
+anyone who can reach the ingress — at a customer-facing event
 that is production activity readable at the public booth. #3499 adds an
 **opt-in** guard so a deployment can require auth on both endpoints, with
 **behaviour unchanged by default**.

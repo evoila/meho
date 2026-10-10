@@ -13,8 +13,7 @@ asserts the round-trip semantics.
 Coverage matrix:
 
 * **Real-consumer YAML round-trip** — every entry in the pinned
-  snapshot of
-  ``https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/rdc-hetzner-dc/targets.yaml``
+  snapshot of the consumer's private ``targets.yaml``
   (24 entries) creates a target with the right top-level columns and
   the right `extras` spill.
 * **`fingerprint` is rejected on POST** — verifies the server-side

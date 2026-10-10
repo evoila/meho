@@ -670,7 +670,7 @@ a NetworkPolicy that allows everything (or nothing).
 
 The actual `values-rdc.yaml` for the dogfooding consumer is environment-
 private and lives in
-[`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc)'s
+`evoila-bosnia/claude-rdc-hetzner-dc`'s
 `manifests/meho/values-rdc.yaml` per Goal #11 cross-repo deps; the
 example here is the public template.
 
@@ -1557,12 +1557,12 @@ smoke capacity scales linearly with PR throughput.
 ### Consumer-side auth (gated)
 
 Cluster auth + RBAC for `meho-ci-*` namespaces is provisioned on
-[`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc),
+`evoila-bosnia/claude-rdc-hetzner-dc`,
 not in this repo — see
 [`docs/cross-repo/rke2-infra-coordination.md`](../cross-repo/rke2-infra-coordination.md)
 for the full contract (Section 1: auth options; Section 2: RBAC verb
 set; Verification: end-to-end check). The consumer-side tracker is
-[`evoila-bosnia/meho-internal#53`](https://github.com/evoila-bosnia/meho-internal/issues/53)
+`evoila-bosnia/meho-internal#53`
 (G2.7-T5).
 
 The workflow ships now and **fails-skip** (skipped at job level, not
@@ -1786,7 +1786,7 @@ code, while the per-PR build keeps its warm-cache read.
 
 The v0.1 deploy contract crosses one repo boundary: `evoila/meho`
 produces the chart + image; the dogfooding consumer
-[`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc)
+`evoila-bosnia/claude-rdc-hetzner-dc`
 operates the rke2-infra cluster the per-PR ephemeral smoke and
 post-merge deploy run against. The handshake spec — cluster auth
 options (OIDC trust preferred over a long-lived kubeconfig secret),

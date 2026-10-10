@@ -5,7 +5,7 @@ framing that picks which shapes ship at all. The conventions here
 exist so a future contributor adding a new endpoint, a new connector,
 or a new MCP tool doesn't have to re-litigate the same eight surface-
 shape questions the v0.8.0 consumer dogfood
-([`claude-rdc-hetzner-dc#771`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/issues/771))
+(`claude-rdc-hetzner-dc#771`)
 surfaced one at a time.
 
 Companion documents:

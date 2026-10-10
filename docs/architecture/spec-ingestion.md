@@ -8,7 +8,7 @@ How MEHO turns a vendor OpenAPI document into rows in `endpoint_descriptor` + `o
 
 One sentence: take an OpenAPI 3.0/3.1 spec, parse it into `EndpointDescriptorProto` rows, ask an LLM to propose 8–15 operation groups + per-group `when_to_use` hints, stage the connector for operator review (`review_status='staged'`, every op `is_enabled=False`), and let the operator enable it once they have polished the LLM output and stamped per-op overrides.
 
-The pipeline operationalises [CLAUDE.md](../../CLAUDE.md) postulate 4 (operation grouping + LLM hints, operator-reviewable) and the v0.1-spec's "auto-derive is the primary operation source" mandate ([v0.1-spec §3 L289–313](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/docs/meho-coordination/v0.1-spec.md)).
+The pipeline operationalises [CLAUDE.md](../../CLAUDE.md) postulate 4 (operation grouping + LLM hints, operator-reviewable) and the v0.1-spec's "auto-derive is the primary operation source" mandate (v0.1-spec §3 L289–313, the original design spec; internal).
 
 ### Supported spec formats
 
@@ -330,7 +330,7 @@ The G0.7 canary is currently stub-LLM-only — the acceptance test ships a deter
 - **vSphere canary runbook:** [g07-vsphere-canary.md](../cross-repo/g07-vsphere-canary.md) — the worked example operators reproduce locally.
 - **Codebase doc:** [docs/codebase/spec-ingestion.md](../codebase/spec-ingestion.md) — internal symbol-level map; updated in lock-step with code changes.
 - **CLAUDE.md postulates:** postulate 1 (two connector kinds, both first-class); postulate 4 (operation grouping + LLM hints, operator-reviewable); postulate 5 (agent surface is meta-tools).
-- **v0.1-spec anchors:** [§3 Operations L289–313](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/docs/meho-coordination/v0.1-spec.md) (auto-derive primary); [§4 JSONFlux](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/docs/meho-coordination/v0.1-spec.md) (set-shaped result discipline the dispatcher applies after this pipeline produces the operation).
+- **v0.1-spec anchors** (the original design spec; internal): §3 Operations L289–313 (auto-derive primary); §4 JSONFlux (set-shaped result discipline the dispatcher applies after this pipeline produces the operation; public design: [jsonflux.md](jsonflux.md)).
 - **ADR:** [locked-decisions.md](../decisions/locked-decisions.md) — locked architecture decisions.
 - **OpenAPI specifications:** [OpenAPI 3.0.3](https://spec.openapis.org/oas/v3.0.3.html); [OpenAPI 3.1.1](https://spec.openapis.org/oas/v3.1.1.html).
 - **Best-practices anchors:** `.claude/skills/implement-issue/ai_engineering_best_practices.md` (LLM prompt discipline, output-schema validation, operator-review gate before LLM-summarised content reaches agents); `.claude/skills/implement-issue/devops_best_practices.md` (architecture docs reflect shipped code; mermaid diagrams for control flow).

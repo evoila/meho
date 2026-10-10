@@ -6,23 +6,23 @@ Copyright (c) 2026 evoila Group
 # `docs/acceptance/` — Goal #11 dogfood-proof contracts
 
 > Producer-side acceptance contracts for
-> [Goal #11 — Deployable v0.1](https://github.com/evoila-bosnia/meho-internal/issues/11).
+> Goal #11 — Deployable v0.1.
 >
 > Each file here codifies one Goal #11 Definition-of-Done bullet so that
 > the RDC operator running the test and the maintainer reviewing the
 > result share a single definition of "passing". The actual end-to-end
 > runs execute on the consumer-side
-> [`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc);
+> `evoila-bosnia/claude-rdc-hetzner-dc`;
 > the contracts and producer-side verifiers live here.
 
 ## Contents
 
 | File | Goal #11 DoD bullet | Initiative G2.8 task |
 | --- | --- | --- |
-| [`install.md`](./install.md) | bullet 1 — `install.sh` cold-deploy → working MEHO at meho.evba.lab in <5 min | [#55](https://github.com/evoila-bosnia/meho-internal/issues/55) |
-| [`smoke.md`](./smoke.md) | bullet 2 — `smoke.sh` passes (login + status + audit-row + Vault + DB-migration state) | [#56](https://github.com/evoila-bosnia/meho-internal/issues/56) |
-| [`rollback.md`](./rollback.md) | bullet 3 — `helm rollback meho` verified end-to-end with a non-trivial schema diff | [#57](https://github.com/evoila-bosnia/meho-internal/issues/57) |
-| [`green-counter.md`](./green-counter.md) | bullets 4 + 5 — 5-consecutive-merged-PR green-smoke counter + `targets.yaml` `rdc-meho` entry | [#58](https://github.com/evoila-bosnia/meho-internal/issues/58) |
+| [`install.md`](./install.md) | bullet 1 — `install.sh` cold-deploy → working MEHO at meho.evba.lab in <5 min | #55 |
+| [`smoke.md`](./smoke.md) | bullet 2 — `smoke.sh` passes (login + status + audit-row + Vault + DB-migration state) | #56 |
+| [`rollback.md`](./rollback.md) | bullet 3 — `helm rollback meho` verified end-to-end with a non-trivial schema diff | #57 |
+| [`green-counter.md`](./green-counter.md) | bullets 4 + 5 — 5-consecutive-merged-PR green-smoke counter + `targets.yaml` `rdc-meho` entry | #58 |
 
 The `green-counter.md` contract is the producer-side spec; the
 counter implementation and the `targets.yaml` entry land on the
@@ -70,9 +70,9 @@ run is one where both sides cooperate on a single boolean outcome.
 ## References
 
 - Parent Goal:
-  [#11 — Deployable v0.1](https://github.com/evoila-bosnia/meho-internal/issues/11)
+  #11 — Deployable v0.1
 - Parent Initiative:
-  [#54 — G2.8 Acceptance / dogfood proof](https://github.com/evoila-bosnia/meho-internal/issues/54)
+  #54 — G2.8 Acceptance / dogfood proof
 - Cross-repo handshake:
   [`docs/cross-repo/rke2-infra-coordination.md`](../cross-repo/rke2-infra-coordination.md)
 - Deploy surface deep-dive:

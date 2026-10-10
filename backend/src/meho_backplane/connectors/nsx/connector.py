@@ -117,9 +117,8 @@ _log = structlog.get_logger(__name__)
 # NSX session-establish endpoint. POST with form-encoded
 # ``j_username`` / ``j_password``; success returns 200 with the
 # ``Set-Cookie: JSESSIONID=...`` and ``X-XSRF-TOKEN: ...`` response
-# headers. Per the consumer wrapper at
-# https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/nsx.sh
-# and the NSX REST API guide.
+# headers. Per the consumer wrapper ``scripts/nsx.sh`` (in the
+# consumer's private repo) and the NSX REST API guide.
 _SESSION_CREATE_PATH = "/api/session/create"
 
 # Header NSX expects on every authenticated request (except session

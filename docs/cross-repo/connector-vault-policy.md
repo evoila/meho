@@ -25,7 +25,7 @@ session loader. The *shape* of "what Vault must grant" — which secret
 subtree, which templated path, which identity claim — is a property of
 that chassis code, so it is documented here and changes in lock-step
 with it. The actual Vault configuration lives on the consumer side
-([`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc)
+(`evoila-bosnia/claude-rdc-hetzner-dc`
 in the dogfood case); this page is the spec that side reads.
 
 This runbook is the **per-target-secret** companion to

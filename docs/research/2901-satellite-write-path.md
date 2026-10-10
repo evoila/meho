@@ -108,8 +108,9 @@ audit row but no effect audit row. §2 (T4) and mechanism 4 turn on this.
 
 So remote execution already runs a *split* audit: synchronous at
 **authorization time**, deferred to **result-acceptance time** for the effect.
-[v0.1-spec §6](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/docs/meho-coordination/v0.1-spec.md)
-("an operation does not return success unless the audit row commits") holds for
+v0.1-spec §6, the original design spec (internal; public audit design:
+[audit.md](../architecture/audit.md)), says "an operation does not return
+success unless the audit row commits". That rule holds for
 the *mint*; it structurally **cannot** hold for the *effect* of a remote write,
 because the executing side has no DB and the mutation is inherently off-net. This
 is not a bug to fix — it is the fact the write-path audit design has to legislate

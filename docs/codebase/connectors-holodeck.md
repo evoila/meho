@@ -582,7 +582,6 @@ External (pinned in `backend/pyproject.toml`):
 - `ConvertTo-Json`:
   https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/convertto-json
 - VMware Holodeck Toolkit: https://core.vmware.com/holodeck-toolkit
-- Consumer wrapper replaced:
-  https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/holodeck.sh
+- Consumer wrapper replaced: `scripts/holodeck.sh` in the consumer's private repo.
 - Sister wrapper deferred to Runbooks Initiative:
-  https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/clone-holodeck-instance.sh
+  `scripts/clone-holodeck-instance.sh` in the consumer's private repo.

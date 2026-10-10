@@ -98,8 +98,30 @@ def test_explicit_mcp_resource_uri_overrides_derivation() -> None:
     assert 'MCP_RESOURCE_URI: "https://meho.test/api/mcp"' in rendered
 
 
-def test_no_mcp_env_keys_when_ingress_disabled_and_nothing_set() -> None:
-    """No Ingress + nothing set → keys omitted (backend startup guard fires)."""
-    rendered = _render("--set", "ingress.enabled=false")
-    assert "MCP_RESOURCE_URI:" not in rendered
-    assert "BACKPLANE_URL:" not in rendered
+def test_render_fails_when_ingress_disabled_and_nothing_set() -> None:
+    """No Ingress + nothing set → ``helm template`` refuses to render (#2394).
+
+    With no Ingress host and no ``config.backplaneUrl`` or
+    ``config.mcpResourceUri``, the MCP audience would be empty. The chart
+    stops at render time with a message that names the three ways to fix
+    it. Before that guard, the pod started and then crash-looped on the
+    backend startup check.
+    """
+    result = subprocess.run(
+        [
+            "helm",
+            "template",
+            "test",
+            str(_CHART_DIR),
+            *_BASE_OVERRIDES,
+            "--set",
+            "ingress.enabled=false",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "MCP resource URI is unresolvable" in result.stderr
+    for fix in ("config.backplaneUrl", "config.mcpResourceUri", "ingress.host"):
+        assert fix in result.stderr

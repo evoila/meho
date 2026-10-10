@@ -831,5 +831,5 @@ out-of-scope to automate.
   §"Why the import policy needs a ticket" (the divergence catalog source).
 - Upstream origin (provenance only): `github.com/ikaric/jsonflux`
   (single commit `da85962`, MIT).
-- v0.1-spec §"JSONFlux / result handles" L294-311:
-  <https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/docs/meho-coordination/v0.1-spec.md>
+- v0.1-spec §"JSONFlux / result handles" L294-311 (the original
+  design spec; internal).

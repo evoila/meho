@@ -145,4 +145,4 @@ The convention is closed-set on the *channel* axis (HTTP / MCP / INTERNAL is the
 - Migrations: [`alembic/versions/0001_create_audit_log.py`](../../backend/alembic/versions/0001_create_audit_log.py), [`0002_create_tenant_and_audit_tenant_id.py`](../../backend/alembic/versions/0002_create_tenant_and_audit_tenant_id.py), [`0004_create_targets_and_audit_target_id.py`](../../backend/alembic/versions/0004_create_targets_and_audit_target_id.py), [`0006_add_audit_log_parent_audit_id.py`](../../backend/alembic/versions/0006_add_audit_log_parent_audit_id.py).
 - Sibling Initiative: [G8.2 #377](https://github.com/evoila/meho/issues/377) (audit replay).
 - Decision: [`locked-decisions.md` decision #3](../decisions/locked-decisions.md) (PII defaults / aggregate-only audit broadcasts).
-- Consumer needs: §G8 of [`consumer-needs.md`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/docs/meho-coordination/consumer-needs.md) L214-234.
+- Consumer needs: §G8 of `consumer-needs.md` L214-234 (an internal document).

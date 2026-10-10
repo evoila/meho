@@ -10,7 +10,7 @@ Copyright (c) 2026 evoila Group
 ## Why this matters
 
 - Today every operator's Claude sessions read and write `~/.claude/projects/<...>/memory/<file>.md` on a single laptop. What one operator's Claude learns is invisible to every other operator's Claude. The corpus dies with the laptop.
-- After the migration: server-side memory across five scopes; **the team becomes the unit of memory** per [consumer-needs.md §G5 L131](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/docs/meho-coordination/consumer-needs.md). A senior teaching their Claude about an infrastructure target can promote that memory to `tenant` scope and every junior's Claude session in the same tenant sees it the next time it searches.
+- After the migration: server-side memory across five scopes; **the team becomes the unit of memory** per consumer-needs.md §G5 L131 (an internal document; the public design is in [memory.md](../architecture/memory.md)). A senior teaching their Claude about an infrastructure target can promote that memory to `tenant` scope and every junior's Claude session in the same tenant sees it the next time it searches.
 - The migration is **one-way** — there is no "restore from laptop" path. The mitigation is the G5.3 #375 per-file picker (when shipped), which lets the operator choose per-file whether each laptop entry migrates, stays laptop-local (machine-specific paths, scratch notes), or gets edited before sending. Until G5.3 ships, the manual `meho remember` path documented here is the migration recipe.
 
 ## The 5-scope decision matrix
@@ -188,6 +188,6 @@ Promotion is **one-way and operator-initiated** — there is no `meho demote` an
 - [Initiative #332 G5.1](https://github.com/evoila/meho/issues/332) — scope + definition of done; the surface this runbook documents.
 - [Initiative #374 G5.2](https://github.com/evoila/meho/issues/374) — auto-expiry + tenant-promotion verb + per-scope RBAC tightening (default 7-day TTL on user scope, `meho promote`).
 - [Initiative #375 G5.3](https://github.com/evoila/meho/issues/375) — laptop-local migration UX (`meho migrate memory` interactive per-file picker + machine-local heuristic + post-login nudge).
-- [Consumer-needs.md §G5](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/docs/meho-coordination/consumer-needs.md) L130-160 — the canonical product spec for the memory layer (team-as-unit-of-memory unlock, 5-scope shape, auto-expiry policy, operator-initiated promotion only).
+- Consumer-needs.md §G5 L130-160 (an internal document) — the canonical product spec for the memory layer (team-as-unit-of-memory unlock, 5-scope shape, auto-expiry policy, operator-initiated promotion only).
 - [`docs/cross-repo/README.md`](./README.md) — the index of cross-repo coordination specs and operator runbooks this doc is listed in.
 - [`docs/cross-repo/kb-migration.md`](./kb-migration.md) — the sister runbook for migrating the consumer's `kb/` corpus into MEHO. Memory and kb ride the same G0.4 substrate but answer different questions ("what does this operator / team prefer" vs "what do we know about vendor X").

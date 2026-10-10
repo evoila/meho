@@ -2310,7 +2310,7 @@ helper should be extracted to a shared `cmd/_authed` package.
   CREATE / PATCH semantics the CLI relies on. The
   real-`targets.yaml` round-trip test replays every conformant
   entry from a pinned snapshot of
-  [`evoila-bosnia/claude-rdc-hetzner-dc/rdc-hetzner-dc/targets.yaml`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/rdc-hetzner-dc/targets.yaml)
+  `evoila-bosnia/claude-rdc-hetzner-dc/rdc-hetzner-dc/targets.yaml`
   (24 entries; SHA pinned in the test module).
 
 ### Out-of-scope
@@ -2326,10 +2326,10 @@ helper should be extracted to a shared `cmd/_authed` package.
 
 ## References
 
-* Parent Goal: [#11](https://github.com/evoila-bosnia/meho-internal/issues/11)
-* Parent Initiative: [G2.6 #42](https://github.com/evoila-bosnia/meho-internal/issues/42)
-* Stack ADR (locked): [#13](https://github.com/evoila-bosnia/meho-internal/issues/13)
-* Cosign keyless ADR (locked): [#15](https://github.com/evoila-bosnia/meho-internal/issues/15) — same identity-claim format used by image (`image.yml`) and chart (`chart.yml`) signing.
+* Parent Goal: #11
+* Parent Initiative: G2.6 #42
+* Stack ADR (locked): #13
+* Cosign keyless ADR (locked): #15 — same identity-claim format used by image (`image.yml`) and chart (`chart.yml`) signing.
 * cobra docs: https://github.com/spf13/cobra
 * zalando/go-keyring: https://github.com/zalando/go-keyring
 * golang.org/x/oauth2 device flow: https://pkg.go.dev/golang.org/x/oauth2#Config.DeviceAuth

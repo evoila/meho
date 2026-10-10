@@ -366,7 +366,7 @@ implemented once in `docs_collections/lifecycle.py`.
 > **external infra** (the collections/services the ops team runs), not an
 > `evoila/meho` change — nothing in this repo was ever named
 > "MEHO.Knowledge". It is tracked on the consumer repo
-> [`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc)
+> `evoila-bosnia/claude-rdc-hetzner-dc`
 > (consumer-side reference: [#1178](https://github.com/evoila/meho/issues/1178)).
 > The in-repo names (`meho-docs` add-on key, `meho-docs:<collection>`
 > entitlement keys, `search_docs` / `list_doc_collections` surface) are
@@ -1043,6 +1043,6 @@ the answer.
 - Parent Goal: [#215](https://github.com/evoila/meho/issues/215).
 - Consumer side (external collection ingest + the MEHO.Knowledge →
   meho-docs rename + per-collection provisioning):
-  [`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc);
+  `evoila-bosnia/claude-rdc-hetzner-dc`;
   consumer-side corpus reference
   [#1178](https://github.com/evoila/meho/issues/1178).

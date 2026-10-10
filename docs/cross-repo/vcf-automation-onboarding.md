@@ -347,7 +347,7 @@ vcfa.tenant.deployment.list`).
 ## Migrating off `scripts/vcf-automation.sh`
 
 The consumer's
-[`scripts/vcf-automation.sh`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/vcf-automation.sh)
+`scripts/vcf-automation.sh`
 drives VCFA REST via a `curl` + per-plane session wrapper. The
 `meho vcf-automation` verbs replace it for the read-only workflows;
 write workflows stay in the wrapper.
@@ -513,6 +513,6 @@ The fix:
 - Connector source: [`backend/src/meho_backplane/connectors/vcf_automation/`](../../backend/src/meho_backplane/connectors/vcf_automation/).
 - CLI verbs: [`cli/internal/cmd/vcf-automation/`](../../cli/internal/cmd/vcf-automation/).
 - E2E integration test: [`backend/tests/test_connectors_vcf_automation_e2e.py`](../../backend/tests/test_connectors_vcf_automation_e2e.py).
-- Consumer wrapper retiring: [`scripts/vcf-automation.sh`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/vcf-automation.sh).
+- Consumer wrapper retiring: `scripts/vcf-automation.sh`.
 - VCFA Automation API references: provider [<https://developer.broadcom.com/xapis/vmware-cloud-foundation-automation-api/latest/>], tenant [<https://developer.broadcom.com/xapis/aria-automation-api/latest/>].
 - Related onboarding docs: [`vault-onboarding.md`](./vault-onboarding.md), [`audit-query.md`](./audit-query.md), [`targets-yaml.md`](./targets-yaml.md), sibling tier-3 connectors (vROps / vRLI / Fleet via #837/#838/#839).

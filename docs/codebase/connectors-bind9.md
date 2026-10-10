@@ -586,6 +586,6 @@ removed by G0.6-T11 (#412) and bind9 has never shipped behind it.
 - Registration substrate: [#395 G0.6-T4 register_typed_operation()](https://github.com/evoila/meho/issues/395)
 - Sibling skeleton precedent: [#321 G3.2-T1 KubernetesConnector skeleton](https://github.com/evoila/meho/issues/321) + `backend/src/meho_backplane/connectors/kubernetes/connector.py`
 - Two-phase registration precedent: `backend/src/meho_backplane/connectors/vault/__init__.py`
-- Consumer wrapper replaced: [scripts/bind9-dns.sh](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/bind9-dns.sh)
+- Consumer wrapper replaced: scripts/bind9-dns.sh
 - ISC bind9 9.18 docs: <https://bind9.readthedocs.io/en/v9.18/>
 - asyncssh: <https://asyncssh.readthedocs.io/>

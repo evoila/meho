@@ -9,7 +9,7 @@ Copyright (c) 2026 evoila Group
 
 ## Why this matters
 
-- The consumer's [`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc) repo carries a `kb/` directory — the team's distilled vendor knowledge (vCenter / NSX / Vault / Keycloak / k8s / Argo / Harbor / general; ~44 entries at the time of writing, and growing).
+- The consumer's `evoila-bosnia/claude-rdc-hetzner-dc` repo carries a `kb/` directory — the team's distilled vendor knowledge (vCenter / NSX / Vault / Keycloak / k8s / Argo / Harbor / general; ~44 entries at the time of writing, and growing).
 - Today every operator's Claude session relies on the repo being cloned and `grep kb/`. New knowledge reaches the team only via PR review + clone. **Two operators landing the same kb entry independently is a real failure mode.**
 - Per [decision #2](../decisions/locked-decisions.md): MEHO ingests the corpus once; the repo `kb/` stays live as the fallback for ≥1 month; the in-repo copy retires only when `meho kb search` is in daily use and the team agrees. There is no auto-retirement — the retire decision is an explicit operator call backed by the G4.3 eval.
 

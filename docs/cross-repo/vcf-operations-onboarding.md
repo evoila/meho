@@ -345,7 +345,7 @@ version they were captured against.
 ## Migrating off `scripts/vcf-operations.sh`
 
 The consumer's
-[`scripts/vcf-operations.sh`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/vcf-operations.sh)
+`scripts/vcf-operations.sh`
 drives vROps suite-api via a `curl` + Basic-auth wrapper. The
 `meho vcf-operations` verbs replace it for the read-only workflows;
 write workflows stay in the wrapper.
@@ -484,7 +484,7 @@ meho vcf-operations alert list --target rdc-vrops --params '{"activeOnly":true}'
 - Fixture refresh tool:
   [`backend/tests/fixtures/vcf/refresh.py`](../../backend/tests/fixtures/vcf/refresh.py).
 - Consumer wrapper retiring:
-  [`scripts/vcf-operations.sh`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/vcf-operations.sh).
+  `scripts/vcf-operations.sh`.
 - vROps Suite API reference:
   <https://developer.broadcom.com/xapis/vrealize-operations-manager-api/latest/>.
 - Related onboarding docs:

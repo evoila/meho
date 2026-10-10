@@ -5,8 +5,8 @@ minimum-viable chassis only — health, version, readiness, metrics, and
 authn/authz federation are layered on by Tasks #19, #20 and the G2.2 /
 G2.3 Initiatives.
 
-Stack choices are locked in [ADR
-0004](https://github.com/evoila-bosnia/meho-internal/issues/13)
+Stack choices are locked in ADR
+0004
 (Python / FastAPI / Pydantic v2 / SQLAlchemy 2.x async / Alembic).
 
 ## Layout
@@ -162,7 +162,7 @@ exit status is `0`. Verification failure (wrong identity, unsigned image,
 tampered registry) exits non-zero with a structured error.
 
 These are the same identity-regex + issuer values
-[`claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc)'s
+`claude-rdc-hetzner-dc`'s
 `install.sh` uses as a **gating** check before pulling the image (per Goal #11
 cross-repo coordination).
 
@@ -200,7 +200,7 @@ SPDX document; `jq '.predicate.packages | length'` returns the package count
 `uv.lock`).
 
 The downstream `install.sh` from
-[`claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc)
+`claude-rdc-hetzner-dc`
 can run this exact command to confirm the SBOM is intact and the bill of
 materials matches the image being pulled.
 

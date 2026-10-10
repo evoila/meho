@@ -569,5 +569,5 @@ for ingested breadth on connectors that *do* publish a convertible spec.
   https://developer.broadcom.com/xapis/aria-automation-api/latest/
   (tenant/iaas).
 - Consumer wrapper this contract mirrors (authoritative):
-  [`scripts/vcf-automation.sh`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/vcf-automation.sh)
+  `scripts/vcf-automation.sh`
   — header comment + login blocks verified 2026-05-21.

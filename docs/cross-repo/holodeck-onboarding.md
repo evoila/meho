@@ -59,7 +59,7 @@ see the [agent meta-tool path](#the-agent-meta-tool-path) section).
 This onboarding doc covers the **inspection** surface only —
 `scripts/holodeck.sh` is fully replaced by `meho holodeck …`. The
 **sister wrapper**
-[`scripts/clone-holodeck-instance.sh`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/clone-holodeck-instance.sh)
+`scripts/clone-holodeck-instance.sh`
 covers multi-step nested-lab provisioning end-to-end (validate templates
 → reserve resources → boot sequence → post-provision validation).
 

@@ -7,7 +7,7 @@ Copyright (c) 2026 evoila Group
 
 > Cross-repo handshake between `evoila/meho` (this repo, producer)
 > and
-> [`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc)
+> `evoila-bosnia/claude-rdc-hetzner-dc`
 > (private; consumer of MEHO and operator of the rke2-infra
 > dogfooding cluster).
 >
@@ -21,11 +21,11 @@ Copyright (c) 2026 evoila Group
 ## Tracking issue
 
 This handshake spec is the producer-side half of
-[`evoila-bosnia/meho-internal#58`](https://github.com/evoila-bosnia/meho-internal/issues/58)
+`evoila-bosnia/meho-internal#58`
 (parent Initiative
-[#54](https://github.com/evoila-bosnia/meho-internal/issues/54),
+#54,
 parent Goal
-[#11](https://github.com/evoila-bosnia/meho-internal/issues/11) —
+#11 —
 DoD bullet 5). The consumer-side issue that lands the
 `targets.yaml` entry and wires it into the connector chassis is
 drafted at
@@ -33,7 +33,7 @@ drafted at
 
 ## Why this handshake exists
 
-[Goal #11](https://github.com/evoila-bosnia/meho-internal/issues/11)
+Goal #11
 DoD bullet 5 lands when MEHO is a managed target the consumer's
 connector chassis can probe — like any other system the consumer
 operates. The contract crosses two repo boundaries:
@@ -459,10 +459,10 @@ consumer's real `targets.yaml`; the snapshot lives at
 
 ## References
 
-- Parent Goal: [#11 — Deployable v0.1](https://github.com/evoila-bosnia/meho-internal/issues/11) — DoD bullet 5
-- Parent Initiative: [#54 — G2.8 Acceptance / dogfood proof](https://github.com/evoila-bosnia/meho-internal/issues/54)
-- Predecessor: [#50 — Per-PR ephemeral cluster smoke (G2.7-T2)](https://github.com/evoila-bosnia/meho-internal/issues/50)
-- Predecessor: [#53 — Cross-repo coordination tracker (G2.7-T5)](https://github.com/evoila-bosnia/meho-internal/issues/53)
+- Parent Goal: #11 — Deployable v0.1 — DoD bullet 5
+- Parent Initiative: #54 — G2.8 Acceptance / dogfood proof
+- Predecessor: #50 — Per-PR ephemeral cluster smoke (G2.7-T2)
+- Predecessor: #53 — Cross-repo coordination tracker (G2.7-T5)
 - Sibling handshake: [`./rke2-infra-coordination.md`](./rke2-infra-coordination.md) — per-PR ephemeral smoke + `repository_dispatch`
 - Green-counter contract: [`docs/acceptance/green-counter.md`](../acceptance/green-counter.md)
 - Smoke acceptance contract: [`docs/acceptance/smoke.md`](../acceptance/smoke.md) — federation chain legs the probe relies on

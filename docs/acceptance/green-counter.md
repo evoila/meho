@@ -16,18 +16,18 @@ Copyright (c) 2026 evoila Group
 > result are working from one shared definition.
 >
 > The counter itself is computed and rendered on the consumer side
-> ([`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc));
+> (`evoila-bosnia/claude-rdc-hetzner-dc`);
 > the producer (this repo) owns the contract + the data source
 > (`pr-smoke.yml`'s workflow-run history) the consumer queries.
 
 ## Tracking issue
 
 This contract is the producer-side half of
-[`evoila-bosnia/meho-internal#58`](https://github.com/evoila-bosnia/meho-internal/issues/58)
+`evoila-bosnia/meho-internal#58`
 (parent Initiative
-[#54](https://github.com/evoila-bosnia/meho-internal/issues/54),
+#54,
 parent Goal
-[#11](https://github.com/evoila-bosnia/meho-internal/issues/11)).
+#11).
 The consumer-side issue that maintains the counter implementation
 and the `targets.yaml` `rdc-meho` entry is drafted at
 [`docs/cross-repo/issue-58-consumer-ticket-body.md`](../cross-repo/issue-58-consumer-ticket-body.md);
@@ -259,10 +259,10 @@ deferred to the consumer-side issue (drafted at
 
 ## References
 
-- Parent Goal: [#11 — Deployable v0.1](https://github.com/evoila-bosnia/meho-internal/issues/11) — DoD bullets 4 + 5
-- Parent Initiative: [#54 — G2.8 Acceptance / dogfood proof](https://github.com/evoila-bosnia/meho-internal/issues/54)
-- Predecessor: [#50 — Per-PR ephemeral cluster smoke (G2.7-T2)](https://github.com/evoila-bosnia/meho-internal/issues/50)
-- Predecessor: [#53 — Cross-repo coordination tracker (G2.7-T5)](https://github.com/evoila-bosnia/meho-internal/issues/53)
+- Parent Goal: #11 — Deployable v0.1 — DoD bullets 4 + 5
+- Parent Initiative: #54 — G2.8 Acceptance / dogfood proof
+- Predecessor: #50 — Per-PR ephemeral cluster smoke (G2.7-T2)
+- Predecessor: #53 — Cross-repo coordination tracker (G2.7-T5)
 - Workflow file: [`.github/workflows/pr-smoke.yml`](../../.github/workflows/pr-smoke.yml)
 - Cross-repo handshake: [`docs/cross-repo/rke2-infra-coordination.md`](../cross-repo/rke2-infra-coordination.md)
 - `targets.yaml` contract: [`docs/cross-repo/targets-yaml.md`](../cross-repo/targets-yaml.md)

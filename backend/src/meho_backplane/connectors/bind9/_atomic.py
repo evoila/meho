@@ -183,8 +183,8 @@ References
   in step 4:
   https://manpages.debian.org/bookworm/bind9-utils/named-checkzone.1.en.html.
 * ``rndc reload`` reference: ISC bind9 9.18 manpages.
-* Consumer wrapper whose pattern is ported:
-  https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/bind9-dns.sh.
+* Consumer wrapper whose pattern is ported: ``scripts/bind9-dns.sh``
+  in the consumer's private repo.
 """
 
 from __future__ import annotations

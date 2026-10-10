@@ -13,18 +13,18 @@ Copyright (c) 2026 evoila Group
 >
 > This document codifies **what "passing" looks like** at the cluster
 > level. The actual rollback exercise runs on the consumer side
-> ([`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc));
+> (`evoila-bosnia/claude-rdc-hetzner-dc`);
 > the producer (this repo) owns the acceptance bar + the verifier the
 > consumer's exercise script invokes as its last step.
 
 ## Tracking issue
 
 This contract closes
-[`evoila-bosnia/meho-internal#57`](https://github.com/evoila-bosnia/meho-internal/issues/57)
+`evoila-bosnia/meho-internal#57`
 (parent Initiative
-[#54](https://github.com/evoila-bosnia/meho-internal/issues/54),
+#54,
 parent Goal
-[#11](https://github.com/evoila-bosnia/meho-internal/issues/11)).
+#11).
 
 ## Two layers of forward-compat assurance
 
@@ -243,7 +243,7 @@ pre-flight checks (VPN, Vault session) that are environment-specific.
 ## Acceptance-criteria status
 
 The full set of acceptance criteria on
-[issue #57](https://github.com/evoila-bosnia/meho-internal/issues/57)
+issue #57
 and where each lands:
 
 | AC | Status at PR-time | Evidence path |
@@ -266,22 +266,22 @@ the exercise + writes the closing artefact.
 ## References
 
 - Parent Goal:
-  [#11 — Deployable v0.1](https://github.com/evoila-bosnia/meho-internal/issues/11)
+  #11 — Deployable v0.1
   (DoD bullet 3)
 - Parent Initiative:
-  [#54 — G2.8 Acceptance / dogfood proof](https://github.com/evoila-bosnia/meho-internal/issues/54)
+  #54 — G2.8 Acceptance / dogfood proof
 - This task:
-  [#57 — helm rollback verified end-to-end with non-trivial schema diff](https://github.com/evoila-bosnia/meho-internal/issues/57)
+  #57 — helm rollback verified end-to-end with non-trivial schema diff
 - Predecessor (unit-level proof):
-  [#30 — forward-compat regression test (testcontainers)](https://github.com/evoila-bosnia/meho-internal/issues/30)
+  #30 — forward-compat regression test (testcontainers)
   / [`backend/tests/migrations/test_migration_rollback.py`](../../backend/tests/migrations/test_migration_rollback.py)
 - Predecessor (additive-only migration discipline):
-  [#29 — migration runner entrypoint + CI guard rejecting destructive migration patterns](https://github.com/evoila-bosnia/meho-internal/issues/29)
-- Predecessor (cold-deploy install): [Task #55 — `install.sh` cold-deploy](https://github.com/evoila-bosnia/meho-internal/issues/55) / [PR #189](https://github.com/evoila/meho/pull/189)
+  #29 — migration runner entrypoint + CI guard rejecting destructive migration patterns
+- Predecessor (cold-deploy install): Task #55 — `install.sh` cold-deploy / [PR #189](https://github.com/evoila/meho/pull/189)
 - Sibling acceptance tasks:
-  [#55 — install.sh cold-deploy](https://github.com/evoila-bosnia/meho-internal/issues/55) (closed),
-  [#56 — smoke.sh federation chain](https://github.com/evoila-bosnia/meho-internal/issues/56),
-  [#58 — 5-PR green counter](https://github.com/evoila-bosnia/meho-internal/issues/58)
+  #55 — install.sh cold-deploy (closed),
+  #56 — smoke.sh federation chain,
+  #58 — 5-PR green counter
 - Producer artefacts the rollback exercise uses:
   - Chart: `oci://ghcr.io/evoila/meho-chart:<version>` ([publish workflow](../../.github/workflows/chart.yml))
   - Migration Job template: [`deploy/charts/meho/templates/migration-job.yaml`](../../deploy/charts/meho/templates/migration-job.yaml)

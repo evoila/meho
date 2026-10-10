@@ -1220,7 +1220,7 @@ jobs:
         if: always()
         continue-on-error: true
         timeout-minutes: 2
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: python-coverage-data-shard-${{ matrix.shard }}
           path: backend/.coverage.*
@@ -1239,7 +1239,7 @@ jobs:
         # timeout-minutes (#3172): same job-cap-cancel hole as the combine
         # step — a hung upload must degrade to an absorbed step failure.
         timeout-minutes: 2
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: coverage-pytest-log-shard-${{ matrix.shard }}
           path: backend/pytest-coverage.log
@@ -1375,7 +1375,7 @@ jobs:
         # timeout-minutes (#3172): same job-cap-cancel hole as the combine
         # step — a hung upload must degrade to an absorbed step failure.
         timeout-minutes: 2
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: python-coverage
           path: backend/coverage.xml
@@ -1809,7 +1809,7 @@ jobs:
         # ONLY for this step.
         if: always() && hashFiles('cli/coverage.out') != ''
         continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: go-coverage
           path: cli/coverage.out

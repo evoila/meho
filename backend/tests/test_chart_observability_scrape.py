@@ -51,7 +51,13 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CHART_DIR = _REPO_ROOT / "deploy" / "charts" / "meho"
 
 # Minimal chassis-required overrides that satisfy values.schema.json.
+# ``--namespace default`` pins ``.Release.Namespace``. Without it, helm takes
+# the namespace from the current kube context, or from the pod's service
+# account when it runs inside Kubernetes (as the CI runners do). The
+# assertions below expect ``default``.
 _BASE_OVERRIDES = [
+    "--namespace",
+    "default",
     "--set",
     "image.tag=test",
     "--set",

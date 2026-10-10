@@ -90,6 +90,144 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.35.20] - 2026-10-11
+
+This release fixes security flaws in two dependencies. The new CLI
+binaries are built with Go 1.26.9, which fixes nine flaws in the Go
+standard library that the v0.35.19 CLI still had. The image moves
+pydantic-ai to 2.53.0 for one HIGH CVE; agent requests stay the same.
+The release also adds `read_docs`, which reads the text around a docs
+search hit, and two safe pfSense reads for local users and static
+routes. `read_docs` stays off until an operator turns it on for a docs
+collection. No database migration; no settings change.
+
+### Security
+
+- The `meho` CLI binaries are now built with Go 1.26.9. The v0.35.19
+  binaries were built with go1.25.14. That Go has nine known flaws in
+  its standard library that the CLI code reaches, and they are fixed
+  only from go1.26.9:
+  - `net/http`, seven flaws: GO-2026-6617, GO-2026-6613, GO-2026-6612,
+    GO-2026-6611, GO-2026-6610, GO-2026-6605 and GO-2026-6603;
+  - `crypto/tls`: GO-2026-6607;
+  - `net/textproto`: GO-2026-6608.
+
+  Go 1.25 gets no more security fixes. `cli/go.mod` now says
+  `go 1.26.9`, and CI and the release workflow build with Go 1.26. CI's
+  `govulncheck` check moves from v1.5.0 to v1.8.0. No CLI code changes.
+  The backplane image and the Helm chart hold no Go code, so these Go
+  flaws do not affect them. **Operators:** install the v0.35.20 CLI to
+  get the fixes. **Contributors:** building the CLI now needs Go 1.26.9
+  or later. (#3957)
+- Python dependencies patched for the `image` workflow's trivy
+  CRITICAL/HIGH promotion gate. `pydantic-ai-slim` moves from 2.30.0 to
+  2.53.0 (CVE-2026-107286, HIGH). The flaw: a streamed request through
+  pydantic-ai's concurrency limiter could keep its slot, so later
+  requests waited forever. MEHO does not use that limiter. The floor in
+  `backend/pyproject.toml` is now `>=2.53.0`. The new version also
+  needs newer packages: `anthropic` 0.109.1 -> 1.12.1, `openai` 2.45.0
+  -> 3.26.1, `pydantic-graph` 2.30.0 -> 2.53.0, `genai-prices` 0.1.1 ->
+  0.1.9 and `jiter` 0.15.0 -> 0.17.0; `distro` is removed. Agent
+  requests stay the same. Since pydantic-ai 2.52.0, an Anthropic model
+  without `max_tokens` asks for the model's largest output and streams
+  the request. So both Anthropic agent builders now set
+  `max_tokens=4096`, the old default, and the request is not streamed,
+  as before. **TLS note:** when `SSL_CERT_FILE` is not set, LLM calls
+  now trust the system CA store instead of the bundled `certifi` list.
+  The image (Debian 13) ships `ca-certificates`, so public endpoints
+  such as the Anthropic API still verify. With `SSL_CERT_FILE` set,
+  nothing changes. (#3966)
+
+### Added
+
+- `read_docs` reads more around a docs hit: the text before and after
+  it, its whole page, or its section (#3948 / #3953).
+  - It is on every face. MCP: the new `read_docs` tool, in the docs
+    add-on next to `search_docs` (it needs the same `meho-docs`
+    capability). REST: `POST /api/v1/read_docs`. CLI:
+    `meho docs read <read-handle> --collection <key>`, with
+    `--mode around|page|section`, `--before N`, `--after N` and
+    `--cursor <next>`. Pass `-` as the handle (or as `--cursor`) to read
+    it from standard input, so it stays out of the shell history.
+    Console: a "Read around this hit" button on search and ask results.
+  - **Off by default.** A `corpus-http` collection turns it on with
+    `"read": "upstream"` in its `backend.ref`. The optional
+    `"read_endpoint"` names the endpoint; without it, MEHO uses the
+    search URL with its last path segment replaced by `read`. Changing
+    only these two keys keeps the collection ready. Only a collection
+    with read on puts a `read_handle` on its search hits and `ask_docs`
+    citations.
+  - **To turn it on, you need two things.** First, a doc service version
+    that offers the read endpoint. Second, `UI_SESSION_ENCRYPTION_KEY`
+    set on the backplane (the chart sets it when
+    `uiConsole.enabled: true`). Every read sends an `X-Meho-Caller`
+    header, so the doc service can limit reads per person. Its value is
+    a keyed hash of the user's subject: it is the same for one person,
+    and nobody can turn it back into the user. Without the key, a read
+    fails (503 / `-32603`).
+  - Every refusal gives the same "docs source not found" answer (404 /
+    `-32602`): an unknown collection, a collection the caller may not
+    use, a disabled one, one without read, or a handle the doc service
+    refuses. So `read_docs` cannot be used to find out which
+    collections exist. A handle that is too old answers "search again"
+    (409 / `-32602` with `data.reason = "search_again"`). A rate limit
+    answers 429 / `-32000` with the seconds to wait (`Retry-After`,
+    capped at 3600).
+  - The handle holds a few words of the hit. MEHO never logs it, never
+    stores it in the audit row, and keeps it and the cursor off the live
+    activity feed. On MCP, the text comes wrapped as untrusted text; the
+    console escapes it. For a file whose owner allows only its link, the
+    reply has `text: null`, `disclosure: "link"` and the link.
+  - The MCP working surface grows from 25 to 26 tools (81 registered in
+    all).
+- Two new `safe` reads on the pfSense connector, `pfsense.user.list` and
+  `pfsense.route.static.list` (#3954 / #3956). They need no approval and
+  change nothing on the firewall. Now nobody needs the whole config file
+  (`pfsense.config.show`) just to check a user or a route.
+  - `pfsense.user.list` returns one row per local user, with only
+    `name`, `descr`, `scope`, `disabled`, `expires`, `uid` and `groups`.
+  - `pfsense.route.static.list` returns one row per static route, with
+    only `network`, `gateway`, `descr` and `disabled`. For a route to a
+    CIDR network, `network` is the value `pfsense.route.static.delete`
+    takes. A route to an alias is listed too, but the delete op does not
+    take an alias.
+  - Both read `/cf/conf/config.xml` over SSH, like
+    `pfsense.config.show`. Each row is built only from a fixed list of
+    fields, so secret fields (password hashes, the IPsec pre-shared key,
+    SSH keys, one-time-password and certificate data) never reach the
+    answer.
+    Every returned string also goes through the same secret-shape check
+    as `pfsense.config.show`, so a value that looks like a secret comes
+    back as `***REDACTED***`. **Known limit:** a secret typed in plain
+    words, for example into `descr`, can still show.
+  - An empty or broken file, a DOCTYPE, an entity or a wrong root
+    element fails the call. The error is fixed text with no file
+    content.
+  - Both return `{rows, total}`, so a long list comes back as a result
+    handle. They sit in the `users` (new) and `routing` operation
+    groups. CLI: `meho pfsense user list` and `meho pfsense route list`.
+  - Live auth model: SSH key (the connector's only one). Tested with
+    synthetic configs; not yet run against a live pfSense.
+- A build file and a threat model for Anthropic's OSS Scanner, a free
+  security scanner for open-source projects, in `.oss-scanner/`. The
+  build file builds the backend, the Go CLI and `helm`, so the scanner
+  can build and test MEHO with no network. The threat model tells the
+  scanner where untrusted input enters MEHO and which security promises
+  must always hold. The scanner reports findings privately to the
+  address in `SECURITY.md`. A new Dependabot entry keeps the build
+  file's base image up to date. No product code changes: the image, the
+  chart and the CLI do not change. (#3968)
+
+### Changed
+
+- Docs and CLI help examples now use neutral example names, such as
+  `fw-01` and `vault-01`, and the documentation address `192.0.2.1`. No
+  behaviour change. (#3955)
+- CI pins Python 3.14 (new `backend/.python-version`) and uv 0.13.0, so
+  a new uv release can no longer change CI on its own. Developers who
+  run `uv sync` in `backend/` also get Python 3.14. The image does not
+  change. (#3971)
+
 ## [0.35.19] - 2026-10-07
 
 This release fixes three security problems and improves docs search

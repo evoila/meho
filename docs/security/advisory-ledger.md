@@ -12,10 +12,10 @@ rc-series release step reconciles against.
 
 | Measurement | Value | How measured |
 |---|---|---|
-| Date | 2026-10-07 (rows 79–80 added; row 78 added 2026-10-04; rows 1–77 measured 2026-09-22) | — |
-| CHANGELOG revision | rows 1–77: `64d1ad28` (`main`, v0.35.12 + `[Unreleased]`); row 78: the v0.35.17 release-cutting PR (`[0.35.17]`); rows 79–80: the v0.35.19 release-cutting PR (`[0.35.19]`) | `git log -1 --oneline` |
-| `### Security` headings | **80** | `grep -cE "^### Security" CHANGELOG.md` |
-| Ledger rows below | **80** | must equal the heading count |
+| Date | 2026-10-11 (row 81 added; rows 79–80 added 2026-10-07; row 78 added 2026-10-04; rows 1–77 measured 2026-09-22) | — |
+| CHANGELOG revision | rows 1–77: `64d1ad28` (`main`, v0.35.12 + `[Unreleased]`); row 78: the v0.35.17 release-cutting PR (`[0.35.17]`); rows 79–80: the v0.35.19 release-cutting PR (`[0.35.19]`); row 81: the v0.35.20 release-cutting PR (`[0.35.20]`) | `git log -1 --oneline` |
+| `### Security` headings | **81** | `grep -cE "^### Security" CHANGELOG.md` |
+| Ledger rows below | **81** | must equal the heading count |
 | Published GHSAs on `evoila/meho` | **0** | `gh api /repos/evoila/meho/security-advisories --jq 'length'` |
 | Externally reported vulnerabilities cited in CHANGELOG | 0 | every entry cites an internal tracker item, an internal review finding, or a scanner alert |
 | Age of `SECURITY.md` policy | since the first commit (`1684c8ca`, 2026-05-09) | `git log --diff-filter=A -- SECURITY.md` |
@@ -88,6 +88,7 @@ the private finding behind the fix.
 
 | # | Version | Line | Summary | Class | Disposition |
 |---|---|---|---|---|---|
+| 81 | 0.35.20 | 104 | Two bullets: `meho` CLI release binaries built with Go 1.26.9 instead of go1.25.14, for nine Go standard-library flaws the CLI code reaches: `net/http` (GO-2026-6617, GO-2026-6613, GO-2026-6612, GO-2026-6611, GO-2026-6610, GO-2026-6605, GO-2026-6603), `crypto/tls` (GO-2026-6607) and `net/textproto` (GO-2026-6608); `govulncheck` v1.8.0 (#3957) — *dep*; `pydantic-ai-slim` 2.53.0 (CVE-2026-107286), with `anthropic` 1.12.1 and `openai` 3.26.1, and the Anthropic agent output limit pinned at 4096 so requests stay the same (#3966) — *dep*. | dep | N/A — upstream advisory |
 | 79 | 0.35.19 | 104 | Two bullets: `pfsense.config.show`, a `safe` read with no approval, returned the whole pfSense `config.xml` (user password hashes, certificate and CA private keys, OpenVPN and IPsec keys, service passwords) to any caller with access to the target; known secret fields and shapes are now redacted in the handler, which fails closed (#3946) — *vuln*; pymongo 4.18.2 (CVE-2026-96748, CVE-2026-96749) and fsspec 2026.9.0 (CVE-2026-104851) (#3950) — *dep*. | vuln (+ dep) | Owed — decision pending (bullet 1); N/A — upstream advisory (bullet 2) |
 | 80 | 0.35.19 | 141 | The weekly `audit_log.raw_payload` age-off (0.34.0) could not run on PostgreSQL: the append-only trigger from migration `0100` rejected its `UPDATE`, so pre-redaction connector answers, which can hold secrets, stayed past the retention window; migration `0103` allows only the `raw_payload` → `NULL` update (#3951). | vuln | Owed — decision pending |
 | 78 | 0.35.17 | 95 | Two bullets: base-image `openssl` / `libssl3t64` / `openssl-provider-legacy` raised to `3.5.7-1~deb13u3` (CVE-2026-75804, CVE-2026-84782) and `libpcre2-8-0` to `10.46-1~deb13u3` (CVE-2026-103111), with a build-time minimum version per Debian source package so the cached apt layer cannot keep older versions (#3921); PyJWT 2.15.0 (CVE-2026-102268 and five more) and urllib3 2.8.0 (CVE-2026-97687, CVE-2026-97689) (#3910). | dep | N/A — upstream advisory |
@@ -174,10 +175,10 @@ the private finding behind the fix.
 | Class | Rows | Disposition today |
 |---|---|---|
 | vuln — MEHO-code vulnerability | **38** (rows 2–5, 7–9, 12, 15, 20, 21, 24–26, 30–33, 35, 37, 38, 40, 43, 47, 59, 62, 64, 65, 67–69, 71, 73, 74, 76, 77, 79, 80; rows 4 and 79 also carry a dependency bump) | 38 × Owed — decision pending; 0 published; 0 exempt |
-| dep — dependency / base-image CVE patch | **6** (rows 34, 44, 45, 46, 51, 78) | N/A — upstream advisory |
+| dep — dependency / base-image CVE patch | **7** (rows 34, 44, 45, 46, 51, 78, 81) | N/A — upstream advisory |
 | hardening — no demonstrated vulnerability | **32** (rows 1, 6, 10, 11, 13, 14, 16–18, 22, 23, 27–29, 36, 41, 42, 48, 50, 52, 53, 55–58, 60, 61, 63, 66, 70, 72, 75) | N/A — hardening |
 | docs — docs-only or non-vulnerability | **4** (rows 19, 39, 49, 54) | N/A — no vulnerability |
-| **Total** | **80** | |
+| **Total** | **81** | |
 
 **Gate 2 status at this snapshot: open.** 38 rows await **publication**
 (`security-advisories` returns 0). The only exemption ground the policy

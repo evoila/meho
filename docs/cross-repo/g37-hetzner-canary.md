@@ -7,8 +7,9 @@ Copyright (c) 2026 evoila Group
 
 This document is the **operator-facing runbook** for ingesting the
 Hetzner Robot Webservice OpenAPI spec through the G0.7 spec-ingestion
-pipeline and curating the read-only v0.2 core (~10 ops) the agent
-surfaces through `search_operations` / `call_operation`. Run this
+pipeline and curating the core (12 ops: 10 reads and the 2 vSwitch
+membership writes) the agent surfaces through `search_operations` /
+`call_operation`. Run this
 procedure when standing up a Hetzner Robot target against a fresh
 deploy, when re-running after a connector or spec revision, or when
 verifying the curation against a staging Robot Webservice account.
@@ -19,7 +20,7 @@ Companion to
 [`docs/cross-repo/connector-ingestion.md`](./connector-ingestion.md)
 (the connector-agnostic ingest runbook). The Hetzner-Robot-specific
 delta is the HTTP Basic auth flow, the single-spec ingest layout
-(`robot-api.yaml`), and the curated 10-op read core.
+(`robot-api.yaml`), the curated 12-op core, and the form-field writes.
 
 ## What this canary proves
 
@@ -50,7 +51,7 @@ End-to-end correctness of the G0.7 ingestion pipeline driven against the
 4. **Curate.** The operator drives `apply_robot_core_curation`
    (which uses `ReviewService.edit_group` + `enable_group` +
    `edit_op(llm_instructions=…)`) against the staged connector to land
-   the 10 read-only core ops and their guidance blobs.
+   the 12 core ops and their guidance blobs.
 5. **Verify.** The operator dispatches one list op through `call_operation`
    to prove the end-to-end agent path works. The JSONFlux seam is
    exercised via the test-only `ForceHandleReducer` pattern (see
@@ -72,7 +73,7 @@ End-to-end correctness of the G0.7 ingestion pipeline driven against the
   until it lands, the operator runs this procedure manually. The
   substrate-level unit tests live at:
   - [`backend/tests/test_connectors_hetzner_robot_core_ops.py`](../../backend/tests/test_connectors_hetzner_robot_core_ops.py)
-    — curation substrate tests (10 ops enabled, non-core ops disabled,
+    — curation substrate tests (12 ops enabled, non-core ops disabled,
     llm_instructions + when_to_use populated, audit rows written).
 
 - **A Postgres instance with pgvector + FTS extensions.** Local
@@ -103,7 +104,39 @@ MEHO operates on a shared egress IP, a single misconfigured target could
 lock every operator off the Robot API for 10 minutes. The connector raises
 `RuntimeError("auth_failed: …")` on the **first** 401 — it never retries,
 never consumes the 2 remaining attempts. Fix the Vault secret and restart
-the target before retrying.
+the target before retrying. A dispatched read or write that gets a 401
+comes back as `connector_auth_failed` after exactly one request.
+
+## Writes: form fields and approval (#3973)
+
+Robot reads write bodies only as form fields
+(`application/x-www-form-urlencoded`). The connector sends every write body
+that way: lists as repeated `name[]` fields (`server[]=321&server[]=421`),
+booleans as `true` / `false`. A nested object is refused before any HTTP
+call. A write is never retried.
+
+Every vSwitch write waits for a human approval, for every kind of login.
+The connector's safety floor sets this again on every ingest:
+
+| Op | What it does | Safety level | Switched on by curation |
+|---|---|---|---|
+| `POST:/vswitch/{vswitch-id}/server` | add servers | `dangerous` | yes |
+| `DELETE:/vswitch/{vswitch-id}/server` | remove servers | `dangerous` | yes |
+| `POST:/vswitch/{vswitch-id}` | rename, or change the VLAN of every member | `dangerous` | no |
+| `DELETE:/vswitch/{vswitch-id}` | cancel the whole vSwitch | `destructive` | no |
+
+- A human waits. The requester cannot approve their own request, not even
+  with `APPROVAL_ALLOW_SELF_APPROVAL=true`.
+- An agent is refused unless it holds an explicit permission; then a
+  membership change waits for approval. The cancel op is always refused for
+  agents.
+- A service login waits. A standing grant cannot be created for these ops:
+  the default grant patterns refuse `DELETE:*` and `POST:/vswitch/*`.
+
+Before #3973 the spec described the rename route as "add servers" and the
+cancel route as "remove servers". Both now say what they really do, and both
+stay off. Purchases (ordering or cancelling servers and add-ons) stay manual
+in the Hetzner portal.
 
 This flow is fully exercised by the `HetznerRobotConnector` skeleton
 G3.7-T6 #846 landed. The connector's `probe()` and `fingerprint()` both
@@ -174,12 +207,12 @@ Expected: a rendered table of 3–10 groups. Compare against the canonical
 | group_key | name | covers |
 |---|---|---|
 | `robot-servers` | Hetzner Robot Dedicated Servers | `GET /server`, `GET /server/{server-ip}` |
-| `robot-networking` | Hetzner Robot Networking | `GET /ip`, `/subnet`, `/vswitch`, `/vswitch/{vswitch-id}`, `/failover`, `/rdns`, `/firewall/{server-ip}` |
+| `robot-networking` | Hetzner Robot Networking | `GET /ip`, `/subnet`, `/vswitch`, `/vswitch/{vswitch-id}`, `/failover`, `/rdns`, `/firewall/{server-ip}`; `POST` and `DELETE /vswitch/{vswitch-id}/server` |
 | `robot-ssh-keys` | Hetzner Robot SSH Keys | `GET /key` |
 
 The LLM may propose additional groups for write paths (`/boot`,
 `/reset`, `/wol`, `/order`). These are expected and stay `staged` —
-the curated read core only enables the 3 groups above.
+the curated core only enables the 3 groups above.
 
 ### Step 3 — apply the curated read-core
 
@@ -212,6 +245,14 @@ Each op's `llm_instructions` is the canonical three-key blob
 (`when_to_call` / `output_shape` / `next_step`) matching the typed-
 connector convention.
 
+Every other op in the 3 curated groups is switched off, so the vSwitch
+rename and cancel ops stay off even when the grouping pass puts them in
+`robot-networking`.
+
+**After a release that changes the Robot spec or floor** (for example
+#3973), re-ingest the packaged spec (Step 1) and apply the curation again
+(this step). The re-ingest applies the new safety levels to existing rows.
+
 ### Step 4 — verify the curation
 
 ```bash
@@ -226,6 +267,22 @@ The first command should return 4 enabled groups, each with the canonical
 
 Every other Robot op the spec ingestion produced should be in the
 `is_enabled=False` state.
+
+Check the vSwitch writes (#3973):
+
+```bash
+meho operation search hetzner-rest-2026.04 "add a server to a vSwitch" --limit 5
+meho operation preview hetzner-rest-2026.04 'POST:/vswitch/{vswitch-id}/server' \
+  --target robot-canary --params '{"vswitch-id": "4321", "body": {"server": [321]}}'
+meho connector review hetzner-rest-2026.04
+```
+
+- The search returns `POST:/vswitch/{vswitch-id}/server` near the top.
+- The preview shows `safety_level: dangerous` and "needs approval", the
+  vSwitch id in the path, and the server list in the body. Nothing is sent.
+- The review shows the rename (`POST:/vswitch/{vswitch-id}`) and cancel
+  (`DELETE:/vswitch/{vswitch-id}`) ops switched off, and the cancel op as
+  `destructive`.
 
 ### Step 5 — dispatch one list op end-to-end
 
@@ -293,11 +350,19 @@ level. The CLI verb `meho connector edit-op --llm-instructions <json>` and
 the matching REST / MCP route extensions are deferred to G3.7-T9 alongside
 the CLI verbs for Robot-specific operations.
 
-### 3. Write ops out of scope for v0.2
+### 3. Only the vSwitch membership writes are curated
 
-Boot, reset, WoL, order, and all other write/mutating Robot paths remain
-`staged` and are never enabled in v0.2 per the Initiative #370 DoD and the
-issue body Out-of-scope section.
+Since #3973 the curated core holds two writes: add servers to a vSwitch and
+remove them, both behind a human approval. Boot, reset, WoL, order, the
+firewall set, the vSwitch rename and cancel, and every other write remain
+off. Ordering and cancelling servers and add-ons stay manual by policy.
+
+### 4. Four curated reads are missing from the shipped spec
+
+`GET:/ip`, `GET:/subnet`, `GET:/failover` and `GET:/key` are curated but not
+in the shipped minimal spec. An install that ingests only that spec has no
+rows for them, and `apply_robot_core_curation` stops at the first missing
+one. Ingest a spec that covers them first.
 
 ## References
 

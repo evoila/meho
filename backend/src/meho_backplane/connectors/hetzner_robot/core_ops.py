@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Hetzner Robot read-only v0.2 core — curated operator-enabled subset.
+"""Hetzner Robot curated core — the operator-enabled subset.
 
-This module names the **10 read-only Hetzner Robot operations** the
-curated Robot read core enables out of the much larger Robot Webservice
-REST corpus the G0.7 spec-ingestion pipeline lands under
-``connector_id="hetzner-rest-2026.04"``. The curation is two-layered:
+This module names the **12 Hetzner Robot operations** the curated Robot
+core enables: 10 reads plus the 2 vSwitch membership writes (#3973). They
+come out of the much larger Robot Webservice REST corpus the G0.7
+spec-ingestion pipeline lands under ``connector_id="hetzner-rest-2026.04"``.
+The curation is two-layered:
 
 * :data:`ROBOT_CORE_GROUPS` — the operator-reviewed ``when_to_use``
   hint per LLM-grouping pass output group. Each entry's ``group_key``
@@ -14,7 +15,7 @@ REST corpus the G0.7 spec-ingestion pipeline lands under
   ops; the ``when_to_use`` is what the agent reads verbatim through
   :func:`~meho_backplane.operations.meta_tools.list_operation_groups`
   to pick a group to search within.
-* :data:`ROBOT_CORE_OPS` — the 10 ``EndpointDescriptor.op_id`` strings
+* :data:`ROBOT_CORE_OPS` — the 12 ``EndpointDescriptor.op_id`` strings
   that flip to ``is_enabled=True`` at operator-review time, paired
   with the per-op ``llm_instructions`` blob the agent inlines into
   the reasoning context when it sees the op in
@@ -49,7 +50,7 @@ registry lookup (``(product, version, impl_id)`` triple) under the same
 token — the row-level product key and the registry key now agree. Same
 short token the SDDC Manager precedent uses (``"sddc"``).
 
-The 10 ops (paths reconciled against the pinned Hetzner Robot Webservice
+The 12 ops (paths reconciled against the pinned Hetzner Robot Webservice
 reference — https://robot.hetzner.com/doc/webservice/en.html — by
 ``tests/test_connectors_hetzner_robot_spec_reconcile.py``; the
 ``{server-ip}`` paths are the vendor's documented deprecated
@@ -77,6 +78,16 @@ IP-addressed alternatives to the ``{server-number}`` routes):
     server addressed by its primary IP.
 10. ``GET:/key`` — ``hetzner-robot.ssh_key.list`` — all SSH public keys
     registered in the Robot portal for the account.
+11. ``POST:/vswitch/{vswitch-id}/server`` — add servers to a vSwitch.
+12. ``DELETE:/vswitch/{vswitch-id}/server`` — remove servers from a vSwitch.
+
+The two vSwitch membership writes (#3973) are the only curated writes. The
+connector's safety floor (:mod:`.ingest_safety`) makes both wait for a human
+approval, and the connector sends their bodies as form fields. The other
+vSwitch writes — rename / VLAN change (``POST:/vswitch/{vswitch-id}``) and
+cancel (``DELETE:/vswitch/{vswitch-id}``) — are not curated, so they stay
+switched off: :func:`apply_robot_core_curation` switches off every non-core
+op in a curated group.
 
 ``GET:/query`` (``hetzner-robot.about``) was removed by #2985: the
 reconcile lane proved the Robot Webservice serves no such endpoint —
@@ -97,7 +108,7 @@ Curation application
 --------------------
 
 :func:`apply_robot_core_curation` is the operator-review-time substrate
-call that makes exactly the 10 curated ops dispatchable. Mirrors
+call that makes exactly the 12 curated ops dispatchable. Mirrors
 :func:`~meho_backplane.connectors.harbor.core_ops.apply_harbor_core_curation`
 verbatim, threading the "enable group but pin non-core ops disabled" needle
 via the audit-log-driven operator-override exclusion.
@@ -218,7 +229,7 @@ class RobotCoreOp:
 #: matches ``/ip_address``.  More-specific prefixes must precede
 #: less-specific ones where overlap exists (e.g. ``/vswitch/{vswitch-id}``
 #: before ``/vswitch``). The rules encode every root-level path the
-#: 10 curated ops use; paths outside these prefixes are un-curated
+#: 12 curated ops use; paths outside these prefixes are un-curated
 #: and stay ``is_enabled=False`` after :func:`apply_robot_core_curation`
 #: runs.
 ROBOT_PATH_RULES: Final[tuple[tuple[str, str], ...]] = (
@@ -235,6 +246,16 @@ ROBOT_PATH_RULES: Final[tuple[tuple[str, str], ...]] = (
     ("/key", "robot-ssh-keys"),
 )
 
+#: The only write op_ids :func:`classify_robot_op` curates: vSwitch
+#: membership add and remove (#3973). Every other write classifies as
+#: ``"none"`` and stays switched off.
+_CURATED_WRITE_OP_IDS: Final[frozenset[str]] = frozenset(
+    {
+        "POST:/vswitch/{vswitch-id}/server",
+        "DELETE:/vswitch/{vswitch-id}/server",
+    }
+)
+
 
 def classify_robot_op(op_id: str) -> str:
     """Return the curated ``group_key`` for a Robot op_id, or ``"none"``.
@@ -243,9 +264,10 @@ def classify_robot_op(op_id: str) -> str:
     helper strips the verb and matches the path against
     :data:`ROBOT_PATH_RULES` in order.
 
-    Only ``GET`` verbs are considered curated (all 10 core ops are
-    read-only). A non-GET op or a path outside the curated families
-    returns ``"none"`` — those rows stay ``is_enabled=False``.
+    ``GET`` ops and the two vSwitch membership writes in
+    :data:`_CURATED_WRITE_OP_IDS` are curated. Any other write, or a path
+    outside the curated families, returns ``"none"`` — those rows stay
+    ``is_enabled=False``.
 
     Returns ``"none"`` for paths outside the curated families (e.g.
     ``/boot``, ``/reset``, ``/wol``); those rows are un-curated and
@@ -261,7 +283,7 @@ def classify_robot_op(op_id: str) -> str:
         method, path = op_id.split(":", 1)
     except ValueError:
         return "none"
-    if method != "GET":
+    if method != "GET" and op_id not in _CURATED_WRITE_OP_IDS:
         return "none"
     for prefix, group_key in ROBOT_PATH_RULES:
         if path == prefix or path.startswith(f"{prefix}/"):
@@ -289,7 +311,7 @@ def _instructions(
 
 
 #: Operator-reviewed ``when_to_use`` hints for the 3 Hetzner Robot groups
-#: the read-only v0.2 core spans. Every hint is one complete sentence the
+#: the curated core spans. Every hint is one complete sentence the
 #: agent reads verbatim — vague hints poison ``search_operations`` ranking.
 ROBOT_CORE_GROUPS: Final[tuple[RobotCoreGroup, ...]] = (
     RobotCoreGroup(
@@ -315,7 +337,9 @@ ROBOT_CORE_GROUPS: Final[tuple[RobotCoreGroup, ...]] = (
             "configuration (active status, Hetzner-services allowlist flag, and "
             "ordered input/output rules). Use when answering questions about IP "
             "assignments, routing, network topology, DNS resolution, or edge "
-            "firewall rules for any resource in the account."
+            "firewall rules for any resource in the account. The group also holds "
+            "the two vSwitch membership writes: add servers to a vSwitch or remove "
+            "them. Each write waits for a human approval before it runs."
         ),
     ),
     RobotCoreGroup(
@@ -332,9 +356,10 @@ ROBOT_CORE_GROUPS: Final[tuple[RobotCoreGroup, ...]] = (
 )
 
 
-#: The 10 curated read-only Hetzner Robot core ops. Each entry carries
-#: the op_id (``GET:/path`` form), the curated group assignment, and the
-#: operator-reviewed ``llm_instructions`` blob.
+#: The 12 curated Hetzner Robot core ops: 10 reads and the 2 vSwitch
+#: membership writes. Each entry carries the op_id (``METHOD:/path`` form),
+#: the curated group assignment, and the operator-reviewed
+#: ``llm_instructions`` blob.
 #:
 #: Paths reconciled against the pinned Hetzner Robot Webservice reference
 #: (https://robot.hetzner.com/doc/webservice/en.html) by
@@ -500,6 +525,67 @@ ROBOT_CORE_OPS: Final[tuple[RobotCoreOp, ...]] = (
         ),
     ),
     RobotCoreOp(
+        op_id="POST:/vswitch/{vswitch-id}/server",
+        group_key="robot-networking",
+        llm_instructions=_instructions(
+            when_to_call=(
+                "Call to add one or more dedicated servers to an existing "
+                "vSwitch. Params: vswitch-id (from hetzner-robot.vswitch.list) "
+                "and body.server, a list of server numbers or main IPs, for "
+                'example {"vswitch-id": "4321", "body": {"server": [321]}}. '
+                "This change WAITS FOR A HUMAN APPROVAL: the call returns "
+                "awaiting_approval, and the person who asked cannot approve "
+                "it. Robot allows 100 calls per hour on this route, so do not "
+                "call it in a loop. This op only adds servers: it never renames "
+                "the vSwitch, changes its VLAN, or cancels it."
+            ),
+            output_shape=(
+                "After approval Robot answers with no body, so the result is an "
+                "empty object {}. The change is not done yet: Robot applies it "
+                "in the background."
+            ),
+            next_step=(
+                "Poll hetzner-robot.vswitch.info (GET:/vswitch/{vswitch-id}) "
+                "until each added server shows status 'ready' ('in process' "
+                "means still running; 'failed' means Robot gave up). A 409 "
+                "VSWITCH_IN_PROCESS error means an earlier change on this "
+                "vSwitch is still running: wait, check the vSwitch, and do not "
+                "repeat the call blindly. On each server, vSwitch traffic needs "
+                "a VLAN interface with MTU 1400."
+            ),
+        ),
+    ),
+    RobotCoreOp(
+        op_id="DELETE:/vswitch/{vswitch-id}/server",
+        group_key="robot-networking",
+        llm_instructions=_instructions(
+            when_to_call=(
+                "Call to remove one or more dedicated servers from a vSwitch. "
+                "Params: vswitch-id (from hetzner-robot.vswitch.list) and "
+                "body.server, a list of server numbers or main IPs, for example "
+                '{"vswitch-id": "4321", "body": {"server": [321]}}. The removed '
+                "servers lose this private network. This change WAITS FOR A "
+                "HUMAN APPROVAL: the call returns awaiting_approval, and the "
+                "person who asked cannot approve it. Robot allows 100 calls per "
+                "hour on this route. This op only removes servers: it never "
+                "cancels the vSwitch."
+            ),
+            output_shape=(
+                "After approval Robot answers with no body, so the result is an "
+                "empty object {}. The change is not done yet: Robot applies it "
+                "in the background."
+            ),
+            next_step=(
+                "Poll hetzner-robot.vswitch.info (GET:/vswitch/{vswitch-id}) "
+                "until the removed servers are gone from server[]. A 409 "
+                "VSWITCH_IN_PROCESS error means an earlier change on this "
+                "vSwitch is still running: wait, check the vSwitch, and do not "
+                "repeat the call blindly. The remaining servers keep using the "
+                "vSwitch VLAN with MTU 1400."
+            ),
+        ),
+    ),
+    RobotCoreOp(
         op_id="GET:/failover",
         group_key="robot-networking",
         llm_instructions=_instructions(
@@ -621,10 +707,10 @@ async def apply_robot_core_curation(
     *,
     tenant_id: UUID | None,
 ) -> None:
-    """Apply the curated 10-op read core against an ingested Robot connector.
+    """Apply the curated 12-op core against an ingested Robot connector.
 
     Drives the substrate so that, after this call returns, exactly
-    the 10 ops in :data:`ROBOT_CORE_OPS` are dispatchable
+    the 12 ops in :data:`ROBOT_CORE_OPS` are dispatchable
     (``is_enabled=True``) and every other ingested op stays
     ``is_enabled=False``. The 3 curated groups land
     ``review_status='enabled'`` so the agent's

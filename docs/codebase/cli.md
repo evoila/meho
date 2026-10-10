@@ -1060,9 +1060,11 @@ narrow-waist contract.
   `--preview-hash` from a prior preview of the identical
   `(connector_id, op_id, target, params)`. Without this verb the CLI
   had no way to obtain the hash, so the destructive tier was
-  MCP-only. The verb exits 1 on a non-ok envelope (`status="error"`
-  for input faults, `status="unavailable"` for a typed/composite op
-  with no literal HTTP request to preview).
+  MCP-only. For an ingested op the human output also prints the
+  `safety_level` and, when the op needs a human approval, an
+  `approval: needs approval` line (#3973). The verb exits 1 on a non-ok
+  envelope (`status="error"` for input faults, `status="unavailable"` for
+  a typed/composite op with no literal HTTP request to preview).
 
 ### Reserved flags (same shape across all three verbs)
 

@@ -27,7 +27,10 @@ import (
 // On `status="ok"` the envelope carries the literal would-be request
 // (`method` / `resolved_path` / `query` / `redacted_body`) plus the
 // `preview_hash` (#3197) — the stable binding a caller presents on the
-// subsequent governed `call_operation` of a `destructive`-tier op. On
+// subsequent governed `call_operation` of a `destructive`-tier op. An
+// ingested op's preview also carries `safety_level` and
+// `requires_approval` (#3973), so the operator sees before the real call
+// that it needs a human approval. On
 // `status="error"` / `status="unavailable"` the `error` string and the
 // `extras.error_code` describe why no preview (and no hash) was produced.
 // `query` / `redacted_body` / `extras` stay `json.RawMessage` so the
@@ -42,8 +45,12 @@ type PreviewResult struct {
 	Query        json.RawMessage `json:"query,omitempty"`
 	RedactedBody json.RawMessage `json:"redacted_body,omitempty"`
 	PreviewHash  string          `json:"preview_hash"`
-	Error        *string         `json:"error"`
-	Extras       json.RawMessage `json:"extras,omitempty"`
+	// SafetyLevel / RequiresApproval are absent on non-ingested previews
+	// and on older backplanes, so both stay optional.
+	SafetyLevel      string          `json:"safety_level,omitempty"`
+	RequiresApproval *bool           `json:"requires_approval,omitempty"`
+	Error            *string         `json:"error"`
+	Extras           json.RawMessage `json:"extras,omitempty"`
 }
 
 // newPreviewCmd returns the `meho operation preview` command — the
@@ -258,6 +265,12 @@ func printPreviewResult(w io.Writer, connectorID, opID string, r *PreviewResult)
 	}
 	fmt.Fprintf(w, "  method:        %s\n", r.Method)
 	fmt.Fprintf(w, "  resolved_path: %s\n", r.ResolvedPath)
+	if r.SafetyLevel != "" {
+		fmt.Fprintf(w, "  safety_level:  %s\n", r.SafetyLevel)
+	}
+	if r.RequiresApproval != nil && *r.RequiresApproval {
+		fmt.Fprintln(w, "  approval:      needs approval — a second person must approve before it runs")
+	}
 	if len(r.Query) > 0 && string(r.Query) != "null" {
 		fmt.Fprintln(w, "  query:")
 		printPrettyOrRaw(w, r.Query)

@@ -22,6 +22,22 @@ group — the **11th** core op — and adds the `hetzner-robot firewall get
 step no longer shells `scripts/hetzner-robot.sh GET /firewall/<server-number>`
 outside MEHO's policy / audit / broadcast / JSONFlux path.
 
+Task #3973 adds **vSwitch membership**: an operator can add a dedicated
+server to a vSwitch, or remove it, through MEHO. What changed:
+
+- Two new curated write ops, `POST:/vswitch/{vswitch-id}/server` (add) and
+  `DELETE:/vswitch/{vswitch-id}/server` (remove). The curated core now has
+  **12 ops**: 10 reads and these 2 writes.
+- Every Robot write now goes out as **form fields**, the only body format
+  Robot reads (see "Form-encoded writes" below).
+- Every vSwitch write **waits for a human approval**, for every kind of
+  login. A standing grant cannot skip the wait (see "Approval for vSwitch
+  writes" below).
+- The two vSwitch ops the spec described wrongly now say what they really
+  do. `POST:/vswitch/{vswitch-id}` renames the vSwitch or changes its VLAN
+  ID. `DELETE:/vswitch/{vswitch-id}` cancels the whole vSwitch. Both stay
+  switched off.
+
 Source: `backend/src/meho_backplane/connectors/hetzner_robot/`.
 
 ## Key types
@@ -48,17 +64,32 @@ Source: `backend/src/meho_backplane/connectors/hetzner_robot/`.
   entries with operator-reviewed `when_to_use` hints spanning the read-only
   core: `robot-servers`, `robot-networking`, `robot-ssh-keys`. (The former
   `robot-about` group fell with the #2985 `GET:/query` removal.)
-- **`ROBOT_CORE_OPS`** (`core_ops.py`) — 10 curated `RobotCoreOp` entries
-  (the read-only v0.2 core), each with `op_id` (`GET:/path` form), `group_key`,
-  and `llm_instructions` blob (`when_to_call` / `output_shape` / `next_step`).
-  The 10th, `GET:/firewall/{server-ip}` (#2848), reads one dedicated server's
+- **`ROBOT_CORE_OPS`** (`core_ops.py`) — 12 curated `RobotCoreOp` entries,
+  each with `op_id` (`METHOD:/path` form), `group_key`, and `llm_instructions`
+  blob (`when_to_call` / `output_shape` / `next_step`). Ten are reads. The
+  10th read, `GET:/firewall/{server-ip}` (#2848), reads one dedicated server's
   packet-filter firewall (status, allowlist flag, ordered input/output rules)
   for the onboarding firewall-verify step and classifies into `robot-networking`.
+  The two writes (#3973) add servers to a vSwitch and remove them, both in
+  `robot-networking`. Their `llm_instructions` tell the agent that the change
+  waits for a human approval (the requester cannot approve it), that Robot
+  applies it in the background (poll `GET:/vswitch/{vswitch-id}` until the
+  server is `ready`, or gone after a remove), that `409 VSWITCH_IN_PROCESS`
+  means an earlier change is still running, that Robot allows 100 calls per
+  hour on these routes, and that vSwitch traffic needs MTU 1400.
 - **`apply_robot_core_curation`** (`core_ops.py`) — async function that
   drives `ReviewService.edit_group` + `enable_group` + `edit_op` to flip the
-  10 curated ops to `is_enabled=True` and land `llm_instructions`.
+  12 curated ops to `is_enabled=True` and land `llm_instructions`. Every
+  other op in a curated group is switched off, so the vSwitch rename and
+  cancel ops stay off.
 - **`classify_robot_op`** (`core_ops.py`) — path-prefix classifier mapping
-  a `GET:/path` op_id to its curated `group_key` via `ROBOT_PATH_RULES`.
+  a `GET:/path` op_id, or one of the two membership writes, to its curated
+  `group_key` via `ROBOT_PATH_RULES`. Every other write returns `"none"`.
+- **`robot_form_fields`** (`connector.py`) — turns a write body into the
+  form fields Robot reads (#3973).
+- **`hetzner_robot_safety_floor`** (`ingest_safety.py`) — the ingest safety
+  floor for the four vSwitch writes (#3973). Registered when the package is
+  imported.
 
 ## Key design decisions
 
@@ -76,13 +107,72 @@ predicate already excludes 4xx from the tenacity retry logic; `_get_robot_json`
 adds the explicit intercept so operators see a useful message instead of a
 generic `httpx.HTTPStatusError`.
 
-### Form-encoded bodies
+### Form-encoded writes
 
-The Robot Webservice API requires `application/x-www-form-urlencoded` bodies
-for all write verbs — it rejects `application/json`. The `_post_form(target,
-path, data)` helper wraps httpx's `data=` parameter (which encodes a dict as
-RFC 3986 form-encoded). v0.2 read operations never POST, but the helper ships
-for v0.2.next write readiness.
+Robot reads write bodies only as `application/x-www-form-urlencoded`. It
+rejects `application/json`. The dispatcher passes every ingested write body
+to the connector's `_post_json` as `json=`. `HetznerRobotConnector`
+overrides `_post_json` (#3973) and sends the body with httpx's `data=`
+instead:
+
+- text and numbers go as they are; booleans go as `true` / `false`;
+- a list goes as repeated `name[]` fields: `{"server": [321, "1.2.3.4"]}`
+  becomes `server[]=321&server[]=1.2.3.4`;
+- a nested object, a list inside a list, or `null` has no form shape, so the
+  write is refused with a clear `ValueError` **before any HTTP call** (the
+  dispatcher reports `connector_error` and the message is in
+  `extras.exception_message`). This is why the firewall set
+  (`POST:/firewall/{server-ip}`), with its nested rule list, cannot be sent;
+  it stays off.
+
+The rest is the shared `HttpConnector._post_json` seam: the real verb (POST
+or DELETE; the DELETE body is sent the same way), **no retry** (a 500 or a
+timeout is exactly one HTTP call), and an empty answer or a `204` maps to
+`{}`. A 401 is one call, and the dispatcher reports it as
+`connector_auth_failed` with the fix-the-credential hint — the same as for
+reads, so the Robot IP block (three failed logins) is never risked by a
+retry.
+
+The older `_post_form(target, path, data)` helper stays for direct callers;
+dispatch does not use it.
+
+### Approval for vSwitch writes
+
+Ingest gives a POST `caution` and a DELETE `dangerous`, both without an
+approval, so a human login would run either at once. The connector's safety
+floor (`ingest_safety.py`, #3973) raises the four vSwitch writes after every
+ingest:
+
+| Op | What it does | Safety level | Approval |
+|---|---|---|---|
+| `POST:/vswitch/{vswitch-id}/server` | add servers | `dangerous` | required |
+| `DELETE:/vswitch/{vswitch-id}/server` | remove servers | `dangerous` | required |
+| `POST:/vswitch/{vswitch-id}` | rename, or change the VLAN of every member | `dangerous` | required |
+| `DELETE:/vswitch/{vswitch-id}` | cancel the whole vSwitch | `destructive` | required |
+
+The floor only raises a level, and it survives a re-ingest: the ingest merge
+keeps the stricter level and puts the approval flag back, even if someone
+lowered it with `meho connector edit-op`. What each login gets:
+
+- **Human:** waits for approval. The requester can never approve their own
+  `dangerous` or `destructive` request, not even with
+  `APPROVAL_ALLOW_SELF_APPROVAL=true`.
+- **Agent:** refused by default. With an explicit agent permission, a
+  membership change waits for approval. The cancel op is always refused for
+  agents.
+- **Service login:** waits for approval. A standing grant cannot skip the
+  wait: the default grant patterns refuse `DELETE:*` and, since #3973,
+  `POST:/vswitch/*`.
+- An approved change runs at most once: a second resume of the same approval
+  returns `already_resumed` and sends nothing.
+- `preview_operation` shows `requires_approval: true`, the safety level, the
+  vSwitch id (in `resolved_path`) and the server list (in `redacted_body`)
+  before the real call.
+
+The rename and cancel ops stay switched off. Even if someone switches the
+cancel op on, it cannot wait for approval: a `destructive` op needs a
+blast-radius statement, and this ingested op has none, so the dispatcher
+refuses it (`blast_radius_required`) before Robot is called.
 
 ### Webservice user
 
@@ -146,8 +236,11 @@ fills the `endpoint_descriptor` table. Because the Robot Webservice publishes
 no OpenAPI document, MEHO ships a hand-authored minimal spec as package data:
 
 - **`operations/ingest/specs/hetzner_robot_minimal.yaml`** — OpenAPI 3.0
-  covering list/get servers, vSwitch get + membership, per-server firewall
-  get/set, reverse DNS, and the `server_addon` order. Each of these spec GET
+  covering list/get servers, vSwitch get + membership add/remove + rename +
+  cancel, per-server firewall get/set, reverse DNS, and the `server_addon`
+  order. The four vSwitch writes declare `application/x-www-form-urlencoded`
+  bodies and match the vendor reference (#3973; before that, the rename and
+  cancel routes were described as membership add and remove). Each of these spec GET
   op_ids (`GET:/server`, `GET:/server/{server-ip}`, `GET:/vswitch`,
   `GET:/vswitch/{vswitch-id}`, `GET:/firewall/{server-ip}`, `GET:/rdns`) is
   curated in `ROBOT_CORE_OPS`, so the ingested rows and the curated read core
@@ -183,11 +276,16 @@ no OpenAPI document, MEHO ships a hand-authored minimal spec as package data:
 - Env-gated automated canary: the full spec ingest against
   `IngestionPipelineService` with a real LLM stub is a follow-up to T8
   requiring the Robot spec reachable from CI.
-- Writes: server reset, vSwitch mutation, cancellation, rDNS edits are out of
-  scope for the read-only core. The write ops are declared in the shipped
-  minimal spec so the ingested corpus covers the full wrapper surface, but
-  only the curated read ops are enabled; the `_post_form` helper is the
-  write-path foundation for the G3.x write-surface curation.
+- Writes: only vSwitch membership add and remove are curated (#3973). Server
+  reset, vSwitch rename / VLAN change, vSwitch cancel, the firewall set and
+  rDNS edits stay switched off. Purchases (ordering or cancelling servers and
+  add-ons) are manual by policy: a person does them in the Hetzner portal.
+  The `server_addon` order in the spec stays off; its body uses `product`,
+  but Robot wants `product_id`.
+- The curated reads `GET:/ip`, `GET:/subnet`, `GET:/failover` and `GET:/key`
+  are not in the shipped minimal spec, so an install that ingests only this
+  spec has no rows for them, and `apply_robot_core_curation` stops at the
+  first missing one.
 - Hetzner Cloud (the second Hetzner product): out of scope.
 
 ## References

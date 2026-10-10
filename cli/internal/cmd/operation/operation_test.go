@@ -222,6 +222,43 @@ func TestPrintPreviewResultOkRendersHash(t *testing.T) {
 	}
 }
 
+// TestPrintPreviewResultOkRendersApprovalNeed — an ingested preview that
+// carries requires_approval=true tells the operator, before the real call,
+// that the change needs a human approval (#3973).
+func TestPrintPreviewResultOkRendersApprovalNeed(t *testing.T) {
+	needsApproval := true
+	r := &PreviewResult{
+		Status:           "ok",
+		OpID:             "POST:/vswitch/{vswitch-id}/server",
+		ConnectorID:      "hetzner-rest-2026.04",
+		SourceKind:       "ingested",
+		Method:           "POST",
+		ResolvedPath:     "/vswitch/4321/server",
+		RedactedBody:     json.RawMessage(`{"server":[321]}`),
+		PreviewHash:      "abc123def456",
+		SafetyLevel:      "dangerous",
+		RequiresApproval: &needsApproval,
+	}
+	var buf bytes.Buffer
+	printPreviewResult(&buf, "hetzner-rest-2026.04", "POST:/vswitch/{vswitch-id}/server", r)
+	out := buf.String()
+	for _, want := range []string{
+		"/vswitch/4321/server", "safety_level:  dangerous", "needs approval", `"server"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printPreviewResult missing %q in output:\n%s", want, out)
+		}
+	}
+
+	noApproval := false
+	r.RequiresApproval = &noApproval
+	buf.Reset()
+	printPreviewResult(&buf, "hetzner-rest-2026.04", "POST:/vswitch/{vswitch-id}/server", r)
+	if strings.Contains(buf.String(), "needs approval") {
+		t.Errorf("requires_approval=false must not print the approval line; got:\n%s", buf.String())
+	}
+}
+
 // TestPrintPreviewResultErrorRendersExtras — a status=error preview
 // surfaces the error string and the extras envelope, and never prints a
 // preview_hash line.

@@ -90,9 +90,13 @@ _EXPECTED_READ_OP_IDS = frozenset(
     }
 )
 
-#: The write/admin ops the spec covers for the full wrapper surface.
+#: The write/admin ops the spec covers for the full wrapper surface: the
+#: vSwitch membership add/remove (#3973), the vSwitch rename and cancel, the
+#: firewall set, and the server_addon order.
 _EXPECTED_WRITE_OP_IDS = frozenset(
     {
+        "POST:/vswitch/{vswitch-id}/server",
+        "DELETE:/vswitch/{vswitch-id}/server",
         "POST:/vswitch/{vswitch-id}",
         "DELETE:/vswitch/{vswitch-id}",
         "POST:/firewall/{server-ip}",

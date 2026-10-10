@@ -434,6 +434,35 @@ async def test_default_model_factory_accepts_bare_id(
         get_settings.cache_clear()
 
 
+async def test_default_model_factory_pins_old_max_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each agent request asks for at most 4096 output tokens, not streamed.
+
+    Since pydantic-ai 2.52, an unset ``max_tokens`` becomes the model's
+    maximum (128,000 for claude-sonnet-4-6) and the request is streamed.
+    The factory pins the old 4096, so the request stays as before.
+    """
+    from meho_backplane.agent.run import default_model_factory
+    from meho_backplane.settings import get_settings
+
+    from ._anthropic_request_capture import capture_first_request, point_anthropic_sdk_at_nowhere
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-max-tokens-test")
+    monkeypatch.delenv("AGENT_DEFAULT_MODEL", raising=False)
+    point_anthropic_sdk_at_nowhere(monkeypatch)
+    get_settings.cache_clear()
+    try:
+        model = default_model_factory()
+        body = await capture_first_request(model, monkeypatch)
+    finally:
+        get_settings.cache_clear()
+
+    assert body["model"] == "claude-sonnet-4-6"
+    assert body["max_tokens"] == 4096
+    assert body.get("stream") is not True
+
+
 async def test_toolset_definition_drives_resolved_call_operation(
     stub_embedding_service: AsyncMock,
 ) -> None:

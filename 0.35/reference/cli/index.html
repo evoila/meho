@@ -3127,6 +3127,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#meho-docs-read" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho docs read
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#meho-docs-search" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -5615,6 +5626,62 @@
     <span class="md-ellipsis">
       
         meho pfsense network interface
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#meho-pfsense-route" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho pfsense route
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="meho pfsense route">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#meho-pfsense-route-list" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho pfsense route list
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#meho-pfsense-user" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho pfsense user
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="meho pfsense user">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#meho-pfsense-user-list" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho pfsense user list
       
     </span>
   </a>
@@ -9678,6 +9745,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#meho-docs-read" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho docs read
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#meho-docs-search" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -12166,6 +12244,62 @@
     <span class="md-ellipsis">
       
         meho pfsense network interface
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#meho-pfsense-route" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho pfsense route
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="meho pfsense route">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#meho-pfsense-route-list" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho pfsense route list
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#meho-pfsense-user" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho pfsense user
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="meho pfsense user">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#meho-pfsense-user-list" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho pfsense user list
       
     </span>
   </a>
@@ -15829,6 +15963,21 @@
 <li><code>--product</code> — replacement product list (repeatable, e.g. --product vsphere --product nsx)</li>
 <li><code>--when-to-use</code> — replacement 'pick this collection when…' blurb surfaced to agents</li>
 </ul>
+<h3 id="meho-docs-read"><code>meho docs read</code><a class="headerlink" href="#meho-docs-read" title="Permanent link">&para;</a></h3>
+<p>Read the text around a docs hit (mandatory --collection)</p>
+<div class="highlight"><pre><span></span><code>meho docs read &lt;read-handle|-&gt; [flags]
+</code></pre></div>
+<ul>
+<li><code>--after</code> — chunks to read after the hit, for --mode around (0..3)</li>
+<li><code>--backplane</code> — backplane URL to query (defaults to the URL recorded by the most recent <code>meho login</code>)</li>
+<li><code>--before</code> — chunks to read before the hit, for --mode around (0..3)</li>
+<li><code>--collection</code> — collection key the hit came from (required; e.g. vmware)</li>
+<li><code>--cursor</code> — the <code>next</code> cursor of an earlier read, to read on (- reads it from standard input)</li>
+<li><code>--json</code> — emit the raw DocsReadResult JSON</li>
+<li><code>--mode</code> — what to read: around (default), page or section</li>
+<li><code>--product</code> — the product you searched with (only for a collection that applies scope filters; leave it out for a hit from a cross-collection search)</li>
+<li><code>--version</code> — the version you searched with (only for a collection that applies scope filters; leave it out for a hit from a cross-collection search)</li>
+</ul>
 <h3 id="meho-docs-search"><code>meho docs search</code><a class="headerlink" href="#meho-docs-search" title="Permanent link">&para;</a></h3>
 <p>Search vendor-document collection(s) (mandatory --collection)</p>
 <div class="highlight"><pre><span></span><code>meho docs search &lt;query&gt; [flags]
@@ -17291,6 +17440,32 @@
 <h4 id="meho-pfsense-network-interface"><code>meho pfsense network interface</code><a class="headerlink" href="#meho-pfsense-network-interface" title="Permanent link">&para;</a></h4>
 <p>List pfSense network interfaces (ifconfig -a)</p>
 <div class="highlight"><pre><span></span><code>meho pfsense network interface [flags]
+</code></pre></div>
+<ul>
+<li><code>--backplane</code> — backplane URL (defaults to the URL from the most recent <code>meho login</code>)</li>
+<li><code>--json</code> — emit the full OperationResult envelope as JSON</li>
+<li><code>--target</code> — target slug to dispatch against (required)</li>
+</ul>
+<h3 id="meho-pfsense-route"><code>meho pfsense route</code><a class="headerlink" href="#meho-pfsense-route" title="Permanent link">&para;</a></h3>
+<p>pfSense static-route sub-verbs (list)</p>
+<div class="highlight"><pre><span></span><code>meho pfsense route
+</code></pre></div>
+<h4 id="meho-pfsense-route-list"><code>meho pfsense route list</code><a class="headerlink" href="#meho-pfsense-route-list" title="Permanent link">&para;</a></h4>
+<p>List pfSense static routes (from config.xml)</p>
+<div class="highlight"><pre><span></span><code>meho pfsense route list [flags]
+</code></pre></div>
+<ul>
+<li><code>--backplane</code> — backplane URL (defaults to the URL from the most recent <code>meho login</code>)</li>
+<li><code>--json</code> — emit the full OperationResult envelope as JSON</li>
+<li><code>--target</code> — target slug to dispatch against (required)</li>
+</ul>
+<h3 id="meho-pfsense-user"><code>meho pfsense user</code><a class="headerlink" href="#meho-pfsense-user" title="Permanent link">&para;</a></h3>
+<p>pfSense local-user sub-verbs (list)</p>
+<div class="highlight"><pre><span></span><code>meho pfsense user
+</code></pre></div>
+<h4 id="meho-pfsense-user-list"><code>meho pfsense user list</code><a class="headerlink" href="#meho-pfsense-user-list" title="Permanent link">&para;</a></h4>
+<p>List pfSense local users (secret fields are never read)</p>
+<div class="highlight"><pre><span></span><code>meho pfsense user list [flags]
 </code></pre></div>
 <ul>
 <li><code>--backplane</code> — backplane URL (defaults to the URL from the most recent <code>meho login</code>)</li>

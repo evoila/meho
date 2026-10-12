@@ -2067,7 +2067,7 @@ to and searches</strong> a MEHO Knowledge instance registered as a <em>doc
 collection</em>. The backplane calls it with a deployment-configured service
 credential (the caller's own token is never forwarded to it), and records
 every query in its own audit log under the calling operator.</p>
-<p>When the capability is granted, an agent gets three meta-tools:</p>
+<p>When the capability is granted, an agent gets four meta-tools:</p>
 <table>
 <thead>
 <tr>
@@ -2083,6 +2083,10 @@ every query in its own audit log under the calling operator.</p>
 <tr>
 <td><code>ask_docs</code></td>
 <td>one composed answer with its sources</td>
+</tr>
+<tr>
+<td><code>read_docs</code></td>
+<td>the text around a passage, its whole page or its section</td>
 </tr>
 <tr>
 <td><code>list_doc_collections</code></td>
@@ -2113,6 +2117,18 @@ same citation check, and with the answer itself marked as untrusted text
 for agents. The choice is per collection, off unless an administrator
 turns it on, and reversible with one collection update. With it on, the
 answer is written by the service's answer model, not the backplane's.</p>
+<p><strong>Reading around a passage.</strong> A passage is one part of a page. When a
+collection is configured to allow it, each passage and each source of an
+answer carries a short-lived read handle. <code>read_docs</code> (and <code>meho docs read</code>,
+and a button on the passage in the console) uses it to return the text
+before and after the passage, the whole page, or its section. Some files
+allow only their link; then the link is returned and no text. In the tool,
+the API and the CLI, every refusal gives the same "not found" answer, so a
+caller cannot use reads to learn which collections exist. The console's
+source page still answers "not found" or "not allowed" for a collection, as
+it always has. Reads are limited per person; a caller that reads too much
+is told how long to wait. Like <code>ask_docs</code> from the service, this is off
+unless an administrator turns it on for a collection.</p>
 <p>The <a href="../memory-and-knowledge/">Memory and knowledge</a> guide covers how this
 attached-document search differs from MEHO's own memory and knowledge
 base, which live inside the backplane.</p>

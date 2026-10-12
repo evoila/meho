@@ -2237,13 +2237,15 @@ Memory and the kb are GA; this add-on is not.</p>
 </div>
 <p><strong>What it is.</strong> The backplane does not ingest or store documents. It
 <strong>attaches to and searches</strong> an external retrieval service —
-<strong>MEHO Knowledge</strong> — registered as a <em>doc collection</em>. Three agent
+<strong>MEHO Knowledge</strong> — registered as a <em>doc collection</em>. Four agent
 tools sit on top of it:</p>
 <ul>
 <li><code>search_docs</code> — returns ranked passages, each with its source
   citation.</li>
 <li><code>ask_docs</code> — composes one answer over the retrieved passages and
   returns it with the sources it used.</li>
+<li><code>read_docs</code> — reads the text around a passage, its whole page or its
+  section, for a collection configured to allow it.</li>
 <li><code>list_doc_collections</code> — lists the collections the caller may search.</li>
 </ul>
 <p><strong>The grounding contract.</strong> Every claim in an answer carries a citation

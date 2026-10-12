@@ -48,13 +48,14 @@ from meho_backplane.connectors.registry import register_connector_v2
 
 # Importing kv_write_preview runs its register_preview_builder calls (the
 # import side-effect that wires the park-time proposed_effect previews for
-# vault.kv.put / patch / delete — #2332).
+# vault.kv.put / patch / delete — #2332 — and metadata.delete — #3424).
 from meho_backplane.connectors.vault import kv_write_preview  # noqa: F401
 from meho_backplane.connectors.vault.connector import VaultConnector
 from meho_backplane.connectors.vault.ops import (
     register_vault_typed_operations,
     vault_kv_delete,
     vault_kv_list,
+    vault_kv_metadata_delete,
     vault_kv_put,
     vault_kv_read,
     vault_kv_versions,
@@ -118,6 +119,7 @@ __all__ = [
     "register_vault_typed_operations",
     "vault_kv_delete",
     "vault_kv_list",
+    "vault_kv_metadata_delete",
     "vault_kv_put",
     "vault_kv_read",
     "vault_kv_versions",

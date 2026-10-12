@@ -676,7 +676,12 @@ def _register_builtin_builders() -> None:
     permission check (capability names, no secret) is not.
     """
     register_preview_builder("k8s.apply", _k8s_apply_preview)
-    for _write_op in ("vault.kv.put", "vault.kv.patch", "vault.kv.delete"):
+    for _write_op in (
+        "vault.kv.put",
+        "vault.kv.patch",
+        "vault.kv.delete",
+        "vault.kv.metadata.delete",
+    ):
         register_permission_preflight(_write_op, _vault_kv_write_preflight)
 
 

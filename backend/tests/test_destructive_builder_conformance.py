@@ -73,6 +73,7 @@ _KNOWN_DESTRUCTIVE_OPS_WITH_BUILDERS: frozenset[str] = frozenset(
         "bind9.record.delete",
         "bind9.record.remove",
         "harbor.robot.delete",
+        "vault.kv.metadata.delete",
         "windns.record.remove",
     }
 )

@@ -313,6 +313,8 @@ KV-v2 **write** surface — `vault.kv.put` (new version, wholesale
 replace), `vault.kv.patch` (merge fields onto the current version), and
 `vault.kv.delete` (soft-delete versions)
 ([`connectors/vault/ops.py`](../../backend/src/meho_backplane/connectors/vault/ops.py)).
+`vault.kv.metadata.delete` (evoila/meho#3424) adds the permanent removal of
+a whole secret: every version and its metadata.
 These ops register `requires_approval=True`, so a human/operator write
 parks for a four-eyes review before it executes. **The review is wasted
 if the write then hits Vault `permission denied`** — the templated §2
@@ -351,6 +353,15 @@ path "secret/data/targets/{{identity.entity.aliases.<ACCESSOR>.name}}/*" {
 path "secret/delete/targets/{{identity.entity.aliases.<ACCESSOR>.name}}/*" {
   capabilities = ["update"]
 }
+
+# Only if this identity may PERMANENTLY remove secrets
+# (`vault.kv.metadata.delete`, evoila/meho#3424). The op sends
+# DELETE <mount>/metadata/<path> and reads the same path before and after,
+# so it needs `read` and `delete` on the /metadata/ path. Leave this out to
+# keep permanent removal impossible for this identity.
+path "secret/metadata/targets/{{identity.entity.aliases.<ACCESSOR>.name}}/*" {
+  capabilities = ["read", "delete"]
+}
 ```
 
 Notes:
@@ -371,11 +382,18 @@ Notes:
   `/data/` grant alone does **not** authorize a soft-delete, so a policy
   that ships only `/data/` denies every delete post-approval. It is not a
   `delete` capability and not a `/metadata/` grant.
-- **No `/metadata/` write grant is needed** for these three ops. `put` /
-  `patch` operate on `/data/`; the version soft-delete operates on
-  `/delete/`. Destroying versions or deleting all metadata
-  (`vault kv metadata delete`) is **not** a wired op and deliberately
-  needs no grant.
+- **No `/metadata/` write grant is needed** for `put`, `patch` and the
+  soft `delete`. `put` / `patch` operate on `/data/`; the version
+  soft-delete operates on `/delete/`.
+- **`vault.kv.metadata.delete` needs `read` and `delete` on the
+  `/metadata/` path** (the third stanza above). `delete` there is what lets
+  Vault remove every version and the metadata. `read` lets the op check the
+  path before the delete (nothing there → nothing is changed) and after it
+  (the op reports `deleted` only when the read finds nothing). Grant it only
+  to an identity that should be able to purge secrets, for example a
+  dedicated teardown role ([vault-provisioning.md](vault-provisioning.md)
+  §8). Destroying single versions (`PUT <mount>/destroy/<path>`) is still
+  **not** a wired op and needs no grant.
 - The **same per-operator templating constraints** from §2 apply: no
   glob inside the rendered `{{identity...}}` segment; the trailing `/*`
   is a literal glob in the static path portion.
@@ -383,10 +401,12 @@ Notes:
 ### 6.2 Verify a token can write a path (`sys/capabilities-self`)
 
 The backplane runs this exact check at **park time** — when a
-`vault.kv.put`/`patch`/`delete` parks for approval, the dispatcher
-probes `POST sys/capabilities-self` on the path the op authorizes
-against (`secret/data/<path>` for `put`/`patch`, `secret/delete/<path>`
-for `delete` — evoila/meho#3274) and surfaces a `permission_preflight`
+`vault.kv.put`/`patch`/`delete`/`metadata.delete` parks for approval, the
+dispatcher probes `POST sys/capabilities-self` on the path the op
+authorizes against (`secret/data/<path>` for `put`/`patch`,
+`secret/delete/<path>` for `delete` — evoila/meho#3274,
+`secret/metadata/<path>` for `metadata.delete` — evoila/meho#3424) and
+surfaces a `permission_preflight`
 banner on the approval row (`will_be_denied: true` when the token lacks
 the required capability), so an operator is **not** asked to approve a
 write that Vault will then reject
@@ -410,6 +430,8 @@ vault token capabilities "secret/data/targets/<op-sub>/<target>"
 # Expect for a writable put/patch path: create read update
 vault token capabilities "secret/delete/targets/<op-sub>/<target>"
 # Expect for a soft-delete-capable path: update
+vault token capabilities "secret/metadata/targets/<op-sub>/<target>"
+# Expect for a path this identity may permanently remove: delete read
 ```
 
 Or, equivalently, against the raw API (what the backplane preflight
@@ -460,6 +482,7 @@ caveat). The contract a deploy must satisfy is therefore:
 | Read (`vault.kv.read`, credential resolution) | Operator's OIDC-federated token | `read` on `secret/data/…/{{identity…}}/*` (§2) |
 | Write (`vault.kv.put` / `patch`) | Operator's OIDC-federated token (dispatcher at park; **reviewer** on approved re-dispatch) | `create` + `update` on `secret/data/…/{{identity…}}/*` (§6.1) |
 | Write (`vault.kv.delete` version soft-delete) | same | `update` on the data path (§6.1) |
+| Write (`vault.kv.metadata.delete` permanent removal) | same | `read` + `delete` on `secret/metadata/…/{{identity…}}/*` (§6.1) |
 
 A deploy that follows only the §2 read grant provisions **read-only** and
 discovers the missing write grant *after* an operator approves a parked

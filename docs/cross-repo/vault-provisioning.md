@@ -588,11 +588,17 @@ the target** (`secret_ref` stays `NULL`).
 #    (Two subtrees in the lab; adjust to your layout. `update` on the KV-v2
 #    `delete/` path is what authorizes a version soft-delete — NOT `data/`;
 #    see connector-vault-policy.md §6.1.)
+#    To also let the teardown PERMANENTLY remove those secrets
+#    (`vault.kv.metadata.delete`, evoila/meho#3424), add the two
+#    `secret/metadata/...` lines: `delete` removes every version and the
+#    metadata, `read` lets the op check the path before and after.
 vault policy write meho-teardown - <<'HCL'
 path "secret/data/ops/**"    { capabilities = ["read"] }
 path "secret/delete/ops/**"  { capabilities = ["update"] }
+path "secret/metadata/ops/**" { capabilities = ["read", "delete"] }
 path "secret/data/lab/**"    { capabilities = ["read"] }
 path "secret/delete/lab/**"  { capabilities = ["update"] }
+path "secret/metadata/lab/**" { capabilities = ["read", "delete"] }
 HCL
 
 # 2. Role on the SAME JWT auth mount as meho-mcp (dedicated mount per surface

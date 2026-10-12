@@ -1027,6 +1027,7 @@ _MOUNT_PREFIXED_PATH_CASES: list[tuple[str, dict[str, Any]]] = [
     ("vault.kv.patch", {"path": "secret/meho/test", "data": {"k": "v"}}),
     ("vault.kv.versions", {"path": "secret/meho/test"}),
     ("vault.kv.delete", {"path": "secret/meho/test", "versions": [1]}),
+    ("vault.kv.metadata.delete", {"path": "secret/meho/test"}),
 ]
 
 
@@ -1079,6 +1080,7 @@ async def test_execute_kv_op_mount_included_path_returns_path_shape_error(
     assert kv.patch_calls == []
     assert kv.versions_calls == []
     assert kv.delete_calls == []
+    assert kv.metadata_delete_calls == []
 
 
 async def test_execute_kv_op_mount_included_path_honors_explicit_non_default_mount(
@@ -1145,6 +1147,8 @@ async def test_execute_kv_op_path_equal_to_mount_is_not_rejected(
         # secret in full).
         ("vault.kv.patch", "credential_write"),
         ("vault.kv.delete", "write"),
+        # #3424 — the permanent delete carries only mount + path.
+        ("vault.kv.metadata.delete", "write"),
     ],
 )
 def test_kv_op_ids_classify_per_decision_3(op_id: str, expected_class: str) -> None:
@@ -1174,6 +1178,7 @@ _KV_APPROVAL_CONTRACT = {
     "vault.kv.put": "caution",
     "vault.kv.patch": "caution",
     "vault.kv.delete": "dangerous",
+    "vault.kv.metadata.delete": "destructive",
 }
 
 
@@ -1219,6 +1224,8 @@ def test_kv_read_ops_do_not_require_approval(op_id: str) -> None:
         # not the data path — mirroring hvac's POST <mount>/delete/<path>.
         ("vault.kv.delete", {"path": "meho/test/x"}, "secret/delete/meho/test/x"),
         ("vault.kv.delete", {"mount": "kv", "path": "meho/y"}, "kv/delete/meho/y"),
+        # #3424: the permanent delete authorizes on the METADATA path.
+        ("vault.kv.metadata.delete", {"path": "meho/test/x"}, "secret/metadata/meho/test/x"),
     ],
 )
 def test_write_target_path_renders_authorization_path(

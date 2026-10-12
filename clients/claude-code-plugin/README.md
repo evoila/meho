@@ -17,6 +17,14 @@ claude plugin marketplace add evoila/meho
 /plugin install meho@meho
 ```
 
+To get a newer plugin version later, run `claude plugin update meho@meho`,
+then restart Claude Code. Claude Code does not update plugins from this
+marketplace on its own unless you turn on auto-update for it in `/plugin`.
+Each change that users need must also raise the `version` in this
+plugin's `.claude-plugin/plugin.json` and in the repo-root
+`.claude-plugin/marketplace.json`. Without that, `claude plugin update`
+keeps the copy you already have.
+
 `evoila/meho` is both the marketplace (`.claude-plugin/marketplace.json` at
 the repo root) and the host of this inline plugin
 (`./clients/claude-code-plugin`). During development you can point the
@@ -50,7 +58,7 @@ to point it at a tenant:
 | `MEHO_INSTANCE` | Backplane base URL, e.g. `https://meho.internal.example`. The wrapper appends `/mcp`. |
 | `MEHO_CA_CERT` | Path to an internal-CA bundle; exported as `NODE_EXTRA_CA_CERTS` for the Node-based shim. Only needed on internal-CA deploys. |
 | `MEHO_MCP_CLIENT_ID` | Pre-registered public OAuth client id the shim presents to Keycloak (default `meho-mcp`). Override only if the realm registers the client under a different name. |
-| `MEHO_MCP_SCOPES` | Space-separated OAuth scopes the shim requests (default `mcp:read mcp:execute`, the working surface). Set it to opt into [elevated operator mode](#elevated-operator-mode-opt-in). Empty or whitespace-only falls back to the default. |
+| `MEHO_MCP_SCOPES` | Space-separated OAuth scopes the shim requests (default `mcp:read mcp:execute offline_access`: the working surface plus a [login that lasts](#how-long-the-login-lasts)). It replaces the whole list. Set it to opt into [elevated operator mode](#elevated-operator-mode-opt-in). Empty or whitespace-only falls back to the default. |
 | `MEHO_PLUGIN_CONFIG` | Override the config-file location (default `${XDG_CONFIG_HOME:-~/.config}/meho/plugin.env`). |
 
 Set the variables in your shell profile, or drop them in the config file:
@@ -76,8 +84,11 @@ agent or a plain operator needs to get work done.
 elevated scope to the request:
 
 ```bash
-MEHO_MCP_SCOPES="mcp:read mcp:execute mcp:admin"
+MEHO_MCP_SCOPES="mcp:read mcp:execute offline_access mcp:admin"
 ```
+
+Keep `offline_access` in the list, or the login ends after the realm's SSO
+idle limit (see [How long the login lasts](#how-long-the-login-lasts)).
 
 An elevated session additionally lists the **operator planes**: the
 agents / principals registry and grants, connector lifecycle, broadcast
@@ -91,17 +102,30 @@ human decisions made through the console or CLI only (#3155). A model
 holding the approve button would collapse the four-eyes gate, so the button
 is not on the wire.
 
-**Realm prerequisite (and the fallback if it is missing).** `mcp:admin`
-must be offered as an **optional** (requestable, non-default) client scope
-on the realm's `meho-mcp` client before elevation takes effect — tracked as
-[`evoila-bosnia/claude-rdc-hetzner-dc#2734`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/issues/2734).
-Until it lands, requesting `mcp:admin` **degrades to the default working
-surface**: per OAuth 2.1 (RFC 6749 §3.3) the authorization server may
-ignore a scope it does not grant, and Keycloak drops any requested scope
-that is not an assigned default/optional client scope — so the token comes
-back without `mcp:admin`, no error is raised, and the operator planes simply
-do not appear. Setting `MEHO_MCP_SCOPES` on a realm that does not yet offer
-the scope is therefore safe: the session behaves exactly as the default.
+**Realm prerequisite.** `mcp:admin` must be offered as an **optional**
+(requestable, non-default) client scope on the realm's `meho-mcp` client.
+If it is not, Keycloak refuses the whole login: it answers `invalid_scope`
+("Invalid scopes: …") and issues no token. Keycloak does not drop a scope
+it does not offer. So set `MEHO_MCP_SCOPES` with `mcp:admin` only after the
+realm offers it.
+
+### How long the login lasts
+
+The shim asks Keycloak for `offline_access` by default. Keycloak then
+issues an offline refresh token, and the login lasts until you have not
+used MEHO for the `meho-mcp` client's offline idle limit. The realm docs
+recommend 48 hours
+([Keycloak realm setup](../../docs-site/install/keycloak-realm.md)).
+`mcp-remote` keeps the login in a file under `~/.mcp-auth` that only your
+user can read.
+
+Without `offline_access`, the login ends at the realm's SSO idle limit,
+which is 30 minutes by default. The next MEHO call then needs a new browser
+login.
+
+The realm must offer `offline_access` as an **optional** client scope on
+`meho-mcp` (`meho admin keycloak bootstrap-clients` sets this up). If it
+does not, Keycloak refuses the login with `invalid_scope`.
 
 ### Prerequisites
 

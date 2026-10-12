@@ -166,7 +166,10 @@ test("in-process: child argv is [node, bundled mcp-remote, url, --static-oauthâ€
   assert.equal(diag.argv[3], "--static-oauth-client-info");
   assert.deepEqual(JSON.parse(diag.argv[4]), { client_id: "meho-mcp" });
   assert.equal(diag.argv[5], "--static-oauth-client-metadata");
-  assert.deepEqual(JSON.parse(diag.argv[6]), { scope: "mcp:read mcp:execute" });
+  // offline_access makes the login last past the realm's SSO idle limit.
+  assert.deepEqual(JSON.parse(diag.argv[6]), {
+    scope: "mcp:read mcp:execute offline_access",
+  });
   assert.equal(diag.argv.length, 7);
 });
 
@@ -381,7 +384,7 @@ test("guard: an empty or whitespace-only scopes falls back to the default surfac
     });
     assert.equal(res.status, 0, res.stderr);
     assert.deepEqual(JSON.parse(JSON.parse(res.stdout).argv[6]), {
-      scope: "mcp:read mcp:execute",
+      scope: "mcp:read mcp:execute offline_access",
     });
   }
 });

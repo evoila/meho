@@ -137,11 +137,34 @@ differences:
 | Device grant | Off | Not used by MCP clients. |
 | Valid redirect URIs | **Loopback only** — `http://localhost:<port>/callback` (Claude Code) plus `http://localhost:<port>/oauth/callback` and its `http://127.0.0.1:<port>/oauth/callback` twin (the `mcp-remote` shim) | MEHO is internal-only, so there is **no** public `claude.ai` Custom-Connector redirect. `<port>` matches the client's configured callback port; the exact per-client values are in [Connect clients](../clients/index.md). |
 | PKCE challenge method | `S256` | Spec-required for public clients. |
-| `offline_access` client scope | Assign as **Optional** | Some MCP clients always request a refresh token; without the scope the authorization request fails with `invalid_scope`. Deliberately *not* given to `meho-cli` — the CLI re-runs the device dance instead of holding a long-lived refresh token. |
+| `offline_access` client scope | Assign as **Optional** | The MEHO Claude Code plugin, the Claude Desktop bundle, and Claude Code's own HTTP client ask for it, so the login lasts past the realm's SSO idle limit. Keycloak refuses a login that asks for a scope the client does not offer: it answers `invalid_scope` and issues no token. `meho-cli` does not get this scope by default. |
+| Client Offline Session Idle (attribute `client.offline.session.idle.timeout`) | **`172800`** seconds (48 hours) — recommended | Sets how long the MCP login lasts with no use. Without it, the realm's Offline Session Idle applies (30 days by default). Set it on the **Advanced** tab of the client, or with `kcadm.sh update clients/<client-uuid> -r <realm> -s 'attributes."client.offline.session.idle.timeout"=172800'`. |
 
 The five mappers and four default scopes apply identically. Which MCP
 client uses which flow — and everything else client-side — is the
 [Connect clients](../clients/index.md) section's territory.
+
+### How long an MCP login lasts
+
+With `offline_access`, Keycloak issues an **offline** refresh token. The
+login then lasts until it has not been used for the offline idle limit
+above: 48 hours with the recommended setting. Using MEHO renews the
+token, which starts the 48 hours again. If your realm turns on **Offline
+Session Max Limited**, that maximum also applies.
+
+Without `offline_access`, the refresh token ends at the realm's **SSO
+Session Idle** limit, which is 30 minutes by default. After that, the next
+MEHO call needs a new browser login.
+
+Two more things must be true:
+
+- The user has the realm role `offline_access`. Keycloak gives it to every
+  user through the realm's default roles (`default-roles-<realm>`). Without
+  it, the token request fails with "Offline tokens not allowed for the user
+  or client".
+- `meho admin keycloak bootstrap-clients` assigns `offline_access` as an
+  optional scope on `meho-mcp`. It does **not** set the 48-hour offline
+  idle limit yet, so set that by hand as shown in the table.
 
 ## Approve-only principal
 
@@ -238,7 +261,7 @@ usually appear:
 | Token issued, every call 401s with `invalid_audience` / `missing_tenant_claim` / `missing_tenant_role_claim` | Missing protocol mappers | Step 3 — add all five, then log out and back in. |
 | Token issued, every call 401s with `invalid_token` or `missing_sub`; the decoded token has no `sub` | The `basic` scope is not a default scope on the client | Step 4 — assign it, re-login (existing tokens stay broken). |
 | `meho login` times out before you can approve | An ambient wrapper timeout (CI step, IDE task) shorter than the approval wait | Run `meho login` in a real terminal, or raise the wrapper timeout. |
-| MCP client fails with `invalid_scope` naming `offline_access` | The scope is not assigned on `meho-mcp` | Assign `offline_access` as an **optional** scope (see the MCP client table above). |
+| MCP login fails with `invalid_scope` ("Invalid scopes: …") and the Keycloak login page never appears | The client asked for a scope that `meho-mcp` does not offer, usually `offline_access` (or `mcp:admin`) | Assign the scope as an **optional** scope on `meho-mcp` (see the MCP client table above). |
 | `x509: certificate signed by unknown authority` | Workstation OS trust store missing your CA | Step 1 / [TLS and ingress](tls-ingress.md#your-workstation-os-trust-store). |
 
 A fuller, client-by-client troubleshooting page ships with the

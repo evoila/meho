@@ -118,19 +118,20 @@ if (caCertPath && typeof tls.setDefaultCACertificates === "function") {
 const clientId = (process.env.MEHO_MCP_CLIENT_ID ?? "").trim() || "meho-mcp";
 delete process.env.MEHO_MCP_CLIENT_ID;
 
-// OAuth scope metadata presented during the handshake. The default is the
-// working surface; the optional `scopes` user_config (delivered as
-// MEHO_MCP_SCOPES) lets an operator deliberately request an elevated
-// surface — append mcp:admin to reach the operator planes. Fall back to the
-// default when the host substitutes an empty/whitespace value for the
-// untouched optional field. Requesting a scope the realm does not grant
-// degrades to the default surface: per OAuth 2.1 (RFC 6749 §3.3) the
-// authorization server may ignore an ungranted scope, and Keycloak drops a
-// scope that is not an assigned default/optional client scope, so the token
-// never carries it and the elevated tools simply do not list. Scrubbed from
-// process.env like the client id.
+// OAuth scopes requested at login. The default is the working surface plus
+// offline_access. offline_access makes the login last: Keycloak then issues
+// an offline refresh token, which ends at the offline idle limit (48 hours
+// recommended on meho-mcp) instead of the realm's SSO idle limit (30 minutes
+// by default). The optional `scopes` user_config (delivered as
+// MEHO_MCP_SCOPES) replaces the whole list — for example to add mcp:admin
+// for the operator planes. Fall back to the default when the host
+// substitutes an empty/whitespace value for the untouched optional field.
+// Keycloak refuses a login that asks for a scope the meho-mcp client does
+// not offer (invalid_scope, no token); it does not drop the scope silently.
+// Scrubbed from process.env like the client id.
 const scopes =
-  (process.env.MEHO_MCP_SCOPES ?? "").trim() || "mcp:read mcp:execute";
+  (process.env.MEHO_MCP_SCOPES ?? "").trim() ||
+  "mcp:read mcp:execute offline_access";
 delete process.env.MEHO_MCP_SCOPES;
 
 // Resolve the vendored mcp-remote CLI entry from the bundle's node_modules

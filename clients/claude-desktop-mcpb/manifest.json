@@ -49,8 +49,8 @@
     "scopes": {
       "type": "string",
       "title": "OAuth scopes (advanced)",
-      "description": "Space-separated OAuth scopes the shim requests during login. Leave as the default working surface; add an elevated scope (e.g. \"mcp:read mcp:execute mcp:admin\") only to deliberately opt into operator mode. Requesting a scope your realm does not grant degrades to the default surface.",
-      "default": "mcp:read mcp:execute",
+      "description": "Space-separated OAuth scopes the shim requests during login. Leave the default: the working surface plus offline_access, which keeps the login alive between uses (up to 48 hours with no use, with the recommended realm setting). Add mcp:admin (e.g. \"mcp:read mcp:execute offline_access mcp:admin\") only to deliberately opt into operator mode. Every scope must be offered by your realm's meho-mcp client, or the login fails with invalid_scope.",
+      "default": "mcp:read mcp:execute offline_access",
       "required": false
     }
   },

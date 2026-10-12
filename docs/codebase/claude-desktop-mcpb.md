@@ -40,8 +40,10 @@ records the launcher's contract and invariants.
    `NODE_EXTRA_CA_CERTS` having been read at boot and warns when that
    variable is absent.
 3. **Env seams.** `MEHO_MCP_CLIENT_ID` (default `meho-mcp`) and
-   `MEHO_MCP_SCOPES` (default `mcp:read mcp:execute`) are read, defaulted
-   when empty, and deleted from `process.env`.
+   `MEHO_MCP_SCOPES` (default `mcp:read mcp:execute offline_access`) are
+   read, defaulted when empty, and deleted from `process.env`.
+   `offline_access` gets an offline refresh token, so the login outlasts the
+   realm's SSO idle limit (30 minutes by default).
 4. **mcp-remote entry.** Resolved from the bundle's `node_modules` via the
    package's `bin` mapping.
 5. **Hand-off.** `process.argv` becomes

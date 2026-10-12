@@ -53,9 +53,16 @@ that differ per deployment —
 
 Two advanced fields default to the working setup and rarely need
 changing: the OAuth **client id** (default `meho-mcp`) and the OAuth
-**scopes** (default `mcp:read mcp:execute`). To opt the session into the
-operator planes, add `mcp:admin` to the scopes field — see
+**scopes** (default `mcp:read mcp:execute offline_access`). To opt the
+session into the operator planes, add `mcp:admin` to the scopes field — see
 [MCP surface and scopes](mcp-surface-and-scopes.md#how-a-client-requests-elevation).
+
+`offline_access` keeps the login alive between uses. The login lasts until
+you have not used MEHO for the `meho-mcp` client's offline idle limit: 48
+hours with the
+[recommended realm setting](../install/keycloak-realm.md#how-long-an-mcp-login-lasts).
+Without it, the login ends at the realm's SSO idle limit (30 minutes by
+default). If you change the scopes field, keep `offline_access` in it.
 
 The bundle still expects the realm's public `meho-mcp` client with the
 shim's loopback redirect URIs registered (below), and — on an
@@ -142,7 +149,7 @@ shape proven in the smoke test (`mcp-remote@0.1.38`):
         "https://meho.example.com/mcp",
         "8456",
         "--static-oauth-client-info", "{\"client_id\": \"meho-mcp\"}",
-        "--static-oauth-client-metadata", "{\"scope\": \"mcp:read mcp:execute\"}"
+        "--static-oauth-client-metadata", "{\"scope\": \"mcp:read mcp:execute offline_access\"}"
       ],
       "env": { "NODE_EXTRA_CA_CERTS": "/path/to/internal-ca.pem" }
     }
@@ -155,6 +162,8 @@ shape proven in the smoke test (`mcp-remote@0.1.38`):
 - `--static-oauth-client-info` pins the pre-registered public
   `meho-mcp` client so the shim skips Dynamic Client Registration
   (which Keycloak's Trusted Hosts policy blocks anyway).
+- `offline_access` in the scope makes the login last between uses (see
+  above). The `meho-mcp` client must offer it as an optional scope.
 - `NODE_EXTRA_CA_CERTS` is only needed on an internal-CA deploy; drop it
   if your backplane and Keycloak present publicly-trusted certificates.
   The alternative is the OS route: with the root CA trusted in the OS

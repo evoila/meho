@@ -38,7 +38,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = join(HERE, "..");
 const WRAPPER = join(PLUGIN_ROOT, "bin", "meho-mcp-remote");
 const URL = "https://meho.internal.example/mcp";
-const DEFAULT_SCOPE = "mcp:read mcp:execute";
+const DEFAULT_SCOPE = "mcp:read mcp:execute offline_access";
 
 // Real `node` must stay resolvable under the controlled PATH: the shim shells
 // out to `node` to resolve the vendored entry, then `exec node <entry> …`.
@@ -164,6 +164,16 @@ test("a warm cache is not re-installed on the next launch", () => {
     .split("\n")
     .filter((l) => l.startsWith("ci "));
   assert.equal(ciRuns.length, 1, `expected exactly one npm ci, got:\n${ciRuns.join("\n")}`);
+});
+
+// offline_access makes Keycloak issue an offline refresh token, so the login
+// lasts until the client's offline idle limit (48 h recommended) instead of
+// ending at the realm's SSO idle limit (30 min by default).
+test("default scope asks for offline_access so the login lasts", () => {
+  const { res } = runWrapper();
+  assert.equal(res.status, 0, res.stderr);
+  const scopes = scopeMetadataFrom(res.stdout).scope.split(" ");
+  assert.ok(scopes.includes("offline_access"), `offline_access missing: ${scopes}`);
 });
 
 test("override: MEHO_MCP_SCOPES sets the requested scope verbatim", () => {

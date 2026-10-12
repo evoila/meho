@@ -64,18 +64,42 @@ CLI device-code flow, `meho-mcp` for MCP. See
 
 ## Authorization request fails with `invalid_scope` naming `offline_access` (W7)
 
-**Symptom.** A browser-flow MCP client (Claude Code) 400s with
-`{"error":"invalid_scope","error_description":"Invalid scopes: … offline_access"}`;
-the Keycloak login page never appears.
+**Symptom.** The Keycloak login page never appears. Keycloak sends the
+browser back to the client's callback address with
+`error=invalid_scope` and `error_description=Invalid scopes: … offline_access`.
+Claude Code shows this error. With the `mcp-remote` shim (the MEHO plugin
+and the Claude Desktop bundle), the browser tab shows
+`Error: No authorization code received`.
 
-**Wall.** The client requested `offline_access` to obtain a refresh
-token, but the `meho-mcp` client does not have that scope assigned.
+**Wall.** The client asked for `offline_access`, but the `meho-mcp`
+client does not offer that scope. Keycloak refuses a login that asks for
+a scope the client does not offer as a default or optional client scope.
+It does not drop the scope silently. The MEHO plugin, the Claude Desktop
+bundle, and Claude Code's own HTTP client all ask for `offline_access`.
+The same error appears for `mcp:admin` when the realm does not offer it.
 
 **Fix.** Assign the realm's built-in `offline_access` scope to
 `meho-mcp` as an **optional** scope (not default — only flows that ask
-for a refresh token should mint one). `meho-cli` is deliberately not
-given it: the device-code CLI re-runs the device dance instead of
-holding a long-lived refresh token.
+for a refresh token should mint one). See
+[Keycloak realm setup](../install/keycloak-realm.md#the-mcp-client-meho-mcp).
+`meho-cli` does not get this scope by default.
+
+## The MEHO login ends after about 30 minutes with no use
+
+**Symptom.** MEHO tools work, but after about half an hour without a MEHO
+call, the next call opens a new browser login or does not answer.
+
+**Wall.** The client did not ask for `offline_access`. Then Keycloak
+issues a normal refresh token, and it ends at the realm's SSO idle limit
+(30 minutes by default). Older versions of the MEHO plugin and the Claude
+Desktop bundle did not ask for it.
+
+**Fix.** Update the MEHO plugin (`claude plugin update meho@meho`, then
+restart Claude Code) or install the current Claude Desktop bundle. If you
+set the scopes yourself (`MEHO_MCP_SCOPES` or the bundle's `scopes`
+field), keep `offline_access` in the list. The login then lasts until the
+`meho-mcp` client's offline idle limit, 48 hours with the
+[recommended realm setting](../install/keycloak-realm.md#how-long-an-mcp-login-lasts).
 
 ## Token issues but every call 401s
 

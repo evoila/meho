@@ -55,19 +55,28 @@ fi
 # metadata matches what the backplane's token audience mappers expect.
 client_id="${MEHO_MCP_CLIENT_ID:-meho-mcp}"
 
-# OAuth scope metadata presented during the handshake. The default is the
-# working surface (mcp:read mcp:execute). MEHO_MCP_SCOPES lets an operator
-# DELIBERATELY request an elevated surface — append mcp:admin to reach the
-# operator planes — never by default. Requesting a scope the realm does not
-# offer degrades to the default surface: per OAuth 2.1 (RFC 6749 §3.3) the
-# authorization server may ignore an ungranted scope, and Keycloak drops a
-# scope that is not an assigned default/optional client scope, so the token
-# never carries it and the elevated tools simply do not list (realm
-# prerequisite tracked as evoila-bosnia/claude-rdc-hetzner-dc#2734). An
-# empty or whitespace-only value falls back to the default.
-scopes="${MEHO_MCP_SCOPES:-mcp:read mcp:execute}"
+# OAuth scopes requested at login. The default is the working surface
+# (mcp:read mcp:execute) plus offline_access.
+#
+# offline_access makes the login last. Without it, Keycloak issues a normal
+# refresh token, which ends at the realm's SSO idle limit (30 minutes by
+# default). The next tool call after that needs a new browser login. With
+# it, Keycloak issues an offline refresh token, which ends at the offline
+# idle limit instead. The realm docs recommend 48 hours on the meho-mcp
+# client (docs-site/install/keycloak-realm.md).
+#
+# MEHO_MCP_SCOPES replaces the whole list, as written. Use it to add
+# mcp:admin for the operator planes; keep offline_access in the list to
+# keep the long login. An empty or whitespace-only value uses the default.
+#
+# Keycloak refuses a login that asks for a scope the meho-mcp client does
+# not offer as a default or optional client scope: it answers invalid_scope
+# and issues no token. It does not drop the scope silently. So every scope
+# in this list must be assigned to meho-mcp on the realm.
+default_scopes="mcp:read mcp:execute offline_access"
+scopes="${MEHO_MCP_SCOPES:-$default_scopes}"
 if [ -z "${scopes//[[:space:]]/}" ]; then
-  scopes="mcp:read mcp:execute"
+  scopes="$default_scopes"
 fi
 
 # Vendor mcp-remote from the committed lockfile instead of resolving it fresh

@@ -74,10 +74,12 @@ requested OAuth scopes delivered as `MEHO_MCP_SCOPES`. The launcher:
    advanced field still authenticates. The seam variable is scrubbed from
    the environment `mcp-remote` inherits.
 4. Resolves the requested OAuth scopes from `MEHO_MCP_SCOPES`, falling back
-   to the default working surface `mcp:read mcp:execute` when the host
+   to the default `mcp:read mcp:execute offline_access` (the working
+   surface plus a login that lasts — see
+   [How long the login lasts](#how-long-the-login-lasts)) when the host
    substitutes an empty/whitespace value for the untouched optional
    `scopes` config. Setting it to an elevated value (e.g.
-   `mcp:read mcp:execute mcp:admin`) is the deliberate opt-in to
+   `mcp:read mcp:execute offline_access mcp:admin`) is the deliberate opt-in to
    [operator mode](#elevated-operator-mode-opt-in). The seam variable is
    scrubbed from the environment `mcp-remote` inherits.
 5. Sets `process.argv` to the `mcp-remote` invocation — the backplane URL,
@@ -187,6 +189,18 @@ lapsed*:
 succeeds **every later launch connects instantly** — the race only bites the
 very first connect on a fresh machine (or again after you clear `~/.mcp-auth`).
 
+## How long the login lasts
+
+The bundle asks Keycloak for `offline_access` by default. Keycloak then
+issues an offline refresh token, and the login lasts until you have not
+used MEHO for the `meho-mcp` client's offline idle limit. The realm docs
+recommend 48 hours
+([Keycloak realm setup](../../docs-site/install/keycloak-realm.md)).
+
+Without `offline_access`, the login ends at the realm's SSO idle limit,
+which is 30 minutes by default. The next MEHO call then needs a new browser
+login. So if you change the `scopes` field, keep `offline_access` in it.
+
 ## Elevated operator mode (opt-in)
 
 By default a session lists only the **working surface** — status,
@@ -194,13 +208,13 @@ connector/operation discovery, `call_operation` / `preview_operation` /
 `result_query`, knowledge, memory, the broadcast trio, target/topology
 reads, and the runbook run family. That is everything an operator needs to
 get work done, and it is what every session gets with the `scopes` field
-left at its default `mcp:read mcp:execute`.
+left at its default `mcp:read mcp:execute offline_access`.
 
 The advanced `scopes` user_config is the deliberate opt-in to **operator
 mode**. Set it to add the elevated scope:
 
 ```
-mcp:read mcp:execute mcp:admin
+mcp:read mcp:execute offline_access mcp:admin
 ```
 
 An elevated session additionally lists the **operator planes**: the agents
@@ -215,17 +229,12 @@ human decisions made through the console or CLI only (#3155). A model
 holding the approve button would collapse the four-eyes gate, so it is
 never on the wire.
 
-**Realm prerequisite (and the fallback if it is missing).** `mcp:admin`
-must be offered as an **optional** (requestable, non-default) client scope
-on the realm's `meho-mcp` client before elevation takes effect — tracked as
-`evoila-bosnia/claude-rdc-hetzner-dc#2734`.
-Until it lands, requesting `mcp:admin` **degrades to the default working
-surface**: per OAuth 2.1 (RFC 6749 §3.3) the authorization server may ignore
-a scope it does not grant, and Keycloak drops any requested scope that is
-not an assigned default/optional client scope — so the token comes back
-without `mcp:admin`, no error is raised, and the operator planes simply do
-not appear. Setting the `scopes` field on a realm that does not yet offer
-the scope is therefore safe: the session behaves exactly as the default.
+**Realm prerequisite.** `mcp:admin` must be offered as an **optional**
+(requestable, non-default) client scope on the realm's `meho-mcp` client.
+If it is not, Keycloak refuses the whole login: it answers `invalid_scope`
+("Invalid scopes: …") and issues no token. Keycloak does not drop a scope
+it does not offer. So add `mcp:admin` to the `scopes` field only after the
+realm offers it; until then, leave the field at its default.
 
 ## Verifying a built bundle
 

@@ -43,6 +43,20 @@ The realm still needs the public `meho-mcp` client and its loopback
 redirect URI, exactly as the manual path below (see
 [Keycloak realm setup](../install/keycloak-realm.md)).
 
+### How long the plugin login lasts
+
+The plugin asks for `offline_access` by default (default scopes:
+`mcp:read mcp:execute offline_access`). So the login lasts until you have
+not used MEHO for the `meho-mcp` client's offline idle limit: 48 hours
+with the [recommended realm setting](../install/keycloak-realm.md#how-long-an-mcp-login-lasts).
+Using MEHO renews the login. `MEHO_MCP_SCOPES` replaces the whole list, so
+keep `offline_access` in it when you set it.
+
+Claude Code does not update plugins from this marketplace on its own,
+unless you turn on auto-update for the marketplace in `/plugin`. To get a
+new plugin version, run `claude plugin update meho@meho`, then restart
+Claude Code.
+
 ## The manual path: configure `.mcp.json`
 
 If you are not using the plugin, Claude Code also speaks MCP over

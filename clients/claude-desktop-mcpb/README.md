@@ -218,7 +218,7 @@ never on the wire.
 **Realm prerequisite (and the fallback if it is missing).** `mcp:admin`
 must be offered as an **optional** (requestable, non-default) client scope
 on the realm's `meho-mcp` client before elevation takes effect — tracked as
-[`evoila-bosnia/claude-rdc-hetzner-dc#2734`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/issues/2734).
+`evoila-bosnia/claude-rdc-hetzner-dc#2734`.
 Until it lands, requesting `mcp:admin` **degrades to the default working
 surface**: per OAuth 2.1 (RFC 6749 §3.3) the authorization server may ignore
 a scope it does not grant, and Keycloak drops any requested scope that is

@@ -15,7 +15,7 @@ One sentence: server-side per-operator × per-tenant memory across five scopes (
 
 The memory layer does not own a storage table of its own. It is a thin, memory-shaped vocabulary (slug, scope, `MemoryEntry`, expiry) over the G0.4 retrieval substrate's `documents` table, pinned to `source="memory"`. Every memory row is a `documents` row with `source="memory"` and `kind="memory-<scope>"`; the natural key is `(tenant_id, source, source_id)` where `source_id` is a colon-separated encoding of `(scope, user_sub, target_name, slug)` (see [`_internal.py`](../../backend/src/meho_backplane/memory/_internal.py)). Hybrid BM25 + cosine retrieval, tenant scoping, and the body-hash re-embed short-circuit are all inherited from G0.4 (#225) — G5.1 adds the vocabulary, the five-scope RBAC matrix, and the four consumer surfaces.
 
-This realises [consumer-needs.md §G5](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/docs/meho-coordination/consumer-needs.md) (the team-as-unit-of-memory unlock; per-scope visibility; operator-initiated promotion only).
+This realises consumer-needs.md §G5, an internal needs document (the team-as-unit-of-memory unlock; per-scope visibility; operator-initiated promotion only).
 
 ## Module shape
 
@@ -177,7 +177,7 @@ Every route, MCP handler, and CLI verb derives `tenant_id` from the JWT-validate
 - Substrate: [#225 G0.4 retrieval substrate](https://github.com/evoila/meho/issues/225) — `index_document` ([`retrieval/indexer.py`](../../backend/src/meho_backplane/retrieval/indexer.py)), `retrieve` ([`retrieval/retriever.py`](../../backend/src/meho_backplane/retrieval/retriever.py)).
 - Tenancy: [#222 G0.1 Tenant model](https://github.com/evoila/meho/issues/222) — `Operator` + `TenantRole`.
 - Sibling Goals: [#216 Goal G5 Memory layer](https://github.com/evoila/meho/issues/216) (parent), [#374 G5.2](https://github.com/evoila/meho/issues/374), [#375 G5.3](https://github.com/evoila/meho/issues/375).
-- Consumer-needs.md §G5 (the canonical product spec): [evoila-bosnia/claude-rdc-hetzner-dc/docs/meho-coordination/consumer-needs.md](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/docs/meho-coordination/consumer-needs.md) L131-160 — team-as-unit-of-memory, 5-scope shape, auto-expiry policy, operator-initiated promotion only.
+- Consumer-needs.md §G5 L131-160 (the canonical product spec; an internal document) — team-as-unit-of-memory, 5-scope shape, auto-expiry policy, operator-initiated promotion only.
 - v0.1-spec §"Memory / context layer" L457-487.
 - Canary acceptance: [`backend/tests/acceptance/test_g51_memory_canary.py`](../../backend/tests/acceptance/test_g51_memory_canary.py) (T5 #426) — 5-scope exercise + RBAC matrix + tenant boundary + 10-query eval corpus.
 - Sister docs: [`docs/architecture/kb.md`](kb.md) (the team-wide knowledge corpus, same substrate), [`docs/architecture/mcp.md`](mcp.md), [`docs/architecture/audit.md`](audit.md).

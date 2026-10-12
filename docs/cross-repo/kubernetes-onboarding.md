@@ -431,7 +431,7 @@ of scope** for v0.2.
 
 ## Migrating off `kubectl-vcf.sh`
 
-The consumer's [`scripts/kubectl-vcf.sh`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/kubectl-vcf.sh)
+The consumer's `scripts/kubectl-vcf.sh`
 wraps `kubectl --kubeconfig <target>.yaml <verb>` with per-target
 kubeconfig resolution. The `meho k8s` verbs replace it for the
 read-only workflows; write workflows stay in the wrapper.
@@ -504,7 +504,7 @@ migrating.
 - Broadcast feed onboarding: [`broadcast-onboarding.md`](./broadcast-onboarding.md). Audit query: [`audit-query.md`](./audit-query.md).
 - Op handlers: [`backend/src/meho_backplane/connectors/kubernetes/`](../../backend/src/meho_backplane/connectors/kubernetes/). CLI verbs: [`cli/internal/cmd/k8s/`](../../cli/internal/cmd/k8s/).
 - E2E acceptance harness: [`backend/tests/integration/test_connectors_k8s_e2e.py`](../../backend/tests/integration/test_connectors_k8s_e2e.py) (meta-tool flow) + [`backend/tests/integration/test_connectors_k8s_k3d.py`](../../backend/tests/integration/test_connectors_k8s_k3d.py) (handler-level).
-- Consumer wrapper retiring (partial — write ops stay): [`scripts/kubectl-vcf.sh`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/kubectl-vcf.sh).
+- Consumer wrapper retiring (partial — write ops stay): `scripts/kubectl-vcf.sh`.
 - `kubernetes_asyncio`: <https://github.com/tomplus/kubernetes_asyncio>.
 - Kubernetes API spec: <https://kubernetes.io/docs/reference/kubernetes-api/>.
 - k3d (CI test cluster): <https://k3d.io/>.

@@ -52,6 +52,12 @@ with the [recommended realm setting](../install/keycloak-realm.md#how-long-an-mc
 Using MEHO renews the login. `MEHO_MCP_SCOPES` replaces the whole list, so
 keep `offline_access` in it when you set it.
 
+When the login has expired, the next MEHO call fails at once with "Your
+MEHO login has expired. Run /mcp, pick meho, and reconnect to log in
+again." A login that nobody finishes stops after 5 minutes. No MEHO call
+waits for a login. See
+[troubleshooting](troubleshooting.md#a-meho-call-says-your-meho-login-has-expired-claude-code-plugin).
+
 Claude Code does not update plugins from this marketplace on its own,
 unless you turn on auto-update for the marketplace in `/plugin`. To get a
 new plugin version, run `claude plugin update meho@meho`, then restart

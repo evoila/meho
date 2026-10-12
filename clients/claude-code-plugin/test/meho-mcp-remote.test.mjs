@@ -11,6 +11,9 @@
 //      never falls back to `npx -y`; a warm cache is not re-installed.
 //   2. The child argv — the URL and the static-OAuth scope metadata handed to
 //      the vendored entry are exactly what the previous npx invocation passed.
+//      The shim runs the entry through lib/login-guard.mjs (#3961), which
+//      keeps that argv; the guard's own rules are pinned in
+//      login-guard.test.mjs.
 //
 // No network / no real npm: `npm` and `npx` are stubbed on a controlled PATH.
 // The `npm` stub fabricates a minimal mcp-remote tree (package.json `bin` +
@@ -57,11 +60,13 @@ writeFileSync(
     'if [ "$1" = "ci" ]; then',
     "  mkdir -p node_modules/mcp-remote/dist",
     "  cat > node_modules/mcp-remote/package.json <<'PKG'",
-    '{ "name": "mcp-remote", "version": "0.1.38", "bin": { "mcp-remote": "dist/proxy.js" } }',
+    '{ "name": "mcp-remote", "version": "0.1.39", "bin": { "mcp-remote": "dist/proxy.js" } }',
     "PKG",
     "  cat > node_modules/mcp-remote/dist/proxy.js <<'PROXY'",
     "#!/usr/bin/env node",
-    "for (const a of process.argv.slice(2)) console.log(a);",
+    "// STUB_HANG: act like mcp-remote waiting for a browser login.",
+    "if (process.env.STUB_HANG) setInterval(() => {}, 1000);",
+    "else for (const a of process.argv.slice(2)) console.log(a);",
     "PROXY",
     "  chmod +x node_modules/mcp-remote/dist/proxy.js",
     "fi",
@@ -103,6 +108,7 @@ function runWrapper({ cache = freshCache(), extraEnv = {} } = {}) {
   const npxLog = join(cache, "npx-invocations.log");
   const res = spawnSync(WRAPPER, [], {
     encoding: "utf8",
+    timeout: 20000,
     env: {
       PATH: PATH_WITH_STUB,
       MEHO_MCP_URL: URL,
@@ -150,6 +156,29 @@ test("client id + url are handed to the vendored entry verbatim", () => {
   const i = args.indexOf("--static-oauth-client-info");
   assert.notEqual(i, -1, `client-info flag absent: ${res.stdout}`);
   assert.deepEqual(JSON.parse(args[i + 1]), { client_id: "meho-mcp" });
+});
+
+test("the shim runs mcp-remote through the login guard", () => {
+  // The stub never connects; the guard must stop it after the time limit.
+  const { res } = runWrapper({
+    extraEnv: { STUB_HANG: "1", MEHO_MCP_LOGIN_TIMEOUT: "1" },
+  });
+  assert.equal(res.status, 1, `expected the guard to stop the stub: ${res.stderr}`);
+  assert.match(res.stderr, /did not connect within 1 second/);
+});
+
+test("MEHO_MCP_LOGIN_TIMEOUT set in the config file reaches the guard", () => {
+  // plugin.env is sourced, not exported; the shim must export this value
+  // for the guard, which runs as a separate node process.
+  const cache = freshCache();
+  const config = join(cache, "plugin.env");
+  writeFileSync(config, "MEHO_MCP_LOGIN_TIMEOUT=1\n");
+  const { res } = runWrapper({
+    cache,
+    extraEnv: { STUB_HANG: "1", MEHO_PLUGIN_CONFIG: config },
+  });
+  assert.equal(res.status, 1, `expected the guard to stop the stub: ${res.stderr}`);
+  assert.match(res.stderr, /did not connect within 1 second/);
 });
 
 test("a warm cache is not re-installed on the next launch", () => {
@@ -207,8 +236,10 @@ test("committed package-lock pins mcp-remote + integrity-locks the tree", () => 
   const lock = JSON.parse(
     readFileSync(join(PLUGIN_ROOT, "package-lock.json"), "utf8"),
   );
-  assert.equal(lock.packages[""].dependencies["mcp-remote"], "0.1.38");
-  assert.equal(lock.packages["node_modules/mcp-remote"].version, "0.1.38");
+  // 0.1.39 answers a call that needs a new login with an error instead of
+  // never answering it; lib/login-guard.mjs relies on that (#3961).
+  assert.equal(lock.packages[""].dependencies["mcp-remote"], "0.1.39");
+  assert.equal(lock.packages["node_modules/mcp-remote"].version, "0.1.39");
   assert.equal(lock.packages["node_modules/qs"].version, "6.16.0");
   const integrities = Object.values(lock.packages).filter((p) => p.integrity);
   assert.ok(integrities.length >= 1, "transitive tree must carry integrity hashes");

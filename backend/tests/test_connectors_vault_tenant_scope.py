@@ -324,6 +324,7 @@ _OUT_OF_NAMESPACE_CALLS: list[tuple[str, dict[str, Any]]] = [
         "vault.kv.delete",
         {"path": f"tenant-{_TENANT_B}/db/creds", "versions": [1]},
     ),
+    ("vault.kv.metadata.delete", {"path": f"tenant-{_TENANT_B}/db/creds"}),
 ]
 
 
@@ -374,6 +375,7 @@ async def test_handler_denies_cross_tenant_path(
             "vault.kv.delete",
             {"path": f"tenant-{_TENANT_A}/db/creds", "versions": [1]},
         ),
+        ("vault.kv.metadata.delete", {"path": f"tenant-{_TENANT_A}/db/creds"}),
     ],
     ids=[
         "read",
@@ -382,6 +384,7 @@ async def test_handler_denies_cross_tenant_path(
         "put",
         "patch",
         "delete",
+        "metadata-delete",
     ],
 )
 async def test_handler_allows_in_namespace_path(
@@ -428,8 +431,9 @@ async def test_handler_allows_read_of_exempt_platform_path(
         ("vault.kv.put", {"path": _PLATFORM_PATH, "data": {"k": "v"}}),
         ("vault.kv.patch", {"path": _PLATFORM_PATH, "data": {"k": "v"}}),
         ("vault.kv.delete", {"path": _PLATFORM_PATH, "versions": [1]}),
+        ("vault.kv.metadata.delete", {"path": _PLATFORM_PATH}),
     ],
-    ids=["put", "patch", "delete"],
+    ids=["put", "patch", "delete", "metadata-delete"],
 )
 async def test_handler_denies_write_to_exempt_platform_path(
     monkeypatch: pytest.MonkeyPatch,

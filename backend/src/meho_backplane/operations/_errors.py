@@ -1843,7 +1843,9 @@ def result_connector_vault_write_forbidden(
     with lacks the required capability on the path the op authorizes against
     (``create``/``update`` on ``<mount>/data/<path>`` for ``put``/``patch``,
     ``update`` on ``<mount>/delete/<path>`` for the ``vault.kv.delete``
-    version soft-delete — #3274). Routing that denial through the
+    version soft-delete — #3274; ``read``/``delete`` on
+    ``<mount>/metadata/<path>`` for the permanent
+    ``vault.kv.metadata.delete`` — #3424). Routing that denial through the
     read-oriented :func:`result_connector_vault_forbidden` mis-describes it:
     that builder talks about a target's ``secret_ref`` being outside the
     readable per-tenant subtree, which does not apply to a typed
@@ -1882,9 +1884,12 @@ def result_connector_vault_write_forbidden(
     # (``vault.kv.delete``) authorizes with ``update`` on the ``/delete/``
     # path; ``put`` / ``patch`` with ``create``/``update`` on the ``/data/``
     # path. Keep the message consistent with the ``write_path`` rendered by
-    # ``vault_kv_write_target_path`` so the two never disagree.
+    # ``vault_kv_write_target_path`` so the two never disagree. The permanent
+    # delete (#3424) reads and deletes on the ``/metadata/`` path.
     if op_id == "vault.kv.delete":
         capability_clause = "lacks 'update' on that delete path"
+    elif op_id == "vault.kv.metadata.delete":
+        capability_clause = "lacks 'read' or 'delete' on that metadata path"
     else:
         capability_clause = "lacks 'create'/'update' on that data path"
     summary = (

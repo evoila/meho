@@ -174,7 +174,8 @@ def enforce_tenant_scope(operator: Operator, *, mount: str, path: str, read_only
     read_only
         Whether the calling op only reads/lists (``vault.kv.read`` /
         ``vault.kv.list`` / ``vault.kv.versions``) or mutates
-        (``vault.kv.put`` / ``vault.kv.patch`` / ``vault.kv.delete``). The
+        (``vault.kv.put`` / ``vault.kv.patch`` / ``vault.kv.delete`` /
+        ``vault.kv.metadata.delete``). The
         :data:`PLATFORM_EXEMPT_PATHS` allow-list is honoured **only** for
         read-only ops: the sole exempt path is the federation-proof health
         secret which the health route only ever reads, so a write/delete to

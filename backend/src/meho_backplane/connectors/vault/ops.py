@@ -16,7 +16,9 @@ G3.3-T1 (#366) completes the KV-v2 op group: ``vault.kv.read``
 ``vault.kv.put`` / ``vault.kv.versions`` / ``vault.kv.delete``. The
 remaining ``sys`` and ``auth`` read/list groups land in sibling Tasks
 under the same Initiative. Secret-engine writes beyond KV-v2
-(database/PKI/transit) stay out of scope.
+(database/PKI/transit) stay out of scope. ``vault.kv.metadata.delete``
+(#3424) adds the permanent removal of a whole secret (every version plus
+its metadata) in the ``destructive`` tier.
 
 Mount handling: every KV-v2 handler accepts an optional ``mount``
 param defaulting to ``"secret"`` (hvac's ``mount_point`` default).
@@ -72,6 +74,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import hvac.exceptions
+
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.vault.ops_auth import register_vault_auth_operations
 from meho_backplane.connectors.vault.ops_auth_write import register_vault_auth_write_operations
@@ -87,6 +91,7 @@ __all__ = [
     "register_vault_typed_operations",
     "vault_kv_delete",
     "vault_kv_list",
+    "vault_kv_metadata_delete",
     "vault_kv_patch",
     "vault_kv_put",
     "vault_kv_read",
@@ -931,6 +936,159 @@ async def vault_kv_delete(
 
 
 # ---------------------------------------------------------------------------
+# vault.kv.metadata.delete — permanently remove a secret (#3424)
+# ---------------------------------------------------------------------------
+
+VAULT_KV_METADATA_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "mount": _MOUNT_PROPERTY,
+        "path": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S",
+            "description": (
+                "Path of the secret to remove, relative to the mount. Do not "
+                "put the mount name in front. Example: to remove "
+                "'secret/meho/test/old-token' on the default 'secret' mount, "
+                "pass 'meho/test/old-token'. A path that starts with the "
+                "mount name ('secret/meho/test/old-token') is rejected."
+            ),
+        },
+    },
+    "required": ["path"],
+    "additionalProperties": False,
+}
+
+_VAULT_KV_METADATA_DELETE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["deleted", "unchanged", "still_present"],
+            "description": (
+                "'deleted': the secret is gone and a metadata read of the "
+                "path now finds nothing. 'unchanged': no secret existed at "
+                "the path, so nothing was changed. 'still_present': Vault "
+                "accepted the delete, but a metadata read still finds the "
+                "secret."
+            ),
+        },
+        "object": {
+            "type": "object",
+            "description": "The secret this call was about: {kind, mount, path}.",
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": "A short next step when status is not 'deleted'.",
+        },
+    },
+    "required": ["status", "object", "guidance"],
+}
+
+_VAULT_KV_METADATA_DELETE_LLM_INSTRUCTIONS: dict[str, Any] = {
+    "when_to_use": (
+        "Permanently remove one KV v2 secret: every version and its "
+        "metadata. This cannot be undone. Unlike vault.kv.delete, there is "
+        "no undelete. Use it to fully purge a temporary or leaked "
+        "credential. It removes only the secret at this exact path; "
+        "secrets below it ('<path>/...') are not touched. A second person "
+        "must approve every call: run preview_operation first and pass its "
+        "preview_hash to call_operation. Safe to run twice: if the path is "
+        "already gone, nothing changes and the result says so."
+    ),
+    "parameter_hints": {
+        "mount": "Optional. KV v2 mount point; defaults to 'secret'.",
+        "path": (
+            "Required. The secret path relative to the mount, without the "
+            "mount name. Example: 'meho/test/old-token', not "
+            "'secret/meho/test/old-token'."
+        ),
+    },
+    "output_shape": (
+        "On success: {'status': 'deleted' | 'unchanged' | 'still_present', "
+        "'object': {'kind': 'kv_secret', 'mount': <str>, 'path': <str>}, "
+        "'guidance': <str|null>}. 'deleted' is reported only after a "
+        "metadata read of the same path finds nothing. Never returns secret "
+        "values. On failure: a connector_error OperationResult with "
+        "extras.exception_class."
+    ),
+}
+
+
+async def _kv_metadata_exists(client: Any, *, mount: str, path: str) -> bool:
+    """Return whether Vault has metadata (so a secret) at ``<mount>/metadata/<path>``.
+
+    Vault answers 404 for a path with no secret, which hvac raises as
+    ``InvalidPath``. Any other error (for example ``Forbidden``) is raised
+    to the dispatcher unchanged. The metadata itself is never returned.
+    """
+    try:
+        await asyncio.to_thread(
+            client.secrets.kv.v2.read_secret_metadata,
+            path=path,
+            mount_point=mount,
+        )
+    except hvac.exceptions.InvalidPath:
+        return False
+    return True
+
+
+async def vault_kv_metadata_delete(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> dict[str, Any]:
+    """Permanently remove a KV v2 secret: every version and its metadata.
+
+    Op-id: ``vault.kv.metadata.delete``. ``safety_level=destructive`` and
+    ``requires_approval=True``: the removal cannot be undone. Delegates to
+    hvac's ``secrets.kv.v2.delete_metadata_and_all_versions``
+    (``DELETE /v1/<mount>/metadata/<path>``).
+
+    Vault answers that DELETE with 204 whether or not a secret existed, so
+    the handler reads the metadata before and after:
+
+    * no secret before the delete -> ``status="unchanged"``, nothing is sent
+      (safe to run twice);
+    * no secret after the delete -> ``status="deleted"``;
+    * the secret is still there after the delete -> ``status="still_present"``.
+
+    The status names follow the governed teardown deletes
+    (``vmware_rest/composites/_teardown.py``). The result names only the
+    mount and path; it never carries secret values or the secret's custom
+    metadata.
+    """
+    mount, path = _extract_mount_and_path("vault.kv.metadata.delete", params)
+
+    # Mutating op: the read-only platform-path allow-list does not apply.
+    enforce_tenant_scope(operator, mount=mount, path=path, read_only=False)
+
+    secret = {"kind": "kv_secret", "mount": mount, "path": path}
+    async with vault_client_for_target(operator, target) as client:
+        if not await _kv_metadata_exists(client, mount=mount, path=path):
+            return {
+                "status": "unchanged",
+                "object": secret,
+                "guidance": "No secret exists at this path. Nothing was deleted.",
+            }
+        await asyncio.to_thread(
+            client.secrets.kv.v2.delete_metadata_and_all_versions,
+            path=path,
+            mount_point=mount,
+        )
+        if await _kv_metadata_exists(client, mount=mount, path=path):
+            return {
+                "status": "still_present",
+                "object": secret,
+                "guidance": (
+                    "Vault accepted the delete, but a metadata read still finds "
+                    "the secret. Check the path with vault.kv.versions before "
+                    "you try again."
+                ),
+            }
+    return {"status": "deleted", "object": secret, "guidance": None}
+
+
+# ---------------------------------------------------------------------------
 # Park-time write-capability preflight (G0.20-T4 #1504)
 # ---------------------------------------------------------------------------
 
@@ -941,15 +1099,27 @@ async def vault_kv_delete(
 #: requires *both* on ``<mount>/data/<path>`` for an unconditional write);
 #: ``delete`` soft-deletes versions via ``POST <mount>/delete/<path>``, which
 #: Vault authorizes with ``update`` on that **delete** path — not the data
-#: path (#3274). The write policy stanza in
+#: path (#3274). ``metadata.delete`` (#3424) sends ``DELETE
+#: <mount>/metadata/<path>``, which Vault authorizes with ``delete`` on that
+#: **metadata** path; the handler also reads the same path before and after
+#: the delete, so it needs ``read`` there too. The write policy stanza in
 #: ``docs/cross-repo/connector-vault-policy.md`` §6.1 therefore grants
-#: ``create``/``update`` on ``secret/data/…`` **and** ``update`` on
-#: ``secret/delete/…`` to cover every op here. A token "passes" the preflight
-#: when its capabilities on that path are a superset of the op's requirement.
+#: ``create``/``update`` on ``secret/data/…``, ``update`` on
+#: ``secret/delete/…`` and ``read``/``delete`` on ``secret/metadata/…`` to
+#: cover every op here. A token "passes" the preflight when its capabilities
+#: on that path are a superset of the op's requirement.
 VAULT_KV_WRITE_CAPABILITIES: dict[str, frozenset[str]] = {
     "vault.kv.put": frozenset({"create", "update"}),
     "vault.kv.patch": frozenset({"create", "update"}),
     "vault.kv.delete": frozenset({"update"}),
+    "vault.kv.metadata.delete": frozenset({"delete", "read"}),
+}
+
+#: Path segment each KV-v2 write op authorizes against, when it is not the
+#: ``data`` segment ``put`` / ``patch`` use (see :func:`vault_kv_write_target_path`).
+_KV_WRITE_AUTH_SEGMENTS: dict[str, str] = {
+    "vault.kv.delete": "delete",
+    "vault.kv.metadata.delete": "metadata",
 }
 
 
@@ -965,10 +1135,15 @@ def vault_kv_write_target_path(op_id: str, params: dict[str, Any]) -> str:
       <mount>/delete/<path>`` (hvac's ``delete_secret_versions``), which
       Vault authorizes with ``update`` on that **delete** path — NOT the
       data path (#3274, lab-verified in claude-rdc-hetzner-dc#2814).
+    * ``vault.kv.metadata.delete`` sends ``DELETE <mount>/metadata/<path>``
+      (hvac's ``delete_metadata_and_all_versions``) and reads the same
+      path before and after, so it authorizes on the **metadata** path
+      (#3424).
 
     The preflight probes ``sys/capabilities-self`` on this exact string, so
     it must match the path the real op authorizes against: ``vault.kv.delete``
-    renders ``<mount>/delete/<path>`` and every other write renders
+    renders ``<mount>/delete/<path>``, ``vault.kv.metadata.delete`` renders
+    ``<mount>/metadata/<path>`` and every other write renders
     ``<mount>/data/<path>``. Probing the data path for a delete gave a false
     ``will_be_denied`` signal — the very "wasted approval" failure the
     preflight (#1504) exists to prevent.
@@ -982,9 +1157,7 @@ def vault_kv_write_target_path(op_id: str, params: dict[str, Any]) -> str:
     """
     mount = str(params.get("mount", _DEFAULT_KV_MOUNT)).strip()
     path = str(params["path"]).strip().lstrip("/")
-    # Version soft-delete (POST <mount>/delete/<path>) authorizes on the
-    # delete/ path; put/patch (POST <mount>/data/<path>) on the data path.
-    segment = "delete" if op_id == "vault.kv.delete" else "data"
+    segment = _KV_WRITE_AUTH_SEGMENTS.get(op_id, "data")
     return f"{mount}/{segment}/{path}"
 
 
@@ -1054,7 +1227,8 @@ async def vault_kv_write_capability_preflight(
     ``{"check": "vault.capabilities-self", "path": <auth-path>,
     "required": [...], "granted": [...], "will_be_denied": bool,
     "principal_sub": <dispatching-operator-sub>}`` — where ``<auth-path>``
-    is ``<mount>/delete/<path>`` for ``vault.kv.delete`` and
+    is ``<mount>/delete/<path>`` for ``vault.kv.delete``,
+    ``<mount>/metadata/<path>`` for ``vault.kv.metadata.delete`` (#3424) and
     ``<mount>/data/<path>`` for ``put`` / ``patch`` (#3274).
 
     ``report_probe_failure=True`` (a caller-named-target seam, #3895)
@@ -1254,6 +1428,33 @@ _KV_OP_SPECS: tuple[dict[str, Any], ...] = (
         "requires_approval": True,
         "llm_instructions": _VAULT_KV_DELETE_LLM_INSTRUCTIONS,
     },
+    {
+        "op_id": "vault.kv.metadata.delete",
+        "handler": vault_kv_metadata_delete,
+        "summary": "Permanently remove a KV v2 secret: every version and its metadata.",
+        "description": (
+            "Permanently removes the secret at the KV v2 path: every version "
+            "and its metadata (DELETE /v1/<mount>/metadata/<path>). This "
+            "cannot be undone; use vault.kv.delete for a reversible soft "
+            "delete. Only the secret at this exact path is removed, not the "
+            "secrets below it. safety_level=destructive and "
+            "requires_approval=True: a second person must approve every "
+            "call, and the call needs the preview_hash of a prior "
+            "preview_operation. The approver sees the mount and path only, "
+            "never a secret value. Reads the metadata before and after the "
+            "delete: an already-missing path returns status 'unchanged' and "
+            "sends nothing; 'deleted' is returned only when the read after "
+            "the delete finds nothing. Failures land as a connector_error "
+            "OperationResult with extras.exception_class naming the failure "
+            "class."
+        ),
+        "parameter_schema": VAULT_KV_METADATA_DELETE_PARAMETER_SCHEMA,
+        "response_schema": _VAULT_KV_METADATA_DELETE_RESPONSE_SCHEMA,
+        "tags": ["write", "delete", "destructive", "irreversible"],
+        "safety_level": "destructive",
+        "requires_approval": True,
+        "llm_instructions": _VAULT_KV_METADATA_DELETE_LLM_INSTRUCTIONS,
+    },
 )
 
 
@@ -1290,14 +1491,16 @@ async def register_vault_typed_operations(
     are needed.
 
     ``requires_approval`` for the mutating ops (``kv.put`` /
-    ``kv.patch`` / ``kv.delete``) is registered ``True`` (G3.15-T1
-    #1409). It became meaningful once G11.7-T1 (#1401) routed human
-    principals hitting a ``requires_approval`` op to the approval queue
-    instead of hard-denying — so the gate parks the write for review
-    rather than blocking the operator. The read ops (``kv.read`` /
-    ``kv.list`` / ``kv.versions``) omit the key and default ``False``.
-    ``safety_level`` (``caution`` for ``kv.put`` / ``kv.patch``,
-    ``dangerous`` for ``kv.delete``) is the orthogonal posture signal.
+    ``kv.patch`` / ``kv.delete`` / ``kv.metadata.delete``) is registered
+    ``True`` (G3.15-T1 #1409). It became meaningful once G11.7-T1 (#1401)
+    routed human principals hitting a ``requires_approval`` op to the
+    approval queue instead of hard-denying — so the gate parks the write
+    for review rather than blocking the operator. The read ops
+    (``kv.read`` / ``kv.list`` / ``kv.versions``) omit the key and default
+    ``False``. ``safety_level`` (``caution`` for ``kv.put`` /
+    ``kv.patch``, ``dangerous`` for ``kv.delete``, ``destructive`` for
+    the permanent ``kv.metadata.delete``, #3424) is the orthogonal posture
+    signal.
     """
     # Curated by T4b (#732); surfaced verbatim by
     # ``list_operation_groups``. Differentiates the KV-v2 read/write
@@ -1307,7 +1510,8 @@ async def register_vault_typed_operations(
     kv_when_to_use = (
         "Use for HashiCorp Vault KV-v2 secret CRUD: read a secret, "
         "write a new version, list child paths under a folder, "
-        "enumerate version history, soft-delete a version. The right "
+        "enumerate version history, soft-delete a version, or "
+        "permanently remove a whole secret. The right "
         "group when the question names a specific secret path "
         "(``kubeconfig/<cluster>``, ``oidc/clients/<id>``, etc.) and "
         "the operator wants the value, the existence, or the "

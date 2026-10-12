@@ -667,7 +667,8 @@ auditRawPayload:
   # Range [0, 3650] (10y ceiling).
   retentionDays: 90
   # -- Cadence of the in-process raw-payload age-off sweeper, in seconds.
-  # Default 604800 (7d / weekly) matches the topology-history prune. Range
+  # Counted from the last recorded run, so a pod restart does not start it
+  # again. Default 604800 (7d / weekly) matches the topology-history prune. Range
   # [60, 604800]: operators wanting a tighter exposure window lower
   # `retentionDays` instead of raising the cadence.
   pruneIntervalSeconds: 604800

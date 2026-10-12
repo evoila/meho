@@ -30,6 +30,7 @@ import asyncssh
 import pytest
 
 import meho_backplane.connectors.winsrv  # noqa: F401 -- registers connector at import
+from meho_backplane.connectors._shared.pwsh import ps_single_quote
 from meho_backplane.connectors.registry import product_impl_id_round_trips
 from meho_backplane.connectors.winsrv import WINSRV_OPS, WinsrvConnector
 from meho_backplane.connectors.winsrv.ops import WINSRV_WHEN_TO_USE_BY_GROUP
@@ -67,6 +68,7 @@ from meho_backplane.connectors.winsrv.ops_system import (
     winsrv_pending_reboot,
     winsrv_uptime,
 )
+from meho_backplane.operations._validate import validate_params
 from meho_backplane.settings import get_settings
 
 
@@ -388,6 +390,80 @@ async def test_power_rejects_negative_delay() -> None:
     with patch.object(connector, "_run_command", run_mock), pytest.raises(ValueError):
         await winsrv_power_reboot(connector, _TARGET, {"delay_seconds": -5})
     run_mock.assert_not_awaited()
+
+
+#: Messages that break the ``shutdown.exe`` message rule: a double quote (ASCII
+#: or typographic), a backslash, a control character (C0, DEL, C1), a leading
+#: ``/`` or ``-``, or more than 512 characters.
+_BAD_POWER_MESSAGES: tuple[str, ...] = (
+    'say "hi"',
+    "curly \u201chi\u201d",
+    "low \u201equote",
+    "back\\slash",
+    "line1\nline2",
+    "ends with newline\n",
+    "tab\there",
+    "nul\x00here",
+    "del\x7fhere",
+    "c1\x85here",
+    "c1\x9fhere",
+    "/starts with a slash",
+    "-starts with a dash",
+    "x" * 513,
+)
+
+#: Messages that keep to the rule (single quotes are fine; PowerShell escapes them).
+_GOOD_POWER_MESSAGES: tuple[str, ...] = (
+    "planned maintenance",
+    "patch o'clock",
+    "it\u2019s time",
+    "patch 2/3 - phase one",
+    "x" * 512,
+    "",
+)
+
+
+@pytest.mark.parametrize("op_id", ["winsrv.power.reboot", "winsrv.power.shutdown"])
+@pytest.mark.parametrize("message", _BAD_POWER_MESSAGES)
+def test_power_schema_refuses_bad_message(op_id: str, message: str) -> None:
+    """The input rules refuse a bad message before the op can run or wait for approval."""
+    op = next(op for op in WINSRV_OPS if op.op_id == op_id)
+    errors = validate_params(op.parameter_schema, {"message": message})
+    assert errors
+    assert all(e["path"] == "$.message" for e in errors)
+
+
+@pytest.mark.parametrize("op_id", ["winsrv.power.reboot", "winsrv.power.shutdown"])
+@pytest.mark.parametrize("message", _GOOD_POWER_MESSAGES)
+def test_power_schema_accepts_good_message(op_id: str, message: str) -> None:
+    op = next(op for op in WINSRV_OPS if op.op_id == op_id)
+    assert validate_params(op.parameter_schema, {"message": message}) == []
+
+
+@pytest.mark.parametrize("handler", [winsrv_power_reboot, winsrv_power_shutdown])
+@pytest.mark.parametrize("message", [*_BAD_POWER_MESSAGES, ["list"], 42])
+async def test_power_handler_refuses_bad_message_before_running(handler: Any, message: Any) -> None:
+    """The handler checks again where the command is built; the error names the rule only."""
+    connector = WinsrvConnector()
+    run_mock = _run("{}")
+    with (
+        patch.object(connector, "_run_command", run_mock),
+        pytest.raises(ValueError, match="no double quotes, backslashes or control") as exc,
+    ):
+        await handler(connector, _TARGET, {"message": message})
+    run_mock.assert_not_awaited()
+    if isinstance(message, str) and message:
+        assert message not in str(exc.value)
+
+
+@pytest.mark.parametrize("message", _GOOD_POWER_MESSAGES[:-1])
+async def test_power_good_message_is_one_quoted_argument(message: str) -> None:
+    connector = WinsrvConnector()
+    run_mock = _run('{"ok":true,"action":"reboot","delay_seconds":15}')
+    with patch.object(connector, "_run_command", run_mock):
+        await winsrv_power_reboot(connector, _TARGET, {"message": message})
+    script = _script_from_call(run_mock)
+    assert f"shutdown.exe /r /t 15 /c {ps_single_quote(message)}; " in script
 
 
 # ---------------------------------------------------------------------------

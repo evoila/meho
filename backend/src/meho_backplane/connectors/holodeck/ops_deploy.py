@@ -597,7 +597,7 @@ async def _reconcile_patch(
 #: config on the appliance, builds a PSCredential, and makes exactly ONE
 #: Connect-VIServer attempt (ErrorAction Stop). Emits ``{ok, server?, message}``
 #: as JSON -- the password is read on the appliance and never returned. The
-#: ``{config_json}`` placeholder is filled with the shell-quoted config path.
+#: ``{config_json}`` placeholder is filled with the PowerShell-quoted config path.
 _PRECHECK_SCRIPT = (
     "$ErrorActionPreference = 'Stop'; "
     "$null = Set-PowerCLIConfiguration -InvalidCertificateAction Ignore "
@@ -625,7 +625,7 @@ async def _run_connect_precheck(
     ``{ok: False, message}`` so the caller's fail-fast branch is the single
     place that decides not to launch.
     """
-    config_json = shlex.quote(f"/holodeck-runtime/config/{config_id}.json")
+    config_json = ps_single_quote(f"/holodeck-runtime/config/{config_id}.json")
     script = _PRECHECK_SCRIPT.format(config_json=config_json)
     try:
         payload = await pwsh_run(self, target, script, operator=operator)

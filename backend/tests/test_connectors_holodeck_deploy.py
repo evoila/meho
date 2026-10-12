@@ -485,6 +485,25 @@ async def test_instance_start_precheck_pwsh_error_is_fail_fast() -> None:
     assert result["started"] is False
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("quote", ["'", "\u2018", "\u2019", "\u201a", "\u201b"])
+async def test_instance_start_precheck_quotes_config_path_for_powershell(quote: str) -> None:
+    """The precheck script quotes the config path with PowerShell rules, not shell rules."""
+    connector = HolodeckConnector()
+    params = {**_START_PARAMS, "config_id": f"cfg{quote}1"}
+    with (
+        patch(
+            "meho_backplane.connectors.holodeck.ops_deploy.pwsh_run",
+            new_callable=AsyncMock,
+        ) as mock_pwsh,
+        patch.object(connector, "_run_command", new_callable=AsyncMock),
+    ):
+        mock_pwsh.return_value = _LOCKED_ACCOUNT
+        await connector.instance_start(_StubTarget(), params)
+    script = mock_pwsh.await_args.args[2]
+    assert f"Get-Content -Raw '/holodeck-runtime/config/cfg{quote}{quote}1.json' " in script
+
+
 # ===========================================================================
 # E. instance.status envelope + benign 5.2 quirk (AC3)
 # ===========================================================================

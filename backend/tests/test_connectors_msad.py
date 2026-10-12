@@ -321,6 +321,36 @@ async def test_user_search_uses_scriptblock_filter_and_escapes() -> None:
     assert "Get-ADUser -Filter {(Name -like $q) -or (SamAccountName -like $q)}" in script
 
 
+#: Every character PowerShell reads as a single quote (ASCII + four
+#: typographic quotes). A name typed in a word processor often carries one.
+_PS_SINGLE_QUOTE_CHARS: tuple[str, ...] = ("'", "\u2018", "\u2019", "\u201a", "\u201b")
+
+
+@pytest.mark.parametrize("quote", _PS_SINGLE_QUOTE_CHARS)
+async def test_user_get_escapes_every_single_quote_character(quote: str) -> None:
+    """``user.get`` doubles each kind of single quote, so the identity stays one string."""
+    connector = MsadConnector()
+    run_mock = _run('{"rows":[],"total":0}')
+    identity = f"o{quote}brien"
+    with patch.object(connector, "_run_command", run_mock):
+        await msad_user_get(connector, _TARGET, {"identity": identity})
+    script = _script_from_call(run_mock)
+    assert f"Get-ADUser -Identity 'o{quote}{quote}brien' -Properties " in script
+    assert f"o{quote}brien" not in script.replace(f"o{quote}{quote}brien", "")
+
+
+@pytest.mark.parametrize("quote", _PS_SINGLE_QUOTE_CHARS)
+async def test_user_search_escapes_every_single_quote_character(quote: str) -> None:
+    """``user.search`` doubles each kind of single quote in the ``$q`` literal."""
+    connector = MsadConnector()
+    run_mock = _run('{"rows":[],"total":0}')
+    with patch.object(connector, "_run_command", run_mock):
+        await msad_user_search(connector, _TARGET, {"query": f"o{quote}brien"})
+    script = _script_from_call(run_mock)
+    assert f"$q = '*o{quote}{quote}brien*'; " in script
+    assert f"o{quote}brien" not in script.replace(f"o{quote}{quote}brien", "")
+
+
 async def test_user_create_is_passwordless_and_disabled() -> None:
     connector = MsadConnector()
     run_mock = _run('{"ok":true,"user":{"SamAccountName":"svc-sql","Enabled":false}}')

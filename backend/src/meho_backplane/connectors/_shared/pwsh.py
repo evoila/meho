@@ -239,18 +239,37 @@ def encode_pwsh_command(script: str) -> str:
     return base64.b64encode(script.encode("utf-16-le")).decode("ascii")
 
 
+#: Every character PowerShell reads as a single quote. The language
+#: specification (``single-quote-character``) lists the ASCII apostrophe and
+#: four typographic quotes; any of them opens or closes a single-quoted string.
+_PS_SINGLE_QUOTES: frozenset[str] = frozenset("'\u2018\u2019\u201a\u201b")
+
+
 def ps_single_quote(value: str) -> str:
     """Return *value* as a safe single-quoted PowerShell string literal.
 
-    Inside a single-quoted PowerShell string the only special character
-    is ``'`` itself; PowerShell escapes it by doubling. Single-quoted
-    strings are literal (no ``$`` expansion), so this is the safe way to
-    embed an operator-supplied non-secret scalar (a zone name, a
-    description, an instance id) into a composed ``-EncodedCommand``
-    script without it being parsed as a variable or subexpression. This
-    is the PowerShell analogue of :func:`shlex.quote`.
+    Inside a single-quoted PowerShell string the only special characters
+    are the single-quote characters. PowerShell reads five of them as a
+    quote: ``'`` (U+0027) and the typographic quotes U+2018, U+2019,
+    U+201A and U+201B. Each one is escaped by writing it twice, so a
+    doubled quote stays text and the value comes back unchanged.
+    Single-quoted strings are literal (no ``$`` or backtick expansion),
+    so this is the safe way to embed an operator-supplied non-secret
+    scalar (a zone name, a description, an instance id) into a composed
+    ``-EncodedCommand`` script. This is the PowerShell analogue of
+    :func:`shlex.quote`.
+
+    Anything that is not a ``str`` raises :exc:`TypeError`. The helper is
+    the safety check, so it never quotes a list, dict or number whose
+    items it cannot escape.
+
+    Reference: PowerShell language specification, section 2.3.5.2
+    (``single-quote-character``):
+    https://learn.microsoft.com/en-us/powershell/scripting/lang-spec/chapter-02
     """
-    return "'" + value.replace("'", "''") + "'"
+    if not isinstance(value, str):
+        raise TypeError(f"ps_single_quote expects a str, got {type(value).__name__}")
+    return "'" + "".join(c + c if c in _PS_SINGLE_QUOTES else c for c in value) + "'"
 
 
 def _connector_seam(connector: Any, attr: str, default: str) -> str:

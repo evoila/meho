@@ -133,7 +133,7 @@ import re
 import shlex
 from typing import TYPE_CHECKING, Any
 
-from meho_backplane.connectors._shared.pwsh import PwshRunError, pwsh_run
+from meho_backplane.connectors._shared.pwsh import PwshRunError, ps_single_quote, pwsh_run
 from meho_backplane.connectors.holodeck.ops import SSH_TRANSPORT_NOTE, HolodeckOp
 
 if TYPE_CHECKING:
@@ -983,14 +983,11 @@ async def holodeck_pod_info(
     pod_id = params.get("pod_id")
     if not isinstance(pod_id, str) or not pod_id.strip():
         return {"pod": None, "error": "pod_id is required and must be a non-empty string"}
-    # PowerShell single-quoting: the only escape inside single quotes
-    # is doubling the single quote itself. asyncssh's argv path runs
-    # the cmd through a shell on the appliance, so the operator-supplied
-    # pod_id is also subject to shell quoting -- but the encoded-command
-    # contract means the shell never sees the value as a discrete token;
-    # the entire pwsh script body is base64'd before transport.
-    quoted_id = pod_id.replace("'", "''")
-    script = f"Get-HoloDeckPod -Id '{quoted_id}' | ConvertTo-Json -Depth 4"
+    # PowerShell single-quoting via the shared helper (it escapes every
+    # character PowerShell reads as a single quote). The encoded-command
+    # contract means the appliance shell never sees the value as a discrete
+    # token; the entire pwsh script body is base64'd before transport.
+    script = f"Get-HoloDeckPod -Id {ps_single_quote(pod_id)} | ConvertTo-Json -Depth 4"
     try:
         payload = await pwsh_run(self, target, script, operator=operator)
     except PwshRunError as exc:

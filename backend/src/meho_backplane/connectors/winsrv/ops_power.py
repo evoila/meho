@@ -32,10 +32,21 @@ The optional operator ``message`` is interpolated only inside a single-quoted
 PowerShell literal via
 :func:`~meho_backplane.connectors._shared.pwsh.ps_single_quote`; the delay is
 a Python-validated non-negative ``int``.
+
+The message is also a program argument for ``shutdown.exe``. Windows
+PowerShell 5.1 does not escape double quotes when it builds a program's
+command line, so the message must keep to a simple rule: at most 512
+characters (the ``shutdown.exe /c`` limit); no double quotes (ASCII or
+typographic), backslashes or control characters (C0, DEL and C1); and it must
+not start with ``/`` or ``-``. The parameter schema refuses a bad value
+before anything runs, and :func:`_validate_message` checks it again where the
+command is built. Then the message always reaches ``shutdown.exe`` as one
+argument that it never reads as an option.
 """
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors._shared.pwsh import ps_single_quote, pwsh_run
@@ -55,6 +66,43 @@ __all__ = [
 #: SSH before the OS tears the channel down, and a small grace window before
 #: the host actually goes down.
 _DEFAULT_DELAY_SECONDS: int = 15
+
+
+#: ``shutdown.exe /c`` accepts a comment of at most 512 characters.
+_MESSAGE_MAX_LEN: int = 512
+
+#: What the message must not contain: a leading ``/`` or ``-`` (so
+#: ``shutdown.exe`` never reads it as an option), and anywhere a double quote
+#: (ASCII or typographic), a backslash or a control character (C0, DEL, C1).
+#: Shared by the parameter schema (``not``/``pattern``, which searches the
+#: whole string) and :func:`_validate_message`, so the two checks cannot drift
+#: apart.
+_MESSAGE_FORBIDDEN_PATTERN: str = r'^[/-]|["\u201c\u201d\u201e\\\x00-\x1f\x7f-\x9f]'
+_MESSAGE_FORBIDDEN_RE: re.Pattern[str] = re.compile(_MESSAGE_FORBIDDEN_PATTERN)
+
+#: The error text names the rule, never the value.
+_MESSAGE_RULE: str = (
+    f"message must be a string of at most {_MESSAGE_MAX_LEN} characters with no "
+    "double quotes, backslashes or control characters, and must not start with / or -"
+)
+
+
+def _validate_message(raw: Any) -> str | None:
+    """Return the message if it keeps to :data:`_MESSAGE_RULE`; ``None`` when absent.
+
+    ``shutdown.exe`` gets the message as a program argument, and Windows
+    PowerShell 5.1 does not escape double quotes in program arguments. A
+    message that keeps to the rule always arrives as one argument.
+    """
+    if raw is None:
+        return None
+    if (
+        not isinstance(raw, str)
+        or len(raw) > _MESSAGE_MAX_LEN
+        or _MESSAGE_FORBIDDEN_RE.search(raw) is not None
+    ):
+        raise ValueError(_MESSAGE_RULE)
+    return raw
 
 
 def _validate_delay(raw: Any) -> int:
@@ -77,7 +125,7 @@ async def _power_action(
 ) -> dict[str, Any]:
     """Schedule ``shutdown.exe`` with *flag* (``/r`` reboot, ``/s`` shutdown)."""
     delay = _validate_delay(params.get("delay_seconds"))
-    message: str | None = params.get("message")
+    message = _validate_message(params.get("message"))
     comment_clause = ""
     if message:
         comment_clause = f" /c {ps_single_quote(message)}"
@@ -136,7 +184,13 @@ _POWER_PARAM_SCHEMA: dict[str, Any] = {
         },
         "message": {
             "type": "string",
-            "description": ("Optional comment shown to logged-in users (``shutdown.exe /c``)."),
+            "maxLength": _MESSAGE_MAX_LEN,
+            "not": {"pattern": _MESSAGE_FORBIDDEN_PATTERN},
+            "description": (
+                "Optional comment shown to logged-in users (``shutdown.exe /c``). "
+                "At most 512 characters; no double quotes, backslashes or "
+                "control characters; must not start with ``/`` or ``-``."
+            ),
         },
     },
     "additionalProperties": False,

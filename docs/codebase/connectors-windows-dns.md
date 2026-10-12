@@ -143,9 +143,9 @@ Every op runs `powershell -NoProfile -NonInteractive -EncodedCommand
 
 Operator-supplied strings (zone / name / IP / CNAME target) are
 interpolated only inside **single-quoted** PowerShell literals via
-`ps_single_quote` (embedded `'` doubled — inside a single-quoted PowerShell
-string the only metacharacter is `'` itself, so doubling is complete
-escaping). TTL is validated as a non-negative `int` before interpolation;
+`ps_single_quote` (inside a single-quoted PowerShell string the only
+metacharacters are the single-quote characters — `'` and the typographic
+quotes U+2018 to U+201B — so doubling each of them is complete escaping). TTL is validated as a non-negative `int` before interpolation;
 A-record IPs must parse as `ipaddress.IPv4Address` before reaching the wire.
 
 ## `fingerprint(target)` / `probe(target)`

@@ -224,7 +224,7 @@ disclosure (CLAUDE.md postulate 5 + Initiative #371).
   `null` shape into a uniform list.
 - **`holodeck.pod.info`** (group `pod`). Runs `Get-HoloDeckPod -Id '<id>' |
   ConvertTo-Json -Depth 4` via `pwsh_run`. `pod_id` parameter is required;
-  the handler PowerShell-quotes single quotes via doubling. Returns
+  the handler quotes it with `ps_single_quote`. Returns
   `{pod: <dict>}` or `{pod: None, error}` on cmdlet / missing-id failure.
 - **`holodeck.service.list`** (group `service`, JSONFlux-shaped). Runs
   `Get-Service | Where-Object { $_.Name -like 'Holo*' } | Select-Object

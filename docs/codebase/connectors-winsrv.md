@@ -155,11 +155,16 @@ over the pooled SSH connection:
 
 Operator-supplied strings (service / feature / user names, iSCSI IQN, volume
 label, reboot message) are interpolated only inside **single-quoted** PowerShell
-literals via `ps_single_quote` (embedded `'` doubled — complete escaping inside a
-single-quoted PowerShell string). Integers (delay, disk number, iSCSI port) are
+literals via `ps_single_quote` (every single-quote character PowerShell accepts —
+`'` and the typographic quotes U+2018 to U+201B — is doubled, which is complete
+escaping inside a single-quoted PowerShell string). Integers (delay, disk number, iSCSI port) are
 validated to `int` before interpolation; `filesystem` and `drive_letter` are
 validated against a bounded enum / `^[A-Za-z]$`; booleans render as fixed
 `$true` / `$false` literals, never as interpolated operator text.
+
+The power `message` is also a `shutdown.exe` argument, so the parameter schema
+and the handler both enforce one rule: at most 512 characters; no double
+quotes, backslashes or control characters; and it must not start with `/` or `-`.
 
 ### No plaintext secret on the wire (deliberate)
 

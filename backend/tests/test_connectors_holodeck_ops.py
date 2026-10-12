@@ -48,6 +48,7 @@ Coverage matrix (per Task #854 acceptance criteria):
 
 from __future__ import annotations
 
+import base64
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
@@ -752,9 +753,22 @@ async def test_pod_info_quotes_pod_id_safely() -> None:
         mock_cmd.return_value = _proc(stdout='{"PodId": "x"}')
         await connector.pod_info(_TARGET, {"pod_id": "Pod-O'Reilly"})
     cmd = mock_cmd.await_args.args[1]
-    # The encoded base64 isn't trivial to decode here, but we can assert
-    # the request shape and trust the round-trip test for the encoding.
     assert cmd.startswith("pwsh -NoProfile -NonInteractive -EncodedCommand ")
+    script = base64.b64decode(cmd.rsplit(" ", 1)[1]).decode("utf-16-le")
+    assert script == "Get-HoloDeckPod -Id 'Pod-O''Reilly' | ConvertTo-Json -Depth 4"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("quote", ["\u2018", "\u2019", "\u201a", "\u201b"])
+async def test_pod_info_escapes_typographic_single_quotes(quote: str) -> None:
+    """PowerShell also reads the four typographic single quotes as quotes; each is doubled."""
+    connector = HolodeckConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout='{"PodId": "x"}')
+        await connector.pod_info(_TARGET, {"pod_id": f"Pod-O{quote}Reilly"})
+    cmd = mock_cmd.await_args.args[1]
+    script = base64.b64decode(cmd.rsplit(" ", 1)[1]).decode("utf-16-le")
+    assert script == f"Get-HoloDeckPod -Id 'Pod-O{quote}{quote}Reilly' | ConvertTo-Json -Depth 4"
 
 
 @pytest.mark.asyncio

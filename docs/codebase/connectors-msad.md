@@ -184,8 +184,9 @@ over the pooled SSH connection:
 
 Operator-supplied identities, attribute values, member identities, and DNs are
 interpolated only inside **single-quoted** PowerShell literals via
-`ps_single_quote` (embedded `'` doubled — complete escaping inside a single-quoted
-PowerShell string). The `limit` cap is Python-validated to a positive `int` before
+`ps_single_quote` (every single-quote character PowerShell accepts — `'` and the
+typographic quotes U+2018 to U+201B — is doubled, which is complete escaping
+inside a single-quoted PowerShell string). The `limit` cap is Python-validated to a positive `int` before
 interpolation; the `protected` toggle renders as a fixed `$true` / `$false`
 literal.
 

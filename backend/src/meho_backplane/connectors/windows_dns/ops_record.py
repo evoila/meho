@@ -34,11 +34,11 @@ PowerShell injection safety
 
 Operator-supplied string values (zone / name / IP / CNAME target) are
 interpolated into the PowerShell script text inside **single-quoted**
-PowerShell string literals with any embedded ``'`` doubled -- the exact
-convention the Holodeck ``pod.info`` handler uses
-(``value.replace("'", "''")``). Inside a single-quoted PowerShell string
-the only metacharacter is ``'`` itself, so doubling it is complete
-escaping. The transport is ``powershell -EncodedCommand`` (base64 UTF-16LE), so
+PowerShell string literals via the shared ``ps_single_quote`` helper.
+Inside a single-quoted PowerShell string the only metacharacters are the
+single-quote characters (``'`` and the typographic quotes U+2018 to
+U+201B), so doubling each of them is complete escaping. The transport is
+``powershell -EncodedCommand`` (base64 UTF-16LE), so
 the *shell* never parses the script -- there is no ``sh -c`` layer to
 escape for, only the PowerShell parser. Integer values (TTL seconds) are
 validated to ``int`` before interpolation. A/CNAME writes prefix

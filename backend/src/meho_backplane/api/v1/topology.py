@@ -201,7 +201,7 @@ _OP_HISTORY = "topology.history"
 
 #: HTTP-boundary ceiling on the number of edges accepted in one
 #: ``POST /edges/bulk`` body. The consumer's INVENTORY.md
-#: (https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/rdc-hetzner-dc/INVENTORY.md)
+#: (kept in the consumer's private repo)
 #: lists ~30 curated cross-system edges at v0.2; the ceiling is sized
 #: well above that so onboarding does not need to chunk the file, but
 #: low enough that a stray hostile body cannot hold a single transaction

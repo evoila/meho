@@ -288,7 +288,7 @@ syntax.
 ## Migrating off `scripts/nsx.sh`
 
 The consumer's
-[`scripts/nsx.sh`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/nsx.sh)
+`scripts/nsx.sh`
 drives NSX REST via a `curl` + session-cookie wrapper. The `meho nsx`
 verbs replace it for the read-only workflows; write workflows stay in
 the wrapper.
@@ -412,6 +412,6 @@ meho nsx firewall rule list policy-app-tier --target rdc-nsx --scope my-domain
 - CLI verbs: [`cli/internal/cmd/nsx/`](../../cli/internal/cmd/nsx/).
 - E2E integration test: [`backend/tests/test_connectors_nsx_e2e.py`](../../backend/tests/test_connectors_nsx_e2e.py).
 - Acceptance tests: [`backend/tests/acceptance/test_g35_nsx_dispatch_smoke.py`](../../backend/tests/acceptance/test_g35_nsx_dispatch_smoke.py), [`backend/tests/acceptance/test_g35_nsx_jsonflux_force_handle.py`](../../backend/tests/acceptance/test_g35_nsx_jsonflux_force_handle.py).
-- Consumer wrapper retiring: [`scripts/nsx.sh`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/nsx.sh).
+- Consumer wrapper retiring: `scripts/nsx.sh`.
 - NSX REST API reference: <https://developer.broadcom.com/xapis/nsx-data-center-rest-api/latest/>.
 - Related onboarding docs: [`vault-onboarding.md`](./vault-onboarding.md), [`audit-query.md`](./audit-query.md), [`broadcast-onboarding.md`](./broadcast-onboarding.md).

@@ -314,8 +314,7 @@ External: `httpx>=0.27` (Bearer header + `AsyncClient`), `structlog`
 - Shared auth module: `connectors/_shared/vcf_auth.py` (#841)
 - vRLI API:
   <https://developer.broadcom.com/xapis/vrealize-log-insight-api/latest/>
-- Consumer wrapper:
-  <https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/vcf-logs.sh>
+- Consumer wrapper: `scripts/vcf-logs.sh` in the consumer's private repo.
 - Sibling skeleton precedent: NSX (`connectors/nsx/`) for the
   session-token + 401 retry-once pattern; VCF Automation
   (`connectors/vcf_automation/`) for the most recent VCF management-

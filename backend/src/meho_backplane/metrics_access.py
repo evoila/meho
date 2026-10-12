@@ -6,9 +6,9 @@
 ``GET /metrics`` (:mod:`meho_backplane.main`) and ``GET /ready``
 (:mod:`meho_backplane.health`) are served on the shared ingress. Left
 unauthenticated they leak operational metrics and the effective four-eyes /
-feature-gate posture to anyone who can reach the ingress — on a shared instance
-hosting an untrusted-visitor tenant (the Envision stand, meho-internal#320) that
-is production activity exposed to the public booth.
+feature-gate posture to anyone who can reach the ingress. On a shared instance
+that hosts an untrusted-visitor tenant (for example a public event booth), that
+is production activity exposed to the public.
 
 :func:`verify_metrics_access` is the shared FastAPI dependency both endpoints
 declare. It is **opt-in and default-open**: when

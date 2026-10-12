@@ -257,7 +257,7 @@ ESXi host and a real vDS. On the holodeck lab:
 ### Cross-repo handoff — queue the script for Phase-D deletion
 
 `scripts/host-detach-from-vds.py` lives in the consumer/ops repo
-[`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc),
+`evoila-bosnia/claude-rdc-hetzner-dc`,
 **not** in `evoila/meho` — its deletion is a cross-repo operator action,
 tracked but not performed here. Once the soak grades ✅ READY:
 

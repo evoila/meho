@@ -427,4 +427,4 @@ listing.
 - Recorded-fixture refresh recipe: [`docs/cross-repo/vcf-fixture-refresh.md`](./vcf-fixture-refresh.md).
 - Sibling onboarding doc shape: [`docs/cross-repo/nsx-onboarding.md`](./nsx-onboarding.md).
 - vRLI API: <https://developer.broadcom.com/xapis/vrealize-log-insight-api/latest/>.
-- Consumer wrapper this replaces: [`scripts/vcf-logs.sh`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/vcf-logs.sh).
+- Consumer wrapper this replaces: `scripts/vcf-logs.sh`.

@@ -57,7 +57,7 @@ just occurred. A client pinned to `"2025-03-26"` receiving a
 `"2025-06-18"` response had no way to know which revision the server
 agreed to, and the operator's log stream stayed silent on the
 mismatch. The consumer-side closed-loop reporting flagged this as
-[`mcp-initialize-protocol-version-silent-upgrade`](https://github.com/evoila-bosnia/meho-internal/issues/697)
+`mcp-initialize-protocol-version-silent-upgrade`
 (signal 15), and the v0.6.0 release body was amended (PR #1159) to
 call out the gap explicitly as observation-not-commitment.
 

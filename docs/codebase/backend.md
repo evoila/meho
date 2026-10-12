@@ -759,7 +759,7 @@ this stage it exposes:
 Database persistence lands progressively in subsequent G2.3 Tasks. The stack (FastAPI, Pydantic v2,
 SQLAlchemy 2.x async, Alembic, structlog, prometheus_client, authlib
 for JOSE) is locked by
-[ADR 0004](https://github.com/evoila-bosnia/meho-internal/issues/13).
+ADR 0004.
 
 The project follows the modern src-layout
 (`backend/src/meho_backplane/...`) so tests resolve only the installed
@@ -1135,7 +1135,7 @@ where appropriate.
 **Verification commands** live in `backend/README.md` under "Verifying
 image signatures" — same regex, same issuer, copy-pasteable into an
 operator runbook. The downstream
-[`claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc)
+`claude-rdc-hetzner-dc`
 `install.sh` runs that exact `cosign verify` as a **gating** check
 before `docker pull`; a failed verification aborts the install with
 the expected-identity error message.
@@ -1230,7 +1230,7 @@ these on the same review cadence as `sigstore/cosign-installer`.
 
 Formerly, after image push, sign, attest, and scan, `image.yml`'s final step
 fired a `repository_dispatch` event of type `meho-image-pushed` at
-[`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc)
+`evoila-bosnia/claude-rdc-hetzner-dc`
 — the dogfooding consumer that operates MEHO against the rke2-infra
 lab cluster. The dispatch was the upstream half of the cross-repo
 handshake; the consumer-side listener (`.github/workflows/meho-deploy.yml`

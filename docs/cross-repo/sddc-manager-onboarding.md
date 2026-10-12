@@ -341,7 +341,7 @@ history; see [`audit-query.md`](./audit-query.md) for filter syntax.
 ## Migrating off `scripts/sddc-manager.sh`
 
 The consumer's
-[`scripts/sddc-manager.sh`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/sddc-manager.sh)
+`scripts/sddc-manager.sh`
 drives SDDC Manager REST via a `curl` + HTTP Basic wrapper. The
 `meho sddc-manager` verbs replace it for the read-only workflows; write
 workflows stay in the wrapper.
@@ -482,6 +482,6 @@ meho sddc-manager domain info domain-wld01 --target rdc-sddc-manager --json \
 - CLI verbs: [`cli/internal/cmd/sddc-manager/`](../../cli/internal/cmd/sddc-manager/).
 - E2E integration test: [`backend/tests/test_connectors_sddc_manager_e2e.py`](../../backend/tests/test_connectors_sddc_manager_e2e.py).
 - Acceptance tests: [`backend/tests/acceptance/test_g35_sddc_dispatch_smoke.py`](../../backend/tests/acceptance/test_g35_sddc_dispatch_smoke.py), [`backend/tests/acceptance/test_g35_sddc_jsonflux_force_handle.py`](../../backend/tests/acceptance/test_g35_sddc_jsonflux_force_handle.py).
-- Consumer wrapper retiring: [`scripts/sddc-manager.sh`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/sddc-manager.sh).
+- Consumer wrapper retiring: `scripts/sddc-manager.sh`.
 - VCF API reference: <https://developer.broadcom.com/xapis/vmware-cloud-foundation-api/latest/>.
 - Related onboarding docs: [`nsx-onboarding.md`](./nsx-onboarding.md), [`vault-onboarding.md`](./vault-onboarding.md), [`audit-query.md`](./audit-query.md), [`broadcast-onboarding.md`](./broadcast-onboarding.md).

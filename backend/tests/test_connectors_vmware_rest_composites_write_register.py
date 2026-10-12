@@ -144,6 +144,8 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.datastore.dir.create",
     "vmware.composite.content_library.delete",
     "vmware.composite.content_library.item.delete",
+    # The destructive DRS rule delete; special-cased in the tier assertion below.
+    "vmware.composite.cluster.drs_rule.delete",
 )
 
 # 5 reads (T5 / #508) -- carried over so the combined-count assertion
@@ -361,6 +363,10 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
         "meho_backplane.connectors.vmware_rest.composites."
         "_library_delete.content_library_item_delete_composite"
     ),
+    "vmware.composite.cluster.drs_rule.delete": (
+        "meho_backplane.connectors.vmware_rest.composites."
+        "_drs_rule_delete.cluster_drs_rule_delete_composite"
+    ),
 }
 
 
@@ -412,6 +418,7 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.datastore.dir.create": "storage",
     "vmware.composite.content_library.delete": "content_library",
     "vmware.composite.content_library.item.delete": "content_library",
+    "vmware.composite.cluster.drs_rule.delete": "cluster",
 }
 
 
@@ -599,6 +606,8 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
             "vmware.composite.datastore.file.delete",
             "vmware.composite.content_library.delete",
             "vmware.composite.content_library.item.delete",
+            # The DRS rule delete.
+            "vmware.composite.cluster.drs_rule.delete",
         ):
             expected_level = "destructive"
         elif row.op_id in caution_ops:
@@ -952,6 +961,16 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
             "invalid_request",
             "precondition_failed",
             "still_present",
+        },
+        # DRS rule delete: the teardown statuses + a reconfigure poll timeout;
+        # invalid_request for an unknown cluster.
+        "vmware.composite.cluster.drs_rule.delete": {
+            "deleted",
+            "unchanged",
+            "invalid_request",
+            "precondition_failed",
+            "still_present",
+            "timeout",
         },
     }
     for op_id, expected_values in expected_status_values.items():

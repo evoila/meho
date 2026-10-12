@@ -56,7 +56,8 @@ SUBSCRIBED composites** subsection), and the seven teardown composites /
 `#3339` -- six destructive deletes `network.portgroup.delete`,
 `host.standard_portgroup.delete`, `folder.delete`, `datastore.file.delete`,
 `content_library.delete`, `content_library.item.delete`, plus the caution
-`datastore.dir.create` (see **Governed teardown deletes**)). The
+`datastore.dir.create` (see **Governed teardown deletes**), and the destructive
+DRS rule delete `cluster.drs_rule.delete` (see **Governed DRS rule delete**)). The
 write composites cover every state-mutating operator workflow named
 in [#214](https://github.com/evoila/meho/issues/214) as required for
 govc-wrapper retirement.
@@ -1123,6 +1124,7 @@ enum) are:
 | `host.detach_from_vds` | `detached`, `incomplete`, `timeout` (the detach is the vim `ReconfigureDvs_Task` host-member remove, polled, #2970) |
 | `cluster.patch` | `completed`, `stopped` (per-host vim maintenance `*_Task`s + the vLCM `software?action=apply&vmw-task=true` cis task, every task polled before the next step, #2970) |
 | `cluster.drs_rule.create` | `created`, `rule_exists`, `insufficient_vms`, `timeout` (idempotent on rule name — a duplicate `rule_exists` is refused before any write; `insufficient_vms` when fewer than two named VMs resolve to the cluster; `timeout` when the `ReconfigureComputeResource_Task` poll gives up) |
+| `cluster.drs_rule.delete` | `deleted`, `unchanged`, `invalid_request`, `precondition_failed`, `still_present`, `timeout` (removes one rule of any type by name; `unchanged` when no rule has the name; `precondition_failed` when two or more rules share it, listed in `blockers`; `invalid_request` for an unknown cluster; `deleted` only after a new read of the rules misses the rule's key; a task *fault* raises `connector_error`) |
 | `cluster.drs_vm_host_rule.create` | `created`, `rule_exists`, `group_exists`, `insufficient_vms`, `insufficient_hosts`, `timeout` (#3505 VM-Host rule; rule + group names are idempotence keys refused before any write; `insufficient_*` when no VM / host name resolves in the cluster; `timeout` when the `ReconfigureComputeResource_Task` poll gives up) |
 | `resource_pool.create` | `created`, `cluster_root_pool_unresolved`, `no_parent` (#3505; the REST `POST:/vcenter/resource-pool` create — `cluster_root_pool_unresolved` when the `cluster` convenience cannot read the cluster's root pool, `no_parent` when neither `parent` nor `cluster` is given, both before any write; read-back confirms the pool under the resolved parent) |
 | `resource_pool.delete` | `deleted`, `not_empty`, `delete_unverified` (#3505; `not_empty` refuses a pool with child pools / VMs unless `force=true` — the REST `DELETE` reparents children up to the parent; `delete_unverified` when the read-back still lists the pool) |
@@ -1661,6 +1663,45 @@ pinned `vi-json.yaml` and the REST paths against `vcenter.yaml`.
 Follow-up (not in #3339): `_write._split_sub_op` puts path values into URLs
 without percent-encoding. The new ops validate every id first; the older
 library ops (`content_library.subscribed.status` / `.sync`) do not yet.
+
+### Governed DRS rule delete (`cluster.drs_rule.delete`)
+
+`vmware.composite.cluster.drs_rule.delete` removes one DRS rule from a cluster,
+by name. It is the opposite of `cluster.drs_rule.create` and
+`cluster.drs_vm_host_rule.create`. A DRS rule tells vCenter where to run VMs:
+keep them together, keep them apart, or run them on (or away from) a group of
+hosts.
+
+- **Risk level:** `destructive` + `requires_approval=True`. A second person
+  always approves, after reading the rule on the approval card. An agent
+  principal is refused.
+- **vSphere call:** the same as the creates. There is no REST path for
+  cluster rules, so it runs `ClusterComputeResource.ReconfigureComputeResource_Task`
+  with one `rulesSpec` entry: `operation: "remove"` and `removeKey` = the
+  rule's key, `modify=true` (nothing else on the cluster changes). The call is
+  the same for every rule type. VM groups and host groups are not removed.
+- **The key is boxed.** `ArrayUpdateSpec.removeKey` is typed `Any` in the
+  pinned `vi-json.yaml`, so the int key is sent as
+  `{"_typeName": "int", "_value": <key>}` (the `Any` discriminator maps `int`
+  to `PrimitiveInt`). This is the first request body that sends a boxed
+  primitive; the body-shape reconcile lane checks the alias against the spec.
+- **One plan, used twice** (the `_teardown.TeardownPlan` seam). It reads the
+  cluster's `name` and `configurationEx.rule` once. An unknown cluster gives
+  `invalid_request`. No rule with the name gives `unchanged` (safe to run
+  twice). Two or more rules with the name give `precondition_failed`, with the
+  rules listed in `blockers`. A rule list vCenter could not read fails the call
+  before any write.
+- **Approval card** (`blast_radius.object`): cluster, cluster name, rule name,
+  key, rule type (`affinity`, `anti_affinity`, `vm_host`, or the vim type name
+  for any other type), enabled, mandatory (required or preferred), and the VMs
+  (up to 50, names best effort) or, for a VM-Host rule, the VM group and the
+  host groups. `children` is empty: removing a rule deletes no other object.
+- **Check after delete:** after the task succeeds it reads the rules again.
+  `deleted` only when no rule has the key any more; otherwise `still_present`.
+
+Code: `composites/_drs_rule_delete.py`. The governed sub-op manifest
+(`RetrievePropertiesEx` + `ReconfigureComputeResource_Task`) is in
+`_governed_subops.py`.
 
 ### Governed NFS tag-based SPBM storage policy (`storage_policy.*`, #3494)
 

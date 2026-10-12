@@ -125,6 +125,8 @@ _WRITE_COMPOSITE_OP_IDS: frozenset[str] = frozenset(
         "vmware.composite.datastore.dir.create",
         "vmware.composite.content_library.delete",
         "vmware.composite.content_library.item.delete",
+        # The destructive DRS rule delete: blast_radius from its own plan.
+        "vmware.composite.cluster.drs_rule.delete",
     }
 )
 

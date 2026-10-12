@@ -69,6 +69,9 @@ resolved VM + host group sets).
 teardown deletes (#3339)  live-read: the mandatory ``blast_radius`` built from
                           the handler's own plan (``_teardown.TeardownPlan``)
                           -- object, children, blockers, refusal
+``cluster.drs_rule.``     live-read: the same ``blast_radius`` from the
+``delete``                handler's plan -- the rule's type, enabled,
+                          mandatory, VMs or groups
 ``datastore.dir.create``  echo: datastore, path, create_parents
 ========================  ====================================================
 
@@ -171,6 +174,9 @@ import httpx
 from meho_backplane.connectors.vmware_rest.composites._datastore_files import (
     datastore_dir_create_preview,
     datastore_file_delete_preview,
+)
+from meho_backplane.connectors.vmware_rest.composites._drs_rule_delete import (
+    cluster_drs_rule_delete_preview,
 )
 from meho_backplane.connectors.vmware_rest.composites._library_delete import (
     content_library_delete_preview,
@@ -1728,11 +1734,14 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "vmware.composite.datastore.dir.create": datastore_dir_create_preview,
     "vmware.composite.content_library.delete": content_library_delete_preview,
     "vmware.composite.content_library.item.delete": content_library_item_delete_preview,
+    # The DRS rule delete is destructive too: its blast radius is the
+    # handler's own plan (the rule, its type, its VMs or groups).
+    "vmware.composite.cluster.drs_rule.delete": cluster_drs_rule_delete_preview,
 }
 
 
 def _register_vmware_write_preview_builders() -> None:
-    """Wire the 45 write-composite park-time preview builders. Import-time.
+    """Wire the 46 write-composite park-time preview builders. Import-time.
 
     The 13 read composites register no builder — they are
     ``requires_approval=False`` and never park, so a preview would be

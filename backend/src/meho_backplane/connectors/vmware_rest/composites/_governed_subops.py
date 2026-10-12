@@ -32,6 +32,7 @@ from typing import Final
 
 from meho_backplane.connectors.vmware_rest.composites import (
     _datastore_files,
+    _drs_rule_delete,
     _host,
     _library,
     _library_delete,
@@ -87,6 +88,12 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.cluster.drs_rule.create": _write._VIM_SUB_OPS_CLUSTER_DRS_RULE_CREATE,
     "vmware.composite.cluster.drs_vm_host_rule.create": (
         _write._VIM_SUB_OPS_CLUSTER_DRS_VM_HOST_RULE_CREATE
+    ),
+    # The delete's child is the same ReconfigureComputeResource_Task as the
+    # create (a rule removal, not a vim Destroy). The composite itself is
+    # destructive, so a human always decides.
+    "vmware.composite.cluster.drs_rule.delete": (
+        _drs_rule_delete._VIM_SUB_OPS_CLUSTER_DRS_RULE_DELETE
     ),
     "vmware.composite.resource_pool.create": (
         _write._SUB_OPS_RESOURCE_POOL_CREATE + _write._VIM_SUB_OPS_RESOURCE_POOL_CREATE

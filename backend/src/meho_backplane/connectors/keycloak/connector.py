@@ -1052,6 +1052,30 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_group_member_remove(self, operator, target, params)
 
+    async def user_delete(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.user.delete`` (#3944)."""
+        from meho_backplane.connectors.keycloak.ops_write_delete import keycloak_user_delete
+
+        return await keycloak_user_delete(self, operator, target, params)
+
+    async def group_delete(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.group.delete`` (#3944)."""
+        from meho_backplane.connectors.keycloak.ops_write_delete import keycloak_group_delete
+
+        return await keycloak_group_delete(self, operator, target, params)
+
+    async def client_delete(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.client.delete`` (#3944)."""
+        from meho_backplane.connectors.keycloak.ops_write_delete import keycloak_client_delete
+
+        return await keycloak_client_delete(self, operator, target, params)
+
     # -- typed-op registrar (G3.13-T2 #1394 fills the read-op walk) ------
 
     @classmethod
@@ -1078,7 +1102,9 @@ class KeycloakConnector(HttpConnector):
         ``client.update`` / ``client_scope.create`` /
         ``protocol_mapper.create`` / ``user.create`` /
         ``user.reset_password`` / ``role_mapping.assign``) onto the same
-        walk — every write registers ``requires_approval=True``.
+        walk — every write registers ``requires_approval=True``. #3944 adds
+        the destructive ``user.delete`` / ``group.delete`` /
+        ``client.delete``.
         """
         # Lazy imports: the operations package pulls in the embedding
         # pipeline (ONNX runtime + a 100 MB+ model on first touch) that a

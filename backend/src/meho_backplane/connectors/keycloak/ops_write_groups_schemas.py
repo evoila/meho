@@ -35,7 +35,10 @@ WHEN_TO_USE_GROUP_WRITE = (
     "tenant claims). All four are privilege-adjacent (a tenant-access "
     "grant), so all are dangerous and require human approval. The typical "
     "flow: create the role group with attributes → add the user → the "
-    "user's minted token then carries the group-derived claims."
+    "user's minted token then carries the group-derived claims. "
+    "``keycloak.group.delete`` removes a group (and, only when asked, its "
+    "sub-groups) for good: destructive, a second person must approve, "
+    "preview first."
 )
 
 _ATTRIBUTES_PROP: dict[str, Any] = {

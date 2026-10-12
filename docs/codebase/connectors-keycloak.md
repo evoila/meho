@@ -21,7 +21,10 @@ those scripts). #2843 extends the read surface to **eight** by adding the
 approval-gated writes (`group.create` with attributes, `group.update_attributes`,
 `group.member.add`, `group.member.remove`, taking the write surface to
 **thirteen**) so a tenant's role groups — the backplane's tenant-claim
-primitive — can be bootstrapped governed.
+primitive — can be bootstrapped governed. #3944 adds three **destructive**
+deletes (`user.delete`, `group.delete`, `client.delete`, taking the write
+surface to **sixteen**). Removing access when an event, a contract or a job
+ends is then audited, and a second person must approve it.
 
 Registry v2 triple: `(product="keycloak", version="26.x",
 impl_id="keycloak-admin")`, plus the `(keycloak, "", "")` wildcard so a
@@ -39,7 +42,8 @@ fresh target with no asserted version still resolves.
   `client_update`, `client_scope_create`, `protocol_mapper_create`,
   `user_create`/`user_reset_password`, `role_mapping_assign`,
   `group_create`, `group_update_attributes`, `group_member_add`,
-  `group_member_remove`), the `_get_admin_json` / `_get_admin_list` GET
+  `group_member_remove`, `user_delete`, `group_delete`, `client_delete`),
+  the `_get_admin_json` / `_get_admin_list` GET
   helpers (object vs array responses), and the `_write_admin` mutating
   helper (POST/PUT/**DELETE**) plus the `_find_client_uuid` /
   `_find_user_uuid` / `_find_realm_role` / `_find_group` / `_user_in_group`
@@ -51,6 +55,12 @@ fresh target with no asserted version still resolves.
   `already_exists`; the membership ops pre-read `_user_in_group` for an
   idempotent `unchanged` result. `KeycloakGroupNotFoundError` is raised
   when a group name/UUID resolves to nothing.
+- `DELETE_WRITE_OPS` (`ops_write_delete_schemas.py`), the delete handlers
+  and approval-card blocks (`ops_write_delete.py`), and the shared lookup +
+  guards (`ops_write_delete_lookup.py`) — the three destructive deletes
+  (#3944). A guard raises `KeycloakDeleteRefusedError` with a stable `code`;
+  `KeycloakDeleteVerificationError` means the object could still be read
+  after the DELETE.
 - `KeycloakOp` + `READ_OPS` (`connectors/keycloak/ops_read.py`) — the
   op-metadata dataclass and the eight-op read registration table (the bind9 /
   pfSense `ops`-table precedent). `WHEN_TO_USE_BY_GROUP` maps each op
@@ -235,7 +245,7 @@ the general posture (see "Write ops" below).
 
 ## Write ops (G3.13-T4, extended by #3280)
 
-Thirteen approval-gated write ops (`requires_approval=True`), all
+Sixteen approval-gated write ops (`requires_approval=True`), all
 dispatching via the admin-auth path, all keyed on the object's **UUID**:
 
 | op_id | safety | Admin REST API |
@@ -253,6 +263,9 @@ dispatching via the admin-auth path, all keyed on the object's **UUID**:
 | `keycloak.group.update_attributes` | dangerous | `PUT .../groups/{group-id}` |
 | `keycloak.group.member.add` | dangerous | `PUT .../users/{user-id}/groups/{groupId}` |
 | `keycloak.group.member.remove` | dangerous | `DELETE .../users/{user-id}/groups/{groupId}` |
+| `keycloak.user.delete` | destructive | `DELETE .../users/{user-id}` |
+| `keycloak.group.delete` | destructive | `DELETE .../groups/{group-id}` |
+| `keycloak.client.delete` | destructive | `DELETE .../clients/{client-uuid}` |
 
 The group-lifecycle writes (#3280) are all `dangerous`: group attributes
 + membership drive the backplane's tenant claims (`tenant_id` /
@@ -296,9 +309,65 @@ their own idempotency above):
   (never raw params); and both ops are pinned in
   `broadcast.events._CREDENTIAL_WRITE_OPS` → aggregate-only broadcast.
 
+### Governed deletes (#3944)
+
+`keycloak.user.delete`, `keycloak.group.delete` and `keycloak.client.delete`
+remove one object each, in the target's managed realm. They are on the
+`destructive` risk level
+([`governed-delete-operations.md`](../decisions/governed-delete-operations.md)):
+
+- A second person must approve every call. No standing grant, no
+  self-approval, and an agent cannot run them.
+- The caller first runs `preview_operation` with the same params and passes
+  its `preview_hash` to `call_operation`.
+- The approval card shows what is deleted (see the preview table below).
+
+How one delete runs:
+
+1. **Find the object.** By internal `id`, or by name: `username` (exact,
+   case-insensitive), `client_id` (the exact clientId), or group `name`
+   (exact, searched at every level of the group tree with
+   `?search=&exact=true&populateHierarchy=false`). A name that matches more
+   than one object is refused (`ambiguous_name`); pass the id instead.
+2. **Check the guards.** These refuse the delete:
+   - `builtin_client` — Keycloak's built-in clients: `admin-cli`, `account`,
+     `account-console`, `broker`, `realm-management`,
+     `security-admin-console`.
+   - `target_login_client` / `target_login_user` — the client and the user
+     this MEHO target logs in with: the admin credential's `client_id`, and
+     its `username` (password login) or the client's
+     `service-account-<clientId>` user (client-secret login). They live in
+     the target's `admin_realm`, so these guards apply when `managed_realm`
+     is that same realm.
+   - `group_has_subgroups` — a group that has sub-groups, unless
+     `delete_subgroups=true`. Keycloak deletes a group's sub-groups with it.
+     An unknown sub-group count counts as "has sub-groups".
+3. **Delete, then read again.** `deleted: true` is reported only after a
+   read of the object answers 404. If it can still be read, the call fails
+   with `KeycloakDeleteVerificationError`.
+
+Steps 1 and 2 run in the preview builder **before** the request waits for
+approval, and again in the handler when the approved call runs (this catches
+a change made while the request waited). A refused delete never reaches an
+approver: the builder raises, the park is refused with
+`blast_radius_required`, and the reason carries the refusal, for example
+`keycloak.client.delete refused (builtin_client): ...`. A delete by name
+acts on the object that has that name when the approved call runs; pass
+the `id` to pin one exact object (the card shows the id).
+
+Safe to run twice: when the object is already gone, the handler sends no
+DELETE and returns `already_absent: true`. The approval card says so too
+(`present: false`, irreversibility `none-object-already-absent`), so a
+repeated teardown still waits for approval as usual and then reports
+`already_absent: true`.
+
+The CLI verbs `meho keycloak user|group|client delete` run the same two
+steps: without `--preview-hash` they only preview and print the hash; with
+it, the request waits for approval.
+
 ### Park-time approval preview (#1857)
 
-Seven of the write ops register bespoke `proposed_effect` preview builders
+Ten of the write ops register bespoke `proposed_effect` preview builders
 in `connectors/keycloak/ops_write_preview.py`, wired onto the per-op hook
 (`operations/_preview.py`, #1437) by an import side-effect in the package
 `__init__`. They give the approval reviewer a resource-centric view at park
@@ -313,6 +382,9 @@ use:
 | `keycloak.group.create` | `{resource, name, parent_id, realm, attribute_keys, attributes}` |
 | `keycloak.group.update_attributes` | `{resource, id, name, realm, replace, attribute_keys, attributes}` |
 | `keycloak.group.member.add` / `.member.remove` | `{resource, action, user_id, username, group_id, group_name, realm}` |
+| `keycloak.user.delete` | `{blast_radius}` — user name, enabled or not, groups |
+| `keycloak.group.delete` | `{blast_radius}` — name, path, member count (up to 1000), sub-group count; direct sub-groups as children |
+| `keycloak.client.delete` | `{blast_radius}` — client id, enabled or not, public or confidential; its service-account user as a child; never the secret |
 
 The group builders surface `attribute_keys` (which attributes change,
 e.g. `tenant_id` / `tenant_role`) and echo the attribute map scrubbed —
@@ -333,9 +405,12 @@ cleartext secret reaches the durable `proposed_effect` row. A Vault-sourced
 password (`password_secret_ref`) is a path, not a secret, so it is surfaced
 as `password_source: "vault"` + the ref. The other six write ops fall
 through to the generic params-echo
-default. The builders are pure (no connector I/O) and so fail-soft by
-construction; see [`approvals.md`](approvals.md) "`proposed_effect` builder
-hook" for the registry contract.
+default. Most builders are pure (no connector I/O) and so fail-soft by
+construction. The three delete builders are not: they read the object live
+(so the egress-free `preview_operation` path, which has no connector, gets
+no card from them) and raise on purpose to refuse a delete. See
+[`approvals.md`](approvals.md) "`proposed_effect` builder hook" for the
+registry contract.
 
 **Spec-reconcile lane (#2988).** Every request path the connector dispatches
 lives as a `_*_PATH` template constant in
@@ -348,8 +423,8 @@ Keycloak spec quirk). The lane
 [`backend/tests/test_connectors_keycloak_spec_reconcile.py`](../../backend/tests/test_connectors_keycloak_spec_reconcile.py)
 (the #2980 harness; parse-only, runs in the required unit sweep, uniform
 skip when the shelf is unconfigured) introspects those live constants and
-asserts all 29 reconciled `METHOD:/path` op_ids (19 at #2988, +10 group
-paths at #3280) are served by the pinned
+asserts all 33 reconciled `METHOD:/path` op_ids (19 at #2988, +10 group
+paths at #3280, +4 delete paths at #3944) are served by the pinned
 `keycloak-26.3` shelf spec (`keycloak-admin-openapi.json` — the vendor's
 Admin REST API OpenAPI at the lab's deployed 26.3.3, from Maven Central
 `org.keycloak:keycloak-api-docs-dist:26.3.3`, Apache-2.0). Two dispatched
@@ -394,10 +469,8 @@ Resolved through `resolve_realm_config`, which tolerates a missing
 - `keycloak.idp.create` (identity-provider federation) is deferred — not
   exercised by the bootstrap scripts (#1406). A future task can add it
   under the same registrar walk.
-- The write ops ship no **object** deletes — no client/user/scope/group
-  removal. `keycloak.group.member.remove` is the one DELETE (it removes a
-  group *membership*, not the group), added by #3280; object deletion is a
-  separate follow-up if an operator workflow needs it.
+- Object deletes cover users, groups and clients (#3944). There is no
+  realm or client-scope delete.
 - No logout-revoke on `aclose` — admin access tokens are short-lived;
   revoke-on-close is deferred (same posture as NSX / vRLI).
 - `/admin/serverinfo` is undocumented (though stable across 26.x); the
@@ -407,6 +480,7 @@ Resolved through `resolve_realm_config`, which tolerates a missing
 
 - Issue: https://github.com/evoila/meho/issues/1393
 - Group-lifecycle write ops: https://github.com/evoila/meho/issues/3280
+- Governed user / group / client deletes: https://github.com/evoila/meho/issues/3944
 - Credential whitespace strip + token error_description: https://github.com/evoila/meho/issues/1474
 - Parent initiative: https://github.com/evoila/meho/issues/1388
 - Keycloak token endpoint + client_credentials grant:

@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import Any
 
 from meho_backplane.connectors.keycloak.ops_read import _UUID_PATTERN, KeycloakOp
+from meho_backplane.connectors.keycloak.ops_write_delete_schemas import DELETE_WRITE_OPS
 from meho_backplane.connectors.keycloak.ops_write_groups_schemas import (
     GROUP_WRITE_OPS,
     WHEN_TO_USE_GROUP_WRITE,
@@ -45,7 +46,8 @@ _WHEN_TO_USE_CLIENT_WRITE = (
     "ClientRepresentation under ``representation``. Updates key on the "
     "internal UUID — pass ``id`` directly, or pass ``client_id`` (the "
     "human clientId) for name→UUID resolution. Create is idempotent on a "
-    "409 already-exists."
+    "409 already-exists. ``keycloak.client.delete`` removes a client for good "
+    "(destructive: a second person must approve, preview first)."
 )
 
 _WHEN_TO_USE_CLIENT_SCOPE_WRITE = (
@@ -72,7 +74,9 @@ _WHEN_TO_USE_USER_WRITE = (
     "(a Vault KV-v2 path; optional ``password_secret_mount`` / "
     "``password_secret_key``) and the connector reads it from Vault under "
     "your identity. Create keys on ``username`` (idempotent on a 409); "
-    "reset keys on the user UUID (``id``) or ``username`` for resolution."
+    "reset keys on the user UUID (``id``) or ``username`` for resolution. "
+    "``keycloak.user.delete`` removes a user for good (destructive: a second "
+    "person must approve, preview first)."
 )
 
 _WHEN_TO_USE_ROLE_MAPPING_WRITE = (
@@ -491,4 +495,7 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
     # Group-lifecycle write ops (#3280) — metadata table lives in the sibling
     # ``ops_write_groups_schemas`` module (handlers in ``ops_write_groups``).
     *GROUP_WRITE_OPS,
+    # Governed user / group / client deletes (#3944) — rows in
+    # ``ops_write_delete_schemas``, handlers in ``ops_write_delete``.
+    *DELETE_WRITE_OPS,
 )

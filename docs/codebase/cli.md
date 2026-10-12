@@ -1163,6 +1163,15 @@ verbs; both hit the same backend functions in
 The CLI `operation preview` verb + `call --preview-hash` flag (#3293)
 give operators the same destructive-tier preview/dispatch pair the MCP
 `preview_operation` + `call_operation(preview_hash)` tools give agents.
+
+A vendor verb can run the same two steps itself. The shared
+`cli/internal/dispatch` core has `Connector.Preview` (posts to
+`/api/v1/operations/preview`) and `Connector.CallWithPreviewHash` (a
+`Call` that also sends `preview_hash`). The Keycloak delete verbs (#3944,
+`meho keycloak user|group|client delete`) use them: without
+`--preview-hash` the verb only previews and prints the hash (nothing is
+deleted, nothing waits for approval); run again with `--preview-hash <hash>`
+and the request waits until a second person approves it.
 The fourth route `GET /api/v1/operations/{descriptor_id}` (tenant-
 admin diagnostic for `llm_instructions` inspection) is deferred — the
 G0.6-T13 DoD was "three CLI verbs", not four.

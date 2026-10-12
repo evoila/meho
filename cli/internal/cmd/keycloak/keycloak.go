@@ -27,6 +27,13 @@
 //   - `meho keycloak user reset-password (--id|--username) --password-secret-ref R`
 //   - `meho keycloak role-mapping assign (--id|--username) --role R`
 //
+// #3944 adds the destructive delete verbs (a second person must approve;
+// the verb previews first, then asks for approval with --preview-hash):
+//
+//   - `meho keycloak user delete (--id|--username)`
+//   - `meho keycloak group delete (--id|--name) [--delete-subgroups]`
+//   - `meho keycloak client delete (--id|--client-id)`
+//
 // User passwords are NEVER passed inline — only a Vault path
 // (--password-secret-ref) — so the password never lands in shell history
 // or op params.
@@ -104,7 +111,8 @@ func NewRootCmd() *cobra.Command {
 			"type the connector ID on every command. Read verbs are safe;\n" +
 			"the write verbs (create / update / reset-password / assign) are\n" +
 			"approval-gated — every write requires human approval through the\n" +
-			"queue before it dispatches.\n\n" +
+			"queue before it dispatches. The delete verbs are destructive: they\n" +
+			"preview first, and a second person must approve.\n\n" +
 			"Per CLAUDE.md postulate 5, these alias verbs are operator-only\n" +
 			"ergonomics — they are not mirrored on the MCP surface. Agents\n" +
 			"continue to use search_operations / call_operation against the\n" +

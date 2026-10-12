@@ -2668,7 +2668,7 @@ meho keycloak
 
 ### `meho keycloak client`
 
-Keycloak client sub-verbs (list, get, create, update)
+Keycloak client sub-verbs (list, get, create, update, delete)
 
 ```
 meho keycloak client
@@ -2685,6 +2685,21 @@ meho keycloak client create [flags]
 - `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
 - `--json` — emit the full OperationResult envelope as JSON
 - `--representation-file`, `-f` — path to a JSON file with the ClientRepresentation body (required)
+- `--target` — target slug to dispatch against (required)
+
+#### `meho keycloak client delete`
+
+Delete a Keycloak client (destructive, a second person must approve)
+
+```
+meho keycloak client delete [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
+- `--client-id` — the exact clientId, the client's name (used when --id is absent)
+- `--id` — the client's internal UUID
+- `--json` — emit the full OperationResult envelope as JSON
+- `--preview-hash` — the preview_hash from a first run of this command; with it, the delete waits for approval
 - `--target` — target slug to dispatch against (required)
 
 #### `meho keycloak client get`
@@ -2764,7 +2779,7 @@ meho keycloak client-scope list [flags]
 
 ### `meho keycloak group`
 
-Keycloak group sub-verbs (list, create, update-attributes, member)
+Keycloak group sub-verbs (list, create, update-attributes, member, delete)
 
 ```
 meho keycloak group
@@ -2783,6 +2798,22 @@ meho keycloak group create [flags]
 - `--json` — emit the full OperationResult envelope as JSON
 - `--name` — the group name (required)
 - `--parent-id` — parent group UUID to nest under (omit for top-level)
+- `--target` — target slug to dispatch against (required)
+
+#### `meho keycloak group delete`
+
+Delete a Keycloak group (destructive, a second person must approve)
+
+```
+meho keycloak group delete [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
+- `--delete-subgroups` — also delete the group's sub-groups (a group with sub-groups is refused without this flag)
+- `--id` — the group's internal UUID
+- `--json` — emit the full OperationResult envelope as JSON
+- `--name` — the exact group name, searched at every level (used when --id is absent)
+- `--preview-hash` — the preview_hash from a first run of this command; with it, the delete waits for approval
 - `--target` — target slug to dispatch against (required)
 
 #### `meho keycloak group list`
@@ -2982,7 +3013,7 @@ meho keycloak role-mapping get [flags]
 
 ### `meho keycloak user`
 
-Keycloak user sub-verbs (list, create, reset-password)
+Keycloak user sub-verbs (list, create, reset-password, delete)
 
 ```
 meho keycloak user
@@ -3004,6 +3035,21 @@ meho keycloak user create [flags]
 - `--representation-file`, `-f` — path to a JSON file with the UserRepresentation body (required)
 - `--target` — target slug to dispatch against (required)
 - `--temporary` — force a password change on first login
+
+#### `meho keycloak user delete`
+
+Delete a Keycloak user (destructive, a second person must approve)
+
+```
+meho keycloak user delete [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
+- `--id` — the user's internal UUID
+- `--json` — emit the full OperationResult envelope as JSON
+- `--preview-hash` — the preview_hash from a first run of this command; with it, the delete waits for approval
+- `--target` — target slug to dispatch against (required)
+- `--username` — the exact username (used when --id is absent)
 
 #### `meho keycloak user list`
 

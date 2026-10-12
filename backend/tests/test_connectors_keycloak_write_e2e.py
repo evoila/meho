@@ -93,12 +93,16 @@ EXPECTED_WRITE_OP_IDS: tuple[str, ...] = (
     "keycloak.group.update_attributes",
     "keycloak.group.member.add",
     "keycloak.group.member.remove",
+    "keycloak.user.delete",
+    "keycloak.group.delete",
+    "keycloak.client.delete",
 )
 
 #: Expected (safety_level, requires_approval) per op — the registration
 #: contract the issue's op table pins. The group-lifecycle ops (#3280) are
 #: all ``dangerous`` (privilege-adjacent: group membership + attributes drive
-#: the backplane's tenant claims).
+#: the backplane's tenant claims). The governed deletes (#3944) are
+#: ``destructive``: a second person must approve.
 EXPECTED_SAFETY: dict[str, str] = {
     "keycloak.realm.create": "dangerous",
     "keycloak.realm.update": "caution",
@@ -113,6 +117,9 @@ EXPECTED_SAFETY: dict[str, str] = {
     "keycloak.group.update_attributes": "dangerous",
     "keycloak.group.member.add": "dangerous",
     "keycloak.group.member.remove": "dangerous",
+    "keycloak.user.delete": "destructive",
+    "keycloak.group.delete": "destructive",
+    "keycloak.client.delete": "destructive",
 }
 
 
@@ -259,10 +266,10 @@ async def _dispatch(op_id: str, params: dict[str, Any]) -> dict[str, Any]:
 
 
 def test_write_ops_registration_set() -> None:
-    """WRITE_OPS carries exactly the thirteen write ops (nine + four group ops)."""
+    """WRITE_OPS carries exactly the sixteen write ops (nine + four group ops + three deletes)."""
     op_ids = {op.op_id for op in WRITE_OPS}
     assert op_ids == set(EXPECTED_WRITE_OP_IDS)
-    assert len(WRITE_OPS) == 13
+    assert len(WRITE_OPS) == 16
 
 
 def test_write_ops_safety_levels_and_approval() -> None:

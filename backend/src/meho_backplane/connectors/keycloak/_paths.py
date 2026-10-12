@@ -56,6 +56,7 @@ _CLIENT_PROTOCOL_MAPPERS_PATH = (
 )
 _CLIENT_SCOPES_PATH = "/admin/realms/{realm}/client-scopes"
 _USERS_PATH = "/admin/realms/{realm}/users"
+_USER_PATH = "/admin/realms/{realm}/users/{user-id}"
 _USER_ROLE_MAPPINGS_PATH = "/admin/realms/{realm}/users/{user-id}/role-mappings"
 _USER_ROLE_MAPPINGS_REALM_PATH = "/admin/realms/{realm}/users/{user-id}/role-mappings/realm"
 _USER_RESET_PASSWORD_PATH = "/admin/realms/{realm}/users/{user-id}/reset-password"

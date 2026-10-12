@@ -65,7 +65,7 @@ Set the variables in your shell profile, or drop them in the config file:
 
 ```bash
 # ~/.config/meho/plugin.env
-MEHO_INSTANCE="https://meho.evba.lab"
+MEHO_INSTANCE="https://meho.example.internal"
 # MEHO_CA_CERT="/etc/ssl/internal-ca.pem"   # only on internal-CA deploys
 ```
 

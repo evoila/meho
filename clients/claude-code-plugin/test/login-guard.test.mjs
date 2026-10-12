@@ -145,8 +145,8 @@ test("an unfinished login stops after the time limit and frees the port", async 
   const { code, ms } = await run.exited;
   assert.equal(code, 1);
   assert.ok(ms < 8000, `took ${ms} ms`);
-  assert.match(run.stderr, /did not finish connecting within 1 second/);
-  assert.match(run.stderr, /Run \/mcp, pick meho, and reconnect/);
+  assert.match(run.stderr, /did not connect within 1 second/);
+  assert.match(run.stderr, /Finish any open MEHO login.*run \/mcp, pick meho, and reconnect/);
   assert.equal(await portIsFree(port), true, "the port must be free again");
 });
 
@@ -159,6 +159,28 @@ test("a connected session is not stopped by the time limit", async () => {
   const { code } = await run.exited;
   assert.equal(code, 0, run.stderr);
   assert.deepEqual(run.lines, ['{"jsonrpc":"2.0","id":1,"result":{}}']);
+});
+
+test("a too-large time limit is capped, not turned into an instant stop", async () => {
+  // Node fires a timer of 2^31 ms or more after 1 ms. The guard caps the
+  // limit at one day instead.
+  const entry = stubEntry(`
+    setTimeout(() => process.stdout.write('{"jsonrpc":"2.0","id":1,"result":{}}\\n'), 500);
+    setTimeout(() => process.exit(0), 1000);
+  `);
+  const run = startGuard(entry, [], { MEHO_MCP_LOGIN_TIMEOUT: "99999999" });
+  const { code } = await run.exited;
+  assert.equal(code, 0, run.stderr);
+  assert.match(run.stderr, /more than one day\. Using 86400/);
+  assert.doesNotMatch(run.stderr, /TimeoutOverflowWarning|did not connect/);
+});
+
+test("a bad time limit value is reported and the default is used", async () => {
+  const entry = stubEntry(`process.exit(0);`);
+  const run = startGuard(entry, [], { MEHO_MCP_LOGIN_TIMEOUT: "abc" });
+  const { code } = await run.exited;
+  assert.equal(code, 0, run.stderr);
+  assert.match(run.stderr, /ignoring MEHO_MCP_LOGIN_TIMEOUT=abc.*Using 300/);
 });
 
 test("an expired login fails the call at once with a clear message", async () => {
@@ -399,7 +421,7 @@ e2e("e2e: an unfinished login stops, frees the callback port and the lockfile", 
     const { code, ms } = await run.exited;
     assert.equal(code, 1);
     assert.ok(ms < 15000, `took ${ms} ms`);
-    assert.match(run.stderr, /did not finish connecting within 2 seconds/);
+    assert.match(run.stderr, /did not connect within 2 seconds/);
     assert.equal(await portIsFree(port), true, "the callback port must be free again");
     const hash = createHash("md5").update(fake.url).digest("hex");
     const lock = join(configDir, `mcp-remote-${mcpRemoteConfigVersion()}`, `${hash}_lock.json`);
@@ -428,7 +450,7 @@ e2e("e2e: a second session does not crash while another one waits for a login", 
     const { code, ms } = await second.exited;
     assert.equal(code, 1);
     assert.ok(ms < 15000, `took ${ms} ms`);
-    assert.match(second.stderr, /did not finish connecting within 2 seconds/);
+    assert.match(second.stderr, /did not connect within 2 seconds/);
     assert.doesNotMatch(second.stderr, /EADDRINUSE/);
     first.child.kill("SIGTERM");
     await first.exited;

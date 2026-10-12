@@ -59,7 +59,7 @@ to point it at a tenant:
 | `MEHO_CA_CERT` | Path to an internal-CA bundle; exported as `NODE_EXTRA_CA_CERTS` for the Node-based shim. Only needed on internal-CA deploys. |
 | `MEHO_MCP_CLIENT_ID` | Pre-registered public OAuth client id the shim presents to Keycloak (default `meho-mcp`). Override only if the realm registers the client under a different name. |
 | `MEHO_MCP_SCOPES` | Space-separated OAuth scopes the shim requests (default `mcp:read mcp:execute offline_access`: the working surface plus a [login that lasts](#how-long-the-login-lasts)). It replaces the whole list. Set it to opt into [elevated operator mode](#elevated-operator-mode-opt-in). Empty or whitespace-only falls back to the default. |
-| `MEHO_MCP_LOGIN_TIMEOUT` | Seconds the shim waits for the connection, including a browser login, before it stops (default `300`). See [When the login expires or is not finished](#when-the-login-expires-or-is-not-finished). |
+| `MEHO_MCP_LOGIN_TIMEOUT` | Seconds the shim waits for the connection, including a browser login, before it stops (default `300`, at most `86400`). See [When the login expires or is not finished](#when-the-login-expires-or-is-not-finished). |
 | `MEHO_PLUGIN_CONFIG` | Override the config-file location (default `${XDG_CONFIG_HOME:-~/.config}/meho/plugin.env`). |
 
 Set the variables in your shell profile, or drop them in the config file:
@@ -201,16 +201,27 @@ of a login:
   connection. This frees the local callback port, so the next session can log
   in. The MCP log then has a line starting with `meho plugin:` that says what
   happened.
-- **Two sessions need a login at the same time.** The second session waits for
-  the first login and uses it when it is done. If it is not done in time, the
-  second session stops with the same `meho plugin:` message. It does not
-  crash. Claude Code may stop waiting for the second session earlier (its
-  startup timeout); then reconnect it with `/mcp` after the login is done.
+- **Two sessions need a login at the same time.** The second session does not
+  crash. But it does not pick up the other session's login either, even when
+  that login is done: it keeps waiting until the shim stops it with the same
+  `meho plugin:` message. So finish the login in the first session's browser
+  tab, then reconnect the second session with `/mcp`. You do not need to wait
+  for the 5 minutes.
+- **Several MEHO login tabs are open.** Only one of them can finish. Close
+  them all, then reconnect once.
+
+**Known limit.** A session that finished its login keeps the local callback
+port and lockfile for as long as it runs. Another session that later needs
+a new login then cannot finish it. If a login does not finish, reconnect
+`meho` with `/mcp` (or close Claude Code) in your other sessions first, then
+try again. Tracked in #4000.
 
 `mcp-remote` keeps saved logins in `~/.mcp-auth/mcp-remote-0.1.38/` (the
 pinned `mcp-remote@0.1.39` names the folder after its previous version). The
 folder changed with this version of the plugin, so expect one new browser
-login after you update.
+login after you update. The Claude Desktop bundle still uses the old folder
+`~/.mcp-auth/mcp-remote-0.1.37/`. If you do not use Claude Desktop, you can
+delete that old folder.
 
 ## Layer-2 skills → template sections
 

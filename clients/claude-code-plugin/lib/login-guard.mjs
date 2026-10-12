@@ -15,10 +15,12 @@
 //    nobody finishes the login, that process stays forever and blocks the
 //    port for every other Claude Code session. The guard stops the process
 //    when it has not connected within MEHO_MCP_LOGIN_TIMEOUT seconds
-//    (default 300). "Connected" means mcp-remote wrote its first message to
-//    stdout: it only does that after the connection to MEHO works. Stopping
-//    the process frees the port, and mcp-remote's own exit handler removes
-//    its lockfile.
+//    (default 300, at most one day). "Connected" means mcp-remote wrote its
+//    first message to stdout: it only does that after the connection to MEHO
+//    works. Stopping the process frees the port, and mcp-remote's own exit
+//    handler removes its lockfile. The same limit also ends a second session
+//    that waits for another session's login: mcp-remote 0.1.39 does not pick
+//    up that login, it keeps waiting.
 //
 // 2. A clear message when the login expires during a session. When a call
 //    needs a new login, the pinned mcp-remote answers the call at once with
@@ -35,6 +37,9 @@
 import { pathToFileURL } from "node:url";
 
 const DEFAULT_LIMIT_SECONDS = 300;
+// One day. Node cannot hold a timer longer than about 24.8 days; a bigger
+// value would make the timer fire at once.
+const MAX_LIMIT_SECONDS = 86400;
 const FORWARD_FAILED = "Failed to forward message to remote server:";
 const LOGIN_EXPIRED_MESSAGE =
   "Your MEHO login has expired. Run /mcp, pick meho, and reconnect to log in again.";
@@ -45,10 +50,23 @@ function say(text) {
 
 function limitSeconds() {
   const raw = (process.env.MEHO_MCP_LOGIN_TIMEOUT ?? "").trim();
+  if (!raw) return DEFAULT_LIMIT_SECONDS;
   const value = Number(raw);
-  return raw && Number.isInteger(value) && value > 0
-    ? value
-    : DEFAULT_LIMIT_SECONDS;
+  if (!Number.isInteger(value) || value <= 0) {
+    say(
+      `ignoring MEHO_MCP_LOGIN_TIMEOUT=${raw}: it must be a whole number ` +
+        `of seconds above 0. Using ${DEFAULT_LIMIT_SECONDS}.`,
+    );
+    return DEFAULT_LIMIT_SECONDS;
+  }
+  if (value > MAX_LIMIT_SECONDS) {
+    say(
+      `MEHO_MCP_LOGIN_TIMEOUT=${raw} is more than one day. ` +
+        `Using ${MAX_LIMIT_SECONDS}.`,
+    );
+    return MAX_LIMIT_SECONDS;
+  }
+  return value;
 }
 
 // Return the JSON-RPC line with the clear message, or null when the chunk is
@@ -86,7 +104,6 @@ if (!entry) {
 }
 
 const limit = limitSeconds();
-delete process.env.MEHO_MCP_LOGIN_TIMEOUT;
 const limitText =
   limit % 60 === 0
     ? `${limit / 60} minute${limit === 60 ? "" : "s"}`
@@ -96,9 +113,9 @@ const limitText =
 // the timer alone never keeps the process alive.
 const connectTimer = setTimeout(() => {
   say(
-    `MEHO did not finish connecting within ${limitText}, so this ` +
-      "attempt stopped. If a MEHO login page is open in your browser, it " +
-      "was not finished. Run /mcp, pick meho, and reconnect to log in again.",
+    `MEHO did not connect within ${limitText}, so this attempt stopped. ` +
+      "Finish any open MEHO login in your browser, then run /mcp, pick " +
+      "meho, and reconnect.",
   );
   process.exit(1);
 }, limit * 1000);

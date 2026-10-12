@@ -117,21 +117,34 @@ browser tab that opens. If Claude Code stops waiting before you finish,
 finish the login anyway and reconnect once more. If a MEHO login tab
 opened when the call failed, you can close it.
 
-## The plugin stops with "MEHO did not finish connecting" (Claude Code plugin)
+## The plugin stops with "MEHO did not connect" (Claude Code plugin)
 
 **Symptom.** `meho` shows as failed, and the MCP log has a line like
-`meho plugin: MEHO did not finish connecting within 5 minutes, so this
-attempt stopped.`
+`meho plugin: MEHO did not connect within 5 minutes, so this attempt
+stopped.`
 
-**Wall.** A browser login started, but nobody finished it in time. Or
-another Claude Code session was waiting for its own login at the same
-time. The plugin stops such a connect after `MEHO_MCP_LOGIN_TIMEOUT`
-seconds (default 300). That frees the local callback port, so the next
-attempt can log in. Older plugin versions waited forever instead, and
-every later session failed with `listen EADDRINUSE`.
+**Wall.** The connect did not finish within `MEHO_MCP_LOGIN_TIMEOUT`
+seconds (default 300). Two common reasons:
 
-**Fix.** Run `/mcp`, pick `meho`, reconnect, and finish the browser login.
-If the login tab opens behind your terminal, look for it there.
+- A browser login started, but nobody finished it in time.
+- Another Claude Code session was running a login at the same time. This
+  session then waits, and it does not pick up the other session's login
+  even when that login is done.
+
+Stopping frees the local callback port, so the next attempt can log in.
+Older plugin versions waited forever instead, and every later session
+failed with `listen EADDRINUSE`.
+
+**Fix.** Finish any open MEHO login in your browser. Then run `/mcp`, pick
+`meho`, and reconnect. If the login tab opens behind your terminal, look
+for it there. If several MEHO login tabs are open, close them all and
+reconnect once.
+
+**Known limit.** A session that finished its login keeps the callback
+port while it runs, so a new login in another session may not finish. Then
+reconnect `meho` (or close Claude Code) in your other sessions first, and
+try again. This is tracked in
+[evoila/meho#4000](https://github.com/evoila/meho/issues/4000).
 
 ## Token issues but every call 401s
 

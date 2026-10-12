@@ -21,6 +21,11 @@ if [ -f "$config_file" ]; then
   # shellcheck disable=SC1090
   . "$config_file"
 fi
+# The login guard (lib/login-guard.mjs) is a separate node process and reads
+# only exported variables, so a value set in the config file must be exported.
+if [ -n "${MEHO_MCP_LOGIN_TIMEOUT:-}" ]; then
+  export MEHO_MCP_LOGIN_TIMEOUT
+fi
 
 # Resolve the backplane MCP endpoint. MEHO_MCP_URL wins; otherwise derive
 # it from MEHO_INSTANCE by appending /mcp.
@@ -86,8 +91,8 @@ fi
 # resolve mcp-remote's *transitive* graph against upstream semver ranges with
 # no committed integrity check. `npm ci` instead installs the exact tree
 # pinned in package-lock.json — a transitive version cannot change without a
-# reviewed lockfile update (evoila-bosnia/meho-internal#309; mirrors the
-# desktop .mcpb bundle's npm-ci vendoring).
+# reviewed lockfile update (mirrors the desktop .mcpb bundle's npm-ci
+# vendoring).
 if ! command -v npm >/dev/null 2>&1; then
   {
     echo "meho plugin: 'npm' was not found on PATH. It is required to vendor"

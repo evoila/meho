@@ -164,7 +164,21 @@ test("the shim runs mcp-remote through the login guard", () => {
     extraEnv: { STUB_HANG: "1", MEHO_MCP_LOGIN_TIMEOUT: "1" },
   });
   assert.equal(res.status, 1, `expected the guard to stop the stub: ${res.stderr}`);
-  assert.match(res.stderr, /did not finish connecting within 1 second/);
+  assert.match(res.stderr, /did not connect within 1 second/);
+});
+
+test("MEHO_MCP_LOGIN_TIMEOUT set in the config file reaches the guard", () => {
+  // plugin.env is sourced, not exported; the shim must export this value
+  // for the guard, which runs as a separate node process.
+  const cache = freshCache();
+  const config = join(cache, "plugin.env");
+  writeFileSync(config, "MEHO_MCP_LOGIN_TIMEOUT=1\n");
+  const { res } = runWrapper({
+    cache,
+    extraEnv: { STUB_HANG: "1", MEHO_PLUGIN_CONFIG: config },
+  });
+  assert.equal(res.status, 1, `expected the guard to stop the stub: ${res.stderr}`);
+  assert.match(res.stderr, /did not connect within 1 second/);
 });
 
 test("a warm cache is not re-installed on the next launch", () => {

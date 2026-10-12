@@ -9,6 +9,34 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.35.21](https://github.com/evoila/meho/releases/tag/v0.35.21) — 2026-10-13
+
+- **Security fix: PowerShell connectors.** This release fixes a
+  critical command injection in the PowerShell-based connectors:
+  `msad`, `winsrv`, `wsfc`, `hyperv`, `windows_dns` and `holodeck`.
+  A value with a typographic single quote could end a quoted
+  PowerShell string early, and the rest of the value ran as PowerShell
+  on the target host. MEHO now handles all five single-quote
+  characters. Please upgrade. Advisory: GHSA-v2v2-4gh2-m4q8.
+- **Security fixes in the client packages.** The Claude Code plugin and
+  the Claude Desktop bundle get newer `proxy-addr` and `undici`
+  versions that fix known vulnerabilities.
+- **Fully remove a Vault secret.** The new `vault.kv.metadata.delete`
+  deletes every version of a Vault secret and its metadata. This
+  cannot be undone, so a second person must approve every call. The
+  approver sees the path, never the secret value.
+- **Delete a vCenter DRS rule.** The new
+  `vmware.composite.cluster.drs_rule.delete` removes one DRS rule from
+  a cluster. A second person must approve every call, after seeing the
+  rule on the approval card.
+- **Longer logins, and no hanging calls.** The Claude Code plugin and
+  the Claude Desktop bundle now keep their login up to the limit your
+  Keycloak realm sets (48 hours is recommended), not about 30 minutes.
+  In Claude Code, a MEHO call no longer hangs while a login waits in
+  the browser: it fails with a clear message, or stops after 5
+  minutes. Run `claude plugin update meho@meho`, restart Claude Code,
+  and log in once.
+
 ## [v0.35.20](https://github.com/evoila/meho/releases/tag/v0.35.20) — 2026-10-12
 
 - **Security fix: the CLI is built with a newer Go.** The `meho` CLI

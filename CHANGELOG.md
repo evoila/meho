@@ -90,6 +90,159 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.35.21] - 2026-10-13
+
+This release fixes a critical PowerShell command injection in the
+PowerShell-based connectors (GHSA-v2v2-4gh2-m4q8). Please upgrade. The
+release also adds two governed deletes: `vault.kv.metadata.delete`
+fully removes a Vault secret, and
+`vmware.composite.cluster.drs_rule.delete` removes a DRS rule from a
+vCenter cluster. A second person must approve every call of both. The
+Claude Code plugin and the Claude Desktop bundle now keep their login
+much longer, and in Claude Code a MEHO call no longer hangs because of
+a login. Plugin users run `claude plugin update meho@meho`, restart
+Claude Code and log in once. No database migration; no backplane
+settings change.
+
+### Security — PowerShell connectors now handle every kind of single quote (GHSA-v2v2-4gh2-m4q8)
+
+- Fixed a PowerShell command injection in the PowerShell-based
+  connectors: `msad`, `winsrv`, `wsfc`, `hyperv`, `windows_dns` and
+  `holodeck`. Advisory: GHSA-v2v2-4gh2-m4q8, rated critical. These
+  connectors put caller values inside single-quoted PowerShell strings.
+  The shared helper `ps_single_quote` (`connectors/_shared/pwsh.py`)
+  escaped only the ASCII apostrophe (`'`). PowerShell also reads four
+  typographic quote characters as single quotes: U+2018, U+2019, U+201A
+  and U+201B. A value with one of them ended the string early, and the
+  rest of the value ran as PowerShell on the target host, with the
+  rights of the account MEHO uses there. Any caller allowed to run an
+  affected operation could do this, AI agents included. Some affected
+  operations are `safe` reads that run without approval, for example
+  the Active Directory user search. Affected releases: Holodeck
+  `pod.info` from 0.6.0, `windows_dns` from 0.28.0, and `msad`,
+  `winsrv`, `wsfc` and `hyperv` from 0.32.0, up to 0.35.20. What
+  changed:
+  - The helper now doubles all five single-quote characters, so a value
+    always stays one string.
+  - The helper now refuses any value that is not a string.
+  - `holodeck.pod.info` and `holodeck.instance.start` quoted a value
+    with their own code. They now use the shared helper.
+  - Extra hardening: `winsrv.power.reboot` and `winsrv.power.shutdown`
+    pass their optional `message` to `shutdown.exe` as a program
+    argument. The message can now have at most 512 characters. It must
+    not contain double quotes, backslashes or control characters. It
+    must not start with `/` or `-`.
+
+  **Operators:** upgrade to 0.35.21. Until then, the advisory lists
+  workarounds. After the upgrade, a reboot or shutdown call whose
+  message breaks the new rule is refused before it runs or waits for
+  approval. No database migration; no settings change.
+
+### Security
+
+- Client dependencies patched, in the lockfiles of the Claude Code
+  plugin and the Claude Desktop bundle. `proxy-addr` moves from 2.0.7
+  to 2.0.8 (CVE-2026-90711 / GHSA-jqcg-44mw-7w3h, rated critical). Our
+  clients cannot reach this flaw, because mcp-remote never sets
+  `trust proxy`. `undici` moves to 7.30.0 in both lockfiles. The plugin
+  had 7.29.1. The bundle had 7.29.0, so it now also gets the undici
+  7.29.1 fixes for ten upstream advisories. The backplane image, the
+  chart and the CLI do not change. (#3994)
+
+### Added
+
+- MEHO can now remove a Vault KV v2 secret for good with the new
+  `vault.kv.metadata.delete` op (#3424 / #4007). It deletes every
+  version of the secret and its metadata, and this cannot be undone.
+  Before, the only delete was the soft `vault.kv.delete`, which Vault
+  can undo, so a leaked or temporary credential could only be fully
+  purged with the Vault CLI. The op uses the "destructive" risk level:
+  a second person must approve every call, agents are denied, and the
+  caller must run `preview_operation` first. The approver sees the
+  mount and path, never a secret value. If the path is already gone,
+  nothing changes and the result says `unchanged`, so it is safe to run
+  twice. The op reports `deleted` only after a read finds the secret
+  gone. The Vault role needs `read` and `delete` on
+  `<mount>/metadata/<path>`. Without them, the approval card shows
+  "will be denied". Tested against a fake Vault; not yet run against a
+  live Vault.
+- MEHO can now remove a DRS rule from a vCenter cluster (#4005 / #4008).
+  A DRS rule tells vCenter where to run VMs, for example "keep these
+  two VMs on different hosts". The new operation
+  `vmware.composite.cluster.drs_rule.delete` on the `vmware-rest-9.0`
+  connector takes the cluster and the rule name and works for every
+  rule type (keep together, keep apart, VM-to-host); VM groups and host
+  groups stay. It is a destructive operation: a second person always
+  approves it, after seeing the rule, its type and its VMs or groups on
+  the approval card. When no rule has the name, nothing changes and the
+  result says `unchanged`, so it is safe to run twice. When two rules
+  share the name, it refuses. It reports `deleted` only after a new
+  read of the cluster rules no longer shows the rule. No config action
+  required. Tested against fakes of the vSphere answers; not yet run
+  against a live vCenter.
+
+### Fixed
+
+- The Claude Code plugin and the Claude Desktop bundle now ask Keycloak
+  for `offline_access`, so a login no longer ends after about 30
+  minutes with no MEHO use (#3995 / #3996). Before, the next MEHO call
+  then started a new browser login in the middle of the session, and
+  often nobody saw the browser tab.
+  - The default scopes are now `mcp:read mcp:execute offline_access`.
+    `MEHO_MCP_SCOPES` (and the bundle's `scopes` field) still replace
+    the whole list, as written.
+  - A login now lasts up to the realm's offline idle limit. The docs
+    recommend 48 hours on the `meho-mcp` client
+    (`client.offline.session.idle.timeout=172800`). Without that
+    setting, the realm's offline idle default applies (30 days by
+    default).
+  - **Realm admins:** the `meho-mcp` client must offer `offline_access`
+    as an optional client scope. `meho admin keycloak bootstrap-clients`
+    already sets this up. If the scope is missing, Keycloak refuses the
+    login with `invalid_scope`. The user also needs the
+    `offline_access` realm role; Keycloak's default roles give it.
+  - The docs said that Keycloak silently drops a scope the client does
+    not offer, for example `mcp:admin`. That was wrong: Keycloak
+    refuses the login with `invalid_scope`. The docs are fixed.
+  - Plugin version 0.30.1. The Desktop bundle takes its version from
+    the release.
+- A MEHO call in Claude Code never hangs because of a plugin login
+  (#3961 / #3999).
+  - A login that expired during a session: the call fails at once with
+    "Your MEHO login has expired. Run /mcp, pick meho, and reconnect to
+    log in again." Then `/mcp` shows `meho` as failed.
+  - A browser login that nobody finishes stops after 5 minutes. This
+    frees the local callback port. `MEHO_MCP_LOGIN_TIMEOUT` sets the
+    limit in seconds (default 300, capped at one day).
+  - A second session no longer crashes with `listen EADDRINUSE` while
+    another session waits for a login. It stops after the same limit.
+    Reconnect it with `/mcp` once the other login is done.
+  - The plugin now uses mcp-remote 0.1.39 (was 0.1.38) and runs it
+    through a small login guard, in the same process. Plugin version
+    0.30.2.
+  - **Users:** run `claude plugin update meho@meho`, restart Claude
+    Code, and log in once. mcp-remote 0.1.39 keeps the saved login in a
+    new folder, so the old login is not used.
+  - **Known limits:** a session that finished its login keeps the
+    callback port while it runs, so a new login in another session may
+    not finish (#4000). After an expired login, one browser tab with
+    the MEHO login may still open; you can close it. The Claude Desktop
+    bundle still uses mcp-remote 0.1.38 and has no login guard.
+
+### Changed
+
+- Docs and code comments no longer link into private repositories.
+  Readers of this public repository could not open those links. No
+  behaviour change. (#3970)
+- CI now runs the 42 chart tests. Before, the Python unit jobs had no
+  Helm, so these tests were always skipped. Each of these jobs now
+  installs Helm 3.16.4. In CI, the tests now fail instead of skip when
+  Helm is missing. The chart does not change. (#3991)
+- One chart test expected a render to work with Ingress turned off and
+  no MCP address set. The chart refuses that render on purpose, with a
+  clear error. The test now checks for that error. The chart does not
+  change. (#3977)
+
 ## [0.35.20] - 2026-10-12
 
 This release fixes security flaws in two dependencies. The new CLI

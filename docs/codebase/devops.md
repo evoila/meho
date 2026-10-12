@@ -1107,7 +1107,10 @@ shape (deterministic file-stride matrix + fan-in):
   false` so one red shard does not cancel the others; each shard keeps
   `--maxfail=1` for fast per-shard feedback. The `tests/integration` /
   `tests/migrations` exclusions and the `MEHO_SKIP_SPEC_INGEST_TESTS` G0.7
-  canary opt-out (#2980) are preserved on **every** shard.
+  canary opt-out (#2980) are preserved on **every** shard. Every shard also
+  installs Helm v3.16.4 (the same pinned `azure/setup-helm` step as
+  `chart.yml`) and sets `MEHO_REQUIRE_HELM=1`, so the `tests/test_chart_*.py`
+  render tests really run there and fail, not skip, if helm is missing.
 - **`python-unit-lane`** — the **fan-in** carrying the exact
   branch-protection required context `Python (ruff + mypy + pytest)`. It
   `needs: [changes, python-lint, python-unit-shard]` and, via `if: always()

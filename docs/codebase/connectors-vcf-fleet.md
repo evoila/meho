@@ -264,8 +264,8 @@ The runbook for end-to-end ingest + enable + verify is
 - Parent goal: <https://github.com/evoila/meho/issues/214>
 - Shared scaffolding (G3.6-T13): <https://github.com/evoila/meho/issues/841>
 - Sibling skeletons: vROps #829, vRLI #830, VCFA #832 (merged).
-- Consumer wrapper (authoritative contract):
-  <https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/vcf-fleet.sh>
+- Consumer wrapper (authoritative contract): `scripts/vcf-fleet.sh`
+  in the consumer's private repo.
 - VCF Fleet / vRSLCM API:
   <https://developer.broadcom.com/xapis/vrealize-suite-lifecycle-manager-api/latest/>
 - Spec-reconcile guard (#2993):

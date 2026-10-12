@@ -38,7 +38,7 @@ request.
 
 | File | Targets | Backed by |
 | --- | --- | --- |
-| [`values-rdc-example.yaml`](./values-rdc-example.yaml) | The RDC Hetzner lab (`*.evba.lab` hosts, rke2-infra ingress-nginx, cluster-internal Postgres + Vault + Keycloak). | The actual, private file lives in [`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc)'s `manifests/meho/values-rdc.yaml`; this file is the sanitized template for other Vault-+-Keycloak-+-Postgres-shaped labs. |
+| [`values-rdc-example.yaml`](./values-rdc-example.yaml) | The RDC Hetzner lab (`*.evba.lab` hosts, rke2-infra ingress-nginx, cluster-internal Postgres + Vault + Keycloak). | The actual, private file lives in `evoila-bosnia/claude-rdc-hetzner-dc`'s `manifests/meho/values-rdc.yaml`; this file is the sanitized template for other Vault-+-Keycloak-+-Postgres-shaped labs. |
 | [`values-gsm-example.yaml`](./values-gsm-example.yaml) | A **Vault-free, GCP-native** install (Initiative #2227) — credentials + the `/api/v1/health` federation proof resolve through GCP Secret Manager (`config.credentialBackend: gsm`) instead of Vault. `vault.address` is left blank; the schema requires it only when `credentialBackend: vault`. | The GSM SA-direct backend (#2230, Phase 1). `gsm.workloadIdentityFederation.*` is left empty here — for the per-operator token-exchange (WIF) shape see `values-gsm-wif-example.yaml`. |
 | [`values-gsm-wif-example.yaml`](./values-gsm-wif-example.yaml) | The GSM backend with **per-operator Workload Identity Federation** (#2232, Phase 2) — credential reads run under the calling operator's Keycloak identity, and the `gsm.workloadIdentityFederation.*` keys render first-class as `GSM_WIF_*` (no `extraEnv`, #2667). Targets the on-prem/no-ambient-identity shape, so it also enables the `checkRunner` service principal (#2642) that background dispatch needs. | The GSM WIF path (#2232); the `GSM_WIF_*` chart rendering landed in #2659. |
 
@@ -1001,7 +1001,7 @@ must carry it for all three surfaces to agree.
 > `defaultClientScopes: ["basic","roles","web-origins","acr"]`
 > explicitly in the admin-API request body, or to re-add each scope
 > via the admin console afterwards. The consumer's reference script
-> at [`scripts/keycloak-bootstrap-meho-cli.sh`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/issues/670)
+> at `scripts/keycloak-bootstrap-meho-cli.sh`
 > sets all four explicitly to be safe.
 
 #### Step 5 — Provision a user in `meho-admins` with a password
@@ -1567,9 +1567,9 @@ helm upgrade --install meho ./deploy/charts/meho/ \
 
 ## References
 
-- Parent Goal: [#11 — Deployable v0.1](https://github.com/evoila-bosnia/meho-internal/issues/11)
-- Parent Initiative: [#36 — G2.5 Helm chart](https://github.com/evoila-bosnia/meho-internal/issues/36)
-- This task: [#40 — values-rdc-example.yaml + ESO sync patterns documented](https://github.com/evoila-bosnia/meho-internal/issues/40)
+- Parent Goal: #11 — Deployable v0.1
+- Parent Initiative: #36 — G2.5 Helm chart
+- This task: #40 — values-rdc-example.yaml + ESO sync patterns documented
 - External Secrets Operator: <https://external-secrets.io/>
 - ESO Vault provider: <https://external-secrets.io/latest/provider/hashicorp-vault/>
 - ESO ExternalSecret API: <https://external-secrets.io/latest/api/externalsecret/>

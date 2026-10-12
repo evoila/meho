@@ -37,7 +37,7 @@ per-surface; the retire-checklist verb verdicts each surface independently.
 
 | Surface | Pre-MEHO artefact | MEHO replacement | Retire boundary |
 | --- | --- | --- | --- |
-| **kb** | [`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc) `kb/` directory | `meho kb search` (`search_knowledge` meta-tool over the `documents` table, `source="kb"`) | Delete `kb/` from the consumer repo + update consumer `CLAUDE.md` to drop the "grep `kb/`" guidance. |
+| **kb** | `evoila-bosnia/claude-rdc-hetzner-dc` `kb/` directory | `meho kb search` (`search_knowledge` meta-tool over the `documents` table, `source="kb"`) | Delete `kb/` from the consumer repo + update consumer `CLAUDE.md` to drop the "grep `kb/`" guidance. |
 | **memory** | Laptop-local `~/.claude/{projects}/memory/` files (per-operator) | `meho memory search` (`search_memory` meta-tool over the `documents` table, `source="memory"`) | Archive each operator's laptop-local `memory/` directory locally; agents fetch from MEHO. |
 | **operations** | The consumer's `grep docs/<product>-<version>/paths.txt + yq` workflow against locally-cloned vendor specs | `meho operation search` + `meho operation call` (`search_operations` / `call_operation` against the `endpoint_descriptor` table) | Stop using the `grep paths.txt` workflow; agents redirect to `meho operation search`. The `docs/<product>-<version>/` directories **stay** in the consumer repo as grounding for future spec re-ingestion (not retired). |
 
@@ -103,7 +103,7 @@ retire-PR description). Never retire on `NOT YET`.
 ### kb
 
 1. **Capture the retire-checklist output** (`meho retrieval retire-checklist --surface kb --json > retire-kb.json`) as evidence in the retire-PR description; commit `retire-kb.json` to the PR as a checked-in audit artefact.
-2. **Open the retire-PR** in [`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc) deleting the `kb/` directory. Title: `chore(kb): retire pre-MEHO kb/ directory (post-#373 G4.3)`. Body cites this runbook + the retire-checklist JSON.
+2. **Open the retire-PR** in `evoila-bosnia/claude-rdc-hetzner-dc` deleting the `kb/` directory. Title: `chore(kb): retire pre-MEHO kb/ directory (post-#373 G4.3)`. Body cites this runbook + the retire-checklist JSON.
 3. **Update the consumer `CLAUDE.md`** in the same PR: drop the "grep `kb/`" guidance and point agents at `meho kb search` instead. The consumer-side runbook for migrating away from grep will ship with [G4.1-T6 #420](https://github.com/evoila/meho/issues/420) (`docs/cross-repo/kb-migration.md`); link it from the consumer `CLAUDE.md` once that runbook lands.
 4. **Archive the pre-retire SHA** by tagging it `kb-pre-retire-<YYYYMMDD>` and pushing the tag to the consumer repo. The tag is the rollback anchor (see below).
 5. **Merge the retire-PR.** The consumer-side ingestion already covers the deleted files; the delete has zero data loss because the documents already live in MEHO's `documents` table.

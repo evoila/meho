@@ -4,8 +4,7 @@
 """SQLAlchemy 2.x async engine + per-request session factory.
 
 The backplane uses **async** SQLAlchemy paired with the ``asyncpg``
-driver (per `ADR 0004
-<https://github.com/evoila-bosnia/meho-internal/issues/13>`_); every
+driver (per ADR 0004); every
 database I/O path off the request hot loop must be ``await``-able so
 the FastAPI event loop never blocks on PostgreSQL. This module owns
 three responsibilities:

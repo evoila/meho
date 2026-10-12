@@ -355,7 +355,7 @@ CLAUDE.md postulate 5's narrow-waist invariant.
 ## Migrating off `bind9-dns.sh`
 
 The consumer's
-[`scripts/bind9-dns.sh`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/bind9-dns.sh)
+`scripts/bind9-dns.sh`
 retires in favour of the verb tree above:
 
 | Wrapper invocation | `meho bind9 …` replacement | Notes |
@@ -407,7 +407,7 @@ PR that touches the connector's transport code.
   `<<< '<password>'` here-string verbatim in `~/.bash_history` for
   every operator invocation.
 - **External coordination**:
-  [evoila-bosnia/claude-rdc-hetzner-dc#86](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/issues/86)
+  evoila-bosnia/claude-rdc-hetzner-dc#86
   tracks the rotation chain + the consumer-side `bind9-dns.sh`
   retirement.
 
@@ -458,7 +458,7 @@ escape hatch.
 - Engineering companion: [`docs/codebase/connectors-bind9.md`](../codebase/connectors-bind9.md).
 - Op handlers: [`backend/src/meho_backplane/connectors/bind9/`](../../backend/src/meho_backplane/connectors/bind9/) (`connector.py` skeleton + safe-sudo, `ops_zone.py`, `ops_record.py`, `ops_config.py`, `_atomic.py`). CLI verbs: [`cli/internal/cmd/bind9/`](../../cli/internal/cmd/bind9/).
 - E2E acceptance harness: [`backend/tests/integration/test_g3_4_bind9_e2e.py`](../../backend/tests/integration/test_g3_4_bind9_e2e.py); containerised fixture: [`backend/tests/integration/test_connectors_bind9_container.py`](../../backend/tests/integration/test_connectors_bind9_container.py).
-- Consumer wrapper retired: [`scripts/bind9-dns.sh`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/bind9-dns.sh).
-- Credential-leak postmortems: [evoila-bosnia/claude-rdc-hetzner-dc#86](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/issues/86) tracks the 2026-05-04 / 2026-05-05 chain + the rotation history that motivated the `_remote_bash_with_sudo()` safe-by-construction design.
+- Consumer wrapper retired: `scripts/bind9-dns.sh`.
+- Credential-leak postmortems: evoila-bosnia/claude-rdc-hetzner-dc#86 tracks the 2026-05-04 / 2026-05-05 chain + the rotation history that motivated the `_remote_bash_with_sudo()` safe-by-construction design.
 - BIND 9 docs: <https://bind9.readthedocs.io/en/v9.18/> (9.18 — Debian bookworm default), <https://bind9.readthedocs.io/en/v9.20/> (9.20 — current Stable Release).
 - Agent meta-tool surface: G0.5 MCP server [#226](https://github.com/evoila/meho/issues/226); `search_operations` / `call_operation`. Onboarding-doc precedents: [`vault-onboarding.md`](./vault-onboarding.md), [`kubernetes-onboarding.md`](./kubernetes-onboarding.md), [`docs/cross-repo/README.md`](./README.md).

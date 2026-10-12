@@ -49,6 +49,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import reset_dispatcher_caches
+from meho_backplane.operations._errors import result_blast_radius_required
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
 from meho_backplane.operations._preview import (
     _PREVIEW_BUILDERS,
@@ -367,6 +368,43 @@ def test_blast_radius_missing_reason(effect: dict[str, Any] | None, is_valid: bo
     """The validator returns ``None`` only for a well-formed block; a reason otherwise."""
     reason = blast_radius_missing_reason(effect)
     assert (reason is None) is is_valid
+
+
+def test_blast_radius_refusal_carries_builder_error_with_secrets_redacted() -> None:
+    """A builder that raises names why in the refusal, but secrets are redacted (#3944).
+
+    A destructive builder raises on purpose to refuse a delete, so the refusal
+    reason carries its error. That text is ``str(exc)``, so it goes through the
+    same redaction + length cap as every other error a result builder emits.
+    """
+    token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.c2lnbmF0dXJlLXZhbHVl"
+    leaky = {
+        "preview_unavailable": True,
+        "preview_error": f"RuntimeError: upstream said Authorization: Bearer {token}",
+    }
+    reason = blast_radius_missing_reason(leaky)
+    assert reason is not None
+    assert "preview builder failed" in reason
+    result = result_blast_radius_required("op.delete", reason, 1.0)
+    assert result.status == "denied"
+    assert result.error is not None
+    assert token not in result.error
+    assert token not in result.extras["reason"]
+
+    refusal = {
+        "preview_unavailable": True,
+        "preview_error": (
+            "KeycloakDeleteRefusedError: keycloak.client.delete refused (builtin_client): "
+            "'admin-cli' is a built-in Keycloak client; deleting it breaks login or the "
+            "admin console."
+        ),
+    }
+    result = result_blast_radius_required(
+        "keycloak.client.delete", blast_radius_missing_reason(refusal) or "", 1.0
+    )
+    assert "(builtin_client)" in result.extras["reason"]
+    # The whole refusal fits under the length cap: the explanation is not cut.
+    assert result.extras["reason"].endswith("admin console.")
 
 
 # ---------------------------------------------------------------------------

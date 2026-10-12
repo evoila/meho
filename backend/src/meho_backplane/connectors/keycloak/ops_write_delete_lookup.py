@@ -171,8 +171,8 @@ def _single_match(
         raise KeycloakDeleteRefusedError(
             op_id,
             "ambiguous_name",
-            f"the name {name!r} matches {len(matches)} {kind}s in realm {realm!r} "
-            f"({found}). Pass the id of the {kind} to delete instead.",
+            f"the name {name!r} matches {len(matches)} {kind}s in realm {realm!r}. "
+            f"Pass the id instead. Matches: {found}",
         )
     return matches[0] if matches else None
 
@@ -370,8 +370,8 @@ async def check_user_guards(
         raise KeycloakDeleteRefusedError(
             USER_DELETE_OP,
             "target_login_user",
-            f"user {username!r} is the account this MEHO target logs in with. "
-            "Deleting it would break the target.",
+            f"{username!r} is the user this MEHO target logs in with; deleting it "
+            "breaks the target.",
         )
 
 
@@ -387,16 +387,16 @@ async def check_client_guards(
         raise KeycloakDeleteRefusedError(
             CLIENT_DELETE_OP,
             "builtin_client",
-            f"{client_id!r} is a client Keycloak creates in every realm. Deleting it "
-            "breaks login or the admin console for the whole realm.",
+            f"{client_id!r} is a built-in Keycloak client; deleting it breaks login "
+            "or the admin console.",
         )
     login_client, _users = await _target_login_identity(connector, operator, target, found.realms)
     if login_client is not None and client_id == login_client:
         raise KeycloakDeleteRefusedError(
             CLIENT_DELETE_OP,
             "target_login_client",
-            f"client {client_id!r} is the client this MEHO target logs in with. "
-            "Deleting it would break the target.",
+            f"{client_id!r} is the client this MEHO target logs in with; deleting it "
+            "breaks the target.",
         )
 
 
@@ -422,7 +422,7 @@ def check_group_guards(found: FoundObject, params: dict[str, Any]) -> None:
     raise KeycloakDeleteRefusedError(
         GROUP_DELETE_OP,
         "group_has_subgroups",
-        f"group {str_field(found.rep, 'path') or found.name!r} has {shown} sub-group(s). "
-        "Deleting a group also deletes all its sub-groups. Pass "
-        "delete_subgroups=true to delete them on purpose.",
+        f"group {str_field(found.rep, 'path') or found.name!r} has {shown} sub-group(s), "
+        "and Keycloak deletes them with it. Pass delete_subgroups=true to do that "
+        "on purpose.",
     )

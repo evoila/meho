@@ -560,10 +560,7 @@ def blast_radius_missing_reason(proposed_effect: Mapping[str, Any] | None) -> st
     if not isinstance(block, Mapping):
         preview_error = proposed_effect.get("preview_error")
         if isinstance(preview_error, str) and preview_error:
-            return (
-                f"proposed_effect.{BLAST_RADIUS_KEY} block is absent because the "
-                f"preview builder failed: {preview_error}"
-            )
+            return f"the preview builder failed: {preview_error}"
         return f"proposed_effect.{BLAST_RADIUS_KEY} block is absent"
     if not block.get("object"):
         return f"{BLAST_RADIUS_KEY}.object (object identity) is missing"

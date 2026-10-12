@@ -892,7 +892,9 @@ falling back to the identifier-only default. When the block is missing
 because the op's preview builder raised, the reason also carries the
 builder's error. A builder raises on purpose to refuse a delete before it
 waits for approval (the Keycloak delete guards, #3944), so the caller reads
-why it was refused. So a `destructive` op that
+why it was refused. `result_blast_radius_required` runs the reason through
+`_sanitize_free_text` (secret-pattern redaction, then a 256-character cap),
+like every other exception text a result builder emits. So a `destructive` op that
 registers no blast-radius preview builder is un-parkable by construction —
 fail-closed. That refusal is **runtime-only**, though: a posture sweep that
 promotes an op to `destructive` without adding its builder ships an

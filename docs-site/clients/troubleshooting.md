@@ -101,6 +101,38 @@ field), keep `offline_access` in the list. The login then lasts until the
 `meho-mcp` client's offline idle limit, 48 hours with the
 [recommended realm setting](../install/keycloak-realm.md#how-long-an-mcp-login-lasts).
 
+## A MEHO call says "Your MEHO login has expired" (Claude Code plugin)
+
+**Symptom.** A MEHO tool call fails at once with "Your MEHO login has
+expired. Run /mcp, pick meho, and reconnect to log in again." After that,
+`/mcp` shows `meho` as failed.
+
+**Wall.** The saved login can no longer be renewed: it was not used for
+the offline idle limit, or the session was ended in Keycloak. A new
+browser login is needed. The plugin does not wait for that login in the
+middle of a call, so the call fails fast instead of hanging.
+
+**Fix.** Run `/mcp`, pick `meho`, and reconnect. Finish the login in the
+browser tab that opens. If Claude Code stops waiting before you finish,
+finish the login anyway and reconnect once more. If a MEHO login tab
+opened when the call failed, you can close it.
+
+## The plugin stops with "MEHO did not finish connecting" (Claude Code plugin)
+
+**Symptom.** `meho` shows as failed, and the MCP log has a line like
+`meho plugin: MEHO did not finish connecting within 5 minutes, so this
+attempt stopped.`
+
+**Wall.** A browser login started, but nobody finished it in time. Or
+another Claude Code session was waiting for its own login at the same
+time. The plugin stops such a connect after `MEHO_MCP_LOGIN_TIMEOUT`
+seconds (default 300). That frees the local callback port, so the next
+attempt can log in. Older plugin versions waited forever instead, and
+every later session failed with `listen EADDRINUSE`.
+
+**Fix.** Run `/mcp`, pick `meho`, reconnect, and finish the browser login.
+If the login tab opens behind your terminal, look for it there.
+
 ## Token issues but every call 401s
 
 The token is minted, but the backplane rejects it on every call. From

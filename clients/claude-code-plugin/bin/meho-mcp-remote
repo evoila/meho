@@ -154,10 +154,14 @@ if [ -z "$entry" ] || [ ! -f "$entry" ]; then
   exit 1
 fi
 
-# Hand mcp-remote the same argv the previous `npx` invocation did: the URL
-# plus the static-OAuth client id and scope metadata. mcp-remote reads
-# process.argv.slice(2), so `node <entry> <url> --flags...` preserves the
-# exact contract. mcp-remote owns this process's stdio from here.
-exec node "$entry" "$url" \
+# Run mcp-remote through the login guard (lib/login-guard.mjs, #3961). The
+# guard loads the vendored entry in the same process and hands it the same
+# argv as before: the URL plus the static-OAuth client id and scope
+# metadata. On top, it stops a connect that does not finish within
+# MEHO_MCP_LOGIN_TIMEOUT seconds (default 300), so an unfinished browser
+# login never holds the callback port forever. And when the login expires
+# during a session, the failed call gets a clear message that says what to
+# do. mcp-remote owns this process's stdio from here.
+exec node "$plugin_root/lib/login-guard.mjs" "$entry" "$url" \
   --static-oauth-client-info "{\"client_id\": \"$client_id\"}" \
   --static-oauth-client-metadata "{\"scope\": \"$scopes\"}"

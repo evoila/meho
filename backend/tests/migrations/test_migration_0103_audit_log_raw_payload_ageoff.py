@@ -948,7 +948,8 @@ def test_restart_reads_the_last_run_and_does_not_run_early(
             prune_payloads = await _tick(engine)
             async with engine.connect() as conn:
                 stored = (await conn.execute(newest_run, run_params)).scalar_one()
-            read = await audit_retention._last_recorded_run()
+            since = datetime.now(UTC) - timedelta(seconds=interval)
+            read = await audit_retention._last_recorded_run(since=since)
             await dispose_engine()
 
             sleeps: list[float] = []

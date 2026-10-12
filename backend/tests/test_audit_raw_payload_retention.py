@@ -24,8 +24,9 @@ Coverage matrix (Task #307 acceptance criteria):
 * **The schedule counts from the last recorded run, not from process
   start** -- a restart before the interval has passed waits only for the
   rest of it (no early run); a restart after it has passed, or with no
-  recorded run, runs one minute after start; the wait is never longer
-  than one interval; a failed read runs at once.
+  recorded run, runs one minute after start; a last-run time in the
+  future counts as due; the wait is never longer than one interval; a
+  failed read runs at once; only rows this job writes count as a run.
 * **Settings bounds** -- Pydantic validators reject out-of-range values
   for the three new ``RAW_PAYLOAD_*`` knobs at construction time.
 * **Loop survives a bad tick / start-stop lifecycle / configured cadence**
@@ -367,7 +368,8 @@ async def test_zero_row_tick_writes_its_audit_row(monkeypatch: pytest.MonkeyPatc
     # Nothing was past the cutoff, so the in-window body is untouched.
     assert (await _get_audit_row(kept)).raw_payload == _RAW_BODY
     # The schedule reads this row as the last run.
-    assert await audit_retention._last_recorded_run() is not None
+    since = datetime.now(UTC) - timedelta(days=7)
+    assert await audit_retention._last_recorded_run(since=since) is not None
 
 
 @pytest.mark.asyncio
@@ -504,17 +506,23 @@ async def _seed_prune_row(
     occurred_at: datetime,
     tenant_id: uuid.UUID = AUDIT_RAW_PAYLOAD_SYSTEM_TENANT_ID,
     path: str = AUDIT_RAW_PAYLOAD_PRUNE_PATH,
+    method: str = INTERNAL_METHOD,
+    operator_sub: str = SYSTEM_OPERATOR_SUB,
 ) -> None:
-    """Insert one age-off run row, as an earlier process would have written it."""
+    """Insert one age-off run row, as an earlier process would have written it.
+
+    The keyword arguments let a test write a row that looks like a run but
+    was written by something else (another tenant, path, method or sub).
+    """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         session.add(
             AuditLog(
                 id=uuid.uuid4(),
                 occurred_at=occurred_at,
-                operator_sub=SYSTEM_OPERATOR_SUB,
+                operator_sub=operator_sub,
                 tenant_id=tenant_id,
-                method=INTERNAL_METHOD,
+                method=method,
                 path=path,
                 status_code=200,
                 duration_ms=Decimal("1.0"),
@@ -608,12 +616,32 @@ async def test_no_recorded_run_runs_soon_after_start(
     """No run recorded (fresh install): run one minute after start."""
     monkeypatch.setenv("RAW_PAYLOAD_PRUNE_INTERVAL_SECONDS", str(_WEEK_SECONDS))
     get_settings.cache_clear()
-    assert await audit_retention._last_recorded_run() is None
+    since = datetime.now(UTC) - timedelta(seconds=_WEEK_SECONDS)
+    assert await audit_retention._last_recorded_run(since=since) is None
 
     sleeps, tick_calls = await _drive_loop(cancel_at_sleep=2)
 
     assert sleeps == [_FIRST_RUN_DELAY_SECONDS, _WEEK_SECONDS]
     assert tick_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_last_run_in_the_future_counts_as_due(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run row stamped 2 days ahead (a pod with a fast clock): run soon.
+
+    Waiting a full interval here would push the schedule back by the clock
+    gap. Running early is safe: a run is safe to run twice.
+    """
+    monkeypatch.setenv("RAW_PAYLOAD_PRUNE_INTERVAL_SECONDS", str(_WEEK_SECONDS))
+    get_settings.cache_clear()
+    await _seed_prune_row(occurred_at=datetime.now(UTC) + timedelta(days=2))
+
+    sleeps, tick_calls = await _drive_loop(cancel_at_sleep=2)
+
+    assert sleeps == [_FIRST_RUN_DELAY_SECONDS, _WEEK_SECONDS]
+    assert tick_calls == 1, "a future last-run time must count as due"
 
 
 @pytest.mark.asyncio
@@ -666,24 +694,44 @@ async def test_last_run_read_failure_runs_soon(monkeypatch: pytest.MonkeyPatch) 
 
 @pytest.mark.asyncio
 async def test_last_recorded_run_reads_only_age_off_rows() -> None:
-    """Only rows with the system tenant id *and* the age-off path count.
+    """Only rows this job writes count, and only within the given window.
 
-    The newest matching row wins, and the value comes back in UTC with a
-    time zone (SQLite returns it without one).
+    A row counts only with the system tenant id, ``method='INTERNAL'``,
+    this job's ``operator_sub`` and the age-off path. A dispatch audit row
+    with the same tenant id and path (an operation whose id happens to be
+    ``audit.raw_payload.prune``) must never count as a run. The newest
+    matching row wins, and the value comes back in UTC with a time zone
+    (SQLite returns it without one).
     """
     now = datetime.now(UTC)
+    since = now - timedelta(seconds=_WEEK_SECONDS)
     # Same path, another tenant: not a run of this job.
     await _seed_prune_row(occurred_at=now - timedelta(hours=1), tenant_id=uuid.uuid4())
     # System tenant, another path: not a run of this job.
     await _seed_prune_row(occurred_at=now - timedelta(hours=2), path="topology.history.prune")
-    assert await audit_retention._last_recorded_run() is None
+    # A dispatch audit row with the same tenant id and path: not a run.
+    await _seed_prune_row(
+        occurred_at=now - timedelta(hours=3),
+        method="DISPATCH",
+        operator_sub="operator-1",
+    )
+    # INTERNAL, same tenant id and path, but another job's sub: not a run.
+    await _seed_prune_row(
+        occurred_at=now - timedelta(hours=4),
+        operator_sub="system:another-job",
+    )
+    assert await audit_retention._last_recorded_run(since=since) is None
 
-    older = now - timedelta(days=9)
+    # A real run older than the window is not read (it means "due now").
+    await _seed_prune_row(occurred_at=now - timedelta(days=9))
+    assert await audit_retention._last_recorded_run(since=since) is None
+
+    older = now - timedelta(days=5)
     newer = now - timedelta(days=3)
     await _seed_prune_row(occurred_at=older)
     await _seed_prune_row(occurred_at=newer)
 
-    last_run = await audit_retention._last_recorded_run()
+    last_run = await audit_retention._last_recorded_run(since=since)
     assert last_run is not None
     assert last_run.tzinfo is not None
     assert last_run == newer
@@ -697,11 +745,12 @@ async def test_last_recorded_run_reads_only_age_off_rows() -> None:
         (-_WEEK_SECONDS, 0.0),  # exactly one interval ago: due now
         (-2 * _DAY_SECONDS, float(_WEEK_SECONDS - 2 * _DAY_SECONDS)),  # the rest
         (0, float(_WEEK_SECONDS)),  # just ran: one full interval
-        (30 * _DAY_SECONDS, float(_WEEK_SECONDS)),  # in the future: capped at one interval
+        (1, 0.0),  # one second in the future (fast clock): due now
+        (30 * _DAY_SECONDS, 0.0),  # far in the future: due now
     ],
 )
 def test_seconds_until_due(last_run_offset_seconds: int | None, expected: float) -> None:
-    """The wait is the rest of the interval, between 0 and one interval."""
+    """The wait is the rest of the interval; a future last run is due now."""
     now = datetime(2026, 1, 15, 12, 0, tzinfo=UTC)
     last_run = (
         None

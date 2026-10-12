@@ -77,16 +77,20 @@ When it runs
 
 The interval counts from the **last recorded run**, not from process
 start. Every run writes one audit row (see "Audit-row shape" below), so
-the newest ``audit.raw_payload.prune`` row of the system tenant is the
-last real run. After the process starts, the loop:
+the newest row this job wrote is the last real run. A row counts only if
+it has the system tenant id, ``method='INTERNAL'``, this job's
+``operator_sub`` and the ``audit.raw_payload.prune`` path. Every
+``INTERNAL`` writer uses a fixed path that no request can choose, so a
+dispatch audit row with the same tenant id and path never counts. After
+the process starts, the loop:
 
 1. waits :data:`_FIRST_RUN_DELAY_SECONDS` (one minute), so the first run
    does not race the rest of startup;
-2. reads the time of the last recorded run (:func:`_last_recorded_run`);
-3. runs at once if a full interval has passed since then, or if no run is
-   recorded (a fresh install, or a database that has no such row yet);
-   otherwise it waits only for the rest of the interval
-   (:func:`_seconds_until_due`);
+2. reads the time of the newest run within the last interval
+   (:func:`_last_recorded_run`);
+3. runs at once if there is no such run (none within the last interval, a
+   fresh install, or a database that has no such row yet); otherwise it
+   waits only for the rest of the interval (:func:`_seconds_until_due`);
 4. then runs once per interval, as before.
 
 So a pod restart (an update, a crash, a node drain) never starts the
@@ -94,18 +98,19 @@ interval again. Before this, the loop slept a full interval after every
 start, so a deployment that restarted more often than once a week never
 ran the age-off at all.
 
-The wait in step 3 is never longer than one interval. A last-run time in
-the future (clock skew between pods) therefore cannot delay the age-off
-by more than one interval. If the read fails, the loop logs
-``audit_raw_payload_retention_last_run_read_failed`` and runs at once: a
-run is safe to run twice, and running early is better than running late.
+A last-run time in the future (a pod with a fast clock wrote it) counts
+as "due now", so it can never push the schedule back. If the read fails,
+the loop logs ``audit_raw_payload_retention_last_run_read_failed`` and
+runs at once. In both cases this is safe: a run is safe to run twice, and
+running early is better than running late. The wait in step 3 is never
+longer than one interval.
 
-The read is cheap. It filters on the system tenant id, which only this
-job writes (about one row per interval), and ``tenant_id`` has the
-``audit_log_tenant_id_idx`` btree. When the job has written many rows
-(a very short interval), PostgreSQL may read the ``occurred_at`` index
-newest-first instead, which stops at the first match, so that is cheap
-too.
+The read is cheap in every case. It looks only at rows from the last
+interval (``occurred_at`` newer than now minus the interval): an older
+run means "due now" anyway, so the answer is the same. PostgreSQL then
+either uses the ``audit_log_tenant_id_idx`` btree (only this job writes
+the system tenant id, so there are few such rows) or reads the
+``occurred_at`` index over the last interval only.
 
 Why ``asyncio.create_task`` and not APScheduler 4.x
 ---------------------------------------------------
@@ -230,14 +235,18 @@ def _resolve_system_tenant_id() -> uuid.UUID:
     return AUDIT_RAW_PAYLOAD_SYSTEM_TENANT_ID
 
 
-async def _last_recorded_run() -> datetime | None:
-    """Return when the age-off last recorded a run, or ``None`` if never.
+async def _last_recorded_run(*, since: datetime) -> datetime | None:
+    """Return the newest run of this job after *since*, or ``None`` if none.
 
-    Every run writes one audit row with the system tenant id and
-    :data:`AUDIT_RAW_PAYLOAD_PRUNE_PATH`, so the newest such row is the last
-    real run. Filtering on the tenant id keeps the read cheap: only this job
-    writes that id, and ``tenant_id`` has the ``audit_log_tenant_id_idx``
-    btree (see "When it runs" in the module docstring).
+    Every run writes one audit row, so the newest such row is the last real
+    run. The filter matches only rows this job writes: the system tenant id,
+    ``method='INTERNAL'``, :data:`SYSTEM_OPERATOR_SUB` and
+    :data:`AUDIT_RAW_PAYLOAD_PRUNE_PATH`. A dispatch audit row with the same
+    tenant id and path (``method='DISPATCH'``) never counts.
+
+    The caller passes ``since = now - interval``. A run older than that means
+    "due now" anyway, and the bound keeps the read cheap in every query plan
+    (see "When it runs" in the module docstring).
 
     SQLite gives back a datetime without a time zone; the writer stores UTC,
     so such a value is read as UTC. PostgreSQL gives back an aware value.
@@ -248,7 +257,10 @@ async def _last_recorded_run() -> datetime | None:
             select(AuditLog.occurred_at)
             .where(
                 AuditLog.tenant_id == _resolve_system_tenant_id(),
+                AuditLog.method == INTERNAL_METHOD,
+                AuditLog.operator_sub == SYSTEM_OPERATOR_SUB,
                 AuditLog.path == AUDIT_RAW_PAYLOAD_PRUNE_PATH,
+                AuditLog.occurred_at > since,
             )
             .order_by(AuditLog.occurred_at.desc())
             .limit(1)
@@ -269,27 +281,27 @@ def _seconds_until_due(
     """Return how many seconds are left until the next run is due.
 
     * No recorded run: ``0`` (run now).
+    * *last_run* is in the future (a pod with a fast clock wrote it): ``0``
+      (run now), so a wrong clock can never push the schedule back.
     * A full interval has passed since *last_run*: ``0`` (run now).
     * Otherwise: what is left of the interval.
 
-    The result is never more than one interval. So a *last_run* in the future
-    (clock skew between pods) cannot delay the age-off by more than one
-    interval.
+    So the result is always between ``0`` and one interval.
     """
-    if last_run is None:
+    if last_run is None or last_run > now:
         return 0.0
     remaining = interval_seconds - (now - last_run).total_seconds()
-    return min(float(interval_seconds), max(0.0, remaining))
+    return max(0.0, remaining)
 
 
-async def _read_last_run_or_none() -> datetime | None:
+async def _read_last_run_or_none(*, since: datetime) -> datetime | None:
     """Read the last recorded run; on a read error, log it and return ``None``.
 
     ``None`` makes the loop run at once. That is the safe choice: a run is
     safe to run twice, and running early is better than running late.
     """
     try:
-        return await _last_recorded_run()
+        return await _last_recorded_run(since=since)
     except Exception as exc:
         _log.warning(
             "audit_raw_payload_retention_last_run_read_failed",
@@ -440,14 +452,12 @@ async def _prune_loop() -> None:
     await asyncio.sleep(_FIRST_RUN_DELAY_SECONDS)
 
     interval = get_settings().raw_payload_prune_interval_seconds
-    last_run = await _read_last_run_or_none()
-    wait_seconds = _seconds_until_due(
-        last_run,
-        now=datetime.now(UTC),
-        interval_seconds=interval,
-    )
-    # One line per start that says when the age-off last ran and when it
-    # runs next, so an operator can check the schedule after a restart.
+    now = datetime.now(UTC)
+    last_run = await _read_last_run_or_none(since=now - timedelta(seconds=interval))
+    wait_seconds = _seconds_until_due(last_run, now=now, interval_seconds=interval)
+    # One line per start that says when the age-off last ran (within the
+    # last interval; ``None`` if not) and when it runs next, so an operator
+    # can check the schedule after a restart.
     _log.info(
         "audit_raw_payload_retention_scheduled",
         last_run_at=last_run.isoformat() if last_run is not None else None,

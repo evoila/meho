@@ -61,8 +61,11 @@ __all__ = [
     "CLUSTER_DRS_RECOMMENDATIONS_RESPONSE_SCHEMA",
     "CLUSTER_DRS_RULE_CREATE_PARAMETER_SCHEMA",
     "CLUSTER_DRS_RULE_CREATE_RESPONSE_SCHEMA",
+    "CLUSTER_DRS_RULE_DELETE_PARAMETER_SCHEMA",
+    "CLUSTER_DRS_RULE_DELETE_RESPONSE_SCHEMA",
     "CLUSTER_DRS_VM_HOST_RULE_CREATE_PARAMETER_SCHEMA",
     "CLUSTER_DRS_VM_HOST_RULE_CREATE_RESPONSE_SCHEMA",
+    "CLUSTER_MOID_PATTERN",
     "CLUSTER_PATCH_PARAMETER_SCHEMA",
     "CLUSTER_PATCH_RESPONSE_SCHEMA",
     "CONTENT_LIBRARY_DELETE_PARAMETER_SCHEMA",
@@ -6670,6 +6673,8 @@ DATASTORE_PATH_PATTERN: str = (
 DATASTORE_MOID_PATTERN: str = r"^datastore-[0-9]+$"
 PORTGROUP_MOID_PATTERN: str = r"^dvportgroup-[0-9]+$"
 HOST_MOID_PATTERN: str = r"^host-[0-9]+$"
+#: Cluster (``ClusterComputeResource``) moids, e.g. ``domain-c7``.
+CLUSTER_MOID_PATTERN: str = r"^domain-c[0-9]+$"
 #: Folder moids (``group-v`` VM, ``group-h`` host, ``group-s`` datastore,
 #: ``group-n`` network, ``group-d`` datacenter folders). ``group-p`` is a
 #: datastore cluster and is not accepted.
@@ -6797,6 +6802,37 @@ FOLDER_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
 FOLDER_DELETE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_schema(
     ["deleted", "unchanged", "precondition_failed", "still_present", "timeout"],
     _DELETE_STATUS_COMMON + " ``'timeout'`` -- Destroy_Task outran the poll bound.",
+)
+
+#: ``vmware.composite.cluster.drs_rule.delete`` parameter schema.
+CLUSTER_DRS_RULE_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "cluster": {
+            "type": "string",
+            "pattern": CLUSTER_MOID_PATTERN,
+            "description": "Cluster moid, e.g. 'domain-c7' (the cluster the rule is on).",
+        },
+        "rule_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Exact name of the DRS rule to delete (any rule type). A name that two or "
+                "more rules on the cluster share is refused."
+            ),
+        },
+    },
+    "required": ["cluster", "rule_name"],
+    "additionalProperties": False,
+}
+
+#: ``vmware.composite.cluster.drs_rule.delete`` response schema.
+CLUSTER_DRS_RULE_DELETE_RESPONSE_SCHEMA: dict[str, Any] = _teardown_response_schema(
+    ["deleted", "unchanged", "invalid_request", "precondition_failed", "still_present", "timeout"],
+    _DELETE_STATUS_COMMON
+    + " Here ``'precondition_failed'`` means two or more rules have this name. "
+    "``'invalid_request'`` -- the cluster moid does not exist. ``'timeout'`` -- "
+    "ReconfigureComputeResource_Task outran the poll bound.",
 )
 
 _DATASTORE_MOID_PARAM: dict[str, Any] = {

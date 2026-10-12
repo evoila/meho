@@ -8,8 +8,9 @@ A recording stand-in for the connector's VI-JSON seam
 ``RetrievePropertiesEx`` (incl. ``Task.info`` polls), a per-datastore file tree
 answers the ``HostDatastoreBrowser`` searches, and the mutating methods
 (``Destroy_Task``, ``RemovePortGroup``, ``DeleteDatastoreFile_Task``,
-``MakeDirectory``) change the store so the handlers' read-backs see the
-result. ``GateRecorder`` replaces the #2254 sub-op gate.
+``MakeDirectory``, and a rule removal through ``ReconfigureComputeResource_Task``)
+change the store so the handlers' read-backs see the result. ``GateRecorder``
+replaces the #2254 sub-op gate.
 """
 
 from __future__ import annotations
@@ -131,6 +132,8 @@ class VimFake:
             return self._task(method, apply=lambda: self._delete_file(json["name"]))
         if method == "MakeDirectory":
             return self._sync(lambda: self._mkdir(json["name"], json["createParentDirectories"]))
+        if method == "ReconfigureComputeResource_Task":
+            return self._task(method, apply=lambda: self._remove_cluster_rules(moid, json))
         raise AssertionError(f"unexpected vim call {path}")
 
     # -- RetrievePropertiesEx ----------------------------------------------
@@ -218,6 +221,20 @@ class VimFake:
                 continue
             groups = props.get("config.network.portgroup") or []
             props["config.network.portgroup"] = [g for g in groups if g["spec"]["name"] != name]
+
+    # -- cluster DRS rules ----------------------------------------------------
+    def _remove_cluster_rules(self, cluster: str, body: dict[str, Any]) -> None:
+        """Apply the ``rulesSpec`` removals; the rule list may be VI-JSON boxed."""
+        props = self.objects[("ClusterComputeResource", cluster)]
+        raw = props.get("configurationEx.rule") or []
+        rules = raw["_value"] if isinstance(raw, dict) else raw
+        removed = {
+            spec["removeKey"]["_value"]
+            for spec in body["spec"]["rulesSpec"]
+            if spec["operation"] == "remove"
+        }
+        kept = [rule for rule in rules if rule.get("key") not in removed]
+        props["configurationEx.rule"] = {**raw, "_value": kept} if isinstance(raw, dict) else kept
 
     # -- datastore files -----------------------------------------------------
     @staticmethod

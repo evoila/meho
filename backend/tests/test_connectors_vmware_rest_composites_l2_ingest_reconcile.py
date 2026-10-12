@@ -1236,6 +1236,7 @@ def test_host_vi_json_paths_exist_in_the_pinned_spec() -> None:
 
 from meho_backplane.connectors.vmware_rest.composites import (  # noqa: E402
     _datastore_files,
+    _drs_rule_delete,
     _library_delete,
     _teardown,
     _teardown_network,
@@ -1286,6 +1287,15 @@ _EXPECTED_3339_VIM_MANIFESTS: dict[str, tuple[Any, set[str]]] = {
     "_VIM_SUB_OPS_CONTENT_LIBRARY_MEDIA_CHECK": (
         _library_delete,
         {"POST:/PropertyCollector/{moId}/RetrievePropertiesEx"},
+    ),
+    # The DRS rule delete rides the same lanes: the cluster rule read, then
+    # the same ReconfigureComputeResource_Task as cluster.drs_rule.create.
+    "_VIM_SUB_OPS_CLUSTER_DRS_RULE_DELETE": (
+        _drs_rule_delete,
+        {
+            "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+            "POST:/ClusterComputeResource/{moId}/ReconfigureComputeResource_Task",
+        },
     ),
 }
 

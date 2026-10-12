@@ -370,3 +370,24 @@ def test_every_emitted_vim_type_name_is_a_pinned_vi_json_schema() -> None:
         "rejected (or mis-deserialised) by a live vCenter. "
         "Protocol: docs/decisions/spec-reconcile-guards-standard.md."
     )
+
+
+def test_drs_rule_delete_remove_key_box_is_the_spec_int_alias() -> None:
+    """The DRS rule delete sends ``removeKey`` as ``{"_typeName": "int", "_value": key}``.
+
+    ``ArrayUpdateSpec.removeKey`` is ``Any``-typed in the pinned ``vi-json.yaml``,
+    so the int key travels boxed. ``int`` is an alias in the ``Any``
+    discriminator mapping (to ``PrimitiveInt``), not a component schema, so it
+    is grounded against that mapping instead of the component list above.
+    Skips uniformly without the spec shelf.
+    """
+    from meho_backplane.connectors.vmware_rest.composites import _drs_rule_delete
+
+    body = _drs_rule_delete._remove_rule_body(7)
+    assert body["spec"]["rulesSpec"][0]["removeKey"] == {"_typeName": "int", "_value": 7}
+    spec_path = require_shelf_spec("vcenter-9.0", "vi-json.yaml")
+    spec_text = spec_path.read_text(encoding="utf-8")
+    assert "\n          int: '#/components/schemas/PrimitiveInt'\n" in spec_text, (
+        "the pinned vi-json.yaml Any discriminator no longer maps 'int' to PrimitiveInt"
+    )
+    assert _vi_json_component_schema_exists(spec_text, "PrimitiveInt")

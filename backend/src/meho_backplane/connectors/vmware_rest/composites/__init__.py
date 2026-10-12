@@ -86,11 +86,16 @@ Scope:
   ``vm.customize`` (GOSC create + apply, secret-hygienic) (#2892), plus
   ``vm.deploy_from_library`` (OVF/OVA content-library deploy, retiring
   ``govc library.deploy``) (#2909).
+* the destructive DRS rule delete ``cluster.drs_rule.delete``
+  (``_drs_rule_delete``): removes one DRS rule from a cluster, by name.
 """
 
 from meho_backplane.connectors.vmware_rest.composites._datastore_files import (
     datastore_dir_create_composite,
     datastore_file_delete_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._drs_rule_delete import (
+    cluster_drs_rule_delete_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites._guest import (
     guest_env_read_composite,
@@ -194,6 +199,7 @@ from meho_backplane.connectors.vmware_rest.composites import _write_preview  # n
 __all__ = [
     "cluster_drs_recommendations_composite",
     "cluster_drs_rule_create_composite",
+    "cluster_drs_rule_delete_composite",
     "cluster_patch_composite",
     "content_library_delete_composite",
     "content_library_item_delete_composite",

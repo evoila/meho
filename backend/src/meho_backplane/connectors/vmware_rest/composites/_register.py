@@ -6,7 +6,7 @@
 # this change (~1490 lines); splitting the metadata table is out of scope for
 # the #3349 governed-subop wiring.
 
-"""``register_vmware_composite_operations`` -- registrar for the 65 composites.
+"""``register_vmware_composite_operations`` -- registrar for the 66 composites.
 
 Module-level async function called from the lifespan-driven
 :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
@@ -40,7 +40,7 @@ login), so it auto-parks for agent / service principals while a human
 seat still executes it immediately; see its caution row below. (The
 former ``host.network_uplinks`` and ``host.vsan_health`` reads were
 re-shipped as typed ops in #2258; see
-:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 49 write
+:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 50 write
 composites (T6 / #509, single-VM ``vm.power`` / #2301, the guest-ops
 write ``vm.guest.file.write`` / #3100, the mutating
 VI-JSON ``vm.disk.grow`` / #2893, the folder-template
@@ -54,7 +54,8 @@ OVF/OVA content-library deploy ``vm.deploy_from_library`` / #2909 +
 three host-domain writes ``host.datastore_mount_nfs`` /
 ``host.disk_mark_flash`` / ``host.service_control`` / #3182, and the
 later Supervisor / #3281, storage-policy, content-library / #3495 and
-resource-pool / #3505 write families, and the #3339 teardown deletes) are
+resource-pool / #3505 write families, the #3339 teardown deletes, and the
+DRS rule delete ``cluster.drs_rule.delete``) are
 all ``requires_approval=True``.
 32 pin ``safety_level="dangerous"`` (T4's default, passed explicitly for
 clarity at the call site; the helper would default to it anyway). 8 pin
@@ -65,14 +66,15 @@ clarity at the call site; the helper would default to it anyway). 8 pin
 ``cluster.drs_vm_host_rule.create``, plus ``namespace.create`` /
 ``storage_policy.create`` / ``content_library.subscribed.create`` /
 ``content_library.subscribed.sync`` (``resource_pool.delete`` is a
-``dangerous`` reparent, not a destroy). 9 pin
+``dangerous`` reparent, not a destroy). 10 pin
 ``safety_level="destructive"`` -- ``vm.destroy`` / #3198 (the first
 destructive op -- the governed-delete tier, decision
 ``docs/decisions/governed-delete-operations.md``), ``namespace.delete``,
-``storage_policy.delete`` and the six #3339 teardown deletes
+``storage_policy.delete``, the six #3339 teardown deletes
 (``network.portgroup.delete``, ``host.standard_portgroup.delete``,
 ``folder.delete``, ``datastore.file.delete``, ``content_library.delete``,
-``content_library.item.delete``). (The ``caution`` tier is not writes-only:
+``content_library.item.delete``) and ``cluster.drs_rule.delete``. (The
+``caution`` tier is not writes-only:
 ``vm.guest.file.read`` above is a ``caution`` read / #3720.)
 Each :class:`_CompositeSpec` row carries its own ``safety_level`` +
 ``requires_approval`` so the policy posture is implied by the row,
@@ -88,6 +90,9 @@ from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.vmware_rest.composites._datastore_files import (
     datastore_dir_create_composite,
     datastore_file_delete_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._drs_rule_delete import (
+    cluster_drs_rule_delete_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites._governed_subops import (
     register_vmware_governed_subops,
@@ -182,6 +187,8 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     CLUSTER_DRS_RECOMMENDATIONS_RESPONSE_SCHEMA,
     CLUSTER_DRS_RULE_CREATE_PARAMETER_SCHEMA,
     CLUSTER_DRS_RULE_CREATE_RESPONSE_SCHEMA,
+    CLUSTER_DRS_RULE_DELETE_PARAMETER_SCHEMA,
+    CLUSTER_DRS_RULE_DELETE_RESPONSE_SCHEMA,
     CLUSTER_DRS_VM_HOST_RULE_CREATE_PARAMETER_SCHEMA,
     CLUSTER_DRS_VM_HOST_RULE_CREATE_RESPONSE_SCHEMA,
     CLUSTER_PATCH_PARAMETER_SCHEMA,
@@ -1281,6 +1288,54 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "cluster", "drs", "vi-json"],
         safety_level="caution",
         requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.cluster.drs_rule.delete",
+        handler=cluster_drs_rule_delete_composite,
+        summary="Delete one DRS rule from a cluster, by name. Any rule type.",
+        description=(
+            "Deletes one DRS rule from a cluster (the opposite of "
+            "cluster.drs_rule.create and cluster.drs_vm_host_rule.create). A DRS "
+            "rule tells vCenter where to run VMs: keep them together, keep them "
+            "apart, or run them on (or away from) a group of hosts. It works for "
+            "every rule type. VM groups and host groups are not deleted. First it "
+            "reads the cluster's rules. If no rule has that name, nothing is "
+            "changed and the result is status='unchanged'. If two or more rules "
+            "have that name, nothing is changed and the result is "
+            "status='precondition_failed' with the rules listed in 'blockers'. An "
+            "unknown cluster moid gives status='invalid_request'. Otherwise it "
+            "runs ClusterComputeResource.ReconfigureComputeResource_Task with one "
+            "rule removal (modify=true, nothing else on the cluster changes), "
+            "waits for it and reads the rules again: status='deleted' only when "
+            "the rule is gone. If vSphere reports an error, the call fails. "
+            "Destructive: a second person must always approve it, after seeing "
+            "the rule (type, enabled, required or not, its VMs or groups). Like "
+            "'govc cluster.rule.remove'."
+        ),
+        parameter_schema=CLUSTER_DRS_RULE_DELETE_PARAMETER_SCHEMA,
+        response_schema=CLUSTER_DRS_RULE_DELETE_RESPONSE_SCHEMA,
+        group_key="cluster",
+        tags=["composite", "write", "cluster", "drs", "vi-json", "teardown", "destructive"],
+        safety_level="destructive",
+        requires_approval=True,
+        llm_instructions={
+            "when_to_use": (
+                "Use it to remove a DRS rule that an environment created, for example "
+                "a keep-apart rule for VMs that were deleted."
+            ),
+            "parameter_hints": {
+                "cluster": "Cluster moid, e.g. 'domain-c7'.",
+                "rule_name": "Exact rule name, as given to cluster.drs_rule.create.",
+            },
+            "output_shape": (
+                "{status: deleted|unchanged|invalid_request|precondition_failed|"
+                "still_present|timeout, object: {kind, cluster, cluster_name, name, key, "
+                "rule_type, enabled, mandatory, vms, vm_count, vm_group, "
+                "affine_host_group, anti_affine_host_group}, blockers: "
+                "[{kind: drs_rule, key, rule_type}], task, task_state, guidance}. "
+                "A vSphere error makes the call fail; it is not a status."
+            ),
+        },
     ),
     _CompositeSpec(
         op_id="vmware.composite.resource_pool.create",
@@ -2608,13 +2663,14 @@ async def register_vmware_composite_operations(
     on every lifespan startup; the skip-re-embed branch keeps that
     cheap.
 
-    Scope: 65 composites total -- 16 read (T5 / #508 + the datastore
+    Scope: 66 composites total -- 16 read (T5 / #508 + the datastore
     cache-refresh read datastore.refresh / #3789 + the VM allocation read
     vm.resource_allocation.show / #3880 + the 4 guest-ops
     reads / #3100 + the supervisor status + the vSphere Namespace status
     (#3502) / storage-policy list / two SUBSCRIBED content-library reads) +
-    49 write (the seven #3339 teardown composites -- six destructive deletes
-    + the caution ``datastore.dir.create`` -- + T6 / #509 + the caution VM
+    50 write (the seven #3339 teardown composites -- six destructive deletes
+    + the caution ``datastore.dir.create`` -- + the destructive DRS rule delete
+    ``cluster.drs_rule.delete`` + T6 / #509 + the caution VM
     allocation write
     ``vm.resource_allocation.set`` / #3880 + the
     destructive-tier ``vm.destroy`` / #3198, the governed vSphere Namespace

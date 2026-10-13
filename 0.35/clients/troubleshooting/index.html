@@ -1087,6 +1087,39 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#the-meho-login-ends-after-about-30-minutes-with-no-use" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The MEHO login ends after about 30 minutes with no use
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-meho-call-says-your-meho-login-has-expired-claude-code-plugin" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A MEHO call says "Your MEHO login has expired" (Claude Code plugin)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-plugin-stops-with-meho-did-not-connect-claude-code-plugin" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The plugin stops with "MEHO did not connect" (Claude Code plugin)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#token-issues-but-every-call-401s" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2018,6 +2051,39 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#the-meho-login-ends-after-about-30-minutes-with-no-use" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The MEHO login ends after about 30 minutes with no use
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-meho-call-says-your-meho-login-has-expired-claude-code-plugin" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A MEHO call says "Your MEHO login has expired" (Claude Code plugin)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-plugin-stops-with-meho-did-not-connect-claude-code-plugin" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The plugin stops with "MEHO did not connect" (Claude Code plugin)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#token-issues-but-every-call-401s" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2179,16 +2245,72 @@ open DCR on a production realm to work around a per-client config gap.</p>
 CLI device-code flow, <code>meho-mcp</code> for MCP. See
 <a href="../../install/keycloak-realm/">Keycloak realm setup</a>.</p>
 <h2 id="authorization-request-fails-with-invalid_scope-naming-offline_access-w7">Authorization request fails with <code>invalid_scope</code> naming <code>offline_access</code> (W7)<a class="headerlink" href="#authorization-request-fails-with-invalid_scope-naming-offline_access-w7" title="Permanent link">&para;</a></h2>
-<p><strong>Symptom.</strong> A browser-flow MCP client (Claude Code) 400s with
-<code>{"error":"invalid_scope","error_description":"Invalid scopes: … offline_access"}</code>;
-the Keycloak login page never appears.</p>
-<p><strong>Wall.</strong> The client requested <code>offline_access</code> to obtain a refresh
-token, but the <code>meho-mcp</code> client does not have that scope assigned.</p>
+<p><strong>Symptom.</strong> The Keycloak login page never appears. Keycloak sends the
+browser back to the client's callback address with
+<code>error=invalid_scope</code> and <code>error_description=Invalid scopes: … offline_access</code>.
+Claude Code shows this error. With the <code>mcp-remote</code> shim (the MEHO plugin
+and the Claude Desktop bundle), the browser tab shows
+<code>Error: No authorization code received</code>.</p>
+<p><strong>Wall.</strong> The client asked for <code>offline_access</code>, but the <code>meho-mcp</code>
+client does not offer that scope. Keycloak refuses a login that asks for
+a scope the client does not offer as a default or optional client scope.
+It does not drop the scope silently. The MEHO plugin, the Claude Desktop
+bundle, and Claude Code's own HTTP client all ask for <code>offline_access</code>.
+The same error appears for <code>mcp:admin</code> when the realm does not offer it.</p>
 <p><strong>Fix.</strong> Assign the realm's built-in <code>offline_access</code> scope to
 <code>meho-mcp</code> as an <strong>optional</strong> scope (not default — only flows that ask
-for a refresh token should mint one). <code>meho-cli</code> is deliberately not
-given it: the device-code CLI re-runs the device dance instead of
-holding a long-lived refresh token.</p>
+for a refresh token should mint one). See
+<a href="../../install/keycloak-realm/#the-mcp-client-meho-mcp">Keycloak realm setup</a>.
+<code>meho-cli</code> does not get this scope by default.</p>
+<h2 id="the-meho-login-ends-after-about-30-minutes-with-no-use">The MEHO login ends after about 30 minutes with no use<a class="headerlink" href="#the-meho-login-ends-after-about-30-minutes-with-no-use" title="Permanent link">&para;</a></h2>
+<p><strong>Symptom.</strong> MEHO tools work, but after about half an hour without a MEHO
+call, the next call opens a new browser login or does not answer.</p>
+<p><strong>Wall.</strong> The client did not ask for <code>offline_access</code>. Then Keycloak
+issues a normal refresh token, and it ends at the realm's SSO idle limit
+(30 minutes by default). Older versions of the MEHO plugin and the Claude
+Desktop bundle did not ask for it.</p>
+<p><strong>Fix.</strong> Update the MEHO plugin (<code>claude plugin update meho@meho</code>, then
+restart Claude Code) or install the current Claude Desktop bundle. If you
+set the scopes yourself (<code>MEHO_MCP_SCOPES</code> or the bundle's <code>scopes</code>
+field), keep <code>offline_access</code> in the list. The login then lasts until the
+<code>meho-mcp</code> client's offline idle limit, 48 hours with the
+<a href="../../install/keycloak-realm/#how-long-an-mcp-login-lasts">recommended realm setting</a>.</p>
+<h2 id="a-meho-call-says-your-meho-login-has-expired-claude-code-plugin">A MEHO call says "Your MEHO login has expired" (Claude Code plugin)<a class="headerlink" href="#a-meho-call-says-your-meho-login-has-expired-claude-code-plugin" title="Permanent link">&para;</a></h2>
+<p><strong>Symptom.</strong> A MEHO tool call fails at once with "Your MEHO login has
+expired. Run /mcp, pick meho, and reconnect to log in again." After that,
+<code>/mcp</code> shows <code>meho</code> as failed.</p>
+<p><strong>Wall.</strong> The saved login can no longer be renewed: it was not used for
+the offline idle limit, or the session was ended in Keycloak. A new
+browser login is needed. The plugin does not wait for that login in the
+middle of a call, so the call fails fast instead of hanging.</p>
+<p><strong>Fix.</strong> Run <code>/mcp</code>, pick <code>meho</code>, and reconnect. Finish the login in the
+browser tab that opens. If Claude Code stops waiting before you finish,
+finish the login anyway and reconnect once more. If a MEHO login tab
+opened when the call failed, you can close it.</p>
+<h2 id="the-plugin-stops-with-meho-did-not-connect-claude-code-plugin">The plugin stops with "MEHO did not connect" (Claude Code plugin)<a class="headerlink" href="#the-plugin-stops-with-meho-did-not-connect-claude-code-plugin" title="Permanent link">&para;</a></h2>
+<p><strong>Symptom.</strong> <code>meho</code> shows as failed, and the MCP log has a line like
+<code>meho plugin: MEHO did not connect within 5 minutes, so this attempt
+stopped.</code></p>
+<p><strong>Wall.</strong> The connect did not finish within <code>MEHO_MCP_LOGIN_TIMEOUT</code>
+seconds (default 300). Two common reasons:</p>
+<ul>
+<li>A browser login started, but nobody finished it in time.</li>
+<li>Another Claude Code session was running a login at the same time. This
+  session then waits, and it does not pick up the other session's login
+  even when that login is done.</li>
+</ul>
+<p>Stopping frees the local callback port, so the next attempt can log in.
+Older plugin versions waited forever instead, and every later session
+failed with <code>listen EADDRINUSE</code>.</p>
+<p><strong>Fix.</strong> Finish any open MEHO login in your browser. Then run <code>/mcp</code>, pick
+<code>meho</code>, and reconnect. If the login tab opens behind your terminal, look
+for it there. If several MEHO login tabs are open, close them all and
+reconnect once.</p>
+<p><strong>Known limit.</strong> A session that finished its login keeps the callback
+port while it runs, so a new login in another session may not finish. Then
+reconnect <code>meho</code> (or close Claude Code) in your other sessions first, and
+try again. This is tracked in
+<a href="https://github.com/evoila/meho/issues/4000">evoila/meho#4000</a>.</p>
 <h2 id="token-issues-but-every-call-401s">Token issues but every call 401s<a class="headerlink" href="#token-issues-but-every-call-401s" title="Permanent link">&para;</a></h2>
 <p>The token is minted, but the backplane rejects it on every call. From
 v0.3.2 the 401 body carries a <strong>specific <code>detail</code> code</strong> — read it

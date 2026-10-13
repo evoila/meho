@@ -995,6 +995,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="The one-command path: the MEHO plugin">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#how-long-the-plugin-login-lasts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How long the plugin login lasts
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -1905,6 +1922,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="The one-command path: the MEHO plugin">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#how-long-the-plugin-login-lasts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How long the plugin login lasts
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -2011,6 +2045,22 @@ session into the operator planes, set <code>MEHO_MCP_SCOPES</code> to add
 The realm still needs the public <code>meho-mcp</code> client and its loopback
 redirect URI, exactly as the manual path below (see
 <a href="../../install/keycloak-realm/">Keycloak realm setup</a>).</p>
+<h3 id="how-long-the-plugin-login-lasts">How long the plugin login lasts<a class="headerlink" href="#how-long-the-plugin-login-lasts" title="Permanent link">&para;</a></h3>
+<p>The plugin asks for <code>offline_access</code> by default (default scopes:
+<code>mcp:read mcp:execute offline_access</code>). So the login lasts until you have
+not used MEHO for the <code>meho-mcp</code> client's offline idle limit: 48 hours
+with the <a href="../../install/keycloak-realm/#how-long-an-mcp-login-lasts">recommended realm setting</a>.
+Using MEHO renews the login. <code>MEHO_MCP_SCOPES</code> replaces the whole list, so
+keep <code>offline_access</code> in it when you set it.</p>
+<p>When the login has expired, the next MEHO call fails at once with "Your
+MEHO login has expired. Run /mcp, pick meho, and reconnect to log in
+again." A login that nobody finishes stops after 5 minutes. No MEHO call
+waits for a login. See
+<a href="../troubleshooting/#a-meho-call-says-your-meho-login-has-expired-claude-code-plugin">troubleshooting</a>.</p>
+<p>Claude Code does not update plugins from this marketplace on its own,
+unless you turn on auto-update for the marketplace in <code>/plugin</code>. To get a
+new plugin version, run <code>claude plugin update meho@meho</code>, then restart
+Claude Code.</p>
 <h2 id="the-manual-path-configure-mcpjson">The manual path: configure <code>.mcp.json</code><a class="headerlink" href="#the-manual-path-configure-mcpjson" title="Permanent link">&para;</a></h2>
 <p>If you are not using the plugin, Claude Code also speaks MCP over
 <strong>native HTTP</strong> — no shim. You point a project-scoped <code>.mcp.json</code> at the

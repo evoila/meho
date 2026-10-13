@@ -2151,18 +2151,22 @@ token only on request (the realm grants <code>mcp:admin</code> request-only):</p
 <li>
 <p><strong>Claude Code plugin</strong> — set the <code>MEHO_MCP_SCOPES</code> environment seam to
   the space-separated scopes you want, adding <code>mcp:admin</code>:</p>
-<div class="highlight"><pre><span></span><code><span class="nv">MEHO_MCP_SCOPES</span><span class="o">=</span><span class="s2">"mcp:read mcp:execute mcp:admin"</span>
+<div class="highlight"><pre><span></span><code><span class="nv">MEHO_MCP_SCOPES</span><span class="o">=</span><span class="s2">"mcp:read mcp:execute offline_access mcp:admin"</span>
 </code></pre></div>
+<p>The variable replaces the whole default list. Keep <code>offline_access</code>
+in it, so the login still lasts between uses.</p>
 </li>
 <li>
 <p><strong>Claude Desktop <code>.mcpb</code> bundle</strong> — set the bundle's <strong>OAuth scopes</strong>
   (<code>scopes</code>) user-config field to the same value in the install dialog.</p>
 </li>
 </ul>
-<p>Requesting a scope your realm does not grant simply degrades to the
-default working surface — it never fails the connection. Leave the scope
-off entirely and the session stays on the 26-tool working surface, which
-is the right default for almost every agent.</p>
+<p>The <code>meho-mcp</code> client on your realm must offer <code>mcp:admin</code> as an
+<strong>optional</strong> client scope first. If it does not, Keycloak refuses the
+whole login with <code>invalid_scope</code> and issues no token — it does not drop
+the scope silently. Leave the scope off entirely and the session stays on
+the 26-tool working surface, which is the right default for almost every
+agent.</p>
 <h2 id="the-human-only-decision-verbs-no-mcp-path">The human-only decision verbs (no MCP path)<a class="headerlink" href="#the-human-only-decision-verbs-no-mcp-path" title="Permanent link">&para;</a></h2>
 <p>Three verbs have <strong>no MCP registration under any scope</strong>, elevated or
 not:</p>

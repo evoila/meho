@@ -780,6 +780,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="The MCP client (meho-mcp)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#how-long-an-mcp-login-lasts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How long an MCP login lasts
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -2037,6 +2054,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="The MCP client (meho-mcp)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#how-long-an-mcp-login-lasts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How long an MCP login lasts
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -2377,13 +2411,37 @@ differences:</p>
 <tr>
 <td><code>offline_access</code> client scope</td>
 <td>Assign as <strong>Optional</strong></td>
-<td>Some MCP clients always request a refresh token; without the scope the authorization request fails with <code>invalid_scope</code>. Deliberately <em>not</em> given to <code>meho-cli</code> — the CLI re-runs the device dance instead of holding a long-lived refresh token.</td>
+<td>The MEHO Claude Code plugin, the Claude Desktop bundle, and Claude Code's own HTTP client ask for it, so the login lasts past the realm's SSO idle limit. Keycloak refuses a login that asks for a scope the client does not offer: it answers <code>invalid_scope</code> and issues no token. <code>meho-cli</code> does not get this scope by default.</td>
+</tr>
+<tr>
+<td>Client Offline Session Idle (attribute <code>client.offline.session.idle.timeout</code>)</td>
+<td><strong><code>172800</code></strong> seconds (48 hours) — recommended</td>
+<td>Sets how long the MCP login lasts with no use. Without it, the realm's Offline Session Idle applies (30 days by default). Set it on the <strong>Advanced</strong> tab of the client, or with <code>kcadm.sh update clients/&lt;client-uuid&gt; -r &lt;realm&gt; -s 'attributes."client.offline.session.idle.timeout"=172800'</code>.</td>
 </tr>
 </tbody>
 </table>
 <p>The five mappers and four default scopes apply identically. Which MCP
 client uses which flow — and everything else client-side — is the
 <a href="../../clients/">Connect clients</a> section's territory.</p>
+<h3 id="how-long-an-mcp-login-lasts">How long an MCP login lasts<a class="headerlink" href="#how-long-an-mcp-login-lasts" title="Permanent link">&para;</a></h3>
+<p>With <code>offline_access</code>, Keycloak issues an <strong>offline</strong> refresh token. The
+login then lasts until it has not been used for the offline idle limit
+above: 48 hours with the recommended setting. Using MEHO renews the
+token, which starts the 48 hours again. If your realm turns on <strong>Offline
+Session Max Limited</strong>, that maximum also applies.</p>
+<p>Without <code>offline_access</code>, the refresh token ends at the realm's <strong>SSO
+Session Idle</strong> limit, which is 30 minutes by default. After that, the next
+MEHO call needs a new browser login.</p>
+<p>Two more things must be true:</p>
+<ul>
+<li>The user has the realm role <code>offline_access</code>. Keycloak gives it to every
+  user through the realm's default roles (<code>default-roles-&lt;realm&gt;</code>). Without
+  it, the token request fails with "Offline tokens not allowed for the user
+  or client".</li>
+<li><code>meho admin keycloak bootstrap-clients</code> assigns <code>offline_access</code> as an
+  optional scope on <code>meho-mcp</code>. It does <strong>not</strong> set the 48-hour offline
+  idle limit yet, so set that by hand as shown in the table.</li>
+</ul>
 <h2 id="approve-only-principal">Approve-only principal<a class="headerlink" href="#approve-only-principal" title="Permanent link">&para;</a></h2>
 <p>By default, clearing the approval queue needs the <strong>operator</strong> role. For
 separation of duties you can instead grant a dedicated approver the
@@ -2501,9 +2559,9 @@ usually appear:</p>
 <td>Run <code>meho login</code> in a real terminal, or raise the wrapper timeout.</td>
 </tr>
 <tr>
-<td>MCP client fails with <code>invalid_scope</code> naming <code>offline_access</code></td>
-<td>The scope is not assigned on <code>meho-mcp</code></td>
-<td>Assign <code>offline_access</code> as an <strong>optional</strong> scope (see the MCP client table above).</td>
+<td>MCP login fails with <code>invalid_scope</code> ("Invalid scopes: …") and the Keycloak login page never appears</td>
+<td>The client asked for a scope that <code>meho-mcp</code> does not offer, usually <code>offline_access</code> (or <code>mcp:admin</code>)</td>
+<td>Assign the scope as an <strong>optional</strong> scope on <code>meho-mcp</code> (see the MCP client table above).</td>
 </tr>
 <tr>
 <td><code>x509: certificate signed by unknown authority</code></td>

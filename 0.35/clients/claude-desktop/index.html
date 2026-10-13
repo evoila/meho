@@ -2127,9 +2127,15 @@ that differ per deployment —</p>
 </ul>
 <p>Two advanced fields default to the working setup and rarely need
 changing: the OAuth <strong>client id</strong> (default <code>meho-mcp</code>) and the OAuth
-<strong>scopes</strong> (default <code>mcp:read mcp:execute</code>). To opt the session into the
-operator planes, add <code>mcp:admin</code> to the scopes field — see
+<strong>scopes</strong> (default <code>mcp:read mcp:execute offline_access</code>). To opt the
+session into the operator planes, add <code>mcp:admin</code> to the scopes field — see
 <a href="../mcp-surface-and-scopes/#how-a-client-requests-elevation">MCP surface and scopes</a>.</p>
+<p><code>offline_access</code> keeps the login alive between uses. The login lasts until
+you have not used MEHO for the <code>meho-mcp</code> client's offline idle limit: 48
+hours with the
+<a href="../../install/keycloak-realm/#how-long-an-mcp-login-lasts">recommended realm setting</a>.
+Without it, the login ends at the realm's SSO idle limit (30 minutes by
+default). If you change the scopes field, keep <code>offline_access</code> in it.</p>
 <p>The bundle still expects the realm's public <code>meho-mcp</code> client with the
 shim's loopback redirect URIs registered (below), and — on an
 internal-CA deploy — one of the two CA trust routes below. If you cannot
@@ -2204,7 +2210,7 @@ shape proven in the smoke test (<code>mcp-remote@0.1.38</code>):</p>
 <span class="w">        </span><span class="s2">"https://meho.example.com/mcp"</span><span class="p">,</span>
 <span class="w">        </span><span class="s2">"8456"</span><span class="p">,</span>
 <span class="w">        </span><span class="s2">"--static-oauth-client-info"</span><span class="p">,</span><span class="w"> </span><span class="s2">"{\"client_id\": \"meho-mcp\"}"</span><span class="p">,</span>
-<span class="w">        </span><span class="s2">"--static-oauth-client-metadata"</span><span class="p">,</span><span class="w"> </span><span class="s2">"{\"scope\": \"mcp:read mcp:execute\"}"</span>
+<span class="w">        </span><span class="s2">"--static-oauth-client-metadata"</span><span class="p">,</span><span class="w"> </span><span class="s2">"{\"scope\": \"mcp:read mcp:execute offline_access\"}"</span>
 <span class="w">      </span><span class="p">],</span>
 <span class="w">      </span><span class="nt">"env"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"NODE_EXTRA_CA_CERTS"</span><span class="p">:</span><span class="w"> </span><span class="s2">"/path/to/internal-ca.pem"</span><span class="w"> </span><span class="p">}</span>
 <span class="w">    </span><span class="p">}</span>
@@ -2217,6 +2223,8 @@ shape proven in the smoke test (<code>mcp-remote@0.1.38</code>):</p>
 <li><code>--static-oauth-client-info</code> pins the pre-registered public
   <code>meho-mcp</code> client so the shim skips Dynamic Client Registration
   (which Keycloak's Trusted Hosts policy blocks anyway).</li>
+<li><code>offline_access</code> in the scope makes the login last between uses (see
+  above). The <code>meho-mcp</code> client must offer it as an optional scope.</li>
 <li><code>NODE_EXTRA_CA_CERTS</code> is only needed on an internal-CA deploy; drop it
   if your backplane and Keycloak present publicly-trusted certificates.
   The alternative is the OS route: with the root CA trusted in the OS

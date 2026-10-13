@@ -90,39 +90,104 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
-### Added — keycloak: governed delete for users, groups and clients (#3944 / #4009)
+## [0.35.22] - 2026-10-13
 
-- MEHO can now delete a Keycloak user, group or client through three new
-  operations: `keycloak.user.delete`, `keycloak.group.delete` and
-  `keycloak.client.delete`. Before, removing an event's login accounts meant
-  calling the Keycloak admin API by hand, with no approval and no audit row.
-  All three are on the destructive risk level, so a second person must
-  approve. Each takes the internal id or a name; a name that matches more
-  than one object is refused. Before the request waits for approval, MEHO
-  refuses to delete Keycloak's built-in clients, the client and user the
-  target logs in with, and a group that still has sub-groups (unless
-  `delete_subgroups=true`). The approval card shows what goes: user name,
-  enabled, groups; group name, member and sub-group counts; client id,
-  enabled, public or confidential. An object already gone returns
-  `already_absent: true`, and `deleted: true` comes only after a read
-  answers 404. CLI: `meho keycloak user|group|client delete`.
+This release fixes a security problem in the audit clean-up. The
+weekly job that empties old pre-redaction connector answers from the
+audit log now counts its interval from its last run, not from pod
+start. Before, on a deployment that restarted more often than once a
+week, the job never ran. So old answers, which can hold secrets, stayed
+past the retention window. After this update, its first run comes about
+one minute after a backplane pod starts. The release also adds a
+governed delete for Keycloak users, groups and clients; a second person
+must approve every call. Four vCenter DRS operations now work on
+vCenter 8.0.x. No database migration; no backplane settings change.
 
-### Fixed — vCenter DRS operations work on vCenter 8.0.x (#3617 / #4020)
+### Security — the `audit_log.raw_payload` age-off no longer restarts its wait on every pod start (#4012)
 
-- Four vCenter DRS operations failed on vCenter 8.0.x before they did
-  any work: `vmware.composite.cluster.drs_recommendations`,
-  `cluster.drs_rule.create`, `cluster.drs_vm_host_rule.create` and
-  `cluster.drs_rule.delete`. The delete failed in its preview, so no
-  preview hash came back and the delete could never be sent. The cause:
-  vCenter 8.0.x rejects the property paths `configurationEx.rule`,
-  `configurationEx.group` and `configurationEx.drsConfig` with HTTP 500
-  `InvalidProperty`. All four operations now read the whole
-  `configurationEx` and pick `rule`, `group` or `drsConfig` from it. A
-  missing `rule` or `group` list counts as empty. The inputs and outputs
-  of the operations do not change. `vmware.object.collect` still sends
-  property paths as given; its description now tells callers to request
-  `configurationEx` and pick the field from the result. The unit-test
-  fakes now reject these paths the way vCenter 8.0.x does.
+- The weekly job that empties `audit_log.raw_payload` now counts its
+  interval from its last run, not from pod start (#4010 / #4012). The
+  job empties `raw_payload` on rows older than the retention window
+  (`auditRawPayload.retentionDays`, default 90 days). `raw_payload`
+  holds a connector's answer before redaction, so it can hold secrets.
+  Before, the job slept a full interval
+  (`auditRawPayload.pruneIntervalSeconds`, default 7 days) after every
+  pod start, and only then ran. So on a deployment that restarted more
+  often than the interval (updates, crashes, node drains), the job
+  never ran. Old raw answers, which can hold secrets, stayed past the
+  retention window. What changed:
+  - About one minute after a pod starts, the job reads the time of its
+    own newest run. It runs at once if no run is recorded within the
+    last interval. Otherwise it waits only for the rest of the
+    interval. After that, it runs once per interval, as before.
+  - Every run now writes its audit row (path `audit.raw_payload.prune`),
+    also when it emptied 0 rows. Only rows this job writes count as a
+    run. With `auditRawPayload.retentionDays: 0` (age-off turned off)
+    it still writes no row.
+  - A last-run time in the future counts as "due now". If the read
+    fails, the job logs
+    `audit_raw_payload_retention_last_run_read_failed` and runs at
+    once.
+  - Each start logs `audit_raw_payload_retention_scheduled` with
+    `last_run_at` and `next_run_in_seconds`, so you can check the
+    schedule after a restart.
+
+  **Operators:** the first age-off run now comes about one minute after
+  a pod starts, on each replica. So the large first `UPDATE` that the
+  0.35.19 entry describes (it clears the whole backlog older than the
+  retention window) now starts about one minute after this update rolls
+  out, not a week later. On a large `audit_log`, this run can take a
+  while. Two pods may run it at the same time; that is safe. No
+  migration and no new setting.
+
+### Added
+
+- MEHO can now delete a Keycloak user, group or client through three
+  new operations: `keycloak.user.delete`, `keycloak.group.delete` and
+  `keycloak.client.delete` (#3944 / #4009). Before, removing an event's
+  login accounts meant calling the Keycloak admin API by hand, with no
+  approval and no audit row. All three are on the destructive risk
+  level, so a second person must approve. Each takes the internal id or
+  a name; a name that matches more than one object is refused. Before
+  the request waits for approval, MEHO refuses to delete Keycloak's
+  built-in clients, the client and user the target logs in with, and a
+  group that still has sub-groups (unless `delete_subgroups=true`). The
+  approval card shows what goes: user name, enabled, groups; group
+  name, member and sub-group counts; client id, enabled, public or
+  confidential. An object already gone returns `already_absent: true`,
+  and `deleted: true` comes only after a read answers 404. CLI:
+  `meho keycloak user|group|client delete`. Without `--preview-hash`
+  the CLI only shows a preview and its hash; run the same command again
+  with `--preview-hash <hash>` to ask for approval. For every
+  destructive operation, a refusal because the preview failed now says
+  why (secrets removed, at most 256 characters). Tested against a
+  mocked Keycloak admin API; not yet run against a live Keycloak.
+
+### Fixed
+
+- Four vCenter DRS operations now work on vCenter 8.0.x (#3617 /
+  #4020). Before, they failed on 8.0.x before they did any work:
+  `vmware.composite.cluster.drs_recommendations`,
+  `vmware.composite.cluster.drs_rule.create`,
+  `vmware.composite.cluster.drs_vm_host_rule.create` and
+  `vmware.composite.cluster.drs_rule.delete`. The delete failed in its
+  preview, so no preview hash came back and the delete could never be
+  sent. The cause: vCenter 8.0.x rejects the property paths
+  `configurationEx.rule`, `configurationEx.group` and
+  `configurationEx.drsConfig` with HTTP 500 `InvalidProperty`. All four
+  operations now read the whole `configurationEx` and pick `rule`,
+  `group` or `drsConfig` from it. A missing `rule` or `group` list
+  counts as empty. The inputs and outputs of the operations do not
+  change. `vmware.object.collect` still sends property paths as given;
+  its description now tells callers to request `configurationEx` and
+  pick the field from the result. These operations are on the
+  `vmware-rest-9.0` connector. Tested against fakes that reject these
+  paths the way vCenter 8.0.x does; not yet run against a live vCenter.
+
+### Changed
+
+- The advisory ledger now marks row 82, the PowerShell fix in 0.35.21,
+  as published: GHSA-v2v2-4gh2-m4q8. Docs only. (#4018)
 
 ## [0.35.21] - 2026-10-13
 

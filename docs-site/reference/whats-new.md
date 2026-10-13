@@ -9,6 +9,27 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.35.22](https://github.com/evoila/meho/releases/tag/v0.35.22) — 2026-10-13
+
+- **Security fix: the audit clean-up now runs on time.** MEHO keeps
+  each connector's answer before redaction in the audit log, and that
+  answer can hold secrets. A weekly job empties old answers. Before,
+  every restart of MEHO started the job's week again. So on a
+  deployment that restarted often, the job never ran, and old answers
+  stayed past the retention window. Now the job counts from its last
+  run. After this update, its first run comes about one minute after
+  MEHO starts.
+- **Delete Keycloak users, groups and clients.** The new
+  `keycloak.user.delete`, `keycloak.group.delete` and
+  `keycloak.client.delete` remove one object from a Keycloak realm. A
+  second person must approve every call, after seeing what goes on the
+  approval card. MEHO refuses to delete Keycloak's built-in clients and
+  the account MEHO itself logs in with.
+- **DRS operations work on vCenter 8.0.** Four DRS operations failed at
+  once on vCenter 8.0.x: the DRS recommendations read, the two rule
+  creates and the rule delete. They now read the cluster settings in a
+  way vCenter 8.0.x accepts.
+
 ## [v0.35.21](https://github.com/evoila/meho/releases/tag/v0.35.21) — 2026-10-13
 
 - **Security fix: PowerShell connectors.** This release fixes a

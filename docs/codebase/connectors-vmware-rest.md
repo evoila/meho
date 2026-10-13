@@ -488,7 +488,11 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     fault class names only, e.g. `NoPermission` / `InvalidProperty`,
     **never** fault text, which can echo a property value) — so an
     operator can tell a genuinely-unset property from a per-property
-    permission/auth/invalid fault (#3708).
+    permission/auth/invalid fault (#3708). The op passes paths through
+    as given. Its description and `properties` hint tell callers that
+    vCenter 8.0.x rejects a path into a cluster's `configurationEx`
+    (`configurationEx.rule` / `.group` / `.drsConfig`), so they request
+    `configurationEx` and pick the field from the result (#3617).
   - **`vmware.tasks.recent`** (`typed_ops_tasks_recent.py`, handler
     `tasks_recent`) — recent vCenter Task objects for change-window
     monitoring (distinct from `event.tail`, which reads the *event*
@@ -1336,7 +1340,7 @@ through unchanged, keeps DataObject `_typeName` tags, and normalises
 nested `Any` positions like `TaskInfo.result` in the same pass), and
 **every** propSet consumer funnels `val` through it: the `_write.py`
 extractors (single-prop, `config.hardware.device`, `config.template`,
-`configurationEx.rule`), `_read.py`'s `_extract_object_props`,
+the cluster's whole `configurationEx`), `_read.py`'s `_extract_object_props`,
 `vim_task.py`'s `Task.info` extraction (a boxed `info.state` /
 `error.localizedMessage` / `progress` still reaches terminal states), and
 the typed reads (`host.usage`, `vm.info`, `host.network_uplinks`,
@@ -1686,7 +1690,10 @@ hosts.
   to `PrimitiveInt`). This is the first request body that sends a boxed
   primitive; the body-shape reconcile lane checks the alias against the spec.
 - **One plan, used twice** (the `_teardown.TeardownPlan` seam). It reads the
-  cluster's `name` and `configurationEx.rule` once. An unknown cluster gives
+  cluster's `name` and its whole `configurationEx` once, and takes the rules
+  from the `rule` array (no array means no rules). It never asks for
+  `configurationEx.rule`: vCenter 8.0.x rejects that path (see "Known issues
+  / gaps" below). An unknown cluster gives
   `invalid_request`. No rule with the name gives `unchanged` (safe to run
   twice). Two or more rules with the name give `precondition_failed`, with the
   rules listed in `blockers`. A rule list vCenter could not read fails the call
@@ -2124,8 +2131,9 @@ pinned `vi-json.yaml`).
 rule's VM names to MoRefs **scoped to the cluster** (a *read*
 `GET:/vcenter/vm?filter.names&filter.clusters`, un-gated) — fewer than two
 resolve → `status='insufficient_vms'` before any write; read the cluster's
-existing rules (`configurationEx.rule` via `RetrievePropertiesEx`, un-gated)
-for the idempotence / name-collision check — a duplicate name →
+whole `configurationEx` via `RetrievePropertiesEx` (un-gated) and take the
+existing rules from its `rule` array for the idempotence / name-collision
+check — a duplicate name →
 `status='rule_exists'`, a **structured status rather than a raw vim
 `DuplicateName` fault**; then issue a single-rule `ClusterConfigSpecEx`
 delta with `modify=true` — `rulesSpec=[{operation: "add", info:
@@ -2762,6 +2770,21 @@ they never park.
   DVS host removal (`DistributedVirtualSwitch.ReconfigureDvs_Task` with
   the `config.configVersion` read). The audit's DVS listing was dropped
   (degradation note above).
+- **No property paths into a cluster's `configurationEx` (#3617)** —
+  vCenter 8.0.x rejects `configurationEx.rule`, `configurationEx.group` and
+  `configurationEx.drsConfig` in `RetrievePropertiesEx` with HTTP 500
+  `InvalidProperty`. The whole `configurationEx` works. The likely reason:
+  the vim API declares the property as the base type
+  `ComputeResourceConfigInfo`, and `rule` / `group` / `drsConfig` exist only
+  on the cluster type `ClusterConfigInfoEx`. So `cluster.drs_recommendations`,
+  `cluster.drs_rule.create`, `cluster.drs_vm_host_rule.create` and
+  `cluster.drs_rule.delete` read the whole object and pick the member in code
+  (`_write._cluster_config_items`; an absent `rule` / `group` array is an
+  empty list, because vim leaves empty arrays out). The unit-test fakes
+  (`tests/_vmware_cluster_config_fake.py`) answer a dotted
+  `configurationEx.<member>` path with the same HTTP 500, so a handler that
+  goes back to the dotted path fails in the unit tests. `object.collect`
+  passes caller paths through unchanged and documents the rule instead.
 - **#2986 read-composite residual + exhaustive read lane** — #2970's
   sweep covered the write composites; the read side's
   `_OP_GET_CLUSTER_DRS = "GET:/vcenter/cluster/{cluster}/drs"` was
@@ -2770,8 +2793,9 @@ they never park.
   `/vcenter/cluster` family is list/get/evc-mode only). #2986 switched
   the `cluster.drs_recommendations` DRS leg to vim: one
   `RetrievePropertiesEx` on the `propertyCollector` singleton reading
-  `ClusterComputeResource.configurationEx.drsConfig`
-  (`ClusterDrsConfigInfo`) and — when
+  the cluster's DRS config (`ClusterDrsConfigInfo`; since #3617 the read
+  asks for the whole `configurationEx` and picks `drsConfig` in code) and
+  — when
   `include_recommendations_history=True` — `drsRecommendation` in the
   same call (the surface `vm.migrate`'s DRS lookup already uses; the
   response envelope keys are unchanged, `drs` now carries the vim

@@ -90,6 +90,40 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — keycloak: governed delete for users, groups and clients (#3944 / #4009)
+
+- MEHO can now delete a Keycloak user, group or client through three new
+  operations: `keycloak.user.delete`, `keycloak.group.delete` and
+  `keycloak.client.delete`. Before, removing an event's login accounts meant
+  calling the Keycloak admin API by hand, with no approval and no audit row.
+  All three are on the destructive risk level, so a second person must
+  approve. Each takes the internal id or a name; a name that matches more
+  than one object is refused. Before the request waits for approval, MEHO
+  refuses to delete Keycloak's built-in clients, the client and user the
+  target logs in with, and a group that still has sub-groups (unless
+  `delete_subgroups=true`). The approval card shows what goes: user name,
+  enabled, groups; group name, member and sub-group counts; client id,
+  enabled, public or confidential. An object already gone returns
+  `already_absent: true`, and `deleted: true` comes only after a read
+  answers 404. CLI: `meho keycloak user|group|client delete`.
+
+### Fixed — vCenter DRS operations work on vCenter 8.0.x (#3617 / #4020)
+
+- Four vCenter DRS operations failed on vCenter 8.0.x before they did
+  any work: `vmware.composite.cluster.drs_recommendations`,
+  `cluster.drs_rule.create`, `cluster.drs_vm_host_rule.create` and
+  `cluster.drs_rule.delete`. The delete failed in its preview, so no
+  preview hash came back and the delete could never be sent. The cause:
+  vCenter 8.0.x rejects the property paths `configurationEx.rule`,
+  `configurationEx.group` and `configurationEx.drsConfig` with HTTP 500
+  `InvalidProperty`. All four operations now read the whole
+  `configurationEx` and pick `rule`, `group` or `drsConfig` from it. A
+  missing `rule` or `group` list counts as empty. The inputs and outputs
+  of the operations do not change. `vmware.object.collect` still sends
+  property paths as given; its description now tells callers to request
+  `configurationEx` and pick the field from the result. The unit-test
+  fakes now reject these paths the way vCenter 8.0.x does.
+
 ## [0.35.21] - 2026-10-13
 
 This release fixes a critical PowerShell command injection in the

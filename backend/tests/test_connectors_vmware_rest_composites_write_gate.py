@@ -59,6 +59,7 @@ from meho_backplane.db.models import (
     PermissionVerdict,
 )
 from meho_backplane.settings import get_settings
+from tests._vmware_cluster_config_fake import cluster_config_ex, reject_config_ex_member_paths
 
 _TENANT_ID = uuid.UUID("00000000-0000-0000-0000-0000000025a6")
 
@@ -858,7 +859,8 @@ class _DrsRuleRecordingConnector:
     collision read + the ``Task.info`` poll (both vmomi ``RetrievePropertiesEx``,
     keyed apart by the request body's ``specSet`` object type) and records every
     ``ReconfigureComputeResource_Task`` write so the tests can assert the
-    mutating vmomi POST never fired when the gate parks / denies.
+    mutating vmomi POST never fired when the gate parks / denies. The cluster
+    read answers like vCenter 8.0.x: a path into ``configurationEx`` fails.
     """
 
     _MOUNT = "/api"
@@ -886,13 +888,14 @@ class _DrsRuleRecordingConnector:
         if path.endswith("/ReconfigureComputeResource_Task"):
             self.reconfig_writes.append(json)
             return {"type": "Task", "value": "task-rule-1"}
+        reject_config_ex_member_paths(json)
         spec_type = json["specSet"][0]["propSet"][0]["type"]
         if spec_type == "ClusterComputeResource":
             return {
                 "objects": [
                     {
                         "obj": {"type": "ClusterComputeResource", "value": "domain-c1"},
-                        "propSet": [{"name": "configurationEx.rule", "val": []}],
+                        "propSet": [{"name": "configurationEx", "val": cluster_config_ex()}],
                     }
                 ]
             }

@@ -933,3 +933,14 @@ def test_object_collect_group_has_non_empty_when_to_use() -> None:
     blurb = VMWARE_TYPED_WHEN_TO_USE_BY_GROUP.get(group_key)
     assert isinstance(blurb, str)
     assert blurb.strip()
+
+
+def test_object_collect_guidance_says_to_read_the_whole_configuration_ex() -> None:
+    """vCenter 8.0.x rejects 'configurationEx.<field>': the guidance names the working read."""
+    llm_instructions = VMWARE_OBJECT_COLLECT_OP.llm_instructions
+    assert llm_instructions is not None
+    hint = llm_instructions["parameter_hints"]["properties"]
+    assert "['configurationEx']" in hint
+    assert "'configurationEx.<field>'" in hint
+    assert "InvalidProperty" in hint
+    assert "request 'configurationEx'" in VMWARE_OBJECT_COLLECT_OP.description

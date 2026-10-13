@@ -24,6 +24,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
 
+import httpx
 import pytest
 from jsonschema import Draft202012Validator, ValidationError
 from sqlalchemy import func, select
@@ -41,6 +42,7 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     CLUSTER_DRS_RULE_DELETE_PARAMETER_SCHEMA,
     CLUSTER_DRS_RULE_DELETE_RESPONSE_SCHEMA,
 )
+from meho_backplane.connectors.vmware_rest.vim_body import retrieve_properties_body
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
 from meho_backplane.db.models import Target as TargetORM
@@ -53,6 +55,7 @@ from meho_backplane.operations.approval_queue import (
 )
 from meho_backplane.operations.meta_tools import call_operation, preview_operation
 from meho_backplane.settings import get_settings
+from tests._vmware_cluster_config_fake import cluster_config_ex
 from tests._vmware_teardown_fake import (
     GateRecorder,
     VimFake,
@@ -101,16 +104,25 @@ def _vm_host_rule(key: int = 12, name: str = "pin-to-hosts") -> dict[str, Any]:
     }
 
 
-def _cluster(conn: VimFake, rules: list[dict[str, Any]], *, boxed: bool = True) -> None:
-    """Seed a cluster; ``boxed`` stores the rule list the way vCenter 8.0.x sends it."""
-    value: Any = {"_typeName": "ArrayOfClusterRuleInfo", "_value": rules} if boxed else rules
+def _cluster(conn: VimFake, rules: list[dict[str, Any]]) -> None:
+    """Seed a cluster whose ``configurationEx`` holds *rules* (none: no ``rule`` array)."""
     conn.add(
         "ClusterComputeResource",
         _CLUSTER,
-        **{"name": "example-cluster", "configurationEx.rule": value},
+        name="example-cluster",
+        configurationEx=cluster_config_ex(rules=rules),
     )
     for vm in ("vm-1", "vm-2"):
         conn.add("VirtualMachine", vm, name=f"name-{vm}")
+
+
+def _cluster_read_paths(conn: VimFake) -> list[list[str]]:
+    """The property paths of every ``RetrievePropertiesEx`` on the cluster, in order."""
+    return [
+        body["specSet"][0]["propSet"][0]["pathSet"]
+        for _path, body in conn.calls_to("RetrievePropertiesEx")
+        if body["specSet"][0]["propSet"][0]["type"] == "ClusterComputeResource"
+    ]
 
 
 async def _call(conn: VimFake, **params: Any) -> Any:
@@ -172,13 +184,15 @@ async def test_delete_anti_affinity_rule_happy_path(gate: GateRecorder) -> None:
         "modify": True,
     }
     # The other rule is untouched.
-    rules = conn.objects[("ClusterComputeResource", _CLUSTER)]["configurationEx.rule"]["_value"]
+    rules = conn.objects[("ClusterComputeResource", _CLUSTER)]["configurationEx"]["rule"]
     assert [r["name"] for r in rules] == ["pin-to-hosts"]
+    # The plan and the check after the delete both read the whole configurationEx.
+    assert _cluster_read_paths(conn) == [["name", "configurationEx"], ["configurationEx"]]
 
 
 async def test_delete_vm_host_rule_shows_groups_and_keeps_them(gate: GateRecorder) -> None:
     conn = VimFake()
-    _cluster(conn, [_vm_host_rule()], boxed=False)
+    _cluster(conn, [_vm_host_rule()])
     out = await _call(conn, cluster=_CLUSTER, rule_name="pin-to-hosts")
 
     assert out["status"] == "deleted"
@@ -214,12 +228,32 @@ async def test_rule_already_gone_is_unchanged(gate: GateRecorder) -> None:
 
 
 async def test_cluster_without_any_rule_is_unchanged(gate: GateRecorder) -> None:
-    """vCenter leaves an empty rule list out of the answer: that means no rules."""
+    """vCenter leaves an empty rule array out of configurationEx: that means no rules."""
     conn = VimFake()
-    conn.add("ClusterComputeResource", _CLUSTER, name="example-cluster")
+    _cluster(conn, [])
+    assert "rule" not in conn.objects[("ClusterComputeResource", _CLUSTER)]["configurationEx"]
     out = await _call(conn, cluster=_CLUSTER, rule_name="keep-apart")
     assert out["status"] == "unchanged"
     assert gate.calls == []
+
+
+async def test_fake_rejects_a_path_into_configuration_ex_like_vcenter_8() -> None:
+    """The fake answers configurationEx.rule like vCenter 8.0.x: HTTP 500 InvalidProperty."""
+    conn = VimFake()
+    _cluster(conn, [_anti_affinity_rule()])
+    body = retrieve_properties_body("ClusterComputeResource", [_CLUSTER], ["configurationEx.rule"])
+    with pytest.raises(httpx.HTTPStatusError) as caught:
+        await conn._post_vmomi_json(
+            object(),
+            "/PropertyCollector/propertyCollector/RetrievePropertiesEx",
+            operator=operator(),
+            json=body,
+        )
+    assert caught.value.response.status_code == 500
+    assert caught.value.response.json() == {
+        "_typeName": "InvalidProperty",
+        "name": "configurationEx.rule",
+    }
 
 
 async def test_run_twice_deletes_once_then_unchanged(gate: GateRecorder) -> None:
@@ -281,8 +315,8 @@ async def test_unreadable_rule_list_fails_before_any_write(gate: GateRecorder) -
     """vCenter could not read the rules: never read that as "no rule"."""
     conn = VimFake()
     _cluster(conn, [_anti_affinity_rule()])
-    conn.unreadable[("ClusterComputeResource", _CLUSTER)] = {"configurationEx.rule"}
-    with pytest.raises(Exception, match=r"could not read configurationEx\.rule"):
+    conn.unreadable[("ClusterComputeResource", _CLUSTER)] = {"configurationEx"}
+    with pytest.raises(Exception, match=r"could not read configurationEx of"):
         await _call(conn, cluster=_CLUSTER, rule_name="keep-apart")
     assert gate.calls == []
 
@@ -330,12 +364,7 @@ async def test_deleted_only_after_the_new_read_misses_the_rule(gate: GateRecorde
     assert out["task_state"] == "success"
     assert "still reads back" in out["guidance"]
     # The plan read, then the task poll, then the new read of the rules.
-    cluster_reads = [
-        body
-        for path, body in conn.calls_to("RetrievePropertiesEx")
-        if body["specSet"][0]["propSet"][0]["type"] == "ClusterComputeResource"
-    ]
-    assert len(cluster_reads) == 2
+    assert _cluster_read_paths(conn) == [["name", "configurationEx"], ["configurationEx"]]
     _validate(out)
 
 

@@ -71,6 +71,7 @@ from meho_backplane.operations.approval_queue import (
     resume_dispatch_after_approval,
 )
 from meho_backplane.settings import get_settings
+from tests._vmware_cluster_config_fake import cluster_config_ex, reject_config_ex_member_paths
 
 _CONNECTOR_ID = "vmware-rest-9.0"
 _TENANT_ID = UUID("00000000-0000-0000-0000-00000000a0a3")
@@ -1701,6 +1702,8 @@ class _DrsRuleVmwareConnector:
     ``Task.info`` poll — the two ``RetrievePropertiesEx`` reads keyed apart by
     the request body's ``specSet`` object type). Records both surfaces so the
     test can prove the mutating vmomi write fires only on the approved resume.
+    The cluster read answers like vCenter 8.0.x: a path into
+    ``configurationEx`` fails.
     """
 
     _MOUNT = "/api"
@@ -1744,13 +1747,15 @@ class _DrsRuleVmwareConnector:
         self.vmomi_calls.append(path)
         if path.endswith("/ReconfigureComputeResource_Task"):
             return {"type": "Task", "value": "task-rule-e2e"}
+        reject_config_ex_member_paths(json)
         spec_type = json["specSet"][0]["propSet"][0]["type"]
         if spec_type == "ClusterComputeResource":
+            config_ex = cluster_config_ex(rules=self.existing_rules)
             return {
                 "objects": [
                     {
                         "obj": {"type": "ClusterComputeResource", "value": "domain-c1"},
-                        "propSet": [{"name": "configurationEx.rule", "val": self.existing_rules}],
+                        "propSet": [{"name": "configurationEx", "val": config_ex}],
                     }
                 ]
             }

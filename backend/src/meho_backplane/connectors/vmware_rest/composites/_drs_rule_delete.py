@@ -60,8 +60,9 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     _CLUSTER_VM_HOST_RULE_INFO_TYPE,
     _OP_RECONFIGURE_COMPUTE_RESOURCE_TASK,
     _OP_RETRIEVE_PROPERTIES,
-    _PROP_CONFIGURATION_EX_RULE,
+    _PROP_CONFIGURATION_EX,
     _VIRTUAL_MACHINE_MO_TYPE,
+    _cluster_config_items,
     _unwrap_value,
     _write_vmomi_sub_op,
 )
@@ -97,7 +98,9 @@ _TASK_TIMEOUT_SECONDS = 600.0
 #: (the ``Any`` discriminator maps ``int`` to ``PrimitiveInt``).
 _VIM_INT_TYPE: Final = "int"
 
-_CLUSTER_PROPS: Final = ["name", _PROP_CONFIGURATION_EX_RULE]
+#: The whole ``configurationEx``, not ``configurationEx.rule``: vCenter 8.0.x
+#: rejects a path into it with ``InvalidProperty`` (see ``_PROP_CONFIGURATION_EX``).
+_CLUSTER_PROPS: Final = ["name", _PROP_CONFIGURATION_EX]
 
 #: vim rule-info ``_typeName`` -> the rule type shown on the approval card.
 #: Any other rule type is shown by its vim type name.
@@ -109,9 +112,8 @@ _RULE_TYPES: Final[dict[str, str]] = {
 
 
 def _rules(props: dict[str, Any]) -> list[dict[str, Any]]:
-    """The cluster's rule-info dicts (an absent property means no rules)."""
-    raw = props.get(_PROP_CONFIGURATION_EX_RULE)
-    return [rule for rule in raw if isinstance(rule, dict)] if isinstance(raw, list) else []
+    """The cluster's rule-info dicts (an absent ``rule`` array means no rules)."""
+    return _cluster_config_items(props.get(_PROP_CONFIGURATION_EX), "rule")
 
 
 def _rule_type(rule: dict[str, Any]) -> str | None:
@@ -162,9 +164,10 @@ async def plan_drs_rule_delete(
 ) -> TeardownPlan:
     """Plan a DRS rule delete (read-only).
 
-    One ``RetrievePropertiesEx`` of the cluster's ``name`` and
-    ``configurationEx.rule``. A rule list vCenter could not read fails the
-    call before any write (:func:`read_object`). An unknown cluster is an
+    One ``RetrievePropertiesEx`` of the cluster's ``name`` and whole
+    ``configurationEx``; the rules are its ``rule`` array. A
+    ``configurationEx`` vCenter could not read fails the call before any
+    write (:func:`read_object`). An unknown cluster is an
     ``invalid_request``; no matching rule means absent; two or more matching
     rules are refused, because the name does not pick one.
     """
@@ -226,7 +229,7 @@ async def _rule_key_present(
         operator,
         mo_type=_CLUSTER_COMPUTE_RESOURCE_MO_TYPE,
         moid=cluster,
-        props=[_PROP_CONFIGURATION_EX_RULE],
+        props=[_PROP_CONFIGURATION_EX],
     )
     if props is None:
         return False

@@ -494,7 +494,11 @@ VMWARE_OBJECT_COLLECT_OP = VmwareTypedOp(
         "error before any read is issued. Reads via PropertyCollector "
         "directly on the connector session, so it works with zero catalog "
         "ingest. Prefer a purpose-built typed op when one covers the "
-        "property set. safety_level=safe, read-only."
+        "property set. vCenter 8.0.x rejects a path into a cluster's "
+        "'configurationEx' (for example 'configurationEx.rule', "
+        "'configurationEx.group' or 'configurationEx.drsConfig') with an "
+        "InvalidProperty error: request 'configurationEx' and pick the field "
+        "from the result. safety_level=safe, read-only."
     ),
     parameter_schema=_PARAMETER_SCHEMA,
     response_schema=_RESPONSE_SCHEMA,
@@ -513,7 +517,13 @@ VMWARE_OBJECT_COLLECT_OP = VmwareTypedOp(
         "parameter_hints": {
             "type": "MO type, e.g. 'VirtualMachine' / 'HostSystem' / 'Datastore'.",
             "moid": "MO id, e.g. 'vm-42' / 'host-12' / 'datastore-5'.",
-            "properties": "1-64 dotted property paths, e.g. ['summary.freeSpace'].",
+            "properties": (
+                "1-64 dotted property paths, e.g. ['summary.freeSpace']. For a "
+                "cluster's DRS rules, groups or DRS settings, request "
+                "['configurationEx'] and pick 'rule', 'group' or 'drsConfig' "
+                "from the result: vCenter 8.0.x rejects 'configurationEx.<field>' "
+                "with InvalidProperty."
+            ),
         },
         "output_shape": (
             "{type, moid, properties: {path: raw_value, ...}, missing: "

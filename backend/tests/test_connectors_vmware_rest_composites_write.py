@@ -86,6 +86,12 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     VM_CREATE_RESPONSE_SCHEMA,
     VM_NIC_REPOINT_PARAMETER_SCHEMA,
 )
+from tests._vmware_cluster_config_fake import (
+    cluster_config_ex,
+    config_ex_member_path,
+    invalid_property_fault,
+    reject_config_ex_member_paths,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -5508,6 +5514,51 @@ def _vm_row(vm: str, name: str) -> dict[str, Any]:
     return {"vm": vm, "name": name, "power_state": "POWERED_ON"}
 
 
+def _cluster_read_path_sets(vmomi_calls: list[tuple[str, Any]]) -> list[list[str]]:
+    """The property paths of every ``RetrievePropertiesEx`` on a cluster, in order."""
+    return [
+        body["specSet"][0]["propSet"][0]["pathSet"]
+        for path, body in vmomi_calls
+        if path.endswith("/RetrievePropertiesEx")
+        and body["specSet"][0]["propSet"][0]["type"] == "ClusterComputeResource"
+    ]
+
+
+def _config_ex_result(config_ex: dict[str, Any]) -> dict[str, Any]:
+    """A ``RetrievePropertiesEx`` result carrying a cluster's whole ``configurationEx``."""
+    return {
+        "objects": [
+            {
+                "obj": {"type": "ClusterComputeResource", "value": "domain-c1"},
+                "propSet": [{"name": "configurationEx", "val": config_ex}],
+            }
+        ]
+    }
+
+
+def test_cluster_rule_and_group_names_come_from_the_whole_configuration_ex() -> None:
+    """The names are picked from configurationEx's rule / group arrays."""
+    result = _config_ex_result(
+        cluster_config_ex(
+            rules=[{"_typeName": "ClusterAntiAffinityRuleSpec", "name": "keep-apart", "key": 1}],
+            groups=[
+                {"_typeName": "ClusterVmGroup", "name": "web-vms"},
+                {"_typeName": "ClusterHostGroup", "name": "gold-hosts"},
+            ],
+        )
+    )
+    assert _write._extract_cluster_rule_names(result) == {"keep-apart"}
+    assert _write._extract_cluster_group_names(result) == {"web-vms", "gold-hosts"}
+
+
+def test_cluster_without_rule_or_group_array_has_no_names() -> None:
+    """vCenter leaves an empty rule / group array out of configurationEx: no names."""
+    result = _config_ex_result(cluster_config_ex())
+    assert "rule" not in result["objects"][0]["propSet"][0]["val"]
+    assert _write._extract_cluster_rule_names(result) == set()
+    assert _write._extract_cluster_group_names(result) == set()
+
+
 class _DrsRuleConnector:
     """Recording double for the drs_rule.create REST reads + vim writes.
 
@@ -5515,6 +5566,8 @@ class _DrsRuleConnector:
     collision read + the ``ReconfigureComputeResource_Task`` write + the Task
     poll (the two ``RetrievePropertiesEx`` reads keyed apart by the request
     body's ``specSet`` object type — ``ClusterComputeResource`` vs ``Task``).
+    The cluster read answers like vCenter 8.0.x: the whole ``configurationEx``
+    works, a path into it fails with HTTP 500 ``InvalidProperty``.
     """
 
     _MOUNT = "/api"
@@ -5557,15 +5610,19 @@ class _DrsRuleConnector:
         self.vmomi_calls.append((path, json))
         if path.endswith("/ReconfigureComputeResource_Task"):
             return {"type": "Task", "value": self.reconfig_task}
+        reject_config_ex_member_paths(json)
         spec_type = json["specSet"][0]["propSet"][0]["type"]
         if spec_type == "ClusterComputeResource":
-            # Live VI-JSON boxes the array-valued rules read (#3106).
-            boxed_rules = {"_typeName": "ArrayOfClusterRuleInfo", "_value": self.existing_rules}
             return {
                 "objects": [
                     {
                         "obj": {"type": "ClusterComputeResource", "value": "domain-c1"},
-                        "propSet": [{"name": "configurationEx.rule", "val": boxed_rules}],
+                        "propSet": [
+                            {
+                                "name": "configurationEx",
+                                "val": cluster_config_ex(rules=self.existing_rules),
+                            }
+                        ],
                     }
                 ]
             }
@@ -5614,6 +5671,9 @@ async def test_drs_rule_create_happy_path_adds_anti_affinity_and_polls(gate: _Ga
         {"vm": "vm-1", "name": "web-01"},
         {"vm": "vm-2", "name": "web-02"},
     ]
+    # The collision read asks for the whole configurationEx, never a path
+    # into it (vCenter 8.0.x rejects configurationEx.rule).
+    assert _cluster_read_path_sets(conn.vmomi_calls) == [["configurationEx"]]
 
     # The single mutating sub-op was gated with its vi-json governance op_id +
     # logical params (resolved moids name the entities the write touches).
@@ -5792,7 +5852,7 @@ async def test_drs_rule_create_reconfig_body_reaches_the_wire_respx(
         "objects": [
             {
                 "obj": {"type": "ClusterComputeResource", "value": "domain-c1"},
-                "propSet": [{"name": "configurationEx.rule", "val": []}],
+                "propSet": [{"name": "configurationEx", "val": cluster_config_ex()}],
             }
         ]
     }
@@ -5812,12 +5872,18 @@ async def test_drs_rule_create_reconfig_body_reaches_the_wire_respx(
             mock.get("/api/about").respond(200, json={"version": "8.0.3"})
             mock.get("/api/vcenter/vm").respond(200, json=vm_list)
             # collision read then Task poll share the RetrievePropertiesEx URL.
-            mock.post(f"{vijson}/PropertyCollector/propertyCollector/RetrievePropertiesEx").mock(
-                side_effect=[
-                    httpx.Response(200, json=rules_result),
-                    httpx.Response(200, json=task_result),
-                ]
-            )
+            # Like vCenter 8.0.3, a path into configurationEx is an HTTP 500.
+            answers = iter([rules_result, task_result])
+
+            def _retrieve(request: httpx.Request) -> httpx.Response:
+                rejected = config_ex_member_path(json.loads(request.content))
+                if rejected is not None:
+                    return httpx.Response(500, json=invalid_property_fault(rejected))
+                return httpx.Response(200, json=next(answers))
+
+            retrieve = mock.post(
+                f"{vijson}/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+            ).mock(side_effect=_retrieve)
             reconfig = mock.post(
                 f"{vijson}/ClusterComputeResource/domain-c1/ReconfigureComputeResource_Task"
             ).respond(200, json={"type": "Task", "value": "task-1"})
@@ -5834,6 +5900,8 @@ async def test_drs_rule_create_reconfig_body_reaches_the_wire_respx(
             )
         assert isinstance(out, dict)
         assert out["status"] == "created"
+        collision_read = json.loads(retrieve.calls[0].request.content)
+        assert collision_read["specSet"][0]["propSet"][0]["pathSet"] == ["configurationEx"]
         assert reconfig.called
         body = json.loads(reconfig.calls[0].request.content)
         assert body["modify"] is True
@@ -6131,7 +6199,11 @@ class _ResourcePoolConnector:
 
 
 class _VmHostRuleConnector:
-    """Recording double for cluster.drs_vm_host_rule.create REST reads + vim writes."""
+    """Recording double for cluster.drs_vm_host_rule.create REST reads + vim writes.
+
+    The cluster read answers like vCenter 8.0.x: the whole ``configurationEx``
+    works, a path into it fails with HTTP 500 ``InvalidProperty``.
+    """
 
     _MOUNT = "/api"
 
@@ -6181,28 +6253,15 @@ class _VmHostRuleConnector:
         self.vmomi_calls.append((path, json))
         if path.endswith("/ReconfigureComputeResource_Task"):
             return {"type": "Task", "value": self.reconfig_task}
+        reject_config_ex_member_paths(json)
         spec_type = json["specSet"][0]["propSet"][0]["type"]
         if spec_type == "ClusterComputeResource":
+            config_ex = cluster_config_ex(rules=self.existing_rules, groups=self.existing_groups)
             return {
                 "objects": [
                     {
                         "obj": {"type": "ClusterComputeResource", "value": "domain-c1"},
-                        "propSet": [
-                            {
-                                "name": "configurationEx.rule",
-                                "val": {
-                                    "_typeName": "ArrayOfClusterRuleInfo",
-                                    "_value": self.existing_rules,
-                                },
-                            },
-                            {
-                                "name": "configurationEx.group",
-                                "val": {
-                                    "_typeName": "ArrayOfClusterGroupInfo",
-                                    "_value": self.existing_groups,
-                                },
-                            },
-                        ],
+                        "propSet": [{"name": "configurationEx", "val": config_ex}],
                     }
                 ]
             }
@@ -6462,6 +6521,9 @@ async def test_vm_host_rule_create_happy_path_adds_groups_and_rule(gate: _GateRe
     assert out["task"] == "task-vmhost-1"
     assert out["resolved_vms"] == [{"vm": "vm-7", "name": "esxi-nested-01"}]
     assert out["resolved_hosts"] == [{"host": "host-3", "name": "esx-dc19-a"}]
+    # One collision read of the whole configurationEx (rules + groups), never
+    # configurationEx.rule / .group (vCenter 8.0.x rejects both).
+    assert _cluster_read_path_sets(conn.vmomi_calls) == [["configurationEx"]]
     assert gate.gated_op_ids == [
         "POST:/ClusterComputeResource/{moId}/ReconfigureComputeResource_Task"
     ]

@@ -171,10 +171,10 @@ __all__ = [
 #: Reads cluster summary + DRS state (optionally surfacing the cluster's
 #: current DRS recommendation list). The composite dispatches one
 #: ``GET:/vcenter/cluster/{cluster}`` plus one vi-json
-#: ``POST:/PropertyCollector/{moId}/RetrievePropertiesEx`` (reading
-#: ``ClusterComputeResource.configurationEx.drsConfig`` and, on request,
-#: ``drsRecommendation``) to a single target -- the pinned vcenter.yaml
-#: serves no cluster DRS REST resource (#2986).
+#: ``POST:/PropertyCollector/{moId}/RetrievePropertiesEx`` (reading the
+#: cluster's whole ``configurationEx``, from which it picks ``drsConfig``,
+#: and, on request, ``drsRecommendation``) to a single target -- the pinned
+#: vcenter.yaml serves no cluster DRS REST resource (#2986).
 CLUSTER_DRS_RECOMMENDATIONS_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -521,9 +521,9 @@ CLUSTER_DRS_RECOMMENDATIONS_RESPONSE_SCHEMA: dict[str, Any] = {
         "drs": {
             "type": "object",
             "description": (
-                "DRS configuration payload: the cluster's vim "
-                "``configurationEx.drsConfig`` (``ClusterDrsConfigInfo`` "
-                "-- the vim API owns the inner shape) read via "
+                "DRS configuration payload: the ``drsConfig`` field "
+                "(``ClusterDrsConfigInfo`` -- the vim API owns the inner "
+                "shape) of the cluster's vim ``configurationEx``, read via "
                 "``RetrievePropertiesEx``; ``{}`` when the property is "
                 "unset on the target."
             ),

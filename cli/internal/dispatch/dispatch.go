@@ -201,6 +201,12 @@ type operationsAPI interface {
 		params *api.GetSearchApiV1OperationsSearchGetParams,
 		reqEditors ...api.RequestEditorFn,
 	) (*api.GetSearchApiV1OperationsSearchGetResponse, error)
+	PostPreviewApiV1OperationsPreviewPostWithResponse(
+		ctx context.Context,
+		params *api.PostPreviewApiV1OperationsPreviewPostParams,
+		body api.PostPreviewApiV1OperationsPreviewPostJSONRequestBody,
+		reqEditors ...api.RequestEditorFn,
+	) (*api.PostPreviewApiV1OperationsPreviewPostResponse, error)
 	Refresh(ctx context.Context) error
 }
 
@@ -251,11 +257,7 @@ func (c Connector) Call(
 	backplaneURL, opID, targetSlug string,
 	params map[string]any,
 ) (*CallResult, error) {
-	var target map[string]any
-	if targetSlug != "" {
-		target = map[string]any{"name": targetSlug}
-	}
-	return c.CallWithTarget(ctx, backplaneURL, opID, target, params)
+	return c.CallWithTarget(ctx, backplaneURL, opID, slugTarget(targetSlug), params)
 }
 
 // CallWithTarget is Call for connectors that need extra target keys
@@ -271,6 +273,49 @@ func (c Connector) CallWithTarget(
 	target map[string]any,
 	params map[string]any,
 ) (*CallResult, error) {
+	body, err := c.callBody(opID, target, params)
+	if err != nil {
+		return nil, err
+	}
+	return c.postCall(ctx, backplaneURL, body)
+}
+
+// CallWithPreviewHash is Call for an op on the destructive risk level. It
+// also sends previewHash: the hash a prior Preview of the same op, target
+// and params returned. The backplane refuses a destructive op without a
+// matching hash, so a verb runs Preview first and passes its hash here.
+func (c Connector) CallWithPreviewHash(
+	ctx context.Context,
+	backplaneURL, opID, targetSlug string,
+	params map[string]any,
+	previewHash string,
+) (*CallResult, error) {
+	body, err := c.callBody(opID, slugTarget(targetSlug), params)
+	if err != nil {
+		return nil, err
+	}
+	if previewHash != "" {
+		h := previewHash
+		body.PreviewHash = &h
+	}
+	return c.postCall(ctx, backplaneURL, body)
+}
+
+// slugTarget returns the dict-shape target {"name": slug}, or nil for an
+// empty slug (the target field is then sent as JSON null).
+func slugTarget(targetSlug string) map[string]any {
+	if targetSlug == "" {
+		return nil
+	}
+	return map[string]any{"name": targetSlug}
+}
+
+// callBody builds the OperationCall body shared by every Call variant.
+func (c Connector) callBody(
+	opID string,
+	target map[string]any,
+	params map[string]any,
+) (api.CallOperationBody, error) {
 	body := api.CallOperationBody{
 		ConnectorId: c.ID,
 		OpId:        opID,
@@ -278,6 +323,51 @@ func (c Connector) CallWithTarget(
 	if target != nil {
 		var t api.CallOperationBody_Target
 		if err := t.FromCallOperationBodyTarget1(target); err != nil {
+			return body, fmt.Errorf("encode target: %w", err)
+		}
+		body.Target = &t
+	}
+	if params != nil {
+		p := params
+		body.Params = &p
+	}
+	return body, nil
+}
+
+// PreviewResult is the part of the POST /api/v1/operations/preview
+// envelope a vendor verb reads: the status, the preview_hash a destructive
+// call must send, and the error + extras when no preview was made. Raw
+// keeps the whole envelope for --json output. Hand-typed for the same
+// reason as CallResult (the route returns `dict[str, Any]`).
+type PreviewResult struct {
+	Status      string          `json:"status"`
+	OpID        string          `json:"op_id"`
+	PreviewHash string          `json:"preview_hash"`
+	Error       *string         `json:"error"`
+	Extras      json.RawMessage `json:"extras,omitempty"`
+	Raw         json.RawMessage `json:"-"`
+}
+
+// Preview POSTs the same op, target and params a Call would send to the
+// preview route. Nothing is sent to the vendor and nothing waits for
+// approval; the result carries the preview_hash that CallWithPreviewHash
+// needs. Uses the same dict-shape target and 401-refresh dance as Call.
+func (c Connector) Preview(
+	ctx context.Context,
+	backplaneURL, opID, targetSlug string,
+	params map[string]any,
+) (*PreviewResult, error) {
+	client, err := newAuthedClient(ctx, backplaneURL)
+	if err != nil {
+		return nil, err
+	}
+	body := api.PreviewOperationBody{
+		ConnectorId: c.ID,
+		OpId:        opID,
+	}
+	if target := slugTarget(targetSlug); target != nil {
+		var t api.PreviewOperationBody_Target
+		if err := t.FromPreviewOperationBodyTarget1(target); err != nil {
 			return nil, fmt.Errorf("encode target: %w", err)
 		}
 		body.Target = &t
@@ -286,7 +376,29 @@ func (c Connector) CallWithTarget(
 		p := params
 		body.Params = &p
 	}
-	return c.postCall(ctx, backplaneURL, body)
+	apiParams := &api.PostPreviewApiV1OperationsPreviewPostParams{}
+	resp, err := client.PostPreviewApiV1OperationsPreviewPostWithResponse(ctx, apiParams, body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode() == http.StatusUnauthorized {
+		if rerr := client.Refresh(ctx); rerr != nil {
+			return nil, rerr
+		}
+		resp, err = client.PostPreviewApiV1OperationsPreviewPostWithResponse(ctx, apiParams, body)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if resp.StatusCode() != http.StatusOK {
+		return nil, classifyNon2xx(resp.HTTPResponse, resp.Body)
+	}
+	var out PreviewResult
+	if err := json.Unmarshal(resp.Body, &out); err != nil {
+		return nil, fmt.Errorf("decode preview response: %w", err)
+	}
+	out.Raw = append(json.RawMessage(nil), resp.Body...)
+	return &out, nil
 }
 
 // postCall issues the typed POST through the generated *WithResponse

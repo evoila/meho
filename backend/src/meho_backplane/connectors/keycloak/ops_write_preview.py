@@ -14,6 +14,9 @@ op_id                             preview stored in ``ApprovalRequest.proposed_e
 ``keycloak.realm.create``         ``{realm, representation}`` (realm body, scrubbed)
 ``keycloak.user.create``          ``{username, realm, representation}`` (user, scrubbed)
 ``keycloak.role_mapping.assign``  ``{username, id, realm, granted_roles}`` (role names)
+``keycloak.user.delete``          ``{blast_radius}`` — user name, enabled, groups
+``keycloak.group.delete``         ``{blast_radius}`` — name, members, sub-groups
+``keycloak.client.delete``        ``{blast_radius}`` — client id, enabled, type
 ================================  ===================================================
 
 Why bespoke builders on top of the generic params-echo default (#1856)
@@ -72,7 +75,8 @@ Fail-soft
 
 Most builders here are pure (no connector I/O) — they read only
 ``ctx.params`` and echo a scrubbed view, so they cannot fault on a network
-call. The one exception is ``_group_update_attributes_preview`` (#3280),
+call. The three delete builders (#3944, below) are different on purpose: see
+"Delete builders". The other exception is ``_group_update_attributes_preview`` (#3280),
 which fetches the group's **current** attributes so the approver can see the
 before→after delta (a tenant-claim write must show what it removes). That
 fetch is the seam's sanctioned before/after builder I/O (the same shape
@@ -82,6 +86,23 @@ false``) rather than dropping the preview. Should any builder raise anyway,
 :func:`~meho_backplane.operations._preview.build_proposed_effect` swallows
 it into the explicit ``preview_unavailable`` marker (#1628) rather than
 blocking the park, matching the existing builder contract.
+
+Delete builders (#3944)
+=======================
+
+``keycloak.user.delete`` / ``keycloak.group.delete`` /
+``keycloak.client.delete`` are on the ``destructive`` risk level, so the park
+is refused unless the preview carries a ``blast_radius`` block (object, child
+objects, irreversibility). Their builders read the object live and run the
+same lookup and guards as the handlers
+(:mod:`~meho_backplane.connectors.keycloak.ops_write_delete_lookup`). A refused
+delete (a name with more than one match, a built-in client, the target's own
+login client or user, a group with sub-groups) **raises** here. The raise
+leaves no ``blast_radius``, so the request never waits for approval, and the
+refusal reason carries the builder's message. An object that is already gone
+yields an honest "nothing to delete" block, so a repeated teardown still
+parks and then returns ``already_absent: true``. Without a live connector
+(the egress-free ``preview_operation`` path) the delete builders decline.
 
 References
 ----------
@@ -97,15 +118,31 @@ References
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors.keycloak._paths import _GROUP_PATH, fill_path
+from meho_backplane.connectors.keycloak.ops_write_delete import (
+    client_blast_radius,
+    group_blast_radius,
+    user_blast_radius,
+)
+from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
+    check_client_guards,
+    check_group_guards,
+    check_user_guards,
+    find_client,
+    find_group,
+    find_user,
+)
 from meho_backplane.connectors.keycloak.redaction import redact_secret_fields
 from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
 from meho_backplane.operations._preview import (
     PreviewContext,
     register_preview_builder,
 )
+
+if TYPE_CHECKING:
+    from meho_backplane.connectors.keycloak.connector import KeycloakConnector
 
 
 def _opt_str(value: Any) -> str | None:
@@ -423,6 +460,54 @@ def _group_membership_preview(action: str) -> Any:
     return _builder
 
 
+def _live_keycloak_connector(ctx: PreviewContext) -> KeycloakConnector | None:
+    """Return the live Keycloak connector, or ``None`` when there is none.
+
+    ``None`` on the egress-free ``preview_operation`` path (no connector
+    instance) or without a target; the delete builders then decline.
+    """
+    if ctx.connector_instance is None or ctx.target is None:
+        return None
+    # Lazy import: the operations package must not import a specific connector
+    # at module load, and this only runs at park time (all modules loaded).
+    from meho_backplane.connectors.keycloak.connector import KeycloakConnector
+
+    connector = ctx.connector_instance
+    return connector if isinstance(connector, KeycloakConnector) else None
+
+
+async def _user_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Card for ``keycloak.user.delete``: user name, enabled or not, groups."""
+    connector = _live_keycloak_connector(ctx)
+    if connector is None:
+        return None
+    found = await find_user(connector, ctx.operator, ctx.target, ctx.params)
+    if found.present:
+        await check_user_guards(connector, ctx.operator, ctx.target, found)
+    return await user_blast_radius(connector, ctx.operator, ctx.target, found)
+
+
+async def _group_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Card for ``keycloak.group.delete``: name, member count, sub-group count."""
+    connector = _live_keycloak_connector(ctx)
+    if connector is None:
+        return None
+    found = await find_group(connector, ctx.operator, ctx.target, ctx.params)
+    check_group_guards(found, ctx.params)
+    return await group_blast_radius(connector, ctx.operator, ctx.target, found)
+
+
+async def _client_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Card for ``keycloak.client.delete``: client id, enabled, public or confidential."""
+    connector = _live_keycloak_connector(ctx)
+    if connector is None:
+        return None
+    found = await find_client(connector, ctx.operator, ctx.target, ctx.params)
+    if found.present:
+        await check_client_guards(connector, ctx.operator, ctx.target, found)
+    return client_blast_radius(found)
+
+
 def _register_keycloak_preview_builders() -> None:
     """Wire the Keycloak park-time preview builders. Called at import time.
 
@@ -439,6 +524,9 @@ def _register_keycloak_preview_builders() -> None:
     register_preview_builder("keycloak.group.update_attributes", _group_update_attributes_preview)
     register_preview_builder("keycloak.group.member.add", _group_membership_preview("add"))
     register_preview_builder("keycloak.group.member.remove", _group_membership_preview("remove"))
+    register_preview_builder("keycloak.user.delete", _user_delete_preview)
+    register_preview_builder("keycloak.group.delete", _group_delete_preview)
+    register_preview_builder("keycloak.client.delete", _client_delete_preview)
 
 
 _register_keycloak_preview_builders()

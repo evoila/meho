@@ -13,18 +13,20 @@ import (
 )
 
 // newUserCmd returns the `meho keycloak user` parent with the read verb
-// `list` (keycloak.user.list) and the approval-gated write verbs `create`
+// `list` (keycloak.user.list), the approval-gated write verbs `create`
 // (keycloak.user.create) and `reset-password`
-// (keycloak.user.reset_password).
+// (keycloak.user.reset_password), and the destructive `delete`
+// (keycloak.user.delete, #3944).
 func newUserCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "user",
-		Short:        "Keycloak user sub-verbs (list, create, reset-password)",
+		Short:        "Keycloak user sub-verbs (list, create, reset-password, delete)",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newUserListCmd())
 	cmd.AddCommand(newUserCreateCmd())
 	cmd.AddCommand(newUserResetPasswordCmd())
+	cmd.AddCommand(newUserDeleteCmd())
 	return cmd
 }
 

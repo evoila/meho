@@ -547,11 +547,20 @@ def blast_radius_missing_reason(proposed_effect: Mapping[str, Any] | None) -> st
     Returns a human-readable reason naming the first missing / malformed
     field so the dispatcher's refuse-to-park result is actionable; ``None``
     means the block is well-formed and the park may proceed.
+
+    When the block is absent because the op's preview builder raised, the
+    reason also carries the builder's error (the ``preview_error`` marker,
+    #1628). A builder raises on purpose to refuse a delete before it waits
+    for approval (for example a protected object, #3944), so the caller must
+    be able to read why.
     """
     if not proposed_effect:
         return "proposed_effect is empty (no blast-radius statement)"
     block = proposed_effect.get(BLAST_RADIUS_KEY)
     if not isinstance(block, Mapping):
+        preview_error = proposed_effect.get("preview_error")
+        if isinstance(preview_error, str) and preview_error:
+            return f"the preview builder failed: {preview_error}"
         return f"proposed_effect.{BLAST_RADIUS_KEY} block is absent"
     if not block.get("object"):
         return f"{BLAST_RADIUS_KEY}.object (object identity) is missing"

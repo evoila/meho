@@ -26,12 +26,15 @@ type fakeOperationsClient struct {
 	lastCallParams   *api.PostCallApiV1OperationsCallPostParams
 	lastCallBody     *api.CallOperationBody
 	lastSearchParams *api.GetSearchApiV1OperationsSearchGetParams
+	lastPreviewBody  *api.PreviewOperationBody
 
 	// Sequenced canned responses — pop one per call. Tests register
 	// two responses on the auth-refresh scenarios (first a 401, then
 	// the post-refresh outcome) and one on every other path.
 	callResponses   []*api.PostCallApiV1OperationsCallPostResponse
 	searchResponses []*api.GetSearchApiV1OperationsSearchGetResponse
+	// previewResponses — one per Preview call (two on the 401 path).
+	previewResponses []*api.PostPreviewApiV1OperationsPreviewPostResponse
 
 	// Per-verb transport-error queues. Drained in lockstep with the
 	// response queues so a refresh-then-transport-failure scenario
@@ -66,6 +69,22 @@ func (f *fakeOperationsClient) GetSearchApiV1OperationsSearchGetWithResponse(
 ) (*api.GetSearchApiV1OperationsSearchGetResponse, error) {
 	f.lastSearchParams = params
 	return popSearchResp(&f.searchResponses), popErr(&f.searchErrors)
+}
+
+func (f *fakeOperationsClient) PostPreviewApiV1OperationsPreviewPostWithResponse(
+	_ context.Context,
+	_ *api.PostPreviewApiV1OperationsPreviewPostParams,
+	body api.PostPreviewApiV1OperationsPreviewPostJSONRequestBody,
+	_ ...api.RequestEditorFn,
+) (*api.PostPreviewApiV1OperationsPreviewPostResponse, error) {
+	bodyCopy := body
+	f.lastPreviewBody = &bodyCopy
+	if len(f.previewResponses) == 0 {
+		return nil, nil
+	}
+	r := f.previewResponses[0]
+	f.previewResponses = f.previewResponses[1:]
+	return r, nil
 }
 
 func (f *fakeOperationsClient) Refresh(_ context.Context) error {
@@ -290,6 +309,116 @@ func TestCallRefreshFailurePropagates(t *testing.T) {
 	_, err := c.Call(context.Background(), "https://bp", "op", "t", nil)
 	if !errors.Is(err, refreshErr) {
 		t.Fatalf("expected refreshErr to propagate; got %v", err)
+	}
+}
+
+// ---- CallWithPreviewHash / Preview (destructive-tier ops, #3944) ----
+
+// TestCallWithPreviewHashSendsTheHash — the hash rides on the call body
+// next to the usual dict-shape target and params.
+func TestCallWithPreviewHashSendsTheHash(t *testing.T) {
+	cr, _ := json.Marshal(CallResult{Status: "awaiting_approval"})
+	f := withFake(t, &fakeOperationsClient{
+		callResponses: []*api.PostCallApiV1OperationsCallPostResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: cr},
+		},
+	})
+	c := New("keycloak-admin-26.x")
+	_, err := c.CallWithPreviewHash(context.Background(), "https://bp",
+		"keycloak.user.delete", "kc", map[string]any{"username": "u"}, "abc123")
+	if err != nil {
+		t.Fatalf("CallWithPreviewHash: %v", err)
+	}
+	if f.lastCallBody.PreviewHash == nil || *f.lastCallBody.PreviewHash != "abc123" {
+		t.Fatalf("preview_hash not sent: %+v", f.lastCallBody.PreviewHash)
+	}
+	got, err := f.lastCallBody.Target.AsCallOperationBodyTarget1()
+	if err != nil || got["name"] != "kc" {
+		t.Fatalf("target should be the dict shape {name: kc}; got %+v (%v)", got, err)
+	}
+	if (*f.lastCallBody.Params)["username"] != "u" {
+		t.Fatalf("params not threaded: %+v", f.lastCallBody.Params)
+	}
+}
+
+// TestCallLeavesPreviewHashUnset — a plain Call keeps the pre-#3197 wire
+// shape: no preview_hash value.
+func TestCallLeavesPreviewHashUnset(t *testing.T) {
+	cr, _ := json.Marshal(CallResult{Status: "ok"})
+	f := withFake(t, &fakeOperationsClient{
+		callResponses: []*api.PostCallApiV1OperationsCallPostResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: cr},
+		},
+	})
+	if _, err := New("c").Call(context.Background(), "https://bp", "op", "t", nil); err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if f.lastCallBody.PreviewHash != nil {
+		t.Fatalf("plain Call must not send a preview_hash; got %q", *f.lastCallBody.PreviewHash)
+	}
+}
+
+// TestPreviewSendsBodyAndDecodesHash — Preview posts the same op, target
+// and params, decodes the hash, and keeps the raw envelope for --json.
+func TestPreviewSendsBodyAndDecodesHash(t *testing.T) {
+	raw := []byte(`{"status":"ok","op_id":"keycloak.user.delete","preview_hash":"h1","method":"COMPOSITE"}`)
+	f := withFake(t, &fakeOperationsClient{
+		previewResponses: []*api.PostPreviewApiV1OperationsPreviewPostResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: raw},
+		},
+	})
+	c := New("keycloak-admin-26.x")
+	r, err := c.Preview(context.Background(), "https://bp", "keycloak.user.delete", "kc",
+		map[string]any{"id": "x"})
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	if r.Status != "ok" || r.PreviewHash != "h1" {
+		t.Fatalf("decoded preview wrong: %+v", r)
+	}
+	if !bytes.Equal(r.Raw, raw) {
+		t.Fatalf("Raw should keep the whole envelope; got %s", r.Raw)
+	}
+	if f.lastPreviewBody.ConnectorId != "keycloak-admin-26.x" || f.lastPreviewBody.OpId != "keycloak.user.delete" {
+		t.Fatalf("preview body identity wrong: %+v", f.lastPreviewBody)
+	}
+	got, err := f.lastPreviewBody.Target.AsPreviewOperationBodyTarget1()
+	if err != nil || got["name"] != "kc" {
+		t.Fatalf("preview target should be {name: kc}; got %+v (%v)", got, err)
+	}
+	if (*f.lastPreviewBody.Params)["id"] != "x" {
+		t.Fatalf("preview params not threaded: %+v", f.lastPreviewBody.Params)
+	}
+}
+
+// TestPreviewRefreshesOn401 — same one-shot refresh dance as Call.
+func TestPreviewRefreshesOn401(t *testing.T) {
+	f := withFake(t, &fakeOperationsClient{
+		previewResponses: []*api.PostPreviewApiV1OperationsPreviewPostResponse{
+			{HTTPResponse: makeHTTPResp(401), Body: []byte(`{"detail":"expired"}`)},
+			{HTTPResponse: makeHTTPResp(200), Body: []byte(`{"status":"ok","preview_hash":"h"}`)},
+		},
+	})
+	r, err := New("c").Preview(context.Background(), "https://bp", "op", "t", nil)
+	if err != nil {
+		t.Fatalf("Preview after refresh: %v", err)
+	}
+	if f.refreshCount != 1 || r.PreviewHash != "h" {
+		t.Fatalf("expected one refresh and the hash; got refresh=%d result=%+v", f.refreshCount, r)
+	}
+}
+
+// TestPreviewClassifiesNon2xx — a non-2xx wraps as *APIResponseError.
+func TestPreviewClassifiesNon2xx(t *testing.T) {
+	withFake(t, &fakeOperationsClient{
+		previewResponses: []*api.PostPreviewApiV1OperationsPreviewPostResponse{
+			{HTTPResponse: makeHTTPResp(403), Body: []byte(`{"detail":"forbidden"}`)},
+		},
+	})
+	_, err := New("c").Preview(context.Background(), "https://bp", "op", "t", nil)
+	var apiErr *APIResponseError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != 403 {
+		t.Fatalf("expected *APIResponseError{403}; got %v", err)
 	}
 }
 

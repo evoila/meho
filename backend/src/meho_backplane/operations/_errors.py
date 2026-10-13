@@ -672,7 +672,13 @@ def result_blast_radius_required(op_id: str, reason: str, duration_ms: float) ->
     Returned when that block is absent or malformed. Fail-closed: the op is
     neither executed nor parked. ``reason`` names the missing field so the
     connector author can populate the op's preview builder.
+
+    ``reason`` can carry a preview builder's exception text (a builder raises
+    on purpose to refuse a delete, #3944), so it goes through
+    :func:`_sanitize_free_text` like every other ``str(exc)`` a result
+    builder emits.
     """
+    reason = _sanitize_free_text(reason)
     return OperationResult(
         status="denied",
         op_id=op_id,

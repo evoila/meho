@@ -1661,6 +1661,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#v03522-2026-10-13" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.22 — 2026-10-13
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#v03521-2026-10-13" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2205,6 +2216,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#v03522-2026-10-13" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.35.22 — 2026-10-13
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#v03521-2026-10-13" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2600,6 +2622,27 @@ which carries the full detail — every change, and the migration recipe
 for each breaking one.</p>
 <p>MEHO is under active development. Each release below links to its full
 notes.</p>
+<h2 id="v03522-2026-10-13"><a href="https://github.com/evoila/meho/releases/tag/v0.35.22">v0.35.22</a> — 2026-10-13<a class="headerlink" href="#v03522-2026-10-13" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Security fix: the audit clean-up now runs on time.</strong> MEHO keeps
+  each connector's answer before redaction in the audit log, and that
+  answer can hold secrets. A weekly job empties old answers. Before,
+  every restart of MEHO started the job's week again. So on a
+  deployment that restarted often, the job never ran, and old answers
+  stayed past the retention window. Now the job counts from its last
+  run. After this update, its first run comes about one minute after
+  MEHO starts.</li>
+<li><strong>Delete Keycloak users, groups and clients.</strong> The new
+  <code>keycloak.user.delete</code>, <code>keycloak.group.delete</code> and
+  <code>keycloak.client.delete</code> remove one object from a Keycloak realm. A
+  second person must approve every call, after seeing what goes on the
+  approval card. MEHO refuses to delete Keycloak's built-in clients and
+  the account MEHO itself logs in with.</li>
+<li><strong>DRS operations work on vCenter 8.0.</strong> Four DRS operations failed at
+  once on vCenter 8.0.x: the DRS recommendations read, the two rule
+  creates and the rule delete. They now read the cluster settings in a
+  way vCenter 8.0.x accepts.</li>
+</ul>
 <h2 id="v03521-2026-10-13"><a href="https://github.com/evoila/meho/releases/tag/v0.35.21">v0.35.21</a> — 2026-10-13<a class="headerlink" href="#v03521-2026-10-13" title="Permanent link">&para;</a></h2>
 <ul>
 <li><strong>Security fix: PowerShell connectors.</strong> This release fixes a

@@ -4674,6 +4674,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#meho-keycloak-client-delete" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho keycloak client delete
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#meho-keycloak-client-get" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -4767,6 +4778,17 @@
     <span class="md-ellipsis">
       
         meho keycloak group create
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#meho-keycloak-group-delete" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho keycloak group delete
       
     </span>
   </a>
@@ -4984,6 +5006,17 @@
     <span class="md-ellipsis">
       
         meho keycloak user create
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#meho-keycloak-user-delete" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho keycloak user delete
       
     </span>
   </a>
@@ -11292,6 +11325,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#meho-keycloak-client-delete" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho keycloak client delete
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#meho-keycloak-client-get" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -11385,6 +11429,17 @@
     <span class="md-ellipsis">
       
         meho keycloak group create
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#meho-keycloak-group-delete" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho keycloak group delete
       
     </span>
   </a>
@@ -11602,6 +11657,17 @@
     <span class="md-ellipsis">
       
         meho keycloak user create
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#meho-keycloak-user-delete" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho keycloak user delete
       
     </span>
   </a>
@@ -16826,7 +16892,7 @@
 <div class="highlight"><pre><span></span><code>meho keycloak
 </code></pre></div>
 <h3 id="meho-keycloak-client"><code>meho keycloak client</code><a class="headerlink" href="#meho-keycloak-client" title="Permanent link">&para;</a></h3>
-<p>Keycloak client sub-verbs (list, get, create, update)</p>
+<p>Keycloak client sub-verbs (list, get, create, update, delete)</p>
 <div class="highlight"><pre><span></span><code>meho keycloak client
 </code></pre></div>
 <h4 id="meho-keycloak-client-create"><code>meho keycloak client create</code><a class="headerlink" href="#meho-keycloak-client-create" title="Permanent link">&para;</a></h4>
@@ -16837,6 +16903,18 @@
 <li><code>--backplane</code> — backplane URL (defaults to the URL from the most recent <code>meho login</code>)</li>
 <li><code>--json</code> — emit the full OperationResult envelope as JSON</li>
 <li><code>--representation-file</code>, <code>-f</code> — path to a JSON file with the ClientRepresentation body (required)</li>
+<li><code>--target</code> — target slug to dispatch against (required)</li>
+</ul>
+<h4 id="meho-keycloak-client-delete"><code>meho keycloak client delete</code><a class="headerlink" href="#meho-keycloak-client-delete" title="Permanent link">&para;</a></h4>
+<p>Delete a Keycloak client (destructive, a second person must approve)</p>
+<div class="highlight"><pre><span></span><code>meho keycloak client delete [flags]
+</code></pre></div>
+<ul>
+<li><code>--backplane</code> — backplane URL (defaults to the URL from the most recent <code>meho login</code>)</li>
+<li><code>--client-id</code> — the exact clientId, the client's name (used when --id is absent)</li>
+<li><code>--id</code> — the client's internal UUID</li>
+<li><code>--json</code> — emit the full OperationResult envelope as JSON</li>
+<li><code>--preview-hash</code> — the preview_hash from a first run of this command; with it, the delete waits for approval</li>
 <li><code>--target</code> — target slug to dispatch against (required)</li>
 </ul>
 <h4 id="meho-keycloak-client-get"><code>meho keycloak client get</code><a class="headerlink" href="#meho-keycloak-client-get" title="Permanent link">&para;</a></h4>
@@ -16896,7 +16974,7 @@
 <li><code>--target</code> — target slug to dispatch against (required)</li>
 </ul>
 <h3 id="meho-keycloak-group"><code>meho keycloak group</code><a class="headerlink" href="#meho-keycloak-group" title="Permanent link">&para;</a></h3>
-<p>Keycloak group sub-verbs (list, create, update-attributes, member)</p>
+<p>Keycloak group sub-verbs (list, create, update-attributes, member, delete)</p>
 <div class="highlight"><pre><span></span><code>meho keycloak group
 </code></pre></div>
 <h4 id="meho-keycloak-group-create"><code>meho keycloak group create</code><a class="headerlink" href="#meho-keycloak-group-create" title="Permanent link">&para;</a></h4>
@@ -16909,6 +16987,19 @@
 <li><code>--json</code> — emit the full OperationResult envelope as JSON</li>
 <li><code>--name</code> — the group name (required)</li>
 <li><code>--parent-id</code> — parent group UUID to nest under (omit for top-level)</li>
+<li><code>--target</code> — target slug to dispatch against (required)</li>
+</ul>
+<h4 id="meho-keycloak-group-delete"><code>meho keycloak group delete</code><a class="headerlink" href="#meho-keycloak-group-delete" title="Permanent link">&para;</a></h4>
+<p>Delete a Keycloak group (destructive, a second person must approve)</p>
+<div class="highlight"><pre><span></span><code>meho keycloak group delete [flags]
+</code></pre></div>
+<ul>
+<li><code>--backplane</code> — backplane URL (defaults to the URL from the most recent <code>meho login</code>)</li>
+<li><code>--delete-subgroups</code> — also delete the group's sub-groups (a group with sub-groups is refused without this flag)</li>
+<li><code>--id</code> — the group's internal UUID</li>
+<li><code>--json</code> — emit the full OperationResult envelope as JSON</li>
+<li><code>--name</code> — the exact group name, searched at every level (used when --id is absent)</li>
+<li><code>--preview-hash</code> — the preview_hash from a first run of this command; with it, the delete waits for approval</li>
 <li><code>--target</code> — target slug to dispatch against (required)</li>
 </ul>
 <h4 id="meho-keycloak-group-list"><code>meho keycloak group list</code><a class="headerlink" href="#meho-keycloak-group-list" title="Permanent link">&para;</a></h4>
@@ -17058,7 +17149,7 @@
 <li><code>--target</code> — target slug to dispatch against (required)</li>
 </ul>
 <h3 id="meho-keycloak-user"><code>meho keycloak user</code><a class="headerlink" href="#meho-keycloak-user" title="Permanent link">&para;</a></h3>
-<p>Keycloak user sub-verbs (list, create, reset-password)</p>
+<p>Keycloak user sub-verbs (list, create, reset-password, delete)</p>
 <div class="highlight"><pre><span></span><code>meho keycloak user
 </code></pre></div>
 <h4 id="meho-keycloak-user-create"><code>meho keycloak user create</code><a class="headerlink" href="#meho-keycloak-user-create" title="Permanent link">&para;</a></h4>
@@ -17074,6 +17165,18 @@
 <li><code>--representation-file</code>, <code>-f</code> — path to a JSON file with the UserRepresentation body (required)</li>
 <li><code>--target</code> — target slug to dispatch against (required)</li>
 <li><code>--temporary</code> — force a password change on first login</li>
+</ul>
+<h4 id="meho-keycloak-user-delete"><code>meho keycloak user delete</code><a class="headerlink" href="#meho-keycloak-user-delete" title="Permanent link">&para;</a></h4>
+<p>Delete a Keycloak user (destructive, a second person must approve)</p>
+<div class="highlight"><pre><span></span><code>meho keycloak user delete [flags]
+</code></pre></div>
+<ul>
+<li><code>--backplane</code> — backplane URL (defaults to the URL from the most recent <code>meho login</code>)</li>
+<li><code>--id</code> — the user's internal UUID</li>
+<li><code>--json</code> — emit the full OperationResult envelope as JSON</li>
+<li><code>--preview-hash</code> — the preview_hash from a first run of this command; with it, the delete waits for approval</li>
+<li><code>--target</code> — target slug to dispatch against (required)</li>
+<li><code>--username</code> — the exact username (used when --id is absent)</li>
 </ul>
 <h4 id="meho-keycloak-user-list"><code>meho keycloak user list</code><a class="headerlink" href="#meho-keycloak-user-list" title="Permanent link">&para;</a></h4>
 <p>List Keycloak users in the managed realm (credentials redacted)</p>

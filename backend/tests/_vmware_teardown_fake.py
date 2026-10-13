@@ -5,7 +5,8 @@
 
 A recording stand-in for the connector's VI-JSON seam
 (``_post_vmomi_json``): a small managed-object store answers
-``RetrievePropertiesEx`` (incl. ``Task.info`` polls), a per-datastore file tree
+``RetrievePropertiesEx`` (incl. ``Task.info`` polls; a ``configurationEx.<member>``
+path fails the way vCenter 8.0.x fails it), a per-datastore file tree
 answers the ``HostDatastoreBrowser`` searches, and the mutating methods
 (``Destroy_Task``, ``RemovePortGroup``, ``DeleteDatastoreFile_Task``,
 ``MakeDirectory``, and a rule removal through ``ReconfigureComputeResource_Task``)
@@ -26,6 +27,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError
 from meho_backplane.operations._preview import PreviewContext
+from tests._vmware_cluster_config_fake import reject_config_ex_member_paths
 
 #: (fault type, message) a method's task -- or a synchronous call -- fails with.
 Fault = tuple[str, str]
@@ -138,6 +140,7 @@ class VimFake:
 
     # -- RetrievePropertiesEx ----------------------------------------------
     def _retrieve(self, body: Any, promote: bool) -> dict[str, Any]:
+        reject_config_ex_member_paths(body)
         spec = body["specSet"][0]
         mo_type = spec["propSet"][0]["type"]
         path_set = spec["propSet"][0]["pathSet"]
@@ -224,17 +227,21 @@ class VimFake:
 
     # -- cluster DRS rules ----------------------------------------------------
     def _remove_cluster_rules(self, cluster: str, body: dict[str, Any]) -> None:
-        """Apply the ``rulesSpec`` removals; the rule list may be VI-JSON boxed."""
-        props = self.objects[("ClusterComputeResource", cluster)]
-        raw = props.get("configurationEx.rule") or []
-        rules = raw["_value"] if isinstance(raw, dict) else raw
+        """Apply the ``rulesSpec`` removals to the cluster's ``configurationEx``.
+
+        Like vCenter, an empty ``rule`` array is left out of the object.
+        """
+        config_ex = self.objects[("ClusterComputeResource", cluster)]["configurationEx"]
         removed = {
             spec["removeKey"]["_value"]
             for spec in body["spec"]["rulesSpec"]
             if spec["operation"] == "remove"
         }
-        kept = [rule for rule in rules if rule.get("key") not in removed]
-        props["configurationEx.rule"] = {**raw, "_value": kept} if isinstance(raw, dict) else kept
+        kept = [rule for rule in config_ex.get("rule", []) if rule.get("key") not in removed]
+        if kept:
+            config_ex["rule"] = kept
+        else:
+            config_ex.pop("rule", None)
 
     # -- datastore files -----------------------------------------------------
     @staticmethod

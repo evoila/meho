@@ -700,18 +700,19 @@ _CLUSTER_VM_GROUP_TYPE = "ClusterVmGroup"
 _CLUSTER_HOST_GROUP_TYPE = "ClusterHostGroup"
 _CLUSTER_GROUP_SPEC_TYPE = "ClusterGroupSpec"
 _CLUSTER_COMPUTE_RESOURCE_MO_TYPE = "ClusterComputeResource"
-# ``ClusterComputeResource.configurationEx.group`` — the array of existing
-# ``ClusterGroupInfo`` (VM + host) groups; read for the VM-Host rule's
-# group-name collision check. The root resource pool of a cluster is read off
+# The root resource pool of a cluster is read off
 # ``ClusterComputeResource.resourcePool`` (a single MoRef) for the #3505
 # resource-pool create's ``cluster`` convenience parent resolution.
-_PROP_CONFIGURATION_EX_GROUP = "configurationEx.group"
 _PROP_CLUSTER_RESOURCE_POOL = "resourcePool"
-# Property path the collision / idempotence read queries on the cluster:
-# ``ClusterComputeResource.configurationEx`` is a ``ClusterConfigInfoEx``
-# whose ``rule`` array holds the existing ``ClusterRuleInfo`` rules
-# (spec-verified). Read un-gated via the shared ``RetrievePropertiesEx``.
-_PROP_CONFIGURATION_EX_RULE = "configurationEx.rule"
+# The cluster's whole configuration. On a cluster the value is a
+# ``ClusterConfigInfoEx``: its ``rule`` array holds the ``ClusterRuleInfo``
+# rules and its ``group`` array the ``ClusterGroupInfo`` (VM + host) groups.
+# The vim API declares the property as the base type
+# ``ComputeResourceConfigInfo``, which has no ``rule`` / ``group`` /
+# ``drsConfig`` member, and vCenter 8.0.x rejects a path into those members
+# (``configurationEx.rule``) with an HTTP 500 ``InvalidProperty`` (#3617).
+# So every read asks for the whole object and picks the member in code.
+_PROP_CONFIGURATION_EX = "configurationEx"
 
 # operator-facing ``rule_type`` -> vim rule-info ``_typeName``.
 _DRS_RULE_TYPE_TYPE_NAMES: dict[str, str] = {
@@ -6042,25 +6043,36 @@ async def vm_clone_from_template_composite(
 # seam + the ``poll_vim_task`` helper (the reconfigure returns a ``*_Task``).
 
 
-def _build_cluster_rules_retrieve_params(cluster_moid: str) -> dict[str, Any]:
-    """Build the ``RetrievePropertiesEx`` body reading a cluster's DRS rules.
+def _build_cluster_config_retrieve_params(cluster_moid: str) -> dict[str, Any]:
+    """Build the ``RetrievePropertiesEx`` body reading a cluster's ``configurationEx``.
 
     A single ``PropertyFilterSpec`` scoped to the ClusterComputeResource
-    object requesting ``configurationEx.rule`` — the array of existing
-    ``ClusterRuleInfo`` rules, each carrying its ``name``. The idempotence /
-    name-collision check reads this before any write so a duplicate rule
-    name returns a structured status instead of a raw vim ``DuplicateName``
-    fault. The singleton ``propertyCollector`` moId rides the path, so the
-    body is only the method args (the shape the typed reads send),
-    ``_typeName``-annotated via the shared trio helper (#3103).
+    object requesting the whole ``configurationEx`` (see
+    :data:`_PROP_CONFIGURATION_EX` for why not ``configurationEx.rule``). The
+    idempotence / name-collision checks pick the existing rule and group
+    names from it before any write, so a duplicate name returns a structured
+    status instead of a raw vim ``DuplicateName`` fault. The singleton
+    ``propertyCollector`` moId rides the path, so the body is only the
+    method args (the shape the typed reads send), ``_typeName``-annotated
+    via the shared trio helper (#3103).
     """
     return retrieve_properties_body(
-        _CLUSTER_COMPUTE_RESOURCE_MO_TYPE, [cluster_moid], [_PROP_CONFIGURATION_EX_RULE]
+        _CLUSTER_COMPUTE_RESOURCE_MO_TYPE, [cluster_moid], [_PROP_CONFIGURATION_EX]
     )
 
 
-def _extract_cluster_rule_names(retrieve_result: Any) -> set[str]:
-    """Pull the existing DRS rule names off a ``RetrievePropertiesEx`` result."""
+def _cluster_config_items(config_ex: Any, member: str) -> list[dict[str, Any]]:
+    """The ``rule`` or ``group`` entries of an un-boxed ``ClusterConfigInfoEx``.
+
+    vim leaves an empty array out of the object, so an absent member (or an
+    absent ``configurationEx``) is an empty list.
+    """
+    items = config_ex.get(member) if isinstance(config_ex, dict) else None
+    return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+
+
+def _extract_cluster_config_names(retrieve_result: Any, member: str) -> set[str]:
+    """Names of the ``member`` entries in a ``configurationEx`` read result."""
     payload = _unwrap_value(retrieve_result)
     objects = payload.get("objects", []) if isinstance(payload, dict) else payload
     names: set[str] = set()
@@ -6070,13 +6082,17 @@ def _extract_cluster_rule_names(retrieve_result: Any) -> set[str]:
         if not isinstance(obj, dict):
             continue
         for prop in obj.get("propSet", []) or []:
-            if not isinstance(prop, dict) or prop.get("name") != _PROP_CONFIGURATION_EX_RULE:
+            if not isinstance(prop, dict) or prop.get("name") != _PROP_CONFIGURATION_EX:
                 continue
-            rules = unwrap_vim_value(prop.get("val"))
-            for rule in rules if isinstance(rules, list) else []:
-                if isinstance(rule, dict) and isinstance(rule.get("name"), str):
-                    names.add(rule["name"])
+            for item in _cluster_config_items(unwrap_vim_value(prop.get("val")), member):
+                if isinstance(item.get("name"), str):
+                    names.add(item["name"])
     return names
+
+
+def _extract_cluster_rule_names(retrieve_result: Any) -> set[str]:
+    """Pull the existing DRS rule names off a ``configurationEx`` read result."""
+    return _extract_cluster_config_names(retrieve_result, "rule")
 
 
 async def _resolve_cluster_name(
@@ -6155,10 +6171,10 @@ async def cluster_drs_rule_create_composite(
     1. Resolve the rule's VM *names* to MoRefs, scoped to the cluster (a
        *read*, un-gated). Fewer than two resolve → ``status="insufficient_vms"``
        before any write (an affinity / anti-affinity rule needs >=2 VMs).
-    2. Read the cluster's existing rules (``configurationEx.rule``, a *read*)
-       for the idempotence / name-collision check: a duplicate name returns
-       ``status="rule_exists"`` — a structured status, not a raw vim
-       ``DuplicateName`` fault.
+    2. Read the cluster's whole ``configurationEx`` (a *read*) and pick the
+       existing rules (``rule``) for the idempotence / name-collision check:
+       a duplicate name returns ``status="rule_exists"`` — a structured
+       status, not a raw vim ``DuplicateName`` fault.
     3. Issue the single ``ReconfigureComputeResource_Task`` add through the
        governed vmomi write seam (:func:`_write_vmomi_sub_op` → the #2254
        gate); a parked/denied gate returns the :class:`OperationResult`
@@ -6203,7 +6219,7 @@ async def cluster_drs_rule_create_composite(
         target,
         _VMOMI_RETRIEVE_PROPERTIES_PATH,
         operator=operator,
-        json=_build_cluster_rules_retrieve_params(cluster_moid),
+        json=_build_cluster_config_retrieve_params(cluster_moid),
     )
     if rule_name in _extract_cluster_rule_names(existing):
         return {
@@ -6745,29 +6761,14 @@ async def resource_pool_delete_composite(
 
 
 def _extract_cluster_group_names(retrieve_result: Any) -> set[str]:
-    """Pull the existing DRS group names off a ``RetrievePropertiesEx`` result.
+    """Pull the existing DRS group names off a ``configurationEx`` read result.
 
     The host / VM group names share one flat namespace with each other (a
-    ``ClusterGroupInfo.name`` is unique within the cluster), read off
-    ``configurationEx.group`` — the collision check for the VM-Host rule's two
-    new groups. Mirrors :func:`_extract_cluster_rule_names`.
+    ``ClusterGroupInfo.name`` is unique within the cluster), picked from the
+    ``group`` array of the cluster's ``configurationEx`` — the collision check
+    for the VM-Host rule's two new groups.
     """
-    payload = _unwrap_value(retrieve_result)
-    objects = payload.get("objects", []) if isinstance(payload, dict) else payload
-    names: set[str] = set()
-    if not isinstance(objects, list):
-        return names
-    for obj in objects:
-        if not isinstance(obj, dict):
-            continue
-        for prop in obj.get("propSet", []) or []:
-            if not isinstance(prop, dict) or prop.get("name") != _PROP_CONFIGURATION_EX_GROUP:
-                continue
-            groups = unwrap_vim_value(prop.get("val"))
-            for group in groups if isinstance(groups, list) else []:
-                if isinstance(group, dict) and isinstance(group.get("name"), str):
-                    names.add(group["name"])
-    return names
+    return _extract_cluster_config_names(retrieve_result, "group")
 
 
 async def _resolve_named_hosts_in_cluster(
@@ -6827,8 +6828,8 @@ async def cluster_drs_vm_host_rule_create_composite(
     1. Resolve the VM + host names to MoRefs, scoped to the cluster (*reads*,
        un-gated). Zero VMs → ``status='insufficient_vms'``; zero hosts →
        ``status='insufficient_hosts'`` (both before any write).
-    2. Read the cluster's existing rule + group names
-       (``configurationEx.rule`` / ``.group``) for the collision check: a
+    2. Read the cluster's whole ``configurationEx`` and pick the existing
+       rule + group names (``rule`` / ``group``) for the collision check: a
        duplicate rule name → ``status='rule_exists'``; a duplicate VM- or
        host-group name → ``status='group_exists'``.
     3. Issue the single ``ReconfigureComputeResource_Task`` through the
@@ -6900,11 +6901,7 @@ async def cluster_drs_vm_host_rule_create_composite(
         target,
         _VMOMI_RETRIEVE_PROPERTIES_PATH,
         operator=operator,
-        json=retrieve_properties_body(
-            _CLUSTER_COMPUTE_RESOURCE_MO_TYPE,
-            [cluster_moid],
-            [_PROP_CONFIGURATION_EX_RULE, _PROP_CONFIGURATION_EX_GROUP],
-        ),
+        json=_build_cluster_config_retrieve_params(cluster_moid),
     )
     if rule_name in _extract_cluster_rule_names(existing):
         return _envelope(

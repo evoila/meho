@@ -50,6 +50,7 @@ from meho_backplane.connectors.vmware_rest.composites._read import (
     performance_summary_composite,
 )
 from meho_backplane.connectors.vmware_rest.vim_body import vim_moref
+from tests._vmware_cluster_config_fake import cluster_config_ex, reject_config_ex_member_paths
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -160,6 +161,7 @@ class _RecordingConnector:
         self.calls.append(
             {"method": "POST", "path": mounted, "query": None, "body": json, "vmomi": True}
         )
+        reject_config_ex_member_paths(json)
         return self._serve(mounted)
 
     def _serve(self, path: str) -> Any:
@@ -252,11 +254,18 @@ async def test_cluster_drs_recommendations_reads_summary_then_vim_drs_config() -
     mount.
     """
     cluster_payload = {"name": "Cluster-A", "drs_enabled": True}
-    drs_config = {"enabled": True, "defaultVmBehavior": "fullyAutomated", "vmotionRate": 3}
+    drs_config = {
+        "_typeName": "ClusterDrsConfigInfo",
+        "enabled": True,
+        "defaultVmBehavior": "fullyAutomated",
+        "vmotionRate": 3,
+    }
     conn = _RecordingConnector(
         {
             "/api/vcenter/cluster/domain-c123": cluster_payload,
-            _RETRIEVE_PROPERTIES_PATH: _retrieve_result({"configurationEx.drsConfig": drs_config}),
+            _RETRIEVE_PROPERTIES_PATH: _retrieve_result(
+                {"configurationEx": cluster_config_ex(drs_config=drs_config)}
+            ),
         }
     )
 
@@ -276,7 +285,8 @@ async def test_cluster_drs_recommendations_reads_summary_then_vim_drs_config() -
     assert conn.mount_calls == ["/vcenter/cluster/domain-c123"]
     assert conn.calls[1]["vmomi"] is True
     # The filter spec scopes one PropertyFilterSpec to the cluster MoRef
-    # and reads only the DRS config (no history requested).
+    # and reads the whole configurationEx (vCenter 8.0.x rejects the path
+    # configurationEx.drsConfig); no history requested.
     body = conn.calls[1]["body"]
     assert body == {
         "specSet": [
@@ -286,7 +296,7 @@ async def test_cluster_drs_recommendations_reads_summary_then_vim_drs_config() -
                     {
                         "_typeName": "PropertySpec",
                         "type": "ClusterComputeResource",
-                        "pathSet": ["configurationEx.drsConfig"],
+                        "pathSet": ["configurationEx"],
                     }
                 ],
                 "objectSet": [
@@ -319,7 +329,7 @@ async def test_cluster_drs_recommendations_history_flag_widens_read_and_surfaces
             "/api/vcenter/cluster/domain-c123": {"name": "Cluster-A"},
             _RETRIEVE_PROPERTIES_PATH: _retrieve_result(
                 {
-                    "configurationEx.drsConfig": {"enabled": True},
+                    "configurationEx": cluster_config_ex(drs_config={"enabled": True}),
                     "drsRecommendation": {
                         "_typeName": "ArrayOfClusterDrsRecommendation",
                         "_value": recs,
@@ -337,7 +347,7 @@ async def test_cluster_drs_recommendations_history_flag_widens_read_and_surfaces
     # The flag widens the same RetrievePropertiesEx read -- no extra call.
     assert len(conn.calls) == 2
     path_set = conn.calls[1]["body"]["specSet"][0]["propSet"][0]["pathSet"]
-    assert path_set == ["configurationEx.drsConfig", "drsRecommendation"]
+    assert path_set == ["configurationEx", "drsRecommendation"]
     assert out["drs"] == {"enabled": True}
     assert out["recommendations_history"] == recs
 
@@ -349,7 +359,7 @@ async def test_cluster_drs_recommendations_history_flag_default_omits_key() -> N
         {
             "/api/vcenter/cluster/domain-c123": {"name": "Cluster-A"},
             _RETRIEVE_PROPERTIES_PATH: _retrieve_result(
-                {"configurationEx.drsConfig": {"enabled": False}}
+                {"configurationEx": cluster_config_ex(drs_config={"enabled": False})}
             ),
         }
     )

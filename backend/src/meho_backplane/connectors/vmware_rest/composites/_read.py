@@ -161,9 +161,8 @@ _OP_GET_CLUSTER = "GET:/vcenter/cluster/{cluster}"
 # ``GET:/vcenter/cluster/{cluster}/drs`` path #508 declared was unserved
 # (the #2970 adjacent finding, fixed in #2986). DRS state is a vim-only
 # surface, so the composite reads it through the PropertyCollector
-# singleton (``configurationEx.drsConfig`` + optional
-# ``drsRecommendation``) -- the same vim seam the vm.migrate DRS lookup
-# uses (#2970).
+# singleton (``configurationEx`` + optional ``drsRecommendation``) -- the
+# same vim seam the vm.migrate DRS lookup uses (#2970).
 _OP_RETRIEVE_PROPERTIES = "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
 _OP_POST_QUERY_EVENTS = "POST:/EventManager/{moId}/QueryEvents"
 _OP_POST_QUERY_AVAILABLE_PERF_METRIC = "POST:/PerformanceManager/{moId}/QueryAvailablePerfMetric"
@@ -203,11 +202,15 @@ _NETWORK_TYPE_DISTRIBUTED_PORTGROUP = "DISTRIBUTED_PORTGROUP"
 # same convention the typed reads and write composites use).
 _PROPERTY_COLLECTOR_MOID = "propertyCollector"
 _CLUSTER_COMPUTE_RESOURCE_MO_TYPE = "ClusterComputeResource"
-# Nested vim property path for the cluster's DRS configuration:
-# ``ClusterConfigInfoEx.drsConfig`` is a ``ClusterDrsConfigInfo``
+# The cluster's whole configuration (a ``ClusterConfigInfoEx`` on a
+# cluster). Its ``drsConfig`` member is the ``ClusterDrsConfigInfo``
 # (``enabled`` / ``defaultVmBehavior`` / ``vmotionRate`` / ...),
-# spec-verified against the pinned vi-json.yaml.
-_PROP_DRS_CONFIG = "configurationEx.drsConfig"
+# spec-verified against the pinned vi-json.yaml. The vim API declares the
+# property as the base type ``ComputeResourceConfigInfo``, which has no
+# ``drsConfig`` member, and vCenter 8.0.x rejects the path
+# ``configurationEx.drsConfig`` with an HTTP 500 ``InvalidProperty`` (#3617).
+# So the composite reads the whole object and picks ``drsConfig`` in code.
+_PROP_CONFIGURATION_EX = "configurationEx"
 # The cluster's current DRS recommendation list
 # (``ClusterDrsRecommendation[]``). Deprecated in the vim API since
 # VI 2.5 but served by the pinned spec and the only surface carrying the
@@ -427,8 +430,8 @@ async def cluster_drs_recommendations_composite(
     1. ``GET:/vcenter/cluster/{cluster}`` -- cluster summary (name,
        resource pool, HA/DRS-enabled flags).
     2. ``POST:/PropertyCollector/{moId}/RetrievePropertiesEx`` (vi-json)
-       -- the cluster's DRS configuration
-       (``ClusterComputeResource.configurationEx.drsConfig``, a
+       -- the cluster's whole ``configurationEx``, from which the handler
+       picks the DRS configuration (``drsConfig``, a
        ``ClusterDrsConfigInfo``: ``enabled``, ``defaultVmBehavior``,
        ``vmotionRate``, ...) plus, when
        ``include_recommendations_history=True``, the cluster's current
@@ -457,7 +460,7 @@ async def cluster_drs_recommendations_composite(
     cluster_result = await _read_sub_op(
         connector, target, operator, _OP_GET_CLUSTER, path_params={"cluster": cluster_moid}
     )
-    path_set = [_PROP_DRS_CONFIG]
+    path_set = [_PROP_CONFIGURATION_EX]
     if include_history:
         path_set.append(_PROP_DRS_RECOMMENDATION)
     retrieve_result = await _read_sub_op(
@@ -469,7 +472,8 @@ async def cluster_drs_recommendations_composite(
         body=_build_cluster_props_retrieve_body(cluster_moid, path_set),
     )
     props = _extract_object_props(retrieve_result)
-    drs_config = props.get(_PROP_DRS_CONFIG)
+    config_ex = props.get(_PROP_CONFIGURATION_EX)
+    drs_config = config_ex.get("drsConfig") if isinstance(config_ex, dict) else None
     out: dict[str, Any] = {
         "cluster": _unwrap_value(cluster_result),
         "drs": drs_config if isinstance(drs_config, dict) else {},

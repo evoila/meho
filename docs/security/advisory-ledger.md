@@ -16,7 +16,7 @@ rc-series release step reconciles against.
 | CHANGELOG revision | rows 1–77: `64d1ad28` (`main`, v0.35.12 + `[Unreleased]`); row 78: the v0.35.17 release-cutting PR (`[0.35.17]`); rows 79–80: the v0.35.19 release-cutting PR (`[0.35.19]`); row 81: the v0.35.20 release-cutting PR (`[0.35.20]`); rows 82–83: the v0.35.21 release-cutting PR (`[0.35.21]`) | `git log -1 --oneline` |
 | `### Security` headings | **83** | `grep -cE "^### Security" CHANGELOG.md` |
 | Ledger rows below | **83** | must equal the heading count |
-| Published GHSAs on `evoila/meho` | **0** (the command also counts drafts: it returns 1, the draft GHSA-v2v2-4gh2-m4q8 for row 82) | `gh api /repos/evoila/meho/security-advisories --jq 'length'` |
+| Published GHSAs on `evoila/meho` | **1** (GHSA-v2v2-4gh2-m4q8, row 82, published 2026-10-13) | `gh api /repos/evoila/meho/security-advisories --jq 'length'` |
 | Externally reported vulnerabilities cited in CHANGELOG | 0 | every entry cites an internal tracker item, an internal review finding, or a scanner alert |
 | Age of `SECURITY.md` policy | since the first commit (`1684c8ca`, 2026-05-09) | `git log --diff-filter=A -- SECURITY.md` |
 
@@ -88,7 +88,7 @@ the private finding behind the fix.
 
 | # | Version | Line | Summary | Class | Disposition |
 |---|---|---|---|---|---|
-| 82 | 0.35.21 | 107 | `ps_single_quote`, the shared quoting helper of the PowerShell-based connectors (`msad`, `winsrv`, `wsfc`, `hyperv`, `windows_dns`, `holodeck`), escaped only the ASCII `'`; a value with a typographic single quote (U+2018, U+2019, U+201A, U+201B) ended the string early and the rest ran as PowerShell on the target host, also through `safe` reads with no approval. The helper now doubles all five characters and refuses non-strings; `holodeck.pod.info` and `holodeck.instance.start` now use it; the `winsrv` reboot/shutdown `message` is limited so `shutdown.exe` gets it as one argument (GHSA-v2v2-4gh2-m4q8). | vuln | Owed — decision pending |
+| 82 | 0.35.21 | 107 | `ps_single_quote`, the shared quoting helper of the PowerShell-based connectors (`msad`, `winsrv`, `wsfc`, `hyperv`, `windows_dns`, `holodeck`), escaped only the ASCII `'`; a value with a typographic single quote (U+2018, U+2019, U+201A, U+201B) ended the string early and the rest ran as PowerShell on the target host, also through `safe` reads with no approval. The helper now doubles all five characters and refuses non-strings; `holodeck.pod.info` and `holodeck.instance.start` now use it; the `winsrv` reboot/shutdown `message` is limited so `shutdown.exe` gets it as one argument (GHSA-v2v2-4gh2-m4q8). | vuln | Published — GHSA-v2v2-4gh2-m4q8 |
 | 83 | 0.35.21 | 141 | Client lockfiles (Claude Code plugin and Claude Desktop bundle): `proxy-addr` 2.0.8 (CVE-2026-90711 / GHSA-jqcg-44mw-7w3h; not reachable, mcp-remote never sets `trust proxy`) and `undici` 7.30.0, which brings the bundle the undici 7.29.1 fixes (#3994). | dep | N/A — upstream advisory |
 | 81 | 0.35.20 | 104 | Two bullets: `meho` CLI release binaries built with Go 1.26.9 instead of go1.25.14, for nine Go standard-library flaws the CLI code reaches: `net/http` (GO-2026-6617, GO-2026-6613, GO-2026-6612, GO-2026-6611, GO-2026-6610, GO-2026-6605, GO-2026-6603), `crypto/tls` (GO-2026-6607) and `net/textproto` (GO-2026-6608); `govulncheck` v1.8.0 (#3957) — *dep*; `pydantic-ai-slim` 2.53.0 (CVE-2026-107286), with `anthropic` 1.12.1 and `openai` 3.26.1, and the Anthropic agent output limit pinned at 4096 so requests stay the same (#3966) — *dep*. | dep | N/A — upstream advisory |
 | 79 | 0.35.19 | 104 | Two bullets: `pfsense.config.show`, a `safe` read with no approval, returned the whole pfSense `config.xml` (user password hashes, certificate and CA private keys, OpenVPN and IPsec keys, service passwords) to any caller with access to the target; known secret fields and shapes are now redacted in the handler, which fails closed (#3946) — *vuln*; pymongo 4.18.2 (CVE-2026-96748, CVE-2026-96749) and fsspec 2026.9.0 (CVE-2026-104851) (#3950) — *dep*. | vuln (+ dep) | Owed — decision pending (bullet 1); N/A — upstream advisory (bullet 2) |
@@ -176,15 +176,15 @@ the private finding behind the fix.
 
 | Class | Rows | Disposition today |
 |---|---|---|
-| vuln — MEHO-code vulnerability | **39** (rows 2–5, 7–9, 12, 15, 20, 21, 24–26, 30–33, 35, 37, 38, 40, 43, 47, 59, 62, 64, 65, 67–69, 71, 73, 74, 76, 77, 79, 80, 82; rows 4 and 79 also carry a dependency bump) | 39 × Owed — decision pending; 0 published; 0 exempt |
+| vuln — MEHO-code vulnerability | **39** (rows 2–5, 7–9, 12, 15, 20, 21, 24–26, 30–33, 35, 37, 38, 40, 43, 47, 59, 62, 64, 65, 67–69, 71, 73, 74, 76, 77, 79, 80, 82; rows 4 and 79 also carry a dependency bump) | 38 × Owed — decision pending; 1 published (row 82); 0 exempt |
 | dep — dependency / base-image CVE patch | **8** (rows 34, 44, 45, 46, 51, 78, 81, 83) | N/A — upstream advisory |
 | hardening — no demonstrated vulnerability | **32** (rows 1, 6, 10, 11, 13, 14, 16–18, 22, 23, 27–29, 36, 41, 42, 48, 50, 52, 53, 55–58, 60, 61, 63, 66, 70, 72, 75) | N/A — hardening |
 | docs — docs-only or non-vulnerability | **4** (rows 19, 39, 49, 54) | N/A — no vulnerability |
 | **Total** | **83** | |
 
-**Gate 2 status at this snapshot: open.** 39 rows await **publication**
-(`security-advisories` returns 1: the draft GHSA-v2v2-4gh2-m4q8 for
-row 82, not yet published). The only exemption ground the policy
+**Gate 2 status at this snapshot: open.** 38 rows await **publication**
+(`security-advisories` returns 1: GHSA-v2v2-4gh2-m4q8, published for
+row 82). The only exemption ground the policy
 allows — the entry predates `SECURITY.md` (2026-05-09) — applies to none of
 them, so the gate closes when every *Owed* row reads *Published* and the
 dated statement is posted on #2661.

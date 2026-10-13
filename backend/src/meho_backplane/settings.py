@@ -885,8 +885,14 @@ class Settings(BaseModel):
         ``docs/architecture/audit.md``. Range ``[0, 3650]`` (10y ceiling is
         functionally permanent for a v0.2 chassis). Read once per tick.
     raw_payload_prune_interval_seconds:
-        Cadence of the #307 raw-payload age-off loop, in seconds. The task
-        (registered in the FastAPI lifespan) sleeps this long between sweeps.
+        How often the #307 raw-payload age-off runs, in seconds. The interval
+        counts from the **last recorded run** (the newest
+        ``audit.raw_payload.prune`` audit row; every run writes one), not
+        from process start, so a pod restart does not start it again. After
+        a start the task (registered in the FastAPI lifespan) waits one
+        minute, then runs at once if a full interval has passed since the
+        last run or no run is recorded; otherwise it waits only for the
+        rest of the interval. After that it runs once per interval.
         Default 604800 (7d / weekly) matches the topology-history prune.
         Range ``[60, 604800]``: below one minute competes with write load;
         the ceiling is the weekly cadence -- operators wanting a tighter

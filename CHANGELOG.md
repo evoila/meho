@@ -90,6 +90,23 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — keycloak: governed delete for users, groups and clients (#3944 / #4009)
+
+- MEHO can now delete a Keycloak user, group or client through three new
+  operations: `keycloak.user.delete`, `keycloak.group.delete` and
+  `keycloak.client.delete`. Before, removing an event's login accounts meant
+  calling the Keycloak admin API by hand, with no approval and no audit row.
+  All three are on the destructive risk level, so a second person must
+  approve. Each takes the internal id or a name; a name that matches more
+  than one object is refused. Before the request waits for approval, MEHO
+  refuses to delete Keycloak's built-in clients, the client and user the
+  target logs in with, and a group that still has sub-groups (unless
+  `delete_subgroups=true`). The approval card shows what goes: user name,
+  enabled, groups; group name, member and sub-group counts; client id,
+  enabled, public or confidential. An object already gone returns
+  `already_absent: true`, and `deleted: true` comes only after a read
+  answers 404. CLI: `meho keycloak user|group|client delete`.
+
 ## [0.35.21] - 2026-10-13
 
 This release fixes a critical PowerShell command injection in the

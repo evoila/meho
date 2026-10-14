@@ -1,5 +1,21 @@
 {% extends "base.html" %}
 
+{#- Per-field validation errors (#384). `errors` maps a form field name to
+    its message; the handlers attribute a Pydantic `loc`, a bad enum value,
+    malformed Extras JSON, and the name/slug uniqueness 409 to the field
+    that caused it. Absent that mapping every failure rendered only in the
+    page-level banner, so the operator was told a write failed but not
+    which of seven fields to fix. -#}
+{%- macro error_for(field) -%}
+  {%- if errors and field in errors -%}
+    <span class="text-xs text-error" role="alert" data-error-for="{{ field }}">{{ errors[field] }}</span>
+  {%- endif -%}
+{%- endmacro -%}
+
+{%- macro error_class(field, base) -%}
+  {%- if errors and field in errors %} {{ base }}{% endif -%}
+{%- endmacro -%}
+
 {% block page_title %}{{ "New" if mode == "create" else "Edit" }} Event Source &middot; MEHO{% endblock %}
 
 {% block content %}
@@ -21,12 +37,17 @@
       <span class="label-text">Name</span>
       {% if mode == "create" %}
         <input type="text" name="name" required maxlength="200"
-               value="{{ values.get('name', '') }}" class="input input-bordered input-sm"
+               value="{{ values.get('name', '') }}" class="input input-bordered input-sm{{ error_class('name', 'input-error') }}"
                placeholder="Prod Alertmanager" />
       {% else %}
         <input type="text" value="{{ values.get('name', '') }}"
-               class="input input-bordered input-sm" disabled />
+               class="input input-bordered input-sm" disabled
+               aria-describedby="event-source-name-immutable" />
+        <span id="event-source-name-immutable" class="text-xs opacity-60">
+          Name is immutable. Delete and re-create the source to change it.
+        </span>
       {% endif %}
+      {{ error_for('name') }}
     </label>
 
     <label class="form-control">
@@ -35,46 +56,55 @@
         <input type="text" name="slug" required maxlength="100"
                pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?"
                value="{{ values.get('slug', '') }}"
-               class="input input-bordered input-sm font-mono" placeholder="prod-alertmanager" />
+               class="input input-bordered input-sm font-mono{{ error_class('slug', 'input-error') }}" placeholder="prod-alertmanager" />
         <span class="text-xs opacity-60 mt-1">Lowercase, digits, hyphen. Globally unique; immutable after creation.</span>
       {% else %}
         <input type="text" value="{{ values.get('slug', '') }}"
-               class="input input-bordered input-sm font-mono" disabled />
+               class="input input-bordered input-sm font-mono" disabled
+               aria-describedby="event-source-slug-immutable" />
+        <span id="event-source-slug-immutable" class="text-xs opacity-60">
+          Slug is the ingest routing token and is immutable after creation.
+        </span>
       {% endif %}
+      {{ error_for('slug') }}
     </label>
 
     <div class="grid gap-3 md:grid-cols-3">
       <label class="form-control">
         <span class="label-text">Kind</span>
-        <select name="kind" class="select select-bordered select-sm" required>
+        <select name="kind" class="select select-bordered select-sm{{ error_class('kind', 'select-error') }}" required>
           {% for k in kind_options %}
             <option value="{{ k }}" {{ "selected" if values.get('kind') == k else "" }}>{{ k }}</option>
           {% endfor %}
         </select>
+        {{ error_for('kind') }}
       </label>
       <label class="form-control">
         <span class="label-text">Auth strategy</span>
-        <select name="auth_strategy" class="select select-bordered select-sm" required>
+        <select name="auth_strategy" class="select select-bordered select-sm{{ error_class('auth_strategy', 'select-error') }}" required>
           {% for a in auth_options %}
             <option value="{{ a }}" {{ "selected" if values.get('auth_strategy') == a else "" }}>{{ a }}</option>
           {% endfor %}
         </select>
+        {{ error_for('auth_strategy') }}
       </label>
       <label class="form-control">
         <span class="label-text">Status</span>
-        <select name="status" class="select select-bordered select-sm" required>
+        <select name="status" class="select select-bordered select-sm{{ error_class('status', 'select-error') }}" required>
           {% for s in status_options %}
             <option value="{{ s }}" {{ "selected" if values.get('status') == s else "" }}>{{ s }}</option>
           {% endfor %}
         </select>
+        {{ error_for('status') }}
       </label>
     </div>
 
     <label class="form-control">
       <span class="label-text">Extras (JSON object, optional)</span>
-      <textarea name="extras" class="textarea textarea-bordered font-mono text-sm min-h-[6rem]"
+      <textarea name="extras" class="textarea textarea-bordered font-mono text-sm min-h-[6rem]{{ error_class('extras', 'textarea-error') }}"
                 placeholder='{"rate_limit": 60, "body_cap": 1048576}'>{{ values.get('extras', '') }}</textarea>
       <span class="text-xs opacity-60 mt-1">Body cap, rate limit, replay window, dedupe config the ingest path reads.</span>
+      {{ error_for('extras') }}
     </label>
 
     <label class="form-control">

@@ -452,6 +452,11 @@ def _ok_ingested_envelope(
     caller can present it on the subsequent governed ``call_operation`` of a
     ``destructive``-tier op. Only ``status="ok"`` previews carry the hash: a
     non-resolvable request has no literal effect to bind.
+
+    The envelope also carries the op's ``safety_level`` and
+    ``requires_approval`` (#3973), so the caller sees before the real call
+    that it needs a human approval. Both are advisory: they are not in
+    :data:`_PREVIEW_HASH_KEYS`, so the hash does not change.
     """
     redacted_body = _redact_request_body(
         request.body, connector_id=connector_id, operator=operator, op_id=op_id
@@ -474,6 +479,8 @@ def _ok_ingested_envelope(
         "resolved_path": request.path,
         "query": request.query,
         "redacted_body": redacted_body,
+        "safety_level": descriptor.safety_level,
+        "requires_approval": descriptor.requires_approval,
     }
     envelope["preview_hash"] = compute_preview_hash(envelope)
     return envelope

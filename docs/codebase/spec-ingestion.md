@@ -493,7 +493,10 @@ for vendor- and version-specific rules.
 The parser is vendor-neutral and assigns only its HTTP-verb baseline. Before
 registration, `ingest/safety_floors.py` applies the matching connector
 advertisement registered during connector startup. VMware's rules live in
-`connectors/vmware_rest/ingest_safety.py`, not in the generic parser. Floors
+`connectors/vmware_rest/ingest_safety.py`, not in the generic parser.
+Hetzner Robot's floor (`connectors/hetzner_robot/ingest_safety.py`, #3973)
+makes every vSwitch write wait for approval and marks the vSwitch cancel
+`destructive`. Floors
 are monotonic: they only raise the parsed tier and set approval; re-ingest keeps
 an already stricter safety tier and an existing approval requirement. Existing
 enablement, review state, and other operator metadata are unchanged by this

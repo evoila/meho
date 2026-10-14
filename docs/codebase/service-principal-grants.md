@@ -203,7 +203,8 @@ delete-shaped ops:
 
 - **by configured pattern** (`Settings.service_grant_delete_shaped_patterns`,
   env `SERVICE_GRANT_DELETE_SHAPED_PATTERNS`, `fnmatchcase` over the op id;
-  default `DELETE:*`, `*.delete`, `*.destroy`, `*.remove`, `*.purge`), and
+  default `DELETE:*`, `*.delete`, `*.destroy`, `*.remove`, `*.purge`,
+  `POST:/vswitch/*`), and
 - **by descriptor** (best-effort when a descriptor resolves via
   `lookup_descriptor`): the `destructive` safety tier (#3183), the HTTP
   `DELETE` verb, or a hand-authored `destructive` tag on a typed op.

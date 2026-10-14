@@ -116,7 +116,9 @@ preview_dispatch(operator, connector_id, op_id, target, params)
                      tenant, op).redacted   ◄── SAME pipeline the response path uses
         ▼
 {status: ok, op_id, connector_id, source_kind, method,
- resolved_path, query, redacted_body, preview_hash [, proposed_effect]}
+ resolved_path, query, redacted_body, preview_hash
+ [, safety_level, requires_approval]   ◄── ingested ops (#3973)
+ [, proposed_effect]}
 ```
 
 The HTTP transport (`HttpConnector._post_json` / `_request_json`) is
@@ -134,7 +136,7 @@ descriptors. Both surfaces stay `OPERATOR`-gated at the route / tool layer.
 
 | `status` | meaning | extra fields |
 |---|---|---|
-| `ok` | request (or synthetic preview) resolved | `method`, `resolved_path`, `query` (object/null), `redacted_body` (object/null), `source_kind`, `preview_hash` (#3197 — SHA-256 over the resolved-request projection; the caller presents it on a `destructive`-tier `call_operation` and the dispatcher recomputes + matches it before parking the approval), and — on a governed-tier synthetic preview whose builder populated — `proposed_effect` (#3312, the reused park-time effect block; unhashed, so it never perturbs the `preview_hash` binding) |
+| `ok` | request (or synthetic preview) resolved | `method`, `resolved_path`, `query` (object/null), `redacted_body` (object/null), `source_kind`, `preview_hash` (#3197 — SHA-256 over the resolved-request projection; the caller presents it on a `destructive`-tier `call_operation` and the dispatcher recomputes + matches it before parking the approval), and — on a governed-tier synthetic preview whose builder populated — `proposed_effect` (#3312, the reused park-time effect block; unhashed, so it never perturbs the `preview_hash` binding). An ingested op's preview also carries `safety_level` and `requires_approval` (#3973) — read off the descriptor, so the caller sees before the real call that it needs a human approval; both are unhashed |
 | `error` | structured failure | `error` (`"<code>: …"`), `extras.error_code` (`unknown_op` / `invalid_params` / `invalid_op_schema` / `no_connector` / `ambiguous_connector` / `dispatch_error`) + per-code detail (`invalid_op_schema` carries `extras.missing_ref`, #3095) |
 | `unavailable` | not an HTTP-ingested op **and** not previewable in a governed tier (destructive, or non-credential-class requires_approval — a credential-class op like `vault.kv.put` stays here so its secret params never surface) | `source_kind`, `extras.error_code=preview_unavailable`, `extras.reason=not_ingested` |
 

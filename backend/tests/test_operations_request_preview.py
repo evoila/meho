@@ -389,6 +389,9 @@ async def test_preview_gh_issue_create_returns_literal_request_without_dispatchi
     # requestBody container unwrapped (#1656) -- NOT {"body": {"title": ...}}.
     assert envelope["redacted_body"] == {"title": "diagnose me"}
     assert envelope["query"] is None
+    # #3973: the descriptor's approval facts ride along (advisory, unhashed).
+    assert envelope["safety_level"] == "safe"
+    assert envelope["requires_approval"] is False
 
     # AC1: nothing was dispatched -- the HTTP transport was never reached.
     assert connector.calls == []

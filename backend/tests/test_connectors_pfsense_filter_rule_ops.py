@@ -207,7 +207,13 @@ def test_validate_normalises_addresses_and_ports() -> None:
         {"type": "block", "interface": "lan", "protocol": "tcp", "destination_port": "9-1"},
         {"type": "block", "interface": "lan", "source": "WEB_SERVERS"},
         {"type": "block", "interface": "lan; rm -rf /"},
+        {"type": "block", "interface": "lan\n"},
         {"type": "reject", "interface": "lan"},
+        {"type": "block", "interface": "lan", "ipprotocol": "inet6", "source": "fe80::1%eth0"},
+        {"type": "block", "interface": "lan", "ipprotocol": "inet6", "destination": "fe80::1%0"},
+        {"type": "block", "interface": "lan", "source": "10.0.0.1\n"},
+        {"type": "block", "interface": "lan", "destination": " 10.0.0.1"},
+        {"type": "block", "interface": "lan", "protocol": "tcp", "destination_port": "443\n"},
     ],
 )
 def test_validate_rejects_bad_rules(params: dict[str, Any]) -> None:
@@ -320,7 +326,7 @@ def test_delete_playback_removes_only_one() -> None:
 
 @pytest.mark.parametrize(
     "rid",
-    [None, "", "1", "1600000001", "010000000", "12345678a", 100000001],
+    [None, "", "1", "1600000001", "010000000", "12345678a", 100000001, "100000001\n"],
 )
 async def test_add_rejects_bad_ridentifier_before_ssh(rid: Any) -> None:
     connector = PfSenseConnector()
@@ -329,6 +335,28 @@ async def test_add_rejects_bad_ridentifier_before_ssh(rid: Any) -> None:
         pytest.raises(ValueError),
     ):
         await connector.filter_rule_add(None, {**_FENCE_PARAMS, "ridentifier": rid})
+    mock_cmd.assert_not_awaited()
+
+
+@pytest.mark.parametrize("descr", ["x\n", "fence\nmore", ""])
+async def test_add_rejects_bad_descr_before_ssh(descr: str) -> None:
+    connector = PfSenseConnector()
+    with (
+        patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd,
+        pytest.raises(ValueError),
+    ):
+        await connector.filter_rule_add(None, {**_FENCE_PARAMS, "descr": descr})
+    mock_cmd.assert_not_awaited()
+
+
+@pytest.mark.parametrize("rid", ["100000001\n", "1", None])
+async def test_delete_rejects_bad_ridentifier_before_ssh(rid: Any) -> None:
+    connector = PfSenseConnector()
+    with (
+        patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd,
+        pytest.raises(ValueError),
+    ):
+        await connector.filter_rule_delete(None, {"ridentifier": rid})
     mock_cmd.assert_not_awaited()
 
 
@@ -595,6 +623,19 @@ async def test_delete_preview_names_the_rule() -> None:
     assert blast["object"]["type"] == "block"
     assert blast["irreversibility"] == "permanent"
     assert declined is None
+
+
+async def test_delete_preview_declines_id_with_trailing_newline() -> None:
+    connector = PfSenseConnector()
+    ctx: Any = SimpleNamespace(
+        params={"ridentifier": f"{_RID}\n"},
+        connector_instance=connector,
+        target=None,
+        operator=None,
+    )
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        assert await _filter_rule_delete_preview(ctx) is None
+    mock_cmd.assert_not_awaited()
 
 
 # ===========================================================================

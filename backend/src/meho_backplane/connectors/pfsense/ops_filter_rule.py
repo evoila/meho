@@ -145,7 +145,7 @@ _SPEC_KEYS = (
 
 def _validate_ridentifier(value: Any) -> str:
     """Return *value* if it is a valid MEHO rule id, else raise."""
-    if not isinstance(value, str) or not _RIDENTIFIER_RE.match(value):
+    if not isinstance(value, str) or not _RIDENTIFIER_RE.fullmatch(value):
         raise ValueError(
             "ridentifier must be a 9-digit number from 100000000 to 999999999 "
             f"(a range pfSense never assigns itself); got {value!r}"
@@ -166,8 +166,14 @@ def _normalize_address(value: Any, field: str) -> str:
         return "any"
     if not isinstance(value, str):
         raise ValueError(f"{field} must be 'any', an IP address or a CIDR; got {value!r}")
+    # pfSense rule addresses never carry an IPv6 zone (``%eth0``) or spaces.
+    if "%" in value or any(ch.isspace() for ch in value):
+        raise ValueError(
+            f"{field} must be 'any', an IP address or a CIDR without a zone or "
+            f"spaces; got {value!r}"
+        )
     try:
-        net = ipaddress.ip_network(value.strip(), strict=False)
+        net = ipaddress.ip_network(value, strict=False)
     except ValueError as exc:
         raise ValueError(
             f"{field} must be 'any', an IP address or a CIDR (aliases are not "
@@ -183,7 +189,7 @@ def _normalize_port(value: Any, field: str) -> str | None:
     if value is None:
         return None
     text = str(value) if isinstance(value, int) and not isinstance(value, bool) else value
-    match = _PORT_RE.match(text) if isinstance(text, str) else None
+    match = _PORT_RE.fullmatch(text) if isinstance(text, str) else None
     if match is None:
         raise ValueError(f"{field} must be a port 'N' or a range 'A-B'; got {value!r}")
     low = int(match.group(1))
@@ -219,7 +225,7 @@ def _validate_placement(params: dict[str, Any], rule_type: str) -> dict[str, Any
     if not isinstance(floating, bool):
         raise ValueError(f"floating must be a boolean; got {floating!r}")
     interface = params.get("interface")
-    if not isinstance(interface, str) or not _INTERFACE_RE.match(interface):
+    if not isinstance(interface, str) or not _INTERFACE_RE.fullmatch(interface):
         raise ValueError(
             "interface must be a pfSense logical interface handle ('wan', 'lan', "
             f"'opt1'; or 'any' for a floating rule); got {interface!r}"
@@ -280,7 +286,7 @@ def _validate_rule_params(params: dict[str, Any]) -> dict[str, Any]:
 def _validate_descr(value: Any, ridentifier: str) -> str:
     if value is None:
         return f"meho: filter rule {ridentifier}"
-    if not isinstance(value, str) or not _DESCR_RE.match(value):
+    if not isinstance(value, str) or not _DESCR_RE.fullmatch(value):
         raise ValueError(
             "descr must match ^[A-Za-z0-9 _.,:/@()-]{1,200}$ (letters, digits, "
             f"space and _ . , : / @ ( ) -); got {value!r}"
@@ -451,7 +457,7 @@ def _port_covers(port: str | None, value: int) -> bool:
     """Whether a rule ``<port>`` could match *value* (aliases count as a match)."""
     if not port:
         return True
-    match = _PORT_RE.match(port)
+    match = _PORT_RE.fullmatch(port)
     if match is None:
         return True
     low = int(match.group(1))
@@ -864,7 +870,7 @@ async def _filter_rule_delete_preview(ctx: PreviewContext) -> dict[str, Any] | N
     the id does not resolve to one rule.
     """
     ridentifier = ctx.params.get("ridentifier")
-    if not isinstance(ridentifier, str) or not _RIDENTIFIER_RE.match(ridentifier):
+    if not isinstance(ridentifier, str) or not _RIDENTIFIER_RE.fullmatch(ridentifier):
         return None
     if ctx.connector_instance is None:
         return None

@@ -191,6 +191,19 @@
               <time datetime="{{ decision_ts }}" class="font-mono text-xs">{{ decision_ts }}</time>
             </p>
           {% endif %}
+          {#- Delegated decision (#3692): the approver acted on another human's
+              written instruction. Read off the decision audit row; absent for an
+              ordinary decision. -#}
+          {% if request.delegation %}
+            <dl class="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-left text-sm" data-testid="approval-delegation">
+              <dt class="opacity-70">Instructed by</dt>
+              <dd class="font-mono [overflow-wrap:anywhere]">{{ request.delegation.instructed_by }}</dd>
+              <dt class="opacity-70">Instruction</dt>
+              <dd class="[overflow-wrap:anywhere]">&ldquo;{{ request.delegation.instruction }}&rdquo;</dd>
+              <dt class="opacity-70">Refs</dt>
+              <dd class="font-mono [overflow-wrap:anywhere]">{{ request.delegation.refs | join(", ") }}</dd>
+            </dl>
+          {% endif %}
         </div>
       </div>
     {% endif %}

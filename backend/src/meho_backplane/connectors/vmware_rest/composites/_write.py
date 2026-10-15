@@ -93,6 +93,7 @@ import time
 from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
 import httpx
+import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import OperationResult
@@ -143,6 +144,8 @@ __all__ = [
     "vm_resize_composite",
     "vm_snapshot_revert_composite",
 ]
+
+_log = structlog.get_logger(__name__)
 
 
 # Connector_id every write composite governs its sub-ops against (fed to
@@ -1060,6 +1063,11 @@ _SUB_OPS_VM_DEPLOY_FROM_LIBRARY: tuple[str, ...] = (
     _OP_FIND_LIBRARY_ITEM,
     _OP_DEPLOY_OVF_LIBRARY_ITEM,
     _power_vm_op_id("start"),
+    # #3697 self-clean on a failed deploy: the same-name VM listing taken
+    # before and after the deploy, and the DELETE that removes a VM the
+    # failed deploy left behind.
+    _OP_LIST_VMS,
+    _OP_DELETE_VM,
 )
 # vm.import_from_library (#3229) REST sub-ops: the shared name-resolution find
 # actions, the optional power-on, and the content-library download-session flow
@@ -1612,19 +1620,22 @@ async def _rollback_created_vm(
     target: Any,
     operator: Operator,
     vm_id: str,
-) -> None:
+) -> bool:
     """Issue ``DELETE:/vcenter/vm/{vm}`` to remove a half-created VM.
 
     Best-effort: rollback faults are swallowed -- the operator already knows
     the create flow failed, and a denied/queued rollback sub-op or a
     transport error must not mask the original failure. A gate result from
     the seam is ignored here for the same reason (the rollback DELETE is a
-    cleanup, not an operator-requested action).
+    cleanup, not an operator-requested action). Returns ``True`` only when
+    the DELETE was issued and did not fault, so a caller can report whether
+    the VM is really gone.
     """
     try:
-        await _write_sub_op(connector, target, operator, _OP_DELETE_VM, {"vm": vm_id})
+        gate, _ = await _write_sub_op(connector, target, operator, _OP_DELETE_VM, {"vm": vm_id})
     except httpx.HTTPError:
-        return
+        return False
+    return gate is None
 
 
 async def _enable_nested_hv(
@@ -2964,6 +2975,114 @@ async def _power_on_deployed_vm(
     return True, None
 
 
+async def _same_name_vm_ids(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    params: dict[str, Any],
+) -> set[str] | None:
+    """VM ids that carry the deploy's ``name`` in its ``resource_pool``.
+
+    Taken once before and once after a failed deploy, so the difference is
+    the VM the deploy created (#3697). ``None`` means "unknown": no ``name``
+    was supplied (vCenter then names the VM from the OVF descriptor, which
+    the composite cannot predict) or the listing faulted. An unknown set
+    turns the name-based cleanup off, so it can never delete a VM that
+    existed before the deploy.
+    """
+    name = params.get("name")
+    if not isinstance(name, str) or not name:
+        return None
+    try:
+        rows = await _resolve_vm_list(
+            connector=connector,
+            target=target,
+            operator=operator,
+            filter_dict={"names": [name], "resource_pools": [params["resource_pool"]]},
+        )
+    except (httpx.HTTPError, RuntimeError):
+        return None
+    return {row["vm"] for row in rows if isinstance(row.get("vm"), str)}
+
+
+async def _clean_up_failed_deploy(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    params: dict[str, Any],
+    *,
+    vm_ids_before: set[str] | None,
+    reported_vm_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Delete a VM a failed deploy left behind; return one issue per VM (#3697).
+
+    The leftover VM is the one the ``DeploymentResult`` names
+    (*reported_vm_id*), plus any VM with the deploy's name in its resource
+    pool that was not there before the deploy started. Each one is removed
+    with the same best-effort ``DELETE:/vcenter/vm/{vm}`` ``vm.create`` uses
+    for its rollback (:func:`_rollback_created_vm`). The returned issues say
+    which VMs were removed (``info``) and which could not be (``warning``),
+    so the operator knows if a partial VM is still there.
+    """
+    leftovers: set[str] = set()
+    if reported_vm_id is not None:
+        leftovers.add(reported_vm_id)
+    if vm_ids_before is not None:
+        vm_ids_after = await _same_name_vm_ids(connector, target, operator, params)
+        if vm_ids_after is not None:
+            leftovers |= vm_ids_after - vm_ids_before
+    issues: list[dict[str, Any]] = []
+    for vm_id in sorted(leftovers):
+        if await _rollback_created_vm(
+            connector=connector, target=target, operator=operator, vm_id=vm_id
+        ):
+            issues.append(
+                _deploy_issue("cleanup", "info", f"removed VM {vm_id} left by the failed deploy")
+            )
+        else:
+            issues.append(
+                _deploy_issue(
+                    "cleanup",
+                    "warning",
+                    f"could not remove VM {vm_id} left by the failed deploy; delete it by hand",
+                )
+            )
+    return issues
+
+
+async def _clean_up_cancelled_deploy(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    params: dict[str, Any],
+    vm_ids_before: set[str] | None,
+) -> None:
+    """Run :func:`_clean_up_failed_deploy` to the end while the caller is cancelled.
+
+    Same drain pattern as the audit middleware's disconnect path: the
+    cleanup runs as its own task under :func:`asyncio.shield`, and the wait
+    is repeated when a cancellation is delivered again, so a level-triggered
+    cancel scope cannot stop the cleanup half-way. The caller re-raises the
+    original cancellation afterwards.
+    """
+    cleanup = asyncio.ensure_future(
+        _clean_up_failed_deploy(connector, target, operator, params, vm_ids_before=vm_ids_before)
+    )
+    while not cleanup.done():
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            continue
+    # Best-effort: a cleanup fault is logged, never raised over the cancellation.
+    exc = None if cleanup.cancelled() else cleanup.exception()
+    if exc is not None:
+        _log.warning(
+            "vmware_deploy_from_library_cleanup_failed",
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+
+
 async def vm_deploy_from_library_composite(
     *,
     operator: Operator,
@@ -2991,9 +3110,20 @@ async def vm_deploy_from_library_composite(
     202 + a durable run handle, #3079): the deploy then runs on a background
     task that owns the vCenter POST, so a caller that disconnects mid-transfer
     no longer cancels the in-flight deploy — on the sync path a dropped caller
-    propagates cancellation into the POST and vCenter rolls the half-created VM
-    back. The sync ceiling stays a bounded mitigation; an item large enough to
-    outrun 3 h still needs the typed ``HttpNfcLease`` import (#2890).
+    propagates cancellation into the POST. The sync ceiling stays a bounded
+    mitigation; an item large enough to outrun 3 h still needs the typed
+    ``HttpNfcLease`` import (#2890).
+
+    **No partial VM after a failed deploy (#3697).** vCenter's own rollback of
+    an interrupted deploy depends on timing, so the composite cleans up
+    itself, like ``import_from_library`` aborting its lease. Before the deploy
+    it lists the VMs that already carry the requested ``name`` in the
+    ``resource_pool``. When the deploy faults, reports ``succeeded=false``, or
+    is cancelled, it deletes the VM the ``DeploymentResult`` names plus any
+    new same-name VM in that pool, and adds a ``cleanup`` issue per VM
+    (``info`` = removed, ``warning`` = still there). Without a ``name`` only
+    a VM named in the ``DeploymentResult`` can be found. A success never
+    deletes anything.
     """
     try:
         item_id, resolution_error = await _resolve_deploy_library_item(
@@ -3021,6 +3151,9 @@ async def vm_deploy_from_library_composite(
     about_version = await connector._about_version(target, operator)
     eula_field = _deploy_eula_field_name(about_version)
     deploy_params = {"ovfLibraryItemId": item_id, **_build_ovf_deploy_body(params, eula_field)}
+    # #3697: remember which same-name VMs already exist, so a failed deploy
+    # can remove the VM it created — and only that one.
+    vm_ids_before = await _same_name_vm_ids(connector, target, operator, params)
     try:
         gate, deploy_payload = await _write_sub_op(
             connector,
@@ -3032,6 +3165,9 @@ async def vm_deploy_from_library_composite(
             timeout=_LIBRARY_ITEM_DEPLOY_TIMEOUT,
         )
     except httpx.HTTPError as exc:
+        cleanup_issues = await _clean_up_failed_deploy(
+            connector, target, operator, params, vm_ids_before=vm_ids_before
+        )
         return _deploy_failure(
             "deploy_error",
             library_item_id=item_id,
@@ -3040,9 +3176,15 @@ async def vm_deploy_from_library_composite(
                     "placement",
                     "error",
                     f"OVF deploy call faulted: {_vsphere_fault_detail(exc)}",
-                )
+                ),
+                *cleanup_issues,
             ],
         )
+    except asyncio.CancelledError:
+        # The caller went away mid-deploy. Remove a partial VM before the
+        # cancellation unwinds (#3697).
+        await _clean_up_cancelled_deploy(connector, target, operator, params, vm_ids_before)
+        raise
     if gate is not None:
         return gate
 
@@ -3054,12 +3196,22 @@ async def vm_deploy_from_library_composite(
             "200 body is a DeploymentResult structure"
         )
     issues = _extract_ovf_issues(result.get("error"))
-    if not result.get("succeeded"):
-        return _deploy_failure("deploy_failed", library_item_id=item_id, issues=issues)
-
     resource = result.get("resource_id")
     vm_id = resource.get("id") if isinstance(resource, dict) else None
     resource_type = resource.get("type") if isinstance(resource, dict) else None
+    if not result.get("succeeded"):
+        reported_vm_id = (
+            vm_id if isinstance(vm_id, str) and resource_type == "VirtualMachine" else None
+        )
+        issues += await _clean_up_failed_deploy(
+            connector,
+            target,
+            operator,
+            params,
+            vm_ids_before=vm_ids_before,
+            reported_vm_id=reported_vm_id,
+        )
+        return _deploy_failure("deploy_failed", library_item_id=item_id, issues=issues)
     if not isinstance(vm_id, str):
         raise RuntimeError(
             "vm.deploy_from_library: deploy reported succeeded=true but no "

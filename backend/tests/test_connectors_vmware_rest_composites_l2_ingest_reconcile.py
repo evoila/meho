@@ -173,16 +173,20 @@ def test_write_composite_sub_op_tuples_are_all_discovered() -> None:
 def test_vm_deploy_from_library_sub_op_manifest_is_expected() -> None:
     """Pin the deploy_from_library manifest so a drift can't shrink the reconcile.
 
-    All four sub-ops are ``vcenter.yaml``-served REST paths (the OVF deploy,
-    both content-library find actions used for name resolution, and the
-    power-on), so — unlike the vim-shaped writes — they reconcile through the
-    generic ``_SUB_OPS_*`` sweep above rather than a ``_VIM_SUB_OPS_*`` lane.
+    All six sub-ops are ``vcenter.yaml``-served REST paths (the OVF deploy,
+    both content-library find actions used for name resolution, the
+    power-on, and the #3697 failed-deploy cleanup: the same-name VM listing
+    and the VM delete), so — unlike the vim-shaped writes — they reconcile
+    through the generic ``_SUB_OPS_*`` sweep above rather than a
+    ``_VIM_SUB_OPS_*`` lane.
     """
     assert set(_write._SUB_OPS_VM_DEPLOY_FROM_LIBRARY) == {
         "POST:/content/library?action=find",
         "POST:/content/library/item?action=find",
         "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy",
         "POST:/vcenter/vm/{vm}/power?action=start",
+        "GET:/vcenter/vm",
+        "DELETE:/vcenter/vm/{vm}",
     }
 
 

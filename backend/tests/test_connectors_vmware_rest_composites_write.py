@@ -37,6 +37,7 @@ respx-transport parity proof lives in
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 from dataclasses import dataclass, field
@@ -199,7 +200,8 @@ class _RecordingConnector:
         else:
             payload = self._responses[self._seq_index]
             self._seq_index += 1
-        if isinstance(payload, Exception):
+        # BaseException so a canned ``asyncio.CancelledError`` models a caller cancel.
+        if isinstance(payload, BaseException):
             raise payload
         return payload
 
@@ -2200,6 +2202,7 @@ async def test_deploy_from_library_deploy_body_shape(gate: _GateRecorder) -> Non
     """The deploy body carries the {deployment_spec, target} shape the pinned spec keys."""
     conn = _RecordingConnector(
         {
+            "/api/vcenter/vm": [],
             "/api/vcenter/ovf/library-item/li-ovf?action=deploy": _deployment_result(
                 succeeded=True
             ),
@@ -2222,7 +2225,8 @@ async def test_deploy_from_library_deploy_body_shape(gate: _GateRecorder) -> Non
         },
         connector=conn,  # type: ignore[arg-type]
     )
-    body = conn.calls[0]["body"]
+    (deploy_post,) = [c for c in conn.calls if c["method"] == "POST"]
+    body = deploy_post["body"]
     assert body["deployment_spec"] == {
         "accept_all_eula": True,
         "name": "router-01",
@@ -2469,6 +2473,172 @@ async def test_deploy_from_library_deploy_error_on_http_fault(gate: _GateRecorde
     assert "404" in out["issues"][0]["message"]
     assert "NOT_FOUND" in out["issues"][0]["message"]
     assert "resource pool resgroup-missing not found" in out["issues"][0]["message"]
+
+
+_DEPLOY_PARAMS_NAMED = {
+    "library_item": "li-ovf",
+    "name": "router-01",
+    "resource_pool": "resgroup-8",
+}
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_fault_after_vm_created_removes_partial_vm(
+    gate: _GateRecorder,
+) -> None:
+    """A deploy fault after vCenter created the VM → the new VM is deleted (#3697).
+
+    The same-name listing before the deploy holds an older VM; after the
+    fault a new same-name VM is there. Only the new one is deleted, and the
+    envelope says so in a ``cleanup`` issue.
+    """
+    conn = _RecordingConnector(
+        [
+            [{"vm": "vm-old", "name": "router-01"}],
+            httpx.ReadTimeout(""),
+            [{"vm": "vm-old", "name": "router-01"}, {"vm": "vm-partial", "name": "router-01"}],
+            None,
+        ]
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deploy_error"
+    assert out["vm_id"] is None
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("GET", "/api/vcenter/vm"),
+        ("POST", "/api/vcenter/ovf/library-item/li-ovf?action=deploy"),
+        ("GET", "/api/vcenter/vm"),
+        ("DELETE", "/api/vcenter/vm/vm-partial"),
+    ]
+    # The listing is scoped to the deploy's name and resource pool.
+    assert conn.calls[0]["query"] == {"names": ["router-01"], "resource_pools": ["resgroup-8"]}
+    assert gate.gated_op_ids == [_DEPLOY_OVF_OP, "DELETE:/vcenter/vm/{vm}"]
+    assert out["issues"][-1] == {
+        "category": "cleanup",
+        "severity": "info",
+        "message": "removed VM vm-partial left by the failed deploy",
+    }
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_deploy_failed_removes_reported_vm(gate: _GateRecorder) -> None:
+    """succeeded=false that still names a created VM → that VM is deleted (#3697)."""
+    failed = _deployment_result(
+        succeeded=False,
+        errors=[{"category": "SERVER", "message": {"default_message": "disk copy failed"}}],
+    )
+    failed["resource_id"] = {"type": "VirtualMachine", "id": "vm-partial"}
+    conn = _RecordingConnector([[], failed, [], None])
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deploy_failed"
+    assert conn.calls[-1]["method"] == "DELETE"
+    assert conn.calls[-1]["path"] == "/api/vcenter/vm/vm-partial"
+    assert out["issues"] == [
+        {"category": "SERVER", "severity": "error", "message": "disk copy failed"},
+        {
+            "category": "cleanup",
+            "severity": "info",
+            "message": "removed VM vm-partial left by the failed deploy",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_cleanup_delete_fault_is_reported(gate: _GateRecorder) -> None:
+    """A cleanup DELETE that faults leaves a ``warning`` issue, not a raise (#3697)."""
+    delete_fault = httpx.ConnectError("refused")
+    conn = _RecordingConnector([[], httpx.ReadTimeout(""), [{"vm": "vm-partial"}], delete_fault])
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deploy_error"
+    assert out["issues"][-1]["category"] == "cleanup"
+    assert out["issues"][-1]["severity"] == "warning"
+    assert "vm-partial" in out["issues"][-1]["message"]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_success_deletes_nothing(gate: _GateRecorder) -> None:
+    """A clean deploy keeps the VM: no second listing and no DELETE (#3697)."""
+    conn = _RecordingConnector(
+        [[{"vm": "vm-old"}], _deployment_result(succeeded=True, vm_id="vm-ovf-1")]
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deployed"
+    assert out["vm_id"] == "vm-ovf-1"
+    assert [c["method"] for c in conn.calls] == ["GET", "POST"]
+    assert gate.gated_op_ids == [_DEPLOY_OVF_OP]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_without_name_never_deletes_by_listing(
+    gate: _GateRecorder,
+) -> None:
+    """No ``name`` → no same-name listing, so a fault deletes nothing (#3697).
+
+    vCenter names the VM from the OVF descriptor then, so the composite
+    cannot tell a new VM from an old one and must not guess.
+    """
+    conn = _RecordingConnector([httpx.ReadTimeout("")])
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"library_item": "li-ovf", "resource_pool": "resgroup-8"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deploy_error"
+    assert [c["method"] for c in conn.calls] == ["POST"]
+    assert [i["category"] for i in out["issues"]] == ["placement"]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_listing_fault_turns_cleanup_off(gate: _GateRecorder) -> None:
+    """A faulted pre-deploy listing → the deploy still runs, but nothing is deleted (#3697)."""
+    conn = _RecordingConnector([httpx.ConnectError("refused"), httpx.ReadTimeout("")])
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deploy_error"
+    assert [c["method"] for c in conn.calls] == ["GET", "POST"]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_cancelled_deploy_removes_partial_vm(
+    gate: _GateRecorder,
+) -> None:
+    """A caller cancel mid-deploy → the partial VM is deleted, then the cancel re-raises (#3697)."""
+    conn = _RecordingConnector([[], asyncio.CancelledError(), [{"vm": "vm-partial"}], None])
+    with pytest.raises(asyncio.CancelledError):
+        await vm_deploy_from_library_composite(
+            operator=_make_operator(),
+            target=object(),
+            params=dict(_DEPLOY_PARAMS_NAMED),
+            connector=conn,  # type: ignore[arg-type]
+        )
+    assert [(c["method"], c["path"]) for c in conn.calls][-1] == (
+        "DELETE",
+        "/api/vcenter/vm/vm-partial",
+    )
 
 
 @pytest.mark.asyncio

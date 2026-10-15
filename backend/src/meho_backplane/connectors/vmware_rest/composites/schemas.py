@@ -3941,7 +3941,8 @@ VM_DEPLOY_FROM_LIBRARY_PARAMETER_SCHEMA: dict[str, Any] = {
             "minLength": 1,
             "description": (
                 "Optional display name for the deployed VM; the server uses the "
-                "OVF descriptor's name when omitted."
+                "OVF descriptor's name when omitted. Set it so a failed deploy can "
+                "find and delete the partial VM it left behind (#3697)."
             ),
         },
         "network_mappings": {
@@ -4041,7 +4042,9 @@ VM_DEPLOY_FROM_LIBRARY_RESPONSE_SCHEMA: dict[str, Any] = {
                 "resolution call itself faulted (HTTP 4xx/5xx), surfaced as a "
                 "structured message with the vCenter status carried in ``issues`` "
                 "rather than a raw vendor error. Every non-``deployed`` status is "
-                "reached before or without a successful mutation."
+                "reached before or without a successful mutation: when a failed "
+                "deploy leaves a partial VM behind, the composite deletes it and "
+                "reports the cleanup in ``issues`` (#3697)."
             ),
         },
         "vm_id": {
@@ -4079,7 +4082,10 @@ VM_DEPLOY_FROM_LIBRARY_RESPONSE_SCHEMA: dict[str, Any] = {
             "description": (
                 "Per-issue projections ``{category, severity, message}`` drawn "
                 "from the OVF deploy report (errors / warnings / information) or "
-                "the resolution / power-on failure. Empty on a clean deploy."
+                "the resolution / power-on failure. Empty on a clean deploy. A "
+                "failed deploy adds one ``category='cleanup'`` entry per partial VM "
+                "it found: severity ``info`` when the VM was deleted, ``warning`` "
+                "when it could not be deleted and is still there (#3697)."
             ),
         },
         "candidates": {

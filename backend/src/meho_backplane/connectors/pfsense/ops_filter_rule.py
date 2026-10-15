@@ -48,10 +48,18 @@ Guards (fail closed)
   add whose id already exists is a no-op when the stored rule is the same
   (``already_present``) and is refused when it differs (``conflict``). Two
   rules with the same id is ``ambiguous`` and refused by both ops.
-* **Persist only on the expected change.** The PHP fragment writes the
-  config only when the id is still absent (add) or exactly one rule was
-  removed (delete). The read-back then checks the rule count moved by
-  exactly one.
+* **One config edit at a time.** Both handlers run under the appliance's
+  config-write lock (:func:`~meho_backplane.connectors.pfsense.ops_write.serialized_config_write`),
+  held from the guard read to the read-back, so no other MEHO config edit
+  on the same pfSense can slip in between the check and the write.
+* **Persist only on the expected change.** The PHP fragment re-checks the
+  id when it runs and writes the config only when the id is still absent
+  (add) or exactly one rule was removed (delete). The read-back then checks
+  the rule count moved by exactly one, and (add) that the stored rule is
+  the requested rule, field by field.
+* **Invalid config reads fail.** An empty, truncated or wrong-root
+  ``config.xml`` is an error, never "zero rules", so a bad read-back can
+  never pass as a verified delete of the last rule.
 
 Rule order
 ----------
@@ -87,6 +95,7 @@ from meho_backplane.connectors.pfsense.ops_write import (
     _child_text,
     _php_squote,
     _read_config_xml,
+    serialized_config_write,
 )
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 
@@ -136,6 +145,38 @@ _SPEC_KEYS = (
     "quick",
     "log",
 )
+
+# Rule settings the add never writes but that change what a stored rule
+# does. A stored rule that has any of them is not "the same rule" as an add
+# request, so the add refuses (``conflict``) instead of ``already_present``.
+# Flags are stored as a (usually empty) element; values carry text.
+_EXTRA_FLAG_TAGS = ("nosync", "allowopts", "disablereplyto", "tcpflags_any")
+_EXTRA_VALUE_TAGS = (
+    "gateway",
+    "sched",
+    "tag",
+    "tagged",
+    "dnpipe",
+    "pdnpipe",
+    "defaultqueue",
+    "ackqueue",
+    "max",
+    "max-src-nodes",
+    "max-src-conn",
+    "max-src-states",
+    "max-src-conn-rate",
+    "max-src-conn-rates",
+    "statetimeout",
+    "statetype",
+    "os",
+    "icmptype",
+    "tcpflags1",
+    "tcpflags2",
+    "vlanprio",
+    "vlanprioset",
+)
+# Values the GUI stores for "no special setting"; they are not an extra.
+_EXTRA_DEFAULTS = {"statetype": "keep state", "icmptype": "any"}
 
 
 # ---------------------------------------------------------------------------
@@ -336,6 +377,19 @@ def _comparable_address(endpoint: dict[str, Any]) -> str:
     return f"network:{value}"
 
 
+def _parse_extras(item: Any) -> dict[str, str]:
+    """Return the rule settings the add never writes (see ``_EXTRA_*_TAGS``)."""
+    extras: dict[str, str] = {}
+    for tag in _EXTRA_FLAG_TAGS:
+        if item.find(tag) is not None:
+            extras[tag] = "yes"
+    for tag in _EXTRA_VALUE_TAGS:
+        text = (_child_text(item, tag) or "").strip()
+        if text and text != _EXTRA_DEFAULTS.get(tag):
+            extras[tag] = text
+    return extras
+
+
 def parse_filter_rules_xml(xml_text: str) -> list[dict[str, Any]]:
     """Parse the ``<filter><rule>`` list from ``/cf/conf/config.xml``.
 
@@ -343,8 +397,14 @@ def parse_filter_rules_xml(xml_text: str) -> list[dict[str, Any]]:
     (the ``ridentifier``), what it does (the ``_SPEC_KEYS`` fields, in the
     same form :func:`pfsense_filter_rule_add` uses), plus ``source_kind`` /
     ``destination_kind``, ``source_not`` / ``destination_not``,
-    ``disabled``, ``associated_rule_id``, ``descr`` and the informational
-    1-based ``position``. Returns an empty list on a parse failure.
+    ``disabled``, ``extras`` (settings the add never writes, see
+    :func:`_parse_extras`), ``associated_rule_id``, ``descr`` and the
+    informational 1-based ``position``.
+
+    Raises :exc:`ValueError` when the text is empty, not well-formed XML, or
+    not a pfSense config with a ``<filter>`` section. A bad read must never
+    look like "zero rules": a delete of the last rule would then pass its
+    read-back check against a failed read.
 
     >>> xml = (
     ...     "<pfsense><filter><rule><tracker>100000001</tracker><type>block</type>"
@@ -357,14 +417,19 @@ def parse_filter_rules_xml(xml_text: str) -> list[dict[str, Any]]:
     ('100000001', 'block', '10.1.0.0/24', 'any')
     """
     if not xml_text.strip():
-        return []
+        raise ValueError("config.xml is empty")
     try:
         root = fromstring(xml_text)
-    except ParseError:
-        return []
-    filter_root = root if root.tag == "filter" else root.find("filter")
+    except ParseError as exc:
+        raise ValueError(f"config.xml is not well-formed XML: {exc}") from exc
+    if root.tag == "filter":
+        filter_root = root
+    elif root.tag == "pfsense":
+        filter_root = root.find("filter")
+    else:
+        raise ValueError(f"config.xml has root <{root.tag}>, expected <pfsense>")
     if filter_root is None:
-        return []
+        raise ValueError("config.xml has no <filter> section")
     rows: list[dict[str, Any]] = []
     for position, item in enumerate(filter_root.findall("rule"), start=1):
         source = _parse_endpoint(item.find("source"))
@@ -390,6 +455,7 @@ def parse_filter_rules_xml(xml_text: str) -> list[dict[str, Any]]:
                 "source_not": source["not"],
                 "destination_not": destination["not"],
                 "disabled": item.find("disabled") is not None,
+                "extras": _parse_extras(item),
                 "associated_rule_id": _child_text(item, "associated-rule-id"),
                 "descr": _child_text(item, "descr"),
                 "position": position,
@@ -669,6 +735,32 @@ def _spec_of(row: dict[str, Any]) -> dict[str, Any]:
     return {key: row.get(key) for key in _SPEC_KEYS}
 
 
+def _stored_rule_differences(row: dict[str, Any], spec: dict[str, Any]) -> list[str]:
+    """Return the names of the settings where the stored *row* differs from *spec*.
+
+    Every ``_SPEC_KEYS`` field is compared. A stored rule that is disabled,
+    negates its source or destination, or carries a setting the add never
+    writes (``extras``) does not behave like the requested rule either, so
+    those count as differences too. Empty means "the same rule".
+    """
+    diffs = [key for key in _SPEC_KEYS if row.get(key) != spec[key]]
+    diffs += [key for key in ("disabled", "source_not", "destination_not") if row.get(key)]
+    diffs += sorted(row.get("extras") or {})
+    return diffs
+
+
+async def _read_rules(
+    self: PfSenseConnector, target: Any, operator: Operator | None, *, stage: str
+) -> tuple[str, list[dict[str, Any]]]:
+    """Read ``config.xml`` and parse its rules; raise when the read is not a config."""
+    xml_text = await _read_config_xml(self, target, operator)
+    try:
+        return xml_text, parse_filter_rules_xml(xml_text)
+    except ValueError as exc:
+        raise RuntimeError(f"{stage}: {exc}") from exc
+
+
+@serialized_config_write
 async def pfsense_filter_rule_add(
     self: PfSenseConnector,
     target: Any,
@@ -677,21 +769,23 @@ async def pfsense_filter_rule_add(
 ) -> dict[str, Any]:
     """Handler for ``pfsense.filter.rule.add`` -- add ONE filter rule.
 
-    Sequence: validate -> read ``config.xml`` -> by ``ridentifier``: 1 match
-    with the same rule -> ``already_present`` (no change); 1 match that
-    differs -> ``conflict``; >1 -> ``ambiguous`` -> unknown interface ->
+    Sequence (under the appliance's config-write lock): validate -> read
+    ``config.xml`` -> by ``ridentifier``: 1 match with the same rule ->
+    ``already_present`` (no change); 1 match that differs in any setting ->
+    ``conflict``; >1 -> ``ambiguous`` -> unknown interface ->
     ``unknown_interface`` -> a ``block`` rule that could match MEHO's own
     SSH path -> ``mgmt_path`` / ``mgmt_path_unknown`` -> otherwise stage the
-    insert, then read back and check the rule is there exactly once and the
-    rule count grew by exactly one.
+    insert, then read back and check the rule is there exactly once, is the
+    requested rule field by field, and the rule count grew by exactly one.
     """
     ridentifier = _validate_ridentifier(params.get("ridentifier"))
     spec = _validate_rule_params(params)
     descr = _validate_descr(params.get("descr"), ridentifier)
     position = _choice(params, "position", _POSITIONS, "top")
 
-    before = await _read_config_xml(self, target, operator)
-    rules_before = parse_filter_rules_xml(before)
+    before, rules_before = await _read_rules(
+        self, target, operator, stage="filter.rule.add refused: config.xml could not be read"
+    )
     matches = [r for r in rules_before if r.get("tracker") == ridentifier]
     result: dict[str, Any] = {
         "op_class": "write",
@@ -716,17 +810,18 @@ async def pfsense_filter_rule_add(
             ),
         }
     if matches:
-        same = _spec_of(matches[0]) == spec
+        differences = _stored_rule_differences(matches[0], spec)
         return {
             **result,
-            "status": "already_present" if same else "conflict",
+            "status": "conflict" if differences else "already_present",
             "existing": matches[0],
-            "guidance": None
-            if same
-            else (
-                f"a different filter rule already uses ridentifier {ridentifier!r}; "
-                "nothing changed -- pick another ridentifier or delete that rule first"
-            ),
+            "guidance": (
+                f"a different filter rule already uses ridentifier {ridentifier!r} "
+                f"(differs in: {', '.join(differences)}); nothing changed -- pick "
+                "another ridentifier or delete that rule first"
+            )
+            if differences
+            else None,
         }
     if spec["interface"] != "any" and not _interface_known(before, spec["interface"]):
         return {
@@ -750,7 +845,12 @@ async def pfsense_filter_rule_add(
         operator=operator,
     )
 
-    rules_after = parse_filter_rules_xml(await _read_config_xml(self, target, operator))
+    _, rules_after = await _read_rules(
+        self,
+        target,
+        operator,
+        stage=f"filter.rule.add verification failed for ridentifier {ridentifier!r}",
+    )
     landed = [r for r in rules_after if r.get("tracker") == ridentifier]
     if len(landed) != 1 or len(rules_after) != len(rules_before) + 1:
         raise RuntimeError(
@@ -758,6 +858,12 @@ async def pfsense_filter_rule_add(
             f"present_after={len(landed)}, rules {len(rules_before)}->{len(rules_after)} "
             "(expected exactly one more); the pfSsh.php playback did not persist a "
             "clean single-rule add"
+        )
+    differences = _stored_rule_differences(landed[0], spec)
+    if differences:
+        raise RuntimeError(
+            f"filter.rule.add verification failed for ridentifier {ridentifier!r}: "
+            f"the stored rule differs from the requested rule in: {', '.join(differences)}"
         )
     return {
         **result,
@@ -768,6 +874,7 @@ async def pfsense_filter_rule_add(
     }
 
 
+@serialized_config_write
 async def pfsense_filter_rule_delete(
     self: PfSenseConnector,
     target: Any,
@@ -776,8 +883,9 @@ async def pfsense_filter_rule_delete(
 ) -> dict[str, Any]:
     """Handler for ``pfsense.filter.rule.delete`` -- governed single-rule delete.
 
-    Sequence: validate -> read ``config.xml`` -> by ``ridentifier``: 0 ->
-    ``not_found``, >1 -> ``ambiguous`` -> a NAT-linked rule ->
+    Sequence (under the appliance's config-write lock): validate -> read
+    ``config.xml`` -> by ``ridentifier``: 0 -> ``not_found``, >1 ->
+    ``ambiguous`` -> a NAT-linked rule ->
     ``nat_associated`` -> an enabled ``pass`` rule that could carry MEHO's
     own SSH path -> ``mgmt_path`` / ``mgmt_path_unknown`` -> otherwise stage
     the delete, then read back and check the rule is gone and the count
@@ -785,8 +893,9 @@ async def pfsense_filter_rule_delete(
     """
     ridentifier = _validate_ridentifier(params.get("ridentifier"))
 
-    before = await _read_config_xml(self, target, operator)
-    rules_before = parse_filter_rules_xml(before)
+    _, rules_before = await _read_rules(
+        self, target, operator, stage="filter.rule.delete refused: config.xml could not be read"
+    )
     matches = [r for r in rules_before if r.get("tracker") == ridentifier]
     result: dict[str, Any] = {
         "op_class": "delete",
@@ -837,7 +946,12 @@ async def pfsense_filter_rule_delete(
         operator=operator,
     )
 
-    rules_after = parse_filter_rules_xml(await _read_config_xml(self, target, operator))
+    _, rules_after = await _read_rules(
+        self,
+        target,
+        operator,
+        stage=f"filter.rule.delete verification failed for ridentifier {ridentifier!r}",
+    )
     still_present = any(r.get("tracker") == ridentifier for r in rules_after)
     if still_present or len(rules_after) != len(rules_before) - 1:
         raise RuntimeError(
@@ -864,8 +978,9 @@ async def _filter_rule_delete_preview(ctx: PreviewContext) -> dict[str, Any] | N
     """Blast-radius builder for ``pfsense.filter.rule.delete``.
 
     Live-reads ``config.xml`` and, when the ``ridentifier`` resolves to
-    exactly one rule, names that rule (what it does, where it sits) so the
-    approver reads exactly what is removed. Declines (``None`` -> the park
+    exactly one rule, names that rule (what it does, including a negated
+    source or destination, where it sits) so the approver reads exactly
+    what is removed. Declines (``None`` -> the park
     is refused ``blast_radius_required``) when the config cannot be read or
     the id does not resolve to one rule.
     """
@@ -880,10 +995,12 @@ async def _filter_rule_delete_preview(ctx: PreviewContext) -> dict[str, Any] | N
             ctx.target,
             ctx.operator,
         )
+        rows = parse_filter_rules_xml(xml_text)
     except Exception:
-        # Fail-soft: a read fault declines the preview -> park refused (fail-closed).
+        # Fail-soft: a read or parse fault declines the preview -> park refused
+        # (fail-closed).
         return None
-    matches = [r for r in parse_filter_rules_xml(xml_text) if r.get("tracker") == ridentifier]
+    matches = [r for r in rows if r.get("tracker") == ridentifier]
     if len(matches) != 1:
         return None
     rule = matches[0]
@@ -893,7 +1010,10 @@ async def _filter_rule_delete_preview(ctx: PreviewContext) -> dict[str, Any] | N
                 "kind": "filter_rule",
                 "ridentifier": ridentifier,
                 **_spec_of(rule),
+                "source_not": rule.get("source_not"),
+                "destination_not": rule.get("destination_not"),
                 "disabled": rule.get("disabled"),
+                "extras": rule.get("extras"),
                 "descr": rule.get("descr"),
                 "position": rule.get("position"),
             },

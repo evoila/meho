@@ -50,6 +50,7 @@ and ``pfsense.route.static.list`` via
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 from datetime import UTC, datetime
@@ -294,6 +295,25 @@ class PfSenseConnector(SshConnector):
     product = "pfsense"
     version = "2.7"
     impl_id = "pfsense-ssh"
+
+    def __init__(self) -> None:
+        super().__init__()
+        # One lock per pfSense appliance, held by every op that edits
+        # config.xml (see ``ops_write.serialized_config_write``, #3544).
+        self._config_write_locks: dict[str, asyncio.Lock] = {}
+
+    def config_write_lock(self, target: Target) -> asyncio.Lock:
+        """Return the lock that serializes config.xml edits on *target*'s appliance.
+
+        Keyed on the SSH host, not the target row: two targets that point at
+        the same pfSense must still share one lock. The dict is only read and
+        written between ``await`` points, so it needs no lock of its own.
+        """
+        key = str(getattr(target, "host", None) or "").lower()
+        lock = self._config_write_locks.get(key)
+        if lock is None:
+            lock = self._config_write_locks[key] = asyncio.Lock()
+        return lock
 
     async def _auth_config(
         self, target: Target, operator: Operator | None = None

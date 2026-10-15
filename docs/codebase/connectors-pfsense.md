@@ -628,8 +628,13 @@ and no audit.
   this way.
 - **Safe to run twice.** If a rule with the id already exists and does the
   same thing, the add returns `already_present` and changes nothing. If it
-  does something different, the add returns `conflict` and changes nothing.
-  Two rules with one id is `ambiguous`; both ops refuse it.
+  does something different, the add returns `conflict` and changes nothing,
+  and `guidance` names the settings that differ. "The same thing" means every
+  setting the add can write is equal, the stored rule is not disabled, it
+  does not negate its source or destination, and it has none of the settings
+  the add never writes (a gateway, a schedule, a tag, a queue, a state
+  option, and so on). Two rules with one id is `ambiguous`; both ops refuse
+  it.
 - **What a rule can say.** `type` is `block`, `pass` or `match` (`match` only
   on floating rules). A rule sits on one interface (or interface group), or
   is floating with a `direction` and `quick`. Source and destination are
@@ -652,11 +657,24 @@ and no audit.
   (`mgmt_path_unknown`). Only the SSH path is checked, not the web GUI.
 - **NAT rules.** The delete refuses a rule linked to a NAT port forward
   (`nat_associated`); remove it together with the NAT rule.
+- **One edit at a time.** Both handlers hold the appliance's config-write
+  lock (`serialized_config_write` in `ops_write.py`, one `asyncio.Lock` per
+  SSH host on the connector) from the first read to the read-back. So two
+  MEHO ops that edit `config.xml` on the same pfSense run one after the
+  other, and a rule cannot change between the guard read and the write.
 - **Write and check.** Both ops use the shared `_apply_playback` helper of the
-  other writes. The fragment writes only when the id is still free (add) or
-  exactly one rule was removed (delete). Then `filter_configure()` reloads the
-  rules, and the handler reads `config.xml` back: the rule count must move by
-  exactly one, or the op fails.
+  other writes. The fragment checks the id again when it runs, and writes
+  only when the id is still free (add) or exactly one rule was removed
+  (delete). Then `filter_configure()` reloads the rules, and the handler
+  reads `config.xml` back: the rule count must move by exactly one, and for
+  the add the stored rule must equal the requested rule setting by setting,
+  or the op fails. A read that is empty, cut off or not a pfSense config is
+  an error, never "zero rules", so a failed read-back can never pass as a
+  verified delete of the last rule.
+- **The delete preview** names the rule as it is stored, including whether
+  its source or destination is negated (`source_not`, `destination_not`),
+  whether it is disabled, and any extra settings. The approver reads exactly
+  what is removed.
 - **Approval.** The add is `dangerous` + `requires_approval`: it waits for a
   human approval, unless an operator gave a standing grant for this op. The
   delete is on the governed-delete tier: a preview hash, and a blast-radius

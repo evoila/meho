@@ -18,6 +18,7 @@ All config.xml fixtures are synthetic (RFC 5737 / RFC 1918 addresses only).
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Iterator
 from types import SimpleNamespace
@@ -170,10 +171,35 @@ def test_parse_filter_rules_reads_spec_and_flags() -> None:
     assert rows[2]["destination_port"] == "443"
 
 
-def test_parse_filter_rules_empty_and_malformed() -> None:
-    assert parse_filter_rules_xml("") == []
-    assert parse_filter_rules_xml("<pfsense><filter>") == []
-    assert parse_filter_rules_xml("<pfsense></pfsense>") == []
+_BAD_CONFIGS = ["", "   \n", "<pfsense><filter>", "<pfsense></pfsense>", "<other><filter/></other>"]
+
+
+@pytest.mark.parametrize("xml_text", _BAD_CONFIGS)
+def test_parse_filter_rules_rejects_invalid_config(xml_text: str) -> None:
+    with pytest.raises(ValueError, match=r"config\.xml"):
+        parse_filter_rules_xml(xml_text)
+
+
+def test_parse_filter_rules_empty_filter_section_is_zero_rules() -> None:
+    assert parse_filter_rules_xml("<pfsense><filter></filter></pfsense>") == []
+    assert parse_filter_rules_xml("<pfsense><filter/></pfsense>") == []
+
+
+def test_parse_filter_rules_reads_negation_disabled_and_extras() -> None:
+    rule = (
+        "<rule><tracker>100000001</tracker><type>block</type><interface>opt1</interface>"
+        "<ipprotocol>inet</ipprotocol><disabled></disabled>"
+        "<source><not></not><address>10.1.0.0/24</address></source>"
+        "<destination><any></any></destination>"
+        "<gateway>LAB_GW</gateway><tag></tag><statetype>keep state</statetype>"
+        "<icmptype>any</icmptype><nosync></nosync></rule>"
+    )
+    row = parse_filter_rules_xml(_config(rule))[0]
+    assert row["disabled"] is True
+    assert row["source_not"] is True
+    assert row["destination_not"] is False
+    assert row["extras"] == {"gateway": "LAB_GW", "nosync": "yes"}
+    assert parse_filter_rules_xml(_config(_FENCE))[0]["extras"] == {}
 
 
 def test_validate_normalises_addresses_and_ports() -> None:
@@ -427,6 +453,34 @@ async def test_add_different_rule_same_id_is_conflict() -> None:
     assert mock_cmd.await_count == 1
 
 
+_FENCE_DISABLED = _FENCE.replace("<type>block</type>", "<type>block</type><disabled></disabled>")
+_FENCE_NOT_SOURCE = _FENCE.replace("<source>", "<source><not></not>")
+_FENCE_NOT_DEST = _FENCE.replace("<destination>", "<destination><not></not>")
+_FENCE_WITH_GATEWAY = _FENCE.replace("</rule>", "<gateway>LAB_GW</gateway></rule>")
+_FENCE_WITH_SCHED = _FENCE.replace("</rule>", "<sched>office</sched></rule>")
+
+
+@pytest.mark.parametrize(
+    ("stored", "field"),
+    [
+        (_FENCE_DISABLED, "disabled"),
+        (_FENCE_NOT_SOURCE, "source_not"),
+        (_FENCE_NOT_DEST, "destination_not"),
+        (_FENCE_WITH_GATEWAY, "gateway"),
+        (_FENCE_WITH_SCHED, "sched"),
+    ],
+)
+async def test_add_stored_rule_with_other_behaviour_is_conflict(stored: str, field: str) -> None:
+    connector = PfSenseConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = [_proc(_config(stored, _LAN_PASS))]
+        result = await connector.filter_rule_add(None, dict(_FENCE_PARAMS))
+    assert result["status"] == "conflict"
+    assert result["applied"] is False
+    assert field in result["guidance"]
+    assert mock_cmd.await_count == 1
+
+
 async def test_add_duplicate_id_is_ambiguous() -> None:
     connector = PfSenseConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
@@ -459,7 +513,7 @@ async def test_add_interface_group_is_accepted() -> None:
             _proc(""),
             _proc(""),
             _proc(""),
-            _proc(_AFTER_ADD),
+            _proc(_config(_FENCE.replace("opt1", "SEGS"), _LAN_PASS)),
         ]
         result = await connector.filter_rule_add(None, {**_FENCE_PARAMS, "interface": "SEGS"})
     assert result["status"] == "added"
@@ -501,6 +555,189 @@ async def test_add_verification_failure_raises() -> None:
         ]
         with pytest.raises(RuntimeError, match="verification failed"):
             await connector.filter_rule_add(None, dict(_FENCE_PARAMS))
+
+
+@pytest.mark.parametrize(
+    ("landed", "field"),
+    [
+        (_FENCE.replace("<interface>opt1</interface>", "<interface>lan</interface>"), "interface"),
+        (_FENCE.replace("<type>block</type>", "<type>pass</type>"), "type"),
+        (_FENCE_NOT_SOURCE, "source_not"),
+        (_FENCE_DISABLED, "disabled"),
+    ],
+)
+async def test_add_verification_compares_the_stored_rule(landed: str, field: str) -> None:
+    connector = PfSenseConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = [
+            _proc(_BEFORE),
+            _proc(_SSH_FLOW),
+            _proc(""),
+            _proc(""),
+            _proc(""),
+            _proc(_config(landed, _LAN_PASS)),  # read-back: right id, wrong rule
+        ]
+        with pytest.raises(RuntimeError, match=f"verification failed.*{field}"):
+            await connector.filter_rule_add(None, dict(_FENCE_PARAMS))
+
+
+@pytest.mark.parametrize("xml_text", _BAD_CONFIGS)
+async def test_add_invalid_read_back_raises(xml_text: str) -> None:
+    connector = PfSenseConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = [
+            _proc(_BEFORE),
+            _proc(_SSH_FLOW),
+            _proc(""),
+            _proc(""),
+            _proc(""),
+            _proc(xml_text),
+        ]
+        with pytest.raises(RuntimeError, match=r"verification failed.*config\.xml"):
+            await connector.filter_rule_add(None, dict(_FENCE_PARAMS))
+
+
+@pytest.mark.parametrize("xml_text", _BAD_CONFIGS)
+async def test_add_invalid_guard_read_stages_nothing(xml_text: str) -> None:
+    connector = PfSenseConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = [_proc(xml_text)]
+        with pytest.raises(RuntimeError, match=r"could not be read.*config\.xml"):
+            await connector.filter_rule_add(None, dict(_FENCE_PARAMS))
+    assert mock_cmd.await_count == 1
+
+
+# ===========================================================================
+# Part A -- concurrent writes on one appliance
+# ===========================================================================
+
+
+def _pass_rule(rid: str, destination: str) -> str:
+    return (
+        f"<rule><tracker>{rid}</tracker><type>pass</type><interface>lan</interface>"
+        f"<ipprotocol>inet</ipprotocol><source><any></any></source>"
+        f"<destination><address>{destination}</address></destination>"
+        f"<descr>meho: filter rule {rid}</descr></rule>"
+    )
+
+
+class _FakePfSense:
+    """In-memory config.xml whose playback saves the copy it loaded at start.
+
+    This is the real pfSense behaviour: ``write_config()`` saves the whole
+    ``$config`` the fragment loaded, so two overlapping edits lose one.
+    """
+
+    def __init__(self, config: str, inserts: dict[str, str]) -> None:
+        self.config = config
+        self.inserts = inserts  # playback script name -> rule XML the fragment adds
+        self.in_flight = 0
+        self.max_in_flight = 0
+
+    async def run(self, target: Any, command: str, operator: Any = None) -> Any:
+        del target, operator
+        await asyncio.sleep(0)
+        if command == "cat /cf/conf/config.xml":
+            return _proc(self.config)
+        if command == 'echo "$SSH_CONNECTION"':
+            return _proc(_SSH_FLOW)
+        if command.startswith("pfSsh.php playback "):
+            self.in_flight += 1
+            self.max_in_flight = max(self.max_in_flight, self.in_flight)
+            loaded = self.config  # the fragment's $config, loaded when it starts
+            for _ in range(3):
+                await asyncio.sleep(0)  # the other op's reads and writes land here
+            rule = self.inserts[command.removeprefix("pfSsh.php playback ")]
+            if (
+                f"<tracker>{rule.split('</tracker>')[0].split('<tracker>')[1]}</tracker>"
+                not in loaded
+            ):
+                self.config = loaded.replace("<filter>", f"<filter>{rule}", 1)
+            self.in_flight -= 1
+        return _proc("")
+
+
+_RID_A, _RID_B = "100000011", "100000012"
+_INSERTS = {
+    f"meho_filter_rule_add_{_RID_A}": _pass_rule(_RID_A, "10.5.0.0/24"),
+    f"meho_filter_rule_add_{_RID_B}": _pass_rule(_RID_B, "10.6.0.0/24"),
+}
+
+
+def _add_params(rid: str, destination: str) -> dict[str, Any]:
+    return {
+        "ridentifier": rid,
+        "type": "pass",
+        "interface": "lan",
+        "destination": destination,
+    }
+
+
+async def test_concurrent_adds_on_one_appliance_run_one_at_a_time() -> None:
+    fake = _FakePfSense(_BEFORE, _INSERTS)
+    connector = PfSenseConnector()
+    target = SimpleNamespace(name="pf-a", host="pf.example.invalid")
+    with patch.object(connector, "_run_command", side_effect=fake.run):
+        first, second = await asyncio.gather(
+            connector.filter_rule_add(target, _add_params(_RID_A, "10.5.0.0/24")),
+            connector.filter_rule_add(target, _add_params(_RID_B, "10.6.0.0/24")),
+        )
+    assert (first["status"], second["status"]) == ("added", "added")
+    assert (first["rules_after"], second["rules_after"]) == (2, 3)
+    assert fake.max_in_flight == 1
+    assert len(parse_filter_rules_xml(fake.config)) == 3
+
+
+async def test_concurrent_adds_without_the_lock_lose_a_change() -> None:
+    """Control: the fake really loses an update, so the test above proves the lock."""
+    from meho_backplane.connectors.pfsense.ops_filter_rule import pfsense_filter_rule_add
+
+    unlocked = pfsense_filter_rule_add.__wrapped__  # type: ignore[attr-defined]
+    fake = _FakePfSense(_BEFORE, _INSERTS)
+    connector = PfSenseConnector()
+    target = SimpleNamespace(name="pf-a", host="pf.example.invalid")
+    with patch.object(connector, "_run_command", side_effect=fake.run):
+        results = await asyncio.gather(
+            unlocked(connector, target, _add_params(_RID_A, "10.5.0.0/24")),
+            unlocked(connector, target, _add_params(_RID_B, "10.6.0.0/24")),
+            return_exceptions=True,
+        )
+    assert fake.max_in_flight == 2
+    assert any(isinstance(r, RuntimeError) for r in results)
+    assert len(parse_filter_rules_xml(fake.config)) == 2
+
+
+async def test_add_then_delete_of_the_same_rule_serialize() -> None:
+    """A delete started while the add runs sees the added rule, not an older config."""
+    fake = _FakePfSense(_BEFORE, _INSERTS)
+    rid = _RID_A
+
+    async def run(target: Any, command: str, operator: Any = None) -> Any:
+        if command == f"pfSsh.php playback meho_filter_rule_delete_{rid}":
+            await asyncio.sleep(0)
+            fake.config = fake.config.replace(_INSERTS[f"meho_filter_rule_add_{rid}"], "", 1)
+            return _proc("")
+        return await fake.run(target, command, operator)
+
+    connector = PfSenseConnector()
+    target = SimpleNamespace(name="pf-a", host="pf.example.invalid")
+    with patch.object(connector, "_run_command", side_effect=run):
+        added, deleted = await asyncio.gather(
+            connector.filter_rule_add(target, _add_params(rid, "10.5.0.0/24")),
+            connector.filter_rule_delete(target, {"ridentifier": rid}),
+        )
+    assert added["status"] == "added"
+    assert deleted["status"] == "deleted"
+    assert fake.config == _BEFORE
+
+
+def test_write_lock_is_per_appliance_host() -> None:
+    connector = PfSenseConnector()
+    a1 = SimpleNamespace(name="a1", host="PF.example.invalid")
+    a2 = SimpleNamespace(name="a2", host="pf.example.invalid")
+    b = SimpleNamespace(name="b", host="other.example.invalid")
+    assert connector.config_write_lock(a1) is connector.config_write_lock(a2)
+    assert connector.config_write_lock(a1) is not connector.config_write_lock(b)
 
 
 # ===========================================================================
@@ -554,9 +791,56 @@ async def test_delete_pass_rule_carrying_mgmt_path_is_refused() -> None:
 async def test_delete_verification_failure_raises() -> None:
     connector = PfSenseConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
-        mock_cmd.side_effect = [_proc(_AFTER_ADD), _proc(""), _proc(""), _proc(""), _proc("")]
+        mock_cmd.side_effect = [
+            _proc(_AFTER_ADD),
+            _proc(""),
+            _proc(""),
+            _proc(""),
+            _proc(_AFTER_ADD),
+        ]
         with pytest.raises(RuntimeError, match="verification failed"):
             await connector.filter_rule_delete(None, {"ridentifier": _RID})
+
+
+@pytest.mark.parametrize("xml_text", _BAD_CONFIGS)
+async def test_delete_of_last_rule_with_invalid_read_back_raises(xml_text: str) -> None:
+    """A failed read-back must not pass as "zero rules left" after the last delete."""
+    connector = PfSenseConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = [
+            _proc(_config(_FENCE)),
+            _proc(""),
+            _proc(""),
+            _proc(""),
+            _proc(xml_text),
+        ]
+        with pytest.raises(RuntimeError, match=r"verification failed.*config\.xml"):
+            await connector.filter_rule_delete(None, {"ridentifier": _RID})
+
+
+async def test_delete_of_last_rule_verifies_against_an_empty_filter_section() -> None:
+    connector = PfSenseConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = [
+            _proc(_config(_FENCE)),
+            _proc(""),
+            _proc(""),
+            _proc(""),
+            _proc(_config()),
+        ]
+        result = await connector.filter_rule_delete(None, {"ridentifier": _RID})
+    assert result["status"] == "deleted"
+    assert (result["rules_before"], result["rules_after"]) == (1, 0)
+
+
+@pytest.mark.parametrize("xml_text", _BAD_CONFIGS)
+async def test_delete_invalid_guard_read_stages_nothing(xml_text: str) -> None:
+    connector = PfSenseConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = [_proc(xml_text)]
+        with pytest.raises(RuntimeError, match=r"could not be read.*config\.xml"):
+            await connector.filter_rule_delete(None, {"ridentifier": _RID})
+    assert mock_cmd.await_count == 1
 
 
 # ===========================================================================
@@ -623,6 +907,34 @@ async def test_delete_preview_names_the_rule() -> None:
     assert blast["object"]["type"] == "block"
     assert blast["irreversibility"] == "permanent"
     assert declined is None
+
+
+async def test_delete_preview_shows_negated_endpoints() -> None:
+    connector = PfSenseConnector()
+    ctx: Any = SimpleNamespace(
+        params={"ridentifier": _RID}, connector_instance=connector, target=None, operator=None
+    )
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = [_proc(_config(_FENCE_NOT_SOURCE, _LAN_PASS)), _proc(_AFTER_ADD)]
+        negated = await _filter_rule_delete_preview(ctx)
+        plain = await _filter_rule_delete_preview(ctx)
+    assert negated is not None and plain is not None
+    assert negated["blast_radius"]["object"]["source"] == "10.1.0.0/24"
+    assert negated["blast_radius"]["object"]["source_not"] is True
+    assert negated["blast_radius"]["object"]["destination_not"] is False
+    assert plain["blast_radius"]["object"]["source_not"] is False
+    assert plain["blast_radius"]["object"]["destination_not"] is False
+
+
+@pytest.mark.parametrize("xml_text", _BAD_CONFIGS)
+async def test_delete_preview_declines_invalid_config(xml_text: str) -> None:
+    connector = PfSenseConnector()
+    ctx: Any = SimpleNamespace(
+        params={"ridentifier": _RID}, connector_instance=connector, target=None, operator=None
+    )
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = [_proc(xml_text)]
+        assert await _filter_rule_delete_preview(ctx) is None
 
 
 async def test_delete_preview_declines_id_with_trailing_newline() -> None:

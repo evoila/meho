@@ -82,9 +82,11 @@ References
 
 from __future__ import annotations
 
+import functools
 import ipaddress
 import re
-from typing import TYPE_CHECKING, Any
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Concatenate
 
 from defusedxml.ElementTree import ParseError, fromstring
 
@@ -100,6 +102,7 @@ __all__ = [
     "parse_static_routes_xml",
     "pfsense_gateway_add",
     "pfsense_route_static_add",
+    "serialized_config_write",
 ]
 
 # pfSense stages playback scripts under this directory; ``pfSsh.php
@@ -386,6 +389,35 @@ async def _apply_playback(
         await self._run_command(target, f"rm -f {path}", operator=operator)
     if played.exit_status != 0:
         raise RuntimeError(f"pfSsh.php playback {script_name!r} failed: exit {played.exit_status}")
+
+
+# ---------------------------------------------------------------------------
+# Config-write serialization (#3544)
+# ---------------------------------------------------------------------------
+
+
+def serialized_config_write[**P, R](
+    handler: Callable[Concatenate[PfSenseConnector, Any, P], Awaitable[R]],
+) -> Callable[Concatenate[PfSenseConnector, Any, P], Awaitable[R]]:
+    """Run a config-editing handler while it holds the appliance's write lock.
+
+    Each config-editing op reads ``config.xml``, plays back a fragment that
+    loads ``$config``, edits it and calls ``write_config()``, then reads the
+    file back. ``write_config()`` saves the whole in-memory ``$config``, so
+    two such ops that overlap on one pfSense can save an old copy and undo
+    each other's change. The lock is held from the first read to the last
+    read-back, so MEHO never runs two of these ops against the same
+    appliance at the same time.
+    """
+
+    @functools.wraps(handler)
+    async def wrapper(
+        self: PfSenseConnector, target: Any, /, *args: P.args, **kwargs: P.kwargs
+    ) -> R:
+        async with self.config_write_lock(target):
+            return await handler(self, target, *args, **kwargs)
+
+    return wrapper
 
 
 # ---------------------------------------------------------------------------

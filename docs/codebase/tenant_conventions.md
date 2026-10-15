@@ -221,7 +221,7 @@ shipped the schema; T3-T5 layer CLI / preamble / seed on top.
    `over_budget`), and a fixed `note`.
 
    `availability` says what MEHO sends in the MCP `initialize`
-   instructions, using the same pack as `budget_status`:
+   instructions, using the same packer as `budget_status`:
 
    | Value | Meaning |
    |---|---|
@@ -253,10 +253,14 @@ shipped the schema; T3-T5 layer CLI / preamble / seed on top.
      still filters on the token's tenant, so a hand-made cursor can only
      reach the caller's own conventions.
 
-   The index reads rows in its own query and the availability through
-   `budget_status` right after, so a write landing between the two can
-   make one page mix two states. The next page then fails on the
-   revision check. The page shape and cursor live in
+   One page comes from one query. `index_page` reads the tenant's rows
+   once and computes the revision, the page, and each entry's
+   availability from that one result, running the same in-memory packer
+   (`render_conventions`) that `initialize` and `budget_status` use. So
+   a page never mixes two states of the table: a convention deleted
+   while the page is built is either listed with its real availability
+   or not listed at all, never listed as `dropped`. The page shape and
+   cursor live in
    [`conventions/index.py`](../../backend/src/meho_backplane/conventions/index.py);
    the query and availability in `ConventionsService.index_page`; the
    resource adapter (error mapping and URIs) in

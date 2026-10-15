@@ -18,7 +18,8 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import update
+from sqlalchemy import delete, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.conventions import index as index_module
@@ -176,6 +177,56 @@ async def test_index_reports_truthful_availability_without_bodies(
     # The canonical per-entry URI reads through the existing per-slug resource.
     detail = _page_text(client, by_slug["how-to"]["uri"])
     assert detail["slug"] == "how-to"
+
+
+@pytest.mark.asyncio
+async def test_change_during_the_read_cannot_split_one_page(
+    client_with_operator: tuple[TestClient, Operator],
+    seeded_operator_tenant: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A convention deleted while the page is built is still truthful.
+
+    The hook deletes the top rule right after the index query returns.
+    If availability came from a second read, the deleted rule would be
+    listed as ``dropped`` and the second rule as ``included``. One query
+    feeds both the list and the pack, so the page shows the state the
+    query saw, and the next first-page read shows the new state.
+    """
+    client, op = client_with_operator
+    await _seed(op.tenant_id, "kept-rule", priority=10, body="a" * 1300, minute=1)
+    await _seed(op.tenant_id, "lost-room", priority=5, body="b" * 1300, minute=2)
+
+    original_execute = AsyncSession.execute
+    deleted = False
+
+    async def execute_then_delete(
+        self: AsyncSession, statement: Any, *args: Any, **kwargs: Any
+    ) -> Any:
+        nonlocal deleted
+        result = await original_execute(self, statement, *args, **kwargs)
+        if not deleted and "tenant_convention" in str(statement).lower():
+            deleted = True
+            async with get_sessionmaker()() as other:
+                await other.execute(
+                    delete(TenantConvention).where(TenantConvention.slug == "kept-rule"),
+                )
+                await other.commit()
+        return result
+
+    monkeypatch.setattr(AsyncSession, "execute", execute_then_delete)
+    page = _page(client)
+    monkeypatch.undo()
+
+    assert deleted is True
+    availability = {e["slug"]: e["availability"] for e in page["entries"]}
+    assert availability == {"kept-rule": "included", "lost-room": "dropped"}
+    assert page["preamble_budget"]["over_budget"] is True
+
+    after = _page(client)
+    assert [e["slug"] for e in after["entries"]] == ["lost-room"]
+    assert after["entries"][0]["availability"] == "included"
+    assert after["revision"] != page["revision"]
 
 
 def _page_text(client: TestClient, uri: str) -> dict[str, Any]:

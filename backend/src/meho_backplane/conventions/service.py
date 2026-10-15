@@ -86,6 +86,7 @@ from meho_backplane.conventions.index import (
     index_revision,
 )
 from meho_backplane.conventions.preamble import assemble_preamble_detailed
+from meho_backplane.conventions.render import ConventionEntry, render_conventions
 from meho_backplane.conventions.schemas import (
     DEFAULT_MAX_PREAMBLE_TOKENS,
     BudgetStatus,
@@ -253,24 +254,25 @@ class ConventionsService:
     ) -> ConventionIndexPage:
         """Return one bounded page of *operator*'s tenant convention index (#3755).
 
-        Reads only metadata columns -- never ``body`` -- in a fixed order
-        (``priority DESC, created_at ASC, id ASC``). Availability comes
-        from :meth:`budget_status`, the same pack MCP ``initialize``
-        uses. *cursor* ``None`` means the first page; otherwise it must
-        be a ``next_cursor`` from an earlier page of the same snapshot.
+        Runs **one** query for the tenant's rows in a fixed order
+        (``priority DESC, created_at ASC, id ASC``). The revision, the
+        page, and every entry's availability all come from that one
+        result, so a page never mixes two states of the table: a
+        convention that is listed is one the pack saw, and the pack
+        saw nothing the list leaves out. Availability is computed in
+        memory with :func:`render_conventions`, the same packer MCP
+        ``initialize`` and :meth:`budget_status` use, so the answer
+        matches what MEHO sends. Bodies are read for the pack but never
+        leave this method.
+
+        *cursor* ``None`` means the first page; otherwise it must be a
+        ``next_cursor`` from an earlier page of the same snapshot.
 
         Raises :class:`~meho_backplane.conventions.index.InvalidIndexCursorError`
         and :class:`~meho_backplane.conventions.index.StaleIndexCursorError`.
         """
         stmt = (
-            select(
-                TenantConvention.id,
-                TenantConvention.slug,
-                TenantConvention.title,
-                TenantConvention.kind,
-                TenantConvention.priority,
-                TenantConvention.updated_at,
-            )
+            select(TenantConvention)
             .where(TenantConvention.tenant_id == operator.tenant_id)
             .order_by(
                 TenantConvention.priority.desc(),
@@ -278,7 +280,7 @@ class ConventionsService:
                 TenantConvention.id.asc(),
             )
         )
-        rows = (await session.execute(stmt)).all()
+        rows = (await session.execute(stmt)).scalars().all()
         revision = index_revision((row.id, row.updated_at) for row in rows)
         offset = 0
         if cursor is not None:
@@ -289,9 +291,15 @@ class ConventionsService:
                 total=len(rows),
             ).o
 
-        budget = await self.budget_status(session=session, operator=operator)
-        included = frozenset(budget.included_slugs)
-        oversize = frozenset(budget.oversize_slugs)
+        rendered = render_conventions(
+            [
+                ConventionEntry(row.slug, row.title, row.body)
+                for row in rows
+                if row.kind == ConventionKind.OPERATIONAL.value
+            ],
+        )
+        included = frozenset(rendered.kept_slugs)
+        oversize = frozenset(rendered.oversize_slugs)
         page_rows = rows[offset : offset + INDEX_PAGE_SIZE]
         end = offset + len(page_rows)
         next_cursor = (
@@ -314,9 +322,9 @@ class ConventionsService:
                 for row in page_rows
             ],
             next_cursor=next_cursor,
-            max_tokens=budget.max_tokens,
-            estimated_tokens=budget.estimated_tokens,
-            over_budget=budget.over_budget,
+            max_tokens=DEFAULT_MAX_PREAMBLE_TOKENS,
+            estimated_tokens=rendered.estimated_tokens,
+            over_budget=bool(rendered.dropped_slugs),
         )
 
     async def get_convention(

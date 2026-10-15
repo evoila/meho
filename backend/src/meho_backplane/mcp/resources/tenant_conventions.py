@@ -61,7 +61,12 @@ Response shape
 
 The handler returns the full convention shape:
 ``{id, tenant_id, slug, title, body, kind, priority, created_by_sub,
-created_at, updated_at}`` as a JSON-serialised dict. The dispatcher
+created_at, updated_at}`` as a JSON-serialised dict. The ``body`` is
+wrapped in the shared untrusted-text envelope
+(:func:`~meho_backplane.untrusted_text.wrap_untrusted_text`), the same
+one the kb and memory resources use: the stored Markdown is
+tenant-written data, not a directive. Hard rules stay in MEHO's code,
+RBAC, and approvals -- never in convention text. The dispatcher
 (:func:`~meho_backplane.mcp.handlers.handle_resources_read`) wraps it
 in a single ``contents`` entry with ``mimeType="text/markdown"`` --
 mirroring the kb / memory resources -- so a client UI can render the
@@ -91,6 +96,7 @@ from meho_backplane.mcp.registry import (
     register_mcp_resource,
 )
 from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.untrusted_text import wrap_untrusted_text
 
 #: Slug shape T2's :class:`~meho_backplane.conventions.schemas.ConventionCreate`
 #: enforces on writes. Pre-compiled at module load so each
@@ -178,13 +184,14 @@ async def _conventions_resource_handler(
     # cleared the tenant-boundary check, so every column is
     # legitimately theirs to read. Mirrors the API surface's
     # :class:`~meho_backplane.conventions.schemas.Convention` shape
-    # (full body + metadata).
+    # (full body + metadata). The body is re-served into an LLM
+    # context, so it goes out inside the untrusted-text envelope.
     return {
         "id": str(row.id),
         "tenant_id": str(row.tenant_id),
         "slug": row.slug,
         "title": row.title,
-        "body": row.body,
+        "body": wrap_untrusted_text(row.body),
         "kind": row.kind,
         "priority": row.priority,
         "created_by_sub": row.created_by_sub,
@@ -199,6 +206,8 @@ register_mcp_resource(
         name="Tenant operational convention",
         description=(
             "Full body + metadata of one tenant convention by slug. "
+            "The body is stored tenant-written Markdown, wrapped as "
+            "untrusted data. "
             "Tenant-scoped: the bound tenant_id MUST match the "
             "operator's JWT tenant claim or the read is rejected "
             "with INVALID_PARAMS (the JSON-RPC analogue of the "

@@ -36,7 +36,9 @@ fixture's per-test SQLite + ``alembic upgrade head``.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -47,6 +49,7 @@ from sqlalchemy import select
 
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
+from meho_backplane.conventions.render import standalone_tokens
 from meho_backplane.conventions.schemas import (
     DEFAULT_MAX_PREAMBLE_TOKENS,
     TOKEN_CHAR_RATIO,
@@ -766,7 +769,9 @@ async def test_get_does_not_leak_cross_tenant(client: TestClient) -> None:
         "max_tokens": DEFAULT_MAX_PREAMBLE_TOKENS,
         "estimated_tokens": 0,
         "over_budget": False,
+        "included_slugs": [],
         "dropped_slugs": [],
+        "oversize_slugs": [],
     }
 
 
@@ -1515,10 +1520,10 @@ async def test_list_conventions_invokes_assembler_with_operator_sub(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``GET /api/v1/conventions`` passes ``operator.sub`` to ``assemble_preamble``.
+    """``GET /api/v1/conventions`` passes ``operator.sub`` to ``assemble_preamble_detailed``.
 
     G12.4-T2 (#1316) wire-up regression guard. The list endpoint
-    builds ``budget_status`` by calling ``assemble_preamble`` with
+    builds ``budget_status`` by calling ``assemble_preamble_detailed`` with
     the operator's tenant + sub; a refactor that silently dropped
     the ``operator.sub`` argument (so every list call would assemble
     priming for a sentinel operator and the calling operator's
@@ -1528,7 +1533,7 @@ async def test_list_conventions_invokes_assembler_with_operator_sub(
     priming. This test asserts the right sub is forwarded so the
     regression is caught at this layer.
 
-    Spy strategy: wrap the real ``assemble_preamble`` import in
+    Spy strategy: wrap the real ``assemble_preamble_detailed`` import in
     ``meho_backplane.conventions.service`` (where the budget arithmetic
     now lives after the G10.12-T0 #1894 service extraction) and record
     every call's positional args. Assert the second positional matches
@@ -1547,13 +1552,13 @@ async def test_list_conventions_invokes_assembler_with_operator_sub(
     )
 
     captured: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
-    real_assemble = conventions_module.assemble_preamble
+    real_assemble = conventions_module.assemble_preamble_detailed
 
     async def _spy_assemble(*args: Any, **kwargs: Any) -> Any:
         captured.append((args, dict(kwargs)))
         return await real_assemble(*args, **kwargs)
 
-    monkeypatch.setattr(conventions_module, "assemble_preamble", _spy_assemble)
+    monkeypatch.setattr(conventions_module, "assemble_preamble_detailed", _spy_assemble)
 
     with respx.mock as r:
         mock_discovery_and_jwks(r, public_jwks(key))
@@ -1738,3 +1743,128 @@ async def test_patch_convention_invokes_detailed_assembler_with_operator_sub(
     assert ps is not None
     assert ps["included"] is True
     assert ps["position"] == 1
+
+
+# ---------------------------------------------------------------------------
+# #3746 -- admission measures the rendered entry, the same way the packer does
+# ---------------------------------------------------------------------------
+
+
+def _body_at_rendered_budget(title: str, fill: str = "é") -> str:
+    """Shortest body of *fill* whose rendered standalone cost equals the budget."""
+    n = 0
+    while standalone_tokens(title, fill * n) < DEFAULT_MAX_PREAMBLE_TOKENS:
+        n += 1
+    return fill * n
+
+
+@pytest.mark.asyncio
+async def test_post_body_fits_alone_but_rendered_entry_returns_422(client: TestClient) -> None:
+    """A body within budget on its own, but over once rendered, is rejected."""
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-rendered-422")
+    token = _token(key)
+    body = "x" * 1979  # estimate_tokens(body) == 600 -- the old check admitted it.
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = _post_convention(client, token, slug="rendered-over", body=body)
+    assert resp.status_code == 422, resp.text
+    detail = resp.json()["detail"]
+    assert "rendered alone" in detail
+    assert f"budget={DEFAULT_MAX_PREAMBLE_TOKENS}" in detail
+
+
+@pytest.mark.asyncio
+async def test_post_exact_rendered_boundary_is_included_and_status_agrees(
+    client: TestClient,
+) -> None:
+    """An entry exactly on the budget is admitted, included, and measured the same everywhere."""
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-rendered-edge")
+    token = _token(key)
+    title = "Grenze für Ünicode"
+    body = _body_at_rendered_budget(title)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = _post_convention(client, token, slug="edge", title=title, body=body)
+        listed = client.get("/api/v1/conventions", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 201, resp.text
+    ps = resp.json()["preamble_status"]
+    assert ps["included"] is True
+    assert ps["fits_alone"] is True
+    assert ps["position"] == 1
+    bs = listed.json()["budget_status"]
+    assert bs["estimated_tokens"] == DEFAULT_MAX_PREAMBLE_TOKENS
+    assert bs["included_slugs"] == ["edge"]
+    assert bs["dropped_slugs"] == []
+    assert bs["oversize_slugs"] == []
+
+
+@pytest.mark.asyncio
+async def test_patch_title_that_overflows_rendered_entry_returns_422(client: TestClient) -> None:
+    """The title is part of the rendered entry, so a title-only PATCH is checked too."""
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-rendered-title")
+    token = _token(key)
+    body = _body_at_rendered_budget("T")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        created = _post_convention(client, token, slug="edge-title", title="T", body=body)
+        title_resp = client.patch(
+            "/api/v1/conventions/edge-title",
+            json={"title": "T" * 200},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        priority_resp = client.patch(
+            "/api/v1/conventions/edge-title",
+            json={"priority": 7},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert created.status_code == 201, created.text
+    assert title_resp.status_code == 422, title_resp.text
+    assert "rendered alone" in title_resp.json()["detail"]
+    assert priority_resp.status_code == 200, priority_resp.text
+
+
+@pytest.mark.asyncio
+async def test_budget_status_distinguishes_included_displaced_and_oversize(
+    client: TestClient,
+) -> None:
+    """Each slug is included or dropped; dropped ones are split by whether they fit alone."""
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-rendered-status")
+    token = _token(key)
+    # A row written before the rendered check existed: too big even alone.
+    sessionmaker = get_sessionmaker()
+    now = datetime.now(UTC)
+    async with sessionmaker() as session:
+        session.add(
+            TenantConvention(
+                id=uuid.uuid4(),
+                tenant_id=_TENANT_A,
+                slug="legacy-oversize",
+                title="Legacy",
+                body="x" * 3000,
+                kind="operational",
+                priority=100,
+                created_by_sub="test:user",
+                created_at=now,
+                updated_at=now,
+            ),
+        )
+        await session.commit()
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        _post_convention(client, token, slug="keep", body="a" * 1100, priority=10)
+        displaced = _post_convention(client, token, slug="displaced", body="a" * 1100, priority=5)
+        _post_convention(client, token, slug="filler", body="Short rule.", priority=1)
+        listed = client.get("/api/v1/conventions", headers={"Authorization": f"Bearer {token}"})
+    ps = displaced.json()["preamble_status"]
+    assert ps["included"] is False
+    assert ps["fits_alone"] is True
+    bs = listed.json()["budget_status"]
+    assert bs["included_slugs"] == ["keep", "filler"]
+    assert bs["dropped_slugs"] == ["legacy-oversize", "displaced"]
+    assert bs["oversize_slugs"] == ["legacy-oversize"]
+    assert bs["over_budget"] is True
+    assert bs["estimated_tokens"] <= bs["max_tokens"]

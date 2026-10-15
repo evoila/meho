@@ -336,8 +336,12 @@ def _install_script_command(script_name: str, script_body: str) -> str:
 
     A quoted-delimiter heredoc writes the fragment verbatim into
     ``/etc/phpshellsessions/<script_name>``; the single-quoted delimiter
-    stops the remote shell expanding ``$config`` or anything else.
+    stops the remote shell expanding ``$config`` or anything else. A script
+    that contains the end marker is refused, so the heredoc always ends
+    exactly where the script ends.
     """
+    if _HEREDOC_DELIM in script_body:
+        raise ValueError("pfSense playback script must not contain the heredoc end marker")
     path = f"{_PHPSHELLSESSIONS_DIR}/{script_name}"
     return f"cat > {path} <<'{_HEREDOC_DELIM}'\n{script_body}{_HEREDOC_DELIM}\n"
 

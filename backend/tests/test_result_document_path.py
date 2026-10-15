@@ -23,6 +23,7 @@ inline with no handle. These tests pin the new contract end to end:
 
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Any
 
@@ -37,6 +38,7 @@ from meho_backplane.connectors.result_handle_store import (
     ResultRecordKindError,
     _StoredPayload,
 )
+from meho_backplane.operations.result_document import document_outline, json_text_bytes
 from meho_backplane.operations.result_query import (
     QueryContractError,
     ResultHandleNotFoundError,
@@ -204,6 +206,38 @@ async def test_document_summary_stays_under_the_threshold(
     if "log" in payload:
         assert "log" not in reduced, "a 5,000-char string must not ride inline"
         assert reduced["name"] == "payments-api"
+
+
+def _escaped_name(i: int) -> str:
+    """A valid field name full of control characters: one byte raw, six as JSON."""
+    return "\x01" * 100 + f"{i:03d}"
+
+
+def test_outline_budget_counts_escaped_json_bytes() -> None:
+    """The outline measures JSON text, so escaped names cannot blow its budget."""
+    document = {_escaped_name(i): "v" * 50 for i in range(64)}
+
+    outline = document_outline(document)
+
+    assert outline, "names under the length limit are still outlined"
+    assert len(outline) < 64, "the byte budget stops the outline before the field cap"
+    assert json_text_bytes(outline) <= 2048
+    assert len(json.dumps(outline)) <= 2048 + 2 * len(outline)  # default separators add spaces
+
+
+async def test_document_summary_with_escaped_field_names_stays_under_the_threshold(
+    result_reducer_cls: type[Any], store: ResultHandleStore
+) -> None:
+    """Escaped field names and values do not push the inline summary past 4 KB."""
+    payload = {_escaped_name(i): "\x02" * 60 for i in range(64)}
+
+    reduced, handle = await _document_handle(result_reducer_cls, store, payload)
+
+    assert handle is not None
+    assert reduced["result_record"] == "document"
+    assert reduced["top_level_field_count"] == 64
+    assert len(json.dumps(reduced)) < 4096, "measured as the MCP transport sends it"
+    assert len(json.dumps(reduced)) < reduced["document_bytes"]
 
 
 async def test_small_non_collection_root_still_passes_through(
@@ -509,6 +543,66 @@ async def test_path_on_a_rows_handle_is_a_contract_error(store: ResultHandleStor
 
     with pytest.raises(QueryContractError, match="holds rows"):
         await run_result_query(_operator(), handle_id, ResultQuerySpec(path="/0"))
+
+
+async def test_path_reads_a_field_the_rows_summary_left_out(
+    result_reducer_cls: type[Any], store: ResultHandleStore
+) -> None:
+    """An omitted scalar beside a row list is read back with ``path`` (#3633).
+
+    ``stderr`` is over the per-value cap of the inline copy, so the summary
+    only counts it. The same ``result_query`` call that reads a document
+    handle returns it from the rows handle; the rows themselves still page.
+    """
+    reducer = result_reducer_cls(store=store)
+    stderr = "e" * 600
+    payload = {"stdout": [{"line": f"l{i}"} for i in range(60)], "stderr": stderr, "exit_code": 1}
+
+    reduced, handle = await reducer.reduce(payload, None, dict(_CONTEXT, op_id="k8s.exec"))
+
+    assert handle is not None
+    assert "stderr" not in reduced
+    assert reduced["omitted_scalar_count"] == 1
+
+    one = await run_result_query(_operator(), handle.handle_id, ResultQuerySpec(path="/stderr"))
+    assert one["value"] == stderr
+    assert one["value_type"] == "string"
+
+    everything = await run_result_query(_operator(), handle.handle_id, ResultQuerySpec(path=""))
+    assert everything["value"] == {"stderr": stderr}
+
+    window = await read_result_window(_operator(), handle.handle_id, offset=0, limit=5)
+    assert window["returned_rows"] == 5
+    assert window["total_rows"] == 60
+
+    with pytest.raises(QueryContractError, match="does not resolve"):
+        await run_result_query(_operator(), handle.handle_id, ResultQuerySpec(path="/exit_code"))
+
+
+async def test_omitted_fields_over_the_record_cap_are_dropped_but_rows_stay(
+    store: ResultHandleStore,
+) -> None:
+    """Omitted fields never cost the caller its rows: too big for the cap, they go."""
+    handle_id = uuid.uuid4()
+
+    stored = await store.spill(
+        tenant_id=_TENANT,
+        operator_sub="op-a",
+        handle_id=handle_id,
+        op_id="x.list",
+        rows=[{"i": 1}, {"i": 2}],
+        total_rows=2,
+        ttl_seconds=60,
+        max_rows=10,
+        max_record_bytes=2_000,
+        document={"big": "b" * 5_000},
+    )
+
+    assert stored == 2
+    window = await read_result_window(_operator(), handle_id, offset=0, limit=5)
+    assert window["returned_rows"] == 2
+    with pytest.raises(QueryContractError, match="holds rows"):
+        await run_result_query(_operator(), handle_id, ResultQuerySpec(path="/big"))
 
 
 async def test_relational_query_on_a_document_is_a_contract_error(

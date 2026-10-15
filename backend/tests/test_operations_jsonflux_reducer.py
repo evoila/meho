@@ -487,6 +487,69 @@ async def test_reduce_rows_summary_stays_under_threshold_with_large_scalar_sibli
     assert reduced["omitted_scalar_count"] == 33 - len(kept)
 
 
+async def test_omitted_scalar_siblings_are_stored_with_the_rows() -> None:
+    """A scalar the inline budget skips is kept with the rows, not lost (#3633).
+
+    ``stderr`` (600 bytes) beside a ``stdout`` row list is over the
+    per-value cap, so it is counted under ``omitted_scalar_count`` and left
+    out of the summary. The spill stores it next to the rows and the store
+    serves it back through ``fetch_document``, the same read a document
+    handle uses. The drill-in rationale names that read. The rows are still
+    paged as before.
+    """
+    store = ResultHandleStore(_ResultStoreRedis())  # type: ignore[arg-type]
+    reducer = JsonFluxReducer(sample_size=5, store=store, max_spill_rows=10000)
+    stderr = "e" * 600
+    payload = {
+        "stdout": [{"line": f"out-{i}"} for i in range(60)],
+        "stderr": stderr,
+        "exit_code": 1,
+    }
+    tenant_id = uuid.UUID("00000000-0000-0000-0000-00000000a0a0")
+    context = {"op_id": "k8s.exec", "operator_sub": "op-a", "tenant_id": str(tenant_id)}
+
+    reduced, handle = await reducer.reduce(payload, None, context)
+
+    assert handle is not None
+    assert reduced["source_key"] == "stdout"
+    assert reduced["exit_code"] == 1
+    assert "stderr" not in reduced
+    assert reduced["omitted_scalar_count"] == 1
+    rationale = handle.fetch_more.drill_in.rationale
+    assert "1 top-level field(s) did not fit the inline summary" in rationale
+    assert '"path": "/<field name>"' in rationale
+    stored = await store.fetch_document(
+        tenant_id=tenant_id, operator_sub="op-a", handle_id=handle.handle_id
+    )
+    assert stored is not None
+    assert stored.document == {"stderr": stderr}
+    window = await store.fetch_window(
+        tenant_id=tenant_id, operator_sub="op-a", handle_id=handle.handle_id, offset=0, limit=100
+    )
+    assert window is not None
+    assert len(window.rows) == 60
+
+
+async def test_rows_handle_without_omitted_scalars_stores_no_document() -> None:
+    """When every scalar fits inline, the rows record carries no document."""
+    store = _FakeStore()
+    reducer = JsonFluxReducer(sample_size=5, store=store, max_spill_rows=10000)
+    payload = {"items": [{"i": i} for i in range(60)], "name": "small"}
+    context = {
+        "op_id": "example.list",
+        "operator_sub": "op-a",
+        "tenant_id": "00000000-0000-0000-0000-00000000a0a0",
+    }
+
+    reduced, handle = await reducer.reduce(payload, None, context)
+
+    assert handle is not None
+    assert reduced["name"] == "small"
+    assert "omitted_scalar_count" not in reduced
+    assert store.spills[0]["document"] is None
+    assert "did not fit the inline summary" not in handle.fetch_more.drill_in.rationale
+
+
 async def test_reduce_scalar_hint_is_kept_outside_the_default_budget() -> None:
     """A ``result_scalars`` hint keeps a value the default rule would skip."""
     reducer = JsonFluxReducer(sample_size=5)
@@ -674,9 +737,9 @@ def test_preserved_scalars_noop_on_bare_list_payload_and_absent_hint() -> None:
     """A bare-list payload has no scalar siblings; no hint means no scalars."""
     hint_context = {"result_scalars": {"keys": ["id"]}}
 
-    assert _preserved_scalars([{"id": "row"}] * 3, None, hint_context) == {}
-    assert _preserved_scalars({"id": "x", "rows": []}, "rows", None) == {}
-    assert _preserved_scalars({"id": "x", "rows": []}, "rows", {}) == {}
+    assert _preserved_scalars([{"id": "row"}] * 3, None, hint_context) == ({}, {})
+    assert _preserved_scalars({"id": "x", "rows": []}, "rows", None) == ({}, {})
+    assert _preserved_scalars({"id": "x", "rows": []}, "rows", {}) == ({}, {})
 
 
 async def test_reduce_keeps_bounded_object_identity_and_spills_full_pem() -> None:
@@ -1476,6 +1539,7 @@ class _FakeStore:
         total_rows: int,
         ttl_seconds: int,
         max_rows: int,
+        document: dict[str, Any] | None = None,
     ) -> int:
         stored = rows[:max_rows]
         self.spills.append(
@@ -1488,6 +1552,7 @@ class _FakeStore:
                 "total_rows": total_rows,
                 "ttl_seconds": ttl_seconds,
                 "rows": stored,
+                "document": document,
             }
         )
         self._rows[(str(tenant_id), str(handle_id))] = stored

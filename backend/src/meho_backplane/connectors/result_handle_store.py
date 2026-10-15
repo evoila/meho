@@ -37,7 +37,9 @@ Key shape + isolation
 ``record_kind`` is ``"rows"`` (a reduced collection, paged and queried) or
 ``"document"`` (one whole payload with no single collection, read with a
 JSON Pointer ``path``, #3633). Records written before the field existed
-decode as ``"rows"``.
+decode as ``"rows"``. A rows record may also carry a ``document``: the
+top-level fields the reducer left out of the inline summary because they
+did not fit its byte budget. They are read with the same ``path`` read.
 
 JSON (not msgpack) so the value is ``str``-compatible with the shared
 broadcast client's ``decode_responses=True`` posture; the rows are
@@ -157,12 +159,13 @@ class SpilledRowSet(msgspec.Struct, frozen=True):
 
 
 class SpilledDocument(msgspec.Struct, frozen=True):
-    """The whole retained document served by :meth:`ResultHandleStore.fetch_document`.
+    """What a ``path`` read resolves against, served by :meth:`ResultHandleStore.fetch_document`.
 
-    A document record holds one payload that had no single paginable
-    collection (a detail object with several lists, a dict of scalars, or a
-    scalar root). It is stored whole or not at all, so there is no partial
-    coverage to report.
+    For a document record this is the whole retained payload: one payload
+    that had no single paginable collection (a detail object with several
+    lists, a dict of scalars, or a scalar root), stored whole or not at all.
+    For a rows record it is the dict of top-level fields the reducer left
+    out of the inline summary (#3633).
     """
 
     document: Any
@@ -184,7 +187,10 @@ class ResultRecordKindError(QueryContractError):
                 '`query={"path": "<JSON Pointer>"}`, for example `"/name"`.'
             )
         else:
-            hint = "it holds rows, not a document. Page it with `offset` / `limit` or query it."
+            hint = (
+                "it holds rows and no fields left out of the inline summary. "
+                "Page it with `offset` / `limit` or query it."
+            )
         super().__init__(f"handle {handle_id} cannot be read this way: {hint}")
 
 
@@ -193,7 +199,9 @@ class _StoredPayload(msgspec.Struct):
 
     ``record_kind`` and ``document`` are additive: a record written before
     they existed decodes as a rows record with no document, because msgspec
-    fills missing fields from their defaults.
+    fills missing fields from their defaults. On a rows record ``document``
+    is ``None`` or the dict of top-level fields the reducer left out of the
+    inline summary (#3633); on a document record it is the whole payload.
     """
 
     operator_sub: str
@@ -208,6 +216,55 @@ class _StoredPayload(msgspec.Struct):
     metadata: dict[str, Any] = msgspec.field(default_factory=dict)
     record_kind: str = _ROWS_RECORD
     document: Any = None
+
+
+def _drop_document_over_cap(
+    baseline: _StoredPayload, max_record_bytes: int, *, handle_id: UUID, tenant_id: UUID
+) -> tuple[_StoredPayload, int]:
+    """Return *baseline* and its encoded size, without its document if that alone breaks the cap.
+
+    The omitted fields a rows record carries (#3633) must never cost the
+    caller its rows, so a set too large for the record cap is dropped with a
+    warning and the rows are stored as before.
+    """
+    size = len(msgspec.json.encode(baseline))
+    if baseline.document is None or size <= max_record_bytes:
+        return baseline, size
+    _log.warning(
+        "result_handle_omitted_fields_dropped",
+        handle_id=str(handle_id),
+        tenant_id=str(tenant_id),
+        op_id=baseline.op_id,
+        record_bytes=size,
+        max_record_bytes=max_record_bytes,
+    )
+    baseline = msgspec.structs.replace(baseline, document=None)
+    return baseline, len(msgspec.json.encode(baseline))
+
+
+def _rows_within_cap(
+    candidates: list[dict[str, Any]], captured_rows: int, baseline_size: int, max_record_bytes: int
+) -> list[dict[str, Any]]:
+    """Return the longest prefix of *candidates* whose record stays under the cap.
+
+    *baseline_size* is the encoded record with no rows. Each row adds its
+    own bytes plus a separator; the running ``stored_rows`` digit count and
+    the ``complete`` coverage label are charged as they grow, so the final
+    encoded record is never a surprise.
+    """
+    selected: list[dict[str, Any]] = []
+    size = baseline_size
+    for row in candidates:
+        row_size = len(msgspec.json.encode(row))
+        candidate_size = size + row_size + (1 if selected else 0)
+        count = len(selected) + 1
+        complete = count == captured_rows
+        candidate_size += len(str(count)) - 1 + (1 if complete else 0)
+        if candidate_size > max_record_bytes:
+            break
+        selected.append(row)
+        size += row_size + (1 if len(selected) > 1 else 0)
+    return selected
 
 
 class ResultHandleStore:
@@ -235,6 +292,7 @@ class ResultHandleStore:
         max_rows: int,
         max_record_bytes: int | None = None,
         metadata: dict[str, Any] | None = None,
+        document: dict[str, Any] | None = None,
     ) -> int:
         """Persist a row-capped, byte-capped prefix of *rows* under the handle key.
 
@@ -243,6 +301,13 @@ class ResultHandleStore:
         failed (Valkey unreachable, serialization error, empty input). A
         zero return is non-fatal: the caller keeps the inline sample
         and leaves the handle's drill-in surface marked unavailable.
+
+        *document* (#3633) carries the payload's top-level fields that did
+        not fit the inline summary, so :meth:`fetch_document` can serve them
+        back. It is written before the rows and counts against the same
+        record cap. When it does not fit the cap on its own it is dropped
+        with a warning and the rows are stored as before, so a large sibling
+        can never cost the caller its rows.
 
         The TTL is enforced server-side by Valkey (``SET ... EX``); no
         sweeper is needed and a crashed process leaves no orphaned key
@@ -269,32 +334,17 @@ class ResultHandleStore:
                 captured_rows=captured_rows,
                 storage_coverage="partial",
                 metadata=metadata,
+                document=document,
             )
-            size = len(msgspec.json.encode(baseline))
-            selected: list[dict[str, Any]] = []
-            for row in candidates:
-                row_size = len(msgspec.json.encode(row))
-                candidate_size = size + row_size + (1 if selected else 0)
-                count = len(selected) + 1
-                complete = count == captured_rows
-                candidate_size += len(str(count)) - 1 + (1 if complete else 0)
-                if candidate_size > max_record_bytes:
-                    break
-                selected.append(row)
-                size += row_size + (1 if len(selected) > 1 else 0)
+            baseline, size = _drop_document_over_cap(
+                baseline, max_record_bytes, handle_id=handle_id, tenant_id=tenant_id
+            )
+            selected = _rows_within_cap(candidates, captured_rows, size, max_record_bytes)
             if not selected:
                 return 0
             coverage = "complete" if len(selected) == captured_rows else "partial"
-            payload = _StoredPayload(
-                operator_sub=operator_sub,
-                op_id=op_id,
-                rows=selected,
-                total_rows=total_rows,
-                stored_rows=len(selected),
-                created_at=created_at,
-                captured_rows=captured_rows,
-                storage_coverage=coverage,
-                metadata=metadata,
+            payload = msgspec.structs.replace(
+                baseline, rows=selected, stored_rows=len(selected), storage_coverage=coverage
             )
             encoded = msgspec.json.encode(payload)
             if len(encoded) > max_record_bytes:
@@ -517,18 +567,21 @@ class ResultHandleStore:
         operator_sub: str,
         handle_id: UUID,
     ) -> SpilledDocument | None:
-        """Return the retained document of a document-record handle.
+        """Return the document a ``path`` read resolves against.
 
-        Same isolation and ``None``-on-miss rules as :meth:`fetch_rows`.
-        Raises :class:`ResultRecordKindError` when the handle holds a rows
-        record: a ``path`` read needs a document.
+        For a document record that is the whole retained payload. For a rows
+        record it is the dict of top-level fields the reducer left out of the
+        inline summary (#3633), when the spill kept one. Same isolation and
+        ``None``-on-miss rules as :meth:`fetch_rows`. Raises
+        :class:`ResultRecordKindError` when the handle holds rows and nothing
+        beside them: a ``path`` read then has nothing to resolve against.
         """
         payload = await self._load(
             tenant_id=tenant_id, operator_sub=operator_sub, handle_id=handle_id
         )
         if payload is None:
             return None
-        if payload.record_kind != _DOCUMENT_RECORD:
+        if payload.record_kind != _DOCUMENT_RECORD and payload.document is None:
             raise ResultRecordKindError(handle_id, _ROWS_RECORD)
         return SpilledDocument(document=payload.document)
 

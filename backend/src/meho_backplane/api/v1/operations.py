@@ -374,7 +374,8 @@ class ResultQueryBody(BaseModel):
             "server-side (filter / select / group_by / aggregate / order_by / "
             "limit) as one bounded read-only SELECT and `offset` / `limit` are "
             "ignored. Every referenced field must be a column on the handle; "
-            "there is no raw-SQL argument. For a document handle, send only "
+            "there is no raw-SQL argument. For a document handle, or for the "
+            "fields a rows handle left out of its inline summary, send only "
             "`path` (an RFC 6901 JSON Pointer); an array value then pages with "
             "`offset` / `limit`."
         ),

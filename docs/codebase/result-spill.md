@@ -16,9 +16,13 @@ threshold (>50 rows or >4 KB by default), the caller gets back:
   sample_bytes, source_key?}` (the bounded preview itself lives once on
   `handle.sample_rows`, #134). When the list sat under a dict key, the
   payload's other top-level scalars stay top-level too, bounded to 32 keys
-  and 1 KB in total; a single value over 512 bytes is not copied (#3633).
-  Skipped keys are counted under `omitted_scalar_count`, so the summary
-  stays smaller than the 4 KB threshold that caused the reduction. Credential-class ops do not get this default copy;
+  and 1 KB of JSON text in total; a single value over 512 bytes is not
+  copied (#3633). Skipped keys are counted under `omitted_scalar_count`,
+  so the summary stays smaller than the 4 KB threshold that caused the
+  reduction. The skipped values are not lost: they are stored with the
+  rows, and `result_query` reads one back with `query={"path":
+  "/<field name>"}` (or all of them with `path: ""`). The drill-in
+  rationale says so when the count is above zero. Credential-class ops do not get this default copy;
   they keep only the scalars their `result_scalars` hint lists (#3084).
   Lists and objects are never copied by default (objects need the
   bounded `result_objects` hint); and
@@ -107,8 +111,11 @@ the reducer keeps it **whole** as a document record under a handle:
 
 - The inline summary is small and fixed in size: `result_record:
   "document"`, `root_type`, `document_bytes`, a `top_level_fields`
-  outline (names and kinds, never values), and the small top-level
-  scalars (same bounded default rule as above).
+  outline (names and kinds, never values; 64 fields and 2 KB of JSON
+  text at most), and the small top-level scalars (same bounded default
+  rule as above). Every budget measures escaped JSON text, the way the
+  MCP transport sends it, so a field name full of control characters
+  cannot push the summary past its bound.
 - `drill_in.example_call` uses `query={"path": "/<first field>"}`.
 - The record is written whole or not at all. Over
   `RESULT_HANDLE_MAX_RECORD_BYTES` it is not stored

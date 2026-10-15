@@ -30,6 +30,7 @@ __all__ = [
     "document_schema",
     "document_summary_md",
     "example_path",
+    "json_text_bytes",
 ]
 
 #: Value of the ``result_record`` summary key for a document handle.
@@ -38,11 +39,24 @@ DOCUMENT_RECORD: Final = "document"
 #: Most top-level fields the outline names.
 _OUTLINE_MAX_FIELDS: Final = 64
 
-#: Byte budget for the outline (field names plus kind labels).
+#: Budget for the outline, in bytes of JSON text (field names, kind labels,
+#: quotes and punctuation, measured with :func:`json_text_bytes`).
 _OUTLINE_BYTE_BUDGET: Final = 2048
 
 #: Longest field name the outline repeats. Longer names are counted, not shown.
 _OUTLINE_MAX_NAME_CHARS: Final = 128
+
+
+def json_text_bytes(value: Any) -> int:
+    """Size of *value* as JSON text, the way the MCP transport sends it.
+
+    The MCP handler serializes a tool result with :func:`json.dumps` and its
+    default ASCII-only output, so a control character or a non-ASCII
+    character in a field name costs up to six bytes (``\\u0001``), not one.
+    Every inline budget measures with this function so an escaped name or
+    value cannot grow the inline summary past its stated bound.
+    """
+    return len(json.dumps(value, separators=(",", ":")))
 
 
 def _describe(value: Any) -> str:
@@ -73,7 +87,7 @@ def document_outline(document: Any) -> dict[str, str]:
         if not isinstance(key, str) or len(key) > _OUTLINE_MAX_NAME_CHARS:
             continue
         label = _describe(value)
-        cost = len(key.encode("utf-8")) + len(label) + 6  # quotes, colon, comma
+        cost = json_text_bytes({key: label})  # the braces stand in for the comma
         if used + cost > _OUTLINE_BYTE_BUDGET:
             break
         outline[key] = label

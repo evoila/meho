@@ -195,8 +195,10 @@ register_mcp_tool(
             'one part with `query={"path": "/key/0/name"}` (an RFC '
             '6901 JSON Pointer; `""` is the whole document). An array '
             "value pages with `offset` / `limit`; any other value comes back "
-            "in `value`. `path` cannot be combined with the other `query` "
-            "fields. Only use this when "
+            "in `value`. A rows handle with `omitted_scalar_count` kept the "
+            "fields that did not fit its inline summary the same way: read one "
+            'with `query={"path": "/<field name>"}`. `path` cannot be '
+            "combined with the other `query` fields. Only use this when "
             "`fetch_more.drill_in.available` is `true` on the handle; when "
             "it is `false` the full set was not spilled and you must "
             "re-call the operation with narrower params instead."
@@ -239,8 +241,9 @@ register_mcp_tool(
                         "`offset`/`limit` are ignored and the handle is queried "
                         "server-side as one bounded read-only SELECT. Every "
                         "referenced field must be a column on the handle. "
-                        "For a document handle, send only `path` instead; "
-                        "`offset`/`limit` then page an array value."
+                        "For a document handle, or for the fields a rows handle "
+                        "left out of its inline summary, send only `path` "
+                        "instead; `offset`/`limit` then page an array value."
                     ),
                     "additionalProperties": False,
                     "properties": {

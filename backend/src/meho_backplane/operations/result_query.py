@@ -400,14 +400,18 @@ async def _read_document_path(
     offset: int,
     limit: int,
 ) -> dict[str, Any]:
-    """Resolve the RFC 6901 *path* against a document handle (#3633).
+    """Resolve the RFC 6901 *path* against a handle's document (#3633).
 
-    An array value pages: ``rows`` holds ``[offset : offset+limit]`` of its
-    items, a non-object item wrapped as ``{"value": item}`` (the same shape
-    the reducer gives a list of scalars). Any other value comes back whole
-    in ``value``. A pointer that does not resolve, or a rows-record handle,
-    is a :class:`QueryContractError`. The output byte budget is the same as
-    for paging and queries.
+    For a document handle that is the whole retained payload. For a rows
+    handle it is the dict of top-level fields the reducer left out of the
+    inline summary (``omitted_scalar_count``), so ``/stderr`` reads a value
+    that was too big to ride inline. An array value pages: ``rows`` holds
+    ``[offset : offset+limit]`` of its items, a non-object item wrapped as
+    ``{"value": item}`` (the same shape the reducer gives a list of scalars).
+    Any other value comes back whole in ``value``. A pointer that does not
+    resolve, or a rows handle with nothing kept beside its rows, is a
+    :class:`QueryContractError`. The output byte budget is the same as for
+    paging and queries.
     """
     assert operator.tenant_id is not None  # checked by the caller (mypy narrowing)
     try:

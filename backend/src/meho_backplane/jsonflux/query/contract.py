@@ -206,8 +206,9 @@ class ResultQuerySpec(BaseModel):
     field-vs-schema validation needs the handle's columns and happens in
     :func:`compile_query`.
 
-    ``path`` is the other read: an RFC 6901 pointer into a document handle.
-    It is never compiled to SQL, so it cannot be combined with any
+    ``path`` is the other read: an RFC 6901 pointer into a document handle,
+    or into the top-level fields a rows handle left out of its inline
+    summary. It is never compiled to SQL, so it cannot be combined with any
     relational field (checked here, at construction).
     """
 
@@ -255,10 +256,11 @@ class ResultQuerySpec(BaseModel):
         max_length=MAX_POINTER_LENGTH,
         description=(
             "RFC 6901 JSON Pointer into a document handle (for example "
-            '`/status/conditions/0`; `""` is the whole document). Reads one '
-            "value; an array value pages with the call's `offset` / `limit`. "
-            "Cannot be combined with `filter`, `select`, `group_by`, "
-            "`aggregate`, `order_by`, or `limit`."
+            '`/status/conditions/0`; `""` is the whole document), or into the '
+            "top-level fields a rows handle left out of its inline summary "
+            "(`omitted_scalar_count`). Reads one value; an array value pages "
+            "with the call's `offset` / `limit`. Cannot be combined with "
+            "`filter`, `select`, `group_by`, `aggregate`, `order_by`, or `limit`."
         ),
     )
 

@@ -95,6 +95,7 @@ from meho_backplane.operations.result_document import (
     document_schema,
     document_summary_md,
     example_path,
+    json_text_bytes,
 )
 from meho_backplane.settings import get_settings
 
@@ -153,14 +154,30 @@ _DRILL_IN_UNAVAILABLE_RATIONALES: dict[DrillInUnavailableReason, str] = {
 }
 
 
-def _drill_in_available_rationale(handle_id: UUID, stored_rows: int, total_rows: int) -> str:
-    """Agent-facing prose for a spilled handle the read-back tool can serve."""
+def _drill_in_available_rationale(
+    handle_id: UUID, stored_rows: int, total_rows: int, omitted_fields: int = 0
+) -> str:
+    """Agent-facing prose for a spilled handle the read-back tool can serve.
+
+    *omitted_fields* (#3633) is the number of top-level scalar fields the
+    inline summary left out (``omitted_scalar_count``). They are stored
+    with the rows, so the prose names the ``path`` read that returns them.
+    """
     tail_note = (
         ""
         if stored_rows >= total_rows
         else (
             f" Only the first {stored_rows} of {total_rows} rows were "
             "spilled; rows past that are not retrievable."
+        )
+    )
+    omitted_note = (
+        ""
+        if omitted_fields <= 0
+        else (
+            f" {omitted_fields} top-level field(s) did not fit the inline summary "
+            "(``omitted_scalar_count``); they are kept with the rows. Read one with "
+            '``query={"path": "/<field name>"}`` or all of them with ``query={"path": ""}``.'
         )
     )
     return (
@@ -171,7 +188,7 @@ def _drill_in_available_rationale(handle_id: UUID, stored_rows: int, total_rows:
         f"beyond the inline sample, or pass a ``query`` (``filter`` / "
         f"``select`` / ``group_by`` / ``aggregate`` / ``order_by`` / "
         f"``limit``) to have the backplane return just the matching rows or "
-        f"the per-group counts instead of the whole set.{tail_note}"
+        f"the per-group counts instead of the whole set.{tail_note}{omitted_note}"
     )
 
 
@@ -452,8 +469,8 @@ class JsonFluxReducer:
             return payload, None
 
         materialized = self._materialize(rows, context)
-        spill_outcome = await self._spill(materialized, context)
-        preserved_scalars = _preserved_scalars(payload, envelope_key, context)
+        preserved_scalars, omitted_scalars = _preserved_scalars(payload, envelope_key, context)
+        spill_outcome = await self._spill(materialized, context, omitted_scalars)
         preserved_scalars.update(_preserved_objects(payload, envelope_key, context))
         digest = _row_digest(rows, envelope_key, digest_spec)
         summary, handle = self._assemble(
@@ -513,7 +530,7 @@ class JsonFluxReducer:
         if isinstance(payload, dict):
             summary, omitted = _default_scalar_siblings(payload, None)
             if omitted:
-                summary["omitted_scalar_count"] = omitted
+                summary["omitted_scalar_count"] = len(omitted)
         summary.update(
             {
                 "result_record": DOCUMENT_RECORD,
@@ -728,8 +745,15 @@ class JsonFluxReducer:
         self,
         materialized: _MaterializedSet,
         context: dict[str, Any] | None,
+        omitted_scalars: dict[str, Any] | None = None,
     ) -> _SpillOutcome:
         """Persist the full materialized rows to the read-back store.
+
+        *omitted_scalars* (#3633) are the payload's top-level scalars the
+        default rule left out of the inline summary. They are stored with
+        the rows so ``result_query`` can read them back with a ``path``; a
+        set too large for the record cap is dropped by the store (logged)
+        and the rows are still kept.
 
         Returns a :class:`_SpillOutcome`: ``stored_rows`` when the rows
         were persisted (so :meth:`_assemble` can build the drill-in
@@ -781,6 +805,7 @@ class JsonFluxReducer:
             total_rows=materialized.total_rows,
             ttl_seconds=self._ttl_seconds,
             max_rows=max_rows,
+            document=omitted_scalars or None,
         )
         if not stored_rows:
             return self._skip("result_store_unavailable", materialized, context)
@@ -853,12 +878,14 @@ class JsonFluxReducer:
         serialized size is bounded independently of per-row object size.
         """
         total_rows = materialized.total_rows
+        omitted_fields = (preserved_scalars or {}).get("omitted_scalar_count", 0)
         fetch_more = _build_fetch_more(
             context,
             handle_id=materialized.handle_id,
             total_rows=total_rows,
             spill_outcome=spill_outcome,
             ttl_seconds=self._ttl_seconds,
+            omitted_fields=omitted_fields if isinstance(omitted_fields, int) else 0,
         )
         sample_rows = _fit_sample_to_budget(
             materialized.sample_rows,
@@ -1115,8 +1142,13 @@ def _preserved_scalars(
     payload: Any,
     envelope_key: str | None,
     context: dict[str, Any] | None,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """Scalar siblings of the reduced collection to keep inline (#3084, #3633).
+
+    Returns ``(preserved, omitted)``: the scalars that ride inline and the
+    ones the default budget left out. The omitted ones are stored with the
+    rows (see :meth:`JsonFluxReducer._spill`) so they stay readable with a
+    ``path``; their number rides inline as ``omitted_scalar_count``.
 
     Two sources, merged:
 
@@ -1131,12 +1163,12 @@ def _preserved_scalars(
     """
     hinted = _hinted_scalars(payload, envelope_key, context)
     if not isinstance(payload, dict) or envelope_key is None or _is_credential_class(context):
-        return hinted
+        return hinted, {}
     preserved, omitted = _default_scalar_siblings(payload, envelope_key, skip=frozenset(hinted))
     preserved.update(hinted)
     if omitted:
-        preserved["omitted_scalar_count"] = omitted
-    return preserved
+        preserved["omitted_scalar_count"] = len(omitted)
+    return preserved, omitted
 
 
 def _hinted_scalars(
@@ -1232,8 +1264,8 @@ def _is_credential_class(context: dict[str, Any] | None) -> bool:
 
 def _default_scalar_siblings(
     payload: dict[str, Any], exclude_key: str | None, *, skip: frozenset[str] = frozenset()
-) -> tuple[dict[str, Any], int]:
-    """Copy *payload*'s scalar values, bounded; return them and a skip count.
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Copy *payload*'s scalar values, bounded; return them and the ones left out.
 
     The default rule for a reduced payload's siblings (#3633 / #3549): every
     top-level JSON scalar (:data:`_SCALAR_VALUE_TYPES` or ``None``) is kept,
@@ -1241,13 +1273,16 @@ def _default_scalar_siblings(
     :data:`_RESERVED_SUMMARY_KEYS`. Lists and objects are never copied (the
     #3592 object seam stays an opt-in). At most
     :data:`_DEFAULT_SCALAR_MAX_KEYS` keys and
-    :data:`_DEFAULT_SCALAR_BYTE_BUDGET` serialized bytes are kept, and no
+    :data:`_DEFAULT_SCALAR_BYTE_BUDGET` bytes of JSON text are kept, and no
     single key over :data:`_DEFAULT_SCALAR_VALUE_BYTE_CAP` bytes; any scalar
-    that does not fit is counted, not copied. Keys in *skip* (already kept by
-    an op hint, outside this budget) are left out.
+    that does not fit goes into the second dict, so the caller can keep it
+    readable elsewhere. Bytes are measured with :func:`json_text_bytes`
+    (escaped, like the MCP transport), so an escaped value cannot grow the
+    summary past the budget. Keys in *skip* (already kept by an op hint,
+    outside this budget) are left out of both dicts.
     """
     preserved: dict[str, Any] = {}
-    omitted = 0
+    omitted: dict[str, Any] = {}
     used = 2  # the enclosing braces
     for key, value in payload.items():
         if (
@@ -1259,13 +1294,13 @@ def _default_scalar_siblings(
             continue
         if value is not None and not isinstance(value, _SCALAR_VALUE_TYPES):
             continue
-        cost = len(_serialize({key: value}))
+        cost = json_text_bytes({key: value})
         if (
             cost > _DEFAULT_SCALAR_VALUE_BYTE_CAP
             or len(preserved) >= _DEFAULT_SCALAR_MAX_KEYS
             or used + cost > _DEFAULT_SCALAR_BYTE_BUDGET
         ):
-            omitted += 1
+            omitted[key] = value
             continue
         preserved[key] = value
         used += cost
@@ -1596,6 +1631,7 @@ def _build_fetch_more(
     total_rows: int,
     spill_outcome: _SpillOutcome,
     ttl_seconds: int,
+    omitted_fields: int = 0,
 ) -> FetchMore:
     """Build the :class:`FetchMore` envelope from the reducer's *context*.
 
@@ -1638,6 +1674,7 @@ def _build_fetch_more(
         total_rows=total_rows,
         spill_outcome=spill_outcome,
         ttl_seconds=ttl_seconds,
+        omitted_fields=omitted_fields,
     )
     native = _native_pagination_from_context(context)
     return FetchMore(drill_in=drill_in, native_pagination=native)
@@ -1649,6 +1686,7 @@ def _build_drill_in(
     total_rows: int,
     spill_outcome: _SpillOutcome,
     ttl_seconds: int,
+    omitted_fields: int = 0,
 ) -> FetchMoreDrillIn:
     """Build the drill-in branch: available when the set was spilled.
 
@@ -1673,7 +1711,9 @@ def _build_drill_in(
         )
     return FetchMoreDrillIn(
         available=True,
-        rationale=_drill_in_available_rationale(handle_id, spill_outcome.stored_rows, total_rows),
+        rationale=_drill_in_available_rationale(
+            handle_id, spill_outcome.stored_rows, total_rows, omitted_fields
+        ),
         mcp_tool=_RESULT_QUERY_TOOL,
         example_call={
             "tool": _RESULT_QUERY_TOOL,

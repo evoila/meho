@@ -44,8 +44,9 @@ operators get three faces of the same surface:
   under `/api/v1/doc_collections/{key}/…`),
 - the MCP tools `search_docs`, `ask_docs`, and `list_doc_collections`
   (+ the companion resource
-  `meho://docs/{collection}/{product}/{version}/{chunk_id}` for the full
-  text of a hit), and
+  `meho://docs/{collection}/{chunk_id}` for the full text of a hit;
+  the older `meho://docs/{collection}/{product}/{version}/{chunk_id}`
+  form still works and ignores the `product` / `version` segments), and
 - the CLI verbs `meho docs search`, `meho docs collections list`, and
   the lifecycle verbs `meho docs collections probe|enable|disable`.
 
@@ -458,8 +459,10 @@ meho docs search "config maximums" --collection vmware --json
 `search_docs` returns ranked **cited chunks**, each carrying the chunk
 text, a `source_url`, a `chunk_id`, and a `document_id`. For the full text
 of a hit on a later turn (when the agent kept only the citation), read
-`meho://docs/{collection}/{product}/{version}/{chunk_id}` via
-`resources/read`.
+`meho://docs/{collection}/{chunk_id}` (the ref the citation carries) via
+`resources/read`. This is best effort: there is no fetch-by-id, so the
+backplane searches for the chunk again and may not find it. Keep the
+chunk text from the search result when you still need it.
 
 ### Cross-collection fan-out (`search_docs` only)
 

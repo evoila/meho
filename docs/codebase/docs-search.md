@@ -1243,23 +1243,41 @@ chunks-shaped one: `ask_docs` for a composed grounded answer, `search_docs`
 for the raw chunks to read itself, `search_knowledge` / `search_memory`
 for the non-vendor corpora.
 
-### `meho://docs/{collection}/{product}/{version}/{chunk_id}` resource (`meho_backplane.mcp.resources.docs`, T3 #1552)
+### `meho://docs/{collection}/{chunk_id}` resource (`meho_backplane.mcp.resources.docs`, T3 #1552, #3914)
 
 The fetch-by-citation companion, gated by the **same**
 `required_capability="meho-docs"` plus the **per-collection**
 `meho-docs:<collection>` entitlement (enforced in the handler via the
-shared gate). The backend (T2) is search-only — there is no
-fetch-chunk-by-id endpoint — so the handler recovers a chunk by
-**re-issuing a scoped search** through the shared service and selecting
-the hit whose `chunk_id` matches the URI. That is why the URI carries the
-leading `collection` segment (plus the optional `product` / `version`):
-`collection` is the mandatory binary scope the re-search needs to route +
-entitle, and encoding it lets `build_docs_scope` enforce the same
-collection posture (belt-and-suspenders, since a blank segment can't match
-the `[^/]+` template). A blank / unknown / not-entitled collection →
-`-32602`; a `chunk_id` absent from the re-search collapses to `-32602`
-"not found" without distinguishing "empty scope" from "no such id", so the
-resource is not a collection-contents oracle.
+shared gate). Two templates share one handler:
+
+- `meho://docs/{collection}/{chunk_id}` is the form a citation's
+  `source_url` carries when no public link is known (`normalize_source_ref`,
+  #1919). An agent can read back the exact ref it was given.
+- `meho://docs/{collection}/{product}/{version}/{chunk_id}` is the older
+  form, kept so existing callers still work. The `product` and `version`
+  segments are accepted and ignored (#3914). A hit does not carry its
+  product or version back, so an agent can only guess them. A guessed or
+  placeholder value must not become a search filter that hides a chunk
+  that exists.
+
+The backend (T2) is search-only, with no fetch-chunk-by-id endpoint. So
+the handler finds a chunk by **searching again** in the collection, with
+the chunk id as the query text, and picks the hit whose `chunk_id` matches
+the URI. The scope is the collection only: no product or version reaches
+the backend, even on a collection that turns on scope filters or the soft
+scope. This cannot widen access, because the collection entitlement still
+gates the read and only the exact-id match is returned.
+
+The recovery is **best effort**. A dense retriever may not rank an opaque
+id inside the 50-hit window, and then the read says "not found" for a
+chunk that exists. Both template descriptions say so, and say that
+`search_docs` / `ask_docs` results already include the chunk text.
+
+A blank / unknown / not-entitled / disabled collection → `-32602`; a
+transiently not-ready collection → `-32603`. A `chunk_id` absent from the
+re-search collapses to `-32602` "not found" without distinguishing "empty
+scope" from "no such id", so the resource is not a collection-contents
+oracle.
 
 ## Control flow (the REST route)
 

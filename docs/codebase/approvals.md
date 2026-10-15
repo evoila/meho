@@ -659,7 +659,10 @@ The response (`ApprovalResultView`) carries `status`, `resumed`
 (`resumed_at is not None`), `reviewed_by` / `decided_at`, and `result` (the
 captured envelope, or `null` while unready). A consumer polls until
 `status == "approved"` and `result` is populated, then resumes by poll on the
-returned task id. `resume_result` is **internal to this surface** — like
+returned task id. When the approved run failed on an upstream vim fault,
+`result.extras.upstream_fault` carries the fault type and full faultstring
+(#3567), so the owner can see why without the approver-owned
+flight-recorder handle. `resume_result` is **internal to this surface** — like
 `params` it is never projected onto the default read view (`_view`) or a
 broadcast frame.
 

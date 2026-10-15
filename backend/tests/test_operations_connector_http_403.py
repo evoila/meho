@@ -65,6 +65,7 @@ from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._errors import (
+    _UPSTREAM_MESSAGE_CAP,
     result_connector_http_403,
     result_connector_http_422,
 )
@@ -552,13 +553,13 @@ def test_result_connector_http_403_empty_body_yields_null_message() -> None:
 
 
 def test_result_connector_http_403_caps_oversized_message() -> None:
-    """A pathological upstream message is capped like the sibling builders."""
-    exc = _make_http_status_error(json_body={"message": "x" * 400})
+    """A pathological upstream message is capped at the 2 KB upstream cap (#3567)."""
+    exc = _make_http_status_error(json_body={"message": "x" * 3000})
     out = result_connector_http_403("POST:/x", exc, duration_ms=0.5)
     message = out.extras["upstream_message"]
     assert isinstance(message, str)
     assert message.endswith("...<truncated>")
-    assert len(message) == 256 + len("...<truncated>")
+    assert len(message) == _UPSTREAM_MESSAGE_CAP + len("...<truncated>")
 
 
 def test_result_connector_http_422_shape_with_errors_array() -> None:

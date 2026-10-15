@@ -64,6 +64,7 @@ from meho_backplane.docs_search.backends import (
 )
 from meho_backplane.docs_search.backends import registry as registry_mod
 from meho_backplane.docs_search.service import DocsScope, ForwardedScope, forwarded_scope
+from meho_backplane.docs_search.target_scope import with_target_default
 from meho_backplane.settings import Settings, get_settings
 
 _JWT = "header.payload.signature-secret"
@@ -717,3 +718,130 @@ async def test_search_docs_corpus_request_body_per_gate(
         **extra_body,
     }
     assert captured[0].content == raw_body
+
+
+# ---------------------------------------------------------------------------
+# The default scope from a named target's fingerprint (#3920)
+# ---------------------------------------------------------------------------
+
+#: A probed vCenter fingerprint, as ``Target.fingerprint`` stores it.
+_VCENTER_FINGERPRINT: dict[str, Any] = {
+    "vendor": "vmware",
+    "product": "vcenter",
+    "version": "8.0.3.00400",
+    "build": "24322831",
+    "reachable": True,
+    "probed_at": "2026-10-01T00:00:00Z",
+    "probe_method": "vimServiceVersions.xml + appliance/system/version",
+}
+_TARGET_DEFAULT_SCOPE: dict[str, str] = {
+    "product": "vcenter",
+    "release": "8.0.3.00400",
+    "source": "default",
+}
+
+
+def _targeted(**caller: str) -> DocsScope:
+    return with_target_default(
+        DocsScope(collection_key="vmware", **caller), "vcenter-01", _VCENTER_FINGERPRINT
+    )
+
+
+def test_target_default_rides_the_soft_scope_only() -> None:
+    """No caller values: the fingerprint becomes a soft scope, never filters."""
+    scope = _targeted()
+    assert scope.source == "default"
+    assert scope.as_filters() == {}
+    assert forwarded_scope(scope, {"scope": "soft"}) == ForwardedScope(
+        mode="soft", soft_scope=_TARGET_DEFAULT_SCOPE
+    )
+    soft_and_filters = forwarded_scope(scope, {"scope": "soft", "scope_filters": True})
+    assert soft_and_filters.soft_scope == _TARGET_DEFAULT_SCOPE
+    assert soft_and_filters.filters == {}
+    # Only the hard-filter gate, or no gate: the default is not sent at all.
+    assert forwarded_scope(scope, {"scope_filters": True}) == ForwardedScope()
+    assert forwarded_scope(scope, {}) == ForwardedScope()
+    assert forwarded_scope(scope, None) == ForwardedScope()
+
+
+@pytest.mark.parametrize(
+    ("caller", "expected"),
+    [
+        ({"version": "9.1"}, {"version": "9.1", "source": "caller"}),
+        ({"product": "vsphere"}, {"product": "vsphere", "source": "caller"}),
+    ],
+)
+def test_caller_values_win_over_the_target_default(
+    caller: dict[str, str], expected: dict[str, str]
+) -> None:
+    """Any caller ``product`` / ``version`` replaces the whole default."""
+    scope = _targeted(**caller)
+    assert scope.source == "caller"
+    assert scope.default_scope() == {}
+    assert forwarded_scope(scope, {"scope": "soft"}).soft_scope == expected
+
+
+@pytest.mark.parametrize(
+    "fingerprint",
+    [None, {}, {"vendor": "vmware", "product": " ", "version": None}],
+)
+def test_target_without_a_fingerprint_adds_no_scope(fingerprint: dict[str, Any] | None) -> None:
+    """A target that was never probed adds its name and nothing else."""
+    scope = with_target_default(DocsScope(collection_key="vmware"), "vcenter-01", fingerprint)
+    assert scope.target == "vcenter-01"
+    assert scope.source is None
+    assert forwarded_scope(scope, {"scope": "soft"}) == ForwardedScope()
+
+
+async def test_search_docs_logs_scope_source_and_target_name(
+    _restore_registry: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``docs_search_completed`` names the scope source and the target, nothing more."""
+    monkeypatch.setattr(service_mod, "_log", structlog.get_logger(service_mod.__name__))
+    fake = _FakeBackend()
+    register_backend(_FakeBackend.backend_type, fake)
+    collection = _make_collection(backend={"type": "fake-rag", "ref": {"scope": "soft"}})
+
+    with structlog.testing.capture_logs() as logs:
+        await search_docs(_make_operator(), "q", scope=_targeted(), collection=collection)
+
+    assert fake.calls[0]["soft_scope"] == _TARGET_DEFAULT_SCOPE
+    assert fake.calls[0]["metadata_filters"] is None
+    completed = [e for e in logs if e["event"] == "docs_search_completed"]
+    assert len(completed) == 1
+    assert completed[0]["scope_source"] == "default"
+    assert completed[0]["target"] == "vcenter-01"
+    assert completed[0]["scope_forwarded"] == "soft"
+    assert completed[0]["product"] is None
+    assert completed[0]["version"] is None
+
+
+async def test_search_docs_corpus_body_carries_the_default_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The corpus gets the release as reported, under ``scope``, and no filters."""
+    _pin_settings(monkeypatch, corpus_service_token=_SERVICE_TOKEN, corpus_audience="")
+    captured: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"results": []})
+
+    _patch_async_client(monkeypatch, httpx.MockTransport(_handler))
+    collection = _make_collection(
+        backend={
+            "type": CORPUS_HTTP_BACKEND_TYPE,
+            "ref": {"endpoint": _CORPUS_URL, "scope": "soft", "scope_filters": True},
+        },
+    )
+
+    await search_docs(
+        _make_operator(), "upgrade pre-check", scope=_targeted(), collection=collection
+    )
+
+    assert len(captured) == 1
+    assert captured[0].content == (
+        b'{"query":"upgrade pre-check","top_k":10,'
+        b'"scope":{"product":"vcenter","release":"8.0.3.00400","source":"default"}}'
+    )

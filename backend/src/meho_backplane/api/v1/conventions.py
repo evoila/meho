@@ -132,13 +132,15 @@ def _not_found() -> HTTPException:
 
 
 def _over_budget_422(exc: OverBudgetError) -> HTTPException:
-    """Map the service's over-budget error to the 422 the wire contract names."""
+    """Map the service's over-budget error to the 422 the wire contract names.
+
+    The detail is the error's own message: it keeps the
+    ``exceeds preamble budget`` phrase and the ``estimated`` /
+    ``budget`` numbers that CLI callers match on.
+    """
     return HTTPException(
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-        detail=(
-            f"convention body exceeds preamble budget "
-            f"(estimated={exc.estimated}, budget={exc.budget})"
-        ),
+        detail=str(exc),
     )
 
 

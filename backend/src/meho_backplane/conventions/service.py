@@ -43,8 +43,9 @@ typed-error vocabulary the consumer maps to its own transport:
   avoidance contract is preserved by construction.
 * :class:`ConventionConflictError` -- a create hit the composite-unique
   index on ``(tenant_id, slug)`` (route: 409).
-* :class:`OverBudgetError` -- an ``operational`` write whose own token
-  estimate exceeds :data:`DEFAULT_MAX_PREAMBLE_TOKENS` (route: 422).
+* :class:`OverBudgetError` -- an ``operational`` write whose rendered
+  standalone cost (the band with only this entry) exceeds
+  :data:`DEFAULT_MAX_PREAMBLE_TOKENS` (route: 422).
   Carries ``estimated`` / ``budget`` ints so the consumer renders the
   same actionable detail the inline gate did.
 
@@ -70,15 +71,11 @@ from meho_backplane.conventions._internal import (
     ConventionNotFoundError,
     ConventionServiceError,
     OverBudgetError,
-    conventions_text_only,
     enforce_budget,
     enforce_patch_budget,
     resolve_patch_fields,
 )
-from meho_backplane.conventions.preamble import (
-    assemble_preamble,
-    assemble_preamble_detailed,
-)
+from meho_backplane.conventions.preamble import assemble_preamble_detailed
 from meho_backplane.conventions.schemas import (
     DEFAULT_MAX_PREAMBLE_TOKENS,
     BudgetStatus,
@@ -89,7 +86,6 @@ from meho_backplane.conventions.schemas import (
     ConventionSummary,
     ConventionUpdate,
     PreambleInclusion,
-    estimate_tokens,
 )
 from meho_backplane.db.models import TenantConvention, TenantConventionHistory
 
@@ -170,6 +166,7 @@ class ConventionsService:
             included=included,
             position=position,
             token_count=token_count,
+            fits_alone=slug not in assembly.oversize_slugs,
             would_drop_slugs=assembly.dropped_slugs,
         )
 
@@ -181,29 +178,30 @@ class ConventionsService:
     ) -> BudgetStatus:
         """Compute the conventions preamble budget for *operator*'s tenant.
 
-        Runs the same :func:`assemble_preamble` primitive T4's MCP
-        ``initialize`` handler uses, so ``estimated_tokens`` and the
-        preamble actually delivered to agent sessions cannot drift. The
+        Runs the same :func:`assemble_preamble_detailed` pack the MCP
+        ``initialize`` handler uses, so the numbers here and the
+        preamble actually sent to agent sessions cannot drift. The
         assembler opens its own DB session (the *session* argument is
         accepted for signature parity with the other methods but the
         assembler does not thread it -- the budget read is a
         committed-state snapshot, not a read-your-own-writes preview).
 
-        The arithmetic is **conventions-only**: the preamble is
-        assembled with priming + catalogue bands (so the list view
-        reflects the exact wire shape MCP ``initialize`` ships), then
-        ``conventions_text_only`` strips everything after the
-        conventions terminator before measuring.
+        The arithmetic is **conventions-only**: ``estimated_tokens`` is
+        the rendered conventions band, not the priming or catalogue
+        bands. Every operational slug lands in exactly one of
+        ``included_slugs`` or ``dropped_slugs``; ``oversize_slugs``
+        marks the dropped ones that do not fit even alone.
         """
-        preamble = await assemble_preamble(
+        assembly = await assemble_preamble_detailed(
             operator.tenant_id, operator.sub, capabilities=operator.capabilities
         )
-        conventions_only_text = conventions_text_only(preamble.text)
         return BudgetStatus(
             max_tokens=DEFAULT_MAX_PREAMBLE_TOKENS,
-            estimated_tokens=estimate_tokens(conventions_only_text),
-            over_budget=bool(preamble.dropped_slugs),
-            dropped_slugs=preamble.dropped_slugs,
+            estimated_tokens=assembly.conventions_tokens,
+            over_budget=bool(assembly.dropped_slugs),
+            included_slugs=assembly.kept_slugs,
+            dropped_slugs=assembly.dropped_slugs,
+            oversize_slugs=assembly.oversize_slugs,
         )
 
     async def list_conventions(
@@ -278,7 +276,7 @@ class ConventionsService:
         Raises :class:`OverBudgetError` (route: 422) and
         :class:`ConventionConflictError` (route: 409).
         """
-        enforce_budget(body.body, body.kind)
+        enforce_budget(body.title, body.body, body.kind)
 
         audit_id = uuid.uuid4()
         bind_preallocated_audit_id(audit_id)
@@ -348,8 +346,8 @@ class ConventionsService:
 
         Applies only fields explicitly set in the request body (the v2
         ``model_fields_set`` set-vs-null pattern). The budget gate fires
-        on a ``body`` change; PATCH cannot change ``kind`` so the check
-        uses the existing row's kind. A priority-only or title-only
+        on a ``title`` or ``body`` change; PATCH cannot change ``kind``
+        so the check uses the existing row's kind. A priority-only
         PATCH still writes a history row carrying the unchanged body in
         both ``body_before`` and ``body_after``.
 
@@ -365,7 +363,7 @@ class ConventionsService:
             raise ConventionNotFoundError(slug)
 
         new_title, new_body, new_priority = resolve_patch_fields(body, existing)
-        enforce_patch_budget(body, new_body, existing)
+        enforce_patch_budget(body, new_title, new_body, existing)
 
         audit_id = uuid.uuid4()
         bind_preallocated_audit_id(audit_id)

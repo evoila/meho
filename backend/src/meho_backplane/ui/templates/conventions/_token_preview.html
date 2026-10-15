@@ -7,11 +7,12 @@
   ``POST /ui/conventions/preview`` on every debounced keystroke from the
   body textarea (and on the kind selector's change).
 
-  The estimated token cost comes from
-  :func:`~meho_backplane.conventions.schemas.estimate_tokens` server-side
-  -- the single source of truth, never a re-derived chars/token ratio on
-  the client. An ``operational`` body whose estimate exceeds the 600-token
-  budget renders in red (``data-over-budget="true"``); ``workflow`` /
+  The estimated token cost is computed server-side -- never a re-derived
+  chars/token ratio on the client. For an ``operational`` entry it is the
+  rendered standalone estimate (title, body, heading, guard, delimiters)
+  from :func:`~meho_backplane.conventions.render.standalone_tokens`, the
+  same number the write check uses. An ``operational`` entry whose
+  estimate exceeds the 600-token budget renders in red (``data-over-budget="true"``); ``workflow`` /
   ``reference`` bodies are exempt (they never enter the preamble) and
   render in a calm style regardless of size.
 

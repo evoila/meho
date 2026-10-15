@@ -25056,6 +25056,12 @@
             "title": "Kind",
             "default": "operational"
           },
+          "title": {
+            "type": "string",
+            "maxLength": 200,
+            "title": "Title",
+            "default": ""
+          },
           "session_ctx": {
             "$ref": "#/components/schemas/UISessionContext",
             "nullable": true
@@ -25739,12 +25745,28 @@
             "type": "boolean",
             "title": "Over Budget"
           },
+          "included_slugs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Included Slugs",
+            "description": "Operational slugs MEHO puts in the MCP initialize instructions, in pack order. An MCP client may ignore instructions, so this does not prove an agent saw them."
+          },
           "dropped_slugs": {
             "items": {
               "type": "string"
             },
             "type": "array",
             "title": "Dropped Slugs"
+          },
+          "oversize_slugs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Oversize Slugs",
+            "description": "Dropped slugs that do not fit the budget even as the only entry. The other dropped slugs fit alone but lost the room to higher-priority entries."
           }
         },
         "type": "object",
@@ -25752,10 +25774,12 @@
           "max_tokens",
           "estimated_tokens",
           "over_budget",
-          "dropped_slugs"
+          "included_slugs",
+          "dropped_slugs",
+          "oversize_slugs"
         ],
         "title": "BudgetStatus",
-        "description": "Preamble budget status for the operator's tenant.\n\nSurfaced as a sub-document on every ``GET /api/v1/conventions``\ncall so the CLI's ``meho conventions list`` (T7 #1094) can warn\nwhen the tenant's ``kind='operational'`` set overflows the\npreamble budget and name the slugs that will be dropped from the\nagent session preamble. Without this surface, T3 #315's\n\"lowest-priority slugs that will be dropped\" acceptance\ncriterion is unsatisfiable from a single list call -- the\ndeferred AC the issue body folds back in.\n\nAll four fields are populated by a single call to\n:func:`~meho_backplane.conventions.preamble.assemble_preamble`\nagainst the operator's tenant, so the budget arithmetic is\nend-to-end consistent with T4's preamble assembler (the same\nhelper that produces the MCP ``initialize`` ``instructions``\nfield). A divergence between the list surface's\n``estimated_tokens`` and the preamble actually delivered to\nagent sessions would be a silent contract drift; sharing the\nprimitive eliminates it by construction.\n\nFields:\n\n* ``max_tokens`` -- the budget the preamble assembler enforces.\n  Currently :data:`DEFAULT_MAX_PREAMBLE_TOKENS` (a module-level\n  constant; configurable via the assembler's ``max_tokens``\n  parameter in tests). Exposed on the list response so\n  operators can do the budget math without grepping the source.\n* ``estimated_tokens`` -- :func:`estimate_tokens` over the\n  assembled preamble text (header + guard + delimited kept\n  blocks). Empty tenant: 0. Fitting tenant: positive integer\n  below ``max_tokens``. Over-budget tenant: positive integer\n  below ``max_tokens`` (the packer dropped slugs whole until it\n  fit), but ``over_budget=True`` and ``dropped_slugs`` is\n  non-empty.\n* ``over_budget`` -- convenience flag derived from\n  ``len(dropped_slugs) > 0``. Cheap derived value but worth\n  surfacing as a boolean so CLI / dashboard consumers branch on\n  one bit rather than a length-of-list check.\n* ``dropped_slugs`` -- slugs that did not fit, in the packer's\n  drop order (lowest-priority-first, ties broken by oldest-\n  first). The CLI prints these on stderr with an\n  \"insufficient_budget\" exit-code-5 warning so the operator\n  knows exactly which conventions never reach an agent\n  session."
+        "description": "Preamble budget status for the operator's tenant.\n\nSurfaced as a sub-document on every ``GET /api/v1/conventions``\ncall so the CLI's ``meho conventions list`` (T7 #1094) can warn\nwhen the tenant's ``kind='operational'`` set overflows the\npreamble budget and name the slugs that will be dropped from the\nagent session preamble. Without this surface, T3 #315's\n\"lowest-priority slugs that will be dropped\" acceptance\ncriterion is unsatisfiable from a single list call -- the\ndeferred AC the issue body folds back in.\n\nAll fields are populated by a single call to\n:func:`~meho_backplane.conventions.preamble.assemble_preamble_detailed`\nagainst the operator's tenant, so the budget arithmetic is\nend-to-end consistent with T4's preamble assembler (the same\nhelper that produces the MCP ``initialize`` ``instructions``\nfield). A divergence between the list surface's\n``estimated_tokens`` and the preamble actually delivered to\nagent sessions would be a silent contract drift; sharing the\nprimitive eliminates it by construction.\n\nFields:\n\n* ``max_tokens`` -- the budget the preamble assembler enforces.\n  Currently :data:`DEFAULT_MAX_PREAMBLE_TOKENS` (a module-level\n  constant; configurable via the assembler's ``max_tokens``\n  parameter in tests). Exposed on the list response so\n  operators can do the budget math without grepping the source.\n* ``estimated_tokens`` -- :func:`estimate_tokens` over the\n  rendered conventions band (header + guard + delimited kept\n  blocks). Empty tenant: 0. Otherwise at most ``max_tokens``\n  when any entry was kept (the packer drops entries whole until\n  the band fits).\n* ``over_budget`` -- convenience flag derived from\n  ``len(dropped_slugs) > 0``. Cheap derived value but worth\n  surfacing as a boolean so CLI / dashboard consumers branch on\n  one bit rather than a length-of-list check.\n* ``dropped_slugs`` -- slugs that did not fit, in the packer's\n  drop order (lowest-priority-first, ties broken by oldest-\n  first). The CLI prints these on stderr with an\n  \"insufficient_budget\" exit-code-5 warning so the operator\n  knows exactly which conventions never reach an agent\n  session.\n* ``included_slugs`` -- slugs in the band, in pack order. Each\n  operational slug is in exactly one of ``included_slugs`` or\n  ``dropped_slugs``. \"Included\" means MEHO sends it in the MCP\n  ``initialize`` instructions; a client may ignore instructions,\n  so it is not proof that an agent applied the rule.\n* ``oversize_slugs`` -- the dropped slugs that do not fit even as\n  the only entry (rows written before the rendered write check,\n  or by another path). The rest of ``dropped_slugs`` fit alone\n  but lost the room to higher-priority entries."
       },
       "CallOperationBody": {
         "properties": {
@@ -26588,7 +26612,7 @@
           "kind"
         ],
         "title": "ConventionCreate",
-        "description": "POST body for ``/api/v1/conventions``.\n\n``slug`` is the operator-visible identifier the URL / CLI / audit\nlog all reference; it is the natural key within a tenant (the\ncomposite-unique index in T1's migration enforces uniqueness).\nBounded at 128 characters and constrained to a URL-safe shape\n(lowercase ASCII, digits, hyphen) so audit log paths stay\ngrep-friendly and no operator can sneak a slash through. The\ntitle and body are bounded only by a generous upper limit; the\nreal budget gate is the over-budget 422 in the route handler,\nwhich runs :func:`estimate_tokens` against ``body`` before\ninsert and rejects any single ``operational`` entry exceeding\n:data:`DEFAULT_MAX_PREAMBLE_TOKENS`.\n\n``priority`` is optional with a default of 0; the SmallInteger\ncolumn on :class:`TenantConvention` bounds the range to\n-32768..32767. Per the issue body, ``priority`` is the ranking\nkey T4's preamble packer uses to drop low-priority entries\nwhole on budget overflow -- higher value wins. The default of\n0 matches the column's ``server_default`` so omitting the field\nround-trips identically through create + show."
+        "description": "POST body for ``/api/v1/conventions``.\n\n``slug`` is the operator-visible identifier the URL / CLI / audit\nlog all reference; it is the natural key within a tenant (the\ncomposite-unique index in T1's migration enforces uniqueness).\nBounded at 128 characters and constrained to a URL-safe shape\n(lowercase ASCII, digits, hyphen) so audit log paths stay\ngrep-friendly and no operator can sneak a slash through. The\ntitle and body are bounded only by a generous upper limit; the\nreal budget gate is the over-budget 422 in the service, which\nrenders the entry alone (heading, guard prefix, band delimiters,\ntitle, and body) and rejects any ``operational`` entry whose\nrendered estimate exceeds :data:`DEFAULT_MAX_PREAMBLE_TOKENS`.\n\n``priority`` is optional with a default of 0; the SmallInteger\ncolumn on :class:`TenantConvention` bounds the range to\n-32768..32767. Per the issue body, ``priority`` is the ranking\nkey T4's preamble packer uses to drop low-priority entries\nwhole on budget overflow -- higher value wins. The default of\n0 matches the column's ``server_default`` so omitting the field\nround-trips identically through create + show."
       },
       "ConventionHistoryEntry": {
         "properties": {
@@ -30661,6 +30685,11 @@
             "minimum": 0.0,
             "title": "Token Count"
           },
+          "fits_alone": {
+            "type": "boolean",
+            "title": "Fits Alone",
+            "description": "True when the rendered conventions band with only this entry fits the budget. Fitting alone does not promise inclusion."
+          },
           "would_drop_slugs": {
             "items": {
               "type": "string"
@@ -30673,10 +30702,11 @@
         "required": [
           "included",
           "token_count",
+          "fits_alone",
           "would_drop_slugs"
         ],
         "title": "PreambleInclusion",
-        "description": "Whether a just-written convention reaches the session preamble.\n\nG0.14-T8 (#1149, signal 18) -- the post-write feedback shape\n``POST /api/v1/conventions`` and ``PATCH /api/v1/conventions/{slug}``\nattach to the response when the convention is ``kind='operational'``.\nWithout it, the operator gets a ``201`` (or ``200`` on PATCH), assumes\nthe rule is in effect, and the agent silently never sees it because\nthe preamble packer dropped it on budget overflow.\n\nFields:\n\n* ``included`` -- ``True`` when the slug landed in the assembled\n  preamble (after the priority-ranked pack against\n  :data:`DEFAULT_MAX_PREAMBLE_TOKENS`). ``False`` when the packer\n  dropped it whole on overflow.\n* ``position`` -- 1-based index of the convention in the assembled\n  preamble's packed order (the packer iterates ``priority DESC,\n  created_at ASC``; ``position=1`` means highest-priority slot in\n  the operator's tenant). ``None`` when ``included=False``.\n* ``token_count`` -- the convention body's own estimated token\n  cost via :func:`estimate_tokens`. Useful for the operator to\n  see why a near-budget body got dropped (it weighed more than\n  the remaining headroom).\n* ``would_drop_slugs`` -- the full ``dropped_slugs`` list the\n  packer produced on this assembly. When ``included=True`` this\n  names *other* slugs that fell out of the preamble (the just-\n  written convention may have pushed a lower-priority neighbour\n  out); when ``included=False`` the list contains *this* slug\n  plus any others dropped under the same pack. The shape lets\n  a single ``meho conventions create ...`` round-trip surface\n  both the personal outcome (did mine land?) and the collateral\n  damage (did mine push someone else out?).\n\nWhy a separate model instead of inlining fields on\n:class:`Convention`: the response shape ``Convention`` is used\nby ``GET /{slug}`` too, where ``preamble_status`` would be\nredundant (operators inspecting a row already have the\n``GET /api/v1/conventions``'s ``budget_status`` envelope for\naggregate budget signal). Keeping the inclusion shape on a\nsub-model means GET-single can drop the field cleanly while\nPOST/PATCH attach it."
+        "description": "Whether a just-written convention reaches the session preamble.\n\nG0.14-T8 (#1149, signal 18) -- the post-write feedback shape\n``POST /api/v1/conventions`` and ``PATCH /api/v1/conventions/{slug}``\nattach to the response when the convention is ``kind='operational'``.\nWithout it, the operator gets a ``201`` (or ``200`` on PATCH), assumes\nthe rule is in effect, and the agent silently never sees it because\nthe preamble packer dropped it on budget overflow.\n\nFields:\n\n* ``included`` -- ``True`` when the slug landed in the assembled\n  preamble (after the priority-ranked pack against\n  :data:`DEFAULT_MAX_PREAMBLE_TOKENS`). ``False`` when the packer\n  dropped it whole on overflow.\n* ``position`` -- 1-based index of the convention in the assembled\n  preamble's packed order (the packer iterates ``priority DESC,\n  created_at ASC``; ``position=1`` means highest-priority slot in\n  the operator's tenant). ``None`` when ``included=False``.\n* ``token_count`` -- the convention's own rendered block cost\n  (heading + body) via :func:`estimate_tokens`. Useful for the\n  operator to see why a near-budget entry got dropped (it weighed\n  more than the remaining headroom).\n* ``fits_alone`` -- ``True`` when the band with only this entry\n  fits the budget. ``fits_alone=True`` with ``included=False``\n  means higher-priority entries used up the room.\n* ``would_drop_slugs`` -- the full ``dropped_slugs`` list the\n  packer produced on this assembly. When ``included=True`` this\n  names *other* slugs that fell out of the preamble (the just-\n  written convention may have pushed a lower-priority neighbour\n  out); when ``included=False`` the list contains *this* slug\n  plus any others dropped under the same pack. The shape lets\n  a single ``meho conventions create ...`` round-trip surface\n  both the personal outcome (did mine land?) and the collateral\n  damage (did mine push someone else out?).\n\nWhy a separate model instead of inlining fields on\n:class:`Convention`: the response shape ``Convention`` is used\nby ``GET /{slug}`` too, where ``preamble_status`` would be\nredundant (operators inspecting a row already have the\n``GET /api/v1/conventions``'s ``budget_status`` envelope for\naggregate budget signal). Keeping the inclusion shape on a\nsub-model means GET-single can drop the field cleanly while\nPOST/PATCH attach it."
       },
       "PreviewOperationBody": {
         "properties": {

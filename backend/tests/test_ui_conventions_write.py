@@ -486,6 +486,24 @@ def test_preview_over_budget_operational_flagged_red() -> None:
     assert "text-error" in body
 
 
+def test_preview_flags_entry_over_budget_only_once_rendered() -> None:
+    """#3746: the preview uses the rendered standalone cost, like the write check."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id, jwks = _admin_session()
+    client, mock = _authenticated_client(session_id=session_id, jwks=jwks)
+    try:
+        response = client.post(
+            "/ui/conventions/preview",
+            # estimate_tokens(body) == 600 -- within budget on its own.
+            data={"title": "Title", "body": "x" * 1979, "kind": "operational"},
+            **_csrf_kwargs(session_id),
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    assert 'data-over-budget="true"' in response.text
+
+
 def test_preview_same_body_as_reference_not_flagged() -> None:
     """The same over-budget body as kind=reference is NOT flagged (exempt)."""
     _seed_tenant(_TENANT_A, "tenant-a")

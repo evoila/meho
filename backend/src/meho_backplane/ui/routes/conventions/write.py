@@ -73,6 +73,7 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.conventions.render import standalone_tokens
 from meho_backplane.conventions.schemas import (
     DEFAULT_MAX_PREAMBLE_TOKENS,
     ConventionCreate,
@@ -249,21 +250,23 @@ async def render_edit_modal(
 async def render_token_preview(
     request: Request,
     *,
+    title: str,
     body: str,
     kind: str,
 ) -> HTMLResponse:
     """Render the debounced token-cost preview fragment.
 
-    Computes the estimated token cost via
-    :func:`~meho_backplane.conventions.schemas.estimate_tokens` (the
-    single source of truth -- no re-derived chars/token ratio). The
-    fragment marks an ``operational`` body that exceeds
-    :data:`DEFAULT_MAX_PREAMBLE_TOKENS` in red; the same body as
-    ``workflow`` / ``reference`` is not flagged (those kinds never enter
-    the preamble, so they are exempt from the budget gate). A sanitised
-    Markdown render of the body is shown alongside.
+    For an ``operational`` entry the cost is the rendered standalone
+    estimate from
+    :func:`~meho_backplane.conventions.render.standalone_tokens` --
+    the same number the server's write check uses, so the preview and
+    the 422 agree. The fragment marks an ``operational`` entry that
+    exceeds :data:`DEFAULT_MAX_PREAMBLE_TOKENS` in red; ``workflow`` /
+    ``reference`` entries show the plain body estimate and are not
+    flagged (those kinds never enter the preamble, so they are exempt
+    from the budget gate). A sanitised Markdown render of the body is
+    shown alongside.
     """
-    estimated = estimate_tokens(body)
     # Resolve the kind defensively: an unknown token (a tampered form,
     # or the selector mid-change) falls back to REFERENCE -- the safe
     # direction (exempt from the budget gate), so a transient bad value
@@ -273,6 +276,7 @@ async def render_token_preview(
     except ValueError:
         kind_enum = ConventionKind.REFERENCE
     counts_against_budget = kind_enum is ConventionKind.OPERATIONAL
+    estimated = standalone_tokens(title, body) if counts_against_budget else estimate_tokens(body)
     over_budget = counts_against_budget and estimated > DEFAULT_MAX_PREAMBLE_TOKENS
     context: dict[str, object] = {
         "estimated_tokens": estimated,
@@ -381,9 +385,9 @@ async def submit_create(
         return _render_create_error(
             request,
             message=(
-                f"Body exceeds the preamble budget "
+                f"Title and body exceed the preamble budget when rendered "
                 f"(estimated {exc.estimated} tokens, budget {exc.budget}). "
-                f"Trim the body or set kind to workflow / reference."
+                f"Shorten them or set kind to workflow / reference."
             ),
         )
 
@@ -442,7 +446,7 @@ async def submit_update(
         return _render_create_error(
             request,
             message=(
-                f"Body exceeds the preamble budget "
+                f"Title and body exceed the preamble budget when rendered "
                 f"(estimated {exc.estimated} tokens, budget {exc.budget})."
             ),
         )

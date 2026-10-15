@@ -85,7 +85,12 @@ like this:
    objects or lists, only nulls, integers past 64 bits, non-finite
    numbers), the caller gets a `QueryContractError` that names the
    field, the reason, and the way out: return it with `select`, or page
-   the raw rows. This happens before any SQL runs.
+   the raw rows. This happens before any SQL runs. One exception to
+   "mixed JSON kinds": a field with whole and decimal numbers (for
+   example `0`, `12.5`, `3`) is queried as one decimal-number column,
+   as long as every whole number is within ±2^53 (a 64-bit float holds
+   these exactly). If one is larger, the field stays not queryable so
+   it is never rounded.
 4. The SQL never uses caller names. Each queryable field becomes a
    typed column with a generated name (`_rr_v_0000`, ...), and the
    table also has a hidden row number, `_rr_ord`

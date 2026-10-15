@@ -140,6 +140,48 @@ async def test_group_by_aggregate_returns_counts(monkeypatch: pytest.MonkeyPatch
     assert counts == {"p0": 10, "p1": 10, "p2": 10}
 
 
+def _cpu_rows() -> list[dict[str, Any]]:
+    """A number field that mixes whole and decimal values, as JSON often does."""
+    return [{"name": "a", "cpu": 0}, {"name": "b", "cpu": 12.5}, {"name": "c", "cpu": 3}]
+
+
+async def test_mixed_whole_and_decimal_numbers_filter_and_sort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install(monkeypatch, _FakeStore(_cpu_rows()), _stub_settings())
+    result = await rq.run_result_query(
+        _operator(),
+        uuid.uuid4(),
+        ResultQuerySpec(
+            filter=[{"field": "cpu", "op": ">", "value": 1}],
+            order_by=[{"field": "cpu", "direction": "desc"}],
+        ),
+    )
+    assert [row["name"] for row in result["rows"]] == ["b", "c"]
+    # Flat output is the raw stored row: the whole number stays an integer.
+    assert result["rows"][1]["cpu"] == 3
+    assert type(result["rows"][1]["cpu"]) is int
+
+
+async def test_mixed_whole_and_decimal_numbers_sum(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install(monkeypatch, _FakeStore(_cpu_rows()), _stub_settings())
+    result = await rq.run_result_query(
+        _operator(),
+        uuid.uuid4(),
+        ResultQuerySpec(aggregate=[{"func": "SUM", "field": "cpu"}]),
+    )
+    assert result["rows"] == [{"sum_cpu": 15.5}]
+
+
+async def test_mixed_whole_and_decimal_numbers_flat_query_keeps_integers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install(monkeypatch, _FakeStore(_cpu_rows()), _stub_settings())
+    result = await rq.run_result_query(_operator(), uuid.uuid4(), ResultQuerySpec())
+    assert result["rows"] == _cpu_rows()
+    assert [type(row["cpu"]) for row in result["rows"]] == [int, float, int]
+
+
 # ---------------------------------------------------------------------------
 # Bounds: row cap + truncated flag
 # ---------------------------------------------------------------------------

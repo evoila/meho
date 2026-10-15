@@ -234,7 +234,10 @@ class MongoDbConnector(Connector):
                 identity = await queries.fetch_fingerprint(client, auth_mode=auth_mode)
         except (OSError, PyMongoError, CredentialsReadError, ValueError) as exc:
             error = redact_fingerprint_error(exc, _classify_fingerprint_error(exc))
-            _log.warning(
+            # Resolved per call, not the module-level proxy: a logger cached on
+            # first use keeps the processor chain it was built with, so
+            # ``capture_logs`` in tests cannot see it (same as auth/jwt.py).
+            structlog.get_logger(__name__).warning(
                 "mongodb_fingerprint_unreachable",
                 target=getattr(target, "name", None),
                 error=error,

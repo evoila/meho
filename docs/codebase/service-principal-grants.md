@@ -179,6 +179,12 @@ those composites always parked for service principals.
   honoured **at dispatch time** by the lookup filter (`revoked_at IS NULL
   AND (expires_at IS NULL OR expires_at > now)`); no sweeper is needed — an
   expired / revoked row simply stops matching.
+- **`revoked_reason`** (#3489) — an optional reason the operator gives when
+  revoking. This mirrors create: create *requires* a `reason`, revoke
+  *accepts* one. When given, it is stored on the grant row and also lands
+  as `reason` in the `service_grant.revoke` audit row payload (the route
+  binds `audit_reason`). A revoke without a reason stays valid; the column
+  is then NULL and the audit payload has no `reason` key.
 
 Uniqueness ("at most one active grant per fully-scoped key") is enforced by
 two **partial** unique indexes — `uq_service_principal_grant_targeted`
@@ -277,7 +283,7 @@ approval queue.
 | `GET` | `/api/v1/service-principals/grants` | List (`principal_sub`, `include_revoked`, `limit`, `offset`). |
 | `GET` | `/api/v1/service-principals/grants/{id}` | Show one. 404 cross-tenant. |
 | `POST` | `/api/v1/service-principals/grants` | Create (the review; `reason` required). 422 on wildcard / delete-shaped / past expiry / duplicate / `target_id`+selector. |
-| `DELETE` | `/api/v1/service-principals/grants/{id}` | Revoke (soft-delete). 404 when absent / already revoked / cross-tenant. |
+| `DELETE` | `/api/v1/service-principals/grants/{id}` | Revoke (soft-delete). Optional `reason` query parameter (1–2048 chars, same limit as create), stored as `revoked_reason` and on the audit row. 404 when absent / already revoked / cross-tenant. |
 
 The route surface (grants + `GET /api/v1/operations/governed-subops`) enters
 `cli/api/openapi.json` and the generated Go client (regenerate with `cd cli

@@ -149,7 +149,9 @@ Three properties are load-bearing for correctness and safety:
 `keycloak.user.delete`, `keycloak.group.delete` and
 `keycloak.client.delete` remove one object each. They are on the
 `destructive` risk level, so they run differently from the other writes.
-Only a person can ask for a delete; MEHO denies it to an agent.
+MEHO always denies a delete to an agent. No grant can change that.
+Any other caller, for example a person or a service account, can ask
+for a delete. The request always waits until a second person approves it.
 
 1. **Preview first.** Call `preview_operation` with the same params. It
    shows what will be deleted and returns a `preview_hash`. Nothing is
@@ -401,8 +403,8 @@ $ meho keycloak user list --target rdc-keycloak --username operator-a
 $ meho keycloak role-mapping get --target rdc-keycloak --id 22222222-2222-2222-2222-222222222222
 
 # List groups with their attributes, then the members of one group
-$ meho keycloak group list --target rdc-keycloak --attributes
-$ meho keycloak group member list --target rdc-keycloak --id 33333333-3333-3333-3333-333333333333
+$ meho keycloak group list --target kc --attributes
+$ meho keycloak group member list --target kc --id 33333333-3333-3333-3333-333333333333
 
 # JSON output for piping to jq
 $ meho keycloak client list --target rdc-keycloak --json | jq '.result.rows[].id'
@@ -507,8 +509,8 @@ users who hold one realm role) have no `meho keycloak` verb. Run them
 with `meho operation call`:
 
 ```console
-$ meho operation call keycloak-admin-26.x keycloak.role.list --target rdc-keycloak
-$ meho operation call keycloak-admin-26.x keycloak.role.users --target rdc-keycloak \
+$ meho operation call keycloak-admin-26.x keycloak.role.list --target kc
+$ meho operation call keycloak-admin-26.x keycloak.role.users --target kc \
     --params '{"name": "tenant_admin"}'
 ```
 
@@ -576,17 +578,17 @@ $ meho keycloak role-mapping assign --target rdc-keycloak \
 
 # Create a role group with attributes (--attribute is repeatable;
 # --parent-id makes it a sub-group)
-$ meho keycloak group create --target rdc-keycloak --name role-tenant-2 \
+$ meho keycloak group create --target kc --name role-tenant-2 \
     --attribute tenant_id=t-2 --attribute tenant_role=admin
 
 # Change a group's attributes (merged by default; --replace sets them all)
-$ meho keycloak group update-attributes --target rdc-keycloak \
+$ meho keycloak group update-attributes --target kc \
     --name role-tenant-2 --attribute tenant_role=member
 
 # Add a user to a group, or remove the user from it
-$ meho keycloak group member add --target rdc-keycloak \
+$ meho keycloak group member add --target kc \
     --group-name role-tenant-2 --username operator-a
-$ meho keycloak group member remove --target rdc-keycloak \
+$ meho keycloak group member remove --target kc \
     --group-name role-tenant-2 --username operator-a
 ```
 
@@ -605,16 +607,16 @@ The three delete verbs work in two steps (see
 
 ```console
 # Step 1: preview only. Nothing is deleted. It prints a preview_hash.
-$ meho keycloak user delete --target rdc-keycloak --username event-guest
+$ meho keycloak user delete --target kc --username event-guest
 
 # Step 2: the same command with the hash. It waits until a second
 # person approves it; the approval runs the delete.
-$ meho keycloak user delete --target rdc-keycloak --username event-guest \
+$ meho keycloak user delete --target kc --username event-guest \
     --preview-hash <hash>
 
 # The same two steps for a group (--name) and a client (--client-id)
-$ meho keycloak group delete --target rdc-keycloak --name event-team
-$ meho keycloak client delete --target rdc-keycloak --client-id event-app
+$ meho keycloak group delete --target kc --name event-team
+$ meho keycloak client delete --target kc --client-id event-app
 ```
 
 Each delete verb also takes `--id <uuid>` instead of the name.

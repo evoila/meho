@@ -208,6 +208,60 @@ shipped the schema; T3-T5 layer CLI / preamble / seed on top.
    joins the eager-import + autouse-fixture reload shape every
    other resource follows.
 
+9. **MCP resource** `meho://tenant-conventions/index` (#3755) -- a
+   bounded list of the caller's own conventions, without bodies. The
+   URI names no tenant: the tenant comes from the caller's token. It is
+   the one convention URI that shows up in `resources/list`, so a
+   client can find conventions without knowing a slug. Minimum role is
+   `read_only`. Each page has at most `INDEX_PAGE_SIZE` (25) entries.
+   An entry carries `slug`, `title`, `kind`, `priority`, `updated_at`,
+   `availability`, and `uri` (the per-slug resource above, which is
+   where the body lives). The page also carries `revision`, `total`,
+   `next_uri`, `preamble_budget` (`max_tokens`, `estimated_tokens`,
+   `over_budget`), and a fixed `note`.
+
+   `availability` says what MEHO sends in the MCP `initialize`
+   instructions, using the same pack as `budget_status`:
+
+   | Value | Meaning |
+   |---|---|
+   | `included` | operational, in the conventions band |
+   | `dropped` | operational, fits alone but lost the room to higher-priority entries |
+   | `dropped_oversize` | operational, too large even as the only entry |
+   | `not_in_preamble` | `workflow` or `reference`; never sent in `initialize` |
+
+   `included` describes what MEHO sends, not what a client did. The
+   `note` says so, and the page has no field that claims a client read,
+   subscribed to, or applied anything. The server advertises the
+   `resources` capability with `subscribe: false`; listing the index
+   loads nothing into a prompt.
+
+   **Paging.** `next_uri` is `meho://tenant-conventions/index/{cursor}`.
+   The cursor is base64url JSON with the tenant id, the `revision`, and
+   the next offset. `revision` is a short SHA-256 digest over every
+   row's `(id, updated_at)` in index order (`priority DESC, created_at
+   ASC, id ASC`), so a walk across pages reads one snapshot:
+
+   - If any convention changed since page one, the next page is refused
+     ("the convention index changed") and the client reads the first
+     page again. Rows are never skipped or repeated silently.
+   - A broken cursor, a cursor for another tenant, and an offset past
+     the end all get one and the same "invalid cursor" message, so the
+     answer tells the caller nothing about other tenants. The tenant
+     check runs before the revision check.
+   - The cursor is not signed. It carries no secret, and every read
+     still filters on the token's tenant, so a hand-made cursor can only
+     reach the caller's own conventions.
+
+   The index reads rows in its own query and the availability through
+   `budget_status` right after, so a write landing between the two can
+   make one page mix two states. The next page then fails on the
+   revision check. The page shape and cursor live in
+   [`conventions/index.py`](../../backend/src/meho_backplane/conventions/index.py);
+   the query and availability in `ConventionsService.index_page`; the
+   resource adapter (error mapping and URIs) in
+   [`mcp/resources/tenant_conventions.py`](../../backend/src/meho_backplane/mcp/resources/tenant_conventions.py).
+
 ## Session-preamble assembler (T4)
 
 [`backend/src/meho_backplane/conventions/preamble.py`](../../backend/src/meho_backplane/conventions/preamble.py)

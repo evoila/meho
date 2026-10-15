@@ -177,6 +177,35 @@ async def test_detail_summary_keeps_scalars_and_outlines_fields(
     assert handle.fetch_more.drill_in.example_call["args"]["query"] == {"path": "/name"}
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {f"key_{i:02d}": "v" * 200 for i in range(30)},
+        {
+            "name": "payments-api",
+            "phase": "Running",
+            "log": "L" * 5_000,
+            "containers": [1],
+            "volumes": [2],
+        },
+    ],
+    ids=["many-medium-strings", "one-large-string"],
+)
+async def test_document_summary_stays_under_the_threshold(
+    result_reducer_cls: type[Any], store: ResultHandleStore, payload: dict[str, Any]
+) -> None:
+    reduced, handle = await _document_handle(result_reducer_cls, store, payload)
+
+    assert handle is not None
+    inline_bytes = len(msgspec.json.encode(reduced))
+    assert inline_bytes < 4096
+    assert inline_bytes < reduced["document_bytes"]
+    assert reduced["omitted_scalar_count"] >= 1
+    if "log" in payload:
+        assert "log" not in reduced, "a 5,000-char string must not ride inline"
+        assert reduced["name"] == "payments-api"
+
+
 async def test_small_non_collection_root_still_passes_through(
     result_reducer_cls: type[Any], store: ResultHandleStore, redis: _FakeRedis
 ) -> None:

@@ -463,6 +463,45 @@ async def test_reduce_keeps_oversized_string_shaped_payload_as_document() -> Non
     assert reduced["top_level_fields"]["stdout"] == "string (200000 chars)"
 
 
+async def test_reduce_rows_summary_stays_under_threshold_with_large_scalar_siblings() -> None:
+    """A list plus many big scalar siblings: the summary stays small (#3633).
+
+    The default scalar copy has a total budget and a per-value cap, so the
+    inline summary can never grow past the 4 KB threshold that caused the
+    reduction. Values that do not fit are counted, not copied.
+    """
+    reducer = JsonFluxReducer(sample_size=5)
+    payload: dict[str, Any] = {f"note_{i}": "n" * 240 for i in range(32)}
+    payload["big"] = "b" * 5_000
+    payload["items"] = [{"id": i} for i in range(60)]
+
+    reduced, handle = await reducer.reduce(payload, None, {"op_id": "k8s.pod.list"})
+
+    assert handle is not None
+    assert reduced["source_key"] == "items"
+    assert "big" not in reduced
+    assert len(_serialize(reduced)) < 4096
+    assert len(_serialize(reduced)) < len(_serialize(payload))
+    kept = [key for key in reduced if key.startswith("note_")]
+    assert kept, "small scalars still ride inline"
+    assert reduced["omitted_scalar_count"] == 33 - len(kept)
+
+
+async def test_reduce_scalar_hint_is_kept_outside_the_default_budget() -> None:
+    """A ``result_scalars`` hint keeps a value the default rule would skip."""
+    reducer = JsonFluxReducer(sample_size=5)
+    payload = _validation_payload(60)
+    payload["description"] = "d" * 2_000
+    context = {"op_id": "installer.sddc.spec.validate", "result_scalars": {"keys": ["description"]}}
+
+    reduced, handle = await reducer.reduce(payload, None, context)
+
+    assert handle is not None
+    assert reduced["description"] == payload["description"]
+    assert reduced["executionStatus"] == "COMPLETED"
+    assert "omitted_scalar_count" not in reduced
+
+
 async def test_reduce_leaves_small_string_shaped_payload_untouched() -> None:
     """A string-shaped payload under the byte threshold still passes through."""
     reducer = JsonFluxReducer(row_threshold=0)

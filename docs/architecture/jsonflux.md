@@ -627,8 +627,10 @@ values are preserved (shape stability across poll states).
 
 Since #3633 the hint is no longer the only way. Without a hint, a
 non-credential op keeps its scalar siblings by default (bounded to 32
-keys and 8 KB; anything that does not fit is counted under
-`omitted_scalar_count`). With a hint, the listed keys are kept on top of
+keys and 1 KB in total, and no single value over 512 bytes; anything that
+does not fit is counted under `omitted_scalar_count`). The budget stays
+well under the 4 KB reduction threshold, so the inline summary is always
+smaller than the response it replaces. With a hint, the listed keys are kept on top of
 the default copy, outside that budget. Credential-class ops
 (`credential_read` / `credential_mint` / `credential_write`) get no
 default copy: for them the hint is still the only path, so a secret-shaped

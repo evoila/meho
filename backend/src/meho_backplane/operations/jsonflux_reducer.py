@@ -294,11 +294,14 @@ _CREDENTIAL_CLASSES = frozenset({"credential_read", "credential_mint", "credenti
 
 #: Bounds for the default scalar-sibling rule (#3633 / #3549). Without an
 #: op hint, the reducer keeps a reduced payload's scalar siblings inline, but
-#: only up to this many keys and this many serialized bytes, so one huge
-#: vendor string cannot undo the reduction. Skipped keys are counted under
-#: ``omitted_scalar_count``.
+#: only up to this many keys, this many serialized bytes in total, and this
+#: many serialized bytes per key. The total stays well under the reduction
+#: threshold, so the inline summary is always smaller than the response it
+#: replaces. Skipped keys are counted under ``omitted_scalar_count``; the
+#: caller reads them from the handle.
 _DEFAULT_SCALAR_MAX_KEYS = 32
-_DEFAULT_SCALAR_BYTE_BUDGET = 8192
+_DEFAULT_SCALAR_BYTE_BUDGET = 1024
+_DEFAULT_SCALAR_VALUE_BYTE_CAP = 512
 
 #: Bounds for the opt-in object projection. They constrain descriptor
 #: metadata as well as the copied JSON so a malformed or overly broad hint
@@ -1238,9 +1241,10 @@ def _default_scalar_siblings(
     :data:`_RESERVED_SUMMARY_KEYS`. Lists and objects are never copied (the
     #3592 object seam stays an opt-in). At most
     :data:`_DEFAULT_SCALAR_MAX_KEYS` keys and
-    :data:`_DEFAULT_SCALAR_BYTE_BUDGET` serialized bytes are kept; any
-    scalar that does not fit is counted, not copied. Keys in *skip* (already
-    kept by an op hint) are left out.
+    :data:`_DEFAULT_SCALAR_BYTE_BUDGET` serialized bytes are kept, and no
+    single key over :data:`_DEFAULT_SCALAR_VALUE_BYTE_CAP` bytes; any scalar
+    that does not fit is counted, not copied. Keys in *skip* (already kept by
+    an op hint, outside this budget) are left out.
     """
     preserved: dict[str, Any] = {}
     omitted = 0
@@ -1256,7 +1260,11 @@ def _default_scalar_siblings(
         if value is not None and not isinstance(value, _SCALAR_VALUE_TYPES):
             continue
         cost = len(_serialize({key: value}))
-        if len(preserved) >= _DEFAULT_SCALAR_MAX_KEYS or used + cost > _DEFAULT_SCALAR_BYTE_BUDGET:
+        if (
+            cost > _DEFAULT_SCALAR_VALUE_BYTE_CAP
+            or len(preserved) >= _DEFAULT_SCALAR_MAX_KEYS
+            or used + cost > _DEFAULT_SCALAR_BYTE_BUDGET
+        ):
             omitted += 1
             continue
         preserved[key] = value

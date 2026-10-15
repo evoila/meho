@@ -16,7 +16,9 @@ threshold (>50 rows or >4 KB by default), the caller gets back:
   sample_bytes, source_key?}` (the bounded preview itself lives once on
   `handle.sample_rows`, #134). When the list sat under a dict key, the
   payload's other top-level scalars stay top-level too, bounded to 32 keys
-  and 8 KB (#3633). Credential-class ops do not get this default copy;
+  and 1 KB in total; a single value over 512 bytes is not copied (#3633).
+  Skipped keys are counted under `omitted_scalar_count`, so the summary
+  stays smaller than the 4 KB threshold that caused the reduction. Credential-class ops do not get this default copy;
   they keep only the scalars their `result_scalars` hint lists (#3084).
   Lists and objects are never copied by default (objects need the
   bounded `result_objects` hint); and

@@ -400,7 +400,9 @@ chars-per-token heuristic (`ceil(len / 3.3)`) the
 write check and the packer render the same text and estimate it the
 same way, so a write that passes always fits the band when it is the
 only entry. The console's token preview (`POST /ui/conventions/preview`)
-shows the same rendered number for `operational` entries.
+shows the same rendered number for `operational` entries. The title,
+body and kind fields of the create and edit modals all refresh it,
+because the title is part of the rendered cost.
 
 `workflow` and `reference` conventions are not preamble-bound and
 are exempt from the 422 -- a `workflow` convention of arbitrary

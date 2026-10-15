@@ -15,9 +15,10 @@ the write surface on top of T1's (#1895) read pages:
 * ``PATCH /ui/conventions/{slug}`` -- submit; calls
   :meth:`ConventionsService.update_convention`.
 * ``POST /ui/conventions/preview`` -- debounced server-side token-cost
-  preview: takes ``body`` + ``kind``, renders the estimated tokens vs the
-  600 budget (red when an ``operational`` body is over) plus the
-  sanitised Markdown render.
+  preview: takes ``title`` + ``body`` + ``kind``, renders the estimated
+  tokens vs the 600 budget (red when an ``operational`` entry is over)
+  plus the sanitised Markdown render. The title and body fields and the
+  kind selector all trigger it, because the title counts too.
 * ``GET /ui/conventions/{slug}/delete`` -- the confirm ``<dialog>`` gate.
 * ``DELETE /ui/conventions/{slug}`` -- delete behind the confirm gate; a
   second DELETE on the already-gone slug renders a benign "already

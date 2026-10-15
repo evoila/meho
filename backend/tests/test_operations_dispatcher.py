@@ -49,7 +49,7 @@ from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import meho_backplane.operations._audit as audit_module
@@ -3408,11 +3408,12 @@ async def test_park_merges_permission_preflight_onto_identifier_default(
     stub_embedding_service: AsyncMock,
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """A parked write with a registered permission preflight stores its banner.
+    """A parked write with a registered permission preflight stores its result.
 
     G0.20-T4 (#1504): the capability-only permission preflight runs and is
     merged under ``proposed_effect["permission_preflight"]`` — so the
-    reviewer sees "this write will be denied" at park time. Since #1856,
+    reviewer sees whether the write is authorized at park time (a
+    will-be-denied verdict refuses the park instead, #3542). Since #1856,
     a non-credential write with no bespoke builder also carries the
     generic params-echo default, so the preflight rides on the
     ``{op_class, params_echo}`` base rather than the bare identifier
@@ -3430,8 +3431,8 @@ async def test_park_merges_permission_preflight_onto_identifier_default(
             "check": "vault.capabilities-self",
             "path": f"secret/data/{ctx.params.get('path', '?')}",
             "required": ["create", "update"],
-            "granted": ["read"],
-            "will_be_denied": True,
+            "granted": ["create", "read", "update"],
+            "will_be_denied": False,
             "principal_sub": ctx.operator.sub,
         }
 
@@ -3444,7 +3445,7 @@ async def test_park_merges_permission_preflight_onto_identifier_default(
         op_id="vault.kv.preflight_op",
         handler=_module_handler_returning_dict,
         summary="Op with a registered permission preflight.",
-        description="Parks for approval; the preflight flags a will-be-denied write.",
+        description="Parks for approval; the preflight says the write is authorized.",
         parameter_schema={"type": "object"},
         safety_level="caution",
         requires_approval=True,
@@ -3471,9 +3472,9 @@ async def test_park_merges_permission_preflight_onto_identifier_default(
             assert row.proposed_effect["op_class"] == "other"
             assert row.proposed_effect["params_echo"] == {"path": "meho/test/x"}
             preflight = row.proposed_effect["permission_preflight"]
-            assert preflight["will_be_denied"] is True
+            assert preflight["will_be_denied"] is False
             assert preflight["required"] == ["create", "update"]
-            assert preflight["granted"] == ["read"]
+            assert preflight["granted"] == ["create", "read", "update"]
             # No raw secret material — only the capability banner.
             assert "data" not in row.proposed_effect
     finally:
@@ -3482,20 +3483,19 @@ async def test_park_merges_permission_preflight_onto_identifier_default(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("will_be_denied", [True, False])
-async def test_park_stamps_write_capability_warning_when_denied(
+async def test_park_refused_when_preflight_says_write_will_be_denied(
     stub_embedding_service: AsyncMock,
     captured_events: list[BroadcastEvent],
     will_be_denied: bool,
 ) -> None:
-    """A will-be-denied preflight promotes a named top-level warning (#2331).
+    """A will-be-denied preflight refuses the park (#3542).
 
     When the park-time capability probe reports ``will_be_denied: true``,
-    the envelope carries ``write_capability_warning =
-    "connector_identity_may_lack_write"`` so the approval surface can render
-    a banner without reaching into ``permission_preflight``. It is a
-    warning, not a gate — the park still proceeds and the op is
-    ``awaiting_approval`` either way. Absent when the write will be
-    authorized.
+    no approval row is written: the caller gets ``denied`` /
+    ``write_capability_denied`` with ``granted`` / ``required`` and the
+    write-policy ``doc_ref``, so no person spends an approval on a write
+    that cannot land. When the write is authorized the op parks as before,
+    with no ``write_capability_warning``.
     """
     from meho_backplane.db.models import ApprovalRequest
     from meho_backplane.operations._preview import (
@@ -3539,18 +3539,31 @@ async def test_park_stamps_write_capability_warning_when_denied(
             target=target,
             params={"path": "meho/test/x"},
         )
-        assert result.status == "awaiting_approval"
-        approval_request_id = UUID(result.extras["approval_request_id"])
         sessionmaker = get_sessionmaker()
-        async with sessionmaker() as fresh:
-            row = await fresh.get(ApprovalRequest, approval_request_id)
-            assert row is not None
-            if will_be_denied:
-                assert (
-                    row.proposed_effect["write_capability_warning"]
-                    == "connector_identity_may_lack_write"
+        if will_be_denied:
+            assert result.status == "denied"
+            assert result.extras["error_code"] == "write_capability_denied"
+            assert result.extras["path"] == "secret/data/meho/test/x"
+            assert result.extras["granted"] == ["read"]
+            assert result.extras["required"] == ["create", "update"]
+            assert result.extras["doc_ref"] == (
+                "docs/cross-repo/connector-vault-policy.md#6-kv-v2-write-surface"
+            )
+            assert result.error is not None
+            assert "did not create an approval request" in result.error
+            async with sessionmaker() as fresh:
+                count = await fresh.scalar(
+                    select(func.count())
+                    .select_from(ApprovalRequest)
+                    .where(ApprovalRequest.op_id == "vault.kv.warn_op")
                 )
-            else:
+            assert count == 0
+        else:
+            assert result.status == "awaiting_approval"
+            approval_request_id = UUID(result.extras["approval_request_id"])
+            async with sessionmaker() as fresh:
+                row = await fresh.get(ApprovalRequest, approval_request_id)
+                assert row is not None
                 assert "write_capability_warning" not in row.proposed_effect
     finally:
         _PERMISSION_PREFLIGHTS.pop("vault.kv.warn_op", None)

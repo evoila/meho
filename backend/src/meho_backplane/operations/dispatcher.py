@@ -106,6 +106,9 @@ Detail payloads land in ``extras``. Codes:
 * ``awaiting_approval`` -- the policy gate issued a ``needs_approval``
   verdict; a durable :class:`~meho_backplane.db.models.ApprovalRequest`
   row was created. ``extras["approval_request_id"]`` carries the UUID.
+* ``write_capability_denied`` (status ``denied``) -- the op needed
+  approval, but its park-time permission preflight said the write will
+  be denied, so no approval row was created (#3542).
 * ``connector_unsupported`` -- the connector / handler raised
   :exc:`NotImplementedError`: it *deliberately* does not implement
   what the dispatch requires (an unsupported ``target.auth_model``;
@@ -311,6 +314,7 @@ from meho_backplane.operations._errors import (
     result_target_required,
     result_unknown_op,
     result_unqualified_target_version,
+    result_write_capability_denied,
     wrap_ok_result,
 )
 from meho_backplane.operations._handler_resolve import (
@@ -2281,10 +2285,9 @@ async def _build_proposed_effect(
             # #2331: promote a will-be-denied preflight to a named,
             # top-level warning on the envelope so the approval surface can
             # render a "this write may not land" banner without reaching
-            # into the ``permission_preflight`` sub-dict. Rides #2332's
-            # preview provenance surface (its natural carrier per the task):
-            # a warning, not a gate — refuse-to-park stays off by default,
-            # the approver may know the write policy is landing alongside.
+            # into the ``permission_preflight`` sub-dict. Since #3542 the
+            # park seams refuse such a park (``_preflight_denied_refusal``),
+            # so the warning only shows on rows parked before that change.
             if preflight.get("will_be_denied") is True:
                 base["write_capability_warning"] = "connector_identity_may_lack_write"
         # Stamp the reviewer-facing preview provenance onto every parked
@@ -2421,6 +2424,24 @@ async def _destructive_binding_refusal(
     return None
 
 
+def _preflight_denied_refusal(
+    *, op_id: str, proposed_effect: dict[str, Any] | None, duration_ms: float
+) -> OperationResult | None:
+    """Refuse a park whose permission preflight says the write will be denied (#3542).
+
+    Returns a ``denied`` / ``write_capability_denied`` result when
+    ``proposed_effect["permission_preflight"]["will_be_denied"]`` is
+    ``True``, else ``None``. A person must not spend an approval on a write
+    the identity cannot perform; the caller fixes the grant and retries.
+    A missing preflight (none registered, or a fail-soft probe fault) never
+    refuses.
+    """
+    preflight = (proposed_effect or {}).get("permission_preflight")
+    if not isinstance(preflight, dict) or preflight.get("will_be_denied") is not True:
+        return None
+    return result_write_capability_denied(op_id, preflight, duration_ms)
+
+
 async def _handle_needs_approval(
     *,
     op_id: str,
@@ -2439,6 +2460,10 @@ async def _handle_needs_approval(
     ``"needs_approval"``. Opens its own DB session (same pattern as
     :func:`audit_and_broadcast_safe`) so the pending row + request audit
     row commit atomically without coupling to any outer transaction.
+
+    When the op's park-time permission preflight says the write will be
+    denied, the park is refused with ``write_capability_denied`` and no row
+    is written (#3542, :func:`_preflight_denied_refusal`).
 
     For a ``destructive``-tier op (#3197) the park is gated first by
     :func:`_destructive_binding_refusal`: it refuses (fail-closed, no row
@@ -2507,6 +2532,14 @@ async def _handle_needs_approval(
         )
         if refusal is not None:
             return refusal
+
+    # #3542: a preflight that says the write will be denied refuses the
+    # park (no row written) instead of asking a person to approve it.
+    refusal = _preflight_denied_refusal(
+        op_id=op_id, proposed_effect=proposed_effect, duration_ms=duration_ms
+    )
+    if refusal is not None:
+        return refusal
 
     try:
         sessionmaker = get_sessionmaker()

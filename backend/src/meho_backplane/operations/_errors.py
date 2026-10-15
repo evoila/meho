@@ -22,7 +22,7 @@ Each builder owns one ``error_code`` from the contract documented in
 ``connector_http_403`` / ``connector_http_422`` /
 ``connector_auth_failed`` / ``connector_tls_verify_failed`` /
 ``connector_vault_forbidden`` / ``connector_probe_refused`` /
-``not_found`` / ``connector_timeout`` / ``connector_error``.
+``write_capability_denied`` / ``not_found`` / ``connector_timeout`` / ``connector_error``.
 The ``status`` field maps
 to ``OperationResult.status``; the ``error_code`` lives in ``extras``
 so callers can both string-match the ``error`` field
@@ -74,6 +74,7 @@ __all__ = [
     "result_target_required",
     "result_unknown_op",
     "result_unqualified_target_version",
+    "result_write_capability_denied",
     "status_code_for_result",
     "wrap_ok_result",
 ]
@@ -1925,6 +1926,57 @@ def result_connector_vault_write_forbidden(
             "doc_ref": f"{_VAULT_WRITE_POLICY_DOC}#6-kv-v2-write-surface",
             "exception_class": type(exc).__name__,
             "exception_message": msg,
+        },
+    )
+
+
+def result_write_capability_denied(
+    op_id: str, preflight: Mapping[str, Any], duration_ms: float
+) -> OperationResult:
+    """Park refused: the park-time permission check says the write will fail (#3542).
+
+    The op needs approval, and its park-time permission preflight
+    (``vault.kv.*`` writes probe ``sys/capabilities-self``) returned
+    ``will_be_denied: true``. Parking it would ask a person to approve a
+    write that the identity cannot perform, so MEHO refuses instead: no
+    approval row is written and the caller gets this result to fix the
+    write grant and call again. ``status`` is ``"denied"`` with a distinct
+    ``error_code``.
+
+    *preflight* is the secret-free preflight dict (capability names, path,
+    reason). Its ``granted`` / ``required`` / ``path`` / ``reason`` fields
+    ride in ``extras`` next to the ``doc_ref`` for the write policy. The
+    ``reason`` may hold a probe exception class or a target lookup problem,
+    so it goes through :func:`_sanitize_free_text`.
+    """
+    path = preflight.get("path")
+    granted = list(preflight.get("granted") or [])
+    required = list(preflight.get("required") or [])
+    reason = preflight.get("reason")
+    reason = _sanitize_free_text(str(reason)) if reason else None
+    detail = f" on {path!r}" if path else ""
+    if required:
+        detail += f" (needs {required}, has {granted})"
+    if reason:
+        detail += f" (check result: {reason})"
+    summary = (
+        f"write_capability_denied: the identity this write runs under cannot "
+        f"perform it{detail}. MEHO did not create an approval request, because "
+        f"the write would fail after approval. Add the write grant (see "
+        f"{_VAULT_WRITE_POLICY_DOC} section 6), then call the operation again."
+    )
+    return OperationResult(
+        status="denied",
+        op_id=op_id,
+        error=f"denied: {summary}",
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "write_capability_denied",
+            "path": path,
+            "granted": granted,
+            "required": required,
+            "reason": reason,
+            "doc_ref": f"{_VAULT_WRITE_POLICY_DOC}#6-kv-v2-write-surface",
         },
     )
 

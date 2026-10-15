@@ -559,6 +559,7 @@ async def enforce_subop_policy(
     from meho_backplane.operations.dispatcher import (
         _build_proposed_effect,
         _destructive_binding_refusal,
+        _preflight_denied_refusal,
     )
 
     started = time.monotonic()
@@ -664,6 +665,14 @@ async def enforce_subop_policy(
             )
             if refusal is not None:
                 return refusal
+
+        # #3542: same refusal as the dispatcher park — a sub-op whose
+        # permission preflight says the write will be denied does not park.
+        refusal = _preflight_denied_refusal(
+            op_id=op_id, proposed_effect=proposed_effect, duration_ms=duration_ms
+        )
+        if refusal is not None:
+            return refusal
 
         run_id = current_agent_run_id_var.get()
         sessionmaker = get_sessionmaker()

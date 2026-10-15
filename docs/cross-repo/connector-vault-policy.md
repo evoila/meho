@@ -406,10 +406,11 @@ dispatcher probes `POST sys/capabilities-self` on the path the op
 authorizes against (`secret/data/<path>` for `put`/`patch`,
 `secret/delete/<path>` for `delete` — evoila/meho#3274,
 `secret/metadata/<path>` for `metadata.delete` — evoila/meho#3424) and
-surfaces a `permission_preflight`
-banner on the approval row (`will_be_denied: true` when the token lacks
-the required capability), so an operator is **not** asked to approve a
-write that Vault will then reject
+stores the result as `permission_preflight` on the approval row. When the
+token lacks the required capability (`will_be_denied: true`), MEHO does not
+park the op at all: the caller gets `denied` / `write_capability_denied`
+(evoila/meho#3542), so an operator is **not** asked to approve a write
+that Vault will then reject
 ([`operations/dispatcher.py`](../../backend/src/meho_backplane/operations/dispatcher.py)
 `_handle_needs_approval` →
 [`connectors/vault/ops.py`](../../backend/src/meho_backplane/connectors/vault/ops.py)
@@ -450,10 +451,10 @@ Expected outcomes:
 - **`create` + `update` present** → the parked write will execute on
   approval; the approval row's `permission_preflight.will_be_denied` is
   `false`.
-- **Only `read` (or `deny`)** → the write will be denied. The approval
-  row shows `will_be_denied: true` with the lacking capabilities. Fix
-  §6.1 (add the write stanza) or §3 (identity-alias mismatch), not the
-  connector.
+- **Only `read` (or `deny`)** → the write will be denied. MEHO refuses to
+  park it and returns `write_capability_denied` with `granted` and
+  `required`. Fix §6.1 (add the write stanza) or §3 (identity-alias
+  mismatch), not the connector, then call the operation again.
 
 > **Reviewer-token caveat.** An *approved* re-dispatch executes under the
 > **reviewing** operator's token, not the original dispatcher's
@@ -489,16 +490,16 @@ discovers the missing write grant *after* an operator approves a parked
 write. Two product signals make that gap visible without reading Vault's
 logs:
 
-- **Park-time warning (before Approve).** The dispatcher runs the §6.2
-  `sys/capabilities-self` probe under the dispatching operator's token and,
-  when the token lacks `create`/`update`, stamps
-  `proposed_effect.write_capability_warning =
-  "connector_identity_may_lack_write"` on the approval row alongside the
-  `permission_preflight` banner (`will_be_denied: true` with the lacking
-  capabilities). This is a **warning, not a gate** — the park still
-  proceeds and the operator may approve anyway (e.g. the write policy is
-  landing in the same change). It surfaces the gap while a human is still
-  in the loop.
+- **Park-time refusal (before Approve).** The dispatcher runs the §6.2
+  `sys/capabilities-self` probe under the dispatching operator's token.
+  When the token lacks `create`/`update`, MEHO does **not** park the op
+  (evoila/meho#3542). The caller gets `status: denied` with
+  `error_code: "write_capability_denied"`, `path`, `granted`, `required`
+  and a `doc_ref` pointing back at this §6. No approval row is created, so
+  no person spends an approval on a write that cannot land. If the write
+  policy is landing in the same change, apply it first, then call the
+  operation again. (Before #3542 this was only a warning,
+  `write_capability_warning`, and the op parked anyway.)
 - **Post-approval structured error (after Approve).** If the write is
   approved and Vault still denies it, the op result is **not** a bare
   `permission denied` or the read-oriented `connector_vault_forbidden`; it

@@ -53,7 +53,9 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from meho_backplane.jsonflux.query.json_pointer import MAX_POINTER_LENGTH, parse_json_pointer
 
 __all__ = [
     "RESULT_TABLE",
@@ -203,6 +205,10 @@ class ResultQuerySpec(BaseModel):
     and the operator/aggregate allow-lists are enforced here, at construction;
     field-vs-schema validation needs the handle's columns and happens in
     :func:`compile_query`.
+
+    ``path`` is the other read: an RFC 6901 pointer into a document handle.
+    It is never compiled to SQL, so it cannot be combined with any
+    relational field (checked here, at construction).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -244,6 +250,40 @@ class ResultQuerySpec(BaseModel):
             "the ceiling (500); the result flags `truncated` when more rows existed."
         ),
     )
+    path: str | None = Field(
+        default=None,
+        max_length=MAX_POINTER_LENGTH,
+        description=(
+            "RFC 6901 JSON Pointer into a document handle (for example "
+            '`/status/conditions/0`; `""` is the whole document). Reads one '
+            "value; an array value pages with the call's `offset` / `limit`. "
+            "Cannot be combined with `filter`, `select`, `group_by`, "
+            "`aggregate`, `order_by`, or `limit`."
+        ),
+    )
+
+    @field_validator("path")
+    @classmethod
+    def _check_path_syntax(cls, v: str | None) -> str | None:
+        """Reject a malformed pointer at construction (RFC 6901 syntax only).
+
+        Array-index rules need the document, so they are checked when the
+        pointer is resolved.
+        """
+        if v is not None:
+            parse_json_pointer(v)
+        return v
+
+    @model_validator(mode="after")
+    def _path_excludes_relational_fields(self) -> ResultQuerySpec:
+        """A ``path`` read and a relational query are two different reads."""
+        if self.path is not None and (not self.is_empty() or self.limit is not None):
+            raise ValueError(
+                "`path` cannot be combined with `filter`, `select`, `group_by`, "
+                "`aggregate`, `order_by`, or `limit`. Send either a `path` or a "
+                "relational query."
+            )
+        return self
 
     def is_empty(self) -> bool:
         """True when no query dimension is set (a pure full read-back)."""
@@ -492,6 +532,10 @@ def compile_query(
     single ``SELECT`` over :data:`RESULT_TABLE` with no trailing statement
     separator.
     """
+    if spec.path is not None:
+        raise QueryContractError(
+            "a `path` read is not a relational query and cannot be compiled to SQL."
+        )
     known = set(columns)
     params: list[Any] = []
 

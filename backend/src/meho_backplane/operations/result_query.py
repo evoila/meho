@@ -56,6 +56,12 @@ from meho_backplane.jsonflux.query.contract import (
     compile_query,
 )
 from meho_backplane.jsonflux.query.engine import QueryEngine
+from meho_backplane.jsonflux.query.json_pointer import (
+    JsonPointerError,
+    json_type,
+    parse_json_pointer,
+    resolve_json_pointer,
+)
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -295,6 +301,9 @@ async def run_result_query(
     operator: Operator,
     handle_id: UUID,
     spec: ResultQuerySpec,
+    *,
+    offset: int = 0,
+    limit: int = 50,
 ) -> dict[str, Any]:
     """Run a bounded, validated structured query over a spilled handle (#3366).
 
@@ -315,9 +324,15 @@ async def run_result_query(
     (time budget exceeded), or :class:`ResultQueryOutputTooLargeError` (byte
     budget exceeded). Each transport maps these to its own recoverable-error
     shape.
+
+    A spec with ``path`` is a document read, not a query: it branches to
+    :func:`_read_document_path`, which uses *offset* / *limit* to page an
+    array value. *offset* / *limit* are ignored for a relational query.
     """
     if operator.tenant_id is None:
         raise ResultHandleNotFoundError(handle_id)
+    if spec.path is not None:
+        return await _read_document_path(operator, handle_id, spec.path, offset, limit)
 
     row_set = await get_result_handle_store().fetch_rows(
         tenant_id=operator.tenant_id,
@@ -370,3 +385,72 @@ async def run_result_query(
         "coverage": "partial" if partial else "complete",
         "coverage_note": coverage_note,
     }
+
+
+#: Remediation for an over-budget ``path`` read.
+_PATH_REMEDIATION = (
+    "Point `path` at a smaller part of the document, or page an array value with a smaller `limit`."
+)
+
+
+async def _read_document_path(
+    operator: Operator,
+    handle_id: UUID,
+    path: str,
+    offset: int,
+    limit: int,
+) -> dict[str, Any]:
+    """Resolve the RFC 6901 *path* against a document handle (#3633).
+
+    An array value pages: ``rows`` holds ``[offset : offset+limit]`` of its
+    items, a non-object item wrapped as ``{"value": item}`` (the same shape
+    the reducer gives a list of scalars). Any other value comes back whole
+    in ``value``. A pointer that does not resolve, or a rows-record handle,
+    is a :class:`QueryContractError`. The output byte budget is the same as
+    for paging and queries.
+    """
+    assert operator.tenant_id is not None  # checked by the caller (mypy narrowing)
+    try:
+        tokens = parse_json_pointer(path)
+    except JsonPointerError as exc:  # already checked by the spec; kept for direct callers
+        raise QueryContractError(str(exc)) from exc
+    stored = await get_result_handle_store().fetch_document(
+        tenant_id=operator.tenant_id,
+        operator_sub=operator.sub,
+        handle_id=handle_id,
+    )
+    if stored is None:
+        raise ResultHandleNotFoundError(handle_id)
+    try:
+        node = resolve_json_pointer(stored.document, tokens)
+    except JsonPointerError as exc:
+        raise QueryContractError(str(exc)) from exc
+
+    result: dict[str, Any] = {
+        "handle_id": str(handle_id),
+        "path": path,
+        "value_type": json_type(node),
+        "offset": offset,
+        "limit": limit,
+        "truncated": False,
+        "coverage": "complete",
+        "coverage_note": None,
+    }
+    if isinstance(node, list):
+        window = node[offset : offset + limit]
+        rows = [item if isinstance(item, dict) else {"value": item} for item in window]
+        result.update(
+            rows=rows, returned_rows=len(rows), total_rows=len(node), stored_rows=len(node)
+        )
+        budgeted: Any = rows
+    else:
+        result.update(rows=[], value=node, returned_rows=1, total_rows=1, stored_rows=1)
+        budgeted = node
+
+    max_bytes = get_settings().result_query_max_output_bytes
+    encoded = msgspec.json.encode(budgeted)
+    if len(encoded) > max_bytes:
+        raise ResultQueryOutputTooLargeError(
+            handle_id, len(encoded), max_bytes, remediation=_PATH_REMEDIATION
+        )
+    return result

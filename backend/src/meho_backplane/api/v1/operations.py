@@ -374,7 +374,9 @@ class ResultQueryBody(BaseModel):
             "server-side (filter / select / group_by / aggregate / order_by / "
             "limit) as one bounded read-only SELECT and `offset` / `limit` are "
             "ignored. Every referenced field must be a column on the handle; "
-            "there is no raw-SQL argument."
+            "there is no raw-SQL argument. For a document handle, send only "
+            "`path` (an RFC 6901 JSON Pointer); an array value then pages with "
+            "`offset` / `limit`."
         ),
     )
 
@@ -421,6 +423,11 @@ async def post_result_query(
                 "handle_id": str(body.handle_id),
             },
         ) from exc
+    except QueryContractError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": str(exc), "reason": "invalid_query"},
+        ) from exc
     except ResultQueryOutputTooLargeError as exc:
         raise HTTPException(
             status_code=422,
@@ -445,7 +452,9 @@ async def _run_result_query_body(
     """
     assert body.query is not None  # guarded by the caller's branch (mypy narrowing)
     try:
-        return await run_result_query(operator, body.handle_id, body.query)
+        return await run_result_query(
+            operator, body.handle_id, body.query, offset=body.offset, limit=body.limit
+        )
     except ResultHandleNotFoundError as exc:
         raise HTTPException(
             status_code=404,

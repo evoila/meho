@@ -31528,7 +31528,7 @@
           "query": {
             "$ref": "#/components/schemas/ResultQuerySpec",
             "nullable": true,
-            "description": "Optional structured query. When present, the handle is queried server-side (filter / select / group_by / aggregate / order_by / limit) as one bounded read-only SELECT and `offset` / `limit` are ignored. Every referenced field must be a column on the handle; there is no raw-SQL argument."
+            "description": "Optional structured query. When present, the handle is queried server-side (filter / select / group_by / aggregate / order_by / limit) as one bounded read-only SELECT and `offset` / `limit` are ignored. Every referenced field must be a column on the handle; there is no raw-SQL argument. For a document handle, send only `path` (an RFC 6901 JSON Pointer); an array value then pages with `offset` / `limit`."
           }
         },
         "additionalProperties": false,
@@ -31592,12 +31592,19 @@
             "nullable": true,
             "title": "Limit",
             "description": "Max output rows. Omitted or above the server ceiling clamps to the ceiling (500); the result flags `truncated` when more rows existed."
+          },
+          "path": {
+            "type": "string",
+            "maxLength": 1024,
+            "nullable": true,
+            "title": "Path",
+            "description": "RFC 6901 JSON Pointer into a document handle (for example `/status/conditions/0`; `\"\"` is the whole document). Reads one value; an array value pages with the call's `offset` / `limit`. Cannot be combined with `filter`, `select`, `group_by`, `aggregate`, `order_by`, or `limit`."
           }
         },
         "additionalProperties": false,
         "type": "object",
         "title": "ResultQuerySpec",
-        "description": "The structured, validated query arguments for a single handle.\n\nEvery field is optional: an empty spec compiles to ``SELECT * FROM\nresult LIMIT <max>`` \u2014 a full read-back capped at the output ceiling.\nThe list caps (``filter`` \u2264 10, ``aggregate`` \u2264 8, ``group_by`` \u2264 4,\n``order_by`` \u2264 4, ``select`` \u2264 64, and each ``IN`` value list \u2264 1000)\nand the operator/aggregate allow-lists are enforced here, at construction;\nfield-vs-schema validation needs the handle's columns and happens in\n:func:`compile_query`."
+        "description": "The structured, validated query arguments for a single handle.\n\nEvery field is optional: an empty spec compiles to ``SELECT * FROM\nresult LIMIT <max>`` \u2014 a full read-back capped at the output ceiling.\nThe list caps (``filter`` \u2264 10, ``aggregate`` \u2264 8, ``group_by`` \u2264 4,\n``order_by`` \u2264 4, ``select`` \u2264 64, and each ``IN`` value list \u2264 1000)\nand the operator/aggregate allow-lists are enforced here, at construction;\nfield-vs-schema validation needs the handle's columns and happens in\n:func:`compile_query`.\n\n``path`` is the other read: an RFC 6901 pointer into a document handle.\nIt is never compiled to SQL, so it cannot be combined with any\nrelational field (checked here, at construction)."
       },
       "RetireChecklistReport": {
         "properties": {

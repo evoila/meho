@@ -430,18 +430,17 @@ async def test_reduce_without_ordering_hint_keeps_oldest_first_sample() -> None:
     ]
 
 
-async def test_reduce_leaves_string_shaped_payload_untouched() -> None:
-    """A string-shaped op output (e.g. ``k8s.exec``) is not reduced.
+async def test_reduce_keeps_oversized_string_shaped_payload_as_document() -> None:
+    """An oversized string-shaped op output becomes a document handle (#3633).
 
-    Regression guard (#1479 AC4): ``k8s.exec`` returns
-    ``{stdout: str, stderr: str, exit_code, ...}`` — no list-shaped
-    collection — so ``_detect_collection`` finds nothing and the reducer
-    passes the payload through verbatim with ``handle is None``. The tail-
-    ordering work must not start reducing string-shaped streams (whose
-    per-stream byte cap is a separate concern enforced in the handler).
+    ``k8s.exec`` returns ``{stdout: str, stderr: str, exit_code, ...}`` — no
+    list-shaped collection. Before #3633 a 200 KB ``stdout`` shipped inline
+    with ``handle is None``. Now the whole payload is kept as a document
+    record: the small scalars stay inline, the big string is named in the
+    outline and read back with ``query={"path": "/stdout"}``. It is still
+    never treated as a list (no ``source_key``, no row sample).
     """
     reducer = JsonFluxReducer(row_threshold=0)  # force-reduce any collection
-    # A huge stdout string must still pass through: it is not a list.
     payload = {
         "stdout": "x" * 200_000,
         "stderr": "",
@@ -452,8 +451,27 @@ async def test_reduce_leaves_string_shaped_payload_untouched() -> None:
 
     reduced, handle = await reducer.reduce(payload, None, {"op_id": "k8s.exec"})
 
-    assert handle is None, "string-shaped exec output must not materialize a handle"
-    assert reduced is payload, "pass-through must return the exact input payload object"
+    assert handle is not None
+    assert handle.sample_rows is None
+    assert "source_key" not in reduced
+    assert reduced["result_record"] == "document"
+    assert reduced["exit_code"] == 0
+    assert reduced["timed_out"] is False
+    assert reduced["stderr"] == ""
+    assert "stdout" not in reduced, "the 200 KB string must not ride inline"
+    assert reduced["omitted_scalar_count"] == 1
+    assert reduced["top_level_fields"]["stdout"] == "string (200000 chars)"
+
+
+async def test_reduce_leaves_small_string_shaped_payload_untouched() -> None:
+    """A string-shaped payload under the byte threshold still passes through."""
+    reducer = JsonFluxReducer(row_threshold=0)
+    payload = {"stdout": "ok", "stderr": "", "exit_code": 0}
+
+    reduced, handle = await reducer.reduce(payload, None, {"op_id": "k8s.exec"})
+
+    assert handle is None
+    assert reduced is payload
 
 
 # ---------------------------------------------------------------------------
@@ -519,12 +537,12 @@ async def test_reduce_preserves_hinted_scalars_alongside_reduction() -> None:
     assert reduced["sample_rows_returned"] == len(handle.sample_rows or ())
 
 
-async def test_reduce_without_scalar_hint_keeps_bookkeeping_only_summary() -> None:
-    """No hint → the summary shape is exactly the pre-#3084 bookkeeping.
+async def test_reduce_without_scalar_hint_keeps_scalar_siblings_by_default() -> None:
+    """No hint → the payload's scalar siblings still ride the summary (#3633).
 
-    Backwards-compat guard: scalar preservation is opt-in per op. An op
-    that never declared ``result_scalars`` must not suddenly grow vendor
-    fields on its reduced summary.
+    The default scalar-sibling rule (#3549): a non-credential op that never
+    declared ``result_scalars`` keeps its top-level scalars next to the
+    reduction bookkeeping. The collection itself is not copied.
     """
     reducer = JsonFluxReducer(sample_size=5)
     payload = _validation_payload(60)
@@ -538,7 +556,12 @@ async def test_reduce_without_scalar_hint_keeps_bookkeeping_only_summary() -> No
         "sample_rows_returned",
         "sample_bytes",
         "source_key",
+        "id",
+        "description",
+        "executionStatus",
+        "resultStatus",
     }
+    assert "validationChecks" not in reduced
 
 
 async def test_reduce_scalar_hint_skips_reserved_non_scalar_and_absent_keys() -> None:
@@ -589,7 +612,8 @@ async def test_reduce_scalar_hint_malformed_is_ignored() -> None:
 
     Matches the never-raise discipline of the sibling ``pagination_hint`` /
     ``result_ordering`` paths: a connector author shipping a broken hint
-    must not break the operator's read at runtime.
+    must not break the operator's read at runtime. A credential-class op is
+    used so the default scalar rule (#3633) cannot add keys of its own.
     """
     reducer = JsonFluxReducer(sample_size=5)
     bookkeeping_keys = {"row_count", "total", "sample_rows_returned", "sample_bytes", "source_key"}
@@ -601,7 +625,7 @@ async def test_reduce_scalar_hint_malformed_is_ignored() -> None:
         {},  # no keys slot at all
     ):
         payload = _validation_payload(60)
-        context: dict[str, Any] = {"op_id": "x", "result_scalars": bad_hint}
+        context: dict[str, Any] = {"op_id": "vault.kv.list", "result_scalars": bad_hint}
         reduced, handle = await reducer.reduce(payload, None, context)
         assert handle is not None
         assert set(reduced) == bookkeeping_keys, f"hint {bad_hint!r} must be ignored wholesale"
@@ -2145,42 +2169,46 @@ def _large_application_pod(now: datetime) -> Any:
     )
 
 
-async def test_pod_info_above_threshold_keeps_container_statuses_inline() -> None:
-    """#2113 acceptance 1+2: a big pod's ``container_statuses`` survives reduce.
+async def test_pod_info_above_threshold_is_kept_whole_as_a_document() -> None:
+    """#2113 + #3633: a big pod is never cut down to one sub-array.
 
     A populated application pod (case B) projected via ``pod_info`` clears
-    the 4 KB byte threshold, so the pre-fix reducer collapsed it to
-    ``source_key="conditions"`` and dropped everything else. The fix
-    exempts the dict-of-arrays detail object from list reduction, so the
-    full flat object ships inline with no handle and every sibling array
-    is retrievable.
+    the 4 KB byte threshold. Before #2113 the reducer collapsed it to
+    ``source_key="conditions"`` and dropped everything else; #2113 passed it
+    through whole. Since #3633 the whole object is kept as a document record:
+    the inline summary names every top-level field, and every sibling array
+    (``container_statuses`` included) is read back intact with a ``path``.
     """
     from meho_backplane.connectors.kubernetes.ops_workload import pod_info
+    from meho_backplane.jsonflux.query.json_pointer import (
+        parse_json_pointer,
+        resolve_json_pointer,
+    )
 
     now = datetime(2026, 7, 6, 12, 0, 0, tzinfo=UTC)
     projection = pod_info(_large_application_pod(now), now=now)
-    # Guard the premise: this projection really is over the byte threshold,
-    # so we are exercising the reducing path, not the trivial small-pod one.
-    reducer = JsonFluxReducer()
+    store = ResultHandleStore(_ResultStoreRedis())  # type: ignore[arg-type]
+    reducer = JsonFluxReducer(store=store)
     assert len(_serialize(projection)) > reducer._byte_threshold, (
         "test premise: the application-pod projection must exceed the byte "
         "threshold, otherwise it never reaches the reduction boundary"
     )
+    tenant_id = uuid.UUID("00000000-0000-0000-0000-00000000a0a0")
+    context = {"op_id": "k8s.pod.info", "operator_sub": "op-a", "tenant_id": str(tenant_id)}
 
-    reduced, handle = await reducer.reduce(projection, None)
+    reduced, handle = await reducer.reduce(projection, None, context)
 
-    # The detail object passes through verbatim — no handle, no collapse.
-    assert handle is None, "a single-object detail op must not mint a list handle"
-    assert reduced is projection
-    assert "source_key" not in reduced, (
-        "the reduced response must NOT collapse to a single sub-array's "
-        "source_key (was 'conditions' pre-#2113)"
-    )
-    # Every sibling array pod_info() projects is intact.
+    assert handle is not None
+    assert handle.fetch_more is not None
+    assert handle.fetch_more.drill_in.available is True
+    assert "source_key" not in reduced, "must NOT collapse to one sub-array (#2113)"
     for key in ("containers", "container_statuses", "volumes", "node", "qos_class"):
-        assert key in reduced, f"sibling field {key!r} was silently discarded"
-    # container_statuses carries the per-container name/image/ready/restart/state.
-    cs = reduced["container_statuses"][0]
+        assert key in reduced["top_level_fields"], f"field {key!r} missing from the outline"
+    stored = await store.fetch_document(
+        tenant_id=tenant_id, operator_sub="op-a", handle_id=handle.handle_id
+    )
+    assert stored is not None
+    cs = resolve_json_pointer(stored.document, parse_json_pointer("/container_statuses/0"))
     assert cs["name"] == "payments-api"
     assert cs["image"] == "registry/payments-api:2.3.1"
     assert cs["ready"] is True
@@ -2701,3 +2729,161 @@ async def test_registered_descriptor_forwards_tls_identity_to_reducer(
     }
     assert result.result["handshake"] is True
     assert store.spills[0]["rows"][0]["pem"] == "L" * 3000
+
+
+# ---------------------------------------------------------------------------
+# Default scalar-sibling rule (#3633 / #3549)
+# ---------------------------------------------------------------------------
+
+
+def _script_run_payload(lines: int = 75) -> dict[str, Any]:
+    """A ``linux.script.run``-shaped payload: a line list plus scalar siblings."""
+    stdout = [f"line {i}" for i in range(lines)]
+    return {
+        "stdout": stdout,
+        "total": len(stdout),
+        "stderr": "warning: something minor\n",
+        "exit_code": 1,
+        "interpreter": "/bin/bash",
+        "used_sudo": False,
+    }
+
+
+_SCRIPT_SIBLINGS = {
+    "exit_code": 1,
+    "stderr": "warning: something minor\n",
+    "interpreter": "/bin/bash",
+    "used_sudo": False,
+}
+
+
+async def test_default_rule_keeps_scalar_siblings_without_a_hint() -> None:
+    """#3549: an over-threshold list + scalars keeps the scalars, no hint needed."""
+    reducer = JsonFluxReducer(sample_size=5)
+
+    reduced, handle = await reducer.reduce(_script_run_payload(), None, {"op_id": "example.run"})
+
+    assert handle is not None
+    assert reduced["source_key"] == "stdout"
+    assert "stdout" not in reduced
+    for key, value in _SCRIPT_SIBLINGS.items():
+        assert reduced[key] == value, f"scalar sibling {key!r} was dropped"
+    # ``total`` is reducer bookkeeping and keeps the reducer's value.
+    assert reduced["total"] == 75
+    assert "omitted_scalar_count" not in reduced
+
+
+@pytest.mark.parametrize("op_id", ["vault.kv.list", "vault.token.create", "linux.script.run"])
+async def test_default_rule_skips_credential_class_ops(op_id: str) -> None:
+    """A credential-class op gets no default copy; it keeps the explicit opt-in."""
+    reducer = JsonFluxReducer(sample_size=5)
+
+    reduced, handle = await reducer.reduce(_script_run_payload(), None, {"op_id": op_id})
+
+    assert handle is not None
+    assert set(reduced) == {
+        "row_count",
+        "total",
+        "sample_rows_returned",
+        "sample_bytes",
+        "source_key",
+    }
+
+
+async def test_default_rule_needs_an_op_id() -> None:
+    """A reduce without an ``op_id`` cannot be classified, so it fails closed."""
+    reducer = JsonFluxReducer(sample_size=5)
+
+    reduced, _handle = await reducer.reduce(_script_run_payload(), None, None)
+
+    assert "exit_code" not in reduced
+
+
+async def test_linux_script_run_keeps_exit_code_through_its_hint() -> None:
+    """#3549 acceptance: ``linux.script.run`` keeps its success signal on spill.
+
+    The op is credential-class (its params may carry secrets), so it uses
+    the explicit ``result_scalars`` hint it registers, read here from the
+    real op definition the dispatcher threads into the context.
+    """
+    from meho_backplane.connectors.linux.ops_write import _SCRIPT_RUN_OP
+
+    instructions = _SCRIPT_RUN_OP.llm_instructions
+    assert isinstance(instructions, dict)
+    context = {"op_id": "linux.script.run", "result_scalars": instructions["result_scalars"]}
+    reducer = JsonFluxReducer(sample_size=5)
+
+    reduced, handle = await reducer.reduce(_script_run_payload(), None, context)
+
+    assert handle is not None
+    for key, value in _SCRIPT_SIBLINGS.items():
+        assert reduced[key] == value, f"scalar sibling {key!r} was dropped"
+
+
+async def test_default_rule_is_bounded() -> None:
+    """The default copy stops at its key and byte budgets and counts the rest."""
+    payload: dict[str, Any] = {"items": [{"i": i} for i in range(60)]}
+    payload["big"] = "y" * 20_000
+    for i in range(40):
+        payload[f"k{i:02d}"] = i
+    reducer = JsonFluxReducer(sample_size=5)
+
+    reduced, handle = await reducer.reduce(payload, None, {"op_id": "example.list"})
+
+    assert handle is not None
+    assert "big" not in reduced
+    kept = [key for key in reduced if key.startswith("k")]
+    assert len(kept) == reducer_module._DEFAULT_SCALAR_MAX_KEYS
+    assert reduced["omitted_scalar_count"] == 1 + 40 - len(kept)
+    scalars = {key: reduced[key] for key in kept}
+    assert len(_serialize(scalars)) <= reducer_module._DEFAULT_SCALAR_BYTE_BUDGET
+
+
+async def test_default_rule_never_copies_object_or_list_siblings() -> None:
+    """Objects stay behind the bounded ``result_objects`` opt-in (#3592)."""
+    payload = {
+        "items": [{"i": i} for i in range(60)],
+        "leaf": {"subject": "CN=x", "pem": "-----BEGIN CERTIFICATE-----"},
+        "tags": ["a", "b"],
+        "name": "inventory",
+    }
+    reducer = JsonFluxReducer(sample_size=5)
+
+    reduced, _handle = await reducer.reduce(payload, None, {"op_id": "example.list"})
+
+    assert reduced["name"] == "inventory"
+    assert "leaf" not in reduced
+    assert "tags" not in reduced
+
+
+def test_object_seam_constants_are_unchanged() -> None:
+    """#3592: the object seam's bounds are not widened by the scalar rule."""
+    assert reducer_module._MAX_RESULT_OBJECTS == 8
+    assert reducer_module._MAX_RESULT_OBJECT_FIELDS == 8
+    assert reducer_module._RESULT_OBJECT_BYTE_BUDGET == 4096
+
+
+async def test_default_rule_does_not_apply_to_a_bare_list() -> None:
+    """A bare top-level list has no siblings; the summary is bookkeeping only."""
+    reducer = JsonFluxReducer(sample_size=5)
+
+    reduced, _handle = await reducer.reduce(
+        [{"i": i} for i in range(60)], None, {"op_id": "x.list"}
+    )
+
+    assert set(reduced) == {"row_count", "total", "sample_rows_returned", "sample_bytes"}
+
+
+async def test_hinted_scalars_are_kept_on_top_of_the_default_copy() -> None:
+    """A hint keeps its keys outside the default budget; the rest still apply."""
+    payload: dict[str, Any] = {"items": [{"i": i} for i in range(60)]}
+    payload["report"] = "r" * 20_000  # over the default budget on its own
+    payload["state"] = "done"
+    context = {"op_id": "example.list", "result_scalars": {"keys": ["report"]}}
+    reducer = JsonFluxReducer(sample_size=5)
+
+    reduced, _handle = await reducer.reduce(payload, None, context)
+
+    assert reduced["report"] == payload["report"]
+    assert reduced["state"] == "done"
+    assert "omitted_scalar_count" not in reduced

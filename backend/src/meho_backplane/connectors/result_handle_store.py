@@ -30,8 +30,14 @@ Key shape + isolation
 ::
 
     KEY:   meho:reshandle:{tenant_id}:{handle_id}
-    VALUE: JSON {operator_sub, op_id, rows, total_rows, stored_rows, created_at}
+    VALUE: JSON {operator_sub, op_id, rows, total_rows, stored_rows, created_at,
+                 ..., record_kind, document}
     TTL:   the handle's ttl_seconds (server-enforced)
+
+``record_kind`` is ``"rows"`` (a reduced collection, paged and queried) or
+``"document"`` (one whole payload with no single collection, read with a
+JSON Pointer ``path``, #3633). Records written before the field existed
+decode as ``"rows"``.
 
 JSON (not msgpack) so the value is ``str``-compatible with the shared
 broadcast client's ``decode_responses=True`` posture; the rows are
@@ -74,10 +80,13 @@ import msgspec
 import redis.asyncio as redis
 import structlog
 
+from meho_backplane.jsonflux.query.contract import QueryContractError
 from meho_backplane.settings import get_settings
 
 __all__ = [
     "ResultHandleStore",
+    "ResultRecordKindError",
+    "SpilledDocument",
     "SpilledRowSet",
     "SpilledWindow",
     "get_result_handle_store",
@@ -89,6 +98,12 @@ _log = structlog.get_logger(__name__)
 #: Key namespace for spilled result-handle rows. Distinct from the
 #: broadcast stream keys so the two never collide on a shared Valkey.
 _KEY_PREFIX = "meho:reshandle"
+
+#: The two record kinds a handle key can hold. A rows record keeps a reduced
+#: collection (paged and queried); a document record keeps one whole payload
+#: that has no single collection (read with a JSON Pointer ``path``).
+_ROWS_RECORD = "rows"
+_DOCUMENT_RECORD = "document"
 
 
 def _key(tenant_id: UUID, handle_id: UUID) -> str:
@@ -141,8 +156,45 @@ class SpilledRowSet(msgspec.Struct, frozen=True):
     stored_rows: int
 
 
+class SpilledDocument(msgspec.Struct, frozen=True):
+    """The whole retained document served by :meth:`ResultHandleStore.fetch_document`.
+
+    A document record holds one payload that had no single paginable
+    collection (a detail object with several lists, a dict of scalars, or a
+    scalar root). It is stored whole or not at all, so there is no partial
+    coverage to report.
+    """
+
+    document: Any
+
+
+class ResultRecordKindError(QueryContractError):
+    """The handle holds the other record kind than the read asked for.
+
+    A ``path`` read needs a document record; paging and relational queries
+    need a rows record. Recoverable: the message names the read that works.
+    """
+
+    def __init__(self, handle_id: UUID, record_kind: str) -> None:
+        self.handle_id = handle_id
+        self.record_kind = record_kind
+        if record_kind == _DOCUMENT_RECORD:
+            hint = (
+                "it holds one document, not rows. Read it with "
+                '`query={"path": "<JSON Pointer>"}`, for example `"/name"`.'
+            )
+        else:
+            hint = "it holds rows, not a document. Page it with `offset` / `limit` or query it."
+        super().__init__(f"handle {handle_id} cannot be read this way: {hint}")
+
+
 class _StoredPayload(msgspec.Struct):
-    """Wire shape persisted under a spilled-handle key."""
+    """Wire shape persisted under a spilled-handle key.
+
+    ``record_kind`` and ``document`` are additive: a record written before
+    they existed decodes as a rows record with no document, because msgspec
+    fills missing fields from their defaults.
+    """
 
     operator_sub: str
     op_id: str | None
@@ -154,6 +206,8 @@ class _StoredPayload(msgspec.Struct):
     storage_coverage: str = "unknown"
     source_coverage: str = "unknown"
     metadata: dict[str, Any] = msgspec.field(default_factory=dict)
+    record_kind: str = _ROWS_RECORD
+    document: Any = None
 
 
 class ResultHandleStore:
@@ -268,27 +322,87 @@ class ResultHandleStore:
         )
         return len(selected)
 
-    async def fetch_window(
+    async def spill_document(
         self,
         *,
         tenant_id: UUID,
         operator_sub: str,
         handle_id: UUID,
-        offset: int,
-        limit: int,
-    ) -> SpilledWindow | None:
-        """Return the ``[offset : offset+limit]`` slice of a spilled handle.
+        op_id: str | None,
+        document: Any,
+        ttl_seconds: int,
+        max_record_bytes: int | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        """Persist *document* whole under the handle key, as a document record.
 
-        Returns ``None`` when the handle is unknown, expired, belongs to
-        a different operator, or the store is unreachable — the four
-        cases the MCP tool surfaces to the agent as the same typed
-        "handle not found or expired" miss (cross-operator access is
-        deliberately indistinguishable from "not found" so the store
-        leaks no existence signal across the operator boundary).
+        Returns ``True`` when the record was written. Returns ``False`` when
+        the encoded record is over the per-record byte cap (a document is
+        never cut, so it is kept whole or not at all), the TTL is not
+        positive, or the store failed. Fail-open like :meth:`spill`.
+        """
+        if ttl_seconds <= 0:
+            return False
+        if max_record_bytes is None:
+            max_record_bytes = get_settings().result_handle_max_record_bytes
+        record = _StoredPayload(
+            operator_sub=operator_sub,
+            op_id=op_id,
+            rows=[],
+            total_rows=0,
+            stored_rows=0,
+            created_at=datetime.now(UTC).isoformat(),
+            storage_coverage="complete",
+            source_coverage="complete",
+            metadata=metadata or {},
+            record_kind=_DOCUMENT_RECORD,
+            document=document,
+        )
+        try:
+            encoded = msgspec.json.encode(record)
+            if len(encoded) > max_record_bytes:
+                _log.warning(
+                    "result_handle_document_over_record_cap",
+                    handle_id=str(handle_id),
+                    tenant_id=str(tenant_id),
+                    op_id=op_id,
+                    record_bytes=len(encoded),
+                    max_record_bytes=max_record_bytes,
+                )
+                return False
+            await self._client.set(_key(tenant_id, handle_id), encoded, ex=ttl_seconds)
+        except (redis.RedisError, msgspec.EncodeError, TypeError, OSError) as exc:
+            _log.warning(
+                "result_handle_spill_failed",
+                handle_id=str(handle_id),
+                tenant_id=str(tenant_id),
+                op_id=op_id,
+                error=str(exc),
+            )
+            return False
+        _log.info(
+            "result_handle_document_spilled",
+            handle_id=str(handle_id),
+            tenant_id=str(tenant_id),
+            op_id=op_id,
+            record_bytes=len(encoded),
+            ttl_seconds=ttl_seconds,
+        )
+        return True
 
-        ``offset`` past ``stored_rows`` yields an empty ``rows`` list with
-        the metadata still populated, so a paging caller learns it has
-        reached the end without a separate count call.
+    async def _load(
+        self,
+        *,
+        tenant_id: UUID,
+        operator_sub: str,
+        handle_id: UUID,
+    ) -> _StoredPayload | None:
+        """Read and decode the record for *handle_id*, or ``None`` on a miss.
+
+        A miss covers an unknown or expired key, another operator's record,
+        an unreachable store, and an undecodable value. They are deliberately
+        the same answer so the store leaks no existence signal across the
+        operator boundary (the #304 isolation contract).
         """
         try:
             raw = await self._client.get(_key(tenant_id, handle_id))
@@ -313,9 +427,41 @@ class ResultHandleStore:
             )
             return None
         if payload.operator_sub != operator_sub:
-            # Cross-operator access within the same tenant: a miss, not
-            # another operator's rows. Mirrors #304's isolation contract.
             return None
+        return payload
+
+    async def fetch_window(
+        self,
+        *,
+        tenant_id: UUID,
+        operator_sub: str,
+        handle_id: UUID,
+        offset: int,
+        limit: int,
+    ) -> SpilledWindow | None:
+        """Return the ``[offset : offset+limit]`` slice of a spilled handle.
+
+        Returns ``None`` when the handle is unknown, expired, belongs to
+        a different operator, or the store is unreachable — the four
+        cases the MCP tool surfaces to the agent as the same typed
+        "handle not found or expired" miss (cross-operator access is
+        deliberately indistinguishable from "not found" so the store
+        leaks no existence signal across the operator boundary).
+
+        ``offset`` past ``stored_rows`` yields an empty ``rows`` list with
+        the metadata still populated, so a paging caller learns it has
+        reached the end without a separate count call.
+
+        Raises :class:`ResultRecordKindError` when the handle holds a
+        document record, which has no rows to page.
+        """
+        payload = await self._load(
+            tenant_id=tenant_id, operator_sub=operator_sub, handle_id=handle_id
+        )
+        if payload is None:
+            return None
+        if payload.record_kind == _DOCUMENT_RECORD:
+            raise ResultRecordKindError(handle_id, _DOCUMENT_RECORD)
         start = max(offset, 0)
         window = payload.rows[start : start + limit] if limit > 0 else []
         return SpilledWindow(
@@ -347,38 +493,44 @@ class ResultHandleStore:
         unreachable store all return ``None`` — the four cases the read tools
         surface as one typed "handle not found or expired", leaking no
         existence signal across the operator boundary.
+
+        Raises :class:`ResultRecordKindError` when the handle holds a
+        document record: a relational query needs rows.
         """
-        try:
-            raw = await self._client.get(_key(tenant_id, handle_id))
-        except (redis.RedisError, OSError) as exc:
-            _log.warning(
-                "result_handle_fetch_failed",
-                handle_id=str(handle_id),
-                tenant_id=str(tenant_id),
-                error=str(exc),
-            )
+        payload = await self._load(
+            tenant_id=tenant_id, operator_sub=operator_sub, handle_id=handle_id
+        )
+        if payload is None:
             return None
-        if raw is None:
-            return None
-        try:
-            payload = msgspec.json.decode(_to_bytes(raw), type=_StoredPayload)
-        except (msgspec.DecodeError, msgspec.ValidationError) as exc:
-            _log.warning(
-                "result_handle_decode_failed",
-                handle_id=str(handle_id),
-                tenant_id=str(tenant_id),
-                error=str(exc),
-            )
-            return None
-        if payload.operator_sub != operator_sub:
-            # Cross-operator access within the same tenant: a miss, not
-            # another operator's rows. Mirrors #304's isolation contract.
-            return None
+        if payload.record_kind == _DOCUMENT_RECORD:
+            raise ResultRecordKindError(handle_id, _DOCUMENT_RECORD)
         return SpilledRowSet(
             rows=payload.rows,
             total_rows=payload.total_rows,
             stored_rows=payload.stored_rows,
         )
+
+    async def fetch_document(
+        self,
+        *,
+        tenant_id: UUID,
+        operator_sub: str,
+        handle_id: UUID,
+    ) -> SpilledDocument | None:
+        """Return the retained document of a document-record handle.
+
+        Same isolation and ``None``-on-miss rules as :meth:`fetch_rows`.
+        Raises :class:`ResultRecordKindError` when the handle holds a rows
+        record: a ``path`` read needs a document.
+        """
+        payload = await self._load(
+            tenant_id=tenant_id, operator_sub=operator_sub, handle_id=handle_id
+        )
+        if payload is None:
+            return None
+        if payload.record_kind != _DOCUMENT_RECORD:
+            raise ResultRecordKindError(handle_id, _ROWS_RECORD)
+        return SpilledDocument(document=payload.document)
 
 
 #: Process-wide singleton. Lazily built from the broadcast Valkey client

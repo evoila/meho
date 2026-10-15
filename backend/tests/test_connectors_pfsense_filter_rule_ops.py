@@ -33,6 +33,13 @@ from sqlalchemy import func, select
 import meho_backplane.connectors.pfsense  # noqa: F401 -- import for registry side-effects
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.pfsense import PFSENSE_OPS, PfSenseConnector
+from meho_backplane.connectors.pfsense.ops_delete import (
+    pfsense_alias_delete,
+    pfsense_alias_member_remove,
+    pfsense_gateway_delete,
+    pfsense_nat_delete,
+    pfsense_route_static_delete,
+)
 from meho_backplane.connectors.pfsense.ops_filter_rule import (
     _build_rule_add_playback,
     _build_rule_delete_playback,
@@ -41,6 +48,12 @@ from meho_backplane.connectors.pfsense.ops_filter_rule import (
     parse_filter_rules_xml,
     parse_ssh_connection,
     rule_matches_mgmt_flow,
+)
+from meho_backplane.connectors.pfsense.ops_read import parse_gateways_xml
+from meho_backplane.connectors.pfsense.ops_write import (
+    pfsense_gateway_add,
+    pfsense_route_static_add,
+    serialized_config_write,
 )
 from meho_backplane.connectors.registry import all_connectors_v2, register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
@@ -630,7 +643,7 @@ class _FakePfSense:
 
     def __init__(self, config: str, inserts: dict[str, str]) -> None:
         self.config = config
-        self.inserts = inserts  # playback script name -> rule XML the fragment adds
+        self.inserts = inserts  # playback script name -> item XML the fragment adds
         self.in_flight = 0
         self.max_in_flight = 0
 
@@ -647,14 +660,16 @@ class _FakePfSense:
             loaded = self.config  # the fragment's $config, loaded when it starts
             for _ in range(3):
                 await asyncio.sleep(0)  # the other op's reads and writes land here
-            rule = self.inserts[command.removeprefix("pfSsh.php playback ")]
-            if (
-                f"<tracker>{rule.split('</tracker>')[0].split('<tracker>')[1]}</tracker>"
-                not in loaded
-            ):
-                self.config = loaded.replace("<filter>", f"<filter>{rule}", 1)
+            item = self.inserts[command.removeprefix("pfSsh.php playback ")]
+            if item not in loaded:
+                section = _SECTION_BY_ITEM_TAG[item[1 : item.index(">")]]
+                self.config = loaded.replace(f"<{section}>", f"<{section}>{item}", 1)
             self.in_flight -= 1
         return _proc("")
+
+
+# The config.xml section each kind of item lands in.
+_SECTION_BY_ITEM_TAG = {"rule": "filter", "gateway_item": "gateways"}
 
 
 _RID_A, _RID_B = "100000011", "100000012"
@@ -738,6 +753,75 @@ def test_write_lock_is_per_appliance_host() -> None:
     b = SimpleNamespace(name="b", host="other.example.invalid")
     assert connector.config_write_lock(a1) is connector.config_write_lock(a2)
     assert connector.config_write_lock(a1) is not connector.config_write_lock(b)
+
+
+_GATEWAY_NAME = "LAB_GW"
+_GATEWAY_ITEM = (
+    f"<gateway_item><interface>lan</interface><gateway>10.0.0.254</gateway>"
+    f"<name>{_GATEWAY_NAME}</name><weight>1</weight><ipprotocol>inet</ipprotocol>"
+    f"<descr>meho: gateway {_GATEWAY_NAME}</descr></gateway_item>"
+)
+_GATEWAY_PARAMS = {"name": _GATEWAY_NAME, "interface": "lan", "gateway": "10.0.0.254"}
+_BEFORE_WITH_GATEWAYS = _BEFORE.replace("<filter>", "<gateways></gateways><filter>", 1)
+_MIXED_INSERTS = {**_INSERTS, f"meho_gateway_add_{_GATEWAY_NAME}": _GATEWAY_ITEM}
+
+
+async def test_filter_rule_add_and_gateway_add_on_one_appliance_serialize() -> None:
+    """An older write op started during a rule add must not undo the rule, or vice versa."""
+    fake = _FakePfSense(_BEFORE_WITH_GATEWAYS, _MIXED_INSERTS)
+    connector = PfSenseConnector()
+    target = SimpleNamespace(name="pf-a", host="pf.example.invalid")
+    with patch.object(connector, "_run_command", side_effect=fake.run):
+        rule, gateway = await asyncio.gather(
+            connector.filter_rule_add(target, _add_params(_RID_A, "10.5.0.0/24")),
+            connector.gateway_add(target, dict(_GATEWAY_PARAMS)),
+        )
+    assert rule["status"] == "added"
+    assert gateway["applied"] is True
+    assert fake.max_in_flight == 1
+    assert len(parse_filter_rules_xml(fake.config)) == 2
+    assert [g["name"] for g in parse_gateways_xml(fake.config)] == [_GATEWAY_NAME]
+
+
+async def test_filter_rule_add_and_gateway_add_without_the_lock_lose_a_change() -> None:
+    """Control: the two unlocked handlers really overwrite each other on the fake."""
+    from meho_backplane.connectors.pfsense.ops_filter_rule import pfsense_filter_rule_add
+
+    unlocked_rule_add = pfsense_filter_rule_add.__wrapped__  # type: ignore[attr-defined]
+    unlocked_gateway_add = pfsense_gateway_add.__wrapped__  # type: ignore[attr-defined]
+    fake = _FakePfSense(_BEFORE_WITH_GATEWAYS, _MIXED_INSERTS)
+    connector = PfSenseConnector()
+    target = SimpleNamespace(name="pf-a", host="pf.example.invalid")
+    with patch.object(connector, "_run_command", side_effect=fake.run):
+        results = await asyncio.gather(
+            unlocked_rule_add(connector, target, _add_params(_RID_A, "10.5.0.0/24")),
+            unlocked_gateway_add(connector, target, dict(_GATEWAY_PARAMS)),
+            return_exceptions=True,
+        )
+    assert fake.max_in_flight == 2
+    assert any(isinstance(r, RuntimeError) for r in results)
+    rules, gateways = parse_filter_rules_xml(fake.config), parse_gateways_xml(fake.config)
+    assert (len(rules), len(gateways)) in {(1, 1), (2, 0)}
+
+
+@pytest.mark.parametrize(
+    "handler",
+    [
+        pfsense_gateway_add,
+        pfsense_route_static_add,
+        pfsense_nat_delete,
+        pfsense_alias_delete,
+        pfsense_route_static_delete,
+        pfsense_gateway_delete,
+        pfsense_alias_member_remove,
+    ],
+    ids=lambda h: h.__name__,
+)
+def test_every_other_config_writer_holds_the_same_lock(handler: Any) -> None:
+    """Every handler that plays back a ``write_config()`` fragment is wrapped by the lock."""
+    inner = handler.__wrapped__
+    assert inner.__name__ == handler.__name__
+    assert handler.__code__ is serialized_config_write(inner).__code__
 
 
 # ===========================================================================

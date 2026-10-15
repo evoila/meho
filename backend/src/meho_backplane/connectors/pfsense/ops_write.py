@@ -425,6 +425,7 @@ def serialized_config_write[**P, R](
 # ---------------------------------------------------------------------------
 
 
+@serialized_config_write
 async def pfsense_gateway_add(
     self: PfSenseConnector,
     target: Any,
@@ -487,6 +488,7 @@ async def pfsense_gateway_add(
     return {**result, "existed_before": False, "applied": True, "existing": None}
 
 
+@serialized_config_write
 async def pfsense_route_static_add(
     self: PfSenseConnector,
     target: Any,

@@ -605,6 +605,14 @@ re-emitted through `ipaddress`, CIDRs canonicalised. Anything outside the
 allowlist is rejected before a single SSH round-trip; `_php_squote` escapes
 defensively on top.
 
+**One edit at a time.** Every handler that plays back a `write_config()`
+fragment (the two adds here, the five deletes in `ops_delete.py`, and the two
+filter-rule ops) is wrapped by `serialized_config_write`. The wrapper holds
+one `asyncio.Lock` per SSH host on the connector from the first `config.xml`
+read to the read-back. `write_config()` saves the whole in-memory `$config`,
+so without the lock two overlapping ops on one appliance could each save an
+old copy and undo the other's change.
+
 **Surgical contract.** The handlers touch only `gateways/gateway_item` and
 `staticroutes/route` — never interface config. The perimeter pfSense frequently
 carries the operator's own access path, so an interface re-enumeration would
@@ -659,9 +667,10 @@ and no audit.
   (`nat_associated`); remove it together with the NAT rule.
 - **One edit at a time.** Both handlers hold the appliance's config-write
   lock (`serialized_config_write` in `ops_write.py`, one `asyncio.Lock` per
-  SSH host on the connector) from the first read to the read-back. So two
-  MEHO ops that edit `config.xml` on the same pfSense run one after the
-  other, and a rule cannot change between the guard read and the write.
+  SSH host on the connector) from the first read to the read-back. The
+  gateway, route, NAT and alias writes hold the same lock, so any two MEHO
+  ops that edit `config.xml` on the same pfSense run one after the other,
+  and a rule cannot change between the guard read and the write.
 - **Write and check.** Both ops use the shared `_apply_playback` helper of the
   other writes. The fragment checks the id again when it runs, and writes
   only when the id is still free (add) or exactly one rule was removed

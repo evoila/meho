@@ -134,6 +134,7 @@ from meho_backplane.connectors.pfsense.ops_write import (
     _validate_gateway_name,
     _validate_network_cidr,
     parse_static_routes_xml,
+    serialized_config_write,
 )
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 
@@ -795,6 +796,7 @@ def _script_token(value: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+@serialized_config_write
 async def pfsense_nat_delete(
     self: PfSenseConnector,
     target: Any,
@@ -884,6 +886,7 @@ async def pfsense_nat_delete(
     }
 
 
+@serialized_config_write
 async def pfsense_alias_delete(
     self: PfSenseConnector,
     target: Any,
@@ -992,6 +995,7 @@ async def pfsense_alias_delete(
     }
 
 
+@serialized_config_write
 async def pfsense_route_static_delete(
     self: PfSenseConnector,
     target: Any,
@@ -1079,6 +1083,7 @@ async def pfsense_route_static_delete(
     }
 
 
+@serialized_config_write
 async def pfsense_gateway_delete(
     self: PfSenseConnector,
     target: Any,
@@ -1209,6 +1214,7 @@ async def pfsense_gateway_delete(
     }
 
 
+@serialized_config_write
 async def pfsense_alias_member_remove(
     self: PfSenseConnector,
     target: Any,

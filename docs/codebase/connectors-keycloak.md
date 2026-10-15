@@ -309,6 +309,48 @@ their own idempotency above):
   (never raw params); and both ops are pinned in
   `broadcast.events._CREDENTIAL_WRITE_OPS` → aggregate-only broadcast.
 
+### Updates read, merge, then write (#3941)
+
+`keycloak.client.update` and `keycloak.realm.update` take a partial
+representation. Keycloak's `PUT` on a client or a realm is **not** a real
+partial update. For some fields that are missing from the body, Keycloak
+writes its own default:
+
+- Client `PUT`: authorization services are turned off when
+  `authorizationServicesEnabled` is missing, and client policies can fill
+  in `frontchannelLogout` and `webOrigins`. A dogfood run saw an update
+  that sent only `{"enabled": false}` also change `frontchannelLogout`,
+  `webOrigins` and the groups mapper's `multivalued` setting.
+- Realm `PUT`: the OAuth 2.0 device-code lifespan and polling interval and
+  the CIBA and PAR settings go back to their defaults when missing, and an
+  `attributes` map removes every realm attribute it does not list.
+
+So both ops do this (`connectors/keycloak/ops_write_merge.py`):
+
+1. `GET` the current client or realm.
+2. Put the caller's fields on top. A map field (`attributes`,
+   `smtpServer`) is merged key by key. A list field (`redirectUris`,
+   `webOrigins`, `protocolMappers`) is replaced only when the caller
+   sends it. So protocol mappers stay as they are unless the caller sends
+   them.
+3. `PUT` the full representation back.
+4. `GET` it again and compare with step 1. The result carries
+   `changed_fields` (what the caller sent), `unrequested_changes` (fields
+   that changed without being sent; a key inside a sent map shows as
+   `attributes.<key>`) and `read_back_checked`. Only field names are
+   reported, never values, so a client `secret` or SMTP password never
+   reaches the result. List order is ignored in the compare, because
+   Keycloak keeps many lists as sets.
+
+The read-back is best effort: if it fails, the write already happened,
+so the op still returns `ok` with `read_back_checked: false`. A realm
+rename (a new `realm` in the representation) is read back under the new
+name.
+
+The approval preview for both ops is the generic params echo: the
+approver sees the fields the caller sent. With read-merge-write those are
+exactly the fields that will change.
+
 ### Governed deletes (#3944)
 
 `keycloak.user.delete`, `keycloak.group.delete` and `keycloak.client.delete`

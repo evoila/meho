@@ -300,6 +300,8 @@ async def test_client_update_resolves_clientid_to_uuid(
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
         list_route = mock.get("/admin/realms/evba/clients").respond(200, json=[_EXISTING_CLIENT])
+        # client.update reads the client first and merges onto it (#3941).
+        mock.get(f"/admin/realms/evba/clients/{_CLIENT_UUID}").respond(200, json=_EXISTING_CLIENT)
         put_route = mock.put(f"/admin/realms/evba/clients/{_CLIENT_UUID}").respond(204)
         result = await _dispatch(
             "keycloak.client.update",

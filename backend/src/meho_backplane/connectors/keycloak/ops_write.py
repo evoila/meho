@@ -114,6 +114,7 @@ from meho_backplane.connectors.keycloak._paths import (
     _USERS_PATH,
     fill_path,
 )
+from meho_backplane.connectors.keycloak.ops_write_merge import read_merge_write
 from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
 
 if TYPE_CHECKING:
@@ -293,21 +294,24 @@ async def keycloak_realm_update(
 
     Op-id: ``keycloak.realm.update``. Defaults to the target's managed
     realm; ``realm`` overrides it. ``representation`` is the partial
-    RealmRepresentation to merge. Returns a value-free confirmation.
+    RealmRepresentation. The handler reads the realm, puts the given fields
+    on top, and PUTs the full realm back, so fields the caller did not send
+    stay as they are (#3941, see :mod:`.ops_write_merge`). Returns a
+    value-free confirmation plus the read-back check.
     """
     realms = resolve_realm_config(target)
     realm_name = str(params.get("realm") or realms.managed_realm).strip()
     representation = dict(params["representation"])
-    representation.setdefault("realm", realm_name)
-    await self._write_admin(
+    new_name = _opt_str(representation.get("realm")) or realm_name
+    check = await read_merge_write(
+        self,
+        operator,
         target,
-        "PUT",
-        fill_path(_ADMIN_REALM_PATH, {"realm": realm_name}),
-        operator=operator,
-        json=representation,
-        idempotent_conflict=False,
+        path=fill_path(_ADMIN_REALM_PATH, {"realm": realm_name}),
+        requested=representation,
+        read_back_path=fill_path(_ADMIN_REALM_PATH, {"realm": new_name}),
     )
-    return {"realm": realm_name, "updated": True}
+    return {"realm": realm_name, "updated": True, **check}
 
 
 # ---------------------------------------------------------------------------
@@ -367,7 +371,10 @@ async def keycloak_client_update(
     Op-id: ``keycloak.client.update``. Keys on the client's internal UUID;
     pass it directly via ``id``, or pass ``client_id`` (the human clientId)
     and the handler resolves the UUID via ``?clientId=`` lookup.
-    ``representation`` is the partial ClientRepresentation. Raises
+    ``representation`` is the partial ClientRepresentation. The handler
+    reads the client, puts the given fields on top, and PUTs the full
+    client back, so fields the caller did not send (and every protocol
+    mapper) stay as they are (#3941, see :mod:`.ops_write_merge`). Raises
     :exc:`KeycloakUserNotFoundError`'s sibling — a clear error — when the
     clientId resolves to no client.
     """
@@ -385,20 +392,17 @@ async def keycloak_client_update(
                 f"keycloak.client.update: no client with clientId={client_id!r} in realm "
                 f"{realms.managed_realm!r}"
             )
-    representation = dict(params["representation"])
-    representation.setdefault("id", uuid)
-    await self._write_admin(
+    check = await read_merge_write(
+        self,
+        operator,
         target,
-        "PUT",
-        fill_path(
+        path=fill_path(
             _CLIENT_PATH,
             {"realm": realms.managed_realm, "client-uuid": quote_segment(uuid)},
         ),
-        operator=operator,
-        json=representation,
-        idempotent_conflict=False,
+        requested=dict(params["representation"]),
     )
-    return {"id": uuid, "client_id": client_id, "updated": True}
+    return {"id": uuid, "client_id": client_id, "updated": True, **check}
 
 
 async def keycloak_client_scope_create(

@@ -182,9 +182,12 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
         handler_attr="realm_update",
         summary="Update a Keycloak realm's top-level config (approval-gated).",
         description=(
-            "PUTs ``/admin/realms/{realm}`` (default the target's managed "
+            "Updates ``/admin/realms/{realm}`` (default the target's managed "
             "realm; ``realm`` overrides) with the partial "
-            "RealmRepresentation under ``representation``. "
+            "RealmRepresentation under ``representation``. Reads the realm, "
+            "puts the given fields on top and PUTs the full realm back, so "
+            "fields you do not send stay as they are; then reads it again "
+            "and reports any field that changed without being sent. "
             "requires_approval=True; dispatches via the admin-auth path."
         ),
         parameter_schema={
@@ -209,7 +212,10 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
             "parameter_hints": {
                 "representation": "Partial RealmRepresentation to merge.",
             },
-            "output_shape": "``{realm, updated}``.",
+            "output_shape": (
+                "``{realm, updated, changed_fields, unrequested_changes, "
+                "read_back_checked}`` — field names only, never values."
+            ),
         },
     ),
     KeycloakOp(
@@ -253,8 +259,12 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
         handler_attr="client_update",
         summary="Update a Keycloak client by UUID or clientId (approval-gated).",
         description=(
-            "PUTs ``/admin/realms/{realm}/clients/{id}`` with the partial "
-            "ClientRepresentation under ``representation``. Keys on the "
+            "Updates ``/admin/realms/{realm}/clients/{id}`` with the partial "
+            "ClientRepresentation under ``representation``. Reads the "
+            "client, puts the given fields on top and PUTs the full client "
+            "back, so fields you do not send (and protocol mappers) stay as "
+            "they are; then reads it again and reports any field that "
+            "changed without being sent. Keys on the "
             "internal UUID — pass ``id`` directly, or pass ``client_id`` "
             "(human clientId) for name→UUID resolution. "
             "requires_approval=True."
@@ -287,7 +297,10 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
                 "id": "Client internal UUID (from keycloak.client.list).",
                 "client_id": "Human clientId; resolved to UUID when id is absent.",
             },
-            "output_shape": "``{id, client_id, updated}``.",
+            "output_shape": (
+                "``{id, client_id, updated, changed_fields, unrequested_changes, "
+                "read_back_checked}`` — field names only, never values."
+            ),
         },
     ),
     KeycloakOp(

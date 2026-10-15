@@ -837,6 +837,10 @@ def result_connector_error(
     ``error`` summary is unchanged (``connector_error: HTTPStatusError``)
     so existing string matchers keep working; the new detail is additive
     in ``extras``.
+
+    #3567: ``extras.upstream_fault`` is set from the response body as above,
+    or from a SOAP fault the ESXi path attached to *exc* (see
+    :func:`_add_attached_upstream_fault`).
     """
     msg = _sanitize_free_text(str(exc))
     extras: dict[str, Any] = {
@@ -848,6 +852,7 @@ def result_connector_error(
         extras["http_status"] = exc.response.status_code
         extras["upstream_message"] = _http_upstream_message(exc.response)
         _add_upstream_fault(extras, exc.response)
+    _add_attached_upstream_fault(extras, exc)
     return OperationResult(
         status="error",
         op_id=op_id,
@@ -1296,7 +1301,13 @@ def _http_upstream_fault(response: httpx.Response) -> dict[str, str | None] | No
     parsed = _soap_fault(text) if text.startswith("<") else _vi_json_fault(response)
     if parsed is None:
         return None
-    fault_type, faultstring = parsed
+    return _upstream_fault_fields(*parsed)
+
+
+def _upstream_fault_fields(
+    fault_type: str | None, faultstring: str | None
+) -> dict[str, str | None]:
+    """Redact, then cap, the two ``upstream_fault`` fields (type at 256, text at 2 KB)."""
     return {
         "type": _sanitize_free_text(fault_type) if fault_type is not None else None,
         "faultstring": (
@@ -1316,6 +1327,27 @@ def _add_upstream_fault(extras: dict[str, Any], response: httpx.Response) -> Non
     fault = _http_upstream_fault(response)
     if fault is not None:
         extras["upstream_fault"] = fault
+
+
+def _add_attached_upstream_fault(extras: dict[str, Any], exc: BaseException) -> None:
+    """Set ``extras["upstream_fault"]`` from a SOAP fault stored on *exc* (#3567).
+
+    On the ESXi SOAP path the connector parses the fault itself and raises a
+    plain :exc:`RuntimeError` or a ``ConnectorAuthError`` with the parsed fault
+    attached (:func:`~meho_backplane.connectors.vmware_rest.soap.attach_soap_fault`).
+    No :exc:`httpx.HTTPStatusError` reaches the builders there, so this reads the
+    attached fault instead. Same redact-then-cap steps as the HTTP case. Does
+    nothing when no fault is attached, or when the key is already set.
+    """
+    if "upstream_fault" in extras:
+        return
+    # Imported here for the same reason as in :func:`_soap_fault`.
+    from meho_backplane.connectors.vmware_rest.soap import soap_fault_of
+
+    fault = soap_fault_of(exc)
+    if fault is None or (fault.fault_type is None and fault.faultstring is None):
+        return
+    extras["upstream_fault"] = _upstream_fault_fields(fault.fault_type, fault.faultstring)
 
 
 def _http_validation_errors(response: httpx.Response) -> list[Any]:
@@ -1733,7 +1765,8 @@ def result_connector_auth_failed(
     ``message`` when JSON, else capped raw text, ``None`` when empty --
     shared with the 403/422 builders via :func:`_http_upstream_message`).
     Like the other upstream-HTTP builders, it also adds ``upstream_fault``
-    (``{type, faultstring}``) when the body is a vim fault (#3567).
+    (``{type, faultstring}``) when the body is a vim fault, or when the
+    exception carries a parsed SOAP fault from the ESXi path (#3567).
     """
     stage: Literal["establish", "dispatch", "after_relogin"]
     if isinstance(exc, ConnectorAuthError):
@@ -1807,6 +1840,7 @@ def result_connector_auth_failed(
     }
     if upstream_response is not None:
         _add_upstream_fault(extras, upstream_response)
+    _add_attached_upstream_fault(extras, exc)
     return OperationResult(
         status="error",
         op_id=op_id,

@@ -223,14 +223,23 @@ the patterns no longer match. See `docs/codebase/redaction.md`.
 upstream error body is a vim fault, the builders that read an upstream
 response (`result_connector_error` for an `httpx.HTTPStatusError`, the
 403 / 422 builders, and `result_connector_auth_failed`) also set
-`extras.upstream_fault = {"type": ..., "faultstring": ...}`. Two body
-shapes are recognised:
+`extras.upstream_fault = {"type": ..., "faultstring": ...}`. The fault
+reaches the builders in one of three ways:
 
-- a VI/JSON fault from vCenter: a JSON object with `_typeName` (the fault
-  class, for example `NotAuthenticated`) and `faultstring`;
-- a SOAP `<soapenv:Fault>` from the vim25 SOAP path, parsed with
+- an HTTP error whose body is a VI/JSON fault from vCenter: a JSON object
+  with `_typeName` (the fault class, for example `NotAuthenticated`) and
+  `faultstring`;
+- an HTTP error whose body is a SOAP `<soapenv:Fault>` (for example a
+  vCenter VI/JSON write that answers with a SOAP-shaped 500), parsed with
   `connectors/vmware_rest/soap.py::parse_soap_fault` (the type comes from
-  the `detail` element's `xsi:type`, for example `InvalidLogin`).
+  the `detail` element's `xsi:type`, for example `InvalidLogin`);
+- a standalone ESXi host. There the connector's SOAP path (`_post_soap`,
+  the SOAP login, and the storage-policy SOAP calls) parses the fault
+  itself and raises a plain `RuntimeError` or a `ConnectorAuthError`, so
+  no HTTP error reaches the builders. `_soap_fault_error` attaches the
+  parsed fault to that exception (`soap.py::attach_soap_fault`), and
+  `result_connector_error` / `result_connector_auth_failed` read it from
+  there. The exception class does not change.
 
 Either value can be `null` when the body does not carry it. Both values
 are redacted, then capped (the faultstring with the 2 KB cap). Any other

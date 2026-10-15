@@ -44,7 +44,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 from unittest.mock import AsyncMock
 from uuid import UUID
 
@@ -1727,6 +1727,121 @@ async def test_vmware_8_0_catalog_serves_fingerprinted_8_0_x_target(
     )
 
     assert result.extras.get("error_code") != "unqualified_target_version"
+
+
+class _VmwareTasksList80Connector(VmwareRest80Connector):
+    """8.0 catalog connector that records the outbound body and returns two tasks."""
+
+    sent: ClassVar[list[tuple[str, str, dict[str, Any] | None]]] = []
+
+    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
+        del target, operator
+        return f"/api{path}"
+
+    async def _post_json(  # type: ignore[override]
+        self,
+        target: Any,
+        path: str,
+        *,
+        operator: Operator,
+        verb: str = "POST",
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        del target, operator, params, extra_headers
+        type(self).sent.append((verb, path, json))
+        return {
+            "task-1": {"service": "com.vmware.vcenter.vm", "status": "SUCCEEDED"},
+            "task-2": {"service": "com.vmware.vcenter.vm", "status": "RUNNING"},
+        }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "expect_ok"),
+    [
+        ({"filter_spec": {"services": ["com.vmware.vcenter.vm"]}}, True),
+        ({"filter_spec": {"tasks": ["task-1"]}, "result_spec": {"exclude_result": True}}, True),
+        ({"return_all": True, "exclude_result": True}, False),
+        ({"filter_spec": {}}, False),
+        ({"filter_spec": {"services": []}}, False),
+    ],
+)
+async def test_vmware_8_0_tasks_list_dispatch_sends_two_level_body(
+    body: dict[str, Any],
+    expect_ok: bool,
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """The corrected 8.0 tasks-list op sends ``{filter_spec, result_spec}`` (#3700).
+
+    A non-empty ``services`` / ``tasks`` filter reaches vCenter and returns
+    rows. The old flat body and an empty filter are refused with
+    ``invalid_params`` before any request leaves MEHO.
+    """
+    _VmwareTasksList80Connector.sent = []
+    register_connector_v2(
+        product="vmware",
+        version="8.0",
+        impl_id="vmware-rest",
+        cls=_VmwareTasksList80Connector,
+    )
+    flat = EndpointDescriptorProto(
+        op_id="POST:/cis/tasks?action=list",
+        method="POST",
+        path="/cis/tasks?action=list",
+        summary="List tasks",
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "body": {
+                    "type": "object",
+                    "properties": {
+                        "exclude_result": {"type": "boolean"},
+                        "return_all": {"type": "boolean"},
+                    },
+                    "x-meho-param-loc": "body",
+                }
+            },
+            "additionalProperties": False,
+        },
+        safety_level="caution",
+    )
+    await register_ingested_operations(
+        product="vmware",
+        version="8.0",
+        impl_id="vmware-rest",
+        spec_source="vcenter.yaml",
+        operations=[flat],
+        embedding_service=stub_embedding_service,
+    )
+    row = (
+        await session.execute(
+            select(EndpointDescriptor).where(
+                EndpointDescriptor.op_id == "POST:/cis/tasks?action=list"
+            )
+        )
+    ).scalar_one()
+    row.is_enabled = True
+    await session.commit()
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-8.0",
+        op_id="POST:/cis/tasks?action=list",
+        target=_FakeTarget(product="vmware", version="8.0.3"),
+        params={"body": body},
+    )
+
+    if expect_ok:
+        assert result.status == "ok", result.error
+        assert _VmwareTasksList80Connector.sent == [("POST", "/api/cis/tasks?action=list", body)]
+        assert isinstance(result.result, dict)
+        assert set(result.result) == {"task-1", "task-2"}
+    else:
+        assert result.extras.get("error_code") == "invalid_params"
+        assert _VmwareTasksList80Connector.sent == []
 
 
 @pytest.mark.asyncio

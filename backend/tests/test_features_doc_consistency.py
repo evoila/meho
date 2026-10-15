@@ -56,6 +56,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from cryptography.fernet import Fernet
 
 from meho_backplane.features import build_features_block
 from meho_backplane.settings import Settings
@@ -106,6 +107,11 @@ FEATURE_GATE_CONTRACT: dict[str, dict[str, Any]] = {
             "ui_session_encryption_key",
         ),
     },
+    "approval_custody": {
+        "docs": "docs/codebase/approvals.md",
+        "env_vars": ("APPROVAL_HANDOFF_ENCRYPTION_KEY",),
+        "settings_attrs": ("approval_handoff_encryption_key",),
+    },
 }
 
 
@@ -154,6 +160,9 @@ def _settings_fully_wired(**unset_overrides: str) -> Settings:
         "ui_keycloak_client_id": "meho-web",
         "ui_keycloak_client_secret": "s3cret",
         "ui_session_encryption_key": "non-empty-placeholder",
+        # Unlike the UI key, the approval-custody gate checks that this
+        # is a real Fernet key, so a throwaway one is generated per call.
+        "approval_handoff_encryption_key": Fernet.generate_key().decode(),
         "mcp_require_session_id": False,
     }
     base.update(unset_overrides)

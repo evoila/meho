@@ -55,3 +55,21 @@ WARNING: checkRunner.enabled=true on a Vault credential backend (#2642).
   the binding is in force:
        vault write auth/jwt/login role={{ .Values.config.vaultOidcRole }} jwt="$RUNNER_TOKEN"
 {{- end }}
+{{- if not .Values.approvalHandoff.enabled }}
+
+WARNING: approvalHandoff.enabled=false, so APPROVAL_HANDOFF_ENCRYPTION_KEY is not set (#3712).
+
+  MEHO will deny every credential-write operation that must wait for
+  approval (for example a Vault KV write). It needs this key to store the
+  operation's input encrypted while it waits.
+
+  To fix it:
+    1. Create a Fernet key:
+         python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    2. Store it in a Kubernetes Secret in namespace {{ .Release.Namespace }}.
+    3. Set approvalHandoff.enabled=true and approvalHandoff.secretName=<that Secret>,
+       then run helm upgrade.
+
+  Check the state any time on GET /ready under features.approval_custody.
+  Steps and key rotation: docs/codebase/approvals.md.
+{{- end }}

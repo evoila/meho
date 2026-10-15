@@ -103,14 +103,56 @@ CLI, UI, audit, and broadcast views.
 Parking fails closed before its transaction commits if the key is missing or
 not a valid Fernet key. The key is deliberately independent of
 `UI_SESSION_ENCRYPTION_KEY`: console enablement must never decide credential
-custody. Configure Helm with an existing Kubernetes Secret:
+custody.
 
-```yaml
-approvalHandoff:
-  enabled: true
-  secretName: meho-approval-handoff
-  secretKey: approval_handoff_encryption_key
-```
+### Required: set the custody key (#3712)
+
+**`APPROVAL_HANDOFF_ENCRYPTION_KEY` is REQUIRED** on every deployment where a
+credential-write operation (for example a Vault KV write) may wait for
+approval. This holds for human and service callers alike. Without a valid key,
+MEHO denies the operation instead of letting it wait, with the message
+`credential-write approval custody is unavailable; configure a valid
+APPROVAL_HANDOFF_ENCRYPTION_KEY before parking this operation`. The Helm chart
+keeps `approvalHandoff` off by default, so an install with unchanged values has
+no key. Since v0.35.2 such an install denies these operations.
+
+Not affected: a credential-write that runs at once under a standing grant (it
+never waits, so it needs no key), and approvals that were already waiting
+before the v0.35.2 upgrade.
+
+Check the state before the first denial: `GET /ready` shows
+`features.approval_custody` with `custody` set to `configured`, `missing` or
+`malformed`. The key value never appears there. `helm install` and
+`helm upgrade` also print a warning while `approvalHandoff.enabled` is false.
+
+Set it up in three steps:
+
+1. Create a Fernet key:
+
+   ```bash
+   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+   ```
+
+2. Store it in a Kubernetes Secret. Pipe it in, so the key stays out of shell
+   history and the process list:
+
+   ```bash
+   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode(), end='')" \
+     | kubectl -n <namespace> create secret generic meho-approval-handoff \
+         --from-file=approval_handoff_encryption_key=/dev/stdin
+   ```
+
+   Or sync the Secret through your usual secret manager (for example an
+   ExternalSecret).
+
+3. Point the chart at the Secret and run `helm upgrade`:
+
+   ```yaml
+   approvalHandoff:
+     enabled: true
+     secretName: meho-approval-handoff
+     secretKey: approval_handoff_encryption_key
+   ```
 
 The chart uses `secretKeyRef`; never place the key in `values.yaml`. Rotate by
 creating a new Fernet key in the referenced Secret and restarting all

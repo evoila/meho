@@ -174,7 +174,8 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "inspect active connections. The state table can be large on busy "
         "firewalls. ``pfsense.filter.rule.add`` adds a block / pass / match "
         "rule with a caller-chosen 9-digit ``ridentifier`` (safety_level="
-        "dangerous, a human approves); ``pfsense.filter.rule.delete`` removes "
+        "dangerous: it waits for a human approval, unless an operator gave a "
+        "standing grant for this op); ``pfsense.filter.rule.delete`` removes "
         "it by that id (GOVERNED DESTRUCTIVE delete). Both refuse a change "
         "that could cut the SSH path MEHO uses to manage the firewall."
     ),

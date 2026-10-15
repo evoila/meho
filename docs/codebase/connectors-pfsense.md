@@ -28,8 +28,9 @@ ONE member out of a *shared* alias without deleting it. #3954 adds two safe
 reads, `pfsense.user.list` and `pfsense.route.static.list`. They return only a
 short list of fields, so nobody needs `pfsense.config.show` (the whole file)
 just to check a user or a static route. #3850 adds `pfsense.filter.rule.add` and
-`pfsense.filter.rule.delete`: add or remove ONE firewall rule by a stable id,
-with a human approval for both.
+`pfsense.filter.rule.delete`: add or remove ONE firewall rule by a stable id.
+The delete always needs a human approval. The add needs a human approval,
+unless an operator gave a standing grant for it.
 
 Source: `backend/src/meho_backplane/connectors/pfsense/`.
 
@@ -275,7 +276,8 @@ are `safety_level="caution"` / `requires_approval=False` — the same posture
 `bind9.record.add` / `windns.record.add` carry for an additive, recoverable,
 idempotent config write. `pfsense.filter.rule.add` (#3850) is
 `safety_level="dangerous"` / `requires_approval=True`: a firewall rule changes
-what traffic the whole firewall lets through, so a human approves every add.
+what traffic the whole firewall lets through, so every add waits for a human
+approval, unless an operator gave a standing grant for this op.
 The 6 destructive ops (#3232 nat/alias; #3313 the three teardown-inverse ops;
 #3850 `filter.rule.delete`) are `safety_level="destructive"` /
 `requires_approval=True` — the governed-delete tier: mandatory human approval
@@ -655,9 +657,10 @@ and no audit.
   exactly one rule was removed (delete). Then `filter_configure()` reloads the
   rules, and the handler reads `config.xml` back: the rule count must move by
   exactly one, or the op fails.
-- **Approval.** The add is `dangerous` + `requires_approval`. The delete is on
-  the governed-delete tier: a preview hash, and a blast-radius preview that
-  names the rule (what it does and where it sits).
+- **Approval.** The add is `dangerous` + `requires_approval`: it waits for a
+  human approval, unless an operator gave a standing grant for this op. The
+  delete is on the governed-delete tier: a preview hash, and a blast-radius
+  preview that names the rule (what it does and where it sits).
 
 ## Known issues
 

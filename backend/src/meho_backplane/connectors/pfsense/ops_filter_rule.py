@@ -19,8 +19,8 @@ undone by a governed inverse op instead of a hand-written script.
   ``<tracker>`` and compiles it into the pf rule as ``ridentifier <n>``
   (``filter.inc``), so it is a stable id for logs, re-runs and the delete.
   ``safety_level="dangerous"`` + ``requires_approval=True``: a firewall rule
-  changes what traffic the whole firewall lets through, so a human approves
-  every add.
+  changes what traffic the whole firewall lets through, so every add waits
+  for a human approval, unless an operator gave a standing grant for this op.
 * ``pfsense.filter.rule.delete`` -- delete ONE rule by ``ridentifier`` on the
   governed-delete tier (``destructive``, mandatory approval, preview-hash
   binding, blast-radius preview), the same as ``pfsense.nat.delete``.
@@ -1017,9 +1017,10 @@ _RULE_ADD_RESPONSE_SCHEMA: dict[str, Any] = {
 _RULE_ADD_LLM_INSTRUCTIONS: dict[str, Any] = {
     "when_to_use": (
         "Add ONE pfSense firewall (filter) rule -- for example a block rule that "
-        "fences one network off from another. safety_level=dangerous: a human "
-        "approves every add, because a firewall rule changes what traffic the "
-        "whole firewall lets through. Pick a 9-digit ``ridentifier`` and keep it: "
+        "fences one network off from another. safety_level=dangerous: it waits "
+        "for a human approval, unless an operator gave a standing grant for this "
+        "op, because a firewall rule changes what traffic the whole firewall "
+        "lets through. Pick a 9-digit ``ridentifier`` and keep it: "
         "re-running the same add is a no-op (``already_present``), and "
         "``pfsense.filter.rule.delete`` removes the rule by that id. A ``block`` "
         "rule that could match the SSH path MEHO uses to manage the firewall is "
@@ -1117,7 +1118,8 @@ FILTER_RULE_OPS: tuple[PfSenseOp, ...] = (
             "rule that could match MEHO's own SSH management path is refused. "
             "Placed at the top (default) or bottom of its interface's rules, then "
             "``write_config()`` + ``filter_configure()`` and a read-back check. "
-            "safety_level=dangerous with mandatory approval."
+            "safety_level=dangerous: it waits for a human approval, unless an "
+            "operator gave a standing grant for this op."
         ),
         parameter_schema=_RULE_ADD_PARAMETER_SCHEMA,
         response_schema=_RULE_ADD_RESPONSE_SCHEMA,

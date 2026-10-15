@@ -403,9 +403,13 @@ use `keycloak.realm.update` with `enabled: false`; that can be undone.
 - **Approval card.** `blast_radius.object` carries `{kind, resource, realm,
   present, enabled, users, clients, groups}`. The counts come from
   `GET .../users/count`, `GET .../groups/count` (all groups, not only the
-  top level) and the length of `GET .../clients`. The children list repeats
-  the three counts. The realm representation is never echoed, so the SMTP
-  password and client secrets stay out of the card.
+  top level) and the length of `GET .../clients`. The client read must
+  answer with a JSON array. Any other body is an error
+  (`KeycloakUnexpectedResponseError`), so the card is not built and
+  nothing waits for approval; it never shows `clients: 0` for a realm
+  whose clients could not be read. The children list repeats the three
+  counts. The realm representation is never echoed, so the SMTP password
+  and client secrets stay out of the card.
 
 The CLI verb is `meho keycloak realm delete --realm R`, with the same two
 steps as the other delete verbs.

@@ -489,6 +489,40 @@ async def test_realm_card_for_a_malformed_read_is_unavailable(kc: KeycloakConnec
     assert "only a 404 counts as absent" in effect["preview_error"]
 
 
+async def test_realm_card_with_no_clients_reports_zero(kc: KeycloakConnector) -> None:
+    """An empty client list is a real count of zero, and the card is valid."""
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(_REALM_PATH).respond(200, json=_realm_rep())
+        mock.get(f"{_REALM_PATH}/users/count").respond(200, json=0)
+        mock.get(f"{_REALM_PATH}/groups/count").respond(200, json={"count": 0})
+        mock.get(f"{_REALM_PATH}/clients").respond(200, json=[])
+        effect = await _card({"realm": _REALM}, kc)
+    assert effect is not None
+    block = effect["preview"]["blast_radius"]
+    assert block["object"]["clients"] == 0
+    assert {"kind": "clients", "count": 0} in block["children"]
+    assert blast_radius_missing_reason(effect["preview"]) is None
+
+
+@pytest.mark.parametrize("body", [{"error": "unknown_error"}, "oops", None, 7])
+async def test_realm_card_with_a_malformed_client_list_is_unavailable(
+    kc: KeycloakConnector, body: Any
+) -> None:
+    """A client read that is not a JSON array gives no card, never ``clients: 0``."""
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(_REALM_PATH).respond(200, json=_realm_rep())
+        mock.get(f"{_REALM_PATH}/users/count").respond(200, json=12)
+        mock.get(f"{_REALM_PATH}/groups/count").respond(200, json={"count": 3})
+        mock.get(f"{_REALM_PATH}/clients").respond(200, json=body)
+        effect = await _card({"realm": _REALM}, kc)
+    assert effect is not None
+    assert effect["preview_unavailable"] is True
+    assert "the client count is unknown" in effect["preview_error"]
+    assert "clients" not in effect.get("preview", {})
+
+
 async def test_realm_card_without_a_live_connector_declines() -> None:
     await _seed_target()
     effect = await _card({"realm": _REALM}, None)
@@ -545,6 +579,30 @@ async def test_protected_realm_is_refused_before_it_waits_for_approval(
     assert call["status"] == "denied", call
     assert call["extras"]["error_code"] == "blast_radius_required"
     assert "(protected_realm)" in call["extras"]["reason"]
+    assert not del_route.called
+    assert await _approval_rows() == 0
+
+
+async def test_malformed_client_list_is_refused_before_it_waits_for_approval(
+    kc: KeycloakConnector,
+) -> None:
+    """When the client count cannot be read, the request never waits for approval."""
+    requester = _operator()
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(_REALM_PATH).respond(200, json=_realm_rep())
+        mock.get(f"{_REALM_PATH}/users/count").respond(200, json=12)
+        mock.get(f"{_REALM_PATH}/groups/count").respond(200, json={"count": 3})
+        mock.get(f"{_REALM_PATH}/clients").respond(200, json={"error": "unknown_error"})
+        del_route = mock.delete(url__regex=r".*").respond(204)
+        preview = await preview_operation(requester, _args(_REALM))
+        assert preview["status"] == "ok", preview
+        call = await call_operation(
+            requester, {**_args(_REALM), "preview_hash": preview["preview_hash"]}
+        )
+    assert call["status"] == "denied", call
+    assert call["extras"]["error_code"] == "blast_radius_required"
+    assert "the client count is unknown" in call["extras"]["reason"]
     assert not del_route.called
     assert await _approval_rows() == 0
 

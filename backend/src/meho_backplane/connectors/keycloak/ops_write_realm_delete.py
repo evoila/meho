@@ -66,6 +66,7 @@ from meho_backplane.connectors.keycloak.ops_write_delete import (
 )
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     KeycloakDeleteRefusedError,
+    KeycloakUnexpectedResponseError,
     get_or_none,
 )
 from meho_backplane.connectors.keycloak.session import (
@@ -164,8 +165,11 @@ async def _count(
 ) -> dict[str, int | None]:
     """Count the realm's users, clients and groups.
 
-    A count is ``None`` when Keycloak answers with an unexpected shape. An
-    HTTP error is raised, not turned into ``None``.
+    A user or group count is ``None`` when Keycloak answers with an
+    unexpected shape. The client list must be a JSON array: any other body
+    raises :exc:`KeycloakUnexpectedResponseError`, so the card never shows
+    ``clients: 0`` for a realm whose clients could not be read. An HTTP
+    error is raised, not turned into ``None``.
     """
     values = {"realm": quote_segment(realm)}
     users: Any = await connector._get_admin_json(
@@ -174,9 +178,13 @@ async def _count(
     groups: Any = await connector._get_admin_json(
         target, fill_path(_GROUPS_COUNT_PATH, values), operator=operator
     )
-    clients = await connector._get_admin_list(
-        target, fill_path(_CLIENTS_PATH, values), operator=operator
-    )
+    clients_path = fill_path(_CLIENTS_PATH, values)
+    clients: Any = await connector._get_admin_json(target, clients_path, operator=operator)
+    if not isinstance(clients, list):
+        raise KeycloakUnexpectedResponseError(
+            f"GET {clients_path} answered with {type(clients).__name__} instead of a "
+            "JSON array; the client count is unknown"
+        )
     group_count = groups.get("count") if isinstance(groups, dict) else None
     return {
         "users": users if isinstance(users, int) and not isinstance(users, bool) else None,

@@ -237,9 +237,12 @@ reaches the builders in one of three ways:
   the SOAP login, and the storage-policy SOAP calls) parses the fault
   itself and raises a plain `RuntimeError` or a `ConnectorAuthError`, so
   no HTTP error reaches the builders. `_soap_fault_error` attaches the
-  parsed fault to that exception (`soap.py::attach_soap_fault`), and
-  `result_connector_error` / `result_connector_auth_failed` read it from
-  there. The exception class does not change.
+  parsed fault to that exception (`soap.py::attach_soap_fault`). The
+  sites that build their own `RuntimeError` for a fault do the same: the
+  `RetrieveServiceContent` step at session establish (ESXi and PBM), and
+  the PBM retry that still fails `NotAuthenticated` after a fresh login.
+  `result_connector_error` / `result_connector_auth_failed` read the fault
+  from there. The exception class and message do not change.
 
 Either value can be `null` when the body does not carry it. Both values
 are redacted, then capped (the faultstring with the 2 KB cap). Any other

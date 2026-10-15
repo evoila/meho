@@ -1371,3 +1371,29 @@ async def test_esxi_invalid_login_reaches_auth_failed_upstream_fault() -> None:
     }
     assert "stub-password" not in repr(result.extras)
     assert "stub-password" not in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_esxi_service_content_fault_reaches_envelope_upstream_fault() -> None:
+    """A ``RetrieveServiceContent`` fault at ESXi session establish keeps its fault."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    fault_xml = _fault_xml("HostNotConnected", _LONG_FAULTSTRING)
+
+    def _sdk(request: httpx.Request) -> httpx.Response:
+        if _soap_method(request.content.decode("utf-8")) == "RetrieveServiceContent":
+            return httpx.Response(500, text=fault_xml)
+        return httpx.Response(500, text="<unexpected/>")
+
+    async with respx.mock(base_url=_ESXI_BASE) as mock:
+        mock.post(_SDK).mock(side_effect=_sdk)
+        with pytest.raises(RuntimeError, match="RetrieveServiceContent faulted") as excinfo:
+            await connector.auth_headers(_esxi_fingerprinted(), _make_operator())
+
+    result = result_connector_error("vmware.host.nfs_mount", excinfo.value, 1.0)
+    assert result.extras["exception_class"] == "RuntimeError"
+    assert result.extras["upstream_fault"] == {
+        "type": "HostNotConnected",
+        "faultstring": _LONG_FAULTSTRING,
+    }
+    assert "Unable to complete Sysinfo operation." not in result.extras["exception_message"]

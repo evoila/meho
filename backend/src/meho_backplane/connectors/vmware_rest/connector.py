@@ -1277,11 +1277,13 @@ class VmwareRestConnector(HttpConnector):
         sc_resp = await self._soap_post(client, build_service_content_envelope(), extensions)
         sc_fault = parse_soap_fault(sc_resp.text)
         if sc_fault is not None:
-            raise RuntimeError(
+            sc_err = RuntimeError(
                 f"vsphere session establish failed for target {target.name!r}: "
                 f"SOAP RetrieveServiceContent faulted "
                 f"({sc_fault.fault_type or sc_fault.faultcode})"
             )
+            attach_soap_fault(sc_err, sc_fault)
+            raise sc_err
         sc_resp.raise_for_status()
         content = parse_service_content(sc_resp.text)
         pc_ref = content.get("propertyCollector")
@@ -1514,11 +1516,13 @@ class VmwareRestConnector(HttpConnector):
             sc_resp = await self._soap_post(client, build_service_content_envelope(), extensions)
             sc_fault = parse_soap_fault(sc_resp.text)
             if sc_fault is not None:
-                raise RuntimeError(
+                sc_err = RuntimeError(
                     f"vmware pbm session establish failed for target {target.name!r}: "
                     f"SOAP RetrieveServiceContent faulted "
                     f"({sc_fault.fault_type or sc_fault.faultcode})"
                 )
+                attach_soap_fault(sc_err, sc_fault)
+                raise sc_err
             sc_resp.raise_for_status()
             content = parse_service_content(sc_resp.text)
             sm_ref = content.get("sessionManager")
@@ -1689,7 +1693,7 @@ class VmwareRestConnector(HttpConnector):
             raise self._soap_fault_error(
                 fault, target, message=f"vmware pbm {method} failed on target {target.name!r}"
             )
-        raise RuntimeError(
+        defect = RuntimeError(
             f"vmware pbm {method} failed on target {target.name!r}: the request carried "
             f"the vcSessionCookie SOAP header (the vim session cookie the /sdk Login "
             f"minted) but /pbm still rejected it as NotAuthenticated after a fresh login. "
@@ -1697,6 +1701,8 @@ class VmwareRestConnector(HttpConnector):
             f"this is a PBM transport/auth defect in the connector, not a stale or rotated "
             f"credential -- do NOT restage the secret."
         )
+        attach_soap_fault(defect, fault)
+        raise defect
 
     async def pbm_create_tag_profile(
         self,

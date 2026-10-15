@@ -61,18 +61,48 @@ shared core:
   raw-SQL argument** on any transport.
 
 The query runs inside the reduce-time `QueryEngine`'s sandbox rebuilt
-per call: the full authorized rows come back from `fetch_rows`, are
-`register`ed under the table name `result`, and the compiled statement
-is the only thing that touches them. Every referenced field is validated
-against the handle's known columns (unknown field → rejected); operators
-and aggregate functions are fixed allow-lists; recognized scalar filter
-literals are checked against the exact DuckDB column type before binding;
-caller values bind as DuckDB prepared-statement parameters, never
-string-interpolated. See
+per call: the full authorized rows come back from `fetch_rows`, and the
+compiled statement is the only thing that touches them. Operators and
+aggregate functions are fixed allow-lists; caller values bind as DuckDB
+prepared-statement parameters, never string-interpolated. See
 [`docs/architecture/jsonflux.md`](../architecture/jsonflux.md#query-surface-3366)
 for why compiling from a fixed template is a stronger safety property
 than sanitizing a caller SQL string (verified on the pinned
 `duckdb==1.5.5`).
+
+### Field catalog and raw output (#3635)
+
+The query does not trust DuckDB to name or type the fields. It works
+like this:
+
+1. `run_result_query` builds the result field catalog
+   (`jsonflux/query/result_catalog.py`) from **every** stored row. A
+   field first seen late in the set is still known.
+2. `compile_query` checks each field against the catalog by exact,
+   case-sensitive name. `Foo` and `foo` are two fields.
+3. A field used in `filter`, `order_by`, `group_by`, or `aggregate`
+   must be queryable in the catalog. If it is not (mixed JSON kinds,
+   objects or lists, only nulls, integers past 64 bits, non-finite
+   numbers), the caller gets a `QueryContractError` that names the
+   field, the reason, and the way out: return it with `select`, or page
+   the raw rows. This happens before any SQL runs.
+4. The SQL never uses caller names. Each queryable field becomes a
+   typed column with a generated name (`_rr_v_0000`, ...), and the
+   table also has a hidden row number, `_rr_ord`
+   (`_project_rows` in `operations/result_query.py`). Filter values are
+   checked against the field's type before binding.
+5. Every output column gets a generated alias (`_rr_o_0`, ...). The
+   `OutputPlan` on `CompiledQuery` maps cursor rows to public names by
+   position. Two equal public names (for example `group_by=["count"]`
+   with `COUNT(*)`) are rejected before SQL, so no column is silently
+   lost.
+6. A flat query (no `group_by`, no `aggregate`) selects only
+   `_rr_ord`, ordered by the caller's terms and then by stored order.
+   The output is copied from the raw stored rows: the whole row, or
+   just the `select` keys the row has. Values come back exactly as
+   captured (the string `"false"` stays a string), and a missing key
+   stays missing. Grouped output comes from DuckDB, but only over
+   single-kind scalar fields, so those values are exact too.
 
 ### Bounds and coverage
 
@@ -100,7 +130,7 @@ total.
 | `FetchMoreDrillIn.reason` / `DrillInUnavailableReason` | `backend/src/meho_backplane/connectors/schemas.py` | The machine-readable no-spill cause on the wire |
 | `ResultHandleStore.spill` / `fetch_window` / `fetch_rows` | `backend/src/meho_backplane/connectors/result_handle_store.py` | Fail-open Valkey persistence + operator/tenant-scoped read-back; `fetch_rows` returns the full authorized set for the query surface (#3366) |
 | `read_result_window` / `run_result_query` / `ResultHandleNotFoundError` | `backend/src/meho_backplane/operations/result_query.py` | Transport-neutral windowed-read core (#3179) + bounded query core (#3366) both surfaces wrap; misses raise the recoverable not-found error |
-| `compile_query` / `ResultQuerySpec` / `QueryContractError` | `backend/src/meho_backplane/jsonflux/query/contract.py` | Compiles the validated query grammar to one parameterized read-only `SELECT` (#3366) |
+| `compile_query` / `ResultQuerySpec` / `QueryContractError` / `OutputPlan` | `backend/src/meho_backplane/jsonflux/query/contract.py` | Compiles the validated query grammar against the result field catalog to one parameterized read-only `SELECT` plus an output plan (#3366, #3635) |
 | `result_query` (MCP) | `backend/src/meho_backplane/mcp/tools/result_query.py` | MCP read surface; misses surface as recoverable `handle_not_found` (`-32602`) |
 | `POST /api/v1/operations/result-query` | `backend/src/meho_backplane/api/v1/operations.py` | REST read surface; misses surface as a `404` with `reason=handle_not_found` (#3179) |
 | `_reduce_or_error` | `backend/src/meho_backplane/operations/dispatcher.py` | Builds `reducer_context` (`tenant_id`, `operator_sub`, `op_id`, hints) from the authenticated `Operator` |

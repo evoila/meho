@@ -194,6 +194,88 @@ async def test_output_byte_cap_lets_narrow_projection_through(
 
 
 # ---------------------------------------------------------------------------
+# Catalog-aware compile + raw-row rehydration (#3635)
+# ---------------------------------------------------------------------------
+
+
+async def test_field_after_sample_window_is_queryable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A field first seen deep in the row set is a valid filter/select target."""
+    rows: list[dict[str, Any]] = [{"stable": i} for i in range(300)]
+    rows.append({"stable": 300, "late": "row-301"})
+    _install(monkeypatch, _FakeStore(rows), _stub_settings())
+    result = await rq.run_result_query(
+        _operator(),
+        uuid.uuid4(),
+        ResultQuerySpec(
+            filter=[{"field": "late", "op": "=", "value": "row-301"}],
+            select=["stable", "late"],
+        ),
+    )
+    assert result["rows"] == [{"stable": 300, "late": "row-301"}]
+
+
+async def test_case_distinct_keys_coexist(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``Foo`` and ``foo`` stay distinct keys in flat and grouped output."""
+    rows = [{"Foo": "upper", "foo": "lower"}, {"Foo": "upper", "foo": "other"}]
+    _install(monkeypatch, _FakeStore(rows), _stub_settings())
+
+    flat = await rq.run_result_query(
+        _operator(),
+        uuid.uuid4(),
+        ResultQuerySpec(
+            filter=[{"field": "foo", "op": "=", "value": "lower"}], select=["Foo", "foo"]
+        ),
+    )
+    assert flat["rows"] == [{"Foo": "upper", "foo": "lower"}]
+
+    whole = await rq.run_result_query(_operator(), uuid.uuid4(), ResultQuerySpec())
+    assert whole["rows"] == rows
+
+    grouped = await rq.run_result_query(
+        _operator(),
+        uuid.uuid4(),
+        ResultQuerySpec(
+            group_by=["Foo", "foo"],
+            aggregate=[{"func": "COUNT"}],
+            order_by=[{"field": "foo"}],
+        ),
+    )
+    assert grouped["rows"] == [
+        {"Foo": "upper", "foo": "lower", "count": 1},
+        {"Foo": "upper", "foo": "other", "count": 1},
+    ]
+    for result in (flat, whole, grouped):
+        assert all("foo_1" not in row for row in result["rows"])
+
+
+async def test_flat_query_rehydrates_raw_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Flat output is the raw stored value: no coercion, absent stays absent."""
+    rows: list[dict[str, Any]] = [
+        {"id": 1, "enabled": "false", "spec": {"Nested": [1, None]}, "maybe": None},
+        {"id": 2, "enabled": True, "spec": "flat"},
+    ]
+    _install(monkeypatch, _FakeStore(rows), _stub_settings())
+
+    whole = await rq.run_result_query(_operator(), uuid.uuid4(), ResultQuerySpec())
+    assert whole["rows"] == rows
+    assert whole["rows"][0]["enabled"] == "false"
+
+    selected = await rq.run_result_query(
+        _operator(),
+        uuid.uuid4(),
+        ResultQuerySpec(
+            filter=[{"field": "id", "op": ">=", "value": 1}],
+            select=["enabled", "spec", "maybe"],
+            order_by=[{"field": "id", "direction": "desc"}],
+        ),
+    )
+    assert selected["rows"] == [
+        {"enabled": True, "spec": "flat"},
+        {"enabled": "false", "spec": {"Nested": [1, None]}, "maybe": None},
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Bounds: wall-time budget via worker-thread conn.interrupt()
 # ---------------------------------------------------------------------------
 

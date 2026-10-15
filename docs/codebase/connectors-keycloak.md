@@ -385,10 +385,10 @@ use `keycloak.realm.update` with `enabled: false`; that can be undone.
   - the target's `admin_realm` (default `master`);
   - the target's `managed_realm`;
   - the realm MEHO's own login uses: the realm in `KEYCLOAK_ISSUER_URL`, and
-    the realm in `KEYCLOAK_ADMIN_URL` when that is set. This guard applies
-    when the target is that Keycloak, which means the target's `host` (or
-    `tls_server_name`) is the host of one of those URLs. The port is not
-    compared, so one host behind two ports still counts as the same Keycloak.
+    the realm in `KEYCLOAK_ADMIN_URL` when that is set. This realm is
+    refused on every Keycloak target, because MEHO cannot tell for sure that
+    a target is a different Keycloak. A realm with the same name on another
+    Keycloak cannot be deleted through MEHO.
   - Names are compared without case.
 - **Safe to run twice.** If `GET /admin/realms/{realm}` answers 404, no
   DELETE is sent and the result is `{realm, deleted: false, already_absent:

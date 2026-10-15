@@ -13,8 +13,8 @@ What is proven:
 * the op registers on the ``destructive`` risk level, with approval required,
   the ``destructive`` tag, group ``realm_write`` and a required ``realm``;
 * the guards (``protected_realm``): the target's admin realm, its managed
-  realm, and the realm MEHO's own login uses when the target is that
-  Keycloak; a change of letter case does not skip them;
+  realm, and the realm MEHO's own login uses (on every Keycloak target,
+  whatever its host); a change of letter case does not skip them;
 * a realm that is already gone → ``already_absent: true`` and no DELETE;
   ``deleted: true`` only after a read answers 404;
 * the approval card: realm, enabled, user / client / group counts, no secret;
@@ -101,7 +101,7 @@ def _creds_loader(_target: KeycloakTargetLike, _operator: Operator) -> Any:
 
 @pytest.fixture(autouse=True)
 def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    # The backplane's own login runs on a different Keycloak by default.
+    # The backplane's own login uses a realm the tests do not delete.
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho-login")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
@@ -353,7 +353,7 @@ def test_guards_cover_master_and_a_custom_admin_realm(realm: str) -> None:
 async def test_realm_delete_refuses_the_backplane_login_realm(
     kc: KeycloakConnector, monkeypatch: pytest.MonkeyPatch, env: str, url: str
 ) -> None:
-    """The realm MEHO's own login uses is protected when the target is that Keycloak."""
+    """The realm MEHO's own login uses is refused (issuer URL and admin URL)."""
     monkeypatch.setenv(env, url)
     get_settings.cache_clear()
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
@@ -366,22 +366,20 @@ async def test_realm_delete_refuses_the_backplane_login_realm(
     assert not del_route.called
 
 
-async def test_login_realm_of_another_keycloak_is_not_protected(
+async def test_login_realm_is_refused_on_a_target_with_a_different_host(
     kc: KeycloakConnector, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The same realm name on a different Keycloak is not MEHO's login realm."""
+    """MEHO's own login realm is refused on every Keycloak target, whatever its host."""
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", f"https://other-keycloak.test/realms/{_REALM}")
     get_settings.cache_clear()
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
-        mock.get(_REALM_PATH).mock(
-            side_effect=[httpx.Response(200, json=_realm_rep()), httpx.Response(404)]
-        )
-        del_route = mock.delete(_REALM_PATH).respond(204)
-        result = await _run({"realm": _REALM})
-    assert result["status"] == "ok", result
-    assert result["result"]["deleted"] is True
-    assert del_route.call_count == 1
+        del_route = mock.delete(url__regex=r".*").respond(204)
+        result = await _run({"realm": _REALM.upper()})
+    assert result["status"] == "error", result
+    assert "(protected_realm)" in result["extras"]["exception_message"]
+    assert "MEHO's own login" in result["extras"]["exception_message"]
+    assert not del_route.called
 
 
 # ---------------------------------------------------------------------------

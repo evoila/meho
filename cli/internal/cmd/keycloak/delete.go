@@ -18,7 +18,7 @@ import (
 //   - keycloak client delete (--id|--client-id)                  → keycloak.client.delete
 //   - keycloak realm delete  --realm R                           → keycloak.realm.delete (#3886)
 //
-// The three ops are on the destructive risk level. The backplane accepts
+// The four ops are on the destructive risk level. The backplane accepts
 // such a call only with the preview_hash of a preview of the same op,
 // target and params, and then the request waits until a second person
 // approves it. The API and MCP work the same way (preview_operation, then
@@ -227,8 +227,10 @@ func newRealmDeleteCmd() *cobra.Command {
 			"     then waits until a second person approves it. Approving it runs\n" +
 			"     the delete; do not run the command again after approval.\n\n" +
 			"--realm is required. MEHO refuses the target's admin realm, its managed\n" +
-			"realm, and the realm MEHO's own login uses. To stop logins but keep the\n" +
-			"realm, use `meho keycloak realm update` with enabled=false instead.\n" +
+			"realm, and the realm MEHO's own login uses. The login realm is refused\n" +
+			"on every Keycloak target, even one that is a different Keycloak, because\n" +
+			"MEHO cannot tell that for sure. To stop logins but keep the realm, use\n" +
+			"`meho keycloak realm update` with enabled=false instead.\n" +
 			"If the realm is already gone, the result says already_absent=true.\n" +
 			"deleted=true is reported only after a read of the realm answers 404.\n\n" +
 			"Exit codes: 0=ok/previewed/waiting for approval, 1=error/denied,\n" +

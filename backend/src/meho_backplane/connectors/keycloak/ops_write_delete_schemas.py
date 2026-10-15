@@ -248,9 +248,10 @@ DELETE_WRITE_OPS: tuple[KeycloakOp, ...] = (
             "session in the realm goes with it. ``realm`` is required; the op "
             "never falls back to the target's managed realm. Refuses "
             "(``protected_realm``) the target's admin realm, its managed realm, "
-            "and the realm MEHO's own login uses when the target is that "
-            "Keycloak. The approval card shows whether the realm is enabled and "
-            "how many users, clients and groups it has. " + _HOW_TO_RUN
+            "and the realm MEHO's own login uses. The login realm is refused on "
+            "every Keycloak target, because MEHO cannot tell for sure that a "
+            "target is a different Keycloak. The approval card shows whether the "
+            "realm is enabled and how many users, clients and groups it has. " + _HOW_TO_RUN
         ),
         parameter_schema=_REALM_DELETE_SCHEMA,
         response_schema=_REALM_DELETE_RESULT_SCHEMA,
@@ -263,7 +264,9 @@ DELETE_WRITE_OPS: tuple[KeycloakOp, ...] = (
                 "Use to remove a short-lived realm for good, for example a test or "
                 "demo realm, or a failed set-up that must be cleaned before a retry. "
                 "To stop logins but keep the realm, use keycloak.realm.update with "
-                "representation={enabled: false} instead; that can be undone. " + _HOW_TO_RUN
+                "representation={enabled: false} instead; that can be undone. "
+                "The realm MEHO's own login uses is refused on every Keycloak "
+                "target, even when the target is a different Keycloak. " + _HOW_TO_RUN
             ),
             "parameter_hints": {
                 "realm": "The exact name of the realm to delete. Required.",

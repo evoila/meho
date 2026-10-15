@@ -18,10 +18,10 @@ once, so this op follows the other governed deletes
      there;
    * the target's ``managed_realm``: the realm this target exists to manage;
    * the realm behind this backplane's own login (``KEYCLOAK_ISSUER_URL``,
-     and ``KEYCLOAK_ADMIN_URL`` when set), when the target is that Keycloak.
-     Deleting it locks every operator out of MEHO. The target counts as
-     "that Keycloak" when its host (or its TLS server name) is the host of
-     one of those two URLs.
+     and ``KEYCLOAK_ADMIN_URL`` when set). Deleting it locks every operator
+     out of MEHO. This realm name is refused on every Keycloak target,
+     because MEHO cannot tell for sure that a target is a different
+     Keycloak.
 
    Realm names are compared without case, so a guard cannot be skipped by
    changing the case of a letter.
@@ -98,37 +98,35 @@ def realm_name_param(params: dict[str, Any]) -> str:
     return realm
 
 
-def _realm_from_url(url: str) -> tuple[str | None, str | None]:
-    """Return ``(host, realm)`` from a Keycloak issuer or admin URL.
+def _realm_from_url(url: str) -> str | None:
+    """Return the realm name in a Keycloak issuer or admin URL.
 
     The realm is the path segment after the last ``realms`` segment, so
     ``https://kc/realms/meho`` and ``https://kc/admin/realms/meho`` both give
-    ``meho``. Missing parts come back as ``None``.
+    ``meho``. A URL with no realm gives ``None``.
     """
-    parts = urlsplit(url)
-    segments = [unquote(s) for s in parts.path.split("/") if s]
+    segments = [unquote(s) for s in urlsplit(url).path.split("/") if s]
     realm = None
     for index in range(len(segments) - 1):
         if segments[index] == "realms":
             realm = segments[index + 1]
-    host = parts.hostname.rstrip(".").lower() if parts.hostname else None
-    return host, realm
+    return realm
 
 
-def _backplane_login_realms(target: KeycloakTargetLike) -> set[str]:
-    """Return the realms this backplane logs in with, when the target is that Keycloak."""
+def _backplane_login_realms() -> set[str]:
+    """Return the realms this backplane's own login uses.
+
+    They are refused on every Keycloak target, not only on the Keycloak
+    behind those URLs: MEHO cannot tell for sure that a target is a
+    different Keycloak.
+    """
     settings = get_settings()
-    target_hosts = {
-        str(name).rstrip(".").lower()
-        for name in (target.host, getattr(target, "tls_server_name", None))
-        if name
-    }
     realms: set[str] = set()
     for url in (str(settings.keycloak_issuer_url), settings.keycloak_admin_url):
         if not url:
             continue
-        host, realm = _realm_from_url(url)
-        if host is not None and realm is not None and host in target_hosts:
+        realm = _realm_from_url(url)
+        if realm is not None:
             realms.add(realm)
     return realms
 
@@ -141,7 +139,7 @@ def check_realm_guards(target: KeycloakTargetLike, realm: str) -> None:
         (DEFAULT_ADMIN_REALM, "Keycloak's own admin realm"),
         (realms.admin_realm, "the target's admin realm; the target logs in there"),
         (realms.managed_realm, "the realm this target manages"),
-        *((name, "the realm MEHO's own login uses") for name in _backplane_login_realms(target)),
+        *((name, "the realm MEHO's own login uses") for name in _backplane_login_realms()),
     )
     for protected, why in reasons:
         if wanted == protected.casefold():
@@ -162,7 +160,11 @@ async def _count(
     target: KeycloakTargetLike,
     realm: str,
 ) -> dict[str, int | None]:
-    """Count the realm's users, clients and groups (``None`` when unreadable)."""
+    """Count the realm's users, clients and groups.
+
+    A count is ``None`` when Keycloak answers with an unexpected shape. An
+    HTTP error is raised, not turned into ``None``.
+    """
     values = {"realm": quote_segment(realm)}
     users: Any = await connector._get_admin_json(
         target, fill_path(_USERS_COUNT_PATH, values), operator=operator

@@ -525,15 +525,28 @@ REST bodies (`target` on `SearchDocsRequest` / `AskDocsRequest`) and the
 `/ui/corpus` form (a hidden `target` field, filled from
 `GET /ui/corpus?target=<name>`; both UI modes use it).
 
-- **Resolution.** `apply_target_default(session, operator, scope, target)`
-  resolves the name with `resolve_target`, the same lookup
+- **Resolution.** `apply_target_default(session, operator, scope, target,
+  op_id=...)` resolves the name with `resolve_target`, the same lookup
   `call_operation` uses: name or alias, inside the caller's tenant only.
   An unknown name, or a target in another tenant, raises
   `TargetNotFoundError`: REST 404 `{"error": "no_target", "query",
   "matches"}`, MCP `-32602` with `data.error_code = "no_target"` and the
   same message `call_operation` gives, a UI error card. An alias that
   matches more than one target is `ambiguous_target` (REST 409). Only the
-  target's name and stored `fingerprint` are read.
+  target's name, id and stored `fingerprint` are read.
+- **Permission.** After the lookup, an **agent** principal is checked
+  against its permission rows the way `call_operation`'s policy gate
+  checks it: `resolve_verdict` with the docs op id (`meho.docs.search` or
+  `meho.docs.ask`), `safety_level="safe"` and the target's id. With no
+  matching row the lookup is allowed (a docs read is a safe op); an
+  explicit `deny` row for that target raises `TargetDeniedError`: REST
+  403 `{"error": "denied", "query", "reason"}`, MCP `-32602` with
+  `data.error_code = "denied"` and the same `denied: <reason>` message
+  `call_operation` returns, a UI error card. A `needs-approval` row does
+  not refuse it (there is nothing to approve). Human and service
+  principals are not gated by these rows, as on `call_operation`. The
+  target name is bound to the audit row before the check, so a denied
+  call's row names the target too.
 - **The default.** `with_target_default` copies the fingerprint's
   `product` and `version`, as reported, into `DocsScope.target_product` /
   `target_release` and the name into `DocsScope.target`. A target without

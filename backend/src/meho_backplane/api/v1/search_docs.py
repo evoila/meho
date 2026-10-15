@@ -371,7 +371,10 @@ async def _run_fanout_or_http_error(
                 "missing claim) -- or the collection has been ``disabled`` by "
                 "an operator (``detail.error='collection_disabled'``). Neither "
                 "is retryable: the collection exists but the principal cannot "
-                "search it, or an operator switched it off."
+                "search it, or an operator switched it off. Also returned when "
+                "the caller's permission rows deny it the named ``target`` "
+                "(``detail.error='denied'``, with the ``reason``), the same "
+                "denial ``call_operation`` returns."
             ),
         },
         409: {
@@ -478,7 +481,9 @@ async def _handle_single(
         audit_product=docs_scope.product,
         audit_version=docs_scope.version,
     )
-    docs_scope = await apply_target_default(session, operator, docs_scope, body.target)
+    docs_scope = await apply_target_default(
+        session, operator, docs_scope, body.target, op_id="meho.docs.search"
+    )
 
     # Resolve + entitle + readiness gate (each typed failure → its own HTTP
     # status; see :func:`_resolve_collection_or_http_error`).

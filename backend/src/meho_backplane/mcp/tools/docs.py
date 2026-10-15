@@ -132,7 +132,7 @@ from meho_backplane.docs_search import (
 )
 from meho_backplane.docs_search.answer import ANSWER_SOURCE_UPSTREAM, answer_docs_question
 from meho_backplane.docs_search.read import DOCS_SOURCE_NOT_FOUND, READ_AROUND_MAX
-from meho_backplane.docs_search.target_scope import apply_target_default
+from meho_backplane.docs_search.target_scope import TargetDeniedError, apply_target_default
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import (
     McpInternalError,
@@ -222,7 +222,8 @@ _TARGET_DEFAULT: Final[str] = (
     "(3) the target's version, used only when the question names none. So "
     "'what changed in 9.1?' asked with an 8.0 target is answered for 9.1. "
     "An unknown target is rejected with the same no_target error "
-    "`call_operation` returns. A target with no detected product or "
+    "`call_operation` returns, and a target you may not use with the same "
+    "denied error. A target with no detected product or "
     "version adds nothing. Only sent when the collection enables the soft "
     "scope."
 )
@@ -255,18 +256,33 @@ async def _with_target_or_error(
     operator: Operator,
     scope: DocsScope,
     target: str | None,
+    *,
+    op_id: str,
 ) -> DocsScope:
     """Add the named target's default scope (#3920) or raise ``-32602``.
 
-    The target resolves the way ``call_operation`` resolves its own (by name
-    or alias, inside the caller's tenant), and a failure carries the same
-    ``no_target`` / ``ambiguous_target`` code, message and near-miss
-    ``matches`` that tool returns.
+    The target resolves and is authorised the way ``call_operation`` resolves
+    and authorises its own (by name or alias, inside the caller's tenant,
+    then the caller's permission rows for *op_id* on that target). A failure
+    carries the same ``no_target`` / ``ambiguous_target`` / ``denied`` code,
+    message and detail (near-miss ``matches``, or the denial ``reason``) that
+    tool returns.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         try:
-            scope = await apply_target_default(session, operator, scope, target)
+            scope = await apply_target_default(session, operator, scope, target, op_id=op_id)
+        except TargetDeniedError as exc:
+            denied: dict[str, Any] = exc.detail if isinstance(exc.detail, dict) else {}
+            reason = str(denied.get("reason", ""))
+            raise McpInvalidParamsError(
+                f"{tool}: denied: {reason}",
+                data={
+                    "error_code": "denied",
+                    "query": str(denied.get("query", target)),
+                    "reason": reason,
+                },
+            ) from exc
         except (TargetNotFoundError, AmbiguousTargetError) as exc:
             detail: dict[str, Any] = exc.detail if isinstance(exc.detail, dict) else {}
             code = str(detail.get("error", "no_target"))
@@ -453,7 +469,9 @@ async def _run_search_single(
     """The single-collection path (T3 #1552): one backend, one collection."""
     scope = _build_scope_or_invalid_params(tool, arguments)
     structlog.contextvars.bind_contextvars(audit_collection=scope.collection_key)
-    scope = await _with_target_or_error(tool, operator, scope, arguments.get("target"))
+    scope = await _with_target_or_error(
+        tool, operator, scope, arguments.get("target"), op_id=_SEARCH_OP_ID
+    )
     collection = await _resolve_collection_or_error(operator, scope, tool=tool)
     return await search_docs(operator, query, scope=scope, collection=collection, limit=limit)
 
@@ -687,7 +705,9 @@ async def _ask_docs_handler(
 
     scope = _build_scope_or_invalid_params("ask_docs", arguments)
     structlog.contextvars.bind_contextvars(audit_collection=scope.collection_key)
-    scope = await _with_target_or_error("ask_docs", operator, scope, arguments.get("target"))
+    scope = await _with_target_or_error(
+        "ask_docs", operator, scope, arguments.get("target"), op_id=_ASK_OP_ID
+    )
     collection = await _resolve_collection_or_error(operator, scope, tool="ask_docs")
 
     outcome = await answer_docs_question(

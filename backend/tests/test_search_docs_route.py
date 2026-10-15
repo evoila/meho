@@ -60,7 +60,7 @@ from meho_backplane.auth.corpus import CorpusChunk, CorpusSearchResponse, Corpus
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, DocCollection, Tenant
+from meho_backplane.db.models import AgentPermission, AuditLog, DocCollection, Tenant
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.settings import get_settings
@@ -1154,36 +1154,58 @@ def test_fanout_drops_non_entitled_collection_from_all(client: TestClient) -> No
 _TARGET_HOST = "vcenter-01.example.test"
 
 
-async def _seed_target(*, tenant_id: str = DEFAULT_TENANT_ID) -> None:
-    """Seed a probed ``vcenter-01`` target in *tenant_id* (its tenant row too)."""
+async def _seed_target(*, tenant_id: str = DEFAULT_TENANT_ID) -> UUID:
+    """Seed a probed ``vcenter-01`` target in *tenant_id* (its tenant row too); return its id."""
     async with get_sessionmaker()() as session, session.begin():
         session.add(Tenant(id=UUID(tenant_id), slug=f"t-{tenant_id[-4:]}", name="Tenant"))
+        target = TargetORM(
+            tenant_id=UUID(tenant_id),
+            name="vcenter-01",
+            aliases=[],
+            product="vcenter",
+            host=_TARGET_HOST,
+            port=443,
+            secret_ref="targets/vcenter-01",
+            auth_model="shared_service_account",
+            fingerprint={
+                "vendor": "vmware",
+                "product": "vcenter",
+                "version": "8.0.3.00400",
+                "reachable": True,
+                "probed_at": "2026-10-01T00:00:00Z",
+                "probe_method": "vimServiceVersions.xml",
+            },
+        )
+        session.add(target)
+        await session.flush()
+        return target.id
+
+
+async def _deny_target(target_id: UUID, *, principal_sub: str) -> None:
+    """Insert a ``deny`` permission row for every op on *target_id*."""
+    async with get_sessionmaker()() as session, session.begin():
         session.add(
-            TargetORM(
-                tenant_id=UUID(tenant_id),
-                name="vcenter-01",
-                aliases=[],
-                product="vcenter",
-                host=_TARGET_HOST,
-                port=443,
-                secret_ref="targets/vcenter-01",
-                auth_model="shared_service_account",
-                fingerprint={
-                    "vendor": "vmware",
-                    "product": "vcenter",
-                    "version": "8.0.3.00400",
-                    "reachable": True,
-                    "probed_at": "2026-10-01T00:00:00Z",
-                    "probe_method": "vimServiceVersions.xml",
-                },
-            ),
+            AgentPermission(
+                tenant_id=UUID(DEFAULT_TENANT_ID),
+                principal_sub=principal_sub,
+                op_pattern="*",
+                verdict="deny",
+                target_scope=str(target_id),
+                created_by_sub="admin:docs-test",
+            )
         )
 
 
-def _post_search(client: TestClient, body: dict[str, Any]) -> tuple[Any, AsyncMock]:
+def _post_search(
+    client: TestClient, body: dict[str, Any], *, principal_kind: str | None = None
+) -> tuple[Any, AsyncMock]:
     key = _make_rsa_keypair("kid-A")
     token = _mint_token(
-        key, sub="op-target", tenant_role=TenantRole.OPERATOR.value, capabilities=_ENTITLED_CAPS
+        key,
+        sub="op-target",
+        tenant_role=TenantRole.OPERATOR.value,
+        capabilities=_ENTITLED_CAPS,
+        principal_kind=principal_kind,
     )
     fake_corpus = _mock_corpus(_make_chunk("c1"))
     with respx.mock as mock_router, patch(_CORPUS_SEAM, new=fake_corpus):
@@ -1250,3 +1272,45 @@ async def test_target_in_another_tenant_is_404_no_target(client: TestClient) -> 
     assert response.status_code == 404, response.text
     assert response.json()["detail"]["error"] == "no_target"
     fake_corpus.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_denied_target_in_own_tenant_is_403_denied(client: TestClient) -> None:
+    """An agent whose permission rows deny it the target gets ``call_operation``'s denial.
+
+    The target is in the agent's tenant, so the lookup succeeds; the shared
+    permission check refuses it as 403 ``{"error": "denied", "query",
+    "reason"}``. No corpus call runs, and the audit row names the target.
+    """
+    await _seed_global_collection(backend=_SOFT_SCOPE_ON)
+    target_id = await _seed_target()
+    await _deny_target(target_id, principal_sub="op-target")
+    response, fake_corpus = _post_search(client, {"target": "vcenter-01"}, principal_kind="agent")
+
+    assert response.status_code == 403, response.text
+    detail = response.json()["detail"]
+    assert detail["error"] == "denied"
+    assert detail["query"] == "vcenter-01"
+    assert detail["reason"].startswith("verdict=deny")
+    fake_corpus.assert_not_awaited()
+
+    async with get_sessionmaker()() as session:
+        rows = (
+            (await session.execute(select(AuditLog).where(AuditLog.path == "/api/v1/search_docs")))
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    assert rows[0].payload["target"] == "vcenter-01"
+    assert _TARGET_HOST not in json.dumps(rows[0].payload)
+
+
+@pytest.mark.asyncio
+async def test_agent_without_deny_row_uses_the_target_default(client: TestClient) -> None:
+    """An agent with no matching row is allowed: a docs lookup is a safe read."""
+    await _seed_global_collection(backend=_SOFT_SCOPE_ON)
+    await _seed_target()
+    response, fake_corpus = _post_search(client, {"target": "vcenter-01"}, principal_kind="agent")
+
+    assert response.status_code == 200, response.text
+    assert fake_corpus.await_args.kwargs["soft_scope"]["source"] == "default"

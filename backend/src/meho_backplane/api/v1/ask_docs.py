@@ -390,7 +390,10 @@ def _raise_pipeline_http_error(answer_error: AskDocsAnswerError) -> NoReturn:
                 "``tenant_id`` it checked) -- or the collection has been "
                 "``disabled`` by an operator "
                 "(``detail.error='collection_disabled'``). Mirrors "
-                "``search_docs``; neither is retryable."
+                "``search_docs``; neither is retryable. Also returned when the "
+                "caller's permission rows deny it the named ``target`` "
+                "(``detail.error='denied'``, with the ``reason``), the same "
+                "denial ``call_operation`` returns."
             ),
         },
         409: {
@@ -482,7 +485,9 @@ async def ask_docs_endpoint(
         audit_product=docs_scope.product,
         audit_version=docs_scope.version,
     )
-    docs_scope = await apply_target_default(session, operator, docs_scope, body.target)
+    docs_scope = await apply_target_default(
+        session, operator, docs_scope, body.target, op_id=_ASK_OP_ID
+    )
 
     collection = await _resolve_collection_or_http_error(
         session, operator, docs_scope.collection_key

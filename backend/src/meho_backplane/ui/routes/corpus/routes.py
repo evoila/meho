@@ -746,7 +746,7 @@ async def _ask_result_context(
     # never composed without a routable collection).
     try:
         docs_scope, collection = await _resolve_scope_or_http_error(
-            operator, collection_key, target
+            operator, collection_key, target, op_id="meho.docs.ask"
         )
     except HTTPException as exc:
         return _search_or_error_context(exc)
@@ -860,11 +860,14 @@ async def _run_search(
     * not entitled -> 403; ``disabled`` -> 403 (terminal); not-ready
       (``provisioning`` / ``rebuilding``) -> 409 (retryable)
     * backend unavailable -> 503 (fail-closed; never an empty list)
-    * a *target* that names no target -> 404, or more than one -> 409
+    * a *target* that names no target -> 404, or more than one -> 409;
+      one the caller may not use -> 403
 
     Returns the ranked cited-chunk list on success.
     """
-    docs_scope, collection = await _resolve_scope_or_http_error(operator, collection_key, target)
+    docs_scope, collection = await _resolve_scope_or_http_error(
+        operator, collection_key, target, op_id="meho.docs.search"
+    )
 
     try:
         result = await search_docs(
@@ -896,12 +899,15 @@ async def _resolve_scope_or_http_error(
     operator: Operator,
     collection_key: str,
     target: str,
+    *,
+    op_id: str,
 ) -> tuple[DocsScope, DocCollection]:
     """Build the scope, add the *target* default (#3920) and gate the collection.
 
     The shared front half of both modes: a missing / blank ``collection`` is
     a 422; an unknown *target* is the target lookup's 404 (more than one
-    match: 409); the collection arms are :func:`_resolve_collection_or_http_error`'s.
+    match: 409), and one the caller's permission rows deny for *op_id* is
+    403; the collection arms are :func:`_resolve_collection_or_http_error`'s.
     """
     try:
         docs_scope = build_docs_scope(collection_key or None)
@@ -913,7 +919,9 @@ async def _resolve_scope_or_http_error(
 
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as db_session, db_session.begin():
-        docs_scope = await apply_target_default(db_session, operator, docs_scope, target or None)
+        docs_scope = await apply_target_default(
+            db_session, operator, docs_scope, target or None, op_id=op_id
+        )
         collection = await _resolve_collection_or_http_error(
             db_session, operator, docs_scope.collection_key
         )

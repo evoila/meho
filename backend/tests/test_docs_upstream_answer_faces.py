@@ -58,9 +58,9 @@ from meho_backplane.auth.corpus import (
     UpstreamAnswer,
 )
 from meho_backplane.auth.jwt import clear_jwks_cache
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
-from meho_backplane.db.models import AuditLog, DocCollection, Tenant
+from meho_backplane.db.models import AgentPermission, AuditLog, DocCollection, Tenant
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.docs_search.answer_errors import (
     CAUSE_CORPUS_UNAVAILABLE,
@@ -75,7 +75,7 @@ from meho_backplane.docs_search.answer_errors import (
 )
 from meho_backplane.main import app as main_app
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
-from meho_backplane.mcp.schemas import INTERNAL_ERROR
+from meho_backplane.mcp.schemas import INTERNAL_ERROR, INVALID_PARAMS
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
@@ -229,6 +229,23 @@ def _operator() -> Operator:
     )
 
 
+#: The agent principal the denied-target tests run as; a grant is keyed on
+#: its ``client_id`` (``agent:<name>``), not its service-account ``sub``.
+_AGENT_CLIENT_ID = "agent:docs-test"
+
+
+def _agent_operator() -> Operator:
+    return Operator(
+        sub="99999999-9999-9999-9999-999999999999",
+        raw_jwt="fixture-jwt-not-real",
+        tenant_id=OPERATOR_TENANT_ID,
+        tenant_role=TenantRole.OPERATOR,
+        capabilities=_ENTITLED,
+        principal_kind=PrincipalKind.AGENT,
+        client_id=_AGENT_CLIENT_ID,
+    )
+
+
 # ---------------------------------------------------------------------------
 # The three faces
 # ---------------------------------------------------------------------------
@@ -242,11 +259,19 @@ def _rest_app() -> FastAPI:
     return app
 
 
-def _rest_post(router: respx.MockRouter, query: str = _QUERY, **refinements: str) -> httpx.Response:
+def _rest_post(
+    router: respx.MockRouter,
+    query: str = _QUERY,
+    *,
+    principal_kind: str | None = None,
+    **refinements: str,
+) -> httpx.Response:
     """POST ``/api/v1/ask_docs`` with a minted, entitled JWT (JWKS on *router*)."""
     key = make_rsa_keypair("kid-A")
     mock_discovery_and_jwks(router, public_jwks(key))
-    token = mint_token(key, sub="op-rest", capabilities=sorted(_ENTITLED))
+    token = mint_token(
+        key, sub="op-rest", capabilities=sorted(_ENTITLED), principal_kind=principal_kind
+    )
     return TestClient(_rest_app()).post(
         "/api/v1/ask_docs",
         json={"query": query, "collection": "vmware", **refinements},
@@ -254,11 +279,12 @@ def _rest_post(router: respx.MockRouter, query: str = _QUERY, **refinements: str
     )
 
 
-def _mcp_call(**refinements: str) -> dict[str, Any]:
+def _mcp_call(*, operator: Operator | None = None, **refinements: str) -> dict[str, Any]:
     """Call the MCP ``ask_docs`` tool as an entitled operator; return the JSON-RPC body."""
+    caller = operator or _operator()
 
     async def _verify() -> Operator:
-        return _operator()
+        return caller
 
     main_app.dependency_overrides[verify_mcp_jwt_and_bind] = _verify
     try:
@@ -759,34 +785,54 @@ _TARGET_DEFAULT_SCOPE: dict[str, str] = {
 _TARGET_HOST = "vcenter-01.example.test"
 
 
-async def _seed_target_async() -> None:
-    """Seed a probed ``vcenter-01`` target in the operator's tenant."""
+async def _seed_target_async() -> uuid.UUID:
+    """Seed a probed ``vcenter-01`` target in the operator's tenant; return its id."""
+    async with get_sessionmaker()() as session, session.begin():
+        target = TargetORM(
+            tenant_id=OPERATOR_TENANT_ID,
+            name="vcenter-01",
+            aliases=[],
+            product="vcenter",
+            host=_TARGET_HOST,
+            port=443,
+            secret_ref="targets/vcenter-01",
+            auth_model="shared_service_account",
+            fingerprint={
+                "vendor": "vmware",
+                "product": "vcenter",
+                "version": "8.0.3.00400",
+                "reachable": True,
+                "probed_at": "2026-10-01T00:00:00Z",
+                "probe_method": "vimServiceVersions.xml",
+            },
+        )
+        session.add(target)
+        await session.flush()
+        return target.id
+
+
+async def _seed_with_target() -> uuid.UUID:
+    await _seed_async(_gated_backend({"scope": "soft", "scope_filters": True}))
+    return await _seed_target_async()
+
+
+async def _deny_target(target_id: uuid.UUID, *, principal_sub: str) -> None:
+    """Insert a ``deny`` permission row for every op on *target_id*."""
     async with get_sessionmaker()() as session, session.begin():
         session.add(
-            TargetORM(
+            AgentPermission(
                 tenant_id=OPERATOR_TENANT_ID,
-                name="vcenter-01",
-                aliases=[],
-                product="vcenter",
-                host=_TARGET_HOST,
-                port=443,
-                secret_ref="targets/vcenter-01",
-                auth_model="shared_service_account",
-                fingerprint={
-                    "vendor": "vmware",
-                    "product": "vcenter",
-                    "version": "8.0.3.00400",
-                    "reachable": True,
-                    "probed_at": "2026-10-01T00:00:00Z",
-                    "probe_method": "vimServiceVersions.xml",
-                },
-            ),
+                principal_sub=principal_sub,
+                op_pattern="*",
+                verdict="deny",
+                target_scope=str(target_id),
+                created_by_sub="admin:docs-test",
+            )
         )
 
 
-async def _seed_with_target() -> None:
-    await _seed_async(_gated_backend({"scope": "soft", "scope_filters": True}))
-    await _seed_target_async()
+async def _seed_denied_target(*, principal_sub: str) -> None:
+    await _deny_target(await _seed_with_target(), principal_sub=principal_sub)
 
 
 @pytest.mark.asyncio
@@ -825,6 +871,34 @@ async def test_rest_unknown_target_is_404_no_target() -> None:
         response = _rest_post(router, target="vcenter-99")
     assert response.status_code == 404, response.text
     assert response.json()["detail"]["error"] == "no_target"
+    assert ask.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_rest_denied_target_is_403_denied() -> None:
+    """REST ``ask_docs`` as an agent denied the target: 403 ``denied``, no answer call."""
+    await _seed_denied_target(principal_sub="op-rest")
+    ask = _FakeAsk()
+    with respx.mock(assert_all_called=False) as router, patch(_ASK_SEAM, new=ask):
+        response = _rest_post(router, principal_kind="agent", target="vcenter-01")
+    assert response.status_code == 403, response.text
+    detail = response.json()["detail"]
+    assert detail["error"] == "denied"
+    assert detail["query"] == "vcenter-01"
+    assert detail["reason"].startswith("verdict=deny")
+    assert ask.calls == 0
+
+
+def test_mcp_denied_target_is_the_denied_error() -> None:
+    """MCP ``ask_docs`` as an agent denied the target: ``-32602`` ``denied``, no answer call."""
+    asyncio.run(_seed_denied_target(principal_sub=_AGENT_CLIENT_ID))
+    ask = _FakeAsk()
+    with patch(_ASK_SEAM, new=ask):
+        body = _mcp_call(operator=_agent_operator(), target="vcenter-01")
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert body["error"]["message"].startswith("ask_docs: denied: verdict=deny")
+    assert body["error"]["data"]["error_code"] == "denied"
+    assert body["error"]["data"]["query"] == "vcenter-01"
     assert ask.calls == 0
 
 

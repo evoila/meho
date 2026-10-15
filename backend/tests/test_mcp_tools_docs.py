@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from collections.abc import Iterator
 from typing import Any
 from unittest.mock import patch
@@ -48,9 +49,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from meho_backplane.auth.corpus import CorpusChunk, CorpusSearchResponse, CorpusUnavailable
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, Tenant
+from meho_backplane.db.models import AgentPermission, AuditLog, Tenant
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.main import app
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
@@ -1027,22 +1028,70 @@ _TARGET_DEFAULT_SCOPE: dict[str, str] = {
 _TARGET_HOST = "vcenter-01.example.test"
 
 
-async def _seed_target(*, fingerprint: dict[str, Any] | None = _VCENTER_FINGERPRINT) -> None:
-    """Seed the operator's tenant and a ``vcenter-01`` target in it."""
+async def _seed_target(*, fingerprint: dict[str, Any] | None = _VCENTER_FINGERPRINT) -> uuid.UUID:
+    """Seed the operator's tenant and a ``vcenter-01`` target in it; return its id."""
     async with get_sessionmaker()() as session, session.begin():
         session.add(Tenant(id=OPERATOR_TENANT_ID, slug="op-test-tenant", name="Op Test"))
+        target = TargetORM(
+            tenant_id=OPERATOR_TENANT_ID,
+            name="vcenter-01",
+            aliases=["vc1"],
+            product="vcenter",
+            host=_TARGET_HOST,
+            port=443,
+            secret_ref="targets/vcenter-01",
+            auth_model="shared_service_account",
+            fingerprint=fingerprint,
+        )
+        session.add(target)
+        await session.flush()
+        return target.id
+
+
+#: The agent principal the denied-target tests run as: ``sub`` is the
+#: service-account UUID, ``client_id`` the ``agent:<name>`` a grant is keyed on.
+_AGENT_SUB = "99999999-9999-9999-9999-999999999999"
+_AGENT_CLIENT_ID = "agent:docs-test"
+
+
+@pytest.fixture
+def agent_docs_client() -> Iterator[TestClient]:
+    """``TestClient`` whose caller is an entitled **agent** principal."""
+    op = Operator(
+        sub=_AGENT_SUB,
+        name="Docs Test Agent",
+        email=None,
+        raw_jwt="fixture-jwt-not-real",
+        tenant_id=OPERATOR_TENANT_ID,
+        tenant_role=TenantRole.OPERATOR,
+        capabilities=_ENTITLED,
+        principal_kind=PrincipalKind.AGENT,
+        client_id=_AGENT_CLIENT_ID,
+    )
+
+    async def _fake_verify() -> Operator:
+        return op
+
+    app.dependency_overrides[verify_mcp_jwt_and_bind] = _fake_verify
+    try:
+        with TestClient(app) as client:
+            yield client
+    finally:
+        app.dependency_overrides.pop(verify_mcp_jwt_and_bind, None)
+
+
+async def _deny_target(target_scope: str, *, principal_sub: str = _AGENT_CLIENT_ID) -> None:
+    """Insert a ``deny`` permission row for every op on *target_scope*."""
+    async with get_sessionmaker()() as session, session.begin():
         session.add(
-            TargetORM(
+            AgentPermission(
                 tenant_id=OPERATOR_TENANT_ID,
-                name="vcenter-01",
-                aliases=["vc1"],
-                product="vcenter",
-                host=_TARGET_HOST,
-                port=443,
-                secret_ref="targets/vcenter-01",
-                auth_model="shared_service_account",
-                fingerprint=fingerprint,
-            ),
+                principal_sub=principal_sub,
+                op_pattern="*",
+                verdict="deny",
+                target_scope=target_scope,
+                created_by_sub="admin:docs-test",
+            )
         )
 
 
@@ -1170,3 +1219,63 @@ async def test_tools_call_search_docs_audit_row_carries_scope_source_and_target(
     assert payload["target"] == "vcenter-01"
     assert _TARGET_HOST not in json.dumps(payload)
     assert "targets/vcenter-01" not in json.dumps(payload)
+
+
+def test_tools_call_search_docs_denied_target_is_the_denied_error(
+    agent_docs_client: TestClient,
+) -> None:
+    """An agent whose permission rows deny it the target gets ``call_operation``'s denial.
+
+    The target is in the agent's own tenant, so the lookup succeeds; the
+    permission check refuses it as ``-32602`` with ``error_code = "denied"``
+    and the agent-readable reason. No corpus call runs, and the audit row
+    still names the target.
+    """
+    _seed_collection_sync(backend=_SOFT_SCOPE_ON)
+    target_id = asyncio.run(_seed_target())
+    asyncio.run(_deny_target(str(target_id)))
+    fake = _fake_corpus(_SAMPLE_CHUNK)
+    with patch(_CORPUS_SEAM, new=fake):
+        response = _search_call(agent_docs_client, {"collection": "vmware", "target": "vc1"})
+    error = response.json()["error"]
+    assert error["code"] == INVALID_PARAMS
+    assert error["message"].startswith("search_docs: denied: verdict=deny")
+    assert error["data"]["error_code"] == "denied"
+    assert error["data"]["query"] == "vc1"
+    assert "permission row" in error["data"]["reason"]
+    assert fake.captured == {}  # type: ignore[attr-defined]
+
+    rows = asyncio.run(_mcp_audit_rows())
+    assert len(rows) == 1
+    assert rows[0].payload["target"] == "vcenter-01"
+    assert _TARGET_HOST not in json.dumps(rows[0].payload)
+
+
+def test_tools_call_search_docs_deny_row_for_another_target_does_not_block(
+    agent_docs_client: TestClient,
+) -> None:
+    """A deny row scoped to a different target leaves this target usable."""
+    _seed_collection_sync(backend=_SOFT_SCOPE_ON)
+    asyncio.run(_seed_target())
+    asyncio.run(_deny_target(str(uuid.uuid4())))
+    fake = _fake_corpus(_SAMPLE_CHUNK)
+    with patch(_CORPUS_SEAM, new=fake):
+        response = _search_call(agent_docs_client, {"collection": "vmware", "target": "vcenter-01"})
+    assert response.json()["result"]["isError"] is False
+    assert fake.captured["soft_scope"] == _TARGET_DEFAULT_SCOPE  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_search_docs_human_operator_is_not_gated_by_agent_rows(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """Agent permission rows gate agents only, as on ``call_operation``."""
+    client, op = docs_client
+    _seed_collection_sync(backend=_SOFT_SCOPE_ON)
+    target_id = asyncio.run(_seed_target())
+    asyncio.run(_deny_target(str(target_id), principal_sub=op.sub))
+    fake = _fake_corpus(_SAMPLE_CHUNK)
+    with patch(_CORPUS_SEAM, new=fake):
+        response = _search_call(client, {"collection": "vmware", "target": "vcenter-01"})
+    assert response.json()["result"]["isError"] is False
+    assert fake.captured["soft_scope"] == _TARGET_DEFAULT_SCOPE  # type: ignore[attr-defined]

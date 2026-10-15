@@ -438,8 +438,10 @@ entitled to** (`meho-docs:<key>`), so every key shown is one
   filters, and only when the collection sets `backend.ref.scope: "soft"`.
   Which version wins: your own `product` / `version`, then a version the
   question names, then the target's. An unknown target is the same
-  `no_target` error `call_operation` returns (REST 404, MCP `-32602`). A
-  cross-collection fan-out ignores it. The audit row and the log record
+  `no_target` error `call_operation` returns (REST 404, MCP `-32602`),
+  and a target your permission rows deny you is the same `denied` error
+  (REST 403, MCP `-32602`, with the reason). A cross-collection fan-out
+  ignores it. The audit row and the log record
   the target's name and `scope_source`, never its address.
 - **Entitlement** — searching a collection the tenant is not entitled to
   (`meho-docs:<key>` missing) → **403** / `-32602`, even though the tool

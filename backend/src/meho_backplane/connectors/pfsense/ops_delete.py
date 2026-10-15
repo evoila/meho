@@ -527,9 +527,10 @@ def _match_static_routes_canonical(xml_text: str, network: str) -> list[dict[str
 def find_gateway_references(xml_text: str, gateway_name: str) -> list[dict[str, Any]]:
     """Return the config objects that reference *gateway_name* (fail-closed guard).
 
-    Scans every place in ``config.xml`` that can name a gateway, so a delete
-    that would pull a gateway out from under a live consumer is refused
-    **before** any mutation:
+    Scans the places in ``config.xml`` listed below that name a gateway, so a
+    delete that would pull a gateway out from under a live consumer is refused
+    **before** any mutation. Not checked yet: DNS server gateway settings
+    (``<system><dnsNgw>``), which pfSense's own delete check also refuses on.
 
     * **Static routes** (``<staticroutes><route>``) -- a route whose
       ``<gateway>`` names this gateway.

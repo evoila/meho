@@ -21,9 +21,12 @@ from fastapi.testclient import TestClient
 from sqlalchemy import update
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.conventions import index as index_module
 from meho_backplane.conventions.index import (
     INDEX_PAGE_SIZE,
     IndexCursor,
+    InvalidIndexCursorError,
+    decode_index_cursor,
     encode_index_cursor,
 )
 from meho_backplane.db.engine import get_sessionmaker
@@ -249,16 +252,28 @@ async def test_foreign_broken_and_out_of_range_cursors_share_one_error(
     extra = base64.urlsafe_b64encode(
         json.dumps({"t": str(op.tenant_id), "r": revision, "o": 1, "x": 1}).encode(),
     ).decode("ascii")
+    oversized = "A" * 1000
+    nested = base64.urlsafe_b64encode(b"[" * 5000).decode("ascii")
 
     messages = {
         _error(client, f"{INDEX_URI}/{token}")["message"]
-        for token in (foreign, beyond, not_json, extra, "%%%", "bad=cursor")
+        for token in (foreign, beyond, not_json, extra, "%%%", "bad=cursor", oversized, nested)
     }
     assert len(messages) == 1
     (message,) = messages
     assert "invalid cursor" in message
     assert str(op.tenant_id) not in message
     assert "changed" not in message
+
+
+def test_deeply_nested_cursor_gets_the_invalid_cursor_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even with the length limit lifted, deep nesting is still an invalid cursor."""
+    monkeypatch.setattr(index_module, "MAX_INDEX_CURSOR_LENGTH", 10**7)
+    token = base64.urlsafe_b64encode(b"[" * 200_000).decode("ascii")
+    with pytest.raises(InvalidIndexCursorError):
+        decode_index_cursor(token, tenant_id=uuid.uuid4(), revision="r", total=1)
 
 
 @pytest.mark.asyncio

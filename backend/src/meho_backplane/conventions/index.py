@@ -64,6 +64,10 @@ __all__ = [
 #: that a page of 200-character titles stays a few KB.
 INDEX_PAGE_SIZE: Final[int] = 25
 
+# A real cursor is about 100 characters. Longer tokens are rejected before
+# decoding, so a broken token never costs real work.
+MAX_INDEX_CURSOR_LENGTH: Final[int] = 256
+
 
 class IndexAvailability(StrEnum):
     """Whether MEHO sends a convention in the MCP ``initialize`` instructions.
@@ -177,10 +181,12 @@ def decode_index_cursor(
     check runs before the revision check, so a foreign cursor never
     reaches the "changed" answer.
     """
+    if len(token) > MAX_INDEX_CURSOR_LENGTH:
+        raise InvalidIndexCursorError("invalid index cursor")
     try:
         raw = base64.b64decode(token.encode("ascii"), altchars=b"-_", validate=True)
         cursor = IndexCursor.model_validate(json.loads(raw.decode("utf-8")))
-    except (binascii.Error, UnicodeError, ValueError) as exc:
+    except (binascii.Error, UnicodeError, ValueError, RecursionError) as exc:
         raise InvalidIndexCursorError("invalid index cursor") from exc
     if cursor.t != tenant_id:
         raise InvalidIndexCursorError("invalid index cursor")

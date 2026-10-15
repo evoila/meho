@@ -274,7 +274,7 @@ approval queue.
 
 | Verb | Path | Purpose |
 |---|---|---|
-| `GET` | `/api/v1/service-principals/grants` | List (`principal_sub`, `include_revoked`, `limit`, `offset`). |
+| `GET` | `/api/v1/service-principals/grants` | List (`principal_sub`, `include_revoked`, `include_expired` (default `true`), `limit`, `offset`). |
 | `GET` | `/api/v1/service-principals/grants/{id}` | Show one. 404 cross-tenant. |
 | `POST` | `/api/v1/service-principals/grants` | Create (the review; `reason` required). 422 on wildcard / delete-shaped / past expiry / duplicate / `target_id`+selector. |
 | `DELETE` | `/api/v1/service-principals/grants/{id}` | Revoke (soft-delete). 404 when absent / already revoked / cross-tenant. |
@@ -282,6 +282,24 @@ approval queue.
 The route surface (grants + `GET /api/v1/operations/governed-subops`) enters
 `cli/api/openapi.json` and the generated Go client (regenerate with `cd cli
 && make snapshot-openapi && make generate` after any signature change).
+
+## CLI surface (`cli/internal/cmd/service-principal/`)
+
+Each REST route has one `meho service-principals grants` verb. The verbs
+call the generated client bindings, so they use the same `operator` role,
+audit, and error rules as REST. There is no MCP tool for this plane.
+
+| CLI verb | REST route | Notes |
+|---|---|---|
+| `meho service-principals grants list` | `GET /api/v1/service-principals/grants` | `--principal`, `--include-revoked`, `--include-expired`, `--limit`, `--offset`, `--json`. Shows only active grants unless you pass `--include-expired` (REST includes expired grants by default). |
+| `meho service-principals grants show <grant-id>` | `GET /api/v1/service-principals/grants/{id}` | `--json`. |
+| `meho service-principals grants create` | `POST /api/v1/service-principals/grants` | `--principal`, `--op-id`, `--connector-id`, `--reason` (all required); either `--target`, or `--target-product` and/or `--target-name-pattern`, or none (targetless); `--expires`; `--json`. A 422 from the server is shown as a one-line error. |
+| `meho service-principals grants revoke <grant-id>` | `DELETE /api/v1/service-principals/grants/{id}` | Asks before it revokes; `--confirm` skips the question. `--json`. |
+
+The full flag list is in the generated CLI reference
+(`docs-site/reference/cli.md`). `test_service_grants_rest_plane_has_cli_parity`
+in `backend/tests/test_mcp_surface_conformance.py` fails CI when a REST
+route on this router has no matching CLI verb in that reference.
 
 ## Scope boundaries (this PR)
 

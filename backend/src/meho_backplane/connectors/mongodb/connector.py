@@ -68,7 +68,12 @@ from meho_backplane.connectors.schemas import (
 
 __all__ = ["MongoDbConnector"]
 
-_log = structlog.get_logger(__name__)
+# The structlog logger is resolved per call at each log site rather than
+# held as a module-level proxy. Production sets
+# ``cache_logger_on_first_use=True``; a cached logger keeps the processor
+# chain it was built with, so a later ``capture_logs()`` in a test cannot see
+# its events (the ``-n 3 --dist loadscope`` flake class). Same precedent as
+# :mod:`meho_backplane.operations.gateway_commands`.
 
 # Forward declaration -- replaced with `from meho_backplane.targets import Target`
 # once G0.3's Target model rollout lands, mirroring the sibling connectors.
@@ -234,7 +239,7 @@ class MongoDbConnector(Connector):
                 identity = await queries.fetch_fingerprint(client, auth_mode=auth_mode)
         except (OSError, PyMongoError, CredentialsReadError, ValueError) as exc:
             error = redact_fingerprint_error(exc, _classify_fingerprint_error(exc))
-            _log.warning(
+            structlog.get_logger(__name__).warning(
                 "mongodb_fingerprint_unreachable",
                 target=getattr(target, "name", None),
                 error=error,
@@ -358,7 +363,7 @@ class MongoDbConnector(Connector):
                 requires_approval=op.requires_approval,
                 llm_instructions=op.llm_instructions,
             )
-        _log.info(
+        structlog.get_logger(__name__).info(
             "mongodb_operations_registered",
             count=len(MONGO_OPS),
             product=cls.product,

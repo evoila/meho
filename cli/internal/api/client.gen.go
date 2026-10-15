@@ -470,6 +470,14 @@ const (
 	RunSummaryStateInProgress RunSummaryState = "in_progress"
 )
 
+// Defines values for SafetyOverlayEntrySafetyLevel.
+const (
+	SafetyOverlayEntrySafetyLevelCaution     SafetyOverlayEntrySafetyLevel = "caution"
+	SafetyOverlayEntrySafetyLevelDangerous   SafetyOverlayEntrySafetyLevel = "dangerous"
+	SafetyOverlayEntrySafetyLevelDestructive SafetyOverlayEntrySafetyLevel = "destructive"
+	SafetyOverlayEntrySafetyLevelSafe        SafetyOverlayEntrySafetyLevel = "safe"
+)
+
 // Defines values for ScheduledTriggerInFlightPolicy.
 const (
 	ScheduledTriggerInFlightPolicyFailIntoAudit ScheduledTriggerInFlightPolicy = "fail_into_audit"
@@ -3601,6 +3609,7 @@ type ConnectorSpecEntry struct {
 	Product                    string                           `json:"product"`
 	ProfileResource            *string                          `json:"profile_resource"`
 	RequiresConnectorClass     string                           `json:"requires_connector_class"`
+	SafetyOverlay              *[]SafetyOverlayEntry            `json:"safety_overlay"`
 	Sha256                     *string                          `json:"sha256"`
 	SpecInfoVersion            *string                          `json:"spec_info_version"`
 	SpecInfoVersionsCompatible *[]string                        `json:"spec_info_versions_compatible"`
@@ -7451,6 +7460,27 @@ type SafetyChangeModel struct {
 	OldSafetyLevel  string                 `json:"old_safety_level"`
 	OpId            string                 `json:"op_id"`
 }
+
+// SafetyOverlayEntry One catalog rule that raises the safety of matching ingested ops.
+//
+// A catalog row that declares :attr:`ConnectorSpecEntry.safety_overlay`
+// lets an operator raise the safety level and turn on approval for
+// chosen operations of that spec, without changing the ingest code.
+// “method“ is matched exactly (upper-cased). “path“ is a
+// shell-style glob matched case-sensitively against the spec path
+// template with any query string removed; “*“ also matches “/“.
+// The rule only ever raises: it never lowers a stricter level and never
+// clears an approval requirement (see
+// :func:`meho_backplane.operations.ingest.safety_floors.apply_safety_floor`).
+type SafetyOverlayEntry struct {
+	Method           string                        `json:"method"`
+	Path             string                        `json:"path"`
+	RequiresApproval *bool                         `json:"requires_approval,omitempty"`
+	SafetyLevel      SafetyOverlayEntrySafetyLevel `json:"safety_level"`
+}
+
+// SafetyOverlayEntrySafetyLevel defines model for SafetyOverlayEntry.SafetyLevel.
+type SafetyOverlayEntrySafetyLevel string
 
 // ScheduledTriggerCreate Request body for “POST /api/v1/scheduler/triggers“.
 //

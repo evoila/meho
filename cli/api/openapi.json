@@ -26531,6 +26531,14 @@
             "type": "array",
             "nullable": true,
             "title": "Op Allowlist"
+          },
+          "safety_overlay": {
+            "items": {
+              "$ref": "#/components/schemas/SafetyOverlayEntry"
+            },
+            "type": "array",
+            "nullable": true,
+            "title": "Safety Overlay"
           }
         },
         "additionalProperties": false,
@@ -32500,6 +32508,46 @@
         ],
         "title": "SafetyChangeModel",
         "description": "Pydantic projection of\n:class:`~meho_backplane.operations.ingest.register_ingested.SafetyChange`.\n\nOne op whose persisted ``safety_level`` a re-ingest overwrote with\na different value (#2702), plus every Sensor pinning it \u2014 those\nsensors keep auto-executing the op on schedule under the stale\ncreate-time ``safe`` assumption until the operator re-audits them."
+      },
+      "SafetyOverlayEntry": {
+        "properties": {
+          "method": {
+            "type": "string",
+            "maxLength": 16,
+            "minLength": 1,
+            "title": "Method"
+          },
+          "path": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Path"
+          },
+          "safety_level": {
+            "type": "string",
+            "enum": [
+              "safe",
+              "caution",
+              "dangerous",
+              "destructive"
+            ],
+            "title": "Safety Level"
+          },
+          "requires_approval": {
+            "type": "boolean",
+            "title": "Requires Approval",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "method",
+          "path",
+          "safety_level"
+        ],
+        "title": "SafetyOverlayEntry",
+        "description": "One catalog rule that raises the safety of matching ingested ops.\n\nA catalog row that declares :attr:`ConnectorSpecEntry.safety_overlay`\nlets an operator raise the safety level and turn on approval for\nchosen operations of that spec, without changing the ingest code.\n``method`` is matched exactly (upper-cased). ``path`` is a\nshell-style glob matched case-sensitively against the spec path\ntemplate with any query string removed; ``*`` also matches ``/``.\nThe rule only ever raises: it never lowers a stricter level and never\nclears an approval requirement (see\n:func:`meho_backplane.operations.ingest.safety_floors.apply_safety_floor`)."
       },
       "ScheduledTriggerCreate": {
         "properties": {

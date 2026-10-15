@@ -150,6 +150,7 @@ async def _preview_handler(
     request: Request,
     body: str = Form(default="", max_length=BODY_MAX_LENGTH),
     kind: str = Form(default="operational", max_length=32),
+    title: str = Form(default="", max_length=TITLE_MAX_LENGTH),
     write_ctx: ConventionsWriteContext = _write_ctx_dep,
 ) -> HTMLResponse:
     """``POST /ui/conventions/preview`` -- debounced token-cost preview.
@@ -159,7 +160,7 @@ async def _preview_handler(
     anonymous / cross-site POST.
     """
     del write_ctx  # gate only -- the preview render needs no operator state.
-    return await render_token_preview(request, body=body, kind=kind)
+    return await render_token_preview(request, title=title, body=body, kind=kind)
 
 
 async def _edit_modal_handler(

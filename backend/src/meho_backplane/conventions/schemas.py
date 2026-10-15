@@ -160,10 +160,10 @@ class ConventionCreate(BaseModel):
     (lowercase ASCII, digits, hyphen) so audit log paths stay
     grep-friendly and no operator can sneak a slash through. The
     title and body are bounded only by a generous upper limit; the
-    real budget gate is the over-budget 422 in the route handler,
-    which runs :func:`estimate_tokens` against ``body`` before
-    insert and rejects any single ``operational`` entry exceeding
-    :data:`DEFAULT_MAX_PREAMBLE_TOKENS`.
+    real budget gate is the over-budget 422 in the service, which
+    renders the entry alone (heading, guard prefix, band delimiters,
+    title, and body) and rejects any ``operational`` entry whose
+    rendered estimate exceeds :data:`DEFAULT_MAX_PREAMBLE_TOKENS`.
 
     ``priority`` is optional with a default of 0; the SmallInteger
     column on :class:`TenantConvention` bounds the range to
@@ -272,10 +272,13 @@ class PreambleInclusion(BaseModel):
       preamble's packed order (the packer iterates ``priority DESC,
       created_at ASC``; ``position=1`` means highest-priority slot in
       the operator's tenant). ``None`` when ``included=False``.
-    * ``token_count`` -- the convention body's own estimated token
-      cost via :func:`estimate_tokens`. Useful for the operator to
-      see why a near-budget body got dropped (it weighed more than
-      the remaining headroom).
+    * ``token_count`` -- the convention's own rendered block cost
+      (heading + body) via :func:`estimate_tokens`. Useful for the
+      operator to see why a near-budget entry got dropped (it weighed
+      more than the remaining headroom).
+    * ``fits_alone`` -- ``True`` when the band with only this entry
+      fits the budget. ``fits_alone=True`` with ``included=False``
+      means higher-priority entries used up the room.
     * ``would_drop_slugs`` -- the full ``dropped_slugs`` list the
       packer produced on this assembly. When ``included=True`` this
       names *other* slugs that fell out of the preamble (the just-
@@ -301,6 +304,12 @@ class PreambleInclusion(BaseModel):
     included: bool
     position: int | None = Field(default=None, ge=1)
     token_count: int = Field(ge=0)
+    fits_alone: bool = Field(
+        description=(
+            "True when the rendered conventions band with only this entry fits "
+            "the budget. Fitting alone does not promise inclusion."
+        ),
+    )
     would_drop_slugs: list[str]
 
 
@@ -351,8 +360,8 @@ class BudgetStatus(BaseModel):
     criterion is unsatisfiable from a single list call -- the
     deferred AC the issue body folds back in.
 
-    All four fields are populated by a single call to
-    :func:`~meho_backplane.conventions.preamble.assemble_preamble`
+    All fields are populated by a single call to
+    :func:`~meho_backplane.conventions.preamble.assemble_preamble_detailed`
     against the operator's tenant, so the budget arithmetic is
     end-to-end consistent with T4's preamble assembler (the same
     helper that produces the MCP ``initialize`` ``instructions``
@@ -369,12 +378,10 @@ class BudgetStatus(BaseModel):
       parameter in tests). Exposed on the list response so
       operators can do the budget math without grepping the source.
     * ``estimated_tokens`` -- :func:`estimate_tokens` over the
-      assembled preamble text (header + guard + delimited kept
-      blocks). Empty tenant: 0. Fitting tenant: positive integer
-      below ``max_tokens``. Over-budget tenant: positive integer
-      below ``max_tokens`` (the packer dropped slugs whole until it
-      fit), but ``over_budget=True`` and ``dropped_slugs`` is
-      non-empty.
+      rendered conventions band (header + guard + delimited kept
+      blocks). Empty tenant: 0. Otherwise at most ``max_tokens``
+      when any entry was kept (the packer drops entries whole until
+      the band fits).
     * ``over_budget`` -- convenience flag derived from
       ``len(dropped_slugs) > 0``. Cheap derived value but worth
       surfacing as a boolean so CLI / dashboard consumers branch on
@@ -385,6 +392,15 @@ class BudgetStatus(BaseModel):
       "insufficient_budget" exit-code-5 warning so the operator
       knows exactly which conventions never reach an agent
       session.
+    * ``included_slugs`` -- slugs in the band, in pack order. Each
+      operational slug is in exactly one of ``included_slugs`` or
+      ``dropped_slugs``. "Included" means MEHO sends it in the MCP
+      ``initialize`` instructions; a client may ignore instructions,
+      so it is not proof that an agent applied the rule.
+    * ``oversize_slugs`` -- the dropped slugs that do not fit even as
+      the only entry (rows written before the rendered write check,
+      or by another path). The rest of ``dropped_slugs`` fit alone
+      but lost the room to higher-priority entries.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -392,7 +408,21 @@ class BudgetStatus(BaseModel):
     max_tokens: int = Field(ge=0)
     estimated_tokens: int = Field(ge=0)
     over_budget: bool
+    included_slugs: list[str] = Field(
+        description=(
+            "Operational slugs MEHO puts in the MCP initialize instructions, in "
+            "pack order. An MCP client may ignore instructions, so this does not "
+            "prove an agent saw them."
+        ),
+    )
     dropped_slugs: list[str]
+    oversize_slugs: list[str] = Field(
+        description=(
+            "Dropped slugs that do not fit the budget even as the only entry. "
+            "The other dropped slugs fit alone but lost the room to "
+            "higher-priority entries."
+        ),
+    )
 
 
 class ConventionListResponse(BaseModel):

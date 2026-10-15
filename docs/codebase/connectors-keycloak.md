@@ -314,6 +314,22 @@ their own idempotency above):
   (never raw params); and both ops are pinned in
   `broadcast.events._CREDENTIAL_WRITE_OPS` → aggregate-only broadcast.
 
+**Length guard (#3628).** Keycloak keeps some text fields in 255-character
+database columns. A longer value fails the database write, and Keycloak
+answers with an HTTP 500 `unknown_error` that does not say why. So the
+write schemas set `maxLength: 255` on these fields:
+
+- `client.create` / `client.update`: `representation.clientId`, `.name`,
+  `.description` (and the top-level `client_id` on `client.create`).
+- `user.create`: `representation.username`, `.email`, `.firstName`,
+  `.lastName` (and the top-level `username`). A user has no `description`.
+
+The dispatcher checks params against the schema before the policy gate, so
+a too-long value comes back at once as `invalid_params`. No approval is
+asked for. The cap counts characters, not bytes, and applies to strings
+only; other representation keys stay unchecked
+(`additionalProperties: true`).
+
 ### User logout (#3851)
 
 `keycloak.user.logout` ends every live session of one user. Keycloak then

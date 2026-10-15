@@ -268,12 +268,10 @@ async def test_over_budget_drops_lowest_priority_whole_never_mid_entry() -> None
     ``dropped_slugs``.
     """
     tenant = uuid.uuid4()
-    # Header (the fixed `## Operational conventions...` heading +
-    # the GUARD_PREFIX block) costs ~71 tokens at 3.3 chars/token.
-    # Each block here is ~28 tokens (## title + 80 chars of body +
-    # newlines). A 110-token budget admits the header (~71) +
-    # exactly one block (~28); a second block (push to ~127) would
-    # exceed the budget and trigger the drop.
+    # The rendered band with one block here (delimiters + heading +
+    # GUARD_PREFIX + "### High priority" + 80 chars of body) is ~116
+    # tokens at 3.3 chars/token; with the second block it is ~146. A
+    # 125-token budget admits exactly one block, so the second drops.
     big_body = "x" * 80
     await _insert_convention(
         tenant_id=tenant,
@@ -290,7 +288,7 @@ async def test_over_budget_drops_lowest_priority_whole_never_mid_entry() -> None
         priority=100,
     )
 
-    result = await assemble_preamble(tenant, _NO_RUNS_OPERATOR, max_tokens=110)
+    result = await assemble_preamble(tenant, _NO_RUNS_OPERATOR, max_tokens=125)
 
     # High-priority block is in the assembled text verbatim.
     assert "High priority" in result.text

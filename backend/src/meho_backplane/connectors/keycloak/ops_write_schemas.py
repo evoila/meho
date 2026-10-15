@@ -124,6 +124,31 @@ _REPRESENTATION_PROP: dict[str, Any] = {
     "additionalProperties": True,
 }
 
+#: Keycloak keeps these fields in 255-character database columns. A longer
+#: value makes the database write fail, and Keycloak then answers with an
+#: HTTP 500 ``unknown_error`` that names no cause (#3628). ``maxLength``
+#: (it applies to strings only) lets the dispatcher reject the call as
+#: ``invalid_params`` before any approval is requested.
+_KEYCLOAK_TEXT_MAX = 255
+
+
+def _representation_prop(*bounded_fields: str) -> dict[str, Any]:
+    """Return the representation schema with a length cap on *bounded_fields*."""
+    return {
+        **_REPRESENTATION_PROP,
+        "properties": {
+            field: {
+                "maxLength": _KEYCLOAK_TEXT_MAX,
+                "description": f"At most {_KEYCLOAK_TEXT_MAX} characters (Keycloak limit).",
+            }
+            for field in bounded_fields
+        },
+    }
+
+
+_CLIENT_REPRESENTATION_PROP = _representation_prop("clientId", "name", "description")
+_USER_REPRESENTATION_PROP = _representation_prop("username", "email", "firstName", "lastName")
+
 _PASSWORD_SECRET_PROPS: dict[str, Any] = {
     "password_secret_ref": {
         "type": "string",
@@ -238,9 +263,10 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
         parameter_schema={
             "type": "object",
             "properties": {
-                "representation": _REPRESENTATION_PROP,
+                "representation": _CLIENT_REPRESENTATION_PROP,
                 "client_id": {
                     "type": "string",
+                    "maxLength": _KEYCLOAK_TEXT_MAX,
                     "description": "clientId (if not in representation).",
                 },
             },
@@ -274,7 +300,7 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
         parameter_schema={
             "type": "object",
             "properties": {
-                "representation": _REPRESENTATION_PROP,
+                "representation": _CLIENT_REPRESENTATION_PROP,
                 "id": {
                     "type": "string",
                     "pattern": _UUID_PATTERN,
@@ -391,9 +417,10 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
         parameter_schema={
             "type": "object",
             "properties": {
-                "representation": _REPRESENTATION_PROP,
+                "representation": _USER_REPRESENTATION_PROP,
                 "username": {
                     "type": "string",
+                    "maxLength": _KEYCLOAK_TEXT_MAX,
                     "description": "Username (if not in representation).",
                 },
                 **_PASSWORD_SECRET_PROPS,

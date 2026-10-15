@@ -72,6 +72,11 @@
           maxlength="{{ title_max_length }}"
           value="{{ convention.title }}"
           class="input input-bordered input-sm w-full"
+          hx-post="/ui/conventions/preview"
+          hx-trigger="keyup changed delay:300ms"
+          hx-target="#conventions-token-preview"
+          hx-swap="outerHTML"
+          hx-include="closest form"
         />
       </label>
 

@@ -633,6 +633,14 @@ the account, its password, its groups and its certificates stay.
   as shell commands.
 - **No secrets.** The parser reads only `name`, `uid`, `scope` and whether a
   `<disabled>` child exists. Hashes, keys and certificates are never read.
+- **Tests.** `backend/tests/test_connectors_pfsense_user_write_ops.py` runs the
+  fragment for real with the `php` command-line interpreter, against a
+  synthetic config and with stand-ins for the pfSense functions. For both ops
+  it compares every user record before and after: only the one user's
+  `disabled` element changes; hashes, keys, groups and certificates stay. The
+  CI unit shards install `php-cli` and set `MEHO_REQUIRE_PHP=1`, so these
+  tests fail instead of skip when php is missing. Without php on a developer
+  machine they skip.
 - **Not done.** VPN sessions that are already open are not closed. The ops do
   not yet share a lock with the other config writes (tracked in #3544).
 

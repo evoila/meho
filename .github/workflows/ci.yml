@@ -690,6 +690,24 @@ jobs:
         with:
           version: v3.16.4
 
+      - name: Install PHP CLI
+        # The pfSense user-write tests
+        # (tests/test_connectors_pfsense_user_write_ops.py) run the
+        # `pfSsh.php playback` fragment with the php command-line
+        # interpreter against a synthetic config. Without php they skip,
+        # so a fragment that changes the wrong user could stay hidden on
+        # main. Same `sudo -n apt-get` pattern as the Go lane's C-toolchain
+        # step below. Every shard needs it: the file stride can put the
+        # test file in any shard.
+        run: |
+          if command -v php >/dev/null 2>&1; then
+            echo "php ready: $(php --version | head -1)"
+            exit 0
+          fi
+          sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y
+          sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends php-cli
+          php --version | head -1
+
       - name: Pytest (unit shard ${{ matrix.shard }}/3)
         # `shell: bash` for `mapfile` + arrays (and the pipefail/-e the
         # default self-hosted shell does not enable — #2865). Under -e a
@@ -700,6 +718,9 @@ jobs:
           # The chart render tests FAIL (not skip) when helm is missing,
           # so losing the Install Helm step above cannot hide them again.
           MEHO_REQUIRE_HELM: "1"
+          # Same for the pfSense fragment tests and the Install PHP CLI
+          # step above: FAIL (not skip) when php is missing.
+          MEHO_REQUIRE_PHP: "1"
           # Pin Tier-2's spaCy model to the unit-lane choice so the
           # acceptance tests in test_redaction_presidio.py + the
           # tier2 path in test_redaction_middleware.py exercise the

@@ -10,6 +10,13 @@ Three layers:
   user's ``disabled`` element is touched), the handler paths (change,
   ``nothing_to_do``, ``not_found`` / ``ambiguous`` / ``protected``, failed
   read-back), and that no secret field reaches the result.
+* **PHP run** (needs the ``php`` command; CI installs it, elsewhere the tests
+  skip): the fragment runs for real against a synthetic ``$config`` array,
+  with stand-ins for the pfSense functions. For both ops, every user record
+  is compared before and after: only the one user's ``disabled`` element
+  changes; every password hash, key, group and certificate stays the same.
+  The fragment's own guards (uid 0, unknown name, duplicate name) write
+  nothing.
 * **Metadata**: ``dangerous`` + requires approval, ``users`` group, the
   response schema, and the broadcast class.
 * **Governed flow** (full ``call_operation`` dispatch): the call waits for
@@ -21,10 +28,15 @@ All config.xml fixtures are synthetic: no lab names, hosts or addresses.
 
 from __future__ import annotations
 
+import copy
 import json
+import os
 import re
+import shutil
+import subprocess
 import uuid
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID
@@ -201,6 +213,202 @@ def test_fragment_touches_only_the_one_users_disabled_element(disable: bool) -> 
     assert body.count("write_config(") == 1
     assert "filter_configure" not in body
     assert "$meho_name = 'vpn.guest-1';" in body
+
+
+# ===========================================================================
+# Part A2 -- the PHP fragment, run for real
+# ===========================================================================
+#
+# ``pfSsh.php playback`` evals the fragment inside a function; that is why
+# pfSense's own playback scripts, and ours, start with ``global $config;``.
+# The harness below does the same with the ``php`` command-line interpreter.
+# It loads a synthetic ``$config`` array in the shape pfSense's parser gives
+# (``user``, ``group``, ``cert`` and ``member`` are always lists), replaces
+# the three pfSense functions the fragment calls with stand-ins that record
+# their calls, runs the fragment, and prints the config back as JSON.
+
+_PHP = shutil.which("php")
+_needs_php = pytest.mark.skipif(
+    _PHP is None and os.environ.get("MEHO_REQUIRE_PHP") != "1",
+    reason="php not installed; set MEHO_REQUIRE_PHP=1 to fail instead of skip",
+)
+
+_PHP_AUTH_INC_STUB = """<?php
+// Stand-ins for the pfSense functions the fragment calls. Each records its call.
+function index_users() {
+    global $config;
+    $index = array();
+    foreach ($config['system']['user'] as $i => $user) {
+        $index[$user['name']] = $i;
+    }
+    return $index;
+}
+function local_user_set(&$user, $force_password = false, $userattributes = array()) {
+    global $meho_calls;
+    $meho_calls[] = array('local_user_set', $user['name'], isset($user['disabled']));
+}
+function write_config($desc = 'Unknown', $backup = true, $write_config_only = false) {
+    global $meho_calls;
+    $meho_calls[] = array('write_config', $desc);
+    return true;
+}
+"""
+
+_PHP_HARNESS = """<?php
+$config = json_decode(stream_get_contents(STDIN), true);
+$meho_calls = array();
+$userindex = null;
+function meho_playback($file) {
+    eval(file_get_contents($file));
+}
+meho_playback($argv[1]);
+echo json_encode(array('config' => $config, 'calls' => $meho_calls, 'userindex' => $userindex));
+"""
+
+
+def _php_user(
+    name: str, uid: str, *, scope: str = "user", disabled: bool = False
+) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "scope": scope,
+        "name": name,
+        "descr": f"{name} account",
+        "uid": uid,
+        "bcrypt-hash": f"{_SECRET_HASH}-{uid}",
+        "authorizedkeys": f"{_SECRET_KEY}-{uid}",
+        "ipsecpsk": f"{_SECRET_PSK}-{uid}",
+        "cert": [f"cert-{uid}"],
+        "priv": ["user-shell-access"],
+    }
+    if disabled:
+        row["disabled"] = ""  # <disabled></disabled> parses to an empty string
+    return row
+
+
+def _php_config(*users: dict[str, Any]) -> dict[str, Any]:
+    """Synthetic parsed config: users, two groups with members, and one certificate per user."""
+    uids = [u["uid"] for u in users]
+    return {
+        "system": {
+            "group": [
+                {"name": "all", "scope": "system", "gid": "1998", "member": uids},
+                {
+                    "name": "vpn-users",
+                    "scope": "local",
+                    "gid": "2000",
+                    "member": uids[1:],
+                    "priv": ["user-shell-access"],
+                },
+            ],
+            "user": list(users),
+        },
+        "cert": [
+            {
+                "refid": f"cert-{uid}",
+                "descr": f"certificate {uid}",
+                "crt": f"crt-{uid}",
+                "prv": f"prv-{uid}",
+            }
+            for uid in uids
+        ],
+    }
+
+
+_PHP_USERS = (
+    _php_user("admin", "0", scope="system"),
+    _php_user("vpn.guest-1", "2000"),
+    _php_user("old_user", "2001", disabled=True),
+)
+
+
+def _run_fragment_in_php(tmp_path: Path, config: dict[str, Any], fragment: str) -> dict[str, Any]:
+    """Run *fragment* against *config* in php and return ``{config, calls, userindex}``."""
+    (tmp_path / "auth.inc").write_text(_PHP_AUTH_INC_STUB)
+    (tmp_path / "run.php").write_text(_PHP_HARNESS)
+    (tmp_path / "fragment").write_text(fragment)
+    proc = subprocess.run(
+        [
+            _PHP or "php",
+            "-n",
+            "-d",
+            f"include_path={tmp_path}",
+            "-d",
+            "display_errors=stderr",
+            "-d",
+            "error_reporting=E_ALL",
+            str(tmp_path / "run.php"),
+            str(tmp_path / "fragment"),
+        ],
+        input=json.dumps(config),
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stderr == "", proc.stderr  # no PHP notice or warning either
+    return json.loads(proc.stdout)
+
+
+def _without_disabled(row: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in row.items() if k != "disabled"}
+
+
+@_needs_php
+@pytest.mark.parametrize(("name", "disable"), [("vpn.guest-1", True), ("old_user", False)])
+def test_fragment_run_in_php_changes_only_that_users_disabled_element(
+    tmp_path: Path, name: str, disable: bool
+) -> None:
+    """Both ops, run for real: one ``disabled`` element changes; every other value stays."""
+    before = _php_config(*_PHP_USERS)
+    out = _run_fragment_in_php(tmp_path, before, build_user_flag_playback(name, disable=disable))
+
+    # The whole config, before and after, differs in exactly one element.
+    expected = copy.deepcopy(before)
+    target = next(u for u in expected["system"]["user"] if u["name"] == name)
+    if disable:
+        target["disabled"] = True
+    else:
+        del target["disabled"]
+    assert out["config"] == expected
+
+    # The same check spelled out per record: hashes, keys, groups and certificates.
+    users_before = {u["name"]: u for u in before["system"]["user"]}
+    users_after = {u["name"]: u for u in out["config"]["system"]["user"]}
+    assert list(users_after) == list(users_before)
+    assert ("disabled" in users_after[name]) is disable
+    assert _without_disabled(users_after[name]) == _without_disabled(users_before[name])
+    for other in set(users_before) - {name}:
+        assert users_after[other] == users_before[other]
+    assert out["config"]["system"]["group"] == before["system"]["group"]
+    assert out["config"]["cert"] == before["cert"]
+
+    # Same calls as the pfSense web page, in order, and local_user_set saw the new flag.
+    action = "disable" if disable else "enable"
+    assert out["calls"] == [
+        ["local_user_set", name, disable],
+        ["write_config", f"meho: {action} user {name}"],
+    ]
+    assert out["userindex"] == {"admin": 0, "vpn.guest-1": 1, "old_user": 2}
+
+
+@_needs_php
+@pytest.mark.parametrize(
+    ("users", "name"),
+    [
+        (_PHP_USERS, "admin"),  # uid 0: refused by the fragment itself, not only by the handler
+        (_PHP_USERS, "nobody"),
+        ((_PHP_USERS[0], _PHP_USERS[1], _PHP_USERS[1]), "vpn.guest-1"),  # two users, one name
+    ],
+)
+@pytest.mark.parametrize("disable", [True, False])
+def test_fragment_run_in_php_writes_nothing_when_its_own_guard_fails(
+    tmp_path: Path, users: tuple[dict[str, Any], ...], name: str, disable: bool
+) -> None:
+    before = _php_config(*users)
+    out = _run_fragment_in_php(tmp_path, before, build_user_flag_playback(name, disable=disable))
+    assert out["config"] == before
+    assert out["calls"] == []
 
 
 # ===========================================================================

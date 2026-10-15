@@ -1500,7 +1500,7 @@ _AUTH_FAILED_DOC_TAIL = (
 
 def _auth_failed_summary(
     *,
-    stage: Literal["establish", "dispatch", "after_relogin"],
+    stage: Literal["establish", "dispatch", "after_relogin", "call"],
     status_code: int,
     host: str,
     remediation: str,
@@ -1521,7 +1521,16 @@ def _auth_failed_summary(
     * ``after_relogin`` -- the **only** stage that re-logged in: the forced
       re-establish SUCCEEDED and the fresh session was still rejected, so the
       "already re-logged-in and retried once" sentence lives here alone.
+    * ``call`` -- a connector rejected a normal call on a live session with
+      an auth/permission fault that a fresh login cannot fix (#3566), so no
+      re-login was tried.
     """
+    if stage == "call":
+        return (
+            f"connector_auth_failed: the upstream rejected this call with an "
+            f"auth/permission fault (HTTP {status_code}) for {host}. "
+            f"{remediation} {_AUTH_FAILED_DOC_TAIL}"
+        )
     if stage == "establish":
         lead = (
             f"connector_auth_failed: the login itself was rejected (HTTP "
@@ -1636,13 +1645,15 @@ def result_connector_auth_failed(
     ``message`` when JSON, else capped raw text, ``None`` when empty --
     shared with the 403/422 builders via :func:`_http_upstream_message`).
     """
-    stage: Literal["establish", "dispatch", "after_relogin"]
+    stage: Literal["establish", "dispatch", "after_relogin", "call"]
     if isinstance(exc, ConnectorAuthError):
-        # A login POST was rejected -- the establish stage, whichever call
-        # site raised it (first establish, or a forced re-login whose POST
-        # was itself rejected -- ``relogin == "attempted_failed"``). The
-        # ``session_establish_<status>`` cause is unchanged (#2400).
-        stage = "establish"
+        # Usually a login POST was rejected -- the establish stage, whichever
+        # call site raised it (first establish, or a forced re-login whose
+        # POST was itself rejected -- ``relogin == "attempted_failed"``). The
+        # ``session_establish_<status>`` cause is unchanged (#2400). A
+        # connector that classifies an auth fault on a normal call says so
+        # with ``exc.stage`` (``call`` / ``after_relogin``, #3566).
+        stage = exc.stage
         status_code = exc.status_code
         cause = exc.cause
         raw_message: str | None = _sanitize_free_text(str(exc))
@@ -1679,11 +1690,12 @@ def result_connector_auth_failed(
         else:
             stage = "dispatch"
             cause = f"dispatch_{status_code}"
-    if stage == "after_relogin":
-        remediation = _auth_scheme_remediation(target_name)
-    elif isinstance(exc, ConnectorAuthError) and exc.remediation:
-        # The connector named a more specific fix than "restage" (#3865).
+    if isinstance(exc, ConnectorAuthError) and exc.remediation:
+        # The connector named a more specific fix than the stage default
+        # (#3865, #3566).
         remediation = exc.remediation
+    elif stage == "after_relogin":
+        remediation = _auth_scheme_remediation(target_name)
     else:
         remediation = _auth_restage_remediation(target_name, secret_ref)
     summary = _auth_failed_summary(

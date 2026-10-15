@@ -17,8 +17,11 @@ the constants below, so the inline view never grows with the document.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Final
 from uuid import UUID
+
+from meho_backplane.jsonflux.query.json_pointer import json_type
 
 __all__ = [
     "DOCUMENT_RECORD",
@@ -27,7 +30,6 @@ __all__ = [
     "document_schema",
     "document_summary_md",
     "example_path",
-    "value_kind",
 ]
 
 #: Value of the ``result_record`` summary key for a document handle.
@@ -43,23 +45,6 @@ _OUTLINE_BYTE_BUDGET: Final = 2048
 _OUTLINE_MAX_NAME_CHARS: Final = 128
 
 
-def value_kind(value: Any) -> str:
-    """Name the JSON kind of *value* (``object`` / ``array`` / ``string`` / ...)."""
-    if isinstance(value, dict):
-        return "object"
-    if isinstance(value, list):
-        return "array"
-    if value is None:
-        return "null"
-    if isinstance(value, bool):
-        return "boolean"
-    if isinstance(value, (int, float)):
-        return "number"
-    if isinstance(value, str):
-        return "string"
-    return type(value).__name__
-
-
 def _describe(value: Any) -> str:
     """A short kind label with a size, e.g. ``array (3 items)``."""
     if isinstance(value, dict):
@@ -68,7 +53,7 @@ def _describe(value: Any) -> str:
         return f"array ({len(value)} items)"
     if isinstance(value, str):
         return f"string ({len(value)} chars)"
-    return value_kind(value)
+    return json_type(value)
 
 
 def document_outline(document: Any) -> dict[str, str]:
@@ -100,8 +85,8 @@ def document_schema(document: Any, outline: dict[str, str]) -> dict[str, Any]:
     """A shallow JSON Schema for the handle: root kind plus outlined fields."""
     marker = {"x-result-record": DOCUMENT_RECORD}
     if not isinstance(document, dict):
-        return {"type": value_kind(document), **marker}
-    properties = {key: {"type": value_kind(document[key])} for key in outline}
+        return {"type": json_type(document), **marker}
+    properties = {key: {"type": json_type(document[key])} for key in outline}
     return {"type": "object", "properties": properties, **marker}
 
 
@@ -138,7 +123,7 @@ def document_drill_in_rationale(handle_id: UUID, tool: str, rest_route: str, pat
     return (
         f"The full result is kept as one document. Read parts of it over MCP via "
         f"the ``{tool}`` tool or over REST via ``{rest_route}``: call either with "
-        f'``handle_id={handle_id}`` and ``query={{"path": "{path}"}}``. ``path`` '
+        f"``handle_id={handle_id}`` and ``query={json.dumps({'path': path})}``. ``path`` "
         "is an RFC 6901 JSON Pointer (``/key/0/name``; ``~1`` means ``/`` and "
         "``~0`` means ``~`` inside a key; an empty path is the whole document). "
         "An array value pages with ``offset`` / ``limit``; any other value comes "

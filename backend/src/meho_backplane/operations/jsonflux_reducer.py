@@ -81,6 +81,7 @@ from meho_backplane.connectors.schemas import (
     ResultHandle,
 )
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
+from meho_backplane.jsonflux.query.json_pointer import json_type
 from meho_backplane.jsonflux.query.result_catalog import (
     AdmissionGuard,
     AdmissionLimitError,
@@ -94,7 +95,6 @@ from meho_backplane.operations.result_document import (
     document_schema,
     document_summary_md,
     example_path,
-    value_kind,
 )
 from meho_backplane.settings import get_settings
 
@@ -482,7 +482,7 @@ class JsonFluxReducer:
         if payload is None or _is_credential_class(context):
             return payload, None
         handle_id = uuid.uuid4()
-        root_type = value_kind(payload)
+        root_type = json_type(payload)
         try:
             self._resolve_admission_guard().require(payload)
         except AdmissionLimitError:
@@ -566,7 +566,7 @@ class JsonFluxReducer:
             op_id=op_id,
             document=payload,
             ttl_seconds=self._ttl_seconds,
-            metadata={"root_type": value_kind(payload), "document_bytes": document_bytes},
+            metadata={"root_type": json_type(payload), "document_bytes": document_bytes},
         )
         if not stored:
             _log.warning(

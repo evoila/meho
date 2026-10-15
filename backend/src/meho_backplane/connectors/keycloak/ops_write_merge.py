@@ -110,9 +110,11 @@ def unrequested_changes(
     map field the caller did send (for example ``attributes``), the keys
     inside it that the caller did not send are compared one by one and
     reported as ``"<field>.<key>"``. That compare also runs when the whole
-    map is missing or ``null`` after the write: every key the caller did
-    not send is then reported as gone. A missing key is never the same as
-    a key holding ``null``. Returns a sorted list of names, never values.
+    map is missing or ``null`` before or after the write: a map that is
+    not there counts as empty. So a key the caller did not send that is
+    gone after the write, or that appeared after the write, is reported.
+    A missing key is never the same as a key holding ``null``. Returns a
+    sorted list of names, never values.
     """
     changed: list[str] = []
     for key in sorted(set(before) | set(after)):
@@ -122,11 +124,12 @@ def unrequested_changes(
                 changed.append(key)
             continue
         sent = requested[key]
-        if not isinstance(sent, dict) or not isinstance(old, dict):
+        if not isinstance(sent, dict):
             continue
+        old_map = old if isinstance(old, dict) else {}
         new_map = new if isinstance(new, dict) else {}
-        for sub in sorted((set(old) | set(new_map)) - set(sent)):
-            if not _same(old.get(sub, _MISSING), new_map.get(sub, _MISSING)):
+        for sub in sorted((set(old_map) | set(new_map)) - set(sent)):
+            if not _same(old_map.get(sub, _MISSING), new_map.get(sub, _MISSING)):
                 changed.append(f"{key}.{sub}")
     return changed
 

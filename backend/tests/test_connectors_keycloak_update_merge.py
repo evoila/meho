@@ -439,6 +439,33 @@ async def test_realm_update_reports_attributes_lost_after_write(
     ]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("had", [None, "missing"], ids=["null", "missing"])
+async def test_realm_update_reports_attribute_added_to_a_new_map(
+    keycloak_connector: KeycloakConnector, had: Any
+) -> None:
+    """The realm had no attributes; one is sent; the read-back has one more: it is named."""
+    before = copy.deepcopy(_REALM_BEFORE)
+    if had is None:
+        before["attributes"] = None
+    else:
+        del before["attributes"]
+    requested = {"attributes": {"frontendUrl": "https://kc.test"}}
+    after = merge_representation(copy.deepcopy(before), copy.deepcopy(requested))
+    after["attributes"]["cibaExpiresIn"] = "120"
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(_REALM_PATH).mock(side_effect=_reads(before, after))
+        put_route = mock.put(_REALM_PATH).respond(204)
+        result = await _dispatch("keycloak.realm.update", {"representation": requested})
+
+    assert result["status"] == "ok", result.get("error")
+    body = json.loads(put_route.calls.last.request.content)
+    assert body["attributes"] == {"frontendUrl": "https://kc.test"}
+    assert result["result"]["read_back_checked"] is True
+    assert result["result"]["unrequested_changes"] == ["attributes.cibaExpiresIn"]
+
+
 # ---------------------------------------------------------------------------
 # Pure helpers
 # ---------------------------------------------------------------------------
@@ -492,3 +519,22 @@ def test_unrequested_changes_tells_a_missing_key_from_null() -> None:
     after = {"attributes": {"sent": "1"}}
     assert unrequested_changes(before, after, {"attributes": {"sent": "1"}}) == ["attributes.k"]
     assert unrequested_changes(after, before, {"attributes": {"sent": "1"}}) == ["attributes.k"]
+
+
+@pytest.mark.parametrize(
+    "before",
+    [{}, {"attributes": None}, {"attributes": "x"}],
+    ids=["missing", "null", "not-a-map"],
+)
+def test_unrequested_changes_reports_keys_added_to_a_map_that_was_not_there(
+    before: dict[str, Any],
+) -> None:
+    """Part of a map was sent; the map was not there before: keys that appeared are named."""
+    requested = {"attributes": {"sent": "1"}}
+    after = {"attributes": {"sent": "1", "added": "2", "other": None}}
+    assert unrequested_changes(before, after, requested) == [
+        "attributes.added",
+        "attributes.other",
+    ]
+    assert unrequested_changes(before, {"attributes": {"sent": "1"}}, requested) == []
+    assert unrequested_changes(before, {}, requested) == []

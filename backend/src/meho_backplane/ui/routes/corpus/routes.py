@@ -73,7 +73,7 @@ from typing import Final
 from urllib.parse import quote
 
 import structlog
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -105,6 +105,7 @@ from meho_backplane.docs_search import (
     search_docs,
 )
 from meho_backplane.docs_search.answer import ANSWER_SOURCE_UPSTREAM
+from meho_backplane.docs_search.target_scope import apply_target_default
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.auth.refresh import (
@@ -132,6 +133,9 @@ _MAX_QUERY_LENGTH: Final[int] = 2000
 #: the backend ``SearchDocsRequest.collection`` cap so an oversized value
 #: is rejected at the form boundary.
 _MAX_COLLECTION_LENGTH: Final[int] = 128
+#: Longest ``target`` name the page and the form accept (#3920); the same
+#: bound the ``search_docs`` / ``ask_docs`` faces keep.
+_MAX_TARGET_LENGTH: Final[int] = 256
 
 #: Number of cited chunks requested per search. Matches the backend
 #: ``search_docs`` request default; the page shows a single ranked list
@@ -420,9 +424,15 @@ def build_corpus_search_router() -> APIRouter:
     async def corpus_index(
         request: Request,
         session: UISessionContext = _require_session,
+        target: str = Query(default="", max_length=_MAX_TARGET_LENGTH),
     ) -> HTMLResponse:
-        """Render the docs-corpus page (delegates to :func:`_render_corpus_index`)."""
-        return await _render_corpus_index(request, session)
+        """Render the docs-corpus page (delegates to :func:`_render_corpus_index`).
+
+        ``target`` (#3920) is a target name a linking page already has; the
+        form carries it so the search and the answer default their version
+        scope to that target's detected product and version.
+        """
+        return await _render_corpus_index(request, session, target.strip())
 
     # NOTE: POST /ui/corpus/search is registered here. There is no
     # /ui/corpus/{slug} route on this surface today, but the search route
@@ -437,14 +447,16 @@ def build_corpus_search_router() -> APIRouter:
         collection: str = Form(default="", max_length=_MAX_COLLECTION_LENGTH),
         q: str = Form(default="", max_length=_MAX_QUERY_LENGTH),
         mode: str = Form(default=_MODE_SEARCH, max_length=16),
+        target: str = Form(default="", max_length=_MAX_TARGET_LENGTH),
     ) -> HTMLResponse:
         """Run the search / ask fragment (delegates to :func:`_render_corpus_search`).
 
         ``mode`` selects between the original retrieve-only ``search`` path
         and the ``ask`` grounded-answer path (#1917); any unrecognised value
-        falls back to ``search``.
+        falls back to ``search``. ``target`` (#3920) is the optional target
+        name the page was opened with.
         """
-        return await _render_corpus_search(request, session, collection, q, mode)
+        return await _render_corpus_search(request, session, collection, q, mode, target.strip())
 
     return router
 
@@ -452,6 +464,7 @@ def build_corpus_search_router() -> APIRouter:
 async def _render_corpus_index(
     request: Request,
     session: UISessionContext,
+    target: str = "",
 ) -> HTMLResponse:
     """Render the docs-corpus page for ``GET /ui/corpus``.
 
@@ -481,6 +494,7 @@ async def _render_corpus_index(
         # Initial render defaults the mode toggle to retrieve-only ``search``
         # (#1917); a submit echoes the operator's chosen ``mode`` back.
         "mode": _MODE_SEARCH,
+        "target": target,
         "cited": [],
         "searched": False,
         "operator_sub": session.operator_sub,
@@ -614,6 +628,7 @@ async def _render_corpus_search(
     collection: str,
     q: str,
     mode: str,
+    target: str = "",
 ) -> HTMLResponse:
     """Run the HTMX search / ask fragment for ``POST /ui/corpus/search``.
 
@@ -651,9 +666,9 @@ async def _render_corpus_search(
     if query:
         operator = await _resolve_operator(session)
         if ask_mode:
-            result_context = await _ask_result_context(operator, query, collection_key)
+            result_context = await _ask_result_context(operator, query, collection_key, target)
         else:
-            result_context = await _search_result_context(operator, query, collection_key)
+            result_context = await _search_result_context(operator, query, collection_key, target)
 
     csrf_token, set_csrf = _resolve_search_csrf(request, str(session.session_id))
     context: dict[str, object] = {
@@ -675,10 +690,11 @@ async def _search_result_context(
     operator: Operator,
     query: str,
     collection_key: str,
+    target: str = "",
 ) -> dict[str, object]:
     """Build the retrieve-mode result context (cited chunks or a typed error)."""
     try:
-        chunks = await _run_search(operator, query, collection_key)
+        chunks = await _run_search(operator, query, collection_key, target)
     except HTTPException as exc:
         return _search_or_error_context(exc)
     return {"cited": _cited_chunks(chunks, collection_key=collection_key)}
@@ -688,6 +704,7 @@ async def _ask_result_context(
     operator: Operator,
     query: str,
     collection_key: str,
+    target: str = "",
 ) -> dict[str, object]:
     """Build the ask-mode result context: a grounded answer, or fail open.
 
@@ -725,24 +742,14 @@ async def _ask_result_context(
     ``search_docs`` call instead, rendered under the same leg banner (best
     effort: if that search also fails, the banner stands alone).
     """
-    # Validate the mandatory collection scope -- a missing / blank
-    # ``collection`` is the same mandatory-scope 422 the search path renders
-    # (an answer is never composed without a routable collection).
+    # The same scope + collection gate the search path runs (an answer is
+    # never composed without a routable collection).
     try:
-        docs_scope = build_docs_scope(collection_key or None)
-    except MissingDocsFilterError as exc:
-        return _search_or_error_context(
-            HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
+        docs_scope, collection = await _resolve_scope_or_http_error(
+            operator, collection_key, target
         )
-
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as db_session, db_session.begin():
-        try:
-            collection = await _resolve_collection_or_http_error(
-                db_session, operator, docs_scope.collection_key
-            )
-        except HTTPException as exc:
-            return _search_or_error_context(exc)
+    except HTTPException as exc:
+        return _search_or_error_context(exc)
 
     outcome = await run_ask_pipeline_capturing_retrieval(
         operator,
@@ -840,7 +847,9 @@ def _ask_answer_context(
     }
 
 
-async def _run_search(operator: Operator, query: str, collection_key: str) -> list[DocsChunk]:
+async def _run_search(
+    operator: Operator, query: str, collection_key: str, target: str = ""
+) -> list[DocsChunk]:
     """Run the in-process ``search_docs`` service, mapping failures to HTTP.
 
     Composes the same primitives the ``POST /api/v1/search_docs`` route
@@ -851,22 +860,11 @@ async def _run_search(operator: Operator, query: str, collection_key: str) -> li
     * not entitled -> 403; ``disabled`` -> 403 (terminal); not-ready
       (``provisioning`` / ``rebuilding``) -> 409 (retryable)
     * backend unavailable -> 503 (fail-closed; never an empty list)
+    * a *target* that names no target -> 404, or more than one -> 409
 
     Returns the ranked cited-chunk list on success.
     """
-    try:
-        docs_scope = build_docs_scope(collection_key or None)
-    except MissingDocsFilterError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=str(exc),
-        ) from exc
-
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as db_session, db_session.begin():
-        collection = await _resolve_collection_or_http_error(
-            db_session, operator, docs_scope.collection_key
-        )
+    docs_scope, collection = await _resolve_scope_or_http_error(operator, collection_key, target)
 
     try:
         result = await search_docs(
@@ -892,6 +890,34 @@ async def _run_search(operator: Operator, query: str, collection_key: str) -> li
         ) from exc
 
     return list(result.chunks)
+
+
+async def _resolve_scope_or_http_error(
+    operator: Operator,
+    collection_key: str,
+    target: str,
+) -> tuple[DocsScope, DocCollection]:
+    """Build the scope, add the *target* default (#3920) and gate the collection.
+
+    The shared front half of both modes: a missing / blank ``collection`` is
+    a 422; an unknown *target* is the target lookup's 404 (more than one
+    match: 409); the collection arms are :func:`_resolve_collection_or_http_error`'s.
+    """
+    try:
+        docs_scope = build_docs_scope(collection_key or None)
+    except MissingDocsFilterError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as db_session, db_session.begin():
+        docs_scope = await apply_target_default(db_session, operator, docs_scope, target or None)
+        collection = await _resolve_collection_or_http_error(
+            db_session, operator, docs_scope.collection_key
+        )
+    return docs_scope, collection
 
 
 async def _resolve_collection_or_http_error(

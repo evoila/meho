@@ -21,6 +21,9 @@ through the one answer seam. For a collection that opted in
   ``version`` through, and the answer call carries the soft ``scope``, the
   hard ``filters`` or neither, per the collection's gates. The UI Ask form
   has no product / version fields, so it never sends either.
+* **Target default** (#3920) -- on all three faces a named ``target`` with
+  a fingerprint becomes the answer call's soft ``scope``
+  (``source: "default"``), never its filters.
 """
 
 from __future__ import annotations
@@ -58,6 +61,7 @@ from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.db.models import AuditLog, DocCollection, Tenant
+from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.docs_search.answer_errors import (
     CAUSE_CORPUS_UNAVAILABLE,
     CAUSE_SYNTHESIS_PARSE,
@@ -278,8 +282,11 @@ def _mcp_call(**refinements: str) -> dict[str, Any]:
     return body
 
 
-def _ui_post() -> str:
-    """Submit the ``/ui/corpus`` Ask form as an entitled session; return the HTML."""
+def _ui_post(**extra: str) -> str:
+    """Submit the ``/ui/corpus`` Ask form as an entitled session; return the HTML.
+
+    *extra* adds form fields (the optional ``target``, #3920).
+    """
 
     async def _session() -> uuid.UUID:
         async with get_sessionmaker()() as session, session.begin():
@@ -308,7 +315,7 @@ def _ui_post() -> str:
         with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=_operator()):
             response = client.post(
                 "/ui/corpus/search",
-                data={"collection": "vmware", "q": _QUERY, "mode": "ask"},
+                data={"collection": "vmware", "q": _QUERY, "mode": "ask", **extra},
                 headers={CSRF_HEADER_NAME: csrf},
             )
     assert response.status_code == 200, response.text
@@ -738,3 +745,126 @@ def test_ui_answer_call_sends_no_refinements_whatever_the_gates() -> None:
     assert (ask.calls, search.calls) == (1, 0)
     assert ask.kwargs[0]["filters"] is None
     assert ask.kwargs[0]["soft_scope"] is None
+
+
+# ---------------------------------------------------------------------------
+# The default scope from a named target, per face (#3920)
+# ---------------------------------------------------------------------------
+
+_TARGET_DEFAULT_SCOPE: dict[str, str] = {
+    "product": "vcenter",
+    "release": "8.0.3.00400",
+    "source": "default",
+}
+_TARGET_HOST = "vcenter-01.example.test"
+
+
+async def _seed_target_async() -> None:
+    """Seed a probed ``vcenter-01`` target in the operator's tenant."""
+    async with get_sessionmaker()() as session, session.begin():
+        session.add(
+            TargetORM(
+                tenant_id=OPERATOR_TENANT_ID,
+                name="vcenter-01",
+                aliases=[],
+                product="vcenter",
+                host=_TARGET_HOST,
+                port=443,
+                secret_ref="targets/vcenter-01",
+                auth_model="shared_service_account",
+                fingerprint={
+                    "vendor": "vmware",
+                    "product": "vcenter",
+                    "version": "8.0.3.00400",
+                    "reachable": True,
+                    "probed_at": "2026-10-01T00:00:00Z",
+                    "probe_method": "vimServiceVersions.xml",
+                },
+            ),
+        )
+
+
+async def _seed_with_target() -> None:
+    await _seed_async(_gated_backend({"scope": "soft", "scope_filters": True}))
+    await _seed_target_async()
+
+
+@pytest.mark.asyncio
+async def test_rest_answer_call_sends_the_target_default() -> None:
+    """REST ``ask_docs`` + ``target``: soft scope from the fingerprint, no filters, audited."""
+    await _seed_with_target()
+    ask, search = _FakeAsk(), _FakeSearch()
+    with (
+        respx.mock(assert_all_called=False) as router,
+        patch(_ASK_SEAM, new=ask),
+        patch(_SEARCH_SEAM, new=search),
+    ):
+        response = _rest_post(router, target="vcenter-01")
+    assert response.status_code == 200, response.text
+    assert ask.kwargs[0]["soft_scope"] == _TARGET_DEFAULT_SCOPE
+    assert ask.kwargs[0]["filters"] is None
+
+    async with get_sessionmaker()() as session:
+        rows = (
+            (await session.execute(select(AuditLog).where(AuditLog.path == "/api/v1/ask_docs")))
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    assert rows[0].payload["scope_source"] == "default"
+    assert rows[0].payload["target"] == "vcenter-01"
+    assert _TARGET_HOST not in json.dumps(rows[0].payload)
+
+
+@pytest.mark.asyncio
+async def test_rest_unknown_target_is_404_no_target() -> None:
+    """REST ``ask_docs`` with an unknown target: the target routes' 404, no answer call."""
+    await _seed_with_target()
+    ask = _FakeAsk()
+    with respx.mock(assert_all_called=False) as router, patch(_ASK_SEAM, new=ask):
+        response = _rest_post(router, target="vcenter-99")
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"]["error"] == "no_target"
+    assert ask.calls == 0
+
+
+def test_mcp_answer_call_sends_the_target_default() -> None:
+    """MCP ``ask_docs`` + ``target``: the same soft scope on the answer call."""
+    asyncio.run(_seed_with_target())
+    ask, search = _FakeAsk(), _FakeSearch()
+    with patch(_ASK_SEAM, new=ask), patch(_SEARCH_SEAM, new=search):
+        body = _mcp_call(target="vcenter-01")
+    assert "result" in body, body
+    assert ask.kwargs[0]["soft_scope"] == _TARGET_DEFAULT_SCOPE
+    assert ask.kwargs[0]["filters"] is None
+
+
+def test_mcp_caller_version_wins_over_the_target() -> None:
+    """MCP ``ask_docs`` + ``target`` + ``version``: the caller's version is sent."""
+    asyncio.run(_seed_with_target())
+    ask = _FakeAsk()
+    with patch(_ASK_SEAM, new=ask):
+        body = _mcp_call(target="vcenter-01", version="9.1")
+    assert "result" in body, body
+    assert ask.kwargs[0]["soft_scope"] == {"version": "9.1", "source": "caller"}
+
+
+def test_ui_answer_call_sends_the_target_default() -> None:
+    """The UI Ask form's ``target`` field gives the same soft scope."""
+    asyncio.run(_seed_with_target())
+    ask, search = _FakeAsk(), _FakeSearch()
+    with patch(_ASK_SEAM, new=ask), patch(_SEARCH_SEAM, new=search):
+        html = _ui_post(target="vcenter-01")
+    assert _EXPECTED_ANSWER in html
+    assert ask.kwargs[0]["soft_scope"] == _TARGET_DEFAULT_SCOPE
+    assert ask.kwargs[0]["filters"] is None
+
+
+def test_ui_unknown_target_shows_an_error_card() -> None:
+    """An unknown target renders the typed error card; no answer call runs."""
+    asyncio.run(_seed_with_target())
+    ask = _FakeAsk()
+    with patch(_ASK_SEAM, new=ask):
+        html = _ui_post(target="vcenter-99")
+    assert "no_target" in html
+    assert ask.calls == 0

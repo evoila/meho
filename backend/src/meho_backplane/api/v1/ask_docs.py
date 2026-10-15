@@ -133,6 +133,7 @@ from meho_backplane.docs_search import (
 )
 from meho_backplane.docs_search.answer import AskPipelineOutcome, answer_docs_question
 from meho_backplane.docs_search.answer_errors import CAUSE_UPSTREAM_REJECTED
+from meho_backplane.docs_search.target_scope import apply_target_default
 
 __all__ = [
     "AskPipelineOutcome",
@@ -175,6 +176,9 @@ class AskDocsRequest(BaseModel):
     naming the absent key (carrying *why* the collection is mandatory)
     rather than Pydantic's generic ``field_required``. ``product`` /
     ``version`` are optional refinements within the chosen collection.
+    ``target`` (#3920) names a target; when ``product`` and ``version`` are
+    both absent, its fingerprint product and version become the default
+    soft scope (a ranking hint, never a filter).
 
     There is **no** ``collections`` fan-out field: ``ask_docs`` is
     single-collection only (#1548 decision 2), matching the MCP tool.
@@ -190,6 +194,7 @@ class AskDocsRequest(BaseModel):
     collection: str | None = Field(default=None, max_length=128)
     product: str | None = Field(default=None, max_length=128)
     version: str | None = Field(default=None, max_length=128)
+    target: str | None = Field(default=None, max_length=256)
     limit: int = Field(default=10, ge=1, le=50)
 
 
@@ -367,6 +372,13 @@ def _raise_pipeline_http_error(answer_error: AskDocsAnswerError) -> NoReturn:
     "/ask_docs",
     response_model=AskDocsResponse,
     responses={
+        404: {
+            "description": (
+                "``target`` names no target in the tenant "
+                "(``detail.error='no_target'``, with near-miss ``matches``), "
+                "the same error the target routes return."
+            ),
+        },
         403: {
             "description": (
                 "Terminal rejection of an otherwise-resolvable collection, in "
@@ -386,6 +398,8 @@ def _raise_pipeline_http_error(answer_error: AskDocsAnswerError) -> NoReturn:
                 "The named collection is known and entitled but transiently "
                 "not ``ready`` (provisioning / rebuilding). Retryable once the "
                 "rebuild finishes. Mirrors ``search_docs``."
+                " Also returned when ``target`` matches more than one target "
+                "(``detail.error='ambiguous_target'``)."
             ),
         },
         422: {
@@ -468,6 +482,7 @@ async def ask_docs_endpoint(
         audit_product=docs_scope.product,
         audit_version=docs_scope.version,
     )
+    docs_scope = await apply_target_default(session, operator, docs_scope, body.target)
 
     collection = await _resolve_collection_or_http_error(
         session, operator, docs_scope.collection_key

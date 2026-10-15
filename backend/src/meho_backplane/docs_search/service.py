@@ -39,7 +39,7 @@ touches the raw query beyond forwarding it to the corpus.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 import structlog
 from pydantic import BaseModel, ConfigDict, Field
@@ -60,6 +60,7 @@ __all__ = [
     "ForwardedScope",
     "MissingDocsFilterError",
     "ScopeForwarding",
+    "ScopeSource",
     "build_docs_scope",
     "forwarded_scope",
     "search_docs",
@@ -89,11 +90,21 @@ _SOFT_SCOPE = "soft"
 #: scope instead (the soft gate wins).
 _SCOPE_FILTERS_REF_KEY = "scope_filters"
 
-#: The ``source`` the soft scope carries: the values came from the caller's
-#: own ``product`` / ``version`` arguments (a later default filled from a
-#: target fingerprint names itself ``"default"``, #3920).
+#: The ``source`` the soft scope carries: ``"caller"`` when the values came
+#: from the caller's own ``product`` / ``version`` arguments, ``"default"``
+#: when they came from a named target's fingerprint (#3920).
 _SCOPE_SOURCE_KEY = "source"
-_SCOPE_SOURCE_CALLER = "caller"
+_SCOPE_SOURCE_CALLER: Final = "caller"
+_SCOPE_SOURCE_DEFAULT: Final = "default"
+
+#: The soft-scope key that carries a target's version (#3920). The backend
+#: reads a default as a release (``8.0.3.00400``) and normalises it itself.
+_RELEASE_KEY = "release"
+
+#: Where the scope of a docs call came from: the caller's own ``product`` /
+#: ``version`` (``"caller"``) or a named target's fingerprint
+#: (``"default"``, #3920). ``None`` when there is no scope.
+ScopeSource = Literal["caller", "default"]
 
 #: How a backend call carried the requested refinements: ``"soft"`` (the
 #: ``scope`` object), ``"filters"`` (``metadata_filters``) or ``"none"``
@@ -143,6 +154,14 @@ class DocsScope(BaseModel):
     no spurious ``None`` values the backend would have to special-case.
     Whether and how the refinements reach the backend is the collection's
     choice: :func:`forwarded_scope` (#3912).
+
+    ``target`` is the name of the target the caller named (#3920), and
+    ``target_product`` / ``target_release`` are that target's fingerprint
+    product and version, as reported. They are the **default** scope: used
+    only when the caller gave neither ``product`` nor ``version``, sent only
+    as a soft ``scope`` and never as a filter, so :meth:`as_filters` leaves
+    them out. Set them with
+    :func:`~meho_backplane.docs_search.target_scope.with_target_default`.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -150,6 +169,9 @@ class DocsScope(BaseModel):
     collection_key: str
     product: str | None = Field(default=None)
     version: str | None = Field(default=None)
+    target: str | None = Field(default=None)
+    target_product: str | None = Field(default=None)
+    target_release: str | None = Field(default=None)
 
     def as_filters(self) -> dict[str, str]:
         """Render the optional refinements as a ``{key: scalar}`` filter dict.
@@ -163,6 +185,31 @@ class DocsScope(BaseModel):
         if self.version is not None:
             filters[_VERSION_KEY] = self.version
         return filters
+
+    def default_scope(self) -> dict[str, str]:
+        """Return the target default as ``{product, release}`` (#3920).
+
+        Empty when the caller gave ``product`` or ``version`` (the caller
+        wins), or when no target fingerprint filled a value. A key with no
+        value is left out.
+        """
+        if self.as_filters():
+            return {}
+        default: dict[str, str] = {}
+        if self.target_product is not None:
+            default[_PRODUCT_KEY] = self.target_product
+        if self.target_release is not None:
+            default[_RELEASE_KEY] = self.target_release
+        return default
+
+    @property
+    def source(self) -> ScopeSource | None:
+        """Where the scope came from: ``"caller"``, ``"default"`` or ``None``."""
+        if self.as_filters():
+            return _SCOPE_SOURCE_CALLER
+        if self.default_scope():
+            return _SCOPE_SOURCE_DEFAULT
+        return None
 
 
 class DocsChunk(BaseModel):
@@ -348,7 +395,8 @@ class ForwardedScope(BaseModel):
     #: :attr:`mode` is ``"filters"``.
     filters: dict[str, str] = Field(default_factory=dict)
     #: The soft ``scope`` object: the requested ``product`` / ``version``
-    #: unchanged, plus ``source``. Empty unless :attr:`mode` is ``"soft"``.
+    #: unchanged, or the target default ``product`` / ``release`` (#3920),
+    #: plus ``source``. Empty unless :attr:`mode` is ``"soft"``.
     soft_scope: dict[str, str] = Field(default_factory=dict)
 
 
@@ -381,6 +429,14 @@ def forwarded_scope(
     backend that refuses unknown request keys needs until it accepts
     ``scope``. Nothing requested means nothing sent, whatever the gates.
 
+    The target default (#3920): when the caller gave neither ``product``
+    nor ``version`` but named a target with a fingerprint
+    (:meth:`DocsScope.default_scope`), the soft gate sends
+    ``{"product": …, "release": …, "source": "default"}``. The backend
+    applies it only when the question names no version itself. The
+    default is never sent as filters: with only ``scope_filters`` on, it
+    is not sent at all.
+
     The caller still records the *requested* ``product`` / ``version`` in
     its log and audit row; only what reaches the backend is gated. This is
     the one rule every backend call that carries refinements goes through:
@@ -397,16 +453,25 @@ def forwarded_scope(
     Returns:
         The :class:`ForwardedScope` for the backend call.
     """
-    requested = scope.as_filters()
-    if not requested or backend_ref is None:
+    if backend_ref is None:
         return ForwardedScope()
-    if backend_ref.get(_SCOPE_REF_KEY) == _SOFT_SCOPE:
+    soft = backend_ref.get(_SCOPE_REF_KEY) == _SOFT_SCOPE
+    requested = scope.as_filters()
+    if requested:
+        if soft:
+            return ForwardedScope(
+                mode="soft",
+                soft_scope={**requested, _SCOPE_SOURCE_KEY: _SCOPE_SOURCE_CALLER},
+            )
+        if backend_ref.get(_SCOPE_FILTERS_REF_KEY) is True:
+            return ForwardedScope(mode="filters", filters=requested)
+        return ForwardedScope()
+    default = scope.default_scope()
+    if default and soft:
         return ForwardedScope(
             mode="soft",
-            soft_scope={**requested, _SCOPE_SOURCE_KEY: _SCOPE_SOURCE_CALLER},
+            soft_scope={**default, _SCOPE_SOURCE_KEY: _SCOPE_SOURCE_DEFAULT},
         )
-    if backend_ref.get(_SCOPE_FILTERS_REF_KEY) is True:
-        return ForwardedScope(mode="filters", filters=requested)
     return ForwardedScope()
 
 
@@ -497,8 +562,9 @@ async def search_docs(
     presence is implied; the route binds the SHA-256 hash to the audit
     row. The ``docs_search_completed`` log records the *requested*
     product/version and, as ``scope_forwarded``, how they were sent
-    (``"soft"``, ``"filters"`` or ``"none"``), and lists the hit chunk ids
-    and source refs (#3915). A search that requested ``product`` or
+    (``"soft"``, ``"filters"`` or ``"none"``), the scope's ``scope_source``
+    and the named ``target`` (#3920; its name only), and lists the hit
+    chunk ids and source refs (#3915). A search that requested ``product`` or
     ``version`` but found nothing also logs ``docs_search_scoped_zero_hits``,
     with the same ``scope_forwarded``.
 
@@ -552,6 +618,8 @@ async def search_docs(
         product=scope.product,
         version=scope.version,
         scope_forwarded=forwarded.mode,
+        scope_source=scope.source,
+        target=scope.target,
         **hit_log_fields(chunks),
     )
     note_scoped_zero_hits(

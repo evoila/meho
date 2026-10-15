@@ -132,12 +132,14 @@ from meho_backplane.docs_search import (
 )
 from meho_backplane.docs_search.answer import ANSWER_SOURCE_UPSTREAM, answer_docs_question
 from meho_backplane.docs_search.read import DOCS_SOURCE_NOT_FOUND, READ_AROUND_MAX
+from meho_backplane.docs_search.target_scope import apply_target_default
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import (
     McpInternalError,
     McpInvalidParamsError,
     McpRateLimitedError,
 )
+from meho_backplane.targets.resolver import AmbiguousTargetError, TargetNotFoundError
 from meho_backplane.untrusted_text import wrap_untrusted_text
 
 __all__: list[str] = []
@@ -208,6 +210,23 @@ _VERSION_RELEASE: Final[str] = (
 )
 _SCOPE_FORWARDING_NOTE: Final[str] = "ignored unless the collection enables scope forwarding."
 
+#: The ``target`` parameter guidance and the scope precedence both tools
+#: state (#3920). The default from a target's fingerprint is a ranking hint
+#: only, sent under the collection's soft scope gate, never a filter.
+_TARGET_DEFAULT: Final[str] = (
+    "OPTIONAL name of a target you are working on (the same name "
+    "`call_operation` takes). When you give neither `product` nor `version`, "
+    "the target's detected product and version become the default scope: a "
+    "ranking hint, never a filter. Which version wins: (1) your own "
+    "`product` / `version`; (2) a version the question itself names; "
+    "(3) the target's version, used only when the question names none. So "
+    "'what changed in 9.1?' asked with an 8.0 target is answered for 9.1. "
+    "An unknown target is rejected with the same no_target error "
+    "`call_operation` returns. A target with no detected product or "
+    "version adds nothing. Only sent when the collection enables the soft "
+    "scope."
+)
+
 
 def _build_scope_or_invalid_params(tool: str, arguments: dict[str, Any]) -> DocsScope:
     """Build the binary scope from *arguments* or raise ``-32602``.
@@ -229,6 +248,39 @@ def _build_scope_or_invalid_params(tool: str, arguments: dict[str, Any]) -> Docs
         return build_docs_scope(collection, product, version)
     except MissingDocsFilterError as exc:
         raise McpInvalidParamsError(f"{tool}: {exc}") from exc
+
+
+async def _with_target_or_error(
+    tool: str,
+    operator: Operator,
+    scope: DocsScope,
+    target: str | None,
+) -> DocsScope:
+    """Add the named target's default scope (#3920) or raise ``-32602``.
+
+    The target resolves the way ``call_operation`` resolves its own (by name
+    or alias, inside the caller's tenant), and a failure carries the same
+    ``no_target`` / ``ambiguous_target`` code, message and near-miss
+    ``matches`` that tool returns.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        try:
+            scope = await apply_target_default(session, operator, scope, target)
+        except (TargetNotFoundError, AmbiguousTargetError) as exc:
+            detail: dict[str, Any] = exc.detail if isinstance(exc.detail, dict) else {}
+            code = str(detail.get("error", "no_target"))
+            query = str(detail.get("query", target))
+            message = (
+                f"no target matches {query!r} in the tenant"
+                if code == "no_target"
+                else f"{query!r} matches more than one target in the tenant"
+            )
+            raise McpInvalidParamsError(
+                f"{tool}: {code}: {message}",
+                data={"error_code": code, "query": query, "matches": detail.get("matches", [])},
+            ) from exc
+    return scope
 
 
 async def _resolve_collection_or_error(
@@ -401,6 +453,7 @@ async def _run_search_single(
     """The single-collection path (T3 #1552): one backend, one collection."""
     scope = _build_scope_or_invalid_params(tool, arguments)
     structlog.contextvars.bind_contextvars(audit_collection=scope.collection_key)
+    scope = await _with_target_or_error(tool, operator, scope, arguments.get("target"))
     collection = await _resolve_collection_or_error(operator, scope, tool=tool)
     return await search_docs(operator, query, scope=scope, collection=collection, limit=limit)
 
@@ -448,7 +501,12 @@ register_mcp_tool(
             "cheaper and sharper). `collection` and `collections`/'all' are "
             "mutually exclusive. "
             "`product` and `version` are OPTIONAL refinements within a "
-            "single collection (ignored on a fan-out). "
+            "single collection (ignored on a fan-out). An OPTIONAL `target` "
+            "(a target name you are working on) fills them from the target's "
+            "detected product and version when you give neither, as a "
+            "ranking hint. Which version wins: your own `product` / "
+            "`version`, then a version the question names, then the "
+            "target's. "
             "Use this for VENDOR REFERENCE — what the documentation says. "
             "Use `search_knowledge` instead for how THIS team does "
             "something (lab conventions, known-good runbooks, "
@@ -540,6 +598,12 @@ register_mcp_tool(
                         f"fan-out, and {_SCOPE_FORWARDING_NOTE}"
                     ),
                 },
+                "target": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "description": f"{_TARGET_DEFAULT} Ignored on a cross-collection fan-out.",
+                },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
@@ -623,6 +687,7 @@ async def _ask_docs_handler(
 
     scope = _build_scope_or_invalid_params("ask_docs", arguments)
     structlog.contextvars.bind_contextvars(audit_collection=scope.collection_key)
+    scope = await _with_target_or_error("ask_docs", operator, scope, arguments.get("target"))
     collection = await _resolve_collection_or_error(operator, scope, tool="ask_docs")
 
     outcome = await answer_docs_question(
@@ -698,7 +763,12 @@ register_mcp_tool(
             "question is rejected without it), naming WHICH corpus to "
             "search and gating entitlement — pick it from "
             "`list_doc_collections`. `product` and `version` are OPTIONAL "
-            "refinements within that collection. "
+            "refinements within that collection. An OPTIONAL `target` (a "
+            "target name you are working on) fills them from the target's "
+            "detected product and version when you give neither, as a "
+            "ranking hint. Which version wins: your own `product` / "
+            "`version`, then a version the question names, then the "
+            "target's. "
             "Use this for VENDOR REFERENCE when you want a composed answer "
             "rather than chunks to read yourself; use `search_docs` for the "
             "raw chunks, `search_knowledge` for how THIS team does "
@@ -763,6 +833,12 @@ register_mcp_tool(
                         f"OPTIONAL version refinement within the collection: {_VERSION_RELEASE} "
                         f"It is {_SCOPE_FORWARDING_NOTE}"
                     ),
+                },
+                "target": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "description": _TARGET_DEFAULT,
                 },
                 "limit": {
                     "type": "integer",

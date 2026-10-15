@@ -431,6 +431,16 @@ entitled to** (`meho-docs:<key>`), so every key shown is one
   precisely as you know it (`9.1.1`, `8.0 U3`, `8.0.3.00400`): a soft
   scope ranks that release first and excludes nothing, so there is no
   need to leave `version` out for KB, CVE or build-number questions.
+- **`target` is an optional version hint** (#3920). Pass the name of the
+  target you are working on (the name `call_operation` takes). When you
+  give neither `product` nor `version`, its detected product and version
+  go to the backend as a soft `scope` with `source: "default"`, never as
+  filters, and only when the collection sets `backend.ref.scope: "soft"`.
+  Which version wins: your own `product` / `version`, then a version the
+  question names, then the target's. An unknown target is the same
+  `no_target` error `call_operation` returns (REST 404, MCP `-32602`). A
+  cross-collection fan-out ignores it. The audit row and the log record
+  the target's name and `scope_source`, never its address.
 - **Entitlement** — searching a collection the tenant is not entitled to
   (`meho-docs:<key>` missing) → **403** / `-32602`, even though the tool
   stays visible via the base `meho-docs` gate.
@@ -619,7 +629,7 @@ a collection with neither sends neither key.)
 | `query` | `str` | always | The free-text search query. |
 | `top_k` | `int` | always | Maximum chunks to return. meho sends **`top_k`** (the key MEHO.Knowledge honours, #1732) — **not** `limit` / `k` / `size`. A corpus that reads only some *other* key and ignores `top_k` silently caps at *its* default. Read `top_k`. |
 | `metadata_filters` | `{key: scalar}` | only when non-empty, the collection sets `backend.ref.scope_filters: true` and does **not** set `backend.ref.scope: "soft"` | Binary `{key: value}` narrowing (e.g. `{"product": "vsphere"}`), values passed through unchanged. Omitted entirely when meho has no filters to send — do not require the key. |
-| `scope` | `{product?, version?, source}` | only when the agent gave `product` and/or `version` and the collection sets `backend.ref.scope: "soft"` (#3912) | The soft scope: a ranking / labelling signal, never a filter. Values as the agent gave them (normalising them is the corpus's job); `source` is `"caller"`. Never sent together with `metadata_filters`. A corpus that refuses unknown keys must accept `scope` before a collection turns the gate on. |
+| `scope` | `{product?, version?, source}` or `{product?, release?, source}` | only when the collection sets `backend.ref.scope: "soft"` (#3912) and either the agent gave `product` and/or `version`, or the agent named a `target` with a fingerprint and gave neither (#3920) | The soft scope: a ranking / labelling signal, never a filter. Values as given (normalising them is the corpus's job). `source` is `"caller"` for the agent's own values, or `"default"` for a target's detected product and version, sent as `product` and `release` (e.g. `{"product": "vcenter", "release": "8.0.3.00400", "source": "default"}`); the corpus applies a default only when the question names no version itself. Never sent together with `metadata_filters`. A corpus that refuses unknown keys must accept `scope` before a collection turns the gate on. |
 | `audience` | `str` | only when configured | RFC 8707 resource indicator, forwarded **in the request body** here (contrast readiness below). Omitted when no audience is configured. |
 
 - **Auth.** `Authorization: Bearer <operator JWT>` — the **operator's** raw
@@ -749,7 +759,7 @@ with its last path segment replaced by `ask`. Same screen, credential and
 | `query` | `str` | The operator's question, verbatim. |
 | `top_k` | `int` | The requested retrieval depth (`ask_docs` `limit`, default 10, cap 50). The corpus **may** cap it lower. |
 | `filters` | `{key: scalar}` | Only when the agent gave `product` and/or `version`, the collection sets `backend.ref.scope_filters: true` and does **not** set `backend.ref.scope: "soft"` (#3912). The answer endpoint's name for search's `metadata_filters`: an exact-match pre-filter, values passed through unchanged. |
-| `scope` | `{product?, version?, source}` | Only when the agent gave `product` and/or `version` and the collection sets `backend.ref.scope: "soft"` (#3912). The soft scope, as on search: a ranking / labelling signal, never a filter; `source` is `"caller"`. Never sent together with `filters`. |
+| `scope` | `{product?, version?, source}` or `{product?, release?, source}` | Only when the collection sets `backend.ref.scope: "soft"` (#3912), on the same terms as on search: the agent's `product` / `version` (`source: "caller"`), or a named target's default (`product` / `release`, `source: "default"`, #3920). A ranking / labelling signal, never a filter. Never sent together with `filters`. |
 | `audience` | `str` | Only when an audience is configured, as on search. |
 
 meho sends **no** `with_rerank` (ranking policy is the corpus's). With

@@ -1510,6 +1510,9 @@ type ApproveResponseBody_DispatchResult struct {
 // naming the absent key (carrying *why* the collection is mandatory)
 // rather than Pydantic's generic “field_required“. “product“ /
 // “version“ are optional refinements within the chosen collection.
+// “target“ (#3920) names a target; when “product“ and “version“ are
+// both absent, its fingerprint product and version become the default
+// soft scope (a ranking hint, never a filter).
 //
 // There is **no** “collections“ fan-out field: “ask_docs“ is
 // single-collection only (#1548 decision 2), matching the MCP tool.
@@ -1522,6 +1525,7 @@ type AskDocsRequest struct {
 	Limit      *int    `json:"limit,omitempty"`
 	Product    *string `json:"product"`
 	Query      string  `json:"query"`
+	Target     *string `json:"target"`
 	Version    *string `json:"version"`
 }
 
@@ -1951,6 +1955,7 @@ type BodyCorpusSearchUiCorpusSearchPost struct {
 	Collection *string `json:"collection,omitempty"`
 	Mode       *string `json:"mode,omitempty"`
 	Q          *string `json:"q,omitempty"`
+	Target     *string `json:"target,omitempty"`
 }
 
 // BodyKbEditorPreviewUiKbEditorPreviewPost defines model for Body_kb_editor_preview_ui_kb_editor_preview_post.
@@ -7752,7 +7757,10 @@ type ScheduledTriggerStatus string
 // with a route-shaped 422 naming the absent key (carrying *why* the
 // collection is mandatory), rather than Pydantic's generic
 // “field_required“. “product“ / “version“ are **optional
-// refinements** within the chosen collection.
+// refinements** within the chosen collection. “target“ (#3920) names a
+// target; when “product“ and “version“ are both absent, its
+// fingerprint product and version become the default soft scope (a
+// ranking hint, never a filter). It is ignored on a fan-out.
 //
 // “collections“ is the opt-in **cross-collection fan-out** scope (G4.6-T5
 // #1554): an explicit list of collection keys to query and RRF-merge.
@@ -7771,6 +7779,7 @@ type SearchDocsRequest struct {
 	Limit       *int      `json:"limit,omitempty"`
 	Product     *string   `json:"product"`
 	Query       string    `json:"query"`
+	Target      *string   `json:"target"`
 	Version     *string   `json:"version"`
 }
 
@@ -10781,6 +10790,11 @@ type UiConnectorsDeleteSubmitUiConnectorsNameDeletePostParams struct {
 // UiConventionsListUiConventionsGetParams defines parameters for UiConventionsListUiConventionsGet.
 type UiConventionsListUiConventionsGetParams struct {
 	Kind *string `form:"kind,omitempty" json:"kind,omitempty"`
+}
+
+// CorpusIndexUiCorpusGetParams defines parameters for CorpusIndexUiCorpusGet.
+type CorpusIndexUiCorpusGetParams struct {
+	Target *string `form:"target,omitempty" json:"target,omitempty"`
 }
 
 // IndexUiGrantsGetParams defines parameters for IndexUiGrantsGet.
@@ -13855,7 +13869,7 @@ type ClientInterface interface {
 	UiConventionsHistoryUiConventionsSlugHistoryGet(ctx context.Context, slug string, body UiConventionsHistoryUiConventionsSlugHistoryGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// CorpusIndexUiCorpusGet request
-	CorpusIndexUiCorpusGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+	CorpusIndexUiCorpusGet(ctx context.Context, params *CorpusIndexUiCorpusGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGet request
 	UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGet(ctx context.Context, collectionKey string, chunkId string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -19054,8 +19068,8 @@ func (c *Client) UiConventionsHistoryUiConventionsSlugHistoryGet(ctx context.Con
 	return c.Client.Do(req)
 }
 
-func (c *Client) CorpusIndexUiCorpusGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewCorpusIndexUiCorpusGetRequest(c.Server)
+func (c *Client) CorpusIndexUiCorpusGet(ctx context.Context, params *CorpusIndexUiCorpusGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCorpusIndexUiCorpusGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -37709,7 +37723,7 @@ func NewUiConventionsHistoryUiConventionsSlugHistoryGetRequestWithBody(server st
 }
 
 // NewCorpusIndexUiCorpusGetRequest generates requests for CorpusIndexUiCorpusGet
-func NewCorpusIndexUiCorpusGetRequest(server string) (*http.Request, error) {
+func NewCorpusIndexUiCorpusGetRequest(server string, params *CorpusIndexUiCorpusGetParams) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -37725,6 +37739,28 @@ func NewCorpusIndexUiCorpusGetRequest(server string) (*http.Request, error) {
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Target != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "target", runtime.ParamLocationQuery, *params.Target); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -44556,7 +44592,7 @@ type ClientWithResponsesInterface interface {
 	UiConventionsHistoryUiConventionsSlugHistoryGetWithResponse(ctx context.Context, slug string, body UiConventionsHistoryUiConventionsSlugHistoryGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConventionsHistoryUiConventionsSlugHistoryGetResponse, error)
 
 	// CorpusIndexUiCorpusGetWithResponse request
-	CorpusIndexUiCorpusGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*CorpusIndexUiCorpusGetResponse, error)
+	CorpusIndexUiCorpusGetWithResponse(ctx context.Context, params *CorpusIndexUiCorpusGetParams, reqEditors ...RequestEditorFn) (*CorpusIndexUiCorpusGetResponse, error)
 
 	// UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetWithResponse request
 	UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetWithResponse(ctx context.Context, collectionKey string, chunkId string, reqEditors ...RequestEditorFn) (*UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse, error)
@@ -51185,6 +51221,7 @@ func (r UiConventionsHistoryUiConventionsSlugHistoryGetResponse) StatusCode() in
 type CorpusIndexUiCorpusGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
 }
 
 // Status returns HTTPResponse.Status
@@ -57198,8 +57235,8 @@ func (c *ClientWithResponses) UiConventionsHistoryUiConventionsSlugHistoryGetWit
 }
 
 // CorpusIndexUiCorpusGetWithResponse request returning *CorpusIndexUiCorpusGetResponse
-func (c *ClientWithResponses) CorpusIndexUiCorpusGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*CorpusIndexUiCorpusGetResponse, error) {
-	rsp, err := c.CorpusIndexUiCorpusGet(ctx, reqEditors...)
+func (c *ClientWithResponses) CorpusIndexUiCorpusGetWithResponse(ctx context.Context, params *CorpusIndexUiCorpusGetParams, reqEditors ...RequestEditorFn) (*CorpusIndexUiCorpusGetResponse, error) {
+	rsp, err := c.CorpusIndexUiCorpusGet(ctx, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -66841,6 +66878,16 @@ func ParseCorpusIndexUiCorpusGetResponse(rsp *http.Response) (*CorpusIndexUiCorp
 	response := &CorpusIndexUiCorpusGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
 	}
 
 	return response, nil

@@ -468,7 +468,9 @@ endpoint reads) and the soft scope as its `scope`. Same precedence, same
 look-alike rule; with both gates off the answer body is byte-for-byte the
 #3911 body, `{query, top_k}` (plus `audience`). That covers the REST and
 MCP `ask_docs` faces, which pass `product` / `version` through; the UI Ask
-form has no such fields, so it never sends either.
+form has no such fields, so it never sends either. All three faces also
+take a `target`, whose fingerprint can fill a default soft scope (see
+*Default scope from a named target* below, #3920).
 
 **What is recorded.** The REST audit row keeps the requested `product` /
 `version`, whatever the gates. The `docs_search_completed` and
@@ -512,6 +514,51 @@ meho docs collections probe vmware
 Rolling back is the same update without `scope` (then a probe). Another
 collection turns on `"scope_filters": true` the same way, once its
 backend applies exact-match filters usefully.
+
+### Default scope from a named target (`docs_search/target_scope.py`, #3920)
+
+An agent working on a target often asks about that target's product
+without naming the version. Every probed target already carries a
+fingerprint (the detected product and version). So `search_docs` and
+`ask_docs` take an optional `target` on every face: the MCP tools, the
+REST bodies (`target` on `SearchDocsRequest` / `AskDocsRequest`) and the
+`/ui/corpus` form (a hidden `target` field, filled from
+`GET /ui/corpus?target=<name>`; both UI modes use it).
+
+- **Resolution.** `apply_target_default(session, operator, scope, target)`
+  resolves the name with `resolve_target`, the same lookup
+  `call_operation` uses: name or alias, inside the caller's tenant only.
+  An unknown name, or a target in another tenant, raises
+  `TargetNotFoundError`: REST 404 `{"error": "no_target", "query",
+  "matches"}`, MCP `-32602` with `data.error_code = "no_target"` and the
+  same message `call_operation` gives, a UI error card. An alias that
+  matches more than one target is `ambiguous_target` (REST 409). Only the
+  target's name and stored `fingerprint` are read.
+- **The default.** `with_target_default` copies the fingerprint's
+  `product` and `version`, as reported, into `DocsScope.target_product` /
+  `target_release` and the name into `DocsScope.target`. A target without
+  a fingerprint adds only its name. `DocsScope.default_scope()` returns
+  `{"product": …, "release": …}` only when the caller gave neither
+  `product` nor `version`; `DocsScope.source` is `"caller"`, `"default"`
+  or `None`.
+- **Never a filter.** `forwarded_scope` sends the default only under the
+  soft gate, as `{"product": "vcenter", "release": "8.0.3.00400",
+  "source": "default"}`. `as_filters()` never includes it, so with only
+  `scope_filters` on, or with no gate, nothing is sent. The backend
+  normalises the product name and the release itself.
+- **Precedence**, stated in both tool descriptions: (1) the caller's
+  `product` / `version` (`source: "caller"`; either one replaces the whole
+  default); (2) a version the question names, which the backend reads;
+  (3) the target default, which the backend uses only when the question
+  names no version. So "what changed in 9.1?" asked with an 8.0 target is
+  answered for 9.1.
+- **Fan-out.** A cross-collection `search_docs` ignores `target`: it is
+  not resolved and no scope is sent. `ask_docs` has no fan-out.
+- **Recorded.** `apply_target_default` binds `audit_scope_source` and
+  `audit_target` (the name only), so every face's audit row carries
+  `scope_source` and `target`. `docs_search_completed` and
+  `docs_ask_completed` log `scope_source` and `target`. The target's
+  address and credentials are never logged or audited.
 
 ### Cross-collection fan-out (`meho_backplane.docs_search.fanout`, T5 #1554)
 
@@ -1379,16 +1426,19 @@ uses the same keys:
 - Next to the *requested* `product` / `version`: `scope_forwarded`, how
   the collection's scope gates sent them to the backend (`"soft"`,
   `"filters"` or `"none"`; see *Scope gates* above, #3912).
+- `scope_source` (`"caller"`, `"default"` or `null`) and `target`, the
+  name of the target the caller named (#3920), on `docs_search_completed`
+  and `docs_ask_completed`.
 
 | Event | Level | Emitted by | Fields |
 | --- | --- | --- | --- |
-| `docs_search_completed` | info | `search_docs` (every single-collection backend search: REST, MCP, UI Search mode, each `ask_docs` variant) | `operator_sub`, `collection_key`, `product`, `version`, `scope_forwarded`, hit fields |
+| `docs_search_completed` | info | `search_docs` (every single-collection backend search: REST, MCP, UI Search mode, each `ask_docs` variant) | `operator_sub`, `collection_key`, `product`, `version`, `scope_forwarded`, `scope_source`, `target`, hit fields |
 | `docs_search_fanout_completed` | info | `search_docs_fanout` | `collections`, hit fields of the fused list, `hit_collections` |
 | `docs_search_multi_query_completed` | info | `retrieve_multi_query` | `collection_key`, `variant_count`, hit fields of the merged list |
 | `docs_ask_query_expanded` | info | `expand_docs_query` | `collection_key`, `variant_count` (no variant strings) |
 | `docs_ask_synthesized` | info | `synthesize_docs_answer` (local answer) | `answer_source="local"`, hit fields of the chunks the answer was composed over, `citation_count`, `cited_chunk_ids` |
 | `docs_ask_no_grounding` | info | `synthesize_docs_answer` (empty retrieval) | the same fields, all empty |
-| `docs_ask_completed` | info | `answer_docs_question` (every successful `ask_docs`, either path: REST, MCP, UI Ask mode) | `operator_sub`, `collection_key`, `product`, `version`, `scope_forwarded`, `answer_source` (`local` or `upstream`), hit fields of the chunks the answer was composed over, `citation_count`, `cited_chunk_ids`; upstream also `upstream_total_ms` / `upstream_llm_ms` |
+| `docs_ask_completed` | info | `answer_docs_question` (every successful `ask_docs`, either path: REST, MCP, UI Ask mode) | `operator_sub`, `collection_key`, `product`, `version`, `scope_forwarded`, `scope_source`, `target`, `answer_source` (`local` or `upstream`), hit fields of the chunks the answer was composed over, `citation_count`, `cited_chunk_ids`; upstream also `upstream_total_ms` / `upstream_llm_ms` |
 | `docs_ask_upstream_failed` | warning | `answer_docs_question` (a failed upstream answer) | `operator_sub`, `collection_key`, `answer_source="upstream"`, `scope_forwarded`, `leg`, `cause`, `upstream_status`, `retry_after`; hit fields only when the backend returned hits that failed to map (`citation_resolution`) |
 | `docs_search_scoped_zero_hits` | warning | `search_docs` | `operator_sub`, `collection_key`, `product`, `version`, `scope_forwarded` |
 | `docs_query_text` | debug | `log_query_text`, only with `DOCS_DEBUG_LOG_QUERY_TEXT=true` | `source`, `collection_key`, `queries` |

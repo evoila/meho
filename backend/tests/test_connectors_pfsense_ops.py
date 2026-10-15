@@ -1062,11 +1062,12 @@ async def test_pfsense_dhcp_leases_response_schema_matches_handler_rows() -> Non
 # ---------------------------------------------------------------------------
 
 
-def test_pfsense_ops_has_nineteen_entries() -> None:
+def test_pfsense_ops_has_twenty_one_entries() -> None:
     """canary + 7 reads + dhcp.leases (#2849) + 2 writes (#3090) + 2 deletes (#3232)
     + 3 teardown-inverse deletes (#3313) + mgmt_flow.summary
-    + user.list / route.static.list (#3954) = 19."""
-    assert len(PFSENSE_OPS) == 19
+    + user.list / route.static.list (#3954) + user.disable / user.enable (#3937)
+    = 21."""
+    assert len(PFSENSE_OPS) == 21
 
 
 def test_pfsense_ops_about_is_first() -> None:
@@ -1093,6 +1094,9 @@ _DELETE_OP_IDS = {
     "pfsense.alias.member.remove",
 }
 
+#: The governed user writes (#3937) -- ``dangerous`` + requires approval.
+_USER_WRITE_OP_IDS = {"pfsense.user.disable", "pfsense.user.enable"}
+
 
 def test_pfsense_read_ops_safe_write_ops_caution_delete_ops_destructive() -> None:
     for op in PFSENSE_OPS:
@@ -1103,6 +1107,10 @@ def test_pfsense_read_ops_safe_write_ops_caution_delete_ops_destructive() -> Non
         elif op.op_id in _WRITE_OP_IDS:
             assert op.safety_level == "caution", (
                 f"{op.op_id!r} write op should be safety_level='caution'"
+            )
+        elif op.op_id in _USER_WRITE_OP_IDS:
+            assert op.safety_level == "dangerous", (
+                f"{op.op_id!r} user write should be safety_level='dangerous'"
             )
         else:
             assert op.safety_level == "safe", f"{op.op_id!r} has safety_level != 'safe'"
@@ -1145,6 +1153,8 @@ def test_pfsense_ops_covers_expected_op_ids() -> None:
         "pfsense.gateway.delete",
         "pfsense.alias.member.remove",
         "pfsense.mgmt_flow.summary",
+        "pfsense.user.disable",
+        "pfsense.user.enable",
     }
     assert op_ids == expected
 
@@ -1170,10 +1180,10 @@ def test_pfsense_ops_handler_attrs_exist_on_connector() -> None:
         )
 
 
-def test_pfsense_ops_requires_approval_only_for_destructive_deletes() -> None:
-    """Only the #3232 governed destructive deletes require approval; all else don't."""
+def test_pfsense_ops_requires_approval_only_for_governed_ops() -> None:
+    """Only the governed deletes (#3232) and user writes (#3937) require approval."""
     for op in PFSENSE_OPS:
-        if op.op_id in _DELETE_OP_IDS:
+        if op.op_id in _DELETE_OP_IDS | _USER_WRITE_OP_IDS:
             assert op.requires_approval, f"{op.op_id!r} destructive delete must require approval"
         else:
             assert not op.requires_approval, f"{op.op_id!r} has requires_approval=True"

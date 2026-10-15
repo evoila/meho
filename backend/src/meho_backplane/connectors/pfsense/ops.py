@@ -130,8 +130,9 @@ def _pfsense_ops() -> tuple[PfSenseOp, ...]:
     (#3232), plus the teardown-inverse deletes
     ``pfsense.route.static.delete`` / ``pfsense.gateway.delete`` /
     ``pfsense.alias.member.remove`` (#3313)) + ``MGMT_FLOW_OPS`` (the
-    management-plane flow classifier ``pfsense.mgmt_flow.summary``).
-    Nineteen ops total.
+    management-plane flow classifier ``pfsense.mgmt_flow.summary``) +
+    ``USER_WRITE_OPS`` (``pfsense.user.disable`` / ``pfsense.user.enable``,
+    #3937). Twenty-one ops total.
 
     Implemented as a function call rather than a literal-and-splat at
     module level so the import order stays linear: ``ops.py`` defines
@@ -149,6 +150,7 @@ def _pfsense_ops() -> tuple[PfSenseOp, ...]:
     from meho_backplane.connectors.pfsense.ops_delete import DELETE_OPS
     from meho_backplane.connectors.pfsense.ops_mgmt_flow import MGMT_FLOW_OPS
     from meho_backplane.connectors.pfsense.ops_read import READ_OPS
+    from meho_backplane.connectors.pfsense.ops_user_write import USER_WRITE_OPS
     from meho_backplane.connectors.pfsense.ops_write import WRITE_OPS
 
     return (
@@ -158,6 +160,7 @@ def _pfsense_ops() -> tuple[PfSenseOp, ...]:
         *WRITE_OPS,
         *DELETE_OPS,
         *MGMT_FLOW_OPS,
+        *USER_WRITE_OPS,
     )
 
 
@@ -175,8 +178,10 @@ def _pfsense_ops() -> tuple[PfSenseOp, ...]:
 #: #252 (meho-internal) adds the management-plane flow classifier
 #: (``pfsense.mgmt_flow.summary``) via the ``ops_mgmt_flow`` module;
 #: #3954 adds the allow-listed config reads (``pfsense.user.list``,
-#: ``pfsense.route.static.list``) via the ``ops_config_reads`` module
-#: -- 19 ops total. The shape of each follow-on PR is "import a new
+#: ``pfsense.route.static.list``) via the ``ops_config_reads`` module;
+#: #3937 adds the governed user writes (``pfsense.user.disable``,
+#: ``pfsense.user.enable``) via the ``ops_user_write`` module -- 21 ops
+#: total. The shape of each follow-on PR is "import a new
 #: module-level tuple and splat it into :data:`PFSENSE_OPS` via
 #: :func:`_pfsense_ops`" -- the registration walk in
 #: :meth:`PfSenseConnector.register_operations` does not need to

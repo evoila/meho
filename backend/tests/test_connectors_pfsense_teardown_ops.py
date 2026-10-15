@@ -111,6 +111,36 @@ _CONFIG_ROUTING_NO_RETIRING_GW = _CONFIG_ROUTING.replace(
     "<gateway>192.0.2.2</gateway><descr>retiring</descr></gateway_item>",
     "",
 )
+# POLICY_GW is used only by a firewall rule that policy-routes out it.
+_CONFIG_FILTER_RULE_GW = (
+    "<pfsense>"
+    "<gateways>"
+    "<gateway_item><name>POLICY_GW</name><interface>opt1</interface>"
+    "<gateway>192.0.2.5</gateway></gateway_item>"
+    "</gateways>"
+    "<filter>"
+    "<rule><tracker>1700000001</tracker><gateway>POLICY_GW</gateway>"
+    "<descr>route lab out policy gw</descr></rule>"
+    "<rule><tracker>1700000002</tracker><gateway>OTHER_GW</gateway></rule>"
+    "<rule><tracker>1700000003</tracker><descr>no policy routing</descr></rule>"
+    "</filter>"
+    "</pfsense>"
+)
+# UPLINK_GW is used only as an interface's upstream gateway (IPv4 on opt1,
+# IPv4 + IPv6 on opt2 -> still one row per interface).
+_CONFIG_INTERFACE_GW = (
+    "<pfsense>"
+    "<interfaces>"
+    "<wan><if>vtnet0</if><gateway>WAN_DHCP</gateway></wan>"
+    "<opt1><if>vtnet1</if><descr>UPLINK</descr><gateway>UPLINK_GW</gateway></opt1>"
+    "<opt2><if>vtnet2</if><gateway>UPLINK_GW</gateway><gatewayv6>UPLINK_GW</gatewayv6></opt2>"
+    "</interfaces>"
+    "<gateways>"
+    "<gateway_item><name>UPLINK_GW</name><interface>opt1</interface>"
+    "<gateway>192.0.2.6</gateway></gateway_item>"
+    "</gateways>"
+    "</pfsense>"
+)
 # Two routes canonicalising to the same network (corrupt -> ambiguous).
 _CONFIG_DUP_ROUTE = (
     "<pfsense><staticroutes>"
@@ -243,6 +273,31 @@ def test_find_gateway_references_legacy_defaultgw_flag() -> None:
     )
     refs = find_gateway_references(cfg, "OLD_GW")
     assert [(r["kind"], r["id"]) for r in refs] == [("default_gateway", "gateway_item_flag")]
+
+
+def test_find_gateway_references_filter_rule_policy_routing() -> None:
+    refs = find_gateway_references(_CONFIG_FILTER_RULE_GW, "POLICY_GW")
+    # Only the rule that names POLICY_GW; rules with another or no gateway are skipped.
+    assert refs == [{"kind": "filter_rule", "id": "1700000001", "descr": "route lab out policy gw"}]
+
+
+def test_find_gateway_references_interface_binding() -> None:
+    refs = find_gateway_references(_CONFIG_INTERFACE_GW, "UPLINK_GW")
+    # One row per interface, even when opt2 names it for both IPv4 and IPv6.
+    assert refs == [
+        {"kind": "interface_gateway", "id": "opt1", "descr": "UPLINK"},
+        {"kind": "interface_gateway", "id": "opt2", "descr": None},
+    ]
+
+
+def test_find_gateway_references_interface_ipv6_only_binding() -> None:
+    cfg = (
+        "<pfsense><interfaces>"
+        "<opt3><if>vtnet3</if><gatewayv6>V6_GW</gatewayv6></opt3>"
+        "</interfaces></pfsense>"
+    )
+    refs = find_gateway_references(cfg, "V6_GW")
+    assert [(r["kind"], r["id"]) for r in refs] == [("interface_gateway", "opt3")]
 
 
 def test_find_gateway_references_unreferenced_is_empty() -> None:
@@ -461,6 +516,27 @@ async def test_gateway_delete_referenced_refuses_and_names_referrers() -> None:
     kinds = sorted(r["kind"] for r in result["references"])
     assert kinds == ["gateway_group", "static_route", "static_route"]
     assert "still referenced" in result["guidance"]
+    # Fail-closed: refuses after a single guard read, stages nothing.
+    assert mock_cmd.await_count == 1
+
+
+@pytest.mark.parametrize(
+    ("config", "name", "kind", "ref_id"),
+    [
+        (_CONFIG_FILTER_RULE_GW, "POLICY_GW", "filter_rule", "1700000001"),
+        (_CONFIG_INTERFACE_GW, "UPLINK_GW", "interface_gateway", "opt1"),
+    ],
+)
+async def test_gateway_delete_refuses_filter_rule_and_interface_referrers(
+    config: str, name: str, kind: str, ref_id: str
+) -> None:
+    connector = PfSenseConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = [_proc(config)]
+        result = await connector.gateway_delete(None, {"name": name})
+    assert result["status"] == "referenced"
+    assert (kind, ref_id) in {(r["kind"], r["id"]) for r in result["references"]}
+    assert f"{kind}({ref_id}" in result["guidance"]
     # Fail-closed: refuses after a single guard read, stages nothing.
     assert mock_cmd.await_count == 1
 

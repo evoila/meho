@@ -25,7 +25,7 @@ All config.xml fixtures are synthetic (RFC 5737 / RFC 1918 addresses).
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -62,16 +62,22 @@ _RETIRING_GW = (
     "<gateway>192.0.2.2</gateway></gateway_item>"
 )
 _ALIAS_Y = "<alias><name>ALIAS_Y</name><type>host</type><address>192.0.2.50</address></alias>"
+_LAB_GW = (
+    "<gateway_item><name>LAB_GW</name><interface>opt1</interface>"
+    "<gateway>192.0.2.1</gateway></gateway_item>"
+)
+# pfSense writes a flag that is on as an empty element.
+_DISABLED_USER = "<user><name>audit</name><disabled></disabled></user>"
 _CONFIG = (
     "<pfsense>"
     "<revision><time>1</time><description>start</description></revision>"
+    f"<system>{_DISABLED_USER}</system>"
     "<staticroutes>"
     f"{_ROUTE}"
     "<route><network>10.20.0.0/24</network><gateway>LAB_GW</gateway></route>"
     "</staticroutes>"
     "<gateways>"
-    "<gateway_item><name>LAB_GW</name><interface>opt1</interface>"
-    "<gateway>192.0.2.1</gateway></gateway_item>"
+    f"{_LAB_GW}"
     f"{_RETIRING_GW}"
     "</gateways>"
     "<aliases></aliases>"
@@ -251,22 +257,33 @@ def _check(before: str, after: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "make_after",
+    ("before", "after"),
     [
         # Only the edited object and the revision changed.
-        lambda c: _save(c, drop=_RETIRING_GW, revision=7),
+        (_CONFIG, _save(_CONFIG, drop=_RETIRING_GW, revision=7)),
         # Same content, different whitespace.
-        lambda c: _save(c, drop=_RETIRING_GW, revision=7).replace("><", ">\n  <"),
-        # An empty element written where there was none is not a change.
-        lambda c: _save(c, drop=_RETIRING_GW, revision=7).replace(
-            "</pfsense>", "<widgets></widgets></pfsense>"
+        (_CONFIG, _save(_CONFIG, drop=_RETIRING_GW, revision=7).replace("><", ">\n  <")),
+        # Deleting the last item leaves the edited section as an empty element.
+        (
+            _CONFIG.replace(_LAB_GW, ""),
+            _save(_CONFIG.replace(_LAB_GW, ""), drop=_RETIRING_GW, revision=7),
         ),
-        # An empty element dropped is not a change either.
-        lambda c: _save(c, drop=_RETIRING_GW, revision=7).replace("<aliases></aliases>", ""),
+        # Deleting the last item may also drop the edited section itself.
+        (
+            _CONFIG.replace(_LAB_GW, ""),
+            _save(_CONFIG.replace(_LAB_GW, ""), drop=_RETIRING_GW, revision=7).replace(
+                "<gateways></gateways>", ""
+            ),
+        ),
+        # Adding the first item creates the edited section.
+        (
+            _save(_CONFIG, drop=f"<gateways>{_LAB_GW}{_RETIRING_GW}</gateways>", revision=1),
+            _save(_CONFIG, drop=_LAB_GW, revision=7),
+        ),
     ],
 )
-def test_full_readback_accepts_only_own_change(make_after: Callable[[str], str]) -> None:
-    _check(_CONFIG, make_after(_CONFIG))
+def test_full_readback_accepts_only_own_change(before: str, after: str) -> None:
+    _check(before, after)
 
 
 @pytest.mark.parametrize(
@@ -281,6 +298,30 @@ def test_full_readback_accepts_only_own_change(make_after: Callable[[str], str])
             _save(_CONFIG, drop=_RETIRING_GW, revision=7).replace(
                 "<aliases></aliases>", f"<aliases>{_ALIAS_Y}</aliases>"
             ),
+            "aliases",
+        ),
+        # A flag on an unrelated object was lost: the user is enabled again.
+        (
+            _save(_CONFIG, drop=_RETIRING_GW, revision=7).replace("<disabled></disabled>", ""),
+            "system",
+        ),
+        # A flag was added to another object in the edited section.
+        (
+            _save(_CONFIG, drop=_RETIRING_GW, revision=7).replace(
+                "<name>LAB_GW</name>", "<name>LAB_GW</name><disabled></disabled>"
+            ),
+            "gateways",
+        ),
+        # An unrelated empty section appeared.
+        (
+            _save(_CONFIG, drop=_RETIRING_GW, revision=7).replace(
+                "</pfsense>", "<widgets></widgets></pfsense>"
+            ),
+            "widgets",
+        ),
+        # An unrelated empty section went away.
+        (
+            _save(_CONFIG, drop=_RETIRING_GW, revision=7).replace("<aliases></aliases>", ""),
             "aliases",
         ),
     ],

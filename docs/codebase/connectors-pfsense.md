@@ -610,8 +610,11 @@ Two guards stop this:
    targets that point at the same pfSense share it. Read ops do not take it.
 2. **A full read-back.** After the op's own check passes,
    `ops_write.assert_only_own_object_changed` compares the whole file before
-   and after. It leaves out the one edited object and the `<revision>` block
-   that every save rewrites. Whitespace and empty elements do not count. Any
+   and after. It leaves out the one edited object, the edited section's
+   container when it is empty, and the `<revision>` block that every save
+   rewrites. Whitespace does not count. Empty elements do count: pfSense
+   stores a flag that is on, such as `<disabled></disabled>` on a user, as an
+   empty element, so a flag that appears or goes away is a real change. Any
    other difference raises an error that says the op's own change was saved
    but other parts of the config changed. The message names the changed
    sections, so the operator can check the pfSense config history.

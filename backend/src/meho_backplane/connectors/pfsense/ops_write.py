@@ -422,20 +422,22 @@ def serialized_config_write[**P, R](
 _ALWAYS_REWRITTEN_SECTIONS = frozenset({"revision"})
 
 
-def _canonical(element: Any) -> tuple[Any, ...] | None:
-    """Return a comparable form of *element*, or ``None`` when it is empty.
+def _canonical(element: Any) -> tuple[Any, ...]:
+    """Return a comparable form of *element*.
 
-    Whitespace around text is ignored. An element with no text, no
-    attributes, and no non-empty children counts as absent: pfSense may
-    write an empty list as an empty element, and that must not look like a
-    change.
+    Whitespace around text is ignored. Empty elements are kept. pfSense
+    writes a setting that is switched on (for example ``<disabled></disabled>``
+    on a user) as an empty element, so an empty element that appears or goes
+    away is a real change.
     """
-    children = tuple(c for c in (_canonical(child) for child in element) if c is not None)
+    children = tuple(_canonical(child) for child in element)
     text = (element.text or "").strip()
     attrs = tuple(sorted(element.attrib.items()))
-    if not children and not text and not attrs:
-        return None
     return (element.tag, attrs, text, children)
+
+
+def _is_empty_container(element: Any) -> bool:
+    return len(element) == 0 and not (element.text or "").strip() and not element.attrib
 
 
 def _sections_without_object(
@@ -455,13 +457,16 @@ def _sections_without_object(
         for item in list(edited.findall(item_tag)):
             if (_child_text(item, key_tag) or "").strip() == key:
                 edited.remove(item)
+        # The edited section is the only container that may be empty on one
+        # side and missing on the other: deleting the last item leaves an
+        # empty element, and adding the first item creates the section.
+        if _is_empty_container(edited):
+            root.remove(edited)
     sections: dict[str, list[tuple[Any, ...]]] = {}
     for child in root:
         if child.tag in _ALWAYS_REWRITTEN_SECTIONS:
             continue
-        canonical = _canonical(child)
-        if canonical is not None:
-            sections.setdefault(child.tag, []).append(canonical)
+        sections.setdefault(child.tag, []).append(_canonical(child))
     return sections
 
 
@@ -479,12 +484,14 @@ def assert_only_own_object_changed(
 
     Call this after the op's own read-back has passed. It compares the whole
     file before and after the write. It leaves out the one object the op
-    edited and the ``<revision>`` block that every save rewrites. Any other
-    difference means one of two things: a second change to the same pfSense
-    was saved while this op ran, or this op's save undid a change that was
-    there before. The op's own change is saved in both cases. But the
-    config is no longer what the operator asked for, so the op fails
-    instead of reporting success.
+    edited, the edited section's container when it is empty, and the
+    ``<revision>`` block that every save rewrites. Whitespace does not count.
+    Empty elements do count: pfSense stores flags such as
+    ``<disabled></disabled>`` that way. Any other difference means one of two
+    things: a second change to the same pfSense was saved while this op ran,
+    or this op's save undid a change that was there before. The op's own
+    change is saved in both cases. But the config is no longer what the
+    operator asked for, so the op fails instead of reporting success.
     """
     old = _sections_without_object(
         before, section=section, item_tag=item_tag, key_tag=key_tag, key=key

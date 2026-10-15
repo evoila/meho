@@ -493,6 +493,14 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     vCenter 8.0.x rejects a path into a cluster's `configurationEx`
     (`configurationEx.rule` / `.group` / `.drsConfig`), so they request
     `configurationEx` and pick the field from the result (#3617).
+    **Use it for distributed switch and distributed portgroup config
+    reads** (type `DistributedVirtualPortgroup` /
+    `VmwareDistributedVirtualSwitch`, for example the VLAN and security
+    policy under `config.defaultPortConfig`). Read polymorphic fields
+    whole: `config.defaultPortConfig` is declared as the base
+    `DVPortSetting`, so a path into a subclass-only field
+    (`config.defaultPortConfig.vlan`) fails with `InvalidProperty`. The
+    hint in `parameter_hints.properties` says this (#3534).
   - **`vmware.tasks.recent`** (`typed_ops_tasks_recent.py`, handler
     `tasks_recent`) — recent vCenter Task objects for change-window
     monitoring (distinct from `event.tail`, which reads the *event*
@@ -1232,10 +1240,11 @@ through vim `VirtualMachine.ReconfigVM_Task`. This is the connector's first
 `ReconfigureComputeResource_Task`, #2895) ride. `vm.create`'s optional
 `nested_hv` leg (#3093) rides the same two seams:
 `VirtualMachineConfigSpec.nestedHVEnabled` has no REST expression (pinned by
-the #3087 recipe lanes) and *raw* VI-JSON dispatch mounts on `/api` — a
-9.x-fleet accommodation that 404s on vCenter 8.0.x (#2466) — so the
-substrate's `/sdk/vim25/{release}` mount is the only cross-version governed
-path to the flag. `vm.create`'s pre-9.0 create arm (#3099) rides them too:
+the #3087 recipe lanes) and *raw* VI-JSON dispatch then mounted on `/api` — a
+9.x-fleet accommodation that 404s on vCenter 8.0.x (#2466; raw dispatch moved to
+`/sdk/vim25` in #3534, but still has no `/api` fallback or task polling) — so the
+substrate's `/sdk/vim25/{release}` mount is the governed cross-version path to
+the flag. `vm.create`'s pre-9.0 create arm (#3099) rides them too:
 `Folder.CreateVM_Task` replaces the vendor-defective 8.0.x REST create,
 gated under its canonical vi-json op_id and polled through
 `poll_vim_task` like the sibling vim writes.
@@ -1597,8 +1606,7 @@ vSphere itself refuses to delete a portgroup with connected ports
 **Why these calls work on vCenter 8.0.x.** The vim calls go through the
 documented `/sdk/vim25/{release}` VI-JSON base (`_post_vmomi_json`), the same
 path the `vm.destroy` vim arm, `vm.disk.grow` and the portgroup writes already
-use on 8.0.3. The ingested `/api` vim bindings are not used (they 404 on 8.0.x,
-#3534). The pinned REST spec has no delete for portgroups, folders or datastore
+use on 8.0.3. The composites do not call the ingested vim bindings directly. The pinned REST spec has no delete for portgroups, folders or datastore
 files, so vim is the only option there. The content-library calls are REST on
 `/api`; vCenter 8.0 and 9.0 serve the same paths (only the path parameter names
 differ), and `vm.deploy_from_library` already uses the same find / item reads
@@ -2680,6 +2688,20 @@ they never park.
   POST sub-ops, and the mutating `vm.disk.grow` write route through
   `_post_vmomi_json`; only the vSphere Automation `GET /vcenter/*` legs
   still use `mount_op_path`.
+- **Ingested vi-json ops mount on `/sdk/vim25/{release}` too (#3534)** —
+  the generic ops ingested from `vi-json.yaml`
+  (`GET:/DistributedVirtualPortgroup/{moId}/config`,
+  `POST:/PropertyCollector/{moId}/RetrievePropertiesEx`, ...) reach the
+  wire through `mount_op_path`. It tells them apart from Automation paths
+  by the PascalCase managed-object type in the first segment
+  (`_mount.is_vmomi_path`). On a modern vCenter session they mount on
+  `/sdk/vim25/{release}` (release from the same cached `_about_version`).
+  Before #3534 they mounted on `/api` and answered a bare 404 on vCenter
+  8.0.x. Limits: there is no `/api` 404 fallback on this path (the hook
+  returns one path); when the release can't be derived the op keeps the
+  `/api` form; legacy `/rest` (vcsim) and ESXi sessions are unchanged.
+  For managed-object property reads, `vmware.object.collect` stays the
+  preferred op: it builds the PropertyCollector body for the caller.
 - **All hand-authored composites shipped** — T5 (#508) ships 5 read;
   #2080 + #2135 add two more reads (`host.network_uplinks` /
   `host.vsan_health`, later re-shipped as typed ops in #2258); T6

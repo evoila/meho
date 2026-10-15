@@ -122,10 +122,12 @@ from meho_backplane.connectors.schemas import (
 )
 from meho_backplane.connectors.vmware_rest._mount import (
     API_MOUNT_LEGACY,
+    API_MOUNT_MODERN,
     SESSION_PATH_LEGACY,
     SESSION_PATH_MODERN,
     adapt_filter_params,
     api_mount_for_session_path,
+    is_vmomi_path,
     mounted_path,
     vmomi_mounted_path,
     vmomi_release_from_version,
@@ -716,9 +718,26 @@ class VmwareRestConnector(HttpConnector):
         reaches ``GET /api/about`` through ``_get_json`` *pre-session*
         — overriding the transport methods would both strip ``.retry``
         and force a spurious session establish on the pre-auth probe.
+
+        Ingested ``vi-json.yaml`` ops (``/{MoType}/{moId}/...``, see
+        :func:`._mount.is_vmomi_path`) are not Automation API paths. On a
+        modern vCenter session they mount on the documented VI-JSON base
+        ``/sdk/vim25/{release}``, the same base :meth:`_post_vmomi_json`
+        uses for the typed reads (#2466). The ``/api`` form 404s on vCenter
+        8.0.x (#3534). When the release can't be derived, or the session
+        is legacy ``/rest`` (vcsim) or ESXi, the path mounts as before.
         """
         await self._session_token(target, operator)
-        session_path = self._session_paths.get(target_cache_key(target), SESSION_PATH_MODERN)
+        cache_key = target_cache_key(target)
+        session_path = self._session_paths.get(cache_key, SESSION_PATH_MODERN)
+        if (
+            is_vmomi_path(path)
+            and self._session_flavors.get(cache_key) != HOST_FLAVOR_ESXI
+            and api_mount_for_session_path(session_path) == API_MOUNT_MODERN
+        ):
+            release = vmomi_release_from_version(await self._about_version(target, operator))
+            if release is not None:
+                return vmomi_mounted_path(release, path)
         return mounted_path(session_path, path)
 
     async def adapt_op_query(

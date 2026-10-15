@@ -1181,15 +1181,15 @@ async def _seed_target(*, tenant_id: str = DEFAULT_TENANT_ID) -> UUID:
         return target.id
 
 
-async def _deny_target(target_id: UUID, *, principal_sub: str) -> None:
-    """Insert a ``deny`` permission row for every op on *target_id*."""
+async def _deny_target(target_id: UUID, *, principal_sub: str, verdict: str = "deny") -> None:
+    """Insert a *verdict* permission row (default ``deny``) for every op on *target_id*."""
     async with get_sessionmaker()() as session, session.begin():
         session.add(
             AgentPermission(
                 tenant_id=UUID(DEFAULT_TENANT_ID),
                 principal_sub=principal_sub,
                 op_pattern="*",
-                verdict="deny",
+                verdict=verdict,
                 target_scope=str(target_id),
                 created_by_sub="admin:docs-test",
             )
@@ -1303,6 +1303,28 @@ async def test_denied_target_in_own_tenant_is_403_denied(client: TestClient) -> 
     assert len(rows) == 1
     assert rows[0].payload["target"] == "vcenter-01"
     assert _TARGET_HOST not in json.dumps(rows[0].payload)
+
+
+@pytest.mark.asyncio
+async def test_needs_approval_target_is_403_denied(client: TestClient) -> None:
+    """A ``needs-approval`` row refuses the docs call: only ``auto-execute`` proceeds.
+
+    ``call_operation`` would park this verdict for an operator's decision.
+    The docs tools have no approval path, so the call is refused as 403
+    ``denied`` with a reason naming the verdict, and the target's product
+    and version never reach the corpus.
+    """
+    await _seed_global_collection(backend=_SOFT_SCOPE_ON)
+    target_id = await _seed_target()
+    await _deny_target(target_id, principal_sub="op-target", verdict="needs-approval")
+    response, fake_corpus = _post_search(client, {"target": "vcenter-01"}, principal_kind="agent")
+
+    assert response.status_code == 403, response.text
+    detail = response.json()["detail"]
+    assert detail["error"] == "denied"
+    assert detail["query"] == "vcenter-01"
+    assert detail["reason"].startswith("verdict=needs-approval")
+    fake_corpus.assert_not_awaited()
 
 
 @pytest.mark.asyncio

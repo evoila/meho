@@ -439,8 +439,9 @@ entitled to** (`meho-docs:<key>`), so every key shown is one
   Which version wins: your own `product` / `version`, then a version the
   question names, then the target's. An unknown target is the same
   `no_target` error `call_operation` returns (REST 404, MCP `-32602`),
-  and a target your permission rows deny you is the same `denied` error
-  (REST 403, MCP `-32602`, with the reason). A cross-collection fan-out
+  and a target your permission rows deny you, or make you wait for
+  approval on, is the same `denied` error (REST 403, MCP `-32602`, with
+  the reason naming the verdict). A cross-collection fan-out
   ignores it. The audit row and the log record
   the target's name and `scope_source`, never its address.
 - **Entitlement** — searching a collection the tenant is not entitled to

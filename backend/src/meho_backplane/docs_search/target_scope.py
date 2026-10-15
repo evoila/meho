@@ -22,10 +22,12 @@ raises the same :class:`~meho_backplane.targets.resolver.TargetNotFoundError`
 (or :class:`~meho_backplane.targets.resolver.AmbiguousTargetError`). The
 permission check is :func:`~meho_backplane.auth.permissions.resolve_verdict`,
 the resolver behind ``call_operation``'s policy gate, run for the docs op on
-the resolved target: an agent principal whose permission rows deny it that
-target gets :class:`TargetDeniedError`, which carries the same ``denied`` code
-and reason ``call_operation`` returns. Only the target's name, id and
-fingerprint are read; its address and credentials are never touched.
+the resolved target: the call proceeds only on an ``auto-execute`` verdict.
+An agent principal whose permission rows deny it that target, or make it
+wait for approval, gets :class:`TargetDeniedError`, which carries the same
+``denied`` code and the verdict reason ``call_operation`` returns. Only the
+target's name, id and fingerprint are read; its address and credentials are
+never touched.
 """
 
 from __future__ import annotations
@@ -52,10 +54,12 @@ class TargetDeniedError(HTTPException):
     """The caller may not use the named target: its permission rows deny it.
 
     Raised for an agent principal whose rows (the same ones ``call_operation``'s
-    policy gate reads) resolve to ``deny`` for the docs op on this target.
-    ``detail`` carries the ``denied`` code, the name the caller gave and the
-    agent-readable ``reason``: the fields ``call_operation``'s ``denied``
-    result carries, so an agent can diagnose the refusal the same way.
+    policy gate reads) resolve to anything but ``auto-execute`` for the docs
+    op on this target: an explicit ``deny``, or a ``needs-approval`` verdict
+    the docs tools cannot park. ``detail`` carries the ``denied`` code, the
+    name the caller gave and the agent-readable ``reason`` (which names the
+    verdict): the fields ``call_operation``'s ``denied`` result carries, so
+    an agent can diagnose the refusal the same way.
     """
 
     def __init__(self, query: str, reason: str) -> None:
@@ -111,9 +115,12 @@ async def _check_target_access(
     :func:`~meho_backplane.auth.permissions.resolve_verdict`, keyed on the
     docs *op_id* and the target's id; a human or service principal is not
     gated by those rows. A docs lookup is a read with no vendor traffic, so
-    it is checked as a ``safe`` op: with no matching row it is allowed, and
-    only an explicit ``deny`` refuses it. A ``needs-approval`` verdict does
-    not refuse it, because there is nothing here to approve.
+    it is checked as a ``safe`` op: with no matching row it is allowed. The
+    call proceeds only on ``auto-execute``. ``call_operation`` parks a
+    ``needs-approval`` verdict until an operator decides; the docs tools
+    have no approval path, so that verdict refuses the call too, and the
+    target's product and version never reach the docs backend without the
+    approval the rows ask for. The reason names the verdict.
     """
     if operator.principal_kind is not PrincipalKind.AGENT:
         return
@@ -124,13 +131,14 @@ async def _check_target_access(
         safety_level="safe",
         target_id=row.id,
     )
-    if verdict is PermissionVerdict.DENY:
+    if verdict is not PermissionVerdict.AUTO_EXECUTE:
         log.info(
             "docs_target_denied",
             operator_sub=operator.sub,
             tenant_id=str(operator.tenant_id),
             op_id=op_id,
             target=row.name,
+            verdict=verdict.value,
             reason=reason,
         )
         raise TargetDeniedError(query, reason)
@@ -162,7 +170,8 @@ async def apply_target_default(
     Raises:
         TargetNotFoundError: no live target matches *target* in the tenant.
         AmbiguousTargetError: more than one target matches *target*.
-        TargetDeniedError: the caller's permission rows deny it this target.
+        TargetDeniedError: the caller's permission rows do not let it use
+            this target without approval (``deny`` or ``needs-approval``).
     """
     if target is not None and target.strip():
         query = target.strip()

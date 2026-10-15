@@ -538,12 +538,15 @@ REST bodies (`target` on `SearchDocsRequest` / `AskDocsRequest`) and the
   against its permission rows the way `call_operation`'s policy gate
   checks it: `resolve_verdict` with the docs op id (`meho.docs.search` or
   `meho.docs.ask`), `safety_level="safe"` and the target's id. With no
-  matching row the lookup is allowed (a docs read is a safe op); an
-  explicit `deny` row for that target raises `TargetDeniedError`: REST
-  403 `{"error": "denied", "query", "reason"}`, MCP `-32602` with
+  matching row the lookup is allowed (a docs read is a safe op). The call
+  proceeds only on `auto-execute`. Any other verdict (an explicit `deny`
+  row, or a `needs-approval` row, which `call_operation` would park but
+  the docs tools cannot) raises `TargetDeniedError`: REST 403
+  `{"error": "denied", "query", "reason"}`, MCP `-32602` with
   `data.error_code = "denied"` and the same `denied: <reason>` message
-  `call_operation` returns, a UI error card. A `needs-approval` row does
-  not refuse it (there is nothing to approve). Human and service
+  `call_operation` returns, a UI error card. The reason names the
+  verdict, so an agent that needs approval for the target sees
+  `verdict=needs-approval` and can ask for it. Human and service
   principals are not gated by these rows, as on `call_operation`. The
   target name is bound to the audit row before the check, so a denied
   call's row names the target too.

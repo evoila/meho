@@ -816,23 +816,23 @@ async def _seed_with_target() -> uuid.UUID:
     return await _seed_target_async()
 
 
-async def _deny_target(target_id: uuid.UUID, *, principal_sub: str) -> None:
-    """Insert a ``deny`` permission row for every op on *target_id*."""
+async def _deny_target(target_id: uuid.UUID, *, principal_sub: str, verdict: str = "deny") -> None:
+    """Insert a *verdict* permission row (default ``deny``) for every op on *target_id*."""
     async with get_sessionmaker()() as session, session.begin():
         session.add(
             AgentPermission(
                 tenant_id=OPERATOR_TENANT_ID,
                 principal_sub=principal_sub,
                 op_pattern="*",
-                verdict="deny",
+                verdict=verdict,
                 target_scope=str(target_id),
                 created_by_sub="admin:docs-test",
             )
         )
 
 
-async def _seed_denied_target(*, principal_sub: str) -> None:
-    await _deny_target(await _seed_with_target(), principal_sub=principal_sub)
+async def _seed_denied_target(*, principal_sub: str, verdict: str = "deny") -> None:
+    await _deny_target(await _seed_with_target(), principal_sub=principal_sub, verdict=verdict)
 
 
 @pytest.mark.asyncio
@@ -886,6 +886,39 @@ async def test_rest_denied_target_is_403_denied() -> None:
     assert detail["error"] == "denied"
     assert detail["query"] == "vcenter-01"
     assert detail["reason"].startswith("verdict=deny")
+    assert ask.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_rest_needs_approval_target_is_403_denied() -> None:
+    """REST ``ask_docs`` as an agent that needs approval for the target: 403 ``denied``.
+
+    Only ``auto-execute`` proceeds. The docs tools cannot park the call, so
+    the answer call never runs and the reason names the verdict.
+    """
+    await _seed_denied_target(principal_sub="op-rest", verdict="needs-approval")
+    ask = _FakeAsk()
+    with respx.mock(assert_all_called=False) as router, patch(_ASK_SEAM, new=ask):
+        response = _rest_post(router, principal_kind="agent", target="vcenter-01")
+    assert response.status_code == 403, response.text
+    detail = response.json()["detail"]
+    assert detail["error"] == "denied"
+    assert detail["query"] == "vcenter-01"
+    assert detail["reason"].startswith("verdict=needs-approval")
+    assert ask.calls == 0
+
+
+def test_mcp_needs_approval_target_is_the_denied_error() -> None:
+    """MCP ``ask_docs`` as an agent that needs approval for the target: ``-32602`` ``denied``."""
+    asyncio.run(_seed_denied_target(principal_sub=_AGENT_CLIENT_ID, verdict="needs-approval"))
+    ask = _FakeAsk()
+    with patch(_ASK_SEAM, new=ask):
+        body = _mcp_call(operator=_agent_operator(), target="vcenter-01")
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert body["error"]["message"].startswith("ask_docs: denied: verdict=needs-approval")
+    assert body["error"]["data"]["error_code"] == "denied"
+    assert body["error"]["data"]["query"] == "vcenter-01"
+    assert body["error"]["data"]["reason"].startswith("verdict=needs-approval")
     assert ask.calls == 0
 
 

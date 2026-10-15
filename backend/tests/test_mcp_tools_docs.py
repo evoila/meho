@@ -1080,15 +1080,17 @@ def agent_docs_client() -> Iterator[TestClient]:
         app.dependency_overrides.pop(verify_mcp_jwt_and_bind, None)
 
 
-async def _deny_target(target_scope: str, *, principal_sub: str = _AGENT_CLIENT_ID) -> None:
-    """Insert a ``deny`` permission row for every op on *target_scope*."""
+async def _deny_target(
+    target_scope: str, *, principal_sub: str = _AGENT_CLIENT_ID, verdict: str = "deny"
+) -> None:
+    """Insert a *verdict* permission row (default ``deny``) for every op on *target_scope*."""
     async with get_sessionmaker()() as session, session.begin():
         session.add(
             AgentPermission(
                 tenant_id=OPERATOR_TENANT_ID,
                 principal_sub=principal_sub,
                 op_pattern="*",
-                verdict="deny",
+                verdict=verdict,
                 target_scope=target_scope,
                 created_by_sub="admin:docs-test",
             )
@@ -1243,6 +1245,36 @@ def test_tools_call_search_docs_denied_target_is_the_denied_error(
     assert error["data"]["error_code"] == "denied"
     assert error["data"]["query"] == "vc1"
     assert "permission row" in error["data"]["reason"]
+    assert fake.captured == {}  # type: ignore[attr-defined]
+
+    rows = asyncio.run(_mcp_audit_rows())
+    assert len(rows) == 1
+    assert rows[0].payload["target"] == "vcenter-01"
+    assert _TARGET_HOST not in json.dumps(rows[0].payload)
+
+
+def test_tools_call_search_docs_needs_approval_target_is_the_denied_error(
+    agent_docs_client: TestClient,
+) -> None:
+    """A ``needs-approval`` row refuses the docs call: only ``auto-execute`` proceeds.
+
+    ``call_operation`` would park this verdict for an operator's decision.
+    The docs tools have no approval path, so the call is refused with the
+    same ``denied`` error, the reason names the verdict, and the target's
+    product and version never reach the corpus.
+    """
+    _seed_collection_sync(backend=_SOFT_SCOPE_ON)
+    target_id = asyncio.run(_seed_target())
+    asyncio.run(_deny_target(str(target_id), verdict="needs-approval"))
+    fake = _fake_corpus(_SAMPLE_CHUNK)
+    with patch(_CORPUS_SEAM, new=fake):
+        response = _search_call(agent_docs_client, {"collection": "vmware", "target": "vc1"})
+    error = response.json()["error"]
+    assert error["code"] == INVALID_PARAMS
+    assert error["message"].startswith("search_docs: denied: verdict=needs-approval")
+    assert error["data"]["error_code"] == "denied"
+    assert error["data"]["query"] == "vc1"
+    assert error["data"]["reason"].startswith("verdict=needs-approval")
     assert fake.captured == {}  # type: ignore[attr-defined]
 
     rows = asyncio.run(_mcp_audit_rows())

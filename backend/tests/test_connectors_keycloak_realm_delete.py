@@ -16,7 +16,9 @@ What is proven:
   realm, and the realm MEHO's own login uses (on every Keycloak target,
   whatever its host); a change of letter case does not skip them;
 * a realm that is already gone → ``already_absent: true`` and no DELETE;
-  ``deleted: true`` only after a read answers 404;
+  ``deleted: true`` only after a read answers 404; a read that answers with
+  something other than a realm object is an error, before and after the
+  DELETE;
 * the approval card: realm, enabled, user / client / group counts, no secret;
 * the approval gate: no preview hash → refused; a protected realm is refused
   before anything waits for approval; a normal delete waits, a second person
@@ -307,6 +309,51 @@ async def test_realm_still_readable_after_delete_is_an_error(kc: KeycloakConnect
     assert result["extras"]["exception_class"] == "KeycloakDeleteVerificationError"
 
 
+# A 2xx answer whose body is not a realm object. ``null`` has to be sent as
+# raw content: ``httpx.Response(json=None)`` means "no body".
+_NOT_A_REALM = [
+    pytest.param(httpx.Response(200, json=[]), id="list"),
+    pytest.param(httpx.Response(200, json="gone"), id="string"),
+    pytest.param(
+        httpx.Response(200, content=b"null", headers={"content-type": "application/json"}),
+        id="null",
+    ),
+]
+
+
+@pytest.mark.parametrize("answer", _NOT_A_REALM)
+async def test_malformed_read_before_delete_is_an_error(
+    kc: KeycloakConnector, answer: httpx.Response
+) -> None:
+    """A body that is not a realm object is never read as "absent"; no DELETE is sent."""
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(_REALM_PATH).mock(return_value=answer)
+        del_route = mock.delete(_REALM_PATH).respond(204)
+        result = await _run({"realm": _REALM})
+    assert result["status"] == "error", result
+    assert result["extras"]["exception_class"] == "KeycloakUnexpectedResponseError"
+    assert not del_route.called
+
+
+@pytest.mark.parametrize("answer", _NOT_A_REALM)
+async def test_malformed_read_after_delete_is_not_deleted_true(
+    kc: KeycloakConnector, answer: httpx.Response
+) -> None:
+    """Only a 404 after the DELETE proves the realm is gone."""
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        get_route = mock.get(_REALM_PATH).mock(
+            side_effect=[httpx.Response(200, json=_realm_rep()), answer]
+        )
+        del_route = mock.delete(_REALM_PATH).respond(204)
+        result = await _run({"realm": _REALM})
+    assert result["status"] == "error", result
+    assert result["extras"]["exception_class"] == "KeycloakUnexpectedResponseError"
+    assert del_route.call_count == 1
+    assert get_route.call_count == 2
+
+
 async def test_realm_name_is_encoded_in_the_path(kc: KeycloakConnector) -> None:
     """A realm name cannot climb out of /admin/realms/{realm}."""
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
@@ -429,6 +476,17 @@ async def test_realm_card_for_an_absent_realm_says_nothing_to_delete(
     assert block["children"] == []
     assert block["irreversibility"] == "none-object-already-absent"
     assert blast_radius_missing_reason(effect["preview"]) is None
+
+
+async def test_realm_card_for_a_malformed_read_is_unavailable(kc: KeycloakConnector) -> None:
+    """A read that is not a realm object gives no card, so nothing waits for approval."""
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(_REALM_PATH).respond(200, json=[])
+        effect = await _card({"realm": _REALM}, kc)
+    assert effect is not None
+    assert effect["preview_unavailable"] is True
+    assert "only a 404 counts as absent" in effect["preview_error"]
 
 
 async def test_realm_card_without_a_live_connector_declines() -> None:

@@ -28,7 +28,9 @@ once, so this op follows the other governed deletes
 2. **Read the realm.** A realm that does not exist is a success with
    ``already_absent: true``, and no DELETE is sent. A teardown can re-run.
 3. **Delete, then read again.** ``deleted: true`` is reported only after
-   ``GET /admin/realms/{realm}`` answers 404.
+   ``GET /admin/realms/{realm}`` answers 404. A read that answers with
+   something other than a realm object (a list, a string, ``null``) is an
+   error, before and after the delete; it is never read as "absent".
 
 The preview builder in
 :mod:`~meho_backplane.connectors.keycloak.ops_write_preview` runs steps 1 and

@@ -350,7 +350,10 @@ How one delete runs:
      An unknown sub-group count counts as "has sub-groups".
 3. **Delete, then read again.** `deleted: true` is reported only after a
    read of the object answers 404. If it can still be read, the call fails
-   with `KeycloakDeleteVerificationError`.
+   with `KeycloakDeleteVerificationError`. Only a 404 counts as absent: a
+   read that answers with something other than a JSON object (a list, a
+   string, `null`) fails with `KeycloakUnexpectedResponseError`, before and
+   after the delete.
 
 Steps 1 and 2 run in the preview builder **before** the request waits for
 approval, and again in the handler when the approved call runs (this catches
@@ -394,7 +397,9 @@ use `keycloak.realm.update` with `enabled: false`; that can be undone.
   DELETE is sent and the result is `{realm, deleted: false, already_absent:
   true}`.
 - **Read again after the delete.** `deleted: true` is reported only after
-  the realm read answers 404.
+  the realm read answers 404. A read that answers with something other
+  than a realm object is an error (`KeycloakUnexpectedResponseError`), not
+  proof that the realm is gone.
 - **Approval card.** `blast_radius.object` carries `{kind, resource, realm,
   present, enabled, users, clients, groups}`. The counts come from
   `GET .../users/count`, `GET .../groups/count` (all groups, not only the

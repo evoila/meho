@@ -30,10 +30,11 @@ from meho_backplane.conventions.index import (
     decode_index_cursor,
     encode_index_cursor,
 )
+from meho_backplane.conventions.service import ConventionsService
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import TenantConvention
 from meho_backplane.mcp.resources.tenant_conventions import INDEX_URI
-from meho_backplane.mcp.schemas import INVALID_PARAMS
+from meho_backplane.mcp.schemas import INVALID_PARAMS, PROTOCOL_VERSION
 from tests.mcp_test_fixtures import (
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
@@ -53,12 +54,13 @@ async def _seed(
     priority: int = 0,
     body: str = "Short rule body.",
     minute: int = 0,
+    row_id: uuid.UUID | None = None,
 ) -> None:
     ts = _BASE_TIME + timedelta(minutes=minute)
     async with get_sessionmaker()() as session:
         session.add(
             TenantConvention(
-                id=uuid.uuid4(),
+                id=row_id or uuid.uuid4(),
                 tenant_id=tenant_id,
                 slug=slug,
                 title=f"Title {slug}",
@@ -177,6 +179,61 @@ async def test_index_reports_truthful_availability_without_bodies(
     # The canonical per-entry URI reads through the existing per-slug resource.
     detail = _page_text(client, by_slug["how-to"]["uri"])
     assert detail["slug"] == "how-to"
+
+
+@pytest.mark.asyncio
+async def test_tied_rows_get_the_same_inclusion_as_the_preamble(
+    client_with_operator: tuple[TestClient, Operator],
+    seeded_operator_tenant: None,
+) -> None:
+    """Rows tied on priority and created_at: the index and the pack agree.
+
+    Three rows share one priority and one creation time, and only one
+    of them fits the budget. The index, ``budget_status``, and the
+    ``initialize`` instructions must all name the same row. The rows
+    are inserted with ids in descending order, so an order that stops
+    at ``created_at`` and falls back to insertion order would pick a
+    different row than the ``id`` tiebreak.
+    """
+    client, op = client_with_operator
+    ids = sorted(uuid.uuid4() for _ in range(3))
+    slugs = [f"tied-{n}" for n in range(3)]
+    for slug, row_id in zip(slugs, reversed(ids), strict=True):
+        await _seed(op.tenant_id, slug, priority=5, body="t" * 1300, row_id=row_id)
+    by_id = dict(zip(reversed(ids), slugs, strict=True))
+
+    page = _page(client)
+    index_included = [e["slug"] for e in page["entries"] if e["availability"] == "included"]
+    assert index_included == [by_id[ids[0]]]
+    assert [e["slug"] for e in page["entries"]] == [by_id[row_id] for row_id in ids]
+
+    async with get_sessionmaker()() as session:
+        budget = await ConventionsService().budget_status(session=session, operator=op)
+    assert budget.included_slugs == index_included
+    assert sorted(budget.dropped_slugs) == sorted(set(slugs) - set(index_included))
+
+    instructions = _initialize(client)["result"]["instructions"]
+    assert [slug for slug in slugs if f"Title {slug}" in instructions] == index_included
+
+
+def _initialize(client: TestClient) -> dict[str, Any]:
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "test-harness", "version": "0.0.0"},
+            },
+        },
+    )
+    assert response.status_code == 200
+    body: dict[str, Any] = response.json()
+    assert "error" not in body
+    return body
 
 
 @pytest.mark.asyncio

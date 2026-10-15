@@ -161,8 +161,8 @@ shipped the schema; T3-T5 layer CLI / preamble / seed on top.
    operator's tenant. Filters by `tenant_id` (resolved from the JWT
    claim by G0.1's contextvar binding). Optional `?kind=operational`
    query param mirrors the CLI's `meho conventions list --kind`
-   verb. Ordering is `priority DESC, created_at ASC` -- the same
-   key T4's preamble assembler will use, so the list view surfaces
+   verb. Ordering is `priority DESC, created_at ASC, id ASC` -- the
+   same key T4's preamble assembler uses, so the list view surfaces
    conventions in the order T4 considers them.
 
 5. **GET /api/v1/conventions/{slug}** (T2) -- single-row lookup by
@@ -286,10 +286,12 @@ the conventions budget. Behaviour for the conventions band:
   [locked-decisions.md](../decisions/locked-decisions.md) -- workflow
   and reference rules are reference material the operator surfaces
   on demand and never enter the session preamble.
-- **Orders deterministically: `priority DESC, created_at ASC`.**
-  Highest priority wins; ties broken by oldest-first. Same key the
-  list API + `meho conventions list` CLI use, so all three surfaces
-  display rules in the same order.
+- **Orders deterministically: `priority DESC, created_at ASC, id ASC`.**
+  Highest priority wins; ties broken by oldest-first, then by `id`
+  so the order is total even when two rows share a creation time.
+  Same key the list API, `meho conventions list` CLI, and the
+  convention index resource use, so every surface displays rules in
+  the same order and reports the same inclusion.
 - **Packs greedily; drops entries WHOLE on overflow
   (skip-and-fill).** For each entry in order, the band is rendered
   with that entry added and the whole text is estimated. If it is
@@ -631,7 +633,7 @@ sub-document to the response when the convention is
   preamble after the priority-ranked pack against
   `DEFAULT_MAX_PREAMBLE_TOKENS`; `False` when it was dropped.
 * `position` — 1-based index of the slug in the assembled
-  preamble's packed order (`priority DESC, created_at ASC`).
+  preamble's packed order (`priority DESC, created_at ASC, id ASC`).
   `None` when `included=False`.
 * `token_count` — the convention's own rendered block cost
   (heading + body).

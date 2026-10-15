@@ -225,8 +225,8 @@ class ConventionsService:
         """List the operator's tenant's conventions + the tenant budget.
 
         Returns the lighter :class:`ConventionSummary` shape (no full
-        ``body``). Ordering is ``priority DESC, created_at ASC`` -- the
-        same key the preamble assembler uses for packing. The ``kind``
+        ``body``). Ordering is ``priority DESC, created_at ASC, id ASC``
+        -- the same key the preamble assembler uses for packing. The ``kind``
         filter narrows the returned entries only; ``budget_status``
         always reflects the full ``operational`` set (a
         ``kind=workflow`` list still wants the truthful budget signal).
@@ -239,6 +239,7 @@ class ConventionsService:
         stmt = stmt.order_by(
             TenantConvention.priority.desc(),
             TenantConvention.created_at.asc(),
+            TenantConvention.id.asc(),
         )
         rows = (await session.execute(stmt)).scalars().all()
         entries = [ConventionSummary.model_validate(row) for row in rows]
@@ -255,7 +256,8 @@ class ConventionsService:
         """Return one bounded page of *operator*'s tenant convention index (#3755).
 
         Runs **one** query for the tenant's rows in a fixed order
-        (``priority DESC, created_at ASC, id ASC``). The revision, the
+        (``priority DESC, created_at ASC, id ASC`` -- the same total
+        order the preamble assembler packs in). The revision, the
         page, and every entry's availability all come from that one
         result, so a page never mixes two states of the table: a
         convention that is listed is one the pack saw, and the pack

@@ -210,7 +210,12 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_REALM_WRITE,
             "parameter_hints": {
-                "representation": "Partial RealmRepresentation to merge.",
+                "representation": (
+                    "Partial RealmRepresentation to merge. Keys inside a map "
+                    "(attributes, smtpServer) are only added or changed; "
+                    "leaving a key out does not remove it, and sending null "
+                    "does not remove it either. Send [] to empty a list."
+                ),
             },
             "output_shape": (
                 "``{realm, updated, changed_fields, unrequested_changes, "
@@ -294,6 +299,12 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_CLIENT_WRITE,
             "parameter_hints": {
+                "representation": (
+                    "Partial ClientRepresentation to merge. Keys inside a map "
+                    "(attributes) are only added or changed; leaving a key "
+                    "out does not remove it, and sending null does not "
+                    "remove it either. Send [] to empty a list."
+                ),
                 "id": "Client internal UUID (from keycloak.client.list).",
                 "client_id": "Human clientId; resolved to UUID when id is absent.",
             },

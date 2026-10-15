@@ -317,10 +317,14 @@ partial update. For some fields that are missing from the body, Keycloak
 writes its own default:
 
 - Client `PUT`: authorization services are turned off when
-  `authorizationServicesEnabled` is missing, and client policies can fill
-  in `frontchannelLogout` and `webOrigins`. A dogfood run saw an update
-  that sent only `{"enabled": false}` also change `frontchannelLogout`,
-  `webOrigins` and the groups mapper's `multivalued` setting.
+  `authorizationServicesEnabled` is missing
+  (`ClientResource.updateAuthorizationSettings`). When `webOrigins` is
+  missing, Keycloak builds it from the redirect URIs
+  (`RepresentationToModel.defaultWebOrigins`). A dogfood run also saw an
+  update that sent only `{"enabled": false}` change `frontchannelLogout`
+  and the groups mapper's `multivalued` setting. In the Keycloak 26.3
+  code a missing `frontchannelLogout` keeps its current value, so the
+  exact source of that change is not known.
 - Realm `PUT`: the OAuth 2.0 device-code lifespan and polling interval and
   the CIBA and PAR settings go back to their defaults when missing, and an
   `attributes` map removes every realm attribute it does not list.
@@ -342,8 +346,15 @@ So both ops do this (`connectors/keycloak/ops_write_merge.py`):
    reaches the result. List order is ignored in the compare, because
    Keycloak keeps many lists as sets.
 
-The read-back is best effort: if it fails, the write already happened,
-so the op still returns `ok` with `read_back_checked: false`. A realm
+**Limit: an update cannot remove a key inside a map.** Because maps merge
+key by key, `realm.update` cannot remove a realm attribute or an
+`smtpServer` key, and `client.update` cannot remove a client attribute.
+Leaving the key out keeps it. Sending `null` for the key does not remove
+it either: Keycloak 26.3 stores the null. To empty a list, send `[]`.
+
+The read-back is best effort: if it fails, or returns something that is
+not an object, the write already happened, so the op still returns `ok`
+with `read_back_checked: false`. A realm
 rename (a new `realm` in the representation) is read back under the new
 name.
 

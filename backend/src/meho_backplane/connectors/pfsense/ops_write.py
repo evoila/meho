@@ -82,9 +82,11 @@ References
 
 from __future__ import annotations
 
+import functools
 import ipaddress
 import re
-from typing import TYPE_CHECKING, Any
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Concatenate
 
 from defusedxml.ElementTree import ParseError, fromstring
 
@@ -97,9 +99,11 @@ if TYPE_CHECKING:
 
 __all__ = [
     "WRITE_OPS",
+    "assert_only_own_object_changed",
     "parse_static_routes_xml",
     "pfsense_gateway_add",
     "pfsense_route_static_add",
+    "serialized_config_write",
 ]
 
 # pfSense stages playback scripts under this directory; ``pfSsh.php
@@ -385,10 +389,125 @@ async def _apply_playback(
 
 
 # ---------------------------------------------------------------------------
+# Config-write serialization + full read-back (#3544)
+# ---------------------------------------------------------------------------
+
+
+def serialized_config_write[**P, R](
+    handler: Callable[Concatenate[PfSenseConnector, Any, P], Awaitable[R]],
+) -> Callable[Concatenate[PfSenseConnector, Any, P], Awaitable[R]]:
+    """Run a config-editing handler while it holds the appliance's write lock.
+
+    Each config-editing op reads ``config.xml``, plays back a fragment that
+    loads ``$config``, edits it and calls ``write_config()``, then reads the
+    file back. ``write_config()`` saves the whole in-memory ``$config``, so
+    two such ops that overlap on one pfSense can save an old copy and undo
+    each other's change. The lock is held from the first read to the last
+    read-back, so MEHO never runs two of these ops against the same
+    appliance at the same time.
+    """
+
+    @functools.wraps(handler)
+    async def wrapper(
+        self: PfSenseConnector, target: Any, /, *args: P.args, **kwargs: P.kwargs
+    ) -> R:
+        async with self.config_write_lock(target):
+            return await handler(self, target, *args, **kwargs)
+
+    return wrapper
+
+
+# Top-level ``config.xml`` elements that every ``write_config()`` rewrites on
+# its own (the time, user, and description of the save).
+_ALWAYS_REWRITTEN_SECTIONS = frozenset({"revision"})
+
+
+def _canonical(element: Any) -> tuple[Any, ...] | None:
+    """Return a comparable form of *element*, or ``None`` when it is empty.
+
+    Whitespace around text is ignored. An element with no text, no
+    attributes, and no non-empty children counts as absent: pfSense may
+    write an empty list as an empty element, and that must not look like a
+    change.
+    """
+    children = tuple(c for c in (_canonical(child) for child in element) if c is not None)
+    text = (element.text or "").strip()
+    attrs = tuple(sorted(element.attrib.items()))
+    if not children and not text and not attrs:
+        return None
+    return (element.tag, attrs, text, children)
+
+
+def _sections_without_object(
+    xml_text: str, *, section: str, item_tag: str, key_tag: str, key: str
+) -> dict[str, list[tuple[Any, ...]]]:
+    """Return the top-level sections of *xml_text*, minus the edited object.
+
+    Every ``<section>/<item_tag>`` whose ``<key_tag>`` text equals *key* is
+    dropped first, so the result holds everything the op must NOT change.
+    """
+    try:
+        root = fromstring(xml_text)
+    except ParseError as exc:
+        raise RuntimeError("config.xml could not be parsed for the full read-back") from exc
+    edited = root.find(section)
+    if edited is not None:
+        for item in list(edited.findall(item_tag)):
+            if (_child_text(item, key_tag) or "").strip() == key:
+                edited.remove(item)
+    sections: dict[str, list[tuple[Any, ...]]] = {}
+    for child in root:
+        if child.tag in _ALWAYS_REWRITTEN_SECTIONS:
+            continue
+        canonical = _canonical(child)
+        if canonical is not None:
+            sections.setdefault(child.tag, []).append(canonical)
+    return sections
+
+
+def assert_only_own_object_changed(
+    before: str,
+    after: str,
+    *,
+    op: str,
+    section: str,
+    item_tag: str,
+    key_tag: str,
+    key: str,
+) -> None:
+    """Raise when ``config.xml`` changed anywhere except the edited object.
+
+    Call this after the op's own read-back has passed. It compares the whole
+    file before and after the write. It leaves out the one object the op
+    edited and the ``<revision>`` block that every save rewrites. Any other
+    difference means one of two things: a second change to the same pfSense
+    was saved while this op ran, or this op's save undid a change that was
+    there before. The op's own change is saved in both cases. But the
+    config is no longer what the operator asked for, so the op fails
+    instead of reporting success.
+    """
+    old = _sections_without_object(
+        before, section=section, item_tag=item_tag, key_tag=key_tag, key=key
+    )
+    new = _sections_without_object(
+        after, section=section, item_tag=item_tag, key_tag=key_tag, key=key
+    )
+    changed = sorted(tag for tag in old.keys() | new.keys() if old.get(tag) != new.get(tag))
+    if changed:
+        raise RuntimeError(
+            f"{op}: the change was saved, but other parts of config.xml also "
+            f"changed while the op ran ({', '.join(changed)}). Another change to "
+            "this pfSense may have been lost, or may have been saved at the same "
+            "time. Check the pfSense config history before you run the op again."
+        )
+
+
+# ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
 
 
+@serialized_config_write
 async def pfsense_gateway_add(
     self: PfSenseConnector,
     target: Any,
@@ -448,9 +567,19 @@ async def pfsense_gateway_add(
             f"gateway {name!r} was not present in config.xml after write_config; "
             "the pfSsh.php playback did not persist"
         )
+    assert_only_own_object_changed(
+        before,
+        after,
+        op="gateway.add",
+        section="gateways",
+        item_tag="gateway_item",
+        key_tag="name",
+        key=name,
+    )
     return {**result, "existed_before": False, "applied": True, "existing": None}
 
 
+@serialized_config_write
 async def pfsense_route_static_add(
     self: PfSenseConnector,
     target: Any,
@@ -505,6 +634,15 @@ async def pfsense_route_static_add(
             f"static route {network!r} was not present in config.xml after "
             "write_config; the pfSsh.php playback did not persist"
         )
+    assert_only_own_object_changed(
+        before,
+        after,
+        op="route.static.add",
+        section="staticroutes",
+        item_tag="route",
+        key_tag="network",
+        key=network,
+    )
     return {**result, "existed_before": False, "applied": True, "existing": None}
 
 

@@ -27,7 +27,8 @@ the caller never asked for. This module makes the update safe:
 4. Read the object again and compare it with step 1. Any field that changed
    but was not in the caller's request is reported by name
    (:func:`unrequested_changes`). Values are never reported, so a client
-   ``secret`` or an SMTP password never reaches the op result.
+   ``secret`` or an SMTP password never reaches the op result. A key that
+   is missing counts as different from a key that holds ``null``.
 
 Because maps merge key by key, an update can add or change a key inside
 a map such as ``attributes`` or ``smtpServer``, but it cannot remove one.
@@ -92,6 +93,14 @@ def _canonical(value: Any) -> Any:
     return value
 
 
+#: Marks a key that is not present at all, so it never compares equal to ``None``.
+_MISSING = object()
+
+
+def _same(old: Any, new: Any) -> bool:
+    return bool(_canonical(old) == _canonical(new))
+
+
 def unrequested_changes(
     before: dict[str, Any], after: dict[str, Any], requested: dict[str, Any]
 ) -> list[str]:
@@ -100,20 +109,25 @@ def unrequested_changes(
     Top-level fields the caller did not send are compared as a whole. For a
     map field the caller did send (for example ``attributes``), the keys
     inside it that the caller did not send are compared one by one and
-    reported as ``"<field>.<key>"``. Returns a sorted list of names, never
-    values.
+    reported as ``"<field>.<key>"``. That compare also runs when the whole
+    map is missing or ``null`` after the write: every key the caller did
+    not send is then reported as gone. A missing key is never the same as
+    a key holding ``null``. Returns a sorted list of names, never values.
     """
     changed: list[str] = []
     for key in sorted(set(before) | set(after)):
-        old, new = before.get(key), after.get(key)
-        sent = requested.get(key)
+        old, new = before.get(key, _MISSING), after.get(key, _MISSING)
         if key not in requested:
-            if _canonical(old) != _canonical(new):
+            if not _same(old, new):
                 changed.append(key)
-        elif isinstance(sent, dict) and isinstance(old, dict) and isinstance(new, dict):
-            for sub in sorted((set(old) | set(new)) - set(sent)):
-                if _canonical(old.get(sub)) != _canonical(new.get(sub)):
-                    changed.append(f"{key}.{sub}")
+            continue
+        sent = requested[key]
+        if not isinstance(sent, dict) or not isinstance(old, dict):
+            continue
+        new_map = new if isinstance(new, dict) else {}
+        for sub in sorted((set(old) | set(new_map)) - set(sent)):
+            if not _same(old.get(sub, _MISSING), new_map.get(sub, _MISSING)):
+                changed.append(f"{key}.{sub}")
     return changed
 
 

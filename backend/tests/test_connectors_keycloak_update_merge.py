@@ -20,6 +20,9 @@ representations:
 * A failed read-back does not fail the (already done) write.
 * ``realm.update`` keeps realm settings and merges ``attributes`` key by
   key.
+* When the caller sends part of a map and the read-back no longer has that
+  map, every key the caller did not send is reported as gone. A missing
+  key is not the same as a key holding ``null``.
 """
 
 from __future__ import annotations
@@ -410,6 +413,32 @@ async def test_realm_update_reports_reset_attribute(
     assert result["result"]["unrequested_changes"] == ["attributes.cibaExpiresIn"]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gone", [None, "missing"], ids=["null", "missing"])
+async def test_realm_update_reports_attributes_lost_after_write(
+    keycloak_connector: KeycloakConnector, gone: Any
+) -> None:
+    """A sent map that is gone after the write reports every key the caller did not send."""
+    requested = {"attributes": {"frontendUrl": "https://kc.test"}}
+    after = merge_representation(copy.deepcopy(_REALM_BEFORE), requested)
+    if gone is None:
+        after["attributes"] = None
+    else:
+        del after["attributes"]
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(_REALM_PATH).mock(side_effect=_reads(_REALM_BEFORE, after))
+        mock.put(_REALM_PATH).respond(204)
+        result = await _dispatch("keycloak.realm.update", {"representation": requested})
+
+    assert result["status"] == "ok", result.get("error")
+    assert result["result"]["read_back_checked"] is True
+    assert result["result"]["unrequested_changes"] == [
+        "attributes.cibaExpiresIn",
+        "attributes.parRequestUriLifespan",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Pure helpers
 # ---------------------------------------------------------------------------
@@ -432,3 +461,34 @@ def test_unrequested_changes_names_added_and_removed_fields() -> None:
     before = {"enabled": True, "old": 1}
     after = {"enabled": False, "new": 2}
     assert unrequested_changes(before, after, {"enabled": False}) == ["new", "old"]
+
+
+@pytest.mark.parametrize(
+    "after",
+    [
+        {"enabled": False},
+        {"enabled": False, "attributes": None},
+        {"enabled": False, "attributes": "x"},
+    ],
+    ids=["missing", "null", "not-a-map"],
+)
+def test_unrequested_changes_reports_untouched_keys_when_map_is_gone(after: dict[str, Any]) -> None:
+    """Part of a map was sent; the map is gone after the write: the untouched keys are named."""
+    before = {"enabled": True, "attributes": {"sent": "1", "kept": "2", "other": None}}
+    requested = {"enabled": False, "attributes": {"sent": "1"}}
+    assert unrequested_changes(before, after, requested) == ["attributes.kept", "attributes.other"]
+
+
+def test_unrequested_changes_does_not_report_a_map_that_had_only_sent_keys() -> None:
+    before = {"attributes": {"sent": "1"}}
+    assert unrequested_changes(before, {}, {"attributes": {"sent": "1"}}) == []
+
+
+def test_unrequested_changes_tells_a_missing_key_from_null() -> None:
+    assert unrequested_changes({"a": None}, {}, {}) == ["a"]
+    assert unrequested_changes({}, {"a": None}, {}) == ["a"]
+    assert unrequested_changes({"a": None}, {"a": None}, {}) == []
+    before = {"attributes": {"sent": "1", "k": None}}
+    after = {"attributes": {"sent": "1"}}
+    assert unrequested_changes(before, after, {"attributes": {"sent": "1"}}) == ["attributes.k"]
+    assert unrequested_changes(after, before, {"attributes": {"sent": "1"}}) == ["attributes.k"]

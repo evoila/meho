@@ -360,7 +360,10 @@ So both ops do this (`connectors/keycloak/ops_write_merge.py`):
    `attributes.<key>`) and `read_back_checked`. Only field names are
    reported, never values, so a client `secret` or SMTP password never
    reaches the result. List order is ignored in the compare, because
-   Keycloak keeps many lists as sets.
+   Keycloak keeps many lists as sets. The key-by-key compare also runs
+   when the whole map is missing or `null` after the write; every key
+   the caller did not send is then reported as gone. A missing key never
+   counts as equal to a key holding `null`.
 
 **Limit: an update cannot remove a key inside a map.** Because maps merge
 key by key, `realm.update` cannot remove a realm attribute or an

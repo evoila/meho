@@ -106,7 +106,7 @@ USER_NAME_RE = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._-]{0,31}$")
 
 def _validate_user_name(value: Any) -> str:
     """Return *value* if it is an allowed pfSense user name, else raise ``ValueError``."""
-    if not isinstance(value, str) or not USER_NAME_RE.match(value):
+    if not isinstance(value, str) or not USER_NAME_RE.fullmatch(value):
         raise ValueError(
             "name must match ^[A-Za-z0-9._][A-Za-z0-9._-]{0,31}$ (letters, digits, "
             f"dot, dash, underscore; no leading dash); got {value!r}"
@@ -315,7 +315,7 @@ def _user_preview(disable: bool) -> Any:
 
     async def _builder(ctx: PreviewContext) -> dict[str, Any] | None:
         name = ctx.params.get("name")
-        if not isinstance(name, str) or not USER_NAME_RE.match(name):
+        if not isinstance(name, str) or not USER_NAME_RE.fullmatch(name):
             return None
         preview: dict[str, Any] = {
             "user": name,

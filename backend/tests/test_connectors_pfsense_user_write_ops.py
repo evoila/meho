@@ -145,6 +145,7 @@ _HOSTILE_NAMES = [
     "$config",
     "",
     "a" * 33,
+    "vpn.guest-1\n",
 ]
 
 
@@ -376,8 +377,8 @@ def test_ops_classify_as_write_on_the_broadcast_feed() -> None:
 def test_parameter_schema_pattern_matches_the_handler_allowlist() -> None:
     pattern = re.compile(USER_WRITE_OPS[0].parameter_schema["properties"]["name"]["pattern"])
     for name in _HOSTILE_NAMES:
-        assert not pattern.match(name)
-    assert pattern.match("vpn.guest-1")
+        assert not pattern.fullmatch(name)
+    assert pattern.fullmatch("vpn.guest-1")
 
 
 async def test_response_schema_accepts_every_outcome() -> None:

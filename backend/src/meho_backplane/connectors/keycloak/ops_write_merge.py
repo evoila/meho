@@ -10,8 +10,9 @@ its own default. Examples from the Keycloak 26.3 server code:
 
 * Client ``PUT`` turns authorization services off when
   ``authorizationServicesEnabled`` is missing
-  (``ClientResource.updateAuthorizationSettings``). Client policies can also
-  fill in defaults such as ``frontchannelLogout`` and ``webOrigins``.
+  (``ClientResource.updateAuthorizationSettings``). When ``webOrigins`` is
+  missing, Keycloak builds it from the redirect URIs
+  (``RepresentationToModel.defaultWebOrigins``).
 * Realm ``PUT`` resets the OAuth 2.0 device-code lifespan and polling
   interval, and the CIBA and PAR settings, when they are missing
   (``DefaultExportImportManager.updateRealm``). A realm ``attributes`` map
@@ -28,8 +29,14 @@ the caller never asked for. This module makes the update safe:
    (:func:`unrequested_changes`). Values are never reported, so a client
    ``secret`` or an SMTP password never reaches the op result.
 
-The read-back is best effort. When it fails, the write has already
-happened, so the op still succeeds and says ``read_back_checked: false``.
+Because maps merge key by key, an update can add or change a key inside
+a map such as ``attributes`` or ``smtpServer``, but it cannot remove one.
+Sending ``null`` for a key does not remove it either: Keycloak stores the
+null. To empty a list, send ``[]``.
+
+The read-back is best effort. When it fails or returns something that is
+not an object, the write has already happened, so the op still succeeds
+and says ``read_back_checked: false``.
 """
 
 from __future__ import annotations
@@ -39,7 +46,9 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from meho_backplane.connectors._shared.vault_creds import CredentialsReadError
 from meho_backplane.connectors.adapters.http import ResponseTooLargeError
+from meho_backplane.connectors.keycloak.connector import KeycloakAdminTokenError
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -137,9 +146,18 @@ async def read_merge_write(
     }
     try:
         after = await connector._get_admin_json(target, read_back_path or path, operator=operator)
-    except (httpx.HTTPError, ResponseTooLargeError):
+    except (
+        httpx.HTTPError,
+        ResponseTooLargeError,
+        OSError,
+        ValueError,
+        KeycloakAdminTokenError,
+        CredentialsReadError,
+    ):
         # The PUT already succeeded; a failed check must not report the
         # write as failed. The caller sees read_back_checked=false.
+        return outcome
+    if not isinstance(after, dict):
         return outcome
     outcome["read_back_checked"] = True
     outcome["unrequested_changes"] = unrequested_changes(before, after, requested)

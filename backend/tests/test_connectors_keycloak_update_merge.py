@@ -29,6 +29,7 @@ import json
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -36,9 +37,13 @@ import respx
 
 import meho_backplane.connectors.keycloak  # noqa: F401 -- import for registry side-effects
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.vault_creds import CredentialsReadError
+from meho_backplane.connectors.adapters.http import ResponseTooLargeError
 from meho_backplane.connectors.keycloak import KeycloakConnector
+from meho_backplane.connectors.keycloak.connector import KeycloakAdminTokenError
 from meho_backplane.connectors.keycloak.ops_write_merge import (
     merge_representation,
+    read_merge_write,
     unrequested_changes,
 )
 from meho_backplane.connectors.keycloak.session import (
@@ -287,6 +292,68 @@ async def test_client_update_read_back_failure_keeps_success(
     assert put_route.called
     assert result["result"]["read_back_checked"] is False
     assert result["result"]["unrequested_changes"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "read_back",
+    [
+        httpx.Response(200, content=b"<html>not json</html>"),
+        httpx.Response(200, json=[{"id": _CLIENT_UUID}]),
+    ],
+    ids=["not-json", "not-an-object"],
+)
+async def test_client_update_bad_read_back_body_keeps_success(
+    keycloak_connector: KeycloakConnector, read_back: httpx.Response
+) -> None:
+    """A read-back body that is not JSON, or not an object, is reported, not raised."""
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        mock.get(_CLIENT_PATH).mock(
+            side_effect=[httpx.Response(200, json=_CLIENT_BEFORE), read_back]
+        )
+        put_route = mock.put(_CLIENT_PATH).respond(204)
+        result = await _dispatch(
+            "keycloak.client.update", {"id": _CLIENT_UUID, "representation": {"enabled": False}}
+        )
+
+    assert result["status"] == "ok", result.get("error")
+    assert put_route.called
+    assert result["result"]["read_back_checked"] is False
+    assert result["result"]["unrequested_changes"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        OSError("connection reset"),
+        ValueError("bad body"),
+        KeycloakAdminTokenError("token mint failed"),
+        CredentialsReadError("credential store unavailable"),
+        ResponseTooLargeError("too large"),
+    ],
+    ids=lambda error: type(error).__name__,
+)
+async def test_read_merge_write_read_back_errors_keep_success(error: Exception) -> None:
+    """Every error the read-back can raise leaves the finished write as a success."""
+    connector = AsyncMock()
+    connector._get_admin_json.side_effect = [copy.deepcopy(_CLIENT_BEFORE), error]
+
+    out = await read_merge_write(
+        connector,
+        _OPERATOR,
+        AsyncMock(),
+        path=_CLIENT_PATH,
+        requested={"enabled": False},
+    )
+
+    connector._write_admin.assert_awaited_once()
+    assert out == {
+        "changed_fields": ["enabled"],
+        "unrequested_changes": [],
+        "read_back_checked": False,
+    }
 
 
 # ---------------------------------------------------------------------------

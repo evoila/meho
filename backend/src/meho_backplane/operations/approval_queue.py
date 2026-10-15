@@ -112,6 +112,7 @@ from meho_backplane.operations.approval_handoff import (
 from meho_backplane.operations.approval_handoff import (
     store as store_handoff,
 )
+from meho_backplane.operations.reducer import handle_owner_sub_var
 
 __all__ = [
     "ApprovalError",
@@ -1309,6 +1310,10 @@ async def _dispatch_resume_with_bound_context(
     work_ref_token = work_ref_var.set(request.work_ref)
     session_token = agent_session_id_var.set(request.agent_session_id)
     parent_token = parent_audit_id_var.set(request.request_audit_id)
+    # #3548: the approver runs the op, but the parker asked for the data and is
+    # the only one GET /approvals/{id}/result serves, so the parker owns any
+    # result handle this run spills.
+    owner_token = handle_owner_sub_var.set(request.principal_sub)
     try:
         result = await dispatch(
             operator=operator,
@@ -1319,6 +1324,7 @@ async def _dispatch_resume_with_bound_context(
             _approved=True,
         )
     finally:
+        handle_owner_sub_var.reset(owner_token)
         parent_audit_id_var.reset(parent_token)
         agent_session_id_var.reset(session_token)
         work_ref_var.reset(work_ref_token)

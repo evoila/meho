@@ -361,6 +361,7 @@ from meho_backplane.operations.dispatch_limits import (
 from meho_backplane.operations.reducer import (
     PassThroughReducer,
     Reducer,
+    handle_owner_sub_var,
 )
 from meho_backplane.redaction import (
     RedactionMiddlewareResult,
@@ -2086,7 +2087,9 @@ async def _reduce_or_error(
     """
     reducer_context: dict[str, Any] = {
         "op_id": op_id,
-        "operator_sub": operator.sub,
+        # #3548: an approval resume runs under the approver but binds the
+        # parking principal as the handle owner, so the parker can read it.
+        "operator_sub": handle_owner_sub_var.get() or operator.sub,
         "audit_id": str(audit_id),
         "source_kind": descriptor.source_kind,
     }

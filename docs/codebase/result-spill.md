@@ -104,6 +104,7 @@ total.
 | `result_query` (MCP) | `backend/src/meho_backplane/mcp/tools/result_query.py` | MCP read surface; misses surface as recoverable `handle_not_found` (`-32602`) |
 | `POST /api/v1/operations/result-query` | `backend/src/meho_backplane/api/v1/operations.py` | REST read surface; misses surface as a `404` with `reason=handle_not_found` (#3179) |
 | `_reduce_or_error` | `backend/src/meho_backplane/operations/dispatcher.py` | Builds `reducer_context` (`tenant_id`, `operator_sub`, `op_id`, hints) from the authenticated `Operator` |
+| `handle_owner_sub_var` | `backend/src/meho_backplane/operations/reducer.py` | Optional handle owner `sub`; the approval resume binds the parking principal so it owns the spill (#3548) |
 
 ## Control flow (dispatch path)
 
@@ -112,6 +113,11 @@ total.
    whenever the operator has a tenant. `Operator.tenant_id` and
    `Operator.sub` are **required** fields on the auth model, so an
    authenticated MCP/REST dispatch always carries both.
+   One exception: an approval resume runs under the approver, but binds
+   `handle_owner_sub_var` to the parking principal. Then `operator_sub` is
+   the parker's `sub`, so the parker can read the handle that
+   `GET /api/v1/approvals/{id}/result` gives it (#3548). See
+   [`approvals.md`](approvals.md).
 2. The reducer validates the captured payload and derives schema, summary,
    and preview directly from raw rows, then `_spill()`:
    - an admission-limit breach returns an unprofiled handle with no spill,
@@ -199,7 +205,8 @@ code-level diagnosis at `v0.13.0` (`f6ee330`):
 4. A drill-in `available=true` handle whose `result_query` still
    misses → the handle expired (TTL default 3600 s) or the read ran as
    a different operator (`sub` mismatch is an intentional
-   `handle_not_found`).
+   `handle_not_found`). For an approved op, the handle belongs to the
+   principal that parked it, not the approver (#3548).
 
 ## Dependencies
 
@@ -233,5 +240,6 @@ code-level diagnosis at `v0.13.0` (`f6ee330`):
 - #1629 — no-spill `reason` surfacing + skip logging + this diagnosis
   (G0.23-T3, RDC cycle-8 signal `k8s-logs-mcp-five-row-sample-cap`).
 - #1479 — tail sample ordering for log-shaped ops (G0.19-T1).
+- #3548 — an approval resume's handle belongs to the parking principal.
 - `docs/architecture/jsonflux.md` — engine provenance + full reducer
   contract.

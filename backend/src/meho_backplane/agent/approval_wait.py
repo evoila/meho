@@ -524,12 +524,29 @@ async def _resume_approved_or_already_resumed(
     agent task (the requester's run), so the session anchor needs no
     re-bind; only the parent link does.
 
+    Composite sub-op park (#3421, the agent side of #3351): when the parked
+    row carries ``resume_parent``, the parked ``op_id`` is a composite's
+    governed sub-op, not a call the agent can re-run as is. The waiter then
+    re-enters the **parent composite** ``_approved=True`` with the approved
+    sub-op cleared, through the same
+    :func:`~meho_backplane.operations.approval_queue.composite_resume_binding`
+    the operator surface uses, so both surfaces resume the same row the same
+    way. Without it the plain re-dispatch of the agent's call reached the
+    sub-op gate again and parked a new request, so nothing executed. The
+    re-entry runs as the agent principal (the operator surface runs as the
+    reviewer); any other governed sub-op is checked against the agent's own
+    grants, and one that would need a second approval fails closed
+    (``composite_resume_multi_gate_unsupported``). A direct park
+    (``resume_parent IS NULL``) keeps the re-dispatch of the agent's original
+    *call_arguments*.
+
     Local imports mirror each other (and the wider module convention):
     ``meta_tools`` imports from ``operations.dispatcher`` which imports back
     through ``meho_backplane.agent.invoke``, so a module-level import here
     would set up an import-time cycle; keeping both inline resolves them
     once at first-call time.
     """
+    from meho_backplane.operations.approval_handoff import consume as consume_handoff
     from meho_backplane.operations.approval_handoff import discard as discard_handoff
     from meho_backplane.operations.approval_queue import claim_resume
 
@@ -545,36 +562,74 @@ async def _resume_approved_or_already_resumed(
             approval_request_id=approval_request_id,
         )
 
-    # The agent already owns the original inputs in memory.  Once it wins the
-    # durable claim, discard any credential-write custody row before dispatch:
-    # a losing waiter returned above and cannot remove another winner's input.
-    # This mirrors the other claim winners without ever decrypting the payload.
     from meho_backplane.db.engine import get_sessionmaker
-
-    async with get_sessionmaker()() as session:
-        await discard_handoff(session, approval_request_id, operator.tenant_id)
-        await session.commit()
-
-    # The re-dispatch threads ``_approved=True`` through the policy gate, so
-    # the durable approval-decision row is the authorization.
     from meho_backplane.operations._audit import parent_audit_id_var
-    from meho_backplane.operations.approval_queue import get_request
+    from meho_backplane.operations.approval_queue import (
+        composite_resume_binding,
+        get_request,
+    )
     from meho_backplane.operations.meta_tools import call_operation_with_approval
 
-    # Load the parked row's pre-generated ``approval.request`` audit id
-    # (tenant-isolated) so the resumed dispatch back-links to it. Pre-0053
-    # rows carry ``request_audit_id IS NULL`` → binds ``None`` (the var's
-    # default), which is the correct no-op for a chain that never had the
-    # anchor.
+    # Load the parked row (tenant-isolated). Its pre-generated
+    # ``approval.request`` audit id is bound below so the resumed dispatch
+    # back-links to it; pre-0053 rows carry ``request_audit_id IS NULL`` →
+    # binds ``None`` (the var's default), the correct no-op for a chain that
+    # never had the anchor. Its ``resume_parent`` (#3421) says whether this is
+    # a composite sub-op park that must re-enter the parent composite.
+    #
+    # Only the claim winner touches the credential-write custody row. A direct
+    # park discards it: the agent already owns the original inputs in memory.
+    # A composite sub-op park whose row only names the parent consumes it,
+    # because the parent's params live only in the encrypted copy. The
+    # decrypted parent stays in a local and is never written to the ORM row.
     async with get_sessionmaker()() as session:
         request = await get_request(
             session,
             tenant_id=operator.tenant_id,
             request_id=approval_request_id,
         )
+        resume_parent = request.resume_parent
+        if resume_parent is not None and request.execution_handle is not None:
+            handoff = await consume_handoff(
+                session, request.execution_handle, request.id, request.tenant_id
+            )
+            resume_parent = cast("dict[str, Any] | None", handoff.get("resume_parent"))
+        else:
+            await discard_handoff(session, approval_request_id, operator.tenant_id)
+        await session.commit()
+
+    # The re-dispatch threads ``_approved=True`` through the policy gate, so
+    # the durable approval-decision row is the authorization.
     parent_token = parent_audit_id_var.set(request.request_audit_id)
     try:
-        return await call_operation_with_approval(operator, call_arguments)
+        # #3421: same composite re-entry as the operator surface. A composite
+        # sub-op park re-enters its parent composite with the approved sub-op
+        # cleared; a direct park (``resume_parent IS NULL``) re-dispatches the
+        # agent's original call unchanged.
+        with composite_resume_binding(
+            subop_op_id=request.op_id,
+            subop_params_hash=request.params_hash,
+            resume_parent=resume_parent,
+        ) as parent_call:
+            if parent_call is None:
+                return await call_operation_with_approval(operator, call_arguments)
+            parent_op_id, parent_params = parent_call
+            _log.info(
+                "approval_wait_resume_composite_parent",
+                approval_request_id=str(approval_request_id),
+                tenant_id=str(operator.tenant_id),
+                subop_op_id=request.op_id,
+                parent_op_id=parent_op_id,
+            )
+            return await call_operation_with_approval(
+                operator,
+                {
+                    **call_arguments,
+                    "connector_id": request.connector_id,
+                    "op_id": parent_op_id,
+                    "params": parent_params,
+                },
+            )
     finally:
         parent_audit_id_var.reset(parent_token)
 
@@ -596,7 +651,8 @@ async def resume_or_surface_awaiting_approval(
     * **approved** — re-invokes the dispatcher with ``_approved=True`` and the
       original in-memory ``params`` from *call_arguments*, returns the new
       envelope (the executed op's result, with the correct audit attribution
-      threaded by the dispatcher).
+      threaded by the dispatcher). A parked composite sub-op instead
+      re-enters its parent composite with that sub-op cleared (#3421).
     * **rejected** — returns the original ``awaiting_approval`` envelope
       annotated with a rejection error code, so the model sees a structured
       tool result.

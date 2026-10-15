@@ -1465,6 +1465,55 @@ composite's own dispatch audit row. This is enforced in
 A direct (non-composite) park is unchanged — `resume_parent` is NULL, so
 the resume keeps the generic re-dispatch of the stored `op_id`.
 
+#### Both resume surfaces read `resume_parent` (#3421)
+
+Two code paths can resume a parked request, and both handle a composite
+sub-op park the same way:
+
+- the operator surface, `resume_dispatch_after_approval`
+  (`operations/approval_queue.py`);
+- the in-process agent waiter, `_resume_approved_or_already_resumed`
+  (`agent/approval_wait.py`).
+
+Both call one helper, `composite_resume_binding` in
+`operations/approval_queue.py`. When the row has a `resume_parent`, the
+helper returns the parent composite's `(op_id, params)` and sets
+`composite_resume_var` and `composite_resume_scope_var` to the approved
+sub-op for the re-dispatch. When `resume_parent` is NULL it returns `None`
+and sets nothing. Because both paths share it, they cannot drift apart.
+`test_operator_and_agent_surfaces_resume_the_same_row_identically` checks
+that both paths dispatch the same row the same way.
+
+What the agent waiter does:
+
+- **Composite sub-op park.** It re-dispatches the parent composite
+  (`_approved=True`) with the row's `connector_id`, the parent `op_id` and
+  the parent params. It keeps the rest of the agent's original call
+  (`target`, `work_ref`, …). The approved sub-op clears its gate and runs
+  once. Before #3421 the waiter re-sent the agent's call without clearing
+  the sub-op, so the sub-op parked a new request and nothing ran.
+- **Direct park.** It re-dispatches the agent's original `call_arguments`
+  unchanged, as before.
+- **Credential-write sub-op.** The row stores only the parent `op_id`; the
+  parent params live in the encrypted custody copy. For a composite park the
+  claim winner consumes that copy to get the parent params. For a direct
+  park it still discards the copy.
+
+One difference stays on purpose: the agent waiter re-enters the composite
+as the **agent**, not as the reviewer. So every other governed sub-op is
+checked against the agent's own grants. If one would need its own approval,
+the multi-gate guard above fails closed
+(`composite_resume_multi_gate_unsupported`) on the agent path too. If the
+agent has no grant for it, that sub-op is denied.
+
+Note: every shipped governed composite is `requires_approval=True` at the
+top level, so an agent's first call parks the composite itself
+(`resume_parent` NULL). A sub-op park with `resume_parent` set happens
+later, inside the resumed composite. Today the agent waiter does not wait on
+that second request; an operator surface resumes it. The waiter's
+composite branch makes the agent path correct whenever it does resume such
+a row.
+
 ## MCP elicitation URL-mode (forward-looking)
 
 When an in-loop agent hits a `needs-approval` verdict, the agent

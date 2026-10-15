@@ -49,6 +49,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import meho_backplane.operations._audit as audit_module
+from meho_backplane.agent.approval_wait import _resume_approved_or_already_resumed
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
@@ -57,6 +58,7 @@ from meho_backplane.connectors.vmware_rest._mount import adapt_filter_params
 from meho_backplane.connectors.vmware_rest.composites import register_vmware_composite_operations
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
+    AgentPermission,
     ApprovalRequest,
     ApprovalRequestStatus,
     AuditLog,
@@ -2956,3 +2958,357 @@ async def test_content_library_subscribed_create_500_on_resume_reaches_approver(
     assert result2.status == "error", result2.error
     assert result2.extras["error_code"] == "create_error"
     assert ("POST", "/content/subscribed-library") in recorder.calls
+
+
+# ===========================================================================
+# #3421 — the in-process agent waiter resumes a composite sub-op park the same
+# way the operator surface does (#3351)
+# ===========================================================================
+#
+# An AGENT principal's governed sub-op parks on the direct seam with
+# ``resume_parent`` set. Before #3421 the agent waiter re-dispatched the
+# agent's original composite call without clearing the approved sub-op, so the
+# sub-op hit its gate again and parked a fresh request: nothing executed and
+# the exactly-one-resumer claim was spent. The waiter now re-enters the parent
+# composite through the same ``composite_resume_binding`` helper the operator
+# surface uses.
+
+_AGENT_SUB = "agent-runner"
+
+
+async def _seed_agent_needs_approval_grant(op_pattern: str) -> None:
+    """Give the agent a ``needs-approval`` grant so its governed sub-op parks.
+
+    Without a grant a ``dangerous`` sub-op is denied for an agent; with one it
+    parks (the ``dangerous`` ceiling), which is the shape under test.
+    """
+    async with get_sessionmaker()() as s:
+        s.add(
+            AgentPermission(
+                tenant_id=_TENANT_ID,
+                principal_sub=_AGENT_SUB,
+                op_pattern=op_pattern,
+                verdict="needs-approval",
+                created_by_sub="ops-admin",
+            )
+        )
+        await s.commit()
+
+
+async def _agent_parks_subop(
+    *, agent: Operator, composite_op_id: str, target_id: UUID, params: dict[str, Any]
+) -> tuple[UUID, dict[str, Any]]:
+    """Run the composite as the agent past its top-level gate; its sub-op parks.
+
+    ``_approved=True`` stands in for the already-approved top-level park (every
+    governed composite is ``requires_approval=True``). Returns the parked
+    sub-op's request id and the envelope the agent's tool received.
+    """
+    result = await dispatch(
+        operator=agent,
+        connector_id=_CONNECTOR_ID,
+        op_id=composite_op_id,
+        target=_FakeVmwareTarget(target_id=target_id),
+        params=params,
+        _approved=True,
+    )
+    assert result.status == "awaiting_approval", result.error
+    return UUID(result.extras["approval_request_id"]), result.model_dump(mode="json")
+
+
+async def _approve_as_reviewer(request_id: UUID) -> Operator:
+    reviewer = _make_operator(sub="ops-reviewer", principal_kind=PrincipalKind.USER)
+    async with get_sessionmaker()() as s:
+        await approve_request(s, request_id, operator=reviewer, params=None)
+        await s.commit()
+    return reviewer
+
+
+def _agent_call_arguments(composite_op_id: str, params: dict[str, Any]) -> dict[str, Any]:
+    """The agent's original ``call_operation`` arguments for the composite."""
+    return {
+        "connector_id": _CONNECTOR_ID,
+        "op_id": composite_op_id,
+        "target": {"name": "prod-vcenter"},
+        "params": params,
+    }
+
+
+async def _approval_row_count() -> int:
+    async with get_sessionmaker()() as s:
+        count = await s.scalar(select(func.count()).select_from(ApprovalRequest))
+    return int(count or 0)
+
+
+@pytest.mark.asyncio
+async def test_agent_waiter_resumes_rest_action_subop_park(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """REST ``?action=`` power sub-op: agent park → approve → agent waiter → power fires."""
+    recorder = _RecordingVmwareConnector()
+    await _bootstrap(recorder, stub_embedding_service)
+    target_id = await _persist_vmware_target()
+    await _seed_agent_needs_approval_grant("POST:/vcenter/vm/*")
+    agent = _make_operator(sub=_AGENT_SUB, principal_kind=PrincipalKind.AGENT)
+    params = {"vm": "vm-1", "verb": "on"}
+
+    request_id, envelope = await _agent_parks_subop(
+        agent=agent,
+        composite_op_id="vmware.composite.vm.power",
+        target_id=target_id,
+        params=params,
+    )
+    assert recorder.calls == [], "the power op must not fire before approval"
+    async with get_sessionmaker()() as s:
+        pending = await s.get(ApprovalRequest, request_id)
+    assert pending is not None
+    assert pending.op_id == "POST:/vcenter/vm/{vm}/power?action=start"
+    assert pending.resume_parent == {"op_id": "vmware.composite.vm.power", "params": params}
+
+    await _approve_as_reviewer(request_id)
+    resumed = await _resume_approved_or_already_resumed(
+        operator=agent,
+        call_arguments=_agent_call_arguments("vmware.composite.vm.power", params),
+        awaiting_envelope=envelope,
+        approval_request_id=request_id,
+    )
+
+    assert resumed["status"] == "ok", resumed
+    assert resumed["result"]["verb"] == "on"
+    # The power write fired exactly once, and no second request was parked.
+    assert recorder.calls == [("POST", "/vcenter/vm/vm-1/power?action=start")]
+    assert await _approval_row_count() == 1
+    async with get_sessionmaker()() as s:
+        final = await s.get(ApprovalRequest, request_id)
+    assert final is not None
+    assert final.resumed_at is not None
+
+
+@pytest.mark.asyncio
+async def test_agent_waiter_resumes_vim_create_subop_park(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """VI-JSON ``CreateVM_Task`` sub-op: agent park → approve → agent waiter → VM exists."""
+    recorder = _Pre9RecordingVmwareConnector()
+    recorder.responses.update({"/vcenter/datastore/datastore-11": {"name": "datastore1"}})
+    recorder.vmomi_responses.update(
+        {
+            "/Folder/group-v55/CreateVM_Task": {
+                "_typeName": "ManagedObjectReference",
+                "type": "Task",
+                "value": "task-3421",
+            },
+            "Task": {
+                "_typeName": "RetrieveResult",
+                "objects": [
+                    {
+                        "_typeName": "ObjectContent",
+                        "obj": {
+                            "_typeName": "ManagedObjectReference",
+                            "type": "Task",
+                            "value": "task-3421",
+                        },
+                        "propSet": [
+                            {
+                                "_typeName": "DynamicProperty",
+                                "name": "info",
+                                "val": {
+                                    "_typeName": "TaskInfo",
+                                    "state": "success",
+                                    "result": {
+                                        "_typeName": "ManagedObjectReference",
+                                        "type": "VirtualMachine",
+                                        "value": "vm-3421",
+                                    },
+                                },
+                            }
+                        ],
+                    }
+                ],
+            },
+        }
+    )
+    await _bootstrap(recorder, stub_embedding_service)
+    target_id = await _persist_vmware_target()
+    await _seed_agent_needs_approval_grant("POST:/Folder/*")
+    agent = _make_operator(sub=_AGENT_SUB, principal_kind=PrincipalKind.AGENT)
+    params = {
+        "name": "vm-agent-approved",
+        "guest_os": "UBUNTU_64",
+        "folder": "group-v55",
+        "resource_pool": "resgroup-8",
+        "datastore": "datastore-11",
+    }
+
+    request_id, envelope = await _agent_parks_subop(
+        agent=agent,
+        composite_op_id="vmware.composite.vm.create",
+        target_id=target_id,
+        params=params,
+    )
+    assert recorder.vmomi_calls == [], "CreateVM_Task must not fire before approval"
+
+    await _approve_as_reviewer(request_id)
+    resumed = await _resume_approved_or_already_resumed(
+        operator=agent,
+        call_arguments=_agent_call_arguments("vmware.composite.vm.create", params),
+        awaiting_envelope=envelope,
+        approval_request_id=request_id,
+    )
+
+    assert resumed["status"] == "ok", resumed
+    assert resumed["result"]["status"] == "created"
+    assert resumed["result"]["vm_id"] == "vm-3421"
+    vmomi_paths = [call[0] for call in recorder.vmomi_calls]
+    assert vmomi_paths.count("/Folder/group-v55/CreateVM_Task") == 1
+    assert await _approval_row_count() == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_waiter_multi_gate_resume_fails_closed(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """The multi-gate guard fires on the agent path too (#3351 B1, #3421).
+
+    The agent re-enters the composite as itself. ``vm.create`` with
+    ``power_on_after_create`` clears the approved create leg, then the power
+    leg would need a second approval for the agent. The guard refuses instead
+    of parking, so the create ran once and no second request exists.
+    """
+    recorder = _RecordingVmwareConnector()
+    recorder.responses.update({"/vcenter/vm": {"value": "vm-agent-multigate"}})
+    await _bootstrap(recorder, stub_embedding_service)
+    target_id = await _persist_vmware_target()
+    await _seed_agent_needs_approval_grant("POST:/vcenter/vm*")
+    agent = _make_operator(sub=_AGENT_SUB, principal_kind=PrincipalKind.AGENT)
+    params = {
+        "name": "vm-agent-multigate",
+        "guest_os": "UBUNTU_64",
+        "folder": "group-v55",
+        "power_on_after_create": True,
+    }
+
+    request_id, envelope = await _agent_parks_subop(
+        agent=agent,
+        composite_op_id="vmware.composite.vm.create",
+        target_id=target_id,
+        params=params,
+    )
+    async with get_sessionmaker()() as s:
+        pending = await s.get(ApprovalRequest, request_id)
+    assert pending is not None
+    assert pending.op_id == "POST:/vcenter/vm"
+
+    await _approve_as_reviewer(request_id)
+    resumed = await _resume_approved_or_already_resumed(
+        operator=agent,
+        call_arguments=_agent_call_arguments("vmware.composite.vm.create", params),
+        awaiting_envelope=envelope,
+        approval_request_id=request_id,
+    )
+
+    assert resumed["status"] == "error", resumed
+    assert resumed["extras"]["error_code"] == "composite_resume_multi_gate_unsupported"
+    assert resumed["extras"]["approved_op_id"] == "POST:/vcenter/vm"
+    assert resumed["extras"]["blocked_op_id"] == "POST:/vcenter/vm/{vm}/power?action=start"
+    assert recorder.calls == [("POST", "/vcenter/vm")]
+    assert await _approval_row_count() == 1
+
+
+@pytest.mark.asyncio
+async def test_operator_and_agent_surfaces_resume_the_same_row_identically(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both resume surfaces re-enter the same parked row the same way (#3421).
+
+    Spies the dispatcher on both surfaces and resumes one parked composite
+    sub-op row through each. Both must dispatch the same parent composite with
+    the same params, ``_approved=True``, and the same approved sub-op bound on
+    the two composite resume vars.
+    """
+    import meho_backplane.operations.dispatcher as dispatcher_module
+    import meho_backplane.operations.meta_tools as meta_tools_module
+    from meho_backplane.connectors import OperationResult
+    from meho_backplane.operations.composite import (
+        composite_resume_scope_var,
+        composite_resume_var,
+    )
+
+    recorder = _RecordingVmwareConnector()
+    await _bootstrap(recorder, stub_embedding_service)
+    target_id = await _persist_vmware_target()
+    await _seed_agent_needs_approval_grant("POST:/vcenter/vm/*")
+    agent = _make_operator(sub=_AGENT_SUB, principal_kind=PrincipalKind.AGENT)
+    params = {"vm": "vm-1", "verb": "on"}
+    request_id, envelope = await _agent_parks_subop(
+        agent=agent,
+        composite_op_id="vmware.composite.vm.power",
+        target_id=target_id,
+        params=params,
+    )
+    reviewer = await _approve_as_reviewer(request_id)
+
+    seen: list[dict[str, Any]] = []
+
+    async def _spy_dispatch(**kwargs: Any) -> OperationResult:
+        seen.append(
+            {
+                "connector_id": kwargs["connector_id"],
+                "op_id": kwargs["op_id"],
+                "params": kwargs["params"],
+                "approved": kwargs.get("_approved"),
+                "target_id": getattr(kwargs["target"], "id", None),
+                "resume": composite_resume_var.get(),
+                "scope": composite_resume_scope_var.get(),
+            }
+        )
+        return OperationResult(status="ok", op_id=kwargs["op_id"], duration_ms=0.0)
+
+    monkeypatch.setattr(dispatcher_module, "dispatch", _spy_dispatch)
+    monkeypatch.setattr(meta_tools_module, "dispatch", _spy_dispatch)
+
+    # Operator surface.
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+    assert row is not None
+    await resume_dispatch_after_approval(operator=reviewer, request=row, params=None)
+
+    # Free the one-resumer claim so the agent surface can resume the same row.
+    async with get_sessionmaker()() as s:
+        await s.execute(
+            update(ApprovalRequest)
+            .where(ApprovalRequest.id == request_id)
+            .values(resumed_at=None, resume_result=None)
+        )
+        await s.commit()
+
+    # Agent surface.
+    await _resume_approved_or_already_resumed(
+        operator=agent,
+        call_arguments=_agent_call_arguments("vmware.composite.vm.power", params),
+        awaiting_envelope=envelope,
+        approval_request_id=request_id,
+    )
+
+    assert len(seen) == 2
+    operator_call, agent_call = seen
+    assert operator_call == agent_call
+    assert operator_call["op_id"] == "vmware.composite.vm.power"
+    assert operator_call["params"] == params
+    assert operator_call["approved"] is True
+    assert operator_call["target_id"] == target_id
+    approved_subop = ("POST:/vcenter/vm/{vm}/power?action=start", row.params_hash)
+    assert operator_call["resume"] == approved_subop
+    assert operator_call["scope"] == approved_subop
+    # Both surfaces reset the vars after the re-entry.
+    assert composite_resume_var.get() is None
+    assert composite_resume_scope_var.get() is None

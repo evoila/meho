@@ -1018,3 +1018,154 @@ async def test_resume_no_ops_when_operator_surface_already_claimed(
     assert request.execution_handle is not None
     async with sessionmaker() as fresh:
         assert await fresh.get(ApprovalExecutionPayload, request.execution_handle) is not None
+
+
+# ---------------------------------------------------------------------------
+# Composite sub-op re-entry vs. direct park (#3421)
+# ---------------------------------------------------------------------------
+
+
+async def _park_approved(
+    *,
+    requester: Operator,
+    connector_id: str,
+    op_id: str,
+    params: dict[str, Any],
+    resume_parent: dict[str, Any] | None = None,
+) -> ApprovalRequest:
+    """Park one request and flip it to ``approved`` (what a reviewer decision does)."""
+    from meho_backplane.operations._validate import compute_params_hash
+    from meho_backplane.operations.approval_queue import create_pending_request
+
+    async with get_sessionmaker()() as s:
+        request = await create_pending_request(
+            s,
+            operator=requester,
+            connector_id=connector_id,
+            op_id=op_id,
+            target=None,
+            params=params,
+            params_hash=compute_params_hash(params),
+            run_id=uuid.uuid4(),
+            resume_parent=resume_parent,
+        )
+        request.status = ApprovalRequestStatus.APPROVED.value
+        request.decided_at = datetime.now(UTC)
+        await s.commit()
+    return request
+
+
+async def test_direct_park_resume_redispatches_original_call_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A direct park (``resume_parent IS NULL``) keeps the generic re-dispatch.
+
+    The waiter passes the agent's original ``call_arguments`` through untouched
+    and binds no composite resume state.
+    """
+    import meho_backplane.operations.meta_tools as meta_tools_module
+    from meho_backplane.agent.approval_wait import _resume_approved_or_already_resumed
+    from meho_backplane.operations.composite import (
+        composite_resume_scope_var,
+        composite_resume_var,
+    )
+
+    requester = _make_operator(sub="agent-direct-park")
+    params = {"name": "direct"}
+    request = await _park_approved(
+        requester=requester, connector_id="apprestest-1.x", op_id="apprestest.op", params=params
+    )
+    call_arguments = {
+        "connector_id": "apprestest-1.x",
+        "op_id": "apprestest.op",
+        "params": params,
+        "target": None,
+        "work_ref": "CHG-1",
+    }
+    seen: list[tuple[dict[str, Any], Any, Any]] = []
+
+    async def _spy(_operator: Operator, arguments: dict[str, Any]) -> dict[str, Any]:
+        seen.append((arguments, composite_resume_var.get(), composite_resume_scope_var.get()))
+        return {"status": "ok"}
+
+    monkeypatch.setattr(meta_tools_module, "call_operation_with_approval", _spy)
+    resumed = await _resume_approved_or_already_resumed(
+        operator=requester,
+        call_arguments=call_arguments,
+        awaiting_envelope={"op_id": "apprestest.op", "extras": {}},
+        approval_request_id=request.id,
+    )
+
+    assert resumed == {"status": "ok"}
+    assert seen == [(call_arguments, None, None)]
+    assert seen[0][0] is call_arguments
+
+
+async def test_credential_composite_subop_resume_uses_handoff_parent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A credential-write composite sub-op park re-enters its parent from custody.
+
+    The row stores only the parent's ``op_id``; the parent's params live in the
+    encrypted custody copy. The agent claim winner consumes that copy (it does
+    not just discard it), re-enters the parent composite with the approved
+    sub-op cleared, and leaves no custody row behind.
+    """
+    import meho_backplane.operations.meta_tools as meta_tools_module
+    from meho_backplane.agent.approval_wait import _resume_approved_or_already_resumed
+    from meho_backplane.operations.composite import (
+        composite_resume_scope_var,
+        composite_resume_var,
+    )
+
+    requester = _make_operator(sub="agent-credential-composite")
+    subop_params = {"value": "test-only-credential-value"}
+    parent = {"op_id": "composite.rotate", "params": {"password": "test-only-parent-value"}}
+    request = await _park_approved(
+        requester=requester,
+        connector_id="vault-1.x",
+        op_id="vault.kv.put",
+        params=subop_params,
+        resume_parent=parent,
+    )
+    assert request.resume_parent == {"op_id": "composite.rotate"}
+    assert request.execution_handle is not None
+    seen: list[tuple[dict[str, Any], Any, Any]] = []
+
+    async def _spy(_operator: Operator, arguments: dict[str, Any]) -> dict[str, Any]:
+        seen.append((arguments, composite_resume_var.get(), composite_resume_scope_var.get()))
+        return {"status": "ok"}
+
+    monkeypatch.setattr(meta_tools_module, "call_operation_with_approval", _spy)
+    resumed = await _resume_approved_or_already_resumed(
+        operator=requester,
+        call_arguments={
+            "connector_id": "vault-1.x",
+            "op_id": "composite.rotate",
+            "params": {},
+            "target": None,
+        },
+        awaiting_envelope={"op_id": "vault.kv.put", "extras": {}},
+        approval_request_id=request.id,
+    )
+
+    assert resumed == {"status": "ok"}
+    approved_subop = ("vault.kv.put", request.params_hash)
+    assert seen == [
+        (
+            {
+                "connector_id": "vault-1.x",
+                "op_id": "composite.rotate",
+                "params": parent["params"],
+                "target": None,
+            },
+            approved_subop,
+            approved_subop,
+        )
+    ]
+    assert composite_resume_var.get() is None
+    async with get_sessionmaker()() as fresh:
+        assert await fresh.get(ApprovalExecutionPayload, request.execution_handle) is None
+        row = await fresh.get(ApprovalRequest, request.id)
+        assert row is not None
+        assert row.resume_parent == {"op_id": "composite.rotate"}

@@ -276,3 +276,101 @@ func TestDeletePreviewJSONPrintsTheEnvelope(t *testing.T) {
 		t.Errorf("envelope not printed in full: %v", env)
 	}
 }
+
+// ---------- keycloak realm delete (#3886) ----------
+
+// TestRealmDeleteVerbExists — `realm delete` hangs under `realm`.
+func TestRealmDeleteVerbExists(t *testing.T) {
+	found := false
+	for _, sub := range newRealmCmd().Commands() {
+		if sub.Name() == "delete" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("realm is missing the delete sub-verb")
+	}
+}
+
+// TestRealmDeletePreviewThenApproval — step 1 previews with the realm param;
+// step 2 sends the same params plus the hash on the call route.
+func TestRealmDeletePreviewThenApproval(t *testing.T) {
+	var previewBody, callBody map[string]any
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/operations/preview": func(w http.ResponseWriter, r *http.Request) {
+			if err := json.NewDecoder(r.Body).Decode(&previewBody); err != nil {
+				t.Errorf("decode: %v", err)
+			}
+			writeJSON(t, w, 200, map[string]any{
+				"status": "ok", "op_id": "keycloak.realm.delete", "preview_hash": "hash-r",
+			})
+		},
+		"POST /api/v1/operations/call": func(w http.ResponseWriter, r *http.Request) {
+			if err := json.NewDecoder(r.Body).Decode(&callBody); err != nil {
+				t.Errorf("decode: %v", err)
+			}
+			writeJSON(t, w, 200, CallResult{
+				Status: "awaiting_approval", OpID: "keycloak.realm.delete",
+				Extras: json.RawMessage(`{"approval_request_id":"ar-realm-1"}`),
+			})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	out, _, err := runCmd(newRealmDeleteCmd(),
+		"--target", "kc", "--realm", "test-run-7", "--backplane", srv.URL)
+	if err != nil {
+		t.Fatalf("preview step should exit 0; got %v", err)
+	}
+	if previewBody["op_id"] != "keycloak.realm.delete" || previewBody["connector_id"] != ConnectorID {
+		t.Errorf("preview identity wrong: %v", previewBody)
+	}
+	params, _ := previewBody["params"].(map[string]any)
+	if len(params) != 1 || params["realm"] != "test-run-7" {
+		t.Errorf("preview params wrong: %v", previewBody["params"])
+	}
+	if !strings.Contains(out, "--preview-hash hash-r") {
+		t.Errorf("output should name the next step; got %q", out)
+	}
+	if callBody != nil {
+		t.Errorf("step 1 must not call the operation")
+	}
+
+	out, _, err = runCmd(newRealmDeleteCmd(), "--target", "kc", "--realm", "test-run-7",
+		"--preview-hash", "hash-r", "--backplane", srv.URL)
+	if err != nil {
+		t.Fatalf("waiting for approval is not an error; got %v", err)
+	}
+	if callBody["preview_hash"] != "hash-r" {
+		t.Errorf("preview_hash not sent: %v", callBody["preview_hash"])
+	}
+	params, _ = callBody["params"].(map[string]any)
+	if params["realm"] != "test-run-7" {
+		t.Errorf("realm not sent: %v", callBody["params"])
+	}
+	if !strings.Contains(out, "ar-realm-1") {
+		t.Errorf("expected the approval id; got %q", out)
+	}
+}
+
+// TestRealmDeleteNeedsRealm — no --realm fails before any request; the verb
+// never falls back to the target's managed realm.
+func TestRealmDeleteNeedsRealm(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"": func(w http.ResponseWriter, r *http.Request) {
+			t.Errorf("no request expected; got %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(500)
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	_, stderr, err := runCmd(newRealmDeleteCmd(), "--target", "kc", "--backplane", srv.URL)
+	if err == nil {
+		t.Fatalf("expected an error without --realm")
+	}
+	if !strings.Contains(stderr, "--realm") {
+		t.Errorf("error should name --realm; got %q", stderr)
+	}
+}

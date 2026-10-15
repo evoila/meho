@@ -1168,7 +1168,8 @@ A vendor verb can run the same two steps itself. The shared
 `cli/internal/dispatch` core has `Connector.Preview` (posts to
 `/api/v1/operations/preview`) and `Connector.CallWithPreviewHash` (a
 `Call` that also sends `preview_hash`). The Keycloak delete verbs (#3944,
-`meho keycloak user|group|client delete`) use them: without
+`meho keycloak user|group|client delete`; #3886, `meho keycloak realm
+delete`) use them: without
 `--preview-hash` the verb only previews and prints the hash (nothing is
 deleted, nothing waits for approval); run again with `--preview-hash <hash>`
 and the request waits until a second person approves it.

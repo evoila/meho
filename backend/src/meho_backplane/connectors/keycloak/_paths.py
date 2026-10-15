@@ -73,6 +73,9 @@ _USER_GROUPS_PATH = "/admin/realms/{realm}/users/{user-id}/groups"
 # the hyphenated ``{group-id}``); the placeholder is byte-for-byte the pinned
 # spec's own name so the #2988 reconcile lane resolves it.
 _USER_GROUP_PATH = "/admin/realms/{realm}/users/{user-id}/groups/{groupId}"
+# Realm delete preview (#3886): how many users and groups go with the realm.
+_USERS_COUNT_PATH = "/admin/realms/{realm}/users/count"
+_GROUPS_COUNT_PATH = "/admin/realms/{realm}/groups/count"
 
 # -- dispatched, but outside the Admin REST spec's scope (see docstring) ----
 

@@ -2930,7 +2930,7 @@ meho keycloak protocol-mapper create [flags]
 
 ### `meho keycloak realm`
 
-Keycloak realm sub-verbs (get, create, update)
+Keycloak realm sub-verbs (get, create, update, delete)
 
 ```
 meho keycloak realm
@@ -2947,6 +2947,20 @@ meho keycloak realm create [flags]
 - `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
 - `--json` — emit the full OperationResult envelope as JSON
 - `--representation-file`, `-f` — path to a JSON file with the RealmRepresentation body (required)
+- `--target` — target slug to dispatch against (required)
+
+#### `meho keycloak realm delete`
+
+Delete a whole Keycloak realm (destructive, a second person must approve)
+
+```
+meho keycloak realm delete [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
+- `--json` — emit the full OperationResult envelope as JSON
+- `--preview-hash` — the preview_hash from a first run of this command; with it, the delete waits for approval
+- `--realm` — the name of the realm to delete (required)
 - `--target` — target slug to dispatch against (required)
 
 #### `meho keycloak realm get`

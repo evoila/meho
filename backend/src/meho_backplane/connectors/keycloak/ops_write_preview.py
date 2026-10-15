@@ -17,6 +17,7 @@ op_id                             preview stored in ``ApprovalRequest.proposed_e
 ``keycloak.user.delete``          ``{blast_radius}`` — user name, enabled, groups
 ``keycloak.group.delete``         ``{blast_radius}`` — name, members, sub-groups
 ``keycloak.client.delete``        ``{blast_radius}`` — client id, enabled, type
+``keycloak.realm.delete``         ``{blast_radius}`` — realm, enabled, counts
 ================================  ===================================================
 
 Why bespoke builders on top of the generic params-echo default (#1856)
@@ -104,6 +105,10 @@ yields an honest "nothing to delete" block, so a repeated teardown still
 parks and then returns ``already_absent: true``. Without a live connector
 (the egress-free ``preview_operation`` path) the delete builders decline.
 
+``keycloak.realm.delete`` (#3886) works the same way. Its builder refuses a
+protected realm (``protected_realm``), then reads the realm and counts its
+users, clients and groups, so the approver sees what goes with it.
+
 References
 ----------
 
@@ -133,6 +138,11 @@ from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     find_client,
     find_group,
     find_user,
+)
+from meho_backplane.connectors.keycloak.ops_write_realm_delete import (
+    check_realm_guards,
+    realm_blast_radius,
+    realm_name_param,
 )
 from meho_backplane.connectors.keycloak.redaction import redact_secret_fields
 from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
@@ -508,6 +518,16 @@ async def _client_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     return client_blast_radius(found)
 
 
+async def _realm_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Card for ``keycloak.realm.delete``: realm, enabled, user / client / group counts."""
+    connector = _live_keycloak_connector(ctx)
+    if connector is None:
+        return None
+    realm = realm_name_param(ctx.params)
+    check_realm_guards(ctx.target, realm)
+    return await realm_blast_radius(connector, ctx.operator, ctx.target, realm)
+
+
 def _register_keycloak_preview_builders() -> None:
     """Wire the Keycloak park-time preview builders. Called at import time.
 
@@ -527,6 +547,7 @@ def _register_keycloak_preview_builders() -> None:
     register_preview_builder("keycloak.user.delete", _user_delete_preview)
     register_preview_builder("keycloak.group.delete", _group_delete_preview)
     register_preview_builder("keycloak.client.delete", _client_delete_preview)
+    register_preview_builder("keycloak.realm.delete", _realm_delete_preview)
 
 
 _register_keycloak_preview_builders()

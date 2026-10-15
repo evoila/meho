@@ -33,6 +33,7 @@
 //   - `meho keycloak user delete (--id|--username)`
 //   - `meho keycloak group delete (--id|--name) [--delete-subgroups]`
 //   - `meho keycloak client delete (--id|--client-id)`
+//   - `meho keycloak realm delete --realm R` (#3886)
 //
 // User passwords are NEVER passed inline — only a Vault path
 // (--password-secret-ref) — so the password never lands in shell history

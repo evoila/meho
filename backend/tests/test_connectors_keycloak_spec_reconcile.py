@@ -62,8 +62,8 @@ Both exclusions are pinned by value below, and an armed test asserts
 they stay **unserved** — the day a newer pinned spec starts serving
 one, that test fails and the constant must be promoted into
 :data:`_METHODS_BY_CONSTANT`. All reconciled op_ids (19 at #2988, extended
-to 29 by the #3280 group-lifecycle ops, and to 33 by the #3944 deletes) were
-served on the armed run; no path repoints were needed. Protocol:
+to 29 by the #3280 group-lifecycle ops, to 33 by the #3944 deletes, and to 36
+by the #3886 realm delete) were served on the armed run; no path repoints were needed. Protocol:
 docs/decisions/spec-reconcile-guards-standard.md.
 """
 
@@ -88,7 +88,8 @@ _SPEC_LABEL = f"{_SPEC_DIR}/{_SPEC_FILE}"
 #: a get and an update) declare both verbs.
 _METHODS_BY_CONSTANT: dict[str, tuple[str, ...]] = {
     "_ADMIN_REALMS_PATH": ("POST",),
-    "_ADMIN_REALM_PATH": ("GET", "PUT"),
+    # Governed realm delete (#3886): the delete plus its 404 read-back.
+    "_ADMIN_REALM_PATH": ("GET", "PUT", "DELETE"),
     "_CLIENTS_PATH": ("GET", "POST"),
     "_CLIENT_PATH": ("GET", "PUT", "DELETE"),
     "_CLIENT_SECRET_PATH": ("GET",),
@@ -113,6 +114,9 @@ _METHODS_BY_CONSTANT: dict[str, tuple[str, ...]] = {
     "_GROUP_MEMBERS_PATH": ("GET",),
     "_USER_GROUPS_PATH": ("GET",),
     "_USER_GROUP_PATH": ("PUT", "DELETE"),
+    # Realm delete approval card (#3886): user and group counts.
+    "_USERS_COUNT_PATH": ("GET",),
+    "_GROUPS_COUNT_PATH": ("GET",),
 }
 
 #: Dispatched constants deliberately outside the pinned Admin REST
@@ -167,6 +171,7 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
     (reconciled against the pinned spec in the armed test below).
     """
     assert sorted(_op_ids(_METHODS_BY_CONSTANT)) == [
+        "DELETE:/admin/realms/{realm}",
         "DELETE:/admin/realms/{realm}/clients/{client-uuid}",
         "DELETE:/admin/realms/{realm}/groups/{group-id}",
         "DELETE:/admin/realms/{realm}/users/{user-id}",
@@ -177,6 +182,7 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/admin/realms/{realm}/clients/{client-uuid}",
         "GET:/admin/realms/{realm}/clients/{client-uuid}/client-secret",
         "GET:/admin/realms/{realm}/groups",
+        "GET:/admin/realms/{realm}/groups/count",
         "GET:/admin/realms/{realm}/groups/{group-id}",
         "GET:/admin/realms/{realm}/groups/{group-id}/children",
         "GET:/admin/realms/{realm}/groups/{group-id}/members",
@@ -184,6 +190,7 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/admin/realms/{realm}/roles/{role-name}",
         "GET:/admin/realms/{realm}/roles/{role-name}/users",
         "GET:/admin/realms/{realm}/users",
+        "GET:/admin/realms/{realm}/users/count",
         "GET:/admin/realms/{realm}/users/{user-id}",
         "GET:/admin/realms/{realm}/users/{user-id}/groups",
         "GET:/admin/realms/{realm}/users/{user-id}/role-mappings",

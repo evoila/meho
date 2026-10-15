@@ -16,6 +16,7 @@ import (
 //   - keycloak user delete   (--id|--username)                   → keycloak.user.delete
 //   - keycloak group delete  (--id|--name) [--delete-subgroups]  → keycloak.group.delete
 //   - keycloak client delete (--id|--client-id)                  → keycloak.client.delete
+//   - keycloak realm delete  --realm R                           → keycloak.realm.delete (#3886)
 //
 // The three ops are on the destructive risk level. The backplane accepts
 // such a call only with the preview_hash of a preview of the same op,
@@ -202,4 +203,53 @@ func renderDeletePreview(cmd *cobra.Command, opID string, p *dispatch.PreviewRes
 		return nil
 	}
 	return dispatch.ErrOpError
+}
+
+// newRealmDeleteCmd returns `meho keycloak realm delete` (keycloak.realm.delete,
+// #3886). It removes a whole realm, with every user, client and group in it.
+// --realm is required: the verb never falls back to the target's managed
+// realm. It runs in the same two steps as the other delete verbs.
+func newRealmDeleteCmd() *cobra.Command {
+	var (
+		f           writeFlags
+		realmName   string
+		previewHash string
+	)
+	cmd := &cobra.Command{
+		Use:   "delete",
+		Short: "Delete a whole Keycloak realm (destructive, a second person must approve)",
+		Long: "delete dispatches keycloak.realm.delete. It removes the realm for good,\n" +
+			"with every user, client, group and session in it.\n\n" +
+			"It runs in two steps:\n" +
+			"  1. Without --preview-hash it only previews: nothing is deleted and\n" +
+			"     nothing waits for approval. It prints a preview_hash.\n" +
+			"  2. Run the same command again with --preview-hash <hash>. The request\n" +
+			"     then waits until a second person approves it. Approving it runs\n" +
+			"     the delete; do not run the command again after approval.\n\n" +
+			"--realm is required. MEHO refuses the target's admin realm, its managed\n" +
+			"realm, and the realm MEHO's own login uses. To stop logins but keep the\n" +
+			"realm, use `meho keycloak realm update` with enabled=false instead.\n" +
+			"If the realm is already gone, the result says already_absent=true.\n" +
+			"deleted=true is reported only after a read of the realm answers 404.\n\n" +
+			"Exit codes: 0=ok/previewed/waiting for approval, 1=error/denied,\n" +
+			"2=auth_expired, 3=unreachable, 4=unexpected.",
+		Example: "  meho keycloak realm delete --target kc --realm test-run-7\n" +
+			"  meho keycloak realm delete --target kc --realm test-run-7 --preview-hash <hash>",
+		Args:          cobra.NoArgs,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if realmName == "" {
+				return output.RenderError(cmd.ErrOrStderr(),
+					output.Unexpected("--realm is required"), f.jsonOut)
+			}
+			return runDelete(cmd, "keycloak.realm.delete", f,
+				map[string]any{"realm": realmName}, previewHash)
+		},
+	}
+	f.bind(cmd)
+	cmd.Flags().StringVar(&realmName, "realm", "", "the name of the realm to delete (required)")
+	cmd.Flags().StringVar(&previewHash, "preview-hash", "",
+		"the preview_hash from a first run of this command; with it, the delete waits for approval")
+	return cmd
 }

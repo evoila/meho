@@ -142,7 +142,9 @@ Choose the bump from what's in `[Unreleased]`:
 ### 2. Roll the CHANGELOG — the load-bearing step
 
 This is the step that keeps getting skipped. Do it in the
-**release-cutting PR**, before the tag.
+**release-cutting PR**, before the tag. The release pull request is the
+only pull request that edits `CHANGELOG.md`. Code pull requests add no
+lines. The **Backfill** item below adds the lines for them.
 
 1. **Audit completeness.** Every merged PR since the last tag must have a
    bullet. Cross-check:
@@ -323,7 +325,8 @@ features will work out of the box?":
     "agent_runtime":  {"configured": false, "missing_env": ["KEYCLOAK_ADMIN_URL", "..."], "docs": "..."},
     "ui_surface":     {"configured": false, "missing_env": ["UI_KEYCLOAK_CLIENT_ID", "..."], "docs": "..."},
     "audit_replay":   {"configured": true,  "capture_mode": "enforced", "missing_env": []},
-    "approval_queue": {"configured": false, "depends_on": "agent_runtime", "effective_posture": "four_eyes_enforced"}
+    "approval_queue": {"configured": false, "depends_on": "agent_runtime", "effective_posture": "four_eyes_enforced"},
+    "approval_custody": {"configured": false, "custody": "missing", "missing_env": ["APPROVAL_HANDOFF_ENCRYPTION_KEY"], "docs": "docs/codebase/approvals.md"}
   }
 }
 ```
@@ -380,6 +383,14 @@ Walk the four gates in the order an operator hits them:
   the deploy set the emergency `APPROVAL_ALLOW_SELF_APPROVAL=true`
   escape (see `docs/codebase/approvals.md` — the endorsed
   single-operator answer is an agent-requester, not the flag).
+
+- [ ] **Approval custody** (required wherever a credential-write
+  operation may wait for approval, #3712). Set
+  `APPROVAL_HANDOFF_ENCRYPTION_KEY` to a Fernet key through the Helm
+  `approvalHandoff` Secret reference. Without it, MEHO denies every
+  credential-write operation that must wait for approval. The `/ready`
+  entry `approval_custody.custody` reads `configured`, `missing` or
+  `malformed`. Steps: [`docs/codebase/approvals.md`](codebase/approvals.md).
 
 - [ ] **GitHub `gh-rest-3` connector credential** (optional;
   enables the `gh/3` typed connector landed by Initiative

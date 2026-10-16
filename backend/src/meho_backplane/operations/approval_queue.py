@@ -73,10 +73,14 @@ where a malicious approver swaps the params between the "request" and the
 
 from __future__ import annotations
 
+import re
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any, cast
+from typing import Any, Final, cast
 
 import structlog
 from sqlalchemy import CursorResult, and_, or_, select, update
@@ -112,12 +116,16 @@ from meho_backplane.operations.approval_handoff import (
 from meho_backplane.operations.approval_handoff import (
     store as store_handoff,
 )
+from meho_backplane.operations.reducer import handle_owner_sub_var
 
 __all__ = [
+    "MAX_REASON_LENGTH",
     "ApprovalError",
     "ApprovalNotFoundError",
     "ApprovalRequestAlreadyDecidedError",
     "ApprovalRequestExpiredError",
+    "DelegatedReasonInvalidError",
+    "Delegation",
     "NonHumanApprovalError",
     "ParamsMismatchError",
     "PreviewBindingMissingError",
@@ -126,14 +134,18 @@ __all__ = [
     "UnauthorizedApprovalError",
     "approve_request",
     "claim_resume",
+    "composite_resume_binding",
     "consume_remote_write_approval",
     "create_pending_request",
     "expire_stale_requests",
     "find_remote_write_approval",
+    "get_decision_delegation",
     "get_request",
     "list_pending",
+    "parse_delegation",
     "publish_approval_event",
     "read_approval_result",
+    "rehydrate_resume_target",
     "reject_request",
     "resume_dispatch_after_approval",
 ]
@@ -344,6 +356,165 @@ class ResultAccessForbiddenError(ApprovalError):
             f"principal {principal_sub!r} is not the owner of approval_request "
             f"{request_id}; its result is readable only by the originating principal"
         )
+
+
+class DelegatedReasonInvalidError(ApprovalError):
+    """A decision reason names an instructing human but is incomplete.
+
+    Raised by :func:`parse_delegation` (called from :func:`approve_request`
+    and :func:`reject_request`) when the reason carries an
+    ``Instructed-by:`` line but the trailer block at its end is missing
+    ``Instruction:`` or ``Refs:``, has an empty value, repeats a key, or is
+    not one contiguous block of ``Key: value`` lines (#3692). Fail-closed:
+    a delegated decision that cannot say who instructed, what they wrote,
+    and where it is tracked is refused, not recorded half-way. The route
+    layer maps this to 422.
+    """
+
+    def __init__(self, problem: str) -> None:
+        self.problem = problem
+        super().__init__(
+            f"delegated decision reason is invalid: {problem}. End the reason "
+            "with a block of three lines: 'Instructed-by: <who>', "
+            "'Instruction: \"<their words>\"', 'Refs: <issue or change ref>'"
+        )
+
+
+#: Upper bound on a decision ``reason``, shared by the REST bodies and the
+#: console form. The audit row stores the reason verbatim; the bound keeps a
+#: paste accident from landing a huge free-text blob on the ledger.
+MAX_REASON_LENGTH: Final[int] = 2000
+
+
+@dataclass(frozen=True, slots=True)
+class Delegation:
+    """Who told the approver to decide, in their own words (#3692).
+
+    Parsed from the git-trailer-style block at the end of a decision
+    ``reason`` by :func:`parse_delegation`. The approver still decides under
+    their **own** identity (``reviewed_by``); this records the other human
+    whose written instruction they acted on. Not related to the RFC 8693
+    ``principal_act`` pair, which describes the *requester's* delegation.
+    """
+
+    instructed_by: str
+    instruction: str
+    refs: tuple[str, ...]
+
+    def to_payload(self) -> dict[str, Any]:
+        """Return the JSON shape stored on the decision audit row."""
+        return {
+            "instructed_by": self.instructed_by,
+            "instruction": self.instruction,
+            "refs": list(self.refs),
+        }
+
+
+#: A reason is delegated iff any line starts with ``Instructed-by:``.
+_INSTRUCTED_BY_LINE = re.compile(r"^[ \t]*instructed-by[ \t]*:", re.IGNORECASE | re.MULTILINE)
+#: One ``Key: value`` trailer line (git trailer shape).
+_TRAILER_LINE = re.compile(r"^([A-Za-z][A-Za-z0-9-]*)[ \t]*:[ \t]*(.*)$")
+#: Quote pairs stripped from the ``Instruction:`` value.
+_QUOTE_PAIRS: Final[tuple[tuple[str, str], ...]] = (('"', '"'), ("\u201c", "\u201d"))
+
+
+def _trailer_block(reason: str) -> dict[str, str] | None:
+    """Parse the last paragraph of *reason* as ``Key: value`` trailers.
+
+    Returns a lower-cased-key dict, or ``None`` when any line of the last
+    paragraph is not a trailer line. Raises on a repeated key.
+    """
+    block: list[str] = []
+    for line in reversed(reason.strip().splitlines()):
+        if not line.strip():
+            break
+        block.append(line.strip())
+    trailers: dict[str, str] = {}
+    for line in reversed(block):
+        match = _TRAILER_LINE.match(line)
+        if match is None:
+            return None
+        key = match.group(1).lower()
+        if key in trailers:
+            raise DelegatedReasonInvalidError(f"the {match.group(1)}: line appears more than once")
+        trailers[key] = match.group(2).strip()
+    return trailers
+
+
+def _unquote(value: str) -> str:
+    for opening, closing in _QUOTE_PAIRS:
+        if len(value) >= 2 and value.startswith(opening) and value.endswith(closing):
+            return value[1:-1].strip()
+    return value
+
+
+def parse_delegation(reason: str) -> Delegation | None:
+    """Parse the delegated-decision trailers out of a decision *reason*.
+
+    Pure and deterministic (#3692). Returns ``None`` when no line starts
+    with ``Instructed-by:`` (keys are case-insensitive) -- an ordinary
+    decision. Otherwise the last paragraph of the reason must be a block of
+    ``Key: value`` lines carrying non-empty ``Instructed-by:``,
+    ``Instruction:`` and ``Refs:`` (comma-separated). Other trailer keys in
+    the block are ignored. Surrounding double quotes on the instruction are
+    removed; the words inside are kept verbatim.
+
+    Raises:
+        DelegatedReasonInvalidError: The marker is present but the block is
+            missing, malformed, or incomplete.
+    """
+    if not reason or not _INSTRUCTED_BY_LINE.search(reason):
+        return None
+    trailers = _trailer_block(reason)
+    if trailers is None or "instructed-by" not in trailers:
+        raise DelegatedReasonInvalidError(
+            "the Instructed-by:, Instruction: and Refs: lines must be one block "
+            "of 'Key: value' lines at the end of the reason, after a blank line"
+        )
+    instructed_by = trailers["instructed-by"]
+    instruction = _unquote(trailers.get("instruction", ""))
+    refs = tuple(ref.strip() for ref in trailers.get("refs", "").split(",") if ref.strip())
+    missing = [
+        name
+        for name, value in (
+            ("Instructed-by", instructed_by),
+            ("Instruction", instruction),
+            ("Refs", refs),
+        )
+        if not value
+    ]
+    if missing:
+        raise DelegatedReasonInvalidError(f"missing or empty: {', '.join(missing)}")
+    return Delegation(instructed_by=instructed_by, instruction=instruction, refs=refs)
+
+
+def _record_delegation(
+    extra: dict[str, Any],
+    delegation: Delegation | None,
+    *,
+    request: ApprovalRequest,
+    operator: Operator,
+    decision: str,
+) -> None:
+    """Add the structured delegation block to *extra* and log it (#3692).
+
+    No-op for an ordinary decision. The block rides the decision audit
+    row's payload (no column, no migration -- the #2087 break-glass
+    precedent), and the WARNING event makes a delegated decision visible
+    in the log stream the way ``approval_self_approval_break_glass`` does.
+    """
+    if delegation is None:
+        return
+    extra["delegation"] = delegation.to_payload()
+    _log.warning(
+        "approval_delegated_decision",
+        approval_request_id=str(request.id),
+        op_id=request.op_id,
+        decision=decision,
+        reviewed_by=operator.sub,
+        instructed_by=delegation.instructed_by,
+        tenant_id=str(operator.tenant_id),
+    )
 
 
 def _now() -> datetime:
@@ -752,10 +923,15 @@ async def approve_request(
             (only raised when *params* is supplied).
         PreviewBindingMissingError: The row is ``destructive``-tier but
             carries no ``preview_hash`` binding (#3197).
+        DelegatedReasonInvalidError: *reason* names an instructing human
+            (``Instructed-by:``) but its trailer block is incomplete (#3692).
     """
     request = await _load_pending_for_approval(
         session, request_id, operator=operator, params=params
     )
+    # Validate before any state change so a bad delegated reason leaves the
+    # row pending (#3692).
+    delegation = parse_delegation(reason)
 
     now = _now()
     request.status = ApprovalRequestStatus.APPROVED.value
@@ -770,6 +946,7 @@ async def approve_request(
     extra: dict[str, Any] = {"decision": "approved", "reviewed_by": operator.sub}
     if reason:
         extra["reason"] = reason
+    _record_delegation(extra, delegation, request=request, operator=operator, decision="approved")
 
     approve_audit_id = uuid.uuid4()
     await _write_audit_row(
@@ -823,6 +1000,8 @@ async def reject_request(
         UnauthorizedApprovalError: Operator lacks approvals access
             (``read_only`` without the ``approver`` capability, #3243).
         ApprovalRequestAlreadyDecidedError: Row is not ``pending``.
+        DelegatedReasonInvalidError: *reason* names an instructing human
+            (``Instructed-by:``) but its trailer block is incomplete (#3692).
     """
     _check_reviewer_role(operator)
 
@@ -833,6 +1012,7 @@ async def reject_request(
 
     if request.status != ApprovalRequestStatus.PENDING.value:
         raise ApprovalRequestAlreadyDecidedError(request_id, request.status)
+    delegation = parse_delegation(reason)
 
     now = _now()
     request.status = ApprovalRequestStatus.REJECTED.value
@@ -847,6 +1027,7 @@ async def reject_request(
     extra: dict[str, Any] = {"decision": "rejected", "reviewed_by": operator.sub}
     if reason:
         extra["reason"] = reason
+    _record_delegation(extra, delegation, request=request, operator=operator, decision="rejected")
 
     reject_audit_id = uuid.uuid4()
     await _write_audit_row(
@@ -1052,7 +1233,9 @@ async def resume_dispatch_after_approval(
     parked **direct** operator op is executed exactly once regardless of
     which surface granted it. The in-process agent-run resume path does
     not call this — it keeps the params in memory and re-dispatches from
-    there (see :mod:`meho_backplane.agent.approval_wait`).
+    there (see :mod:`meho_backplane.agent.approval_wait`). Both paths re-enter
+    a parked composite sub-op through the same
+    :func:`composite_resume_binding` helper (#3421).
 
     *params* source:
 
@@ -1103,7 +1286,7 @@ async def resume_dispatch_after_approval(
     if effective_params is None and request.execution_handle is None:
         return _resume_pre0036_denied(operator, request)
 
-    resolved_target, denied = await _rehydrate_resume_target(operator, request)
+    resolved_target, denied = await rehydrate_resume_target(operator, request)
     if denied is not None:
         return denied
 
@@ -1243,6 +1426,53 @@ def _resume_pre0036_denied(operator: Operator, request: ApprovalRequest) -> Any:
     )
 
 
+@contextmanager
+def composite_resume_binding(
+    *,
+    subop_op_id: str,
+    subop_params_hash: str,
+    resume_parent: dict[str, Any] | None,
+) -> Iterator[tuple[str, dict[str, Any]] | None]:
+    """Set up the re-entry of a parent composite for an approved sub-op park.
+
+    The one composite re-entry path both resume surfaces share (#3351, #3421):
+    the operator surface (:func:`_dispatch_resume_with_bound_context`) and the
+    in-process agent waiter
+    (:func:`~meho_backplane.agent.approval_wait.resume_or_surface_awaiting_approval`).
+    Sharing it keeps the two surfaces from drifting apart.
+
+    * ``resume_parent`` set (a composite sub-op park) — yields the parent
+      composite's ``(op_id, params)`` to re-dispatch ``_approved=True``. For the
+      block it sets
+      :data:`~meho_backplane.operations.composite.composite_resume_var` to the
+      approved sub-op's ``(op_id, params_hash)``, so that one sub-op clears its
+      gate instead of parking again. It also sets
+      :data:`~meho_backplane.operations.composite.composite_resume_scope_var`,
+      which is never consumed, so a second governed sub-op that would need its
+      own approval fails closed (``composite_resume_multi_gate_unsupported``)
+      instead of parking (#3351 review B1).
+    * ``resume_parent`` is ``None`` (a direct park) — yields ``None`` and sets
+      nothing; the caller keeps its generic re-dispatch.
+    """
+    if resume_parent is None:
+        yield None
+        return
+
+    from meho_backplane.operations.composite import (
+        composite_resume_scope_var,
+        composite_resume_var,
+    )
+
+    approved_subop = (subop_op_id, subop_params_hash)
+    resume_token = composite_resume_var.set(approved_subop)
+    scope_token = composite_resume_scope_var.set(approved_subop)
+    try:
+        yield str(resume_parent["op_id"]), cast(dict[str, Any], resume_parent["params"])
+    finally:
+        composite_resume_scope_var.reset(scope_token)
+        composite_resume_var.reset(resume_token)
+
+
 async def _dispatch_resume_with_bound_context(
     *,
     operator: Operator,
@@ -1272,6 +1502,8 @@ async def _dispatch_resume_with_bound_context(
     clears its gate and the whole governed step reproduces, instead of the
     old generic re-dispatch of the un-executable sub-op key. A direct-op park
     (``resume_parent IS NULL``) keeps the generic re-dispatch of ``op_id``.
+    The var handling lives in :func:`composite_resume_binding`, which the
+    in-process agent waiter uses too (#3421).
 
     The resume re-enters the composite under the approving reviewer, who
     auto-executes every governed sub-op (all ``dangerous`` +
@@ -1282,50 +1514,40 @@ async def _dispatch_resume_with_bound_context(
     governed sub-op would ever need its own approval, rather than re-park and
     re-run the earlier legs on a second resume (#3351 review B1).
     """
-    from meho_backplane.operations.composite import (
-        composite_resume_scope_var,
-        composite_resume_var,
-    )
     from meho_backplane.operations.dispatcher import dispatch
 
     resume_parent = (
         resume_parent_override if resume_parent_override is not None else request.resume_parent
     )
-    if resume_parent is not None:
-        dispatch_op_id = str(resume_parent["op_id"])
-        dispatch_params = cast(dict[str, Any], resume_parent["params"])
-        approved_subop = (request.op_id, request.params_hash)
-        resume_token = composite_resume_var.set(approved_subop)
-        # The scope var is NOT consumed on the sub-op match, so the fail-closed
-        # multi-gate guard in ``enforce_subop_policy`` can still tell it is
-        # inside a resume after the approved sub-op has cleared (#3351 B1).
-        scope_token = composite_resume_scope_var.set(approved_subop)
-    else:
-        dispatch_op_id = request.op_id
-        dispatch_params = effective_params
-        resume_token = None
-        scope_token = None
-
     work_ref_token = work_ref_var.set(request.work_ref)
     session_token = agent_session_id_var.set(request.agent_session_id)
     parent_token = parent_audit_id_var.set(request.request_audit_id)
+    # #3548: the approver runs the op, but the parker asked for the data and is
+    # the only one GET /approvals/{id}/result serves, so the parker owns any
+    # result handle this run spills.
+    owner_token = handle_owner_sub_var.set(request.principal_sub)
     try:
-        result = await dispatch(
-            operator=operator,
-            connector_id=request.connector_id,
-            op_id=dispatch_op_id,
-            target=resolved_target,
-            params=dispatch_params,
-            _approved=True,
-        )
+        with composite_resume_binding(
+            subop_op_id=request.op_id,
+            subop_params_hash=request.params_hash,
+            resume_parent=resume_parent,
+        ) as parent_call:
+            dispatch_op_id, dispatch_params = (
+                parent_call if parent_call is not None else (request.op_id, effective_params)
+            )
+            result = await dispatch(
+                operator=operator,
+                connector_id=request.connector_id,
+                op_id=dispatch_op_id,
+                target=resolved_target,
+                params=dispatch_params,
+                _approved=True,
+            )
     finally:
+        handle_owner_sub_var.reset(owner_token)
         parent_audit_id_var.reset(parent_token)
         agent_session_id_var.reset(session_token)
         work_ref_var.reset(work_ref_token)
-        if resume_token is not None:
-            composite_resume_var.reset(resume_token)
-        if scope_token is not None:
-            composite_resume_scope_var.reset(scope_token)
     # Persist the reduced result envelope so the originating consumer can read it
     # back (principal-scoped) and resume a non-idempotent parked op by poll
     # instead of a second submit (#3209). Reached only by the exactly-one-resumer
@@ -1335,7 +1557,7 @@ async def _dispatch_resume_with_bound_context(
     return result
 
 
-async def _rehydrate_resume_target(
+async def rehydrate_resume_target(
     operator: Operator,
     request: ApprovalRequest,
 ) -> tuple[Any, Any]:
@@ -1350,6 +1572,13 @@ async def _rehydrate_resume_target(
     since dispatching with ``target=None`` would let a typed handler that
     derives its connection from ``connector_id`` / ``params`` execute the
     approved privileged write outside the original target scope.
+
+    Shared by the operator surface (:func:`resume_dispatch_after_approval`)
+    and the in-process agent waiter's composite re-entry
+    (:mod:`meho_backplane.agent.approval_wait`, #3421). Loading by the saved
+    ``target_id`` instead of the name the caller used at park time means a
+    target renamed, or deleted and re-created under the same name, while the
+    request waited can never receive the approved write.
     """
     if request.target_id is None:
         return None, None
@@ -1791,6 +2020,43 @@ async def get_request(
     access (indistinguishable to the caller).
     """
     return await _load_for_tenant(session, request_id, tenant_id)
+
+
+async def get_decision_delegation(
+    session: AsyncSession, request: ApprovalRequest
+) -> Delegation | None:
+    """Read the delegation block off *request*'s decision audit row (#3692).
+
+    The block lives only on the ``approval.decision`` audit row's payload
+    (no column), so the single-request read views load it from there.
+    Returns ``None`` for an undecided or expired request, for an ordinary
+    decision, or when the stored block is not the expected shape
+    (fail-open: the view just omits it).
+    """
+    if request.status not in (
+        ApprovalRequestStatus.APPROVED.value,
+        ApprovalRequestStatus.REJECTED.value,
+    ):
+        return None
+    stmt = select(AuditLog.payload).where(
+        AuditLog.tenant_id == request.tenant_id,
+        AuditLog.path == "approval.decision",
+        AuditLog.payload["approval_request_id"].as_string() == str(request.id),
+    )
+    if request.request_audit_id is not None:
+        # Indexed narrowing: decision rows parent-link to the request row.
+        stmt = stmt.where(AuditLog.parent_audit_id == request.request_audit_id)
+    for payload in (await session.execute(stmt)).scalars():
+        block = payload.get("delegation") if isinstance(payload, dict) else None
+        if not isinstance(block, dict):
+            continue
+        refs = block.get("refs")
+        return Delegation(
+            instructed_by=str(block.get("instructed_by", "")),
+            instruction=str(block.get("instruction", "")),
+            refs=tuple(str(ref) for ref in refs) if isinstance(refs, list) else (),
+        )
+    return None
 
 
 async def read_approval_result(

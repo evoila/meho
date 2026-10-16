@@ -24,7 +24,12 @@ approval-gated writes (`group.create` with attributes, `group.update_attributes`
 primitive — can be bootstrapped governed. #3944 adds three **destructive**
 deletes (`user.delete`, `group.delete`, `client.delete`, taking the write
 surface to **sixteen**). Removing access when an event, a contract or a job
-ends is then audited, and a second person must approve it.
+ends is then audited, and a second person must approve it. #3851 adds
+`user.logout` (taking the write surface to **seventeen**): it ends all live
+sessions of one user, so their refresh tokens stop working at once. #3886 adds a
+fourth destructive delete, `realm.delete` (write surface **eighteen**), so a
+short-lived realm (a test run, a demo, a failed set-up) is removed through
+MEHO too, not by a direct API call.
 
 Registry v2 triple: `(product="keycloak", version="26.x",
 impl_id="keycloak-admin")`, plus the `(keycloak, "", "")` wildcard so a
@@ -42,7 +47,8 @@ fresh target with no asserted version still resolves.
   `client_update`, `client_scope_create`, `protocol_mapper_create`,
   `user_create`/`user_reset_password`, `role_mapping_assign`,
   `group_create`, `group_update_attributes`, `group_member_add`,
-  `group_member_remove`, `user_delete`, `group_delete`, `client_delete`),
+  `group_member_remove`, `user_delete`, `group_delete`, `client_delete`,
+  `user_logout`, `realm_delete`),
   the `_get_admin_json` / `_get_admin_list` GET
   helpers (object vs array responses), and the `_write_admin` mutating
   helper (POST/PUT/**DELETE**) plus the `_find_client_uuid` /
@@ -60,13 +66,15 @@ fresh target with no asserted version still resolves.
   guards (`ops_write_delete_lookup.py`) — the three destructive deletes
   (#3944). A guard raises `KeycloakDeleteRefusedError` with a stable `code`;
   `KeycloakDeleteVerificationError` means the object could still be read
-  after the DELETE.
+  after the DELETE. The realm delete (#3886) has its row in the same table
+  and its guards, approval card and handler in `ops_write_realm_delete.py`.
 - `KeycloakOp` + `READ_OPS` (`connectors/keycloak/ops_read.py`) — the
   op-metadata dataclass and the eight-op read registration table (the bind9 /
   pfSense `ops`-table precedent). `WHEN_TO_USE_BY_GROUP` maps each op
   group to its curated selection blurb.
 - `WRITE_OPS` + the write handlers (`connectors/keycloak/ops_write.py`) —
-  the nine approval-gated write ops, reusing the `KeycloakOp` dataclass.
+  the nine original approval-gated write ops plus `user.logout` (#3851),
+  reusing the `KeycloakOp` dataclass.
   Every op is `requires_approval=True`; a create treats HTTP 409 as an
   idempotent success; `user.create`/`user.reset_password` source the
   password through the credential-backend seam via
@@ -245,7 +253,7 @@ the general posture (see "Write ops" below).
 
 ## Write ops (G3.13-T4, extended by #3280)
 
-Sixteen approval-gated write ops (`requires_approval=True`), all
+Seventeen approval-gated write ops (`requires_approval=True`), all
 dispatching via the admin-auth path, all keyed on the object's **UUID**:
 
 | op_id | safety | Admin REST API |
@@ -266,6 +274,8 @@ dispatching via the admin-auth path, all keyed on the object's **UUID**:
 | `keycloak.user.delete` | destructive | `DELETE .../users/{user-id}` |
 | `keycloak.group.delete` | destructive | `DELETE .../groups/{group-id}` |
 | `keycloak.client.delete` | destructive | `DELETE .../clients/{client-uuid}` |
+| `keycloak.user.logout` | caution | `POST .../users/{user-id}/logout` |
+| `keycloak.realm.delete` | destructive | `DELETE /admin/realms/{realm}` |
 
 The group-lifecycle writes (#3280) are all `dangerous`: group attributes
 + membership drive the backplane's tenant claims (`tenant_id` /
@@ -325,6 +335,85 @@ asked for. The cap counts characters, not bytes, and applies to strings
 only; other representation keys stay unchecked
 (`additionalProperties: true`).
 
+### Updates read, merge, then write (#3941)
+
+`keycloak.client.update` and `keycloak.realm.update` take a partial
+representation. Keycloak's `PUT` on a client or a realm is **not** a real
+partial update. For some fields that are missing from the body, Keycloak
+writes its own default:
+
+- Client `PUT`: authorization services are turned off when
+  `authorizationServicesEnabled` is missing
+  (`ClientResource.updateAuthorizationSettings`). When `webOrigins` is
+  missing, Keycloak builds it from the redirect URIs
+  (`RepresentationToModel.defaultWebOrigins`). A dogfood run also saw an
+  update that sent only `{"enabled": false}` change `frontchannelLogout`
+  and the groups mapper's `multivalued` setting. In the Keycloak 26.3
+  code a missing `frontchannelLogout` keeps its current value, so the
+  exact source of that change is not known.
+- Realm `PUT`: the OAuth 2.0 device-code lifespan and polling interval and
+  the CIBA and PAR settings go back to their defaults when missing, and an
+  `attributes` map removes every realm attribute it does not list.
+
+So both ops do this (`connectors/keycloak/ops_write_merge.py`):
+
+1. `GET` the current client or realm.
+2. Put the caller's fields on top. A map field (`attributes`,
+   `smtpServer`) is merged key by key. A list field (`redirectUris`,
+   `webOrigins`, `protocolMappers`) is replaced only when the caller
+   sends it. So protocol mappers stay as they are unless the caller sends
+   them.
+3. `PUT` the full representation back.
+4. `GET` it again and compare with step 1. The result carries
+   `changed_fields` (what the caller sent), `unrequested_changes` (fields
+   that changed without being sent; a key inside a sent map shows as
+   `attributes.<key>`) and `read_back_checked`. Only field names are
+   reported, never values, so a client `secret` or SMTP password never
+   reaches the result. List order is ignored in the compare, because
+   Keycloak keeps many lists as sets. The key-by-key compare also runs
+   when the whole map is missing or `null` before or after the write; a
+   map that is not there counts as empty. So a key the caller did not
+   send that is gone after the write, or that appeared after the write,
+   is reported. A missing key never counts as equal to a key holding
+   `null`.
+
+**Limit: an update cannot remove a key inside a map.** Because maps merge
+key by key, `realm.update` cannot remove a realm attribute or an
+`smtpServer` key, and `client.update` cannot remove a client attribute.
+Leaving the key out keeps it. Sending `null` for the key does not remove
+it either: Keycloak 26.3 stores the null. To empty a list, send `[]`.
+
+The read-back is best effort: if it fails, or returns something that is
+not an object, the write already happened, so the op still returns `ok`
+with `read_back_checked: false`. A realm
+rename (a new `realm` in the representation) is read back under the new
+name.
+
+The approval preview for both ops is the generic params echo: the
+approver sees the fields the caller sent. With read-merge-write those are
+exactly the fields that will change.
+
+### User logout (#3851)
+
+`keycloak.user.logout` ends every live session of one user. Keycloak then
+rejects their refresh tokens at once. Use it when access must stop now,
+for example at the end of an event or when someone leaves.
+
+- Pass `id` (the user's UUID) or `username`. A username is looked up with
+  `_find_user_uuid` (exact match), the same as `user.reset_password`.
+- A user that does not exist raises `KeycloakUserNotFoundError`: no match
+  for the username, or a 404 from the logout call for an `id`.
+- Safe to run twice. Keycloak answers 204 whether or not the user had
+  sessions. The result is `{id, username, logged_out: true}`.
+- It reads and returns no credential. It does not change the password (that
+  is `user.reset_password`). It signs out one user only; the realm-wide
+  `POST .../logout-all` is not offered.
+- Risk level `caution`, approval required, group `user_write`. No bespoke
+  approval card: the generic params echo shows the `id` / `username`. On the
+  broadcast feed it is a plain `write` (pinned in
+  `broadcast/events.py::_WRITE_OPS`, because `.logout` is not a write suffix).
+- CLI: `meho keycloak user logout (--id|--username)`.
+
 ### Governed deletes (#3944)
 
 `keycloak.user.delete`, `keycloak.group.delete` and `keycloak.client.delete`
@@ -360,7 +449,10 @@ How one delete runs:
      An unknown sub-group count counts as "has sub-groups".
 3. **Delete, then read again.** `deleted: true` is reported only after a
    read of the object answers 404. If it can still be read, the call fails
-   with `KeycloakDeleteVerificationError`.
+   with `KeycloakDeleteVerificationError`. Only a 404 counts as absent: a
+   read that answers with something other than a JSON object (a list, a
+   string, `null`) fails with `KeycloakUnexpectedResponseError`, before and
+   after the delete.
 
 Steps 1 and 2 run in the preview builder **before** the request waits for
 approval, and again in the handler when the approved call runs (this catches
@@ -381,9 +473,49 @@ The CLI verbs `meho keycloak user|group|client delete` run the same two
 steps: without `--preview-hash` they only preview and print the hash; with
 it, the request waits for approval.
 
+### Realm delete (#3886)
+
+`keycloak.realm.delete` removes a whole realm: every user, client, group and
+session in it goes at once. It is on the same `destructive` risk level as the
+other deletes, in the `realm_write` group. To stop logins but keep the realm,
+use `keycloak.realm.update` with `enabled: false`; that can be undone.
+
+- **`realm` is required.** The op never falls back to the target's
+  `managed_realm`.
+- **Protected realms** are refused with the `protected_realm` code, before
+  the request waits for approval and again when the approved call runs:
+  - the target's `admin_realm` (default `master`);
+  - the target's `managed_realm`;
+  - the realm MEHO's own login uses: the realm in `KEYCLOAK_ISSUER_URL`, and
+    the realm in `KEYCLOAK_ADMIN_URL` when that is set. This realm is
+    refused on every Keycloak target, because MEHO cannot tell for sure that
+    a target is a different Keycloak. A realm with the same name on another
+    Keycloak cannot be deleted through MEHO.
+  - Names are compared without case.
+- **Safe to run twice.** If `GET /admin/realms/{realm}` answers 404, no
+  DELETE is sent and the result is `{realm, deleted: false, already_absent:
+  true}`.
+- **Read again after the delete.** `deleted: true` is reported only after
+  the realm read answers 404. A read that answers with something other
+  than a realm object is an error (`KeycloakUnexpectedResponseError`), not
+  proof that the realm is gone.
+- **Approval card.** `blast_radius.object` carries `{kind, resource, realm,
+  present, enabled, users, clients, groups}`. The counts come from
+  `GET .../users/count`, `GET .../groups/count` (all groups, not only the
+  top level) and the length of `GET .../clients`. The client read must
+  answer with a JSON array. Any other body is an error
+  (`KeycloakUnexpectedResponseError`), so the card is not built and
+  nothing waits for approval; it never shows `clients: 0` for a realm
+  whose clients could not be read. The children list repeats the three
+  counts. The realm representation is never echoed, so the SMTP password
+  and client secrets stay out of the card.
+
+The CLI verb is `meho keycloak realm delete --realm R`, with the same two
+steps as the other delete verbs.
+
 ### Park-time approval preview (#1857)
 
-Ten of the write ops register bespoke `proposed_effect` preview builders
+Eleven of the write ops register bespoke `proposed_effect` preview builders
 in `connectors/keycloak/ops_write_preview.py`, wired onto the per-op hook
 (`operations/_preview.py`, #1437) by an import side-effect in the package
 `__init__`. They give the approval reviewer a resource-centric view at park
@@ -401,6 +533,7 @@ use:
 | `keycloak.user.delete` | `{blast_radius}` — user name, enabled or not, groups |
 | `keycloak.group.delete` | `{blast_radius}` — name, path, member count (up to 1000), sub-group count; direct sub-groups as children |
 | `keycloak.client.delete` | `{blast_radius}` — client id, enabled or not, public or confidential; its service-account user as a child; never the secret |
+| `keycloak.realm.delete` | `{blast_radius}` — realm, enabled or not, user / client / group counts; never the realm body |
 
 The group builders surface `attribute_keys` (which attributes change,
 e.g. `tenant_id` / `tenant_role`) and echo the attribute map scrubbed —
@@ -419,10 +552,10 @@ bespoke builders are at least as strict as the generic echo they bypass: a
 anywhere in an `additionalProperties` representation) is scrubbed too, so no
 cleartext secret reaches the durable `proposed_effect` row. A Vault-sourced
 password (`password_secret_ref`) is a path, not a secret, so it is surfaced
-as `password_source: "vault"` + the ref. The other six write ops fall
+as `password_source: "vault"` + the ref. The other seven write ops fall
 through to the generic params-echo
 default. Most builders are pure (no connector I/O) and so fail-soft by
-construction. The three delete builders are not: they read the object live
+construction. The four delete builders are not: they read the object live
 (so the egress-free `preview_operation` path, which has no connector, gets
 no card from them) and raise on purpose to refuse a delete. See
 [`approvals.md`](approvals.md) "`proposed_effect` builder hook" for the
@@ -439,8 +572,9 @@ Keycloak spec quirk). The lane
 [`backend/tests/test_connectors_keycloak_spec_reconcile.py`](../../backend/tests/test_connectors_keycloak_spec_reconcile.py)
 (the #2980 harness; parse-only, runs in the required unit sweep, uniform
 skip when the shelf is unconfigured) introspects those live constants and
-asserts all 33 reconciled `METHOD:/path` op_ids (19 at #2988, +10 group
-paths at #3280, +4 delete paths at #3944) are served by the pinned
+asserts all 37 reconciled `METHOD:/path` op_ids (19 at #2988, +10 group
+paths at #3280, +4 delete paths at #3944, +1 user logout path at #3851,
++3 realm-delete paths at #3886) are served by the pinned
 `keycloak-26.3` shelf spec (`keycloak-admin-openapi.json` — the vendor's
 Admin REST API OpenAPI at the lab's deployed 26.3.3, from Maven Central
 `org.keycloak:keycloak-api-docs-dist:26.3.3`, Apache-2.0). Two dispatched
@@ -485,8 +619,8 @@ Resolved through `resolve_realm_config`, which tolerates a missing
 - `keycloak.idp.create` (identity-provider federation) is deferred — not
   exercised by the bootstrap scripts (#1406). A future task can add it
   under the same registrar walk.
-- Object deletes cover users, groups and clients (#3944). There is no
-  realm or client-scope delete.
+- Object deletes cover users, groups and clients (#3944) and whole realms
+  (#3886). There is no client-scope delete.
 - No logout-revoke on `aclose` — admin access tokens are short-lived;
   revoke-on-close is deferred (same posture as NSX / vRLI).
 - `/admin/serverinfo` is undocumented (though stable across 26.x); the
@@ -497,6 +631,8 @@ Resolved through `resolve_realm_config`, which tolerates a missing
 - Issue: https://github.com/evoila/meho/issues/1393
 - Group-lifecycle write ops: https://github.com/evoila/meho/issues/3280
 - Governed user / group / client deletes: https://github.com/evoila/meho/issues/3944
+- User session logout: https://github.com/evoila/meho/issues/3851
+- Governed realm delete: https://github.com/evoila/meho/issues/3886
 - Credential whitespace strip + token error_description: https://github.com/evoila/meho/issues/1474
 - Parent initiative: https://github.com/evoila/meho/issues/1388
 - Keycloak token endpoint + client_credentials grant:

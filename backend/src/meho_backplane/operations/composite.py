@@ -573,8 +573,10 @@ async def enforce_subop_policy(
         publish_approval_event,
     )
     from meho_backplane.operations.dispatcher import (
+        _audit_denied_and_return,
         _build_proposed_effect,
         _destructive_binding_refusal,
+        _preflight_denied_refusal,
     )
 
     started = time.monotonic()
@@ -680,6 +682,26 @@ async def enforce_subop_policy(
             )
             if refusal is not None:
                 return refusal
+
+        # #3542: same refusal as the dispatcher park — a sub-op whose
+        # permission preflight says the write will be denied does not park.
+        # The parent composite returns this result as is and the dispatcher
+        # writes no audit row for a handler-returned result, so the refusal
+        # is recorded here, on the sub-op's path, linked to the parent's
+        # audit id. Same writer as the dispatcher park.
+        refusal = _preflight_denied_refusal(
+            op_id=op_id, proposed_effect=proposed_effect, duration_ms=duration_ms
+        )
+        if refusal is not None:
+            return await _audit_denied_and_return(
+                refusal,
+                operator=operator,
+                descriptor=descriptor,
+                target=target,
+                params=params,
+                params_hash=params_hash,
+                duration_ms=duration_ms,
+            )
 
         run_id = current_agent_run_id_var.get()
         sessionmaker = get_sessionmaker()

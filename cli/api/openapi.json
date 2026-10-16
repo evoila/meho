@@ -10052,7 +10052,7 @@
           "approvals"
         ],
         "summary": "Approve Approval Request",
-        "description": "Approve a pending request and re-dispatch the original operation.\n\nThe ``params`` body must be the original params unchanged; the service\nre-hashes them and rejects with 422 on a mismatch. On a successful\napproval the original dispatch is re-executed and the result returned.\n\nAsync governed dispatch (#3079): with ``async: true`` the decision is\nstill recorded + audited synchronously, but the resumed op is dispatched\non a background task and the route returns HTTP 202 + a durable run\nhandle (``{\"run_id\", \"status\": \"pending\", \"async\": true}``) instead of\nblocking for the resumed op's full duration. The resume runs through the\nsame exactly-one-resumer claim + policy bypass + audit path the inline\nresume uses. Default (``async`` absent / false) is byte-identical to the\npre-#3079 inline resume below.\n\nHTTP status codes:\n\n* 200 \u2014 approved + re-dispatched successfully (sync).\n* 202 \u2014 approved; resume launched in the background (``async: true``).\n* 403 \u2014 caller lacks approvals-plane access (neither ``operator`` role\n  nor the ``approver`` capability, #3243), **or** the approver is the\n  requester and self-approval break-glass is disabled (G11.7-T1 #1401).\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 request is already decided.\n* 422 \u2014 params hash mismatch.",
+        "description": "Approve a pending request and re-dispatch the original operation.\n\nThe ``params`` body must be the original params unchanged; the service\nre-hashes them and rejects with 422 on a mismatch. On a successful\napproval the original dispatch is re-executed and the result returned.\n\nAsync governed dispatch (#3079): with ``async: true`` the decision is\nstill recorded + audited synchronously, but the resumed op is dispatched\non a background task and the route returns HTTP 202 + a durable run\nhandle (``{\"run_id\", \"status\": \"pending\", \"async\": true}``) instead of\nblocking for the resumed op's full duration. The resume runs through the\nsame exactly-one-resumer claim + policy bypass + audit path the inline\nresume uses. Default (``async`` absent / false) is byte-identical to the\npre-#3079 inline resume below.\n\nHTTP status codes:\n\n* 200 \u2014 approved + re-dispatched successfully (sync).\n* 202 \u2014 approved; resume launched in the background (``async: true``).\n* 403 \u2014 caller lacks approvals-plane access (neither ``operator`` role\n  nor the ``approver`` capability, #3243), **or** the approver is the\n  requester and self-approval break-glass is disabled (G11.7-T1 #1401).\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 request is already decided.\n* 422 \u2014 params hash mismatch, a reason over 2000 characters, or a\n  delegated reason (``Instructed-by:``) missing ``Instruction:`` /\n  ``Refs:`` (#3692).",
         "operationId": "approve_approval_request_api_v1_approvals__request_id__approve_post",
         "parameters": [
           {
@@ -10116,7 +10116,7 @@
           "approvals"
         ],
         "summary": "Reject Approval Request",
-        "description": "Reject a pending request; the original operation is not executed.\n\nHTTP status codes:\n\n* 200 \u2014 rejected successfully.\n* 403 \u2014 caller lacks approvals-plane access (neither ``operator`` role\n  nor the ``approver`` capability, #3243).\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 request is already decided.",
+        "description": "Reject a pending request; the original operation is not executed.\n\nHTTP status codes:\n\n* 200 \u2014 rejected successfully.\n* 403 \u2014 caller lacks approvals-plane access (neither ``operator`` role\n  nor the ``approver`` capability, #3243).\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 request is already decided.\n* 422 \u2014 a reason over 2000 characters, or a delegated reason\n  (``Instructed-by:``) missing ``Instruction:`` / ``Refs:`` (#3692).",
         "operationId": "reject_approval_request_api_v1_approvals__request_id__reject_post",
         "parameters": [
           {
@@ -10445,7 +10445,7 @@
           "service-principal-grants"
         ],
         "summary": "Revoke Grant",
-        "description": "Revoke (soft-delete) a standing grant.\n\nReturns 204 on success; 404 when the grant is absent, already revoked,\nor belongs to another tenant. Audited via the audit middleware.",
+        "description": "Revoke (soft-delete) a standing grant.\n\n``reason`` is optional, so a revoke without one stays valid. When given,\nit is stored as ``revoked_reason`` on the grant row and as ``reason`` in\nthe audit row payload, the same way create records its ``reason``.\nIt is a query parameter, not a body, because a DELETE body is not well\nsupported by HTTP clients and proxies.\n\nReturns 204 on success; 404 when the grant is absent, already revoked,\nor belongs to another tenant. Audited via the audit middleware.",
         "operationId": "revoke_grant_api_v1_service_principals_grants__grant_id__delete",
         "parameters": [
           {
@@ -10457,6 +10457,20 @@
               "format": "uuid",
               "title": "Grant Id"
             }
+          },
+          {
+            "name": "reason",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048,
+              "nullable": true,
+              "description": "Optional reason for the revoke. Stored on the grant and the audit row.",
+              "title": "Reason"
+            },
+            "description": "Optional reason for the revoke. Stored on the grant and the audit row."
           },
           {
             "name": "authorization",
@@ -22832,6 +22846,10 @@
           "reviewer_context": {
             "$ref": "#/components/schemas/ReviewerContextView",
             "nullable": true
+          },
+          "delegation": {
+            "$ref": "#/components/schemas/DelegationView",
+            "nullable": true
           }
         },
         "type": "object",
@@ -22909,8 +22927,9 @@
           },
           "reason": {
             "type": "string",
+            "maxLength": 2000,
             "title": "Reason",
-            "description": "Optional human-readable approval reason (recorded in the audit row).",
+            "description": "Optional human-readable approval reason (recorded in the audit row). End it with Instructed-by: / Instruction: / Refs: lines when another human instructed this decision.",
             "default": ""
           },
           "async": {
@@ -26531,6 +26550,14 @@
             "type": "array",
             "nullable": true,
             "title": "Op Allowlist"
+          },
+          "safety_overlay": {
+            "items": {
+              "$ref": "#/components/schemas/SafetyOverlayEntry"
+            },
+            "type": "array",
+            "nullable": true,
+            "title": "Safety Overlay"
           }
         },
         "additionalProperties": false,
@@ -27374,8 +27401,9 @@
           },
           "reason": {
             "type": "string",
+            "maxLength": 2000,
             "title": "Reason",
-            "description": "Optional rationale recorded on the decision audit row.",
+            "description": "Optional rationale recorded on the decision audit row. End it with Instructed-by: / Instruction: / Refs: lines when another human instructed this decision.",
             "default": ""
           }
         },
@@ -27468,6 +27496,33 @@
         ],
         "title": "DeclareCapabilitiesRequest",
         "description": "Replace-all intake for the capability declaration (the full surface set).\n\nA declaration is the add-on's *complete* current surface set: persisting\nit replaces any prior declaration wholesale, so a capability dropped from\nthe list is deactivated and leaves no dead surface. A ``(kind, name)``\nlisted twice is a malformed declaration and is rejected loudly rather\nthan silently de-duplicated."
+      },
+      "DelegationView": {
+        "properties": {
+          "instructed_by": {
+            "type": "string",
+            "title": "Instructed By"
+          },
+          "instruction": {
+            "type": "string",
+            "title": "Instruction"
+          },
+          "refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Refs"
+          }
+        },
+        "type": "object",
+        "required": [
+          "instructed_by",
+          "instruction",
+          "refs"
+        ],
+        "title": "DelegationView",
+        "description": "Who told the approver to decide, read off the decision audit row (#3692).\n\nPresent only when the decision ``reason`` ended with the\n``Instructed-by:`` / ``Instruction:`` / ``Refs:`` trailer block. The\napprover is still ``reviewed_by``; ``instructed_by`` is the other human\nwhose written instruction they acted on."
       },
       "DeprecateTemplateResponse": {
         "properties": {
@@ -31132,8 +31187,9 @@
         "properties": {
           "reason": {
             "type": "string",
+            "maxLength": 2000,
             "title": "Reason",
-            "description": "Optional human-readable rejection reason (recorded in the audit row).",
+            "description": "Optional human-readable rejection reason (recorded in the audit row). End it with Instructed-by: / Instruction: / Refs: lines when another human instructed this decision.",
             "default": ""
           }
         },
@@ -31528,7 +31584,7 @@
           "query": {
             "$ref": "#/components/schemas/ResultQuerySpec",
             "nullable": true,
-            "description": "Optional structured query. When present, the handle is queried server-side (filter / select / group_by / aggregate / order_by / limit) as one bounded read-only SELECT and `offset` / `limit` are ignored. Every referenced field must be a column on the handle; there is no raw-SQL argument."
+            "description": "Optional structured query. When present, the handle is queried server-side (filter / select / group_by / aggregate / order_by / limit) as one bounded read-only SELECT and `offset` / `limit` are ignored. Every referenced field must be a column on the handle; there is no raw-SQL argument. For a document handle, or for the fields a rows handle left out of its inline summary, send only `path` (an RFC 6901 JSON Pointer); an array value then pages with `offset` / `limit`."
           }
         },
         "additionalProperties": false,
@@ -31592,12 +31648,19 @@
             "nullable": true,
             "title": "Limit",
             "description": "Max output rows. Omitted or above the server ceiling clamps to the ceiling (500); the result flags `truncated` when more rows existed."
+          },
+          "path": {
+            "type": "string",
+            "maxLength": 1024,
+            "nullable": true,
+            "title": "Path",
+            "description": "RFC 6901 JSON Pointer into a document handle (for example `/status/conditions/0`; `\"\"` is the whole document), or into the top-level fields a rows handle left out of its inline summary (`omitted_scalar_count`). Reads one value; an array value pages with the call's `offset` / `limit`. Cannot be combined with `filter`, `select`, `group_by`, `aggregate`, `order_by`, or `limit`."
           }
         },
         "additionalProperties": false,
         "type": "object",
         "title": "ResultQuerySpec",
-        "description": "The structured, validated query arguments for a single handle.\n\nEvery field is optional: an empty spec compiles to ``SELECT * FROM\nresult LIMIT <max>`` \u2014 a full read-back capped at the output ceiling.\nThe list caps (``filter`` \u2264 10, ``aggregate`` \u2264 8, ``group_by`` \u2264 4,\n``order_by`` \u2264 4, ``select`` \u2264 64, and each ``IN`` value list \u2264 1000)\nand the operator/aggregate allow-lists are enforced here, at construction;\nfield-vs-schema validation needs the handle's columns and happens in\n:func:`compile_query`."
+        "description": "The structured, validated query arguments for a single handle.\n\nEvery field is optional: an empty spec compiles to ``SELECT * FROM\nresult LIMIT <max>`` \u2014 a full read-back capped at the output ceiling.\nThe list caps (``filter`` \u2264 10, ``aggregate`` \u2264 8, ``group_by`` \u2264 4,\n``order_by`` \u2264 4, ``select`` \u2264 64, and each ``IN`` value list \u2264 1000)\nand the operator/aggregate allow-lists are enforced here, at construction;\nfield-vs-schema validation needs the handle's columns and happens in\n:func:`compile_query`.\n\n``path`` is the other read: an RFC 6901 pointer into a document handle,\nor into the top-level fields a rows handle left out of its inline\nsummary. It is never compiled to SQL, so it cannot be combined with any\nrelational field (checked here, at construction)."
       },
       "RetireChecklistReport": {
         "properties": {
@@ -32500,6 +32563,46 @@
         ],
         "title": "SafetyChangeModel",
         "description": "Pydantic projection of\n:class:`~meho_backplane.operations.ingest.register_ingested.SafetyChange`.\n\nOne op whose persisted ``safety_level`` a re-ingest overwrote with\na different value (#2702), plus every Sensor pinning it \u2014 those\nsensors keep auto-executing the op on schedule under the stale\ncreate-time ``safe`` assumption until the operator re-audits them."
+      },
+      "SafetyOverlayEntry": {
+        "properties": {
+          "method": {
+            "type": "string",
+            "maxLength": 16,
+            "minLength": 1,
+            "title": "Method"
+          },
+          "path": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Path"
+          },
+          "safety_level": {
+            "type": "string",
+            "enum": [
+              "safe",
+              "caution",
+              "dangerous",
+              "destructive"
+            ],
+            "title": "Safety Level"
+          },
+          "requires_approval": {
+            "type": "boolean",
+            "title": "Requires Approval",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "method",
+          "path",
+          "safety_level"
+        ],
+        "title": "SafetyOverlayEntry",
+        "description": "One catalog rule that raises the safety of matching ingested ops.\n\nA catalog row that declares :attr:`ConnectorSpecEntry.safety_overlay`\nlets an operator raise the safety level and turn on approval for\nchosen operations of that spec, without changing the ingest code.\n``method`` is matched exactly (upper-cased). ``path`` is a\nshell-style glob matched case-sensitively against the spec path\ntemplate with any query string removed; ``*`` also matches ``/``.\nThe rule only ever raises: it never lowers a stricter level and never\nclears an approval requirement (see\n:func:`meho_backplane.operations.ingest.safety_floors.apply_safety_floor`)."
       },
       "ScheduledTriggerCreate": {
         "properties": {
@@ -33468,6 +33571,11 @@
             "type": "string",
             "nullable": true,
             "title": "Revoked By Sub"
+          },
+          "revoked_reason": {
+            "type": "string",
+            "nullable": true,
+            "title": "Revoked Reason"
           }
         },
         "type": "object",
@@ -33485,10 +33593,11 @@
           "created_at",
           "expires_at",
           "revoked_at",
-          "revoked_by_sub"
+          "revoked_by_sub",
+          "revoked_reason"
         ],
         "title": "ServiceGrantRead",
-        "description": "Row shape every accessor returns.\n\n``from_attributes=True`` allows direct construction from an ORM row.\nExposes ``revoked_at`` / ``revoked_by_sub`` so callers can tell a live\ngrant from a revoked one in the history."
+        "description": "Row shape every accessor returns.\n\n``from_attributes=True`` allows direct construction from an ORM row.\nExposes ``revoked_at`` / ``revoked_by_sub`` / ``revoked_reason`` so\ncallers can tell a live grant from a revoked one in the history, and why\nit was revoked."
       },
       "ShowTemplateResponse": {
         "properties": {

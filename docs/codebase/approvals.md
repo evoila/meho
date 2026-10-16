@@ -103,14 +103,56 @@ CLI, UI, audit, and broadcast views.
 Parking fails closed before its transaction commits if the key is missing or
 not a valid Fernet key. The key is deliberately independent of
 `UI_SESSION_ENCRYPTION_KEY`: console enablement must never decide credential
-custody. Configure Helm with an existing Kubernetes Secret:
+custody.
 
-```yaml
-approvalHandoff:
-  enabled: true
-  secretName: meho-approval-handoff
-  secretKey: approval_handoff_encryption_key
-```
+### Required: set the custody key (#3712)
+
+**`APPROVAL_HANDOFF_ENCRYPTION_KEY` is REQUIRED** on every deployment where a
+credential-write operation (for example a Vault KV write) may wait for
+approval. This holds for human and service callers alike. Without a valid key,
+MEHO denies the operation instead of letting it wait, with the message
+`credential-write approval custody is unavailable; configure a valid
+APPROVAL_HANDOFF_ENCRYPTION_KEY before parking this operation`. The Helm chart
+keeps `approvalHandoff` off by default, so an install with unchanged values has
+no key. Since v0.35.2 such an install denies these operations.
+
+Not affected: a credential-write that runs at once under a standing grant (it
+never waits, so it needs no key), and approvals that were already waiting
+before the v0.35.2 upgrade.
+
+Check the state before the first denial: `GET /ready` shows
+`features.approval_custody` with `custody` set to `configured`, `missing` or
+`malformed`. The key value never appears there. `helm install` and
+`helm upgrade` also print a warning while `approvalHandoff.enabled` is false.
+
+Set it up in three steps:
+
+1. Create a Fernet key:
+
+   ```bash
+   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+   ```
+
+2. Store it in a Kubernetes Secret. Pipe it in, so the key stays out of shell
+   history and the process list:
+
+   ```bash
+   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode(), end='')" \
+     | kubectl -n <namespace> create secret generic meho-approval-handoff \
+         --from-file=approval_handoff_encryption_key=/dev/stdin
+   ```
+
+   Or sync the Secret through your usual secret manager (for example an
+   ExternalSecret).
+
+3. Point the chart at the Secret and run `helm upgrade`:
+
+   ```yaml
+   approvalHandoff:
+     enabled: true
+     secretName: meho-approval-handoff
+     secretKey: approval_handoff_encryption_key
+   ```
 
 The chart uses `secretKeyRef`; never place the key in `values.yaml`. Rotate by
 creating a new Fernet key in the referenced Secret and restarting all
@@ -427,6 +469,82 @@ routed to `NEEDS_APPROVAL`, re-running the gate on resume would re-queue
 the call instead of executing it, so the bypass is what lets the
 approved op run.
 
+## Delegated decisions: the reason-line convention (#3692)
+
+Sometimes an approver decides because **another person told them to, in
+writing**. The approver still decides under their own identity
+(`reviewed_by`). The decision reason records the other person, their
+words, and where the work is tracked. It uses three `Key: value` lines
+at the end of the reason, in the style of git trailers
+(`Signed-off-by:`):
+
+```text
+Ran the delete after sign-off in the change window.
+
+Instructed-by: lead@example.com
+Instruction: "please run the cleanup tonight"
+Refs: #12, CHG-9
+```
+
+Rules (`parse_delegation` in `operations/approval_queue.py`, pure and
+deterministic):
+
+- A reason is **delegated** when any line starts with `Instructed-by:`.
+  Keys are case-insensitive.
+- The trailer lines must be the **last paragraph** of the reason (after
+  a blank line), and every line in that paragraph must be `Key: value`.
+  Other keys in the block are ignored.
+- `Instructed-by:`, `Instruction:` and `Refs:` must all be present and
+  non-empty. `Refs:` is comma-separated. Surrounding double quotes on
+  the instruction are removed; the words inside are kept as written.
+- A key may appear only once.
+
+If a delegated reason breaks a rule, `DelegatedReasonInvalidError` is
+raised **before** any state change, so the row stays `pending` and no
+decision audit row is written. Both `approve_request` and
+`reject_request` call the parser, so every decide surface gets the same
+check:
+
+| Surface | Refusal |
+|---|---|
+| REST `/approve`, `/reject`, `/decide` | 422, `detail` starts with `delegated_reason_invalid:` |
+| Console approve / deny | the modal re-renders with a 422 banner naming what is missing |
+| CLI `meho approvals approve` / `reject --reason` | posts to `/decide`; prints the 422 body |
+
+**On the ledger.** There is no new column and no migration (the same
+choice as the #2087 break-glass audit). A valid delegated decision adds
+a `delegation` object to the `approval.decision` audit row's payload,
+next to the verbatim `reason`:
+
+```json
+{"decision": "approved", "reviewed_by": "<approver sub>",
+ "reason": "Ran the delete ...\n\nInstructed-by: ...",
+ "delegation": {"instructed_by": "lead@example.com",
+                "instruction": "please run the cleanup tonight",
+                "refs": ["#12", "CHG-9"]}}
+```
+
+It also emits the WARNING log event `approval_delegated_decision`
+(`approval_request_id`, `op_id`, `decision`, `reviewed_by`,
+`instructed_by`, `tenant_id`). Find delegated decisions on the ledger by
+filtering `approval.decision` rows whose payload has a `delegation` key.
+
+**On the read surfaces.** `get_decision_delegation` reads the block back
+from the decision audit row. `GET /api/v1/approvals/{id}` carries it as
+the optional `delegation` field of `ApprovalRequestView` (the list view
+leaves it `null`). `meho approvals show` and the `approve` / `reject`
+summary print `Instructed by` / `Instruction` / `Refs`. The console shows
+the same three lines on the decided modal and on the outcome card right
+after a decision (`project_request_to_view(row, delegation)`).
+
+**Reason length.** All three REST bodies (`ApproveRequestBody`,
+`RejectRequestBody`, `DecideRequestBody`) and the console form cap
+`reason` at `MAX_REASON_LENGTH` (2000 characters). A longer reason is a
+422.
+
+`work_ref` is unchanged: it stays the requester-side change ref. The
+`Refs:` values may match it, but they do not have to.
+
 ## Single-operator tenants: use an agent-requester, not break-glass (#1738)
 
 The self-approval guard enforces requester != approver on the stable
@@ -659,9 +777,45 @@ The response (`ApprovalResultView`) carries `status`, `resumed`
 (`resumed_at is not None`), `reviewed_by` / `decided_at`, and `result` (the
 captured envelope, or `null` while unready). A consumer polls until
 `status == "approved"` and `result` is populated, then resumes by poll on the
-returned task id. `resume_result` is **internal to this surface** — like
+returned task id. When the approved run failed on an upstream vim fault,
+`result.extras.upstream_fault` carries the fault type and full faultstring
+(#3567), so the owner can see why without the approver-owned
+flight-recorder handle. `resume_result` is **internal to this surface** — like
 `params` it is never projected onto the default read view (`_view`) or a
 broadcast frame.
+
+### Who owns a result handle from an approved run (#3548)
+
+The approved op runs under the **approver's** `Operator`. Before #3548 a
+large result spilled into a handle owned by the approver's `sub`. But
+`/result` serves only the **parker**, so the parker got an envelope with a
+handle it could not open (`handle_not_found`).
+
+Now the parker owns it:
+
+- `_dispatch_resume_with_bound_context` binds
+  `operations.reducer.handle_owner_sub_var` to `request.principal_sub` for
+  the run (token reset in `finally`).
+- `dispatcher._reduce_or_error` uses that value as
+  `reducer_context["operator_sub"]` when it is set. Otherwise it uses the
+  dispatching operator's `sub`, as before.
+- The tenant does not change. The approver can only load rows from its own
+  tenant, so the parker's tenant is the same.
+- Every spill in the run follows the binding, including the child ops of a
+  resumed multi-step (composite) op.
+
+What this means:
+
+- One owner per handle. The parker can page and query it with
+  `result_query`. Any other principal still misses, **including the
+  approver**. The approver still sees the summary and sample rows inline. The
+  approver did not ask for the data.
+- The audit model is unchanged. The run's audit row still names the
+  approver as the actor. The parker's `result_query` reads run under the
+  parker, so they match the parker's `approval.result` row.
+- Only the operator-surface resume does this. A normal dispatch, and the
+  in-process agent-run resume (it already runs as the parking agent), keep
+  handles owned by the caller.
 
 **Relation to the #3027 add-on step event.** `publish_approval_event`
 already durably records the *decision* (`approval.approved` / `.rejected`)
@@ -1069,8 +1223,29 @@ hooks and merges them: the preview (or the identifier-only default when
 there is no preview) is the base, the preflight result is attached
 under `proposed_effect["permission_preflight"]` when it fired, and the
 catalog `safety_level` (#1855, above) is stamped on top. Both hooks are
-opt-in and fail-soft — a preflight that raises degrades to no banner;
-the park always proceeds.
+opt-in and fail-soft — a preflight that raises degrades to no banner and
+the park proceeds.
+
+**A will-be-denied verdict refuses the park (#3542).** When the preflight
+returns `will_be_denied: true`, MEHO does not write an approval row.
+`dispatcher._preflight_denied_refusal` runs after `_build_proposed_effect`
+and the destructive-tier checks, at both park points (`_handle_needs_approval`
+and the composite sub-op seam `composite.enforce_subop_policy`). It
+returns `status="denied"` with `error_code="write_capability_denied"` and
+`extras` `path` / `granted` / `required` / `reason` / `doc_ref` (the write
+policy, `connector-vault-policy.md#6-kv-v2-write-surface`). So no person
+spends an approval on a write the identity cannot perform. The caller adds
+the write grant and calls again. Both park points still write one `denied`
+audit row for the attempt on the refused op's own path (the refusal details
+ride under `payload["error"]`) and publish one `denied` broadcast event, the
+same as an ordinary policy denial. They share one writer,
+`dispatcher._audit_denied_and_return`. For a refused step inside a
+multi-step operation the row is written by the sub-op gate and carries the
+parent operation's audit id in `parent_audit_id`. This matters because the
+parent returns the step's result as is, and the dispatcher writes no audit
+row for a result a handler returns. Before #3542 the verdict was only a
+warning and the op parked anyway; rows parked then still carry
+`write_capability_warning`, which the console modal shows as a banner.
 
 The KV-v2 write ops (`vault.kv.put` / `vault.kv.patch` /
 `vault.kv.delete`) register a preflight that probes
@@ -1246,7 +1421,8 @@ free-text reason (an `audit_log` read deferred to a follow-up).
 badge (mirroring the ops-launcher `safety_badge` mold — error for
 `dangerous`, warning for `caution`) + an `op_class` chip in the header;
 a `role="alert"` warning banner when `write_capability_warning` is set
-(#2331); an error banner when `preview_unavailable` is true, carrying
+(#2331; new parks with that verdict are refused since #3542, so only older
+rows carry it); an error banner when `preview_unavailable` is true, carrying
 `preview_error` (#1628); a reason-keyed notice when `preview_populated`
 is false (`credential_write_redacted` → elevated-risk redaction copy,
 `connector_did_not_populate` → a neutral "no preview" note, #2332); and a
@@ -1464,6 +1640,68 @@ composite's own dispatch audit row. This is enforced in
 
 A direct (non-composite) park is unchanged — `resume_parent` is NULL, so
 the resume keeps the generic re-dispatch of the stored `op_id`.
+
+#### Both resume surfaces read `resume_parent` (#3421)
+
+Two code paths can resume a request that waits for approval, and both
+handle a composite (multi-step operation) sub-op the same way:
+
+- the operator surface, `resume_dispatch_after_approval`
+  (`operations/approval_queue.py`);
+- the in-process agent waiter, `_resume_approved_or_already_resumed`
+  (`agent/approval_wait.py`).
+
+Both call one helper, `composite_resume_binding` in
+`operations/approval_queue.py`. When the row has a `resume_parent`, the
+helper returns the parent composite's `(op_id, params)` and sets
+`composite_resume_var` and `composite_resume_scope_var` to the approved
+sub-op while the parent runs again. When `resume_parent` is NULL it returns
+`None` and sets nothing. Because both paths share it, they cannot drift
+apart. `test_operator_and_agent_surfaces_resume_the_same_row_identically`
+checks that both paths run the same row the same way.
+
+What the agent waiter does:
+
+- **Composite sub-op waiting for approval.** It runs the parent composite
+  again (`_approved=True`) with the row's `connector_id`, the parent `op_id`
+  and the parent params. It keeps the rest of the agent's original call
+  (`work_ref`, …). The approved sub-op clears its gate and runs once. Before
+  #3421 the waiter re-sent the agent's call without clearing the sub-op, so
+  the sub-op created a second request and nothing ran.
+- **Target check.** The re-run uses the target the row saved by id
+  (`rehydrate_resume_target`, the same check the operator surface runs), not
+  the target name from the agent's original call. While the request waited,
+  that name may have moved to another target: the target was renamed, or
+  deleted and a new one created with the same name. Loading by id means the
+  approved write can only run against the original target. If the saved
+  target no longer resolves (soft-deleted or revoked), the waiter returns a
+  `denied` envelope and runs nothing. This check runs before the
+  one-resumer claim, so a refused resume leaves the claim free.
+  Covered by `test_composite_resume_uses_saved_target_when_name_was_reassigned`
+  and `test_composite_resume_fails_closed_when_saved_target_deleted_and_name_reused`
+  (unit) and the two `test_agent_waiter_composite_resume_*` tests (end to
+  end).
+- **Direct request (no `resume_parent`).** It runs the agent's original
+  `call_arguments` again unchanged, as before, including the target name.
+- **Credential-write sub-op.** The row stores only the parent `op_id`; the
+  parent params live in the encrypted custody copy. For a composite sub-op
+  the claim winner consumes that copy to get the parent params. For a direct
+  request it still discards the copy.
+
+One difference stays on purpose: the agent waiter re-enters the composite
+as the **agent**, not as the reviewer. So every other governed sub-op is
+checked against the agent's own grants. If one would need its own approval,
+the multi-gate guard above fails closed
+(`composite_resume_multi_gate_unsupported`) on the agent path too. If the
+agent has no grant for it, that sub-op is denied.
+
+Note: every shipped governed composite is `requires_approval=True` at the
+top level, so an agent's first call makes the composite itself wait for
+approval (`resume_parent` NULL). A sub-op request with `resume_parent` set
+happens later, inside the resumed composite. Today the agent waiter does not
+wait on that second request; an operator surface resumes it. The waiter's
+composite branch makes the agent path correct whenever it does resume such
+a row.
 
 ## MCP elicitation URL-mode (forward-looking)
 

@@ -19,24 +19,47 @@ G11.2 approval substrate established:
 The helper here closes that gap. It subscribes to the per-tenant Valkey stream
 (``meho:feed:{tenant_id}`` — the same stream the SSE feed and the
 ``meho_broadcast_watch`` tool read from) and blocks until it sees the
-``approval.{approved,rejected}`` event for *this* request, or the timeout
-elapses. The caller (the agent's wrapped ``call_operation`` tool) then either
-re-dispatches with ``_approved=True`` (approved), reports the rejection back
-to the model (rejected), or surfaces a timeout as a structured tool result the
+``approval.{approved,rejected,expired}`` event for *this* request, or the
+stored approval row shows a decision, or the timeout elapses. The caller (the
+agent's wrapped ``call_operation`` tool) then either re-dispatches with
+``_approved=True`` (approved), reports the rejection or expiry back to the
+model (no dispatch), or surfaces a timeout as a structured tool result the
 agent can reason about.
 
-Why broadcast and not DB polling
-================================
+Broadcast first, stored row as the fallback (#3732)
+===================================================
 
-The acceptance criteria explicitly require the agent runtime to "subscribe (via
-the existing broadcast SSE/watch substrate)" — broadcast already exists, runs
-sub-second latency (vs. a polling interval), and is the same channel the UI
-wall-monitor consumes, so the agent learns of decisions in lockstep with human
-operators. The substrate is fail-open at the publish side (a broadcast outage
-never blocks the durable decision), so the agent-side wait must tolerate a
-missed event — it does, via the timeout: if the broadcast happens to drop the
-event the agent run fails the wait cleanly with a structured ``"timeout"``
-return; the operator can re-issue or the run can be cancelled.
+The broadcast is the fast path: sub-second latency, and the same channel the
+UI wall-monitor consumes, so the agent learns of decisions in lockstep with
+human operators. But the broadcast is fail-open at the publish side (an
+outage never blocks the durable decision), and an event can be missed. So
+the stored :class:`~meho_backplane.db.models.ApprovalRequest` row, read
+tenant-scoped through
+:func:`~meho_backplane.operations.approval_queue.get_request`, is the
+authority. The wait reads it:
+
+* once before the first ``XREAD`` (a decision that landed before the wait
+  started is not missed);
+* after every notifier error, and at least every
+  :data:`_DURABLE_RECHECK_SECONDS` while the row stays ``pending``;
+* once more before it returns ``"timeout"``.
+
+Each ``XREAD`` is also cut off locally (:func:`asyncio.timeout`) at the
+moment the next stored-row read is due: the recheck boundary or the
+deadline, whichever comes first. Its server-side ``BLOCK`` window ends
+one reply grace before that moment, so a healthy reply lands in time. A
+Valkey that accepts the command but never answers would otherwise hold
+the wait for the client's full socket timeout, well past the next
+stored-row read and the deadline. A cut-off ``XREAD`` counts as a
+notifier error: the row is read at once.
+
+So a ``"timeout"`` means the row was still ``pending`` (or could not be
+read) at the deadline. This is a bounded fallback, not a polling service:
+one primary-key read per interval, only while an agent waits.
+
+An approval status is not an execution result. ``approved`` only allows the
+caller to try the existing exactly-one-resumer claim and re-dispatch; the
+dispatcher's envelope reports what actually happened.
 
 Why ``XREAD BLOCK`` and not the high-level ``watch`` tool
 =========================================================
@@ -53,40 +76,44 @@ Cursor discipline
 =================
 
 ``XREAD`` reads entries strictly past the cursor it's given (last-id-seen
-exclusive). The wait starts the cursor at "now" — the ``approval.pending``
-event was published *before* the agent's wrapped ``call_operation`` returned
-the ``awaiting_approval`` envelope, so a cursor at "now" cannot miss the
-subsequent decision. Concretely we pass ``"$"`` to ``XREAD`` on the first
-read (the standard "tail from this moment forward" cursor); subsequent reads
-in the loop advance to the most recent entry id seen so a busy tenant doesn't
-re-emit already-considered entries.
+exclusive). The wait starts the cursor at ``"$"`` (the "tail from this moment
+forward" cursor); subsequent reads in the loop advance to the most recent
+entry id seen so a busy tenant doesn't re-emit already-considered entries.
+A decision published before the first ``XREAD`` is not on that tail; the
+stored-row reads above catch it instead.
 
 Fail-open semantics
 ===================
 
-Every recoverable broadcast failure (Valkey unreachable, malformed entry,
-parse error) returns ``"timeout"`` rather than raising. The wrapper caller
-maps that to a structured awaiting-approval-timeout tool result that lets
-the agent reason about the failure (try again later / abort) instead of
-crashing the loop. The audit row + decision row remain the canonical record
-of what the operator actually decided; the broadcast is only the real-time
-view.
+A recoverable broadcast failure (Valkey unreachable, malformed entry, parse
+error) never raises. The wait re-reads the stored row and keeps waiting until
+the deadline. A stored-row read that fails (database error, row not visible
+to this tenant) is also logged and treated as "no decision seen yet". Only
+when the deadline passes with no decision seen does the wait return
+``"timeout"``, which the wrapper maps to a structured
+awaiting-approval-timeout tool result. ``asyncio.CancelledError`` always
+propagates; nothing retries after a cancel.
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
+import math
 import time
 import uuid
 from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
 import structlog
 from redis.exceptions import RedisError
+from sqlalchemy.exc import SQLAlchemyError
 
 from meho_backplane.broadcast.client import get_broadcast_blocking_client
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from meho_backplane.auth.operator import Operator
 
 __all__ = [
@@ -99,11 +126,15 @@ __all__ = [
 _log = structlog.get_logger(__name__)
 
 #: One :class:`Literal` return shape per outcome the caller switches on.
-#: ``approved`` / ``rejected`` mirror the durable decision states; ``timeout``
-#: covers the timeout cap and every recoverable broadcast failure (Valkey
-#: unreachable, malformed entries) so the caller has a single non-decision
-#: branch to handle.
-ApprovalDecision = Literal["approved", "rejected", "timeout"]
+#: ``approved`` / ``rejected`` / ``expired`` mirror the terminal states of the
+#: stored approval row; ``timeout`` means no decision was seen before the
+#: deadline (the row was still ``pending``, or could not be read).
+ApprovalDecision = Literal["approved", "rejected", "expired", "timeout"]
+
+#: Longest gap between two reads of the stored approval row while the wait
+#: runs. The broadcast is the fast path; this bounds how late a decision is
+#: seen when its broadcast event is lost (#3732).
+_DURABLE_RECHECK_SECONDS: Final[float] = 5.0
 
 #: Per-iteration ``XREAD BLOCK`` window inside the wait loop. Smaller than
 #: the overall timeout so an ``asyncio.CancelledError`` (operator cancels the
@@ -114,6 +145,27 @@ ApprovalDecision = Literal["approved", "rejected", "timeout"]
 #: orders-of-magnitude longer overall wait wrapped around it.
 _BLOCK_WINDOW_MS: Final[int] = 5_000
 
+#: How long before the next stored-row read an ``XREAD``'s ``BLOCK`` window
+#: ends, so the reply still lands before that read is due. Covers the
+#: reply's network latency on a healthy server. The local cut-off sits at
+#: the read itself, never later, so a server that accepted the command but
+#: never answers cannot delay the read past :data:`_DURABLE_RECHECK_SECONDS`
+#: or the overall deadline. Must stay well below the recheck interval.
+_XREAD_REPLY_GRACE_SECONDS: Final[float] = 1.0
+
+#: Longest pause before the next ``XREAD`` after a Valkey error, so an
+#: unreachable Valkey does not spin the loop. The stored row is read
+#: *before* this pause, and the pause is cut at the deadline, so it never
+#: delays a read past :data:`_DURABLE_RECHECK_SECONDS` or the deadline.
+_XREAD_ERROR_BACKOFF_SECONDS: Final[float] = 1.0
+
+#: How one ``XREAD`` iteration ended, as seen by the wait loop.
+#: ``answered`` — Valkey replied (entries or an empty BLOCK timeout);
+#: ``stalled`` — the local cut-off ended the call; ``error`` — a recoverable
+#: broadcast error. The last two make the loop read the stored row at once;
+#: only ``error`` is followed by a back-off pause.
+_NotifierOutcome = Literal["answered", "stalled", "error"]
+
 #: Upper bound on entries returned per ``XREAD`` invocation. The wait only
 #: cares about the single matching ``approval.{approved,rejected}`` entry,
 #: but a busy tenant may publish many unrelated events between iterations;
@@ -123,10 +175,13 @@ _XREAD_COUNT: Final[int] = 100
 #: Op-id prefix every decision broadcast event carries. The publisher in
 #: :func:`~meho_backplane.operations.approval_queue.publish_approval_event`
 #: builds ``f"approval.{decision}"`` for ``decision`` in
-#: ``{"pending", "approved", "rejected", "expired"}``; we filter for the two
-#: terminal decisions on this request id only.
-_APPROVED_OP_ID: Final[str] = "approval.approved"
-_REJECTED_OP_ID: Final[str] = "approval.rejected"
+#: ``{"pending", "approved", "rejected", "expired"}``; we filter for the
+#: three terminal decisions on this request id only.
+_TERMINAL_OP_IDS: Final[dict[str, ApprovalDecision]] = {
+    "approval.approved": "approved",
+    "approval.rejected": "rejected",
+    "approval.expired": "expired",
+}
 
 
 def _stream_key(tenant_id: uuid.UUID) -> str:
@@ -145,16 +200,15 @@ def _entry_matches_request(
     *,
     target_request_id: str,
 ) -> ApprovalDecision | None:
-    """Return ``"approved"``/``"rejected"`` if *fields* is THIS request's
-    terminal decision, ``None`` otherwise.
+    """Return ``"approved"``/``"rejected"``/``"expired"`` if *fields* is THIS
+    request's terminal decision, ``None`` otherwise.
 
     Each stream entry carries a single ``event`` field whose value is the
     JSON-serialised :class:`~meho_backplane.broadcast.events.BroadcastEvent`.
-    We parse it, gate on (a) ``op_id`` being one of the two terminal decisions
+    We parse it, gate on (a) ``op_id`` being one of the terminal decisions
     and (b) ``payload.approval_request_id`` matching the request the agent is
-    waiting on. Anything else (other approvals' decisions, ``pending`` /
-    ``expired`` for this request, unrelated ops) is filtered out and the wait
-    keeps looping.
+    waiting on. Anything else (other approvals' decisions, ``pending`` for
+    this request, unrelated ops) is filtered out and the wait keeps looping.
 
     Parse failures log + return ``None`` (the wait skips the entry and
     continues) rather than raising — a single malformed entry must not
@@ -169,13 +223,13 @@ def _entry_matches_request(
     except (json.JSONDecodeError, TypeError):
         _log.warning("approval_wait_entry_malformed", target_request_id=target_request_id)
         return None
-    op_id = payload.get("op_id")
-    if op_id not in (_APPROVED_OP_ID, _REJECTED_OP_ID):
+    decision = _TERMINAL_OP_IDS.get(payload.get("op_id"))
+    if decision is None:
         return None
     event_payload = payload.get("payload") or {}
     if event_payload.get("approval_request_id") != target_request_id:
         return None
-    return "approved" if op_id == _APPROVED_OP_ID else "rejected"
+    return decision
 
 
 def _xread_items(raw_response: Any) -> list[tuple[str, dict[str, str]]]:
@@ -207,33 +261,47 @@ async def _xread_one_iteration(
     block_ms: int,
     target_request_id: str,
     tenant_id: uuid.UUID,
-    remaining: float,
-) -> tuple[ApprovalDecision | None, str]:
-    """Run one ``XREAD BLOCK`` iteration; return (decision-or-None, new-cursor).
+    reply_timeout_s: float,
+) -> tuple[ApprovalDecision | None, str, _NotifierOutcome]:
+    """Run one ``XREAD BLOCK`` iteration, cut off locally if the reply stalls.
 
-    Three outcomes the caller folds into the surrounding while-loop:
+    Returns ``(decision-or-None, new-cursor, outcome)``. The outcomes the
+    caller folds into the surrounding while-loop:
 
-    * ``("approved" | "rejected", _)`` — terminal decision observed; the loop
+    * ``(decision, _, "answered")`` — terminal decision observed; the loop
       returns.
-    * ``(None, advanced_cursor)`` — entries arrived but none matched this
-      request; the loop continues with the advanced cursor (so a busy
-      tenant doesn't re-process the same entries).
-    * ``(None, cursor)`` — BLOCK timed out empty *or* a recoverable broadcast
-      error fired; the loop re-issues with the same cursor.
+    * ``(None, advanced_cursor, "answered")`` — entries arrived but none
+      matched this request; the loop continues with the advanced cursor (so
+      a busy tenant doesn't re-process the same entries).
+    * ``(None, cursor, "answered")`` — BLOCK timed out empty; the loop
+      re-issues with the same cursor.
+    * ``(None, cursor, "stalled")`` — the reply stalled past the local
+      cut-off; the caller re-reads the stored row before it loops again.
+    * ``(None, cursor, "error")`` — a recoverable broadcast error fired; the
+      caller re-reads the stored row, then pauses briefly before it loops
+      again.
 
+    The call is cut off locally after *reply_timeout_s*; the caller sets
+    that to the time left until the next stored-row read is due, and a
+    *block_ms* that ends :data:`_XREAD_REPLY_GRACE_SECONDS` earlier. Without
+    the cut-off a Valkey that accepts ``XREAD`` but never answers holds the
+    call for the client's socket timeout (35 s), far past that read.
     A :class:`~redis.exceptions.RedisError` (Valkey unreachable, malformed
     response) or :class:`OSError` (socket-layer hiccup) is logged + folded
-    into the "loop again" branch with a small back-off sleep — the same
-    fail-open posture the publisher uses at write time.
+    into the "loop again" branch — the same fail-open posture the publisher
+    uses at write time. The back-off pause after it belongs to the caller,
+    so it runs *after* the stored row is read and is cut at the deadline;
+    a sleep here would push that read past the recheck interval.
     :class:`asyncio.CancelledError` propagates verbatim so the agent loop
     tears down cleanly when the run is cancelled.
     """
     try:
-        raw_response = await client.xread(
-            {stream_key: cursor},
-            block=block_ms,
-            count=_XREAD_COUNT,
-        )
+        async with asyncio.timeout(reply_timeout_s):
+            raw_response = await client.xread(
+                {stream_key: cursor},
+                block=block_ms,
+                count=_XREAD_COUNT,
+            )
     except asyncio.CancelledError:
         _log.info(
             "approval_wait_cancelled",
@@ -241,6 +309,17 @@ async def _xread_one_iteration(
             tenant_id=str(tenant_id),
         )
         raise
+    except TimeoutError:
+        # Must precede the ``OSError`` branch: ``TimeoutError`` is an
+        # ``OSError`` subclass. redis-py disconnects the connection on any
+        # exception raised mid-read, so the next ``XREAD`` starts clean.
+        _log.warning(
+            "approval_wait_xread_stalled",
+            approval_request_id=target_request_id,
+            tenant_id=str(tenant_id),
+            reply_timeout_seconds=reply_timeout_s,
+        )
+        return (None, cursor, "stalled")
     except (RedisError, OSError) as exc:
         _log.warning(
             "approval_wait_xread_error",
@@ -248,12 +327,11 @@ async def _xread_one_iteration(
             tenant_id=str(tenant_id),
             error_class=type(exc).__name__,
         )
-        await asyncio.sleep(min(1.0, max(0.0, remaining)))
-        return (None, cursor)
+        return (None, cursor, "error")
 
     items = _xread_items(raw_response)
     if not items:
-        return (None, cursor)
+        return (None, cursor, "answered")
     new_cursor = cursor
     for entry_id, fields in items:
         new_cursor = entry_id
@@ -268,8 +346,55 @@ async def _xread_one_iteration(
                 tenant_id=str(tenant_id),
                 decision=decision,
             )
-            return (decision, new_cursor)
-    return (None, new_cursor)
+            return (decision, new_cursor, "answered")
+    return (None, new_cursor, "answered")
+
+
+async def _read_stored_decision(
+    *,
+    tenant_id: uuid.UUID,
+    approval_request_id: uuid.UUID,
+) -> ApprovalDecision | None:
+    """Read the stored approval row; return its terminal state, or ``None``.
+
+    ``None`` means "no decision seen": the row is still ``pending``, or it
+    could not be read. A read that fails (database error, or no row visible
+    to *tenant_id*) is logged and never raises, so a database hiccup does
+    not end the wait early. :func:`get_request` scopes the read to the
+    tenant, so a row of another tenant is never seen.
+    ``asyncio.CancelledError`` is not caught and propagates.
+
+    Local imports: ``approval_queue`` is imported lazily everywhere in this
+    module (see :func:`_resume_approved_or_already_resumed`).
+    """
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.operations.approval_queue import ApprovalNotFoundError, get_request
+
+    try:
+        async with get_sessionmaker()() as session:
+            request = await get_request(
+                session,
+                tenant_id=tenant_id,
+                request_id=approval_request_id,
+            )
+            status = request.status
+    except (ApprovalNotFoundError, SQLAlchemyError, OSError) as exc:
+        _log.warning(
+            "approval_wait_durable_read_unavailable",
+            approval_request_id=str(approval_request_id),
+            tenant_id=str(tenant_id),
+            error_class=type(exc).__name__,
+        )
+        return None
+    if status in ("approved", "rejected", "expired"):
+        _log.info(
+            "approval_wait_durable_decision_observed",
+            approval_request_id=str(approval_request_id),
+            tenant_id=str(tenant_id),
+            decision=status,
+        )
+        return cast("ApprovalDecision", status)
+    return None
 
 
 async def wait_for_approval_decision(
@@ -278,47 +403,36 @@ async def wait_for_approval_decision(
     approval_request_id: uuid.UUID,
     timeout_seconds: float,
 ) -> ApprovalDecision:
-    """Block until the broadcast feed reports a terminal decision, or time out.
+    """Block until a terminal decision is seen, or time out.
 
-    Drives ``XREAD BLOCK`` against ``meho:feed:{tenant_id}`` with a short
-    per-call window (:data:`_BLOCK_WINDOW_MS`), looping until either an
-    ``approval.{approved,rejected}`` event for *approval_request_id* arrives
-    or the cumulative wait reaches *timeout_seconds*. Returns one of the three
-    :data:`ApprovalDecision` literals; the caller's wrapped ``call_operation``
-    branches on the return.
-
-    Per-iteration mechanics are extracted to :func:`_xread_one_iteration`;
-    this function owns the deadline / cursor-bootstrap / outer loop.
+    Reads the stored approval row first. While it is ``pending``, loops
+    ``XREAD BLOCK`` on ``meho:feed:{tenant_id}`` until an
+    ``approval.{approved,rejected,expired}`` event for *approval_request_id*
+    arrives, a re-read of the row shows a decision, or *timeout_seconds*
+    passes. The row is re-read after every notifier error, at least every
+    :data:`_DURABLE_RECHECK_SECONDS`, and once more at the deadline. Each
+    ``XREAD`` is cut off locally at the moment the next re-read is due, so
+    a Valkey that stops answering never delays a re-read past
+    :data:`_DURABLE_RECHECK_SECONDS` or the deadline. After a Valkey error
+    the row is read first; the back-off pause comes after that read and is
+    cut at the deadline, so a late error cannot delay a re-read either.
 
     Args:
-        tenant_id: The operator's tenant; selects the per-tenant Valkey stream
-            to read from. The dispatcher recorded the request under this
-            tenant; cross-tenant decisions are structurally impossible because
-            the stream key is tenant-scoped.
-        approval_request_id: The ``approval_request.id`` the agent is awaiting,
-            lifted from the ``call_operation`` envelope's
-            ``extras["approval_request_id"]``.
-        timeout_seconds: Overall wait cap. Default policy lives in the caller
-            (``Settings.agent_approval_wait_timeout_seconds``); we take the
-            number here so a test can pin a sub-second value without monkey-
-            patching settings.
+        tenant_id: The operator's tenant. Scopes both the Valkey stream and
+            the stored-row read, so another tenant's decision is never seen.
+        approval_request_id: The ``approval_request.id`` the agent awaits
+            (``extras["approval_request_id"]`` on the envelope).
+        timeout_seconds: Overall wait cap (the caller passes
+            ``Settings.agent_approval_wait_timeout_seconds``).
 
     Returns:
-        - ``"approved"`` — the operator approved; the caller should re-dispatch
-          with ``_approved=True``.
-        - ``"rejected"`` — the operator rejected; the caller surfaces the
-          rejection to the model.
-        - ``"timeout"`` — either the wall-clock cap elapsed without a decision
-          event arriving, or every ``XREAD`` invocation in this wait raised a
-          broadcast-substrate error. The caller surfaces this as an
-          ``awaiting_approval_timeout`` tool result so the agent can reason
-          about it (no decision has been observed; the durable decision row
-          remains the source of truth and may exist regardless).
+        ``"approved"`` (the caller tries the resume claim and re-dispatches),
+        ``"rejected"`` or ``"expired"`` (the caller never dispatches), or
+        ``"timeout"`` (the final re-read still found the row ``pending``, or
+        could not read it).
 
-    Notes:
-        ``asyncio.CancelledError`` from a parent cancellation (operator cancels
-        the run mid-wait) propagates verbatim — the wait is one part of the
-        agent's cooperative-cancellation tree.
+    ``asyncio.CancelledError`` (the run is cancelled mid-wait) propagates
+    verbatim; nothing retries after it.
     """
     deadline = time.monotonic() + timeout_seconds
     # Long-poll client; per-iteration BLOCK is _BLOCK_WINDOW_MS (5 s). The
@@ -328,46 +442,105 @@ async def wait_for_approval_decision(
     # 35 s socket_timeout removes the race so a quiet stream returns
     # cleanly from XREAD with no entries. RDC #789 N1 / Initiative #1353.
     client = get_broadcast_blocking_client()
-    stream_key = _stream_key(tenant_id)
     target_request_id = str(approval_request_id)
-    # ``"$"`` is the Valkey "tail from the moment of this call" cursor. The
-    # ``approval.pending`` event for this request was published BEFORE the
-    # agent's wrapped ``call_operation`` returned and we entered this wait, so
-    # ``"$"`` cannot miss the subsequent terminal decision event. Subsequent
-    # iterations advance the cursor to the latest entry id seen so a busy
-    # tenant doesn't re-emit already-considered entries.
-    cursor: str = "$"
     _log.info(
         "approval_wait_started",
         approval_request_id=target_request_id,
         tenant_id=str(tenant_id),
         timeout_seconds=timeout_seconds,
     )
+    read_stored = functools.partial(
+        _read_stored_decision, tenant_id=tenant_id, approval_request_id=approval_request_id
+    )
+    # A decision committed before the wait started is on the stored row,
+    # not on the ``"$"`` tail the watch loop subscribes from.
+    stored = await read_stored()
+    if stored is not None:
+        return stored
+    decision = await _watch_until_decision(
+        client,
+        tenant_id=tenant_id,
+        target_request_id=target_request_id,
+        deadline=deadline,
+        read_stored=read_stored,
+    )
+    if decision is not None:
+        return decision
+    stored = await read_stored()
+    if stored is not None:
+        return stored
+    _log.info(
+        "approval_wait_timeout", approval_request_id=target_request_id, tenant_id=str(tenant_id)
+    )
+    return "timeout"
 
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            _log.info(
-                "approval_wait_timeout",
-                approval_request_id=target_request_id,
-                tenant_id=str(tenant_id),
-            )
-            return "timeout"
-        # Cap each iteration's BLOCK at the smaller of the per-iteration
-        # window and the remaining wall-clock; the integer cast guards against
-        # a fractional-millisecond sub-1ms tail at the very end of the budget.
-        block_ms = max(1, min(_BLOCK_WINDOW_MS, int(remaining * 1000)))
-        decision, cursor = await _xread_one_iteration(
+
+async def _watch_until_decision(
+    client: Any,
+    *,
+    tenant_id: uuid.UUID,
+    target_request_id: str,
+    deadline: float,
+    read_stored: Callable[[], Awaitable[ApprovalDecision | None]],
+) -> ApprovalDecision | None:
+    """Loop ``XREAD`` and stored re-reads until a decision is seen or *deadline* passes.
+
+    Returns the decision from either source, or ``None`` once the deadline
+    has passed with the row still ``pending`` (the caller reads the row one
+    last time). *read_stored* reads the tenant-scoped stored row; it is
+    called after every notifier stall or error, and at least every
+    :data:`_DURABLE_RECHECK_SECONDS`. After an error the loop pauses for up
+    to :data:`_XREAD_ERROR_BACKOFF_SECONDS` *after* that read, cut at the
+    deadline, so neither a stall nor a late error can delay a read.
+    """
+    stream_key = _stream_key(tenant_id)
+    next_recheck = time.monotonic() + _DURABLE_RECHECK_SECONDS
+    # ``"$"`` is the Valkey "tail from the moment of this call" cursor.
+    # Subsequent iterations advance the cursor to the latest entry id seen so
+    # a busy tenant doesn't re-emit already-considered entries.
+    cursor: str = "$"
+
+    while (remaining := deadline - time.monotonic()) > 0:
+        # The next stored-row read is due at the recheck boundary or the
+        # deadline, whichever comes first. The XREAD is cut off locally at
+        # that moment; its BLOCK window ends one reply grace earlier so a
+        # healthy reply lands in time. A budget shorter than two graces
+        # (the tail before the deadline) is split in half instead, so the
+        # loop never spins on 1 ms reads. The ceiling keeps BLOCK from
+        # ending a fraction of a millisecond before the read is due.
+        read_budget_s = min(remaining, next_recheck - time.monotonic())
+        block_s = max(read_budget_s - _XREAD_REPLY_GRACE_SECONDS, read_budget_s / 2)
+        if block_s < 0.001:
+            # Under 2 ms to the deadline: no room for one more round trip.
+            break
+        block_ms = min(_BLOCK_WINDOW_MS, math.ceil(block_s * 1000))
+        decision, cursor, outcome = await _xread_one_iteration(
             client,
             stream_key=stream_key,
             cursor=cursor,
             block_ms=block_ms,
             target_request_id=target_request_id,
             tenant_id=tenant_id,
-            remaining=remaining,
+            reply_timeout_s=read_budget_s,
         )
         if decision is not None:
             return decision
+        # A quiet BLOCK ends one reply grace before the recheck boundary;
+        # that counts as due, so the row is read now rather than after one
+        # more tiny XREAD.
+        if outcome != "answered" or time.monotonic() >= next_recheck - _XREAD_REPLY_GRACE_SECONDS:
+            stored = await read_stored()
+            if stored is not None:
+                return stored
+            next_recheck = time.monotonic() + _DURABLE_RECHECK_SECONDS
+        if outcome == "error":
+            # The row was just read, so this pause cannot delay a stored
+            # read past the recheck interval; it is cut at the deadline so
+            # the final read still runs on time.
+            await asyncio.sleep(
+                max(0.0, min(_XREAD_ERROR_BACKOFF_SECONDS, deadline - time.monotonic()))
+            )
+    return None
 
 
 #: ``extras["error_code"]`` value on a wrapped ``call_operation`` envelope that
@@ -390,10 +563,9 @@ def _build_awaiting_approval_timeout_envelope(
     (so the model still sees the ``op_id``, the ``approval_request_id``, and
     the human-readable ``error`` prose) but overwrites the ``error_code`` with
     :data:`AWAITING_APPROVAL_TIMEOUT_ERROR_CODE` and the ``error`` message with
-    a wait-context string. The audit row is untouched — broadcast outage or a
-    pre-deadline forgotten request both surface here, but neither is a durable
-    decision; the operator's actual decision row (if one exists) remains the
-    canonical record.
+    a wait-context string. The audit row is untouched. Reached only when the
+    final re-read still found the row ``pending`` or could not read it, so
+    the decision may still come later.
     """
     extras = dict(original_envelope.get("extras") or {})
     extras["error_code"] = AWAITING_APPROVAL_TIMEOUT_ERROR_CODE
@@ -462,6 +634,30 @@ def _build_rejected_envelope(
     return annotated
 
 
+def _build_expired_envelope(
+    *,
+    original_envelope: dict[str, Any],
+    approval_request_id: uuid.UUID,
+) -> dict[str, Any]:
+    """Annotate the original envelope when the request expired undecided.
+
+    Same shape as :func:`_build_rejected_envelope`: ``status`` stays
+    ``"awaiting_approval"``, ``extras["error_code"] = "approval_expired"`` and
+    ``extras["decision"] = "expired"``. The op was not run; an expired
+    request is terminal and is never dispatched (#3732).
+    """
+    annotated = dict(original_envelope)
+    annotated["error"] = (
+        f"awaiting_approval: approval request {approval_request_id} expired "
+        "before anyone decided. The operation was not run."
+    )
+    extras = dict(original_envelope.get("extras") or {})
+    extras["error_code"] = "approval_expired"
+    extras["decision"] = "expired"
+    annotated["extras"] = extras
+    return annotated
+
+
 def _build_already_resumed_envelope(
     *,
     original_envelope: dict[str, Any],
@@ -524,14 +720,69 @@ async def _resume_approved_or_already_resumed(
     agent task (the requester's run), so the session anchor needs no
     re-bind; only the parent link does.
 
+    Composite sub-op park (#3421, the agent side of #3351): when the parked
+    row carries ``resume_parent``, the parked ``op_id`` is a composite's
+    governed sub-op, not a call the agent can re-run as is. The waiter then
+    re-enters the **parent composite** ``_approved=True`` with the approved
+    sub-op cleared, through the same
+    :func:`~meho_backplane.operations.approval_queue.composite_resume_binding`
+    the operator surface uses, so both surfaces resume the same row the same
+    way. Without it the plain re-dispatch of the agent's call reached the
+    sub-op gate again and parked a new request, so nothing executed. The
+    re-entry runs as the agent principal (the operator surface runs as the
+    reviewer); any other governed sub-op is checked against the agent's own
+    grants, and one that would need a second approval fails closed
+    (``composite_resume_multi_gate_unsupported``). The re-entry dispatches
+    against the target the row saved by id
+    (:func:`~meho_backplane.operations.approval_queue.rehydrate_resume_target`,
+    the operator surface's check), never the name in *call_arguments*: a
+    target renamed, or deleted and re-created under the same name, while the
+    request waited must not receive the approved write. A saved target that
+    no longer resolves fails closed with a ``denied`` envelope before the
+    claim. A direct park (``resume_parent IS NULL``) keeps the re-dispatch of
+    the agent's original *call_arguments*.
+
     Local imports mirror each other (and the wider module convention):
     ``meta_tools`` imports from ``operations.dispatcher`` which imports back
     through ``meho_backplane.agent.invoke``, so a module-level import here
     would set up an import-time cycle; keeping both inline resolves them
     once at first-call time.
     """
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.operations._audit import parent_audit_id_var
+    from meho_backplane.operations.approval_handoff import consume as consume_handoff
     from meho_backplane.operations.approval_handoff import discard as discard_handoff
-    from meho_backplane.operations.approval_queue import claim_resume
+    from meho_backplane.operations.approval_queue import (
+        claim_resume,
+        composite_resume_binding,
+        get_request,
+        rehydrate_resume_target,
+    )
+    from meho_backplane.operations.meta_tools import call_operation_with_approval
+
+    # Load the parked row (tenant-isolated). Its pre-generated
+    # ``approval.request`` audit id is bound below so the resumed dispatch
+    # back-links to it; pre-0053 rows carry ``request_audit_id IS NULL`` →
+    # binds ``None`` (the var's default), the correct no-op for a chain that
+    # never had the anchor. Its ``resume_parent`` (#3421) says whether this is
+    # a composite sub-op park that must re-enter the parent composite.
+    async with get_sessionmaker()() as session:
+        request = await get_request(
+            session,
+            tenant_id=operator.tenant_id,
+            request_id=approval_request_id,
+        )
+
+    # A composite re-entry dispatches against the target the row saved by id,
+    # the same check the operator surface runs, not the name the agent used
+    # when it parked: that name may point at another target by now. A saved
+    # target that no longer resolves fails closed here, before the claim, so
+    # the refused resume does not burn the one-resumer claim.
+    resolved_target: Any = None
+    if request.resume_parent is not None:
+        resolved_target, denied = await rehydrate_resume_target(operator, request)
+        if denied is not None:
+            return cast("dict[str, Any]", denied.model_dump(mode="json"))
 
     if not await claim_resume(approval_request_id):
         _log.info(
@@ -545,36 +796,59 @@ async def _resume_approved_or_already_resumed(
             approval_request_id=approval_request_id,
         )
 
-    # The agent already owns the original inputs in memory.  Once it wins the
-    # durable claim, discard any credential-write custody row before dispatch:
-    # a losing waiter returned above and cannot remove another winner's input.
-    # This mirrors the other claim winners without ever decrypting the payload.
-    from meho_backplane.db.engine import get_sessionmaker
-
+    # Only the claim winner touches the credential-write custody row. A direct
+    # park discards it: the agent already owns the original inputs in memory.
+    # A composite sub-op park whose row only names the parent consumes it,
+    # because the parent's params live only in the encrypted copy. The
+    # decrypted parent stays in a local and is never written to the ORM row.
     async with get_sessionmaker()() as session:
-        await discard_handoff(session, approval_request_id, operator.tenant_id)
+        resume_parent = request.resume_parent
+        if resume_parent is not None and request.execution_handle is not None:
+            handoff = await consume_handoff(
+                session, request.execution_handle, request.id, request.tenant_id
+            )
+            resume_parent = cast("dict[str, Any] | None", handoff.get("resume_parent"))
+        else:
+            await discard_handoff(session, approval_request_id, operator.tenant_id)
         await session.commit()
 
     # The re-dispatch threads ``_approved=True`` through the policy gate, so
     # the durable approval-decision row is the authorization.
-    from meho_backplane.operations._audit import parent_audit_id_var
-    from meho_backplane.operations.approval_queue import get_request
-    from meho_backplane.operations.meta_tools import call_operation_with_approval
-
-    # Load the parked row's pre-generated ``approval.request`` audit id
-    # (tenant-isolated) so the resumed dispatch back-links to it. Pre-0053
-    # rows carry ``request_audit_id IS NULL`` → binds ``None`` (the var's
-    # default), which is the correct no-op for a chain that never had the
-    # anchor.
-    async with get_sessionmaker()() as session:
-        request = await get_request(
-            session,
-            tenant_id=operator.tenant_id,
-            request_id=approval_request_id,
-        )
     parent_token = parent_audit_id_var.set(request.request_audit_id)
     try:
-        return await call_operation_with_approval(operator, call_arguments)
+        # #3421: same composite re-entry as the operator surface. A composite
+        # sub-op park re-enters its parent composite with the approved sub-op
+        # cleared; a direct park (``resume_parent IS NULL``) re-dispatches the
+        # agent's original call unchanged.
+        with composite_resume_binding(
+            subop_op_id=request.op_id,
+            subop_params_hash=request.params_hash,
+            resume_parent=resume_parent,
+        ) as parent_call:
+            if parent_call is None:
+                return await call_operation_with_approval(operator, call_arguments)
+            parent_op_id, parent_params = parent_call
+            _log.info(
+                "approval_wait_resume_composite_parent",
+                approval_request_id=str(approval_request_id),
+                tenant_id=str(operator.tenant_id),
+                subop_op_id=request.op_id,
+                parent_op_id=parent_op_id,
+                target_id=str(request.target_id) if request.target_id else None,
+            )
+            # ``target`` is cleared so the stale name is never looked up; the
+            # saved target (or ``None`` for a tenant-wide op) is passed as is.
+            return await call_operation_with_approval(
+                operator,
+                {
+                    **call_arguments,
+                    "connector_id": request.connector_id,
+                    "op_id": parent_op_id,
+                    "params": parent_params,
+                    "target": None,
+                },
+                resolved_target=resolved_target,
+            )
     finally:
         parent_audit_id_var.reset(parent_token)
 
@@ -596,10 +870,13 @@ async def resume_or_surface_awaiting_approval(
     * **approved** — re-invokes the dispatcher with ``_approved=True`` and the
       original in-memory ``params`` from *call_arguments*, returns the new
       envelope (the executed op's result, with the correct audit attribution
-      threaded by the dispatcher).
+      threaded by the dispatcher). A parked composite sub-op instead
+      re-enters its parent composite with that sub-op cleared (#3421).
     * **rejected** — returns the original ``awaiting_approval`` envelope
       annotated with a rejection error code, so the model sees a structured
       tool result.
+    * **expired** — returns the envelope annotated with the
+      ``approval_expired`` error code. Nothing is dispatched.
     * **timeout** — returns the envelope annotated with the
       :data:`AWAITING_APPROVAL_TIMEOUT_ERROR_CODE` so the agent can reason
       about it (try later / abort).
@@ -625,9 +902,10 @@ async def resume_or_surface_awaiting_approval(
 
     Returns:
         The envelope the wrapped ``call_operation`` returns to the model:
-        a fresh dispatch result on approval, the rejection-annotated
-        envelope on rejection, or the timeout-annotated envelope on
-        timeout / broadcast failure.
+        the dispatcher's envelope on approval (it, not the approval, says
+        whether the op succeeded, failed or is uncertain), the rejection- or
+        expiry-annotated envelope, or the timeout-annotated envelope when no
+        decision was seen before the deadline.
 
     Raises:
         ValueError: ``extras["approval_request_id"]`` is missing or not a
@@ -650,17 +928,15 @@ async def resume_or_surface_awaiting_approval(
             approval_request_id=approval_request_id,
         )
 
-    if decision == "rejected":
+    if decision in ("rejected", "expired"):
         _log.info(
-            "approval_wait_rejected_surfaced_to_agent",
+            f"approval_wait_{decision}_surfaced_to_agent",
             approval_request_id=str(approval_request_id),
             tenant_id=str(operator.tenant_id),
             op_id=awaiting_envelope.get("op_id"),
         )
-        return _build_rejected_envelope(
-            original_envelope=awaiting_envelope,
-            approval_request_id=approval_request_id,
-        )
+        build = _build_rejected_envelope if decision == "rejected" else _build_expired_envelope
+        return build(original_envelope=awaiting_envelope, approval_request_id=approval_request_id)
 
     # decision == "timeout"
     return _build_awaiting_approval_timeout_envelope(

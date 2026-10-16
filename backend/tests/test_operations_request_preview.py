@@ -63,6 +63,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import register_typed_operation, reset_dispatcher_caches
+from meho_backplane.operations._composite_preview import PLAN_NOT_SHOWN_NOTE
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
 from meho_backplane.operations._preview import (
     _PREVIEW_BUILDERS,
@@ -767,7 +768,64 @@ async def test_preview_requires_approval_typed_op_serves_bespoke_proposed_effect
         "semantics": "soft_delete",
         "versions": [3],
     }
+    assert envelope["plan_shown"] is True
+    assert "plan_note" not in envelope
     # No dispatch happened.
+    assert captured_events == []
+
+
+async def _live_read_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """A live-read builder: it needs a connector, so it declines offline (#4028)."""
+    if ctx.connector_instance is None:
+        return None
+    return {"blast_radius": {"present": True}}
+
+
+@pytest.mark.asyncio
+async def test_preview_says_plan_not_shown_when_builder_needs_the_target(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+    _preview_builders_snapshot: None,
+) -> None:
+    """A plan that must read the target is not in the preview, and the preview says so (#4028).
+
+    The preview never dials the target, so a live-read builder (DRS rule
+    delete, Keycloak deletes, ``windns.record.remove``) declines. The envelope
+    must not look like a complete preview: ``plan_shown`` is false and
+    ``plan_note`` names where the plan is shown. The hash binding is unchanged.
+    """
+    register_connector_v2(product="demo", version="", impl_id="", cls=_RecordingHttpConnector)
+    await register_typed_operation(
+        product="demo",
+        version="1.x",
+        impl_id="demo",
+        op_id="demo.rule.delete",
+        handler=_handler_returning_ok,
+        summary="A governed delete that reads the target to plan.",
+        description="Typed, destructive.",
+        parameter_schema={"type": "object"},
+        safety_level="destructive",
+        requires_approval=True,
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+    register_preview_builder("demo.rule.delete", _live_read_delete_preview)
+
+    envelope = await preview_dispatch(
+        operator=_make_operator(),
+        connector_id="demo-1.x",
+        op_id="demo.rule.delete",
+        target=_FakeTarget(product="demo", version="1.x", name="demo-prod"),
+        params={"cluster": "c1", "rule_name": "r1"},
+    )
+
+    assert envelope["status"] == "ok"
+    assert isinstance(envelope["preview_hash"], str)
+    assert "proposed_effect" not in envelope
+    assert envelope["plan_shown"] is False
+    assert envelope["plan_note"] == PLAN_NOT_SHOWN_NOTE
+    assert "approval request" in envelope["plan_note"]
     assert captured_events == []
 
 

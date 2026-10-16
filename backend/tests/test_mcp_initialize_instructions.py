@@ -574,3 +574,40 @@ async def test_initialize_logs_receipt_matching_the_shared_render(
     assert receipt["conventions_max_tokens"] == DEFAULT_MAX_PREAMBLE_TOKENS
     assert receipt["instructions_tokens"] == estimate_tokens(instructions)
     assert expected.text in instructions
+
+
+@pytest.mark.asyncio
+async def test_initialize_advertises_resources_without_subscriptions(
+    client_with_operator: tuple[TestClient, Operator],
+    seeded_operator_tenant: None,
+) -> None:
+    """#3755: the resources capability is on; subscriptions and list-change are off.
+
+    The convention index is offered as a resource only. ``initialize``
+    does not subscribe the client, and the instructions do not pull the
+    index into the prompt.
+    """
+    client, op = client_with_operator
+    now = datetime.now(UTC)
+    async with get_sessionmaker()() as session:
+        session.add(
+            TenantConvention(
+                id=uuid.uuid4(),
+                tenant_id=op.tenant_id,
+                slug="index-check",
+                title="Index check",
+                body="A short operational rule.",
+                kind="operational",
+                priority=1,
+                created_by_sub="test:user",
+                created_at=now,
+                updated_at=now,
+            ),
+        )
+        await session.commit()
+
+    response = post_mcp(client, _initialize_envelope())
+
+    result = response.json()["result"]
+    assert result["capabilities"]["resources"] == {"listChanged": False, "subscribe": False}
+    assert "meho://tenant-conventions/index" not in result["instructions"]

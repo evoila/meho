@@ -18,6 +18,7 @@ from typing import Any, Final
 from fastapi.responses import HTMLResponse
 
 from meho_backplane.db.models import ApprovalRequest
+from meho_backplane.operations.approval_queue import Delegation
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME
 from meho_backplane.ui.references import subject_ref
 
@@ -37,7 +38,9 @@ STATUS_PILL_CLASS: Final[dict[str, str]] = {
 }
 
 
-def project_request_to_view(row: ApprovalRequest) -> dict[str, Any]:
+def project_request_to_view(
+    row: ApprovalRequest, delegation: Delegation | None = None
+) -> dict[str, Any]:
     """Project an :class:`ApprovalRequest` ORM row into a template dict.
 
     The templates render only the operator-relevant subset: the pending
@@ -64,6 +67,12 @@ def project_request_to_view(row: ApprovalRequest) -> dict[str, Any]:
     (``docs/codebase/approvals.md``). The status pill class is resolved by
     the template from :data:`STATUS_PILL_CLASS`, not baked in here, so the
     projection stays presentation-free.
+
+    ``delegation`` (#3692) is the delegated-decision block -- who instructed
+    the approver, their words, and the refs -- or ``None``. It is read off
+    the decision audit row (no column), so only the callers that loaded it
+    pass it; the key is always present so the templates stay
+    ``StrictUndefined``-safe.
     """
     return {
         "id": str(row.id),
@@ -80,6 +89,7 @@ def project_request_to_view(row: ApprovalRequest) -> dict[str, Any]:
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "decided_at": row.decided_at.isoformat() if row.decided_at else None,
         "expires_at": row.expires_at.isoformat() if row.expires_at else None,
+        "delegation": delegation.to_payload() if delegation is not None else None,
     }
 
 

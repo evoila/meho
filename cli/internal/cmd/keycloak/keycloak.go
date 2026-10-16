@@ -33,6 +33,10 @@
 //   - `meho keycloak user delete (--id|--username)`
 //   - `meho keycloak group delete (--id|--name) [--delete-subgroups]`
 //   - `meho keycloak client delete (--id|--client-id)`
+//   - `meho keycloak realm delete --realm R` (#3886)
+//
+// #3851 adds `meho keycloak user logout (--id|--username)` (approval-gated):
+// it ends all live sessions of one user.
 //
 // User passwords are NEVER passed inline — only a Vault path
 // (--password-secret-ref) — so the password never lands in shell history
@@ -109,10 +113,11 @@ func NewRootCmd() *cobra.Command {
 			"Each verb dispatches through POST /api/v1/operations/call with\n" +
 			"connector_id=\"keycloak-admin-26.x\" pre-baked so operators don't\n" +
 			"type the connector ID on every command. Read verbs are safe;\n" +
-			"the write verbs (create / update / reset-password / assign) are\n" +
-			"approval-gated — every write requires human approval through the\n" +
-			"queue before it dispatches. The delete verbs are destructive: they\n" +
-			"preview first, and a second person must approve.\n\n" +
+			"the write verbs (create / update / reset-password / assign /\n" +
+			"logout) are approval-gated — every write requires human approval\n" +
+			"through the queue before it dispatches. The delete verbs are\n" +
+			"destructive: they preview first, and a second person must\n" +
+			"approve.\n\n" +
 			"Per CLAUDE.md postulate 5, these alias verbs are operator-only\n" +
 			"ergonomics — they are not mirrored on the MCP surface. Agents\n" +
 			"continue to use search_operations / call_operation against the\n" +

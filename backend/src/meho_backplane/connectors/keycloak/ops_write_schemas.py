@@ -36,7 +36,10 @@ _WHEN_TO_USE_REALM_WRITE = (
     "update the managed realm's top-level config "
     "(``keycloak.realm.update``). Both require human approval. Pass the "
     "RealmRepresentation under ``representation``. Re-running a create is "
-    "idempotent (a 409 already-exists is treated as success)."
+    "idempotent (a 409 already-exists is treated as success). "
+    "``keycloak.realm.delete`` removes a whole realm for good (destructive: a "
+    "second person must approve, preview first); disabling it with "
+    "``keycloak.realm.update`` and ``enabled: false`` is the reversible choice."
 )
 
 _WHEN_TO_USE_CLIENT_WRITE = (
@@ -76,7 +79,19 @@ _WHEN_TO_USE_USER_WRITE = (
     "your identity. Create keys on ``username`` (idempotent on a 409); "
     "reset keys on the user UUID (``id``) or ``username`` for resolution. "
     "``keycloak.user.delete`` removes a user for good (destructive: a second "
-    "person must approve, preview first)."
+    "person must approve, preview first). ``keycloak.user.logout`` ends all "
+    "live sessions of one user now (requires approval)."
+)
+
+_WHEN_TO_USE_USER_LOGOUT = (
+    "Use to end all live sessions of one user right now "
+    "(``keycloak.user.logout``), so their refresh tokens stop working at "
+    "once — for example when a seat must be cut at the end of an event or "
+    "when someone leaves. Requires approval. Key on the user UUID (``id``) "
+    "or ``username``. This does not change the password: use "
+    "``keycloak.user.reset_password`` to rotate the credential. It signs out "
+    "one user only, never the whole realm. Safe to run twice: a user with "
+    "no sessions is still a success."
 )
 
 _WHEN_TO_USE_ROLE_MAPPING_WRITE = (
@@ -207,9 +222,12 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
         handler_attr="realm_update",
         summary="Update a Keycloak realm's top-level config (approval-gated).",
         description=(
-            "PUTs ``/admin/realms/{realm}`` (default the target's managed "
+            "Updates ``/admin/realms/{realm}`` (default the target's managed "
             "realm; ``realm`` overrides) with the partial "
-            "RealmRepresentation under ``representation``. "
+            "RealmRepresentation under ``representation``. Reads the realm, "
+            "puts the given fields on top and PUTs the full realm back, so "
+            "fields you do not send stay as they are; then reads it again "
+            "and reports any field that changed without being sent. "
             "requires_approval=True; dispatches via the admin-auth path."
         ),
         parameter_schema={
@@ -232,9 +250,17 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_REALM_WRITE,
             "parameter_hints": {
-                "representation": "Partial RealmRepresentation to merge.",
+                "representation": (
+                    "Partial RealmRepresentation to merge. Keys inside a map "
+                    "(attributes, smtpServer) are only added or changed; "
+                    "leaving a key out does not remove it, and sending null "
+                    "does not remove it either. Send [] to empty a list."
+                ),
             },
-            "output_shape": "``{realm, updated}``.",
+            "output_shape": (
+                "``{realm, updated, changed_fields, unrequested_changes, "
+                "read_back_checked}`` — field names only, never values."
+            ),
         },
     ),
     KeycloakOp(
@@ -279,8 +305,12 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
         handler_attr="client_update",
         summary="Update a Keycloak client by UUID or clientId (approval-gated).",
         description=(
-            "PUTs ``/admin/realms/{realm}/clients/{id}`` with the partial "
-            "ClientRepresentation under ``representation``. Keys on the "
+            "Updates ``/admin/realms/{realm}/clients/{id}`` with the partial "
+            "ClientRepresentation under ``representation``. Reads the "
+            "client, puts the given fields on top and PUTs the full client "
+            "back, so fields you do not send (and protocol mappers) stay as "
+            "they are; then reads it again and reports any field that "
+            "changed without being sent. Keys on the "
             "internal UUID — pass ``id`` directly, or pass ``client_id`` "
             "(human clientId) for name→UUID resolution. "
             "requires_approval=True."
@@ -310,10 +340,19 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_CLIENT_WRITE,
             "parameter_hints": {
+                "representation": (
+                    "Partial ClientRepresentation to merge. Keys inside a map "
+                    "(attributes) are only added or changed; leaving a key "
+                    "out does not remove it, and sending null does not "
+                    "remove it either. Send [] to empty a list."
+                ),
                 "id": "Client internal UUID (from keycloak.client.list).",
                 "client_id": "Human clientId; resolved to UUID when id is absent.",
             },
-            "output_shape": "``{id, client_id, updated}``.",
+            "output_shape": (
+                "``{id, client_id, updated, changed_fields, unrequested_changes, "
+                "read_back_checked}`` — field names only, never values."
+            ),
         },
     ),
     KeycloakOp(
@@ -525,4 +564,46 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
     # Governed user / group / client deletes (#3944) — rows in
     # ``ops_write_delete_schemas``, handlers in ``ops_write_delete``.
     *DELETE_WRITE_OPS,
+    # Per-user session logout (#3851).
+    KeycloakOp(
+        op_id="keycloak.user.logout",
+        handler_attr="user_logout",
+        summary="End all live sessions of one Keycloak user (approval-gated).",
+        description=(
+            "POSTs ``.../users/{id}/logout``. Keycloak removes every session "
+            "of the user, so their refresh tokens stop working at once. Keys "
+            "on the user UUID (``id``) or ``username`` for resolution. Safe "
+            "to run twice (204 either way). Does not touch the password and "
+            "never signs out other users. requires_approval=True."
+        ),
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "pattern": _UUID_PATTERN,
+                    "description": "User internal UUID.",
+                },
+                "username": {
+                    "type": "string",
+                    "description": "Username (resolved to UUID if id absent).",
+                },
+            },
+            "anyOf": [{"required": ["id"]}, {"required": ["username"]}],
+            "additionalProperties": False,
+        },
+        response_schema=_WRITE_CONFIRM_SCHEMA,
+        group_key="user_write",
+        tags=("write", "user", "session", "keycloak"),
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions={
+            "when_to_use": _WHEN_TO_USE_USER_LOGOUT,
+            "parameter_hints": {
+                "id": "User internal UUID (from keycloak.user.list).",
+                "username": "Username; resolved to UUID when id is absent.",
+            },
+            "output_shape": "``{id, username, logged_out}`` — no credential material.",
+        },
+    ),
 )

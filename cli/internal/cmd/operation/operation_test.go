@@ -14,6 +14,7 @@ import (
 
 	"github.com/evoila/meho/cli/internal/auth"
 	"github.com/evoila/meho/cli/internal/backplane"
+	"github.com/evoila/meho/cli/internal/output"
 )
 
 // TestTruncateAsciiNoTrim — string within budget passes through.
@@ -218,6 +219,110 @@ func TestPrintPreviewResultOkRendersHash(t *testing.T) {
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("printPreviewResult ok missing %q in output:\n%s", want, out)
+		}
+	}
+}
+
+// previewEnvelopeWithPlan is a composite preview envelope as the backplane
+// sends it when the plan is built without the target (#4028).
+const previewEnvelopeWithPlan = `{
+  "status": "ok",
+  "op_id": "vault.kv.delete",
+  "connector_id": "vault-1.x",
+  "source_kind": "typed",
+  "method": "COMPOSITE",
+  "resolved_path": "vault.kv.delete",
+  "query": null,
+  "redacted_body": {"path": "app/db"},
+  "preview_hash": "abc123",
+  "proposed_effect": {"op_class": "write", "preview": {"resource": "kv_secret", "path": "app/db"}},
+  "plan_shown": true
+}`
+
+// TestPrintPreviewResultRendersProposedEffect — the summary prints the
+// plan when the backplane sends one (#4028).
+func TestPrintPreviewResultRendersProposedEffect(t *testing.T) {
+	var r PreviewResult
+	if err := json.Unmarshal([]byte(previewEnvelopeWithPlan), &r); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var buf bytes.Buffer
+	printPreviewResult(&buf, "vault-1.x", "vault.kv.delete", &r)
+	out := buf.String()
+	for _, want := range []string{"plan (proposed_effect):", `"kv_secret"`, "preview_hash: abc123"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printPreviewResult missing %q in output:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "not shown") {
+		t.Errorf("a preview with a plan must not say the plan is not shown; got:\n%s", out)
+	}
+}
+
+// TestPreviewResultJSONKeepsPlanFields — `--json` prints the decoded
+// PreviewResult, so the plan fields must survive the decode/encode round
+// trip (#4028).
+func TestPreviewResultJSONKeepsPlanFields(t *testing.T) {
+	var r PreviewResult
+	if err := json.Unmarshal([]byte(previewEnvelopeWithPlan), &r); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var buf bytes.Buffer
+	if err := output.PrintJSON(&buf, &r); err != nil {
+		t.Fatalf("PrintJSON: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("re-decode: %v", err)
+	}
+	effect, ok := got["proposed_effect"].(map[string]any)
+	if !ok || effect["op_class"] != "write" {
+		t.Errorf("--json dropped proposed_effect; got:\n%s", buf.String())
+	}
+	if got["plan_shown"] != true {
+		t.Errorf("--json dropped plan_shown; got:\n%s", buf.String())
+	}
+
+	// An ingested preview has no plan slot: nothing extra is emitted.
+	var ingested PreviewResult
+	if err := json.Unmarshal([]byte(`{"status":"ok","method":"GET","preview_hash":"h"}`), &ingested); err != nil {
+		t.Fatalf("decode ingested: %v", err)
+	}
+	buf.Reset()
+	if err := output.PrintJSON(&buf, &ingested); err != nil {
+		t.Fatalf("PrintJSON ingested: %v", err)
+	}
+	for _, key := range []string{"proposed_effect", "plan_shown", "plan_note"} {
+		if strings.Contains(buf.String(), key) {
+			t.Errorf("ingested preview must not emit %q; got:\n%s", key, buf.String())
+		}
+	}
+}
+
+// TestPrintPreviewResultSaysPlanNotShown — when the plan needs the target,
+// the summary says the plan is not shown and prints the note (#4028).
+func TestPrintPreviewResultSaysPlanNotShown(t *testing.T) {
+	shown := false
+	r := &PreviewResult{
+		Status:       "ok",
+		SourceKind:   "composite",
+		Method:       "COMPOSITE",
+		ResolvedPath: "vmware.composite.cluster.drs_rule.delete",
+		RedactedBody: json.RawMessage(`{"cluster":"domain-c8","rule_name":"r1"}`),
+		PreviewHash:  "def456",
+		PlanShown:    &shown,
+		PlanNote:     "The plan is shown on the approval request.",
+	}
+	var buf bytes.Buffer
+	printPreviewResult(&buf, "vmware-rest-9.0", "vmware.composite.cluster.drs_rule.delete", r)
+	out := buf.String()
+	for _, want := range []string{
+		"plan: not shown in this preview",
+		"The plan is shown on the approval request.",
+		"preview_hash: def456",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printPreviewResult missing %q in output:\n%s", want, out)
 		}
 	}
 }

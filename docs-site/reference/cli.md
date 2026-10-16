@@ -2930,7 +2930,7 @@ meho keycloak protocol-mapper create [flags]
 
 ### `meho keycloak realm`
 
-Keycloak realm sub-verbs (get, create, update)
+Keycloak realm sub-verbs (get, create, update, delete)
 
 ```
 meho keycloak realm
@@ -2947,6 +2947,20 @@ meho keycloak realm create [flags]
 - `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
 - `--json` — emit the full OperationResult envelope as JSON
 - `--representation-file`, `-f` — path to a JSON file with the RealmRepresentation body (required)
+- `--target` — target slug to dispatch against (required)
+
+#### `meho keycloak realm delete`
+
+Delete a whole Keycloak realm (destructive, a second person must approve)
+
+```
+meho keycloak realm delete [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
+- `--json` — emit the full OperationResult envelope as JSON
+- `--preview-hash` — the preview_hash from a first run of this command; with it, the delete waits for approval
+- `--realm` — the name of the realm to delete (required)
 - `--target` — target slug to dispatch against (required)
 
 #### `meho keycloak realm get`
@@ -3013,7 +3027,7 @@ meho keycloak role-mapping get [flags]
 
 ### `meho keycloak user`
 
-Keycloak user sub-verbs (list, create, reset-password, delete)
+Keycloak user sub-verbs (list, create, reset-password, delete, logout)
 
 ```
 meho keycloak user
@@ -3064,6 +3078,20 @@ meho keycloak user list [flags]
 - `--max` — cap on the number of users returned (0 = no cap)
 - `--target` — target slug to dispatch against (required)
 - `--username` — filter to matching users by username (Keycloak ?username=)
+
+#### `meho keycloak user logout`
+
+End all live sessions of one Keycloak user (approval-gated)
+
+```
+meho keycloak user logout [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
+- `--id` — the user's internal UUID (skips name→UUID resolution)
+- `--json` — emit the full OperationResult envelope as JSON
+- `--target` — target slug to dispatch against (required)
+- `--username` — the username (resolved to UUID when --id is absent)
 
 #### `meho keycloak user reset-password`
 
@@ -4392,6 +4420,7 @@ meho service-principals grants revoke <grant-id> [flags]
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
 - `--confirm` — confirm revocation
 - `--json` — emit a machine-readable result JSON
+- `--reason` — optional reason for the revoke, stored on the grant and the audit row
 
 #### `meho service-principals grants show`
 

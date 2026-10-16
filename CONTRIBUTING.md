@@ -86,7 +86,11 @@ target — coordinate via the consumer-side ticket.
    `fix/<issue#>-<slug>`, `chore/<slug>`, etc. The `<issue#>` is the
    planning issue on `evoila-bosnia/meho-internal`.
 2. **Make your change.** Stay in scope — adjacent findings go into
-   the PR description, not stealth commits.
+   the PR description, not stealth commits. Do not edit
+   `CHANGELOG.md`. The release pull request adds the line for your
+   change (see
+   [`docs/RELEASING.md`](./docs/RELEASING.md#2-roll-the-changelog--the-load-bearing-step),
+   step 2).
 3. **Sign every commit** with `git commit -s` (see
    [Developer Certificate of Origin](#developer-certificate-of-origin)).
 4. **Conventional Commits** in the subject:
@@ -100,7 +104,8 @@ target — coordinate via the consumer-side ticket.
 8. **Claude review** is the review of record on every PR — the
    in-house review pass (`/auto-review-pr` in auto-runs,
    `/review-pr-slim` interactively); address the findings or document
-   why a finding is wrong inline.
+   why a finding is wrong inline. Reviewers (people, Claude, Codex) do
+   not ask for CHANGELOG lines in a code pull request.
 9. **Maintainer review** approves the human side. Reviews on
    `evoila/meho` are mandatory; reviews on `evoila-bosnia/meho-internal`
    PRs (planning-only, ADRs, governance docs) are best-effort because

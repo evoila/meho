@@ -37,6 +37,7 @@ from meho_backplane.connectors.base import ConnectorResourceNotFoundError
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector, VsphereTargetLike
 from meho_backplane.connectors.vmware_rest._mount import (
+    is_vmomi_path,
     vmomi_mounted_path,
     vmomi_release_from_version,
 )
@@ -409,5 +410,99 @@ async def test_about_version_resolved_once_and_cached_across_reads() -> None:
             )
         # Two vmomi reads, one /api/about probe.
         assert about.call_count == 1
+    finally:
+        await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Ingested vi-json ops: mount_op_path routes them to /sdk/vim25 (#3534)
+# ---------------------------------------------------------------------------
+
+_DVPG_CONFIG_PATH = "/DistributedVirtualPortgroup/dvportgroup-7/config"
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("/DistributedVirtualPortgroup/dvportgroup-7/config", True),
+        ("/PropertyCollector/propertyCollector/RetrievePropertiesEx", True),
+        ("VirtualMachine/vm-42/ReconfigVM_Task", True),
+        ("/vcenter/vm", False),
+        ("/appliance/system/version", False),
+        ("/api/vcenter/vm", False),
+        ("/sdk/vim25/8.0.3.0/Folder/group-d1/CreateFolder", False),
+        ("/", False),
+        ("", False),
+    ],
+)
+def test_is_vmomi_path(path: str, expected: bool) -> None:
+    assert is_vmomi_path(path) is expected
+
+
+@pytest.mark.asyncio
+async def test_mount_op_path_mounts_ingested_vi_json_op_on_sdk_vim25() -> None:
+    """An ingested vi-json op mounts on /sdk/vim25/{release}, not the 404ing /api."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    try:
+        async with respx.mock(base_url=_BASE) as mock:
+            mock.post("/api/session").respond(200, json="tok")
+            mock.get("/api/about").respond(200, json={"version": "8.0.3"})
+            mounted = await connector.mount_op_path(
+                _StubTarget(), _DVPG_CONFIG_PATH, _make_operator()
+            )
+        assert mounted == "/sdk/vim25/8.0.3.0/DistributedVirtualPortgroup/dvportgroup-7/config"
+    finally:
+        await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_mount_op_path_keeps_automation_paths_on_api() -> None:
+    """A vcenter.yaml path still mounts on /api and never probes the release."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    try:
+        async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+            mock.post("/api/session").respond(200, json="tok")
+            about = mock.get("/api/about").respond(200, json={"version": "8.0.3"})
+            mounted = await connector.mount_op_path(_StubTarget(), "/vcenter/vm", _make_operator())
+        assert mounted == "/api/vcenter/vm"
+        assert not about.called
+    finally:
+        await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_mount_op_path_vi_json_op_without_release_stays_on_api() -> None:
+    """No derivable release -> the vi-json op keeps the /api form (no malformed path)."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    try:
+        async with respx.mock(base_url=_BASE) as mock:
+            mock.post("/api/session").respond(200, json="tok")
+            mock.get("/api/about").respond(200, json={"version": "garbage"})
+            mounted = await connector.mount_op_path(
+                _StubTarget(), _DVPG_CONFIG_PATH, _make_operator()
+            )
+        assert mounted == f"/api{_DVPG_CONFIG_PATH}"
+    finally:
+        await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_mount_op_path_vi_json_op_on_legacy_session_stays_on_rest() -> None:
+    """vcsim / legacy targets serve no VI-JSON: the vi-json op keeps the /rest mount."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    try:
+        async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+            mock.post("/api/session").respond(404)
+            mock.post("/rest/com/vmware/cis/session").respond(200, json={"value": "tok"})
+            about = mock.get("/api/about").respond(200, json={"version": "8.0.3"})
+            mounted = await connector.mount_op_path(
+                _StubTarget(), _DVPG_CONFIG_PATH, _make_operator()
+            )
+        assert mounted == f"/rest{_DVPG_CONFIG_PATH}"
+        assert not about.called
     finally:
         await connector.aclose()

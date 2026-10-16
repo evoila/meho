@@ -418,13 +418,17 @@ class ServicePrincipalGrantService:
         tenant_id: uuid.UUID,
         grant_id: uuid.UUID,
         revoked_by_sub: str,
+        *,
+        reason: str | None = None,
     ) -> bool:
         """Soft-delete the grant matching ``(tenant_id, grant_id)``.
 
-        Stamps ``revoked_at`` / ``revoked_by_sub`` on a still-live row
-        (the row is retained for history). Returns ``True`` when a live row
-        was revoked, ``False`` when none matched (absent, already revoked,
-        or cross-tenant — the ``tenant_id`` predicate hides other tenants).
+        Stamps ``revoked_at`` / ``revoked_by_sub`` / ``revoked_reason`` on a
+        still-live row (the row is retained for history). ``reason`` is
+        optional: unlike create, a revoke without a reason stays valid.
+        Returns ``True`` when a live row was revoked, ``False`` when none
+        matched (absent, already revoked, or cross-tenant — the ``tenant_id``
+        predicate hides other tenants).
         """
         now = datetime.now(UTC)
         sessionmaker = get_sessionmaker()
@@ -436,7 +440,11 @@ class ServicePrincipalGrantService:
                     ServicePrincipalGrant.id == grant_id,
                     ServicePrincipalGrant.revoked_at.is_(None),
                 )
-                .values(revoked_at=now, revoked_by_sub=revoked_by_sub)
+                .values(
+                    revoked_at=now,
+                    revoked_by_sub=revoked_by_sub,
+                    revoked_reason=reason,
+                )
                 .returning(ServicePrincipalGrant.id)
             )
             revoked = result.scalar_one_or_none() is not None

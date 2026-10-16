@@ -242,7 +242,7 @@ func createGrant(ctx context.Context, url string, body api.ServiceGrantCreate) (
 
 func newRevokeCmd() *cobra.Command {
 	var confirm, jsonOut bool
-	var backplaneOverride string
+	var reason, backplaneOverride string
 	cmd := &cobra.Command{Use: "revoke <grant-id>", Short: "Revoke a service-principal grant (operator)", Args: cobra.ExactArgs(1), SilenceUsage: true, SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id, err := uuid.Parse(args[0])
@@ -264,7 +264,7 @@ func newRevokeCmd() *cobra.Command {
 			if err != nil {
 				return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 			}
-			resp, err := revokeGrant(cmd.Context(), url, id)
+			resp, err := revokeGrant(cmd.Context(), url, id, reason)
 			if err != nil {
 				return renderRequestError(cmd, url, err, jsonOut)
 			}
@@ -279,19 +279,29 @@ func newRevokeCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "confirm revocation")
+	cmd.Flags().StringVar(&reason, "reason", "", "optional reason for the revoke, stored on the grant and the audit row")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit a machine-readable result JSON")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "", "backplane URL (defaults to the URL from `meho login`)")
 	return cmd
 }
 
-func revokeGrant(ctx context.Context, url string, id uuid.UUID) (*api.RevokeGrantApiV1ServicePrincipalsGrantsGrantIdDeleteResponse, error) {
+func revokeGrant(ctx context.Context, url string, id uuid.UUID, reason string) (*api.RevokeGrantApiV1ServicePrincipalsGrantsGrantIdDeleteResponse, error) {
 	authed, err := newAuthedClient(ctx, url)
 	if err != nil {
 		return nil, err
 	}
 	return retryOn401(ctx, authed, func(ctx context.Context) (*api.RevokeGrantApiV1ServicePrincipalsGrantsGrantIdDeleteResponse, error) {
-		return authed.RevokeGrantApiV1ServicePrincipalsGrantsGrantIdDeleteWithResponse(ctx, id, nil)
+		return authed.RevokeGrantApiV1ServicePrincipalsGrantsGrantIdDeleteWithResponse(ctx, id, revokeGrantParams(reason))
 	}, func(r *api.RevokeGrantApiV1ServicePrincipalsGrantsGrantIdDeleteResponse) int { return r.StatusCode() })
+}
+
+// revokeGrantParams sends the reason only when the operator gave one, so a
+// revoke without --reason keeps the plain DELETE with no query string.
+func revokeGrantParams(reason string) *api.RevokeGrantApiV1ServicePrincipalsGrantsGrantIdDeleteParams {
+	if reason == "" {
+		return nil
+	}
+	return &api.RevokeGrantApiV1ServicePrincipalsGrantsGrantIdDeleteParams{Reason: &reason}
 }
 
 func printGrantList(w io.Writer, grants []api.ServiceGrantRead) {

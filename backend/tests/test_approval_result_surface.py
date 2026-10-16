@@ -43,6 +43,7 @@ from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequestStatus, AuditLog
 from meho_backplane.main import app
+from meho_backplane.operations._errors import result_connector_error
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
@@ -361,6 +362,64 @@ async def test_result_endpoint_owner_reads_result_non_operator_role() -> None:
     assert body["approval_request_id"] == str(request_id)
     assert body["status"] == "approved"
     assert body["result"] == seeded
+
+
+@pytest.mark.asyncio
+async def test_result_endpoint_surfaces_upstream_fault_to_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed resume's ``extras.upstream_fault`` reaches the owner via ``/result`` (#3567).
+
+    The flight-recorder handle of an approval-resumed run belongs to the
+    approver, so the parker cannot drill into it. The captured envelope is
+    then the parker's only view of why the op failed: it must carry the
+    structured vim fault type and the full faultstring.
+    """
+    request_id = await _park_approved()
+
+    upstream_request = httpx.Request("POST", "https://vcenter.example.test/sdk/vim25/x")
+    upstream_response = httpx.Response(
+        500,
+        json={
+            "_typeName": "NotAuthenticated",
+            "object": {"_typeName": "ManagedObjectReference", "value": "x" * 300},
+            "faultstring": "The session is not authenticated.",
+        },
+        request=upstream_request,
+    )
+    failed = result_connector_error(
+        _BRINGUP_OP,
+        httpx.HTTPStatusError("500", request=upstream_request, response=upstream_response),
+        3.0,
+    )
+
+    import meho_backplane.operations.dispatcher as dispatcher_module
+
+    async def _fake_dispatch(**_kwargs: object) -> OperationResult:
+        return failed
+
+    monkeypatch.setattr(dispatcher_module, "dispatch", _fake_dispatch)
+    async with get_sessionmaker()() as s:
+        row = await get_request(s, tenant_id=_TENANT_ID, request_id=request_id)
+    await resume_dispatch_after_approval(operator=_make_operator(), request=row)
+
+    key = make_rsa_keypair("kid-owner-fault")
+    headers = {"Authorization": f"Bearer {_token(key, role=TenantRole.READ_ONLY, sub=_OWNER_SUB)}"}
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="https://testserver",
+        ) as ac:
+            response = await ac.get(f"/api/v1/approvals/{request_id}/result", headers=headers)
+
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["status"] == "error"
+    assert result["extras"]["upstream_fault"] == {
+        "type": "NotAuthenticated",
+        "faultstring": "The session is not authenticated.",
+    }
 
 
 @pytest.mark.asyncio

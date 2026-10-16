@@ -87,6 +87,7 @@ from meho_backplane.connectors.vmware_rest.vim_body import VIM_TYPE_NAME_KEY
 __all__ = [
     "SOAP_CONTENT_TYPE",
     "SoapFault",
+    "attach_soap_fault",
     "build_create_nas_datastore_envelope",
     "build_datastore_refresh_envelope",
     "build_login_envelope",
@@ -101,6 +102,7 @@ __all__ = [
     "parse_service_content",
     "parse_soap_fault",
     "soap_action_for_version",
+    "soap_fault_of",
 ]
 
 # --- Wire constants --------------------------------------------------------
@@ -206,6 +208,28 @@ class SoapFault:
     faultcode: str | None
     faultstring: str | None
     fault_type: str | None
+
+
+#: Attribute name the parsed fault rides on, on the exception the connector
+#: raises for it (#3567). Kept in one place so the writer and the reader agree.
+_SOAP_FAULT_ATTR: Final = "soap_fault"
+
+
+def attach_soap_fault(exc: BaseException, fault: SoapFault) -> None:
+    """Store the parsed *fault* on *exc*, so the error envelope can show it (#3567).
+
+    On the ESXi SOAP path no :exc:`httpx.HTTPStatusError` reaches the error
+    builders: the connector raises a plain :exc:`RuntimeError` or a
+    ``ConnectorAuthError`` instead. This keeps the fault type and the full
+    faultstring with that exception, and keeps its class unchanged.
+    """
+    setattr(exc, _SOAP_FAULT_ATTR, fault)
+
+
+def soap_fault_of(exc: BaseException) -> SoapFault | None:
+    """The :class:`SoapFault` stored by :func:`attach_soap_fault`, else ``None``."""
+    fault = getattr(exc, _SOAP_FAULT_ATTR, None)
+    return fault if isinstance(fault, SoapFault) else None
 
 
 # --- Small XML helpers -----------------------------------------------------

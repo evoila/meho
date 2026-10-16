@@ -1094,8 +1094,8 @@ def test_3091_vim_paths_exist_in_the_pinned_spec(manifest_name: str) -> None:
 #
 # vm.create's optional ``nested_hv`` leg is vi-json, not vcenter REST:
 # ``VirtualMachineConfigSpec.nestedHVEnabled`` has no REST expression (the
-# #3087 recipe lanes pin that gap) and raw VI-JSON dispatch mounts on
-# ``/api`` — a 9.x-fleet shape that 404s on vCenter 8.0.x (#2466) — so the
+# #3087 recipe lanes pin that gap) and raw VI-JSON dispatch has no ``/api``
+# fallback and no Task polling (#2466, #3534) — so the
 # leg rides the same governed vmomi substrate as disk-grow:
 # ``POST:/VirtualMachine/{moId}/ReconfigVM_Task`` (the flag write) plus the
 # shared Task-poll read ``RetrievePropertiesEx``. The #3099 pre-9.0 create

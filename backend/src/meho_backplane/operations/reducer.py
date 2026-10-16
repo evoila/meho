@@ -36,6 +36,7 @@ plumbing to break.
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from typing import Any, Protocol, runtime_checkable
 
 from meho_backplane.connectors.schemas import ResultHandle
@@ -44,7 +45,16 @@ __all__ = [
     "PassThroughReducer",
     "Reducer",
     "ResultHandle",
+    "handle_owner_sub_var",
 ]
+
+#: The principal that owns a spilled result handle, when it is not the
+#: operator running the dispatch (#3548). ``None`` (the default) keeps the
+#: normal rule: the dispatching operator owns its handle. The approval resume
+#: binds the parking principal's ``sub`` here while it re-runs the approved op
+#: under the approver, so the handle inside the stored result belongs to the
+#: principal that ``GET /api/v1/approvals/{id}/result`` serves.
+handle_owner_sub_var: ContextVar[str | None] = ContextVar("handle_owner_sub", default=None)
 
 
 @runtime_checkable

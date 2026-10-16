@@ -150,8 +150,10 @@ lookups in `_lookups.py`, paths in `_paths.py`, and park-time previews in
   carries the Vault write ops'
   `sys/capabilities-self` `permission_preflight` (`will_be_denied`, plus
   `vault_target`), probed under that target's role — a probe that itself
-  fails (role login refused) shows `will_be_denied: true`,
-  `reason: probe_failed:<class>` instead of no block; the resolver's
+  fails (role login refused) gives `will_be_denied: true`,
+  `reason: probe_failed:<class>` instead of no block. A `will_be_denied`
+  verdict (including a non-Vault `vault_target`) refuses the park with
+  `write_capability_denied`, so no approval is asked for (#3542); the resolver's
   `target_id` / `target_name` log binding is restored afterwards so audit
   attribution stays on the VCFA target.
   The result carries only the Vault target and ref, version, SHA-256 and length, plus

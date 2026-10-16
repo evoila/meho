@@ -1105,8 +1105,29 @@ hooks and merges them: the preview (or the identifier-only default when
 there is no preview) is the base, the preflight result is attached
 under `proposed_effect["permission_preflight"]` when it fired, and the
 catalog `safety_level` (#1855, above) is stamped on top. Both hooks are
-opt-in and fail-soft — a preflight that raises degrades to no banner;
-the park always proceeds.
+opt-in and fail-soft — a preflight that raises degrades to no banner and
+the park proceeds.
+
+**A will-be-denied verdict refuses the park (#3542).** When the preflight
+returns `will_be_denied: true`, MEHO does not write an approval row.
+`dispatcher._preflight_denied_refusal` runs after `_build_proposed_effect`
+and the destructive-tier checks, at both park points (`_handle_needs_approval`
+and the composite sub-op seam `composite.enforce_subop_policy`). It
+returns `status="denied"` with `error_code="write_capability_denied"` and
+`extras` `path` / `granted` / `required` / `reason` / `doc_ref` (the write
+policy, `connector-vault-policy.md#6-kv-v2-write-surface`). So no person
+spends an approval on a write the identity cannot perform. The caller adds
+the write grant and calls again. Both park points still write one `denied`
+audit row for the attempt on the refused op's own path (the refusal details
+ride under `payload["error"]`) and publish one `denied` broadcast event, the
+same as an ordinary policy denial. They share one writer,
+`dispatcher._audit_denied_and_return`. For a refused step inside a
+multi-step operation the row is written by the sub-op gate and carries the
+parent operation's audit id in `parent_audit_id`. This matters because the
+parent returns the step's result as is, and the dispatcher writes no audit
+row for a result a handler returns. Before #3542 the verdict was only a
+warning and the op parked anyway; rows parked then still carry
+`write_capability_warning`, which the console modal shows as a banner.
 
 The KV-v2 write ops (`vault.kv.put` / `vault.kv.patch` /
 `vault.kv.delete`) register a preflight that probes
@@ -1282,7 +1303,8 @@ free-text reason (an `audit_log` read deferred to a follow-up).
 badge (mirroring the ops-launcher `safety_badge` mold — error for
 `dangerous`, warning for `caution`) + an `op_class` chip in the header;
 a `role="alert"` warning banner when `write_capability_warning` is set
-(#2331); an error banner when `preview_unavailable` is true, carrying
+(#2331; new parks with that verdict are refused since #3542, so only older
+rows carry it); an error banner when `preview_unavailable` is true, carrying
 `preview_error` (#1628); a reason-keyed notice when `preview_populated`
 is false (`credential_write_redacted` → elevated-risk redaction copy,
 `connector_did_not_populate` → a neutral "no preview" note, #2332); and a

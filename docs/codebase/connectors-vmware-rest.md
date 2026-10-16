@@ -935,8 +935,8 @@ pre-#2765 left every vCenter target permanently `reachable=False`.
    `reachable=True`, `product="esxi"`, `version` = the `about.version` the
    unauthenticated `RetrieveServiceContent` already returned (cached in
    `_about_versions`, exact e.g. `9.1.0`), `extras.api_type == "HostAgent"`,
-   and `probe_method` names the `GET /api/about` 400 → SOAP
-   `RetrieveServiceContent` chain. So a standalone ESXi target now
+   and `probe_method` is `GET /api/about (400) -> soap-currentsession (live)`
+   (see the liveness bullet below). So a standalone ESXi target now
    fingerprints reachable instead of dead-ending on the vAPI-only
    `/api/about`.
    - **Liveness read (`#3773d` / `#3710`).** Reachability is **confirmed with
@@ -952,6 +952,15 @@ pre-#2765 left every vCenter target permanently `reachable=False`.
      `reachable=False` ("stale/void SOAP session") instead of masking the
      outage. A missing SessionManager moid or a read failure degrades to
      unreachable, never propagates.
+   - **The ESXi probe is always live (`#3710`).** Every ESXi probe sends
+     exactly one SOAP call to the host — the `currentSession` read — even
+     when the session cache is warm (no new `RetrieveServiceContent` or
+     `Login` is needed then). `probe_method` ends in `(live)` to say so:
+     `reachable` comes from a call made during this probe. A `(cached)`
+     ending would mean the answer came from earlier data without asking the
+     host. The ESXi probe never does that, so it never reports `(cached)`.
+     Note that `version` still comes from the `about.version` cached at login
+     time; only reachability is checked live.
 
 `probe(target)` delegates to `fingerprint()` and folds the boolean
 reachable flag into a `ProbeResult`. Failure modes (TCP `ConnectError`,

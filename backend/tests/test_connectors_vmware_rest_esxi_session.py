@@ -813,7 +813,35 @@ async def test_fingerprint_standalone_esxi_reachable_product_esxi() -> None:
     assert result.version == _ABOUT_VERSION
     assert result.extras["session_flavor"] == "esxi"
     assert result.extras["api_type"] == "HostAgent"
-    assert "soap-retrieveservicecontent" in result.probe_method
+    assert result.probe_method == "GET /api/about (400) -> soap-currentsession (live)"
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_warm_cache_makes_exactly_one_live_soap_call() -> None:
+    """(#3710) A probe on a warm session cache still asks the host.
+
+    The first fingerprint logs in (cold cache). The second one reuses the
+    cached session, so it must not log in again -- but it must still send
+    exactly one live SOAP call (the currentSession read), not answer from
+    the cached about.version. probe_method says the answer was live.
+    """
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    router = _SdkRouter(retrieve_xml=_CURRENT_SESSION_OK_XML)
+    target = _esxi_fingerprinted()
+
+    async with respx.mock(base_url=_ESXI_BASE) as mock:
+        mock.post(_SDK).mock(side_effect=router)
+        mock.get("/api/about").respond(400)
+        await connector.fingerprint(target, _make_operator())
+        assert "Login" in router.methods
+        router.methods.clear()
+        result = await connector.fingerprint(target, _make_operator())
+
+    assert router.methods == ["RetrievePropertiesEx"]
+    assert "currentSession" in router.bodies[-1]
+    assert result.reachable is True
+    assert result.probe_method.endswith("(live)")
 
 
 @pytest.mark.asyncio
@@ -1170,6 +1198,7 @@ async def test_fingerprint_dead_session_reports_unreachable(
     # the liveness read, not the cache — the whole point of the #3710 close.
     assert result.extras["version"] == _ABOUT_VERSION
     assert "stale/void SOAP session" in result.extras["error"]
+    assert result.probe_method.endswith("(live)")
     # The reset was attempted (Logout between the two currentSession reads).
     assert "Logout" in router.methods
 

@@ -6902,6 +6902,11 @@ type ResultQueryBody struct {
 	// and the operator/aggregate allow-lists are enforced here, at construction;
 	// field-vs-schema validation needs the handle's columns and happens in
 	// :func:`compile_query`.
+	//
+	// ``path`` is the other read: an RFC 6901 pointer into a document handle,
+	// or into the top-level fields a rows handle left out of its inline
+	// summary. It is never compiled to SQL, so it cannot be combined with any
+	// relational field (checked here, at construction).
 	Query *ResultQuerySpec `json:"query,omitempty"`
 }
 
@@ -6914,6 +6919,11 @@ type ResultQueryBody struct {
 // and the operator/aggregate allow-lists are enforced here, at construction;
 // field-vs-schema validation needs the handle's columns and happens in
 // :func:`compile_query`.
+//
+// “path“ is the other read: an RFC 6901 pointer into a document handle,
+// or into the top-level fields a rows handle left out of its inline
+// summary. It is never compiled to SQL, so it cannot be combined with any
+// relational field (checked here, at construction).
 type ResultQuerySpec struct {
 	// Aggregate Aggregate output columns (COUNT/SUM/MIN/MAX/AVG).
 	Aggregate *[]Aggregate `json:"aggregate,omitempty"`
@@ -6929,6 +6939,9 @@ type ResultQuerySpec struct {
 
 	// OrderBy Sort terms (max 4).
 	OrderBy *[]OrderBy `json:"order_by,omitempty"`
+
+	// Path RFC 6901 JSON Pointer into a document handle (for example `/status/conditions/0`; `""` is the whole document), or into the top-level fields a rows handle left out of its inline summary (`omitted_scalar_count`). Reads one value; an array value pages with the call's `offset` / `limit`. Cannot be combined with `filter`, `select`, `group_by`, `aggregate`, `order_by`, or `limit`.
+	Path *string `json:"path"`
 
 	// Select Projection: columns to return (max 64). Omit for all columns. Not allowed together with `aggregate` (the output is then the group keys plus the aggregates).
 	Select *[]string `json:"select,omitempty"`

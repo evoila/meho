@@ -2129,8 +2129,9 @@ async def _reduce_or_error(
     # author registered one via ``llm_instructions``) so the reducer copies
     # the listed scalar siblings (a validation/task id, execution status)
     # into the inline summary instead of swallowing them with the rest of
-    # the dict envelope. ``None`` on ops without a hint -- the summary
-    # keeps its bookkeeping-only shape. Pulled here (vs. in the reducer)
+    # the dict envelope. ``None`` on ops without a hint -- the reducer then
+    # applies its bounded default scalar rule (#3633), except for
+    # credential-class ops, which keep only the bookkeeping. Pulled here (vs. in the reducer)
     # for the same decoupling reason as the two hints above.
     result_scalars = _result_scalars_from_descriptor(descriptor)
     if result_scalars is not None:

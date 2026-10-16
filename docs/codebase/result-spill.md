@@ -14,8 +14,23 @@ threshold (>50 rows or >4 KB by default), the caller gets back:
 
 - an inline summary `{row_count, total, sample_rows_returned,
   sample_bytes, source_key?}` (the bounded preview itself lives once on
-  `handle.sample_rows`, #134; ops registering a `result_scalars` hint
-  additionally keep the listed payload scalars top-level, #3084), and
+  `handle.sample_rows`, #134). When the list sat under a dict key, the
+  payload's other top-level scalars stay top-level too, bounded to 32 keys
+  and 1 KB of JSON text in total; a single value over 512 bytes is not
+  copied (#3633). Skipped keys are counted under `omitted_scalar_count`,
+  so the summary stays smaller than the 4 KB threshold that caused the
+  reduction. The skipped values are not lost: they are stored with the
+  rows, and `result_query` reads one back with `query={"path":
+  "/<field name>"}` (or all of them with `path: ""`). The drill-in
+  rationale names that read when the count is above zero and the store
+  kept the fields. When they leave no room for the rows under the
+  per-record cap, the store drops them, keeps the rows, and reports
+  `document_stored=False`; the rationale then says the fields are not
+  retrievable from the handle instead of naming a read that fails.
+  Credential-class ops do not get this default copy;
+  they keep only the scalars their `result_scalars` hint lists (#3084).
+  Lists and objects are never copied by default (objects need the
+  bounded `result_objects` hint); and
 - a `ResultHandle` on `OperationResult.handle` carrying `summary_md`,
   `schema_`, `total_rows`, `sample_rows`, and the self-documenting
   `fetch_more` envelope.
@@ -127,6 +142,39 @@ plus a `coverage_note` — so a `COUNT` over a capped spill is labelled as
 covering the stored subset, **never** presented as a whole-inventory
 total.
 
+## Document records and `path` reads (#3633)
+
+Some large results have no single list to reduce: a detail object with
+several lists (`k8s.pod.info`), a dict of scalars (`k8s.exec`), or a
+scalar root. When such a payload serializes past the byte threshold,
+the reducer keeps it **whole** as a document record under a handle:
+
+- The inline summary is small and fixed in size: `result_record:
+  "document"`, `root_type`, `document_bytes`, a `top_level_fields`
+  outline (names and kinds, never values; 64 fields and 2 KB of JSON
+  text at most), and the small top-level scalars (same bounded default
+  rule as above). Every budget measures escaped JSON text, the way the
+  MCP transport sends it, so a field name full of control characters
+  cannot push the summary past its bound.
+- `drill_in.example_call` uses `query={"path": "/<first field>"}`.
+- The record is written whole or not at all. Over
+  `RESULT_HANDLE_MAX_RECORD_BYTES` it is not stored
+  (`reason=result_store_unavailable`); over the admission work limit it
+  is not stored either (`reason=admission_limit_exceeded`).
+- Credential-class ops and reduces without an `op_id` pass through
+  unchanged, as before.
+
+Read it with `result_query` and `query={"path": "<RFC 6901 JSON
+Pointer>"}`. `path` cannot be combined with any relational field (a
+`ValidationError` at spec construction). An array value pages with the
+call's `offset` / `limit` (items that are not objects come back as
+`{"value": item}`); any other value comes back whole in `value`, with
+`value_type` naming its JSON type. A pointer that does not resolve
+(missing member, `-`, a leading-zero or out-of-range index) is a
+recoverable `QueryContractError`. So is a `path` read on a rows handle,
+or paging / a relational query on a document handle. The same output
+byte budget applies.
+
 ## Key types
 
 | Symbol | Where | Role |
@@ -134,6 +182,9 @@ total.
 | `JsonFluxReducer._spill` / `_SpillOutcome` | `backend/src/meho_backplane/operations/jsonflux_reducer.py` | Persists the materialized rows; reports `stored_rows` **or** a machine-readable `skip_reason` |
 | `FetchMoreDrillIn.reason` / `DrillInUnavailableReason` | `backend/src/meho_backplane/connectors/schemas.py` | The machine-readable no-spill cause on the wire |
 | `ResultHandleStore.spill` / `fetch_window` / `fetch_rows` | `backend/src/meho_backplane/connectors/result_handle_store.py` | Fail-open Valkey persistence + operator/tenant-scoped read-back; `fetch_rows` returns the full authorized set for the query surface (#3366) |
+| `ResultHandleStore.spill_document` / `fetch_document` / `ResultRecordKindError` | `backend/src/meho_backplane/connectors/result_handle_store.py` | Document records (#3633): stored whole or not at all; a read of the wrong record kind is a recoverable contract error |
+| `parse_json_pointer` / `resolve_json_pointer` | `backend/src/meho_backplane/jsonflux/query/json_pointer.py` | RFC 6901 pointer syntax and resolution for `path` reads (#3633) |
+| `document_outline` and friends | `backend/src/meho_backplane/operations/result_document.py` | The bounded inline view of a document record (#3633) |
 | `read_result_window` / `run_result_query` / `ResultHandleNotFoundError` | `backend/src/meho_backplane/operations/result_query.py` | Transport-neutral windowed-read core (#3179) + bounded query core (#3366) both surfaces wrap; misses raise the recoverable not-found error |
 | `compile_query` / `ResultQuerySpec` / `QueryContractError` / `OutputPlan` | `backend/src/meho_backplane/jsonflux/query/contract.py` | Compiles the validated query grammar against the result field catalog to one parameterized read-only `SELECT` plus an output plan (#3366, #3635) |
 | `result_query` (MCP) | `backend/src/meho_backplane/mcp/tools/result_query.py` | MCP read surface; misses surface as recoverable `handle_not_found` (`-32602`) |
@@ -159,9 +210,9 @@ total.
      reason `admission_limit_exceeded`;
    - no usable `tenant_id`/`operator_sub` (absent or non-UUID) →
      skip, reason `no_tenant_context`;
-   - `ResultHandleStore.spill()` returns `False` (Valkey unreachable,
-     write rejected, or the guard `ttl/max_rows <= 0` / empty rows) →
-     skip, reason `result_store_unavailable`;
+   - `ResultHandleStore.spill()` reports `stored_rows == 0` (Valkey
+     unreachable, write rejected, or the guard `ttl/max_rows <= 0` /
+     empty rows) → skip, reason `result_store_unavailable`;
    - otherwise → `stored_rows = min(total_rows,
      RESULT_HANDLE_MAX_SPILL_ROWS)`.
 3. `_assemble()` builds the inline summary + handle; the drill-in
@@ -213,7 +264,7 @@ code-level diagnosis at `v0.13.0` (`f6ee330`):
   dispatch, so `no_tenant_context` cannot fire there (it covers
   non-dispatch reduces and malformed context only). A 5-of-300 sample
   with no working `result_query` route on a live deploy means
-  `ResultHandleStore.spill()` returned `False` — Valkey (the broadcast
+  `ResultHandleStore.spill()` stored no rows — Valkey (the broadcast
   service the store piggybacks on, `BROADCAST_REDIS_URL`) unreachable
   from the backplane pod, or the write rejected.
 - **What was actually wrong user-side:** before #1629 both skip causes

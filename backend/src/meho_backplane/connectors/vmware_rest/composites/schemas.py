@@ -3942,7 +3942,10 @@ VM_DEPLOY_FROM_LIBRARY_PARAMETER_SCHEMA: dict[str, Any] = {
             "description": (
                 "Optional display name for the deployed VM; the server uses the "
                 "OVF descriptor's name when omitted. Set it so a failed deploy can "
-                "find and delete the partial VM it left behind (#3697)."
+                "find and delete the partial VM it left behind (#3697). A same-name "
+                "VM that another caller creates in the same resource pool while "
+                "this deploy runs is deleted too, so do not run two deploys with "
+                "the same name into the same resource pool at the same time."
             ),
         },
         "network_mappings": {

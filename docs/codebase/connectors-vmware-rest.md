@@ -1965,7 +1965,11 @@ same guarantee `vm.import_from_library` gets from aborting its lease:
    VM is still there.
 
 Only VMs that were *not* there before the deploy are deleted, so an older VM
-with the same name is never touched. Without `name` (vCenter then names the
+with the same name is never touched. A same-name VM that another caller
+creates in the same resource pool while this deploy runs also looks new, and
+is deleted too. The REST VM listing cannot show which deploy created a VM. So
+do not run two deploys with the same `name` into the same resource pool at the
+same time. Without `name` (vCenter then names the
 VM from the OVF descriptor) or when the first listing faults, only a VM the
 `DeploymentResult` names can be cleaned up. On a cancel, the cleanup runs as
 a shielded task (the audit middleware's drain pattern) and the cancellation

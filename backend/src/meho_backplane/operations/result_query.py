@@ -45,17 +45,29 @@ from typing import Any
 from uuid import UUID
 
 import msgspec
+import pyarrow as pa
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.result_handle_store import get_result_handle_store
 from meho_backplane.jsonflux.query.contract import (
     RESULT_TABLE,
+    ROW_ORDINAL,
     CompiledQuery,
     QueryContractError,
     ResultQuerySpec,
     compile_query,
 )
 from meho_backplane.jsonflux.query.engine import QueryEngine
+from meho_backplane.jsonflux.query.json_pointer import (
+    JsonPointerError,
+    json_type,
+    parse_json_pointer,
+    resolve_json_pointer,
+)
+from meho_backplane.jsonflux.query.result_catalog import (
+    ResultFieldCatalog,
+    _build_catalog_from_admitted,
+)
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -221,14 +233,28 @@ class ResultQueryOutputTooLargeError(Exception):
         )
 
 
-def _known_columns(engine: QueryEngine) -> dict[str, str]:
-    """Return exact registered handle column names mapped to DuckDB types.
+#: Arrow type for each catalog scalar family in the explicit projection.
+_FAMILY_ARROW_TYPES: dict[str, pa.DataType] = {
+    "boolean": pa.bool_(),
+    "integer": pa.int64(),
+    "number": pa.float64(),
+    "string": pa.string(),
+}
 
-    The contract compiler validates every referenced field against this set,
-    so an unknown field is rejected before any SQL runs.
+
+def _project_rows(rows: list[dict[str, Any]], catalog: ResultFieldCatalog) -> pa.Table:
+    """Build the relational table the compiled ``SELECT`` runs over.
+
+    One typed column per queryable catalog field, named by its generated
+    internal identifier, plus the hidden row ordinal. Fields that cannot be
+    queried are left out: they are only ever returned raw, by ordinal.
     """
-    described = engine.conn.execute(f"DESCRIBE {RESULT_TABLE}").fetchall()
-    return {str(row[0]): str(row[1]) for row in described}
+    columns: dict[str, pa.Array] = {ROW_ORDINAL: pa.array(range(len(rows)), type=pa.int64())}
+    for entry in catalog.fields:
+        if entry.queryable and entry.scalar_family is not None:
+            arrow_type = _FAMILY_ARROW_TYPES[entry.scalar_family]
+            columns[entry.column] = pa.array([row.get(entry.name) for row in rows], type=arrow_type)
+    return pa.table(columns)
 
 
 def _execute_sync(engine: QueryEngine, compiled: CompiledQuery) -> tuple[list[str], list[Any]]:
@@ -253,29 +279,25 @@ async def _run_compiled_query(
 ) -> tuple[list[dict[str, Any]], bool, int]:
     """Compile *spec*, run it under the time budget; return rows + flags.
 
-    The engine is created + the rows registered + the contract compiled
-    inline (bounded work), then only the ``SELECT`` execution runs on a
-    worker thread so the event loop can interrupt it on timeout. The result
-    is capped to ``max_output_rows`` and ``truncated`` is ``True`` when the
-    underlying result had more rows than the cap admits.
+    The field catalog is built from every stored row (the rows passed the
+    reducer's admission guard before they were spilled), the spec is
+    compiled against it, and the explicit projection is registered inline
+    (bounded work). Only the ``SELECT`` execution runs on a worker thread so
+    the event loop can interrupt it on timeout. The result is capped to
+    ``max_output_rows`` and ``truncated`` is ``True`` when the underlying
+    result had more rows than the cap admits. Output rows come from the
+    compiled output plan: flat queries copy the raw stored rows.
     """
+    catalog = _build_catalog_from_admitted(rows)
+    compiled = compile_query(spec, catalog, max_limit=max_output_rows)
     engine = QueryEngine()
     try:
-        engine.register(RESULT_TABLE, rows, unwrap="auto")
-        columns = _known_columns(engine)
-        compiled = compile_query(
-            spec,
-            list(columns),
-            max_limit=max_output_rows,
-            column_types=columns,
-        )
+        engine.conn.register(RESULT_TABLE, _project_rows(rows, catalog))
 
         loop = asyncio.get_running_loop()
         future = loop.run_in_executor(None, _execute_sync, engine, compiled)
         try:
-            result_columns, fetched = await asyncio.wait_for(
-                asyncio.shield(future), timeout_seconds
-            )
+            _, fetched = await asyncio.wait_for(asyncio.shield(future), timeout_seconds)
         except TimeoutError as exc:  # asyncio.TimeoutError aliases this on 3.11+
             with contextlib.suppress(Exception):
                 engine.conn.interrupt()
@@ -287,7 +309,7 @@ async def _run_compiled_query(
 
     truncated = len(fetched) > compiled.effective_limit
     capped = fetched[: compiled.effective_limit]
-    result_rows = [dict(zip(result_columns, row, strict=False)) for row in capped]
+    result_rows = compiled.output_plan.rehydrate(capped, raw_rows=rows)
     return result_rows, truncated, compiled.effective_limit
 
 
@@ -295,6 +317,9 @@ async def run_result_query(
     operator: Operator,
     handle_id: UUID,
     spec: ResultQuerySpec,
+    *,
+    offset: int = 0,
+    limit: int = 50,
 ) -> dict[str, Any]:
     """Run a bounded, validated structured query over a spilled handle (#3366).
 
@@ -315,9 +340,15 @@ async def run_result_query(
     (time budget exceeded), or :class:`ResultQueryOutputTooLargeError` (byte
     budget exceeded). Each transport maps these to its own recoverable-error
     shape.
+
+    A spec with ``path`` is a document read, not a query: it branches to
+    :func:`_read_document_path`, which uses *offset* / *limit* to page an
+    array value. *offset* / *limit* are ignored for a relational query.
     """
     if operator.tenant_id is None:
         raise ResultHandleNotFoundError(handle_id)
+    if spec.path is not None:
+        return await _read_document_path(operator, handle_id, spec.path, offset, limit)
 
     row_set = await get_result_handle_store().fetch_rows(
         tenant_id=operator.tenant_id,
@@ -370,3 +401,76 @@ async def run_result_query(
         "coverage": "partial" if partial else "complete",
         "coverage_note": coverage_note,
     }
+
+
+#: Remediation for an over-budget ``path`` read.
+_PATH_REMEDIATION = (
+    "Point `path` at a smaller part of the document, or page an array value with a smaller `limit`."
+)
+
+
+async def _read_document_path(
+    operator: Operator,
+    handle_id: UUID,
+    path: str,
+    offset: int,
+    limit: int,
+) -> dict[str, Any]:
+    """Resolve the RFC 6901 *path* against a handle's document (#3633).
+
+    For a document handle that is the whole retained payload. For a rows
+    handle it is the dict of top-level fields the reducer left out of the
+    inline summary (``omitted_scalar_count``), so ``/stderr`` reads a value
+    that was too big to ride inline. An array value pages: ``rows`` holds
+    ``[offset : offset+limit]`` of its items, a non-object item wrapped as
+    ``{"value": item}`` (the same shape the reducer gives a list of scalars).
+    Any other value comes back whole in ``value``. A pointer that does not
+    resolve, or a rows handle with nothing kept beside its rows, is a
+    :class:`QueryContractError`. The output byte budget is the same as for
+    paging and queries.
+    """
+    assert operator.tenant_id is not None  # checked by the caller (mypy narrowing)
+    try:
+        tokens = parse_json_pointer(path)
+    except JsonPointerError as exc:  # already checked by the spec; kept for direct callers
+        raise QueryContractError(str(exc)) from exc
+    stored = await get_result_handle_store().fetch_document(
+        tenant_id=operator.tenant_id,
+        operator_sub=operator.sub,
+        handle_id=handle_id,
+    )
+    if stored is None:
+        raise ResultHandleNotFoundError(handle_id)
+    try:
+        node = resolve_json_pointer(stored.document, tokens)
+    except JsonPointerError as exc:
+        raise QueryContractError(str(exc)) from exc
+
+    result: dict[str, Any] = {
+        "handle_id": str(handle_id),
+        "path": path,
+        "value_type": json_type(node),
+        "offset": offset,
+        "limit": limit,
+        "truncated": False,
+        "coverage": "complete",
+        "coverage_note": None,
+    }
+    if isinstance(node, list):
+        window = node[offset : offset + limit]
+        rows = [item if isinstance(item, dict) else {"value": item} for item in window]
+        result.update(
+            rows=rows, returned_rows=len(rows), total_rows=len(node), stored_rows=len(node)
+        )
+        budgeted: Any = rows
+    else:
+        result.update(rows=[], value=node, returned_rows=1, total_rows=1, stored_rows=1)
+        budgeted = node
+
+    max_bytes = get_settings().result_query_max_output_bytes
+    encoded = msgspec.json.encode(budgeted)
+    if len(encoded) > max_bytes:
+        raise ResultQueryOutputTooLargeError(
+            handle_id, len(encoded), max_bytes, remediation=_PATH_REMEDIATION
+        )
+    return result

@@ -146,11 +146,13 @@ via a scoped rule, but a missed secret is the failure the parent goal
 Beyond the connector-*result* boundary, the dispatch **error
 builders** (`operations/_errors.py`) route every free-text diagnostic
 they emit — `extras.exception_message`, `extras.upstream_message`,
+`extras.upstream_fault.type` / `.faultstring`,
 `extras.detail`, and the `error` summary tails built from them —
 through `_sanitize_free_text`: a Tier-1 pass with the packaged
 default policy (pinned via `get_default_policy()`, deliberately
 bypassing the resolver override table so a registered shadow-mode
-policy cannot disable it), followed by the 256-char cap. Redaction
+policy cannot disable it), followed by the length cap (256 chars, or
+2 KB for upstream body text, #3567). Redaction
 runs **before** the cap so a secret straddling the cap boundary
 cannot survive truncation as an unmatchable cleartext fragment.
 

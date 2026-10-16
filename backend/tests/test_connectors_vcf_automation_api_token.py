@@ -870,29 +870,35 @@ async def _parked_effect() -> dict[str, Any]:
     return dict(rows[0].proposed_effect)
 
 
-async def test_park_card_carries_the_vault_write_preflight(
+async def _assert_park_refused(result: dict[str, Any]) -> dict[str, Any]:
+    """The preflight said the Vault write will be denied: no park (#3542)."""
+    assert result["status"] == "denied"
+    extras: dict[str, Any] = result["extras"]
+    assert extras["error_code"] == "write_capability_denied"
+    async with get_sessionmaker()() as session:
+        rows = (await session.execute(select(ApprovalRequest))).scalars().all()
+    assert rows == []
+    return extras
+
+
+async def test_park_refused_when_the_target_role_may_not_write(
     vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     probes = _capabilities(monkeypatch, ["read"])
     with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
         routes = _mount_user_flow(mock)
-        await run("vcfa.provider.api_token.create", _CREATE_PARAMS, approved=False)
+        result = await run("vcfa.provider.api_token.create", _CREATE_PARAMS, approved=False)
     assert not any(route.called for route in routes.values())
-    effect = await _parked_effect()
-    preflight = effect["permission_preflight"]
-    assert preflight["vault_target"] == _VAULT_TARGET
-    assert preflight["path"] == "secret/data/example/vcfa-target"
-    assert preflight["required"] == ["create", "update"]
-    assert preflight["will_be_denied"] is True
-    assert effect["write_capability_warning"] == "connector_identity_may_lack_write"
+    extras = await _assert_park_refused(result)
+    assert extras["path"] == "secret/data/example/vcfa-target"
+    assert extras["required"] == ["create", "update"]
+    assert extras["granted"] == ["read"]
     # Probed under the named Vault target (its role), not the caller's identity.
     assert [(t.name, paths) for t, paths in probes] == [
         (_VAULT_TARGET, ["secret/data/example/vcfa-target"])
     ]
-    store = effect["preview"]["store"]
-    assert store["vault_target"] == _VAULT_TARGET
     for secret in (MINTED_TOKEN, PASSWORD, USER_JWT):
-        assert secret not in json.dumps(effect)
+        assert secret not in json.dumps(result)
 
 
 async def test_park_card_preflight_passes_when_the_target_role_may_write(
@@ -901,11 +907,16 @@ async def test_park_card_preflight_passes_when_the_target_role_may_write(
     _capabilities(monkeypatch, ["create", "read", "update"])
     await run("vcfa.provider.api_token.create", _CREATE_PARAMS, approved=False)
     effect = await _parked_effect()
-    assert effect["permission_preflight"]["will_be_denied"] is False
+    preflight = effect["permission_preflight"]
+    assert preflight["will_be_denied"] is False
+    assert preflight["vault_target"] == _VAULT_TARGET
     assert "write_capability_warning" not in effect
+    assert effect["preview"]["store"]["vault_target"] == _VAULT_TARGET
+    for secret in (MINTED_TOKEN, PASSWORD, USER_JWT):
+        assert secret not in json.dumps(effect)
 
 
-async def test_park_card_reports_a_failed_probe(
+async def test_park_refused_when_the_probe_fails(
     vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class _RoleRefusedError(Exception):
@@ -919,27 +930,22 @@ async def test_park_card_reports_a_failed_probe(
             return None
 
     monkeypatch.setattr(vault_ops_module, "vault_client_for_target", lambda _o, _t: _Ctx())
-    await run("vcfa.provider.api_token.create", _CREATE_PARAMS, approved=False)
-    effect = await _parked_effect()
-    preflight = effect["permission_preflight"]
-    assert preflight["will_be_denied"] is True
-    assert preflight["reason"] == "probe_failed:_RoleRefusedError"
-    assert preflight["vault_target"] == _VAULT_TARGET
-    assert effect["write_capability_warning"] == "connector_identity_may_lack_write"
+    result = await run("vcfa.provider.api_token.create", _CREATE_PARAMS, approved=False)
+    extras = await _assert_park_refused(result)
+    assert extras["reason"] == "probe_failed:_RoleRefusedError"
 
 
-async def test_park_card_flags_a_non_vault_target(
+async def test_park_refused_for_a_non_vault_target(
     vcfa: VcfAutomationConnector, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     probes = _capabilities(monkeypatch, ["create", "update"])
-    await run(
+    result = await run(
         "vcfa.provider.api_token.create",
         {**_CREATE_PARAMS, "vault_target": TARGET_NAME},
         approved=False,
     )
-    preflight = (await _parked_effect())["permission_preflight"]
-    assert preflight["will_be_denied"] is True
-    assert "not a Vault-connector target" in preflight["reason"]
+    extras = await _assert_park_refused(result)
+    assert "not a Vault-connector target" in extras["reason"]
     assert probes == []
 
 

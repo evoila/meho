@@ -363,19 +363,31 @@ async def _session_instructions(operator: Operator) -> str | None:
     consumers of the assembler must not see it. Both bands use the
     empty-drops-cleanly join convention, so an all-GA registry
     degrades to the preamble alone.
+
+    #3746: every call logs an ``mcp_preamble_receipt`` record computed
+    from this assembly (not from the write-path feedback): which
+    convention slugs were included or dropped, the conventions band
+    estimate against its budget, and the estimate for the whole
+    ``instructions`` text, reported separately. It records what MEHO
+    sent; the MCP client may ignore ``instructions``, so it is not
+    proof that an agent applied them.
     """
     # Imported inside the function to break the import cycle (mcp.server
     # → conventions.preamble → db → ... → mcp.server). The cost of one
     # function-local import per ``initialize`` call is negligible (the
     # module is already loaded by the time any handshake arrives).
-    from meho_backplane.conventions.preamble import assemble_preamble
+    from meho_backplane.conventions.preamble import assemble_preamble_detailed
+    from meho_backplane.conventions.schemas import (
+        DEFAULT_MAX_PREAMBLE_TOKENS,
+        estimate_tokens,
+    )
 
     # ``sub`` (G12.4-T2 #1316) drives the per-run priming band;
     # ``capabilities`` (G4.6-T4 #1553) drives the doc-collection catalogue
     # band. An operator with no in-progress runs and no entitled collections
     # sees a byte-identical preamble to the pre-band shape (each band helper
     # returns ``text=""`` and the assembler omits that section).
-    preamble = await assemble_preamble(
+    preamble = await assemble_preamble_detailed(
         operator.tenant_id, operator.sub, capabilities=operator.capabilities
     )
     if preamble.dropped_slugs:
@@ -391,6 +403,16 @@ async def _session_instructions(operator: Operator) -> str | None:
             dropped_slugs=preamble.dropped_slugs,
         )
     joined = "\n\n".join(band for band in (preamble.text, FEATURE_MATURITY_BAND) if band)
+    _log.info(
+        "mcp_preamble_receipt",
+        tenant_id=str(operator.tenant_id),
+        included_slugs=preamble.kept_slugs,
+        dropped_slugs=preamble.dropped_slugs,
+        oversize_slugs=preamble.oversize_slugs,
+        conventions_tokens=preamble.conventions_tokens,
+        conventions_max_tokens=DEFAULT_MAX_PREAMBLE_TOKENS,
+        instructions_tokens=estimate_tokens(joined),
+    )
     # Since G6.5-T6 (#2546) every preamble carries the static
     # broadcast-discipline band, so the payload is always non-empty;
     # the ``or None`` stays as a defensive belt for the theoretical

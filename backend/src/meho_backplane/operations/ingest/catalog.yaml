@@ -45,6 +45,12 @@
 #       against; optional, not enforced. null until smoke-tested.
 #   notes                        -- operator context: sharp edges, version
 #       quirks, appliance-served vs portal-hosted, curation status.
+#   safety_overlay               -- optional list of rules that raise the
+#       safety of ingested ops (#3340). Each rule has `method` (exact),
+#       `path` (glob, `*` also matches `/`), `safety_level`, and optional
+#       `requires_approval` (default false). It only raises: it never
+#       lowers a level or clears approval. Rows already in the database
+#       change only on the next ingest of the connector.
 
 entries:
   # --- Generic-ingested connectors (Layer 2: ingest the vendor OpenAPI) ---

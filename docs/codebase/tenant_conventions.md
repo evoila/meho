@@ -117,7 +117,7 @@ Two design points:
   (route: 409), and `OverBudgetError` (route: 422). The route maps
   each to the wire status it already produced; the BFF maps the same
   errors to HTMX partials. The error classes + the pure helpers
-  (budget gate, set-vs-null PATCH resolution, conventions-band slice)
+  (budget gate, set-vs-null PATCH resolution)
   live in
   [`conventions/_internal.py`](../../backend/src/meho_backplane/conventions/_internal.py).
 
@@ -161,8 +161,8 @@ shipped the schema; T3-T5 layer CLI / preamble / seed on top.
    operator's tenant. Filters by `tenant_id` (resolved from the JWT
    claim by G0.1's contextvar binding). Optional `?kind=operational`
    query param mirrors the CLI's `meho conventions list --kind`
-   verb. Ordering is `priority DESC, created_at ASC` -- the same
-   key T4's preamble assembler will use, so the list view surfaces
+   verb. Ordering is `priority DESC, created_at ASC, id ASC` -- the
+   same key T4's preamble assembler uses, so the list view surfaces
    conventions in the order T4 considers them.
 
 5. **GET /api/v1/conventions/{slug}** (T2) -- single-row lookup by
@@ -180,7 +180,9 @@ shipped the schema; T3-T5 layer CLI / preamble / seed on top.
    `initialize` response. Over-budget entries are dropped whole
    (never mid-entry truncation of an operational rule), and the
    dropped-slug list flows back to callers so `meho conventions
-   list` can surface it. The assembler lives in
+   list` can surface it. Each `initialize` also logs an
+   `mcp_preamble_receipt` record (see
+   [Rendered budget](#rendered-budget-one-shared-primitive-3746)). The assembler lives in
    [`backend/src/meho_backplane/conventions/preamble.py`](../../backend/src/meho_backplane/conventions/preamble.py);
    the MCP handler integration is in
    [`backend/src/meho_backplane/mcp/server.py`](../../backend/src/meho_backplane/mcp/server.py)
@@ -194,10 +196,75 @@ shipped the schema; T3-T5 layer CLI / preamble / seed on top.
    G0.5's resource registry. Tenant-scoped: the URI's `tenant_id`
    MUST match the operator's JWT tenant or the read rejects with
    `-32602` (the JSON-RPC analogue of the issue body's "403"; same
-   shape `meho://tenant/{id}/info` settled on, G0.5-T4). Lives in
+   shape `meho://tenant/{id}/info` settled on, G0.5-T4). The minimum
+   role is `read_only`. The `body` comes back inside the shared
+   untrusted-text envelope (`<<UNTRUSTED_AGENT_TEXT ...
+   END_UNTRUSTED_AGENT_TEXT>>`, from
+   [`untrusted_text.py`](../../backend/src/meho_backplane/untrusted_text.py)),
+   the same one the kb and memory resources use. The stored Markdown
+   is data, not a directive; hard rules stay in code, RBAC, and
+   approvals. Lives in
    [`backend/src/meho_backplane/mcp/resources/tenant_conventions.py`](../../backend/src/meho_backplane/mcp/resources/tenant_conventions.py);
    joins the eager-import + autouse-fixture reload shape every
    other resource follows.
+
+9. **MCP resource** `meho://tenant-conventions/index` (#3755) -- a
+   bounded list of the caller's own conventions, without bodies. The
+   URI names no tenant: the tenant comes from the caller's token. It is
+   the one convention URI that shows up in `resources/list`, so a
+   client can find conventions without knowing a slug. Minimum role is
+   `read_only`. Each page has at most `INDEX_PAGE_SIZE` (25) entries.
+   An entry carries `slug`, `title`, `kind`, `priority`, `updated_at`,
+   `availability`, and `uri` (the per-slug resource above, which is
+   where the body lives). The page also carries `revision`, `total`,
+   `next_uri`, `preamble_budget` (`max_tokens`, `estimated_tokens`,
+   `over_budget`), and a fixed `note`.
+
+   `availability` says what MEHO sends in the MCP `initialize`
+   instructions, using the same packer as `budget_status`:
+
+   | Value | Meaning |
+   |---|---|
+   | `included` | operational, in the conventions band |
+   | `dropped` | operational, fits alone but lost the room to higher-priority entries |
+   | `dropped_oversize` | operational, too large even as the only entry |
+   | `not_in_preamble` | `workflow` or `reference`; never sent in `initialize` |
+
+   `included` describes what MEHO sends, not what a client did. The
+   `note` says so, and the page has no field that claims a client read,
+   subscribed to, or applied anything. The server advertises the
+   `resources` capability with `subscribe: false`; listing the index
+   loads nothing into a prompt.
+
+   **Paging.** `next_uri` is `meho://tenant-conventions/index/{cursor}`.
+   The cursor is base64url JSON with the tenant id, the `revision`, and
+   the next offset. `revision` is a short SHA-256 digest over every
+   row's `(id, updated_at)` in index order (`priority DESC, created_at
+   ASC, id ASC`), so a walk across pages reads one snapshot:
+
+   - If any convention changed since page one, the next page is refused
+     ("the convention index changed") and the client reads the first
+     page again. Rows are never skipped or repeated silently.
+   - A broken cursor, a cursor for another tenant, and an offset past
+     the end all get one and the same "invalid cursor" message, so the
+     answer tells the caller nothing about other tenants. The tenant
+     check runs before the revision check.
+   - The cursor is not signed. It carries no secret, and every read
+     still filters on the token's tenant, so a hand-made cursor can only
+     reach the caller's own conventions.
+
+   One page comes from one query. `index_page` reads the tenant's rows
+   once and computes the revision, the page, and each entry's
+   availability from that one result, running the same in-memory packer
+   (`render_conventions`) that `initialize` and `budget_status` use. So
+   a page never mixes two states of the table: a convention deleted
+   while the page is built is either listed with its real availability
+   or not listed at all, never listed as `dropped`. The page shape and
+   cursor live in
+   [`conventions/index.py`](../../backend/src/meho_backplane/conventions/index.py);
+   the query and availability in `ConventionsService.index_page`; the
+   resource adapter (error mapping and URIs) in
+   [`mcp/resources/tenant_conventions.py`](../../backend/src/meho_backplane/mcp/resources/tenant_conventions.py).
 
 ## Session-preamble assembler (T4)
 
@@ -219,12 +286,18 @@ the conventions budget. Behaviour for the conventions band:
   [locked-decisions.md](../decisions/locked-decisions.md) -- workflow
   and reference rules are reference material the operator surfaces
   on demand and never enter the session preamble.
-- **Orders deterministically: `priority DESC, created_at ASC`.**
-  Highest priority wins; ties broken by oldest-first. Same key the
-  list API + `meho conventions list` CLI use, so all three surfaces
-  display rules in the same order.
-- **Packs greedily; drops lowest-priority entries WHOLE on
-  overflow.** Never mid-entry truncation -- the issue body is
+- **Orders deterministically: `priority DESC, created_at ASC, id ASC`.**
+  Highest priority wins; ties broken by oldest-first, then by `id`
+  so the order is total even when two rows share a creation time.
+  Same key the list API, `meho conventions list` CLI, and the
+  convention index resource use, so every surface displays rules in
+  the same order and reports the same inclusion.
+- **Packs greedily; drops entries WHOLE on overflow
+  (skip-and-fill).** For each entry in order, the band is rendered
+  with that entry added and the whole text is estimated. If it is
+  over budget, the entry is dropped and packing goes on, so a
+  smaller lower-priority entry can still use the room left. Never
+  mid-entry truncation -- the issue body is
   explicit that a half-an-operational-rule is a safety bug
   ("never paste secret..." cut at the comma is worse than cleanly
   omitted). The dropped slugs are returned on
@@ -243,15 +316,66 @@ the conventions budget. Behaviour for the conventions band:
   delimiter pair -- a body containing `END_TENANT_CONVENTIONS>>`
   cannot plant a second terminator inside the block.
 
-The token-budget arithmetic uses
-[`conventions.schemas.estimate_tokens`](../../backend/src/meho_backplane/conventions/schemas.py)
--- the same chars-per-token heuristic T2's write-time 422 gate
-runs. Sharing the helper means a body that POSTs successfully will
-always fit the packer's budget under the same arithmetic; a
-divergence would mean a write passing the API only to be silently
-dropped at every future preamble assembly, the precise failure
-mode the "`kubectl apply --dry-run=server` discipline" exists to
-prevent.
+The band itself (header, guard prefix, delimiters, delimiter
+neutralising) is rendered by the pure
+[`conventions/render.py`](../../backend/src/meho_backplane/conventions/render.py)
+module, and the token-budget arithmetic goes through it too; see the
+next section.
+
+### Rendered budget: one shared primitive (#3746)
+
+Before #3746 the write check measured the body alone, while the
+packer measured the heading, the guard text, and the blocks (but not
+the band delimiters). So a body of up to 600 tokens passed the write
+and was then dropped at every `initialize`, even with no other
+conventions. Now every consumer uses the same pure functions in
+[`conventions/render.py`](../../backend/src/meho_backplane/conventions/render.py):
+
+- `render_conventions(entries, max_tokens) -> ConventionsRender` --
+  packs `ConventionEntry(slug, title, body)` values (already in
+  priority order) into the band. It returns the band `text`,
+  `estimated_tokens` (= `estimate_tokens(text)`), `kept_slugs`,
+  `dropped_slugs`, `oversize_slugs`, and per-entry `token_counts`.
+  No I/O; same input, same output.
+- `standalone_tokens(title, body) -> int` -- the estimate of the
+  whole band when this entry is its only block. Heading, guard
+  prefix, delimiters, and delimiter neutralising are all included.
+
+Who uses them:
+
+- **Write admission** (`enforce_budget` / `enforce_patch_budget` in
+  `_internal.py`): an `operational` create, or a PATCH that changes
+  the title or body, is rejected with 422 when
+  `standalone_tokens(title, body) > 600`.
+- **Packer** (`assemble_preamble_detailed`): calls
+  `render_conventions` on the rows it loaded.
+- **Feedback**: `preamble_status` on POST/PATCH and `budget_status`
+  on the list both read the same pack.
+- **MCP `initialize`**: `_session_instructions` logs one
+  `mcp_preamble_receipt` record per session with `included_slugs`,
+  `dropped_slugs`, `oversize_slugs`, `conventions_tokens`,
+  `conventions_max_tokens`, and `instructions_tokens` (the estimate
+  for the whole `instructions` text: broadcast, conventions,
+  priming, catalogue, maturity bands). Only the conventions band is
+  held to the 600-token budget; the whole-text number is reported
+  on its own line, not charged to it.
+
+What "fits" means:
+
+- **Fits alone** (the write check) -- the band with only this entry
+  is within budget. It does **not** promise inclusion: higher-priority
+  entries share the same 600-token band and can use up the room.
+- **Included** -- MEHO puts the entry in the `instructions` text it
+  sends on `initialize`. The MCP spec makes `instructions` a hint to
+  the client; a client may ignore it. So "included" is not proof that
+  an agent applied the rule.
+- **Dropped** -- not in the band. `oversize_slugs` marks the dropped
+  entries that do not fit even alone (rows written before #3746, or
+  written by another path such as a migration).
+
+The estimate is still the chars-per-token heuristic
+(`ceil(len / 3.3)`, counting Unicode code points). It is not a
+guarantee about any model's real token count.
 
 ### Untrusted-content isolation (OWASP LLM01:2025)
 
@@ -316,22 +440,29 @@ handlers.
 ## Write-time 422 validation (T2)
 
 `POST /api/v1/conventions` and `PATCH /api/v1/conventions/{slug}`
-both run a write-time over-budget gate: if the submitted body is
-`kind='operational'` and its token estimate alone exceeds the
-preamble budget (`DEFAULT_MAX_PREAMBLE_TOKENS = 600`), the route
-rejects with **422** + a detail message naming `estimated` vs
-`budget`. PATCH evaluates against the **existing** kind (the
+both run a write-time over-budget gate: if the convention is
+`kind='operational'` and its **rendered standalone** estimate
+(`standalone_tokens(title, body)`, see
+[Rendered budget](#rendered-budget-one-shared-primitive-3746))
+exceeds the preamble budget (`DEFAULT_MAX_PREAMBLE_TOKENS = 600`),
+the route rejects with **422**. The detail reads
+`convention exceeds preamble budget when rendered alone
+(estimated=X, budget=Y)`. PATCH runs the check when the title or the
+body changes (a priority-only PATCH is not checked) and evaluates
+against the **existing** kind (the
 PATCH surface deliberately cannot change `kind` -- see
 [`ConventionUpdate`](../../backend/src/meho_backplane/conventions/schemas.py)).
 
-The estimator is `meho_backplane.conventions.schemas.estimate_tokens`
--- a chars-per-token heuristic (`ceil(len / 3.3)`) the
-`v0.1-spec §"Memory / context layer"` lines 457-487 baselines. T4
-(#316) reuses the same function for its priority-ranked packer,
-so the two sites cannot drift -- a divergence would silently let a
-write through the API only for the preamble packer to drop it at
-every future assembly (the "`kubectl apply --dry-run=server`
-discipline" the issue body names).
+The estimator underneath is
+`meho_backplane.conventions.schemas.estimate_tokens` -- a
+chars-per-token heuristic (`ceil(len / 3.3)`) the
+`v0.1-spec §"Memory / context layer"` lines 457-487 baselines. The
+write check and the packer render the same text and estimate it the
+same way, so a write that passes always fits the band when it is the
+only entry. The console's token preview (`POST /ui/conventions/preview`)
+shows the same rendered number for `operational` entries. The title,
+body and kind fields of the create and edit modals all refresh it,
+because the title is part of the rendered cost.
 
 `workflow` and `reference` conventions are not preamble-bound and
 are exempt from the 422 -- a `workflow` convention of arbitrary
@@ -470,17 +601,15 @@ those land server-side from the T2 routes via the audit middleware.
 honours the over-budget warning AC. The
 `GET /api/v1/conventions` response carries a `budget_status`
 sub-document (`max_tokens`, `estimated_tokens`, `over_budget`,
-`dropped_slugs`) computed by a call to
-`assemble_preamble(operator.tenant_id, operator.sub)` on every list
-call. `estimated_tokens` stays **conventions-only** even after
-G12.4-T2 (#1316) added the runbook-priming band: the assembler is
-invoked with the calling operator's `sub` so the assembled wire text
-matches the operator's MCP session exactly, then
-`_conventions_text_only` slices off the priming band before
-`estimate_tokens` measures the result. The signal stays honest -- a
-tenant with zero operational conventions reports
+`included_slugs`, `dropped_slugs`, `oversize_slugs`) computed by a
+call to `assemble_preamble_detailed(operator.tenant_id, operator.sub)`
+on every list call. `estimated_tokens` is the rendered conventions
+band only (the pack's `conventions_tokens`), never the priming or
+catalogue bands. A tenant with zero operational conventions reports
 `estimated_tokens=0` regardless of how many runbook runs the
-operator has.
+operator has. Every operational slug is in exactly one of
+`included_slugs` or `dropped_slugs`; `oversize_slugs` is the part of
+`dropped_slugs` that does not fit even alone.
 
 **Per-write inclusion feedback (G0.14-T8 #1149).** A complementary
 post-write signal: `POST /api/v1/conventions` and
@@ -494,6 +623,7 @@ sub-document to the response when the convention is
     "included": true,
     "position": 4,
     "token_count": 142,
+    "fits_alone": true,
     "would_drop_slugs": []
   }
 }
@@ -503,9 +633,13 @@ sub-document to the response when the convention is
   preamble after the priority-ranked pack against
   `DEFAULT_MAX_PREAMBLE_TOKENS`; `False` when it was dropped.
 * `position` — 1-based index of the slug in the assembled
-  preamble's packed order (`priority DESC, created_at ASC`).
+  preamble's packed order (`priority DESC, created_at ASC, id ASC`).
   `None` when `included=False`.
-* `token_count` — the convention body's own estimated token cost.
+* `token_count` — the convention's own rendered block cost
+  (heading + body).
+* `fits_alone` — `True` when the band with only this entry fits the
+  budget. `fits_alone=True` with `included=False` means
+  higher-priority entries used up the room.
 * `would_drop_slugs` — every slug dropped on this pack. When
   `included=True` this names *other* slugs the write displaced;
   when `included=False` the just-written slug appears here.

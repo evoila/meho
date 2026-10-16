@@ -322,8 +322,13 @@ _DELETE_OP_IDS: frozenset[str] = frozenset(
         "pfsense.route.static.delete",
         "pfsense.gateway.delete",
         "pfsense.alias.member.remove",
+        "pfsense.filter.rule.delete",
     }
 )
+
+#: The approval-gated firewall rule add (#3850): ``dangerous`` +
+#: ``requires_approval``, covered by ``test_connectors_pfsense_filter_rule_ops.py``.
+_DANGEROUS_OP_IDS: frozenset[str] = frozenset({"pfsense.filter.rule.add"})
 
 #: The parameterized read op (meho-internal#252). ``safe`` like the rest of
 #: the read surface, but it takes real params (``sanctioned_src`` /
@@ -441,18 +446,28 @@ async def pfsense_e2e(
 
 
 def test_pfsense_ops_registration_count() -> None:
-    """All 19 pfSense ops registered (11 read/identity + 2 write + 5 delete +
-    1 parameterized mgmt-flow read, meho-internal#252)."""
+    """All 21 pfSense ops registered (11 read/identity + 2 write + 6 delete +
+    1 approval-gated rule add + 1 parameterized mgmt-flow read)."""
     op_ids = {op.op_id for op in PFSENSE_OPS}
-    missing = (set(EXPECTED_OP_IDS) | _WRITE_OP_IDS | _DELETE_OP_IDS | _PARAM_READ_OP_IDS) - op_ids
+    missing = (
+        set(EXPECTED_OP_IDS)
+        | _WRITE_OP_IDS
+        | _DELETE_OP_IDS
+        | _DANGEROUS_OP_IDS
+        | _PARAM_READ_OP_IDS
+    ) - op_ids
     assert not missing, f"Missing ops: {missing}"
-    assert len(PFSENSE_OPS) == 19, f"Expected 19 ops, got {len(PFSENSE_OPS)}"
+    assert len(PFSENSE_OPS) == 21, f"Expected 21 ops, got {len(PFSENSE_OPS)}"
 
 
 def test_pfsense_ops_safety_levels_and_approval() -> None:
     """Read ops 'safe', write ops (#3090) 'caution', delete ops (#3232)
     'destructive' + requires_approval; nothing else requires approval."""
     for op in PFSENSE_OPS:
+        if op.op_id in _DANGEROUS_OP_IDS:
+            assert op.safety_level == "dangerous", f"{op.op_id} should be dangerous"
+            assert op.requires_approval, f"{op.op_id} must require approval"
+            continue
         if op.op_id in _DELETE_OP_IDS:
             assert op.safety_level == "destructive", f"{op.op_id} should be destructive"
             assert op.requires_approval, f"{op.op_id} destructive delete must require approval"
@@ -472,6 +487,7 @@ def test_pfsense_read_ops_parameter_schemas_are_empty() -> None:
         if (
             op.op_id not in _WRITE_OP_IDS
             and op.op_id not in _DELETE_OP_IDS
+            and op.op_id not in _DANGEROUS_OP_IDS
             and op.op_id not in _PARAM_READ_OP_IDS
         ):
             assert schema.get("properties") == {}, (

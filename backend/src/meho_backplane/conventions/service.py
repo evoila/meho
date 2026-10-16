@@ -43,8 +43,9 @@ typed-error vocabulary the consumer maps to its own transport:
   avoidance contract is preserved by construction.
 * :class:`ConventionConflictError` -- a create hit the composite-unique
   index on ``(tenant_id, slug)`` (route: 409).
-* :class:`OverBudgetError` -- an ``operational`` write whose own token
-  estimate exceeds :data:`DEFAULT_MAX_PREAMBLE_TOKENS` (route: 422).
+* :class:`OverBudgetError` -- an ``operational`` write whose rendered
+  standalone cost (the band with only this entry) exceeds
+  :data:`DEFAULT_MAX_PREAMBLE_TOKENS` (route: 422).
   Carries ``estimated`` / ``budget`` ints so the consumer renders the
   same actionable detail the inline gate did.
 
@@ -70,15 +71,22 @@ from meho_backplane.conventions._internal import (
     ConventionNotFoundError,
     ConventionServiceError,
     OverBudgetError,
-    conventions_text_only,
     enforce_budget,
     enforce_patch_budget,
     resolve_patch_fields,
 )
-from meho_backplane.conventions.preamble import (
-    assemble_preamble,
-    assemble_preamble_detailed,
+from meho_backplane.conventions.index import (
+    INDEX_PAGE_SIZE,
+    ConventionIndexEntry,
+    ConventionIndexPage,
+    IndexCursor,
+    decode_index_cursor,
+    encode_index_cursor,
+    index_availability,
+    index_revision,
 )
+from meho_backplane.conventions.preamble import assemble_preamble_detailed
+from meho_backplane.conventions.render import ConventionEntry, render_conventions
 from meho_backplane.conventions.schemas import (
     DEFAULT_MAX_PREAMBLE_TOKENS,
     BudgetStatus,
@@ -89,7 +97,6 @@ from meho_backplane.conventions.schemas import (
     ConventionSummary,
     ConventionUpdate,
     PreambleInclusion,
-    estimate_tokens,
 )
 from meho_backplane.db.models import TenantConvention, TenantConventionHistory
 
@@ -170,6 +177,7 @@ class ConventionsService:
             included=included,
             position=position,
             token_count=token_count,
+            fits_alone=slug not in assembly.oversize_slugs,
             would_drop_slugs=assembly.dropped_slugs,
         )
 
@@ -181,29 +189,30 @@ class ConventionsService:
     ) -> BudgetStatus:
         """Compute the conventions preamble budget for *operator*'s tenant.
 
-        Runs the same :func:`assemble_preamble` primitive T4's MCP
-        ``initialize`` handler uses, so ``estimated_tokens`` and the
-        preamble actually delivered to agent sessions cannot drift. The
+        Runs the same :func:`assemble_preamble_detailed` pack the MCP
+        ``initialize`` handler uses, so the numbers here and the
+        preamble actually sent to agent sessions cannot drift. The
         assembler opens its own DB session (the *session* argument is
         accepted for signature parity with the other methods but the
         assembler does not thread it -- the budget read is a
         committed-state snapshot, not a read-your-own-writes preview).
 
-        The arithmetic is **conventions-only**: the preamble is
-        assembled with priming + catalogue bands (so the list view
-        reflects the exact wire shape MCP ``initialize`` ships), then
-        ``conventions_text_only`` strips everything after the
-        conventions terminator before measuring.
+        The arithmetic is **conventions-only**: ``estimated_tokens`` is
+        the rendered conventions band, not the priming or catalogue
+        bands. Every operational slug lands in exactly one of
+        ``included_slugs`` or ``dropped_slugs``; ``oversize_slugs``
+        marks the dropped ones that do not fit even alone.
         """
-        preamble = await assemble_preamble(
+        assembly = await assemble_preamble_detailed(
             operator.tenant_id, operator.sub, capabilities=operator.capabilities
         )
-        conventions_only_text = conventions_text_only(preamble.text)
         return BudgetStatus(
             max_tokens=DEFAULT_MAX_PREAMBLE_TOKENS,
-            estimated_tokens=estimate_tokens(conventions_only_text),
-            over_budget=bool(preamble.dropped_slugs),
-            dropped_slugs=preamble.dropped_slugs,
+            estimated_tokens=assembly.conventions_tokens,
+            over_budget=bool(assembly.dropped_slugs),
+            included_slugs=assembly.kept_slugs,
+            dropped_slugs=assembly.dropped_slugs,
+            oversize_slugs=assembly.oversize_slugs,
         )
 
     async def list_conventions(
@@ -216,8 +225,8 @@ class ConventionsService:
         """List the operator's tenant's conventions + the tenant budget.
 
         Returns the lighter :class:`ConventionSummary` shape (no full
-        ``body``). Ordering is ``priority DESC, created_at ASC`` -- the
-        same key the preamble assembler uses for packing. The ``kind``
+        ``body``). Ordering is ``priority DESC, created_at ASC, id ASC``
+        -- the same key the preamble assembler uses for packing. The ``kind``
         filter narrows the returned entries only; ``budget_status``
         always reflects the full ``operational`` set (a
         ``kind=workflow`` list still wants the truthful budget signal).
@@ -230,11 +239,95 @@ class ConventionsService:
         stmt = stmt.order_by(
             TenantConvention.priority.desc(),
             TenantConvention.created_at.asc(),
+            TenantConvention.id.asc(),
         )
         rows = (await session.execute(stmt)).scalars().all()
         entries = [ConventionSummary.model_validate(row) for row in rows]
         budget = await self.budget_status(session=session, operator=operator)
         return entries, budget
+
+    async def index_page(
+        self,
+        *,
+        session: AsyncSession,
+        operator: Operator,
+        cursor: str | None = None,
+    ) -> ConventionIndexPage:
+        """Return one bounded page of *operator*'s tenant convention index (#3755).
+
+        Runs **one** query for the tenant's rows in a fixed order
+        (``priority DESC, created_at ASC, id ASC`` -- the same total
+        order the preamble assembler packs in). The revision, the
+        page, and every entry's availability all come from that one
+        result, so a page never mixes two states of the table: a
+        convention that is listed is one the pack saw, and the pack
+        saw nothing the list leaves out. Availability is computed in
+        memory with :func:`render_conventions`, the same packer MCP
+        ``initialize`` and :meth:`budget_status` use, so the answer
+        matches what MEHO sends. Bodies are read for the pack but never
+        leave this method.
+
+        *cursor* ``None`` means the first page; otherwise it must be a
+        ``next_cursor`` from an earlier page of the same snapshot.
+
+        Raises :class:`~meho_backplane.conventions.index.InvalidIndexCursorError`
+        and :class:`~meho_backplane.conventions.index.StaleIndexCursorError`.
+        """
+        stmt = (
+            select(TenantConvention)
+            .where(TenantConvention.tenant_id == operator.tenant_id)
+            .order_by(
+                TenantConvention.priority.desc(),
+                TenantConvention.created_at.asc(),
+                TenantConvention.id.asc(),
+            )
+        )
+        rows = (await session.execute(stmt)).scalars().all()
+        revision = index_revision((row.id, row.updated_at) for row in rows)
+        offset = 0
+        if cursor is not None:
+            offset = decode_index_cursor(
+                cursor,
+                tenant_id=operator.tenant_id,
+                revision=revision,
+                total=len(rows),
+            ).o
+
+        rendered = render_conventions(
+            [
+                ConventionEntry(row.slug, row.title, row.body)
+                for row in rows
+                if row.kind == ConventionKind.OPERATIONAL.value
+            ],
+        )
+        included = frozenset(rendered.kept_slugs)
+        oversize = frozenset(rendered.oversize_slugs)
+        page_rows = rows[offset : offset + INDEX_PAGE_SIZE]
+        end = offset + len(page_rows)
+        next_cursor = (
+            encode_index_cursor(IndexCursor(t=operator.tenant_id, r=revision, o=end))
+            if end < len(rows)
+            else None
+        )
+        return ConventionIndexPage(
+            revision=revision,
+            total=len(rows),
+            entries=[
+                ConventionIndexEntry(
+                    slug=row.slug,
+                    title=row.title,
+                    kind=row.kind,
+                    priority=row.priority,
+                    updated_at=row.updated_at,
+                    availability=index_availability(row.slug, row.kind, included, oversize),
+                )
+                for row in page_rows
+            ],
+            next_cursor=next_cursor,
+            max_tokens=DEFAULT_MAX_PREAMBLE_TOKENS,
+            estimated_tokens=rendered.estimated_tokens,
+            over_budget=bool(rendered.dropped_slugs),
+        )
 
     async def get_convention(
         self,
@@ -278,7 +371,7 @@ class ConventionsService:
         Raises :class:`OverBudgetError` (route: 422) and
         :class:`ConventionConflictError` (route: 409).
         """
-        enforce_budget(body.body, body.kind)
+        enforce_budget(body.title, body.body, body.kind)
 
         audit_id = uuid.uuid4()
         bind_preallocated_audit_id(audit_id)
@@ -348,8 +441,8 @@ class ConventionsService:
 
         Applies only fields explicitly set in the request body (the v2
         ``model_fields_set`` set-vs-null pattern). The budget gate fires
-        on a ``body`` change; PATCH cannot change ``kind`` so the check
-        uses the existing row's kind. A priority-only or title-only
+        on a ``title`` or ``body`` change; PATCH cannot change ``kind``
+        so the check uses the existing row's kind. A priority-only
         PATCH still writes a history row carrying the unchanged body in
         both ``body_before`` and ``body_after``.
 
@@ -365,7 +458,7 @@ class ConventionsService:
             raise ConventionNotFoundError(slug)
 
         new_title, new_body, new_priority = resolve_patch_fields(body, existing)
-        enforce_patch_budget(body, new_body, existing)
+        enforce_patch_budget(body, new_title, new_body, existing)
 
         audit_id = uuid.uuid4()
         bind_preallocated_audit_id(audit_id)

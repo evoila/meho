@@ -470,6 +470,14 @@ const (
 	RunSummaryStateInProgress RunSummaryState = "in_progress"
 )
 
+// Defines values for SafetyOverlayEntrySafetyLevel.
+const (
+	SafetyOverlayEntrySafetyLevelCaution     SafetyOverlayEntrySafetyLevel = "caution"
+	SafetyOverlayEntrySafetyLevelDangerous   SafetyOverlayEntrySafetyLevel = "dangerous"
+	SafetyOverlayEntrySafetyLevelDestructive SafetyOverlayEntrySafetyLevel = "destructive"
+	SafetyOverlayEntrySafetyLevelSafe        SafetyOverlayEntrySafetyLevel = "safe"
+)
+
 // Defines values for ScheduledTriggerInFlightPolicy.
 const (
 	ScheduledTriggerInFlightPolicyFailIntoAudit ScheduledTriggerInFlightPolicy = "fail_into_audit"
@@ -1510,6 +1518,9 @@ type ApproveResponseBody_DispatchResult struct {
 // naming the absent key (carrying *why* the collection is mandatory)
 // rather than Pydantic's generic “field_required“. “product“ /
 // “version“ are optional refinements within the chosen collection.
+// “target“ (#3920) names a target; when “product“ and “version“ are
+// both absent, its fingerprint product and version become the default
+// soft scope (a ranking hint, never a filter).
 //
 // There is **no** “collections“ fan-out field: “ask_docs“ is
 // single-collection only (#1548 decision 2), matching the MCP tool.
@@ -1522,6 +1533,7 @@ type AskDocsRequest struct {
 	Limit      *int    `json:"limit,omitempty"`
 	Product    *string `json:"product"`
 	Query      string  `json:"query"`
+	Target     *string `json:"target"`
 	Version    *string `json:"version"`
 }
 
@@ -1951,6 +1963,7 @@ type BodyCorpusSearchUiCorpusSearchPost struct {
 	Collection *string `json:"collection,omitempty"`
 	Mode       *string `json:"mode,omitempty"`
 	Q          *string `json:"q,omitempty"`
+	Target     *string `json:"target,omitempty"`
 }
 
 // BodyKbEditorPreviewUiKbEditorPreviewPost defines model for Body_kb_editor_preview_ui_kb_editor_preview_post.
@@ -2663,6 +2676,7 @@ type BodyUiConventionsPreviewUiConventionsPreviewPost struct {
 	// (an ops anomaly; the operator still authenticates fine, the chip
 	// just falls back to the tenant UUID).
 	SessionCtx *UISessionContext `json:"session_ctx,omitempty"`
+	Title      *string           `json:"title,omitempty"`
 }
 
 // BodyUiCorpusChunkReadUiCorpusChunksCollectionKeyChunkIdPost defines model for Body_ui_corpus_chunk_read_ui_corpus_chunks__collection_key___chunk_id__post.
@@ -3039,8 +3053,8 @@ type BroadcastOverridesListResponse struct {
 // criterion is unsatisfiable from a single list call -- the
 // deferred AC the issue body folds back in.
 //
-// All four fields are populated by a single call to
-// :func:`~meho_backplane.conventions.preamble.assemble_preamble`
+// All fields are populated by a single call to
+// :func:`~meho_backplane.conventions.preamble.assemble_preamble_detailed`
 // against the operator's tenant, so the budget arithmetic is
 // end-to-end consistent with T4's preamble assembler (the same
 // helper that produces the MCP “initialize“ “instructions“
@@ -3057,12 +3071,10 @@ type BroadcastOverridesListResponse struct {
 //     parameter in tests). Exposed on the list response so
 //     operators can do the budget math without grepping the source.
 //   - “estimated_tokens“ -- :func:`estimate_tokens` over the
-//     assembled preamble text (header + guard + delimited kept
-//     blocks). Empty tenant: 0. Fitting tenant: positive integer
-//     below “max_tokens“. Over-budget tenant: positive integer
-//     below “max_tokens“ (the packer dropped slugs whole until it
-//     fit), but “over_budget=True“ and “dropped_slugs“ is
-//     non-empty.
+//     rendered conventions band (header + guard + delimited kept
+//     blocks). Empty tenant: 0. Otherwise at most “max_tokens“
+//     when any entry was kept (the packer drops entries whole until
+//     the band fits).
 //   - “over_budget“ -- convenience flag derived from
 //     “len(dropped_slugs) > 0“. Cheap derived value but worth
 //     surfacing as a boolean so CLI / dashboard consumers branch on
@@ -3073,11 +3085,26 @@ type BroadcastOverridesListResponse struct {
 //     "insufficient_budget" exit-code-5 warning so the operator
 //     knows exactly which conventions never reach an agent
 //     session.
+//   - “included_slugs“ -- slugs in the band, in pack order. Each
+//     operational slug is in exactly one of “included_slugs“ or
+//     “dropped_slugs“. "Included" means MEHO sends it in the MCP
+//     “initialize“ instructions; a client may ignore instructions,
+//     so it is not proof that an agent applied the rule.
+//   - “oversize_slugs“ -- the dropped slugs that do not fit even as
+//     the only entry (rows written before the rendered write check,
+//     or by another path). The rest of “dropped_slugs“ fit alone
+//     but lost the room to higher-priority entries.
 type BudgetStatus struct {
 	DroppedSlugs    []string `json:"dropped_slugs"`
 	EstimatedTokens int      `json:"estimated_tokens"`
-	MaxTokens       int      `json:"max_tokens"`
-	OverBudget      bool     `json:"over_budget"`
+
+	// IncludedSlugs Operational slugs MEHO puts in the MCP initialize instructions, in pack order. An MCP client may ignore instructions, so this does not prove an agent saw them.
+	IncludedSlugs []string `json:"included_slugs"`
+	MaxTokens     int      `json:"max_tokens"`
+	OverBudget    bool     `json:"over_budget"`
+
+	// OversizeSlugs Dropped slugs that do not fit the budget even as the only entry. The other dropped slugs fit alone but lost the room to higher-priority entries.
+	OversizeSlugs []string `json:"oversize_slugs"`
 }
 
 // CallOperationBody Request body for the “POST /api/v1/operations/call“ route.
@@ -3582,6 +3609,7 @@ type ConnectorSpecEntry struct {
 	Product                    string                           `json:"product"`
 	ProfileResource            *string                          `json:"profile_resource"`
 	RequiresConnectorClass     string                           `json:"requires_connector_class"`
+	SafetyOverlay              *[]SafetyOverlayEntry            `json:"safety_overlay"`
 	Sha256                     *string                          `json:"sha256"`
 	SpecInfoVersion            *string                          `json:"spec_info_version"`
 	SpecInfoVersionsCompatible *[]string                        `json:"spec_info_versions_compatible"`
@@ -3636,10 +3664,13 @@ type Convention struct {
 	//   preamble's packed order (the packer iterates ``priority DESC,
 	//   created_at ASC``; ``position=1`` means highest-priority slot in
 	//   the operator's tenant). ``None`` when ``included=False``.
-	// * ``token_count`` -- the convention body's own estimated token
-	//   cost via :func:`estimate_tokens`. Useful for the operator to
-	//   see why a near-budget body got dropped (it weighed more than
-	//   the remaining headroom).
+	// * ``token_count`` -- the convention's own rendered block cost
+	//   (heading + body) via :func:`estimate_tokens`. Useful for the
+	//   operator to see why a near-budget entry got dropped (it weighed
+	//   more than the remaining headroom).
+	// * ``fits_alone`` -- ``True`` when the band with only this entry
+	//   fits the budget. ``fits_alone=True`` with ``included=False``
+	//   means higher-priority entries used up the room.
 	// * ``would_drop_slugs`` -- the full ``dropped_slugs`` list the
 	//   packer produced on this assembly. When ``included=True`` this
 	//   names *other* slugs that fell out of the preamble (the just-
@@ -3675,10 +3706,10 @@ type Convention struct {
 // (lowercase ASCII, digits, hyphen) so audit log paths stay
 // grep-friendly and no operator can sneak a slash through. The
 // title and body are bounded only by a generous upper limit; the
-// real budget gate is the over-budget 422 in the route handler,
-// which runs :func:`estimate_tokens` against “body“ before
-// insert and rejects any single “operational“ entry exceeding
-// :data:`DEFAULT_MAX_PREAMBLE_TOKENS`.
+// real budget gate is the over-budget 422 in the service, which
+// renders the entry alone (heading, guard prefix, band delimiters,
+// title, and body) and rejects any “operational“ entry whose
+// rendered estimate exceeds :data:`DEFAULT_MAX_PREAMBLE_TOKENS`.
 //
 // “priority“ is optional with a default of 0; the SmallInteger
 // column on :class:`TenantConvention` bounds the range to
@@ -3777,8 +3808,8 @@ type ConventionListResponse struct {
 	// criterion is unsatisfiable from a single list call -- the
 	// deferred AC the issue body folds back in.
 	//
-	// All four fields are populated by a single call to
-	// :func:`~meho_backplane.conventions.preamble.assemble_preamble`
+	// All fields are populated by a single call to
+	// :func:`~meho_backplane.conventions.preamble.assemble_preamble_detailed`
 	// against the operator's tenant, so the budget arithmetic is
 	// end-to-end consistent with T4's preamble assembler (the same
 	// helper that produces the MCP ``initialize`` ``instructions``
@@ -3795,12 +3826,10 @@ type ConventionListResponse struct {
 	//   parameter in tests). Exposed on the list response so
 	//   operators can do the budget math without grepping the source.
 	// * ``estimated_tokens`` -- :func:`estimate_tokens` over the
-	//   assembled preamble text (header + guard + delimited kept
-	//   blocks). Empty tenant: 0. Fitting tenant: positive integer
-	//   below ``max_tokens``. Over-budget tenant: positive integer
-	//   below ``max_tokens`` (the packer dropped slugs whole until it
-	//   fit), but ``over_budget=True`` and ``dropped_slugs`` is
-	//   non-empty.
+	//   rendered conventions band (header + guard + delimited kept
+	//   blocks). Empty tenant: 0. Otherwise at most ``max_tokens``
+	//   when any entry was kept (the packer drops entries whole until
+	//   the band fits).
 	// * ``over_budget`` -- convenience flag derived from
 	//   ``len(dropped_slugs) > 0``. Cheap derived value but worth
 	//   surfacing as a boolean so CLI / dashboard consumers branch on
@@ -3811,6 +3840,15 @@ type ConventionListResponse struct {
 	//   "insufficient_budget" exit-code-5 warning so the operator
 	//   knows exactly which conventions never reach an agent
 	//   session.
+	// * ``included_slugs`` -- slugs in the band, in pack order. Each
+	//   operational slug is in exactly one of ``included_slugs`` or
+	//   ``dropped_slugs``. "Included" means MEHO sends it in the MCP
+	//   ``initialize`` instructions; a client may ignore instructions,
+	//   so it is not proof that an agent applied the rule.
+	// * ``oversize_slugs`` -- the dropped slugs that do not fit even as
+	//   the only entry (rows written before the rendered write check,
+	//   or by another path). The rest of ``dropped_slugs`` fit alone
+	//   but lost the room to higher-priority entries.
 	BudgetStatus BudgetStatus        `json:"budget_status"`
 	Items        []ConventionSummary `json:"items"`
 	NextCursor   *string             `json:"next_cursor"`
@@ -6413,10 +6451,13 @@ type PermissionVerdict string
 //     preamble's packed order (the packer iterates “priority DESC,
 //     created_at ASC“; “position=1“ means highest-priority slot in
 //     the operator's tenant). “None“ when “included=False“.
-//   - “token_count“ -- the convention body's own estimated token
-//     cost via :func:`estimate_tokens`. Useful for the operator to
-//     see why a near-budget body got dropped (it weighed more than
-//     the remaining headroom).
+//   - “token_count“ -- the convention's own rendered block cost
+//     (heading + body) via :func:`estimate_tokens`. Useful for the
+//     operator to see why a near-budget entry got dropped (it weighed
+//     more than the remaining headroom).
+//   - “fits_alone“ -- “True“ when the band with only this entry
+//     fits the budget. “fits_alone=True“ with “included=False“
+//     means higher-priority entries used up the room.
 //   - “would_drop_slugs“ -- the full “dropped_slugs“ list the
 //     packer produced on this assembly. When “included=True“ this
 //     names *other* slugs that fell out of the preamble (the just-
@@ -6436,6 +6477,8 @@ type PermissionVerdict string
 // sub-model means GET-single can drop the field cleanly while
 // POST/PATCH attach it.
 type PreambleInclusion struct {
+	// FitsAlone True when the rendered conventions band with only this entry fits the budget. Fitting alone does not promise inclusion.
+	FitsAlone      bool     `json:"fits_alone"`
 	Included       bool     `json:"included"`
 	Position       *int     `json:"position"`
 	TokenCount     int      `json:"token_count"`
@@ -6868,6 +6911,11 @@ type ResultQueryBody struct {
 	// and the operator/aggregate allow-lists are enforced here, at construction;
 	// field-vs-schema validation needs the handle's columns and happens in
 	// :func:`compile_query`.
+	//
+	// ``path`` is the other read: an RFC 6901 pointer into a document handle,
+	// or into the top-level fields a rows handle left out of its inline
+	// summary. It is never compiled to SQL, so it cannot be combined with any
+	// relational field (checked here, at construction).
 	Query *ResultQuerySpec `json:"query,omitempty"`
 }
 
@@ -6880,6 +6928,11 @@ type ResultQueryBody struct {
 // and the operator/aggregate allow-lists are enforced here, at construction;
 // field-vs-schema validation needs the handle's columns and happens in
 // :func:`compile_query`.
+//
+// “path“ is the other read: an RFC 6901 pointer into a document handle,
+// or into the top-level fields a rows handle left out of its inline
+// summary. It is never compiled to SQL, so it cannot be combined with any
+// relational field (checked here, at construction).
 type ResultQuerySpec struct {
 	// Aggregate Aggregate output columns (COUNT/SUM/MIN/MAX/AVG).
 	Aggregate *[]Aggregate `json:"aggregate,omitempty"`
@@ -6895,6 +6948,9 @@ type ResultQuerySpec struct {
 
 	// OrderBy Sort terms (max 4).
 	OrderBy *[]OrderBy `json:"order_by,omitempty"`
+
+	// Path RFC 6901 JSON Pointer into a document handle (for example `/status/conditions/0`; `""` is the whole document), or into the top-level fields a rows handle left out of its inline summary (`omitted_scalar_count`). Reads one value; an array value pages with the call's `offset` / `limit`. Cannot be combined with `filter`, `select`, `group_by`, `aggregate`, `order_by`, or `limit`.
+	Path *string `json:"path"`
 
 	// Select Projection: columns to return (max 64). Omit for all columns. Not allowed together with `aggregate` (the output is then the group keys plus the aggregates).
 	Select *[]string `json:"select,omitempty"`
@@ -7418,6 +7474,27 @@ type SafetyChangeModel struct {
 	OpId            string                 `json:"op_id"`
 }
 
+// SafetyOverlayEntry One catalog rule that raises the safety of matching ingested ops.
+//
+// A catalog row that declares :attr:`ConnectorSpecEntry.safety_overlay`
+// lets an operator raise the safety level and turn on approval for
+// chosen operations of that spec, without changing the ingest code.
+// “method“ is matched exactly (upper-cased). “path“ is a
+// shell-style glob matched case-sensitively against the spec path
+// template with any query string removed; “*“ also matches “/“.
+// The rule only ever raises: it never lowers a stricter level and never
+// clears an approval requirement (see
+// :func:`meho_backplane.operations.ingest.safety_floors.apply_safety_floor`).
+type SafetyOverlayEntry struct {
+	Method           string                        `json:"method"`
+	Path             string                        `json:"path"`
+	RequiresApproval *bool                         `json:"requires_approval,omitempty"`
+	SafetyLevel      SafetyOverlayEntrySafetyLevel `json:"safety_level"`
+}
+
+// SafetyOverlayEntrySafetyLevel defines model for SafetyOverlayEntry.SafetyLevel.
+type SafetyOverlayEntrySafetyLevel string
+
 // ScheduledTriggerCreate Request body for “POST /api/v1/scheduler/triggers“.
 //
 // Discriminated by *kind*: exactly one of “cron_expr“ / “fire_at“
@@ -7752,7 +7829,10 @@ type ScheduledTriggerStatus string
 // with a route-shaped 422 naming the absent key (carrying *why* the
 // collection is mandatory), rather than Pydantic's generic
 // “field_required“. “product“ / “version“ are **optional
-// refinements** within the chosen collection.
+// refinements** within the chosen collection. “target“ (#3920) names a
+// target; when “product“ and “version“ are both absent, its
+// fingerprint product and version become the default soft scope (a
+// ranking hint, never a filter). It is ignored on a fan-out.
 //
 // “collections“ is the opt-in **cross-collection fan-out** scope (G4.6-T5
 // #1554): an explicit list of collection keys to query and RRF-merge.
@@ -7771,6 +7851,7 @@ type SearchDocsRequest struct {
 	Limit       *int      `json:"limit,omitempty"`
 	Product     *string   `json:"product"`
 	Query       string    `json:"query"`
+	Target      *string   `json:"target"`
 	Version     *string   `json:"version"`
 }
 
@@ -8147,8 +8228,9 @@ type ServiceGrantListResponse struct {
 // ServiceGrantRead Row shape every accessor returns.
 //
 // “from_attributes=True“ allows direct construction from an ORM row.
-// Exposes “revoked_at“ / “revoked_by_sub“ so callers can tell a live
-// grant from a revoked one in the history.
+// Exposes “revoked_at“ / “revoked_by_sub“ / “revoked_reason“ so
+// callers can tell a live grant from a revoked one in the history, and why
+// it was revoked.
 type ServiceGrantRead struct {
 	ConnectorId       string              `json:"connector_id"`
 	CreatedAt         time.Time           `json:"created_at"`
@@ -8160,6 +8242,7 @@ type ServiceGrantRead struct {
 	Reason            string              `json:"reason"`
 	RevokedAt         *time.Time          `json:"revoked_at"`
 	RevokedBySub      *string             `json:"revoked_by_sub"`
+	RevokedReason     *string             `json:"revoked_reason"`
 	TargetId          *openapi_types.UUID `json:"target_id"`
 	TargetNamePattern *string             `json:"target_name_pattern"`
 	TargetProduct     *string             `json:"target_product"`
@@ -10455,6 +10538,8 @@ type CreateGrantApiV1ServicePrincipalsGrantsPostParams struct {
 
 // RevokeGrantApiV1ServicePrincipalsGrantsGrantIdDeleteParams defines parameters for RevokeGrantApiV1ServicePrincipalsGrantsGrantIdDelete.
 type RevokeGrantApiV1ServicePrincipalsGrantsGrantIdDeleteParams struct {
+	// Reason Optional reason for the revoke. Stored on the grant and the audit row.
+	Reason        *string `form:"reason,omitempty" json:"reason,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -10781,6 +10866,11 @@ type UiConnectorsDeleteSubmitUiConnectorsNameDeletePostParams struct {
 // UiConventionsListUiConventionsGetParams defines parameters for UiConventionsListUiConventionsGet.
 type UiConventionsListUiConventionsGetParams struct {
 	Kind *string `form:"kind,omitempty" json:"kind,omitempty"`
+}
+
+// CorpusIndexUiCorpusGetParams defines parameters for CorpusIndexUiCorpusGet.
+type CorpusIndexUiCorpusGetParams struct {
+	Target *string `form:"target,omitempty" json:"target,omitempty"`
 }
 
 // IndexUiGrantsGetParams defines parameters for IndexUiGrantsGet.
@@ -13855,7 +13945,7 @@ type ClientInterface interface {
 	UiConventionsHistoryUiConventionsSlugHistoryGet(ctx context.Context, slug string, body UiConventionsHistoryUiConventionsSlugHistoryGetJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// CorpusIndexUiCorpusGet request
-	CorpusIndexUiCorpusGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+	CorpusIndexUiCorpusGet(ctx context.Context, params *CorpusIndexUiCorpusGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGet request
 	UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGet(ctx context.Context, collectionKey string, chunkId string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -19054,8 +19144,8 @@ func (c *Client) UiConventionsHistoryUiConventionsSlugHistoryGet(ctx context.Con
 	return c.Client.Do(req)
 }
 
-func (c *Client) CorpusIndexUiCorpusGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewCorpusIndexUiCorpusGetRequest(c.Server)
+func (c *Client) CorpusIndexUiCorpusGet(ctx context.Context, params *CorpusIndexUiCorpusGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCorpusIndexUiCorpusGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -30847,6 +30937,28 @@ func NewRevokeGrantApiV1ServicePrincipalsGrantsGrantIdDeleteRequest(server strin
 		return nil, err
 	}
 
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Reason != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "reason", runtime.ParamLocationQuery, *params.Reason); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
 	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
@@ -37709,7 +37821,7 @@ func NewUiConventionsHistoryUiConventionsSlugHistoryGetRequestWithBody(server st
 }
 
 // NewCorpusIndexUiCorpusGetRequest generates requests for CorpusIndexUiCorpusGet
-func NewCorpusIndexUiCorpusGetRequest(server string) (*http.Request, error) {
+func NewCorpusIndexUiCorpusGetRequest(server string, params *CorpusIndexUiCorpusGetParams) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -37725,6 +37837,28 @@ func NewCorpusIndexUiCorpusGetRequest(server string) (*http.Request, error) {
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Target != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "target", runtime.ParamLocationQuery, *params.Target); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -44556,7 +44690,7 @@ type ClientWithResponsesInterface interface {
 	UiConventionsHistoryUiConventionsSlugHistoryGetWithResponse(ctx context.Context, slug string, body UiConventionsHistoryUiConventionsSlugHistoryGetJSONRequestBody, reqEditors ...RequestEditorFn) (*UiConventionsHistoryUiConventionsSlugHistoryGetResponse, error)
 
 	// CorpusIndexUiCorpusGetWithResponse request
-	CorpusIndexUiCorpusGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*CorpusIndexUiCorpusGetResponse, error)
+	CorpusIndexUiCorpusGetWithResponse(ctx context.Context, params *CorpusIndexUiCorpusGetParams, reqEditors ...RequestEditorFn) (*CorpusIndexUiCorpusGetResponse, error)
 
 	// UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetWithResponse request
 	UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetWithResponse(ctx context.Context, collectionKey string, chunkId string, reqEditors ...RequestEditorFn) (*UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse, error)
@@ -51185,6 +51319,7 @@ func (r UiConventionsHistoryUiConventionsSlugHistoryGetResponse) StatusCode() in
 type CorpusIndexUiCorpusGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
 }
 
 // Status returns HTTPResponse.Status
@@ -57198,8 +57333,8 @@ func (c *ClientWithResponses) UiConventionsHistoryUiConventionsSlugHistoryGetWit
 }
 
 // CorpusIndexUiCorpusGetWithResponse request returning *CorpusIndexUiCorpusGetResponse
-func (c *ClientWithResponses) CorpusIndexUiCorpusGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*CorpusIndexUiCorpusGetResponse, error) {
-	rsp, err := c.CorpusIndexUiCorpusGet(ctx, reqEditors...)
+func (c *ClientWithResponses) CorpusIndexUiCorpusGetWithResponse(ctx context.Context, params *CorpusIndexUiCorpusGetParams, reqEditors ...RequestEditorFn) (*CorpusIndexUiCorpusGetResponse, error) {
+	rsp, err := c.CorpusIndexUiCorpusGet(ctx, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -66841,6 +66976,16 @@ func ParseCorpusIndexUiCorpusGetResponse(rsp *http.Response) (*CorpusIndexUiCorp
 	response := &CorpusIndexUiCorpusGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
 	}
 
 	return response, nil

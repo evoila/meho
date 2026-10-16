@@ -1191,3 +1191,16 @@ def _perf_lifespan_step_timing(request: pytest.FixtureRequest) -> Iterator[None]
     finally:
         for name, orig in originals.items():
             setattr(main_mod, name, orig)
+
+
+@pytest.fixture
+def result_reducer_cls() -> type[Any]:
+    """Return the production result reducer class (#3633).
+
+    Lets suites outside the reducer's own test module build a reducer with
+    test overrides (a fake store, small thresholds) without importing it by
+    its module path.
+    """
+    from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
+
+    return JsonFluxReducer

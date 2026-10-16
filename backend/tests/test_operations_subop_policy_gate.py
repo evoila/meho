@@ -515,3 +515,61 @@ async def test_destructive_subop_refused_without_preview_binding(
     # Fail-closed: no identifier-only pending row was written for the park.
     count = await session.scalar(select(func.count()).select_from(ApprovalRequest))
     assert count == 0
+
+
+@pytest.mark.asyncio
+async def test_subop_park_refused_when_preflight_says_write_will_be_denied(
+    session: AsyncSession,
+) -> None:
+    """A sub-op whose permission preflight says the write will be denied does not park (#3542).
+
+    The composite seam reuses the dispatcher's ``_preflight_denied_refusal``,
+    so a governed sub-op gets the same ``write_capability_denied`` refusal as
+    a top-level dispatch, and no approval row is written. The refusal is
+    still recorded: one ``denied`` audit row on the sub-op's path, through
+    the same writer the dispatcher park uses.
+    """
+    from typing import Any
+
+    from meho_backplane.db.models import AuditLog
+    from meho_backplane.operations._preview import (
+        _PERMISSION_PREFLIGHTS,
+        PreviewContext,
+        register_permission_preflight,
+    )
+
+    op_id = "PUT:/vcenter/preflight-denied"
+
+    async def _preflight(ctx: PreviewContext) -> dict[str, Any]:
+        return {
+            "check": "vault.capabilities-self",
+            "path": "secret/data/example",
+            "required": ["create", "update"],
+            "granted": ["read"],
+            "will_be_denied": True,
+        }
+
+    register_permission_preflight(op_id, _preflight)
+    try:
+        result = await enforce_subop_policy(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=op_id,
+            safety_level="caution",
+            requires_approval=True,
+            target=None,
+            params={"value": "x"},
+        )
+    finally:
+        _PERMISSION_PREFLIGHTS.pop(op_id, None)
+    assert result is not None
+    assert result.status == "denied"
+    assert result.extras["error_code"] == "write_capability_denied"
+    assert result.extras["granted"] == ["read"]
+    count = await session.scalar(select(func.count()).select_from(ApprovalRequest))
+    assert count == 0
+    rows = (await session.execute(select(AuditLog).where(AuditLog.path == op_id))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].status_code == 403
+    assert rows[0].payload["result_status"] == "denied"
+    assert rows[0].payload["error"]["error_code"] == "write_capability_denied"

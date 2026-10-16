@@ -25,7 +25,11 @@ from typing import Any
 
 import pytest
 
-from meho_backplane.connectors.vmware_rest.vim_body import fault_message, unwrap_vim_value
+from meho_backplane.connectors.vmware_rest.vim_body import (
+    fault_message,
+    method_fault_type,
+    unwrap_vim_value,
+)
 
 # ---------------------------------------------------------------------------
 # Primitive boxes (the live 8.0.3 evidence shapes, #3106)
@@ -258,3 +262,34 @@ def test_fault_message_non_dict_and_empty_return_none() -> None:
     assert fault_message("boom") is None
     assert fault_message({}) is None
     assert fault_message({"fault": "not-a-dict"}) is None
+
+
+# ---------------------------------------------------------------------------
+# method_fault_type: the VI-JSON 500 fault-body parser (#3566)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        (
+            '{"_typeName":"NotAuthenticated","object":{"type":"GuestProcessManager",'
+            '"value":"guestOperationsProcessManager"},"privilegeId":"",'
+            '"faultstring":"The session is not authenticated."}',
+            "NotAuthenticated",
+        ),
+        ('{"_typeName":"InvalidLogin","faultstring":"x"}', "InvalidLogin"),
+        ('{"_typeName":"NoPermission","privilegeId":"System.View"}', "NoPermission"),
+        ('{"_typeName":"InvalidArgument","faultstring":"bad"}', "InvalidArgument"),
+        # Not a fault body: empty, not JSON, not an object, no / blank _typeName.
+        ("", None),
+        ("<html>500 Internal Server Error</html>", None),
+        ('["NotAuthenticated"]', None),
+        ('"NotAuthenticated"', None),
+        ('{"faultstring":"no type"}', None),
+        ('{"_typeName":"  "}', None),
+        ('{"_typeName":7}', None),
+    ],
+)
+def test_method_fault_type_truth_table(body: str, expected: str | None) -> None:
+    assert method_fault_type(body) == expected

@@ -512,7 +512,10 @@ VMWARE_OBJECT_COLLECT_OP = VmwareTypedOp(
             "object when no dedicated typed op fits. Supply the object 'type' "
             "and 'moid' and the exact 'properties' list. Bounded: one object, "
             "no traversal, <=64 paths. Prefer vm.info / host.usage / "
-            "host.vsan_health when they cover what you need."
+            "host.vsan_health when they cover what you need. Use it for "
+            "distributed switch and distributed portgroup config reads "
+            "(type 'DistributedVirtualPortgroup' or "
+            "'VmwareDistributedVirtualSwitch')."
         ),
         "parameter_hints": {
             "type": "MO type, e.g. 'VirtualMachine' / 'HostSystem' / 'Datastore'.",
@@ -522,7 +525,12 @@ VMWARE_OBJECT_COLLECT_OP = VmwareTypedOp(
                 "cluster's DRS rules, groups or DRS settings, request "
                 "['configurationEx'] and pick 'rule', 'group' or 'drsConfig' "
                 "from the result: vCenter 8.0.x rejects 'configurationEx.<field>' "
-                "with InvalidProperty."
+                "with InvalidProperty. Read a polymorphic field whole: for a "
+                "distributed portgroup's VLAN or security policy, request "
+                "['config.defaultPortConfig'], not "
+                "'config.defaultPortConfig.vlan'. The field's declared type is "
+                "the base DVPortSetting, so a path into a subclass-only field "
+                "fails with InvalidProperty."
             ),
         },
         "output_shape": (

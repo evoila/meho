@@ -62,8 +62,9 @@ Both exclusions are pinned by value below, and an armed test asserts
 they stay **unserved** — the day a newer pinned spec starts serving
 one, that test fails and the constant must be promoted into
 :data:`_METHODS_BY_CONSTANT`. All reconciled op_ids (19 at #2988, extended
-to 29 by the #3280 group-lifecycle ops, to 33 by the #3944 deletes, and to 36
-by the #3886 realm delete) were served on the armed run; no path repoints were needed. Protocol:
+to 29 by the #3280 group-lifecycle ops, to 33 by the #3944 deletes, to
+34 by the #3851 user logout, and to 37 by the #3886 realm delete) were
+served on the armed run; no path repoints were needed. Protocol:
 docs/decisions/spec-reconcile-guards-standard.md.
 """
 
@@ -101,6 +102,7 @@ _METHODS_BY_CONSTANT: dict[str, tuple[str, ...]] = {
     "_USER_ROLE_MAPPINGS_PATH": ("GET",),
     "_USER_ROLE_MAPPINGS_REALM_PATH": ("POST",),
     "_USER_RESET_PASSWORD_PATH": ("PUT",),
+    "_USER_LOGOUT_PATH": ("POST",),
     "_ROLES_PATH": ("GET",),
     "_ROLE_PATH": ("GET",),
     "_ROLE_USERS_PATH": ("GET",),
@@ -201,6 +203,7 @@ def test_hand_coded_op_id_manifest_is_pinned() -> None:
         "POST:/admin/realms/{realm}/groups",
         "POST:/admin/realms/{realm}/groups/{group-id}/children",
         "POST:/admin/realms/{realm}/users",
+        "POST:/admin/realms/{realm}/users/{user-id}/logout",
         "POST:/admin/realms/{realm}/users/{user-id}/role-mappings/realm",
         "PUT:/admin/realms/{realm}",
         "PUT:/admin/realms/{realm}/clients/{client-uuid}",

@@ -174,6 +174,65 @@ func TestRunAddJSONHappyPath(t *testing.T) {
 	}
 }
 
+// TestRunAddUpdatedPath200 — the backplane answers 200 when it
+// overwrote an existing slug in place (#1845). The write succeeded,
+// so the verb must exit 0 and say "updated", not fall through to
+// unexpected_response (#4086).
+func TestRunAddUpdatedPath200(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/kb", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(newKbEntry(t, "existing-slug", "new body"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, stdout, stderr := newRunCmd(t)
+	cmd.SetIn(bytes.NewBufferString(""))
+	err := runAdd(cmd, addOptions{
+		Slug: "existing-slug", BodyArg: "new body", BackplaneOverride: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("runAdd on 200: %v; stderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `updated kb entry "existing-slug"`) {
+		t.Errorf("expected updated line; got %q", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "created kb entry") {
+		t.Errorf("200 must not be reported as created; got %q", stdout.String())
+	}
+}
+
+// TestRunAddJSONUpdatedPath200 — --json emits the round-tripped
+// entry on 200 exactly as it does on 201.
+func TestRunAddJSONUpdatedPath200(t *testing.T) {
+	entry := newKbEntry(t, "x", "y")
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/kb", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(entry)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, stdout, _ := newRunCmd(t)
+	cmd.SetIn(bytes.NewBufferString(""))
+	if err := runAdd(cmd, addOptions{Slug: "x", BodyArg: "y", JSONOut: true, BackplaneOverride: srv.URL}); err != nil {
+		t.Fatalf("runAdd --json on 200: %v", err)
+	}
+	var decoded api.KbEntry
+	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
+		t.Fatalf("stdout not JSON: %v; %q", err, stdout.String())
+	}
+	if decoded.Slug != "x" || decoded.Body != "y" {
+		t.Errorf("decode: %+v", decoded)
+	}
+}
+
 // TestRunAdd403SurfacesInsufficientRole — operator-role JWT lands
 // as 403; the CLI must classify it as insufficient_role exit 5.
 func TestRunAdd403SurfacesInsufficientRole(t *testing.T) {
@@ -259,44 +318,53 @@ func TestRunAddReadsBodyFromStdin(t *testing.T) {
 	}
 }
 
-// TestRunAddRejects201WithoutJSONPayload pins the JSON201 nil-guard
-// (M2). The generated `ParseCreateKbApiV1KbPostResponse` only
-// populates JSON201 when the response carries Content-Type with
-// `json` AND status 201; a backplane / proxy that returns 201 with
-// a missing or mistyped content-type leaves JSON201 nil. Without
+// TestRunAddRejectsSuccessWithoutJSONPayload pins the JSON200 /
+// JSON201 nil-guard (M2). The generated
+// `ParseCreateKbApiV1KbPostResponse` only populates those fields
+// when the response carries Content-Type with `json` AND the
+// matching status; a backplane / proxy that returns 200 or 201 with
+// a missing or mistyped content-type leaves the field nil. Without
 // the guard, `--json` would emit `null` and the summary mode would
 // silently no-op (printAddSummary nil-guards) — phantom success.
 // The verb must instead route to output.Unexpected (exit 4).
-func TestRunAddRejects201WithoutJSONPayload(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/kb", func(w http.ResponseWriter, _ *http.Request) {
-		// Deliberately omit Content-Type so the generated parser
-		// leaves JSON201 nil. Body content is irrelevant for the
-		// guard's behaviour.
-		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte("not-json"))
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-	seedXDGAndToken(t, srv.URL)
+func TestRunAddRejectsSuccessWithoutJSONPayload(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusCreated} {
+		t.Run(fmt.Sprintf("%d", status), func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/api/v1/kb", func(w http.ResponseWriter, _ *http.Request) {
+				// Deliberately omit Content-Type so the generated
+				// parser leaves JSON200 / JSON201 nil. Body content
+				// is irrelevant for the guard's behaviour.
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte("not-json"))
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+			seedXDGAndToken(t, srv.URL)
 
-	cmd, _, stderr := newRunCmd(t)
-	cmd.SetIn(bytes.NewBufferString(""))
-	err := runAdd(cmd, addOptions{
-		Slug: "x", BodyArg: "y", BackplaneOverride: srv.URL,
-	})
-	if err == nil {
-		t.Fatalf("expected error on 201 without JSON payload")
-	}
-	if !strings.Contains(stderr.String(), "unexpected_response") {
-		t.Errorf("expected unexpected_response classification; got %q", stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "HTTP 201 without a kb entry payload") {
-		t.Errorf("expected detail mentioning missing payload; got %q", stderr.String())
-	}
-	type ec interface{ ExitCode() int }
-	if x, ok := err.(ec); !ok || x.ExitCode() != 4 {
-		t.Errorf("expected ExitCode 4; got %v", err)
+			cmd, stdout, stderr := newRunCmd(t)
+			cmd.SetIn(bytes.NewBufferString(""))
+			err := runAdd(cmd, addOptions{
+				Slug: "x", BodyArg: "y", BackplaneOverride: srv.URL,
+			})
+			if err == nil {
+				t.Fatalf("expected error on %d without JSON payload", status)
+			}
+			if !strings.Contains(stderr.String(), "unexpected_response") {
+				t.Errorf("expected unexpected_response classification; got %q", stderr.String())
+			}
+			want := fmt.Sprintf("HTTP %d without a kb entry payload", status)
+			if !strings.Contains(stderr.String(), want) {
+				t.Errorf("expected detail %q; got %q", want, stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Errorf("expected no stdout on guard failure; got %q", stdout.String())
+			}
+			type ec interface{ ExitCode() int }
+			if x, ok := err.(ec); !ok || x.ExitCode() != 4 {
+				t.Errorf("expected ExitCode 4; got %v", err)
+			}
+		})
 	}
 }
 
@@ -317,7 +385,10 @@ func TestAddCmdHelpMentionsBodyAndMetadata(t *testing.T) {
 	// strings.ToLower so the test doesn't pin to the description's
 	// chosen capitalisation.
 	lower := strings.ToLower(buf.String())
-	for _, want := range []string{"--body", "--metadata", "tenant_admin"} {
+	for _, want := range []string{
+		"--body", "--metadata", "tenant_admin",
+		"created (http 201)", "updated (http 200)",
+	} {
 		if !strings.Contains(lower, want) {
 			t.Errorf("expected help to mention %q; got %q", want, buf.String())
 		}

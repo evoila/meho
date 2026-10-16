@@ -41,6 +41,8 @@ from meho_backplane.conventions.preamble import (
     BROADCAST_DISCIPLINE_BAND,
     GUARD_PREFIX,
 )
+from meho_backplane.conventions.render import ConventionEntry, render_conventions
+from meho_backplane.conventions.schemas import DEFAULT_MAX_PREAMBLE_TOKENS, estimate_tokens
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Tenant, TenantConvention
 from meho_backplane.mcp.maturity import FEATURE_MATURITY_BAND, MATURITY_BLOCK_END
@@ -510,3 +512,102 @@ async def test_initialize_does_not_log_mismatch_when_versions_match(
         "matching client protocolVersion must not emit the mismatch warning; "
         f"got events={mismatch_events!r}"
     )
+
+
+@pytest.mark.asyncio
+async def test_initialize_logs_receipt_matching_the_shared_render(
+    client_with_operator: tuple[TestClient, Operator],
+    seeded_operator_tenant: None,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """#3746: initialize logs its own inclusion receipt from the shared render.
+
+    The receipt names included and dropped slugs, the conventions band
+    estimate against its budget, and the whole ``instructions`` estimate
+    reported separately. It must match :func:`render_conventions` over
+    the same rows -- one shared answer.
+    """
+    client, op = client_with_operator
+    rows = [
+        ("keep-rule", "Keep", "a" * 1100, 100),
+        ("dropped-rule", "Dropped", "a" * 1100, 50),
+        ("filler-rule", "Filler", "Short rule.", 1),
+    ]
+    sessionmaker = get_sessionmaker()
+    now = datetime.now(UTC)
+    async with sessionmaker() as session:
+        session.add_all(
+            [
+                TenantConvention(
+                    id=uuid.uuid4(),
+                    tenant_id=op.tenant_id,
+                    slug=slug,
+                    title=title,
+                    body=body,
+                    kind="operational",
+                    priority=priority,
+                    created_by_sub="test:user",
+                    created_at=now,
+                    updated_at=now,
+                )
+                for slug, title, body, priority in rows
+            ],
+        )
+        await session.commit()
+
+    response = post_mcp(client, _initialize_envelope())
+    assert response.status_code == 200
+    instructions = response.json()["result"]["instructions"]
+
+    receipt_lines = [
+        line for line in capfd.readouterr().out.splitlines() if "mcp_preamble_receipt" in line
+    ]
+    assert len(receipt_lines) == 1, receipt_lines
+    receipt = json.loads(receipt_lines[0])
+    expected = render_conventions(
+        [ConventionEntry(slug, title, body) for slug, title, body, _ in rows],
+    )
+    assert receipt["included_slugs"] == expected.kept_slugs == ["keep-rule", "filler-rule"]
+    assert receipt["dropped_slugs"] == expected.dropped_slugs == ["dropped-rule"]
+    assert receipt["oversize_slugs"] == []
+    assert receipt["conventions_tokens"] == expected.estimated_tokens
+    assert receipt["conventions_max_tokens"] == DEFAULT_MAX_PREAMBLE_TOKENS
+    assert receipt["instructions_tokens"] == estimate_tokens(instructions)
+    assert expected.text in instructions
+
+
+@pytest.mark.asyncio
+async def test_initialize_advertises_resources_without_subscriptions(
+    client_with_operator: tuple[TestClient, Operator],
+    seeded_operator_tenant: None,
+) -> None:
+    """#3755: the resources capability is on; subscriptions and list-change are off.
+
+    The convention index is offered as a resource only. ``initialize``
+    does not subscribe the client, and the instructions do not pull the
+    index into the prompt.
+    """
+    client, op = client_with_operator
+    now = datetime.now(UTC)
+    async with get_sessionmaker()() as session:
+        session.add(
+            TenantConvention(
+                id=uuid.uuid4(),
+                tenant_id=op.tenant_id,
+                slug="index-check",
+                title="Index check",
+                body="A short operational rule.",
+                kind="operational",
+                priority=1,
+                created_by_sub="test:user",
+                created_at=now,
+                updated_at=now,
+            ),
+        )
+        await session.commit()
+
+    response = post_mcp(client, _initialize_envelope())
+
+    result = response.json()["result"]
+    assert result["capabilities"]["resources"] == {"listChanged": False, "subscribe": False}
+    assert "meho://tenant-conventions/index" not in result["instructions"]

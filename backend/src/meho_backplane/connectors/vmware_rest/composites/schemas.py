@@ -448,8 +448,9 @@ DATASTORE_USAGE_PARAMETER_SCHEMA: dict[str, Any] = {
 
 #: ``vmware.composite.network.portgroup.audit`` parameter schema.
 #:
-#: Lists distributed portgroups with host membership + connected-VM
-#: aggregation. All sub-ops are vCenter REST.
+#: Lists distributed portgroups with parent switch, VLAN and connected-VM
+#: aggregation. The listing is vCenter REST; the per-portgroup details are
+#: vim PropertyCollector reads (#3802).
 NETWORK_PORTGROUP_AUDIT_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -457,13 +458,10 @@ NETWORK_PORTGROUP_AUDIT_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "minLength": 1,
             "description": (
-                "Accepted but inert (#2970 degradation): this only ever "
-                "scoped the distributed-switch listing that fed the "
-                "``dvs_name`` enrichment, and the pinned vcenter.yaml "
-                "serves no DVS list resource, so that step was dropped. "
-                "The generic network resource has no per-DVS filter "
-                "either, so the returned portgroup set was never "
-                "narrowed by this value."
+                "Keep only the portgroups whose parent distributed "
+                "switch matches this value. Matches the switch "
+                "managed-object ID (for example 'dvs-21') or its "
+                "display name."
             ),
         },
         "include_disconnected_vms": {
@@ -725,30 +723,76 @@ NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA: dict[str, Any] = {
                     },
                     "dvs": {
                         "type": ["string", "null"],
-                        "description": "Parent DVS managed-object ID, if present.",
+                        "description": (
+                            "Parent distributed switch managed-object ID, "
+                            "read from the portgroup's "
+                            "``config.distributedVirtualSwitch``. ``null`` "
+                            "when vCenter does not report it (for example, "
+                            "no read permission on the switch)."
+                        ),
                     },
                     "dvs_name": {
                         "type": ["string", "null"],
                         "description": (
-                            "Always ``null`` (#2970 degradation): the "
-                            "DVS listing that resolved display names is "
-                            "not served by the pinned spec. Key retained "
-                            "for response-envelope stability."
+                            "Display name of the parent distributed switch. "
+                            "``null`` when the switch is unknown."
                         ),
                     },
                     "type": {
                         "type": ["string", "null"],
                         "description": "Portgroup type from the listing row.",
                     },
+                    "vlan": {
+                        "type": ["object", "null"],
+                        "properties": {
+                            "mode": {"type": "string", "enum": ["access", "trunk"]},
+                            "vlan_id": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 4094,
+                                "description": "The access VLAN ID (mode 'access').",
+                            },
+                            "ranges": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "start": {"type": "integer"},
+                                        "end": {"type": "integer"},
+                                    },
+                                    "required": ["start", "end"],
+                                },
+                                "description": (
+                                    "The trunk VLAN ranges (mode 'trunk'), "
+                                    "sorted, with touching ranges merged."
+                                ),
+                            },
+                        },
+                        "required": ["mode"],
+                        "description": (
+                            "The portgroup's default VLAN, from "
+                            "``config.defaultPortConfig.vlan``: "
+                            "``{mode: 'access', vlan_id}`` or "
+                            "``{mode: 'trunk', ranges}``. ``null`` for a "
+                            "private VLAN or a shape vCenter did not report."
+                        ),
+                    },
                     "vm_count": {
                         "type": "integer",
                         "minimum": 0,
-                        "description": "Number of VMs attached to this portgroup.",
+                        "description": (
+                            "Number of VMs with a network adapter on this "
+                            "portgroup (powered-on only unless "
+                            "include_disconnected_vms is true)."
+                        ),
                     },
                     "vm_names": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Names of VMs attached to this portgroup.",
+                        "description": (
+                            "Names of the VMs with a network adapter on this "
+                            "portgroup, from the portgroup's ``vm`` property."
+                        ),
                     },
                 },
                 "required": ["id", "vm_count", "vm_names"],

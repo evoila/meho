@@ -128,6 +128,14 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors.vmware_rest.composites._write import (
+    _DVPG_MO_TYPE,
+    _DVS_MO_TYPE,
+    _PROP_DVPG_DEFAULT_PORT_CONFIG,
+    _PROP_DVPG_DVS,
+    _observed_vlan_identity,
+    _vlan_identity_view,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops import _int_or_none
 from meho_backplane.connectors.vmware_rest.vim_body import (
     retrieve_properties_body,
@@ -183,16 +191,14 @@ _OP_LIST_VMS = "GET:/vcenter/vm"
 # all: the plural ``distributed-switches`` path #1602 repointed to exists
 # only under ``/vcenter/namespace-management/networks/nsx/`` (NSX-scoped)
 # in the canonical ``vcenter.yaml`` -- the #2970 real-spec reconcile
-# finding. The audit's DVS-list step is therefore dropped (see the
-# handler's degradation note); enumerating switches is a vim-only surface.
-# There is likewise NO dedicated ``distributed-portgroup(s)`` list
+# finding. There is likewise NO dedicated ``distributed-portgroup(s)`` list
 # resource: distributed portgroups are enumerated via the generic network
 # resource filtered to ``DISTRIBUTED_PORTGROUP`` (the singular
 # ``distributed-portgroup`` op_id #508 declared was absent from every
 # ingest -- #1602). The generic ``Network`` summary returns only
-# ``{network (id), name, type}`` -- it carries no parent-DVS field, so
-# the per-portgroup ``dvs``/``dvs_name`` enrichment is best-effort (see
-# the handler note).
+# ``{network (id), name, type}``, so the portgroup audit reads the parent
+# switch, the VLAN and the connected VMs from the portgroup managed object
+# through the PropertyCollector (#3802).
 _OP_LIST_NETWORK = "GET:/vcenter/network"
 _NETWORK_TYPE_DISTRIBUTED_PORTGROUP = "DISTRIBUTED_PORTGROUP"
 
@@ -234,6 +240,22 @@ _PROP_VM_DATASTORE = "datastore"
 _DATASTORE_MO_TYPE = "Datastore"
 _PROP_DATASTORE_SUMMARY = "summary"
 
+# vim properties for the portgroup audit (#3802). ``vm`` is the inherited
+# ``Network.vm`` property: the VMs with a NIC on this portgroup. The
+# portgroup's switch + port config property names are shared with the
+# portgroup write composites. ``config.defaultPortConfig`` is read whole,
+# never the deep ``config.defaultPortConfig.vlan`` path (vCenter 8.0.x
+# answers that path with HTTP 500).
+_PROP_NAME = "name"
+_PROP_NETWORK_VM = "vm"
+_PROP_VM_POWER_STATE = "runtime.powerState"
+_VM_POWERED_ON = "poweredOn"
+_PORTGROUP_AUDIT_PATHS: tuple[str, ...] = (
+    _PROP_DVPG_DVS,
+    _PROP_DVPG_DEFAULT_PORT_CONFIG,
+    _PROP_NETWORK_VM,
+)
+
 # Per-composite sub-op-id tuples. Each tuple lists the raw-REST /
 # vi-json sub-ops the composite issues directly on the connector
 # session. Pre-#2253 these fed the L2 pre-flight check that guarded a
@@ -263,7 +285,7 @@ _SUB_OPS_DATASTORE_USAGE: tuple[str, ...] = (
 )
 _SUB_OPS_NETWORK_PORTGROUP_AUDIT: tuple[str, ...] = (
     _OP_LIST_NETWORK,
-    _OP_LIST_VMS,
+    _OP_RETRIEVE_PROPERTIES,
 )
 _SUB_OPS_DATASTORE_REFRESH: tuple[str, ...] = (
     _OP_POST_REFRESH_DATASTORE,
@@ -964,8 +986,105 @@ async def datastore_usage_composite(
     return {"datastores": aggregated}
 
 
-# Pre-existing >100-line handler from G3.1-T5 #508.
-# code-quality-allow: pre-existing G3.1-T5 #508 handler
+async def _retrieve_props_by_moid(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    mo_type: str,
+    moids: list[str],
+    path_set: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Read *path_set* on every ``(mo_type, moid)`` object in one PropertyCollector call.
+
+    Returns ``{moid: {property: value}}``. No call is made when *moids* is
+    empty, so an empty inventory costs no round trip.
+    """
+    if not moids:
+        return {}
+    result = await _read_sub_op(
+        connector,
+        target,
+        operator,
+        _OP_RETRIEVE_PROPERTIES,
+        path_params={"moId": _PROPERTY_COLLECTOR_MOID},
+        body=retrieve_properties_body(mo_type, moids, path_set),
+    )
+    return _extract_props_by_moid(result)
+
+
+def _moref_value(ref: Any) -> str | None:
+    """The moid (``value``) of a vim MoRef dict, or ``None``."""
+    value = ref.get("value") if isinstance(ref, dict) else None
+    return value if isinstance(value, str) else None
+
+
+async def _read_dvs_names(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    dvs_refs: list[dict[str, Any]],
+) -> dict[str, str]:
+    """Resolve ``{dvs_moid: display name}`` for the parent switches.
+
+    The MoRef from ``config.distributedVirtualSwitch`` names the concrete
+    switch type (``VmwareDistributedVirtualSwitch`` on a vSphere switch),
+    so the read uses that type, one call per distinct type.
+    """
+    moids_by_type: dict[str, list[str]] = {}
+    for ref in dvs_refs:
+        moid = _moref_value(ref)
+        ref_type = ref.get("type")
+        mo_type = ref_type if isinstance(ref_type, str) else _DVS_MO_TYPE
+        if moid is not None and moid not in moids_by_type.setdefault(mo_type, []):
+            moids_by_type[mo_type].append(moid)
+    names: dict[str, str] = {}
+    for mo_type, moids in moids_by_type.items():
+        props = await _retrieve_props_by_moid(
+            connector, target, operator, mo_type, moids, [_PROP_NAME]
+        )
+        for moid, values in props.items():
+            name = values.get(_PROP_NAME)
+            if isinstance(name, str):
+                names[moid] = name
+    return names
+
+
+async def _read_vm_names(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    vm_moids: list[str],
+    *,
+    powered_on_only: bool,
+) -> dict[str, str]:
+    """Resolve ``{vm_moid: name}``, keeping only powered-on VMs unless told otherwise."""
+    props = await _retrieve_props_by_moid(
+        connector,
+        target,
+        operator,
+        _VIRTUAL_MACHINE_MO_TYPE,
+        vm_moids,
+        [_PROP_NAME, _PROP_VM_POWER_STATE],
+    )
+    names: dict[str, str] = {}
+    for moid, values in props.items():
+        name = values.get(_PROP_NAME)
+        if not isinstance(name, str):
+            continue
+        if powered_on_only and values.get(_PROP_VM_POWER_STATE) != _VM_POWERED_ON:
+            continue
+        names[moid] = name
+    return names
+
+
+def _portgroup_vm_moids(props: dict[str, Any]) -> list[str]:
+    """The moids in a portgroup's ``vm`` property (VMs with a NIC on it)."""
+    refs = props.get(_PROP_NETWORK_VM)
+    if not isinstance(refs, list):
+        return []
+    return [moid for moid in (_moref_value(ref) for ref in refs) if moid is not None]
+
+
 async def network_portgroup_audit_composite(
     *,
     operator: Operator,
@@ -973,7 +1092,7 @@ async def network_portgroup_audit_composite(
     params: dict[str, Any],
     connector: VmwareRestConnector,
 ) -> dict[str, Any]:
-    """Audit distributed portgroups with connected-VM aggregation.
+    """Audit distributed portgroups: parent switch, VLAN and connected VMs.
 
     Op-id: ``vmware.composite.network.portgroup.audit``.
 
@@ -981,42 +1100,40 @@ async def network_portgroup_audit_composite(
 
     1. ``GET:/vcenter/network`` with ``filter.types=[DISTRIBUTED_PORTGROUP]``
        -- list distributed portgroups. The REST Automation API has no
-       dedicated distributed-portgroup resource; portgroups are
-       enumerated through the generic ``Network`` resource filtered to
-       the ``DISTRIBUTED_PORTGROUP`` type (#1602).
-    2. Per portgroup: ``GET:/vcenter/vm`` with ``filter.networks`` --
-       VMs connected to the portgroup. Drives the ``vm_count`` +
-       ``vm_names`` aggregation.
+       dedicated distributed-portgroup resource (#1602).
+    2. One ``RetrievePropertiesEx`` over every portgroup reading
+       ``config.distributedVirtualSwitch`` (parent switch),
+       ``config.defaultPortConfig`` (read whole; ``vlan`` is picked in code
+       because the deep ``config.defaultPortConfig.vlan`` path fails on
+       vCenter 8.0.x) and ``vm`` (the VMs with a NIC on that portgroup).
+    3. One ``RetrievePropertiesEx`` per switch type reading the parent
+       switches' ``name``.
+    4. One ``RetrievePropertiesEx`` over the union of connected VMs reading
+       ``name`` + ``runtime.powerState``.
+
+    #3802: the old per-portgroup ``GET:/vcenter/vm`` call, filtered by
+    network, is gone. The VM list resource has no network filter, so
+    vCenter ignored it and every row got the whole VM inventory. The
+    portgroup's own ``vm`` property scopes each row to its own VMs.
+
+    ``filter_dvs`` keeps only the portgroups whose parent switch moid or
+    name equals the value. Unless ``include_disconnected_vms`` is true,
+    only powered-on VMs are counted.
 
     Returns
     -------
     dict[str, Any]
-        ``{"portgroups": [{"id": ..., "name": ..., "dvs": <id|None>,
-        "dvs_name": <str|None>, "type": ..., "vm_count": ...,
-        "vm_names": [...]}, ...]}``.
-
-    Degradation note (#2970): the pre-#2970 step 1 listed distributed
-    switches via ``GET:/vcenter/network/distributed-switches`` to build a
-    moid->name index for ``dvs_name`` enrichment -- but the pinned
-    ``vcenter.yaml`` serves that path only under the NSX-scoped
-    ``/vcenter/namespace-management/`` tree, so the step 404s on a real
-    vCenter 9.0 and is dropped. ``dvs_name`` is therefore always ``None``
-    (it already was in practice: the generic ``Network`` summary carries
-    only ``{network (id), name, type}`` -- no parent-DVS reference to
-    join on -- so the index was never consulted with a hit). ``dvs``
-    stays best-effort: populated when the upstream payload happens to
-    expose a ``vds``/``distributed_switch`` field, ``None`` otherwise.
-    ``filter_dvs`` only ever scoped that index, so it is accepted but
-    inert -- see the parameter schema note.
+        ``{"portgroups": [{"id": ..., "name": ..., "dvs": <moid|None>,
+        "dvs_name": <str|None>, "type": ..., "vlan": <view|None>,
+        "vm_count": ..., "vm_names": [...]}, ...]}``. ``vlan`` is
+        ``{"mode": "access", "vlan_id": N}`` or ``{"mode": "trunk",
+        "ranges": [{"start", "end"}, ...]}``, and ``None`` for a private
+        VLAN or a shape the switch did not report.
     """
     include_disconnected = bool(params.get("include_disconnected_vms", False))
+    filter_dvs = params.get("filter_dvs")
 
-    # Distributed portgroups come from the generic network resource
-    # filtered to the DISTRIBUTED_PORTGROUP type -- there is no
-    # standalone distributed-portgroup list endpoint (and no DVS list
-    # resource at all; see the degradation note above).
     pg_query: dict[str, Any] = {"filter.types": [_NETWORK_TYPE_DISTRIBUTED_PORTGROUP]}
-
     pg_listing = await _read_sub_op(connector, target, operator, _OP_LIST_NETWORK, query=pg_query)
     pg_entries = _unwrap_value(pg_listing)
     if not isinstance(pg_entries, list):
@@ -1024,42 +1141,49 @@ async def network_portgroup_audit_composite(
             f"network_portgroup_audit: expected list from {_OP_LIST_NETWORK!r}, "
             f"got {type(pg_entries).__name__}"
         )
-
-    aggregated: list[dict[str, Any]] = []
+    listed: dict[str, dict[str, Any]] = {}
     for entry in pg_entries:
         if not isinstance(entry, dict):
             continue
         pg_id = entry.get("network") or entry.get("portgroup")
-        if not isinstance(pg_id, str):
+        if isinstance(pg_id, str):
+            listed[pg_id] = entry
+
+    pg_props = await _retrieve_props_by_moid(
+        connector, target, operator, _DVPG_MO_TYPE, list(listed), list(_PORTGROUP_AUDIT_PATHS)
+    )
+    dvs_refs = [
+        ref for props in pg_props.values() if isinstance(ref := props.get(_PROP_DVPG_DVS), dict)
+    ]
+    dvs_names = await _read_dvs_names(connector, target, operator, dvs_refs)
+
+    rows: list[tuple[dict[str, Any], list[str]]] = []
+    for pg_id, entry in listed.items():
+        props = pg_props.get(pg_id, {})
+        dvs_moid = _moref_value(props.get(_PROP_DVPG_DVS))
+        dvs_name = dvs_names.get(dvs_moid) if dvs_moid is not None else None
+        if filter_dvs and filter_dvs not in (dvs_moid, dvs_name):
             continue
-        vm_query: dict[str, Any] = {"filter.networks": [pg_id]}
-        if not include_disconnected:
-            # vSphere REST accepts a power-state filter; the
-            # ``include_disconnected`` flag toggles it. Default is
-            # active VMs only.
-            vm_query["filter.power_states"] = ["POWERED_ON"]
-        vms = await _read_sub_op(connector, target, operator, _OP_LIST_VMS, query=vm_query)
-        vm_entries = _unwrap_value(vms)
-        if not isinstance(vm_entries, list):
-            vm_entries = []
-        vm_names = [
-            v["name"] for v in vm_entries if isinstance(v, dict) and isinstance(v.get("name"), str)
-        ]
-        dvs_ref = entry.get("vds") or entry.get("distributed_switch")
-        dvs_ref_str = dvs_ref if isinstance(dvs_ref, str) else None
-        aggregated.append(
-            {
-                "id": pg_id,
-                "name": entry.get("name"),
-                "dvs": dvs_ref_str,
-                # Always None post-#2970: the DVS-list step that built the
-                # moid->name index is not served by the pinned spec (see
-                # the handler degradation note). Key retained for
-                # response-envelope stability.
-                "dvs_name": None,
-                "type": entry.get("type"),
-                "vm_count": len(vm_names),
-                "vm_names": vm_names,
-            }
-        )
+        port_setting = props.get(_PROP_DVPG_DEFAULT_PORT_CONFIG)
+        raw_vlan = port_setting.get("vlan") if isinstance(port_setting, dict) else None
+        row = {
+            "id": pg_id,
+            "name": entry.get("name"),
+            "dvs": dvs_moid,
+            "dvs_name": dvs_name,
+            "type": entry.get("type"),
+            "vlan": _vlan_identity_view(_observed_vlan_identity(raw_vlan)),
+        }
+        rows.append((row, _portgroup_vm_moids(props)))
+
+    all_vm_moids = list(dict.fromkeys(moid for _, moids in rows for moid in moids))
+    vm_names_by_moid = await _read_vm_names(
+        connector, target, operator, all_vm_moids, powered_on_only=not include_disconnected
+    )
+    aggregated: list[dict[str, Any]] = []
+    for row, vm_moids in rows:
+        vm_names = [vm_names_by_moid[moid] for moid in vm_moids if moid in vm_names_by_moid]
+        row["vm_count"] = len(vm_names)
+        row["vm_names"] = vm_names
+        aggregated.append(row)
     return {"portgroups": aggregated}

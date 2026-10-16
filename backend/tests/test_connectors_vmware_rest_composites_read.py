@@ -22,7 +22,7 @@ Coverage matrix (carried over from G3.1-T5 / #508, mechanism swapped):
   dispatch-mechanism swap.
 * Envelope tolerance: ``{"value": [...]}`` (legacy) and bare lists
   (modern) both parse correctly.
-* Filter pass-through: ``filter_names`` / ``filter_dvs`` / ``moId`` /
+* Filter pass-through: ``filter_names`` / ``moId`` /
   ``entity_moid`` flow into the sub-op query / path / body.
 * Error fan-out: a load-bearing sub-op raising ``httpx.HTTPStatusError``
   propagates out of the handler (the dispatcher's outer branch wraps it
@@ -1180,106 +1180,305 @@ async def test_datastore_usage_detail_error_propagates() -> None:
 # vmware.composite.network.portgroup.audit
 # ---------------------------------------------------------------------------
 
+_DVPG_TYPE = "DistributedVirtualPortgroup"
+_VDS_TYPE = "VmwareDistributedVirtualSwitch"
+_VM_TYPE = "VirtualMachine"
+_DEEP_VLAN_PATH = "config.defaultPortConfig.vlan"
 
-@pytest.mark.asyncio
-async def test_network_portgroup_audit_reads_two_phases() -> None:
-    """Portgroup listing + per-portgroup VM listings aggregate to the expected shape.
 
-    Two phases post-#2970: the DVS-listing step was dropped (the pinned
-    vcenter.yaml serves no DVS list resource), so ``dvs_name`` is always
-    ``None`` and ``dvs`` is the pg row's own best-effort field.
-    """
-    pg_listing = [
-        {"network": "pg-1", "name": "PG-A", "vds": "dvs-1", "type": "DISTRIBUTED_PORTGROUP"},
-        {"network": "pg-2", "name": "PG-B", "type": "DISTRIBUTED_PORTGROUP"},
-    ]
-    vms_per_pg = {
-        "pg-1": [{"name": "vm-pg1-a"}, {"name": "vm-pg1-b"}],
-        "pg-2": [],
+def _boxed(value: Any) -> Any:
+    """Box a primitive the way live VI-JSON puts it in ``DynamicProperty.val``."""
+    if isinstance(value, str):
+        return {"_typeName": "string", "_value": value}
+    return value
+
+
+def _moref_array(mo_type: str, moids: list[str]) -> dict[str, Any]:
+    return {
+        "_typeName": "ArrayOfManagedObjectReference",
+        "_value": [vim_moref(mo_type, moid) for moid in moids],
     }
-    sequence: list[Any] = [pg_listing]
-    for pg in pg_listing:
-        sequence.append(vms_per_pg[pg["network"]])
-    conn = _RecordingConnector(sequence)
 
-    out = await network_portgroup_audit_composite(
+
+def _access_port_config(vlan_id: int) -> dict[str, Any]:
+    return {
+        "_typeName": "VMwareDVSPortSetting",
+        "vlan": {
+            "_typeName": "VmwareDistributedVirtualSwitchVlanIdSpec",
+            "inherited": False,
+            "vlanId": vlan_id,
+        },
+    }
+
+
+def _trunk_port_config(ranges: list[tuple[int, int]]) -> dict[str, Any]:
+    return {
+        "_typeName": "VMwareDVSPortSetting",
+        "vlan": {
+            "_typeName": "VmwareDistributedVirtualSwitchTrunkVlanSpec",
+            "inherited": False,
+            "vlanId": [
+                {"_typeName": "NumericRange", "start": start, "end": end} for start, end in ranges
+            ],
+        },
+    }
+
+
+# Two portgroups on two switches, with disjoint VLANs and disjoint VMs,
+# except ``vm-5`` which has one NIC on each portgroup. ``vm-4`` is
+# powered off. ``vm-9`` exists but sits on neither portgroup.
+_PG_INVENTORY: dict[str, dict[str, dict[str, Any]]] = {
+    _DVPG_TYPE: {
+        "dvportgroup-11": {
+            "config.distributedVirtualSwitch": vim_moref(_VDS_TYPE, "dvs-1"),
+            "config.defaultPortConfig": _access_port_config(110),
+            "vm": _moref_array(_VM_TYPE, ["vm-1", "vm-2", "vm-5"]),
+        },
+        "dvportgroup-12": {
+            "config.distributedVirtualSwitch": vim_moref(_VDS_TYPE, "dvs-2"),
+            "config.defaultPortConfig": _trunk_port_config([(300, 300), (200, 210)]),
+            "vm": _moref_array(_VM_TYPE, ["vm-3", "vm-4", "vm-5"]),
+        },
+    },
+    _VDS_TYPE: {
+        "dvs-1": {"name": "DSwitch-Prod"},
+        "dvs-2": {"name": "DSwitch-Lab"},
+    },
+    _VM_TYPE: {
+        "vm-1": {"name": "web-01", "runtime.powerState": "poweredOn"},
+        "vm-2": {"name": "web-02", "runtime.powerState": "poweredOn"},
+        "vm-3": {"name": "db-01", "runtime.powerState": "poweredOn"},
+        "vm-4": {"name": "db-02", "runtime.powerState": "poweredOff"},
+        "vm-5": {"name": "router-01", "runtime.powerState": "poweredOn"},
+        "vm-9": {"name": "unrelated-01", "runtime.powerState": "poweredOn"},
+    },
+}
+
+_PG_LISTING = [
+    {"network": "dvportgroup-11", "name": "PG-Prod", "type": "DISTRIBUTED_PORTGROUP"},
+    {"network": "dvportgroup-12", "name": "PG-Lab", "type": "DISTRIBUTED_PORTGROUP"},
+]
+
+
+class _InventoryConnector(_RecordingConnector):
+    """Fake that answers each PropertyCollector read from ``_PG_INVENTORY``.
+
+    The answer depends on the object type, the moids and the property
+    paths in the request body -- not on call order -- so a handler that
+    reads the wrong object gets the wrong data back. The one GET (the
+    portgroup listing) is served from *listing*. Like vCenter 8.0.x, the
+    fake fails a request for the deep ``config.defaultPortConfig.vlan``
+    path.
+    """
+
+    def __init__(
+        self,
+        listing: Any,
+        *,
+        mount_prefix: str = "/api",
+        inventory: dict[str, dict[str, dict[str, Any]]] = _PG_INVENTORY,
+    ) -> None:
+        super().__init__([listing], mount_prefix=mount_prefix)
+        self._inventory = inventory
+
+    async def _post_vmomi_json(
+        self,
+        target: Any,
+        path: str,
+        *,
+        operator: Operator,
+        json: dict[str, Any] | None = None,
+    ) -> Any:
+        mounted = f"{self._mount_prefix}{path}"
+        self.calls.append(
+            {"method": "POST", "path": mounted, "query": None, "body": json, "vmomi": True}
+        )
+        assert json is not None
+        spec = json["specSet"][0]
+        mo_type = spec["propSet"][0]["type"]
+        path_set = spec["propSet"][0]["pathSet"]
+        if _DEEP_VLAN_PATH in path_set:
+            raise _http_error(500, mounted)
+        objects = []
+        for obj_spec in spec["objectSet"]:
+            moid = obj_spec["obj"]["value"]
+            props = self._inventory[mo_type][moid]
+            objects.append(
+                {
+                    "obj": vim_moref(mo_type, moid),
+                    "propSet": [
+                        {"name": name, "val": _boxed(props[name])}
+                        for name in path_set
+                        if name in props
+                    ],
+                }
+            )
+        return {"_typeName": "RetrieveResult", "objects": objects}
+
+
+def _read_targets(conn: _RecordingConnector) -> list[tuple[str, list[str], list[str]]]:
+    """``(type, moids, pathSet)`` of every PropertyCollector call, in order."""
+    targets = []
+    for call in conn.calls:
+        if call["method"] != "POST":
+            continue
+        spec = call["body"]["specSet"][0]
+        targets.append(
+            (
+                spec["propSet"][0]["type"],
+                [o["obj"]["value"] for o in spec["objectSet"]],
+                spec["propSet"][0]["pathSet"],
+            )
+        )
+    return targets
+
+
+async def _run_audit(conn: _RecordingConnector, params: dict[str, Any]) -> dict[str, Any]:
+    return await network_portgroup_audit_composite(
         operator=_make_operator(),
         target=object(),
-        params={},
+        params=params,
         connector=conn,  # type: ignore[arg-type]
     )
 
-    # 1 + 2 portgroups = 3 calls (no DVS listing -- #2970).
-    assert len(conn.calls) == 3
-    # Portgroups come from the generic network resource, type-filtered.
-    # On the modern /api mount the filter params are sent bare (#2298).
-    assert conn.calls[0]["path"] == "/api/vcenter/network"
-    assert conn.calls[0]["query"] == {"types": ["DISTRIBUTED_PORTGROUP"]}
-    # Per-PG VM call filters by network + power state, bare on /api.
-    assert conn.calls[1]["path"] == "/api/vcenter/vm"
-    assert conn.calls[1]["query"] == {
-        "networks": ["pg-1"],
-        "power_states": ["POWERED_ON"],
-    }
+
+@pytest.mark.asyncio
+async def test_network_portgroup_audit_rows_carry_only_their_own_vms_vlan_and_switch() -> None:
+    """#3802: each row gets only its own VMs, its own VLAN and its own switch.
+
+    Two portgroups with disjoint VM sets and VLANs. The fake answers by
+    the requested object, so any cross-portgroup bleed (the old
+    whole-inventory VM list on every row) shows up as a wrong row.
+    """
+    conn = _InventoryConnector(_PG_LISTING)
+
+    out = await _run_audit(conn, {})
+
     assert out["portgroups"] == [
         {
-            "id": "pg-1",
-            "name": "PG-A",
+            "id": "dvportgroup-11",
+            "name": "PG-Prod",
             "dvs": "dvs-1",
-            "dvs_name": None,
+            "dvs_name": "DSwitch-Prod",
             "type": "DISTRIBUTED_PORTGROUP",
-            "vm_count": 2,
-            "vm_names": ["vm-pg1-a", "vm-pg1-b"],
+            "vlan": {"mode": "access", "vlan_id": 110},
+            "vm_count": 3,
+            "vm_names": ["web-01", "web-02", "router-01"],
         },
         {
-            "id": "pg-2",
-            "name": "PG-B",
+            "id": "dvportgroup-12",
+            "name": "PG-Lab",
+            "dvs": "dvs-2",
+            "dvs_name": "DSwitch-Lab",
+            "type": "DISTRIBUTED_PORTGROUP",
+            "vlan": {
+                "mode": "trunk",
+                "ranges": [{"start": 200, "end": 210}, {"start": 300, "end": 300}],
+            },
+            # vm-4 is powered off, so it is left out by default.
+            "vm_count": 2,
+            "vm_names": ["db-01", "router-01"],
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_network_portgroup_audit_reads_portgroup_objects_not_the_vm_list() -> None:
+    """The audit lists portgroups once, then reads vim properties in batches.
+
+    No ``GET /vcenter/vm`` call is made (it has no ``networks`` filter),
+    and the port config is read whole, never the deep VLAN path.
+    """
+    conn = _InventoryConnector(_PG_LISTING)
+
+    await _run_audit(conn, {})
+
+    get_calls = [c for c in conn.calls if c["method"] == "GET"]
+    assert [c["path"] for c in get_calls] == ["/api/vcenter/network"]
+    assert get_calls[0]["query"] == {"types": ["DISTRIBUTED_PORTGROUP"]}
+    assert all(
+        c["path"] == "/api/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+        for c in conn.calls
+        if c["method"] == "POST"
+    )
+    assert _read_targets(conn) == [
+        (
+            _DVPG_TYPE,
+            ["dvportgroup-11", "dvportgroup-12"],
+            ["config.distributedVirtualSwitch", "config.defaultPortConfig", "vm"],
+        ),
+        (_VDS_TYPE, ["dvs-1", "dvs-2"], ["name"]),
+        (_VM_TYPE, ["vm-1", "vm-2", "vm-5", "vm-3", "vm-4"], ["name", "runtime.powerState"]),
+    ]
+    for _, _, path_set in _read_targets(conn):
+        assert _DEEP_VLAN_PATH not in path_set
+
+
+@pytest.mark.asyncio
+async def test_network_portgroup_audit_include_disconnected_keeps_powered_off_vms() -> None:
+    """``include_disconnected_vms=True`` keeps VMs that are not powered on."""
+    conn = _InventoryConnector(_PG_LISTING)
+
+    out = await _run_audit(conn, {"include_disconnected_vms": True})
+
+    lab = out["portgroups"][1]
+    assert lab["vm_names"] == ["db-01", "db-02", "router-01"]
+    assert lab["vm_count"] == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("filter_dvs", ["dvs-2", "DSwitch-Lab"])
+async def test_network_portgroup_audit_filter_dvs_keeps_matching_switch_only(
+    filter_dvs: str,
+) -> None:
+    """``filter_dvs`` matches the parent switch moid or name; VMs of other rows are not read."""
+    conn = _InventoryConnector(_PG_LISTING)
+
+    out = await _run_audit(conn, {"filter_dvs": filter_dvs})
+
+    assert [row["id"] for row in out["portgroups"]] == ["dvportgroup-12"]
+    assert _read_targets(conn)[-1][1] == ["vm-3", "vm-4", "vm-5"]
+
+
+@pytest.mark.asyncio
+async def test_network_portgroup_audit_empty_listing_makes_one_call() -> None:
+    """No distributed portgroups -> only the listing call, no vim reads."""
+    conn = _InventoryConnector([])
+
+    out = await _run_audit(conn, {})
+
+    assert out == {"portgroups": []}
+    assert len(conn.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_network_portgroup_audit_tolerates_unset_properties() -> None:
+    """A portgroup without a reported switch, VLAN or VMs gets null / empty fields.
+
+    vim leaves unset properties out of ``propSet``; the row must not
+    crash or borrow another portgroup's data.
+    """
+    conn = _InventoryConnector(
+        [{"network": "dvportgroup-99", "name": "PG-Bare", "type": "DISTRIBUTED_PORTGROUP"}],
+        inventory={_DVPG_TYPE: {"dvportgroup-99": {}}},
+    )
+
+    out = await _run_audit(conn, {})
+
+    assert out["portgroups"] == [
+        {
+            "id": "dvportgroup-99",
+            "name": "PG-Bare",
             "dvs": None,
             "dvs_name": None,
             "type": "DISTRIBUTED_PORTGROUP",
+            "vlan": None,
             "vm_count": 0,
             "vm_names": [],
-        },
+        }
     ]
-
-
-@pytest.mark.asyncio
-async def test_network_portgroup_audit_filter_dvs_is_inert() -> None:
-    """``filter_dvs`` is accepted but changes nothing (#2970 degradation).
-
-    It only ever scoped the dropped DVS listing; the portgroup call stays
-    type-filtered only, and no extra sub-op fires.
-    """
-    sequence: list[Any] = [[]]
-    conn = _RecordingConnector(sequence)
-    await network_portgroup_audit_composite(
-        operator=_make_operator(),
-        target=object(),
-        params={"filter_dvs": "dvs-prod"},
-        connector=conn,  # type: ignore[arg-type]
-    )
-    assert len(conn.calls) == 1
-    # Portgroup call is type-filtered only -- no vdses filter anywhere.
-    assert conn.calls[0]["query"] == {"types": ["DISTRIBUTED_PORTGROUP"]}
-
-
-@pytest.mark.asyncio
-async def test_network_portgroup_audit_include_disconnected_drops_power_filter() -> None:
-    """``include_disconnected_vms=True`` removes the ``POWERED_ON`` filter on the VM call."""
-    sequence = [
-        [{"network": "pg-1", "name": "PG-A", "type": "DISTRIBUTED_PORTGROUP"}],
-        [],
-    ]
-    conn = _RecordingConnector(sequence)
-    await network_portgroup_audit_composite(
-        operator=_make_operator(),
-        target=object(),
-        params={"include_disconnected_vms": True},
-        connector=conn,  # type: ignore[arg-type]
-    )
-    vm_call = conn.calls[1]
-    assert "networks" in vm_call["query"]
-    assert "power_states" not in vm_call["query"]
+    # Only the portgroup read runs: no switch or VM to resolve.
+    assert len(_read_targets(conn)) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1318,26 +1517,13 @@ async def test_portgroup_audit_keeps_filter_prefix_on_legacy_mount() -> None:
     """Legacy/vcsim ``/rest`` portgroup audit keeps the ``filter.*`` param style (#2298).
 
     Regression pin for the mount-flavor split: the same request that sends
-    bare params on modern ``/api`` must still send ``filter.types`` /
-    ``filter.networks`` / ``filter.power_states`` on the legacy mount vcsim
-    serves, or the existing vcsim fixtures break.
+    bare params on modern ``/api`` must still send ``filter.types`` on the
+    legacy mount vcsim serves, or the existing vcsim fixtures break.
     """
-    pg_listing = [{"network": "pg-1", "name": "PG-A", "type": "DISTRIBUTED_PORTGROUP"}]
-    conn = _RecordingConnector(
-        [pg_listing, [{"name": "vm-a"}]],
-        mount_prefix="/rest",
-    )
-    await network_portgroup_audit_composite(
-        operator=_make_operator(),
-        target=object(),
-        params={},
-        connector=conn,  # type: ignore[arg-type]
-    )
+    conn = _InventoryConnector(_PG_LISTING, mount_prefix="/rest")
+    await _run_audit(conn, {})
+    assert conn.calls[0]["path"] == "/rest/vcenter/network"
     assert conn.calls[0]["query"] == {"filter.types": ["DISTRIBUTED_PORTGROUP"]}
-    assert conn.calls[1]["query"] == {
-        "filter.networks": ["pg-1"],
-        "filter.power_states": ["POWERED_ON"],
-    }
 
 
 @pytest.mark.asyncio

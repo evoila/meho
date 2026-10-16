@@ -805,6 +805,14 @@ all-missing "void" for the rest of the pod lifetime. Two mechanisms recover it:
   *why* the session died (idle expiry, `hostd` restart, …), and reads both the
   9.x nested `LocalizedMethodFault` and the 8.0.x flattened fault shapes via
   `fault_type_name`.
+- *Recovery markers (`#3777`).* Each (b) reset logs a
+  `vmware_object_collect_auth_reset` event (target name + fault class names,
+  never fault text), and `object.collect` adds `session_health_reset: 1` to its
+  result (not in `required`, absent on a normal read; the result also lands in
+  the audit row). When the probe liveness read below had to log in again, the
+  fingerprint `extras` carry `session_health_reset: 1` and a
+  `vmware_esxi_probe_session_relogin` event logs the target, the fault class
+  names and whether the session came back (`live`).
 - *(a) Bounded session max-age (defense in depth).* A warm-cached session older
   than `VMWARE_SOAP_SESSION_MAX_AGE_SECONDS` (**default `1200` s / 20 min**) is
   proactively invalidated + re-established **before** its next read, so a

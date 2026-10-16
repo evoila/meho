@@ -221,7 +221,7 @@ async def _collect_with_auth_health_reset(
     mo_type: str,
     moid: str,
     properties: list[str],
-) -> tuple[dict[str, Any], list[str], list[dict[str, str]], dict[str, int]]:
+) -> tuple[dict[str, Any], list[str], list[dict[str, str]], dict[str, int], list[str]]:
     """Read the object's properties, self-healing a stale-but-live session once (#3773b).
 
     Issues the ``RetrievePropertiesEx`` read and flattens it. If the object
@@ -244,7 +244,10 @@ async def _collect_with_auth_health_reset(
     ``ManagedObjectNotFound``) never trigger it and are returned unchanged.
 
     Returns the ``(props, missing, missing_properties, fault_counts)`` tuple of
-    :func:`_extract_object_content` for the read that stands.
+    :func:`_extract_object_content` for the read that stands, plus
+    ``reset_fault_types``: the sorted fault class names that triggered the
+    reset, or an empty list when no reset ran (#3777). Callers use it to mark
+    a recovery; it holds class names only, never fault text.
     """
     body = build_object_collect_retrieve_params(mo_type, moid, properties)
 
@@ -260,19 +263,20 @@ async def _collect_with_auth_health_reset(
     result = await _read()
     read_props, missing, missing_properties, fault_counts = _extract_object_content(result)
     if not _all_properties_missing_with_auth_fault(properties, read_props, missing_properties):
-        return read_props, missing, missing_properties, fault_counts
+        return read_props, missing, missing_properties, fault_counts, []
 
+    reset_fault_types = sorted(fault_counts)
     _log.info(
         "vmware_object_collect_auth_reset",
         target=target.name,
         mo_type=mo_type,
         moid=moid,
         requested=len(properties),
-        missing_fault_types=sorted(fault_counts),
+        missing_fault_types=reset_fault_types,
     )
     await connector.invalidate_session(target)
     result = await _read()
-    return _extract_object_content(result)
+    return (*_extract_object_content(result), reset_fault_types)
 
 
 async def object_collect_impl(
@@ -324,7 +328,13 @@ async def object_collect_impl(
     moid = params["moid"]
     properties: list[str] = list(params["properties"])
 
-    read_props, missing, missing_properties, fault_counts = await _collect_with_auth_health_reset(
+    (
+        read_props,
+        missing,
+        missing_properties,
+        fault_counts,
+        reset_fault_types,
+    ) = await _collect_with_auth_health_reset(
         connector, operator, target, mo_type, moid, properties
     )
 
@@ -338,7 +348,7 @@ async def object_collect_impl(
         missing=len(missing),
         missing_fault_types=sorted(fault_counts),
     )
-    return {
+    out: dict[str, Any] = {
         "type": mo_type,
         "moid": moid,
         "properties": read_props,
@@ -346,6 +356,11 @@ async def object_collect_impl(
         "missing_properties": missing_properties,
         "missing_fault_summary": fault_counts,
     }
+    if reset_fault_types:
+        # Present only when the session was reset and the read ran again
+        # (#3777), so an operator can see and count recoveries.
+        out["session_health_reset"] = 1
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -454,11 +469,21 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
             ),
             "additionalProperties": {"type": "integer"},
         },
+        "session_health_reset": {
+            "type": "integer",
+            "enum": [1],
+            "description": (
+                "Present (value 1) only when MEHO found the cached session "
+                "dead, logged in again and read the object a second time. "
+                "Absent on a normal read."
+            ),
+        },
     },
     # ``missing_properties`` / ``missing_fault_summary`` are deliberately NOT
     # required: they are additive (#3708), always emitted by the current
     # handler but kept optional so historically-captured / older-connector
-    # responses validate unchanged.
+    # responses validate unchanged. ``session_health_reset`` (#3777) is only
+    # present after a session reset, so a clean read must validate without it.
     "required": ["type", "moid", "properties", "missing"],
 }
 

@@ -812,6 +812,104 @@ async def test_result_cache_metrics_are_aggregate_and_logs_carry_no_rows() -> No
     assert "sensitive-cell" not in rendered
 
 
+class _OomRedis(_InfoRedis):
+    """Dedicated client at its ``maxmemory`` ceiling with ``noeviction``.
+
+    Valkey answers every write with an OOM error but still serves reads
+    and ``INFO``.
+    """
+
+    async def set(self, *_a: Any, **_k: Any) -> None:
+        raise redis.exceptions.OutOfMemoryError(
+            "OOM command not allowed when used memory > 'maxmemory'."
+        )
+
+
+class _SharedValkey(_FakeRedis):
+    """Working shared client: result-handle keys, rate-limit counters, streams."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.counters: dict[str, int] = {}
+        self.streams: dict[str, list[dict[str, Any]]] = {}
+
+    def pipeline(self, transaction: bool = True) -> Any:
+        from tests.test_broadcast_announce_rate_limit import _FakePipeline
+
+        return _FakePipeline(self.counters)
+
+    async def xadd(self, name: str, fields: dict[str, Any], **_k: Any) -> str:
+        entries = self.streams.setdefault(name, [])
+        entries.append(fields)
+        return f"1700000000000-{len(entries) - 1}"
+
+
+async def test_full_result_cache_does_not_block_broadcast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A full result cache must not stop broadcast publish or the announce limit.
+
+    The dedicated store refuses the write (``noeviction`` at ``maxmemory``).
+    The spill fails open, and the shared Valkey still takes the
+    rate-limit counter and the announcement.
+    """
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from meho_backplane.broadcast import AgentAnnouncementEvent
+    from meho_backplane.broadcast import publisher as publisher_module
+    from meho_backplane.broadcast.publisher import publish_agent_announcement
+    from meho_backplane.broadcast.rate_limit import enforce_announce_rate_limit
+
+    shared, full = _SharedValkey(), _OomRedis()
+    store = ResultHandleStore(shared, dedicated_client=full, writer_enabled=True)
+    rejected = {"outcome": "rejected", "namespace": "v2"}
+    before_rejected = _metric("result_cache_records_total", rejected)
+    tenant = uuid4()
+
+    stored = await store.spill(
+        tenant_id=tenant,
+        operator_sub="op-a",
+        handle_id=uuid4(),
+        op_id="vault.kv.list",
+        rows=_rows(4),
+        total_rows=4,
+        ttl_seconds=60,
+        max_rows=100,
+    )
+
+    assert stored == 0
+    assert _metric("result_cache_records_total", rejected) == before_rejected + 1
+    assert full.store == {}
+    assert shared.store == {}
+
+    # rate_limit.py and publisher.py import get_broadcast_client by name,
+    # so patch each module's own reference.
+    monkeypatch.setattr("meho_backplane.broadcast.rate_limit.get_broadcast_client", lambda: shared)
+    monkeypatch.setattr(
+        "meho_backplane.broadcast.rate_limit.get_settings",
+        lambda: SimpleNamespace(broadcast_announce_rate_per_minute=10),
+    )
+    monkeypatch.setattr(publisher_module, "get_broadcast_client", lambda: shared)
+    monkeypatch.setattr(publisher_module, "_persist_agent_announcement", AsyncMock())
+
+    await enforce_announce_rate_limit(tenant, "op-a")
+    entry_id = await publish_agent_announcement(
+        AgentAnnouncementEvent(
+            tenant_id=tenant,
+            principal_sub="op-a",
+            activity="investigating",
+            phase="start",
+            ts=datetime.now(UTC),
+        )
+    )
+
+    assert list(shared.counters.values()) == [1]
+    assert entry_id == "1700000000000-0"
+    assert [len(entries) for entries in shared.streams.values()] == [1]
+
+
 async def test_get_result_handle_store_reuses_broadcast_client_when_urls_match(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

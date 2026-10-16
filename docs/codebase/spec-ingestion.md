@@ -478,6 +478,7 @@ Frozen Pydantic v2 model. One per operation. Maps 1:1 to a subset of
 | `response_schema` | `response_schema` | Success-response schema or `None` |
 | `safety_level` | `safety_level` | HTTP-verb heuristic, narrow VIM destructive-action hint, then any connector-owned minimum safety floor, then the catalog `safety_overlay` |
 | `requires_approval` | `requires_approval` | `False` for ordinary operations; `True` for destructive-action hints, a connector-owned minimum safety floor, or a catalog `safety_overlay` rule |
+| `llm_instructions` | `llm_instructions` | `None` from the parser; set only by a connector-owned spec correction |
 
 The parser treats a VIM-style operation whose `operationId` or final path
 method starts with `Destroy`, `Delete`, `Remove`, or `Unregister` as
@@ -498,6 +499,23 @@ are monotonic: they only raise the parsed tier and set approval; re-ingest keeps
 an already stricter safety tier and an existing approval requirement. Existing
 enablement, review state, and other operator metadata are unchanged by this
 promotion. The dry-run path applies the same floor before reporting its result.
+
+#### Connector spec corrections
+
+Some vendor specs describe an operation's request body wrongly. The parser
+stays vendor-neutral, so a connector can register a correction in
+`ingest/spec_corrections.py`. A correction gets the catalog `version` and one
+parsed proto, and returns the same proto or a fixed copy. It runs just before
+the safety floor, on both the register path and the dry-run path.
+
+A correction may also set `llm_instructions`. Registration stores it on a new
+row. On re-ingest it fills `llm_instructions` only when the row has none, so
+an operator's own edit is never replaced.
+
+VMware's corrections live in `connectors/vmware_rest/ingest_corrections.py`.
+Today there is one: on the 8.0 catalog, `POST /cis/tasks?action=list` gets the
+`{filter_spec, result_spec}` body (see
+[connectors-vmware-rest.md](connectors-vmware-rest.md)).
 
 #### Catalog safety overlay (#3340)
 

@@ -617,6 +617,20 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    fingerprint-probe path is keyed literally (`GET:/api/about`). The reconcile
    lane `test_connectors_vmware_rest_8_0_spec_reconcile.py` pins the two specs
    to an identical served-op_id set, so they are re-keyed in lock-step (#3614).
+   **8.0 tasks-list body (#3700).** `POST /cis/tasks?action=list` (list
+   vCenter tasks) is not in the shipped minimal; it comes with a full-surface
+   re-ingest. The 8.0 spec gives it a flat body (`exclude_result` /
+   `return_all` at the top), which vCenter 8.0.3 rejects with HTTP 400.
+   `ingest_corrections.py` replaces the body at ingest time with the
+   two-level shape the 9.0 spec already has:
+   `{filter_spec: {services | tasks | operations | status | targets | users},
+   result_spec: {return_all, exclude_result}}`. The corrected schema refuses
+   the flat body and an empty filter before any request is sent: vCenter 8.0.3
+   needs a non-empty `filter_spec.services` or `filter_spec.tasks` list. The
+   row's `llm_instructions` says the same. The 9.0 catalog is left as
+   ingested. The reconcile lane above pins the corrected body shape, against
+   a fixture always and against the pinned vendor 8.0 U3 spec when the shelf
+   has it.
 3. The same import triggers the side-effect import of
    `meho_backplane.connectors.vmware_rest.composites`, whose
    `__init__` calls

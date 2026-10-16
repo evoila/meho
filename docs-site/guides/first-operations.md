@@ -125,7 +125,12 @@ Two honest limits:
 - It covers **spec-ingested HTTP operations**. A typed or composite
   operation (like the Kubernetes ops here) has no single literal HTTP
   request, so preview returns `status: "unavailable"` — that is the
-  expected answer, not a failure.
+  expected answer, not a failure. The exception is a destructive or
+  approval-gated typed or composite operation. Its preview returns
+  `status: "ok"` with the params and a `preview_hash`. It shows the plan
+  (`proposed_effect`) only when the plan does not need the target. When
+  the plan needs the target, `plan_shown` is `false` and `plan_note`
+  says the plan is shown on the approval request.
 - It is available over MCP, REST (`POST /api/v1/operations/preview`),
   and the CLI (`meho operation preview <connector_id> <op_id>`).
 

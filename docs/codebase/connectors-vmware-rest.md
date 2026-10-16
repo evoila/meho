@@ -833,6 +833,51 @@ all-missing "void" for the rest of the pod lifetime. Two mechanisms recover it:
   wall-clock steps) in `_session_established_at`, dropped alongside the token on
   `invalidate_session` / `aclose`.
 
+**VI-JSON 500 auth faults on vCenter (`#3566`).** On the vCenter VI-JSON
+path, vCenter reports a vim method fault as **HTTP 500** with the fault object
+as the JSON body (`{"_typeName": "NotAuthenticated", "faultstring": ...}`).
+`_post_vmomi_json` now reads that body (`vim_body.method_fault_type`) and
+treats the same auth set as the SOAP path (`_SOAP_AUTH_FAULT_TYPES`:
+`InvalidLogin` / `NoPermission` / `NotAuthenticated`) as auth-class:
+
+- `NotAuthenticated` → `invalidate_session(target)`, a new login, and **one**
+  retry of the same call. This is the guest-operations case: vCenter passes
+  guest calls on to the ESXi host, and the host-gateway token tied to the
+  session can go stale while vCenter-local calls (`RetrievePropertiesEx`) on
+  the same session still work (Broadcom KB 440879). A new session gets a new
+  token. The rejected call never ran, so the retry is safe for a write too.
+  The retry covers **only the failing call**, not the whole dispatch, so the
+  earlier steps of a multi-step operation (for example `StartProgramInGuest`
+  before the `ListProcessesInGuest` polls of `guest.program.run`) never run
+  twice. A recovered call returns normally, so the dispatcher writes one
+  success audit row and no error row. If the fault comes back on the fresh
+  session it raises `ConnectorAuthError(stage="after_relogin",
+  cause="vim_fault_NotAuthenticated_after_relogin")` with a "do not restage,
+  check the host connection" remediation.
+- `InvalidLogin` / `NoPermission` → `ConnectorAuthError(stage="call",
+  cause="vim_fault_<type>")` at once, with no retry: a new session cannot fix
+  a rejected credential or a missing privilege (the `#3810` PBM precedent).
+  `NoPermission` carries a "grant the privilege, do not restage" remediation.
+- A **401 on the retried call** (after the connector's own re-login) is
+  final too: `ConnectorAuthError(stage="after_relogin",
+  cause="session_dispatch_401_after_relogin")`, the same cause the
+  dispatcher stamps on its own post-re-login rejection. It must not escape
+  as a plain status error, because the dispatcher's `#2067` recovery would
+  then log in a third time and re-run the **whole** operation, so a step
+  that already ran before the fault (the `StartProgramInGuest` of
+  `guest.program.run`) would run twice. A 401 on the **first** try is
+  unchanged and still uses the dispatcher's recovery.
+- Any other fault (`InvalidArgument`, `PlatformConfigFault`, ...) and any
+  other status (on the first try or on the retried call) are unchanged: the
+  plain `httpx.HTTPStatusError` reaches the dispatcher.
+
+`ConnectorAuthError.status_code` is the real status (500). The dispatcher's
+existing `except ConnectorAuthError` arm turns it into `connector_auth_failed`;
+`ConnectorAuthError.stage` (`establish` by default) makes the summary say
+which step was rejected (see `error-message-shape.md`). The ESXi SOAP path
+(`_soap_fault_error`) still raises the establish-stage error for a mid-call
+fault and recovers on the next dispatch, not within the call.
+
 ### fingerprint() / probe()
 
 `fingerprint(target)` runs the #2765 probe chain. `GET /api/about`

@@ -21,6 +21,9 @@ through the one answer seam. For a collection that opted in
   ``version`` through, and the answer call carries the soft ``scope``, the
   hard ``filters`` or neither, per the collection's gates. The UI Ask form
   has no product / version fields, so it never sends either.
+* **Target default** (#3920) -- on all three faces a named ``target`` with
+  a fingerprint becomes the answer call's soft ``scope``
+  (``source: "default"``), never its filters.
 """
 
 from __future__ import annotations
@@ -55,9 +58,10 @@ from meho_backplane.auth.corpus import (
     UpstreamAnswer,
 )
 from meho_backplane.auth.jwt import clear_jwks_cache
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
-from meho_backplane.db.models import AuditLog, DocCollection, Tenant
+from meho_backplane.db.models import AgentPermission, AuditLog, DocCollection, Tenant
+from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.docs_search.answer_errors import (
     CAUSE_CORPUS_UNAVAILABLE,
     CAUSE_SYNTHESIS_PARSE,
@@ -71,7 +75,7 @@ from meho_backplane.docs_search.answer_errors import (
 )
 from meho_backplane.main import app as main_app
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
-from meho_backplane.mcp.schemas import INTERNAL_ERROR
+from meho_backplane.mcp.schemas import INTERNAL_ERROR, INVALID_PARAMS
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
@@ -225,6 +229,23 @@ def _operator() -> Operator:
     )
 
 
+#: The agent principal the denied-target tests run as; a grant is keyed on
+#: its ``client_id`` (``agent:<name>``), not its service-account ``sub``.
+_AGENT_CLIENT_ID = "agent:docs-test"
+
+
+def _agent_operator() -> Operator:
+    return Operator(
+        sub="99999999-9999-9999-9999-999999999999",
+        raw_jwt="fixture-jwt-not-real",
+        tenant_id=OPERATOR_TENANT_ID,
+        tenant_role=TenantRole.OPERATOR,
+        capabilities=_ENTITLED,
+        principal_kind=PrincipalKind.AGENT,
+        client_id=_AGENT_CLIENT_ID,
+    )
+
+
 # ---------------------------------------------------------------------------
 # The three faces
 # ---------------------------------------------------------------------------
@@ -238,11 +259,19 @@ def _rest_app() -> FastAPI:
     return app
 
 
-def _rest_post(router: respx.MockRouter, query: str = _QUERY, **refinements: str) -> httpx.Response:
+def _rest_post(
+    router: respx.MockRouter,
+    query: str = _QUERY,
+    *,
+    principal_kind: str | None = None,
+    **refinements: str,
+) -> httpx.Response:
     """POST ``/api/v1/ask_docs`` with a minted, entitled JWT (JWKS on *router*)."""
     key = make_rsa_keypair("kid-A")
     mock_discovery_and_jwks(router, public_jwks(key))
-    token = mint_token(key, sub="op-rest", capabilities=sorted(_ENTITLED))
+    token = mint_token(
+        key, sub="op-rest", capabilities=sorted(_ENTITLED), principal_kind=principal_kind
+    )
     return TestClient(_rest_app()).post(
         "/api/v1/ask_docs",
         json={"query": query, "collection": "vmware", **refinements},
@@ -250,11 +279,12 @@ def _rest_post(router: respx.MockRouter, query: str = _QUERY, **refinements: str
     )
 
 
-def _mcp_call(**refinements: str) -> dict[str, Any]:
+def _mcp_call(*, operator: Operator | None = None, **refinements: str) -> dict[str, Any]:
     """Call the MCP ``ask_docs`` tool as an entitled operator; return the JSON-RPC body."""
+    caller = operator or _operator()
 
     async def _verify() -> Operator:
-        return _operator()
+        return caller
 
     main_app.dependency_overrides[verify_mcp_jwt_and_bind] = _verify
     try:
@@ -278,8 +308,11 @@ def _mcp_call(**refinements: str) -> dict[str, Any]:
     return body
 
 
-def _ui_post() -> str:
-    """Submit the ``/ui/corpus`` Ask form as an entitled session; return the HTML."""
+def _ui_post(**extra: str) -> str:
+    """Submit the ``/ui/corpus`` Ask form as an entitled session; return the HTML.
+
+    *extra* adds form fields (the optional ``target``, #3920).
+    """
 
     async def _session() -> uuid.UUID:
         async with get_sessionmaker()() as session, session.begin():
@@ -308,7 +341,7 @@ def _ui_post() -> str:
         with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=_operator()):
             response = client.post(
                 "/ui/corpus/search",
-                data={"collection": "vmware", "q": _QUERY, "mode": "ask"},
+                data={"collection": "vmware", "q": _QUERY, "mode": "ask", **extra},
                 headers={CSRF_HEADER_NAME: csrf},
             )
     assert response.status_code == 200, response.text
@@ -738,3 +771,207 @@ def test_ui_answer_call_sends_no_refinements_whatever_the_gates() -> None:
     assert (ask.calls, search.calls) == (1, 0)
     assert ask.kwargs[0]["filters"] is None
     assert ask.kwargs[0]["soft_scope"] is None
+
+
+# ---------------------------------------------------------------------------
+# The default scope from a named target, per face (#3920)
+# ---------------------------------------------------------------------------
+
+_TARGET_DEFAULT_SCOPE: dict[str, str] = {
+    "product": "vcenter",
+    "release": "8.0.3.00400",
+    "source": "default",
+}
+_TARGET_HOST = "vcenter-01.example.test"
+
+
+async def _seed_target_async() -> uuid.UUID:
+    """Seed a probed ``vcenter-01`` target in the operator's tenant; return its id."""
+    async with get_sessionmaker()() as session, session.begin():
+        target = TargetORM(
+            tenant_id=OPERATOR_TENANT_ID,
+            name="vcenter-01",
+            aliases=[],
+            product="vcenter",
+            host=_TARGET_HOST,
+            port=443,
+            secret_ref="targets/vcenter-01",
+            auth_model="shared_service_account",
+            fingerprint={
+                "vendor": "vmware",
+                "product": "vcenter",
+                "version": "8.0.3.00400",
+                "reachable": True,
+                "probed_at": "2026-10-01T00:00:00Z",
+                "probe_method": "vimServiceVersions.xml",
+            },
+        )
+        session.add(target)
+        await session.flush()
+        return target.id
+
+
+async def _seed_with_target() -> uuid.UUID:
+    await _seed_async(_gated_backend({"scope": "soft", "scope_filters": True}))
+    return await _seed_target_async()
+
+
+async def _deny_target(target_id: uuid.UUID, *, principal_sub: str, verdict: str = "deny") -> None:
+    """Insert a *verdict* permission row (default ``deny``) for every op on *target_id*."""
+    async with get_sessionmaker()() as session, session.begin():
+        session.add(
+            AgentPermission(
+                tenant_id=OPERATOR_TENANT_ID,
+                principal_sub=principal_sub,
+                op_pattern="*",
+                verdict=verdict,
+                target_scope=str(target_id),
+                created_by_sub="admin:docs-test",
+            )
+        )
+
+
+async def _seed_denied_target(*, principal_sub: str, verdict: str = "deny") -> None:
+    await _deny_target(await _seed_with_target(), principal_sub=principal_sub, verdict=verdict)
+
+
+@pytest.mark.asyncio
+async def test_rest_answer_call_sends_the_target_default() -> None:
+    """REST ``ask_docs`` + ``target``: soft scope from the fingerprint, no filters, audited."""
+    await _seed_with_target()
+    ask, search = _FakeAsk(), _FakeSearch()
+    with (
+        respx.mock(assert_all_called=False) as router,
+        patch(_ASK_SEAM, new=ask),
+        patch(_SEARCH_SEAM, new=search),
+    ):
+        response = _rest_post(router, target="vcenter-01")
+    assert response.status_code == 200, response.text
+    assert ask.kwargs[0]["soft_scope"] == _TARGET_DEFAULT_SCOPE
+    assert ask.kwargs[0]["filters"] is None
+
+    async with get_sessionmaker()() as session:
+        rows = (
+            (await session.execute(select(AuditLog).where(AuditLog.path == "/api/v1/ask_docs")))
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    assert rows[0].payload["scope_source"] == "default"
+    assert rows[0].payload["target"] == "vcenter-01"
+    assert _TARGET_HOST not in json.dumps(rows[0].payload)
+
+
+@pytest.mark.asyncio
+async def test_rest_unknown_target_is_404_no_target() -> None:
+    """REST ``ask_docs`` with an unknown target: the target routes' 404, no answer call."""
+    await _seed_with_target()
+    ask = _FakeAsk()
+    with respx.mock(assert_all_called=False) as router, patch(_ASK_SEAM, new=ask):
+        response = _rest_post(router, target="vcenter-99")
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"]["error"] == "no_target"
+    assert ask.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_rest_denied_target_is_403_denied() -> None:
+    """REST ``ask_docs`` as an agent denied the target: 403 ``denied``, no answer call."""
+    await _seed_denied_target(principal_sub="op-rest")
+    ask = _FakeAsk()
+    with respx.mock(assert_all_called=False) as router, patch(_ASK_SEAM, new=ask):
+        response = _rest_post(router, principal_kind="agent", target="vcenter-01")
+    assert response.status_code == 403, response.text
+    detail = response.json()["detail"]
+    assert detail["error"] == "denied"
+    assert detail["query"] == "vcenter-01"
+    assert detail["reason"].startswith("verdict=deny")
+    assert ask.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_rest_needs_approval_target_is_403_denied() -> None:
+    """REST ``ask_docs`` as an agent that needs approval for the target: 403 ``denied``.
+
+    Only ``auto-execute`` proceeds. The docs tools cannot park the call, so
+    the answer call never runs and the reason names the verdict.
+    """
+    await _seed_denied_target(principal_sub="op-rest", verdict="needs-approval")
+    ask = _FakeAsk()
+    with respx.mock(assert_all_called=False) as router, patch(_ASK_SEAM, new=ask):
+        response = _rest_post(router, principal_kind="agent", target="vcenter-01")
+    assert response.status_code == 403, response.text
+    detail = response.json()["detail"]
+    assert detail["error"] == "denied"
+    assert detail["query"] == "vcenter-01"
+    assert detail["reason"].startswith("verdict=needs-approval")
+    assert ask.calls == 0
+
+
+def test_mcp_needs_approval_target_is_the_denied_error() -> None:
+    """MCP ``ask_docs`` as an agent that needs approval for the target: ``-32602`` ``denied``."""
+    asyncio.run(_seed_denied_target(principal_sub=_AGENT_CLIENT_ID, verdict="needs-approval"))
+    ask = _FakeAsk()
+    with patch(_ASK_SEAM, new=ask):
+        body = _mcp_call(operator=_agent_operator(), target="vcenter-01")
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert body["error"]["message"].startswith("ask_docs: denied: verdict=needs-approval")
+    assert body["error"]["data"]["error_code"] == "denied"
+    assert body["error"]["data"]["query"] == "vcenter-01"
+    assert body["error"]["data"]["reason"].startswith("verdict=needs-approval")
+    assert ask.calls == 0
+
+
+def test_mcp_denied_target_is_the_denied_error() -> None:
+    """MCP ``ask_docs`` as an agent denied the target: ``-32602`` ``denied``, no answer call."""
+    asyncio.run(_seed_denied_target(principal_sub=_AGENT_CLIENT_ID))
+    ask = _FakeAsk()
+    with patch(_ASK_SEAM, new=ask):
+        body = _mcp_call(operator=_agent_operator(), target="vcenter-01")
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert body["error"]["message"].startswith("ask_docs: denied: verdict=deny")
+    assert body["error"]["data"]["error_code"] == "denied"
+    assert body["error"]["data"]["query"] == "vcenter-01"
+    assert ask.calls == 0
+
+
+def test_mcp_answer_call_sends_the_target_default() -> None:
+    """MCP ``ask_docs`` + ``target``: the same soft scope on the answer call."""
+    asyncio.run(_seed_with_target())
+    ask, search = _FakeAsk(), _FakeSearch()
+    with patch(_ASK_SEAM, new=ask), patch(_SEARCH_SEAM, new=search):
+        body = _mcp_call(target="vcenter-01")
+    assert "result" in body, body
+    assert ask.kwargs[0]["soft_scope"] == _TARGET_DEFAULT_SCOPE
+    assert ask.kwargs[0]["filters"] is None
+
+
+def test_mcp_caller_version_wins_over_the_target() -> None:
+    """MCP ``ask_docs`` + ``target`` + ``version``: the caller's version is sent."""
+    asyncio.run(_seed_with_target())
+    ask = _FakeAsk()
+    with patch(_ASK_SEAM, new=ask):
+        body = _mcp_call(target="vcenter-01", version="9.1")
+    assert "result" in body, body
+    assert ask.kwargs[0]["soft_scope"] == {"version": "9.1", "source": "caller"}
+
+
+def test_ui_answer_call_sends_the_target_default() -> None:
+    """The UI Ask form's ``target`` field gives the same soft scope."""
+    asyncio.run(_seed_with_target())
+    ask, search = _FakeAsk(), _FakeSearch()
+    with patch(_ASK_SEAM, new=ask), patch(_SEARCH_SEAM, new=search):
+        html = _ui_post(target="vcenter-01")
+    assert _EXPECTED_ANSWER in html
+    assert ask.kwargs[0]["soft_scope"] == _TARGET_DEFAULT_SCOPE
+    assert ask.kwargs[0]["filters"] is None
+
+
+def test_ui_unknown_target_shows_an_error_card() -> None:
+    """An unknown target renders the typed error card; no answer call runs."""
+    asyncio.run(_seed_with_target())
+    ask = _FakeAsk()
+    with patch(_ASK_SEAM, new=ask):
+        html = _ui_post(target="vcenter-99")
+    assert "no_target" in html
+    assert ask.calls == 0

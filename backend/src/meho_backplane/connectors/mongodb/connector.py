@@ -44,7 +44,7 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import structlog
 from pymongo import AsyncMongoClient
@@ -68,7 +68,18 @@ from meho_backplane.connectors.schemas import (
 
 __all__ = ["MongoDbConnector"]
 
-_log = structlog.get_logger(__name__)
+
+def _log() -> structlog.typing.FilteringBoundLogger:
+    """Resolve the structlog logger per call (not a module-level proxy).
+
+    A module-level proxy caches its bound methods on first use under the
+    production ``cache_logger_on_first_use=True`` config, which orphans them
+    from a later :func:`structlog.testing.capture_logs`. Resolving per call
+    reads the live config each time -- the same discipline as
+    :mod:`meho_backplane.checks.notify` and :mod:`meho_backplane.auth.jwt`.
+    """
+    return cast("structlog.typing.FilteringBoundLogger", structlog.get_logger(__name__))
+
 
 # Forward declaration -- replaced with `from meho_backplane.targets import Target`
 # once G0.3's Target model rollout lands, mirroring the sibling connectors.
@@ -234,10 +245,7 @@ class MongoDbConnector(Connector):
                 identity = await queries.fetch_fingerprint(client, auth_mode=auth_mode)
         except (OSError, PyMongoError, CredentialsReadError, ValueError) as exc:
             error = redact_fingerprint_error(exc, _classify_fingerprint_error(exc))
-            # Resolved per call, not the module-level proxy: a logger cached on
-            # first use keeps the processor chain it was built with, so
-            # ``capture_logs`` in tests cannot see it (same as auth/jwt.py).
-            structlog.get_logger(__name__).warning(
+            _log().warning(
                 "mongodb_fingerprint_unreachable",
                 target=getattr(target, "name", None),
                 error=error,
@@ -361,7 +369,7 @@ class MongoDbConnector(Connector):
                 requires_approval=op.requires_approval,
                 llm_instructions=op.llm_instructions,
             )
-        _log.info(
+        _log().info(
             "mongodb_operations_registered",
             count=len(MONGO_OPS),
             product=cls.product,

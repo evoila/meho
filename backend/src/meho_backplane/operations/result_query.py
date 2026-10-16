@@ -505,4 +505,5 @@ async def _read_document_path(
         raise ResultQueryOutputTooLargeError(
             handle_id, len(encoded), max_bytes, remediation=_PATH_REMEDIATION
         )
+    _check_wire_ceiling(result, handle_id, _PATH_REMEDIATION)
     return result

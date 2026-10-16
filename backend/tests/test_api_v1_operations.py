@@ -1463,3 +1463,18 @@ def test_post_result_query_document_errors_are_422(
     assert response.status_code == 422
     if reason is not None:
         assert response.json()["detail"]["reason"] == reason
+
+
+def test_post_result_query_path_over_wire_ceiling_returns_422(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `path` read over the wire ceiling -> 422 output_too_large (#3641)."""
+    monkeypatch.setenv("RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES", "256")
+    get_settings.cache_clear()
+    body = {"handle_id": str(uuid.uuid4()), "query": {"path": "/items"}}
+    response = _post_document_read(client, monkeypatch, body)
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["reason"] == "output_too_large"
+    assert detail["delivery"] == "unavailable"
+    assert "256-byte delivery limit" in detail["message"]

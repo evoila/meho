@@ -619,10 +619,10 @@ class Settings(BaseModel):
         ``RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES``.
     result_query_response_wire_max_bytes:
         Terminal wire ceiling, in bytes, for a ``result_query`` response
-        (query and paging), measured the same way (#3641). A response over
-        it fails with the recoverable ``output_too_large`` error. Higher
-        than ``result_query_max_output_bytes`` because it counts the whole
-        encoded response, not just the rows. The default is generous on
+        (query, paging and path reads), measured the same way (#3641). A
+        response over it fails with the recoverable ``output_too_large``
+        error. Higher than ``result_query_max_output_bytes`` because it
+        counts the whole encoded response, not just the rows. The default is generous on
         purpose; a load benchmark may tune it. Default 2097152 (2 MiB). Env
         ``RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES``.
     result_query_timeout_seconds:

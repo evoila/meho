@@ -137,7 +137,8 @@ and calling `conn.interrupt()` on expiry.
 
 `RESULT_QUERY_MAX_OUTPUT_BYTES` is the query-domain shaping budget: it
 checks the `rows` before encoding. A second, terminal check (#3641) runs on
-the finished response of both read modes: `RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES`
+the finished response of all three read modes (query, paging and `path`
+reads): `RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES`
 (default 2 MiB) against the size the MCP `tools/call` wire really carries
 (text block plus `structuredContent`, escaping included, measured by
 `operations/delivery_budget.py`). A response over it is refused with the same
@@ -182,7 +183,7 @@ call's `offset` / `limit` (items that are not objects come back as
 (missing member, `-`, a leading-zero or out-of-range index) is a
 recoverable `QueryContractError`. So is a `path` read on a rows handle,
 or paging / a relational query on a document handle. The same output
-byte budget applies.
+byte budget applies, and so does the terminal wire check (#3641).
 
 ## Key types
 

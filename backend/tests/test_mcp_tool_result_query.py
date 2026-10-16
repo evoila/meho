@@ -527,3 +527,21 @@ def test_paging_a_document_handle_is_recoverable_invalid_params(
     assert body["error"]["code"] == INVALID_PARAMS
     assert body["error"]["data"]["reason"] == "invalid_query"
     assert "path" in body["error"]["message"]
+
+
+def test_path_read_over_wire_ceiling_is_output_too_large(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    fake_store: _FakeStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `path` read over the wire ceiling is refused like the other read modes."""
+    monkeypatch.setenv("RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES", "256")
+    get_settings.cache_clear()
+    client, op = client_with_operator
+    handle = uuid4()
+    _seed_document(fake_store, op, handle)
+    body = _call(client, {"handle_id": str(handle), "query": {"path": "/containers"}}).json()
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert body["error"]["data"] == {"reason": "output_too_large", "delivery": "unavailable"}
+    assert "256-byte delivery limit" in body["error"]["message"]
+    assert "Point `path` at a smaller part" in body["error"]["message"]

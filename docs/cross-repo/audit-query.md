@@ -97,7 +97,7 @@ meho audit query --session-id 11111111-1111-1111-1111-111111111111 --result-stat
 
 For the full parent/child **session-graph tree** (lineage between composite operations, not just a flat list) use [`meho audit replay <session-id>`](./audit-replay.md) — the G8.2 replay surface that the substrate's `parent_audit_id` recursive-CTE traversal builds on. Replay is a `tenant_admin` forensic act on every surface (#1843); see the [replay runbook](./audit-replay.md) for the role posture and the 10000-row cap.
 
-> Note: a *different* filter, `parent_audit_id`, is still **not** supported as a flat filter in v0.2 — the substrate raises `UnsupportedFilterError` (HTTP 400 / `-32602`) for it. The column itself is populated and is what the replay CTE walks; only the standalone flat filter is gated (see the [filter table](#filter-semantics) below).
+> Note: a *different* filter, `parent_audit_id`, is also a supported flat filter (since #4030). Pass `--parent-audit-id <uuid>` on the CLI, or `parent_audit_id` in the REST body / the MCP `query_audit` tool. It is an exact match and returns only the **direct children** of that one row, not grandchildren. To see the whole tree, use [`meho audit replay`](./audit-replay.md). See the [filter table](#filter-semantics) below.
 
 ## Filter semantics
 

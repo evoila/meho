@@ -1277,9 +1277,13 @@ class _InventoryConnector(_RecordingConnector):
         *,
         mount_prefix: str = "/api",
         inventory: dict[str, dict[str, dict[str, Any]]] = _PG_INVENTORY,
+        paged_type: str | None = None,
     ) -> None:
         super().__init__([listing], mount_prefix=mount_prefix)
         self._inventory = inventory
+        # When set, every read of this object type answers with a ``token``,
+        # the way vCenter does when it pages a result.
+        self._paged_type = paged_type
 
     async def _post_vmomi_json(
         self,
@@ -1313,7 +1317,10 @@ class _InventoryConnector(_RecordingConnector):
                     ],
                 }
             )
-        return {"_typeName": "RetrieveResult", "objects": objects}
+        result: dict[str, Any] = {"_typeName": "RetrieveResult", "objects": objects}
+        if mo_type == self._paged_type:
+            result["token"] = "1"
+        return result
 
 
 def _read_targets(conn: _RecordingConnector) -> list[tuple[str, list[str], list[str]]]:
@@ -1479,6 +1486,49 @@ async def test_network_portgroup_audit_tolerates_unset_properties() -> None:
     ]
     # Only the portgroup read runs: no switch or VM to resolve.
     assert len(_read_targets(conn)) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("paged_type", [_DVPG_TYPE, _VM_TYPE])
+async def test_network_portgroup_audit_fails_on_a_paged_answer(paged_type: str) -> None:
+    """A paged vim answer (a ``token``) fails the audit; it never returns short rows.
+
+    vCenter may return part of the objects plus a ``token`` for the rest.
+    The audit does not follow the token, so it must raise instead of
+    returning rows with missing VMs or portgroups.
+    """
+    conn = _InventoryConnector(_PG_LISTING, paged_type=paged_type)
+
+    with pytest.raises(RuntimeError, match="paged"):
+        await _run_audit(conn, {})
+
+
+@pytest.mark.asyncio
+async def test_network_portgroup_audit_reads_many_vms_in_chunks_of_50() -> None:
+    """More than 50 VMs are read in chunks of 50 and the chunks are merged."""
+    vm_moids = [f"vm-{n}" for n in range(1, 121)]
+    inventory: dict[str, dict[str, dict[str, Any]]] = {
+        _DVPG_TYPE: {
+            "dvportgroup-11": {
+                "config.distributedVirtualSwitch": vim_moref(_VDS_TYPE, "dvs-1"),
+                "config.defaultPortConfig": _access_port_config(110),
+                "vm": _moref_array(_VM_TYPE, vm_moids),
+            },
+        },
+        _VDS_TYPE: {"dvs-1": {"name": "DSwitch-Prod"}},
+        _VM_TYPE: {
+            moid: {"name": f"name-{moid}", "runtime.powerState": "poweredOn"} for moid in vm_moids
+        },
+    }
+    conn = _InventoryConnector(_PG_LISTING[:1], inventory=inventory)
+
+    out = await _run_audit(conn, {})
+
+    row = out["portgroups"][0]
+    assert row["vm_count"] == 120
+    assert row["vm_names"] == [f"name-{moid}" for moid in vm_moids]
+    vm_reads = [moids for mo_type, moids, _ in _read_targets(conn) if mo_type == _VM_TYPE]
+    assert vm_reads == [vm_moids[0:50], vm_moids[50:100], vm_moids[100:120]]
 
 
 # ---------------------------------------------------------------------------

@@ -207,6 +207,9 @@ _NETWORK_TYPE_DISTRIBUTED_PORTGROUP = "DISTRIBUTED_PORTGROUP"
 # concrete value the ``{moId}`` path template takes at call time (the
 # same convention the typed reads and write composites use).
 _PROPERTY_COLLECTOR_MOID = "propertyCollector"
+#: Objects per ``RetrievePropertiesEx`` in :func:`_retrieve_props_by_moid` --
+#: small enough that vCenter does not page the answer.
+_RETRIEVE_CHUNK = 50
 _CLUSTER_COMPUTE_RESOURCE_MO_TYPE = "ClusterComputeResource"
 # The cluster's whole configuration (a ``ClusterConfigInfoEx`` on a
 # cluster). Its ``drsConfig`` member is the ``ClusterDrsConfigInfo``
@@ -994,22 +997,37 @@ async def _retrieve_props_by_moid(
     moids: list[str],
     path_set: list[str],
 ) -> dict[str, dict[str, Any]]:
-    """Read *path_set* on every ``(mo_type, moid)`` object in one PropertyCollector call.
+    """Read *path_set* on every ``(mo_type, moid)`` object, in chunks of 50.
 
     Returns ``{moid: {property: value}}``. No call is made when *moids* is
     empty, so an empty inventory costs no round trip.
+
+    vCenter may page a ``RetrievePropertiesEx`` answer: it returns some
+    objects plus a ``token`` for the rest. Small chunks keep a normal
+    inventory from paging (same size as ``_teardown_reads.read_many``).
+    If an answer still carries a ``token``, this raises instead of
+    returning rows with missing objects.
     """
-    if not moids:
-        return {}
-    result = await _read_sub_op(
-        connector,
-        target,
-        operator,
-        _OP_RETRIEVE_PROPERTIES,
-        path_params={"moId": _PROPERTY_COLLECTOR_MOID},
-        body=retrieve_properties_body(mo_type, moids, path_set),
-    )
-    return _extract_props_by_moid(result)
+    by_moid: dict[str, dict[str, Any]] = {}
+    for start in range(0, len(moids), _RETRIEVE_CHUNK):
+        chunk = moids[start : start + _RETRIEVE_CHUNK]
+        result = await _read_sub_op(
+            connector,
+            target,
+            operator,
+            _OP_RETRIEVE_PROPERTIES,
+            path_params={"moId": _PROPERTY_COLLECTOR_MOID},
+            body=retrieve_properties_body(mo_type, chunk, path_set),
+        )
+        payload = _unwrap_value(result)
+        if isinstance(payload, dict) and payload.get("token"):
+            raise RuntimeError(
+                f"vCenter paged the {_OP_RETRIEVE_PROPERTIES!r} answer for "
+                f"{len(chunk)} {mo_type} objects (it returned a token), so the "
+                "answer is incomplete; refusing to return partial results"
+            )
+        by_moid.update(_extract_props_by_moid(result))
+    return by_moid
 
 
 def _moref_value(ref: Any) -> str | None:
@@ -1110,6 +1128,9 @@ async def network_portgroup_audit_composite(
        switches' ``name``.
     4. One ``RetrievePropertiesEx`` over the union of connected VMs reading
        ``name`` + ``runtime.powerState``.
+
+    Each vim read sends at most 50 objects per call. A paged answer (a
+    ``token``) fails the audit instead of dropping objects.
 
     #3802: the old per-portgroup ``GET:/vcenter/vm`` call, filtered by
     network, is gone. The VM list resource has no network filter, so

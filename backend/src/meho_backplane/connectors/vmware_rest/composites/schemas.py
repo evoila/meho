@@ -468,9 +468,10 @@ NETWORK_PORTGROUP_AUDIT_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "boolean",
             "default": False,
             "description": (
-                "When true, the VM aggregation includes VMs whose power "
-                "state is OFF or whose NIC is disconnected. Default "
-                "false returns only actively-connected VMs."
+                "When true, also count VMs that are not powered on. "
+                "Default false counts only powered-on VMs. A VM counts "
+                "when it has a network adapter on the portgroup, even if "
+                "that adapter is disconnected."
             ),
         },
     },

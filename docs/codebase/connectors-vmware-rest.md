@@ -2739,6 +2739,10 @@ they never park.
      type from the returned reference (`VmwareDistributedVirtualSwitch`);
   3. the connected VMs' `name` + `runtime.powerState` (gives `vm_names`
      / `vm_count`; powered-on only unless `include_disconnected_vms`).
+  Each read sends at most 50 objects per call, so a normal inventory
+  is not paged. If vCenter still pages an answer (returns a `token`),
+  the audit fails with an error instead of returning rows with missing
+  VMs or portgroups.
   `vlan` is `{mode: "access", vlan_id}` or `{mode: "trunk", ranges}`
   (the same view `network.portgroup.vlan.set` returns), or `null` for a
   private VLAN. The port config is read whole, never as the deep

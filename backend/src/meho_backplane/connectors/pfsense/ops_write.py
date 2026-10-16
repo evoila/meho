@@ -99,6 +99,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "WRITE_OPS",
+    "assert_only_own_object_changed",
     "parse_static_routes_xml",
     "pfsense_gateway_add",
     "pfsense_route_static_add",
@@ -392,7 +393,7 @@ async def _apply_playback(
 
 
 # ---------------------------------------------------------------------------
-# Config-write serialization (#3544)
+# Config-write serialization + full read-back (#3544)
 # ---------------------------------------------------------------------------
 
 
@@ -418,6 +419,114 @@ def serialized_config_write[**P, R](
             return await handler(self, target, *args, **kwargs)
 
     return wrapper
+
+
+# Top-level ``config.xml`` elements that every ``write_config()`` rewrites on
+# its own (the time, user, and description of the save).
+_ALWAYS_REWRITTEN_SECTIONS = frozenset({"revision"})
+
+
+def _canonical(element: Any) -> tuple[Any, ...]:
+    """Return a comparable form of *element*.
+
+    Whitespace around text is ignored. Empty elements are kept. pfSense
+    writes a setting that is switched on (for example ``<disabled></disabled>``
+    on a user) as an empty element, so an empty element that appears or goes
+    away is a real change.
+    """
+    children = tuple(_canonical(child) for child in element)
+    text = (element.text or "").strip()
+    attrs = tuple(sorted(element.attrib.items()))
+    return (element.tag, attrs, text, children)
+
+
+def _is_empty_container(element: Any) -> bool:
+    return len(element) == 0 and not (element.text or "").strip() and not element.attrib
+
+
+def _parse_config_for_readback(xml_text: str) -> Any:
+    try:
+        return fromstring(xml_text)
+    except ParseError as exc:
+        raise RuntimeError("config.xml could not be parsed for the full read-back") from exc
+
+
+def _sections_without_object(
+    root: Any, *, section: str, item_tag: str, key_tag: str, key: str
+) -> dict[str, list[tuple[Any, ...]]]:
+    """Return the top-level sections of the parsed config, minus the edited object.
+
+    Every ``<section>/<item_tag>`` whose ``<key_tag>`` text equals *key* is
+    dropped first, so the result holds everything the op must NOT change.
+    """
+    edited = root.find(section)
+    if edited is not None:
+        for item in list(edited.findall(item_tag)):
+            if (_child_text(item, key_tag) or "").strip() == key:
+                edited.remove(item)
+        # The edited section is the only container that may be empty on one
+        # side and missing on the other: deleting the last item leaves an
+        # empty element, and adding the first item creates the section.
+        if _is_empty_container(edited):
+            root.remove(edited)
+    sections: dict[str, list[tuple[Any, ...]]] = {}
+    for child in root:
+        if child.tag in _ALWAYS_REWRITTEN_SECTIONS:
+            continue
+        sections.setdefault(child.tag, []).append(_canonical(child))
+    return sections
+
+
+def assert_only_own_object_changed(
+    before: str,
+    after: str,
+    *,
+    op: str,
+    section: str,
+    item_tag: str,
+    key_tag: str,
+    key: str,
+    expected_side_effects: Callable[[Any, Any], None] | None = None,
+) -> None:
+    """Raise when ``config.xml`` changed anywhere except the edited object.
+
+    Call this after the op's own read-back has passed. It compares the whole
+    file before and after the write. It leaves out the one object the op
+    edited, the edited section's container when it is empty, and the
+    ``<revision>`` block that every save rewrites. Whitespace does not count.
+    Empty elements do count: pfSense stores flags such as
+    ``<disabled></disabled>`` that way. Any other difference means one of two
+    things: a second change to the same pfSense was saved while this op ran,
+    or this op's save undid a change that was there before. The op's own
+    change is saved in both cases. But the config is no longer what the
+    operator asked for, so the op fails instead of reporting success.
+
+    An op whose playback is known to change something else as well (the
+    filter-rule ops move the GUI separator rows of the edited interface)
+    passes *expected_side_effects*. It is called with the parsed *before*
+    and *after* trees and must apply exactly those changes to the *before*
+    tree, so the comparison still rejects everything the op did not mean to
+    do. It may also drop from both trees a detail that pfSense may or may
+    not write, such as an empty list element.
+    """
+    old_root = _parse_config_for_readback(before)
+    new_root = _parse_config_for_readback(after)
+    if expected_side_effects is not None:
+        expected_side_effects(old_root, new_root)
+    old = _sections_without_object(
+        old_root, section=section, item_tag=item_tag, key_tag=key_tag, key=key
+    )
+    new = _sections_without_object(
+        new_root, section=section, item_tag=item_tag, key_tag=key_tag, key=key
+    )
+    changed = sorted(tag for tag in old.keys() | new.keys() if old.get(tag) != new.get(tag))
+    if changed:
+        raise RuntimeError(
+            f"{op}: the change was saved, but other parts of config.xml also "
+            f"changed while the op ran ({', '.join(changed)}). Another change to "
+            "this pfSense may have been lost, or may have been saved at the same "
+            "time. Check the pfSense config history before you run the op again."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -485,6 +594,15 @@ async def pfsense_gateway_add(
             f"gateway {name!r} was not present in config.xml after write_config; "
             "the pfSsh.php playback did not persist"
         )
+    assert_only_own_object_changed(
+        before,
+        after,
+        op="gateway.add",
+        section="gateways",
+        item_tag="gateway_item",
+        key_tag="name",
+        key=name,
+    )
     return {**result, "existed_before": False, "applied": True, "existing": None}
 
 
@@ -543,6 +661,15 @@ async def pfsense_route_static_add(
             f"static route {network!r} was not present in config.xml after "
             "write_config; the pfSsh.php playback did not persist"
         )
+    assert_only_own_object_changed(
+        before,
+        after,
+        op="route.static.add",
+        section="staticroutes",
+        item_tag="route",
+        key_tag="network",
+        key=network,
+    )
     return {**result, "existed_before": False, "applied": True, "existing": None}
 
 

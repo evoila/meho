@@ -526,7 +526,7 @@ async def test_add_interface_group_is_accepted() -> None:
             _proc(""),
             _proc(""),
             _proc(""),
-            _proc(_config(_FENCE.replace("opt1", "SEGS"), _LAN_PASS)),
+            _proc(config.replace("<filter>", f"<filter>{_FENCE.replace('opt1', 'SEGS')}", 1)),
         ]
         result = await connector.filter_rule_add(None, {**_FENCE_PARAMS, "interface": "SEGS"})
     assert result["status"] == "added"

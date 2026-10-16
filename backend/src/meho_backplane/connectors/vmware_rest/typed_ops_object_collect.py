@@ -76,6 +76,12 @@ _RETRIEVE_PROPERTIES_PATH = "/PropertyCollector/propertyCollector/RetrieveProper
 #: a *partial* per-field ``NoPermission`` (some properties readable) is a real
 #: permission outcome and is excluded structurally by the "no property came
 #: back" guard in :func:`_all_properties_missing_with_auth_fault`.
+#:
+#: Known tradeoff of including ``NoPermission``: on a target whose principal
+#: really lost all permissions, every such read costs one extra login and
+#: evicts the shared per-target session. We accept that cost, because the
+#: reset happens at most once per read and the same symptom also marks a
+#: stale session that the reset recovers.
 _AUTH_CLASS_MISSING_FAULT_TYPES = frozenset({"NotAuthenticated", "NoPermission"})
 
 #: Maximum number of property paths accepted in one request. Caps the
@@ -484,7 +490,9 @@ VMWARE_OBJECT_COLLECT_OP = VmwareTypedOp(
     description=(
         "Reads a caller-specified set of property paths off a single "
         "managed object addressed by 'type' + 'moid', returning "
-        "{properties: {path: value}, missing: [path]}. The bounded generic "
+        "{properties: {path: value}, missing: [path], missing_properties: "
+        "[{path, fault_type?}], missing_fault_summary: {fault_type: count}}. "
+        "The bounded generic "
         "escape hatch for the long tail of one-off managed-object reads: "
         "no purpose-built op needed. Bounded by construction to keep it a "
         "dumb substrate -- exactly one object, no TraversalSpec (cannot "

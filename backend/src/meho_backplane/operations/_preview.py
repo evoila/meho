@@ -73,7 +73,7 @@ writes are the separate follow-up #1452).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
@@ -157,14 +157,18 @@ def _scrub_secret_param_keys(value: Any) -> Any:
 
     Walks dicts + lists recursively. For every dict, a key that
     :func:`~meho_backplane.broadcast.events.is_secret_param_name` marks as
-    secret has its whole value replaced -- scalar or subtree -- so a nested
-    ``{"credentials": [...]}`` leaks no element. This is the same name check
-    the broadcast params scrub uses, so a param the broadcast path flags as
+    secret has its whole value replaced when that value is a string, a
+    mapping or a sequence -- so a nested ``{"credentials": [...]}`` leaks
+    no element. This is the same name check and the same value rule the
+    broadcast params scrub uses, so a param the broadcast path flags as
     secret is always masked here too (``password``, ``admin_password``,
-    ``rootPassword``, ``client_secret``, ``api_key``, ...). Every other
-    value is walked so a secret keyed deep inside the params tree is still
-    caught. Scalars pass through. The input is never mutated; a new
-    structure is returned.
+    ``rootPassword``, ``client_secret``, ``api_key``, ...). Bare scalars
+    (bool / int / float / ``None``) under a secret-shaped name pass
+    through, like on the broadcast path: secret material is a string or a
+    blob, never ``bind_secret_id=true`` or ``secret_id_ttl=600``, and the
+    approver needs to see those settings. Every other value is walked so
+    a secret keyed deep inside the params tree is still caught. The input
+    is never mutated; a new structure is returned.
 
     This is the key-name half of the generic echo's redaction; the
     value-shape half is :func:`apply_connector_boundary_redaction`.
@@ -173,7 +177,9 @@ def _scrub_secret_param_keys(value: Any) -> Any:
         return {
             key: (
                 _PARAM_REDACTED
-                if isinstance(key, str) and is_secret_param_name(key)
+                if isinstance(key, str)
+                and is_secret_param_name(key)
+                and isinstance(item, (str, Mapping, Sequence))
                 else _scrub_secret_param_keys(item)
             )
             for key, item in value.items()

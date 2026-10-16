@@ -313,6 +313,46 @@ async def test_no_builder_echo_masks_every_key_the_broadcast_scrub_flags(key: st
 
 
 @pytest.mark.asyncio
+async def test_no_builder_echo_keeps_scalar_settings_under_secret_names() -> None:
+    """Bare scalars under a secret-shaped name stay visible (#3808).
+
+    The broadcast scrub masks only string, mapping and list values under a
+    secret-shaped name. The echo uses the same rule, so settings like
+    ``bind_secret_id`` or ``secret_id_ttl`` stay readable for the approver
+    while a real string secret is still masked.
+    """
+    from meho_backplane.broadcast.events import scrub_broadcast_params
+
+    params = {
+        "role_name": "fake-role",
+        "bind_secret_id": False,
+        "secret_id_ttl": 600,
+        "secret_id_num_uses": 5,
+        "secret_id": "FAKE-secret-value-0002",
+    }
+    scrubbed, _detected = scrub_broadcast_params(params)
+    assert scrubbed["bind_secret_id"] is False
+    assert scrubbed["secret_id_ttl"] == 600
+
+    ctx = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="vault.auth.approle.write"),  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=_operator(),
+        target=_FakeTarget(),
+        params=params,
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    assert effect["params_echo"] == {
+        "role_name": "fake-role",
+        "bind_secret_id": False,
+        "secret_id_ttl": 600,
+        "secret_id_num_uses": 5,
+        "secret_id": "***REDACTED***",
+    }
+
+
+@pytest.mark.asyncio
 async def test_no_builder_echo_scrubs_secret_value_shapes() -> None:
     """The generic echo runs the connector-boundary value-shape scrub too.
 

@@ -187,15 +187,19 @@ ARG TAILWIND_SHA_ARM64=8f48dcb72be3b351c10563c5329b4638ba8516820dc3b3a1609625a16
 # the supply-chain story. `sha256sum` ships in coreutils, which the slim
 # image already includes.
 #
-# The download has a time limit and retries. A plain `urlretrieve` call has
-# no time limit: when the connection stops sending data, it waits forever,
-# and the image job only ends when GitHub cancels it at its 45-minute limit
-# (#4167 -- nine runs in two days, each stalled on this one download while
-# the other platform's copy finished in seconds). The `timeout=` below is a
-# socket time limit, so it fires both on a slow connect and on a read that
-# stops receiving data. Five tries with a short growing pause bound the
-# worst case to a few minutes; after the last failed try the build stops
-# with a clear error instead of hanging.
+# The download has two time limits and retries. A plain `urlretrieve` call
+# has no time limit: when the connection stops sending data, it waits
+# forever, and the image job only ends when GitHub cancels it at its
+# 45-minute limit (#4167 -- nine runs in two days, each stalled on this one
+# download while the other platform's copy finished in seconds). The
+# `timeout=` below is a socket time limit: it fires on a slow connect and on
+# a read that receives nothing for 30 seconds. It does not fire when the
+# server keeps sending a few bytes every few seconds, so a second limit
+# covers each whole try: an alarm signal (`signal.alarm`) stops the try
+# after 120 seconds no matter what state it is in. A normal download takes
+# 2 to 12 seconds. Five tries with a short growing pause bound the worst
+# case to about 11 minutes; after the last failed try the build stops with
+# a clear error instead of hanging.
 #
 # This step is a Dockerfile heredoc (not a `\`-continued one-liner) only so
 # the Python download script can be written as a plain multi-line script.
@@ -208,6 +212,7 @@ case "${TARGETPLATFORM:-linux/amd64}" in
 esac
 python - "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VER}/tailwindcss-${TW_ARCH}" /tmp/tailwindcss <<'PY'
 import shutil
+import signal
 import sys
 import time
 import urllib.request
@@ -215,16 +220,29 @@ from http.client import HTTPException
 
 url, dest = sys.argv[1], sys.argv[2]
 attempts = 5
+socket_timeout = 30  # seconds one connect or one read may wait for data
+try_limit = 120  # seconds one whole try may take, from connect to last byte
+
+
+def stop_try(signum, frame):
+    raise TimeoutError(f"download did not finish within {try_limit}s")
+
+
+signal.signal(signal.SIGALRM, stop_try)
 for attempt in range(1, attempts + 1):
+    signal.alarm(try_limit)
     try:
-        with urllib.request.urlopen(url, timeout=30) as resp, open(dest, "wb") as out:
+        with urllib.request.urlopen(url, timeout=socket_timeout) as resp, open(dest, "wb") as out:
             shutil.copyfileobj(resp, out)
-        break
     except (OSError, HTTPException) as exc:
+        signal.alarm(0)
         print(f"tailwind download try {attempt}/{attempts} failed: {exc!r}", file=sys.stderr)
         if attempt == attempts:
             sys.exit(1)
         time.sleep(5 * attempt)
+    else:
+        signal.alarm(0)
+        break
 PY
 echo "${TW_SHA}  /tmp/tailwindcss" | sha256sum -c -
 install -m 0755 /tmp/tailwindcss /usr/local/bin/tailwindcss

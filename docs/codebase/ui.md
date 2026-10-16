@@ -111,10 +111,11 @@ Two artifacts ship in the backend image:
    Dockerfile downloads the CLI by URL with a SHA256 check (mirroring
    the `kubeconform` install pattern in
    [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)).
-   The download has a 30-second socket time limit and tries up to five
-   times, so a stalled connection fails the build in minutes instead of
-   hanging until the CI job limit (#4167). The step selects the right
-   arch by `$TARGETPLATFORM`, then runs:
+   The download has a 30-second socket time limit, a 120-second limit on
+   each whole try, and up to five tries, so a stalled or very slow
+   connection fails the build in minutes instead of hanging until the CI
+   job limit (#4167). The step selects the right arch by
+   `$TARGETPLATFORM`, then runs:
 
    ```bash
    tailwindcss \

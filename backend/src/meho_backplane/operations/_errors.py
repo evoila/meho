@@ -1839,8 +1839,9 @@ def _vault_write_target_clause(target_name: str | None, vault_role: str | None) 
     if vault_role:
         return f" It was dispatched on target {target_name!r} under vault_role {vault_role!r}."
     return (
-        f" It was dispatched on target {target_name!r}, which sets no vault_role, "
-        f"so the default role was used."
+        f" It was dispatched on target {target_name!r}, which sets no vault_role "
+        f"override, so the role came from the deployment's fallback chain "
+        f"(check-runner role, per-tenant role, then the global default)."
     )
 
 

@@ -559,8 +559,10 @@ def test_write_forbidden_names_acting_target_and_role_when_passed() -> None:
     assert "dispatched on target 'vault-main' under vault_role 'meho-writer'" in out.error
 
 
-def test_write_forbidden_names_target_without_role_as_default_role() -> None:
-    """#3716: a target with no vault_role is named, with the default-role note."""
+def test_write_forbidden_names_target_without_role_override() -> None:
+    """#3716: a target with no vault_role is named; the note says no override was
+    set and does not claim which role was used (the login role resolver has a
+    check-runner and a per-tenant tier before the global default)."""
     from meho_backplane.operations._errors import result_connector_vault_write_forbidden
 
     out = result_connector_vault_write_forbidden(
@@ -571,8 +573,10 @@ def test_write_forbidden_names_target_without_role_as_default_role() -> None:
         target_name="vault-main",
     )
     assert out.error is not None
-    assert "dispatched on target 'vault-main', which sets no vault_role" in out.error
+    assert "dispatched on target 'vault-main', which sets no vault_role override" in out.error
+    assert "fallback chain" in out.error
     assert "under vault_role" not in out.error
+    assert "default role was used" not in out.error
 
 
 def test_write_forbidden_omits_target_clause_when_not_passed() -> None:

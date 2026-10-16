@@ -1359,6 +1359,46 @@ async def test_fingerprint_dead_after_relogin_still_marks_extras(
 
 
 @pytest.mark.asyncio
+async def test_fingerprint_relogin_then_transport_error_still_marks_extras(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(#3777) The re-login succeeded but the retried read raised a transport
+    error. The reset still shows: the unreachable fingerprint carries the
+    marker and the relogin event is logged with live=False."""
+    monkeypatch.setattr(connector_module, "_SESSION_MAX_AGE_SECONDS", 0)
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    router = _SdkRouter(retrieve_xml=_CURRENT_SESSION_NOTAUTH_XML)
+    target = _esxi_fingerprinted()
+
+    def _retry_drops_connection(request: httpx.Request) -> httpx.Response:
+        response = router(request)
+        if router.methods.count("RetrievePropertiesEx") == 2:
+            raise httpx.ConnectError("connection reset during the retried read")
+        return response
+
+    with capture_logs() as logs:
+        async with respx.mock(base_url=_ESXI_BASE) as mock:
+            mock.post(_SDK).mock(side_effect=_retry_drops_connection)
+            mock.get("/api/about").respond(400)
+            result = await connector.fingerprint(target, _make_operator())
+
+    assert result.reachable is False
+    assert result.extras["session_health_reset"] == 1
+    # The re-login itself went through; only the read after it failed.
+    assert router.methods.count("Login") == 2
+    assert router.methods.count("RetrievePropertiesEx") == 2
+    (event,) = [e for e in logs if e["event"] == "vmware_esxi_probe_session_relogin"]
+    assert event == {
+        "event": "vmware_esxi_probe_session_relogin",
+        "log_level": "info",
+        "target": target.name,
+        "fault_types": ["NotAuthenticated"],
+        "live": False,
+    }
+
+
+@pytest.mark.asyncio
 async def test_fingerprint_warm_session_has_no_relogin_marker() -> None:
     """(#3777) A live session on the first read: no marker, no relogin event."""
     connector = _make_connector()

@@ -34,6 +34,7 @@ descriptor), so it works on a fresh boot with **zero catalog ingest**.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -221,6 +222,8 @@ async def _collect_with_auth_health_reset(
     mo_type: str,
     moid: str,
     properties: list[str],
+    *,
+    on_reset: Callable[[list[str]], None] | None = None,
 ) -> tuple[dict[str, Any], list[str], list[dict[str, str]], dict[str, int], list[str]]:
     """Read the object's properties, self-healing a stale-but-live session once (#3773b).
 
@@ -248,6 +251,11 @@ async def _collect_with_auth_health_reset(
     ``reset_fault_types``: the sorted fault class names that triggered the
     reset, or an empty list when no reset ran (#3777). Callers use it to mark
     a recovery; it holds class names only, never fault text.
+
+    ``on_reset`` is called with those fault class names right before the
+    retried read. The retry can raise (re-login refused, transport error), and
+    then nothing is returned; a caller that must record every reset even in
+    that case passes ``on_reset`` to learn about it.
     """
     body = build_object_collect_retrieve_params(mo_type, moid, properties)
 
@@ -274,6 +282,8 @@ async def _collect_with_auth_health_reset(
         requested=len(properties),
         missing_fault_types=reset_fault_types,
     )
+    if on_reset is not None:
+        on_reset(reset_fault_types)
     await connector.invalidate_session(target)
     result = await _read()
     return (*_extract_object_content(result), reset_fault_types)

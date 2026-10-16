@@ -834,7 +834,10 @@ all-missing "void" for the rest of the pod lifetime. Two mechanisms recover it:
   the audit row). When the probe liveness read below had to log in again, the
   fingerprint `extras` carry `session_health_reset: 1` and a
   `vmware_esxi_probe_session_relogin` event logs the target, the fault class
-  names and whether the session came back (`live`).
+  names and whether the session came back (`live`). This holds even when the
+  retried read raises (re-login refused, transport error): the helper reports
+  the reset to the probe before the retry, so the unreachable fingerprint still
+  carries the marker and the event says `live=False`.
 - *(a) Bounded session max-age (defense in depth).* A warm-cached session older
   than `VMWARE_SOAP_SESSION_MAX_AGE_SECONDS` (**default `1200` s / 20 min**) is
   proactively invalidated + re-established **before** its next read, so a

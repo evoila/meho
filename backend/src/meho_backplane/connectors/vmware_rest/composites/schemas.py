@@ -3940,8 +3940,15 @@ VM_DEPLOY_FROM_LIBRARY_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "minLength": 1,
             "description": (
-                "Optional display name for the deployed VM; the server uses the "
-                "OVF descriptor's name when omitted."
+                "Optional display name for the deployed VM; the OVF descriptor's "
+                "default name is used when omitted (read from the OVF summary before "
+                "the deploy; a descriptor without a name is refused with "
+                "``invalid_reference``). While the deploy runs the VM carries a "
+                "unique deploy name (``<name>-meho-<token>``, cut to vCenter's "
+                "80-character limit) and is renamed to this name once the deploy "
+                "succeeds (#3697). A failed deploy finds and deletes only the VM "
+                "(or vApp, with its VMs) that carries its own deploy name, so an "
+                "older or another caller's same-name VM is never touched."
             ),
         },
         "network_mappings": {
@@ -4040,8 +4047,13 @@ VM_DEPLOY_FROM_LIBRARY_RESPONSE_SCHEMA: dict[str, Any] = {
                 "``'resolve_error'`` — a content-library ``?action=find`` "
                 "resolution call itself faulted (HTTP 4xx/5xx), surfaced as a "
                 "structured message with the vCenter status carried in ``issues`` "
-                "rather than a raw vendor error. Every non-``deployed`` status is "
-                "reached before or without a successful mutation."
+                "rather than a raw vendor error. ``'resolve_error'`` and "
+                "``'invalid_reference'`` also cover the OVF summary read that "
+                "supplies the default VM name when ``name`` is omitted (#3697). "
+                "Every non-``deployed`` status is reached before or without a "
+                "successful mutation: when a failed deploy leaves a partial VM "
+                "or vApp behind, the composite removes it and reports the cleanup "
+                "in ``issues`` (#3697)."
             ),
         },
         "vm_id": {
@@ -4079,7 +4091,15 @@ VM_DEPLOY_FROM_LIBRARY_RESPONSE_SCHEMA: dict[str, Any] = {
             "description": (
                 "Per-issue projections ``{category, severity, message}`` drawn "
                 "from the OVF deploy report (errors / warnings / information) or "
-                "the resolution / power-on failure. Empty on a clean deploy."
+                "the resolution / power-on failure. Empty on a clean deploy. A "
+                "failed deploy adds one ``category='cleanup'`` entry per partial VM "
+                "or vApp it found: severity ``info`` when it was removed, "
+                "``warning`` when it could not be removed, its removal waits for "
+                "an approval request (named in the message), or the check itself "
+                "faulted (#3697). A ``category='rename'`` warning means the deploy "
+                "succeeded but the VM still carries its deploy name; the message "
+                "names both names and, for a parked rename, the approval request "
+                "that renames this VM when approved."
             ),
         },
         "candidates": {

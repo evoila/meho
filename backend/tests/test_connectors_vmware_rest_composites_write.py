@@ -37,8 +37,11 @@ respx-transport parity proof lives in
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import copy
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID, uuid4
@@ -86,6 +89,7 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     VM_CREATE_RESPONSE_SCHEMA,
     VM_NIC_REPOINT_PARAMETER_SCHEMA,
 )
+from meho_backplane.operations.composite import composite_resume_state_var
 from tests._vmware_cluster_config_fake import (
     cluster_config_ex,
     config_ex_member_path,
@@ -199,7 +203,8 @@ class _RecordingConnector:
         else:
             payload = self._responses[self._seq_index]
             self._seq_index += 1
-        if isinstance(payload, Exception):
+        # BaseException so a canned ``asyncio.CancelledError`` models a caller cancel.
+        if isinstance(payload, BaseException):
             raise payload
         return payload
 
@@ -242,7 +247,10 @@ class _GateRecorder:
     handler gates and returns a canned verdict: ``None`` (auto-execute -->
     the handler proceeds with the direct write) by default, or a
     per-op_id :class:`OperationResult` (``awaiting_approval`` / ``denied``)
-    when the test wants to prove the gate short-circuits.
+    when the test wants to prove the gate short-circuits. The resume state a
+    park would save and the ``after_main_effect`` switch (#3697: a park
+    whose approval re-enters the composite at this step instead of
+    repeating its main effect) are recorded per call too.
     """
 
     def __init__(self, gate_for: dict[str, OperationResult] | None = None) -> None:
@@ -259,6 +267,8 @@ class _GateRecorder:
         requires_approval: bool,
         target: Any,
         params: dict[str, Any],
+        resume_state: dict[str, Any] | None = None,
+        after_main_effect: bool = False,
     ) -> OperationResult | None:
         self.calls.append(
             {
@@ -267,6 +277,8 @@ class _GateRecorder:
                 "safety_level": safety_level,
                 "requires_approval": requires_approval,
                 "params": dict(params),
+                "resume_state": resume_state,
+                "after_main_effect": after_main_effect,
             }
         )
         return self._gate_for.get(op_id)
@@ -274,6 +286,15 @@ class _GateRecorder:
     @property
     def gated_op_ids(self) -> list[str]:
         return [c["op_id"] for c in self.calls]
+
+    @property
+    def after_main_effect_op_ids(self) -> list[str]:
+        """The op_ids gated as writes after the main effect, in call order."""
+        return [c["op_id"] for c in self.calls if c["after_main_effect"]]
+
+    def resume_state(self, op_id: str) -> dict[str, Any] | None:
+        """The resume state the (last) gate call for *op_id* would save on a park."""
+        return next(c["resume_state"] for c in reversed(self.calls) if c["op_id"] == op_id)
 
 
 @pytest.fixture
@@ -2080,8 +2101,82 @@ async def test_vm_clone_non_string_deploy_payload_raises(gate: _GateRecorder) ->
 # ===========================================================================
 
 _DEPLOY_OVF_OP = "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy"
+_RENAME_VM_OP = "POST:/VirtualMachine/{moId}/Rename_Task"
+_RENAME_VAPP_OP = "POST:/VirtualApp/{moId}/Rename_Task"
+_DELETE_VM_OP = "DELETE:/vcenter/vm/{vm}"
 _FIND_LIBRARY_PATH = "/api/content/library?action=find"
 _FIND_ITEM_PATH = "/api/content/library/item?action=find"
+_DEPLOY_PATH = "/api/vcenter/ovf/library-item/li-ovf?action=deploy"
+_FILTER_PATH = "/api/vcenter/ovf/library-item/li-ovf?action=filter"
+_LIST_VMS_PATH = "/api/vcenter/vm"
+# The deploy token every #3697 test pins, and the unique deploy names it yields.
+_DEPLOY_TOKEN = "0123456789"
+_DEPLOY_NAME = "router-01-meho-0123456789"
+_OVF_DEFAULT_NAME = "ovf-default"
+_OVF_DEFAULT_DEPLOY_NAME = "ovf-default-meho-0123456789"
+_OVF_SUMMARY = {"name": _OVF_DEFAULT_NAME, "EULAs": [], "networks": [], "storage_groups": []}
+_DESTROY_VAPP_OP = "POST:/VirtualApp/{moId}/Destroy_Task"
+_RESOURCE_POOL_ID = "resgroup-8"
+_VAPP_TYPE = "VirtualApp"
+
+
+def _vim_moref(mo_type: str, moid: str) -> dict[str, str]:
+    return {"_typeName": "ManagedObjectReference", "type": mo_type, "value": moid}
+
+
+def _pool_children(*vapps: tuple[str, str]) -> dict[str, Any]:
+    """Canned vim reads for the cleanup's vApp lookup (#3697).
+
+    ``ResourcePool`` serves the target pool's ``resourcePool`` children (a
+    boxed array, as live VI-JSON sends it) with one ``VirtualApp`` MoRef per
+    ``(moid, name)``; ``VirtualApp`` serves those vApps' names. With no vApps
+    the children array is empty and the composite reads no names.
+    """
+    children = {
+        "_typeName": "ArrayOfManagedObjectReference",
+        "_value": [_vim_moref(_VAPP_TYPE, moid) for moid, _ in vapps],
+    }
+    children_read = _retrieve_result("ResourcePool", _RESOURCE_POOL_ID, "resourcePool", children)
+    vmomi = {"ResourcePool": children_read}
+    if vapps:
+        vmomi[_VAPP_TYPE] = {
+            "_typeName": "RetrieveResult",
+            "objects": [
+                {
+                    "_typeName": "ObjectContent",
+                    "obj": _vim_moref(_VAPP_TYPE, moid),
+                    "propSet": [{"_typeName": "DynamicProperty", "name": "name", "val": name}],
+                }
+                for moid, name in vapps
+            ],
+        }
+    return vmomi
+
+
+#: The common case: the target pool holds no vApp, so only the VM listing matters.
+_NO_VAPPS = _pool_children()
+
+
+def _destroy_vmomi(vapp_id: str) -> dict[str, Any]:
+    """Canned ``Destroy_Task`` MoRef for the cleanup's vApp leg (Task poll auto-succeeds)."""
+    return {f"/{_VAPP_TYPE}/{vapp_id}/Destroy_Task": _task_moref("task-destroy-1")}
+
+
+def _vapp_cleanup_vmomi(*vapps: tuple[str, str], destroy: str) -> dict[str, Any]:
+    """The vApp lookup reads plus a successful ``Destroy_Task`` for *destroy*."""
+    return {**_pool_children(*vapps), **_destroy_vmomi(destroy)}
+
+
+@pytest.fixture
+def deploy_token(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Pin the random deploy token so the unique deploy name is predictable."""
+    monkeypatch.setattr(_write, "_new_deploy_token", lambda: _DEPLOY_TOKEN)
+    return _DEPLOY_TOKEN
+
+
+def _rename_vmomi(vm_id: str, *, mo_type: str = "VirtualMachine") -> dict[str, Any]:
+    """Canned ``Rename_Task`` MoRef for the deploy's rename leg (Task poll auto-succeeds)."""
+    return {f"/{mo_type}/{vm_id}/Rename_Task": _task_moref("task-rename-1")}
 
 
 def _deployment_result(
@@ -2107,14 +2202,20 @@ def _deployment_result(
 
 
 @pytest.mark.asyncio
-async def test_deploy_from_library_id_passthrough_deployed(gate: _GateRecorder) -> None:
-    """library_item id passthrough → one gated deploy → status='deployed' with the VM id."""
+async def test_deploy_from_library_id_passthrough_deployed(
+    gate: _GateRecorder, deploy_token: str
+) -> None:
+    """library_item id passthrough → OVF summary → gated deploy → rename → ``deployed``.
+
+    Without ``name`` the composite reads the OVF default name first (#3697),
+    deploys under the unique deploy name, and renames the VM to the default.
+    """
     conn = _RecordingConnector(
         {
-            "/api/vcenter/ovf/library-item/li-ovf?action=deploy": _deployment_result(
-                succeeded=True, vm_id="vm-ovf-1"
-            ),
-        }
+            _FILTER_PATH: _OVF_SUMMARY,
+            _DEPLOY_PATH: _deployment_result(succeeded=True, vm_id="vm-ovf-1"),
+        },
+        vmomi=_rename_vmomi("vm-ovf-1"),
     )
     out = await vm_deploy_from_library_composite(
         operator=_make_operator(),
@@ -2128,11 +2229,23 @@ async def test_deploy_from_library_id_passthrough_deployed(gate: _GateRecorder) 
     assert out["library_item_id"] == "li-ovf"
     assert out["powered_on"] is False
     assert out["issues"] == []
-    # No name-resolution reads on the id path; only the deploy was gated.
+    # No name-resolution reads on the id path; the summary is an un-gated
+    # read, the deploy and the rename are gated writes.
     assert [(c["method"], c["path"]) for c in conn.calls] == [
-        ("POST", "/api/vcenter/ovf/library-item/li-ovf?action=deploy"),
+        ("POST", _FILTER_PATH),
+        ("POST", _DEPLOY_PATH),
     ]
-    assert gate.gated_op_ids == [_DEPLOY_OVF_OP]
+    assert conn.calls[0]["body"] == {"target": {"resource_pool_id": "resgroup-8"}}
+    assert conn.calls[1]["body"]["deployment_spec"]["name"] == _OVF_DEFAULT_DEPLOY_NAME
+    assert conn.vmomi_calls[0] == (
+        "/VirtualMachine/vm-ovf-1/Rename_Task",
+        {"newName": _OVF_DEFAULT_NAME},
+    )
+    assert gate.gated_op_ids == [_DEPLOY_OVF_OP, _RENAME_VM_OP]
+    # The rename is gated with the vim op's own params and saves the deployed
+    # VM as resume state, so approving a parked rename renames this VM (#3697).
+    assert gate.calls[1]["params"] == {"moId": "vm-ovf-1", "body": {"newName": _OVF_DEFAULT_NAME}}
+    assert gate.after_main_effect_op_ids == [_RENAME_VM_OP]
 
 
 @pytest.mark.asyncio
@@ -2147,16 +2260,13 @@ async def test_deploy_from_library_deploy_issued_with_long_timeout(gate: _GateRe
     lets the composite wait for.
     """
     conn = _RecordingConnector(
-        {
-            "/api/vcenter/ovf/library-item/li-ovf?action=deploy": _deployment_result(
-                succeeded=True, vm_id="vm-ovf-1"
-            ),
-        }
+        {_DEPLOY_PATH: _deployment_result(succeeded=True, vm_id="vm-ovf-1")},
+        vmomi=_rename_vmomi("vm-ovf-1"),
     )
     out = await vm_deploy_from_library_composite(
         operator=_make_operator(),
         target=object(),
-        params={"library_item": "li-ovf", "resource_pool": "resgroup-8"},
+        params=dict(_DEPLOY_PARAMS_NAMED),
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "deployed"
@@ -2177,12 +2287,12 @@ async def test_deploy_from_library_read_timeout_names_exception_type(gate: _Gate
     timeout of defect-1 makes a real deploy no longer *hit* this path.)
     """
     conn = _RecordingConnector(
-        {"/api/vcenter/ovf/library-item/li-ovf?action=deploy": httpx.ReadTimeout("")}
+        {_DEPLOY_PATH: httpx.ReadTimeout(""), _LIST_VMS_PATH: []}, vmomi=_NO_VAPPS
     )
     out = await vm_deploy_from_library_composite(
         operator=_make_operator(),
         target=object(),
-        params={"library_item": "li-ovf", "resource_pool": "resgroup-8"},
+        params=dict(_DEPLOY_PARAMS_NAMED),
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "deploy_error"
@@ -2196,14 +2306,17 @@ async def test_deploy_from_library_read_timeout_names_exception_type(gate: _Gate
 
 
 @pytest.mark.asyncio
-async def test_deploy_from_library_deploy_body_shape(gate: _GateRecorder) -> None:
-    """The deploy body carries the {deployment_spec, target} shape the pinned spec keys."""
+async def test_deploy_from_library_deploy_body_shape(
+    gate: _GateRecorder, deploy_token: str
+) -> None:
+    """The deploy body carries the {deployment_spec, target} shape the pinned spec keys.
+
+    ``deployment_spec.name`` is the unique deploy name, not the caller's
+    ``name`` (#3697); the rename afterwards gives the VM the caller's name.
+    """
     conn = _RecordingConnector(
-        {
-            "/api/vcenter/ovf/library-item/li-ovf?action=deploy": _deployment_result(
-                succeeded=True
-            ),
-        }
+        {_DEPLOY_PATH: _deployment_result(succeeded=True)},
+        vmomi=_rename_vmomi("vm-ovf-9"),
     )
     await vm_deploy_from_library_composite(
         operator=_make_operator(),
@@ -2222,10 +2335,11 @@ async def test_deploy_from_library_deploy_body_shape(gate: _GateRecorder) -> Non
         },
         connector=conn,  # type: ignore[arg-type]
     )
-    body = conn.calls[0]["body"]
+    (deploy_post,) = conn.calls
+    body = deploy_post["body"]
     assert body["deployment_spec"] == {
         "accept_all_eula": True,
-        "name": "router-01",
+        "name": _DEPLOY_NAME,
         "network_mappings": {"nat": "dvportgroup-42", "mgmt": "dvportgroup-43"},
         "storage_provisioning": "thin",
         "storage_profile_id": "profile-1",
@@ -2242,6 +2356,7 @@ async def test_deploy_from_library_deploy_body_shape(gate: _GateRecorder) -> Non
         "host_id": "host-19",
         "folder_id": "group-v10",
     }
+    assert conn.vmomi_calls[0] == ("/VirtualMachine/vm-ovf-9/Rename_Task", {"newName": "router-01"})
 
 
 @pytest.mark.parametrize(
@@ -2271,17 +2386,14 @@ async def test_deploy_from_library_eula_field_is_version_aware(
     Exactly one casing is ever emitted — the other must never leak onto the wire.
     """
     conn = _RecordingConnector(
-        {
-            "/api/vcenter/ovf/library-item/li-ovf?action=deploy": _deployment_result(
-                succeeded=True
-            ),
-        },
+        {_DEPLOY_PATH: _deployment_result(succeeded=True)},
+        vmomi=_rename_vmomi("vm-ovf-9"),
         about_version=about_version,
     )
     await vm_deploy_from_library_composite(
         operator=_make_operator(),
         target=object(),
-        params={"library_item": "li-ovf", "resource_pool": "resgroup-8"},
+        params=dict(_DEPLOY_PARAMS_NAMED),
         connector=conn,  # type: ignore[arg-type]
     )
     deployment_spec = conn.calls[0]["body"]["deployment_spec"]
@@ -2296,10 +2408,12 @@ async def test_deploy_from_library_name_resolution_scoped_by_library(gate: _Gate
         {
             _FIND_LIBRARY_PATH: ["lib-7"],
             _FIND_ITEM_PATH: ["li-resolved"],
+            "/api/vcenter/ovf/library-item/li-resolved?action=filter": _OVF_SUMMARY,
             "/api/vcenter/ovf/library-item/li-resolved?action=deploy": _deployment_result(
                 succeeded=True, vm_id="vm-ovf-2"
             ),
-        }
+        },
+        vmomi=_rename_vmomi("vm-ovf-2"),
     )
     out = await vm_deploy_from_library_composite(
         operator=_make_operator(),
@@ -2313,18 +2427,21 @@ async def test_deploy_from_library_name_resolution_scoped_by_library(gate: _Gate
     )
     assert out["status"] == "deployed"
     assert out["library_item_id"] == "li-resolved"
-    # Library find, then item find (scoped + type=ovf), then the deploy.
+    # Library find, then item find (scoped + type=ovf), the OVF summary for the
+    # default name (no ``name`` given), then the deploy.
     assert [(c["method"], c["path"]) for c in conn.calls] == [
         ("POST", _FIND_LIBRARY_PATH),
         ("POST", _FIND_ITEM_PATH),
+        ("POST", "/api/vcenter/ovf/library-item/li-resolved?action=filter"),
         ("POST", "/api/vcenter/ovf/library-item/li-resolved?action=deploy"),
     ]
     # The find bodies are the FindSpec at the top level of the /api body (#3071),
     # NOT the legacy /rest {"spec": {...}} envelope vCenter 8.x 400s.
     assert conn.calls[0]["body"] == {"name": "lab-templates"}
     assert conn.calls[1]["body"] == {"name": "holorouter-ova", "type": "ovf", "library_id": "lib-7"}
-    # The finds are un-gated reads; only the deploy hit the policy seam.
-    assert gate.gated_op_ids == [_DEPLOY_OVF_OP]
+    # The finds and the summary are un-gated reads; the deploy and the rename
+    # hit the policy seam.
+    assert gate.gated_op_ids == [_DEPLOY_OVF_OP, _RENAME_VM_OP]
 
 
 @pytest.mark.asyncio
@@ -2403,7 +2520,7 @@ async def test_deploy_from_library_deploy_failed_surfaces_report_issues(
     """succeeded=false → deploy_failed with the report's per-issue messages (not a raw fault)."""
     conn = _RecordingConnector(
         {
-            "/api/vcenter/ovf/library-item/li-ovf?action=deploy": _deployment_result(
+            _DEPLOY_PATH: _deployment_result(
                 succeeded=False,
                 errors=[
                     {
@@ -2419,12 +2536,14 @@ async def test_deploy_from_library_deploy_failed_surfaces_report_issues(
                     {"category": "VALIDATION", "message": {"default_message": "deprecated hw"}}
                 ],
             ),
-        }
+            _LIST_VMS_PATH: [],
+        },
+        vmomi=_NO_VAPPS,
     )
     out = await vm_deploy_from_library_composite(
         operator=_make_operator(),
         target=object(),
-        params={"library_item": "li-ovf", "resource_pool": "resgroup-8"},
+        params=dict(_DEPLOY_PARAMS_NAMED),
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "deploy_failed"
@@ -2453,11 +2572,11 @@ async def test_deploy_from_library_deploy_error_on_http_fault(gate: _GateRecorde
             },
         ),
     )
-    conn = _RecordingConnector({"/api/vcenter/ovf/library-item/li-ovf?action=deploy": fault})
+    conn = _RecordingConnector({_DEPLOY_PATH: fault, _LIST_VMS_PATH: []}, vmomi=_NO_VAPPS)
     out = await vm_deploy_from_library_composite(
         operator=_make_operator(),
         target=object(),
-        params={"library_item": "li-ovf", "resource_pool": "resgroup-missing"},
+        params={**_DEPLOY_PARAMS_NAMED, "resource_pool": "resgroup-missing"},
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "deploy_error"
@@ -2469,6 +2588,955 @@ async def test_deploy_from_library_deploy_error_on_http_fault(gate: _GateRecorde
     assert "404" in out["issues"][0]["message"]
     assert "NOT_FOUND" in out["issues"][0]["message"]
     assert "resource pool resgroup-missing not found" in out["issues"][0]["message"]
+
+
+_DEPLOY_PARAMS_NAMED = {
+    "library_item": "li-ovf",
+    "name": "router-01",
+    "resource_pool": "resgroup-8",
+}
+
+
+def test_deploy_vm_name_is_unique_and_fits_the_vcenter_limit() -> None:
+    """The deploy name is ``<name>-meho-<token>``, cut to vCenter's 80-character limit (#3697)."""
+    assert _write._deploy_vm_name("router-01", _DEPLOY_TOKEN) == _DEPLOY_NAME
+    long_name = _write._deploy_vm_name("x" * 100, _DEPLOY_TOKEN)
+    assert len(long_name) == 80
+    assert long_name.endswith(f"-meho-{_DEPLOY_TOKEN}")
+    assert long_name.startswith("x" * 64)
+    # Two deploys never share a name.
+    assert _write._new_deploy_token() != _write._new_deploy_token()
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_fault_after_vm_created_removes_partial_vm(
+    gate: _GateRecorder, deploy_token: str
+) -> None:
+    """A deploy fault after vCenter created the VM → the VM is deleted (#3697).
+
+    The listing after the fault is keyed by the unique deploy name, so it
+    finds exactly the VM this deploy created. The envelope says so in a
+    ``cleanup`` issue.
+    """
+    conn = _RecordingConnector(
+        [httpx.ReadTimeout(""), [{"vm": "vm-partial", "name": _DEPLOY_NAME}], None],
+        vmomi=_NO_VAPPS,
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deploy_error"
+    assert out["vm_id"] is None
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("POST", _DEPLOY_PATH),
+        ("GET", _LIST_VMS_PATH),
+        ("DELETE", "/api/vcenter/vm/vm-partial"),
+    ]
+    assert conn.calls[0]["body"]["deployment_spec"]["name"] == _DEPLOY_NAME
+    # The listing is keyed by the unique deploy name, never by the caller's name.
+    assert conn.calls[1]["query"] == {"names": [_DEPLOY_NAME]}
+    # The vApp lookup reads the target pool's children; none here, so no name read.
+    assert [path for path, _ in conn.vmomi_calls] == [
+        "/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+    ]
+    assert gate.gated_op_ids == [_DEPLOY_OVF_OP, _DELETE_VM_OP]
+    # The cleanup DELETE saves the failed deploy as resume state: an approval
+    # re-runs the cleanup on this VM, never the deploy (#3697).
+    assert gate.after_main_effect_op_ids == [_DELETE_VM_OP]
+    assert out["issues"][-1] == {
+        "category": "cleanup",
+        "severity": "info",
+        "message": "removed VM vm-partial left by the failed deploy",
+    }
+
+
+class _InventoryConnector(_RecordingConnector):
+    """A :class:`_RecordingConnector` whose VM listing filters a fixed inventory by name."""
+
+    def __init__(
+        self,
+        responses: dict[str, Any],
+        *,
+        vms: list[dict[str, str]],
+        vmomi: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(responses, vmomi=vmomi)
+        self._vms = vms
+
+    async def _get_json(
+        self,
+        target: Any,
+        path: str,
+        *,
+        operator: Operator,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        self.calls.append(
+            {
+                "method": "GET",
+                "path": path,
+                "query": params,
+                "body": None,
+                "timeout": httpx.USE_CLIENT_DEFAULT,
+            }
+        )
+        names = set((params or {}).get("names", []))
+        return [vm for vm in self._vms if vm["name"] in names]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_cleanup_keeps_another_callers_same_name_vm(
+    gate: _GateRecorder, deploy_token: str
+) -> None:
+    """A same-name VM another caller created during the deploy survives the cleanup (#3697).
+
+    vCenter holds ``router-01`` from another caller and this deploy's partial
+    VM under its unique deploy name. The cleanup lists by the deploy name,
+    so only the partial VM is deleted; ``router-01`` is never touched.
+    """
+    conn = _InventoryConnector(
+        {_DEPLOY_PATH: httpx.ReadTimeout(""), "/api/vcenter/vm/vm-partial": None},
+        vms=[
+            {"vm": "vm-other", "name": "router-01"},
+            {"vm": "vm-partial", "name": _DEPLOY_NAME},
+        ],
+        vmomi=_NO_VAPPS,
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deploy_error"
+    deletes = [c["path"] for c in conn.calls if c["method"] == "DELETE"]
+    assert deletes == ["/api/vcenter/vm/vm-partial"]
+    assert "vm-other" not in str(out["issues"])
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_deploy_failed_removes_reported_vm(
+    gate: _GateRecorder, deploy_token: str
+) -> None:
+    """succeeded=false that still names a created VM → that VM is deleted once (#3697).
+
+    The listing by deploy name finds the same VM; the two sources are merged
+    so the DELETE is issued once.
+    """
+    failed = _deployment_result(
+        succeeded=False,
+        errors=[{"category": "SERVER", "message": {"default_message": "disk copy failed"}}],
+    )
+    failed["resource_id"] = {"type": "VirtualMachine", "id": "vm-partial"}
+    conn = _RecordingConnector(
+        [failed, [{"vm": "vm-partial", "name": _DEPLOY_NAME}], None], vmomi=_NO_VAPPS
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deploy_failed"
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("POST", _DEPLOY_PATH),
+        ("GET", _LIST_VMS_PATH),
+        ("DELETE", "/api/vcenter/vm/vm-partial"),
+    ]
+    assert out["issues"] == [
+        {"category": "SERVER", "severity": "error", "message": "disk copy failed"},
+        {
+            "category": "cleanup",
+            "severity": "info",
+            "message": "removed VM vm-partial left by the failed deploy",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_cleanup_delete_fault_is_reported(gate: _GateRecorder) -> None:
+    """A cleanup DELETE that faults leaves a ``warning`` issue, not a raise (#3697)."""
+    delete_fault = httpx.ConnectError("refused")
+    conn = _RecordingConnector(
+        [httpx.ReadTimeout(""), [{"vm": "vm-partial"}], delete_fault], vmomi=_NO_VAPPS
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deploy_error"
+    assert out["issues"][-1]["category"] == "cleanup"
+    assert out["issues"][-1]["severity"] == "warning"
+    assert "vm-partial" in out["issues"][-1]["message"]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_cleanup_listing_fault_names_the_deploy_name(
+    gate: _GateRecorder, deploy_token: str
+) -> None:
+    """A faulted cleanup listing → a ``warning`` naming the deploy name; nothing deleted (#3697)."""
+    conn = _RecordingConnector(
+        [httpx.ReadTimeout(""), httpx.ConnectError("refused")], vmomi=_NO_VAPPS
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deploy_error"
+    assert [c["method"] for c in conn.calls] == ["POST", "GET"]
+    assert [i["category"] for i in out["issues"]] == ["placement", "cleanup"]
+    assert out["issues"][1]["severity"] == "warning"
+    assert _DEPLOY_NAME in out["issues"][1]["message"]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_success_renames_and_deletes_nothing(
+    gate: _GateRecorder, deploy_token: str
+) -> None:
+    """A clean deploy renames the VM to the caller's name; no listing and no DELETE (#3697)."""
+    conn = _RecordingConnector(
+        [_deployment_result(succeeded=True, vm_id="vm-ovf-1")],
+        vmomi=_rename_vmomi("vm-ovf-1"),
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deployed"
+    assert out["vm_id"] == "vm-ovf-1"
+    assert out["issues"] == []
+    assert [c["method"] for c in conn.calls] == ["POST"]
+    assert conn.calls[0]["body"]["deployment_spec"]["name"] == _DEPLOY_NAME
+    assert conn.vmomi_calls[0] == ("/VirtualMachine/vm-ovf-1/Rename_Task", {"newName": "router-01"})
+    assert conn.vmomi_calls[1][0].endswith("/RetrievePropertiesEx")
+    assert gate.gated_op_ids == [_DEPLOY_OVF_OP, _RENAME_VM_OP]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_vapp_is_renamed_through_the_vapp_path(
+    gate: _GateRecorder,
+) -> None:
+    """A deployed vApp is renamed via ``/VirtualApp/{moId}/Rename_Task`` (#3697)."""
+    conn = _RecordingConnector(
+        [_deployment_result(succeeded=True, vm_id="resgroup-v9", resource_type="VirtualApp")],
+        vmomi=_rename_vmomi("resgroup-v9", mo_type="VirtualApp"),
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deployed"
+    assert out["resource_type"] == "VirtualApp"
+    assert conn.vmomi_calls[0][0] == "/VirtualApp/resgroup-v9/Rename_Task"
+    assert gate.gated_op_ids == [_DEPLOY_OVF_OP, _RENAME_VAPP_OP]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_rename_not_authorized_stays_deployed(
+    monkeypatch: pytest.MonkeyPatch, deploy_token: str
+) -> None:
+    """A parked rename → ``deployed`` with a ``rename`` warning naming the request (#3697).
+
+    The VM already exists when the rename parks, so the park saves the
+    deployed VM as its resume state: approving it re-enters the composite at
+    the rename of this VM, and never re-runs the deploy. The warning names
+    both names and the approval request.
+    """
+    gate = _install_gate(
+        monkeypatch, _GateRecorder(gate_for={_RENAME_VM_OP: _awaiting(_RENAME_VM_OP)})
+    )
+    conn = _RecordingConnector([_deployment_result(succeeded=True, vm_id="vm-ovf-1")])
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deployed"
+    assert out["vm_id"] == "vm-ovf-1"
+    assert conn.vmomi_calls == []
+    (issue,) = out["issues"]
+    assert issue["category"] == "rename"
+    assert issue["severity"] == "warning"
+    assert _DEPLOY_NAME in issue["message"]
+    assert "'router-01'" in issue["message"]
+    assert "waits for approval request 00000000-0000-0000-0000-0000000000aa" in issue["message"]
+    assert gate.after_main_effect_op_ids == [_RENAME_VM_OP]
+    assert gate.calls[1]["params"] == {"moId": "vm-ovf-1", "body": {"newName": "router-01"}}
+    # Only the deploy ran; nothing deployed twice.
+    assert [c["method"] for c in conn.calls] == ["POST"]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_rename_denied_stays_deployed(
+    monkeypatch: pytest.MonkeyPatch, deploy_token: str
+) -> None:
+    """A denied rename → ``deployed`` with a ``rename`` warning saying so (#3697)."""
+    denied = OperationResult(status="denied", op_id=_RENAME_VM_OP, result=None, duration_ms=1.0)
+    _install_gate(monkeypatch, _GateRecorder(gate_for={_RENAME_VM_OP: denied}))
+    conn = _RecordingConnector([_deployment_result(succeeded=True, vm_id="vm-ovf-1")])
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deployed"
+    (issue,) = out["issues"]
+    assert issue["category"] == "rename"
+    assert issue["message"].endswith("was not authorized")
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_rename_fault_stays_deployed(
+    gate: _GateRecorder, deploy_token: str
+) -> None:
+    """A faulted ``Rename_Task`` → ``deployed`` with a ``rename`` warning (#3697)."""
+    conn = _RecordingConnector(
+        [_deployment_result(succeeded=True, vm_id="vm-ovf-1")],
+        vmomi={
+            "/VirtualMachine/vm-ovf-1/Rename_Task": _task_moref("task-rename-9"),
+            "Task": _task_info_result("task-rename-9", "error", "The name already exists"),
+        },
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deployed"
+    (issue,) = out["issues"]
+    assert issue["category"] == "rename"
+    assert "The name already exists" in issue["message"]
+    assert _DEPLOY_NAME in issue["message"]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_rename_transport_fault_stays_deployed(
+    gate: _GateRecorder,
+) -> None:
+    """A transport fault on the rename → ``deployed`` with a ``rename`` warning (#3697)."""
+    conn = _RecordingConnector(
+        [_deployment_result(succeeded=True, vm_id="vm-ovf-1")],
+        vmomi={"/VirtualMachine/vm-ovf-1/Rename_Task": httpx.ConnectError("refused")},
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deployed"
+    (issue,) = out["issues"]
+    assert issue["category"] == "rename"
+    assert "failed" in issue["message"]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_rename_timeout_stays_deployed(
+    gate: _GateRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rename task that never finishes → ``deployed`` with a ``rename`` warning (#3697)."""
+    monkeypatch.setattr(_write, "_VM_DEPLOY_TASK_TIMEOUT_SECONDS", 0.0)
+    conn = _RecordingConnector(
+        [_deployment_result(succeeded=True, vm_id="vm-ovf-1")],
+        vmomi={
+            "/VirtualMachine/vm-ovf-1/Rename_Task": _task_moref("task-rename-9"),
+            "Task": _task_info_result("task-rename-9", "running"),
+        },
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deployed"
+    (issue,) = out["issues"]
+    assert issue["category"] == "rename"
+    assert "did not finish" in issue["message"]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_without_name_summary_fault_refuses_before_deploy(
+    gate: _GateRecorder,
+) -> None:
+    """No ``name`` and a faulted OVF summary → ``resolve_error``; no VM is created (#3697)."""
+    fault = httpx.HTTPStatusError(
+        "not found",
+        request=httpx.Request("POST", "https://vc" + _FILTER_PATH),
+        response=httpx.Response(
+            404, json={"error_type": "NOT_FOUND", "messages": [{"default_message": "no item"}]}
+        ),
+    )
+    conn = _RecordingConnector({_FILTER_PATH: fault})
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"library_item": "li-ovf", "resource_pool": "resgroup-8"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "resolve_error"
+    assert out["library_item_id"] == "li-ovf"
+    assert out["issues"][0]["category"] == "resolve"
+    assert "404" in out["issues"][0]["message"]
+    assert [(c["method"], c["path"]) for c in conn.calls] == [("POST", _FILTER_PATH)]
+    assert gate.calls == []
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_without_name_and_no_ovf_name_refuses(
+    gate: _GateRecorder,
+) -> None:
+    """No ``name`` and an OVF descriptor without one → ``invalid_reference``; no deploy (#3697)."""
+    conn = _RecordingConnector({_FILTER_PATH: {"EULAs": [], "networks": []}})
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"library_item": "li-ovf", "resource_pool": "resgroup-8"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "invalid_reference"
+    assert out["library_item_id"] == "li-ovf"
+    assert out["issues"][0]["category"] == "input"
+    assert "set name" in out["issues"][0]["message"]
+    assert [(c["method"], c["path"]) for c in conn.calls] == [("POST", _FILTER_PATH)]
+    assert gate.calls == []
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_without_name_cleans_up_by_deploy_name(
+    gate: _GateRecorder, deploy_token: str
+) -> None:
+    """No ``name`` → the OVF default name forms the deploy name; a fault still cleans up (#3697)."""
+    conn = _RecordingConnector(
+        [_OVF_SUMMARY, httpx.ReadTimeout(""), [{"vm": "vm-partial"}], None], vmomi=_NO_VAPPS
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"library_item": "li-ovf", "resource_pool": "resgroup-8"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deploy_error"
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("POST", _FILTER_PATH),
+        ("POST", _DEPLOY_PATH),
+        ("GET", _LIST_VMS_PATH),
+        ("DELETE", "/api/vcenter/vm/vm-partial"),
+    ]
+    assert conn.calls[1]["body"]["deployment_spec"]["name"] == _OVF_DEFAULT_DEPLOY_NAME
+    assert conn.calls[2]["query"] == {"names": [_OVF_DEFAULT_DEPLOY_NAME]}
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_cancelled_deploy_removes_partial_vm(
+    gate: _GateRecorder,
+) -> None:
+    """A caller cancel mid-deploy → the partial VM is deleted, then the cancel re-raises (#3697)."""
+    conn = _RecordingConnector(
+        [asyncio.CancelledError(), [{"vm": "vm-partial"}], None], vmomi=_NO_VAPPS
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await vm_deploy_from_library_composite(
+            operator=_make_operator(),
+            target=object(),
+            params=dict(_DEPLOY_PARAMS_NAMED),
+            connector=conn,  # type: ignore[arg-type]
+        )
+    assert [(c["method"], c["path"]) for c in conn.calls][-1] == (
+        "DELETE",
+        "/api/vcenter/vm/vm-partial",
+    )
+
+
+class _HeldConnector(_RecordingConnector):
+    """A :class:`_RecordingConnector` that holds chosen calls open.
+
+    ``hold`` maps a 0-based call number to an event. That call waits on the
+    event before it is recorded and served; ``entered[n]`` is set once call
+    ``n`` starts waiting. A call that is cancelled while it waits uses no
+    canned response.
+    """
+
+    def __init__(
+        self,
+        responses: list[Any],
+        *,
+        hold: dict[int, asyncio.Event],
+        vmomi: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(responses, vmomi=vmomi or _NO_VAPPS)
+        self._hold = hold
+        self._call_number = 0
+        self.entered = {n: asyncio.Event() for n in hold}
+
+    async def _wait_if_held(self) -> None:
+        n = self._call_number
+        self._call_number += 1
+        if n in self._hold:
+            self.entered[n].set()
+            await self._hold[n].wait()
+
+    async def _get_json(self, target: Any, path: str, **kwargs: Any) -> Any:
+        await self._wait_if_held()
+        return await super()._get_json(target, path, **kwargs)
+
+    async def _post_json(self, target: Any, path: str, **kwargs: Any) -> Any:
+        await self._wait_if_held()
+        return await super()._post_json(target, path, **kwargs)
+
+
+async def _cancel_repeatedly_during_cleanup(
+    task: asyncio.Task[Any], conn: _HeldConnector, listing_call: int, listing_held: asyncio.Event
+) -> None:
+    """Cancel *task* three times while its cleanup listing is held open, then release it."""
+    await asyncio.wait_for(conn.entered[listing_call].wait(), timeout=5)
+    for _ in range(3):
+        task.cancel()
+        await asyncio.sleep(0)
+    assert not task.done()
+    listing_held.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=5)
+    assert task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_real_cancel_cleanup_survives_more_cancels(
+    gate: _GateRecorder,
+) -> None:
+    """A real task cancel mid-deploy, cancelled again during cleanup, still deletes (#3697).
+
+    Call 0 (the deploy POST) and call 1 (the cleanup listing) are held open.
+    The task is cancelled while the POST waits, and cancelled three more
+    times while the cleanup listing waits. The shielded cleanup must still
+    run to the DELETE, and the cancel must reach the caller.
+    """
+    deploy_held = asyncio.Event()
+    listing_held = asyncio.Event()
+    # The cancelled POST uses no response: listing, DELETE.
+    conn = _HeldConnector([[{"vm": "vm-partial"}], None], hold={0: deploy_held, 1: listing_held})
+    task = asyncio.create_task(
+        vm_deploy_from_library_composite(
+            operator=_make_operator(),
+            target=object(),
+            params=dict(_DEPLOY_PARAMS_NAMED),
+            connector=conn,  # type: ignore[arg-type]
+        )
+    )
+    await asyncio.wait_for(conn.entered[0].wait(), timeout=5)
+    task.cancel()
+    await _cancel_repeatedly_during_cleanup(task, conn, 1, listing_held)
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("GET", _LIST_VMS_PATH),
+        ("DELETE", "/api/vcenter/vm/vm-partial"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_cancel_during_fault_cleanup_still_deletes(
+    gate: _GateRecorder,
+) -> None:
+    """A cancel during the ``deploy_error`` cleanup still deletes, then cancels the caller (#3697).
+
+    The deploy POST faults at once; the cleanup listing (call 1) is held
+    open and the task is cancelled three times meanwhile. The shielded
+    cleanup runs to the DELETE and the cancel is raised afterwards, so the
+    disconnect is honoured instead of a stale envelope being returned.
+    """
+    listing_held = asyncio.Event()
+    conn = _HeldConnector(
+        [httpx.ReadTimeout(""), [{"vm": "vm-partial"}], None], hold={1: listing_held}
+    )
+    task = asyncio.create_task(
+        vm_deploy_from_library_composite(
+            operator=_make_operator(),
+            target=object(),
+            params=dict(_DEPLOY_PARAMS_NAMED),
+            connector=conn,  # type: ignore[arg-type]
+        )
+    )
+    await _cancel_repeatedly_during_cleanup(task, conn, 1, listing_held)
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("POST", _DEPLOY_PATH),
+        ("GET", _LIST_VMS_PATH),
+        ("DELETE", "/api/vcenter/vm/vm-partial"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_cancel_during_deploy_failed_cleanup_still_deletes(
+    gate: _GateRecorder,
+) -> None:
+    """A cancel during the ``succeeded=false`` cleanup still deletes, then cancels (#3697)."""
+    listing_held = asyncio.Event()
+    failed = _deployment_result(succeeded=False)
+    failed["resource_id"] = {"type": "VirtualMachine", "id": "vm-partial"}
+    conn = _HeldConnector([failed, [], None], hold={1: listing_held})
+    task = asyncio.create_task(
+        vm_deploy_from_library_composite(
+            operator=_make_operator(),
+            target=object(),
+            params=dict(_DEPLOY_PARAMS_NAMED),
+            connector=conn,  # type: ignore[arg-type]
+        )
+    )
+    await _cancel_repeatedly_during_cleanup(task, conn, 1, listing_held)
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("POST", _DEPLOY_PATH),
+        ("GET", _LIST_VMS_PATH),
+        ("DELETE", "/api/vcenter/vm/vm-partial"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_cleanup_delete_parked_names_the_approval_request(
+    monkeypatch: pytest.MonkeyPatch, deploy_token: str
+) -> None:
+    """A parked cleanup DELETE → a ``warning`` naming the approval request (#3697).
+
+    The park saves the failed deploy as its resume state: approving it
+    re-runs the cleanup, which deletes this VM, and never re-runs the deploy.
+    Nothing reaches the wire for the DELETE meanwhile.
+    """
+    gate = _install_gate(
+        monkeypatch, _GateRecorder(gate_for={_DELETE_VM_OP: _awaiting(_DELETE_VM_OP)})
+    )
+    conn = _RecordingConnector(
+        [httpx.ReadTimeout(""), [{"vm": "vm-partial", "name": _DEPLOY_NAME}]], vmomi=_NO_VAPPS
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deploy_error"
+    assert [c["method"] for c in conn.calls] == ["POST", "GET"]
+    assert gate.after_main_effect_op_ids == [_DELETE_VM_OP]
+    assert gate.calls[1]["params"] == {"vm": "vm-partial"}
+    assert out["issues"][-1] == {
+        "category": "cleanup",
+        "severity": "warning",
+        "message": (
+            "VM vm-partial left by the failed deploy is still there; its removal waits "
+            "for approval request 00000000-0000-0000-0000-0000000000aa"
+        ),
+    }
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_power_on_parked_names_the_approval_request(
+    monkeypatch: pytest.MonkeyPatch, deploy_token: str
+) -> None:
+    """A parked follow-on power-on → ``deployed`` with a warning naming the request (#3697).
+
+    The VM exists, so the power-on park saves it as resume state too:
+    approving it starts this VM instead of deploying a second one.
+    """
+    power_op = _write._power_vm_op_id("start")
+    gate = _install_gate(monkeypatch, _GateRecorder(gate_for={power_op: _awaiting(power_op)}))
+    conn = _RecordingConnector(
+        [_deployment_result(succeeded=True, vm_id="vm-ovf-1")], vmomi=_rename_vmomi("vm-ovf-1")
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={**_DEPLOY_PARAMS_NAMED, "power_on": True},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deployed"
+    assert out["powered_on"] is False
+    assert [c["method"] for c in conn.calls] == ["POST"]
+    assert gate.after_main_effect_op_ids == [_RENAME_VM_OP, power_op]
+    (issue,) = out["issues"]
+    assert issue["category"] == "power_on"
+    assert "waits for approval request 00000000-0000-0000-0000-0000000000aa" in issue["message"]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_vapp_fault_destroys_the_vapp_by_deploy_name(
+    gate: _GateRecorder, deploy_token: str
+) -> None:
+    """A faulted vApp deploy → the vApp with the deploy name is destroyed with its VMs (#3697).
+
+    A multi-VM OVF deploys as a vApp that carries the deploy name; its VMs
+    carry the OVF's own names (``web-01`` / ``db-01`` here), so the VM
+    listing by deploy name finds nothing. The target pool's children show
+    the vApp; its ``Destroy_Task`` removes it and its VMs. Another vApp in
+    the same pool is never touched.
+    """
+    conn = _InventoryConnector(
+        {_DEPLOY_PATH: httpx.ReadTimeout("")},
+        vms=[{"vm": "vm-web", "name": "web-01"}, {"vm": "vm-db", "name": "db-01"}],
+        vmomi=_vapp_cleanup_vmomi(
+            ("resgroup-v2", "other-vapp"), ("resgroup-v9", _DEPLOY_NAME), destroy="resgroup-v9"
+        ),
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deploy_error"
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("POST", _DEPLOY_PATH),
+        ("GET", _LIST_VMS_PATH),
+    ]
+    children_read, names_read, destroy, _poll = conn.vmomi_calls
+    assert children_read[1]["specSet"][0]["objectSet"][0]["obj"]["value"] == _RESOURCE_POOL_ID
+    assert names_read[1]["specSet"][0]["propSet"][0] == {
+        "_typeName": "PropertySpec",
+        "type": _VAPP_TYPE,
+        "pathSet": ["name"],
+    }
+    assert destroy == ("/VirtualApp/resgroup-v9/Destroy_Task", {})
+    assert gate.gated_op_ids == [_DEPLOY_OVF_OP, _DESTROY_VAPP_OP]
+    assert gate.calls[1]["params"] == {"moId": "resgroup-v9", "body": {}}
+    assert gate.after_main_effect_op_ids == [_DESTROY_VAPP_OP]
+    assert out["issues"][-1] == {
+        "category": "cleanup",
+        "severity": "info",
+        "message": "removed vApp resgroup-v9 and its VMs left by the failed deploy",
+    }
+    assert "resgroup-v2" not in str(out["issues"])
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_deploy_failed_destroys_the_reported_vapp_once(
+    gate: _GateRecorder, deploy_token: str
+) -> None:
+    """succeeded=false naming a ``VirtualApp`` → that vApp is destroyed, once (#3697).
+
+    The reported id and the pool lookup find the same vApp; the two sources
+    are merged so one ``Destroy_Task`` is issued.
+    """
+    failed = _deployment_result(succeeded=False)
+    failed["resource_id"] = {"type": "VirtualApp", "id": "resgroup-v9"}
+    conn = _RecordingConnector(
+        [failed, []],
+        vmomi=_vapp_cleanup_vmomi(("resgroup-v9", _DEPLOY_NAME), destroy="resgroup-v9"),
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deploy_failed"
+    destroys = [path for path, _ in conn.vmomi_calls if path.endswith("/Destroy_Task")]
+    assert destroys == ["/VirtualApp/resgroup-v9/Destroy_Task"]
+    assert out["issues"] == [
+        {
+            "category": "cleanup",
+            "severity": "info",
+            "message": "removed vApp resgroup-v9 and its VMs left by the failed deploy",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_cancelled_vapp_deploy_destroys_the_vapp(
+    gate: _GateRecorder, deploy_token: str
+) -> None:
+    """A real cancel mid-deploy of a vApp still destroys the vApp, then cancels (#3697).
+
+    The VM listing (held open and cancelled three more times) finds nothing
+    because the vApp's VMs carry other names; the pool lookup finds the vApp
+    and its ``Destroy_Task`` runs before the cancel reaches the caller.
+    """
+    deploy_held = asyncio.Event()
+    listing_held = asyncio.Event()
+    conn = _HeldConnector(
+        [[]],
+        hold={0: deploy_held, 1: listing_held},
+        vmomi=_vapp_cleanup_vmomi(("resgroup-v9", _DEPLOY_NAME), destroy="resgroup-v9"),
+    )
+    task = asyncio.create_task(
+        vm_deploy_from_library_composite(
+            operator=_make_operator(),
+            target=object(),
+            params=dict(_DEPLOY_PARAMS_NAMED),
+            connector=conn,  # type: ignore[arg-type]
+        )
+    )
+    await asyncio.wait_for(conn.entered[0].wait(), timeout=5)
+    task.cancel()
+    await _cancel_repeatedly_during_cleanup(task, conn, 1, listing_held)
+    assert [(c["method"], c["path"]) for c in conn.calls] == [("GET", _LIST_VMS_PATH)]
+    destroys = [path for path, _ in conn.vmomi_calls if path.endswith("/Destroy_Task")]
+    assert destroys == ["/VirtualApp/resgroup-v9/Destroy_Task"]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_vapp_destroy_parked_or_faulted_is_a_warning(
+    monkeypatch: pytest.MonkeyPatch, deploy_token: str
+) -> None:
+    """A parked or faulted vApp ``Destroy_Task`` → a ``warning`` naming the vApp (#3697)."""
+    gate = _install_gate(
+        monkeypatch, _GateRecorder(gate_for={_DESTROY_VAPP_OP: _awaiting(_DESTROY_VAPP_OP)})
+    )
+    conn = _RecordingConnector(
+        [httpx.ReadTimeout(""), []], vmomi=_pool_children(("resgroup-v9", _DEPLOY_NAME))
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deploy_error"
+    assert gate.after_main_effect_op_ids == [_DESTROY_VAPP_OP]
+    assert not any(path.endswith("/Destroy_Task") for path, _ in conn.vmomi_calls)
+    assert out["issues"][-1] == {
+        "category": "cleanup",
+        "severity": "warning",
+        "message": (
+            "vApp resgroup-v9 and its VMs left by the failed deploy are still there; "
+            "their removal waits for approval request 00000000-0000-0000-0000-0000000000aa"
+        ),
+    }
+
+    _install_gate(monkeypatch, _GateRecorder())
+    conn = _RecordingConnector(
+        [httpx.ReadTimeout(""), []],
+        vmomi={
+            **_pool_children(("resgroup-v9", _DEPLOY_NAME)),
+            "/VirtualApp/resgroup-v9/Destroy_Task": httpx.ConnectError("refused"),
+        },
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deploy_error"
+    assert out["issues"][-1]["severity"] == "warning"
+    assert "could not remove vApp resgroup-v9 and its VMs" in out["issues"][-1]["message"]
+    assert "ConnectError" in out["issues"][-1]["message"]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_vapp_lookup_fault_names_the_pool(
+    gate: _GateRecorder, deploy_token: str
+) -> None:
+    """A faulted pool read → a ``warning`` naming the deploy name and the pool (#3697).
+
+    The VM found by the listing is still deleted.
+    """
+    conn = _RecordingConnector(
+        [httpx.ReadTimeout(""), [{"vm": "vm-partial"}], None],
+        vmomi={"ResourcePool": httpx.ConnectError("refused")},
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deploy_error"
+    assert [c["method"] for c in conn.calls] == ["POST", "GET", "DELETE"]
+    assert [(i["category"], i["severity"]) for i in out["issues"]] == [
+        ("placement", "error"),
+        ("cleanup", "warning"),
+        ("cleanup", "info"),
+    ]
+    assert _DEPLOY_NAME in out["issues"][1]["message"]
+    assert _RESOURCE_POOL_ID in out["issues"][1]["message"]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_cleanup_json_fault_keeps_the_deploy_failure(
+    gate: _GateRecorder, deploy_token: str
+) -> None:
+    """A cleanup step that raises a non-HTTP error → a ``warning``, the deploy failure kept (#3697).
+
+    The DELETE's JSON parsing fails. The shielded cleanup task fails with it;
+    the drain must catch that and report it, not raise it over the original
+    ``deploy_error`` envelope.
+    """
+    conn = _RecordingConnector(
+        [httpx.ReadTimeout(""), [{"vm": "vm-partial"}], json.JSONDecodeError("bad", "", 0)],
+        vmomi=_NO_VAPPS,
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deploy_error"
+    assert out["issues"] == [
+        {
+            "category": "placement",
+            "severity": "error",
+            "message": "OVF deploy call faulted: transport fault (ReadTimeout)",
+        },
+        {
+            "category": "cleanup",
+            "severity": "warning",
+            "message": "the cleanup failed (JSONDecodeError); check vCenter by hand",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_drain_deploy_cleanup_reports_a_cleanup_that_raises() -> None:
+    """A raising cleanup becomes a ``warning`` issue from the drain, never a raise (#3697)."""
+
+    async def cleanup() -> list[dict[str, Any]]:
+        raise ValueError("boom")
+
+    issues = await _write._drain_deploy_cleanup(cleanup())
+    assert issues == [
+        {
+            "category": "cleanup",
+            "severity": "warning",
+            "message": "the cleanup failed (ValueError); check vCenter by hand",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_drain_deploy_cleanup_cancel_then_failure_still_cancels() -> None:
+    """A cancel during a cleanup that then raises is re-raised, not hidden (#3697).
+
+    The caller is cancelled while the shielded cleanup waits; the cleanup
+    then fails. The drain must still honour the cancel after it reads the
+    failure, so the cancelled caller never sees a result.
+    """
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def cleanup() -> list[dict[str, Any]]:
+        started.set()
+        await release.wait()
+        raise ValueError("boom")
+
+    task = asyncio.create_task(_write._drain_deploy_cleanup(cleanup()))
+    await asyncio.wait_for(started.wait(), timeout=5)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=5)
+    assert task.cancelled()
 
 
 @pytest.mark.asyncio
@@ -2528,14 +3596,15 @@ async def test_deploy_from_library_gate_short_circuits_before_deploy(
     out = await vm_deploy_from_library_composite(
         operator=_make_operator(),
         target=object(),
-        params={"library_item": "li-ovf", "resource_pool": "resgroup-8"},
+        params=dict(_DEPLOY_PARAMS_NAMED),
         connector=conn,  # type: ignore[arg-type]
     )
     assert isinstance(out, OperationResult)
     assert out.status == "awaiting_approval"
     assert out.op_id == _DEPLOY_OVF_OP
-    # id passthrough → no resolution reads, and the deploy was gated off the wire.
+    # id passthrough + name → no reads at all, and the deploy was gated off the wire.
     assert conn.calls == []
+    assert conn.vmomi_calls == []
     assert gate.gated_op_ids == [_DEPLOY_OVF_OP]
 
 
@@ -2544,26 +3613,30 @@ async def test_deploy_from_library_power_on_after_deploy(gate: _GateRecorder) ->
     """power_on=true → deploy then a gated power-start; powered_on=true."""
     conn = _RecordingConnector(
         {
-            "/api/vcenter/ovf/library-item/li-ovf?action=deploy": _deployment_result(
-                succeeded=True, vm_id="vm-ovf-7"
-            ),
+            _DEPLOY_PATH: _deployment_result(succeeded=True, vm_id="vm-ovf-7"),
             "/api/vcenter/vm/vm-ovf-7/power?action=start": {},
-        }
+        },
+        vmomi=_rename_vmomi("vm-ovf-7"),
     )
     out = await vm_deploy_from_library_composite(
         operator=_make_operator(),
         target=object(),
-        params={"library_item": "li-ovf", "resource_pool": "resgroup-8", "power_on": True},
+        params={**_DEPLOY_PARAMS_NAMED, "power_on": True},
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "deployed"
     assert out["powered_on"] is True
     assert out["issues"] == []
     assert [(c["method"], c["path"]) for c in conn.calls] == [
-        ("POST", "/api/vcenter/ovf/library-item/li-ovf?action=deploy"),
+        ("POST", _DEPLOY_PATH),
         ("POST", "/api/vcenter/vm/vm-ovf-7/power?action=start"),
     ]
-    assert gate.gated_op_ids == [_DEPLOY_OVF_OP, "POST:/vcenter/vm/{vm}/power?action=start"]
+    # Deploy, then the rename to the caller's name, then the power-on.
+    assert gate.gated_op_ids == [
+        _DEPLOY_OVF_OP,
+        _RENAME_VM_OP,
+        "POST:/vcenter/vm/{vm}/power?action=start",
+    ]
 
 
 @pytest.mark.asyncio
@@ -2576,16 +3649,15 @@ async def test_deploy_from_library_power_on_failure_stays_deployed(gate: _GateRe
     )
     conn = _RecordingConnector(
         {
-            "/api/vcenter/ovf/library-item/li-ovf?action=deploy": _deployment_result(
-                succeeded=True, vm_id="vm-ovf-7"
-            ),
+            _DEPLOY_PATH: _deployment_result(succeeded=True, vm_id="vm-ovf-7"),
             "/api/vcenter/vm/vm-ovf-7/power?action=start": fault,
-        }
+        },
+        vmomi=_rename_vmomi("vm-ovf-7"),
     )
     out = await vm_deploy_from_library_composite(
         operator=_make_operator(),
         target=object(),
-        params={"library_item": "li-ovf", "resource_pool": "resgroup-8", "power_on": True},
+        params={**_DEPLOY_PARAMS_NAMED, "power_on": True},
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "deployed"
@@ -2594,6 +3666,328 @@ async def test_deploy_from_library_power_on_failure_stays_deployed(gate: _GateRe
     assert len(out["issues"]) == 1
     assert out["issues"][0]["category"] == "power_on"
     assert out["issues"][0]["severity"] == "warning"
+
+
+# ---------------------------------------------------------------------------
+# #3697 — an approval re-enters the composite with the state its park saved:
+# the deploy keeps its name, a follow-on step continues on the existing VM.
+# ---------------------------------------------------------------------------
+
+
+_DEPLOY_COMPOSITE_OP = "vmware.composite.vm.deploy_from_library"
+_DEPLOYED_STATE = {
+    "vm_id": "vm-ovf-1",
+    "resource_type": "VirtualMachine",
+    "library_item_id": "li-ovf",
+    "name": "router-01",
+    "step": "rename",
+    "issues": [],
+}
+
+
+@contextlib.contextmanager
+def _resumed(op_id: str, state: dict[str, Any]) -> Iterator[None]:
+    """Bind the state a parked sub-op of *op_id* saved, as the resume binding does."""
+    token = composite_resume_state_var.set((op_id, state))
+    try:
+        yield
+    finally:
+        composite_resume_state_var.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_deploy_park_saves_the_deploy_name(
+    gate: _GateRecorder, deploy_token: str
+) -> None:
+    """The deploy sub-op's gate carries the deploy name as resume state (#3697)."""
+    conn = _RecordingConnector(
+        [_deployment_result(succeeded=True, vm_id="vm-ovf-1")], vmomi=_rename_vmomi("vm-ovf-1")
+    )
+    await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert gate.resume_state(_DEPLOY_OVF_OP) == {"deploy_name": _DEPLOY_NAME}
+    # The deploy itself is the main effect: its park re-runs the composite.
+    assert gate.after_main_effect_op_ids == [_RENAME_VM_OP]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_resumed_deploy_keeps_the_saved_deploy_name(
+    gate: _GateRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resumed deploy runs under the name its first run chose, not a new one (#3697).
+
+    The approved sub-op clears its gate by params hash; a fresh token would
+    change the deploy name inside the body and the approval would not match.
+    """
+    monkeypatch.setattr(_write, "_new_deploy_token", lambda: pytest.fail("new token drawn"))
+    conn = _RecordingConnector(
+        [_deployment_result(succeeded=True, vm_id="vm-ovf-1")], vmomi=_rename_vmomi("vm-ovf-1")
+    )
+    with _resumed(_DEPLOY_COMPOSITE_OP, {"deploy_name": _DEPLOY_NAME}):
+        out = await vm_deploy_from_library_composite(
+            operator=_make_operator(),
+            target=object(),
+            params=dict(_DEPLOY_PARAMS_NAMED),
+            connector=conn,  # type: ignore[arg-type]
+        )
+    assert out["status"] == "deployed"
+    assert conn.calls[0]["body"]["deployment_spec"]["name"] == _DEPLOY_NAME
+    assert gate.calls[0]["params"]["deployment_spec"]["name"] == _DEPLOY_NAME
+    assert conn.vmomi_calls[0] == ("/VirtualMachine/vm-ovf-1/Rename_Task", {"newName": "router-01"})
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_rename_park_saves_the_vm_and_defers_the_power_on(
+    monkeypatch: pytest.MonkeyPatch, deploy_token: str
+) -> None:
+    """A parked rename saves the deployed VM; the power-on waits for that approval (#3697).
+
+    Approving the one request finishes the deploy: the resume renames the
+    VM and then powers it on. So the first run does not power on a VM whose
+    rename is still waiting, and the envelope says why.
+    """
+    gate = _install_gate(
+        monkeypatch, _GateRecorder(gate_for={_RENAME_VM_OP: _awaiting(_RENAME_VM_OP)})
+    )
+    conn = _RecordingConnector([_deployment_result(succeeded=True, vm_id="vm-ovf-1")])
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={**_DEPLOY_PARAMS_NAMED, "power_on": True},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deployed"
+    assert out["powered_on"] is False
+    assert [c["method"] for c in conn.calls] == ["POST"], "no power-on after a parked rename"
+    assert gate.gated_op_ids == [_DEPLOY_OVF_OP, _RENAME_VM_OP]
+    assert gate.resume_state(_RENAME_VM_OP) == {
+        "deploy_name": _DEPLOY_NAME,
+        "deployed": _DEPLOYED_STATE,
+    }
+    assert [(i["category"], i["severity"]) for i in out["issues"]] == [
+        ("rename", "warning"),
+        ("power_on", "warning"),
+    ]
+    assert out["issues"][1]["message"] == (
+        "the power-on runs once the rename's approval request is approved"
+    )
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_resumed_at_the_rename_renames_and_powers_on_only(
+    gate: _GateRecorder,
+) -> None:
+    """A resume at the rename step renames the existing VM and powers it on; no deploy (#3697)."""
+    conn = _RecordingConnector(
+        {"/api/vcenter/vm/vm-ovf-1/power?action=start": {}}, vmomi=_rename_vmomi("vm-ovf-1")
+    )
+    with _resumed(_DEPLOY_COMPOSITE_OP, {"deploy_name": _DEPLOY_NAME, "deployed": _DEPLOYED_STATE}):
+        out = await vm_deploy_from_library_composite(
+            operator=_make_operator(),
+            target=object(),
+            params={**_DEPLOY_PARAMS_NAMED, "power_on": True},
+            connector=conn,  # type: ignore[arg-type]
+        )
+    assert out == {
+        "status": "deployed",
+        "vm_id": "vm-ovf-1",
+        "resource_type": "VirtualMachine",
+        "library_item_id": "li-ovf",
+        "powered_on": True,
+        "issues": [],
+        "candidates": None,
+    }
+    # No item resolution, no OVF summary, no deploy: only the two follow-on writes.
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("POST", "/api/vcenter/vm/vm-ovf-1/power?action=start")
+    ]
+    assert conn.vmomi_calls[0] == ("/VirtualMachine/vm-ovf-1/Rename_Task", {"newName": "router-01"})
+    assert gate.gated_op_ids == [_RENAME_VM_OP, _write._power_vm_op_id("start")]
+    # The power-on's own park would continue at the power-on, rename done.
+    assert gate.resume_state(_write._power_vm_op_id("start")) == {
+        "deploy_name": _DEPLOY_NAME,
+        "deployed": {**_DEPLOYED_STATE, "step": "power_on"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_resumed_at_the_power_on_only_powers_on(
+    gate: _GateRecorder,
+) -> None:
+    """A resume at the power-on step keeps the saved issues and skips the rename (#3697)."""
+    rename_warning = _write._deploy_issue("rename", "warning", "deployed as x; rename to y faulted")
+    state = {**_DEPLOYED_STATE, "step": "power_on", "issues": [rename_warning]}
+    conn = _RecordingConnector({"/api/vcenter/vm/vm-ovf-1/power?action=start": {}})
+    with _resumed(_DEPLOY_COMPOSITE_OP, {"deploy_name": _DEPLOY_NAME, "deployed": state}):
+        out = await vm_deploy_from_library_composite(
+            operator=_make_operator(),
+            target=object(),
+            params={**_DEPLOY_PARAMS_NAMED, "power_on": True},
+            connector=conn,  # type: ignore[arg-type]
+        )
+    assert out["status"] == "deployed"
+    assert out["powered_on"] is True
+    assert out["issues"] == [rename_warning]
+    assert conn.vmomi_calls == []
+    assert gate.gated_op_ids == [_write._power_vm_op_id("start")]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_cleanup_park_saves_the_failed_deploy(
+    monkeypatch: pytest.MonkeyPatch, deploy_token: str
+) -> None:
+    """A parked cleanup DELETE saves the failed deploy as its resume state (#3697)."""
+    gate = _install_gate(
+        monkeypatch, _GateRecorder(gate_for={_DELETE_VM_OP: _awaiting(_DELETE_VM_OP)})
+    )
+    conn = _RecordingConnector(
+        [
+            {
+                "succeeded": False,
+                "resource_id": {"type": "VirtualMachine", "id": "vm-partial"},
+                "error": {"errors": [{"name": "disk", "category": "SERVER"}]},
+            },
+            [{"vm": "vm-partial", "name": _DEPLOY_NAME}],
+        ],
+        vmomi=_NO_VAPPS,
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deploy_failed"
+    (ovf_issue, cleanup_issue) = out["issues"]
+    assert cleanup_issue["category"] == "cleanup"
+    assert gate.resume_state(_DELETE_VM_OP) == {
+        "deploy_name": _DEPLOY_NAME,
+        "failed": {
+            "status": "deploy_failed",
+            "library_item_id": "li-ovf",
+            "reported": ["vm-partial", "VirtualMachine"],
+            "issues": [ovf_issue],
+        },
+    }
+    assert gate.after_main_effect_op_ids == [_DELETE_VM_OP]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_resumed_cleanup_removes_what_is_still_there(
+    gate: _GateRecorder,
+) -> None:
+    """A resume of a parked cleanup re-runs the cleanup only; no second deploy (#3697).
+
+    The saved failure envelope is rebuilt around the fresh cleanup outcome.
+    """
+    ovf_issue = _write._deploy_issue("placement", "error", "OVF deploy call faulted: 400")
+    failed = {
+        "status": "deploy_error",
+        "library_item_id": "li-ovf",
+        "reported": None,
+        "issues": [ovf_issue],
+    }
+    conn = _RecordingConnector(
+        [[{"vm": "vm-partial", "name": _DEPLOY_NAME}], None], vmomi=_NO_VAPPS
+    )
+    with _resumed(_DEPLOY_COMPOSITE_OP, {"deploy_name": _DEPLOY_NAME, "failed": failed}):
+        out = await vm_deploy_from_library_composite(
+            operator=_make_operator(),
+            target=object(),
+            params=dict(_DEPLOY_PARAMS_NAMED),
+            connector=conn,  # type: ignore[arg-type]
+        )
+    assert out == {
+        "status": "deploy_error",
+        "vm_id": None,
+        "resource_type": None,
+        "library_item_id": "li-ovf",
+        "powered_on": False,
+        "issues": [
+            ovf_issue,
+            _write._deploy_issue(
+                "cleanup", "info", "removed VM vm-partial left by the failed deploy"
+            ),
+        ],
+        "candidates": None,
+    }
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("GET", _LIST_VMS_PATH),
+        ("DELETE", "/api/vcenter/vm/vm-partial"),
+    ]
+    assert conn.calls[0]["query"] == {"names": [_DEPLOY_NAME]}
+    assert gate.gated_op_ids == [_DELETE_VM_OP]
+
+
+@pytest.mark.asyncio
+async def test_vm_create_rollback_park_saves_the_rollback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """vm.create's rollback DELETE saves what its resume needs (#3697)."""
+    gate = _install_gate(
+        monkeypatch, _GateRecorder(gate_for={_DELETE_VM_OP: _awaiting(_DELETE_VM_OP)})
+    )
+    conn = _RecordingConnector(
+        [
+            [{"folder": "folder-1", "name": "Prod"}],
+            {"value": "vm-77"},
+            _http_error(400, "https://vc/api/vcenter/vm/vm-77/network"),
+        ]
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder_name": "Prod",
+            "name": "web-02",
+            "guest_os": "UBUNTU_64",
+            "nics": [{"network": "net-x"}],
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "rolled_back"
+    assert [c["method"] for c in conn.calls] == ["GET", "POST", "POST"], "DELETE parked"
+    assert gate.after_main_effect_op_ids == [_DELETE_VM_OP]
+    assert gate.resume_state(_DELETE_VM_OP) == {
+        "rollback": {
+            "vm_id": "vm-77",
+            "steps": ["folder_lookup", "create"],
+            "failed_step": "nic_attach",
+            "reason": out["rollback_reason"],
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_vm_create_resumed_rollback_only_deletes_the_vm(gate: _GateRecorder) -> None:
+    """A resume of a parked rollback DELETE deletes that VM and creates nothing (#3697)."""
+    rollback = {
+        "vm_id": "vm-77",
+        "steps": ["folder_lookup", "create"],
+        "failed_step": "nic_attach",
+        "reason": "nic attach for network='net-x' failed: 400",
+    }
+    conn = _RecordingConnector({"/api/vcenter/vm/vm-77": {}})
+    with _resumed("vmware.composite.vm.create", {"rollback": rollback}):
+        out = await vm_create_composite(
+            operator=_make_operator(),
+            target=object(),
+            params={"folder_name": "Prod", "name": "web-02", "guest_os": "UBUNTU_64"},
+            connector=conn,  # type: ignore[arg-type]
+        )
+    assert out == {
+        "status": "rolled_back",
+        "vm_id": None,
+        "steps_succeeded": ["folder_lookup", "create"],
+        "failed_step": "nic_attach",
+        "rollback_reason": "nic attach for network='net-x' failed: 400",
+    }
+    assert [(c["method"], c["path"]) for c in conn.calls] == [("DELETE", "/api/vcenter/vm/vm-77")]
+    assert gate.gated_op_ids == [_DELETE_VM_OP]
 
 
 # ===========================================================================

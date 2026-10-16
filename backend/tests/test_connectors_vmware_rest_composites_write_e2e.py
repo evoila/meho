@@ -441,6 +441,9 @@ def _benign_responses_for(composite_op_id: str) -> dict[str, Any]:
         # deploy_from_library: id passthrough → no finds; the synchronous OVF
         # deploy returns a DeploymentResult that succeeds → status='deployed'.
         "vmware.composite.vm.deploy_from_library": {
+            # No ``name`` in the benign params: the OVF summary supplies the
+            # default VM name the deploy name is built from (#3697).
+            "/vcenter/ovf/library-item/li-1?action=filter": {"name": "ovf-default"},
             "/vcenter/ovf/library-item/li-1?action=deploy": {
                 "succeeded": True,
                 "resource_id": {"type": "VirtualMachine", "id": "vm-benign"},
@@ -520,6 +523,10 @@ def _benign_vmomi_for(composite_op_id: str) -> dict[str, Any]:
         },
         "vmware.composite.host.evacuate": {
             "/HostSystem/host-1/EnterMaintenanceMode_Task": _vmomi_task_moref("t-enter-benign"),
+        },
+        # #3697: the deployed VM is renamed from its unique deploy name.
+        "vmware.composite.vm.deploy_from_library": {
+            "/VirtualMachine/vm-benign/Rename_Task": _vmomi_task_moref("t-rename-benign"),
         },
         "vmware.composite.host.detach_from_vds": {
             "DistributedVirtualSwitch": _vmomi_retrieve_result(
@@ -1603,10 +1610,14 @@ async def test_deploy_from_library_queue_approve_resume_with_2681_envelope(
        ``status='deployed'``.
     """
     recorder = _RecordingVmwareConnector()
+    recorder.responses["/vcenter/ovf/library-item/li-1?action=filter"] = {"name": "ovf-default"}
     recorder.responses["/vcenter/ovf/library-item/li-1?action=deploy"] = {
         "succeeded": True,
         "resource_id": {"type": "VirtualMachine", "id": "vm-ovf-9"},
     }
+    recorder.vmomi_responses["/VirtualMachine/vm-ovf-9/Rename_Task"] = _vmomi_task_moref(
+        "t-rename-9"
+    )
     await _bootstrap(recorder, stub_embedding_service)
 
     target_id = uuid.uuid4()
@@ -1687,8 +1698,341 @@ async def test_deploy_from_library_queue_approve_resume_with_2681_envelope(
     assert result2.status == "ok", result2.error
     assert result2.result["status"] == "deployed"
     assert result2.result["vm_id"] == "vm-ovf-9"
-    # The synchronous OVF deploy fired exactly once, on the approved resume.
+    # The synchronous OVF deploy fired exactly once, on the approved resume,
+    # after the un-gated OVF summary read (#3697: no ``name`` in the params).
+    assert recorder.calls == [
+        ("POST", "/vcenter/ovf/library-item/li-1?action=filter"),
+        ("POST", "/vcenter/ovf/library-item/li-1?action=deploy"),
+    ]
+    assert recorder.vmomi_calls[0] == (
+        "/VirtualMachine/vm-ovf-9/Rename_Task",
+        {"newName": "ovf-default"},
+    )
+
+
+# ===========================================================================
+# vm.deploy_from_library — a park after the VM exists resumes on that VM (#3697)
+# ===========================================================================
+#
+# The rename, the power-on and the cleanup removals run after the deploy's
+# main effect exists. Their parks keep the parent composite on the row (the
+# resume must go through the composite's built-in code: with nothing
+# ingested, a generic re-dispatch of the sub-op's key would be ``unknown_op``
+# and the VM would stay behind) plus the state that makes the re-entry
+# continue at that step instead of deploying a second VM. The deploy itself
+# saves its unique deploy name, so a resumed deploy keeps the params hash the
+# human approved.
+
+_DEPLOY_OP_ID = "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy"
+_RENAME_VM_OP_ID = "POST:/VirtualMachine/{moId}/Rename_Task"
+_DEPLOY_NAMED_PARAMS: dict[str, Any] = {
+    "library_item": "li-1",
+    "name": "web-01",
+    "resource_pool": "resgroup-8",
+}
+
+
+class _DeployRecordingVmwareConnector(_RecordingVmwareConnector):
+    """A recorder that also keeps the OVF deploy bodies, to read the deploy name."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.deploy_bodies: list[dict[str, Any]] = []
+
+    async def _post_json(
+        self,
+        target: Any,
+        path: str,
+        *,
+        operator: Operator,
+        verb: str = "POST",
+        json: Any = None,
+        data: Any = None,
+        extra_headers: Any = None,
+        timeout: Any = None,
+    ) -> Any:
+        if self._spec(path).endswith("?action=deploy"):
+            self.deploy_bodies.append(json)
+        return await super()._post_json(
+            target, path, operator=operator, verb=verb, json=json, timeout=timeout
+        )
+
+
+def _deploy_recorder(*, succeeded: bool) -> _DeployRecordingVmwareConnector:
+    """A recorder serving one OVF deploy of ``vm-ovf-9``, its rename and its cleanup reads."""
+    recorder = _DeployRecordingVmwareConnector()
+    recorder.responses["/vcenter/ovf/library-item/li-1?action=deploy"] = {
+        "succeeded": succeeded,
+        "resource_id": {"type": "VirtualMachine", "id": "vm-ovf-9"},
+    }
+    recorder.vmomi_responses["/VirtualMachine/vm-ovf-9/Rename_Task"] = _vmomi_task_moref(
+        "t-rename-9"
+    )
+    # The cleanup's two lookups by deploy name: the VM listing (the recorder
+    # serves it whatever the name filter says) and the pool's child vApps.
+    recorder.responses["/vcenter/vm"] = {"value": [{"vm": "vm-ovf-9", "name": "web-01-meho-x"}]}
+    recorder.vmomi_responses["ResourcePool"] = _vmomi_retrieve_result(
+        "ResourcePool", "resgroup-8", "resourcePool", []
+    )
+    return recorder
+
+
+async def _seed_service_grant(*, op_id: str, target_id: UUID) -> None:
+    """Grant the ``svc-blueprint`` service principal a standing grant on one op."""
+    async with get_sessionmaker()() as s:
+        s.add(
+            ServicePrincipalGrant(
+                id=uuid.uuid4(),
+                tenant_id=_TENANT_ID,
+                principal_sub="svc-blueprint",
+                op_id=op_id,
+                connector_id=_CONNECTOR_ID,
+                target_id=target_id,
+                reason="unattended build",
+                created_by_sub="ops-admin",
+            )
+        )
+        await s.commit()
+
+
+async def _service_deploys_until_a_follow_on_parks(
+    recorder: _DeployRecordingVmwareConnector, *, parked_op_id: str
+) -> tuple[Operator, UUID, ApprovalRequest]:
+    """Run the deploy as a service principal with grants on the composite and the deploy only.
+
+    The deploy runs; the first follow-on write (*parked_op_id*) has no grant
+    and parks. Returns the reviewer, the parked request id and its row.
+    """
+    target_id = await _persist_vmware_target()
+    for op_id in ("vmware.composite.vm.deploy_from_library", _DEPLOY_OP_ID):
+        await _seed_service_grant(op_id=op_id, target_id=target_id)
+    svc = _make_operator(sub="svc-blueprint", principal_kind=PrincipalKind.SERVICE)
+    result = await dispatch(
+        operator=svc,
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.vm.deploy_from_library",
+        target=_FakeVmwareTarget(target_id=target_id),
+        params=_DEPLOY_NAMED_PARAMS,
+    )
+    assert result.status == "ok", result.error
+    request_id = UUID(result.result["issues"][-1]["message"].rsplit(" ", 1)[-1])
+    async with get_sessionmaker()() as s:
+        pending = await s.get(ApprovalRequest, request_id)
+    assert pending is not None
+    assert pending.op_id == parked_op_id
+    assert pending.status == ApprovalRequestStatus.PENDING.value
+    reviewer = await _approve_as_reviewer(request_id)
+    return reviewer, request_id, pending
+
+
+@pytest.mark.asyncio
+async def test_deploy_rename_park_approve_resume_renames_the_deployed_vm_without_ingest(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A parked rename, approved, renames the VM through the composite; no second deploy.
+
+    Nothing is ingested, so the vim rename op has no descriptor. The park
+    records the parent composite with the deployed VM as its state, and the
+    resume re-enters the composite at the rename: one ``Rename_Task`` on the
+    existing VM, no ``unknown_op``, and the OVF deploy fired exactly once.
+    """
+    recorder = _deploy_recorder(succeeded=True)
+    await _bootstrap(recorder, stub_embedding_service)
+    reviewer, request_id, pending = await _service_deploys_until_a_follow_on_parks(
+        recorder, parked_op_id=_RENAME_VM_OP_ID
+    )
     assert recorder.calls == [("POST", "/vcenter/ovf/library-item/li-1?action=deploy")]
+    assert recorder.vmomi_calls == [], "the rename waits for approval"
+    deploy_name = recorder.deploy_bodies[0]["deployment_spec"]["name"]
+    assert deploy_name.startswith("web-01-meho-")
+    assert pending.params == {"moId": "vm-ovf-9", "body": {"newName": "web-01"}}
+    assert pending.resume_parent == {
+        "op_id": "vmware.composite.vm.deploy_from_library",
+        "params": _DEPLOY_NAMED_PARAMS,
+        "state": {
+            "deploy_name": deploy_name,
+            "deployed": {
+                "vm_id": "vm-ovf-9",
+                "resource_type": "VirtualMachine",
+                "library_item_id": "li-1",
+                "name": "web-01",
+                "step": "rename",
+                "issues": [],
+            },
+        },
+    }
+
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+    assert row is not None
+    resume = await resume_dispatch_after_approval(operator=reviewer, request=row, params=None)
+
+    assert resume.status == "ok", resume.error
+    assert resume.result["status"] == "deployed"
+    assert resume.result["vm_id"] == "vm-ovf-9"
+    assert resume.result["issues"] == []
+    # The resume issued the rename only: the deploy did not run a second time.
+    assert recorder.calls == [("POST", "/vcenter/ovf/library-item/li-1?action=deploy")]
+    assert recorder.vmomi_calls[0] == (
+        "/VirtualMachine/vm-ovf-9/Rename_Task",
+        {"newName": "web-01"},
+    )
+    assert await _approval_row_count() == 1
+
+
+@pytest.mark.asyncio
+async def test_deploy_cleanup_park_approve_resume_deletes_the_partial_vm_without_ingest(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A parked cleanup DELETE, approved, removes the partial VM through the composite.
+
+    The deploy reports ``succeeded=false`` and names the VM it left. The
+    service principal has no grant on the delete, so the cleanup parks with
+    the failed deploy as its state. The resume re-enters the composite,
+    which re-runs the cleanup: the DELETE fires on the existing VM, the
+    deploy does not run again, and the envelope is the failure with the
+    cleanup reported.
+    """
+    recorder = _deploy_recorder(succeeded=False)
+    await _bootstrap(recorder, stub_embedding_service)
+    reviewer, request_id, pending = await _service_deploys_until_a_follow_on_parks(
+        recorder, parked_op_id="DELETE:/vcenter/vm/{vm}"
+    )
+    assert recorder.calls == [
+        ("POST", "/vcenter/ovf/library-item/li-1?action=deploy"),
+        ("GET", "/vcenter/vm"),
+    ]
+    deploy_name = recorder.deploy_bodies[0]["deployment_spec"]["name"]
+    assert pending.params == {"vm": "vm-ovf-9"}
+    assert pending.resume_parent == {
+        "op_id": "vmware.composite.vm.deploy_from_library",
+        "params": _DEPLOY_NAMED_PARAMS,
+        "state": {
+            "deploy_name": deploy_name,
+            "failed": {
+                "status": "deploy_failed",
+                "library_item_id": "li-1",
+                "reported": ["vm-ovf-9", "VirtualMachine"],
+                "issues": [],
+            },
+        },
+    }
+
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+    assert row is not None
+    resume = await resume_dispatch_after_approval(operator=reviewer, request=row, params=None)
+
+    assert resume.status == "ok", resume.error
+    assert resume.result["status"] == "deploy_failed"
+    assert resume.result["issues"] == [
+        {
+            "category": "cleanup",
+            "severity": "info",
+            "message": "removed VM vm-ovf-9 left by the failed deploy",
+        }
+    ]
+    # The resume looked the deploy name up again and deleted the VM; no second deploy.
+    assert recorder.calls == [
+        ("POST", "/vcenter/ovf/library-item/li-1?action=deploy"),
+        ("GET", "/vcenter/vm"),
+        ("GET", "/vcenter/vm"),
+        ("DELETE", "/vcenter/vm/vm-ovf-9"),
+    ]
+    assert await _approval_row_count() == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_waiter_resumes_a_parked_deploy_under_the_same_deploy_name(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """The agent path resumes an approved deploy with the deploy name its park saved.
+
+    With the real token generator the first run draws a random deploy name
+    into the deploy body. The approved sub-op clears its gate by params
+    hash, so the resume must deploy under that same name — a fresh token
+    would leave the deploy parked again (or refused) and nothing deployed.
+    The agent's rename then parks on its own row during the resume (a write
+    after the main effect is allowed to), with the deployed VM as its state.
+    """
+    recorder = _deploy_recorder(succeeded=True)
+    await _bootstrap(recorder, stub_embedding_service)
+    target_id = await _persist_vmware_target()
+    await _seed_agent_needs_approval_grant("POST:/vcenter/ovf/*")
+    await _seed_agent_needs_approval_grant("POST:/VirtualMachine/*")
+    agent = _make_operator(sub=_AGENT_SUB, principal_kind=PrincipalKind.AGENT)
+
+    request_id, envelope = await _agent_parks_subop(
+        agent=agent,
+        composite_op_id="vmware.composite.vm.deploy_from_library",
+        target_id=target_id,
+        params=_DEPLOY_NAMED_PARAMS,
+    )
+    assert recorder.calls == [], "the deploy must not fire before approval"
+    async with get_sessionmaker()() as s:
+        pending = await s.get(ApprovalRequest, request_id)
+    assert pending is not None
+    assert pending.op_id == _DEPLOY_OP_ID
+    approved_name = pending.params["deployment_spec"]["name"]
+    assert approved_name.startswith("web-01-meho-")
+    assert pending.resume_parent == {
+        "op_id": "vmware.composite.vm.deploy_from_library",
+        "params": _DEPLOY_NAMED_PARAMS,
+        "state": {"deploy_name": approved_name},
+    }
+
+    await _approve_as_reviewer(request_id)
+    resumed = await _resume_approved_or_already_resumed(
+        operator=agent,
+        call_arguments=_agent_call_arguments(
+            "vmware.composite.vm.deploy_from_library", _DEPLOY_NAMED_PARAMS
+        ),
+        awaiting_envelope=envelope,
+        approval_request_id=request_id,
+    )
+
+    assert resumed["status"] == "ok", resumed
+    assert resumed["result"]["status"] == "deployed"
+    assert resumed["result"]["vm_id"] == "vm-ovf-9"
+    # One deploy, under the approved name — not a second park, not a refusal.
+    assert recorder.calls == [("POST", "/vcenter/ovf/library-item/li-1?action=deploy")]
+    assert [body["deployment_spec"]["name"] for body in recorder.deploy_bodies] == [approved_name]
+    # The rename parked on its own row, naming it; its resume continues at
+    # the rename of this VM.
+    assert recorder.vmomi_calls == []
+    (rename_issue,) = resumed["result"]["issues"]
+    assert rename_issue["category"] == "rename"
+    assert (
+        f"deployed as {approved_name!r}; rename to 'web-01' waits for approval request "
+        in (rename_issue["message"])
+    )
+    assert await _approval_row_count() == 2
+    rename_request_id = UUID(rename_issue["message"].rsplit(" ", 1)[-1])
+    async with get_sessionmaker()() as s:
+        rename_row = await s.get(ApprovalRequest, rename_request_id)
+    assert rename_row is not None
+    assert rename_row.op_id == _RENAME_VM_OP_ID
+    assert rename_row.resume_parent == {
+        "op_id": "vmware.composite.vm.deploy_from_library",
+        "params": _DEPLOY_NAMED_PARAMS,
+        "state": {
+            "deploy_name": approved_name,
+            "deployed": {
+                "vm_id": "vm-ovf-9",
+                "resource_type": "VirtualMachine",
+                "library_item_id": "li-1",
+                "name": "web-01",
+                "step": "rename",
+                "issues": [],
+            },
+        },
+    }
 
 
 # ===========================================================================
@@ -2977,23 +3321,28 @@ async def test_content_library_subscribed_create_500_on_resume_reaches_approver(
 _AGENT_SUB = "agent-runner"
 
 
-async def _seed_agent_needs_approval_grant(op_pattern: str) -> None:
-    """Give the agent a ``needs-approval`` grant so its governed sub-op parks.
-
-    Without a grant a ``dangerous`` sub-op is denied for an agent; with one it
-    parks (the ``dangerous`` ceiling), which is the shape under test.
-    """
+async def _seed_agent_grant(op_pattern: str, *, verdict: str) -> None:
+    """Give the agent an :class:`AgentPermission` row for *op_pattern*."""
     async with get_sessionmaker()() as s:
         s.add(
             AgentPermission(
                 tenant_id=_TENANT_ID,
                 principal_sub=_AGENT_SUB,
                 op_pattern=op_pattern,
-                verdict="needs-approval",
+                verdict=verdict,
                 created_by_sub="ops-admin",
             )
         )
         await s.commit()
+
+
+async def _seed_agent_needs_approval_grant(op_pattern: str) -> None:
+    """Give the agent a ``needs-approval`` grant so its governed sub-op parks.
+
+    Without a grant a ``dangerous`` sub-op is denied for an agent; with one it
+    parks (the ``dangerous`` ceiling), which is the shape under test.
+    """
+    await _seed_agent_grant(op_pattern, verdict="needs-approval")
 
 
 async def _agent_parks_subop(

@@ -20,10 +20,15 @@ spec:
     type: Recreate
   template:
     metadata:
-      {{- with .Values.podAnnotations }}
       annotations:
+        # Valkey reads valkey.conf only at start-up. The checksum changes
+        # the pod template whenever the ConfigMap changes (for example a
+        # new `maxmemory` or `maxmemoryPolicy`), so a Helm upgrade restarts
+        # the pod and the new settings take effect.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
       labels:
         {{- include "resultCache.selectorLabels" . | nindent 8 }}
         {{- with .Values.podLabels }}

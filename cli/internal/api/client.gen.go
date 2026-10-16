@@ -53,6 +53,14 @@ const (
 	ApprovalRequestStatusRejected ApprovalRequestStatus = "rejected"
 )
 
+// Defines values for ApprovalResultState.
+const (
+	ApprovalResultStateExecuted   ApprovalResultState = "executed"
+	ApprovalResultStateFailed     ApprovalResultState = "failed"
+	ApprovalResultStateNotStarted ApprovalResultState = "not_started"
+	ApprovalResultStateStarted    ApprovalResultState = "started"
+)
+
 // Defines values for AuthModel.
 const (
 	AuthModelImpersonation        AuthModel = "impersonation"
@@ -1397,12 +1405,32 @@ type ApprovalRequestView struct {
 	Id             openapi_types.UUID     `json:"id"`
 	OpId           string                 `json:"op_id"`
 	ParamsHash     string                 `json:"params_hash"`
+	PreviewHash    *string                `json:"preview_hash"`
 	PrincipalAct   *string                `json:"principal_act"`
 	PrincipalName  *string                `json:"principal_name"`
 	PrincipalSub   string                 `json:"principal_sub"`
 	ProposedEffect map[string]interface{} `json:"proposed_effect"`
-	ReviewedBy     *string                `json:"reviewed_by"`
-	ReviewedByName *string                `json:"reviewed_by_name"`
+
+	// ResultState Whether an approved request has run yet (#3486).
+	//
+	// Read off the row, never stored. ``status`` keeps its closed four-state
+	// contract; this field adds the run phase next to it, so a client that
+	// lists or shows requests can tell "approved, not run yet" from
+	// "approved and run" without polling the owner-only ``/result`` read.
+	//
+	// * :attr:`NOT_STARTED` -- approved, and no resumer has claimed the run
+	//   yet (``resumed_at IS NULL``).
+	// * :attr:`STARTED` -- a resumer claimed the run (``resumed_at`` is set),
+	//   but no result is stored. Either the op is still running, or the run
+	//   ended without a stored result: the result write is best-effort, and a
+	//   re-dispatch that raised instead of returning an envelope stores
+	//   nothing. Both resume paths (operator surfaces and the in-process
+	//   agent waiter) store the envelope they get back.
+	// * :attr:`EXECUTED` -- the stored result has ``status == "ok"``.
+	// * :attr:`FAILED` -- a result is stored and its ``status`` is not ``ok``.
+	ResultState    *ApprovalResultState `json:"result_state,omitempty"`
+	ReviewedBy     *string              `json:"reviewed_by"`
+	ReviewedByName *string              `json:"reviewed_by_name"`
 
 	// ReviewerContext Redacted, human-legible context for judging a parked request (#3353).
 	//
@@ -1447,6 +1475,25 @@ type ApprovalRequestView struct {
 	TenantId openapi_types.UUID    `json:"tenant_id"`
 	WorkRef  *string               `json:"work_ref"`
 }
+
+// ApprovalResultState Whether an approved request has run yet (#3486).
+//
+// Read off the row, never stored. “status“ keeps its closed four-state
+// contract; this field adds the run phase next to it, so a client that
+// lists or shows requests can tell "approved, not run yet" from
+// "approved and run" without polling the owner-only “/result“ read.
+//
+//   - :attr:`NOT_STARTED` -- approved, and no resumer has claimed the run
+//     yet (“resumed_at IS NULL“).
+//   - :attr:`STARTED` -- a resumer claimed the run (“resumed_at“ is set),
+//     but no result is stored. Either the op is still running, or the run
+//     ended without a stored result: the result write is best-effort, and a
+//     re-dispatch that raised instead of returning an envelope stores
+//     nothing. Both resume paths (operator surfaces and the in-process
+//     agent waiter) store the envelope they get back.
+//   - :attr:`EXECUTED` -- the stored result has “status == "ok"“.
+//   - :attr:`FAILED` -- a result is stored and its “status“ is not “ok“.
+type ApprovalResultState string
 
 // ApprovalResultView Principal-scoped view of an approved dispatch's result (#3209).
 //
@@ -3187,10 +3234,13 @@ type BudgetStatus struct {
 // tracker API call (Goal #1651 ships the field only).
 type CallOperationBody struct {
 	// Async Async governed dispatch (#3079). When true, ``/call`` returns a durable run handle (HTTP 202) immediately instead of holding the connection for the op's full duration; execution proceeds server-side and the caller polls / cancels via ``/api/v1/operations/runs/{handle}``. The completed ``OperationResult`` envelope is persisted on the run, so a dropped response never loses the outcome. Default false — sync mode is byte-identical to the pre-#3079 behaviour.
-	Async       *bool                   `json:"async,omitempty"`
-	ConnectorId string                  `json:"connector_id"`
-	OpId        string                  `json:"op_id"`
-	Params      *map[string]interface{} `json:"params,omitempty"`
+	Async       *bool  `json:"async,omitempty"`
+	ConnectorId string `json:"connector_id"`
+
+	// IdempotencyKey Optional retry key for a call that waits for approval (#3486). If you send the same key again with the identical call, MEHO returns the approval request it already made (same approval_request_id, extras.approval_request_reused=true) instead of a second one. The key belongs to you: another principal's key never matches. It is free again once that request is rejected or expires. The same key with a different call is refused with idempotency_key_conflict. Ignored when the call does not wait for approval.
+	IdempotencyKey *string                 `json:"idempotency_key"`
+	OpId           string                  `json:"op_id"`
+	Params         *map[string]interface{} `json:"params,omitempty"`
 
 	// PreviewHash Preview-result-hash binding for the destructive tier (#3197). The hash a prior preview_operation of the identical (connector_id, op_id, target, params) returned. REQUIRED for a safety_level='destructive' op — the dispatcher refuses to park the approval fail-closed unless it matches the server-recomputed preview hash. Ignored for every non-destructive op. None default keeps a bare call_operation byte-identical to pre-#3197.
 	PreviewHash *string                   `json:"preview_hash"`

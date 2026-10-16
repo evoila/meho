@@ -305,6 +305,7 @@ from meho_backplane.operations._errors import (
     result_connector_vault_write_forbidden,
     result_denied,
     result_handler_unreachable,
+    result_idempotency_key_conflict,
     result_invalid_op_schema,
     result_invalid_params,
     result_no_connector,
@@ -2500,6 +2501,7 @@ async def _handle_needs_approval(
     params_hash: str,
     duration_ms: float,
     preview_hash: str | None = None,
+    idempotency_key: str | None = None,
 ) -> OperationResult:
     """Create a durable pending approval row and return an awaiting_approval result.
 
@@ -2524,6 +2526,13 @@ async def _handle_needs_approval(
 
     On success returns :func:`~meho_backplane.operations._errors.result_awaiting_approval`
     with the pending row's id in ``extras["approval_request_id"]``.
+
+    With an ``idempotency_key`` (#3486), a retry of the same call by the
+    same principal returns the existing live row's id (and
+    ``extras["approval_request_reused"] = True``) instead of a new row; no
+    second ``approval.pending`` event is published. The gates above still
+    run first, unchanged. A key held by a different call is refused with
+    ``idempotency_key_conflict`` and nothing is parked.
     On unexpected failure, logs at error level and falls back to a
     ``denied`` result so the dispatcher never raises.
     """
@@ -2533,6 +2542,8 @@ async def _handle_needs_approval(
     from meho_backplane.db.engine import get_sessionmaker
     from meho_backplane.operations.approval_handoff import ApprovalHandoffKeyError
     from meho_backplane.operations.approval_queue import (
+        EXPIRY_OPERATOR_SUB,
+        IdempotencyKeyConflictError,
         create_pending_request,
         publish_approval_event,
     )
@@ -2615,11 +2626,23 @@ async def _handle_needs_approval(
                 run_id=run_id,
                 proposed_effect=proposed_effect,
                 preview_hash=preview_hash,
+                idempotency_key=idempotency_key,
             )
             await session.commit()
+        if getattr(request, "_reused", False):
+            return result_awaiting_approval(op_id, request.id, duration_ms, reused=True)
         # Publish AFTER commit so a phantom event cannot outlive a failed
         # transaction (the helper is fail-open: a broadcast outage does
         # not block the durable decision).
+        expired_request = getattr(request, "_expired_request", None)
+        if expired_request is not None:
+            await publish_approval_event(
+                tenant_id=operator.tenant_id,
+                request=expired_request,
+                decision="expired",
+                principal_sub=EXPIRY_OPERATOR_SUB,
+                audit_id=expired_request._audit_id,
+            )
         await publish_approval_event(
             tenant_id=operator.tenant_id,
             request=request,
@@ -2628,6 +2651,16 @@ async def _handle_needs_approval(
             audit_id=request._audit_id,  # type: ignore[attr-defined]
         )
         return result_awaiting_approval(op_id, request.id, duration_ms)
+    except IdempotencyKeyConflictError as exc:
+        return await _audit_denied_and_return(
+            result_idempotency_key_conflict(op_id, exc.request_id, duration_ms),
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
+        )
     except ApprovalHandoffKeyError:
         return result_denied(
             op_id,
@@ -2665,6 +2698,7 @@ async def dispatch(
     params: dict[str, Any],
     _approved: bool = False,
     preview_hash: str | None = None,
+    idempotency_key: str | None = None,
 ) -> OperationResult:
     """Single entry point for every MEHO operation.
 
@@ -2681,6 +2715,12 @@ async def dispatch(
     the server-recomputed preview hash (see :func:`_destructive_binding_refusal`).
     ``None`` (the default) for every non-destructive dispatch and on the
     ``_approved`` resume path (the binding was verified at park + approve).
+
+    ``idempotency_key`` is an optional client-chosen retry key (#3486). It
+    is consulted **only** when the call parks for approval: a retry of the
+    identical call by the same principal returns the existing live
+    approval request instead of a second one (see
+    :func:`_handle_needs_approval`). Ignored on every other path.
 
     ``_approved`` is an **internal** flag set only by the approval-queue
     resume path (:mod:`meho_backplane.api.v1.approvals`) after a human
@@ -2917,6 +2957,7 @@ async def dispatch(
                     params_hash=params_hash,
                     duration_ms=duration_ms,
                     preview_hash=preview_hash,
+                    idempotency_key=idempotency_key,
                 )
             if verdict is not PermissionVerdict.AUTO_EXECUTE:
                 # Defensive fail-closed: only an explicit AUTO_EXECUTE proceeds

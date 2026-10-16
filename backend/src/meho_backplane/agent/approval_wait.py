@@ -115,6 +115,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from meho_backplane.auth.operator import Operator
+    from meho_backplane.db.models import ApprovalRequest
 
 __all__ = [
     "AWAITING_APPROVAL_TIMEOUT_ERROR_CODE",
@@ -689,6 +690,9 @@ def _build_already_resumed_envelope(
     return annotated
 
 
+# code-quality-allow: about 65 of the lines are the docstring that records the
+# one-resumer claim, audit lineage and composite re-entry contracts; the body
+# is one linear load -> claim -> consume handoff -> re-dispatch -> store flow.
 async def _resume_approved_or_already_resumed(
     *,
     operator: Operator,
@@ -749,16 +753,14 @@ async def _resume_approved_or_already_resumed(
     once at first-call time.
     """
     from meho_backplane.db.engine import get_sessionmaker
-    from meho_backplane.operations._audit import parent_audit_id_var
     from meho_backplane.operations.approval_handoff import consume as consume_handoff
     from meho_backplane.operations.approval_handoff import discard as discard_handoff
     from meho_backplane.operations.approval_queue import (
         claim_resume,
-        composite_resume_binding,
         get_request,
+        persist_resume_result,
         rehydrate_resume_target,
     )
-    from meho_backplane.operations.meta_tools import call_operation_with_approval
 
     # Load the parked row (tenant-isolated). Its pre-generated
     # ``approval.request`` audit id is bound below so the resumed dispatch
@@ -814,12 +816,43 @@ async def _resume_approved_or_already_resumed(
 
     # The re-dispatch threads ``_approved=True`` through the policy gate, so
     # the durable approval-decision row is the authorization.
+    envelope = await _redispatch_approved(
+        operator=operator,
+        request=request,
+        call_arguments=call_arguments,
+        resume_parent=resume_parent,
+        resolved_target=resolved_target,
+    )
+    # #3486: store the outcome, as the operator resume does, so the list and
+    # show views move the request from ``started`` to ``executed`` or
+    # ``failed``. Fail-soft: the dispatch's own audit row already committed.
+    await persist_resume_result(approval_request_id, envelope)
+    return envelope
+
+
+async def _redispatch_approved(
+    *,
+    operator: Operator,
+    request: ApprovalRequest,
+    call_arguments: dict[str, Any],
+    resume_parent: dict[str, Any] | None,
+    resolved_target: Any,
+) -> dict[str, Any]:
+    """Run the approved call once more on the agent's task and return its envelope.
+
+    Binds ``parent_audit_id`` off the parked row so the executed dispatch
+    back-links to the ``approval.request`` audit row (#2323). #3421: same
+    composite re-entry as the operator surface. A composite sub-op park
+    re-enters its parent composite with the approved sub-op cleared; a direct
+    park (``resume_parent IS NULL``) re-dispatches the agent's original call
+    unchanged.
+    """
+    from meho_backplane.operations._audit import parent_audit_id_var
+    from meho_backplane.operations.approval_queue import composite_resume_binding
+    from meho_backplane.operations.meta_tools import call_operation_with_approval
+
     parent_token = parent_audit_id_var.set(request.request_audit_id)
     try:
-        # #3421: same composite re-entry as the operator surface. A composite
-        # sub-op park re-enters its parent composite with the approved sub-op
-        # cleared; a direct park (``resume_parent IS NULL``) re-dispatches the
-        # agent's original call unchanged.
         with composite_resume_binding(
             subop_op_id=request.op_id,
             subop_params_hash=request.params_hash,
@@ -830,7 +863,7 @@ async def _resume_approved_or_already_resumed(
             parent_op_id, parent_params = parent_call
             _log.info(
                 "approval_wait_resume_composite_parent",
-                approval_request_id=str(approval_request_id),
+                approval_request_id=str(request.id),
                 tenant_id=str(operator.tenant_id),
                 subop_op_id=request.op_id,
                 parent_op_id=parent_op_id,

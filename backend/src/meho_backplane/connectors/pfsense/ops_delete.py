@@ -134,7 +134,9 @@ from meho_backplane.connectors.pfsense.ops_write import (
     _read_config_xml,
     _validate_gateway_name,
     _validate_network_cidr,
+    assert_only_own_object_changed,
     parse_static_routes_xml,
+    serialized_config_write,
 )
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 
@@ -836,6 +838,7 @@ def _script_token(value: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+@serialized_config_write
 async def pfsense_nat_delete(
     self: PfSenseConnector,
     target: Any,
@@ -915,6 +918,15 @@ async def pfsense_nat_delete(
             "(expected exactly one fewer); the pfSsh.php playback did not persist a "
             "clean single-rule delete"
         )
+    assert_only_own_object_changed(
+        before,
+        after,
+        op="nat.delete",
+        section="nat",
+        item_tag="rule",
+        key_tag="tracker",
+        key=tracker,
+    )
     return {
         **result,
         "status": "deleted",
@@ -925,6 +937,7 @@ async def pfsense_nat_delete(
     }
 
 
+@serialized_config_write
 async def pfsense_alias_delete(
     self: PfSenseConnector,
     target: Any,
@@ -1023,6 +1036,15 @@ async def pfsense_alias_delete(
             f"aliases {len(aliases_before)}->{len(aliases_after)} (expected exactly one "
             "fewer); the pfSsh.php playback did not persist a clean single-alias delete"
         )
+    assert_only_own_object_changed(
+        before,
+        after,
+        op="alias.delete",
+        section="aliases",
+        item_tag="alias",
+        key_tag="name",
+        key=name,
+    )
     return {
         **result,
         "status": "deleted",
@@ -1033,6 +1055,7 @@ async def pfsense_alias_delete(
     }
 
 
+@serialized_config_write
 async def pfsense_route_static_delete(
     self: PfSenseConnector,
     target: Any,
@@ -1110,6 +1133,15 @@ async def pfsense_route_static_delete(
             "(expected exactly one fewer); the pfSsh.php playback did not persist a "
             "clean single-route delete"
         )
+    assert_only_own_object_changed(
+        before,
+        after,
+        op="route.static.delete",
+        section="staticroutes",
+        item_tag="route",
+        key_tag="network",
+        key=stored_network,
+    )
     return {
         **result,
         "status": "deleted",
@@ -1120,6 +1152,7 @@ async def pfsense_route_static_delete(
     }
 
 
+@serialized_config_write
 async def pfsense_gateway_delete(
     self: PfSenseConnector,
     target: Any,
@@ -1238,6 +1271,15 @@ async def pfsense_gateway_delete(
                 "fewer); the pfSsh.php playback did not persist a clean single-gateway "
                 "delete"
             )
+    assert_only_own_object_changed(
+        before,
+        after,
+        op="gateway.delete",
+        section="gateways",
+        item_tag="gateway_item",
+        key_tag="name",
+        key=name,
+    )
 
     return {
         **result,
@@ -1249,6 +1291,7 @@ async def pfsense_gateway_delete(
     }
 
 
+@serialized_config_write
 async def pfsense_alias_member_remove(
     self: PfSenseConnector,
     target: Any,
@@ -1386,6 +1429,16 @@ async def pfsense_alias_member_remove(
             f"{len(aliases_after)} (expected unchanged); the pfSsh.php playback did not "
             "persist a clean single-member removal that retained the shared alias"
         )
+    # The alias itself was checked above; this checks everything else.
+    assert_only_own_object_changed(
+        before,
+        after,
+        op="alias.member.remove",
+        section="aliases",
+        item_tag="alias",
+        key_tag="name",
+        key=name,
+    )
     return {
         **result,
         "status": "removed",

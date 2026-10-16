@@ -73,6 +73,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._errors import (
+    _UPSTREAM_MESSAGE_CAP,
     is_auth_failed_status,
     result_connector_auth_failed,
 )
@@ -706,13 +707,13 @@ def test_result_connector_auth_failed_non_json_body_falls_back_to_text() -> None
 
 
 def test_result_connector_auth_failed_caps_oversized_message() -> None:
-    """A pathological upstream message is capped like the sibling builders."""
-    exc = _make_http_status_error(status_code=401, json_body={"message": "x" * 400})
+    """A pathological upstream message is capped at the 2 KB upstream cap (#3567)."""
+    exc = _make_http_status_error(status_code=401, json_body={"message": "x" * 3000})
     out = result_connector_auth_failed("GET:/x", exc, _FakeTarget(), duration_ms=0.5)
     message = out.extras["upstream_message"]
     assert isinstance(message, str)
     assert message.endswith("...<truncated>")
-    assert len(message) == 256 + len("...<truncated>")
+    assert len(message) == _UPSTREAM_MESSAGE_CAP + len("...<truncated>")
 
 
 def test_result_connector_auth_failed_missing_host_degrades_gracefully() -> None:
@@ -826,6 +827,53 @@ def test_connector_auth_error_is_session_login_error() -> None:
     err = ConnectorAuthError("m", status_code=401, cause="session_establish_401")
     assert isinstance(err, SessionLoginError)
     assert isinstance(err, RuntimeError)
+
+
+def test_result_connector_auth_failed_call_stage_uses_connector_remediation() -> None:
+    """#3566: a ``call``-stage error says the call was rejected, not the login."""
+    err = ConnectorAuthError(
+        "vmware vi-json POST /X/x/M on target 'vc-a' was rejected with vim fault NoPermission",
+        status_code=500,
+        cause="vim_fault_NoPermission",
+        remediation="Grant the missing privilege, then retry.",
+        stage="call",
+    )
+    out = result_connector_auth_failed("vmware.x", err, _FakeTarget(name="vc-a"), 1.0)
+    assert out.error is not None
+    assert "rejected this call with an auth/permission fault (HTTP 500)" in out.error
+    assert "login itself was rejected" not in out.error
+    assert "already re-logged-in" not in out.error
+    assert "Grant the missing privilege" in out.error
+    assert out.extras["cause"] == "vim_fault_NoPermission"
+    assert out.extras["http_status"] == 500
+    assert out.extras["remediation"] == "Grant the missing privilege, then retry."
+
+
+def test_result_connector_auth_failed_after_relogin_stage_prefers_connector_remediation() -> None:
+    """#3566: a connector ``after_relogin`` error keeps the re-login story + its own fix."""
+    err = ConnectorAuthError(
+        "vmware vi-json POST /X/x/M on target 'vc-a' was rejected with vim fault NotAuthenticated",
+        status_code=500,
+        cause="vim_fault_NotAuthenticated_after_relogin",
+        remediation="Check the host connection, then retry.",
+        stage="after_relogin",
+    )
+    out = result_connector_auth_failed("vmware.x", err, _FakeTarget(name="vc-a"), 1.0)
+    assert out.error is not None
+    assert "already re-logged-in and retried once" in out.error
+    assert "login itself was rejected" not in out.error
+    assert "Check the host connection" in out.error
+    assert out.extras["cause"] == "vim_fault_NotAuthenticated_after_relogin"
+    assert out.extras["http_status"] == 500
+
+
+def test_connector_auth_error_defaults_to_establish_stage() -> None:
+    """#3566: existing raise sites that pass no ``stage`` keep the establish story."""
+    err = ConnectorAuthError("m", status_code=401, cause="session_establish_401")
+    assert err.stage == "establish"
+    out = result_connector_auth_failed("x", err, _FakeTarget(), 1.0)
+    assert out.error is not None
+    assert "login itself was rejected" in out.error
 
 
 # ---------------------------------------------------------------------------

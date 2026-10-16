@@ -137,6 +137,7 @@ from meho_backplane.operations.ingest.register_ingested import (
 )
 from meho_backplane.operations.ingest.safety_floors import apply_safety_floor
 from meho_backplane.operations.ingest.service import ReviewService
+from meho_backplane.operations.ingest.spec_corrections import apply_spec_correction
 from meho_backplane.operations.ingest.spec_provenance import upsert_spec_provenance
 from meho_backplane.retrieval.embedding import EmbeddingService
 
@@ -1011,7 +1012,14 @@ class IngestionPipelineService:
                 product=product, version=version, operations=parsed
             )
             floored = tuple(
-                apply_safety_floor(product=product, version=version, impl_id=impl_id, proto=proto)
+                apply_safety_floor(
+                    product=product,
+                    version=version,
+                    impl_id=impl_id,
+                    proto=apply_spec_correction(
+                        product=product, version=version, impl_id=impl_id, proto=proto
+                    ),
+                )
                 for proto in allowlist_result.kept
             )
             total_ops += len(floored)

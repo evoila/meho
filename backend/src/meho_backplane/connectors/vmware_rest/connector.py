@@ -122,10 +122,12 @@ from meho_backplane.connectors.schemas import (
 )
 from meho_backplane.connectors.vmware_rest._mount import (
     API_MOUNT_LEGACY,
+    API_MOUNT_MODERN,
     SESSION_PATH_LEGACY,
     SESSION_PATH_MODERN,
     adapt_filter_params,
     api_mount_for_session_path,
+    is_vmomi_path,
     mounted_path,
     vmomi_mounted_path,
     vmomi_release_from_version,
@@ -142,6 +144,7 @@ from meho_backplane.connectors.vmware_rest.session import (
 from meho_backplane.connectors.vmware_rest.soap import (
     SOAP_CONTENT_TYPE,
     SoapFault,
+    attach_soap_fault,
     build_create_nas_datastore_envelope,
     build_datastore_refresh_envelope,
     build_login_envelope,
@@ -169,6 +172,7 @@ from meho_backplane.connectors.vmware_rest.soap_pbm import (
     parse_pbm_profiles,
     parse_pbm_service_content,
 )
+from meho_backplane.connectors.vmware_rest.vim_body import method_fault_type
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
 
 __all__ = [
@@ -338,6 +342,39 @@ _VCENTER_PROPERTY_COLLECTOR_MOID = "propertyCollector"
 #: dispatcher's cold-re-login recovery), the SOAP analogue of a vCenter
 #: 401/403 at ``POST /api/session``.
 _SOAP_AUTH_FAULT_TYPES = frozenset({"InvalidLogin", "NoPermission", "NotAuthenticated"})
+#: The one VI-JSON auth fault a fresh vCenter session can fix (#3566). A
+#: call that vCenter relays to an ESXi host (guest operations) is rejected
+#: as ``NotAuthenticated`` when the host-gateway token tied to the session
+#: has gone stale, while vCenter-local calls on the same session still work
+#: (Broadcom KB 440879). A new login issues a new token, so
+#: :meth:`VmwareRestConnector._post_vmomi_json` logs in again and retries the
+#: call once. ``InvalidLogin`` / ``NoPermission`` are credential / privilege
+#: rejections a new session cannot fix, so they raise without a retry.
+_VIJSON_RELOGIN_FAULT_TYPE: Final[str] = "NotAuthenticated"
+#: Remediation for a ``NoPermission`` VI-JSON fault: the login works, so a
+#: restage cannot help -- the service account needs the privilege.
+_VIJSON_NO_PERMISSION_REMEDIATION: Final[str] = (
+    "vCenter accepted the service account but it lacks a privilege this call "
+    "needs. Grant the missing privilege to that account in vCenter, then retry. "
+    "Do NOT restage the secret -- the credential itself works."
+)
+#: Remediation when ``NotAuthenticated`` survives the one re-login + retry.
+_VIJSON_NOT_AUTHENTICATED_REMEDIATION: Final[str] = (
+    "MEHO logged in to vCenter again and retried once, and vCenter still "
+    "answered NotAuthenticated. The credential works, so do NOT restage the "
+    "secret. Calls that vCenter passes on to an ESXi host (for example guest "
+    "operations) fail this way when that host's link to vCenter rejects the "
+    "session. Check the host's connection state in vCenter, then retry."
+)
+#: HTTP statuses the dispatcher's #2067 recovery would retry by re-running
+#: the **whole** operation. After :meth:`VmwareRestConnector._post_vmomi_json`
+#: has already logged in again for a ``NotAuthenticated`` fault, such a
+#: status on the retried call must not escape as a plain
+#: :class:`httpx.HTTPStatusError`: the dispatcher would log in a third time
+#: and run every earlier step of the operation again (a started guest
+#: program would start twice). vCenter rejects a session with 401; 440 is
+#: the vRLI member of the dispatcher's set and never comes from vCenter.
+_VIJSON_AFTER_RELOGIN_AUTH_STATUSES: Final[frozenset[int]] = frozenset({401})
 #: The one vim ``detail`` fault localName a re-mint of the PBM SOAP session can
 #: recover (#3810). PBM authenticates by the ``vcSessionCookie`` SOAP header
 #: carrying the vim session cookie; once that header is present, a
@@ -347,8 +384,12 @@ _SOAP_AUTH_FAULT_TYPES = frozenset({"InvalidLogin", "NoPermission", "NotAuthenti
 #: ``NoPermission`` (principal lacks the privilege) — genuine rejections a fresh
 #: session cannot fix — a ``NotAuthenticated`` is a session-liveness signal.
 _PBM_REMINT_FAULT_TYPE: Final[str] = "NotAuthenticated"
-#: ``probe_method`` stamped on a standalone-ESXi fingerprint.
-_ESXI_SOAP_PROBE = "GET /api/about (400) -> soap-retrieveservicecontent"
+#: ``probe_method`` stamped on a standalone-ESXi fingerprint (#3710). It names
+#: the call that proves reachability -- the authenticated
+#: ``SessionManager.currentSession`` read over SOAP -- and ends in ``(live)``:
+#: every ESXi probe makes that call to the host, even on a warm session cache.
+#: The ESXi probe never answers from cache, so there is no ``(cached)`` form.
+_ESXI_SOAP_PROBE = "GET /api/about (400) -> soap-currentsession (live)"
 
 # JSON-RPC 2.0 discriminator ESXi's ``/api`` handler stamps on its error
 # bodies. Recognising it (or the "Unsupported content type" message text)
@@ -480,6 +521,85 @@ def _is_acceptable_auth_model(value: Any) -> bool:
     if value is AuthModel.SHARED_SERVICE_ACCOUNT:
         return True
     return bool(value == AuthModel.SHARED_SERVICE_ACCOUNT.value)
+
+
+def _vijson_auth_fault_type(exc: httpx.HTTPStatusError) -> str | None:
+    """Return the auth fault class of a VI-JSON 500 fault body, else ``None`` (#3566).
+
+    VI-JSON reports a vim method fault as HTTP 500 with the fault object as
+    the JSON body. Only the auth set shared with the SOAP path
+    (:data:`_SOAP_AUTH_FAULT_TYPES`) counts, so both transports classify the
+    same fault the same way. Any other status or fault keeps the caller's
+    normal error path.
+    """
+    if exc.response.status_code != 500:
+        return None
+    fault_type = method_fault_type(exc.response.text)
+    return fault_type if fault_type in _SOAP_AUTH_FAULT_TYPES else None
+
+
+def _vijson_auth_error(
+    fault_type: str,
+    target: VsphereTargetLike,
+    vmomi_path: str,
+    exc: httpx.HTTPStatusError,
+) -> ConnectorAuthError:
+    """Build the :class:`ConnectorAuthError` for a VI-JSON auth fault (#3566).
+
+    ``NotAuthenticated`` only reaches here after the one re-login + retry,
+    so it is the ``after_relogin`` stage. ``InvalidLogin`` / ``NoPermission``
+    are raised on the first try (``call`` stage): a new session cannot fix
+    them. ``status_code`` is the real HTTP status (500), and the message
+    names only the target, the vim method path, and the fault class.
+    """
+    after_relogin = fault_type == _VIJSON_RELOGIN_FAULT_TYPE
+    if after_relogin:
+        remediation: str | None = _VIJSON_NOT_AUTHENTICATED_REMEDIATION
+    elif fault_type == "NoPermission":
+        remediation = _VIJSON_NO_PERMISSION_REMEDIATION
+    else:
+        remediation = None
+    suffix = "_after_relogin" if after_relogin else ""
+    return ConnectorAuthError(
+        f"vmware vi-json POST {vmomi_path} on target {target.name!r} was rejected "
+        f"with vim fault {fault_type}",
+        status_code=exc.response.status_code,
+        cause=f"vim_fault_{fault_type}{suffix}",
+        target_name=getattr(target, "name", None),
+        host=getattr(target, "host", None),
+        secret_ref=getattr(target, "secret_ref", None),
+        remediation=remediation,
+        stage="after_relogin" if after_relogin else "call",
+    )
+
+
+def _vijson_relogin_rejected_error(
+    target: VsphereTargetLike,
+    vmomi_path: str,
+    exc: httpx.HTTPStatusError,
+) -> ConnectorAuthError:
+    """Build the final :class:`ConnectorAuthError` for a 401 on the retried call (#3566).
+
+    The connector already logged in again for a ``NotAuthenticated`` fault
+    and the fresh session was rejected with an HTTP auth status. This is
+    the ``after_relogin`` stage with the dispatcher's own
+    ``session_dispatch_<status>_after_relogin`` cause, so the result reads
+    the same as the dispatcher's post-re-login rejection. Raising it (and
+    not the plain status error) stops the dispatcher from re-running the
+    whole operation on top of this retry.
+    """
+    status_code = exc.response.status_code
+    return ConnectorAuthError(
+        f"vmware vi-json POST {vmomi_path} on target {target.name!r} was rejected "
+        f"with HTTP {status_code} after a re-login for vim fault "
+        f"{_VIJSON_RELOGIN_FAULT_TYPE}",
+        status_code=status_code,
+        cause=f"session_dispatch_{status_code}_after_relogin",
+        target_name=getattr(target, "name", None),
+        host=getattr(target, "host", None),
+        secret_ref=getattr(target, "secret_ref", None),
+        stage="after_relogin",
+    )
 
 
 class VmwareRestConnector(HttpConnector):
@@ -716,9 +836,26 @@ class VmwareRestConnector(HttpConnector):
         reaches ``GET /api/about`` through ``_get_json`` *pre-session*
         — overriding the transport methods would both strip ``.retry``
         and force a spurious session establish on the pre-auth probe.
+
+        Ingested ``vi-json.yaml`` ops (``/{MoType}/{moId}/...``, see
+        :func:`._mount.is_vmomi_path`) are not Automation API paths. On a
+        modern vCenter session they mount on the documented VI-JSON base
+        ``/sdk/vim25/{release}``, the same base :meth:`_post_vmomi_json`
+        uses for the typed reads (#2466). The ``/api`` form 404s on vCenter
+        8.0.x (#3534). When the release can't be derived, or the session
+        is legacy ``/rest`` (vcsim) or ESXi, the path mounts as before.
         """
         await self._session_token(target, operator)
-        session_path = self._session_paths.get(target_cache_key(target), SESSION_PATH_MODERN)
+        cache_key = target_cache_key(target)
+        session_path = self._session_paths.get(cache_key, SESSION_PATH_MODERN)
+        if (
+            is_vmomi_path(path)
+            and self._session_flavors.get(cache_key) != HOST_FLAVOR_ESXI
+            and api_mount_for_session_path(session_path) == API_MOUNT_MODERN
+        ):
+            release = vmomi_release_from_version(await self._about_version(target, operator))
+            if release is not None:
+                return vmomi_mounted_path(release, path)
         return mounted_path(session_path, path)
 
     async def adapt_op_query(
@@ -796,8 +933,18 @@ class VmwareRestConnector(HttpConnector):
         /sdk/vim25/8.0.3.0/... and /api/... both 404 on vCenter 8.0.3``)
         rather than a bare 404. Non-404 failures (401 / 403 / 5xx /
         transport) propagate unchanged — those are not "this mount isn't
-        served". ``promote_managed_object_not_found`` is intentionally opt-in
-        for a typed single-resource read that can safely render a missing MoID
+        served" — with one exception (#3566): a 500 whose VI-JSON fault body
+        is an auth fault. ``NotAuthenticated`` drops the cached session, logs
+        in again and retries the call once; if the fault comes back, or the
+        fault is ``InvalidLogin`` / ``NoPermission`` (which a new session
+        cannot fix), it raises :class:`ConnectorAuthError` so the dispatcher
+        returns ``connector_auth_failed``. A 401 on the retried call is
+        final too (``after_relogin``): the dispatcher must not re-run the
+        whole operation on top of this retry. A 401 on the first try still
+        propagates to the dispatcher's own recovery.
+
+        ``promote_managed_object_not_found`` is intentionally opt-in for a
+        typed single-resource read that can safely render a missing MoID
         as ``not_found``. It defaults to ``False`` so shared task polling and
         destructive-composite preflight reads retain their existing transport
         failure semantics (#3479).
@@ -818,6 +965,54 @@ class VmwareRestConnector(HttpConnector):
                 json=json,
                 promote_managed_object_not_found=promote_managed_object_not_found,
             )
+        try:
+            return await self._post_vmomi_json_vcenter(
+                target, vmomi_path, operator, json, promote_managed_object_not_found
+            )
+        except httpx.HTTPStatusError as exc:
+            fault_type = _vijson_auth_fault_type(exc)
+            if fault_type is None:
+                raise
+            if fault_type != _VIJSON_RELOGIN_FAULT_TYPE:
+                raise _vijson_auth_error(fault_type, target, vmomi_path, exc) from exc
+        # NotAuthenticated: drop the cached session and retry this one call on
+        # a fresh login (#3566). The rejected call never ran, so the retry is
+        # safe for a write too. Retrying only this call (not the whole
+        # dispatch) means earlier steps of a multi-step operation do not run
+        # twice.
+        _log.info(
+            "vsphere_vijson_not_authenticated_relogin",
+            target=target.name,
+            vmomi_path=vmomi_path,
+        )
+        await self.invalidate_session(target)
+        await self._session_token(target, operator)
+        try:
+            return await self._post_vmomi_json_vcenter(
+                target, vmomi_path, operator, json, promote_managed_object_not_found
+            )
+        except httpx.HTTPStatusError as exc:
+            fault_type = _vijson_auth_fault_type(exc)
+            if fault_type is not None:
+                raise _vijson_auth_error(fault_type, target, vmomi_path, exc) from exc
+            # An HTTP auth status on the retried call is final here. Letting
+            # it escape would make the dispatcher log in again and re-run
+            # the whole operation, so a step that already ran before the
+            # NotAuthenticated fault (a started guest program) would run
+            # twice.
+            if exc.response.status_code in _VIJSON_AFTER_RELOGIN_AUTH_STATUSES:
+                raise _vijson_relogin_rejected_error(target, vmomi_path, exc) from exc
+            raise
+
+    async def _post_vmomi_json_vcenter(
+        self,
+        target: VsphereTargetLike,
+        vmomi_path: str,
+        operator: Operator,
+        json: dict[str, Any] | None,
+        promote_managed_object_not_found: bool,
+    ) -> dict[str, Any]:
+        """Run one vCenter VI-JSON call with the mount resolution of :meth:`_post_vmomi_json`."""
         session_path = self._session_paths.get(target_cache_key(target), SESSION_PATH_MODERN)
         if api_mount_for_session_path(session_path) == API_MOUNT_LEGACY:
             legacy_path = mounted_path(session_path, vmomi_path)
@@ -1276,11 +1471,13 @@ class VmwareRestConnector(HttpConnector):
         sc_resp = await self._soap_post(client, build_service_content_envelope(), extensions)
         sc_fault = parse_soap_fault(sc_resp.text)
         if sc_fault is not None:
-            raise RuntimeError(
+            sc_err = RuntimeError(
                 f"vsphere session establish failed for target {target.name!r}: "
                 f"SOAP RetrieveServiceContent faulted "
                 f"({sc_fault.fault_type or sc_fault.faultcode})"
             )
+            attach_soap_fault(sc_err, sc_fault)
+            raise sc_err
         sc_resp.raise_for_status()
         content = parse_service_content(sc_resp.text)
         pc_ref = content.get("propertyCollector")
@@ -1513,11 +1710,13 @@ class VmwareRestConnector(HttpConnector):
             sc_resp = await self._soap_post(client, build_service_content_envelope(), extensions)
             sc_fault = parse_soap_fault(sc_resp.text)
             if sc_fault is not None:
-                raise RuntimeError(
+                sc_err = RuntimeError(
                     f"vmware pbm session establish failed for target {target.name!r}: "
                     f"SOAP RetrieveServiceContent faulted "
                     f"({sc_fault.fault_type or sc_fault.faultcode})"
                 )
+                attach_soap_fault(sc_err, sc_fault)
+                raise sc_err
             sc_resp.raise_for_status()
             content = parse_service_content(sc_resp.text)
             sm_ref = content.get("sessionManager")
@@ -1688,7 +1887,7 @@ class VmwareRestConnector(HttpConnector):
             raise self._soap_fault_error(
                 fault, target, message=f"vmware pbm {method} failed on target {target.name!r}"
             )
-        raise RuntimeError(
+        defect = RuntimeError(
             f"vmware pbm {method} failed on target {target.name!r}: the request carried "
             f"the vcSessionCookie SOAP header (the vim session cookie the /sdk Login "
             f"minted) but /pbm still rejected it as NotAuthenticated after a fresh login. "
@@ -1696,6 +1895,8 @@ class VmwareRestConnector(HttpConnector):
             f"this is a PBM transport/auth defect in the connector, not a stale or rotated "
             f"credential -- do NOT restage the secret."
         )
+        attach_soap_fault(defect, fault)
+        raise defect
 
     async def pbm_create_tag_profile(
         self,
@@ -1901,9 +2102,14 @@ class VmwareRestConnector(HttpConnector):
         (never the envelope). ``SoapFault`` carries only
         ``faultcode`` / ``faultstring`` / ``fault_type``, none of which echo
         the Login envelope, so the credential cannot leak through either arm.
+
+        Both arms also carry the parsed *fault* (:func:`.soap.attach_soap_fault`),
+        so the error envelope can show ``extras.upstream_fault`` with the fault
+        type and the full faultstring (#3567).
         """
+        err: Exception
         if fault.fault_type in _SOAP_AUTH_FAULT_TYPES:
-            return ConnectorAuthError(
+            err = ConnectorAuthError(
                 message,
                 status_code=401,
                 cause=f"session_establish_{fault.fault_type}",
@@ -1911,9 +2117,12 @@ class VmwareRestConnector(HttpConnector):
                 host=getattr(target, "host", None),
                 secret_ref=getattr(target, "secret_ref", None),
             )
-        fault_type = fault.fault_type or fault.faultcode or "SoapFault"
-        detail = f": {fault.faultstring}" if fault.faultstring else ""
-        return RuntimeError(f"{message}: vim fault {fault_type}{detail}")
+        else:
+            fault_type = fault.fault_type or fault.faultcode or "SoapFault"
+            detail = f": {fault.faultstring}" if fault.faultstring else ""
+            err = RuntimeError(f"{message}: vim fault {fault_type}{detail}")
+        attach_soap_fault(err, fault)
+        return err
 
     def _pooled_client_for(self, cache_key: tuple[str, str]) -> httpx.AsyncClient | None:
         """Return the pooled per-target client whose key carries *cache_key*'s prefix.
@@ -2163,8 +2372,8 @@ class VmwareRestConnector(HttpConnector):
         ``_about_versions`` (exact, e.g. ``9.1.0``); product is stamped
         ``esxi`` (the same slug ``product_from_line_id`` maps ``embeddedEsx`` /
         ``esx`` to and ``classify_host_target`` keys off). ``probe_method``
-        names the ``GET /api/about`` 400 → SOAP ``RetrieveServiceContent``
-        chain (``about.apiType == "HostAgent"``).
+        names the ``GET /api/about`` 400 → SOAP ``currentSession`` liveness
+        read chain and ends in ``(live)`` (:data:`_ESXI_SOAP_PROBE`).
 
         #3773(d)/#3710 — reachability is **confirmed with one lightweight
         authenticated read** routed through the (b)-protected object.collect

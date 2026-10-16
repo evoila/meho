@@ -260,6 +260,131 @@ async def test_no_builder_echo_scrubs_secret_param_keys() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "key",
+    [
+        # The well-known names the echo always masked.
+        "password",
+        "passwd",
+        "pwd",
+        "secret",
+        "client_secret",
+        "secret_id",
+        "token",
+        "api_key",
+        "apikey",
+        "access_token",
+        "refresh_token",
+        "auth_token",
+        "session_token",
+        "private_key",
+        "credentials",
+        # Longer names the broadcast scrub flags (#3808).
+        "vcsa_root_password",
+        "adminPassword",
+        "nsx-admin-password",
+        "sddcManagerApiKey",
+        "ssh_private_key",
+        "kubeconfig",
+        "PassWord",
+        "passWord",
+    ],
+)
+async def test_no_builder_echo_masks_every_key_the_broadcast_scrub_flags(key: str) -> None:
+    """The echo and the broadcast scrub agree on which params are secret (#3808).
+
+    Both use the same name check, so a param that the broadcast path flags
+    as secret is always masked in the stored echo.
+    """
+    from meho_backplane.broadcast.events import scrub_broadcast_params
+
+    params = {"name": "fake-appliance", key: "FAKE-secret-value-0001"}
+    _scrubbed, secret_detected = scrub_broadcast_params(params)
+    assert secret_detected is True
+
+    ctx = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="holodeck.config.apply"),  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=_operator(),
+        target=_FakeTarget(),
+        params=params,
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    assert effect["params_echo"] == {"name": "fake-appliance", key: "***REDACTED***"}
+
+
+@pytest.mark.asyncio
+async def test_no_builder_echo_keeps_scalar_settings_under_secret_names() -> None:
+    """Bare scalars under a secret-shaped name stay visible (#3808).
+
+    The broadcast scrub masks only string, mapping and list values under a
+    secret-shaped name. The echo uses the same rule, so settings like
+    ``bind_secret_id`` or ``secret_id_ttl`` stay readable for the approver
+    while a real string secret is still masked.
+    """
+    from meho_backplane.broadcast.events import scrub_broadcast_params
+
+    params = {
+        "role_name": "fake-role",
+        "bind_secret_id": False,
+        "secret_id_ttl": 600,
+        "secret_id_num_uses": 5,
+        "secret_id": "FAKE-secret-value-0002",
+    }
+    scrubbed, _detected = scrub_broadcast_params(params)
+    assert scrubbed["bind_secret_id"] is False
+    assert scrubbed["secret_id_ttl"] == 600
+
+    ctx = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="vault.auth.approle.write"),  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=_operator(),
+        target=_FakeTarget(),
+        params=params,
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    assert effect["params_echo"] == {
+        "role_name": "fake-role",
+        "bind_secret_id": False,
+        "secret_id_ttl": 600,
+        "secret_id_num_uses": 5,
+        "secret_id": "***REDACTED***",
+    }
+
+
+@pytest.mark.asyncio
+async def test_no_builder_echo_scrubs_secrets_nested_in_tuples() -> None:
+    """A secret inside a tuple is masked, like the broadcast scrub does (#3808).
+
+    The echo walks the same container types as the broadcast scrub: any
+    mapping and any sequence other than a string. A tuple of dicts must
+    not slip past the walk and reach the stored echo as a plain list with
+    the secret still inside.
+    """
+    from meho_backplane.broadcast.events import scrub_broadcast_params
+
+    params = {"items": ({"name": "fake-vm", "adminPassword": "FAKE-secret-value-0003"},)}
+    scrubbed, secret_detected = scrub_broadcast_params(params)
+    assert secret_detected is True
+    assert scrubbed["items"][0]["adminPassword"] != "FAKE-secret-value-0003"
+
+    ctx = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="holodeck.config.apply"),  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=_operator(),
+        target=_FakeTarget(),
+        params=params,
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    assert effect["params_echo"] == {
+        "items": [{"name": "fake-vm", "adminPassword": "***REDACTED***"}]
+    }
+
+
+@pytest.mark.asyncio
 async def test_no_builder_echo_scrubs_secret_value_shapes() -> None:
     """The generic echo runs the connector-boundary value-shape scrub too.
 

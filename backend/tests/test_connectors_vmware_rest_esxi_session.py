@@ -84,6 +84,7 @@ from meho_backplane.connectors.vmware_rest.typed_ops_host_storage_devices import
     build_host_storage_devices_retrieve_params,
 )
 from meho_backplane.connectors.vmware_rest.typed_ops_object_collect import object_collect_impl
+from meho_backplane.operations._errors import result_connector_auth_failed, result_connector_error
 from meho_backplane.settings import get_settings
 
 _ESXI_HOST = "esxi-standalone.test.invalid"
@@ -813,7 +814,35 @@ async def test_fingerprint_standalone_esxi_reachable_product_esxi() -> None:
     assert result.version == _ABOUT_VERSION
     assert result.extras["session_flavor"] == "esxi"
     assert result.extras["api_type"] == "HostAgent"
-    assert "soap-retrieveservicecontent" in result.probe_method
+    assert result.probe_method == "GET /api/about (400) -> soap-currentsession (live)"
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_warm_cache_makes_exactly_one_live_soap_call() -> None:
+    """(#3710) A probe on a warm session cache still asks the host.
+
+    The first fingerprint logs in (cold cache). The second one reuses the
+    cached session, so it must not log in again -- but it must still send
+    exactly one live SOAP call (the currentSession read), not answer from
+    the cached about.version. probe_method says the answer was live.
+    """
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    router = _SdkRouter(retrieve_xml=_CURRENT_SESSION_OK_XML)
+    target = _esxi_fingerprinted()
+
+    async with respx.mock(base_url=_ESXI_BASE) as mock:
+        mock.post(_SDK).mock(side_effect=router)
+        mock.get("/api/about").respond(400)
+        await connector.fingerprint(target, _make_operator())
+        assert "Login" in router.methods
+        router.methods.clear()
+        result = await connector.fingerprint(target, _make_operator())
+
+    assert router.methods == ["RetrievePropertiesEx"]
+    assert "currentSession" in router.bodies[-1]
+    assert result.reachable is True
+    assert result.probe_method.endswith("(live)")
 
 
 @pytest.mark.asyncio
@@ -1170,6 +1199,7 @@ async def test_fingerprint_dead_session_reports_unreachable(
     # the liveness read, not the cache — the whole point of the #3710 close.
     assert result.extras["version"] == _ABOUT_VERSION
     assert "stale/void SOAP session" in result.extras["error"]
+    assert result.probe_method.endswith("(live)")
     # The reset was attempted (Logout between the two currentSession reads).
     assert "Logout" in router.methods
 
@@ -1346,3 +1376,143 @@ async def test_fingerprint_warm_session_has_no_relogin_marker() -> None:
     assert "session_health_reset" not in result.extras
     recovery_events = {"vmware_esxi_probe_session_relogin", "vmware_object_collect_auth_reset"}
     assert not [e for e in logs if e["event"] in recovery_events]
+
+
+# ---------------------------------------------------------------------------
+# #3567 — the error envelope shows the vim fault from the ESXi SOAP path
+# ---------------------------------------------------------------------------
+
+#: A faultstring longer than the 256-char exception-message cap, with the
+#: useful part at the end, so a cut would lose it.
+_LONG_FAULTSTRING = (
+    "An error occurred during host configuration. " + "x" * 300 + " Operation failed, diagnostics"
+    " report: Unable to complete Sysinfo operation."
+)
+
+
+def _fault_xml(fault_type: str, faultstring: str) -> str:
+    return _envelope(
+        "<soapenv:Fault><faultcode>ServerFaultCode</faultcode>"
+        f"<faultstring>{faultstring}</faultstring>"
+        f'<detail><{fault_type}Fault xsi:type="{fault_type}"></{fault_type}Fault></detail>'
+        "</soapenv:Fault>"
+    )
+
+
+def _op_fault_router(fault_xml: str) -> Any:
+    """Log in fine, then answer the op itself with *fault_xml* (HTTP 500)."""
+
+    def _route(request: httpx.Request) -> httpx.Response:
+        method = _soap_method(request.content.decode("utf-8"))
+        if method == "RetrieveServiceContent":
+            return httpx.Response(200, text=_SERVICE_CONTENT_XML)
+        if method == "Login":
+            return httpx.Response(
+                200,
+                text=_LOGIN_OK_XML,
+                headers={"set-cookie": f"{_SOAP_COOKIE}={_COOKIE_VALUE}; Path=/"},
+            )
+        return httpx.Response(500, text=fault_xml)
+
+    return _route
+
+
+@pytest.mark.asyncio
+async def test_esxi_write_fault_reaches_envelope_upstream_fault() -> None:
+    """A SOAP write fault from ``_post_soap`` shows its type and full text in the envelope."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+
+    async with respx.mock(base_url=_ESXI_BASE) as mock:
+        mock.post(_SDK).mock(
+            side_effect=_op_fault_router(_fault_xml("PlatformConfigFault", _LONG_FAULTSTRING))
+        )
+        with pytest.raises(RuntimeError) as excinfo:
+            await connector._post_vmomi_json(
+                _esxi_fingerprinted(),
+                "/HostDatastoreSystem/ha-datastoresystem/CreateNasDatastore",
+                operator=_make_operator(),
+                json={"spec": {"remoteHost": "nas01.example.invalid"}},
+            )
+
+    result = result_connector_error("vmware.host.nfs_mount", excinfo.value, 1.0)
+    extras = result.extras
+    # The class stays RuntimeError, so existing matchers keep working.
+    assert extras["exception_class"] == "RuntimeError"
+    assert extras["upstream_fault"] == {
+        "type": "PlatformConfigFault",
+        "faultstring": _LONG_FAULTSTRING,
+    }
+    # The 256-char exception message alone would have lost the end of the text.
+    assert "Unable to complete Sysinfo operation." not in extras["exception_message"]
+
+
+@pytest.mark.asyncio
+async def test_esxi_auth_fault_mid_op_reaches_auth_failed_upstream_fault() -> None:
+    """A ``NoPermission`` fault from ``_post_soap`` reaches ``connector_auth_failed``."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    target = _esxi_fingerprinted()
+    faultstring = "Permission to perform this operation was denied."
+
+    async with respx.mock(base_url=_ESXI_BASE) as mock:
+        mock.post(_SDK).mock(side_effect=_op_fault_router(_fault_xml("NoPermission", faultstring)))
+        with pytest.raises(ConnectorAuthError) as excinfo:
+            await connector._post_vmomi_json(
+                target,
+                "/HostDatastoreSystem/ha-datastoresystem/CreateNasDatastore",
+                operator=_make_operator(),
+                json={"spec": {"remoteHost": "nas01.example.invalid"}},
+            )
+
+    result = result_connector_auth_failed("vmware.host.nfs_mount", excinfo.value, target, 1.0)
+    assert result.extras["error_code"] == "connector_auth_failed"
+    assert result.extras["upstream_fault"] == {"type": "NoPermission", "faultstring": faultstring}
+
+
+@pytest.mark.asyncio
+async def test_esxi_invalid_login_reaches_auth_failed_upstream_fault() -> None:
+    """An ``InvalidLogin`` fault at SOAP login reaches ``connector_auth_failed``, no secret."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    target = _esxi_fingerprinted()
+    router = _SdkRouter(login_fault=True)
+
+    async with respx.mock(base_url=_ESXI_BASE) as mock:
+        mock.post(_SDK).mock(side_effect=router)
+        with pytest.raises(ConnectorAuthError) as excinfo:
+            await connector.auth_headers(target, _make_operator())
+
+    result = result_connector_auth_failed("vmware.host.nfs_mount", excinfo.value, target, 1.0)
+    assert result.extras["upstream_fault"] == {
+        "type": "InvalidLogin",
+        "faultstring": "Cannot complete login due to an incorrect user name or password.",
+    }
+    assert "stub-password" not in repr(result.extras)
+    assert "stub-password" not in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_esxi_service_content_fault_reaches_envelope_upstream_fault() -> None:
+    """A ``RetrieveServiceContent`` fault at ESXi session establish keeps its fault."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    fault_xml = _fault_xml("HostNotConnected", _LONG_FAULTSTRING)
+
+    def _sdk(request: httpx.Request) -> httpx.Response:
+        if _soap_method(request.content.decode("utf-8")) == "RetrieveServiceContent":
+            return httpx.Response(500, text=fault_xml)
+        return httpx.Response(500, text="<unexpected/>")
+
+    async with respx.mock(base_url=_ESXI_BASE) as mock:
+        mock.post(_SDK).mock(side_effect=_sdk)
+        with pytest.raises(RuntimeError, match="RetrieveServiceContent faulted") as excinfo:
+            await connector.auth_headers(_esxi_fingerprinted(), _make_operator())
+
+    result = result_connector_error("vmware.host.nfs_mount", excinfo.value, 1.0)
+    assert result.extras["exception_class"] == "RuntimeError"
+    assert result.extras["upstream_fault"] == {
+        "type": "HostNotConnected",
+        "faultstring": _LONG_FAULTSTRING,
+    }
+    assert "Unable to complete Sysinfo operation." not in result.extras["exception_message"]

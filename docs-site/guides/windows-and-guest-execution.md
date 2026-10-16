@@ -57,9 +57,10 @@ controller — the AD cmdlets contact the local directory. Object deletes
 
 **Windows DNS (`windns`).** Read the zones on an AD-integrated DNS server,
 read records, add A and CNAME records, and remove a record set. The
-record removal runs on the governed-delete tier: it previews the exact
-set that would be removed, parks for a human, and is bound to that
-preview before it executes.
+record removal is a permanent delete. You preview it first to get a
+preview hash. The preview does not list the records. MEHO reads them
+when you send the call, and the approver sees them on the approval
+request before it runs.
 
 **Failover Clustering (`wsfc`).** Cluster, node, clustered-role, resource,
 and quorum state, plus cluster validation and guarded role moves. The
@@ -217,7 +218,13 @@ ladder:
 | `safe` | Read-class; executes under default-allow. | `winsrv.service.list`, `msad.user.get`, `wsfc.cluster.get`, `mssql.databases.list`, `hyperv.vms.list` |
 | `caution` | Recoverable write; subject to policy. | `winsrv.service.restart`, `msad.group.add-member`, `wsfc.groups.move`, `mssql.backup.database`, `hyperv.export.vm` |
 | `dangerous` + approval | Disruptive or destructive; **parks for a human** before it runs. | `winsrv.power.reboot`, `winsrv.feature.remove`, `msad.user.delete`, `wsfc.nodes.evict`, `wsfc.groups.offline`, `mssql.databases.drop`, `mssql.backup.restore`, `hyperv.checkpoints.revert` |
-| `destructive` + approval | Permanent delete; previews the exact blast radius, parks, and binds the approval to that preview. | `windns.record.remove` |
+| `destructive` + approval | Permanent delete. You must preview it first and pass the preview hash to the call. The call then waits for approval, and the approval request shows what will be deleted. | `windns.record.remove` |
+
+The preview of `windns.record.remove` does not show the records it will
+delete. The preview never contacts the DNS server, and this list needs a
+read of the server. The preview says so: it returns `plan_shown: false`
+and a `plan_note`. MEHO reads the records when you send the call, and
+the approver sees them on the approval request.
 
 When you call a parked operation, it does **not** execute. The dispatcher
 durably parks it and returns `awaiting_approval` with an

@@ -40,6 +40,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector, VsphereTargetLike, soap_pbm
+from meho_backplane.operations._errors import result_connector_error
 from meho_backplane.settings import get_settings
 
 _VC_HOST = "vcenter-nested.test.invalid"
@@ -475,3 +476,60 @@ async def test_pbm_create_no_permission_fault_is_not_retried() -> None:
     # The message names the method+target and never echoes the credential.
     assert "PbmCreate" in str(exc_info.value)
     assert "stub-password" not in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# #3567 — the error envelope shows the vim fault from the PBM path
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pbm_persistent_notauthenticated_reaches_envelope_upstream_fault() -> None:
+    """The do-not-restage RuntimeError still carries the ``NotAuthenticated`` fault."""
+    connector = _make_connector()
+    router = _VcRouter(create_responses=[_NOT_AUTH])
+
+    async with respx.mock(base_url=_VC_BASE) as mock:
+        mock.post(_SDK).mock(side_effect=router.sdk)
+        mock.post(_PBM).mock(side_effect=router.pbm)
+        with pytest.raises(RuntimeError) as exc_info:
+            await _create(connector)
+    await _close(connector)
+
+    result = result_connector_error("vmware.storage_policy.create", exc_info.value, 1.0)
+    extras = result.extras
+    # The class and the message stay as they were; only the fault is added.
+    assert extras["exception_class"] == "RuntimeError"
+    assert "do NOT restage" in str(exc_info.value)
+    assert extras["upstream_fault"] == {
+        "type": "NotAuthenticated",
+        "faultstring": "The session is not authenticated.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_pbm_service_content_fault_reaches_envelope_upstream_fault() -> None:
+    """A vim ``RetrieveServiceContent`` fault at PBM session establish keeps its fault."""
+    connector = _make_connector()
+    faultstring = "The host is not available. " + "y" * 300 + " Try again later."
+    fault_xml = _fault_xml("HostNotConnected", faultstring)
+
+    def _sdk(request: httpx.Request) -> httpx.Response:
+        if _soap_method(request.content.decode("utf-8")) == "RetrieveServiceContent":
+            return httpx.Response(500, text=fault_xml)
+        return httpx.Response(500, text="<unexpected-sdk/>")
+
+    async with respx.mock(base_url=_VC_BASE) as mock:
+        mock.post(_SDK).mock(side_effect=_sdk)
+        with pytest.raises(RuntimeError, match="RetrieveServiceContent faulted") as exc_info:
+            await _create(connector)
+    await _close(connector)
+
+    result = result_connector_error("vmware.storage_policy.create", exc_info.value, 1.0)
+    assert result.extras["exception_class"] == "RuntimeError"
+    assert result.extras["upstream_fault"] == {
+        "type": "HostNotConnected",
+        "faultstring": faultstring,
+    }
+    # The short message names only the fault type; the full text rides on the fault.
+    assert "Try again later." not in result.extras["exception_message"]

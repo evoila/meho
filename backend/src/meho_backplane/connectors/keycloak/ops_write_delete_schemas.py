@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Op-metadata rows for the governed Keycloak deletes (#3944).
+"""Op-metadata rows for the governed Keycloak deletes (#3944, #3886).
 
 Kept apart from the handlers in
 :mod:`~meho_backplane.connectors.keycloak.ops_write_delete` so both modules
@@ -9,10 +9,11 @@ stay under the file-size budget (the ``ops_write`` / ``ops_write_schemas``
 split). :mod:`~meho_backplane.connectors.keycloak.ops_write_schemas` folds
 :data:`DELETE_WRITE_OPS` into the connector's ``WRITE_OPS``. Each delete sits
 in the operation group of the object it removes (``user_write``,
-``group_write``, ``client_write``), the way other connectors group their
-deletes with the object.
+``group_write``, ``client_write``, ``realm_write``), the way other connectors
+group their deletes with the object. The realm delete (#3886) has its handler
+in :mod:`~meho_backplane.connectors.keycloak.ops_write_realm_delete`.
 
-All three rows are ``safety_level="destructive"`` + ``requires_approval=True``
+All four rows are ``safety_level="destructive"`` + ``requires_approval=True``
 and carry the ``destructive`` tag, so they take the governed-delete path: a
 second person must approve, the caller must first run ``preview_operation``
 and pass its ``preview_hash``, and the approval card shows what is deleted.
@@ -114,6 +115,33 @@ _CLIENT_DELETE_SCHEMA: dict[str, Any] = {
 }
 
 
+_REALM_DELETE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "realm": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "The name of the realm to delete. Required: the target's managed "
+                "realm is never used as a default."
+            ),
+        },
+    },
+    "required": ["realm"],
+    "additionalProperties": False,
+}
+
+_REALM_DELETE_RESULT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "realm": {"type": "string", "description": "The realm that was deleted."},
+        "deleted": _DELETE_RESULT_SCHEMA["properties"]["deleted"],
+        "already_absent": _DELETE_RESULT_SCHEMA["properties"]["already_absent"],
+    },
+    "additionalProperties": True,
+}
+
+
 DELETE_WRITE_OPS: tuple[KeycloakOp, ...] = (
     KeycloakOp(
         op_id="keycloak.user.delete",
@@ -209,6 +237,41 @@ DELETE_WRITE_OPS: tuple[KeycloakOp, ...] = (
                 "client_id": "The exact clientId, when you do not have the id.",
             },
             "output_shape": "``{realm, id, client_id, deleted, already_absent}``.",
+        },
+    ),
+    KeycloakOp(
+        op_id="keycloak.realm.delete",
+        handler_attr="realm_delete",
+        summary="Delete a whole Keycloak realm (destructive, a second person must approve).",
+        description=(
+            "DELETEs ``/admin/realms/{realm}``. Every user, client, group and "
+            "session in the realm goes with it. ``realm`` is required; the op "
+            "never falls back to the target's managed realm. Refuses "
+            "(``protected_realm``) the target's admin realm, its managed realm, "
+            "and the realm MEHO's own login uses. The login realm is refused on "
+            "every Keycloak target, because MEHO cannot tell for sure that a "
+            "target is a different Keycloak. The approval card shows whether the "
+            "realm is enabled and how many users, clients and groups it has. " + _HOW_TO_RUN
+        ),
+        parameter_schema=_REALM_DELETE_SCHEMA,
+        response_schema=_REALM_DELETE_RESULT_SCHEMA,
+        group_key="realm_write",
+        tags=("write", "destructive", "realm", "keycloak"),
+        safety_level="destructive",
+        requires_approval=True,
+        llm_instructions={
+            "when_to_use": (
+                "Use to remove a short-lived realm for good, for example a test or "
+                "demo realm, or a failed set-up that must be cleaned before a retry. "
+                "To stop logins but keep the realm, use keycloak.realm.update with "
+                "representation={enabled: false} instead; that can be undone. "
+                "The realm MEHO's own login uses is refused on every Keycloak "
+                "target, even when the target is a different Keycloak. " + _HOW_TO_RUN
+            ),
+            "parameter_hints": {
+                "realm": "The exact name of the realm to delete. Required.",
+            },
+            "output_shape": "``{realm, deleted, already_absent}``.",
         },
     ),
 )

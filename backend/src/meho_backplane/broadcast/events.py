@@ -77,6 +77,7 @@ from meho_backplane.redaction.resolver import get_default_policy
 __all__ = [
     "BroadcastEvent",
     "classify_op",
+    "is_secret_param_name",
     "redact_payload",
     "scrub_broadcast_params",
     "scrub_secret_named_values",
@@ -1061,11 +1062,20 @@ def _is_secret_param_name(name: str) -> bool:
     """True when *name* is a secret-shaped param/field name.
 
     Normalises camelCase and kebab-case to snake_case tokens, then
-    checks single tokens and adjacent pairs. Shared by the runtime
-    scrub below and the classifier-coverage test's parameter-schema
-    sweep so both layers agree on what "secret-bearing" means.
+    checks single tokens and adjacent pairs. The name is also checked
+    once without the camelCase split, so an odd-cased whole word still
+    matches as one token. Shared by the runtime scrub below and the
+    classifier-coverage test's parameter-schema sweep so both layers
+    agree on what "secret-bearing" means.
     """
-    normalised = _CAMEL_BOUNDARY.sub("_", name).replace("-", "_").replace(".", "_").lower()
+    flat = name.replace("-", "_").replace(".", "_")
+    return _tokens_are_secret(_CAMEL_BOUNDARY.sub("_", flat).lower()) or _tokens_are_secret(
+        flat.lower()
+    )
+
+
+def _tokens_are_secret(normalised: str) -> bool:
+    """Apply the token rules to an already-normalised snake_case name."""
     tokens = [token for token in normalised.split("_") if token]
     if not tokens:
         return False
@@ -1074,6 +1084,17 @@ def _is_secret_param_name(name: str) -> bool:
     if tokens[-1] in _SECRET_NAME_TOKENS_FINAL:
         return True
     return any(pair in _SECRET_NAME_TOKEN_PAIRS for pair in itertools.pairwise(tokens))
+
+
+def is_secret_param_name(name: str) -> bool:
+    """Public entry to :func:`_is_secret_param_name`.
+
+    The approval-park params echo
+    (:func:`~meho_backplane.operations._preview._redact_echoed_params`)
+    uses it to decide which param values to mask, so the echo and the
+    broadcast scrub cannot disagree on what a secret-named param is.
+    """
+    return _is_secret_param_name(name)
 
 
 def _scrub_secret_named_keys(node: Any) -> tuple[Any, bool]:

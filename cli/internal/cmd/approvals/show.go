@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
@@ -178,6 +179,13 @@ func printDetail(cmd *cobra.Command, d *api.ApprovalRequestView) {
 	}
 	if d.DecidedAt != nil {
 		fmt.Fprintf(w, "Decided at:   %s\n", *d.DecidedAt)
+	}
+	// Delegated decision (#3692): the reviewer acted on another human's
+	// written instruction, read off the decision audit row.
+	if dl := d.Delegation; dl != nil {
+		fmt.Fprintf(w, "Instructed by: %s\n", dl.InstructedBy)
+		fmt.Fprintf(w, "Instruction:  %q\n", dl.Instruction)
+		fmt.Fprintf(w, "Refs:         %s\n", strings.Join(dl.Refs, ", "))
 	}
 	if d.ProposedEffect != nil {
 		b, _ := json.MarshalIndent(d.ProposedEffect, "  ", "  ")

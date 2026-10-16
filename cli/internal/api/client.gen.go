@@ -470,6 +470,14 @@ const (
 	RunSummaryStateInProgress RunSummaryState = "in_progress"
 )
 
+// Defines values for SafetyOverlayEntrySafetyLevel.
+const (
+	SafetyOverlayEntrySafetyLevelCaution     SafetyOverlayEntrySafetyLevel = "caution"
+	SafetyOverlayEntrySafetyLevelDangerous   SafetyOverlayEntrySafetyLevel = "dangerous"
+	SafetyOverlayEntrySafetyLevelDestructive SafetyOverlayEntrySafetyLevel = "destructive"
+	SafetyOverlayEntrySafetyLevelSafe        SafetyOverlayEntrySafetyLevel = "safe"
+)
+
 // Defines values for ScheduledTriggerInFlightPolicy.
 const (
 	ScheduledTriggerInFlightPolicyFailIntoAudit ScheduledTriggerInFlightPolicy = "fail_into_audit"
@@ -1366,9 +1374,17 @@ type ApprovalRequestStatus string
 
 // ApprovalRequestView Read-only view of an :class:`~meho_backplane.db.models.ApprovalRequest`.
 type ApprovalRequestView struct {
-	ConnectorId    string                 `json:"connector_id"`
-	CreatedAt      string                 `json:"created_at"`
-	DecidedAt      *string                `json:"decided_at"`
+	ConnectorId string  `json:"connector_id"`
+	CreatedAt   string  `json:"created_at"`
+	DecidedAt   *string `json:"decided_at"`
+
+	// Delegation Who told the approver to decide, read off the decision audit row (#3692).
+	//
+	// Present only when the decision ``reason`` ended with the
+	// ``Instructed-by:`` / ``Instruction:`` / ``Refs:`` trailer block. The
+	// approver is still ``reviewed_by``; ``instructed_by`` is the other human
+	// whose written instruction they acted on.
+	Delegation     *DelegationView        `json:"delegation,omitempty"`
 	ExpiresAt      *string                `json:"expires_at"`
 	Id             openapi_types.UUID     `json:"id"`
 	OpId           string                 `json:"op_id"`
@@ -1478,7 +1494,7 @@ type ApproveRequestBody struct {
 	// Params The original dispatch params, unchanged. The hash must match the stored params_hash on the approval request.
 	Params *map[string]interface{} `json:"params,omitempty"`
 
-	// Reason Optional human-readable approval reason (recorded in the audit row).
+	// Reason Optional human-readable approval reason (recorded in the audit row). End it with Instructed-by: / Instruction: / Refs: lines when another human instructed this decision.
 	Reason *string `json:"reason,omitempty"`
 }
 
@@ -3601,6 +3617,7 @@ type ConnectorSpecEntry struct {
 	Product                    string                           `json:"product"`
 	ProfileResource            *string                          `json:"profile_resource"`
 	RequiresConnectorClass     string                           `json:"requires_connector_class"`
+	SafetyOverlay              *[]SafetyOverlayEntry            `json:"safety_overlay"`
 	Sha256                     *string                          `json:"sha256"`
 	SpecInfoVersion            *string                          `json:"spec_info_version"`
 	SpecInfoVersionsCompatible *[]string                        `json:"spec_info_versions_compatible"`
@@ -4191,7 +4208,7 @@ type DecideRequestBody struct {
 	// Decision One of 'approved' / 'rejected'.
 	Decision string `json:"decision"`
 
-	// Reason Optional rationale recorded on the decision audit row.
+	// Reason Optional rationale recorded on the decision audit row. End it with Instructed-by: / Instruction: / Refs: lines when another human instructed this decision.
 	Reason *string `json:"reason,omitempty"`
 }
 
@@ -4249,6 +4266,18 @@ type DecideResponseBody_DispatchResult struct {
 // than silently de-duplicated.
 type DeclareCapabilitiesRequest struct {
 	Capabilities []CapabilityDeclaration `json:"capabilities"`
+}
+
+// DelegationView Who told the approver to decide, read off the decision audit row (#3692).
+//
+// Present only when the decision “reason“ ended with the
+// “Instructed-by:“ / “Instruction:“ / “Refs:“ trailer block. The
+// approver is still “reviewed_by“; “instructed_by“ is the other human
+// whose written instruction they acted on.
+type DelegationView struct {
+	InstructedBy string   `json:"instructed_by"`
+	Instruction  string   `json:"instruction"`
+	Refs         []string `json:"refs"`
 }
 
 // DeprecateTemplateResponse Response for “meho_runbook_deprecate_template“ -- the now-deprecated coordinates.
@@ -6710,7 +6739,7 @@ type RefreshResult struct {
 
 // RejectRequestBody POST body for “…/reject“.
 type RejectRequestBody struct {
-	// Reason Optional human-readable rejection reason (recorded in the audit row).
+	// Reason Optional human-readable rejection reason (recorded in the audit row). End it with Instructed-by: / Instruction: / Refs: lines when another human instructed this decision.
 	Reason *string `json:"reason,omitempty"`
 }
 
@@ -6902,6 +6931,11 @@ type ResultQueryBody struct {
 	// and the operator/aggregate allow-lists are enforced here, at construction;
 	// field-vs-schema validation needs the handle's columns and happens in
 	// :func:`compile_query`.
+	//
+	// ``path`` is the other read: an RFC 6901 pointer into a document handle,
+	// or into the top-level fields a rows handle left out of its inline
+	// summary. It is never compiled to SQL, so it cannot be combined with any
+	// relational field (checked here, at construction).
 	Query *ResultQuerySpec `json:"query,omitempty"`
 }
 
@@ -6914,6 +6948,11 @@ type ResultQueryBody struct {
 // and the operator/aggregate allow-lists are enforced here, at construction;
 // field-vs-schema validation needs the handle's columns and happens in
 // :func:`compile_query`.
+//
+// “path“ is the other read: an RFC 6901 pointer into a document handle,
+// or into the top-level fields a rows handle left out of its inline
+// summary. It is never compiled to SQL, so it cannot be combined with any
+// relational field (checked here, at construction).
 type ResultQuerySpec struct {
 	// Aggregate Aggregate output columns (COUNT/SUM/MIN/MAX/AVG).
 	Aggregate *[]Aggregate `json:"aggregate,omitempty"`
@@ -6929,6 +6968,9 @@ type ResultQuerySpec struct {
 
 	// OrderBy Sort terms (max 4).
 	OrderBy *[]OrderBy `json:"order_by,omitempty"`
+
+	// Path RFC 6901 JSON Pointer into a document handle (for example `/status/conditions/0`; `""` is the whole document), or into the top-level fields a rows handle left out of its inline summary (`omitted_scalar_count`). Reads one value; an array value pages with the call's `offset` / `limit`. Cannot be combined with `filter`, `select`, `group_by`, `aggregate`, `order_by`, or `limit`.
+	Path *string `json:"path"`
 
 	// Select Projection: columns to return (max 64). Omit for all columns. Not allowed together with `aggregate` (the output is then the group keys plus the aggregates).
 	Select *[]string `json:"select,omitempty"`
@@ -7451,6 +7493,27 @@ type SafetyChangeModel struct {
 	OldSafetyLevel  string                 `json:"old_safety_level"`
 	OpId            string                 `json:"op_id"`
 }
+
+// SafetyOverlayEntry One catalog rule that raises the safety of matching ingested ops.
+//
+// A catalog row that declares :attr:`ConnectorSpecEntry.safety_overlay`
+// lets an operator raise the safety level and turn on approval for
+// chosen operations of that spec, without changing the ingest code.
+// “method“ is matched exactly (upper-cased). “path“ is a
+// shell-style glob matched case-sensitively against the spec path
+// template with any query string removed; “*“ also matches “/“.
+// The rule only ever raises: it never lowers a stricter level and never
+// clears an approval requirement (see
+// :func:`meho_backplane.operations.ingest.safety_floors.apply_safety_floor`).
+type SafetyOverlayEntry struct {
+	Method           string                        `json:"method"`
+	Path             string                        `json:"path"`
+	RequiresApproval *bool                         `json:"requires_approval,omitempty"`
+	SafetyLevel      SafetyOverlayEntrySafetyLevel `json:"safety_level"`
+}
+
+// SafetyOverlayEntrySafetyLevel defines model for SafetyOverlayEntry.SafetyLevel.
+type SafetyOverlayEntrySafetyLevel string
 
 // ScheduledTriggerCreate Request body for “POST /api/v1/scheduler/triggers“.
 //

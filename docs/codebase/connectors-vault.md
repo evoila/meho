@@ -592,8 +592,14 @@ and after the delete) and returns a redaction-safe summary:
 ```
 
 The dispatcher merges that under
-`ApprovalRequest.proposed_effect["permission_preflight"]`, so the
-approval surface can render a "this write will be denied" banner.
+`ApprovalRequest.proposed_effect["permission_preflight"]`. When
+`will_be_denied` is `True`, the dispatcher refuses the park instead: no
+approval row is written and the caller gets `denied` /
+`write_capability_denied` with `path`, `granted`, `required` and a
+`doc_ref` to the write policy (#3542). The refused attempt is still
+recorded as a `denied` audit row, like a policy denial. This holds for a
+top-level call and for a step inside a multi-step operation. A probe that fails
+returns `None` (fail-soft), so it never refuses a park.
 
 Two design points keep this correct:
 

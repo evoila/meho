@@ -56,6 +56,7 @@ __all__ = [
     "USER_DELETE_OP",
     "FoundObject",
     "KeycloakDeleteRefusedError",
+    "KeycloakUnexpectedResponseError",
     "check_client_guards",
     "check_group_guards",
     "check_user_guards",
@@ -102,6 +103,16 @@ class KeycloakDeleteRefusedError(Exception):
         self.code = code
 
 
+class KeycloakUnexpectedResponseError(RuntimeError):
+    """Keycloak answered a read with a body that is not a JSON object.
+
+    A read of one object (a user, a client, a group, a realm) either returns
+    that object or answers 404. Anything else (a list, a string, ``null``) is
+    not proof that the object is absent, so the delete stops here instead of
+    guessing.
+    """
+
+
 @dataclass(frozen=True)
 class FoundObject:
     """The object one delete acts on, after the lookup.
@@ -146,14 +157,24 @@ async def get_or_none(
     path: str,
     operator: Operator,
 ) -> dict[str, Any] | None:
-    """GET one object; ``None`` when Keycloak answers 404 (it does not exist)."""
+    """GET one object; ``None`` only when Keycloak answers 404 (it does not exist).
+
+    A 2xx answer whose body is not a JSON object raises
+    :exc:`KeycloakUnexpectedResponseError`. It is never read as "absent": a
+    delete that trusted it could report ``deleted: true`` without a 404.
+    """
     try:
-        rep = await connector._get_admin_json(target, path, operator=operator)
+        rep: Any = await connector._get_admin_json(target, path, operator=operator)
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
             return None
         raise
-    return rep if isinstance(rep, dict) else None
+    if not isinstance(rep, dict):
+        raise KeycloakUnexpectedResponseError(
+            f"GET {path} answered with {type(rep).__name__} instead of a JSON object; "
+            "only a 404 counts as absent"
+        )
+    return rep
 
 
 def _single_match(

@@ -766,8 +766,10 @@ Three invariants make the hook safe to wire on the park path:
    connector-boundary engine walks Mappings key-by-key without inspecting
    the *key*). It uses `broadcast.events.is_secret_param_name`, the same
    name check as the broadcast params scrub, so any param the broadcast
-   path flags as secret is also masked in the echo (#3808). It also uses
-   the same value rule: only a string, mapping or list value is masked.
+   path flags as secret is also masked in the echo (#3808). It walks the
+   same containers too: every mapping and every sequence other than a
+   string (a list or a tuple). It also uses the same value rule: only a
+   string, mapping or sequence value is masked.
    A bare boolean, number or `null` under a secret-shaped name (for
    example `bind_secret_id: false` or `secret_id_ttl: 600`) stays
    visible, because it is a setting, not a secret, and the approver

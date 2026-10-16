@@ -155,7 +155,10 @@ def _preview_failure_reason(exc: Exception) -> str:
 def _scrub_secret_param_keys(value: Any) -> Any:
     """Replace secret-by-name param values with :data:`_PARAM_REDACTED`.
 
-    Walks dicts + lists recursively. For every dict, a key that
+    Walks any mapping and any sequence (other than strings and bytes)
+    recursively, the same container types the broadcast params scrub
+    walks, so a tuple of dicts hides its secrets the same way a list
+    does. For every mapping, a key that
     :func:`~meho_backplane.broadcast.events.is_secret_param_name` marks as
     secret has its whole value replaced when that value is a string, a
     mapping or a sequence -- so a nested ``{"credentials": [...]}`` leaks
@@ -173,7 +176,7 @@ def _scrub_secret_param_keys(value: Any) -> Any:
     This is the key-name half of the generic echo's redaction; the
     value-shape half is :func:`apply_connector_boundary_redaction`.
     """
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return {
             key: (
                 _PARAM_REDACTED
@@ -184,7 +187,7 @@ def _scrub_secret_param_keys(value: Any) -> Any:
             )
             for key, item in value.items()
         }
-    if isinstance(value, list):
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return [_scrub_secret_param_keys(item) for item in value]
     return value
 

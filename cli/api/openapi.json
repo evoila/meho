@@ -22806,6 +22806,11 @@
             "type": "string",
             "title": "Params Hash"
           },
+          "preview_hash": {
+            "type": "string",
+            "nullable": true,
+            "title": "Preview Hash"
+          },
           "proposed_effect": {
             "additionalProperties": true,
             "type": "object",
@@ -22813,6 +22818,10 @@
           },
           "status": {
             "$ref": "#/components/schemas/ApprovalRequestStatus"
+          },
+          "result_state": {
+            "$ref": "#/components/schemas/ApprovalResultState",
+            "nullable": true
           },
           "reviewed_by": {
             "type": "string",
@@ -22873,6 +22882,17 @@
         ],
         "title": "ApprovalRequestView",
         "description": "Read-only view of an :class:`~meho_backplane.db.models.ApprovalRequest`."
+      },
+      "ApprovalResultState": {
+        "type": "string",
+        "enum": [
+          "not_started",
+          "started",
+          "executed",
+          "failed"
+        ],
+        "title": "ApprovalResultState",
+        "description": "Whether an approved request has run yet (#3486).\n\nRead off the row, never stored. ``status`` keeps its closed four-state\ncontract; this field adds the run phase next to it, so a client that\nlists or shows requests can tell \"approved, not run yet\" from\n\"approved and run\" without polling the owner-only ``/result`` read.\n\n* :attr:`NOT_STARTED` -- approved, and no resumer has claimed the run\n  yet (``resumed_at IS NULL``).\n* :attr:`STARTED` -- a resumer claimed the run (``resumed_at`` is set),\n  but no result is stored. Either the op is still running, or the run\n  ended without a stored result: the result write is best-effort, and a\n  re-dispatch that raised instead of returning an envelope stores\n  nothing. Both resume paths (operator surfaces and the in-process\n  agent waiter) store the envelope they get back.\n* :attr:`EXECUTED` -- the stored result has ``status == \"ok\"``.\n* :attr:`FAILED` -- a result is stored and its ``status`` is not ``ok``."
       },
       "ApprovalResultView": {
         "properties": {
@@ -25883,6 +25903,14 @@
             "nullable": true,
             "title": "Preview Hash",
             "description": "Preview-result-hash binding for the destructive tier (#3197). The hash a prior preview_operation of the identical (connector_id, op_id, target, params) returned. REQUIRED for a safety_level='destructive' op \u2014 the dispatcher refuses to park the approval fail-closed unless it matches the server-recomputed preview hash. Ignored for every non-destructive op. None default keeps a bare call_operation byte-identical to pre-#3197."
+          },
+          "idempotency_key": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Idempotency Key",
+            "description": "Optional retry key for a call that waits for approval (#3486). If you send the same key again with the identical call, MEHO returns the approval request it already made (same approval_request_id, extras.approval_request_reused=true) instead of a second one. The key belongs to you: another principal's key never matches. It is free again once that request is rejected or expires. The same key with a different call is refused with idempotency_key_conflict. Ignored when the call does not wait for approval."
           },
           "async": {
             "type": "boolean",

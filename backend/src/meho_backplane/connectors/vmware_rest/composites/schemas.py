@@ -149,6 +149,7 @@ __all__ = [
     "VM_DISK_GROW_RESPONSE_SCHEMA",
     "VM_MIGRATE_PARAMETER_SCHEMA",
     "VM_MIGRATE_RESPONSE_SCHEMA",
+    "VM_MOID_PATTERN",
     "VM_NIC_REPOINT_PARAMETER_SCHEMA",
     "VM_NIC_REPOINT_RESPONSE_SCHEMA",
     "VM_POWER_BULK_PARAMETER_SCHEMA",
@@ -1232,20 +1233,32 @@ VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA: dict[str, Any] = {
 }
 
 
+#: vCenter VM moid shape, e.g. ``vm-42``. A VM name does not match.
+VM_MOID_PATTERN: str = r"^vm-[0-9]+$"
+
+
 #: ``vmware.composite.vm.destroy`` parameter schema (#3198).
 #:
 #: The first governed destructive delete. A single required ``vm`` moid —
 #: the destroy takes no ``force`` flag: a powered-on VM is refused
 #: (``status='not_powered_off'``), never implicitly powered off, and the
 #: mandatory human approval is the confirmation, not a param.
+#:
+#: ``vm`` must match :data:`VM_MOID_PATTERN` (#3479). A VM name fails schema
+#: validation with ``invalid_params`` before the blast-radius preview runs.
+#: The composite does not look a name up: two VMs can share a name, so the
+#: caller reads the inventory and passes the moid.
 VM_DESTROY_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "vm": {
             "type": "string",
             "minLength": 1,
+            "pattern": VM_MOID_PATTERN,
             "description": (
-                "Target VM moid to permanently destroy. The VM must be "
+                "vCenter moid of the VM to permanently destroy, like "
+                "'vm-42'. Not the VM name: look the moid up with an "
+                "inventory read first. The VM must be "
                 "POWERED_OFF — a running VM is refused with "
                 "``status='not_powered_off'`` (no implicit power-off)."
             ),
@@ -1334,14 +1347,18 @@ VM_POWER_BULK_PARAMETER_SCHEMA: dict[str, Any] = {
 #: Single-VM power verb. Hard verbs (``on`` / ``off`` / ``reset``) hit
 #: ``POST:/vcenter/vm/{vm}/power``; soft verbs (``guest_shutdown`` /
 #: ``guest_reboot``) hit ``POST:/vcenter/vm/{vm}/guest/power`` and require
-#: running VMware Tools.
+#: running VMware Tools. ``vm`` must match :data:`VM_MOID_PATTERN` (#3479).
 VM_POWER_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "vm": {
             "type": "string",
             "minLength": 1,
-            "description": "VM moid to act on.",
+            "pattern": VM_MOID_PATTERN,
+            "description": (
+                "vCenter moid of the VM to act on, like 'vm-42'. Not the "
+                "VM name: look the moid up with an inventory read first."
+            ),
         },
         "verb": {
             "type": "string",

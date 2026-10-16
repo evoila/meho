@@ -731,3 +731,89 @@ async def test_composite_preview_hash_is_param_sensitive(stub_embedding_service:
     assert p1["status"] == "ok"
     assert p1["preview_hash"] == p1b["preview_hash"]  # stable for identical args
     assert p1["preview_hash"] != p2["preview_hash"]  # a different delete → different hash
+
+
+# ---------------------------------------------------------------------------
+# A VM name where a moid belongs fails as invalid_params (#3479)
+# ---------------------------------------------------------------------------
+
+
+def _assert_vm_pattern_error(extras: dict[str, Any]) -> None:
+    assert extras["error_code"] == "invalid_params"
+    errors = extras["validation_errors"]
+    assert [(e["path"], e["validator"]) for e in errors] == [("$.vm", "pattern")]
+
+
+@pytest.mark.asyncio
+async def test_destroy_with_vm_name_is_invalid_params_not_blast_radius_denial(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A name fails schema validation before the preview reads vCenter."""
+    recorder = _RecordingVmwareConnector(about_version="9.0.0")
+    _seed_vm_reads(recorder)
+    await _bootstrap(recorder, stub_embedding_service)
+    await _seed_target()
+
+    requester = _make_operator(sub="op-requester")
+    args = {
+        "connector_id": _CONNECTOR_ID,
+        "op_id": _OP_ID,
+        "target": "test-vcenter",
+        "params": {"vm": "doomed-vm"},
+    }
+
+    preview = await preview_operation(requester, args)
+    assert preview["status"] == "error", preview
+    _assert_vm_pattern_error(preview["extras"])
+
+    call = await call_operation(requester, {**args, "preview_hash": "0" * 64})
+    assert call["status"] == "error", call
+    _assert_vm_pattern_error(call["extras"])
+    assert recorder.calls == []
+    assert await _pending_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_power_with_vm_name_is_invalid_params(stub_embedding_service: AsyncMock) -> None:
+    """vm.power refuses a name at dispatch instead of failing at vCenter with a 404."""
+    recorder = _RecordingVmwareConnector(about_version="9.0.0")
+    await _bootstrap(recorder, stub_embedding_service)
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.vm.power",
+        target=_FakeVmwareTarget(),
+        params={"vm": "web-01", "verb": "off"},
+    )
+    assert result.status == "error"
+    _assert_vm_pattern_error(result.extras)
+    assert recorder.calls == []
+
+
+@pytest.mark.parametrize("value", ["vm-42", "vm-1001"])
+def test_vm_moid_pattern_accepts_moids(value: str) -> None:
+    from meho_backplane.connectors.vmware_rest.composites.schemas import (
+        VM_DESTROY_PARAMETER_SCHEMA,
+        VM_POWER_PARAMETER_SCHEMA,
+    )
+    from meho_backplane.operations._validate import validate_params
+
+    assert validate_params(VM_DESTROY_PARAMETER_SCHEMA, {"vm": value}) == []
+    assert validate_params(VM_POWER_PARAMETER_SCHEMA, {"vm": value, "verb": "on"}) == []
+
+
+@pytest.mark.parametrize("value", ["web-01", "vm-", "vm-abc", "VM-42", "host-42"])
+def test_vm_moid_pattern_rejects_non_moids(value: str) -> None:
+    from meho_backplane.connectors.vmware_rest.composites.schemas import (
+        VM_DESTROY_PARAMETER_SCHEMA,
+        VM_POWER_PARAMETER_SCHEMA,
+    )
+    from meho_backplane.operations._validate import validate_params
+
+    for schema, params in (
+        (VM_DESTROY_PARAMETER_SCHEMA, {"vm": value}),
+        (VM_POWER_PARAMETER_SCHEMA, {"vm": value, "verb": "on"}),
+    ):
+        errors = validate_params(schema, params)
+        assert [(e["path"], e["validator"]) for e in errors] == [("$.vm", "pattern")]

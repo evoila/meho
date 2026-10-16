@@ -1573,6 +1573,18 @@ tooling matches; group `vm`, tags `composite / write / vm / lifecycle /
 destroy / destructive`). Params: one required `vm` moid — no `force` flag,
 because the mandatory human approval *is* the confirmation.
 
+**`vm` must be a moid, not a name (#3479).** `vm.destroy` and `vm.power`
+both declare `"pattern": "^vm-[0-9]+$"` on `vm` (`schemas.VM_MOID_PATTERN`).
+A VM name such as `web-01` fails schema validation, so `preview_operation`
+and `call_operation` return `invalid_params` with a `validation_errors` entry
+at `$.vm` (`validator: "pattern"`). This happens before any vCenter read. Before
+the pattern, a name made the `vm.destroy` preview read 404, and the call was
+denied as `blast_radius_required`, which hid the real cause. For `vm.power` a
+name failed later at vCenter with a 404. The composites do not look a name up:
+two VMs can have the same name, and a destroy must not guess. The caller reads
+the inventory (for example `GET:/vcenter/vm` with `filter.names`) and passes
+the moid.
+
 The destructive tier is enforced generically (see
 [`approvals.md`](approvals.md#first-governed-delete-vmwarecompositevmdestroy-3198)):
 mandatory human approval always (agent verdict `DENY`, no standing grant,

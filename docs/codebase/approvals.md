@@ -666,6 +666,39 @@ flight-recorder handle. `resume_result` is **internal to this surface** — like
 `params` it is never projected onto the default read view (`_view`) or a
 broadcast frame.
 
+### Who owns a result handle from an approved run (#3548)
+
+The approved op runs under the **approver's** `Operator`. Before #3548 a
+large result spilled into a handle owned by the approver's `sub`. But
+`/result` serves only the **parker**, so the parker got an envelope with a
+handle it could not open (`handle_not_found`).
+
+Now the parker owns it:
+
+- `_dispatch_resume_with_bound_context` binds
+  `operations.reducer.handle_owner_sub_var` to `request.principal_sub` for
+  the run (token reset in `finally`).
+- `dispatcher._reduce_or_error` uses that value as
+  `reducer_context["operator_sub"]` when it is set. Otherwise it uses the
+  dispatching operator's `sub`, as before.
+- The tenant does not change. The approver can only load rows from its own
+  tenant, so the parker's tenant is the same.
+- Every spill in the run follows the binding, including the child ops of a
+  resumed multi-step (composite) op.
+
+What this means:
+
+- One owner per handle. The parker can page and query it with
+  `result_query`. Any other principal still misses, **including the
+  approver**. The approver still sees the summary and sample rows inline. The
+  approver did not ask for the data.
+- The audit model is unchanged. The run's audit row still names the
+  approver as the actor. The parker's `result_query` reads run under the
+  parker, so they match the parker's `approval.result` row.
+- Only the operator-surface resume does this. A normal dispatch, and the
+  in-process agent-run resume (it already runs as the parking agent), keep
+  handles owned by the caller.
+
 **Relation to the #3027 add-on step event.** `publish_approval_event`
 already durably records the *decision* (`approval.approved` / `.rejected`)
 for the paired add-on that requested the approval

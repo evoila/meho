@@ -21,7 +21,7 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor, ServicePrincipalGrant
+from meho_backplane.db.models import EndpointDescriptor, ServicePrincipalGrant, Target
 from meho_backplane.operations.service_grant_schemas import ServiceGrantCreate
 from meho_backplane.operations.service_grants import (
     GrantValidationError,
@@ -617,3 +617,104 @@ async def test_null_target_only_park_hint_fires_for_target_scoped_dispatch(
             target_id=None,
         )
     ) is None
+
+
+# ---------------------------------------------------------------------------
+# Orphaned grants (#3430)
+# ---------------------------------------------------------------------------
+
+
+async def _seed_target(name: str, *, deleted: bool = False) -> uuid.UUID:
+    target_id = uuid.uuid4()
+    async with get_sessionmaker()() as s, s.begin():
+        s.add(
+            Target(
+                id=target_id,
+                tenant_id=_TENANT_ID,
+                name=name,
+                aliases=[],
+                product="vmware",
+                host=f"{name}.test",
+                port=443,
+                deleted_at=datetime.now(UTC) if deleted else None,
+            )
+        )
+    return target_id
+
+
+async def _soft_delete_target(target_id: uuid.UUID) -> None:
+    async with get_sessionmaker()() as s, s.begin():
+        await s.execute(
+            update(Target).where(Target.id == target_id).values(deleted_at=datetime.now(UTC))
+        )
+
+
+@pytest.mark.asyncio
+async def test_grant_on_re_registered_target_is_orphaned_with_remediation() -> None:
+    """Delete + register again under a new id: the old grant reads as orphaned.
+
+    The live-target grant and a selector grant on the same op are not flagged.
+    The orphaned grant is not revoked (read-time classification only).
+    """
+    svc = ServicePrincipalGrantService()
+    old_id = await _seed_target("sddc-mgr")
+    orphan = await svc.create(_TENANT_ID, _CREATOR, _payload(target_id=old_id))
+    assert orphan.orphaned is False
+
+    # Tear down and rebuild: the old row is soft-deleted, the new row gets a new id.
+    await _soft_delete_target(old_id)
+    new_id = await _seed_target("sddc-mgr")
+    live = await svc.create(_TENANT_ID, _CREATOR, _payload(target_id=new_id))
+    selector = await svc.create(
+        _TENANT_ID,
+        _CREATOR,
+        ServiceGrantCreate(
+            principal_sub=_PRINCIPAL,
+            op_id="vmware.composite.vm.create",
+            connector_id=_CONNECTOR,
+            target_name_pattern="sddc-mgr",
+            reason="survives a new registration",
+        ),
+    )
+    targetless = await svc.create(_TENANT_ID, _CREATOR, _payload(op_id="vmware.composite.vm.power"))
+
+    listed = {g.id: g for g in await svc.list_(_TENANT_ID)}
+    assert listed[orphan.id].orphaned is True
+    remediation = listed[orphan.id].orphan_remediation
+    assert remediation is not None
+    assert str(old_id) in remediation
+    assert "target_name_pattern='sddc-mgr'" in remediation
+    assert "revoke" in remediation
+    for ok in (live, selector, targetless):
+        assert listed[ok.id].orphaned is False
+        assert listed[ok.id].orphan_remediation is None
+
+    shown = await svc.get(_TENANT_ID, orphan.id)
+    assert shown is not None
+    assert shown.orphaned is True
+    # Never auto-revoked: cleanup stays an operator decision.
+    assert shown.revoked_at is None
+
+
+@pytest.mark.asyncio
+async def test_grant_on_unknown_target_id_is_orphaned_without_old_name() -> None:
+    """A target id with no row at all (or in another tenant) is orphaned too."""
+    svc = ServicePrincipalGrantService()
+    entry = await svc.create(_TENANT_ID, _CREATOR, _payload(target_id=uuid.uuid4()))
+    assert entry.orphaned is True
+    assert entry.orphan_remediation is not None
+    assert "target_name_pattern or target_product" in entry.orphan_remediation
+
+
+@pytest.mark.asyncio
+async def test_revoked_grant_on_deleted_target_is_not_flagged() -> None:
+    """A revoked grant is already cleaned up, so it is not called orphaned."""
+    svc = ServicePrincipalGrantService()
+    target_id = await _seed_target("gone", deleted=True)
+    entry = await svc.create(_TENANT_ID, _CREATOR, _payload(target_id=target_id))
+    assert entry.orphaned is True
+    assert await svc.revoke(_TENANT_ID, entry.id, _CREATOR)
+
+    history = {g.id: g for g in await svc.list_(_TENANT_ID, include_revoked=True)}
+    assert history[entry.id].orphaned is False
+    assert history[entry.id].orphan_remediation is None

@@ -33576,6 +33576,16 @@
             "type": "string",
             "nullable": true,
             "title": "Revoked Reason"
+          },
+          "orphaned": {
+            "type": "boolean",
+            "title": "Orphaned",
+            "default": false
+          },
+          "orphan_remediation": {
+            "type": "string",
+            "nullable": true,
+            "title": "Orphan Remediation"
           }
         },
         "type": "object",
@@ -33597,7 +33607,7 @@
           "revoked_reason"
         ],
         "title": "ServiceGrantRead",
-        "description": "Row shape every accessor returns.\n\n``from_attributes=True`` allows direct construction from an ORM row.\nExposes ``revoked_at`` / ``revoked_by_sub`` / ``revoked_reason`` so\ncallers can tell a live grant from a revoked one in the history, and why\nit was revoked."
+        "description": "Row shape every accessor returns.\n\n``from_attributes=True`` allows direct construction from an ORM row.\nExposes ``revoked_at`` / ``revoked_by_sub`` / ``revoked_reason`` so\ncallers can tell a live grant from a revoked one in the history, and why\nit was revoked.\n\n``orphaned`` / ``orphan_remediation`` are filled in by the service when\nit reads the grant (see\n:func:`~meho_backplane.operations.service_grants.classify_orphaned_grants`);\nbuilding the shape straight from an ORM row leaves them at the\nnot-orphaned default."
       },
       "ShowTemplateResponse": {
         "properties": {

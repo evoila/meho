@@ -36,6 +36,10 @@ _KIND_ORDER: Final[dict[str, int]] = {
 _SAFE_SCALAR_KINDS: Final[frozenset[str]] = frozenset({"boolean", "integer", "number", "string"})
 _INT64_MIN: Final[int] = -(2**63)
 _INT64_MAX: Final[int] = 2**63 - 1
+#: Largest integer a 64-bit float holds exactly. A field that mixes integers
+#: and decimals is queried as a float column only when every integer fits.
+_FLOAT_EXACT_INT_MAX: Final[int] = 2**53
+_NUMERIC_KINDS: Final[frozenset[str]] = frozenset({"integer", "number"})
 _STRING_CHUNK_CHARS: Final[int] = 4096
 
 
@@ -192,6 +196,7 @@ class _FieldAccumulator:
     kinds: set[str] = field(default_factory=set)
     presence_count: int = 0
     has_int64_overflow: bool = False
+    has_float_inexact_integer: bool = False
     has_nonfinite_number: bool = False
 
 
@@ -218,6 +223,8 @@ def _build_catalog_from_admitted(rows: list[dict[str, Any]]) -> ResultFieldCatal
             accumulator.kinds.add(kind)
             if kind == "integer" and not _is_int64(value):
                 accumulator.has_int64_overflow = True
+            if kind == "integer" and abs(value) > _FLOAT_EXACT_INT_MAX:
+                accumulator.has_float_inexact_integer = True
             if kind == "number" and not math.isfinite(value):
                 accumulator.has_nonfinite_number = True
 
@@ -238,10 +245,16 @@ def _freeze_field(
     scalar_family: str | None = None
     if not nonnull_kinds:
         reason = "null_only"
-    elif len(nonnull_kinds) != 1:
+    elif nonnull_kinds == _NUMERIC_KINDS and accumulator.has_float_inexact_integer:
+        # A float column would round these integers; keep them raw-only.
+        reason = "mixed_non_null_kinds"
+    elif len(nonnull_kinds) != 1 and nonnull_kinds != _NUMERIC_KINDS:
         reason = "mixed_non_null_kinds"
     else:
-        candidate_family = next(iter(nonnull_kinds))
+        # Whole and decimal numbers together query as one float column.
+        candidate_family = (
+            "number" if nonnull_kinds == _NUMERIC_KINDS else next(iter(nonnull_kinds))
+        )
         if candidate_family not in _SAFE_SCALAR_KINDS:
             reason = "container_value"
         else:

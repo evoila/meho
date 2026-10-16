@@ -5,8 +5,8 @@
 # ConnectorSpecEntry schema + its loaders + the boot-time registry/artifact
 # validators); already over the line-count limit on origin/main. Splitting it
 # would fragment a single reviewed artifact with no clean responsibility
-# boundary. Pre-existing; this change only adds the declarative op-allowlist
-# field + its lookup helper (security review T3-F01).
+# boundary. Pre-existing; later changes add the declarative op-allowlist and
+# safety-overlay fields + their lookup helpers.
 
 """Curated connector-spec catalog (Goal #214 raw-REST ingest on-ramp; #743).
 
@@ -69,6 +69,7 @@ from __future__ import annotations
 import difflib
 import functools
 import re
+from fnmatch import fnmatchcase
 from importlib import resources
 from typing import Literal
 
@@ -76,6 +77,8 @@ import yaml
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+
+from meho_backplane.operations.ingest.schemas import SafetyLevel
 
 #: Declarative classifier for whether the catalog row's upstream URL(s)
 #: can drive a ``meho connector ingest --catalog <product>/<version>``
@@ -257,6 +260,48 @@ class OpAllowlistEntry(BaseModel):
         return (self.method, self.path)
 
 
+class SafetyOverlayEntry(BaseModel):
+    """One catalog rule that raises the safety of matching ingested ops.
+
+    A catalog row that declares :attr:`ConnectorSpecEntry.safety_overlay`
+    lets an operator raise the safety level and turn on approval for
+    chosen operations of that spec, without changing the ingest code.
+    ``method`` is matched exactly (upper-cased). ``path`` is a
+    shell-style glob matched case-sensitively against the spec path
+    template with any query string removed; ``*`` also matches ``/``.
+    The rule only ever raises: it never lowers a stricter level and never
+    clears an approval requirement (see
+    :func:`meho_backplane.operations.ingest.safety_floors.apply_safety_floor`).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    method: str = Field(min_length=1, max_length=16)
+    path: str = Field(min_length=1, max_length=512)
+    safety_level: SafetyLevel
+    requires_approval: bool = False
+
+    @field_validator("method")
+    @classmethod
+    def _method_upper(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if not normalized:
+            raise ValueError("safety_overlay method must not be blank")
+        return normalized
+
+    @field_validator("path")
+    @classmethod
+    def _path_is_absolute(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized.startswith("/"):
+            raise ValueError(f"safety_overlay path {normalized!r} must start with '/'")
+        return normalized
+
+    def matches(self, method: str, path: str) -> bool:
+        """Return whether this rule covers the ``(method, path)`` of a parsed op."""
+        return method.upper() == self.method and fnmatchcase(path.split("?", 1)[0], self.path)
+
+
 class ConnectorSpecEntry(BaseModel):
     """One curated ``(product, version)`` -> spec-source mapping.
 
@@ -371,6 +416,14 @@ class ConnectorSpecEntry(BaseModel):
     #: connector-owned safety floor's pinned keys
     #: (``connectors/meho_automation/ingest_safety.py``).
     op_allowlist: tuple[OpAllowlistEntry, ...] | None = None
+    #: Declarative per-spec safety overlay. Each entry raises the
+    #: ``safety_level`` and can turn on ``requires_approval`` for the
+    #: ingested ops it matches. It is applied at ingest, after any
+    #: connector-owned safety floor, and it only ever raises. Rows that
+    #: were ingested before the overlay changed keep their old values
+    #: until the next ingest of the connector. ``None`` (the default)
+    #: means no overlay.
+    safety_overlay: tuple[SafetyOverlayEntry, ...] | None = None
 
     @field_validator("product", "version", "impl_id", "requires_connector_class")
     @classmethod
@@ -479,6 +532,21 @@ class ConnectorSpecEntry(BaseModel):
         keys = [entry.key for entry in value]
         if len(set(keys)) != len(keys):
             raise ValueError("op_allowlist entries must be unique on (method, path)")
+        return value
+
+    @field_validator("safety_overlay")
+    @classmethod
+    def _safety_overlay_nonempty_unique(
+        cls, value: tuple[SafetyOverlayEntry, ...] | None
+    ) -> tuple[SafetyOverlayEntry, ...] | None:
+        """A declared overlay must be non-empty and unique on ``(method, path)``."""
+        if value is None:
+            return value
+        if not value:
+            raise ValueError("safety_overlay must be null (no overlay) or a non-empty list")
+        keys = [(entry.method, entry.path) for entry in value]
+        if len(set(keys)) != len(keys):
+            raise ValueError("safety_overlay entries must be unique on (method, path)")
         return value
 
 
@@ -619,6 +687,18 @@ def op_allowlist_for(product: str, version: str) -> frozenset[tuple[str, str]] |
     if entry is None or entry.op_allowlist is None:
         return None
     return frozenset(op.key for op in entry.op_allowlist)
+
+
+def safety_overlay_for(product: str, version: str) -> tuple[SafetyOverlayEntry, ...]:
+    """Return the catalog safety overlay for ``(product, version)``.
+
+    Returns an empty tuple when the product is not in the catalog or its
+    row declares no overlay.
+    """
+    entry = load_catalog().get(product, version)
+    if entry is None or entry.safety_overlay is None:
+        return ()
+    return entry.safety_overlay
 
 
 def load_spec_resource(spec_resource: str) -> str:

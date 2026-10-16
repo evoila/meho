@@ -156,6 +156,15 @@
               </label>
             </div>
           </fieldset>
+          {#- #3920: a target name the linking page passed (``?target=``). The
+              search and the answer default their version scope to that
+              target's detected product and version. -#}
+          {% if target %}
+            <input type="hidden" name="target" value="{{ target }}" />
+            <span class="badge badge-ghost self-center" title="Version hint from this target">
+              Target: {{ target }}
+            </span>
+          {% endif %}
           <button type="submit" class="btn btn-primary gap-1" aria-label="Search the corpus">
             {{ icon("search") }}
             Go

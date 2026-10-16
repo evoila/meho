@@ -27,9 +27,12 @@ static route, retire a gateway (fail-closed on any live referrer), and trim
 ONE member out of a *shared* alias without deleting it. #3954 adds two safe
 reads, `pfsense.user.list` and `pfsense.route.static.list`. They return only a
 short list of fields, so nobody needs `pfsense.config.show` (the whole file)
-just to check a user or a static route. #3937 adds `pfsense.user.disable` and
-`pfsense.user.enable`: they turn one local user off or on again, and a second
-person must approve each call.
+just to check a user or a static route. #3850 adds `pfsense.filter.rule.add` and
+`pfsense.filter.rule.delete`: add or remove ONE firewall rule by a stable id.
+The delete always needs a human approval. The add needs a human approval,
+unless an operator gave a standing grant for it. #3937 adds
+`pfsense.user.disable` and `pfsense.user.enable`: they turn one local user off
+or on again, and a second person must approve each call.
 
 Source: `backend/src/meho_backplane/connectors/pfsense/`.
 
@@ -44,7 +47,8 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
   `route_static_add`, #3090), the destructive-delete bound-method shims
   (`nat_delete`, `alias_delete`, #3232; `route_static_delete`, `gateway_delete`,
   `alias_member_remove`, #3313), the allow-listed config-read shims
-  (`user_list`, `route_static_list`, #3954), and the user-write shims
+  (`user_list`, `route_static_list`, #3954), the filter-rule shims
+  (`filter_rule_add`, `filter_rule_delete`, #3850), and the user-write shims
   (`user_disable`, `user_enable`, #3937).
 
 - **`_auth_config()` override** — the load-bearing auth constraint. Requires
@@ -66,8 +70,19 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
   meho-internal#252 appends the parameterized management-plane flow classifier
   `pfsense.mgmt_flow.summary` via the `ops_mgmt_flow` module; #3954 appends
   `pfsense.user.list` and `pfsense.route.static.list` via the
-  `ops_config_reads` module; #3937 appends `pfsense.user.disable` and
-  `pfsense.user.enable` via the `ops_user_write` module.
+  `ops_config_reads` module; #3850 appends `pfsense.filter.rule.add` and
+  `pfsense.filter.rule.delete` via the `ops_filter_rule` module; #3937
+  appends `pfsense.user.disable` and `pfsense.user.enable` via the
+  `ops_user_write` module.
+
+- **Filter-rule ops** (`ops_filter_rule.py`, #3850) — the parser
+  `parse_filter_rules_xml`, the input checks (`_validate_rule_params`,
+  `_validate_ridentifier`), the management-path guard
+  (`parse_ssh_connection`, `rule_matches_mgmt_flow`, `_mgmt_guard`), the
+  `pfSsh.php playback` fragments (`_build_rule_add_playback`,
+  `_build_rule_delete_playback`), the handlers `pfsense_filter_rule_add` /
+  `pfsense_filter_rule_delete`, the delete's blast-radius preview builder, and
+  the `FILTER_RULE_OPS` tuple. See "Filter-rule ops" below.
 
 - **Allow-listed config reads** (`ops_config_reads.py`, #3954) — the pure
   parsers `list_local_users` and `list_static_routes`, the strict root parser
@@ -82,7 +97,9 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
   (`parse_nat_port_forwards_xml` / `parse_aliases_xml`), the fail-closed
   reference scans (`find_alias_references` — nested aliases + filter / NAT
   port-forward / outbound / 1:1 rules; `find_gateway_references` — static
-  routes + gateway groups + default-gateway setting), the canonical route
+  routes + gateway groups + default-gateway setting + filter rules that
+  policy-route out the gateway + interface `<gateway>` / `<gatewayv6>`
+  bindings), the canonical route
   matcher (`_match_static_routes_canonical`) and member-token split
   (`_alias_members`), the delete/remove-by-identity `pfSsh.php playback`
   fragment builders (`_build_nat_delete_playback` / `_build_alias_delete_playback`
@@ -256,6 +273,8 @@ Two-phase registration, identical to the bind9 pattern:
 | `pfsense.alias.delete` | `cat /cf/conf/config.xml` guard (match one `<aliases><alias>` by name + fail-closed reference scan) + `pfSsh.php playback` fragment (delete-by-name + `write_config()` + `filter_configure()`) + read-back verify | `alias` | `destructive` |
 | `pfsense.route.static.delete` | `cat /cf/conf/config.xml` guard (canonical-match one `<staticroutes><route>` by network) + `pfSsh.php playback` fragment (delete-by-network + `write_config()` + `system_routing_configure()`) + read-back verify | `routing` | `destructive` |
 | `pfsense.gateway.delete` | `cat /cf/conf/config.xml` guard (match one `<gateways><gateway_item>` by name + fail-closed reference scan) + `pfSsh.php playback` fragment (delete-by-name + `write_config()` + `system_routing_configure()`) + read-back verify | `routing` | `destructive` |
+| `pfsense.filter.rule.add` | `cat /cf/conf/config.xml` guard (id, interface) + `echo "$SSH_CONNECTION"` (block rules) + `pfSsh.php playback` fragment (insert top/bottom + `write_config()` + `filter_configure()`) + read-back verify | `firewall` | `dangerous` |
+| `pfsense.filter.rule.delete` | `cat /cf/conf/config.xml` guard (match one `<filter><rule>` by `<tracker>`) + `echo "$SSH_CONNECTION"` (enabled pass rules) + `pfSsh.php playback` fragment (delete-by-tracker + `write_config()` + `filter_configure()`) + read-back verify | `firewall` | `destructive` |
 | `pfsense.alias.member.remove` | `cat /cf/conf/config.xml` guard (match one `<aliases><alias>` by name + locate the member token) + `pfSsh.php playback` fragment (read-modify-write `<address>`/`<detail>` + `write_config()` + `filter_configure()`) + read-back verify | `alias` | `destructive` |
 | `pfsense.user.disable` | `cat /cf/conf/config.xml` guard (match one `<system><user>` by name, refuse the admin account) + `pfSsh.php playback` fragment (set `disabled` + `local_user_set()` + `write_config()`) + read-back verify | `users` | `dangerous` |
 | `pfsense.user.enable` | same as `pfsense.user.disable`, but clears `disabled` | `users` | `dangerous` |
@@ -264,8 +283,12 @@ The 11 read / identity ops plus the `pfsense.mgmt_flow.summary` classifier are
 `safety_level="safe"`; the 2 write ops (#3090)
 are `safety_level="caution"` / `requires_approval=False` — the same posture
 `bind9.record.add` / `windns.record.add` carry for an additive, recoverable,
-idempotent config write. The 5 destructive ops (#3232 nat/alias; #3313 the
-three teardown-inverse ops) are `safety_level="destructive"` /
+idempotent config write. `pfsense.filter.rule.add` (#3850) is
+`safety_level="dangerous"` / `requires_approval=True`: a firewall rule changes
+what traffic the whole firewall lets through, so every add waits for a human
+approval, unless an operator gave a standing grant for this op.
+The 6 destructive ops (#3232 nat/alias; #3313 the three teardown-inverse ops;
+#3850 `filter.rule.delete`) are `safety_level="destructive"` /
 `requires_approval=True` — the governed-delete tier: mandatory human approval
 (no agent path, no standing grant, no self-approval even under break-glass, no
 satellite mint), a #3197 preview-hash binding, and a mandatory blast-radius
@@ -593,12 +616,150 @@ re-emitted through `ipaddress`, CIDRs canonicalised. Anything outside the
 allowlist is rejected before a single SSH round-trip; `_php_squote` escapes
 defensively on top.
 
+**One edit at a time.** Every handler that plays back a `write_config()`
+fragment (the two adds here, the five deletes in `ops_delete.py`, and the two
+filter-rule ops) is wrapped by `serialized_config_write`. The wrapper holds
+one `asyncio.Lock` per SSH host on the connector from the first `config.xml`
+read to the read-back. `write_config()` saves the whole in-memory `$config`,
+so without the lock two overlapping ops on one appliance could each save an
+old copy and undo the other's change.
+
 **Surgical contract.** The handlers touch only `gateways/gateway_item` and
 `staticroutes/route` — never interface config. The perimeter pfSense frequently
 carries the operator's own access path, so an interface re-enumeration would
 sever the very session issuing the change. `pfsense.route.static.add` calls
 `system_routing_configure()` (route-table apply only); `pfsense.gateway.add`
 applies nothing — a pre-staged gateway is inert config until referenced.
+
+### One config edit at a time, and a full read-back (#3544)
+
+Nine of the ops that edit `config.xml` (the two `add` ops above, the five
+governed deletes, and the two filter-rule ops below) follow the same pattern.
+The two user writes (#3937) do not yet; see "User writes" below.
+The playback fragment loads the
+whole config into `$config`, edits it, and `write_config()` saves the whole
+config again. So two of these ops that overlap on one pfSense can save an old
+copy and undo each other's change. `pfSsh.php playback` still exits 0 in that
+case.
+
+Two guards stop this:
+
+1. **A lock per appliance.** Each handler has the
+   `ops_write.serialized_config_write` decorator. It holds
+   `PfSenseConnector.config_write_lock(target)` from the first `config.xml`
+   read to the last read-back. The lock is keyed on the SSH host, so two
+   targets that point at the same pfSense share it. Read ops do not take it.
+2. **A full read-back.** After the op's own check passes,
+   `ops_write.assert_only_own_object_changed` compares the whole file before
+   and after. It leaves out the one edited object, the edited section's
+   container when it is empty, and the `<revision>` block that every save
+   rewrites. Whitespace does not count. Empty elements do count: pfSense
+   stores a flag that is on, such as `<disabled></disabled>` on a user, as an
+   empty element, so a flag that appears or goes away is a real change. Any
+   other difference raises an error that says the op's own change was saved
+   but other parts of the config changed. The message names the changed
+   sections, so the operator can check the pfSense config history.
+
+The two filter-rule ops change one more thing on purpose: the rows of the GUI
+separators of the edited interface (`<filter><separator>`). An add at the top
+of an interface that already has rules moves every separator row of that
+interface down by one. A delete moves the rows below the deleted rule up by
+one. Both also write the interface's separator list back, so an empty
+element such as `<lan></lan>` can appear. The two handlers tell the read-back
+to expect exactly these changes (`_expected_separator_update` in
+`ops_filter_rule.py`): the moved rows must match, and the empty list element
+is allowed on either side. Any other change to the separators still fails
+the op.
+
+Limits:
+
+- The lock lives in the backplane process. It covers MEHO's own ops while the
+  backplane runs as one replica (the Helm default). Running several replicas
+  needs a shared lock.
+- The read-back sees every change that happens between the op's first read
+  and its read-back, except one: a change that is saved inside the PHP run
+  and then undone by the same run's save. Inside MEHO the lock prevents this.
+  A change made by hand in the pfSense web UI at that exact moment can still
+  be lost without notice.
+- The filter-rule add calls `filter_rules_sort()`, which puts the rules in
+  pfSense's own order. A config whose rules are not in that order, for
+  example after a hand edit, fails the add's full read-back. Every GUI save
+  sorts the rules, so a config that pfSense wrote itself is already in order.
+
+A new config-editing op must use the decorator and call the full read-back
+after its own check.
+
+## Filter-rule ops (#3850)
+
+`pfsense.filter.rule.add` adds ONE filter rule; `pfsense.filter.rule.delete`
+removes it again. Before these ops, a block rule (for example a fence between
+two networks) had to be a hand-written script outside MEHO, with no approval
+and no audit.
+
+- **Stable id.** The caller picks a `ridentifier`: a 9-digit number from
+  100000000 to 999999999. It is stored as the rule's `<tracker>`, and pfSense
+  puts it into the pf rule as `ridentifier <n>` (`filter.inc`), so logs show
+  it too. pfSense never uses this range itself: its own generated rules use
+  10000-13999, 10000000+ and 1000000000+, and GUI rules use a unix timestamp.
+  The delete only takes ids in the same range, so it only removes rules made
+  this way.
+- **Safe to run twice.** If a rule with the id already exists and does the
+  same thing, the add returns `already_present` and changes nothing. If it
+  does something different, the add returns `conflict` and changes nothing,
+  and `guidance` names the settings that differ. "The same thing" means every
+  setting the add can write is equal, the stored rule is not disabled, it
+  does not negate its source or destination, and it has none of the settings
+  the add never writes (a gateway, a schedule, a tag, a queue, a state
+  option, and so on). Two rules with one id is `ambiguous`; both ops refuse
+  it.
+- **What a rule can say.** `type` is `block`, `pass` or `match` (`match` only
+  on floating rules). A rule sits on one interface (or interface group), or
+  is floating with a `direction` and `quick`. Source and destination are
+  `any`, an IP address or a CIDR, each with an optional port or port range
+  (protocol `tcp`, `udp` or `tcp/udp` only). Aliases, `not`, gateways and
+  schedules are not supported. The interface must exist in `<interfaces>` or
+  `<ifgroups>` (`unknown_interface` otherwise).
+- **Order.** The first matching rule wins, so a block rule under a broad pass
+  rule does nothing. `position` puts the rule at the `top` (default) or
+  `bottom` of its interface's rules (or of the floating rules), the same way
+  the GUI does it: `get_interface_ruleindex`, the GUI's separator shift, then
+  `filter_rules_sort()`.
+- **MEHO keeps its own way in.** The firewall is also the path MEHO uses to
+  reach it. Before it adds a `block` rule, or deletes an enabled `pass` rule,
+  the op reads `$SSH_CONNECTION` of its own SSH session (client IP, server IP,
+  server port). It refuses (`mgmt_path`) when the rule could match that flow.
+  The check over-matches on purpose: it ignores the interface and direction,
+  ignores a source port, and counts an alias, a keyword (`lan`, `(self)`) or
+  a `not` address as a match. If the flow cannot be read, the op refuses
+  (`mgmt_path_unknown`). Only the SSH path is checked, not the web GUI.
+- **NAT rules.** The delete refuses a rule linked to a NAT port forward
+  (`nat_associated`); remove it together with the NAT rule.
+- **One edit at a time.** Both handlers hold the appliance's config-write
+  lock (`serialized_config_write` in `ops_write.py`, one `asyncio.Lock` per
+  SSH host on the connector) from the first read to the read-back. The
+  gateway, route, NAT and alias writes hold the same lock, so any two MEHO
+  ops that edit `config.xml` on the same pfSense run one after the other,
+  and a rule cannot change between the guard read and the write.
+- **Write and check.** Both ops use the shared `_apply_playback` helper of the
+  other writes. The fragment checks the id again when it runs, and writes
+  only when the id is still free (add) or exactly one rule was removed
+  (delete). Then `filter_configure()` reloads the rules, and the handler
+  reads `config.xml` back: the rule count must move by exactly one, and for
+  the add the stored rule must equal the requested rule setting by setting,
+  or the op fails. A read that is empty, cut off or not a pfSense config is
+  an error, never "zero rules", so a failed read-back can never pass as a
+  verified delete of the last rule. Last, the shared full read-back
+  (`assert_only_own_object_changed`) checks that nothing else in
+  `config.xml` changed, except the separator rows the fragment moves. See
+  "One config edit at a time, and a full read-back" above.
+- **The delete preview** names the rule as it is stored, including whether
+  its source or destination is negated (`source_not`, `destination_not`),
+  whether it is disabled, and any extra settings. The approver reads exactly
+  what is removed.
+- **Approval.** The add is `dangerous` + `requires_approval`: it waits for a
+  human approval, unless an operator gave a standing grant for this op. The
+  delete is on the governed-delete tier: a preview hash, and a blast-radius
+  preview that names the rule (what it does and where it sits).
 
 ## User writes (#3937)
 
@@ -642,7 +803,8 @@ the account, its password, its groups and its certificates stay.
   tests fail instead of skip when php is missing. Without php on a developer
   machine they skip.
 - **Not done.** VPN sessions that are already open are not closed. The ops do
-  not yet share a lock with the other config writes (tracked in #3544).
+  not yet hold the shared config-write lock or run the full read-back that
+  #3544 added for the other config writes. That is separate work.
 
 ## Known issues
 
@@ -679,6 +841,10 @@ the account, its password, its groups and its certificates stay.
 - Task #3954: `pfsense.user.list` + `pfsense.route.static.list` — safe reads
   with an allow-list of fields, so nobody needs `pfsense.config.show` to check
   a user or a static route.
+- Task #3850: `pfsense.filter.rule.add` + `pfsense.filter.rule.delete` — add
+  and remove ONE firewall rule by a stable id, with approval, the
+  management-path guard, and read-back. pfSense 2.7.2 sources used:
+  `firewall_rules_edit.php`, `firewall_rules.php`, `filter.inc`, `util.inc`.
 - Parent initiative: #370 (G3.7 tier-3 standalone connectors).
 - Bind9 connector (canonical typed-SSH reference): `docs/codebase/connectors-bind9.md`.
 - `SshConnector` adapter: `backend/src/meho_backplane/connectors/adapters/ssh.py`.

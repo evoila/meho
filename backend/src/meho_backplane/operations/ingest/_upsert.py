@@ -247,6 +247,7 @@ def _apply_skip_reembed(existing: EndpointDescriptor, ctx: UpsertContext) -> Non
     existing.path = ctx.proto.path
     existing.parameter_schema = ctx.proto.parameter_schema
     existing.response_schema = ctx.proto.response_schema
+    _seed_llm_instructions(existing, ctx)
     _apply_safety_metadata(existing, ctx)
     existing.needs_reingest = False
     existing.updated_at = ctx.now
@@ -270,6 +271,7 @@ def _apply_reembed_update(
     existing.tags = ctx.tags_with_marker
     existing.parameter_schema = ctx.proto.parameter_schema
     existing.response_schema = ctx.proto.response_schema
+    _seed_llm_instructions(existing, ctx)
     _apply_safety_metadata(existing, ctx)
     existing.needs_reingest = False
     existing.embedding = embedding
@@ -298,7 +300,7 @@ def _build_new_descriptor(
         tags=ctx.tags_with_marker,
         parameter_schema=ctx.proto.parameter_schema,
         response_schema=ctx.proto.response_schema,
-        llm_instructions=None,
+        llm_instructions=ctx.proto.llm_instructions,
         safety_level=ctx.proto.safety_level,
         requires_approval=ctx.proto.requires_approval,
         is_enabled=False,
@@ -309,6 +311,16 @@ def _build_new_descriptor(
         created_at=ctx.now,
         updated_at=ctx.now,
     )
+
+
+def _seed_llm_instructions(existing: EndpointDescriptor, ctx: UpsertContext) -> None:
+    """Store a spec correction's ``llm_instructions`` on a row that has none.
+
+    A row that already carries instructions keeps them, so an operator's
+    review edit is never replaced by a re-ingest.
+    """
+    if ctx.proto.llm_instructions is not None and existing.llm_instructions is None:
+        existing.llm_instructions = ctx.proto.llm_instructions
 
 
 def _apply_safety_metadata(existing: EndpointDescriptor, ctx: UpsertContext) -> None:

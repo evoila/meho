@@ -74,6 +74,8 @@ where a malicious approver swaps the params between the "request" and the
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
@@ -112,6 +114,7 @@ from meho_backplane.operations.approval_handoff import (
 from meho_backplane.operations.approval_handoff import (
     store as store_handoff,
 )
+from meho_backplane.operations.reducer import handle_owner_sub_var
 
 __all__ = [
     "ApprovalError",
@@ -126,6 +129,7 @@ __all__ = [
     "UnauthorizedApprovalError",
     "approve_request",
     "claim_resume",
+    "composite_resume_binding",
     "consume_remote_write_approval",
     "create_pending_request",
     "expire_stale_requests",
@@ -134,6 +138,7 @@ __all__ = [
     "list_pending",
     "publish_approval_event",
     "read_approval_result",
+    "rehydrate_resume_target",
     "reject_request",
     "resume_dispatch_after_approval",
 ]
@@ -1052,7 +1057,9 @@ async def resume_dispatch_after_approval(
     parked **direct** operator op is executed exactly once regardless of
     which surface granted it. The in-process agent-run resume path does
     not call this — it keeps the params in memory and re-dispatches from
-    there (see :mod:`meho_backplane.agent.approval_wait`).
+    there (see :mod:`meho_backplane.agent.approval_wait`). Both paths re-enter
+    a parked composite sub-op through the same
+    :func:`composite_resume_binding` helper (#3421).
 
     *params* source:
 
@@ -1103,7 +1110,7 @@ async def resume_dispatch_after_approval(
     if effective_params is None and request.execution_handle is None:
         return _resume_pre0036_denied(operator, request)
 
-    resolved_target, denied = await _rehydrate_resume_target(operator, request)
+    resolved_target, denied = await rehydrate_resume_target(operator, request)
     if denied is not None:
         return denied
 
@@ -1243,6 +1250,53 @@ def _resume_pre0036_denied(operator: Operator, request: ApprovalRequest) -> Any:
     )
 
 
+@contextmanager
+def composite_resume_binding(
+    *,
+    subop_op_id: str,
+    subop_params_hash: str,
+    resume_parent: dict[str, Any] | None,
+) -> Iterator[tuple[str, dict[str, Any]] | None]:
+    """Set up the re-entry of a parent composite for an approved sub-op park.
+
+    The one composite re-entry path both resume surfaces share (#3351, #3421):
+    the operator surface (:func:`_dispatch_resume_with_bound_context`) and the
+    in-process agent waiter
+    (:func:`~meho_backplane.agent.approval_wait.resume_or_surface_awaiting_approval`).
+    Sharing it keeps the two surfaces from drifting apart.
+
+    * ``resume_parent`` set (a composite sub-op park) — yields the parent
+      composite's ``(op_id, params)`` to re-dispatch ``_approved=True``. For the
+      block it sets
+      :data:`~meho_backplane.operations.composite.composite_resume_var` to the
+      approved sub-op's ``(op_id, params_hash)``, so that one sub-op clears its
+      gate instead of parking again. It also sets
+      :data:`~meho_backplane.operations.composite.composite_resume_scope_var`,
+      which is never consumed, so a second governed sub-op that would need its
+      own approval fails closed (``composite_resume_multi_gate_unsupported``)
+      instead of parking (#3351 review B1).
+    * ``resume_parent`` is ``None`` (a direct park) — yields ``None`` and sets
+      nothing; the caller keeps its generic re-dispatch.
+    """
+    if resume_parent is None:
+        yield None
+        return
+
+    from meho_backplane.operations.composite import (
+        composite_resume_scope_var,
+        composite_resume_var,
+    )
+
+    approved_subop = (subop_op_id, subop_params_hash)
+    resume_token = composite_resume_var.set(approved_subop)
+    scope_token = composite_resume_scope_var.set(approved_subop)
+    try:
+        yield str(resume_parent["op_id"]), cast(dict[str, Any], resume_parent["params"])
+    finally:
+        composite_resume_scope_var.reset(scope_token)
+        composite_resume_var.reset(resume_token)
+
+
 async def _dispatch_resume_with_bound_context(
     *,
     operator: Operator,
@@ -1272,6 +1326,8 @@ async def _dispatch_resume_with_bound_context(
     clears its gate and the whole governed step reproduces, instead of the
     old generic re-dispatch of the un-executable sub-op key. A direct-op park
     (``resume_parent IS NULL``) keeps the generic re-dispatch of ``op_id``.
+    The var handling lives in :func:`composite_resume_binding`, which the
+    in-process agent waiter uses too (#3421).
 
     The resume re-enters the composite under the approving reviewer, who
     auto-executes every governed sub-op (all ``dangerous`` +
@@ -1282,50 +1338,40 @@ async def _dispatch_resume_with_bound_context(
     governed sub-op would ever need its own approval, rather than re-park and
     re-run the earlier legs on a second resume (#3351 review B1).
     """
-    from meho_backplane.operations.composite import (
-        composite_resume_scope_var,
-        composite_resume_var,
-    )
     from meho_backplane.operations.dispatcher import dispatch
 
     resume_parent = (
         resume_parent_override if resume_parent_override is not None else request.resume_parent
     )
-    if resume_parent is not None:
-        dispatch_op_id = str(resume_parent["op_id"])
-        dispatch_params = cast(dict[str, Any], resume_parent["params"])
-        approved_subop = (request.op_id, request.params_hash)
-        resume_token = composite_resume_var.set(approved_subop)
-        # The scope var is NOT consumed on the sub-op match, so the fail-closed
-        # multi-gate guard in ``enforce_subop_policy`` can still tell it is
-        # inside a resume after the approved sub-op has cleared (#3351 B1).
-        scope_token = composite_resume_scope_var.set(approved_subop)
-    else:
-        dispatch_op_id = request.op_id
-        dispatch_params = effective_params
-        resume_token = None
-        scope_token = None
-
     work_ref_token = work_ref_var.set(request.work_ref)
     session_token = agent_session_id_var.set(request.agent_session_id)
     parent_token = parent_audit_id_var.set(request.request_audit_id)
+    # #3548: the approver runs the op, but the parker asked for the data and is
+    # the only one GET /approvals/{id}/result serves, so the parker owns any
+    # result handle this run spills.
+    owner_token = handle_owner_sub_var.set(request.principal_sub)
     try:
-        result = await dispatch(
-            operator=operator,
-            connector_id=request.connector_id,
-            op_id=dispatch_op_id,
-            target=resolved_target,
-            params=dispatch_params,
-            _approved=True,
-        )
+        with composite_resume_binding(
+            subop_op_id=request.op_id,
+            subop_params_hash=request.params_hash,
+            resume_parent=resume_parent,
+        ) as parent_call:
+            dispatch_op_id, dispatch_params = (
+                parent_call if parent_call is not None else (request.op_id, effective_params)
+            )
+            result = await dispatch(
+                operator=operator,
+                connector_id=request.connector_id,
+                op_id=dispatch_op_id,
+                target=resolved_target,
+                params=dispatch_params,
+                _approved=True,
+            )
     finally:
+        handle_owner_sub_var.reset(owner_token)
         parent_audit_id_var.reset(parent_token)
         agent_session_id_var.reset(session_token)
         work_ref_var.reset(work_ref_token)
-        if resume_token is not None:
-            composite_resume_var.reset(resume_token)
-        if scope_token is not None:
-            composite_resume_scope_var.reset(scope_token)
     # Persist the reduced result envelope so the originating consumer can read it
     # back (principal-scoped) and resume a non-idempotent parked op by poll
     # instead of a second submit (#3209). Reached only by the exactly-one-resumer
@@ -1335,7 +1381,7 @@ async def _dispatch_resume_with_bound_context(
     return result
 
 
-async def _rehydrate_resume_target(
+async def rehydrate_resume_target(
     operator: Operator,
     request: ApprovalRequest,
 ) -> tuple[Any, Any]:
@@ -1350,6 +1396,13 @@ async def _rehydrate_resume_target(
     since dispatching with ``target=None`` would let a typed handler that
     derives its connection from ``connector_id`` / ``params`` execute the
     approved privileged write outside the original target scope.
+
+    Shared by the operator surface (:func:`resume_dispatch_after_approval`)
+    and the in-process agent waiter's composite re-entry
+    (:mod:`meho_backplane.agent.approval_wait`, #3421). Loading by the saved
+    ``target_id`` instead of the name the caller used at park time means a
+    target renamed, or deleted and re-created under the same name, while the
+    request waited can never receive the approved write.
     """
     if request.target_id is None:
         return None, None

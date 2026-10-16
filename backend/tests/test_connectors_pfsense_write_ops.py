@@ -39,6 +39,8 @@ import pytest
 import meho_backplane.connectors.pfsense  # noqa: F401 -- import for registry side-effects
 from meho_backplane.connectors.pfsense import PFSENSE_OPS, PfSenseConnector
 from meho_backplane.connectors.pfsense.ops_write import (
+    _HEREDOC_DELIM,
+    _install_script_command,
     _php_squote,
     parse_static_routes_xml,
 )
@@ -444,6 +446,25 @@ def test_php_squote_escapes_quote_and_backslash() -> None:
     assert _php_squote("plain") == "'plain'"
     assert _php_squote("a'b") == "'a\\'b'"
     assert _php_squote("a\\b") == "'a\\\\b'"
+
+
+def test_install_script_command_stages_body_verbatim() -> None:
+    cmd = _install_script_command("meho_x", "echo 1;\n")
+    assert cmd == (
+        f"cat > /etc/phpshellsessions/meho_x <<'{_HEREDOC_DELIM}'\necho 1;\n{_HEREDOC_DELIM}\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        f"echo 1;\n{_HEREDOC_DELIM}\necho 2;\n",
+        f"$x = '{_HEREDOC_DELIM}';\n",
+    ],
+)
+def test_install_script_command_refuses_end_marker(body: str) -> None:
+    with pytest.raises(ValueError):
+        _install_script_command("meho_x", body)
 
 
 # ---------------------------------------------------------------------------

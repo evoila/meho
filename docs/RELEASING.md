@@ -142,7 +142,9 @@ Choose the bump from what's in `[Unreleased]`:
 ### 2. Roll the CHANGELOG — the load-bearing step
 
 This is the step that keeps getting skipped. Do it in the
-**release-cutting PR**, before the tag.
+**release-cutting PR**, before the tag. The release pull request is the
+only pull request that edits `CHANGELOG.md`. Code pull requests add no
+lines. The **Backfill** item below adds the lines for them.
 
 1. **Audit completeness.** Every merged PR since the last tag must have a
    bullet. Cross-check:

@@ -488,11 +488,14 @@
               }
             }
           },
+          "404": {
+            "description": "``target`` names no target in the tenant (``detail.error='no_target'``, with near-miss ``matches``), the same error the target routes return."
+          },
           "403": {
-            "description": "Terminal rejection of an otherwise-resolvable collection, in one of two forms (both 403, distinguished by the ``detail.error`` field): the tenant is not entitled to the named collection (``detail.error='not_entitled'`` -- it lacks the ``meho-docs:<collection>`` capability even though it can see the add-on; the structured detail names the ``required_capability`` and the ``operator_sub`` / ``tenant_id`` it checked so the operator can grant the missing claim) -- or the collection has been ``disabled`` by an operator (``detail.error='collection_disabled'``). Neither is retryable: the collection exists but the principal cannot search it, or an operator switched it off."
+            "description": "Terminal rejection of an otherwise-resolvable collection, in one of two forms (both 403, distinguished by the ``detail.error`` field): the tenant is not entitled to the named collection (``detail.error='not_entitled'`` -- it lacks the ``meho-docs:<collection>`` capability even though it can see the add-on; the structured detail names the ``required_capability`` and the ``operator_sub`` / ``tenant_id`` it checked so the operator can grant the missing claim) -- or the collection has been ``disabled`` by an operator (``detail.error='collection_disabled'``). Neither is retryable: the collection exists but the principal cannot search it, or an operator switched it off. Also returned when the caller's permission rows deny it the named ``target`` (``detail.error='denied'``, with the ``reason``), the same denial ``call_operation`` returns."
           },
           "409": {
-            "description": "The named collection is known and entitled but transiently not ``ready`` (provisioning / rebuilding) -- its backend is not answerable yet. Retryable once the rebuild finishes. A ``disabled`` collection is the terminal 403 above, not a 409."
+            "description": "The named collection is known and entitled but transiently not ``ready`` (provisioning / rebuilding) -- its backend is not answerable yet. Retryable once the rebuild finishes. A ``disabled`` collection is the terminal 403 above, not a 409. Also returned when ``target`` matches more than one target (``detail.error='ambiguous_target'``)."
           },
           "422": {
             "description": "The mandatory ``collection`` scope is absent / blank, names no collection visible to the tenant, or both a single ``collection`` and a fan-out ``collections`` / ``collection='all'`` scope were supplied (they are mutually exclusive). A docs query without a routable collection is rejected rather than forwarded as an unscoped query."
@@ -544,11 +547,14 @@
               }
             }
           },
+          "404": {
+            "description": "``target`` names no target in the tenant (``detail.error='no_target'``, with near-miss ``matches``), the same error the target routes return."
+          },
           "403": {
-            "description": "Terminal rejection of an otherwise-resolvable collection, in one of two forms (both 403, distinguished by ``detail.error``): the tenant is not entitled to the named collection (``detail.error='not_entitled'`` -- it lacks the ``meho-docs:<collection>`` capability; the structured detail names the ``required_capability`` and the ``operator_sub`` / ``tenant_id`` it checked) -- or the collection has been ``disabled`` by an operator (``detail.error='collection_disabled'``). Mirrors ``search_docs``; neither is retryable."
+            "description": "Terminal rejection of an otherwise-resolvable collection, in one of two forms (both 403, distinguished by ``detail.error``): the tenant is not entitled to the named collection (``detail.error='not_entitled'`` -- it lacks the ``meho-docs:<collection>`` capability; the structured detail names the ``required_capability`` and the ``operator_sub`` / ``tenant_id`` it checked) -- or the collection has been ``disabled`` by an operator (``detail.error='collection_disabled'``). Mirrors ``search_docs``; neither is retryable. Also returned when the caller's permission rows deny it the named ``target`` (``detail.error='denied'``, with the ``reason``), the same denial ``call_operation`` returns."
           },
           "409": {
-            "description": "The named collection is known and entitled but transiently not ``ready`` (provisioning / rebuilding). Retryable once the rebuild finishes. Mirrors ``search_docs``."
+            "description": "The named collection is known and entitled but transiently not ``ready`` (provisioning / rebuilding). Retryable once the rebuild finishes. Mirrors ``search_docs``. Also returned when ``target`` matches more than one target (``detail.error='ambiguous_target'``)."
           },
           "422": {
             "description": "The mandatory ``collection`` scope is absent / blank, or names no collection visible to the tenant (an absent / cross-tenant key lands here -- it is unknown to the tenant-scoped catalogue). A grounded answer is never composed without a routable collection."
@@ -10439,7 +10445,7 @@
           "service-principal-grants"
         ],
         "summary": "Revoke Grant",
-        "description": "Revoke (soft-delete) a standing grant.\n\nReturns 204 on success; 404 when the grant is absent, already revoked,\nor belongs to another tenant. Audited via the audit middleware.",
+        "description": "Revoke (soft-delete) a standing grant.\n\n``reason`` is optional, so a revoke without one stays valid. When given,\nit is stored as ``revoked_reason`` on the grant row and as ``reason`` in\nthe audit row payload, the same way create records its ``reason``.\nIt is a query parameter, not a body, because a DELETE body is not well\nsupported by HTTP clients and proxies.\n\nReturns 204 on success; 404 when the grant is absent, already revoked,\nor belongs to another tenant. Audited via the audit middleware.",
         "operationId": "revoke_grant_api_v1_service_principals_grants__grant_id__delete",
         "parameters": [
           {
@@ -10451,6 +10457,20 @@
               "format": "uuid",
               "title": "Grant Id"
             }
+          },
+          {
+            "name": "reason",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048,
+              "nullable": true,
+              "description": "Optional reason for the revoke. Stored on the grant and the audit row.",
+              "title": "Reason"
+            },
+            "description": "Optional reason for the revoke. Stored on the grant and the audit row."
           },
           {
             "name": "authorization",
@@ -17905,8 +17925,21 @@
           "ui-corpus"
         ],
         "summary": "Corpus Index",
-        "description": "Render the docs-corpus page (delegates to :func:`_render_corpus_index`).",
+        "description": "Render the docs-corpus page (delegates to :func:`_render_corpus_index`).\n\n``target`` (#3920) is a target name a linking page already has; the\nform carries it so the search and the answer default their version\nscope to that target's detected product and version.",
         "operationId": "corpus_index_ui_corpus_get",
+        "parameters": [
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "",
+              "title": "Target"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -17914,6 +17947,16 @@
               "text/html": {
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -17927,7 +17970,7 @@
           "ui-corpus"
         ],
         "summary": "Corpus Search",
-        "description": "Run the search / ask fragment (delegates to :func:`_render_corpus_search`).\n\n``mode`` selects between the original retrieve-only ``search`` path\nand the ``ask`` grounded-answer path (#1917); any unrecognised value\nfalls back to ``search``.",
+        "description": "Run the search / ask fragment (delegates to :func:`_render_corpus_search`).\n\n``mode`` selects between the original retrieve-only ``search`` path\nand the ``ask`` grounded-answer path (#1917); any unrecognised value\nfalls back to ``search``. ``target`` (#3920) is the optional target\nname the page was opened with.",
         "operationId": "corpus_search_ui_corpus_search_post",
         "requestBody": {
           "content": {
@@ -22973,6 +23016,12 @@
             "nullable": true,
             "title": "Version"
           },
+          "target": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Target"
+          },
           "limit": {
             "type": "integer",
             "maximum": 50.0,
@@ -22987,7 +23036,7 @@
           "query"
         ],
         "title": "AskDocsRequest",
-        "description": "POST body for ``/api/v1/ask_docs``.\n\n``collection`` is the **mandatory binary scope** -- typed optional here\nso a missing value is rejected by the service with a route-shaped 422\nnaming the absent key (carrying *why* the collection is mandatory)\nrather than Pydantic's generic ``field_required``. ``product`` /\n``version`` are optional refinements within the chosen collection.\n\nThere is **no** ``collections`` fan-out field: ``ask_docs`` is\nsingle-collection only (#1548 decision 2), matching the MCP tool.\n``extra=\"forbid\"`` rejects unknown fields at 422 -- so a client sending\na ``collections`` list (or a pre-rename key) fails loud rather than\nsilently fanning out, the same posture every public v1 request schema\nships under."
+        "description": "POST body for ``/api/v1/ask_docs``.\n\n``collection`` is the **mandatory binary scope** -- typed optional here\nso a missing value is rejected by the service with a route-shaped 422\nnaming the absent key (carrying *why* the collection is mandatory)\nrather than Pydantic's generic ``field_required``. ``product`` /\n``version`` are optional refinements within the chosen collection.\n``target`` (#3920) names a target; when ``product`` and ``version`` are\nboth absent, its fingerprint product and version become the default\nsoft scope (a ranking hint, never a filter).\n\nThere is **no** ``collections`` fan-out field: ``ask_docs`` is\nsingle-collection only (#1548 decision 2), matching the MCP tool.\n``extra=\"forbid\"`` rejects unknown fields at 422 -- so a client sending\na ``collections`` list (or a pre-rename key) fails loud rather than\nsilently fanning out, the same posture every public v1 request schema\nships under."
       },
       "AskDocsResponse": {
         "properties": {
@@ -23883,6 +23932,12 @@
             "maxLength": 16,
             "title": "Mode",
             "default": "search"
+          },
+          "target": {
+            "type": "string",
+            "maxLength": 256,
+            "title": "Target",
+            "default": ""
           }
         },
         "type": "object",
@@ -26490,6 +26545,14 @@
             "type": "array",
             "nullable": true,
             "title": "Op Allowlist"
+          },
+          "safety_overlay": {
+            "items": {
+              "$ref": "#/components/schemas/SafetyOverlayEntry"
+            },
+            "type": "array",
+            "nullable": true,
+            "title": "Safety Overlay"
           }
         },
         "additionalProperties": false,
@@ -31487,7 +31550,7 @@
           "query": {
             "$ref": "#/components/schemas/ResultQuerySpec",
             "nullable": true,
-            "description": "Optional structured query. When present, the handle is queried server-side (filter / select / group_by / aggregate / order_by / limit) as one bounded read-only SELECT and `offset` / `limit` are ignored. Every referenced field must be a column on the handle; there is no raw-SQL argument."
+            "description": "Optional structured query. When present, the handle is queried server-side (filter / select / group_by / aggregate / order_by / limit) as one bounded read-only SELECT and `offset` / `limit` are ignored. Every referenced field must be a column on the handle; there is no raw-SQL argument. For a document handle, or for the fields a rows handle left out of its inline summary, send only `path` (an RFC 6901 JSON Pointer); an array value then pages with `offset` / `limit`."
           }
         },
         "additionalProperties": false,
@@ -31551,12 +31614,19 @@
             "nullable": true,
             "title": "Limit",
             "description": "Max output rows. Omitted or above the server ceiling clamps to the ceiling (500); the result flags `truncated` when more rows existed."
+          },
+          "path": {
+            "type": "string",
+            "maxLength": 1024,
+            "nullable": true,
+            "title": "Path",
+            "description": "RFC 6901 JSON Pointer into a document handle (for example `/status/conditions/0`; `\"\"` is the whole document), or into the top-level fields a rows handle left out of its inline summary (`omitted_scalar_count`). Reads one value; an array value pages with the call's `offset` / `limit`. Cannot be combined with `filter`, `select`, `group_by`, `aggregate`, `order_by`, or `limit`."
           }
         },
         "additionalProperties": false,
         "type": "object",
         "title": "ResultQuerySpec",
-        "description": "The structured, validated query arguments for a single handle.\n\nEvery field is optional: an empty spec compiles to ``SELECT * FROM\nresult LIMIT <max>`` \u2014 a full read-back capped at the output ceiling.\nThe list caps (``filter`` \u2264 10, ``aggregate`` \u2264 8, ``group_by`` \u2264 4,\n``order_by`` \u2264 4, ``select`` \u2264 64, and each ``IN`` value list \u2264 1000)\nand the operator/aggregate allow-lists are enforced here, at construction;\nfield-vs-schema validation needs the handle's columns and happens in\n:func:`compile_query`."
+        "description": "The structured, validated query arguments for a single handle.\n\nEvery field is optional: an empty spec compiles to ``SELECT * FROM\nresult LIMIT <max>`` \u2014 a full read-back capped at the output ceiling.\nThe list caps (``filter`` \u2264 10, ``aggregate`` \u2264 8, ``group_by`` \u2264 4,\n``order_by`` \u2264 4, ``select`` \u2264 64, and each ``IN`` value list \u2264 1000)\nand the operator/aggregate allow-lists are enforced here, at construction;\nfield-vs-schema validation needs the handle's columns and happens in\n:func:`compile_query`.\n\n``path`` is the other read: an RFC 6901 pointer into a document handle,\nor into the top-level fields a rows handle left out of its inline\nsummary. It is never compiled to SQL, so it cannot be combined with any\nrelational field (checked here, at construction)."
       },
       "RetireChecklistReport": {
         "properties": {
@@ -32460,6 +32530,46 @@
         "title": "SafetyChangeModel",
         "description": "Pydantic projection of\n:class:`~meho_backplane.operations.ingest.register_ingested.SafetyChange`.\n\nOne op whose persisted ``safety_level`` a re-ingest overwrote with\na different value (#2702), plus every Sensor pinning it \u2014 those\nsensors keep auto-executing the op on schedule under the stale\ncreate-time ``safe`` assumption until the operator re-audits them."
       },
+      "SafetyOverlayEntry": {
+        "properties": {
+          "method": {
+            "type": "string",
+            "maxLength": 16,
+            "minLength": 1,
+            "title": "Method"
+          },
+          "path": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Path"
+          },
+          "safety_level": {
+            "type": "string",
+            "enum": [
+              "safe",
+              "caution",
+              "dangerous",
+              "destructive"
+            ],
+            "title": "Safety Level"
+          },
+          "requires_approval": {
+            "type": "boolean",
+            "title": "Requires Approval",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "method",
+          "path",
+          "safety_level"
+        ],
+        "title": "SafetyOverlayEntry",
+        "description": "One catalog rule that raises the safety of matching ingested ops.\n\nA catalog row that declares :attr:`ConnectorSpecEntry.safety_overlay`\nlets an operator raise the safety level and turn on approval for\nchosen operations of that spec, without changing the ingest code.\n``method`` is matched exactly (upper-cased). ``path`` is a\nshell-style glob matched case-sensitively against the spec path\ntemplate with any query string removed; ``*`` also matches ``/``.\nThe rule only ever raises: it never lowers a stricter level and never\nclears an approval requirement (see\n:func:`meho_backplane.operations.ingest.safety_floors.apply_safety_floor`)."
+      },
       "ScheduledTriggerCreate": {
         "properties": {
           "kind": {
@@ -32752,6 +32862,12 @@
             "nullable": true,
             "title": "Version"
           },
+          "target": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Target"
+          },
           "limit": {
             "type": "integer",
             "maximum": 50.0,
@@ -32766,7 +32882,7 @@
           "query"
         ],
         "title": "SearchDocsRequest",
-        "description": "POST body for ``/api/v1/search_docs``.\n\n``collection`` is the **mandatory binary scope** (G4.6-T3 #1552) -- it\nis typed optional here so a missing value is rejected by the service\nwith a route-shaped 422 naming the absent key (carrying *why* the\ncollection is mandatory), rather than Pydantic's generic\n``field_required``. ``product`` / ``version`` are **optional\nrefinements** within the chosen collection.\n\n``collections`` is the opt-in **cross-collection fan-out** scope (G4.6-T5\n#1554): an explicit list of collection keys to query and RRF-merge.\n``collection=\"all\"`` is the equivalent sentinel for *every* entitled,\nready collection. The fan-out scope is **mutually exclusive** with a\nsingle ``collection`` -- supplying both is a 422. ``product`` /\n``version`` refinements do not apply to a fan-out (each collection is a\npre-scoped corpus); they are ignored on the fan-out path.\n\n``extra=\"forbid\"`` rejects unknown fields at 422 so a client sending\na pre-rename key fails loud rather than running with the defaults --\nthe same posture every public v1 request schema ships under."
+        "description": "POST body for ``/api/v1/search_docs``.\n\n``collection`` is the **mandatory binary scope** (G4.6-T3 #1552) -- it\nis typed optional here so a missing value is rejected by the service\nwith a route-shaped 422 naming the absent key (carrying *why* the\ncollection is mandatory), rather than Pydantic's generic\n``field_required``. ``product`` / ``version`` are **optional\nrefinements** within the chosen collection. ``target`` (#3920) names a\ntarget; when ``product`` and ``version`` are both absent, its\nfingerprint product and version become the default soft scope (a\nranking hint, never a filter). It is ignored on a fan-out.\n\n``collections`` is the opt-in **cross-collection fan-out** scope (G4.6-T5\n#1554): an explicit list of collection keys to query and RRF-merge.\n``collection=\"all\"`` is the equivalent sentinel for *every* entitled,\nready collection. The fan-out scope is **mutually exclusive** with a\nsingle ``collection`` -- supplying both is a 422. ``product`` /\n``version`` refinements do not apply to a fan-out (each collection is a\npre-scoped corpus); they are ignored on the fan-out path.\n\n``extra=\"forbid\"`` rejects unknown fields at 422 so a client sending\na pre-rename key fails loud rather than running with the defaults --\nthe same posture every public v1 request schema ships under."
       },
       "SearchDocsResponse": {
         "properties": {
@@ -33421,6 +33537,11 @@
             "type": "string",
             "nullable": true,
             "title": "Revoked By Sub"
+          },
+          "revoked_reason": {
+            "type": "string",
+            "nullable": true,
+            "title": "Revoked Reason"
           }
         },
         "type": "object",
@@ -33438,10 +33559,11 @@
           "created_at",
           "expires_at",
           "revoked_at",
-          "revoked_by_sub"
+          "revoked_by_sub",
+          "revoked_reason"
         ],
         "title": "ServiceGrantRead",
-        "description": "Row shape every accessor returns.\n\n``from_attributes=True`` allows direct construction from an ORM row.\nExposes ``revoked_at`` / ``revoked_by_sub`` so callers can tell a live\ngrant from a revoked one in the history."
+        "description": "Row shape every accessor returns.\n\n``from_attributes=True`` allows direct construction from an ORM row.\nExposes ``revoked_at`` / ``revoked_by_sub`` / ``revoked_reason`` so\ncallers can tell a live grant from a revoked one in the history, and why\nit was revoked."
       },
       "ShowTemplateResponse": {
         "properties": {

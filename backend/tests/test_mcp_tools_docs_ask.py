@@ -283,7 +283,14 @@ def test_ask_docs_present_with_strict_collection_schema(
     assert schema["type"] == "object"
     assert schema["required"] == ["query", "collection"]
     assert schema["additionalProperties"] is False
-    assert set(schema["properties"]) == {"query", "collection", "product", "version", "limit"}
+    assert set(schema["properties"]) == {
+        "query",
+        "collection",
+        "product",
+        "version",
+        "target",
+        "limit",
+    }
     assert schema["properties"]["limit"]["default"] == 10
     assert schema["properties"]["limit"]["maximum"] == 50
     # Wire shape never leaks the server-side gating fields.

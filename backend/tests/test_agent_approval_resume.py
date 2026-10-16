@@ -1140,6 +1140,34 @@ def _stub_stalled_notifier(monkeypatch: pytest.MonkeyPatch) -> tuple[AsyncMock, 
     return client, cancelled
 
 
+def _stub_late_failing_notifier(
+    monkeypatch: pytest.MonkeyPatch, *, extra_s: float
+) -> tuple[AsyncMock, list[bool]]:
+    """A notifier whose every ``XREAD`` raises late: *extra_s* after its BLOCK window.
+
+    Models a Valkey that drops the connection just before the wait's local
+    cut-off. Returns the mock and a list that grows by one entry per raise.
+    """
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
+    raised: list[bool] = []
+
+    async def _xread(*_args: object, **kwargs: object) -> object:
+        block_ms = kwargs.get("block")
+        assert isinstance(block_ms, int)
+        await asyncio.sleep(block_ms / 1000 + extra_s)
+        raised.append(True)
+        raise RedisConnectionError("valkey dropped the connection")
+
+    client = AsyncMock()
+    client.xread = AsyncMock(side_effect=_xread)
+    monkeypatch.setattr(
+        "meho_backplane.agent.approval_wait.get_broadcast_blocking_client",
+        lambda: client,
+    )
+    return client, raised
+
+
 def _record_stored_read_times(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     """Record the loop time at which each stored-row read starts.
 
@@ -1316,10 +1344,74 @@ async def test_stalled_notifier_timeout_honours_the_deadline(
     assert cancelled
 
 
+async def test_late_notifier_error_does_not_delay_the_stored_reread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ``XREAD`` that raises just before the cut-off still re-reads the row on time.
+
+    The error back-off must run *after* the stored read, not before it. A
+    back-off that runs first adds up to a full second to the gap between
+    two reads, so a late error would push the gap past the re-check interval.
+    """
+    import meho_backplane.agent.approval_wait as approval_wait_module
+
+    recheck_s = 0.5
+    monkeypatch.setattr(approval_wait_module, "_DURABLE_RECHECK_SECONDS", recheck_s)
+    monkeypatch.setattr(approval_wait_module, "_XREAD_REPLY_GRACE_SECONDS", 0.2)
+    monkeypatch.setattr(approval_wait_module, "_XREAD_ERROR_BACKOFF_SECONDS", 0.1)
+    request = await _park_request(requester=_make_operator())
+    # BLOCK ends 0.2 s before the cut-off; the raise lands 0.1 s after BLOCK,
+    # so every call errors 0.1 s before the local cut-off would fire.
+    client, raised = _stub_late_failing_notifier(monkeypatch, extra_s=0.1)
+    read_times = _record_stored_read_times(monkeypatch)
+    flip = asyncio.create_task(_set_status_later(request.id, ApprovalRequestStatus.APPROVED, 1.2))
+
+    decision = await wait_for_approval_decision(
+        tenant_id=_TENANT_ID, approval_request_id=request.id, timeout_seconds=30.0
+    )
+    await flip
+
+    assert decision == "approved"
+    assert client.xread.await_count >= 2
+    assert len(raised) >= 2
+    gaps = [later - earlier for earlier, later in itertools.pairwise(read_times)]
+    assert len(gaps) >= 2
+    assert max(gaps) < recheck_s + 0.1
+
+
+async def test_late_notifier_error_honours_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the defaults, an ``XREAD`` that raises just before the deadline ends on time.
+
+    The one-second error back-off is cut at the deadline, so the final
+    stored read runs when the wait is due to end, not a second later.
+    """
+    request = await _park_request(requester=_make_operator())
+    timeout_s = 0.3
+    # The BLOCK window for a 0.3 s budget is 0.15 s; the raise lands at
+    # 0.25 s, just before the 0.3 s deadline.
+    _client, raised = _stub_late_failing_notifier(monkeypatch, extra_s=0.1)
+    read_times = _record_stored_read_times(monkeypatch)
+
+    started = asyncio.get_running_loop().time()
+    decision = await wait_for_approval_decision(
+        tenant_id=_TENANT_ID, approval_request_id=request.id, timeout_seconds=timeout_s
+    )
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert decision == "timeout"
+    assert raised
+    assert elapsed < timeout_s + 0.2
+    # The row is read right after the error, before any back-off pause.
+    assert len(read_times) >= 3
+
+
 async def test_default_recheck_interval_is_at_most_five_seconds() -> None:
     from meho_backplane.agent.approval_wait import (
         _BLOCK_WINDOW_MS,
         _DURABLE_RECHECK_SECONDS,
+        _XREAD_ERROR_BACKOFF_SECONDS,
         _XREAD_REPLY_GRACE_SECONDS,
     )
 
@@ -1328,6 +1420,9 @@ async def test_default_recheck_interval_is_at_most_five_seconds() -> None:
     # The BLOCK window ends one grace before each read; a grace close to the
     # interval would leave no room for the broadcast fast path.
     assert _XREAD_REPLY_GRACE_SECONDS * 2 <= _DURABLE_RECHECK_SECONDS
+    # The error back-off runs after a stored read; one close to the interval
+    # would leave the next XREAD no time before the following read is due.
+    assert _XREAD_ERROR_BACKOFF_SECONDS * 2 <= _DURABLE_RECHECK_SECONDS
 
 
 async def test_deadline_reread_returns_late_durable_decision(

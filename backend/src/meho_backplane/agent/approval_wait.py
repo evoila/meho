@@ -112,6 +112,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from meho_backplane.broadcast.client import get_broadcast_blocking_client
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from meho_backplane.auth.operator import Operator
 
 __all__ = [
@@ -150,6 +152,19 @@ _BLOCK_WINDOW_MS: Final[int] = 5_000
 #: never answers cannot delay the read past :data:`_DURABLE_RECHECK_SECONDS`
 #: or the overall deadline. Must stay well below the recheck interval.
 _XREAD_REPLY_GRACE_SECONDS: Final[float] = 1.0
+
+#: Longest pause before the next ``XREAD`` after a Valkey error, so an
+#: unreachable Valkey does not spin the loop. The stored row is read
+#: *before* this pause, and the pause is cut at the deadline, so it never
+#: delays a read past :data:`_DURABLE_RECHECK_SECONDS` or the deadline.
+_XREAD_ERROR_BACKOFF_SECONDS: Final[float] = 1.0
+
+#: How one ``XREAD`` iteration ended, as seen by the wait loop.
+#: ``answered`` — Valkey replied (entries or an empty BLOCK timeout);
+#: ``stalled`` — the local cut-off ended the call; ``error`` — a recoverable
+#: broadcast error. The last two make the loop read the stored row at once;
+#: only ``error`` is followed by a back-off pause.
+_NotifierOutcome = Literal["answered", "stalled", "error"]
 
 #: Upper bound on entries returned per ``XREAD`` invocation. The wait only
 #: cares about the single matching ``approval.{approved,rejected}`` entry,
@@ -247,22 +262,24 @@ async def _xread_one_iteration(
     target_request_id: str,
     tenant_id: uuid.UUID,
     reply_timeout_s: float,
-) -> tuple[ApprovalDecision | None, str, bool]:
+) -> tuple[ApprovalDecision | None, str, _NotifierOutcome]:
     """Run one ``XREAD BLOCK`` iteration, cut off locally if the reply stalls.
 
-    Returns ``(decision-or-None, new-cursor, notifier_failed)``. The outcomes
-    the caller folds into the surrounding while-loop:
+    Returns ``(decision-or-None, new-cursor, outcome)``. The outcomes the
+    caller folds into the surrounding while-loop:
 
-    * ``(decision, _, False)`` — terminal decision observed; the loop
+    * ``(decision, _, "answered")`` — terminal decision observed; the loop
       returns.
-    * ``(None, advanced_cursor, False)`` — entries arrived but none matched
-      this request; the loop continues with the advanced cursor (so a busy
-      tenant doesn't re-process the same entries).
-    * ``(None, cursor, False)`` — BLOCK timed out empty; the loop re-issues
-      with the same cursor.
-    * ``(None, cursor, True)`` — a recoverable broadcast error fired, or the
-      reply stalled past the local cut-off; the caller re-reads the stored
-      row before it loops again.
+    * ``(None, advanced_cursor, "answered")`` — entries arrived but none
+      matched this request; the loop continues with the advanced cursor (so
+      a busy tenant doesn't re-process the same entries).
+    * ``(None, cursor, "answered")`` — BLOCK timed out empty; the loop
+      re-issues with the same cursor.
+    * ``(None, cursor, "stalled")`` — the reply stalled past the local
+      cut-off; the caller re-reads the stored row before it loops again.
+    * ``(None, cursor, "error")`` — a recoverable broadcast error fired; the
+      caller re-reads the stored row, then pauses briefly before it loops
+      again.
 
     The call is cut off locally after *reply_timeout_s*; the caller sets
     that to the time left until the next stored-row read is due, and a
@@ -271,8 +288,10 @@ async def _xread_one_iteration(
     call for the client's socket timeout (35 s), far past that read.
     A :class:`~redis.exceptions.RedisError` (Valkey unreachable, malformed
     response) or :class:`OSError` (socket-layer hiccup) is logged + folded
-    into the "loop again" branch with a small back-off sleep — the same
-    fail-open posture the publisher uses at write time.
+    into the "loop again" branch — the same fail-open posture the publisher
+    uses at write time. The back-off pause after it belongs to the caller,
+    so it runs *after* the stored row is read and is cut at the deadline;
+    a sleep here would push that read past the recheck interval.
     :class:`asyncio.CancelledError` propagates verbatim so the agent loop
     tears down cleanly when the run is cancelled.
     """
@@ -300,7 +319,7 @@ async def _xread_one_iteration(
             tenant_id=str(tenant_id),
             reply_timeout_seconds=reply_timeout_s,
         )
-        return (None, cursor, True)
+        return (None, cursor, "stalled")
     except (RedisError, OSError) as exc:
         _log.warning(
             "approval_wait_xread_error",
@@ -308,12 +327,11 @@ async def _xread_one_iteration(
             tenant_id=str(tenant_id),
             error_class=type(exc).__name__,
         )
-        await asyncio.sleep(min(1.0, max(0.0, reply_timeout_s)))
-        return (None, cursor, True)
+        return (None, cursor, "error")
 
     items = _xread_items(raw_response)
     if not items:
-        return (None, cursor, False)
+        return (None, cursor, "answered")
     new_cursor = cursor
     for entry_id, fields in items:
         new_cursor = entry_id
@@ -328,8 +346,8 @@ async def _xread_one_iteration(
                 tenant_id=str(tenant_id),
                 decision=decision,
             )
-            return (decision, new_cursor, False)
-    return (None, new_cursor, False)
+            return (decision, new_cursor, "answered")
+    return (None, new_cursor, "answered")
 
 
 async def _read_stored_decision(
@@ -395,7 +413,9 @@ async def wait_for_approval_decision(
     :data:`_DURABLE_RECHECK_SECONDS`, and once more at the deadline. Each
     ``XREAD`` is cut off locally at the moment the next re-read is due, so
     a Valkey that stops answering never delays a re-read past
-    :data:`_DURABLE_RECHECK_SECONDS` or the deadline.
+    :data:`_DURABLE_RECHECK_SECONDS` or the deadline. After a Valkey error
+    the row is read first; the back-off pause comes after that read and is
+    cut at the deadline, so a late error cannot delay a re-read either.
 
     Args:
         tenant_id: The operator's tenant. Scopes both the Valkey stream and
@@ -422,7 +442,6 @@ async def wait_for_approval_decision(
     # 35 s socket_timeout removes the race so a quiet stream returns
     # cleanly from XREAD with no entries. RDC #789 N1 / Initiative #1353.
     client = get_broadcast_blocking_client()
-    stream_key = _stream_key(tenant_id)
     target_request_id = str(approval_request_id)
     _log.info(
         "approval_wait_started",
@@ -434,10 +453,47 @@ async def wait_for_approval_decision(
         _read_stored_decision, tenant_id=tenant_id, approval_request_id=approval_request_id
     )
     # A decision committed before the wait started is on the stored row,
-    # not on the ``"$"`` tail below.
+    # not on the ``"$"`` tail the watch loop subscribes from.
     stored = await read_stored()
     if stored is not None:
         return stored
+    decision = await _watch_until_decision(
+        client,
+        tenant_id=tenant_id,
+        target_request_id=target_request_id,
+        deadline=deadline,
+        read_stored=read_stored,
+    )
+    if decision is not None:
+        return decision
+    stored = await read_stored()
+    if stored is not None:
+        return stored
+    _log.info(
+        "approval_wait_timeout", approval_request_id=target_request_id, tenant_id=str(tenant_id)
+    )
+    return "timeout"
+
+
+async def _watch_until_decision(
+    client: Any,
+    *,
+    tenant_id: uuid.UUID,
+    target_request_id: str,
+    deadline: float,
+    read_stored: Callable[[], Awaitable[ApprovalDecision | None]],
+) -> ApprovalDecision | None:
+    """Loop ``XREAD`` and stored re-reads until a decision is seen or *deadline* passes.
+
+    Returns the decision from either source, or ``None`` once the deadline
+    has passed with the row still ``pending`` (the caller reads the row one
+    last time). *read_stored* reads the tenant-scoped stored row; it is
+    called after every notifier stall or error, and at least every
+    :data:`_DURABLE_RECHECK_SECONDS`. After an error the loop pauses for up
+    to :data:`_XREAD_ERROR_BACKOFF_SECONDS` *after* that read, cut at the
+    deadline, so neither a stall nor a late error can delay a read.
+    """
+    stream_key = _stream_key(tenant_id)
     next_recheck = time.monotonic() + _DURABLE_RECHECK_SECONDS
     # ``"$"`` is the Valkey "tail from the moment of this call" cursor.
     # Subsequent iterations advance the cursor to the latest entry id seen so
@@ -458,7 +514,7 @@ async def wait_for_approval_decision(
             # Under 2 ms to the deadline: no room for one more round trip.
             break
         block_ms = min(_BLOCK_WINDOW_MS, math.ceil(block_s * 1000))
-        decision, cursor, notifier_failed = await _xread_one_iteration(
+        decision, cursor, outcome = await _xread_one_iteration(
             client,
             stream_key=stream_key,
             cursor=cursor,
@@ -472,19 +528,19 @@ async def wait_for_approval_decision(
         # A quiet BLOCK ends one reply grace before the recheck boundary;
         # that counts as due, so the row is read now rather than after one
         # more tiny XREAD.
-        if notifier_failed or time.monotonic() >= next_recheck - _XREAD_REPLY_GRACE_SECONDS:
+        if outcome != "answered" or time.monotonic() >= next_recheck - _XREAD_REPLY_GRACE_SECONDS:
             stored = await read_stored()
             if stored is not None:
                 return stored
             next_recheck = time.monotonic() + _DURABLE_RECHECK_SECONDS
-
-    stored = await read_stored()
-    if stored is not None:
-        return stored
-    _log.info(
-        "approval_wait_timeout", approval_request_id=target_request_id, tenant_id=str(tenant_id)
-    )
-    return "timeout"
+        if outcome == "error":
+            # The row was just read, so this pause cannot delay a stored
+            # read past the recheck interval; it is cut at the deadline so
+            # the final read still runs on time.
+            await asyncio.sleep(
+                max(0.0, min(_XREAD_ERROR_BACKOFF_SECONDS, deadline - time.monotonic()))
+            )
+    return None
 
 
 #: ``extras["error_code"]`` value on a wrapped ``call_operation`` envelope that

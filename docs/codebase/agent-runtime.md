@@ -472,6 +472,10 @@ The agent runtime closes that gap with a wrapped `call_operation`. On
      but stops answering cannot delay a stored read past 5 seconds, and
      cannot hold the wait for the client's 35-second socket timeout. A
      cut-off `XREAD` counts as a Valkey error: the row is read at once.
+   - After a Valkey error it reads the row first, then pauses for at most
+     one second (`_XREAD_ERROR_BACKOFF_SECONDS`) before the next `XREAD`.
+     The pause is cut at the deadline. So an error raised late in an
+     `XREAD` cannot delay a stored read past 5 seconds or the deadline.
    - It reads the row once more before it gives up at the deadline.
 2. **On approval** — re-invokes the dispatcher with `_approved=True` and the
    original in-memory `params` (passed through `call_operation_with_approval`

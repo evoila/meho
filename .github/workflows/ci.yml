@@ -299,7 +299,7 @@ jobs:
         # The Python version comes from backend/.python-version (3.14, the
         # same as the image's python:3.14-slim). uv reads that file for every
         # uv command in CI: they all run in backend/ or pass --project backend.
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           version: "0.13.0"
           enable-cache: true
@@ -600,7 +600,7 @@ jobs:
         # same lockfile are near-instant, so the three shards share one
         # warm uv cache. `version` pins uv; see the python-lint job for
         # why, and for where the Python version comes from.
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           version: "0.13.0"
           enable-cache: true
@@ -1098,7 +1098,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           # Pinned uv; see the python-lint job for why.
           version: "0.13.0"
@@ -1233,7 +1233,7 @@ jobs:
         if: always()
         continue-on-error: true
         timeout-minutes: 2
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: python-coverage-data-shard-${{ matrix.shard }}
           path: backend/.coverage.*
@@ -1252,7 +1252,7 @@ jobs:
         # timeout-minutes (#3172): same job-cap-cancel hole as the combine
         # step — a hung upload must degrade to an absorbed step failure.
         timeout-minutes: 2
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: coverage-pytest-log-shard-${{ matrix.shard }}
           path: backend/pytest-coverage.log
@@ -1295,7 +1295,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           # Pinned uv; see the python-lint job for why.
           version: "0.13.0"
@@ -1313,7 +1313,7 @@ jobs:
         # a shard that produced no artifact (see the job header).
         continue-on-error: true
         timeout-minutes: 2
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: python-coverage-data-shard-1
           path: backend
@@ -1321,7 +1321,7 @@ jobs:
       - name: Download shard 2 coverage data
         continue-on-error: true
         timeout-minutes: 2
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: python-coverage-data-shard-2
           path: backend
@@ -1329,7 +1329,7 @@ jobs:
       - name: Download shard 3 coverage data
         continue-on-error: true
         timeout-minutes: 2
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: python-coverage-data-shard-3
           path: backend
@@ -1388,7 +1388,7 @@ jobs:
         # timeout-minutes (#3172): same job-cap-cancel hole as the combine
         # step — a hung upload must degrade to an absorbed step failure.
         timeout-minutes: 2
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: python-coverage
           path: backend/coverage.xml
@@ -1565,7 +1565,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           # Pinned uv; see the python-lint job for why.
           version: "0.13.0"
@@ -1661,7 +1661,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           # Pinned uv; see the python-lint job for why.
           version: "0.13.0"
@@ -1822,7 +1822,7 @@ jobs:
         # ONLY for this step.
         if: always() && hashFiles('cli/coverage.out') != ''
         continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: go-coverage
           path: cli/coverage.out
@@ -1875,7 +1875,7 @@ jobs:
         # `uv run` (cli/api/snapshot-openapi.py imports meho_backplane.main
         # and calls app.openapi()), so the backend env must resolve. Same
         # action + cache shape as the Python lanes.
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           # Pinned uv; see the python-lint job for why.
           version: "0.13.0"

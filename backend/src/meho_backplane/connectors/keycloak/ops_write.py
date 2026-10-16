@@ -21,7 +21,11 @@ op_id                               safety       Admin REST API
 ``keycloak.user.create``            caution      ``POST .../realms/{realm}/users``
 ``keycloak.user.reset_password``    caution      ``PUT .../users/{id}/reset-password``
 ``keycloak.role_mapping.assign``    dangerous    ``POST .../users/{id}/role-mappings/realm``
+``keycloak.user.logout``            caution      ``POST .../users/{id}/logout``
 ==================================  ===========  ===========================================
+
+``keycloak.user.logout`` (#3851) came later. It ends every live session of
+one user, so their refresh tokens stop working at once.
 
 ``keycloak.idp.create`` (identity-provider federation) is **deliberately
 deferred**: the issue (#1406) notes it is "not exercised by current
@@ -98,6 +102,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import httpx
+
 from meho_backplane.connectors._shared.vault_creds import (
     load_vault_secret_data,
     strip_credential_value,
@@ -109,6 +115,7 @@ from meho_backplane.connectors.keycloak._paths import (
     _CLIENT_PROTOCOL_MAPPERS_PATH,
     _CLIENT_SCOPES_PATH,
     _CLIENTS_PATH,
+    _USER_LOGOUT_PATH,
     _USER_RESET_PASSWORD_PATH,
     _USER_ROLE_MAPPINGS_REALM_PATH,
     _USERS_PATH,
@@ -136,6 +143,7 @@ __all__ = [
     "keycloak_realm_update",
     "keycloak_role_mapping_assign",
     "keycloak_user_create",
+    "keycloak_user_logout",
     "keycloak_user_reset_password",
 ]
 
@@ -582,6 +590,52 @@ async def keycloak_user_reset_password(
         idempotent_conflict=False,
     )
     return {"id": uuid, "username": username, "password_reset": True}
+
+
+async def keycloak_user_logout(
+    self: KeycloakConnector,
+    operator: Operator,
+    target: KeycloakTargetLike,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """End every live session of one user (``POST .../users/{id}/logout``).
+
+    Op-id: ``keycloak.user.logout``. Keys on the user's internal UUID; pass
+    it via ``id`` or pass ``username`` for name→UUID resolution. Keycloak
+    answers 204 whether or not the user had sessions, so a second run is a
+    success too. A user that does not exist raises
+    :exc:`KeycloakUserNotFoundError`. The op reads and returns no credential.
+    """
+    realms = resolve_realm_config(target)
+    uuid = _opt_str(params.get("id"))
+    username = _opt_str(params.get("username"))
+    if uuid is None:
+        if username is None:
+            raise ValueError("keycloak.user.logout requires either 'id' (UUID) or 'username'")
+        uuid = await self._find_user_uuid(target, realms.managed_realm, username, operator=operator)
+        if uuid is None:
+            raise KeycloakUserNotFoundError(
+                f"keycloak.user.logout: no user with username={username!r} in realm "
+                f"{realms.managed_realm!r}"
+            )
+    try:
+        await self._write_admin(
+            target,
+            "POST",
+            fill_path(
+                _USER_LOGOUT_PATH,
+                {"realm": realms.managed_realm, "user-id": quote_segment(uuid)},
+            ),
+            operator=operator,
+            idempotent_conflict=False,
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            raise KeycloakUserNotFoundError(
+                f"keycloak.user.logout: no user with id={uuid!r} in realm {realms.managed_realm!r}"
+            ) from exc
+        raise
+    return {"id": uuid, "username": username, "logged_out": True}
 
 
 # ---------------------------------------------------------------------------

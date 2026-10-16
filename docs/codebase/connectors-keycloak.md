@@ -24,7 +24,9 @@ approval-gated writes (`group.create` with attributes, `group.update_attributes`
 primitive — can be bootstrapped governed. #3944 adds three **destructive**
 deletes (`user.delete`, `group.delete`, `client.delete`, taking the write
 surface to **sixteen**). Removing access when an event, a contract or a job
-ends is then audited, and a second person must approve it.
+ends is then audited, and a second person must approve it. #3851 adds
+`user.logout` (taking the write surface to **seventeen**): it ends all live
+sessions of one user, so their refresh tokens stop working at once.
 
 Registry v2 triple: `(product="keycloak", version="26.x",
 impl_id="keycloak-admin")`, plus the `(keycloak, "", "")` wildcard so a
@@ -42,7 +44,8 @@ fresh target with no asserted version still resolves.
   `client_update`, `client_scope_create`, `protocol_mapper_create`,
   `user_create`/`user_reset_password`, `role_mapping_assign`,
   `group_create`, `group_update_attributes`, `group_member_add`,
-  `group_member_remove`, `user_delete`, `group_delete`, `client_delete`),
+  `group_member_remove`, `user_delete`, `group_delete`, `client_delete`,
+  `user_logout`),
   the `_get_admin_json` / `_get_admin_list` GET
   helpers (object vs array responses), and the `_write_admin` mutating
   helper (POST/PUT/**DELETE**) plus the `_find_client_uuid` /
@@ -66,7 +69,8 @@ fresh target with no asserted version still resolves.
   pfSense `ops`-table precedent). `WHEN_TO_USE_BY_GROUP` maps each op
   group to its curated selection blurb.
 - `WRITE_OPS` + the write handlers (`connectors/keycloak/ops_write.py`) —
-  the nine approval-gated write ops, reusing the `KeycloakOp` dataclass.
+  the nine original approval-gated write ops plus `user.logout` (#3851),
+  reusing the `KeycloakOp` dataclass.
   Every op is `requires_approval=True`; a create treats HTTP 409 as an
   idempotent success; `user.create`/`user.reset_password` source the
   password through the credential-backend seam via
@@ -245,7 +249,7 @@ the general posture (see "Write ops" below).
 
 ## Write ops (G3.13-T4, extended by #3280)
 
-Sixteen approval-gated write ops (`requires_approval=True`), all
+Seventeen approval-gated write ops (`requires_approval=True`), all
 dispatching via the admin-auth path, all keyed on the object's **UUID**:
 
 | op_id | safety | Admin REST API |
@@ -266,6 +270,7 @@ dispatching via the admin-auth path, all keyed on the object's **UUID**:
 | `keycloak.user.delete` | destructive | `DELETE .../users/{user-id}` |
 | `keycloak.group.delete` | destructive | `DELETE .../groups/{group-id}` |
 | `keycloak.client.delete` | destructive | `DELETE .../clients/{client-uuid}` |
+| `keycloak.user.logout` | caution | `POST .../users/{user-id}/logout` |
 
 The group-lifecycle writes (#3280) are all `dangerous`: group attributes
 + membership drive the backplane's tenant claims (`tenant_id` /
@@ -383,6 +388,27 @@ The approval preview for both ops is the generic params echo: the
 approver sees the fields the caller sent. With read-merge-write those are
 exactly the fields that will change.
 
+### User logout (#3851)
+
+`keycloak.user.logout` ends every live session of one user. Keycloak then
+rejects their refresh tokens at once. Use it when access must stop now,
+for example at the end of an event or when someone leaves.
+
+- Pass `id` (the user's UUID) or `username`. A username is looked up with
+  `_find_user_uuid` (exact match), the same as `user.reset_password`.
+- A user that does not exist raises `KeycloakUserNotFoundError`: no match
+  for the username, or a 404 from the logout call for an `id`.
+- Safe to run twice. Keycloak answers 204 whether or not the user had
+  sessions. The result is `{id, username, logged_out: true}`.
+- It reads and returns no credential. It does not change the password (that
+  is `user.reset_password`). It signs out one user only; the realm-wide
+  `POST .../logout-all` is not offered.
+- Risk level `caution`, approval required, group `user_write`. No bespoke
+  approval card: the generic params echo shows the `id` / `username`. On the
+  broadcast feed it is a plain `write` (pinned in
+  `broadcast/events.py::_WRITE_OPS`, because `.logout` is not a write suffix).
+- CLI: `meho keycloak user logout (--id|--username)`.
+
 ### Governed deletes (#3944)
 
 `keycloak.user.delete`, `keycloak.group.delete` and `keycloak.client.delete`
@@ -477,7 +503,7 @@ bespoke builders are at least as strict as the generic echo they bypass: a
 anywhere in an `additionalProperties` representation) is scrubbed too, so no
 cleartext secret reaches the durable `proposed_effect` row. A Vault-sourced
 password (`password_secret_ref`) is a path, not a secret, so it is surfaced
-as `password_source: "vault"` + the ref. The other six write ops fall
+as `password_source: "vault"` + the ref. The other seven write ops fall
 through to the generic params-echo
 default. Most builders are pure (no connector I/O) and so fail-soft by
 construction. The three delete builders are not: they read the object live
@@ -497,8 +523,9 @@ Keycloak spec quirk). The lane
 [`backend/tests/test_connectors_keycloak_spec_reconcile.py`](../../backend/tests/test_connectors_keycloak_spec_reconcile.py)
 (the #2980 harness; parse-only, runs in the required unit sweep, uniform
 skip when the shelf is unconfigured) introspects those live constants and
-asserts all 33 reconciled `METHOD:/path` op_ids (19 at #2988, +10 group
-paths at #3280, +4 delete paths at #3944) are served by the pinned
+asserts all 34 reconciled `METHOD:/path` op_ids (19 at #2988, +10 group
+paths at #3280, +4 delete paths at #3944, +1 user logout path at #3851) are
+served by the pinned
 `keycloak-26.3` shelf spec (`keycloak-admin-openapi.json` — the vendor's
 Admin REST API OpenAPI at the lab's deployed 26.3.3, from Maven Central
 `org.keycloak:keycloak-api-docs-dist:26.3.3`, Apache-2.0). Two dispatched
@@ -555,6 +582,7 @@ Resolved through `resolve_realm_config`, which tolerates a missing
 - Issue: https://github.com/evoila/meho/issues/1393
 - Group-lifecycle write ops: https://github.com/evoila/meho/issues/3280
 - Governed user / group / client deletes: https://github.com/evoila/meho/issues/3944
+- User session logout: https://github.com/evoila/meho/issues/3851
 - Credential whitespace strip + token error_description: https://github.com/evoila/meho/issues/1474
 - Parent initiative: https://github.com/evoila/meho/issues/1388
 - Keycloak token endpoint + client_credentials grant:

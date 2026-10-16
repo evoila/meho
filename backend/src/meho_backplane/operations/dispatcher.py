@@ -2537,6 +2537,7 @@ async def _handle_needs_approval(
     from meho_backplane.db.engine import get_sessionmaker
     from meho_backplane.operations.approval_handoff import ApprovalHandoffKeyError
     from meho_backplane.operations.approval_queue import (
+        EXPIRY_OPERATOR_SUB,
         IdempotencyKeyConflictError,
         create_pending_request,
         publish_approval_event,
@@ -2634,7 +2635,7 @@ async def _handle_needs_approval(
                 tenant_id=operator.tenant_id,
                 request=expired_request,
                 decision="expired",
-                principal_sub=operator.sub,
+                principal_sub=EXPIRY_OPERATOR_SUB,
                 audit_id=expired_request._audit_id,
             )
         await publish_approval_event(

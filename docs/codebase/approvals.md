@@ -861,7 +861,10 @@ for approval.
   approved, so a retry does not get it back. Instead, `create_pending_request`
   locks it and expires it in the same transaction (`_expire_if_overdue`,
   the same steps and the same `approval.decision` audit row as
-  `expire_stale_requests`). Then it parks a new request with the same key.
+  `expire_stale_requests`). Like the sweeper, it records the expiry under
+  the system identity `system:approval-expiry` (`expiry_operator` in
+  `approval_queue.py`), not under the requester. Then it parks a new
+  request with the same key.
   The reply carries the new `approval_request_id` and no
   `approval_request_reused`. After commit the dispatcher publishes
   `approval.expired` for the old request and `approval.pending` for the
@@ -1574,7 +1577,7 @@ a phantom event cannot outlive a failed transaction:
 | Create | `approval.pending` | `create_pending_request` (dispatcher parks a `needs-approval` verdict). | `operations/dispatcher.py::_handle_needs_approval` |
 | Approve | `approval.approved` | `approve_request` succeeds. | `api/v1/approvals.py` (REST), `mcp/tools/approvals.py` (MCP) |
 | Reject | `approval.rejected` | `reject_request` succeeds. | `api/v1/approvals.py` (REST), `mcp/tools/approvals.py` (MCP) |
-| Expire | `approval.expired` | `expire_stale_requests` (periodic sweeper) per expired row. | `operations/approval_expiry.py::_sweep_one_tenant` (commits then publishes per returned row's `_audit_id`) |
+| Expire | `approval.expired` | `expire_stale_requests` (periodic sweeper) per expired row, or a late retry with the same idempotency key that finds its request still `pending` past the deadline. Both use the `system:approval-expiry` identity. | `operations/approval_expiry.py::_sweep_one_tenant` (commits then publishes per returned row's `_audit_id`); `operations/dispatcher.py::_handle_needs_approval` (publishes the `_expired_request` before the new `approval.pending`) |
 
 Payload: `approval_request_id`, `decision`, `connector_id`,
 `approval_op_id`. The event's `audit_id` field is the decision row's

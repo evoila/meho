@@ -89,7 +89,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.delegation import resolve_actor_sub
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.db.models import (
     ApprovalRequest,
@@ -121,6 +121,7 @@ from meho_backplane.operations.approval_handoff import (
 from meho_backplane.operations.reducer import handle_owner_sub_var
 
 __all__ = [
+    "EXPIRY_OPERATOR_SUB",
     "MAX_REASON_LENGTH",
     "ApprovalError",
     "ApprovalNotFoundError",
@@ -143,6 +144,7 @@ __all__ = [
     "consume_remote_write_approval",
     "create_pending_request",
     "expire_stale_requests",
+    "expiry_operator",
     "find_remote_write_approval",
     "get_decision_delegation",
     "get_request",
@@ -672,21 +674,50 @@ async def _insert_idempotent_request(
     return None
 
 
+#: The acting identity for every expiry: the sweeper and the late-retry path
+#: of :func:`create_pending_request`. A stable synthetic sub makes expiries
+#: filterable in audit queries and distinct from operator-driven decisions,
+#: the same pattern the topology scheduler (``system:topology-scheduler``)
+#: and connector system contexts use.
+EXPIRY_OPERATOR_SUB: Final = "system:approval-expiry"
+
+
+def expiry_operator(tenant_id: uuid.UUID) -> Operator:
+    """Build the synthetic per-tenant operator that expires requests.
+
+    ``raw_jwt`` is the empty string: an expiry forwards no token
+    downstream. ``OPERATOR`` role satisfies the ``>= operator`` floor
+    :func:`expire_stale_requests` enforces on the acting identity.
+    """
+    return Operator(
+        sub=EXPIRY_OPERATOR_SUB,
+        name=None,
+        email=None,
+        raw_jwt="",
+        tenant_id=tenant_id,
+        tenant_role=TenantRole.OPERATOR,
+    )
+
+
 async def _expire_if_overdue(
-    session: AsyncSession, existing: ApprovalRequest, *, operator: Operator
+    session: AsyncSession, existing: ApprovalRequest
 ) -> ApprovalRequest | None:
     """Expire *existing* when it is ``pending`` and past its deadline (#3486).
 
     The sweeper may not have run yet (or may be off). Such a row can no
     longer be approved, so a retry must not get it back. It is locked and
     expired here, in the caller's transaction, the same way
-    :func:`expire_stale_requests` does it. That frees the key, so the
-    caller then parks a new request.
+    :func:`expire_stale_requests` does it and under the same
+    :func:`expiry_operator` identity, so the decision audit row names the
+    system, not the requester. That frees the key, so the caller then
+    parks a new request.
 
     Returns the expired row, or ``None`` when *existing* is still usable
     (``approved``, or ``pending`` and within its deadline). Also ``None``
-    when a concurrent decision or sweep changed the row first: the normal
-    insert path then sorts it out.
+    when a concurrent sweep or reject changed the row between the first
+    read and the locked re-read. In that rare case the caller returns the
+    stale *existing* row as reused; the next retry finds the key free and
+    parks a new request.
     """
     if existing.status != ApprovalRequestStatus.PENDING.value:
         return None
@@ -707,7 +738,11 @@ async def _expire_if_overdue(
     if locked is None:
         return None
     await _expire_request(
-        session, locked, operator=operator, cutoff=cutoff, default_ttl=default_ttl
+        session,
+        locked,
+        operator=expiry_operator(locked.tenant_id),
+        cutoff=cutoff,
+        default_ttl=default_ttl,
     )
     return locked
 
@@ -968,7 +1003,7 @@ async def create_pending_request(
             idempotency_key=idempotency_key,
         )
         if existing is not None:
-            expired_request = await _expire_if_overdue(session, existing, operator=operator)
+            expired_request = await _expire_if_overdue(session, existing)
             if expired_request is None:
                 return _reuse(existing)
 

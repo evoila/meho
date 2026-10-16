@@ -771,6 +771,42 @@ func TestPrintIngestSummaryNonDryRun(t *testing.T) {
 	}
 }
 
+// TestPrintIngestSummaryGroupLines checks the per-group lines: groups
+// that gained ops or were created get a line, untouched groups do not,
+// and a typed group that also holds ingested ops gets a warning (#3713).
+func TestPrintIngestSummaryGroupLines(t *testing.T) {
+	groups := []api.GroupSummaryModel{
+		{GroupKey: "inventory", OperationsAdded: 2, IngestedOperationCount: 40},
+		{GroupKey: "vm_lifecycle", Created: true, OperationsAdded: 3, IngestedOperationCount: 3},
+		{GroupKey: "events", IngestedOperationCount: 12},
+		{GroupKey: "vmware-object-collect", TypedOperationCount: 1, IngestedOperationCount: 78},
+	}
+	r := &api.IngestResponse{
+		Ingestion: api.IngestionResultModel{ConnectorId: "vmware-rest-9.0"},
+		Grouping: &api.GroupingResultModel{
+			ConnectorId:        "vmware-rest-9.0",
+			GroupsCreated:      1,
+			OperationsAssigned: 5,
+			Groups:             &groups,
+		},
+	}
+	var buf bytes.Buffer
+	printIngestSummary(&buf, ingestOptions{}, r)
+	out := buf.String()
+	for _, want := range []string{
+		"    inventory: +2 ops\n",
+		"    vm_lifecycle: +3 ops (new group)\n",
+		"    warning: typed group vmware-object-collect also holds 78 ingested op(s)\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("render missing %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "events") {
+		t.Errorf("a group with no change must not get a line:\n%s", out)
+	}
+}
+
 // TestIngestResponseDecodesCanonical pins the wire shape: the
 // canonical IngestionResultModel + GroupingResultModel (PR #488
 // api_schemas.py) ship snake_case field names that mirror the

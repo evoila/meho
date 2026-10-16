@@ -743,6 +743,27 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	}
 }
 
+// printGroupingGroups lists the groups the grouping pass changed: one
+// line per group that gained ops or was created. It also warns about a
+// typed group (one that holds typed operations) that holds ingested
+// operations too, so an operator sees a mixed group before enabling it.
+func printGroupingGroups(w io.Writer, groups []api.GroupSummaryModel) {
+	for _, g := range groups {
+		if g.OperationsAdded > 0 || g.Created {
+			note := ""
+			if g.Created {
+				note = " (new group)"
+			}
+			fmt.Fprintf(w, "    %s: +%d ops%s\n", g.GroupKey, g.OperationsAdded, note)
+		}
+		if g.TypedOperationCount > 0 && g.IngestedOperationCount > 0 {
+			fmt.Fprintf(w, "    warning: typed group %s also holds %d ingested op(s)\n",
+				g.GroupKey, g.IngestedOperationCount,
+			)
+		}
+	}
+}
+
 // printIngestSummary renders an IngestResponse for human eyes. The
 // shape matches what an operator running `meho connector ingest`
 // interactively expects to read: connector_id first (so they can
@@ -798,6 +819,9 @@ func printIngestSummary(w io.Writer, opts ingestOptions, r *api.IngestResponse) 
 			)
 		}
 		fmt.Fprintln(w)
+		if r.Grouping.Groups != nil {
+			printGroupingGroups(w, *r.Grouping.Groups)
+		}
 	} else if !opts.DryRun {
 		fmt.Fprintln(w, "  grouping: skipped (backplane returned no grouping result)")
 	}

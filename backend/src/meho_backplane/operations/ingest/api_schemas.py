@@ -79,6 +79,7 @@ __all__ = [
     "DroppedOpModel",
     "EditGroupBody",
     "EditOpBody",
+    "GroupSummaryModel",
     "GroupingResultModel",
     "IngestJobHandle",
     "IngestJobStatusResponse",
@@ -678,6 +679,25 @@ class IngestionResultModel(BaseModel):
     dropped_ops: list[DroppedOpModel] = Field(default_factory=list)
 
 
+class GroupSummaryModel(BaseModel):
+    """Pydantic projection of
+    :class:`~meho_backplane.operations.ingest.llm_groups.GroupSummary`.
+
+    One row per group: how many ops this run added to it, and how many
+    typed vs ingested ops it holds now. ``typed_operation_count > 0``
+    means a typed registrar owns the group; grouping never files
+    ingested ops into such a group.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    group_key: str
+    created: bool
+    operations_added: int
+    typed_operation_count: int
+    ingested_operation_count: int
+
+
 class GroupingResultModel(BaseModel):
     """Pydantic projection of
     :class:`~meho_backplane.operations.ingest.llm_groups.GroupingResult`.
@@ -694,6 +714,7 @@ class GroupingResultModel(BaseModel):
     operations_unassigned: int
     llm_call_count: int
     llm_duration_ms: float
+    groups: list[GroupSummaryModel] = Field(default_factory=list)
 
 
 class IngestResponse(BaseModel):

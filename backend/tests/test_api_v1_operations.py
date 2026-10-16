@@ -1014,6 +1014,40 @@ def test_post_result_query_paging_over_budget_returns_422(
     assert "limit" in detail["message"].lower()
 
 
+def test_post_result_query_over_wire_ceiling_returns_422(
+    client: TestClient,
+    fake_result_store: _FakeResultStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read under the row budget but over the wire ceiling -> 422 (#3641).
+
+    ``detail.reason`` is ``output_too_large`` and ``detail.delivery`` is
+    ``unavailable``: the read was refused whole, not cut.
+    """
+    monkeypatch.setenv("RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES", "1024")
+    get_settings.cache_clear()
+    handle = uuid.uuid4()
+    fake_result_store.seed(
+        tenant_id=uuid.UUID(DEFAULT_TENANT_ID),
+        operator_sub="op-1",
+        handle_id=handle,
+        rows=[{"i": i, "note": 'a "quoted" value'} for i in range(40)],
+    )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/result-query",
+            json={"handle_id": str(handle), "offset": 0, "limit": 40},
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["reason"] == "output_too_large"
+    assert detail["delivery"] == "unavailable"
+    assert "1024-byte delivery limit" in detail["message"]
+
+
 def test_post_result_query_unknown_handle_returns_typed_404(
     client: TestClient,
     fake_result_store: _FakeResultStore,

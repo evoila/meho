@@ -58,6 +58,7 @@ from meho_backplane.operations.addon_capability_schemas import (
 from meho_backplane.operations.addon_pairing import AddonPairingService
 from meho_backplane.operations.addon_pairing_contract import BACKPLANE_CONTRACT_VERSION
 from meho_backplane.operations.addon_pairing_schemas import PairAddonRequest
+from meho_backplane.settings import get_settings
 from meho_backplane.topology.schemas import TopologyEdge, TopologyEdgeEndpoint
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
@@ -581,6 +582,43 @@ def test_call_operation_ok_envelope_conforms(
     # their declared UUID / enum shapes against the real dispatcher path.
     assert uuid.UUID(payload["audit_id"])
     assert payload["delivery"] == "complete"
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+def test_call_operation_over_wire_ceiling_keeps_completed_status(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A completed write over the response wire ceiling stays ``ok`` (#3641).
+
+    The write ran and its audit row committed, so the envelope keeps
+    ``status="ok"`` and the ``audit_id`` receipt, drops the inline result,
+    and says ``delivery="unavailable"`` (this op mints no handle). It still
+    conforms to the declared ``outputSchema``.
+    """
+    monkeypatch.setenv("RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES", "64")
+    get_settings.cache_clear()
+    client, _op = client_with_operator
+    with patch(_PUBLISH_NODES, new=AsyncMock()):
+        response = _call(
+            client,
+            "call_operation",
+            {
+                "connector_id": "topology-graph-1.x",
+                "op_id": "topology.create_node",
+                "params": {"kind": "vault-role", "name": "conf-call-op-over-ceiling"},
+            },
+        )
+    payload = _assert_conforms("call_operation", response)
+    assert payload["status"] == "ok", payload
+    assert payload["status"] not in {"error", "connector_error"}
+    assert "connector_error" not in json.dumps(payload)
+    assert payload["delivery"] == "unavailable"
+    assert uuid.UUID(payload["audit_id"])
+    assert "handle" in payload and payload["handle"] is None
+    assert payload["result"] is None
+    assert "Do not re-invoke" in payload["extras"]["remediation"]
+    assert payload["extras"]["delivery_max_bytes"] == 64
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)

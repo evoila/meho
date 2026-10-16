@@ -62,6 +62,7 @@ from meho_backplane.jsonflux.query.result_catalog import (
     ResultFieldCatalog,
     _build_catalog_from_admitted,
 )
+from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -155,7 +156,7 @@ async def read_result_window(
             remediation=ResultQueryOutputTooLargeError.PAGING_REMEDIATION,
         )
 
-    return {
+    payload = {
         "handle_id": str(handle_id),
         "rows": window.rows,
         "offset": offset,
@@ -165,6 +166,8 @@ async def read_result_window(
         "stored_rows": window.stored_rows,
         "truncated": window.truncated,
     }
+    _check_wire_ceiling(payload, handle_id, ResultQueryOutputTooLargeError.PAGING_REMEDIATION)
+    return payload
 
 
 class ResultQueryTimeoutError(Exception):
@@ -216,14 +219,41 @@ class ResultQueryOutputTooLargeError(Exception):
         output_bytes: int,
         max_bytes: int,
         remediation: str | None = None,
+        *,
+        wire: bool = False,
     ) -> None:
         self.handle_id = handle_id
         self.output_bytes = output_bytes
         self.max_bytes = max_bytes
         self.remediation = remediation or self.QUERY_REMEDIATION
-        super().__init__(
-            f"result for handle {handle_id} is {output_bytes} serialized bytes, "
-            f"over the {max_bytes}-byte output budget. {self.remediation}"
+        if wire:
+            detail = (
+                f"the response for handle {handle_id} is {output_bytes} bytes on the "
+                f"wire, over the {max_bytes}-byte delivery limit, so it was not "
+                "delivered (delivery unavailable)."
+            )
+        else:
+            detail = (
+                f"result for handle {handle_id} is {output_bytes} serialized bytes, "
+                f"over the {max_bytes}-byte output budget."
+            )
+        super().__init__(f"{detail} {self.remediation}")
+
+
+def _check_wire_ceiling(payload: dict[str, Any], handle_id: UUID, remediation: str) -> None:
+    """Refuse a read-back response that is too large on the wire (#3641).
+
+    The terminal check, after the pre-encode row-bytes check: it measures
+    the whole response as the MCP ``tools/call`` wire carries it (text block
+    plus ``structuredContent``) against ``result_query_response_wire_max_bytes``.
+    The REST twin shares the bound; it sends the payload once, so it is
+    always smaller than this measurement.
+    """
+    max_bytes = get_settings().result_query_response_wire_max_bytes
+    size = measure_delivered_wire_bytes(payload)
+    if size > max_bytes:
+        raise ResultQueryOutputTooLargeError(
+            handle_id, size, max_bytes, remediation=remediation, wire=True
         )
 
 
@@ -374,7 +404,7 @@ async def run_result_query(
         else None
     )
 
-    return {
+    payload = {
         "handle_id": str(handle_id),
         "rows": json_safe_rows,
         "offset": 0,
@@ -386,3 +416,5 @@ async def run_result_query(
         "coverage": "partial" if partial else "complete",
         "coverage_note": coverage_note,
     }
+    _check_wire_ceiling(payload, handle_id, ResultQueryOutputTooLargeError.QUERY_REMEDIATION)
+    return payload

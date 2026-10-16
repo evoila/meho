@@ -105,7 +105,9 @@ async def _result_query_handler(
     except ResultHandleNotFoundError as exc:
         raise _handle_not_found(handle_id) from exc
     except ResultQueryOutputTooLargeError as exc:
-        raise McpInvalidParamsError(str(exc), data={"reason": "output_too_large"}) from exc
+        raise McpInvalidParamsError(
+            str(exc), data={"reason": "output_too_large", "delivery": "unavailable"}
+        ) from exc
 
 
 async def _run_query(
@@ -138,7 +140,9 @@ async def _run_query(
     except ResultQueryTimeoutError as exc:
         raise McpInvalidParamsError(str(exc), data={"reason": "query_timeout"}) from exc
     except ResultQueryOutputTooLargeError as exc:
-        raise McpInvalidParamsError(str(exc), data={"reason": "output_too_large"}) from exc
+        raise McpInvalidParamsError(
+            str(exc), data={"reason": "output_too_large", "delivery": "unavailable"}
+        ) from exc
 
 
 def _handle_not_found(handle_id: UUID) -> McpInvalidParamsError:

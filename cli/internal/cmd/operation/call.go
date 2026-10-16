@@ -295,6 +295,17 @@ func postCall(
 	return &out, nil
 }
 
+// resultHandleID returns the handle_id of a result handle, or "" when there is none.
+func resultHandleID(raw json.RawMessage) string {
+	var h struct {
+		HandleID string `json:"handle_id"`
+	}
+	if len(raw) == 0 || json.Unmarshal(raw, &h) != nil {
+		return ""
+	}
+	return h.HandleID
+}
+
 func printCallResult(w io.Writer, connectorID, opID string, r *CallResult) {
 	fmt.Fprintf(w, "%s %s — status=%s (%.0fms)\n", connectorID, opID, r.Status, r.DurationMs)
 	if r.Status == "ok" {
@@ -324,6 +335,11 @@ func printCallResult(w io.Writer, connectorID, opID string, r *CallResult) {
 		}
 		if r.Delivery != nil && (*r.Delivery == "unavailable" || *r.Delivery == "partial") {
 			fmt.Fprintln(w, "delivery incomplete: operation already executed; do not re-invoke it.")
+			if *r.Delivery == "partial" {
+				if id := resultHandleID(r.Handle); id != "" {
+					fmt.Fprintf(w, "the response was too large to show; read it with `meho operation result-query %s`.\n", id)
+				}
+			}
 			if r.AuditID != nil {
 				fmt.Fprintln(w, "inspect the audit receipt or operation status.")
 			} else {

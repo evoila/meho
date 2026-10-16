@@ -120,6 +120,15 @@ compiled `SELECT` runs under a `RESULT_QUERY_TIMEOUT_SECONDS` (default 5)
 wall-time budget enforced by running `conn.execute()` on a worker thread
 and calling `conn.interrupt()` on expiry.
 
+`RESULT_QUERY_MAX_OUTPUT_BYTES` is the query-domain shaping budget: it
+checks the `rows` before encoding. A second, terminal check (#3641) runs on
+the finished response of both read modes: `RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES`
+(default 2 MiB) against the size the MCP `tools/call` wire really carries
+(text block plus `structuredContent`, escaping included, measured by
+`operations/delivery_budget.py`). A response over it is refused with the same
+recoverable `output_too_large` error, now carrying `delivery=unavailable`
+(MCP `data`, REST `detail`). Nothing is cut; the caller narrows the read.
+
 Because the spill itself is capped at `RESULT_HANDLE_MAX_SPILL_ROWS`, a
 query may run over a subset of the true collection. The result carries
 `coverage`: `complete` when `stored_rows == total_rows`, else `partial`
@@ -248,6 +257,8 @@ code-level diagnosis at `v0.13.0` (`f6ee330`):
   (256 KB) / `RESULT_QUERY_TIMEOUT_SECONDS` (5) bound a single query's
   output rows, serialized size, and wall time (#3366); all validated
   `> 0`.
+- `RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES` (2 MiB) bounds a whole read-back
+  response on the wire (#3641); validated `> 0`.
 - `duckdb==1.5.5` / `pyarrow==25.0.1` (pinned) — the sandboxed
   `QueryEngine` the lazy compiled-query path runs inside. The reducer does
   not construct an engine for its catalog, summary, or preview.

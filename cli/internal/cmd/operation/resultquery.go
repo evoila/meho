@@ -6,6 +6,7 @@ package operation
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -110,7 +111,10 @@ func newResultQueryCmd() *cobra.Command {
 			"A handle that does not exist, has expired (TTL elapsed), or belongs " +
 			"to a different operator is a 404 carrying a structured " +
 			"`reason=handle_not_found` detail: re-run the original operation to " +
-			"mint a fresh handle.",
+			"mint a fresh handle.\n\n" +
+			"A read that is too large to deliver is refused with " +
+			"`reason=output_too_large`: nothing is returned. Lower --limit, or " +
+			"narrow the query with --select or --where, and try the read again.",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -193,6 +197,10 @@ func runResultQuery(cmd *cobra.Command, opts resultQueryOptions) error {
 	}
 	result, err := postResultQuery(cmd.Context(), client, handleID, opts.Offset, opts.Limit, spec)
 	if err != nil {
+		if msg, ok := outputTooLargeMessage(err); ok {
+			return output.RenderError(cmd.ErrOrStderr(),
+				output.Unexpected("result too large to deliver: "+msg), opts.JSONOut)
+		}
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
 	if opts.JSONOut {
@@ -200,6 +208,27 @@ func runResultQuery(cmd *cobra.Command, opts resultQueryOptions) error {
 	}
 	printResultQueryResult(cmd.OutOrStdout(), result)
 	return nil
+}
+
+// outputTooLargeMessage returns the backplane's message when err is the
+// `reason=output_too_large` refusal: the read was too large to deliver, so
+// nothing was returned. The message carries the size, the limit, and how to
+// narrow the read.
+func outputTooLargeMessage(err error) (string, bool) {
+	var apiErr *apiResponseError
+	if !errors.As(err, &apiErr) {
+		return "", false
+	}
+	var body struct {
+		Detail struct {
+			Message string `json:"message"`
+			Reason  string `json:"reason"`
+		} `json:"detail"`
+	}
+	if json.Unmarshal([]byte(apiErr.Body), &body) != nil || body.Detail.Reason != "output_too_large" {
+		return "", false
+	}
+	return body.Detail.Message, true
 }
 
 // buildResultQuerySpec assembles the structured query from the query flags,

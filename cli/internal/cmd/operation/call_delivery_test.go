@@ -180,3 +180,58 @@ func TestCallDeliveryDoesNotChangeStructuredFailureExit(t *testing.T) {
 		})
 	}
 }
+
+// A response too large to deliver comes back as delivery=partial with a
+// handle; the render points the operator at result-query for that handle.
+func TestCallDeliveryPartialPointsAtResultQuery(t *testing.T) {
+	const handle = "55555555-5555-5555-5555-555555555555"
+	out, err := executeDeliveryCall(t, callDeliveryResponse(t, map[string]any{
+		"status": "ok", "op_id": "vault.kv.read", "result": nil,
+		"handle":   map[string]any{"handle_id": handle},
+		"audit_id": "66666666-6666-6666-6666-666666666666", "delivery": "partial",
+	}), false)
+	if err != nil {
+		t.Fatalf("partial delivery must exit 0: %v", err)
+	}
+	for _, want := range []string{
+		"delivery: partial",
+		"do not re-invoke it.",
+		"meho operation result-query " + handle,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("partial render missing %q: %q", want, out)
+		}
+	}
+}
+
+// A result-query read over the delivery limit is a 422 with
+// reason=output_too_large; the CLI names it and shows the server message.
+func TestResultQueryOutputTooLargeRendersDeliveryMessage(t *testing.T) {
+	body := `{"detail":{"message":"the response is 3000000 bytes on the wire, over the 2097152-byte delivery limit, so it was not delivered (delivery unavailable). Read a smaller window: lower ` + "`limit`" + ` and retry.","reason":"output_too_large","delivery":"unavailable"}}`
+	withFakeClient(t, &fakeOperationsClient{
+		resultQueryResponses: []*api.PostResultQueryApiV1OperationsResultQueryPostResponse{
+			{HTTPResponse: makeHTTPResp(http.StatusUnprocessableEntity), Body: []byte(body)},
+		},
+	})
+	cmd := newResultQueryCmd()
+	var out, errBuf bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errBuf)
+	cmd.SetArgs([]string{"11111111-1111-1111-1111-111111111111", "--backplane", "https://x"})
+	_ = cmd.Execute()
+	for _, want := range []string{"result too large to deliver:", "2097152-byte delivery limit", "lower `limit`"} {
+		if !strings.Contains(errBuf.String(), want) {
+			t.Errorf("output_too_large render missing %q: %q", want, errBuf.String())
+		}
+	}
+}
+
+func TestOutputTooLargeMessageIgnoresOtherReasons(t *testing.T) {
+	err := &apiResponseError{StatusCode: 404, Body: `{"detail":{"message":"gone","reason":"handle_not_found"}}`}
+	if _, ok := outputTooLargeMessage(err); ok {
+		t.Fatal("handle_not_found must not be treated as output_too_large")
+	}
+	if _, ok := outputTooLargeMessage(errors.New("dial tcp: refused")); ok {
+		t.Fatal("a transport error must not be treated as output_too_large")
+	}
+}

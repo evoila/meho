@@ -107,9 +107,11 @@ from meho_backplane.operations.addon_orchestration import (
     bound_parent_linkage,
     resolve_or_open_orchestration_run,
 )
+from meho_backplane.operations.delivery_budget import bound_complete_response
 from meho_backplane.operations.dispatch_limits import rate_limited_read_envelope
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.ingest.list_connectors import next_step_for_registered_connector
+from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import (
     AmbiguousTargetError,
     TargetNotFoundError,
@@ -1143,6 +1145,10 @@ async def _call_operation_impl(
         tenant_id=str(operator.tenant_id),
         approved=approved,
     )
+    # #3641: terminal wire ceiling, measured on the real MCP encoding. A
+    # completed op that is too large to deliver keeps ``status="ok"`` and
+    # gets ``delivery="partial"`` / ``"unavailable"`` instead.
+    result = bound_complete_response(result, get_settings().result_complete_response_wire_max_bytes)
     return result.model_dump(mode="json")
 
 

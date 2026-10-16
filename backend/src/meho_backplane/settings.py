@@ -597,13 +597,34 @@ class Settings(BaseModel):
         ``result_handle_max_spill_rows`` (how many rows are *stored*): this
         bounds how many a single query *returns*.
     result_query_max_output_bytes:
-        Serialized-output ceiling, in JSON bytes, applied to a
-        ``result_query`` query result **after** the row cap. A wide or
-        deeply-nested projection can blow the MCP result token budget even
+        Query-domain shaping budget: a ceiling, in JSON bytes, on the
+        ``rows`` of a ``result_query`` read (query and paging), checked
+        **before** the response is encoded for the wire and **after** the
+        row cap. A wide or deeply-nested projection can be too large even
         under 500 rows, so an over-budget result fails closed with an
         actionable error (narrow ``select``, add a ``filter``, or lower
-        ``limit``) rather than returning a giant envelope. Default 262144
+        ``limit``) rather than returning a giant envelope. Distinct from,
+        and lower than, the terminal ``result_query_response_wire_max_bytes``
+        ceiling, which measures the whole encoded response. Default 262144
         (256 KB). Env ``RESULT_QUERY_MAX_OUTPUT_BYTES``.
+    result_complete_response_wire_max_bytes:
+        Terminal wire ceiling, in bytes, for a completed ``call_operation``
+        response (#3641). Measured after encoding, on the real MCP
+        ``tools/call`` wire: the text block plus the ``structuredContent``
+        copy, escaping included. An ``ok`` response over the ceiling keeps
+        ``status="ok"`` and is returned with ``delivery="partial"`` (receipt
+        plus result handle) or ``delivery="unavailable"`` (receipt only),
+        never as an error. The default is generous on purpose; a load
+        benchmark may tune it. Default 262144 (256 KiB). Env
+        ``RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES``.
+    result_query_response_wire_max_bytes:
+        Terminal wire ceiling, in bytes, for a ``result_query`` response
+        (query and paging), measured the same way (#3641). A response over
+        it fails with the recoverable ``output_too_large`` error. Higher
+        than ``result_query_max_output_bytes`` because it counts the whole
+        encoded response, not just the rows. The default is generous on
+        purpose; a load benchmark may tune it. Default 2097152 (2 MiB). Env
+        ``RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES``.
     result_query_timeout_seconds:
         Wall-time budget for a single ``result_query`` compiled ``SELECT``.
         DuckDB exposes no native Python query timeout, so the core runs
@@ -1397,7 +1418,13 @@ class Settings(BaseModel):
     # are the query interface's own resource ceilings; it inherits neither the
     # spill row cap above nor the reducer's hardcoded TTL.
     result_query_max_output_rows: int = Field(default=500, gt=0)
+    # Query-domain shaping budget (rows only, checked before encoding).
     result_query_max_output_bytes: int = Field(default=262144, gt=0)
+    # #3641 -- terminal wire ceilings, measured after encoding on the MCP
+    # wire (text block + structuredContent). Generous defaults; a benchmark
+    # may tune them.
+    result_complete_response_wire_max_bytes: int = Field(default=262144, gt=0)
+    result_query_response_wire_max_bytes: int = Field(default=2097152, gt=0)
     result_query_timeout_seconds: int = Field(default=5, gt=0)
     jsonflux_sample_byte_budget: int = Field(default=4096, gt=0)
     composite_max_depth: int = Field(default=8, gt=0)
@@ -2431,6 +2458,12 @@ def get_settings() -> Settings:
         ),
         result_query_max_output_bytes=int(
             os.environ.get("RESULT_QUERY_MAX_OUTPUT_BYTES", "262144"),
+        ),
+        result_complete_response_wire_max_bytes=int(
+            os.environ.get("RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES", "262144"),
+        ),
+        result_query_response_wire_max_bytes=int(
+            os.environ.get("RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES", "2097152"),
         ),
         result_query_timeout_seconds=int(
             os.environ.get("RESULT_QUERY_TIMEOUT_SECONDS", "5"),

@@ -322,8 +322,32 @@ rather than publish a schema its payloads violate. `call_operation` exposes an
 audit receipt. Its nullable `delivery` is about response shaping, not how much
 upstream data a result handle retained: `complete` means the shaped response was
 delivered, `unavailable` means execution completed but shaping failed and callers
-must inspect audit/status evidence without re-invoking it, and `partial` is
-reserved for later delivery-budget handling.
+must inspect audit/status evidence without re-invoking it, and `partial` means
+the response was too large to deliver but the `handle` still reaches the caller.
+
+### Response wire ceiling (#3641)
+
+A completed `call_operation` response is also checked against a wire ceiling,
+`RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES` (default 256 KiB). The size is measured
+on the real `tools/call` wire by `measure_delivered_wire_bytes`
+(`operations/delivery_budget.py`): the encoded text block plus the encoded
+`structuredContent` copy, escaping included. It is a byte count, not a token
+count. The MCP dispatcher builds the text block with the same
+`tool_result_text` function, so the measurement cannot drift from what is sent.
+
+When an `ok` response is over the ceiling, `bound_complete_response` drops the
+inline `result` and the extras and keeps the status `ok`:
+
+- `delivery="partial"` when the receipt and the `handle` still fit. The caller
+  reads the result through `result_query`.
+- `delivery="unavailable"` otherwise. Only the `audit_id` receipt and the
+  remediation text remain.
+
+`extras.remediation` says the operation already ran and must not be re-invoked;
+`extras.delivered_bytes` and `extras.delivery_max_bytes` give the numbers. A
+completed write is never reported as an error because its response was too
+large. Non-`ok` envelopes are not rewritten. The REST `/call` twin shares the
+same check; REST sends the payload once, so its real size is always smaller.
 
 ## Agent-surface scoping (working vs. operator, #3154)
 

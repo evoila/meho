@@ -22,7 +22,7 @@ Each builder owns one ``error_code`` from the contract documented in
 ``connector_http_403`` / ``connector_http_422`` /
 ``connector_auth_failed`` / ``connector_tls_verify_failed`` /
 ``connector_vault_forbidden`` / ``connector_probe_refused`` /
-``not_found`` / ``connector_timeout`` / ``connector_error``.
+``write_capability_denied`` / ``not_found`` / ``connector_timeout`` / ``connector_error``.
 The ``status`` field maps
 to ``OperationResult.status``; the ``error_code`` lives in ``extras``
 so callers can both string-match the ``error`` field
@@ -70,10 +70,12 @@ __all__ = [
     "result_no_connector",
     "result_no_target",
     "result_rate_limited",
+    "result_receipt_too_large",
     "result_target_invalid_type",
     "result_target_required",
     "result_unknown_op",
     "result_unqualified_target_version",
+    "result_write_capability_denied",
     "status_code_for_result",
     "wrap_ok_result",
 ]
@@ -540,6 +542,51 @@ def result_rate_limited(
             "limit": limit,
             "retry_after_seconds": retry_after_seconds,
             "reason": reason,
+        },
+    )
+
+
+def result_receipt_too_large(
+    op_id: str, receipt_bytes: int, max_bytes: int, duration_ms: float
+) -> OperationResult:
+    """The receipt of a completed run could not be delivered, so the call is refused.
+
+    #3641. A completed ``call_operation`` must always deliver its receipt
+    (``status``, ``op_id``, ``audit_id``, ``delivery`` and the remediation
+    text) inside ``RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES``. The receipt
+    grows with the ``op_id``, so an unusually long one (or one with many
+    non-ASCII characters, which the text block escapes twice) can push it
+    over the ceiling. ``refuse_undeliverable_receipt`` in
+    :mod:`meho_backplane.operations.delivery_budget` measures the widest
+    receipt for the ``op_id`` before dispatch and returns this envelope
+    instead of running the operation. Nothing ran, so the caller may call
+    again once the ``op_id`` or the ceiling changes.
+
+    The ``op_id`` is not repeated in the message: it already rides the
+    envelope's ``op_id`` field, and repeating a very long id would only
+    make the refusal larger.
+    """
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=(
+            f"receipt_too_large: the receipt for this op_id ({len(op_id)} characters) "
+            f"would take {receipt_bytes} bytes on the wire; the delivery limit is "
+            f"{max_bytes} bytes. The operation did not run. Check the op_id with "
+            "search_operations. If it is correct, an operator must raise "
+            "RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES. See docs/codebase/mcp.md, "
+            '"Response wire ceiling".'
+        ),
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "receipt_too_large",
+            "receipt_bytes": receipt_bytes,
+            "delivery_max_bytes": max_bytes,
+            "remediation": (
+                "The operation did not run, so it is safe to call again. Check the "
+                "op_id with search_operations; if it is correct, an operator must "
+                "raise RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES."
+            ),
         },
     )
 
@@ -1629,7 +1676,7 @@ _AUTH_FAILED_DOC_TAIL = (
 
 def _auth_failed_summary(
     *,
-    stage: Literal["establish", "dispatch", "after_relogin"],
+    stage: Literal["establish", "dispatch", "after_relogin", "call"],
     status_code: int,
     host: str,
     remediation: str,
@@ -1650,7 +1697,16 @@ def _auth_failed_summary(
     * ``after_relogin`` -- the **only** stage that re-logged in: the forced
       re-establish SUCCEEDED and the fresh session was still rejected, so the
       "already re-logged-in and retried once" sentence lives here alone.
+    * ``call`` -- a connector rejected a normal call on a live session with
+      an auth/permission fault that a fresh login cannot fix (#3566), so no
+      re-login was tried.
     """
+    if stage == "call":
+        return (
+            f"connector_auth_failed: the upstream rejected this call with an "
+            f"auth/permission fault (HTTP {status_code}) for {host}. "
+            f"{remediation} {_AUTH_FAILED_DOC_TAIL}"
+        )
     if stage == "establish":
         lead = (
             f"connector_auth_failed: the login itself was rejected (HTTP "
@@ -1768,13 +1824,15 @@ def result_connector_auth_failed(
     (``{type, faultstring}``) when the body is a vim fault, or when the
     exception carries a parsed SOAP fault from the ESXi path (#3567).
     """
-    stage: Literal["establish", "dispatch", "after_relogin"]
+    stage: Literal["establish", "dispatch", "after_relogin", "call"]
     if isinstance(exc, ConnectorAuthError):
-        # A login POST was rejected -- the establish stage, whichever call
-        # site raised it (first establish, or a forced re-login whose POST
-        # was itself rejected -- ``relogin == "attempted_failed"``). The
-        # ``session_establish_<status>`` cause is unchanged (#2400).
-        stage = "establish"
+        # Usually a login POST was rejected -- the establish stage, whichever
+        # call site raised it (first establish, or a forced re-login whose
+        # POST was itself rejected -- ``relogin == "attempted_failed"``). The
+        # ``session_establish_<status>`` cause is unchanged (#2400). A
+        # connector that classifies an auth fault on a normal call says so
+        # with ``exc.stage`` (``call`` / ``after_relogin``, #3566).
+        stage = exc.stage
         status_code = exc.status_code
         cause = exc.cause
         raw_message: str | None = _sanitize_free_text(str(exc))
@@ -1811,11 +1869,12 @@ def result_connector_auth_failed(
     upstream_message = (
         _http_upstream_message(upstream_response) if upstream_response is not None else None
     )
-    if stage == "after_relogin":
-        remediation = _auth_scheme_remediation(target_name)
-    elif isinstance(exc, ConnectorAuthError) and exc.remediation:
-        # The connector named a more specific fix than "restage" (#3865).
+    if isinstance(exc, ConnectorAuthError) and exc.remediation:
+        # The connector named a more specific fix than the stage default
+        # (#3865, #3566).
         remediation = exc.remediation
+    elif stage == "after_relogin":
+        remediation = _auth_scheme_remediation(target_name)
     else:
         remediation = _auth_restage_remediation(target_name, secret_ref)
     summary = _auth_failed_summary(
@@ -1967,6 +2026,20 @@ def result_connector_vault_forbidden(
 _VAULT_WRITE_POLICY_DOC = "docs/cross-repo/connector-vault-policy.md"
 
 
+def _vault_write_target_clause(target_name: str | None, vault_role: str | None) -> str:
+    """Name the acting vault target and its role, or ``""`` when unknown (#3716)."""
+    if not target_name:
+        return ""
+    if vault_role:
+        return f" It was dispatched on target {target_name!r} under vault_role {vault_role!r}."
+    return (
+        f" It was dispatched on target {target_name!r}, which sets no vault_role "
+        f"override, so the role came from the deployment's fallback chain "
+        f"(for a check run: the check-runner role, or the global default when "
+        f"it is unset; otherwise: the per-tenant role, then the global default)."
+    )
+
+
 def result_connector_vault_write_forbidden(
     op_id: str,
     exc: BaseException,
@@ -1974,6 +2047,8 @@ def result_connector_vault_write_forbidden(
     *,
     write_path: str | None,
     identity_hint: str | None = None,
+    target_name: str | None = None,
+    vault_role: str | None = None,
 ) -> OperationResult:
     """A KV-v2 write was denied by Vault RBAC (post-approval write-identity gap).
 
@@ -2001,10 +2076,16 @@ def result_connector_vault_write_forbidden(
     path is the op's own authorization path (rendered by the caller via
     :func:`~meho_backplane.connectors.vault.ops.vault_kv_write_target_path`),
     and the identity hint is the dispatching / reviewing operator's ``sub``.
-    The remediation points at the write-capability stanza (§6.1) and the
-    ``sys/capabilities-self`` probe (§6.2) of the policy doc, and repeats
-    the do-NOT-widen-the-shared-policy warning: the grant is per-operator
-    templated, not a role-wide widen.
+    The remediation names two fixes, cheapest first (#3716). The write runs
+    under the operator's token logged in with the dispatch target's
+    ``extras["vault_role"]`` (#3274), so the first fix is to check that role
+    and run the same write on a vault target whose role can already write
+    the path — no policy change. Only when no such target exists does it
+    point at the write-capability stanza (§6.1) and the
+    ``sys/capabilities-self`` probe (§6.2), and repeat the
+    do-NOT-widen-the-shared-policy warning: the grant is per-operator
+    templated, not a role-wide widen. ``target_name`` / ``vault_role`` name
+    the acting target and its role in the text when the caller knows them.
 
     ``extras`` carries the machine-usable fields
     (``error_code`` / ``path`` / ``identity_hint`` / ``doc_ref`` /
@@ -2021,6 +2102,7 @@ def result_connector_vault_write_forbidden(
     identity_clause = (
         f" The write dispatched under identity {identity_hint!r}." if identity_hint else ""
     )
+    target_clause = _vault_write_target_clause(target_name, vault_role)
     # #3274: the capability + path kind is op-aware. A version soft-delete
     # (``vault.kv.delete``) authorizes with ``update`` on the ``/delete/``
     # path; ``put`` / ``patch`` with ``create``/``update`` on the ``/data/``
@@ -2036,13 +2118,18 @@ def result_connector_vault_write_forbidden(
     summary = (
         f"vault_write_identity_forbidden: Vault denied the KV-v2 write{path_clause} "
         f"(permission denied). The approval handshake succeeded, but the identity "
-        f"the connector dispatched the write with {capability_clause}.{identity_clause} "
-        f"This is a deploy write-identity gap, not a bug in the approve→execute flow: "
-        f"add the per-operator write-capability stanza (§6.1) so the "
-        f"dispatching/reviewing operator's token can write the path, and verify it "
-        f"with the 'sys/capabilities-self' probe (§6.2). Do NOT widen the backplane's "
-        f"shared Vault policy — the write grant is per-operator templated. See "
-        f"{_VAULT_WRITE_POLICY_DOC} §6 for the write-identity contract."
+        f"the connector dispatched the write with {capability_clause}.{identity_clause}"
+        f"{target_clause} "
+        f"This is a deploy write-identity gap, not a bug in the approve→execute flow. "
+        f"Fix it in this order: (1) check the target's vault_role — the write runs "
+        f"under the operator's token and the vault_role of the target it is "
+        f"dispatched on, so another registered vault target may already hold this "
+        f"path under a broader role; dispatch the same write there (no policy "
+        f"change). (2) Otherwise add the per-operator write-capability stanza (§6.1) "
+        f"so the dispatching/reviewing operator's token can write the path, and "
+        f"verify it with the 'sys/capabilities-self' probe (§6.2). Do NOT widen the "
+        f"backplane's shared Vault policy — the write grant is per-operator "
+        f"templated. See {_VAULT_WRITE_POLICY_DOC} §6 for the write-identity contract."
     )
     if msg:
         # hvac renders Forbidden as "permission denied, on POST <url>" — the
@@ -2060,6 +2147,57 @@ def result_connector_vault_write_forbidden(
             "doc_ref": f"{_VAULT_WRITE_POLICY_DOC}#6-kv-v2-write-surface",
             "exception_class": type(exc).__name__,
             "exception_message": msg,
+        },
+    )
+
+
+def result_write_capability_denied(
+    op_id: str, preflight: Mapping[str, Any], duration_ms: float
+) -> OperationResult:
+    """Park refused: the park-time permission check says the write will fail (#3542).
+
+    The op needs approval, and its park-time permission preflight
+    (``vault.kv.*`` writes probe ``sys/capabilities-self``) returned
+    ``will_be_denied: true``. Parking it would ask a person to approve a
+    write that the identity cannot perform, so MEHO refuses instead: no
+    approval row is written and the caller gets this result to fix the
+    write grant and call again. ``status`` is ``"denied"`` with a distinct
+    ``error_code``.
+
+    *preflight* is the secret-free preflight dict (capability names, path,
+    reason). Its ``granted`` / ``required`` / ``path`` / ``reason`` fields
+    ride in ``extras`` next to the ``doc_ref`` for the write policy. The
+    ``reason`` may hold a probe exception class or a target lookup problem,
+    so it goes through :func:`_sanitize_free_text`.
+    """
+    path = preflight.get("path")
+    granted = list(preflight.get("granted") or [])
+    required = list(preflight.get("required") or [])
+    reason = preflight.get("reason")
+    reason = _sanitize_free_text(str(reason)) if reason else None
+    detail = f" on {path!r}" if path else ""
+    if required:
+        detail += f" (needs {required}, has {granted})"
+    if reason:
+        detail += f" (check result: {reason})"
+    summary = (
+        f"write_capability_denied: the identity this write runs under cannot "
+        f"perform it{detail}. MEHO did not create an approval request, because "
+        f"the write would fail after approval. Add the write grant (see "
+        f"{_VAULT_WRITE_POLICY_DOC} section 6), then call the operation again."
+    )
+    return OperationResult(
+        status="denied",
+        op_id=op_id,
+        error=f"denied: {summary}",
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "write_capability_denied",
+            "path": path,
+            "granted": granted,
+            "required": required,
+            "reason": reason,
+            "doc_ref": f"{_VAULT_WRITE_POLICY_DOC}#6-kv-v2-write-surface",
         },
     )
 

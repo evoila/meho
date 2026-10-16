@@ -10052,7 +10052,7 @@
           "approvals"
         ],
         "summary": "Approve Approval Request",
-        "description": "Approve a pending request and re-dispatch the original operation.\n\nThe ``params`` body must be the original params unchanged; the service\nre-hashes them and rejects with 422 on a mismatch. On a successful\napproval the original dispatch is re-executed and the result returned.\n\nAsync governed dispatch (#3079): with ``async: true`` the decision is\nstill recorded + audited synchronously, but the resumed op is dispatched\non a background task and the route returns HTTP 202 + a durable run\nhandle (``{\"run_id\", \"status\": \"pending\", \"async\": true}``) instead of\nblocking for the resumed op's full duration. The resume runs through the\nsame exactly-one-resumer claim + policy bypass + audit path the inline\nresume uses. Default (``async`` absent / false) is byte-identical to the\npre-#3079 inline resume below.\n\nHTTP status codes:\n\n* 200 \u2014 approved + re-dispatched successfully (sync).\n* 202 \u2014 approved; resume launched in the background (``async: true``).\n* 403 \u2014 caller lacks approvals-plane access (neither ``operator`` role\n  nor the ``approver`` capability, #3243), **or** the approver is the\n  requester and self-approval break-glass is disabled (G11.7-T1 #1401).\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 request is already decided.\n* 422 \u2014 params hash mismatch.",
+        "description": "Approve a pending request and re-dispatch the original operation.\n\nThe ``params`` body must be the original params unchanged; the service\nre-hashes them and rejects with 422 on a mismatch. On a successful\napproval the original dispatch is re-executed and the result returned.\n\nAsync governed dispatch (#3079): with ``async: true`` the decision is\nstill recorded + audited synchronously, but the resumed op is dispatched\non a background task and the route returns HTTP 202 + a durable run\nhandle (``{\"run_id\", \"status\": \"pending\", \"async\": true}``) instead of\nblocking for the resumed op's full duration. The resume runs through the\nsame exactly-one-resumer claim + policy bypass + audit path the inline\nresume uses. Default (``async`` absent / false) is byte-identical to the\npre-#3079 inline resume below.\n\nHTTP status codes:\n\n* 200 \u2014 approved + re-dispatched successfully (sync).\n* 202 \u2014 approved; resume launched in the background (``async: true``).\n* 403 \u2014 caller lacks approvals-plane access (neither ``operator`` role\n  nor the ``approver`` capability, #3243), **or** the approver is the\n  requester and self-approval break-glass is disabled (G11.7-T1 #1401).\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 request is already decided.\n* 422 \u2014 params hash mismatch, a reason over 2000 characters, or a\n  delegated reason (``Instructed-by:``) missing ``Instruction:`` /\n  ``Refs:`` (#3692).",
         "operationId": "approve_approval_request_api_v1_approvals__request_id__approve_post",
         "parameters": [
           {
@@ -10116,7 +10116,7 @@
           "approvals"
         ],
         "summary": "Reject Approval Request",
-        "description": "Reject a pending request; the original operation is not executed.\n\nHTTP status codes:\n\n* 200 \u2014 rejected successfully.\n* 403 \u2014 caller lacks approvals-plane access (neither ``operator`` role\n  nor the ``approver`` capability, #3243).\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 request is already decided.",
+        "description": "Reject a pending request; the original operation is not executed.\n\nHTTP status codes:\n\n* 200 \u2014 rejected successfully.\n* 403 \u2014 caller lacks approvals-plane access (neither ``operator`` role\n  nor the ``approver`` capability, #3243).\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 request is already decided.\n* 422 \u2014 a reason over 2000 characters, or a delegated reason\n  (``Instructed-by:``) missing ``Instruction:`` / ``Refs:`` (#3692).",
         "operationId": "reject_approval_request_api_v1_approvals__request_id__reject_post",
         "parameters": [
           {
@@ -22846,6 +22846,10 @@
           "reviewer_context": {
             "$ref": "#/components/schemas/ReviewerContextView",
             "nullable": true
+          },
+          "delegation": {
+            "$ref": "#/components/schemas/DelegationView",
+            "nullable": true
           }
         },
         "type": "object",
@@ -22923,8 +22927,9 @@
           },
           "reason": {
             "type": "string",
+            "maxLength": 2000,
             "title": "Reason",
-            "description": "Optional human-readable approval reason (recorded in the audit row).",
+            "description": "Optional human-readable approval reason (recorded in the audit row). End it with Instructed-by: / Instruction: / Refs: lines when another human instructed this decision.",
             "default": ""
           },
           "async": {
@@ -26545,6 +26550,14 @@
             "type": "array",
             "nullable": true,
             "title": "Op Allowlist"
+          },
+          "safety_overlay": {
+            "items": {
+              "$ref": "#/components/schemas/SafetyOverlayEntry"
+            },
+            "type": "array",
+            "nullable": true,
+            "title": "Safety Overlay"
           }
         },
         "additionalProperties": false,
@@ -27388,8 +27401,9 @@
           },
           "reason": {
             "type": "string",
+            "maxLength": 2000,
             "title": "Reason",
-            "description": "Optional rationale recorded on the decision audit row.",
+            "description": "Optional rationale recorded on the decision audit row. End it with Instructed-by: / Instruction: / Refs: lines when another human instructed this decision.",
             "default": ""
           }
         },
@@ -27482,6 +27496,33 @@
         ],
         "title": "DeclareCapabilitiesRequest",
         "description": "Replace-all intake for the capability declaration (the full surface set).\n\nA declaration is the add-on's *complete* current surface set: persisting\nit replaces any prior declaration wholesale, so a capability dropped from\nthe list is deactivated and leaves no dead surface. A ``(kind, name)``\nlisted twice is a malformed declaration and is rejected loudly rather\nthan silently de-duplicated."
+      },
+      "DelegationView": {
+        "properties": {
+          "instructed_by": {
+            "type": "string",
+            "title": "Instructed By"
+          },
+          "instruction": {
+            "type": "string",
+            "title": "Instruction"
+          },
+          "refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Refs"
+          }
+        },
+        "type": "object",
+        "required": [
+          "instructed_by",
+          "instruction",
+          "refs"
+        ],
+        "title": "DelegationView",
+        "description": "Who told the approver to decide, read off the decision audit row (#3692).\n\nPresent only when the decision ``reason`` ended with the\n``Instructed-by:`` / ``Instruction:`` / ``Refs:`` trailer block. The\napprover is still ``reviewed_by``; ``instructed_by`` is the other human\nwhose written instruction they acted on."
       },
       "DeprecateTemplateResponse": {
         "properties": {
@@ -29129,6 +29170,45 @@
         "title": "GrantPrincipalKind",
         "description": "What kind of principal a grant's ``principal_sub`` names (#3795).\n\nSelects the create-time enforceability check applied by\n:meth:`~meho_backplane.agents.grants.AgentGrantService.grant`:\n\n* :attr:`AGENT` (default) \u2014 ``principal_sub`` must name a registered,\n  non-revoked :class:`~meho_backplane.db.models.AgentPrincipal` by its\n  ``keycloak_client_id`` (``agent:<name>``). This is the shipped\n  behaviour; the grant enforces against a registered agent client's\n  token (matched on the token's client identity, #3795).\n* :attr:`USER_AGENT` \u2014 ``principal_sub`` is the JWT ``sub`` of a **human\n  user** who authenticates with ``principal_kind=agent`` through a\n  public client. There is no ``AgentPrincipal`` row for such a sub (its\n  ``azp`` is the public client, not ``agent:<name>``), so the registry\n  check is skipped and the raw sub is accepted. Enforcement matches on\n  the token ``sub`` directly. Deliberately explicit \u2014 the caller opts\n  into keying a grant on a bare sub, which the default rejects to catch\n  typos.\n\nThe field is optional on the create surfaces and defaults to\n:attr:`AGENT`, so every existing caller is unaffected."
       },
+      "GroupSummaryModel": {
+        "properties": {
+          "group_key": {
+            "type": "string",
+            "title": "Group Key"
+          },
+          "created": {
+            "type": "boolean",
+            "title": "Created"
+          },
+          "operations_added": {
+            "type": "integer",
+            "title": "Operations Added"
+          },
+          "typed_operation_count": {
+            "type": "integer",
+            "title": "Typed Operation Count"
+          },
+          "composite_operation_count": {
+            "type": "integer",
+            "title": "Composite Operation Count"
+          },
+          "ingested_operation_count": {
+            "type": "integer",
+            "title": "Ingested Operation Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "group_key",
+          "created",
+          "operations_added",
+          "typed_operation_count",
+          "composite_operation_count",
+          "ingested_operation_count"
+        ],
+        "title": "GroupSummaryModel",
+        "description": "Pydantic projection of\n:class:`~meho_backplane.operations.ingest.llm_groups.GroupSummary`.\n\nOne row per group: how many ops this run added to it, and how many\ntyped, composite, and ingested ops it holds now.\n``typed_operation_count > 0`` means a typed registrar owns the\ngroup; grouping never files ingested ops into such a group.\nComposite ops do not make a group typed."
+      },
       "GroupingResultModel": {
         "properties": {
           "connector_id": {
@@ -29154,6 +29234,13 @@
           "llm_duration_ms": {
             "type": "number",
             "title": "Llm Duration Ms"
+          },
+          "groups": {
+            "items": {
+              "$ref": "#/components/schemas/GroupSummaryModel"
+            },
+            "type": "array",
+            "title": "Groups"
           }
         },
         "type": "object",
@@ -31146,8 +31233,9 @@
         "properties": {
           "reason": {
             "type": "string",
+            "maxLength": 2000,
             "title": "Reason",
-            "description": "Optional human-readable rejection reason (recorded in the audit row).",
+            "description": "Optional human-readable rejection reason (recorded in the audit row). End it with Instructed-by: / Instruction: / Refs: lines when another human instructed this decision.",
             "default": ""
           }
         },
@@ -32521,6 +32609,46 @@
         ],
         "title": "SafetyChangeModel",
         "description": "Pydantic projection of\n:class:`~meho_backplane.operations.ingest.register_ingested.SafetyChange`.\n\nOne op whose persisted ``safety_level`` a re-ingest overwrote with\na different value (#2702), plus every Sensor pinning it \u2014 those\nsensors keep auto-executing the op on schedule under the stale\ncreate-time ``safe`` assumption until the operator re-audits them."
+      },
+      "SafetyOverlayEntry": {
+        "properties": {
+          "method": {
+            "type": "string",
+            "maxLength": 16,
+            "minLength": 1,
+            "title": "Method"
+          },
+          "path": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Path"
+          },
+          "safety_level": {
+            "type": "string",
+            "enum": [
+              "safe",
+              "caution",
+              "dangerous",
+              "destructive"
+            ],
+            "title": "Safety Level"
+          },
+          "requires_approval": {
+            "type": "boolean",
+            "title": "Requires Approval",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "method",
+          "path",
+          "safety_level"
+        ],
+        "title": "SafetyOverlayEntry",
+        "description": "One catalog rule that raises the safety of matching ingested ops.\n\nA catalog row that declares :attr:`ConnectorSpecEntry.safety_overlay`\nlets an operator raise the safety level and turn on approval for\nchosen operations of that spec, without changing the ingest code.\n``method`` is matched exactly (upper-cased). ``path`` is a\nshell-style glob matched case-sensitively against the spec path\ntemplate with any query string removed; ``*`` also matches ``/``.\nThe rule only ever raises: it never lowers a stricter level and never\nclears an approval requirement (see\n:func:`meho_backplane.operations.ingest.safety_floors.apply_safety_floor`)."
       },
       "ScheduledTriggerCreate": {
         "properties": {

@@ -84,6 +84,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from defusedxml.ElementTree import ParseError, fromstring
@@ -93,8 +94,10 @@ from meho_backplane.connectors.pfsense.ops_write import (
     _INTERFACE_RE,
     _apply_playback,
     _child_text,
+    _is_empty_container,
     _php_squote,
     _read_config_xml,
+    assert_only_own_object_changed,
     serialized_config_write,
 )
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
@@ -749,6 +752,77 @@ def _stored_rule_differences(row: dict[str, Any], spec: dict[str, Any]) -> list[
     return diffs
 
 
+def _section_of(rule: dict[str, Any]) -> str:
+    """Return the GUI section a rule sits in: its interface, or ``FloatingRules``."""
+    return "FloatingRules" if rule["floating"] else rule["interface"]
+
+
+def _section_rules(rules: list[dict[str, Any]], section: str) -> list[dict[str, Any]]:
+    """Return the rules pfSense's ``get_interface_ruleindex()`` counts for *section*.
+
+    pfSense lowercases the section name but compares it to the rule's
+    interface as stored, so a rule on an upper-case interface group is never
+    counted. The playback then behaves as if the section were empty.
+    """
+    wanted = section.lower()
+    if wanted == "floatingrules":
+        return [r for r in rules if r["floating"]]
+    return [r for r in rules if not r["floating"] and r["interface"] == wanted]
+
+
+def _expected_separator_update(
+    section: str, index: int | None, *, up: bool
+) -> Callable[[Any, Any], None]:
+    """Return the full read-back hook for a playback that updated *section*'s separators.
+
+    The fragment does two things beside the rule itself. ``shift_separators()``
+    moves the rows of the section's separators: *index* is the rule's
+    position among the section's rules, ``-1`` moves every row, ``None``
+    moves none, and rows at ``fr0`` or at or above the rule stay. The hook
+    applies that to the "before" tree. The fragment also writes the
+    section's separator list back with ``config_set_path()``, which may
+    leave an empty element such as ``<lan></lan>`` where there was none.
+    The hook drops an empty list for the section, and an empty
+    ``<separator>``, from both trees, so the read-back accepts that element
+    whether pfSense wrote it or not.
+    """
+    key = section.lower()
+
+    def apply(before_root: Any, after_root: Any) -> None:
+        _shift_separator_rows(before_root, key, index, up=up)
+        for root in (before_root, after_root):
+            _drop_empty_separator_list(root, key)
+
+    return apply
+
+
+def _shift_separator_rows(root: Any, key: str, index: int | None, *, up: bool) -> None:
+    rows = root.find(f"filter/separator/{key}")
+    if rows is None or index is None:
+        return
+    for sep in rows:
+        row_el = sep.find("row")
+        text = ((row_el.text if row_el is not None else "") or "").strip()
+        if not text.startswith("fr") or not text[2:].isdigit():
+            continue
+        row = int(text[2:])
+        if index != -1 and (row == 0 or row <= index):
+            continue
+        row_el.text = f"fr{row - 1 if up else row + 1}"
+
+
+def _drop_empty_separator_list(root: Any, key: str) -> None:
+    filter_root = root.find("filter")
+    separator = filter_root.find("separator") if filter_root is not None else None
+    if separator is None:
+        return
+    rows = separator.find(key)
+    if rows is not None and _is_empty_container(rows):
+        separator.remove(rows)
+    if _is_empty_container(separator):
+        filter_root.remove(separator)
+
+
 async def _read_rules(
     self: PfSenseConnector, target: Any, operator: Operator | None, *, stage: str
 ) -> tuple[str, list[dict[str, Any]]]:
@@ -777,6 +851,8 @@ async def pfsense_filter_rule_add(
     SSH path -> ``mgmt_path`` / ``mgmt_path_unknown`` -> otherwise stage the
     insert, then read back and check the rule is there exactly once, is the
     requested rule field by field, and the rule count grew by exactly one.
+    Then the full read-back checks nothing else changed, except the separator
+    rows an insert at the top of a non-empty section moves down by one.
     """
     ridentifier = _validate_ridentifier(params.get("ridentifier"))
     spec = _validate_rule_params(params)
@@ -845,7 +921,7 @@ async def pfsense_filter_rule_add(
         operator=operator,
     )
 
-    _, rules_after = await _read_rules(
+    after, rules_after = await _read_rules(
         self,
         target,
         operator,
@@ -865,6 +941,22 @@ async def pfsense_filter_rule_add(
             f"filter.rule.add verification failed for ridentifier {ridentifier!r}: "
             f"the stored rule differs from the requested rule in: {', '.join(differences)}"
         )
+    # The fragment only touches the separators when it inserts at the top of
+    # a section that already has rules (see ``_build_rule_add_playback``).
+    section = _section_of(spec)
+    shifted = position == "top" and bool(_section_rules(rules_before, section))
+    assert_only_own_object_changed(
+        before,
+        after,
+        op="filter.rule.add",
+        section="filter",
+        item_tag="rule",
+        key_tag="tracker",
+        key=ridentifier,
+        expected_side_effects=_expected_separator_update(section, -1, up=False)
+        if shifted
+        else None,
+    )
     return {
         **result,
         "status": "added",
@@ -889,11 +981,12 @@ async def pfsense_filter_rule_delete(
     ``nat_associated`` -> an enabled ``pass`` rule that could carry MEHO's
     own SSH path -> ``mgmt_path`` / ``mgmt_path_unknown`` -> otherwise stage
     the delete, then read back and check the rule is gone and the count
-    dropped by exactly one.
+    dropped by exactly one. Then the full read-back checks nothing else
+    changed, except the separator rows below the rule, which move up by one.
     """
     ridentifier = _validate_ridentifier(params.get("ridentifier"))
 
-    _, rules_before = await _read_rules(
+    before, rules_before = await _read_rules(
         self, target, operator, stage="filter.rule.delete refused: config.xml could not be read"
     )
     matches = [r for r in rules_before if r.get("tracker") == ridentifier]
@@ -946,7 +1039,7 @@ async def pfsense_filter_rule_delete(
         operator=operator,
     )
 
-    _, rules_after = await _read_rules(
+    after, rules_after = await _read_rules(
         self,
         target,
         operator,
@@ -960,6 +1053,21 @@ async def pfsense_filter_rule_delete(
             "(expected exactly one fewer); the pfSsh.php playback did not persist a "
             "clean single-rule delete"
         )
+    # The fragment always writes the section's separator list back, and
+    # moves the rows below the deleted rule up (see ``_build_rule_delete_playback``).
+    section = _section_of(rule)
+    in_section = _section_rules(rules_before, section)
+    index = next((i for i, r in enumerate(in_section) if r is rule), None)
+    assert_only_own_object_changed(
+        before,
+        after,
+        op="filter.rule.delete",
+        section="filter",
+        item_tag="rule",
+        key_tag="tracker",
+        key=ridentifier,
+        expected_side_effects=_expected_separator_update(section, index, up=True),
+    )
     return {
         **result,
         "status": "deleted",

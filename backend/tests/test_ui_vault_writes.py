@@ -522,7 +522,9 @@ def test_vault_put_awaiting_approval_renders_banner_and_approvals_link() -> None
     # Register the connector + ops + the in-process Vault fake so the parked
     # dispatch reaches the real policy gate (the handler never runs on a park).
     with pytest.MonkeyPatch.context() as mp:
-        install_fake_client(mp, secret={"password": _SECRET_VALUE})
+        fake = install_fake_client(mp, secret={"password": _SECRET_VALUE})
+        # Grant the write at park time, or the park is refused (#3542).
+        fake.sys.default_capabilities = ["create", "read", "update"]
         _register_vault(_make_stub())
         client, mock, csrf = _client_with_role_and_csrf(
             tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR

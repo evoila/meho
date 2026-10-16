@@ -59,7 +59,7 @@ from meho_backplane.operations.meta_tools import (
     search_operations,
 )
 from meho_backplane.retrieval.embedding import EMBEDDING_DIMENSION
-from meho_backplane.settings import get_settings
+from meho_backplane.settings import RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES, get_settings
 
 # ---------------------------------------------------------------------------
 # Settings + isolation fixtures
@@ -1242,6 +1242,67 @@ async def test_call_operation_missing_target_name_returns_target_required_envelo
     )
     assert result["status"] == "error"
     assert result["extras"]["error_code"] == "target_required"
+
+
+@pytest.mark.asyncio
+async def test_call_operation_refuses_undeliverable_receipt_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3641: an op_id whose receipt cannot fit the wire ceiling never runs.
+
+    With the ceiling at its floor, 256 non-ASCII characters (escaped twice
+    in the MCP text block) push even the receipt of a completed run over
+    the ceiling. The call comes back as a ``receipt_too_large`` error
+    envelope, and the dispatcher is never called.
+    """
+    monkeypatch.setenv(
+        "RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES", str(RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES)
+    )
+    get_settings.cache_clear()
+    dispatch_mock = AsyncMock()
+    monkeypatch.setattr("meho_backplane.operations.meta_tools.dispatch", dispatch_mock)
+    operator = _make_operator(tenant_id=_TENANT_A)
+    op_id = "\u00e9" * 256
+    result = await call_operation(
+        operator,
+        {"connector_id": "vault-1.x", "op_id": op_id, "target": None, "params": {}},
+    )
+    assert result["status"] == "error"
+    assert result["op_id"] == op_id
+    assert result["extras"]["error_code"] == "receipt_too_large"
+    assert result["extras"]["receipt_bytes"] > RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES
+    assert result["extras"]["delivery_max_bytes"] == RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES
+    assert result["audit_id"] is None
+    assert result["delivery"] is None
+    assert "did not run" in result["error"]
+    dispatch_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_call_operation_realistic_op_id_runs_at_the_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 256-character ASCII op_id fits the floor, so the pre-check lets it run."""
+    monkeypatch.setenv(
+        "RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES", str(RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES)
+    )
+    get_settings.cache_clear()
+    op_id = "x" * 256
+    dispatch_mock = AsyncMock(
+        return_value=OperationResult(
+            status="ok", op_id=op_id, result={"done": True}, duration_ms=1.0, audit_id=uuid.uuid4()
+        )
+    )
+    monkeypatch.setattr("meho_backplane.operations.meta_tools.dispatch", dispatch_mock)
+    operator = _make_operator(tenant_id=_TENANT_A)
+    result = await call_operation(
+        operator,
+        {"connector_id": "vault-1.x", "op_id": op_id, "target": None, "params": {}},
+    )
+    dispatch_mock.assert_awaited_once()
+    assert result["status"] == "ok"
+    assert result["result"] == {"done": True}
+    assert result["audit_id"] is not None
 
 
 @pytest.mark.asyncio

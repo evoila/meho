@@ -103,14 +103,56 @@ CLI, UI, audit, and broadcast views.
 Parking fails closed before its transaction commits if the key is missing or
 not a valid Fernet key. The key is deliberately independent of
 `UI_SESSION_ENCRYPTION_KEY`: console enablement must never decide credential
-custody. Configure Helm with an existing Kubernetes Secret:
+custody.
 
-```yaml
-approvalHandoff:
-  enabled: true
-  secretName: meho-approval-handoff
-  secretKey: approval_handoff_encryption_key
-```
+### Required: set the custody key (#3712)
+
+**`APPROVAL_HANDOFF_ENCRYPTION_KEY` is REQUIRED** on every deployment where a
+credential-write operation (for example a Vault KV write) may wait for
+approval. This holds for human and service callers alike. Without a valid key,
+MEHO denies the operation instead of letting it wait, with the message
+`credential-write approval custody is unavailable; configure a valid
+APPROVAL_HANDOFF_ENCRYPTION_KEY before parking this operation`. The Helm chart
+keeps `approvalHandoff` off by default, so an install with unchanged values has
+no key. Since v0.35.2 such an install denies these operations.
+
+Not affected: a credential-write that runs at once under a standing grant (it
+never waits, so it needs no key), and approvals that were already waiting
+before the v0.35.2 upgrade.
+
+Check the state before the first denial: `GET /ready` shows
+`features.approval_custody` with `custody` set to `configured`, `missing` or
+`malformed`. The key value never appears there. `helm install` and
+`helm upgrade` also print a warning while `approvalHandoff.enabled` is false.
+
+Set it up in three steps:
+
+1. Create a Fernet key:
+
+   ```bash
+   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+   ```
+
+2. Store it in a Kubernetes Secret. Pipe it in, so the key stays out of shell
+   history and the process list:
+
+   ```bash
+   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode(), end='')" \
+     | kubectl -n <namespace> create secret generic meho-approval-handoff \
+         --from-file=approval_handoff_encryption_key=/dev/stdin
+   ```
+
+   Or sync the Secret through your usual secret manager (for example an
+   ExternalSecret).
+
+3. Point the chart at the Secret and run `helm upgrade`:
+
+   ```yaml
+   approvalHandoff:
+     enabled: true
+     secretName: meho-approval-handoff
+     secretKey: approval_handoff_encryption_key
+   ```
 
 The chart uses `secretKeyRef`; never place the key in `values.yaml`. Rotate by
 creating a new Fernet key in the referenced Secret and restarting all
@@ -426,6 +468,82 @@ is unchanged in mechanism but now matters for humans too: with humans
 routed to `NEEDS_APPROVAL`, re-running the gate on resume would re-queue
 the call instead of executing it, so the bypass is what lets the
 approved op run.
+
+## Delegated decisions: the reason-line convention (#3692)
+
+Sometimes an approver decides because **another person told them to, in
+writing**. The approver still decides under their own identity
+(`reviewed_by`). The decision reason records the other person, their
+words, and where the work is tracked. It uses three `Key: value` lines
+at the end of the reason, in the style of git trailers
+(`Signed-off-by:`):
+
+```text
+Ran the delete after sign-off in the change window.
+
+Instructed-by: lead@example.com
+Instruction: "please run the cleanup tonight"
+Refs: #12, CHG-9
+```
+
+Rules (`parse_delegation` in `operations/approval_queue.py`, pure and
+deterministic):
+
+- A reason is **delegated** when any line starts with `Instructed-by:`.
+  Keys are case-insensitive.
+- The trailer lines must be the **last paragraph** of the reason (after
+  a blank line), and every line in that paragraph must be `Key: value`.
+  Other keys in the block are ignored.
+- `Instructed-by:`, `Instruction:` and `Refs:` must all be present and
+  non-empty. `Refs:` is comma-separated. Surrounding double quotes on
+  the instruction are removed; the words inside are kept as written.
+- A key may appear only once.
+
+If a delegated reason breaks a rule, `DelegatedReasonInvalidError` is
+raised **before** any state change, so the row stays `pending` and no
+decision audit row is written. Both `approve_request` and
+`reject_request` call the parser, so every decide surface gets the same
+check:
+
+| Surface | Refusal |
+|---|---|
+| REST `/approve`, `/reject`, `/decide` | 422, `detail` starts with `delegated_reason_invalid:` |
+| Console approve / deny | the modal re-renders with a 422 banner naming what is missing |
+| CLI `meho approvals approve` / `reject --reason` | posts to `/decide`; prints the 422 body |
+
+**On the ledger.** There is no new column and no migration (the same
+choice as the #2087 break-glass audit). A valid delegated decision adds
+a `delegation` object to the `approval.decision` audit row's payload,
+next to the verbatim `reason`:
+
+```json
+{"decision": "approved", "reviewed_by": "<approver sub>",
+ "reason": "Ran the delete ...\n\nInstructed-by: ...",
+ "delegation": {"instructed_by": "lead@example.com",
+                "instruction": "please run the cleanup tonight",
+                "refs": ["#12", "CHG-9"]}}
+```
+
+It also emits the WARNING log event `approval_delegated_decision`
+(`approval_request_id`, `op_id`, `decision`, `reviewed_by`,
+`instructed_by`, `tenant_id`). Find delegated decisions on the ledger by
+filtering `approval.decision` rows whose payload has a `delegation` key.
+
+**On the read surfaces.** `get_decision_delegation` reads the block back
+from the decision audit row. `GET /api/v1/approvals/{id}` carries it as
+the optional `delegation` field of `ApprovalRequestView` (the list view
+leaves it `null`). `meho approvals show` and the `approve` / `reject`
+summary print `Instructed by` / `Instruction` / `Refs`. The console shows
+the same three lines on the decided modal and on the outcome card right
+after a decision (`project_request_to_view(row, delegation)`).
+
+**Reason length.** All three REST bodies (`ApproveRequestBody`,
+`RejectRequestBody`, `DecideRequestBody`) and the console form cap
+`reason` at `MAX_REASON_LENGTH` (2000 characters). A longer reason is a
+422.
+
+`work_ref` is unchanged: it stays the requester-side change ref. The
+`Refs:` values may match it, but they do not have to.
 
 ## Single-operator tenants: use an agent-requester, not break-glass (#1738)
 
@@ -796,10 +914,20 @@ Three invariants make the hook safe to wire on the park path:
    expected to return identity-only / scrubbed summaries. The generic
    params-echo default (#1856) scrubs the echoed params with **two**
    passes that reuse the existing redaction discipline:
-   `_scrub_secret_param_keys` masks values keyed by a well-known
-   credential name (`password` / `client_secret` / `token` / … —
-   recursively, since the connector-boundary engine walks Mappings
-   key-by-key without inspecting the *key*), then
+   `_scrub_secret_param_keys` masks values keyed by a secret-shaped
+   name (`password` / `admin_password` / `rootPassword` /
+   `client_secret` / `api_key` / … — recursively, since the
+   connector-boundary engine walks Mappings key-by-key without inspecting
+   the *key*). It uses `broadcast.events.is_secret_param_name`, the same
+   name check as the broadcast params scrub, so any param the broadcast
+   path flags as secret is also masked in the echo (#3808). It walks the
+   same containers too: every mapping and every sequence other than a
+   string (a list or a tuple). It also uses the same value rule: only a
+   string, mapping or sequence value is masked.
+   A bare boolean, number or `null` under a secret-shaped name (for
+   example `bind_secret_id: false` or `secret_id_ttl: 600`) stays
+   visible, because it is a setting, not a secret, and the approver
+   needs to see it. Then
    `apply_connector_boundary_redaction` (the same per-`(connector_id,
    tenant, op)` pipeline the response path and the dispatch-request
    preview run) catches secret *value* shapes (JWTs, bearer tokens,
@@ -1105,8 +1233,29 @@ hooks and merges them: the preview (or the identifier-only default when
 there is no preview) is the base, the preflight result is attached
 under `proposed_effect["permission_preflight"]` when it fired, and the
 catalog `safety_level` (#1855, above) is stamped on top. Both hooks are
-opt-in and fail-soft — a preflight that raises degrades to no banner;
-the park always proceeds.
+opt-in and fail-soft — a preflight that raises degrades to no banner and
+the park proceeds.
+
+**A will-be-denied verdict refuses the park (#3542).** When the preflight
+returns `will_be_denied: true`, MEHO does not write an approval row.
+`dispatcher._preflight_denied_refusal` runs after `_build_proposed_effect`
+and the destructive-tier checks, at both park points (`_handle_needs_approval`
+and the composite sub-op seam `composite.enforce_subop_policy`). It
+returns `status="denied"` with `error_code="write_capability_denied"` and
+`extras` `path` / `granted` / `required` / `reason` / `doc_ref` (the write
+policy, `connector-vault-policy.md#6-kv-v2-write-surface`). So no person
+spends an approval on a write the identity cannot perform. The caller adds
+the write grant and calls again. Both park points still write one `denied`
+audit row for the attempt on the refused op's own path (the refusal details
+ride under `payload["error"]`) and publish one `denied` broadcast event, the
+same as an ordinary policy denial. They share one writer,
+`dispatcher._audit_denied_and_return`. For a refused step inside a
+multi-step operation the row is written by the sub-op gate and carries the
+parent operation's audit id in `parent_audit_id`. This matters because the
+parent returns the step's result as is, and the dispatcher writes no audit
+row for a result a handler returns. Before #3542 the verdict was only a
+warning and the op parked anyway; rows parked then still carry
+`write_capability_warning`, which the console modal shows as a banner.
 
 The KV-v2 write ops (`vault.kv.put` / `vault.kv.patch` /
 `vault.kv.delete`) register a preflight that probes
@@ -1282,7 +1431,8 @@ free-text reason (an `audit_log` read deferred to a follow-up).
 badge (mirroring the ops-launcher `safety_badge` mold — error for
 `dangerous`, warning for `caution`) + an `op_class` chip in the header;
 a `role="alert"` warning banner when `write_capability_warning` is set
-(#2331); an error banner when `preview_unavailable` is true, carrying
+(#2331; new parks with that verdict are refused since #3542, so only older
+rows carry it); an error banner when `preview_unavailable` is true, carrying
 `preview_error` (#1628); a reason-keyed notice when `preview_populated`
 is false (`credential_write_redacted` → elevated-risk redaction copy,
 `connector_did_not_populate` → a neutral "no preview" note, #2332); and a
@@ -1591,6 +1741,84 @@ params. See [agent-runtime.md § Awaiting-approval resume](agent-runtime.md#awai
 for the agent-run substrate's full shape, including the wait timeout
 (`Settings.agent_approval_wait_timeout_seconds`, default 30 min) and the
 fail-open semantics on broadcast outage.
+
+## An add-on proposes a governed destroy (#3478)
+
+A paired add-on signs in as a **service principal** (client credentials,
+`principal_kind=service`). It **can** drive a destructive op. It cannot run
+the op alone: a human must approve it. It needs no standing grant. This is
+the supported way for an add-on to do two-person deletes without a person
+typing each delete on the CLI.
+
+The rule that confuses people: the destructive tier is DENY **only for
+agent principals**. For service and user principals it waits for approval.
+The rule is recorded in
+[`governed-delete-operations.md`](../decisions/governed-delete-operations.md)
+("Who may propose").
+
+| Principal kind | Destructive op | Code |
+|---|---|---|
+| `agent` | Refused (DENY). Nothing is parked. | `auth/permissions.py:131` `_SAFETY_DEFAULT` + `:154` `_SAFETY_CEILING`; agent branch of `operations/_validate.py:450` `policy_gate` |
+| `service` | Waits for approval. No grant can approve it in advance. | `operations/_validate.py:362` `_non_agent_verdict` (the `destructive` branch); `operations/service_grants.py:758` `consult_and_record_grant` refuses the tier before any grant lookup |
+| `user` | Waits for approval. | `operations/_validate.py:362` `_non_agent_verdict` |
+
+### The round trip
+
+The add-on needs the `operator` role to call `POST /api/v1/operations/call`
+and `/preview`. Paths are under `backend/src/meho_backplane/`.
+
+1. **Preview.** The add-on calls `preview_operation` (REST
+   `POST /api/v1/operations/preview`) with the exact
+   `(connector_id, op_id, target, params)`. The reply carries a
+   `preview_hash`. The reply does **not** carry the blast-radius statement.
+2. **Call with the hash.** The add-on calls `call_operation` with the same
+   values plus `preview_hash` (`operations/meta_tools.py:427`
+   `CallOperationBody.preview_hash`, passed on to `dispatch` at `:1131`).
+3. **Park.** The policy gate returns `NEEDS_APPROVAL`, so the dispatcher
+   reaches `_handle_needs_approval` (`operations/dispatcher.py:2487`). For a
+   destructive op it runs `_destructive_binding_refusal` (`:2364`, called at
+   `:2567`) before it writes any row. That check recomputes the preview hash
+   on the server and needs a valid blast-radius block on `proposed_effect`.
+   A missing or wrong hash, or a missing block, is refused, and no row is
+   written. On success the row stores `preview_hash`, and the blast radius
+   lives on the row's `proposed_effect`. The add-on gets
+   `status="awaiting_approval"` and `extras.approval_request_id`. It should
+   store that id.
+4. **A human approves.** The approver must be a different person: there is
+   no self-approval for this tier, not even with break-glass
+   (`operations/approval_queue.py:1835` `_check_self_approval`). The approve
+   step checks the preview hash again (`:1926`
+   `_check_destructive_preview_binding`). The decision verbs are human-only
+   on every surface, so the add-on cannot approve its own request.
+5. **The op runs under the approver.**
+   `resume_dispatch_after_approval` (`operations/approval_queue.py:1221`)
+   re-runs the dispatch with the **approver's** `Operator`. So the approver's
+   role is what counts when the op runs, and the audit row for the delete
+   names the approver. The result is saved on the row
+   (`_persist_resume_result`, `:1359`). A large result goes into a result
+   handle that the add-on owns (see "Who owns a result handle" above).
+6. **The add-on reads the result.** The add-on polls
+   `GET /api/v1/approvals/{id}/result` (`api/v1/approvals.py:614`,
+   `read_approval_result` at `operations/approval_queue.py:2062`). Only the
+   principal that parked the op may read it; anyone else gets 403
+   `not_request_owner`, even the approver. The reply has `result: null`
+   until the op has run.
+
+A paired add-on can also read the approval outcome from its durable
+step-event stream ([`addon-step-events.md`](addon-step-events.md), #3027).
+That says *whether* the op was approved; `/result` says *what the run
+returned*.
+
+**Pinned by tests:**
+
+- `tests/test_connectors_harbor_robot_delete.py::test_service_principal_proposes_destroy_and_adopts_result`
+  — the full round trip for a service principal, including the `/result`
+  read by the parker and the 403 for the approver.
+- `tests/test_service_principal_grant_gate.py::test_service_principal_destructive_parks_and_grant_never_satisfies`
+  — a destructive op parks for a service principal even with a live
+  matching grant.
+- `tests/test_connectors_harbor_robot_delete.py::test_agent_principal_is_denied`
+  — the same op is refused for an agent principal.
 
 ## Service-principal standing grants + safety_level gate (#3151 / #3152)
 

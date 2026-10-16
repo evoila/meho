@@ -1010,6 +1010,15 @@ uiConsole:
 # Credential-write approvals keep their input in a short-lived encrypted
 # custody row. This independent key is wired only by secretKeyRef; it is not
 # shared with the optional browser-console session key.
+#
+# REQUIRED if any credential-write operation (for example a Vault KV write)
+# must wait for approval. While this block is off, the pod gets no
+# APPROVAL_HANDOFF_ENCRYPTION_KEY and MEHO denies every such operation
+# instead of letting it wait for approval. `GET /ready` shows the state under
+# `features.approval_custody`. Create a Fernet key with
+# `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`,
+# store it in a Kubernetes Secret, then set `enabled: true` and `secretName`.
+# Steps and key rotation: docs/codebase/approvals.md.
 approvalHandoff:
   enabled: false
   secretName: ""
@@ -1079,6 +1088,67 @@ broadcast:
     password: ""
   # -- Broadcast subchart's own ingress NetworkPolicy (subchart
   # `networkPolicy` block). Admits tcp/6379 only from the backplane Pods.
+  networkPolicy:
+    enabled: true
+    backplanePodLabels:
+      app.kubernetes.io/name: meho
+    extraAllowedSelectors: []
+
+# Dedicated result-cache store (`charts/result-cache/`, Valkey 9.x). Holds
+# the full rows behind result handles, apart from the broadcast store above,
+# so a burst of large handles can only fill this store. Off by default.
+# Roll order: enable the store with `writerEnabled: false`, roll out, check
+# the backplane can reach it, then set `writerEnabled: true`.
+resultCache:
+  enabled: false
+  # -- Sets RESULT_CACHE_WRITER_ENABLED on the backplane. While false, new
+  # result handles are written to the broadcast store; reads already check
+  # this store first and then the broadcast store.
+  writerEnabled: false
+  image:
+    repository: valkey/valkey
+    tag: "9.0-alpine"
+    pullPolicy: IfNotPresent
+  # -- Replica count. Capped at 1 (no persistence, no Sentinel).
+  replicas: 1
+  # -- Valkey `maxmemory` byte ceiling. Generous default; a load test may
+  # tune it. Keep it below `resources.limits.memory`.
+  maxmemory: "768mb"
+  # -- Valkey `maxmemory-policy`. `noeviction` refuses new result writes at
+  # the ceiling instead of dropping live handles.
+  maxmemoryPolicy: noeviction
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+    fsGroup: 999
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+  resources:
+    limits:
+      cpu: 500m
+      memory: 1Gi
+      ephemeral-storage: 512Mi
+    requests:
+      cpu: 50m
+      memory: 128Mi
+      ephemeral-storage: 128Mi
+  service:
+    type: ClusterIP
+    port: 6379
+  # -- Valkey requirepass authentication. Same shape as `broadcast.auth`.
+  auth:
+    enabled: true
+    existingSecret: ""
+    existingSecretPasswordKey: requirepass
+    password: ""
+  # -- The subchart's own ingress NetworkPolicy. Admits tcp/6379 only from
+  # the backplane Pods.
   networkPolicy:
     enabled: true
     backplanePodLabels:

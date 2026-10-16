@@ -50,6 +50,10 @@ from meho_backplane.connectors.pfsense.ops_filter_rule import (
     rule_matches_mgmt_flow,
 )
 from meho_backplane.connectors.pfsense.ops_read import parse_gateways_xml
+from meho_backplane.connectors.pfsense.ops_user_write import (
+    pfsense_user_disable,
+    pfsense_user_enable,
+)
 from meho_backplane.connectors.pfsense.ops_write import (
     pfsense_gateway_add,
     pfsense_route_static_add,
@@ -526,7 +530,7 @@ async def test_add_interface_group_is_accepted() -> None:
             _proc(""),
             _proc(""),
             _proc(""),
-            _proc(_config(_FENCE.replace("opt1", "SEGS"), _LAN_PASS)),
+            _proc(config.replace("<filter>", f"<filter>{_FENCE.replace('opt1', 'SEGS')}", 1)),
         ]
         result = await connector.filter_rule_add(None, {**_FENCE_PARAMS, "interface": "SEGS"})
     assert result["status"] == "added"
@@ -814,6 +818,8 @@ async def test_filter_rule_add_and_gateway_add_without_the_lock_lose_a_change() 
         pfsense_route_static_delete,
         pfsense_gateway_delete,
         pfsense_alias_member_remove,
+        pfsense_user_disable,
+        pfsense_user_enable,
     ],
     ids=lambda h: h.__name__,
 )

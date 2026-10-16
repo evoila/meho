@@ -441,7 +441,11 @@ async def post_result_query(
     except ResultQueryOutputTooLargeError as exc:
         raise HTTPException(
             status_code=422,
-            detail={"message": str(exc), "reason": "output_too_large"},
+            detail={
+                "message": str(exc),
+                "reason": "output_too_large",
+                "delivery": "unavailable",
+            },
         ) from exc
     except ResultReadRejectedError as exc:
         raise _read_rejected(exc) from exc
@@ -502,7 +506,11 @@ async def _run_result_query_body(
     except ResultQueryOutputTooLargeError as exc:
         raise HTTPException(
             status_code=422,
-            detail={"message": str(exc), "reason": "output_too_large"},
+            detail={
+                "message": str(exc),
+                "reason": "output_too_large",
+                "delivery": "unavailable",
+            },
         ) from exc
     except ResultReadRejectedError as exc:
         raise _read_rejected(exc) from exc

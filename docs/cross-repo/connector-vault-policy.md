@@ -327,6 +327,18 @@ path **before** an operator approves the parked write.
 
 ### 6.1 Write-capability policy stanza
 
+> **Check the target's `vault_role` first.** A write runs under the
+> operator's token, logged in with the `extras.vault_role` of the vault
+> target it is dispatched on. When the target sets none, the role comes
+> from the deployment's fallback chain: for a check run, the check-runner
+> role or, when that is unset, the global default; for every other
+> operator, the per-tenant role, then the global default (see §6.3 for
+> the exact order). So before
+> you add the stanza below, check which target the write ran on. Another
+> registered vault target may already have a role that can write this
+> path. If so, run the same write on that target. No policy change is
+> needed.
+
 Like the §2 reads, KV-v2 writes are scoped per operator through ACL
 policy templating. KV-v2 authorizes each write against a **different**
 path prefix: `vault.kv.put` / `vault.kv.patch` write the value under
@@ -406,10 +418,11 @@ dispatcher probes `POST sys/capabilities-self` on the path the op
 authorizes against (`secret/data/<path>` for `put`/`patch`,
 `secret/delete/<path>` for `delete` — evoila/meho#3274,
 `secret/metadata/<path>` for `metadata.delete` — evoila/meho#3424) and
-surfaces a `permission_preflight`
-banner on the approval row (`will_be_denied: true` when the token lacks
-the required capability), so an operator is **not** asked to approve a
-write that Vault will then reject
+stores the result as `permission_preflight` on the approval row. When the
+token lacks the required capability (`will_be_denied: true`), MEHO does not
+park the op at all: the caller gets `denied` / `write_capability_denied`
+(evoila/meho#3542), so an operator is **not** asked to approve a write
+that Vault will then reject
 ([`operations/dispatcher.py`](../../backend/src/meho_backplane/operations/dispatcher.py)
 `_handle_needs_approval` →
 [`connectors/vault/ops.py`](../../backend/src/meho_backplane/connectors/vault/ops.py)
@@ -450,10 +463,10 @@ Expected outcomes:
 - **`create` + `update` present** → the parked write will execute on
   approval; the approval row's `permission_preflight.will_be_denied` is
   `false`.
-- **Only `read` (or `deny`)** → the write will be denied. The approval
-  row shows `will_be_denied: true` with the lacking capabilities. Fix
-  §6.1 (add the write stanza) or §3 (identity-alias mismatch), not the
-  connector.
+- **Only `read` (or `deny`)** → the write will be denied. MEHO refuses to
+  park it and returns `write_capability_denied` with `granted` and
+  `required`. Fix §6.1 (add the write stanza) or §3 (identity-alias
+  mismatch), not the connector, then call the operation again.
 
 > **Reviewer-token caveat.** An *approved* re-dispatch executes under the
 > **reviewing** operator's token, not the original dispatcher's
@@ -470,8 +483,27 @@ Expected outcomes:
 
 The read path (§2–§5) and the write path use the **same** federated
 identity model: every KV op runs under the acting **operator's**
-OIDC-federated Vault token (the `meho-mcp` role), never a shared god-mode
-backplane token. There is no separate service-account identity for agent
+OIDC-federated Vault token, never a shared god-mode backplane token. The
+role the token logs in under is picked in this order (first match wins):
+
+1. the dispatch target's `extras.vault_role`, when the target sets one
+   (evoila/meho#3274);
+2. for the synthetic background-dispatch operator (a check run) only: the
+   dedicated check-runner role (`VAULT_CHECK_RUNNER_ROLE`,
+   evoila/meho#2757). When that variable is unset, a check run uses the
+   deployment-global `VAULT_OIDC_ROLE` directly and **skips step 3**;
+3. a per-tenant role from `VAULT_OIDC_ROLE_BY_TENANT` matching the
+   operator's tenant (evoila/meho#3852). A check run never reaches this
+   step;
+4. the deployment-global `VAULT_OIDC_ROLE` (usually `meho-mcp`).
+
+So the write identity is the operator's JWT together with the role this
+chain selects. When you diagnose a denied write on a target without a
+`vault_role`, check steps 2–4 for the acting operator before you edit a
+policy: the role was not necessarily `meho-mcp`. For a check run, the
+per-tenant map does not matter; only the check-runner role or the global
+default can apply. There is no separate
+service-account identity for agent
 writes in this model — an *agent-initiated* `vault.kv.put` still parks and
 executes under a human operator's token (the dispatcher's at park time,
 the reviewer's on approved re-dispatch; see the §6.2 reviewer-token
@@ -489,24 +521,27 @@ discovers the missing write grant *after* an operator approves a parked
 write. Two product signals make that gap visible without reading Vault's
 logs:
 
-- **Park-time warning (before Approve).** The dispatcher runs the §6.2
-  `sys/capabilities-self` probe under the dispatching operator's token and,
-  when the token lacks `create`/`update`, stamps
-  `proposed_effect.write_capability_warning =
-  "connector_identity_may_lack_write"` on the approval row alongside the
-  `permission_preflight` banner (`will_be_denied: true` with the lacking
-  capabilities). This is a **warning, not a gate** — the park still
-  proceeds and the operator may approve anyway (e.g. the write policy is
-  landing in the same change). It surfaces the gap while a human is still
-  in the loop.
+- **Park-time refusal (before Approve).** The dispatcher runs the §6.2
+  `sys/capabilities-self` probe under the dispatching operator's token.
+  When the token lacks `create`/`update`, MEHO does **not** park the op
+  (evoila/meho#3542). The caller gets `status: denied` with
+  `error_code: "write_capability_denied"`, `path`, `granted`, `required`
+  and a `doc_ref` pointing back at this §6. No approval row is created, so
+  no person spends an approval on a write that cannot land. If the write
+  policy is landing in the same change, apply it first, then call the
+  operation again. (Before #3542 this was only a warning,
+  `write_capability_warning`, and the op parked anyway.)
 - **Post-approval structured error (after Approve).** If the write is
   approved and Vault still denies it, the op result is **not** a bare
   `permission denied` or the read-oriented `connector_vault_forbidden`; it
   is the write-specific `error_code: "vault_write_identity_forbidden"` with
   `path` (the denied `secret/data/<path>`), `identity_hint` (the acting
   operator's `sub`), and `doc_ref` pointing back at this §6. It names the
-  §6.1 write stanza as the fix and repeats the do-NOT-widen-the-shared-policy
-  warning (the grant is per-operator templated, not role-wide).
+  acting target and its `vault_role` when known, and lists two fixes in
+  order: first, run the same write on a vault target whose `vault_role`
+  can already write the path (no policy change); second, add the §6.1
+  write stanza. It repeats the do-NOT-widen-the-shared-policy warning
+  (the grant is per-operator templated, not role-wide).
 
 To verify the contract for a given operator + target before wiring an
 approval flow, run the §6.2 `sys/capabilities-self` probe under **that

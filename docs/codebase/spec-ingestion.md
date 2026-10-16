@@ -289,8 +289,9 @@ vCenter variant — owned by the profiled-dispatch wiring
 
 `run_llm_grouping()` opens its own transaction and runs:
 
-1. **Pass 1 (group derivation)** — only when no `operation_group`
-   rows yet exist for the connector triple. Sends every unassigned
+1. **Pass 1 (group derivation)** — when the connector triple has no
+   `operation_group` row that can take ingested ops (none at all, or
+   only typed groups). Sends every unassigned
    op's `(op_id, summary, tags)` to the LLM and asks for an array of
    `{group_key, name, when_to_use}` proposals. Output is validated
    against `GroupProposal` (snake_case key, non-empty fields, bounded
@@ -307,7 +308,8 @@ vCenter variant — owned by the profiled-dispatch wiring
 The function commits exactly once at the end of both passes, in the
 same transaction as a single `meho_connector_llm_grouping` audit row
 that records `{connector_id, groups_created, operations_assigned,
-operations_unassigned, llm_call_count, batch_size}`. Partial failure
+operations_unassigned, llm_call_count, batch_size,
+operations_added_by_group}`. Partial failure
 (LLM output that fails schema validation) raises
 `LlmOutputInvalid`, rolls back the transaction, and leaves the
 connector in whatever state preceded the call — operator retries via
@@ -316,12 +318,35 @@ the CLI verb T5 will ship.
 Idempotency:
 
 * No unassigned ops → true no-op, zero LLM calls, no audit row.
-* Existing `operation_group` rows present but some ops still
-  unassigned → Pass 1 skipped, Pass 2 only runs against the
-  unassigned-op subset using the existing groups verbatim. This is
-  the "partial-regrouping" branch.
 * Fully fresh connector → both passes run, all groups + assignments
   persist in one transaction.
+* Existing groups present but some ops still unassigned → the
+  "partial-regrouping" branch (#3713):
+  * **Typed groups are never targets.** A group that holds any
+    `source_kind='typed'` op belongs to a typed registrar. It is a
+    curated, single-purpose surface, so Pass 2 never files an ingested
+    op into it. The signal is the group's members, not its key shape;
+    `operation_group` has no source column.
+  * **Composite ops do not make a group typed.** Hand-written
+    composites are filed into the shared semantic groups (`vm`,
+    `cluster`, `storage`, ...). Those groups stay Pass-2 targets, so
+    ingested ops can still fill them.
+  * **Only typed groups exist** → the run is a full grouping run
+    (Pass 1 + Pass 2) over the unassigned ops.
+  * **Non-typed groups exist** → Pass 2 runs over the unassigned ops
+    against those groups (persisted keys are projected without
+    re-validation, #3685). Ops still left over get an "extend" Pass 1:
+    the prompt lists the existing groups and asks for at most
+    `max_groups` new ones, and `[]` is a valid answer. A second Pass 2
+    then files the leftovers into the new groups only.
+  * Every Pass-1 proposal whose key already exists in the connector
+    scope (typed keys included) is dropped, so no persisted group is
+    renamed or duplicated.
+* `GroupingResult.groups` carries one `GroupSummary` per group in
+  scope: `operations_added` this run, `created`, and how many typed,
+  composite, and ingested ops the group now holds. The ingest job result and
+  `meho connector ingest` show it; the CLI prints a warning for a typed
+  group that also holds ingested ops.
 
 The LLM client is injected as a `LlmClient` `Protocol` (one async
 method, `generate_json`). Tests pass a deterministic stub from
@@ -476,8 +501,9 @@ Frozen Pydantic v2 model. One per operation. Maps 1:1 to a subset of
 | `tags` | `tags` | Spec tags + optional `spec:<source>` marker |
 | `parameter_schema` | `parameter_schema` | Flattened JSON Schema 2020-12 with `x-meho-param-loc`; `additionalProperties: false` (#293) |
 | `response_schema` | `response_schema` | Success-response schema or `None` |
-| `safety_level` | `safety_level` | HTTP-verb heuristic, narrow VIM destructive-action hint, then any connector-owned minimum safety floor |
-| `requires_approval` | `requires_approval` | `False` for ordinary operations; `True` for destructive-action hints or a connector-owned minimum safety floor |
+| `safety_level` | `safety_level` | HTTP-verb heuristic, narrow VIM destructive-action hint, then any connector-owned minimum safety floor, then the catalog `safety_overlay` |
+| `requires_approval` | `requires_approval` | `False` for ordinary operations; `True` for destructive-action hints, a connector-owned minimum safety floor, or a catalog `safety_overlay` rule |
+| `llm_instructions` | `llm_instructions` | `None` from the parser; set only by a connector-owned spec correction |
 
 The parser treats a VIM-style operation whose `operationId` or final path
 method starts with `Destroy`, `Delete`, `Remove`, or `Unregister` as
@@ -499,9 +525,38 @@ an already stricter safety tier and an existing approval requirement. Existing
 enablement, review state, and other operator metadata are unchanged by this
 promotion. The dry-run path applies the same floor before reporting its result.
 
+#### Connector spec corrections
+
+Some vendor specs describe an operation's request body wrongly. The parser
+stays vendor-neutral, so a connector can register a correction in
+`ingest/spec_corrections.py`. A correction gets the catalog `version` and one
+parsed proto, and returns the same proto or a fixed copy. It runs just before
+the safety floor, on both the register path and the dry-run path.
+
+A correction may also set `llm_instructions`. Registration stores it on a new
+row. On re-ingest it fills `llm_instructions` only when the row has none, so
+an operator's own edit is never replaced.
+
+VMware's corrections live in `connectors/vmware_rest/ingest_corrections.py`.
+Today there is one: on the 8.0 catalog, `POST /cis/tasks?action=list` gets the
+`{filter_spec, result_spec}` body (see
+[connectors-vmware-rest.md](connectors-vmware-rest.md)).
+
+#### Catalog safety overlay (#3340)
+
+A catalog row can also declare `safety_overlay`: a list of
+`(method, path glob) -> safety_level, requires_approval` rules
+(`SafetyOverlayEntry` in `ingest/catalog.py`). `apply_safety_floor` runs
+the connector floor first and then the overlay. The overlay only raises:
+the strictest level wins and approval is never cleared. An op that a rule
+matches counts as governed in `has_safety_floor`, so re-ingest uses the
+same raise-only update for existing rows. The overlay is keyed on the
+catalog `(product, version)`, like `op_allowlist`. Operator guide:
+`docs/cross-repo/connector-catalog.md`, "Safety overlay".
+
 #### Applying corrected floors to existing rows
 
-Deploying a corrected connector floor does not rewrite rows that were already
+Deploying a corrected connector floor or catalog safety overlay does not rewrite rows that were already
 ingested. Run the next connector ingest — `POST /api/v1/connectors/ingest` or
 `meho connector ingest` — to apply the corrected `safety_level` and approval
 posture to existing `endpoint_descriptor` rows. That re-ingest is the
@@ -567,8 +622,9 @@ per role in the T3 grouping run:
   validator; oversized prose rejected via bounded `max_length`.
 * `GroupingResult` — counts + timings the orchestrator returns
   (`groups_created`, `operations_assigned`, `operations_unassigned`,
-  `llm_call_count`, `llm_duration_ms`). Surfaced in the operator-
-  facing CLI / API at T5.
+  `llm_call_count`, `llm_duration_ms`, and `groups`: one
+  `GroupSummary` per group). Surfaced in the operator-facing CLI / API
+  at T5.
 * `GroupingConfig` — tunable knobs (`batch_size`, `min_groups`,
   `max_groups`). Constructed from the keyword arguments to
   `run_llm_grouping()`; `validate()` raises `ValueError` before any
@@ -2044,20 +2100,27 @@ run_llm_grouping
 ├─ GroupingConfig.validate     # bounds check on min/max/batch_size
 ├─ load_unassigned_ops         # group_id IS NULL + scope match
 │  └─ early return GroupingResult(...zeros...) if none
-├─ _resolve_groups_for_pass2
-│  ├─ load_existing_groups
-│  ├─ if existing → project rows into GroupProposal list (skip Pass 1)
-│  └─ else
-│     ├─ render_propose_groups_prompt
-│     ├─ llm_client.generate_json   # Pass 1 LLM call
-│     ├─ parse_proposal_response   # GroupProposal schema validation
-│     └─ _persist_proposed_groups  # session.add per row + flush
-├─ _assign_ops_in_batches
-│  └─ for each batch of `batch_size` ops:
-│     ├─ render_assign_ops_prompt
-│     ├─ llm_client.generate_json   # Pass 2 LLM call
-│     └─ parse_assignment_response  # filter unknown ops + coerce unknown keys
-├─ _apply_assignments_to_rows   # mutate EndpointDescriptor.group_id
+├─ _drive_two_pass_grouping
+│  ├─ load_existing_groups + load_group_membership
+│  ├─ candidates = groups with no typed member (composites allowed)
+│  ├─ if no candidates → _create_groups_and_assign(all unassigned ops)
+│  ├─ else
+│  │  ├─ _assign_and_apply(unassigned ops, candidates)   # Pass 2
+│  │  └─ if leftovers → _create_groups_and_assign(leftovers, extend)
+│  └─ _summarise_groups            # per-group GroupSummary
+│
+│  _create_groups_and_assign:
+│  ├─ render_propose_groups_prompt  # extend mode lists existing groups
+│  ├─ llm_client.generate_json      # Pass 1 LLM call
+│  ├─ parse_proposal_response       # GroupProposal schema validation
+│  ├─ drop proposals with an existing key
+│  ├─ _persist_proposed_groups      # session.add per row + flush
+│  └─ _assign_and_apply             # Pass 2
+│
+│  _assign_and_apply:
+│  ├─ _assign_ops_in_batches        # one LLM call per `batch_size` ops
+│  │  └─ parse_assignment_response  # filter unknown ops + coerce unknown keys
+│  └─ _apply_assignments_to_rows    # mutate EndpointDescriptor.group_id
 ├─ _write_grouping_audit_row    # meho_connector_llm_grouping
 └─ session.commit               # atomic: groups + assignments + audit
 ```

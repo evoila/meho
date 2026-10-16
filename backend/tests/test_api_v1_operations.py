@@ -50,7 +50,7 @@ from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations.result_query import MAX_LIMIT
-from meho_backplane.settings import get_settings
+from meho_backplane.settings import RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES, get_settings
 from tests._result_store_helpers import MemoryResultStore
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
@@ -693,6 +693,47 @@ async def test_post_call_absent_target_rides_target_required_envelope(
     assert body["extras"]["error_code"] == "target_required"
 
 
+def test_post_call_refuses_undeliverable_receipt_before_dispatch(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3641: an op_id whose receipt cannot fit the wire ceiling never runs.
+
+    The ceiling is set to its floor. A 256-character non-ASCII op_id is
+    escaped twice in the MCP text block, so even the receipt of a completed
+    run would be over the ceiling. The REST twin shares ``call_operation``,
+    so it returns the same ``receipt_too_large`` envelope (HTTP 200, the
+    dispatcher contract) and the dispatcher is never called.
+    """
+    monkeypatch.setenv(
+        "RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES", str(RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES)
+    )
+    get_settings.cache_clear()
+    dispatch_mock = AsyncMock()
+    monkeypatch.setattr("meho_backplane.operations.meta_tools.dispatch", dispatch_mock)
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/call",
+            json={
+                "connector_id": "ghost-rest-9.0",
+                "op_id": "\u00e9" * 256,
+                "target": None,
+                "params": {},
+            },
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["extras"]["error_code"] == "receipt_too_large"
+    assert body["extras"]["receipt_bytes"] > RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES
+    assert body["extras"]["delivery_max_bytes"] == RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES
+    assert body["audit_id"] is None
+    assert "did not run" in body["error"]
+    dispatch_mock.assert_not_awaited()
+
+
 def test_post_call_unknown_op_returns_200_with_error_envelope(client: TestClient) -> None:
     """The dispatcher's structured-error envelope rides on a 200 body."""
     key = make_rsa_keypair("kid-A")
@@ -956,6 +997,40 @@ def test_post_result_query_paging_over_budget_returns_422(
     assert detail["reason"] == "output_too_large"
     # Paging remediation names a smaller `limit`, not `select` / `filter`.
     assert "limit" in detail["message"].lower()
+
+
+def test_post_result_query_over_wire_ceiling_returns_422(
+    client: TestClient,
+    fake_result_store: MemoryResultStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read under the row budget but over the wire ceiling -> 422 (#3641).
+
+    ``detail.reason`` is ``output_too_large`` and ``detail.delivery`` is
+    ``unavailable``: the read was refused whole, not cut.
+    """
+    monkeypatch.setenv("RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES", "1024")
+    get_settings.cache_clear()
+    handle = uuid.uuid4()
+    fake_result_store.seed(
+        tenant_id=uuid.UUID(DEFAULT_TENANT_ID),
+        operator_sub="op-1",
+        handle_id=handle,
+        rows=[{"i": i, "note": 'a "quoted" value'} for i in range(40)],
+    )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/result-query",
+            json={"handle_id": str(handle), "offset": 0, "limit": 40},
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["reason"] == "output_too_large"
+    assert detail["delivery"] == "unavailable"
+    assert "1024-byte delivery limit" in detail["message"]
 
 
 def test_post_result_query_unknown_handle_returns_typed_404(
@@ -1355,3 +1430,18 @@ def test_post_result_query_document_errors_are_422(
     assert response.status_code == 422
     if reason is not None:
         assert response.json()["detail"]["reason"] == reason
+
+
+def test_post_result_query_path_over_wire_ceiling_returns_422(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `path` read over the wire ceiling -> 422 output_too_large (#3641)."""
+    monkeypatch.setenv("RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES", "256")
+    get_settings.cache_clear()
+    body = {"handle_id": str(uuid.uuid4()), "query": {"path": "/items"}}
+    response = _post_document_read(client, monkeypatch, body)
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["reason"] == "output_too_large"
+    assert detail["delivery"] == "unavailable"
+    assert "256-byte delivery limit" in detail["message"]

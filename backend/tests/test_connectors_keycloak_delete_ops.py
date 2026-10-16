@@ -287,6 +287,7 @@ async def test_delete_ops_register_destructive_and_approval_gated(kc: KeycloakCo
         "keycloak.user.delete": "user_write",
         "keycloak.group.delete": "group_write",
         "keycloak.client.delete": "client_write",
+        "keycloak.realm.delete": "realm_write",  # #3886, see test_connectors_keycloak_realm_delete
     }
 
 

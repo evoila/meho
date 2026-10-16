@@ -928,3 +928,87 @@ func TestTargetLabelResolvesNameAlongsideGUID(t *testing.T) {
 		t.Errorf("targetLabel nil context = %q; want bare GUID", got)
 	}
 }
+
+// TestPrintDetailRendersDelegation pins the delegated-decision block
+// (#3692) on `meho approvals show`: who instructed the reviewer, their
+// quoted words, and the refs.
+func TestPrintDetailRendersDelegation(t *testing.T) {
+	d := newApprovalView(t, "approved", "T-test")
+	d.Delegation = &api.DelegationView{
+		InstructedBy: "bob@example.com",
+		Instruction:  "please approve the cleanup",
+		Refs:         []string{"#12", "CHG-9"},
+	}
+
+	cmd, stdout, _ := newCapturingCmd(t)
+	printDetail(cmd, &d)
+	out := stdout.String()
+	for _, want := range []string{
+		"Instructed by: bob@example.com",
+		"Instruction:  \"please approve the cleanup\"",
+		"Refs:         #12, CHG-9",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printDetail render missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+// TestPrintDetailOmitsDelegationWhenAbsent keeps an ordinary decision
+// free of the delegated-decision lines (#3692).
+func TestPrintDetailOmitsDelegationWhenAbsent(t *testing.T) {
+	d := newApprovalView(t, "approved", "T-test")
+	cmd, stdout, _ := newCapturingCmd(t)
+	printDetail(cmd, &d)
+	if strings.Contains(stdout.String(), "Instructed by:") {
+		t.Errorf("printDetail rendered a delegation block for an ordinary decision:\n%s", stdout.String())
+	}
+}
+
+// TestPrintDecisionRendersDelegation pins the delegated-decision block
+// (#3692) on the `meho approvals approve|reject` summary.
+func TestPrintDecisionRendersDelegation(t *testing.T) {
+	d := newApprovalView(t, "rejected", "T-test")
+	d.Delegation = &api.DelegationView{
+		InstructedBy: "bob@example.com",
+		Instruction:  "reject it, wrong cluster",
+		Refs:         []string{"#12"},
+	}
+	var buf bytes.Buffer
+	printDecision(&buf, stubID, &d)
+	out := buf.String()
+	for _, want := range []string{
+		"approval_request " + stubID + " → rejected",
+		"reviewed by: alice@example.com",
+		"instructed by: bob@example.com",
+		"instruction:   \"reject it, wrong cluster\"",
+		"refs:          #12",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printDecision render missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+// TestApproveSurfacesDecide422DelegatedReason confirms a refused
+// delegated reason (#3692) reaches the caller as the 422 body.
+func TestApproveSurfacesDecide422DelegatedReason(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/approvals/" + stubID + "/decide": func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = w.Write([]byte(`{"detail":"delegated_reason_invalid: missing or empty: Refs"}`))
+		},
+	})
+	defer srv.Close()
+	client := newTestClient(t, srv)
+
+	_, err := postDecision(context.Background(), client, mustUUID(t, stubID), "approve",
+		"ok\n\nInstructed-by: bob@example.com\nInstruction: \"go\"")
+	var he *httpResponseError
+	if !errors.As(err, &he) || he.statusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("expected *httpResponseError 422; got %T %v", err, err)
+	}
+	if !strings.Contains(string(he.body), "delegated_reason_invalid") {
+		t.Errorf("422 body lost the detail: %s", he.body)
+	}
+}

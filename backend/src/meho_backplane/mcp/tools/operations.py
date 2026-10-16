@@ -564,7 +564,10 @@ register_mcp_tool(
                     "type": ["string", "null"],
                     "enum": ["complete", "partial", "unavailable", None],
                     "description": (
-                        "Response delivery state, separate from whether the operation executed."
+                        "Response delivery state, separate from whether the operation executed. "
+                        "`partial`: the response was too large to deliver; read the result "
+                        "through `result_query` with `handle`. `unavailable`: no result was "
+                        "delivered. In both cases the operation already ran; do not re-invoke it."
                     ),
                 },
                 # ``handle`` was missing from the declared properties
@@ -628,9 +631,18 @@ register_mcp_tool(
             "only a hashed params_hash, so the request shape is otherwise "
             "unrecoverable). Inspection only -- it never sends the request "
             "and never re-dispatches a past one. Covers ingested HTTP ops "
-            "(`source_kind='ingested'`); for a typed/composite op it "
-            'returns `status="unavailable"` (no single literal HTTP '
-            "request to preview). Arguments mirror `call_operation`: "
+            "(`source_kind='ingested'`). A typed/composite op returns "
+            '`status="unavailable"` (no single literal HTTP request), '
+            "except a destructive or approval-gated one: it returns "
+            '`status="ok"`, `method="COMPOSITE"`, the redacted params and '
+            "a `preview_hash`. It shows the plan as `proposed_effect` only "
+            "when the plan can be built without contacting the target; "
+            "otherwise `plan_shown` is false and `plan_note` says the plan "
+            "is shown on the approval request instead. An approval-gated op "
+            "that writes a credential (for example `vault.kv.put`) is NOT "
+            'previewable and stays `status="unavailable"`, so its secret '
+            "params never surface. Arguments mirror "
+            "`call_operation`: "
             "`connector_id` (required), `op_id` (required), `target` "
             '(optional; bare string `"rdc-vcenter"` or dict '
             '`{"name": "rdc-vcenter"}`), `params` (operation-specific).'
@@ -728,6 +740,28 @@ register_mcp_tool(
                         "as `call_operation`'s `preview_hash` arg to govern a "
                         "destructive-tier delete."
                     ),
+                },
+                "proposed_effect": {
+                    "type": "object",
+                    "description": (
+                        "The plan of what the operation will change, the "
+                        "same block the approval request shows. Present only "
+                        "on a typed/composite preview whose plan can be built "
+                        "without contacting the target."
+                    ),
+                },
+                "plan_shown": {
+                    "type": "boolean",
+                    "description": (
+                        "Typed/composite preview only: true when "
+                        "`proposed_effect` is present. False means the plan "
+                        "needs the target and is shown only on the approval "
+                        "request."
+                    ),
+                },
+                "plan_note": {
+                    "type": "string",
+                    "description": "Plain reason the plan is not shown (when plan_shown is false).",
                 },
                 "error": {"type": ["string", "null"]},
                 "extras": {"type": "object"},

@@ -200,10 +200,15 @@ func newRobotDeleteCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "delete",
-		Short: "Delete a project-scoped robot account from Harbor",
+		Short: "Delete a project-scoped robot account from Harbor (a second person must approve)",
 		Long: "delete dispatches harbor.robot.delete against connector_id=\"harbor-rest-2.x\".\n" +
 			"Requires the numeric --id returned by harbor robot create.\n" +
 			"This operation is irreversible.\n\n" +
+			"harbor.robot.delete is on the destructive risk level. So the command\n" +
+			"first previews the delete, then sends it with the preview_hash. The\n" +
+			"request then waits until a second person approves it (status=\n" +
+			"awaiting_approval). Approving it runs the delete. If the preview fails,\n" +
+			"the command stops and shows why; nothing is sent.\n\n" +
 			"--json emits the full OperationResult envelope.",
 		Example: "  meho harbor robot delete --project myproject --id 42 --target prod-harbor\n" +
 			"  meho harbor robot delete --project myproject --id 42 --target prod-harbor --json",
@@ -234,9 +239,12 @@ func runRobotDelete(cmd *cobra.Command, projectName string, robotID int, targetN
 		"project": projectName,
 		"id":      robotID,
 	}
-	r, err := conn.Call(cmd.Context(), backplaneURL, "harbor.robot.delete", targetName, params)
+	r, p, err := conn.PreviewAndCall(cmd.Context(), backplaneURL, "harbor.robot.delete", targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
+	}
+	if r == nil {
+		return conn.RenderPreviewFailure(cmd, "harbor.robot.delete", p, jsonOut)
 	}
 	return conn.Render(cmd, "harbor.robot.delete", r, jsonOut, printRobotDelete)
 }

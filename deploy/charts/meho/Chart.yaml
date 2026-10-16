@@ -51,3 +51,11 @@ dependencies:
     version: 0.1.0
     repository: ""
     condition: broadcast.enabled
+  # Dedicated result-handle store (`charts/result-cache/`), off by default.
+  # The `alias` maps the parent's camelCase `resultCache:` values block onto
+  # the subchart; its helpers pin the resource name to `result-cache`.
+  - name: result-cache
+    condition: resultCache.enabled
+    alias: resultCache
+    version: 0.1.0
+    repository: ""

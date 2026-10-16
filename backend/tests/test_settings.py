@@ -31,7 +31,11 @@ import pytest
 from cryptography.fernet import Fernet
 from pydantic import ValidationError
 
-from meho_backplane.settings import Settings, get_settings
+from meho_backplane.settings import (
+    RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES,
+    Settings,
+    get_settings,
+)
 
 
 def _settings_kwargs(database_url: str) -> dict[str, object]:
@@ -372,6 +376,74 @@ def test_result_handle_max_spill_rows_env_override_takes_effect(
         assert get_settings().result_handle_max_spill_rows == 250000
     finally:
         get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# #3639 — dedicated result-cache store URL, password, and writer gate
+# ---------------------------------------------------------------------------
+
+
+def _clear_result_cache_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "RESULT_CACHE_REDIS_URL",
+        "RESULT_CACHE_REDIS_PASSWORD",
+        "RESULT_CACHE_WRITER_ENABLED",
+        "BROADCAST_REDIS_URL",
+        "BROADCAST_REDIS_PASSWORD",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_result_cache_falls_back_to_broadcast_store_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset ``RESULT_CACHE_REDIS_URL`` → broadcast URL and password, writer off."""
+    _base_env(monkeypatch)
+    _clear_result_cache_env(monkeypatch)
+    monkeypatch.setenv("BROADCAST_REDIS_URL", "redis://broadcast.test:6379/0")
+    monkeypatch.setenv("BROADCAST_REDIS_PASSWORD", "bc-pass")
+    get_settings.cache_clear()
+    try:
+        s = get_settings()
+        assert s.result_cache_redis_url == s.broadcast_redis_url
+        assert s.result_cache_redis_password == "bc-pass"
+        assert s.result_cache_writer_enabled is False
+    finally:
+        get_settings.cache_clear()
+
+
+def test_result_cache_env_overrides_take_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A set URL uses its own password (not the broadcast one) and the gate parses."""
+    _base_env(monkeypatch)
+    _clear_result_cache_env(monkeypatch)
+    monkeypatch.setenv("BROADCAST_REDIS_PASSWORD", "bc-pass")
+    monkeypatch.setenv("RESULT_CACHE_REDIS_URL", "redis://result-cache.test:6379/0")
+    monkeypatch.setenv("RESULT_CACHE_WRITER_ENABLED", "true")
+    get_settings.cache_clear()
+    try:
+        s = get_settings()
+        assert s.result_cache_redis_url == "redis://result-cache.test:6379/0"
+        assert s.result_cache_redis_password is None
+        assert s.result_cache_writer_enabled is True
+    finally:
+        get_settings.cache_clear()
+    monkeypatch.setenv("RESULT_CACHE_REDIS_PASSWORD", "rc-pass")
+    get_settings.cache_clear()
+    try:
+        assert get_settings().result_cache_redis_password == "rc-pass"
+    finally:
+        get_settings.cache_clear()
+
+
+def test_result_cache_url_rejects_unsupported_scheme() -> None:
+    """``valkey://`` (and other non-redis-py schemes) fail at construction."""
+    with pytest.raises(ValidationError, match="RESULT_CACHE_REDIS_URL"):
+        Settings(
+            **_settings_kwargs("sqlite+aiosqlite:///:memory:"),  # type: ignore[arg-type]
+            result_cache_redis_url="valkey://result-cache.test:6379",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -862,6 +934,8 @@ def test_result_query_bounds_default_when_unset(
         "RESULT_QUERY_EXECUTOR_WORKERS",
         "RESULT_QUERY_TENANT_CONCURRENCY",
         "RESULT_QUERY_RATE_PER_MINUTE",
+        "RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES",
+        "RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES",
     ):
         monkeypatch.delenv(var, raising=False)
     get_settings.cache_clear()
@@ -873,6 +947,8 @@ def test_result_query_bounds_default_when_unset(
         assert settings.result_query_executor_workers == 4
         assert settings.result_query_tenant_concurrency == 4
         assert settings.result_query_rate_per_minute == 0
+        assert settings.result_complete_response_wire_max_bytes == 262144
+        assert settings.result_query_response_wire_max_bytes == 2097152
     finally:
         get_settings.cache_clear()
 
@@ -893,6 +969,8 @@ def test_result_query_bounds_read_from_env(
     monkeypatch.setenv("RESULT_QUERY_EXECUTOR_WORKERS", "8")
     monkeypatch.setenv("RESULT_QUERY_TENANT_CONCURRENCY", "2")
     monkeypatch.setenv("RESULT_QUERY_RATE_PER_MINUTE", "120")
+    monkeypatch.setenv("RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES", "65536")
+    monkeypatch.setenv("RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES", "524288")
     get_settings.cache_clear()
     try:
         settings = get_settings()
@@ -902,6 +980,8 @@ def test_result_query_bounds_read_from_env(
         assert settings.result_query_executor_workers == 8
         assert settings.result_query_tenant_concurrency == 2
         assert settings.result_query_rate_per_minute == 120
+        assert settings.result_complete_response_wire_max_bytes == 65536
+        assert settings.result_query_response_wire_max_bytes == 524288
     finally:
         get_settings.cache_clear()
 
@@ -914,6 +994,8 @@ def test_result_query_bounds_read_from_env(
         "result_query_timeout_seconds",
         "result_query_executor_workers",
         "result_query_tenant_concurrency",
+        "result_complete_response_wire_max_bytes",
+        "result_query_response_wire_max_bytes",
     ],
 )
 def test_result_query_bounds_reject_non_positive(field: str) -> None:
@@ -926,6 +1008,30 @@ def test_result_query_bounds_reject_non_positive(field: str) -> None:
             database_url="sqlite+aiosqlite:///:memory:",
             **{field: 0},
         )
+
+
+@pytest.mark.parametrize("value", [1, 64, RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES - 1])
+def test_complete_response_ceiling_below_floor_is_rejected(value: int) -> None:
+    """A ceiling the completed-operation receipt cannot fit fails at startup (#3641)."""
+    with pytest.raises(ValidationError, match="receipt of a completed operation"):
+        Settings(
+            keycloak_issuer_url="https://keycloak.test/realms/meho",
+            keycloak_audience="meho-backplane",
+            vault_addr="https://vault.test",
+            database_url="sqlite+aiosqlite:///:memory:",
+            result_complete_response_wire_max_bytes=value,
+        )
+
+
+def test_complete_response_ceiling_at_floor_is_accepted() -> None:
+    settings = Settings(
+        keycloak_issuer_url="https://keycloak.test/realms/meho",
+        keycloak_audience="meho-backplane",
+        vault_addr="https://vault.test",
+        database_url="sqlite+aiosqlite:///:memory:",
+        result_complete_response_wire_max_bytes=RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES,
+    )
+    assert settings.result_complete_response_wire_max_bytes == 2048
 
 
 @pytest.mark.parametrize(("value", "expected"), [(None, 16777216), ("4096", 4096)])

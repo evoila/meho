@@ -470,6 +470,14 @@ const (
 	RunSummaryStateInProgress RunSummaryState = "in_progress"
 )
 
+// Defines values for SafetyOverlayEntrySafetyLevel.
+const (
+	SafetyOverlayEntrySafetyLevelCaution     SafetyOverlayEntrySafetyLevel = "caution"
+	SafetyOverlayEntrySafetyLevelDangerous   SafetyOverlayEntrySafetyLevel = "dangerous"
+	SafetyOverlayEntrySafetyLevelDestructive SafetyOverlayEntrySafetyLevel = "destructive"
+	SafetyOverlayEntrySafetyLevelSafe        SafetyOverlayEntrySafetyLevel = "safe"
+)
+
 // Defines values for ScheduledTriggerInFlightPolicy.
 const (
 	ScheduledTriggerInFlightPolicyFailIntoAudit ScheduledTriggerInFlightPolicy = "fail_into_audit"
@@ -1366,9 +1374,17 @@ type ApprovalRequestStatus string
 
 // ApprovalRequestView Read-only view of an :class:`~meho_backplane.db.models.ApprovalRequest`.
 type ApprovalRequestView struct {
-	ConnectorId    string                 `json:"connector_id"`
-	CreatedAt      string                 `json:"created_at"`
-	DecidedAt      *string                `json:"decided_at"`
+	ConnectorId string  `json:"connector_id"`
+	CreatedAt   string  `json:"created_at"`
+	DecidedAt   *string `json:"decided_at"`
+
+	// Delegation Who told the approver to decide, read off the decision audit row (#3692).
+	//
+	// Present only when the decision ``reason`` ended with the
+	// ``Instructed-by:`` / ``Instruction:`` / ``Refs:`` trailer block. The
+	// approver is still ``reviewed_by``; ``instructed_by`` is the other human
+	// whose written instruction they acted on.
+	Delegation     *DelegationView        `json:"delegation,omitempty"`
 	ExpiresAt      *string                `json:"expires_at"`
 	Id             openapi_types.UUID     `json:"id"`
 	OpId           string                 `json:"op_id"`
@@ -1478,7 +1494,7 @@ type ApproveRequestBody struct {
 	// Params The original dispatch params, unchanged. The hash must match the stored params_hash on the approval request.
 	Params *map[string]interface{} `json:"params,omitempty"`
 
-	// Reason Optional human-readable approval reason (recorded in the audit row).
+	// Reason Optional human-readable approval reason (recorded in the audit row). End it with Instructed-by: / Instruction: / Refs: lines when another human instructed this decision.
 	Reason *string `json:"reason,omitempty"`
 }
 
@@ -3601,6 +3617,7 @@ type ConnectorSpecEntry struct {
 	Product                    string                           `json:"product"`
 	ProfileResource            *string                          `json:"profile_resource"`
 	RequiresConnectorClass     string                           `json:"requires_connector_class"`
+	SafetyOverlay              *[]SafetyOverlayEntry            `json:"safety_overlay"`
 	Sha256                     *string                          `json:"sha256"`
 	SpecInfoVersion            *string                          `json:"spec_info_version"`
 	SpecInfoVersionsCompatible *[]string                        `json:"spec_info_versions_compatible"`
@@ -4191,7 +4208,7 @@ type DecideRequestBody struct {
 	// Decision One of 'approved' / 'rejected'.
 	Decision string `json:"decision"`
 
-	// Reason Optional rationale recorded on the decision audit row.
+	// Reason Optional rationale recorded on the decision audit row. End it with Instructed-by: / Instruction: / Refs: lines when another human instructed this decision.
 	Reason *string `json:"reason,omitempty"`
 }
 
@@ -4249,6 +4266,18 @@ type DecideResponseBody_DispatchResult struct {
 // than silently de-duplicated.
 type DeclareCapabilitiesRequest struct {
 	Capabilities []CapabilityDeclaration `json:"capabilities"`
+}
+
+// DelegationView Who told the approver to decide, read off the decision audit row (#3692).
+//
+// Present only when the decision “reason“ ended with the
+// “Instructed-by:“ / “Instruction:“ / “Refs:“ trailer block. The
+// approver is still “reviewed_by“; “instructed_by“ is the other human
+// whose written instruction they acted on.
+type DelegationView struct {
+	InstructedBy string   `json:"instructed_by"`
+	Instruction  string   `json:"instruction"`
+	Refs         []string `json:"refs"`
 }
 
 // DeprecateTemplateResponse Response for “meho_runbook_deprecate_template“ -- the now-deprecated coordinates.
@@ -5256,18 +5285,36 @@ type GovernedSubopsResponse struct {
 // :attr:`AGENT`, so every existing caller is unaffected.
 type GrantPrincipalKind string
 
+// GroupSummaryModel Pydantic projection of
+// :class:`~meho_backplane.operations.ingest.llm_groups.GroupSummary`.
+//
+// One row per group: how many ops this run added to it, and how many
+// typed, composite, and ingested ops it holds now.
+// “typed_operation_count > 0“ means a typed registrar owns the
+// group; grouping never files ingested ops into such a group.
+// Composite ops do not make a group typed.
+type GroupSummaryModel struct {
+	CompositeOperationCount int    `json:"composite_operation_count"`
+	Created                 bool   `json:"created"`
+	GroupKey                string `json:"group_key"`
+	IngestedOperationCount  int    `json:"ingested_operation_count"`
+	OperationsAdded         int    `json:"operations_added"`
+	TypedOperationCount     int    `json:"typed_operation_count"`
+}
+
 // GroupingResultModel Pydantic projection of
 // :class:`~meho_backplane.operations.ingest.llm_groups.GroupingResult`.
 //
 // Mirrors the dataclass; rendered alongside :class:`IngestionResultModel`
 // in the ingest response so the operator sees both counts.
 type GroupingResultModel struct {
-	ConnectorId          string  `json:"connector_id"`
-	GroupsCreated        int     `json:"groups_created"`
-	LlmCallCount         int     `json:"llm_call_count"`
-	LlmDurationMs        float32 `json:"llm_duration_ms"`
-	OperationsAssigned   int     `json:"operations_assigned"`
-	OperationsUnassigned int     `json:"operations_unassigned"`
+	ConnectorId          string               `json:"connector_id"`
+	Groups               *[]GroupSummaryModel `json:"groups,omitempty"`
+	GroupsCreated        int                  `json:"groups_created"`
+	LlmCallCount         int                  `json:"llm_call_count"`
+	LlmDurationMs        float32              `json:"llm_duration_ms"`
+	OperationsAssigned   int                  `json:"operations_assigned"`
+	OperationsUnassigned int                  `json:"operations_unassigned"`
 }
 
 // HTTPValidationError defines model for HTTPValidationError.
@@ -6710,7 +6757,7 @@ type RefreshResult struct {
 
 // RejectRequestBody POST body for “…/reject“.
 type RejectRequestBody struct {
-	// Reason Optional human-readable rejection reason (recorded in the audit row).
+	// Reason Optional human-readable rejection reason (recorded in the audit row). End it with Instructed-by: / Instruction: / Refs: lines when another human instructed this decision.
 	Reason *string `json:"reason,omitempty"`
 }
 
@@ -7464,6 +7511,27 @@ type SafetyChangeModel struct {
 	OldSafetyLevel  string                 `json:"old_safety_level"`
 	OpId            string                 `json:"op_id"`
 }
+
+// SafetyOverlayEntry One catalog rule that raises the safety of matching ingested ops.
+//
+// A catalog row that declares :attr:`ConnectorSpecEntry.safety_overlay`
+// lets an operator raise the safety level and turn on approval for
+// chosen operations of that spec, without changing the ingest code.
+// “method“ is matched exactly (upper-cased). “path“ is a
+// shell-style glob matched case-sensitively against the spec path
+// template with any query string removed; “*“ also matches “/“.
+// The rule only ever raises: it never lowers a stricter level and never
+// clears an approval requirement (see
+// :func:`meho_backplane.operations.ingest.safety_floors.apply_safety_floor`).
+type SafetyOverlayEntry struct {
+	Method           string                        `json:"method"`
+	Path             string                        `json:"path"`
+	RequiresApproval *bool                         `json:"requires_approval,omitempty"`
+	SafetyLevel      SafetyOverlayEntrySafetyLevel `json:"safety_level"`
+}
+
+// SafetyOverlayEntrySafetyLevel defines model for SafetyOverlayEntry.SafetyLevel.
+type SafetyOverlayEntrySafetyLevel string
 
 // ScheduledTriggerCreate Request body for “POST /api/v1/scheduler/triggers“.
 //

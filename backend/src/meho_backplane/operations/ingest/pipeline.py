@@ -103,6 +103,7 @@ from meho_backplane.operations.ingest.api_schemas import (
     AffectedSensorModel,
     DroppedOpModel,
     GroupingResultModel,
+    GroupSummaryModel,
     IngestionResultModel,
     SafetyChangeModel,
     SpecSource,
@@ -137,6 +138,7 @@ from meho_backplane.operations.ingest.register_ingested import (
 )
 from meho_backplane.operations.ingest.safety_floors import apply_safety_floor
 from meho_backplane.operations.ingest.service import ReviewService
+from meho_backplane.operations.ingest.spec_corrections import apply_spec_correction
 from meho_backplane.operations.ingest.spec_provenance import upsert_spec_provenance
 from meho_backplane.retrieval.embedding import EmbeddingService
 
@@ -463,6 +465,17 @@ class IngestionPipelineResult:
                 operations_unassigned=self.grouping.operations_unassigned,
                 llm_call_count=self.grouping.llm_call_count,
                 llm_duration_ms=self.grouping.llm_duration_ms,
+                groups=[
+                    GroupSummaryModel(
+                        group_key=g.group_key,
+                        created=g.created,
+                        operations_added=g.operations_added,
+                        typed_operation_count=g.typed_operation_count,
+                        composite_operation_count=g.composite_operation_count,
+                        ingested_operation_count=g.ingested_operation_count,
+                    )
+                    for g in self.grouping.groups
+                ],
             )
         return ingestion_model, grouping_model
 
@@ -1011,7 +1024,14 @@ class IngestionPipelineService:
                 product=product, version=version, operations=parsed
             )
             floored = tuple(
-                apply_safety_floor(product=product, version=version, impl_id=impl_id, proto=proto)
+                apply_safety_floor(
+                    product=product,
+                    version=version,
+                    impl_id=impl_id,
+                    proto=apply_spec_correction(
+                        product=product, version=version, impl_id=impl_id, proto=proto
+                    ),
+                )
                 for proto in allowlist_result.kept
             )
             total_ops += len(floored)

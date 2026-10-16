@@ -322,8 +322,55 @@ rather than publish a schema its payloads violate. `call_operation` exposes an
 audit receipt. Its nullable `delivery` is about response shaping, not how much
 upstream data a result handle retained: `complete` means the shaped response was
 delivered, `unavailable` means execution completed but shaping failed and callers
-must inspect audit/status evidence without re-invoking it, and `partial` is
-reserved for later delivery-budget handling.
+must inspect audit/status evidence without re-invoking it, and `partial` means
+the response was too large to deliver but the `handle` still reaches the caller.
+
+### Response wire ceiling (#3641)
+
+A completed `call_operation` response is also checked against a wire ceiling,
+`RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES` (default 256 KiB). The size is measured
+on the real `tools/call` wire by `measure_delivered_wire_bytes`
+(`operations/delivery_budget.py`): the encoded text block plus the encoded
+`structuredContent` copy, escaping included. It is a byte count, not a token
+count. The MCP dispatcher builds the text block with the same
+`tool_result_text` function, so the measurement cannot drift from what is sent.
+
+When an `ok` response is over the ceiling, `bound_complete_response` drops the
+inline `result` and the extras and keeps the status `ok`:
+
+- `delivery="partial"` when the `handle` can be read back and the receipt with
+  the handle still fits. The caller reads the result through `result_query`. A
+  handle counts as readable only when its `fetch_more.drill_in.available` is
+  true: the reducer also mints handles whose rows were never stored (store
+  down, no tenant context, admission limit), and those cannot be read.
+- `delivery="unavailable"` otherwise. Only the `audit_id` receipt and the
+  remediation text remain; an unreadable handle is dropped too.
+
+`extras.remediation` says the operation already ran and must not be re-invoked;
+`extras.delivered_bytes` and `extras.delivery_max_bytes` give the numbers. A
+completed write is never reported as an error because its response was too
+large. Non-`ok` envelopes are not rewritten. The REST `/call` twin shares the
+same check; REST sends the payload once, so its real size is always smaller.
+
+The receipt must always reach the caller. Two checks make sure it can:
+
+- The ceiling has a floor, `RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES` (2048
+  bytes, `settings.py`). `Settings` rejects a smaller
+  `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES` at startup, before any operation
+  runs. The floor holds the receipt for an ASCII `op_id` of 256 characters.
+- The receipt grows with the `op_id`, and non-ASCII characters cost more
+  because the text block escapes them twice. So `call_operation` runs
+  `refuse_undeliverable_receipt` before dispatch. It measures the widest
+  receipt the `op_id` can produce (`receipt_wire_bytes`: the real `op_id`, the
+  widest possible `audit_id`, `duration_ms` and byte counts, same encoders as
+  the response). A call whose receipt could not fit the ceiling is refused
+  with `status="error"` and `extras.error_code="receipt_too_large"`, and the
+  operation never runs. The refusal says so and that calling again is safe.
+
+`bound_complete_response` still measures the final `unavailable` response. Only
+a caller that skipped the pre-check could push it over the ceiling; then it is
+delivered anyway with a `delivery_receipt_over_ceiling` warning, because
+dropping the `audit_id` of a completed write would be worse.
 
 ## Agent-surface scoping (working vs. operator, #3154)
 

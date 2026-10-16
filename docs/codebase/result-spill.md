@@ -139,6 +139,16 @@ error at once. Paging and `path` reads run under the same budget; their
 timeout error names the way out for that surface (a smaller `limit`, or a
 smaller part of the document).
 
+`RESULT_QUERY_MAX_OUTPUT_BYTES` is the query-domain shaping budget: it
+checks the `rows` before encoding. A second, terminal check (#3641) runs on
+the finished response of all three read modes (query, paging and `path`
+reads): `RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES`
+(default 2 MiB) against the size the MCP `tools/call` wire really carries
+(text block plus `structuredContent`, escaping included, measured by
+`operations/delivery_budget.py`). A response over it is refused with the same
+recoverable `output_too_large` error, now carrying `delivery=unavailable`
+(MCP `data`, REST `detail`). Nothing is cut; the caller narrows the read.
+
 Because the spill itself is capped at `RESULT_HANDLE_MAX_SPILL_ROWS`, a
 query may run over a subset of the true collection. The result carries
 `coverage`: `complete` when `stored_rows == total_rows`, else `partial`
@@ -224,7 +234,7 @@ call's `offset` / `limit` (items that are not objects come back as
 (missing member, `-`, a leading-zero or out-of-range index) is a
 recoverable `QueryContractError`. So is a `path` read on a rows handle,
 or paging / a relational query on a document handle. The same output
-byte budget applies.
+byte budget applies, and so does the terminal wire check (#3641).
 
 ## Key types
 
@@ -331,10 +341,12 @@ code-level diagnosis at `v0.13.0` (`f6ee330`):
    `handle.fetch_more.drill_in` in the response: `reason` now names the
    branch.
 2. `result_store_unavailable` → check backplane logs for
-   `result_handle_spill_failed` (carries the Valkey error) and the
-   broadcast service health (`BROADCAST_REDIS_URL`; the store reuses
-   the broadcast client's pool, so a broken broadcast feed and a
-   broken spill store fail together).
+   `result_handle_spill_failed` (carries the Valkey error and the
+   `namespace`) and the health of the store it names: `v2` is the
+   dedicated result-cache store (`RESULT_CACHE_REDIS_URL`), `legacy` the
+   broadcast store (`BROADCAST_REDIS_URL`). A full result-cache store
+   (`noeviction` at `maxmemory`) shows as `OOM command not allowed` and a
+   rising `result_cache_records_total{outcome="rejected"}`.
 3. `no_tenant_context` → the reduce ran outside an authenticated
    dispatch; check the `jsonflux_spill_skipped` warning's
    `has_tenant_id` / `has_operator_sub` / `tenant_id_malformed`
@@ -345,11 +357,51 @@ code-level diagnosis at `v0.13.0` (`f6ee330`):
    `handle_not_found`). For an approved op, the handle belongs to the
    principal that parked it, not the approver (#3548).
 
+## Dedicated result-cache store (#3639)
+
+Result handles used to live only in the broadcast Valkey, next to the
+governance keys (broadcast, rate limits, approval waits). That Valkey has
+no byte ceiling, so many large handles could get it OOM-killed and take
+governance down too. Handles now move to their own Valkey (chart subchart
+`result-cache`, `maxmemory` + `noeviction`; see
+[devops.md](devops.md#result-cache-subchart-chartsresult-cache)).
+
+The move is reader-first, so it is safe during a rolling update:
+
+| Step | Reads | Writes |
+|---|---|---|
+| `RESULT_CACHE_REDIS_URL` unset | `v2` key, then legacy key — both on the broadcast client | legacy key, broadcast client |
+| URL set, `RESULT_CACHE_WRITER_ENABLED=false` | `v2` key on the dedicated client, then legacy key on the broadcast client | legacy key, broadcast client |
+| URL set, writer on | same | `meho:reshandle:v2:{tenant}:{handle}`, dedicated client |
+
+- The fallback read uses the caller's own tenant id, so it never reads
+  another tenant's record. The operator check still runs on whatever
+  record is found.
+- There is no dual write. Legacy keys drain by their own TTL; the store
+  keeps both clients for that time.
+- Rows records and document records follow the same rule: both
+  `spill` and `spill_document` write where the writer flag says.
+- A failing dedicated client counts as a miss and the read falls back to
+  the legacy key.
+- `RESULT_CACHE_REDIS_PASSWORD` is the dedicated store's `requirepass`.
+  When the URL is unset, the broadcast password is used.
+
+Metrics (aggregate only, no row content, keys, or vendor totals):
+
+- `result_cache_records_total{outcome, namespace}` — writes `admitted` or
+  `rejected` (over the byte cap, refused, or failed), per `v2` / `legacy`.
+- `result_cache_reads_total{source}` — reads found in `v2`, found by the
+  `legacy` fallback, or `miss`.
+- `result_cache_memory_bytes{kind}` — `used` and `max` memory of the
+  dedicated store, sampled from `INFO memory` after each `v2` write.
+
 ## Dependencies
 
-- Valkey via the broadcast fast client
+- Valkey via two clients: the broadcast fast client
   (`meho_backplane.broadcast.client.get_broadcast_client`,
-  `BROADCAST_REDIS_URL`) — shared pool, 5 s socket timeouts, fail-fast.
+  `BROADCAST_REDIS_URL`) for legacy keys, and a dedicated client from
+  `RESULT_CACHE_REDIS_URL` for `v2` keys (the same client when the URL is
+  unset). Both use 5 s socket timeouts and fail fast.
 - `RESULT_HANDLE_MAX_SPILL_ROWS` (default 10000, validated `> 0`) caps
   the per-key value size; `ttl_seconds` (reducer default 3600) bounds
   lifetime server-side.
@@ -361,6 +413,17 @@ code-level diagnosis at `v0.13.0` (`f6ee330`):
   (4), validated `> 0`, and `RESULT_QUERY_RATE_PER_MINUTE` (0 = off),
   validated `>= 0`, bound how many result reads run at once and how often
   one principal may read (#3640).
+- `RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES` (2 MiB) bounds a whole read-back
+  response on the wire (#3641); validated `> 0`.
+- `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES` (256 KiB) bounds a completed
+  `call_operation` response the same way (#3641); validated `>= 2048`
+  (`RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES`) so the receipt always fits.
+  A call whose receipt could not fit (an unusually long or non-ASCII
+  `op_id`) is refused before it runs with `error_code="receipt_too_large"`.
+  Over the ceiling, `delivery="partial"` keeps the handle only when its
+  `fetch_more.drill_in.available` is true; a handle whose spill was skipped
+  or failed is dropped and the response is `delivery="unavailable"`. Details
+  in `docs/codebase/mcp.md`, "Response wire ceiling".
 - `duckdb==1.5.5` / `pyarrow==25.0.1` (pinned) — the sandboxed
   `QueryEngine` the lazy compiled-query path runs inside. The reducer does
   not construct an engine for its catalog, summary, or preview.

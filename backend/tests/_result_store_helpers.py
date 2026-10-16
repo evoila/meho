@@ -7,9 +7,10 @@ The read cores (:mod:`meho_backplane.operations.result_query`) fetch the
 raw record on the event loop and decode it on the worker pool (#3640), so
 a test double must hold real encoded records. :class:`MemoryResultStore`
 is the production :class:`ResultHandleStore` over a dict-backed client;
-``seed`` / ``seed_document`` write records the way the reducer does, and
-the client can hold a ``GET`` (``gate``, ``delay``) or serve one record for
-any key (``fallback``) so a test can read under a random handle.
+``seed`` / ``seed_document`` write records under the ``v2`` key the reader
+checks first, and the client can hold a ``GET`` (``gate``, ``delay``) or
+serve one record for any key (``fallback``) so a test can read under a
+random handle.
 """
 
 from __future__ import annotations
@@ -23,8 +24,8 @@ import msgspec
 
 from meho_backplane.connectors.result_handle_store import (
     ResultHandleStore,
-    _key,
     _StoredPayload,
+    _v2_key,
 )
 
 __all__ = ["MemoryResultStore", "MemoryValkey"]
@@ -112,7 +113,7 @@ class MemoryResultStore(ResultHandleStore):
         document: dict[str, Any] | None = None,
     ) -> None:
         """Store a rows record under the handle key."""
-        self.client.values[_key(tenant_id, handle_id)] = _rows_record(
+        self.client.values[_v2_key(tenant_id, handle_id)] = _rows_record(
             operator_sub=operator_sub, rows=rows, total_rows=total_rows, document=document
         )
 
@@ -120,7 +121,7 @@ class MemoryResultStore(ResultHandleStore):
         self, *, tenant_id: UUID, operator_sub: str, handle_id: UUID, document: Any
     ) -> None:
         """Store a document record under the handle key."""
-        self.client.values[_key(tenant_id, handle_id)] = _document_record(
+        self.client.values[_v2_key(tenant_id, handle_id)] = _document_record(
             operator_sub=operator_sub, document=document
         )
 

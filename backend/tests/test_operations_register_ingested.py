@@ -1985,3 +1985,106 @@ async def test_reingest_repairs_curated_row_on_reembed_branch(
     assert row.custom_description == "Curated: governed ISO/OVA import step 3."
     assert row.custom_notes == "Falls back to govc library.import -pull."
     assert row.llm_instructions == {"when_to_call": "during governed content-library PULL"}
+
+
+def _flat_tasks_list_proto() -> EndpointDescriptorProto:
+    """The 8.0 tasks-list op as the 8.0 spec ingests it: a flat ``GetSpec`` body (#3700)."""
+    return EndpointDescriptorProto(
+        op_id="POST:/cis/tasks?action=list",
+        method="POST",
+        path="/cis/tasks?action=list",
+        summary="List tasks",
+        description="Returns information about tasks.",
+        tags=["Cis.Tasks"],
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "body": {
+                    "type": "object",
+                    "properties": {
+                        "exclude_result": {"type": "boolean"},
+                        "return_all": {"type": "boolean"},
+                    },
+                    "x-meho-param-loc": "body",
+                },
+            },
+            "additionalProperties": False,
+        },
+        safety_level="caution",
+    )
+
+
+async def _tasks_list_row() -> EndpointDescriptor:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        return (
+            await session.execute(
+                select(EndpointDescriptor).where(
+                    EndpointDescriptor.op_id == "POST:/cis/tasks?action=list"
+                )
+            )
+        ).scalar_one()
+
+
+@pytest.mark.asyncio
+async def test_vmware_8_0_tasks_list_registers_corrected_body_and_instructions(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The 8.0 tasks-list row stores the ``{filter_spec, result_spec}`` body (#3700)."""
+    await register_ingested_operations(
+        product="vmware",
+        version="8.0",
+        impl_id="vmware-rest",
+        spec_source="vcenter.yaml",
+        operations=[_flat_tasks_list_proto()],
+        embedding_service=stub_embedding_service,
+    )
+
+    row = await _tasks_list_row()
+    body = row.parameter_schema["properties"]["body"]
+    assert set(body["properties"]) == {"filter_spec", "result_spec"}
+    assert "body" in row.parameter_schema["required"]
+    assert row.llm_instructions is not None
+    assert "non-empty `services` or `tasks`" in row.llm_instructions["parameter_hints"]["body"]
+
+
+@pytest.mark.asyncio
+async def test_reingest_seeds_missing_instructions_but_keeps_operator_edits(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Re-ingest fills empty ``llm_instructions`` and never replaces an operator edit."""
+    kwargs: dict[str, Any] = {
+        "product": "vmware",
+        "version": "8.0",
+        "impl_id": "vmware-rest",
+        "spec_source": "vcenter.yaml",
+        "operations": [_flat_tasks_list_proto()],
+        "embedding_service": stub_embedding_service,
+    }
+    await register_ingested_operations(**kwargs)
+
+    sessionmaker = get_sessionmaker()
+
+    async def _set_instructions(value: dict[str, Any] | None) -> None:
+        async with sessionmaker() as session:
+            row = (
+                await session.execute(
+                    select(EndpointDescriptor).where(
+                        EndpointDescriptor.op_id == "POST:/cis/tasks?action=list"
+                    )
+                )
+            ).scalar_one()
+            row.llm_instructions = value
+            await session.commit()
+
+    # A row ingested before the correction existed has no instructions.
+    await _set_instructions(None)
+    await register_ingested_operations(**kwargs)
+    seeded = (await _tasks_list_row()).llm_instructions
+    assert seeded is not None
+    assert "parameter_hints" in seeded
+
+    # An operator's own instructions survive the next re-ingest.
+    await _set_instructions({"when_to_use": "operator text"})
+    await register_ingested_operations(**kwargs)
+    assert (await _tasks_list_row()).llm_instructions == {"when_to_use": "operator text"}

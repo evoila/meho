@@ -71,6 +71,7 @@ def _core_settings(timeout: int = 10) -> Any:
     return types.SimpleNamespace(
         result_query_max_output_rows=500,
         result_query_max_output_bytes=262144,
+        result_query_response_wire_max_bytes=2097152,
         result_query_timeout_seconds=timeout,
     )
 

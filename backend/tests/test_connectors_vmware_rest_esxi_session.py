@@ -65,6 +65,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 import respx
+from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import target_cache_key
@@ -813,7 +814,35 @@ async def test_fingerprint_standalone_esxi_reachable_product_esxi() -> None:
     assert result.version == _ABOUT_VERSION
     assert result.extras["session_flavor"] == "esxi"
     assert result.extras["api_type"] == "HostAgent"
-    assert "soap-retrieveservicecontent" in result.probe_method
+    assert result.probe_method == "GET /api/about (400) -> soap-currentsession (live)"
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_warm_cache_makes_exactly_one_live_soap_call() -> None:
+    """(#3710) A probe on a warm session cache still asks the host.
+
+    The first fingerprint logs in (cold cache). The second one reuses the
+    cached session, so it must not log in again -- but it must still send
+    exactly one live SOAP call (the currentSession read), not answer from
+    the cached about.version. probe_method says the answer was live.
+    """
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    router = _SdkRouter(retrieve_xml=_CURRENT_SESSION_OK_XML)
+    target = _esxi_fingerprinted()
+
+    async with respx.mock(base_url=_ESXI_BASE) as mock:
+        mock.post(_SDK).mock(side_effect=router)
+        mock.get("/api/about").respond(400)
+        await connector.fingerprint(target, _make_operator())
+        assert "Login" in router.methods
+        router.methods.clear()
+        result = await connector.fingerprint(target, _make_operator())
+
+    assert router.methods == ["RetrievePropertiesEx"]
+    assert "currentSession" in router.bodies[-1]
+    assert result.reachable is True
+    assert result.probe_method.endswith("(live)")
 
 
 @pytest.mark.asyncio
@@ -1170,6 +1199,7 @@ async def test_fingerprint_dead_session_reports_unreachable(
     # the liveness read, not the cache — the whole point of the #3710 close.
     assert result.extras["version"] == _ABOUT_VERSION
     assert "stale/void SOAP session" in result.extras["error"]
+    assert result.probe_method.endswith("(live)")
     # The reset was attempted (Logout between the two currentSession reads).
     assert "Logout" in router.methods
 
@@ -1255,8 +1285,137 @@ async def test_esxi_liveness_unreachable_when_session_manager_moid_absent() -> N
     connector = _make_connector()
     # No establish has run, so no SessionManager moid is cached for this target.
     assert connector._esxi_session_manager_moids == {}
-    live = await connector._esxi_session_is_live(_esxi_fingerprinted(), _make_operator())
+    live, session_reset = await connector._esxi_session_is_live(
+        _esxi_fingerprinted(), _make_operator()
+    )
     assert live is False
+    assert session_reset is False
+
+
+# ---------------------------------------------------------------------------
+# #3777 — a probe that had to log in again leaves a marker
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_relogin_marks_extras_and_logs_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(#3777) The liveness read found a dead session, logged in again and got
+    currentSession back. The fingerprint carries session_health_reset=1 and a
+    vmware_esxi_probe_session_relogin event names the target and the fault
+    class only."""
+    monkeypatch.setattr(connector_module, "_SESSION_MAX_AGE_SECONDS", 0)
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    router = _SdkRouter(retrieve_sequence=[_CURRENT_SESSION_NOTAUTH_XML, _CURRENT_SESSION_OK_XML])
+    target = _esxi_fingerprinted()
+
+    with capture_logs() as logs:
+        async with respx.mock(base_url=_ESXI_BASE) as mock:
+            mock.post(_SDK).mock(side_effect=router)
+            mock.get("/api/about").respond(400)
+            result = await connector.fingerprint(target, _make_operator())
+
+    assert result.reachable is True
+    assert result.extras["session_health_reset"] == 1
+    events = [e for e in logs if e["event"] == "vmware_esxi_probe_session_relogin"]
+    assert events == [
+        {
+            "event": "vmware_esxi_probe_session_relogin",
+            "log_level": "info",
+            "target": target.name,
+            "fault_types": ["NotAuthenticated"],
+            "live": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_dead_after_relogin_still_marks_extras(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(#3777) The re-login ran but the session is still void: the unreachable
+    fingerprint also says a re-login was tried."""
+    monkeypatch.setattr(connector_module, "_SESSION_MAX_AGE_SECONDS", 0)
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    router = _SdkRouter(
+        retrieve_sequence=[_CURRENT_SESSION_NOTAUTH_XML, _CURRENT_SESSION_NOTAUTH_XML]
+    )
+    target = _esxi_fingerprinted()
+
+    with capture_logs() as logs:
+        async with respx.mock(base_url=_ESXI_BASE) as mock:
+            mock.post(_SDK).mock(side_effect=router)
+            mock.get("/api/about").respond(400)
+            result = await connector.fingerprint(target, _make_operator())
+
+    assert result.reachable is False
+    assert result.extras["session_health_reset"] == 1
+    (event,) = [e for e in logs if e["event"] == "vmware_esxi_probe_session_relogin"]
+    assert event["live"] is False
+    assert event["fault_types"] == ["NotAuthenticated"]
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_relogin_then_transport_error_still_marks_extras(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(#3777) The re-login succeeded but the retried read raised a transport
+    error. The reset still shows: the unreachable fingerprint carries the
+    marker and the relogin event is logged with live=False."""
+    monkeypatch.setattr(connector_module, "_SESSION_MAX_AGE_SECONDS", 0)
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    router = _SdkRouter(retrieve_xml=_CURRENT_SESSION_NOTAUTH_XML)
+    target = _esxi_fingerprinted()
+
+    def _retry_drops_connection(request: httpx.Request) -> httpx.Response:
+        response = router(request)
+        if router.methods.count("RetrievePropertiesEx") == 2:
+            raise httpx.ConnectError("connection reset during the retried read")
+        return response
+
+    with capture_logs() as logs:
+        async with respx.mock(base_url=_ESXI_BASE) as mock:
+            mock.post(_SDK).mock(side_effect=_retry_drops_connection)
+            mock.get("/api/about").respond(400)
+            result = await connector.fingerprint(target, _make_operator())
+
+    assert result.reachable is False
+    assert result.extras["session_health_reset"] == 1
+    # The re-login itself went through; only the read after it failed.
+    assert router.methods.count("Login") == 2
+    assert router.methods.count("RetrievePropertiesEx") == 2
+    (event,) = [e for e in logs if e["event"] == "vmware_esxi_probe_session_relogin"]
+    assert event == {
+        "event": "vmware_esxi_probe_session_relogin",
+        "log_level": "info",
+        "target": target.name,
+        "fault_types": ["NotAuthenticated"],
+        "live": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_warm_session_has_no_relogin_marker() -> None:
+    """(#3777) A live session on the first read: no marker, no relogin event."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    router = _SdkRouter(retrieve_xml=_CURRENT_SESSION_OK_XML)
+    target = _esxi_fingerprinted()
+
+    with capture_logs() as logs:
+        async with respx.mock(base_url=_ESXI_BASE) as mock:
+            mock.post(_SDK).mock(side_effect=router)
+            mock.get("/api/about").respond(400)
+            result = await connector.fingerprint(target, _make_operator())
+
+    assert result.reachable is True
+    assert "session_health_reset" not in result.extras
+    recovery_events = {"vmware_esxi_probe_session_relogin", "vmware_object_collect_auth_reset"}
+    assert not [e for e in logs if e["event"] in recovery_events]
 
 
 # ---------------------------------------------------------------------------

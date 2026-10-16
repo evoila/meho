@@ -44,12 +44,12 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import meho_backplane.operations._audit as audit_module
@@ -302,6 +302,34 @@ async def _module_composite_handler_terminal_error(
             }
         ],
     }
+
+
+async def _module_composite_handler_gated_subop(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any] | OperationResult:
+    """Composite handler with one approval-gated write step (#3542).
+
+    The step goes through the direct-session sub-op gate
+    (``enforce_subop_policy``), like the shipped write composites. When the
+    gate returns a result (parked, denied, refused) the handler returns it as
+    is and never runs the write.
+    """
+    from meho_backplane.operations.composite import enforce_subop_policy
+
+    gate = await enforce_subop_policy(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.gated_step",
+        safety_level="caution",
+        requires_approval=True,
+        target=target,
+        params={"path": params.get("path", "?")},
+    )
+    if gate is not None:
+        return gate
+    return {"parent": "ok", "step": "ran"}
 
 
 async def _module_composite_handler_warning_only(
@@ -1729,6 +1757,121 @@ async def test_vmware_8_0_catalog_serves_fingerprinted_8_0_x_target(
     assert result.extras.get("error_code") != "unqualified_target_version"
 
 
+class _VmwareTasksList80Connector(VmwareRest80Connector):
+    """8.0 catalog connector that records the outbound body and returns two tasks."""
+
+    sent: ClassVar[list[tuple[str, str, dict[str, Any] | None]]] = []
+
+    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
+        del target, operator
+        return f"/api{path}"
+
+    async def _post_json(  # type: ignore[override]
+        self,
+        target: Any,
+        path: str,
+        *,
+        operator: Operator,
+        verb: str = "POST",
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        del target, operator, params, extra_headers
+        type(self).sent.append((verb, path, json))
+        return {
+            "task-1": {"service": "com.vmware.vcenter.vm", "status": "SUCCEEDED"},
+            "task-2": {"service": "com.vmware.vcenter.vm", "status": "RUNNING"},
+        }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "expect_ok"),
+    [
+        ({"filter_spec": {"services": ["com.vmware.vcenter.vm"]}}, True),
+        ({"filter_spec": {"tasks": ["task-1"]}, "result_spec": {"exclude_result": True}}, True),
+        ({"return_all": True, "exclude_result": True}, False),
+        ({"filter_spec": {}}, False),
+        ({"filter_spec": {"services": []}}, False),
+    ],
+)
+async def test_vmware_8_0_tasks_list_dispatch_sends_two_level_body(
+    body: dict[str, Any],
+    expect_ok: bool,
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """The corrected 8.0 tasks-list op sends ``{filter_spec, result_spec}`` (#3700).
+
+    A non-empty ``services`` / ``tasks`` filter reaches vCenter and returns
+    rows. The old flat body and an empty filter are refused with
+    ``invalid_params`` before any request leaves MEHO.
+    """
+    _VmwareTasksList80Connector.sent = []
+    register_connector_v2(
+        product="vmware",
+        version="8.0",
+        impl_id="vmware-rest",
+        cls=_VmwareTasksList80Connector,
+    )
+    flat = EndpointDescriptorProto(
+        op_id="POST:/cis/tasks?action=list",
+        method="POST",
+        path="/cis/tasks?action=list",
+        summary="List tasks",
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "body": {
+                    "type": "object",
+                    "properties": {
+                        "exclude_result": {"type": "boolean"},
+                        "return_all": {"type": "boolean"},
+                    },
+                    "x-meho-param-loc": "body",
+                }
+            },
+            "additionalProperties": False,
+        },
+        safety_level="caution",
+    )
+    await register_ingested_operations(
+        product="vmware",
+        version="8.0",
+        impl_id="vmware-rest",
+        spec_source="vcenter.yaml",
+        operations=[flat],
+        embedding_service=stub_embedding_service,
+    )
+    row = (
+        await session.execute(
+            select(EndpointDescriptor).where(
+                EndpointDescriptor.op_id == "POST:/cis/tasks?action=list"
+            )
+        )
+    ).scalar_one()
+    row.is_enabled = True
+    await session.commit()
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-8.0",
+        op_id="POST:/cis/tasks?action=list",
+        target=_FakeTarget(product="vmware", version="8.0.3"),
+        params={"body": body},
+    )
+
+    if expect_ok:
+        assert result.status == "ok", result.error
+        assert _VmwareTasksList80Connector.sent == [("POST", "/api/cis/tasks?action=list", body)]
+        assert isinstance(result.result, dict)
+        assert set(result.result) == {"task-1", "task-2"}
+    else:
+        assert result.extras.get("error_code") == "invalid_params"
+        assert _VmwareTasksList80Connector.sent == []
+
+
 @pytest.mark.asyncio
 async def test_dispatch_ingested_builds_request_via_request_json(
     stub_embedding_service: AsyncMock,
@@ -2784,7 +2927,8 @@ async def test_dispatch_kv_write_forbidden_uses_write_identity_error(
     )
 
     operator = _make_operator(sub="op-writer")
-    target = _FakeTarget(product="vault")
+    target = _FakeTarget(product="vault", name="vault-main")
+    target.extras = {"vault_role": "meho-writer"}  # type: ignore[attr-defined]
 
     result = await dispatch(
         operator=operator,
@@ -2800,6 +2944,8 @@ async def test_dispatch_kv_write_forbidden_uses_write_identity_error(
     # Data path rendered from mount default + params; identity is the caller.
     assert result.extras["path"] == "secret/data/meho/test/x"
     assert result.extras["identity_hint"] == "op-writer"
+    # #3716: the acting target and its vault_role are named in the text.
+    assert "target 'vault-main' under vault_role 'meho-writer'" in result.error
     # NOT mislabelled as the read-path credential-resolution cause.
     assert "connector_vault_forbidden" not in result.error
     assert result.extras["error_code"] != "connector_vault_forbidden"
@@ -3408,11 +3554,12 @@ async def test_park_merges_permission_preflight_onto_identifier_default(
     stub_embedding_service: AsyncMock,
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """A parked write with a registered permission preflight stores its banner.
+    """A parked write with a registered permission preflight stores its result.
 
     G0.20-T4 (#1504): the capability-only permission preflight runs and is
     merged under ``proposed_effect["permission_preflight"]`` — so the
-    reviewer sees "this write will be denied" at park time. Since #1856,
+    reviewer sees whether the write is authorized at park time (a
+    will-be-denied verdict refuses the park instead, #3542). Since #1856,
     a non-credential write with no bespoke builder also carries the
     generic params-echo default, so the preflight rides on the
     ``{op_class, params_echo}`` base rather than the bare identifier
@@ -3430,8 +3577,8 @@ async def test_park_merges_permission_preflight_onto_identifier_default(
             "check": "vault.capabilities-self",
             "path": f"secret/data/{ctx.params.get('path', '?')}",
             "required": ["create", "update"],
-            "granted": ["read"],
-            "will_be_denied": True,
+            "granted": ["create", "read", "update"],
+            "will_be_denied": False,
             "principal_sub": ctx.operator.sub,
         }
 
@@ -3444,7 +3591,7 @@ async def test_park_merges_permission_preflight_onto_identifier_default(
         op_id="vault.kv.preflight_op",
         handler=_module_handler_returning_dict,
         summary="Op with a registered permission preflight.",
-        description="Parks for approval; the preflight flags a will-be-denied write.",
+        description="Parks for approval; the preflight says the write is authorized.",
         parameter_schema={"type": "object"},
         safety_level="caution",
         requires_approval=True,
@@ -3471,9 +3618,9 @@ async def test_park_merges_permission_preflight_onto_identifier_default(
             assert row.proposed_effect["op_class"] == "other"
             assert row.proposed_effect["params_echo"] == {"path": "meho/test/x"}
             preflight = row.proposed_effect["permission_preflight"]
-            assert preflight["will_be_denied"] is True
+            assert preflight["will_be_denied"] is False
             assert preflight["required"] == ["create", "update"]
-            assert preflight["granted"] == ["read"]
+            assert preflight["granted"] == ["create", "read", "update"]
             # No raw secret material — only the capability banner.
             assert "data" not in row.proposed_effect
     finally:
@@ -3481,21 +3628,96 @@ async def test_park_merges_permission_preflight_onto_identifier_default(
 
 
 @pytest.mark.asyncio
+async def test_park_params_echo_masks_secret_named_params(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A parked op's ``params_echo`` never stores a secret-named param value (#3808).
+
+    The params carry secret values under names the old exact-name list
+    missed (``vcsa_root_password``, camelCase ``adminPassword``,
+    ``sddcManagerApiKey``). The broadcast scrub flags them as secret, and
+    the echo on the stored approval row masks the same keys, so the two
+    paths agree. Non-secret params stay readable.
+    """
+    from meho_backplane.broadcast.events import scrub_broadcast_params
+    from meho_backplane.db.models import ApprovalRequest
+
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    target = _FakeTarget(product="vault")
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.secret_params_op",
+        handler=_module_handler_returning_dict,
+        summary="Dangerous op whose params carry secret values.",
+        description="Parks for approval; the echo must mask the secret values.",
+        parameter_schema={"type": "object"},
+        safety_level="dangerous",
+        requires_approval=True,
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+    secret_values = ["FAKE-root-pw-0001", "FAKE-nsx-pw-0002", "FAKE-api-key-0003"]
+    params: dict[str, Any] = {
+        "appliance": "fake-appliance-01",
+        "vcsa_root_password": secret_values[0],
+        "nsx": {"adminPassword": secret_values[1], "size": "medium"},
+        "sddcManagerApiKey": secret_values[2],
+    }
+    # The broadcast scrub (the source of ``broadcast_params_secret_detected``)
+    # flags these params as secret.
+    _scrubbed, secret_detected = scrub_broadcast_params(params)
+    assert secret_detected is True
+
+    result = await dispatch(
+        operator=_make_operator(principal_kind=PrincipalKind.USER),
+        connector_id="vault-1.x",
+        op_id="vault.kv.secret_params_op",
+        target=target,
+        params=params,
+    )
+    assert result.status == "awaiting_approval"
+    approval_request_id = UUID(result.extras["approval_request_id"])
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        row = await fresh.get(ApprovalRequest, approval_request_id)
+        assert row is not None
+        echo = row.proposed_effect["params_echo"]
+        assert echo == {
+            "appliance": "fake-appliance-01",
+            "vcsa_root_password": "***REDACTED***",
+            "nsx": {"adminPassword": "***REDACTED***", "size": "medium"},
+            "sddcManagerApiKey": "***REDACTED***",
+        }
+        stored = repr(row.proposed_effect)
+        for value in secret_values:
+            assert value not in stored
+    # The park's broadcast carries no secret value either.
+    broadcast = repr([event.payload for event in captured_events])
+    for value in secret_values:
+        assert value not in broadcast
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("will_be_denied", [True, False])
-async def test_park_stamps_write_capability_warning_when_denied(
+async def test_park_refused_when_preflight_says_write_will_be_denied(
     stub_embedding_service: AsyncMock,
     captured_events: list[BroadcastEvent],
     will_be_denied: bool,
 ) -> None:
-    """A will-be-denied preflight promotes a named top-level warning (#2331).
+    """A will-be-denied preflight refuses the park (#3542).
 
     When the park-time capability probe reports ``will_be_denied: true``,
-    the envelope carries ``write_capability_warning =
-    "connector_identity_may_lack_write"`` so the approval surface can render
-    a banner without reaching into ``permission_preflight``. It is a
-    warning, not a gate — the park still proceeds and the op is
-    ``awaiting_approval`` either way. Absent when the write will be
-    authorized.
+    no approval row is written: the caller gets ``denied`` /
+    ``write_capability_denied`` with ``granted`` / ``required`` and the
+    write-policy ``doc_ref``, so no person spends an approval on a write
+    that cannot land. The refusal still lands as one ``denied`` audit row
+    on the op's own path (with the refusal details under ``error``) and
+    one ``denied`` broadcast event, exactly like a policy denial. When the
+    write is authorized the op parks as before, with no
+    ``write_capability_warning``.
     """
     from meho_backplane.db.models import ApprovalRequest
     from meho_backplane.operations._preview import (
@@ -3539,21 +3761,172 @@ async def test_park_stamps_write_capability_warning_when_denied(
             target=target,
             params={"path": "meho/test/x"},
         )
-        assert result.status == "awaiting_approval"
-        approval_request_id = UUID(result.extras["approval_request_id"])
         sessionmaker = get_sessionmaker()
-        async with sessionmaker() as fresh:
-            row = await fresh.get(ApprovalRequest, approval_request_id)
-            assert row is not None
-            if will_be_denied:
-                assert (
-                    row.proposed_effect["write_capability_warning"]
-                    == "connector_identity_may_lack_write"
+        if will_be_denied:
+            assert result.status == "denied"
+            assert result.extras["error_code"] == "write_capability_denied"
+            assert result.extras["path"] == "secret/data/meho/test/x"
+            assert result.extras["granted"] == ["read"]
+            assert result.extras["required"] == ["create", "update"]
+            assert result.extras["doc_ref"] == (
+                "docs/cross-repo/connector-vault-policy.md#6-kv-v2-write-surface"
+            )
+            assert result.error is not None
+            assert "did not create an approval request" in result.error
+            async with sessionmaker() as fresh:
+                count = await fresh.scalar(
+                    select(func.count())
+                    .select_from(ApprovalRequest)
+                    .where(ApprovalRequest.op_id == "vault.kv.warn_op")
                 )
-            else:
+                op_rows = (
+                    (
+                        await fresh.execute(
+                            select(AuditLog).where(AuditLog.path == "vault.kv.warn_op")
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                request_rows = (
+                    (
+                        await fresh.execute(
+                            select(AuditLog).where(AuditLog.path == "approval.request")
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+            assert count == 0
+            assert len(request_rows) == 0
+            assert len(op_rows) == 1
+            assert op_rows[0].payload["result_status"] == "denied"
+            assert op_rows[0].status_code == 403
+            assert op_rows[0].payload["error"]["error_code"] == "write_capability_denied"
+            assert op_rows[0].payload["error"]["granted"] == ["read"]
+            assert op_rows[0].payload["error"]["required"] == ["create", "update"]
+            assert len(captured_events) == 1
+            assert captured_events[0].result_status == "denied"
+        else:
+            assert result.status == "awaiting_approval"
+            approval_request_id = UUID(result.extras["approval_request_id"])
+            async with sessionmaker() as fresh:
+                row = await fresh.get(ApprovalRequest, approval_request_id)
+                assert row is not None
                 assert "write_capability_warning" not in row.proposed_effect
     finally:
         _PERMISSION_PREFLIGHTS.pop("vault.kv.warn_op", None)
+
+
+@pytest.mark.asyncio
+async def test_composite_with_refused_step_writes_one_denied_audit_row(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A parent operation with a refused step leaves one denial audit record (#3542).
+
+    The composite's gated step has a permission preflight that says the write
+    will be denied. The sub-op gate refuses the park and the parent returns
+    that result as is. The dispatcher writes no audit row for a
+    handler-returned result, so the gate records the refusal itself: exactly
+    one ``denied`` audit row, on the step's path, linked to the parent
+    operation's audit id. No approval request and no approval-request audit
+    row are written.
+    """
+    from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
+    from meho_backplane.operations._preview import (
+        _PERMISSION_PREFLIGHTS,
+        PreviewContext,
+        register_permission_preflight,
+    )
+
+    async def _preflight(ctx: PreviewContext) -> dict[str, Any]:
+        return {
+            "check": "vault.capabilities-self",
+            "path": f"secret/data/{ctx.params.get('path', '?')}",
+            "required": ["create", "update"],
+            "granted": ["read"],
+            "will_be_denied": True,
+        }
+
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    target = _FakeTarget(product="vault")
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as s:
+        s.add(
+            EndpointDescriptor(
+                id=uuid.uuid4(),
+                tenant_id=None,
+                product="vault",
+                version="1.x",
+                impl_id="vault",
+                op_id="vault.composite.gated_write",
+                source_kind="composite",
+                method=None,
+                path=None,
+                handler_ref=(
+                    "tests.test_operations_dispatcher._module_composite_handler_gated_subop"
+                ),
+                summary="Composite with one gated write step.",
+                description="The step parks for approval unless its preflight refuses.",
+                tags=[],
+                parameter_schema={"type": "object"},
+                response_schema=None,
+                llm_instructions=None,
+                safety_level="safe",
+                requires_approval=False,
+                is_enabled=True,
+                embedding=stub_embedding_service.encode_one.return_value,
+                custom_description=None,
+                custom_notes=None,
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+        await s.commit()
+    register_permission_preflight("vault.kv.gated_step", _preflight)
+    try:
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id="vault-1.x",
+            op_id="vault.composite.gated_write",
+            target=target,
+            params={"path": "meho/test/x"},
+        )
+    finally:
+        _PERMISSION_PREFLIGHTS.pop("vault.kv.gated_step", None)
+
+    assert result.status == "denied"
+    assert result.op_id == "vault.kv.gated_step"
+    assert result.extras["error_code"] == "write_capability_denied"
+    assert result.extras["granted"] == ["read"]
+
+    async with sessionmaker() as fresh:
+        approval_count = await fresh.scalar(select(func.count()).select_from(ApprovalRequest))
+        rows = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.method == "DISPATCH")))
+            .scalars()
+            .all()
+        )
+        request_rows = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.path == "approval.request")))
+            .scalars()
+            .all()
+        )
+    assert approval_count == 0
+    assert request_rows == []
+    # Exactly one denial record for the whole parent operation.
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.path == "vault.kv.gated_step"
+    assert row.status_code == 403
+    assert row.payload["result_status"] == "denied"
+    assert row.payload["error"]["error_code"] == "write_capability_denied"
+    assert row.payload["error"]["required"] == ["create", "update"]
+    # The step's row points at the parent operation's audit id.
+    assert row.parent_audit_id is not None
+    assert len(captured_events) == 1
+    assert captured_events[0].result_status == "denied"
 
 
 # ---------------------------------------------------------------------------

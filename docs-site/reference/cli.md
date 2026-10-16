@@ -859,7 +859,7 @@ meho bind9 record get <fqdn> [flags]
 
 #### `meho bind9 record remove`
 
-Remove the A/AAAA records at an FQDN (atomic-apply)
+Remove the A/AAAA records at an FQDN (a second person must approve)
 
 ```
 meho bind9 record remove <fqdn> [flags]
@@ -1803,6 +1803,7 @@ meho harbor operation call <op_id> [flags]
 - `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit the full OperationResult envelope as JSON
 - `--params` — params as inline JSON or @<file>
+- `--preview-hash` — preview_hash from a prior `meho operation preview` of the same op, target and params; required for a destructive op
 - `--target` — Harbor target slug
 
 #### `meho harbor operation search`
@@ -1907,7 +1908,7 @@ meho harbor robot create [flags]
 
 #### `meho harbor robot delete`
 
-Delete a project-scoped robot account from Harbor
+Delete a project-scoped robot account from Harbor (a second person must approve)
 
 ```
 meho harbor robot delete [flags]
@@ -2930,7 +2931,7 @@ meho keycloak protocol-mapper create [flags]
 
 ### `meho keycloak realm`
 
-Keycloak realm sub-verbs (get, create, update)
+Keycloak realm sub-verbs (get, create, update, delete)
 
 ```
 meho keycloak realm
@@ -2947,6 +2948,20 @@ meho keycloak realm create [flags]
 - `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
 - `--json` — emit the full OperationResult envelope as JSON
 - `--representation-file`, `-f` — path to a JSON file with the RealmRepresentation body (required)
+- `--target` — target slug to dispatch against (required)
+
+#### `meho keycloak realm delete`
+
+Delete a whole Keycloak realm (destructive, a second person must approve)
+
+```
+meho keycloak realm delete [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
+- `--json` — emit the full OperationResult envelope as JSON
+- `--preview-hash` — the preview_hash from a first run of this command; with it, the delete waits for approval
+- `--realm` — the name of the realm to delete (required)
 - `--target` — target slug to dispatch against (required)
 
 #### `meho keycloak realm get`
@@ -5863,6 +5878,7 @@ meho vmware operation call <op_id> [flags]
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit the full OperationResult envelope as JSON instead of the human render
 - `--params` — operation params as inline JSON or @<file>; omitted means no params
+- `--preview-hash` — preview_hash from a prior `meho operation preview` of the same op, target and params; required for a destructive op
 - `--target` — target slug to dispatch against (required for ops that read a target)
 
 #### `meho vmware operation search`

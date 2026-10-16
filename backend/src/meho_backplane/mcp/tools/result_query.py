@@ -113,7 +113,9 @@ async def _result_query_handler(
     except ResultQueryTimeoutError as exc:
         raise McpInvalidParamsError(str(exc), data={"reason": "query_timeout"}) from exc
     except ResultQueryOutputTooLargeError as exc:
-        raise McpInvalidParamsError(str(exc), data={"reason": "output_too_large"}) from exc
+        raise McpInvalidParamsError(
+            str(exc), data={"reason": "output_too_large", "delivery": "unavailable"}
+        ) from exc
     except ResultReadRejectedError as exc:
         raise _read_rejected(exc) from exc
 
@@ -150,7 +152,9 @@ async def _run_query(
     except ResultQueryTimeoutError as exc:
         raise McpInvalidParamsError(str(exc), data={"reason": "query_timeout"}) from exc
     except ResultQueryOutputTooLargeError as exc:
-        raise McpInvalidParamsError(str(exc), data={"reason": "output_too_large"}) from exc
+        raise McpInvalidParamsError(
+            str(exc), data={"reason": "output_too_large", "delivery": "unavailable"}
+        ) from exc
     except ResultReadRejectedError as exc:
         raise _read_rejected(exc) from exc
 

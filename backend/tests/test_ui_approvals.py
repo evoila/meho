@@ -2121,3 +2121,124 @@ def test_internal_params_never_reach_the_history_view() -> None:
         assert "flavor" not in body
         assert "params_hash" not in body
         assert "0" * 64 not in body
+
+
+# ---------------------------------------------------------------------------
+# #3692 -- delegated decisions: the approver acted on another human's
+# written instruction. The console shows who instructed, their words, and
+# the refs; an incomplete trailer block is refused and the row stays pending.
+# ---------------------------------------------------------------------------
+
+_DELEGATED_REASON = (
+    "Denied after the change review.\n"
+    "\n"
+    "Instructed-by: lead@example.com\n"
+    'Instruction: "deny this one, wrong cluster"\n'
+    "Refs: #12, CHG-9"
+)
+
+
+def _post_console_decision(rid: uuid.UUID, action: str, reason: str) -> tuple[str, int]:
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RESUME_DISPATCH, new_callable=AsyncMock, return_value=_dispatch_result()),
+        ):
+            response = client.post(
+                f"/ui/approvals/{rid}/{action}",
+                data={"reason": reason},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+    return response.text, response.status_code
+
+
+def test_delegated_reject_renders_delegation_on_outcome_and_detail() -> None:
+    """A delegated deny shows the delegation on the outcome card and the decided modal."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+
+    body, status_code = _post_console_decision(rid, "reject", _DELEGATED_REASON)
+
+    assert status_code == 200, body
+    assert "Request denied" in body
+    assert 'data-testid="approval-delegation"' in body
+    assert "Instructed by" in body
+    assert "lead@example.com" in body
+    assert "deny this one, wrong cluster" in body
+    assert "#12, CHG-9" in body
+
+    # The decided modal reads the block back off the decision audit row.
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub="op-99")
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            detail = client.get(f"/ui/approvals/{rid}")
+
+    assert detail.status_code == 200, detail.text
+    assert 'data-testid="approval-delegation"' in detail.text
+    assert "lead@example.com" in detail.text
+    assert "deny this one, wrong cluster" in detail.text
+    assert "#12, CHG-9" in detail.text
+
+
+def test_ordinary_decided_modal_has_no_delegation_block() -> None:
+    """A decided row with a plain reason renders no delegation block."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+
+    body, status_code = _post_console_decision(rid, "reject", "too risky")
+
+    assert status_code == 200, body
+    assert 'data-testid="approval-delegation"' not in body
+
+
+@pytest.mark.parametrize("action", ["approve", "reject"])
+def test_delegated_reason_missing_instruction_is_refused_in_modal(action: str) -> None:
+    """An ``Instructed-by:`` reason without ``Instruction:`` is a 422 banner; row stays pending."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+
+    body, status_code = _post_console_decision(
+        rid, action, "ok\n\nInstructed-by: lead@example.com\nRefs: #12"
+    )
+
+    assert status_code == 200, body
+    assert "422" in body
+    assert "Instruction" in body
+    assert "Request approved" not in body
+    assert "Request denied" not in body
+    assert _request_status(rid) == ApprovalRequestStatus.PENDING.value
+
+
+def test_pending_modal_reason_field_is_multiline() -> None:
+    """The shared reason field is a textarea, so a pasted trailer keeps its line breaks.
+
+    A single-line text input joins the ``Instructed-by:`` / ``Instruction:`` /
+    ``Refs:`` lines on paste, and the parser then records an ordinary reason
+    with no delegation. Both confirm forms must still pull the field by id.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    before, after = body.split('id="meho-approval-reason"')
+    assert before.rsplit("<", 1)[1].strip().startswith("textarea")
+    reason_field = after.split(">")[0]
+    assert 'name="reason"' in reason_field
+    assert 'maxlength="2000"' in reason_field
+    assert all('name="reason"' not in tag.split(">")[0] for tag in body.split("<input")[1:])
+    assert body.count('hx-include="#meho-approval-reason"') == 2

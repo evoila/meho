@@ -1541,6 +1541,68 @@ composite's own dispatch audit row. This is enforced in
 A direct (non-composite) park is unchanged — `resume_parent` is NULL, so
 the resume keeps the generic re-dispatch of the stored `op_id`.
 
+#### Both resume surfaces read `resume_parent` (#3421)
+
+Two code paths can resume a request that waits for approval, and both
+handle a composite (multi-step operation) sub-op the same way:
+
+- the operator surface, `resume_dispatch_after_approval`
+  (`operations/approval_queue.py`);
+- the in-process agent waiter, `_resume_approved_or_already_resumed`
+  (`agent/approval_wait.py`).
+
+Both call one helper, `composite_resume_binding` in
+`operations/approval_queue.py`. When the row has a `resume_parent`, the
+helper returns the parent composite's `(op_id, params)` and sets
+`composite_resume_var` and `composite_resume_scope_var` to the approved
+sub-op while the parent runs again. When `resume_parent` is NULL it returns
+`None` and sets nothing. Because both paths share it, they cannot drift
+apart. `test_operator_and_agent_surfaces_resume_the_same_row_identically`
+checks that both paths run the same row the same way.
+
+What the agent waiter does:
+
+- **Composite sub-op waiting for approval.** It runs the parent composite
+  again (`_approved=True`) with the row's `connector_id`, the parent `op_id`
+  and the parent params. It keeps the rest of the agent's original call
+  (`work_ref`, …). The approved sub-op clears its gate and runs once. Before
+  #3421 the waiter re-sent the agent's call without clearing the sub-op, so
+  the sub-op created a second request and nothing ran.
+- **Target check.** The re-run uses the target the row saved by id
+  (`rehydrate_resume_target`, the same check the operator surface runs), not
+  the target name from the agent's original call. While the request waited,
+  that name may have moved to another target: the target was renamed, or
+  deleted and a new one created with the same name. Loading by id means the
+  approved write can only run against the original target. If the saved
+  target no longer resolves (soft-deleted or revoked), the waiter returns a
+  `denied` envelope and runs nothing. This check runs before the
+  one-resumer claim, so a refused resume leaves the claim free.
+  Covered by `test_composite_resume_uses_saved_target_when_name_was_reassigned`
+  and `test_composite_resume_fails_closed_when_saved_target_deleted_and_name_reused`
+  (unit) and the two `test_agent_waiter_composite_resume_*` tests (end to
+  end).
+- **Direct request (no `resume_parent`).** It runs the agent's original
+  `call_arguments` again unchanged, as before, including the target name.
+- **Credential-write sub-op.** The row stores only the parent `op_id`; the
+  parent params live in the encrypted custody copy. For a composite sub-op
+  the claim winner consumes that copy to get the parent params. For a direct
+  request it still discards the copy.
+
+One difference stays on purpose: the agent waiter re-enters the composite
+as the **agent**, not as the reviewer. So every other governed sub-op is
+checked against the agent's own grants. If one would need its own approval,
+the multi-gate guard above fails closed
+(`composite_resume_multi_gate_unsupported`) on the agent path too. If the
+agent has no grant for it, that sub-op is denied.
+
+Note: every shipped governed composite is `requires_approval=True` at the
+top level, so an agent's first call makes the composite itself wait for
+approval (`resume_parent` NULL). A sub-op request with `resume_parent` set
+happens later, inside the resumed composite. Today the agent waiter does not
+wait on that second request; an operator surface resumes it. The waiter's
+composite branch makes the agent path correct whenever it does resume such
+a row.
+
 ## MCP elicitation URL-mode (forward-looking)
 
 When an in-loop agent hits a `needs-approval` verdict, the agent

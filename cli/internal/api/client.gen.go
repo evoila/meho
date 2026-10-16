@@ -8205,8 +8205,9 @@ type ServiceGrantListResponse struct {
 // ServiceGrantRead Row shape every accessor returns.
 //
 // “from_attributes=True“ allows direct construction from an ORM row.
-// Exposes “revoked_at“ / “revoked_by_sub“ so callers can tell a live
-// grant from a revoked one in the history.
+// Exposes “revoked_at“ / “revoked_by_sub“ / “revoked_reason“ so
+// callers can tell a live grant from a revoked one in the history, and why
+// it was revoked.
 type ServiceGrantRead struct {
 	ConnectorId       string              `json:"connector_id"`
 	CreatedAt         time.Time           `json:"created_at"`
@@ -8218,6 +8219,7 @@ type ServiceGrantRead struct {
 	Reason            string              `json:"reason"`
 	RevokedAt         *time.Time          `json:"revoked_at"`
 	RevokedBySub      *string             `json:"revoked_by_sub"`
+	RevokedReason     *string             `json:"revoked_reason"`
 	TargetId          *openapi_types.UUID `json:"target_id"`
 	TargetNamePattern *string             `json:"target_name_pattern"`
 	TargetProduct     *string             `json:"target_product"`
@@ -10513,6 +10515,8 @@ type CreateGrantApiV1ServicePrincipalsGrantsPostParams struct {
 
 // RevokeGrantApiV1ServicePrincipalsGrantsGrantIdDeleteParams defines parameters for RevokeGrantApiV1ServicePrincipalsGrantsGrantIdDelete.
 type RevokeGrantApiV1ServicePrincipalsGrantsGrantIdDeleteParams struct {
+	// Reason Optional reason for the revoke. Stored on the grant and the audit row.
+	Reason        *string `form:"reason,omitempty" json:"reason,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -30908,6 +30912,28 @@ func NewRevokeGrantApiV1ServicePrincipalsGrantsGrantIdDeleteRequest(server strin
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Reason != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "reason", runtime.ParamLocationQuery, *params.Reason); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("DELETE", queryURL.String(), nil)

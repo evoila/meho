@@ -167,6 +167,40 @@ Two-step shape:
 query, not a filtered list. It reuses `query._build_audit_entry` so a replay
 node and a `query_audit` row for the same audit id agree field-for-field.
 
+### Client-credential runs (#3446)
+
+What anchors the rows of a run by a client-credential service principal
+(a `PrincipalKind.SERVICE` token, for example an automation add-on), and
+how an operator replays it.
+
+- Such a caller usually has no MCP session and no in-process agent loop, so
+  neither normal source of `agent_session_id` applies.
+- The run is named by its `work_ref`. When the caller passes a `work_ref`
+  to `call_operation` (the field, or the `Meho-Work-Ref` header), MEHO opens
+  one orchestration run per `(clientId, work_ref)` in the caller's tenant
+  (`operations/addon_orchestration.py`). Opening writes one start row:
+  `method=ORCHESTRATION`, `path=addon.orchestration`, no parent.
+- Every call of that run gets the run's `session_id` as its
+  `agent_session_id`, and the start row as its `parent_audit_id`. So the
+  normal session replay rebuilds the run as one tree. The 10,000 anchor-row
+  cap and the 413 `session_too_large` answer apply unchanged.
+- This works for every service principal with a recovered clientId, paired
+  add-on or not. Before #3446 only paired add-ons got it, and an unpaired
+  service account's rows landed with a NULL `agent_session_id`.
+- A call **without** a `work_ref` still lands NULL. There is nothing to group
+  it by. Find those rows by principal (`meho audit query --principal`).
+
+How an operator replays a client-credential run:
+
+1. `meho audit query --work-ref <ref>` (or
+   `GET /api/v1/audit/by-work-ref/{ref}`) — the rows show the shared
+   `agent_session_id`.
+2. `meho audit replay <session-id>` (or
+   `GET /api/v1/audit/sessions/{session_id}/replay`, `tenant_admin`).
+
+Design and tests: [`addon-parent-linkage.md`](addon-parent-linkage.md),
+`tests/test_client_credential_replay.py`.
+
 ## REST surface (G8.1-T2 #466, G8.2-T4 #1012)
 
 The six routes under `backend/src/meho_backplane/api/v1/audit.py` are the

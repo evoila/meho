@@ -7,10 +7,13 @@ Covers the two acceptance criteria of the task directly:
 
 1. *A multi-dispatch external run replays as one audit subtree spanning
    orchestration + resulting dispatches* — :func:`test_run_replays_as_one_subtree`.
-2. *Linkage only accepted from the paired principal for its own work_refs* —
+2. *Linkage only accepted from a service principal for its own work_refs* —
    :func:`test_non_service_principal_gets_no_linkage`,
-   :func:`test_unpaired_service_principal_gets_no_linkage`, and
-   :func:`test_distinct_principals_same_work_ref_are_isolated`.
+   :func:`test_cross_tenant_pairing_is_declined`,
+   :func:`test_same_client_id_in_other_tenant_is_declined`, and
+   :func:`test_distinct_principals_same_work_ref_are_isolated`. Since #3446 an
+   unpaired client-credential principal is linked too —
+   :func:`test_unpaired_service_principal_gets_linkage`.
 
 Plus the resolve-or-open idempotency the multi-dispatch grouping relies on and
 the contextvar-binding contract :func:`write_audit_row` reads.
@@ -149,7 +152,7 @@ async def _insert_dispatch_row(op_id: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Authorization: linkage only from a paired principal (criterion 2)
+# Authorization: linkage only from a service principal (criterion 2)
 # --------------------------------------------------------------------------- #
 
 
@@ -168,12 +171,29 @@ async def test_non_service_principal_gets_no_linkage() -> None:
     assert await _count(AddonOrchestrationRun) == 0
 
 
-async def test_unpaired_service_principal_gets_no_linkage() -> None:
+async def test_unpaired_service_principal_gets_linkage() -> None:
+    # #3446: a client-credential principal with no pairing still gets a run,
+    # so its dispatches are not NULL-anchored in the replay graph.
     await _seed_tenant()
-    # No pairing row seeded for this clientId.
-    op = _service_operator(client_id="addon:not-paired")
-    assert await resolve_or_open_orchestration_run(op, "jira:OPS-1") is None
-    assert await _count(AddonOrchestrationRun) == 0
+    op = _service_operator(client_id="svc-build-bot")
+    run = await resolve_or_open_orchestration_run(op, "jira:OPS-1")
+    assert run is not None
+    assert run.keycloak_client_id == "svc-build-bot"
+    assert await _count(AddonOrchestrationRun, tenant_id=_TENANT) == 1
+
+
+async def test_same_client_id_in_other_tenant_is_declined() -> None:
+    # The run key (client_id, work_ref) is global. A token from another tenant
+    # with the same clientId must never resolve the first tenant's run.
+    await _seed_tenant()
+    await _seed_tenant(tenant_id=_OTHER_TENANT, slug="tenant-b")
+    first = await resolve_or_open_orchestration_run(
+        _service_operator(client_id="svc-build-bot"), "jira:OPS-1"
+    )
+    assert first is not None
+    other = _service_operator(client_id="svc-build-bot", tenant_id=_OTHER_TENANT)
+    assert await resolve_or_open_orchestration_run(other, "jira:OPS-1") is None
+    assert await _count(AddonOrchestrationRun) == 1
 
 
 async def test_service_principal_without_client_id_gets_no_linkage() -> None:

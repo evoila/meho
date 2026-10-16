@@ -1102,15 +1102,15 @@ async def _call_operation_impl(
         work_ref_token = work_ref_var.set(work_ref_arg)
     try:
         async with AsyncExitStack() as linkage_stack:
-            # #3028 out-of-process parent-linkage: when a paired add-on service
-            # principal dispatches under a ``work_ref``, group its per-step
-            # dispatches into one audit-replay subtree by binding the
-            # orchestration run's synthesized ``session_id`` + anchor
-            # ``parent_audit_id`` around the dispatch. Resolution reads the
-            # *effective* work_ref (the arg above or an ambient ``Meho-Work-Ref``
-            # header) and returns ``None`` for any non-paired caller, so the
-            # pre-#3028 behaviour (an independent audit row) is untouched for
-            # users, agents, and unpaired service principals.
+            # #3028 / #3446 out-of-process parent-linkage: when a
+            # client-credential service principal (paired add-on or not)
+            # dispatches under a ``work_ref``, group its per-step dispatches
+            # into one audit-replay subtree by binding the orchestration run's
+            # synthesized ``session_id`` + anchor ``parent_audit_id`` around the
+            # dispatch. Resolution reads the *effective* work_ref (the arg above
+            # or an ambient ``Meho-Work-Ref`` header) and returns ``None`` for
+            # users and agents, so their behaviour (an independent audit row)
+            # is untouched.
             effective_work_ref = work_ref_var.get()
             if effective_work_ref:
                 linkage_run = await resolve_or_open_orchestration_run(operator, effective_work_ref)

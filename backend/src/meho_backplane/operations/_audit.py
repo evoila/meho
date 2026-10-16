@@ -226,8 +226,14 @@ def resolve_agent_session_id() -> uuid.UUID | None:
       the same session anchor its envelope rows get from
       :func:`~meho_backplane.mcp.audit.write_mcp_audit_row`.
 
-    Returns ``None`` outside both contexts (chassis HTTP, system sweeps)
-    — the correct value for the nullable column. A bound-but-malformed
+    A client-credential service principal that dispatches over the REST
+    chassis with a ``work_ref`` reaches the first source too:
+    ``call_operation`` binds :data:`agent_session_id_var` to the session id
+    of the principal's orchestration run for that work_ref
+    (:mod:`meho_backplane.operations.addon_orchestration`, #3446).
+
+    Returns ``None`` outside these contexts (chassis HTTP without such a
+    binding, system sweeps) — the correct value for the nullable column. A bound-but-malformed
     ``mcp_session_id`` is a programming error (the binder only binds
     canonical UUID strings); it is logged and treated as unbound, the
     same fail-soft posture :func:`meho_backplane.mcp.audit._resolve_uuid_contextvar`

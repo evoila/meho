@@ -347,8 +347,12 @@ _SOAP_AUTH_FAULT_TYPES = frozenset({"InvalidLogin", "NoPermission", "NotAuthenti
 #: ``NoPermission`` (principal lacks the privilege) — genuine rejections a fresh
 #: session cannot fix — a ``NotAuthenticated`` is a session-liveness signal.
 _PBM_REMINT_FAULT_TYPE: Final[str] = "NotAuthenticated"
-#: ``probe_method`` stamped on a standalone-ESXi fingerprint.
-_ESXI_SOAP_PROBE = "GET /api/about (400) -> soap-retrieveservicecontent"
+#: ``probe_method`` stamped on a standalone-ESXi fingerprint (#3710). It names
+#: the call that proves reachability -- the authenticated
+#: ``SessionManager.currentSession`` read over SOAP -- and ends in ``(live)``:
+#: every ESXi probe makes that call to the host, even on a warm session cache.
+#: The ESXi probe never answers from cache, so there is no ``(cached)`` form.
+_ESXI_SOAP_PROBE = "GET /api/about (400) -> soap-currentsession (live)"
 
 # JSON-RPC 2.0 discriminator ESXi's ``/api`` handler stamps on its error
 # bodies. Recognising it (or the "Unsupported content type" message text)
@@ -2163,8 +2167,8 @@ class VmwareRestConnector(HttpConnector):
         ``_about_versions`` (exact, e.g. ``9.1.0``); product is stamped
         ``esxi`` (the same slug ``product_from_line_id`` maps ``embeddedEsx`` /
         ``esx`` to and ``classify_host_target`` keys off). ``probe_method``
-        names the ``GET /api/about`` 400 → SOAP ``RetrieveServiceContent``
-        chain (``about.apiType == "HostAgent"``).
+        names the ``GET /api/about`` 400 → SOAP ``currentSession`` liveness
+        read chain and ends in ``(live)`` (:data:`_ESXI_SOAP_PROBE`).
 
         #3773(d)/#3710 — reachability is **confirmed with one lightweight
         authenticated read** routed through the (b)-protected object.collect

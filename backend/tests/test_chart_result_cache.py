@@ -10,7 +10,9 @@ NetworkPolicy, and a ``valkey.conf`` with an explicit ``maxmemory`` and
 backplane at it. The subchart name is pinned (no ``nameOverride``), both
 network policies admit the Pod port even when the Service port changes, and a
 config checksum on the pod template makes a changed ``valkey.conf`` roll the
-pod. Skips where ``helm`` is absent unless ``MEHO_REQUIRE_HELM=1``.
+pod. With the longest release name Helm accepts, the backplane still references
+the shortened names the subchart renders. Skips where ``helm`` is absent unless
+``MEHO_REQUIRE_HELM=1``.
 """
 
 from __future__ import annotations
@@ -59,29 +61,34 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _run(*extra: str) -> subprocess.CompletedProcess[str]:
+def _run(*extra: str, release: str = "test") -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["helm", "template", "test", str(_CHART_DIR), *_BASE_OVERRIDES, *extra],
+        ["helm", "template", release, str(_CHART_DIR), *_BASE_OVERRIDES, *extra],
         capture_output=True,
         text=True,
         check=False,
     )
 
 
-def _render(*extra: str) -> list[dict[str, Any]]:
-    result = _run(*extra)
+def _render(*extra: str, release: str = "test") -> list[dict[str, Any]]:
+    result = _run(*extra, release=release)
     assert result.returncode == 0, result.stderr
     return [doc for doc in yaml.safe_load_all(result.stdout) if doc]
 
 
-def _result_cache_docs(*extra: str) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
-    docs = _render("--set", "resultCache.enabled=true", *extra)
+def _result_cache_docs(
+    *extra: str, release: str = "test"
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    docs = _render("--set", "resultCache.enabled=true", *extra, release=release)
     return docs, {d["kind"]: d for d in docs if _is_result_cache(d)}
 
 
 def _backplane_deployment(docs: list[dict[str, Any]]) -> dict[str, Any]:
     return next(
-        d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "test-meho"
+        d
+        for d in docs
+        if d["kind"] == "Deployment"
+        and d["metadata"]["labels"].get("app.kubernetes.io/name") == "meho"
     )
 
 
@@ -92,7 +99,10 @@ def _backplane_env(docs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 def _parent_egress_to_result_cache(docs: list[dict[str, Any]]) -> dict[str, Any]:
     parent_np = next(
-        d for d in docs if d["kind"] == "NetworkPolicy" and d["metadata"]["name"] == "test-meho"
+        d
+        for d in docs
+        if d["kind"] == "NetworkPolicy"
+        and d["metadata"]["labels"].get("app.kubernetes.io/name") == "meho"
     )
     return next(
         rule
@@ -159,10 +169,17 @@ def test_parent_chart_wires_egress_and_backplane_env() -> None:
     assert env["RESULT_CACHE_WRITER_ENABLED"]["value"] == "true"
 
 
-def test_backplane_references_line_up_with_subchart_names() -> None:
+# Helm refuses release names longer than 53 characters. With this one the
+# subchart's `<release>-result-cache` exceeds 63 characters and is shortened.
+_LONGEST_RELEASE = "r" * 53
+
+
+@pytest.mark.parametrize("release", ["test", _LONGEST_RELEASE])
+def test_backplane_references_line_up_with_subchart_names(release: str) -> None:
     """The URL host, the Secret reference, and the egress selector all point at
-    the resources the subchart really renders."""
-    docs, ours = _result_cache_docs()
+    the resources the subchart really renders, also when the subchart shortens
+    its names for a long release name."""
+    docs, ours = _result_cache_docs(release=release)
     env = _backplane_env(docs)
 
     host = env["RESULT_CACHE_REDIS_URL"]["value"].removeprefix("redis://").split(":")[0]
@@ -177,6 +194,18 @@ def test_backplane_references_line_up_with_subchart_names() -> None:
     pod_labels = ours["Deployment"]["spec"]["template"]["metadata"]["labels"]
     egress_selector = _parent_egress_to_result_cache(docs)["to"][0]["podSelector"]["matchLabels"]
     assert all(pod_labels.get(k) == v for k, v in egress_selector.items())
+
+
+def test_long_release_name_shortens_the_store_name() -> None:
+    """Guards the parametrized check above: the long name really exercises the
+    63-character cut, so the references cannot pass by accident."""
+    docs, ours = _result_cache_docs(release=_LONGEST_RELEASE)
+    service_name = ours["Service"]["metadata"]["name"]
+    assert len(service_name) == 63
+    assert service_name != f"{_LONGEST_RELEASE}-result-cache"
+    assert _backplane_env(docs)["RESULT_CACHE_REDIS_URL"]["value"] == (
+        f"redis://{service_name}:6379/0"
+    )
 
 
 def test_name_override_is_rejected() -> None:

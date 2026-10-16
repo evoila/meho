@@ -475,7 +475,9 @@ broadcast store that also holds rate limits and approval waits.
   `.Chart.Name`, so the subchart helpers pin the resource name to
   `result-cache`. There is no `nameOverride`: the backplane URL, the
   Secret reference, and the egress selector all use the fixed name, and
-  the schema rejects the key.
+  the schema rejects the key. The parent chart builds the URL host and
+  the Secret name with the subchart's `resultCache.fullname` helper, so
+  a long release name that gets cut to 63 characters still matches.
 - **Ports.** `resultCache.service.port` only changes the Service's front
   port. Valkey always listens on 6379, and both NetworkPolicies admit
   that Pod port, so a custom Service port does not block the traffic.

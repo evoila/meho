@@ -121,14 +121,17 @@ spec:
             {{- if .Values.resultCache.enabled }}
             # RESULT_CACHE_REDIS_URL points result-handle reads and writes at
             # the dedicated result-cache store (charts/result-cache). Unset,
-            # the backplane falls back to BROADCAST_REDIS_URL.
+            # the backplane falls back to BROADCAST_REDIS_URL. The host and
+            # the Secret name below come from the subchart's own name helper,
+            # which shortens long names to 63 characters; a hand-built
+            # `<release>-result-cache` would not match for a long release name.
             - name: RESULT_CACHE_REDIS_URL
-              value: "redis://{{ .Release.Name }}-result-cache:{{ .Values.resultCache.service.port }}/0"
+              value: "redis://{{ include "resultCache.fullname" . }}:{{ .Values.resultCache.service.port }}/0"
             {{- if .Values.resultCache.auth.enabled }}
             - name: RESULT_CACHE_REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.resultCache.auth.existingSecret | default (printf "%s-result-cache-auth" .Release.Name) }}
+                  name: {{ .Values.resultCache.auth.existingSecret | default (printf "%s-auth" (include "resultCache.fullname" .)) }}
                   key: {{ .Values.resultCache.auth.existingSecretPasswordKey }}
             {{- end }}
             # Write new result handles to the dedicated store. Turn on only

@@ -47,9 +47,12 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
+from meho_backplane.api.v1 import service_grants
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.main import app
 from meho_backplane.mcp import registry as mcp_registry
@@ -102,6 +105,21 @@ _BROADCAST_WORKING_SURFACE_CLI_VERBS: dict[str, str] = {
     "meho_broadcast_announce": "meho broadcast announce",
     "meho_broadcast_watch": "meho broadcast watch",
 }
+
+# The service-principal standing-grants plane is REST + CLI only (no MCP
+# tool). Every REST route must keep a matching `meho service-principals
+# grants` verb. The verbs are checked against the generated CLI reference,
+# which CI rebuilds from the cobra command tree, so a missing verb fails here.
+_SERVICE_GRANTS_PREFIX = "/api/v1/service-principals/grants"
+_SERVICE_GRANTS_CLI_VERBS: dict[tuple[str, str], str] = {
+    ("GET", _SERVICE_GRANTS_PREFIX): "meho service-principals grants list",
+    ("GET", _SERVICE_GRANTS_PREFIX + "/{grant_id}"): "meho service-principals grants show",
+    ("POST", _SERVICE_GRANTS_PREFIX): "meho service-principals grants create",
+    ("DELETE", _SERVICE_GRANTS_PREFIX + "/{grant_id}"): "meho service-principals grants revoke",
+}
+
+# backend/tests/<this> -> parents[2] == repo root
+_CLI_REFERENCE = Path(__file__).resolve().parents[2] / "docs-site" / "reference" / "cli.md"
 
 #: The default working surface, as the exact sorted listing a ``tools/list``
 #: response carries for a session that clears role + capability but is NOT
@@ -267,6 +285,20 @@ def test_broadcast_working_surface_has_cli_parity() -> None:
     assert all(
         verb.startswith("meho broadcast ") for verb in _BROADCAST_WORKING_SURFACE_CLI_VERBS.values()
     )
+
+
+def test_service_grants_rest_plane_has_cli_parity() -> None:
+    """Every service-principal grants REST route has its `meho` CLI verb."""
+    routes = {
+        (method, route.path)
+        for route in service_grants.router.routes
+        if isinstance(route, APIRoute)
+        for method in route.methods or ()
+    }
+    assert routes == set(_SERVICE_GRANTS_CLI_VERBS)
+    cli_reference = _CLI_REFERENCE.read_text(encoding="utf-8")
+    for verb in _SERVICE_GRANTS_CLI_VERBS.values():
+        assert f"#### `{verb}`" in cli_reference, f"{verb} is missing from the CLI reference"
 
 
 def test_pinned_surfaces_partition_the_live_registry() -> None:

@@ -1076,6 +1076,14 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_client_delete(self, operator, target, params)
 
+    async def user_logout(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``keycloak.user.logout`` (#3851)."""
+        from meho_backplane.connectors.keycloak.ops_write import keycloak_user_logout
+
+        return await keycloak_user_logout(self, operator, target, params)
+
     # -- typed-op registrar (G3.13-T2 #1394 fills the read-op walk) ------
 
     @classmethod
@@ -1104,7 +1112,7 @@ class KeycloakConnector(HttpConnector):
         ``user.reset_password`` / ``role_mapping.assign``) onto the same
         walk — every write registers ``requires_approval=True``. #3944 adds
         the destructive ``user.delete`` / ``group.delete`` /
-        ``client.delete``.
+        ``client.delete``. #3851 adds ``user.logout``.
         """
         # Lazy imports: the operations package pulls in the embedding
         # pipeline (ONNX runtime + a 100 MB+ model on first touch) that a

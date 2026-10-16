@@ -10,6 +10,9 @@ Two contracts:
 * **Happy path (operator)** — create → list → show → revoke round-trips,
   and the create-time review rejects a delete-shaped op / a wildcard with
   HTTP 422.
+* **Revoke reason (#3489)** — an optional ``reason`` on revoke lands on
+  the grant row (``revoked_reason``) and on the ``service_grant.revoke``
+  audit row payload, the same way create records its ``reason``.
 """
 
 from __future__ import annotations
@@ -21,10 +24,13 @@ from typing import Any
 import pytest
 import respx
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 import meho_backplane.audit as _audit_module
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import AuditLog
 from meho_backplane.main import app
 from meho_backplane.settings import get_settings
 
@@ -210,3 +216,100 @@ def test_create_rejects_target_id_with_selector(client: TestClient) -> None:
         }
         response = client.post(_BASE, headers=headers, json=body)
     assert response.status_code == 422, response.text
+
+
+def _create_grant(client: TestClient, headers: dict[str, str], op_id: str) -> str:
+    body = {
+        "principal_sub": "svc:deploy-bot",
+        "op_id": op_id,
+        "connector_id": "vmware-rest-9.0",
+        "reason": "unattended build",
+    }
+    created = client.post(_BASE, headers=headers, json=body)
+    assert created.status_code == 201, created.text
+    return str(created.json()["id"])
+
+
+async def _revoke_audit_payload(grant_id: str) -> dict[str, Any]:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(AuditLog).where(
+                        AuditLog.method == "DELETE",
+                        AuditLog.path == f"{_BASE}/{grant_id}",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    assert rows[0].status_code == 204
+    return dict(rows[0].payload)
+
+
+@pytest.mark.asyncio
+async def test_revoke_reason_lands_on_grant_row_and_audit_row(client: TestClient) -> None:
+    """A revoke reason round-trips onto ``revoked_reason`` and the audit payload."""
+    key = make_rsa_keypair("kid-rev-reason")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key, role=TenantRole.OPERATOR)}"}
+        grant_id = _create_grant(client, headers, "vmware.composite.vm.snapshot")
+
+        revoked = client.delete(
+            f"{_BASE}/{grant_id}", headers=headers, params={"reason": "bot retired"}
+        )
+        assert revoked.status_code == 204, revoked.text
+
+        after = client.get(f"{_BASE}/{grant_id}", headers=headers)
+        assert after.status_code == 200
+        assert after.json()["revoked_reason"] == "bot retired"
+
+        history = client.get(_BASE, headers=headers, params={"include_revoked": "true"})
+        by_id = {g["id"]: g for g in history.json()["grants"]}
+        assert by_id[grant_id]["revoked_reason"] == "bot retired"
+
+    payload = await _revoke_audit_payload(grant_id)
+    assert payload["op_id"] == "service_grant.revoke"
+    assert payload["reason"] == "bot retired"
+
+
+@pytest.mark.asyncio
+async def test_revoke_without_reason_stays_valid(client: TestClient) -> None:
+    """No reason → 204, ``revoked_reason`` is null, and the audit payload has no reason."""
+    key = make_rsa_keypair("kid-rev-noreason")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key, role=TenantRole.OPERATOR)}"}
+        grant_id = _create_grant(client, headers, "vmware.composite.vm.clone")
+
+        revoked = client.delete(f"{_BASE}/{grant_id}", headers=headers)
+        assert revoked.status_code == 204, revoked.text
+
+        after = client.get(f"{_BASE}/{grant_id}", headers=headers)
+        assert after.json()["revoked_at"] is not None
+        assert after.json()["revoked_reason"] is None
+
+    payload = await _revoke_audit_payload(grant_id)
+    assert payload["op_id"] == "service_grant.revoke"
+    assert "reason" not in payload
+
+
+@pytest.mark.parametrize("reason", ["", "x" * 2049])
+def test_revoke_rejects_empty_or_too_long_reason(client: TestClient, reason: str) -> None:
+    """The revoke reason uses the same 1..2048 length rule as the create reason."""
+    key = make_rsa_keypair("kid-rev-badreason")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key, role=TenantRole.OPERATOR)}"}
+        grant_id = _create_grant(client, headers, "vmware.composite.vm.migrate")
+
+        response = client.delete(f"{_BASE}/{grant_id}", headers=headers, params={"reason": reason})
+        assert response.status_code == 422, response.text
+
+        # The grant is still live: a rejected revoke changes nothing.
+        after = client.get(f"{_BASE}/{grant_id}", headers=headers)
+        assert after.json()["revoked_at"] is None

@@ -192,3 +192,38 @@ func TestCreateWiresTargetSelector(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestRevokeWiresOptionalReason(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		args      []string
+		wantQuery string
+	}{
+		{name: "with reason", args: []string{"--reason", "bot retired"}, wantQuery: "reason=bot+retired"},
+		{name: "without reason", args: nil, wantQuery: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodDelete || r.URL.Path != "/api/v1/service-principals/grants/"+testGrantID {
+					t.Fatalf("route: %s %s", r.Method, r.URL.Path)
+				}
+				if r.URL.RawQuery != tc.wantQuery {
+					t.Fatalf("query: got %q want %q", r.URL.RawQuery, tc.wantQuery)
+				}
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer srv.Close()
+			seedCredentials(t, srv.URL)
+			cmd := NewGrantsCmd()
+			cmd.SetArgs(append([]string{"revoke", testGrantID, "--confirm", "--json"}, tc.args...))
+			var stdout bytes.Buffer
+			cmd.SetOut(&stdout)
+			if err := cmd.Execute(); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(stdout.String(), `"status": "revoked"`) {
+				t.Errorf("output: %s", stdout.String())
+			}
+		})
+	}
+}

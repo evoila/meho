@@ -5303,6 +5303,9 @@ class ServicePrincipalGrant(Base):
         default=None,
     )
     revoked_by_sub: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Optional reason the operator gave when revoking (#3489). NULL when the
+    # revoke carried no reason, and on every live row.
+    revoked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         Index(

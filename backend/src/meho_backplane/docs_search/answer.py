@@ -187,7 +187,10 @@ async def answer_docs_question(
     both paths: the upstream answer call carries the soft ``scope`` or the
     hard ``filters`` (or neither), and each search of the local pipeline
     applies the same rule. ``docs_ask_completed`` records the *requested*
-    values and ``scope_forwarded`` (``"soft"``, ``"filters"`` or ``"none"``).
+    values, ``scope_forwarded`` (``"soft"``, ``"filters"`` or ``"none"``),
+    and the scope's ``scope_source`` and ``target`` name (#3920). A named
+    target's fingerprint default (:meth:`DocsScope.default_scope`) rides the
+    same gate, soft scope only.
 
     The caller has already resolved, entitled and readiness-checked
     *collection* and bound the audit row; this never touches either.
@@ -226,6 +229,8 @@ async def answer_docs_question(
             product=scope.product,
             version=scope.version,
             scope_forwarded=forwarded.mode,
+            scope_source=scope.source,
+            target=scope.target,
             **ask_log_fields(
                 answer_source=outcome.answer_source,
                 hits=outcome.retrieved_chunks,

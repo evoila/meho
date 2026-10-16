@@ -280,7 +280,7 @@ jobs:
         # dropped this upload on every red scan; the explicit `!cancelled()`
         # opts out of that default and the outcome check restores the PR skip.
         if: ${{ !cancelled() && steps.trivy.outcome != 'skipped' }}
-        uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd  # v4.38.1
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
         with:
           sarif_file: trivy-results.sarif
           # Category disambiguates this run when other SARIF sources (e.g.
@@ -295,7 +295,7 @@ jobs:
         # Security-tab upload above: publishes on a red scan, skips on the
         # pull_request path where the scan step never ran.
         if: ${{ !cancelled() && steps.trivy.outcome != 'skipped' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: trivy-results
           path: trivy-results.sarif
@@ -395,7 +395,7 @@ jobs:
         # even before the attest step runs. We *also* pass `output-file:` so
         # the file lives at a predictable path for the cosign attest step.
         if: github.event_name != 'pull_request'
-        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26  # v0.24.2
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c  # v0.24.3
         with:
           image: ghcr.io/evoila/meho@${{ steps.build.outputs.digest }}
           format: spdx-json

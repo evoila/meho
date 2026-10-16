@@ -296,6 +296,8 @@ async def test_revoke_is_soft_delete_and_allows_regrant() -> None:
     assert revoked is not None
     assert revoked.revoked_at is not None
     assert revoked.revoked_by_sub == "op-revoker"
+    # No reason given → no reason stored (a reason is optional on revoke).
+    assert revoked.revoked_reason is None
 
     # Re-revoking an already-revoked grant is a no-op → False (404 at the boundary).
     assert await svc.revoke(_TENANT_ID, entry.id, "op-revoker") is False
@@ -303,6 +305,18 @@ async def test_revoke_is_soft_delete_and_allows_regrant() -> None:
     # The scope is free again: a fresh grant for the same key is accepted.
     again = await svc.create(_TENANT_ID, _CREATOR, _payload(op_id=op))
     assert again.id != entry.id
+
+
+@pytest.mark.asyncio
+async def test_revoke_stores_optional_reason() -> None:
+    """A reason passed to revoke is stored as ``revoked_reason`` on the row (#3489)."""
+    svc = ServicePrincipalGrantService()
+    entry = await svc.create(_TENANT_ID, _CREATOR, _payload(op_id="vmware.composite.vm.update"))
+
+    assert await svc.revoke(_TENANT_ID, entry.id, "op-revoker", reason="bot retired") is True
+    revoked = await svc.get(_TENANT_ID, entry.id)
+    assert revoked is not None
+    assert revoked.revoked_reason == "bot retired"
 
 
 @pytest.mark.asyncio

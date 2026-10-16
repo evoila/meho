@@ -2968,6 +2968,8 @@ type BoolCompare struct {
 // BroadcastAnnounceRequest The REST representation of a governed agent announcement.
 type BroadcastAnnounceRequest struct {
 	Activity       string                                  `json:"activity"`
+	ClaimId        *openapi_types.UUID                     `json:"claim_id"`
+	IdempotencyKey *string                                 `json:"idempotency_key"`
 	Phase          *BroadcastAnnounceRequestPhase          `json:"phase,omitempty"`
 	PlannedOpClass *BroadcastAnnounceRequestPlannedOpClass `json:"planned_op_class"`
 	RunId          *openapi_types.UUID                     `json:"run_id"`
@@ -2985,10 +2987,19 @@ type BroadcastAnnounceRequestPhase string
 type BroadcastAnnounceRequestPlannedOpClass string
 
 // BroadcastAnnounceResponse Acknowledgement with distinct durable event id and stream cursor.
+//
+// “cursor“ is “None“ on an idempotent replay (“replayed=true“),
+// because nothing new was written to the stream.
 type BroadcastAnnounceResponse struct {
-	Cursor         string              `json:"cursor"`
+	ActorSub       *string             `json:"actor_sub"`
+	Admission      string              `json:"admission"`
+	ClaimId        openapi_types.UUID  `json:"claim_id"`
+	Cursor         *string             `json:"cursor"`
 	EventId        openapi_types.UUID  `json:"event_id"`
+	OwnerSub       string              `json:"owner_sub"`
+	Phase          string              `json:"phase"`
 	PlannedOpClass *string             `json:"planned_op_class"`
+	Replayed       bool                `json:"replayed"`
 	RunId          *openapi_types.UUID `json:"run_id"`
 	Targets        *[]string           `json:"targets"`
 	TtlMinutes     *int                `json:"ttl_minutes"`

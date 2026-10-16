@@ -28,7 +28,6 @@ from typing import Any
 
 from pydantic_ai import ModelRetry
 
-from meho_backplane.agent.invoke import current_agent_run_id_var
 from meho_backplane.agent.meta_tool import MetaToolSpec, _MetaToolHandler
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import get_tool
@@ -38,7 +37,6 @@ from meho_backplane.mcp.server import McpInvalidParamsError, McpRateLimitedError
 # ``register_mcp_tool`` calls for ``meho_broadcast_{announce,recent,watch}``,
 # so :func:`get_tool` can resolve their (schema, handler) pairs below.
 from meho_backplane.mcp.tools import broadcast as _broadcast_mcp_tools  # noqa: F401
-from meho_backplane.operations._audit import work_ref_var
 
 __all__ = ["build_broadcast_meta_tools"]
 
@@ -55,10 +53,12 @@ _MCP_BROADCAST_ANNOUNCE = "meho_broadcast_announce"
 _MCP_BROADCAST_RECENT = "meho_broadcast_recent"
 _MCP_BROADCAST_WATCH = "meho_broadcast_watch"
 
-#: Announce arguments the run supplies for itself from the run context, so
-#: they are stripped from the model-facing schema: the run knows its own id
-#: and change-ticket ref, and self-reporting them is both redundant and
-#: spoofable. See :func:`_make_run_scoped_announce`.
+#: Announce arguments the server stamps from the checked hosted run (#3736),
+#: so they are stripped from the model-facing schema: the announce handler
+#: reads the run id from the ambient run context and the work reference
+#: from the run row (:mod:`meho_backplane.auth.agent_admission`). The model
+#: never reports them; a value it sends anyway that differs from the run is
+#: refused.
 _RUN_SCOPED_ANNOUNCE_FIELDS: tuple[str, ...] = ("run_id", "work_ref")
 
 
@@ -122,34 +122,6 @@ def _model_retry_on_mcp_error(handler: _MetaToolHandler) -> _MetaToolHandler:
     return _wrapped
 
 
-def _make_run_scoped_announce(base_handler: _MetaToolHandler) -> _MetaToolHandler:
-    """Wrap the announce handler to stamp the run's identity onto the event.
-
-    A hosted run knows its own ``run_id`` and change-ticket ``work_ref``
-    from the ambient run context (bound by
-    :class:`~meho_backplane.agent.invocation.AgentInvoker` around the loop,
-    and inherited by every tool call in the loop's task — the same
-    ContextVar substrate ``approval_wait`` and the audit writers read). The
-    model neither sees nor supplies these fields; the wrapper injects them
-    so announcements auto-group under the run without the model
-    self-reporting (which would be redundant and spoofable). Absent context
-    (an announce outside a run) leaves the field unset — both are optional
-    on :class:`~meho_backplane.broadcast.agent_events.AgentAnnouncementEvent`.
-    """
-
-    async def _announce(operator: Operator, arguments: dict[str, Any]) -> dict[str, Any]:
-        enriched = dict(arguments)
-        run_id = current_agent_run_id_var.get()
-        if run_id is not None:
-            enriched["run_id"] = str(run_id)
-        run_work_ref = work_ref_var.get()
-        if run_work_ref is not None and "work_ref" not in enriched:
-            enriched["work_ref"] = run_work_ref
-        return await base_handler(operator, enriched)
-
-    return _announce
-
-
 _BROADCAST_ANNOUNCE_DESCRIPTION = (
     "Announce your intent, progress, or completion on the tenant's shared "
     "coordination feed so peer operators and agents can see what you are "
@@ -160,9 +132,13 @@ _BROADCAST_ANNOUNCE_DESCRIPTION = (
     "human-readable summary); `target` / `targets` (managed target name(s) "
     "the work touches); `scope` (free-form hint); `planned_op_class` (the op "
     "class you are about to run, e.g. 'write' / 'credential_read', so peers "
-    "can gauge risk); `ttl_minutes` (1..1440, how long the claim stays "
-    "active); `phase` ('start' / 'update' / 'completion', default 'update'). "
-    "Your run's id is attached automatically -- do not report it yourself."
+    "can gauge risk); `ttl_minutes` (1..1440, default 30, how long the claim "
+    "stays active); `phase` ('start' / 'update' / 'completion', default "
+    "'start'). A 'start' returns a `claim_id`; send that `claim_id` and a "
+    "fresh `idempotency_key` with each 'update' and the final 'completion'. "
+    "A claim is advisory: it tells peers what you intend, it does not lock "
+    "anything. Your run's id and work reference are attached by the server "
+    "-- do not report them yourself."
 )
 
 _BROADCAST_RECENT_DESCRIPTION = (
@@ -195,7 +171,7 @@ def build_broadcast_meta_tools() -> tuple[MetaToolSpec, ...]:
     Each entry reuses the MCP handler verbatim (wrapped so handler-side
     errors reach the model as :class:`ModelRetry`); the read tools publish
     the MCP tool's wire schema as-is, and announce publishes it minus the
-    run-scoped fields the wrapper injects. ``OPERATOR`` floor matches the MCP
+    run-scoped fields the server stamps from the hosted run. ``OPERATOR`` floor matches the MCP
     tools' ``required_role`` — the same identity gate every broadcast surface
     uses.
     """
@@ -210,7 +186,7 @@ def build_broadcast_meta_tools() -> tuple[MetaToolSpec, ...]:
     return (
         MetaToolSpec(
             name=_BROADCAST_ANNOUNCE,
-            handler=_model_retry_on_mcp_error(_make_run_scoped_announce(announce_handler)),
+            handler=_model_retry_on_mcp_error(announce_handler),
             description=_BROADCAST_ANNOUNCE_DESCRIPTION,
             parameter_schema=announce_schema,
             required_role=TenantRole.OPERATOR,

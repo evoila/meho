@@ -47,7 +47,6 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast import (
     ACTIVITY_MAX_CHARS,
     BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL,
-    AgentAnnouncementEvent,
     dispose_broadcast_client,
     get_broadcast_client,
     publish_agent_announcement,
@@ -60,6 +59,7 @@ from meho_backplane.mcp.tools.broadcast import (
 )
 from meho_backplane.settings import get_settings
 from meho_backplane.untrusted_text import wrap_untrusted_text
+from tests.broadcast_admission_helpers import patch_agent_admission, trusted_event
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     build_operator,
@@ -122,6 +122,10 @@ def _disable_announce_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
         "meho_backplane.mcp.tools.broadcast.enforce_announce_rate_limit",
         AsyncMock(return_value=None),
     )
+    # Publishing needs a trusted agent identity (#3736). These wire tests
+    # are not about admission, so every caller is admitted as an agent
+    # principal; admission is tested in test_broadcast_agent_admission.py.
+    patch_agent_admission(monkeypatch)
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +204,7 @@ def test_tools_list_exposes_announce_for_operator(
     assert schema["properties"]["activity"]["minLength"] == 1
     # Phase enum exposed verbatim.
     assert schema["properties"]["phase"]["enum"] == ["start", "update", "completion"]
-    assert schema["properties"]["phase"]["default"] == "update"
+    assert schema["properties"]["phase"]["default"] == "start"
 
 
 def test_tools_list_hides_announce_from_read_only(
@@ -486,13 +490,7 @@ async def test_publish_agent_announcement_propagates_exception() -> None:
 
     from redis import exceptions as redis_exceptions
 
-    event = AgentAnnouncementEvent(
-        tenant_id=OPERATOR_TENANT_ID,
-        principal_sub="op-test",
-        activity="investigating",
-        phase="start",
-        ts=datetime.now(UTC),
-    )
+    event = trusted_event(tenant_id=OPERATOR_TENANT_ID, ts=datetime.now(UTC))
     bc = get_broadcast_client()
     with (
         patch.object(
@@ -561,15 +559,16 @@ def test_metric_increments_per_phase(
     """
     client, _op = client_with_operator
     bc = get_broadcast_client()
-    baseline = _counter_value(BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL, phase=phase_label)
     with patch.object(bc, "xadd", new=AsyncMock(return_value="1747800000000-0")):
-        post_mcp(
-            client,
-            _tools_call(
-                "meho_broadcast_announce",
-                {"activity": "x", "phase": phase_label},
-            ),
-        )
+        arguments: dict[str, Any] = {"activity": "x", "phase": phase_label}
+        if phase_label != "start":
+            # update / completion continue a claim: open one first.
+            opened = _result_dict(
+                post_mcp(client, _tools_call("meho_broadcast_announce", {"activity": "x"}))
+            )
+            arguments |= {"claim_id": opened["claim_id"], "idempotency_key": f"k-{phase_label}"}
+        baseline = _counter_value(BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL, phase=phase_label)
+        post_mcp(client, _tools_call("meho_broadcast_announce", arguments))
     after = _counter_value(BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL, phase=phase_label)
     assert after - baseline == 1
 
@@ -579,19 +578,19 @@ def test_metric_increments_per_phase(
     [TenantRole.OPERATOR],
     indirect=True,
 )
-def test_phase_defaults_to_update(
+def test_phase_defaults_to_start(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """When ``phase`` is omitted the publish credits the ``update`` counter."""
+    """When ``phase`` is omitted the publish opens a claim (#3736: default ``start``)."""
     client, _op = client_with_operator
     bc = get_broadcast_client()
-    baseline = _counter_value(BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL, phase="update")
+    baseline = _counter_value(BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL, phase="start")
     with patch.object(bc, "xadd", new=AsyncMock(return_value="1747800000000-0")):
         post_mcp(
             client,
             _tools_call("meho_broadcast_announce", {"activity": "investigating"}),
         )
-    assert _counter_value(BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL, phase="update") - baseline == 1
+    assert _counter_value(BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL, phase="start") - baseline == 1
 
 
 @pytest.mark.parametrize(

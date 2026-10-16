@@ -942,21 +942,26 @@ async def test_full_result_cache_does_not_block_broadcast(
         lambda: SimpleNamespace(broadcast_announce_rate_per_minute=10),
     )
     monkeypatch.setattr(publisher_module, "get_broadcast_client", lambda: shared)
-    monkeypatch.setattr(publisher_module, "_persist_agent_announcement", AsyncMock())
+    monkeypatch.setattr(
+        publisher_module, "_persist_agent_announcement", AsyncMock(return_value=None)
+    )
 
     await enforce_announce_rate_limit(tenant, "op-a")
-    entry_id = await publish_agent_announcement(
+    result = await publish_agent_announcement(
         AgentAnnouncementEvent(
             tenant_id=tenant,
             principal_sub="op-a",
             activity="investigating",
             phase="start",
             ts=datetime.now(UTC),
+            claim_id=uuid4(),
+            owner_sub="agent:op-a",
+            admission="agent_principal",
         )
     )
 
     assert list(shared.counters.values()) == [1]
-    assert entry_id == "1700000000000-0"
+    assert result.cursor == "1700000000000-0"
     assert [len(entries) for entries in shared.streams.values()] == [1]
 
 

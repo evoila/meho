@@ -113,6 +113,7 @@ __all__ = [
     "list_recent_events_strict",
     "parse_entry",
     "parse_since",
+    "row_to_announcement",
     "select_event_model",
     "stream_key",
 ]
@@ -633,7 +634,7 @@ def _stream_oldest_dt(raw_entries: list[tuple[str, dict[str, str]]]) -> datetime
     return datetime.fromtimestamp(int(ms_part) / 1000, UTC)
 
 
-def _row_to_announcement(row: AgentAnnouncement) -> AgentAnnouncementEvent:
+def row_to_announcement(row: AgentAnnouncement) -> AgentAnnouncementEvent:
     """Reconstruct an :class:`AgentAnnouncementEvent` from a durable row.
 
     Uses :meth:`pydantic.BaseModel.model_validate` (not the typed
@@ -662,6 +663,10 @@ def _row_to_announcement(row: AgentAnnouncement) -> AgentAnnouncementEvent:
             "run_id": row.run_id,
             "phase": row.phase,
             "ts": created_at,
+            "claim_id": row.claim_id,
+            "owner_sub": row.owner_sub,
+            "actor_sub": row.actor_sub,
+            "admission": row.admission,
         }
     )
 
@@ -745,7 +750,7 @@ async def _backfill_recent_from_db(
     for row in reversed(rows):
         if str(row.id) in seen_event_ids:
             continue
-        event = _row_to_announcement(row)
+        event = row_to_announcement(row)
         if not event_matches(
             event,
             op_class=op_class,

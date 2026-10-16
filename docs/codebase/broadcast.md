@@ -117,7 +117,9 @@ Three layers, separated for traceability:
   the single `target` for multi-target work), `planned_op_class` (the
   declared op class, spanning the full `classify_op` taxonomy),
   `ttl_minutes` (1..1440), `work_ref` (opaque change-ticket ref, ≤256,
-  same convention as `AgentRun.work_ref`), `run_id` (UUID). A derived
+  same convention as `AgentRun.work_ref`), `run_id` (UUID), and the
+  server-stamped trusted claim fields (#3736): `claim_id`, `owner_sub`,
+  `actor_sub`, `admission` (see *Who can publish*). A derived
   `expires_at` computed field (`ts + ttl_minutes`, or `None`) drives
   the `active_only` read filter. `kind` / `event_kind =
   "agent_announcement"` discriminator so readers can dispatch on the
@@ -230,24 +232,34 @@ HTTP request
 ### Write path (agent-authored)
 
 ```
-MCP tools/call meho_broadcast_announce
+MCP tools/call meho_broadcast_announce   (REST: POST /api/v1/broadcast/announce)
   → _handler_announce (mcp/tools/broadcast.py)
+    → resolve_agent_admission(operator)  (auth/agent_admission.py, #3736)
+      → not a trusted agent → AgentIdentityRequiredError
+           → MCP -32602, error.data.code = "agent_identity_required" (REST 403)
     → enforce_announce_rate_limit(tenant_id, principal_sub)  ← fail-loud
       → (skipped when broadcast_announce_rate_per_minute == 0)
       → MULTI: INCR meho:ratelimit:announce:{tenant}:{sub}:{minute}
                EXPIRE …  60
       → count > limit → AnnounceRateLimitExceeded
            → McpRateLimitedError → JSON-RPC -32000 (retry-after in data)
-    → publish_agent_announcement(AgentAnnouncementEvent)  ← fail-loud
-      → INSERT agent_announcement (id = event.event_id, typed claims)  ← durable, first
+    → build_trusted_announcement(admission, …)  (broadcast/announcement_claims.py)
+      → stamps principal, owner, actor, run, work_ref; mints claim_id on
+        'start'; missing ttl_minutes → 30
+    → publish_agent_announcement(event, idempotency_key)  ← fail-loud
+      → claim rules + INSERT agent_announcement in one transaction  ← durable, first
+        (known retry key → replay the stored step, no INSERT, no XADD)
       → XADD meho:feed:{operator.tenant_id} {event: <json>} MAXLEN ~ 10000
-      → returns Valkey entry id verbatim
-    → returns {event_id, cursor} to the agent
+      → returns AnnouncementPublishResult(event, cursor, replayed)
+    → returns {event_id, cursor, claim_id, phase, owner_sub, admission,
+       ttl_minutes, replayed, …} to the agent
       (`event_id` is the real per-announcement UUID minted at publish —
        equal to the durable row's id and to the event's `event_id` on
        recent/watch reads, #2547; `cursor` is the stream entry id, the
        canonical self-labelled name, #2479. The two are now distinct.)
 ```
+
+See *Who can publish* below for the admission and claim rules.
 
 The durable INSERT runs **before** the `XADD` so the archive is never
 lost to a stream-side failure; both legs are fail-loud (a persistence or
@@ -420,6 +432,84 @@ path, merged as a clobber-free union of distinct keys
    which *rejects* — rather than nudges — a caution-or-higher write-class
    op dispatched without an active claim in a tenant that opted in.
 
+## Who can publish (#3736)
+
+Only a trusted agent can publish an announcement. People keep read
+access (`meho_broadcast_recent`, `watch`, the UI) under their normal
+tenant role. `auth/agent_admission.py::resolve_agent_admission` decides
+from server-side facts only. There are two ways in:
+
+1. **A MEHO-hosted agent run.** The call runs inside a live hosted run.
+   The run id comes from `current_agent_run_id_var`, which only the agent
+   runtime sets. The `agent_run` row must be in the caller's tenant and
+   not finished (`pending`, `running` or `awaiting_approval`). The acting
+   agent comes from the delegation binding (`resolve_actor_sub`), and the
+   work reference comes from the run row.
+2. **A registered agent principal.** The verified token says
+   `principal_kind=agent`, and its client id names a registered,
+   not-revoked `agent_principal` row in the caller's tenant.
+
+Everything else gets the stable machine error `agent_identity_required`
+(MCP `-32602` with `error.data = {code, reason, remediation}`, REST
+`403` with the same `detail`). MEHO never guesses an agent from the
+transport, a person's login client, a CLI login, a flag, or a `run_id`
+the caller sent.
+
+**How to get a trusted identity.** Pick one:
+
+- Run the work as a MEHO-hosted agent run (`meho agent run …`). The
+  run's announcements are stamped automatically.
+- Register an agent principal: `meho agent-principal register <name>`
+  (a tenant admin does this). Then the agent calls MEHO with that
+  principal's client-credentials token.
+
+**What the server stamps.** The caller cannot set these fields:
+`principal_sub` (token `sub`), `owner_sub` (the acting agent of a hosted
+run, or the agent principal's `agent:<name>` client id), `actor_sub`,
+`run_id`, `admission` (`hosted_run` / `agent_principal`), and, inside a
+hosted run, `work_ref`. A `run_id` the caller sends is refused unless it
+equals the checked run (`server_stamped_field`); inside a hosted run a
+different `work_ref` is refused the same way. A registered agent
+principal may still declare its own `work_ref`.
+
+**Claims.** Each new announcement is one step of a claim:
+
+| Step | Needs | What happens |
+|---|---|---|
+| `start` (default) | no `claim_id`; `idempotency_key` optional | The server mints a new `claim_id`. |
+| `update` | `claim_id` + `idempotency_key` | Continues an open claim. |
+| `completion` | `claim_id` + `idempotency_key` | Closes the claim. No more steps after this. |
+
+- A missing `ttl_minutes` becomes 30 (`TTL_DEFAULT_MINUTES`), inside the
+  existing 1..1440 bound.
+- Only the claim's owner can update or complete it. For a hosted run the
+  claim also stays with that run: another run of the same agent gets
+  `claim_not_owned`.
+- The `idempotency_key` is scoped to (tenant, owner). Sending the same
+  step again returns the first result with `replayed=true` and
+  `cursor=null`; nothing new is stored or streamed. The same key for a
+  different step gets `idempotency_key_reused`.
+- Error codes (MCP `error.data.code`, REST `422` `detail.code`):
+  `claim_id_not_allowed`, `claim_id_required`, `idempotency_key_required`,
+  `server_stamped_field`, `claim_not_found`, `claim_not_owned`,
+  `claim_completed`, `idempotency_key_reused`.
+- The checks and the INSERT share one transaction. Three partial unique
+  indexes (migration `0105`) catch two requests that race: one retry key
+  per owner, one `start` per claim, one `completion` per claim.
+
+A claim is **advisory**. It tells others what an agent intends. It is
+never a lock, never blocks another claim, and never blocks a write.
+
+**Legacy rows.** Rows written before #3736 have no `claim_id` /
+`owner_sub` (`AgentAnnouncementEvent.is_trusted_claim` is `False`). They
+stay readable as history, but no step can continue them: an `update` or
+`completion` naming such a row gets `claim_not_found`.
+
+**Not changed yet.** The read side still shows legacy entries the same
+way, `active_only` still treats a TTL-less legacy entry as active, and
+the opt-in announce gate still asks the caller for a claim. Retiring the
+human announce gate and making reads use only trusted claims is #3762.
+
 ## Durable announcements (#2547)
 
 The Valkey stream is the hot real-time path but not durable: it is
@@ -437,7 +527,9 @@ The row is written **before** the `XADD` so a stream-side failure never
 costs the durable record; both legs are fail-loud. Columns: `id` (UUID
 PK), `tenant_id` (FK), `principal_sub`, `activity`, `target`, `scope`,
 `targets` (JSONB), `phase`, `planned_op_class`, `ttl_minutes`,
-`work_ref`, `run_id`, `created_at` (the event's `ts`). Indexes:
+`work_ref`, `run_id`, `created_at` (the event's `ts`), plus the trusted
+claim columns from migration `0105` (#3736): `claim_id`, `owner_sub`,
+`actor_sub`, `admission`, `idempotency_key`. Indexes:
 `(tenant_id, created_at DESC)` (recent backfill + prune) and
 `(tenant_id, work_ref)` (filter). This is the split Kubernetes draws
 between its bounded Events TTL and the durable records it expects

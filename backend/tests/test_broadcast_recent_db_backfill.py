@@ -119,6 +119,7 @@ async def test_publish_persists_durable_row_keyed_on_event_uuid() -> None:
     """The publisher writes one durable row keyed on the event's UUID."""
     tenant_id = await _seed_tenant()
     run_id = uuid.uuid4()
+    claim_id = uuid.uuid4()
     event = AgentAnnouncementEvent(
         tenant_id=tenant_id,
         principal_sub="op-1",
@@ -132,13 +133,18 @@ async def test_publish_persists_durable_row_keyed_on_event_uuid() -> None:
         run_id=run_id,
         phase="start",
         ts=datetime.now(UTC),
+        claim_id=claim_id,
+        owner_sub="agent:op-1",
+        actor_sub="agent:op-1",
+        admission="hosted_run",
     )
     bc = get_broadcast_client()
     with patch.object(bc, "xadd", new=AsyncMock(return_value="1747800000000-0")):
-        returned_cursor = await publish_agent_announcement(event)
+        result = await publish_agent_announcement(event, idempotency_key="key-1")
 
-    # Return value stays the stream cursor; the durable id is the UUID.
-    assert returned_cursor == "1747800000000-0"
+    # The result carries the stream cursor; the durable id is the UUID.
+    assert result.cursor == "1747800000000-0"
+    assert result.replayed is False
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         row = await session.get(AgentAnnouncement, event.event_id)
@@ -155,6 +161,12 @@ async def test_publish_persists_durable_row_keyed_on_event_uuid() -> None:
     assert row.work_ref == "gh:evoila/meho#123"
     assert row.run_id == run_id
     assert row.phase == "start"
+    # #3736 trusted claim columns.
+    assert row.claim_id == claim_id
+    assert row.owner_sub == "agent:op-1"
+    assert row.actor_sub == "agent:op-1"
+    assert row.admission == "hosted_run"
+    assert row.idempotency_key == "key-1"
 
 
 # ---------------------------------------------------------------------------

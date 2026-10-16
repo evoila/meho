@@ -920,10 +920,12 @@ meho broadcast announce <activity> [flags]
 ```
 
 - `--backplane` — backplane URL
+- `--claim-id` — claim UUID returned by the start (needed for update and completion)
+- `--idempotency-key` — retry key for this step (needed for update and completion)
 - `--json` — emit JSON
 - `--phase` — start, update, or completion
 - `--planned-op-class` — declared operation class
-- `--run-id` — agent run UUID
+- `--run-id` — deprecated: the server sets the agent run
 - `--scope` — announcement scope
 - `--target` — target name
 - `--targets` — target names

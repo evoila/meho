@@ -888,8 +888,13 @@ the row changed under it: another retry expired it and parked a replacement,
 or a sweep, reject or approve got there first. `_resolve_idempotent_request`
 then looks the key up again and returns what holds it now, for example the
 replacement as a reused request. It never returns the expired row it read
-first. `tests/integration/test_approval_idempotent_retry_pg.py` runs this
-race on a real Postgres.
+first. That second lookup refreshes the row the session already holds
+(`populate_existing`). This matters when an approve commits while the late
+retry waits for the lock: the row is now `approved`, and the retry returns
+it. With the cached `pending` state it would try to expire the row again,
+miss again, and never return.
+`tests/integration/test_approval_idempotent_retry_pg.py` runs both races
+(two late retries; a late retry against an approve) on a real Postgres.
 
 **What does not change.** The lookup runs inside `create_pending_request`,
 after every park gate in `_handle_needs_approval`. So a retry still goes
@@ -951,7 +956,7 @@ get the same request back. Then watch `result_state` on `GET
 **Pinned by tests:** `tests/test_approval_idempotent_park.py` (retry,
 scoping, conflict, race, `result_state` on the REST list and show after both
 resume paths), `tests/integration/test_approval_idempotent_retry_pg.py` (two
-late retries on a real Postgres) and
+late retries, and a late retry against an approve, on a real Postgres) and
 `tests/migrations/test_migration_0105_add_approval_request_idempotency_key.py`.
 
 ## `proposed_effect` builder hook (#1437)

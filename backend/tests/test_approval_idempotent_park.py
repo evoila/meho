@@ -27,6 +27,7 @@ second approval request. This suite pins:
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -486,6 +487,60 @@ async def test_retry_that_loses_the_expiry_race_gets_the_replacement(
             .all()
         )
     assert len(decisions) == 1
+
+
+@pytest.mark.asyncio
+async def test_late_retry_that_waits_on_an_approval_gets_the_approved_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A late retry that waited for an approve must return the approved row.
+
+    Sequence: the retry reads its ``pending`` row past the deadline. Before
+    it can lock the row, an approve (started before the deadline) commits.
+    The locked re-read then finds no ``pending`` row. The retry looks the
+    key up again and must see the row as ``approved``, not the ``pending``
+    state its session cached on the first read. With the stale state it
+    would try to expire the row again, miss again, and never return.
+    """
+    first = await _park_direct()
+    assert first.expires_at is not None
+    late: datetime = first.expires_at + timedelta(seconds=1)
+    real_now = approval_queue_module._now
+    clock = {"now": real_now}
+    monkeypatch.setattr(approval_queue_module, "_now", lambda: clock["now"]())
+
+    real_lock = approval_queue_module._lock_and_expire_pending
+    approved = {"n": 0}
+
+    async def _approve_then_lock(*args: Any, **kwargs: Any) -> ApprovalRequest | None:
+        if approved["n"] == 0:
+            approved["n"] += 1
+            clock["now"] = real_now
+            async with get_sessionmaker()() as s:
+                await approve_request(s, first.id, operator=_operator(sub="op-reviewer"))
+                await s.commit()
+            clock["now"] = lambda: late
+        return await real_lock(*args, **kwargs)
+
+    monkeypatch.setattr(approval_queue_module, "_lock_and_expire_pending", _approve_then_lock)
+    clock["now"] = lambda: late
+
+    retry = await asyncio.wait_for(_park_direct(), timeout=10)
+
+    assert retry.id == first.id
+    assert retry.status == ApprovalRequestStatus.APPROVED.value
+    assert getattr(retry, "_reused", False) is True
+    assert getattr(retry, "_expired_request", None) is None
+    assert approved["n"] == 1
+    assert await _approval_row_count() == 1
+    assert await _request_audit_count() == 1
+    async with get_sessionmaker()() as s:
+        decisions = (
+            (await s.execute(select(AuditLog).where(AuditLog.path == "approval.decision")))
+            .scalars()
+            .all()
+        )
+    assert [d.payload.get("decision") for d in decisions] == ["approved"]
 
 
 # ---------------------------------------------------------------------------

@@ -602,12 +602,22 @@ async def _find_idempotent_request(
 
     Scoped to the tenant **and** the principal, so a key never matches
     another tenant's or another requester's request.
+
+    ``populate_existing`` refreshes a row the session already holds. The
+    retry loop in :func:`_resolve_idempotent_request` calls this again after
+    its locked re-read missed; by then the row may have been approved on
+    another connection. Without the refresh the session would keep the
+    cached ``pending`` state, treat the row as overdue again, and loop.
     """
-    stmt = select(ApprovalRequest).where(
-        ApprovalRequest.tenant_id == tenant_id,
-        ApprovalRequest.principal_sub == principal_sub,
-        ApprovalRequest.idempotency_key == idempotency_key,
-        ApprovalRequest.status.in_(_IDEMPOTENT_LIVE_STATUSES),
+    stmt = (
+        select(ApprovalRequest)
+        .where(
+            ApprovalRequest.tenant_id == tenant_id,
+            ApprovalRequest.principal_sub == principal_sub,
+            ApprovalRequest.idempotency_key == idempotency_key,
+            ApprovalRequest.status.in_(_IDEMPOTENT_LIVE_STATUSES),
+        )
+        .execution_options(populate_existing=True)
     )
     return (await session.execute(stmt)).scalars().first()
 

@@ -22,7 +22,8 @@ Route inventory
   201 on success; 422 on a wildcard, a delete-shaped op, a past expiry, or
   a duplicate active grant. Role: ``operator``.
 * ``DELETE /api/v1/service-principals/grants/{grant_id}`` — revoke
-  (soft-delete). 204 on success; 404 when absent / already revoked /
+  (soft-delete). Query: optional ``reason``, stored on the grant row and
+  on the audit row. 204 on success; 404 when absent / already revoked /
   cross-tenant. Role: ``operator``.
 
 Role: ``operator`` (not ``tenant_admin``) — mirrors the approvals surface,
@@ -155,8 +156,20 @@ async def create_grant(
 async def revoke_grant(
     grant_id: Annotated[UUID, Path()],
     operator: Operator = _require_operator,
+    reason: str | None = Query(
+        default=None,
+        min_length=1,
+        max_length=2048,
+        description="Optional reason for the revoke. Stored on the grant and the audit row.",
+    ),
 ) -> Response:
     """Revoke (soft-delete) a standing grant.
+
+    ``reason`` is optional, so a revoke without one stays valid. When given,
+    it is stored as ``revoked_reason`` on the grant row and as ``reason`` in
+    the audit row payload, the same way create records its ``reason``.
+    It is a query parameter, not a body, because a DELETE body is not well
+    supported by HTTP clients and proxies.
 
     Returns 204 on success; 404 when the grant is absent, already revoked,
     or belongs to another tenant. Audited via the audit middleware.
@@ -164,9 +177,10 @@ async def revoke_grant(
     structlog.contextvars.bind_contextvars(
         audit_op_id=_GRANT_OP_IDS["revoke"],
         audit_op_class="write",
+        audit_reason=reason,
     )
     service = ServicePrincipalGrantService()
-    revoked = await service.revoke(operator.tenant_id, grant_id, operator.sub)
+    revoked = await service.revoke(operator.tenant_id, grant_id, operator.sub, reason=reason)
     if not revoked:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,

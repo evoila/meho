@@ -10445,7 +10445,7 @@
           "service-principal-grants"
         ],
         "summary": "Revoke Grant",
-        "description": "Revoke (soft-delete) a standing grant.\n\nReturns 204 on success; 404 when the grant is absent, already revoked,\nor belongs to another tenant. Audited via the audit middleware.",
+        "description": "Revoke (soft-delete) a standing grant.\n\n``reason`` is optional, so a revoke without one stays valid. When given,\nit is stored as ``revoked_reason`` on the grant row and as ``reason`` in\nthe audit row payload, the same way create records its ``reason``.\nIt is a query parameter, not a body, because a DELETE body is not well\nsupported by HTTP clients and proxies.\n\nReturns 204 on success; 404 when the grant is absent, already revoked,\nor belongs to another tenant. Audited via the audit middleware.",
         "operationId": "revoke_grant_api_v1_service_principals_grants__grant_id__delete",
         "parameters": [
           {
@@ -10457,6 +10457,20 @@
               "format": "uuid",
               "title": "Grant Id"
             }
+          },
+          {
+            "name": "reason",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048,
+              "nullable": true,
+              "description": "Optional reason for the revoke. Stored on the grant and the audit row.",
+              "title": "Reason"
+            },
+            "description": "Optional reason for the revoke. Stored on the grant and the audit row."
           },
           {
             "name": "authorization",
@@ -33468,6 +33482,11 @@
             "type": "string",
             "nullable": true,
             "title": "Revoked By Sub"
+          },
+          "revoked_reason": {
+            "type": "string",
+            "nullable": true,
+            "title": "Revoked Reason"
           }
         },
         "type": "object",
@@ -33485,10 +33504,11 @@
           "created_at",
           "expires_at",
           "revoked_at",
-          "revoked_by_sub"
+          "revoked_by_sub",
+          "revoked_reason"
         ],
         "title": "ServiceGrantRead",
-        "description": "Row shape every accessor returns.\n\n``from_attributes=True`` allows direct construction from an ORM row.\nExposes ``revoked_at`` / ``revoked_by_sub`` so callers can tell a live\ngrant from a revoked one in the history."
+        "description": "Row shape every accessor returns.\n\n``from_attributes=True`` allows direct construction from an ORM row.\nExposes ``revoked_at`` / ``revoked_by_sub`` / ``revoked_reason`` so\ncallers can tell a live grant from a revoked one in the history, and why\nit was revoked."
       },
       "ShowTemplateResponse": {
         "properties": {

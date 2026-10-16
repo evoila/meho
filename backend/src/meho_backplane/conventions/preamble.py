@@ -258,7 +258,10 @@ async def _fetch_operational_conventions(
     Extracted helper shared by :func:`assemble_preamble_detailed`'s
     two code paths -- when it owns a session vs. when the caller
     passes one in. Centralises the ORDER BY contract (``priority
-    DESC, created_at ASC``) so the two paths cannot drift.
+    DESC, created_at ASC, id ASC``) so the two paths cannot drift.
+    The ``id`` tiebreak makes the order total: two rows with the same
+    priority and creation time pack in the same order here and in
+    the convention index (#3755), so both report the same inclusion.
     """
     result = await session.execute(
         select(TenantConvention)
@@ -274,6 +277,7 @@ async def _fetch_operational_conventions(
         .order_by(
             TenantConvention.priority.desc(),
             TenantConvention.created_at.asc(),
+            TenantConvention.id.asc(),
         ),
     )
     return list(result.scalars().all())

@@ -45,17 +45,23 @@ from typing import Any
 from uuid import UUID
 
 import msgspec
+import pyarrow as pa
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.result_handle_store import get_result_handle_store
 from meho_backplane.jsonflux.query.contract import (
     RESULT_TABLE,
+    ROW_ORDINAL,
     CompiledQuery,
     QueryContractError,
     ResultQuerySpec,
     compile_query,
 )
 from meho_backplane.jsonflux.query.engine import QueryEngine
+from meho_backplane.jsonflux.query.result_catalog import (
+    ResultFieldCatalog,
+    _build_catalog_from_admitted,
+)
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -221,14 +227,28 @@ class ResultQueryOutputTooLargeError(Exception):
         )
 
 
-def _known_columns(engine: QueryEngine) -> dict[str, str]:
-    """Return exact registered handle column names mapped to DuckDB types.
+#: Arrow type for each catalog scalar family in the explicit projection.
+_FAMILY_ARROW_TYPES: dict[str, pa.DataType] = {
+    "boolean": pa.bool_(),
+    "integer": pa.int64(),
+    "number": pa.float64(),
+    "string": pa.string(),
+}
 
-    The contract compiler validates every referenced field against this set,
-    so an unknown field is rejected before any SQL runs.
+
+def _project_rows(rows: list[dict[str, Any]], catalog: ResultFieldCatalog) -> pa.Table:
+    """Build the relational table the compiled ``SELECT`` runs over.
+
+    One typed column per queryable catalog field, named by its generated
+    internal identifier, plus the hidden row ordinal. Fields that cannot be
+    queried are left out: they are only ever returned raw, by ordinal.
     """
-    described = engine.conn.execute(f"DESCRIBE {RESULT_TABLE}").fetchall()
-    return {str(row[0]): str(row[1]) for row in described}
+    columns: dict[str, pa.Array] = {ROW_ORDINAL: pa.array(range(len(rows)), type=pa.int64())}
+    for entry in catalog.fields:
+        if entry.queryable and entry.scalar_family is not None:
+            arrow_type = _FAMILY_ARROW_TYPES[entry.scalar_family]
+            columns[entry.column] = pa.array([row.get(entry.name) for row in rows], type=arrow_type)
+    return pa.table(columns)
 
 
 def _execute_sync(engine: QueryEngine, compiled: CompiledQuery) -> tuple[list[str], list[Any]]:
@@ -253,29 +273,25 @@ async def _run_compiled_query(
 ) -> tuple[list[dict[str, Any]], bool, int]:
     """Compile *spec*, run it under the time budget; return rows + flags.
 
-    The engine is created + the rows registered + the contract compiled
-    inline (bounded work), then only the ``SELECT`` execution runs on a
-    worker thread so the event loop can interrupt it on timeout. The result
-    is capped to ``max_output_rows`` and ``truncated`` is ``True`` when the
-    underlying result had more rows than the cap admits.
+    The field catalog is built from every stored row (the rows passed the
+    reducer's admission guard before they were spilled), the spec is
+    compiled against it, and the explicit projection is registered inline
+    (bounded work). Only the ``SELECT`` execution runs on a worker thread so
+    the event loop can interrupt it on timeout. The result is capped to
+    ``max_output_rows`` and ``truncated`` is ``True`` when the underlying
+    result had more rows than the cap admits. Output rows come from the
+    compiled output plan: flat queries copy the raw stored rows.
     """
+    catalog = _build_catalog_from_admitted(rows)
+    compiled = compile_query(spec, catalog, max_limit=max_output_rows)
     engine = QueryEngine()
     try:
-        engine.register(RESULT_TABLE, rows, unwrap="auto")
-        columns = _known_columns(engine)
-        compiled = compile_query(
-            spec,
-            list(columns),
-            max_limit=max_output_rows,
-            column_types=columns,
-        )
+        engine.conn.register(RESULT_TABLE, _project_rows(rows, catalog))
 
         loop = asyncio.get_running_loop()
         future = loop.run_in_executor(None, _execute_sync, engine, compiled)
         try:
-            result_columns, fetched = await asyncio.wait_for(
-                asyncio.shield(future), timeout_seconds
-            )
+            _, fetched = await asyncio.wait_for(asyncio.shield(future), timeout_seconds)
         except TimeoutError as exc:  # asyncio.TimeoutError aliases this on 3.11+
             with contextlib.suppress(Exception):
                 engine.conn.interrupt()
@@ -287,7 +303,7 @@ async def _run_compiled_query(
 
     truncated = len(fetched) > compiled.effective_limit
     capped = fetched[: compiled.effective_limit]
-    result_rows = [dict(zip(result_columns, row, strict=False)) for row in capped]
+    result_rows = compiled.output_plan.rehydrate(capped, raw_rows=rows)
     return result_rows, truncated, compiled.effective_limit
 
 

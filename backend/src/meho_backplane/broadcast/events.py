@@ -487,6 +487,10 @@ _WRITE_OPS: Final[frozenset[str]] = frozenset(
         "keycloak.group.update_attributes",
         "keycloak.group.member.add",
         "keycloak.group.member.remove",
+        # keycloak per-user session logout (#3851): a mutation (it ends live
+        # sessions) whose ``.logout`` suffix is not a write suffix. Its params
+        # are a user id or username only, so plain ``write``.
+        "keycloak.user.logout",
     }
 )
 

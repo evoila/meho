@@ -42,6 +42,7 @@ import asyncio
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -60,6 +61,7 @@ from meho_backplane.broadcast import reset_broadcast_client_for_testing
 from meho_backplane.broadcast.events import BroadcastEvent
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog
+from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations.approval_handoff import ApprovalExecutionPayload
 from meho_backplane.settings import get_settings
 
@@ -1490,3 +1492,318 @@ async def test_post_approval_dispatch_outcome_is_returned_unchanged(
     )
 
     assert out == dispatch_envelope
+
+
+# ---------------------------------------------------------------------------
+# Composite sub-op re-entry vs. direct park (#3421)
+# ---------------------------------------------------------------------------
+
+
+async def _park_approved(
+    *,
+    requester: Operator,
+    connector_id: str,
+    op_id: str,
+    params: dict[str, Any],
+    resume_parent: dict[str, Any] | None = None,
+    target_id: uuid.UUID | None = None,
+) -> ApprovalRequest:
+    """Park one request and flip it to ``approved`` (what a reviewer decision does).
+
+    *target_id* is saved on the row the way a real park saves it: the queue
+    reads only ``target.id`` from the dispatch target.
+    """
+    from meho_backplane.operations._validate import compute_params_hash
+    from meho_backplane.operations.approval_queue import create_pending_request
+
+    async with get_sessionmaker()() as s:
+        request = await create_pending_request(
+            s,
+            operator=requester,
+            connector_id=connector_id,
+            op_id=op_id,
+            target=SimpleNamespace(id=target_id) if target_id is not None else None,
+            params=params,
+            params_hash=compute_params_hash(params),
+            run_id=uuid.uuid4(),
+            resume_parent=resume_parent,
+        )
+        request.status = ApprovalRequestStatus.APPROVED.value
+        request.decided_at = datetime.now(UTC)
+        await s.commit()
+    return request
+
+
+async def test_direct_park_resume_redispatches_original_call_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A direct park (``resume_parent IS NULL``) keeps the generic re-dispatch.
+
+    The waiter passes the agent's original ``call_arguments`` through untouched
+    and binds no composite resume state.
+    """
+    import meho_backplane.operations.meta_tools as meta_tools_module
+    from meho_backplane.agent.approval_wait import _resume_approved_or_already_resumed
+    from meho_backplane.operations.composite import (
+        composite_resume_scope_var,
+        composite_resume_var,
+    )
+
+    requester = _make_operator(sub="agent-direct-park")
+    params = {"name": "direct"}
+    request = await _park_approved(
+        requester=requester, connector_id="apprestest-1.x", op_id="apprestest.op", params=params
+    )
+    call_arguments = {
+        "connector_id": "apprestest-1.x",
+        "op_id": "apprestest.op",
+        "params": params,
+        "target": None,
+        "work_ref": "CHG-1",
+    }
+    seen: list[tuple[dict[str, Any], Any, Any]] = []
+
+    async def _spy(_operator: Operator, arguments: dict[str, Any]) -> dict[str, Any]:
+        seen.append((arguments, composite_resume_var.get(), composite_resume_scope_var.get()))
+        return {"status": "ok"}
+
+    monkeypatch.setattr(meta_tools_module, "call_operation_with_approval", _spy)
+    resumed = await _resume_approved_or_already_resumed(
+        operator=requester,
+        call_arguments=call_arguments,
+        awaiting_envelope={"op_id": "apprestest.op", "extras": {}},
+        approval_request_id=request.id,
+    )
+
+    assert resumed == {"status": "ok"}
+    assert seen == [(call_arguments, None, None)]
+    assert seen[0][0] is call_arguments
+
+
+async def test_credential_composite_subop_resume_uses_handoff_parent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A credential-write composite sub-op park re-enters its parent from custody.
+
+    The row stores only the parent's ``op_id``; the parent's params live in the
+    encrypted custody copy. The agent claim winner consumes that copy (it does
+    not just discard it), re-enters the parent composite with the approved
+    sub-op cleared, and leaves no custody row behind.
+    """
+    import meho_backplane.operations.meta_tools as meta_tools_module
+    from meho_backplane.agent.approval_wait import _resume_approved_or_already_resumed
+    from meho_backplane.operations.composite import (
+        composite_resume_scope_var,
+        composite_resume_var,
+    )
+
+    requester = _make_operator(sub="agent-credential-composite")
+    subop_params = {"value": "test-only-credential-value"}
+    parent = {"op_id": "composite.rotate", "params": {"password": "test-only-parent-value"}}
+    request = await _park_approved(
+        requester=requester,
+        connector_id="vault-1.x",
+        op_id="vault.kv.put",
+        params=subop_params,
+        resume_parent=parent,
+    )
+    assert request.resume_parent == {"op_id": "composite.rotate"}
+    assert request.execution_handle is not None
+    seen: list[tuple[dict[str, Any], Any, Any]] = []
+
+    async def _spy(
+        _operator: Operator, arguments: dict[str, Any], *, resolved_target: Any = None
+    ) -> dict[str, Any]:
+        assert resolved_target is None, "tenant-wide park: no saved target"
+        seen.append((arguments, composite_resume_var.get(), composite_resume_scope_var.get()))
+        return {"status": "ok"}
+
+    monkeypatch.setattr(meta_tools_module, "call_operation_with_approval", _spy)
+    resumed = await _resume_approved_or_already_resumed(
+        operator=requester,
+        call_arguments={
+            "connector_id": "vault-1.x",
+            "op_id": "composite.rotate",
+            "params": {},
+            "target": None,
+        },
+        awaiting_envelope={"op_id": "vault.kv.put", "extras": {}},
+        approval_request_id=request.id,
+    )
+
+    assert resumed == {"status": "ok"}
+    approved_subop = ("vault.kv.put", request.params_hash)
+    assert seen == [
+        (
+            {
+                "connector_id": "vault-1.x",
+                "op_id": "composite.rotate",
+                "params": parent["params"],
+                "target": None,
+            },
+            approved_subop,
+            approved_subop,
+        )
+    ]
+    assert composite_resume_var.get() is None
+    async with get_sessionmaker()() as fresh:
+        assert await fresh.get(ApprovalExecutionPayload, request.execution_handle) is None
+        row = await fresh.get(ApprovalRequest, request.id)
+        assert row is not None
+        assert row.resume_parent == {"op_id": "composite.rotate"}
+
+
+# ---------------------------------------------------------------------------
+# Composite re-entry dispatches against the target the row saved by id
+# ---------------------------------------------------------------------------
+
+
+async def _persist_target(name: str) -> uuid.UUID:
+    """Persist one live target row in the test tenant and return its id."""
+    target_id = uuid.uuid4()
+    async with get_sessionmaker()() as s:
+        s.add(
+            TargetORM(
+                id=target_id,
+                tenant_id=_TENANT_ID,
+                name=name,
+                product="apprestest",
+                host="target.invalid",
+                aliases=[],
+            )
+        )
+        await s.commit()
+    return target_id
+
+
+async def _park_composite_subop_on_target(target_id: uuid.UUID) -> ApprovalRequest:
+    """Park an approved composite sub-op that was dispatched against *target_id*."""
+    return await _park_approved(
+        requester=_make_operator(sub="agent-composite-target"),
+        connector_id="apprestest-1.x",
+        op_id="apprestest.sub",
+        params={"vm": "vm-1"},
+        resume_parent={"op_id": "apprestest.composite", "params": {"vm": "vm-1"}},
+        target_id=target_id,
+    )
+
+
+async def test_composite_resume_uses_saved_target_when_name_was_reassigned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A renamed target: the re-entry runs against the saved target, not the name.
+
+    The agent parked while the target was called ``vc-a``. While the request
+    waited, that target was renamed and a new target took the name ``vc-a``.
+    The composite re-entry must dispatch against the original target (loaded
+    by the saved id) and must not look the stale name up at all.
+    """
+    import meho_backplane.operations.meta_tools as meta_tools_module
+    from meho_backplane.agent.approval_wait import _resume_approved_or_already_resumed
+    from meho_backplane.operations.composite import (
+        composite_resume_scope_var,
+        composite_resume_var,
+    )
+
+    original_id = await _persist_target("vc-a")
+    request = await _park_composite_subop_on_target(original_id)
+    assert request.target_id == original_id
+
+    async with get_sessionmaker()() as s:
+        original = await s.get(TargetORM, original_id)
+        assert original is not None
+        original.name = "vc-b"
+        await s.commit()
+    impostor_id = await _persist_target("vc-a")
+
+    seen: list[dict[str, Any]] = []
+
+    async def _spy(
+        _operator: Operator, arguments: dict[str, Any], *, resolved_target: Any = None
+    ) -> dict[str, Any]:
+        seen.append(
+            {
+                "arguments": arguments,
+                "target_id": getattr(resolved_target, "id", None),
+                "target_name": getattr(resolved_target, "name", None),
+                "resume": composite_resume_var.get(),
+                "scope": composite_resume_scope_var.get(),
+            }
+        )
+        return {"status": "ok"}
+
+    monkeypatch.setattr(meta_tools_module, "call_operation_with_approval", _spy)
+    resumed = await _resume_approved_or_already_resumed(
+        operator=_make_operator(sub="agent-composite-target"),
+        call_arguments={
+            "connector_id": "apprestest-1.x",
+            "op_id": "apprestest.composite",
+            "params": {"vm": "vm-1"},
+            "target": {"name": "vc-a"},
+        },
+        awaiting_envelope={"op_id": "apprestest.sub", "extras": {}},
+        approval_request_id=request.id,
+    )
+
+    assert resumed == {"status": "ok"}
+    assert len(seen) == 1
+    assert seen[0]["target_id"] == original_id
+    assert seen[0]["target_id"] != impostor_id
+    assert seen[0]["target_name"] == "vc-b"
+    assert seen[0]["arguments"]["target"] is None
+    assert seen[0]["arguments"]["op_id"] == "apprestest.composite"
+    approved_subop = ("apprestest.sub", request.params_hash)
+    assert seen[0]["resume"] == approved_subop
+    assert seen[0]["scope"] == approved_subop
+
+
+async def test_composite_resume_fails_closed_when_saved_target_deleted_and_name_reused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deleted target whose name was reused: refuse, dispatch nothing, keep the claim.
+
+    The saved target was soft-deleted while the request waited and a new
+    target now carries its old name. The re-entry must not run against the
+    new target. It returns a ``denied`` envelope and leaves the one-resumer
+    claim free, the same as the operator surface.
+    """
+    import meho_backplane.operations.meta_tools as meta_tools_module
+    from meho_backplane.agent.approval_wait import _resume_approved_or_already_resumed
+
+    original_id = await _persist_target("vc-a")
+    request = await _park_composite_subop_on_target(original_id)
+
+    async with get_sessionmaker()() as s:
+        original = await s.get(TargetORM, original_id)
+        assert original is not None
+        original.deleted_at = datetime.now(UTC)
+        await s.commit()
+    await _persist_target("vc-a")
+
+    calls: list[Any] = []
+
+    async def _spy(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        calls.append((args, kwargs))
+        return {"status": "ok"}
+
+    monkeypatch.setattr(meta_tools_module, "call_operation_with_approval", _spy)
+    resumed = await _resume_approved_or_already_resumed(
+        operator=_make_operator(sub="agent-composite-target"),
+        call_arguments={
+            "connector_id": "apprestest-1.x",
+            "op_id": "apprestest.composite",
+            "params": {"vm": "vm-1"},
+            "target": {"name": "vc-a"},
+        },
+        awaiting_envelope={"op_id": "apprestest.sub", "extras": {}},
+        approval_request_id=request.id,
+    )
+
+    assert resumed["status"] == "denied"
+    assert resumed["extras"]["error_code"] == "denied"
+    assert str(original_id) in resumed["error"]
+    assert calls == []
+    async with get_sessionmaker()() as fresh:
+        row = await fresh.get(ApprovalRequest, request.id)
+    assert row is not None
+    assert row.resumed_at is None, "a refused resume must not burn the claim"

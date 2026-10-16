@@ -82,9 +82,11 @@ References
 
 from __future__ import annotations
 
+import functools
 import ipaddress
 import re
-from typing import TYPE_CHECKING, Any
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Concatenate
 
 from defusedxml.ElementTree import ParseError, fromstring
 
@@ -100,6 +102,7 @@ __all__ = [
     "parse_static_routes_xml",
     "pfsense_gateway_add",
     "pfsense_route_static_add",
+    "serialized_config_write",
 ]
 
 # pfSense stages playback scripts under this directory; ``pfSsh.php
@@ -336,8 +339,12 @@ def _install_script_command(script_name: str, script_body: str) -> str:
 
     A quoted-delimiter heredoc writes the fragment verbatim into
     ``/etc/phpshellsessions/<script_name>``; the single-quoted delimiter
-    stops the remote shell expanding ``$config`` or anything else.
+    stops the remote shell expanding ``$config`` or anything else. A script
+    that contains the end marker is refused, so the heredoc always ends
+    exactly where the script ends.
     """
+    if _HEREDOC_DELIM in script_body:
+        raise ValueError("pfSense playback script must not contain the heredoc end marker")
     path = f"{_PHPSHELLSESSIONS_DIR}/{script_name}"
     return f"cat > {path} <<'{_HEREDOC_DELIM}'\n{script_body}{_HEREDOC_DELIM}\n"
 
@@ -385,10 +392,40 @@ async def _apply_playback(
 
 
 # ---------------------------------------------------------------------------
+# Config-write serialization (#3544)
+# ---------------------------------------------------------------------------
+
+
+def serialized_config_write[**P, R](
+    handler: Callable[Concatenate[PfSenseConnector, Any, P], Awaitable[R]],
+) -> Callable[Concatenate[PfSenseConnector, Any, P], Awaitable[R]]:
+    """Run a config-editing handler while it holds the appliance's write lock.
+
+    Each config-editing op reads ``config.xml``, plays back a fragment that
+    loads ``$config``, edits it and calls ``write_config()``, then reads the
+    file back. ``write_config()`` saves the whole in-memory ``$config``, so
+    two such ops that overlap on one pfSense can save an old copy and undo
+    each other's change. The lock is held from the first read to the last
+    read-back, so MEHO never runs two of these ops against the same
+    appliance at the same time.
+    """
+
+    @functools.wraps(handler)
+    async def wrapper(
+        self: PfSenseConnector, target: Any, /, *args: P.args, **kwargs: P.kwargs
+    ) -> R:
+        async with self.config_write_lock(target):
+            return await handler(self, target, *args, **kwargs)
+
+    return wrapper
+
+
+# ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
 
 
+@serialized_config_write
 async def pfsense_gateway_add(
     self: PfSenseConnector,
     target: Any,
@@ -451,6 +488,7 @@ async def pfsense_gateway_add(
     return {**result, "existed_before": False, "applied": True, "existing": None}
 
 
+@serialized_config_write
 async def pfsense_route_static_add(
     self: PfSenseConnector,
     target: Any,

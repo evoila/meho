@@ -73,6 +73,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._errors import (
+    _UPSTREAM_MESSAGE_CAP,
     is_auth_failed_status,
     result_connector_auth_failed,
 )
@@ -706,13 +707,13 @@ def test_result_connector_auth_failed_non_json_body_falls_back_to_text() -> None
 
 
 def test_result_connector_auth_failed_caps_oversized_message() -> None:
-    """A pathological upstream message is capped like the sibling builders."""
-    exc = _make_http_status_error(status_code=401, json_body={"message": "x" * 400})
+    """A pathological upstream message is capped at the 2 KB upstream cap (#3567)."""
+    exc = _make_http_status_error(status_code=401, json_body={"message": "x" * 3000})
     out = result_connector_auth_failed("GET:/x", exc, _FakeTarget(), duration_ms=0.5)
     message = out.extras["upstream_message"]
     assert isinstance(message, str)
     assert message.endswith("...<truncated>")
-    assert len(message) == 256 + len("...<truncated>")
+    assert len(message) == _UPSTREAM_MESSAGE_CAP + len("...<truncated>")
 
 
 def test_result_connector_auth_failed_missing_host_degrades_gracefully() -> None:

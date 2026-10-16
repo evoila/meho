@@ -208,13 +208,50 @@ upstream response body — `extras.exception_message`,
 tails built from them — passes through `_sanitize_free_text`: a
 Tier-1 redaction pass with the packaged default policy
 (credential-shaped patterns only, so hosts / statuses / remediation
-prose stay legible), then the `_EXC_MESSAGE_CAP=256` truncation.
-Where the rows below say "capped" for these fields, read
+prose stay legible), then a length cap. The cap is
+`_EXC_MESSAGE_CAP=256` for exception text and `_UPSTREAM_MESSAGE_CAP=2048`
+for `extras.upstream_message` (#3567): the upstream body is the vendor's
+own diagnosis, and 256 chars often cut a vim faultstring to a useless
+fragment. Where the rows below say "capped" for these fields, read
 "redacted, then capped": the cap alone is a length bound, not a
 secrecy bound — a credential inside the first 256 chars used to ride
 the envelope verbatim. Redaction runs first so a secret straddling
 the cap boundary cannot survive truncation as a cleartext fragment
 the patterns no longer match. See `docs/codebase/redaction.md`.
+
+**Structured vim fault: `extras.upstream_fault` (#3567).** When the
+upstream error body is a vim fault, the builders that read an upstream
+response (`result_connector_error` for an `httpx.HTTPStatusError`, the
+403 / 422 builders, and `result_connector_auth_failed`) also set
+`extras.upstream_fault = {"type": ..., "faultstring": ...}`. The fault
+reaches the builders in one of three ways:
+
+- an HTTP error whose body is a VI/JSON fault from vCenter: a JSON object
+  with `_typeName` (the fault class, for example `NotAuthenticated`) and
+  `faultstring`;
+- an HTTP error whose body is a SOAP `<soapenv:Fault>` (for example a
+  vCenter VI/JSON write that answers with a SOAP-shaped 500), parsed with
+  `connectors/vmware_rest/soap.py::parse_soap_fault` (the type comes from
+  the `detail` element's `xsi:type`, for example `InvalidLogin`);
+- a standalone ESXi host. There the connector's SOAP path (`_post_soap`,
+  the SOAP login, and the storage-policy SOAP calls) parses the fault
+  itself and raises a plain `RuntimeError` or a `ConnectorAuthError`, so
+  no HTTP error reaches the builders. `_soap_fault_error` attaches the
+  parsed fault to that exception (`soap.py::attach_soap_fault`). The
+  sites that build their own `RuntimeError` for a fault do the same: the
+  `RetrieveServiceContent` step at session establish (ESXi and PBM), and
+  the PBM retry that still fails `NotAuthenticated` after a fresh login.
+  `result_connector_error` / `result_connector_auth_failed` read the fault
+  from there. The exception class and message do not change.
+
+Either value can be `null` when the body does not carry it. Both values
+are redacted, then capped (the faultstring with the 2 KB cap). Any other
+body leaves the key out, so other envelopes keep their exact shape. An
+agent or operator can branch on `upstream_fault.type` without parsing the
+free text. The field rides the approval `/result` payload too, because
+that payload is the whole envelope: the person who parked an op can see
+why the approved run failed, even though the flight-recorder handle
+belongs to the approver.
 
 ## When the response is intentionally bare
 

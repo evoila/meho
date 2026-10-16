@@ -1,18 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Out-of-process audit parent-linkage for paired add-on orchestrations (#3028).
+"""Out-of-process audit parent-linkage for service-principal runs (#3028, #3446).
 
 Initiative #2900 scope item 4. #2086 gave *in-process* dispatches a single
 audit-replay subtree: the approval-resume path re-binds ``parent_audit_id`` /
 ``agent_session_id`` before a resumed dispatch, so the executed op's audit row
-nests under the parking call instead of orphaning as a second root. A paired
-add-on orchestrating from *outside* the backplane has no in-process parent
+nests under the parking call instead of orphaning as a second root. A
+client-credential service principal (for example a paired add-on)
+orchestrating from *outside* the backplane has no in-process parent
 audit row to hang its per-step dispatches off — each ``call_operation`` it
 issues would otherwise land as an independent replay root.
 
 This module synthesises the missing parent. The first ``call_operation`` a
-paired principal issues under a given ``work_ref`` **opens** an orchestration
+service principal issues under a given ``work_ref`` **opens** an orchestration
 run: one :class:`~meho_backplane.db.models.AddonOrchestrationRun` row keyed by
 ``(keycloak_client_id, work_ref)`` carrying a fresh ``session_id`` (the replay
 anchor) and ``anchor_audit_id``, plus one ``audit_log`` "orchestration-root"
@@ -24,16 +25,21 @@ replay`` — which anchors on ``agent_session_id`` and descends by
 ``parent_audit_id`` — then reconstructs one subtree spanning the orchestration
 and all resulting dispatches.
 
-Authorization (the "only from the paired principal for its own work_refs"
-contract):
+Who gets linkage (the "only the caller's own runs" contract):
 
-* Linkage is offered **only** to a ``PrincipalKind.SERVICE`` principal whose
-  recovered ``client_id`` resolves to a live :class:`AddonPairing` in the same
-  tenant. A non-paired principal (or a user / agent token) gets ``None`` — no
-  linkage, dispatches stay independent exactly as before.
-* A run is keyed by the **caller's own** ``keycloak_client_id``, so a different
-  paired principal presenting the same work_ref string opens (or resolves) its
-  own run and can never attach to — or even observe — another add-on's subtree.
+* Linkage is offered to every ``PrincipalKind.SERVICE`` principal (a
+  client-credential token) with a recovered ``client_id``, paired or not
+  (#3446). Paired add-ons were the first users; an unpaired service account
+  that dispatches over the REST chassis has no other session anchor, so
+  without this its rows landed with a NULL ``agent_session_id`` and could not
+  be replayed as a tree. A user or agent token gets ``None`` — no linkage,
+  dispatches stay independent exactly as before.
+* When the ``client_id`` *is* paired, the pairing must belong to the caller's
+  tenant; a cross-tenant clientId collision is declined.
+* A run is keyed by the **caller's own** ``keycloak_client_id`` and is only
+  resolved inside the caller's tenant, so a different principal presenting the
+  same work_ref string opens (or resolves) its own run and can never attach to
+  — or even observe — another principal's subtree.
 
 The row is the out-of-process analogue of ``ApprovalRequest``'s
 ``{request_audit_id, agent_session_id}`` durable copies (#2086): resolve once,
@@ -108,12 +114,15 @@ def _to_run(row: AddonOrchestrationRun) -> OrchestrationRun:
     )
 
 
-async def _select_run(keycloak_client_id: str, work_ref: str) -> OrchestrationRun | None:
+async def _select_run(
+    tenant_id: uuid.UUID, keycloak_client_id: str, work_ref: str
+) -> OrchestrationRun | None:
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         row = (
             await session.execute(
                 select(AddonOrchestrationRun).where(
+                    AddonOrchestrationRun.tenant_id == tenant_id,
                     AddonOrchestrationRun.keycloak_client_id == keycloak_client_id,
                     AddonOrchestrationRun.work_ref == work_ref,
                 )
@@ -199,12 +208,12 @@ async def resolve_or_open_orchestration_run(
     """Resolve (or open) the parent-linkage anchor for *operator*'s *work_ref*.
 
     Returns ``None`` when the caller is not eligible for out-of-process linkage
-    — i.e. it is not a paired add-on service principal for this tenant. In that
-    case the dispatch keeps its pre-#3028 behaviour (an independent audit row).
-    Only a ``PrincipalKind.SERVICE`` principal whose ``client_id`` matches a
-    live :class:`AddonPairing` in the operator's own tenant is linked, and the
-    run is keyed by that client_id so it is scoped to the caller's own
-    work_refs.
+    — it is not a ``PrincipalKind.SERVICE`` principal with a ``client_id``, or
+    its ``client_id`` is paired to another tenant. In that case the dispatch
+    keeps its pre-#3028 behaviour (an independent audit row). Any other
+    client-credential principal is linked, paired or not (#3446). The run is
+    keyed by the caller's own client_id and looked up inside the caller's
+    tenant, so it is scoped to the caller's own work_refs.
     """
     client_id = operator.client_id
     if operator.principal_kind is not PrincipalKind.SERVICE or not client_id:
@@ -214,12 +223,12 @@ async def resolve_or_open_orchestration_run(
     from meho_backplane.operations.addon_pairing import AddonPairingService
 
     pairing = await AddonPairingService().get_by_client_id(client_id)
-    if pairing is None or pairing.tenant_id != operator.tenant_id:
-        # Not a paired principal (or a cross-tenant clientId collision that must
-        # never link) — decline linkage rather than fabricating a subtree.
+    if pairing is not None and pairing.tenant_id != operator.tenant_id:
+        # A cross-tenant clientId collision must never link — decline rather
+        # than fabricating a subtree.
         return None
 
-    existing = await _select_run(client_id, work_ref)
+    existing = await _select_run(operator.tenant_id, client_id, work_ref)
     if existing is not None:
         return existing
     try:
@@ -235,9 +244,16 @@ async def resolve_or_open_orchestration_run(
             raise
         # Lost the resolve-or-open race: a concurrent dispatch for the same
         # (client_id, work_ref) opened the run first. Its row now exists.
-        raced = await _select_run(client_id, work_ref)
-        if raced is None:  # pragma: no cover - unique violation implies a row
-            raise
+        raced = await _select_run(operator.tenant_id, client_id, work_ref)
+        if raced is None:
+            # The unique key is global, so the row that won belongs to another
+            # tenant. Never attach to it; fall back to an independent row.
+            _log.warning(
+                "addon_orchestration_run_cross_tenant_collision",
+                keycloak_client_id=client_id,
+                work_ref=work_ref,
+            )
+            return None
         return raced
 
 

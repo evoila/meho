@@ -4655,9 +4655,11 @@ class AddonOrchestrationRun(Base):
     Schema decisions
     ----------------
 
-    * ``keycloak_client_id`` -- Text NOT NULL. The paired principal's OAuth
-      clientId, equal to :attr:`AddonPairing.keycloak_client_id`. The linkage
-      key: a run belongs to exactly one paired principal.
+    * ``keycloak_client_id`` -- Text NOT NULL. The service principal's OAuth
+      clientId (for a paired add-on, equal to
+      :attr:`AddonPairing.keycloak_client_id`; unpaired client-credential
+      principals open runs too since #3446). The linkage key: a run belongs to
+      exactly one principal.
     * ``work_ref`` -- Text NOT NULL. The external change-ticket ref the run
       groups under. Together with ``keycloak_client_id`` it uniquely names a
       run (``addon_orchestration_run_client_work_ref_idx``), which is both the

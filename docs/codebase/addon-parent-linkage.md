@@ -1,4 +1,4 @@
-# Add-on out-of-process audit parent-linkage (#3028)
+# Service-principal out-of-process audit parent-linkage (#3028, #3446)
 
 How a paired add-on's multi-step orchestration, driven from *outside* the
 backplane, collapses into a single audit-replay subtree — the out-of-process
@@ -35,16 +35,23 @@ its `session_id` + `anchor_audit_id` around the dispatch, so the DISPATCH row
 anchor. Replay then reconstructs the orchestration and all its resulting
 dispatches as one subtree.
 
-**Authorization — linkage only from the paired principal for its own
-work_refs.** Linkage is offered only to a `PrincipalKind.SERVICE` principal
-whose recovered `client_id` resolves to a live `addon_pairing` in the same
-tenant. A run is keyed by the caller's *own* `keycloak_client_id`, so:
+**Who gets linkage — any service principal, for its own work_refs.** Linkage
+is offered to every `PrincipalKind.SERVICE` principal (a client-credential
+token) with a recovered `client_id`. Since #3446 it does not need an
+`addon_pairing` row: an unpaired service account that dispatches over REST
+has no other session anchor, and without a run its rows landed with a NULL
+`agent_session_id`. A run is keyed by the caller's *own*
+`keycloak_client_id` and is only looked up inside the caller's tenant, so:
 
-- a non-paired caller (a user, an agent, an unpaired service account) gets no
-  linkage — dispatches keep their pre-#3028 independent-row behaviour;
-- a *different* paired principal presenting the same `work_ref` string opens or
-  resolves its own run and can never attach to — or observe — another add-on's
-  subtree.
+- a user or an agent gets no linkage — dispatches keep their pre-#3028
+  independent-row behaviour;
+- a `client_id` that *is* paired, but to another tenant, is declined;
+- a *different* principal presenting the same `work_ref` string opens or
+  resolves its own run and can never attach to — or observe — another
+  principal's subtree;
+- the unique key `(keycloak_client_id, work_ref)` is global. If a token from
+  another tenant carries the same clientId and work_ref, it does not attach to
+  the existing run; it falls back to an independent row.
 
 Audit stays synchronous append-only (v0.1-spec §6): the anchor is an ordinary
 audit row carrying only its own columns. No back-reference column is added to
@@ -73,9 +80,10 @@ audit row carrying only its own columns. No back-reference column is added to
 - `Operator.client_id` (`auth/operator.py`) — the caller's OAuth `clientId`,
   recovered at JWT verification by `_extract_client_id` (`auth/jwt.py`) from the
   `service-account-<clientId>` username marker (the same #3178 marker the
-  `service` classification keys on). `None` for interactive users and any token
-  without the marker. For a paired add-on it equals
-  `addon_pairing.keycloak_client_id`.
+  `service` classification keys on) or, for a service token without the
+  marker, from its verified `azp` / `client_id` claim (#3446). `None` for
+  interactive users and any token carrying neither. For a paired add-on it
+  equals `addon_pairing.keycloak_client_id`.
 - `AddonPairingService.get_by_client_id(client_id)` (`operations/addon_pairing.py`)
   — the pairing lookup by the globally-unique clientId; returns the row
   (carrying its `tenant_id` for the caller to cross-check).
@@ -90,10 +98,11 @@ the REST route, is the single hook:
    header) off `work_ref_var`;
 3. if non-empty, `resolve_or_open_orchestration_run(operator, work_ref)`:
    - not a `SERVICE` principal, or no `client_id` → `None`;
-   - `client_id` has no live pairing, or the pairing is another tenant's →
-     `None`;
-   - otherwise SELECT the existing run, or open one (insert the run row + write
-     the anchor audit row in one transaction);
+   - `client_id` is paired to another tenant → `None`;
+   - otherwise SELECT the existing run in the caller's tenant, or open one
+     (insert the run row + write the anchor audit row in one transaction). A
+     lost unique-key race that leaves no row in the caller's tenant means the
+     key belongs to another tenant → `None`;
 4. if a run came back, enter `bound_parent_linkage(run)` on an `AsyncExitStack`
    so `agent_session_id_var` + `parent_audit_id_var` are set for the dispatch;
 5. `dispatch(...)` runs; `write_audit_row` reads those vars into the DISPATCH
@@ -123,14 +132,22 @@ would re-scatter replay into per-dispatch roots).
   `GET /api/v1/audit/sessions/{session_id}/replay` renders the tree. A
   first-class "list my orchestration runs" endpoint is a possible follow-up,
   not required by the task.
-- **clientId recovery is username-derived.** `client_id` is stripped from the
-  `service-account-<clientId>` marker, not read from a dedicated `azp` claim.
-  That keeps it consistent with the #3178 service classification and needs no
-  new Keycloak mapper, but a realm that stops emitting the marker would drop
-  the linkage (the dispatch would simply fall back to an independent audit
-  row — fail-open into the pre-#3028 behaviour, never a wrong subtree).
+- **clientId recovery has two sources.** `client_id` is stripped from the
+  `service-account-<clientId>` username marker when present. A service token
+  without the marker (a client without the `profile` scope, or a realm that
+  renamed the mapper) falls back to its verified `azp` / RFC 9068 `client_id`
+  claim (#3446, the same fallback agents use since #3795). A token with
+  neither gets no linkage: the dispatch falls back to an independent audit
+  row — fail-open into the pre-#3028 behaviour, never a wrong subtree.
 - **Run rows are not reaped.** An orchestration run row is small and durable;
   a retention sweep (mirroring approval-request TTLs) is a later concern.
+- **A call without a `work_ref` is not linked.** The `work_ref` names the run;
+  without one there is nothing to group by, and the row keeps a NULL
+  `agent_session_id`. A service principal that wants its run replayable must
+  send a `work_ref` on every call.
+- **Names still say "addon".** The module, table, and anchor `path`
+  (`addon.orchestration`) kept their names when linkage widened to unpaired
+  service principals in #3446, to avoid a migration and a contract change.
 - This generalises the "verify the caller's client id against the pairing's
   `keycloak_client_id`" hardening item named in
   [`addon-pairing.md`](addon-pairing.md) §Known issues — the same clientId ↔
@@ -139,6 +156,9 @@ would re-scatter replay into per-dispatch roots).
 ## References
 
 - Initiative #2900 (add-on pairing contract, scope item 4), Task #3028.
+- #3446 — widened linkage to unpaired client-credential principals so their
+  REST runs replay as one tree; see
+  [`audit_query.md`](audit_query.md#client-credential-runs-3446).
 - #2086 — the in-process replay-as-tree lineage this extends
   (`operations/approval_queue.py` `_dispatch_resume_with_bound_context` is the
   re-bind precedent).

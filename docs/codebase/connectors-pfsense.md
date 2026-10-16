@@ -624,8 +624,9 @@ applies nothing — a pre-staged gateway is inert config until referenced.
 
 ### One config edit at a time, and a full read-back (#3544)
 
-All seven ops that edit `config.xml` (the two `add` ops above and the five
-governed deletes) follow the same pattern. The playback fragment loads the
+All nine ops that edit `config.xml` (the two `add` ops above, the five
+governed deletes, and the two filter-rule ops below) follow the same pattern.
+The playback fragment loads the
 whole config into `$config`, edits it, and `write_config()` saves the whole
 config again. So two of these ops that overlap on one pfSense can save an old
 copy and undo each other's change. `pfSsh.php playback` still exits 0 in that
@@ -649,6 +650,17 @@ Two guards stop this:
    but other parts of the config changed. The message names the changed
    sections, so the operator can check the pfSense config history.
 
+The two filter-rule ops change one more thing on purpose: the rows of the GUI
+separators of the edited interface (`<filter><separator>`). An add at the top
+of an interface that already has rules moves every separator row of that
+interface down by one. A delete moves the rows below the deleted rule up by
+one. Both also write the interface's separator list back, so an empty
+element such as `<lan></lan>` can appear. The two handlers tell the read-back
+to expect exactly these changes (`_expected_separator_update` in
+`ops_filter_rule.py`): the moved rows must match, and the empty list element
+is allowed on either side. Any other change to the separators still fails
+the op.
+
 Limits:
 
 - The lock lives in the backplane process. It covers MEHO's own ops while the
@@ -659,6 +671,10 @@ Limits:
   and then undone by the same run's save. Inside MEHO the lock prevents this.
   A change made by hand in the pfSense web UI at that exact moment can still
   be lost without notice.
+- The filter-rule add calls `filter_rules_sort()`, which puts the rules in
+  pfSense's own order. A config whose rules are not in that order, for
+  example after a hand edit, fails the add's full read-back. Every GUI save
+  sorts the rules, so a config that pfSense wrote itself is already in order.
 
 A new config-editing op must use the decorator and call the full read-back
 after its own check.
@@ -722,7 +738,10 @@ and no audit.
   the add the stored rule must equal the requested rule setting by setting,
   or the op fails. A read that is empty, cut off or not a pfSense config is
   an error, never "zero rules", so a failed read-back can never pass as a
-  verified delete of the last rule.
+  verified delete of the last rule. Last, the shared full read-back
+  (`assert_only_own_object_changed`) checks that nothing else in
+  `config.xml` changed, except the separator rows the fragment moves. See
+  "One config edit at a time, and a full read-back" above.
 - **The delete preview** names the rule as it is stored, including whether
   its source or destination is negated (`source_not`, `destination_not`),
   whether it is disabled, and any extra settings. The approver reads exactly

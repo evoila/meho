@@ -17,7 +17,9 @@ when it starts, waits, and then saves the edited copy -- the same
 * without the lock the same fake really does lose one change, so the first
   test proves the lock, not the fake;
 * the full read-back raises when the op's own change was saved but another
-  part of ``config.xml`` changed or was lost.
+  part of ``config.xml`` changed or was lost;
+* the two filter-rule ops get the same checks, and their read-back expects
+  the separator rows the pfSense playback moves, and nothing else.
 
 All config.xml fixtures are synthetic (RFC 5737 / RFC 1918 addresses).
 """
@@ -28,7 +30,7 @@ import asyncio
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -68,10 +70,42 @@ _LAB_GW = (
 )
 # pfSense writes a flag that is on as an empty element.
 _DISABLED_USER = "<user><name>audit</name><disabled></disabled></user>"
+_INTERFACES = "<interfaces><lan><ipaddr>10.0.0.1</ipaddr></lan></interfaces>"
+
+
+def _block_rule(rid: str) -> str:
+    return (
+        f"<rule><tracker>{rid}</tracker><type>block</type><interface>lan</interface>"
+        "<ipprotocol>inet</ipprotocol><source><address>10.1.0.0/24</address></source>"
+        "<destination><address>10.2.0.0/24</address></destination>"
+        f"<descr>meho: filter rule {rid}</descr></rule>"
+    )
+
+
+_RULE_A_ID, _RULE_B_ID, _NEW_RULE_ID = "100000001", "100000003", "100000002"
+_RULE_A = _block_rule(_RULE_A_ID)
+_RULE_B = _block_rule(_RULE_B_ID)
+# A pass rule: the add does not read the management flow for it.
+_NEW_RULE = (
+    f"<rule><tracker>{_NEW_RULE_ID}</tracker><type>pass</type><interface>lan</interface>"
+    "<ipprotocol>inet</ipprotocol><source><any></any></source>"
+    "<destination><address>10.5.0.0/24</address></destination>"
+    f"<descr>meho: filter rule {_NEW_RULE_ID}</descr></rule>"
+)
+_NEW_RULE_PARAMS: dict[str, Any] = {
+    "ridentifier": _NEW_RULE_ID,
+    "type": "pass",
+    "interface": "lan",
+    "destination": "10.5.0.0/24",
+}
+_EMPTY_LAN_SEPARATORS = "<separator><lan></lan></separator>"
+_FILTER = f"<filter>{_RULE_A}{_EMPTY_LAN_SEPARATORS}</filter>"
 _CONFIG = (
     "<pfsense>"
     "<revision><time>1</time><description>start</description></revision>"
     f"<system>{_DISABLED_USER}</system>"
+    f"{_INTERFACES}"
+    f"{_FILTER}"
     "<staticroutes>"
     f"{_ROUTE}"
     "<route><network>10.20.0.0/24</network><gateway>LAB_GW</gateway></route>"
@@ -92,10 +126,22 @@ def _proc(stdout: str = "", exit_status: int = 0) -> Any:
     return proc
 
 
-def _save(config: str, *, drop: str, revision: int) -> str:
-    """Return *config* with *drop* removed and a new ``<revision>``, like write_config()."""
-    assert drop in config
-    edited = config.replace(drop, "")
+def _save(
+    config: str, *, revision: int, drop: str | None = None, add: tuple[str, str] | None = None
+) -> str:
+    """Return *config* after one edit and a new ``<revision>``, like write_config().
+
+    *drop* is an XML snippet to remove; *add* is ``(section tag, snippet)``
+    to insert at the start of that section.
+    """
+    edited = config
+    if drop is not None:
+        assert drop in edited
+        edited = edited.replace(drop, "")
+    if add is not None:
+        section, snippet = add
+        assert f"<{section}>" in edited
+        edited = edited.replace(f"<{section}>", f"<{section}>{snippet}", 1)
     start = edited.index("<revision>")
     end = edited.index("</revision>") + len("</revision>")
     return f"{edited[:start]}<revision><time>{revision}</time></revision>{edited[end:]}"
@@ -104,9 +150,9 @@ def _save(config: str, *, drop: str, revision: int) -> str:
 class _FakePfSense:
     """In-memory ``config.xml`` whose playback saves the copy it loaded at start."""
 
-    def __init__(self, config: str, edits: dict[str, str]) -> None:
+    def __init__(self, config: str, edits: dict[str, dict[str, Any]]) -> None:
         self.config = config
-        self.edits = edits  # playback script name -> XML snippet the fragment removes
+        self.edits = edits  # playback script name -> the _save() edit that fragment makes
         self.saves = 0
         self.playbacks_in_flight = 0
         self.max_playbacks_in_flight = 0
@@ -127,20 +173,22 @@ class _FakePfSense:
             )
             await asyncio.sleep(0.01)  # the PHP process runs; another save may land now
             self.saves += 1
-            self.config = _save(snapshot, drop=self.edits[script], revision=100 + self.saves)
+            self.config = _save(snapshot, revision=100 + self.saves, **self.edits[script])
             self.playbacks_in_flight -= 1
             return _proc()
         return _proc()  # stage / rm of the playback script
 
 
+_EDITS: dict[str, dict[str, Any]] = {
+    "meho_route_delete_10_10_0_0_24": {"drop": _ROUTE},
+    "meho_gateway_delete_RETIRING_GW": {"drop": _RETIRING_GW},
+    f"meho_filter_rule_add_{_NEW_RULE_ID}": {"add": ("filter", _NEW_RULE)},
+    f"meho_filter_rule_delete_{_RULE_A_ID}": {"drop": _RULE_A},
+}
+
+
 def _fake_for_route_and_gateway() -> _FakePfSense:
-    return _FakePfSense(
-        _CONFIG,
-        {
-            "meho_route_delete_10_10_0_0_24": _ROUTE,
-            "meho_gateway_delete_RETIRING_GW": _RETIRING_GW,
-        },
-    )
+    return _FakePfSense(_CONFIG, _EDITS)
 
 
 async def _delete_route_and_gateway_together(
@@ -199,6 +247,57 @@ def test_lock_is_shared_per_appliance_host() -> None:
     assert connector.config_write_lock(_TARGET) is not connector.config_write_lock(other_host)
 
 
+async def test_filter_rule_add_and_gateway_delete_together_both_persist() -> None:
+    fake = _fake_for_route_and_gateway()
+    connector = PfSenseConnector()
+    with patch.object(connector, "_run_command", side_effect=fake.run):
+        added, deleted = await asyncio.gather(
+            connector.filter_rule_add(_TARGET, dict(_NEW_RULE_PARAMS)),
+            connector.gateway_delete(_TARGET, {"name": "RETIRING_GW"}),
+        )
+
+    assert (added["status"], deleted["status"]) == ("added", "deleted")
+    assert fake.max_playbacks_in_flight == 1
+    assert _NEW_RULE in fake.config
+    assert _RETIRING_GW not in fake.config
+
+
+async def test_filter_rule_delete_and_route_delete_together_both_persist() -> None:
+    fake = _fake_for_route_and_gateway()
+    connector = PfSenseConnector()
+    with patch.object(connector, "_run_command", side_effect=fake.run):
+        rule, route = await asyncio.gather(
+            connector.filter_rule_delete(_TARGET, {"ridentifier": _RULE_A_ID}),
+            connector.route_static_delete(_TARGET, {"network": "10.10.0.0/24"}),
+        )
+
+    assert (rule["status"], route["status"]) == ("deleted", "deleted")
+    assert fake.max_playbacks_in_flight == 1
+    assert _RULE_A not in fake.config
+    assert _ROUTE not in fake.config
+
+
+async def test_without_the_lock_a_filter_rule_add_loses_its_change() -> None:
+    fake = _fake_for_route_and_gateway()
+    connector = PfSenseConnector()
+    with (
+        patch.object(connector, "_run_command", side_effect=fake.run),
+        patch.object(connector, "config_write_lock", side_effect=lambda _t: asyncio.Lock()),
+    ):
+        results = await asyncio.gather(
+            connector.filter_rule_add(_TARGET, dict(_NEW_RULE_PARAMS)),
+            connector.gateway_delete(_TARGET, {"name": "RETIRING_GW"}),
+            return_exceptions=True,
+        )
+
+    assert fake.max_playbacks_in_flight == 2
+    add_result, gateway_result = results
+    assert isinstance(add_result, RuntimeError)
+    assert "verification failed" in str(add_result)
+    assert gateway_result["status"] == "deleted"
+    assert _NEW_RULE not in fake.config  # the add was undone by the gateway save
+
+
 # ---------------------------------------------------------------------------
 # Full read-back: own change saved, but something else changed or was lost
 # ---------------------------------------------------------------------------
@@ -223,6 +322,37 @@ async def test_full_readback_flags_a_change_lost_by_a_stale_save() -> None:
     assert "(aliases)" in message
     assert _ROUTE not in fake.config
     assert _ALIAS_Y not in fake.config
+
+
+@pytest.mark.parametrize(
+    ("op", "params", "own_change_gone"),
+    [
+        ("filter.rule.add", _NEW_RULE_PARAMS, _RULE_A),
+        ("filter.rule.delete", {"ridentifier": _RULE_A_ID}, _RULE_A),
+    ],
+    ids=["add", "delete"],
+)
+async def test_filter_rule_ops_flag_a_change_lost_by_a_stale_save(
+    op: str, params: dict[str, Any], own_change_gone: str
+) -> None:
+    # Same shape as the route test above: the op's own change persists, but
+    # its save dropped ALIAS_Y, which landed just before the op's first read.
+    fake = _fake_for_route_and_gateway()
+    fake.stale_snapshot = fake.config
+    fake.config = fake.config.replace("<aliases></aliases>", f"<aliases>{_ALIAS_Y}</aliases>")
+    connector = PfSenseConnector()
+    handler = getattr(connector, op.replace(".", "_"))
+    with (
+        patch.object(connector, "_run_command", side_effect=fake.run),
+        pytest.raises(RuntimeError, match=rf"{op}: the change was saved.*\(aliases\)"),
+    ):
+        await handler(_TARGET, dict(params))
+
+    assert _ALIAS_Y not in fake.config
+    if op == "filter.rule.add":
+        assert _NEW_RULE in fake.config
+    else:
+        assert own_change_gone not in fake.config
 
 
 async def test_full_readback_flags_another_save_that_landed_during_the_op() -> None:
@@ -334,3 +464,172 @@ def test_full_readback_rejects_any_other_change(after: str, changed: str) -> Non
 def test_full_readback_fails_closed_on_unparseable_config() -> None:
     with pytest.raises(RuntimeError, match="could not be parsed"):
         _check(_CONFIG, "<pfsense")
+
+
+# ---------------------------------------------------------------------------
+# Filter-rule ops: the read-back expects the separator rows the playback moves
+# ---------------------------------------------------------------------------
+
+
+def _filter_config(*rules: str, separators: str = "") -> str:
+    return _CONFIG.replace(_FILTER, f"<filter>{''.join(rules)}{separators}</filter>")
+
+
+def _lan_separator(row: int, text: str = "after the first rule") -> str:
+    return (
+        f"<separator><lan><sep0><row>fr{row}</row><text>{text}</text>"
+        "<color>bg-info</color><if>lan</if></sep0></lan></separator>"
+    )
+
+
+async def _run_filter_op(op: str, params: dict[str, Any], before: str, after: str) -> Any:
+    connector = PfSenseConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = [_proc(before), _proc(), _proc(), _proc(), _proc(after)]
+        return await getattr(connector, op.replace(".", "_"))(_TARGET, dict(params))
+
+
+_ADD_CASES = [
+    pytest.param(
+        "top",
+        _filter_config(_RULE_A, _RULE_B, separators=_lan_separator(1)),
+        _filter_config(_NEW_RULE, _RULE_A, _RULE_B, separators=_lan_separator(2)),
+        True,
+        id="top-moves-every-row-down",
+    ),
+    pytest.param(
+        "top",
+        _filter_config(_RULE_A, _RULE_B, separators=_lan_separator(1)),
+        _filter_config(_NEW_RULE, _RULE_A, _RULE_B, separators=_lan_separator(1)),
+        False,
+        id="top-rows-not-moved",
+    ),
+    pytest.param(
+        "bottom",
+        _filter_config(_RULE_A, _RULE_B, separators=_lan_separator(1)),
+        _filter_config(_RULE_A, _RULE_B, _NEW_RULE, separators=_lan_separator(1)),
+        True,
+        id="bottom-leaves-rows",
+    ),
+    pytest.param(
+        "bottom",
+        _filter_config(_RULE_A, _RULE_B, separators=_lan_separator(1)),
+        _filter_config(_RULE_A, _RULE_B, _NEW_RULE, separators=_lan_separator(2)),
+        False,
+        id="bottom-rows-moved",
+    ),
+    pytest.param(
+        "top",
+        _filter_config(_RULE_A, _RULE_B),
+        _filter_config(_NEW_RULE, _RULE_A, _RULE_B, separators=_EMPTY_LAN_SEPARATORS),
+        True,
+        id="top-creates-the-empty-separator-list",
+    ),
+    pytest.param(
+        "top",
+        _filter_config(),
+        _filter_config(_NEW_RULE),
+        True,
+        id="top-of-an-empty-interface-touches-no-separators",
+    ),
+    pytest.param(
+        "top",
+        _filter_config(_RULE_A, _RULE_B, separators=_lan_separator(1)),
+        _filter_config(_NEW_RULE, _RULE_A, _RULE_B, separators=_lan_separator(2, "renamed")),
+        False,
+        id="top-with-another-separator-change",
+    ),
+]
+
+
+@pytest.mark.parametrize(("position", "before", "after", "ok"), _ADD_CASES)
+async def test_filter_rule_add_readback_expects_only_the_separator_shift(
+    position: str, before: str, after: str, ok: bool
+) -> None:
+    params = {**_NEW_RULE_PARAMS, "position": position}
+    if ok:
+        result = await _run_filter_op("filter.rule.add", params, before, after)
+        assert result["status"] == "added"
+        return
+    with pytest.raises(RuntimeError, match=r"filter\.rule\.add: the change was saved.*\(filter\)"):
+        await _run_filter_op("filter.rule.add", params, before, after)
+
+
+_DELETE_CASES = [
+    pytest.param(
+        _RULE_A_ID,
+        _filter_config(_RULE_A, _RULE_B, separators=_lan_separator(1)),
+        _filter_config(_RULE_B, separators=_lan_separator(0)),
+        True,
+        id="first-rule-moves-rows-below-up",
+    ),
+    pytest.param(
+        _RULE_A_ID,
+        _filter_config(_RULE_A, _RULE_B, separators=_lan_separator(1)),
+        _filter_config(_RULE_B, separators=_lan_separator(1)),
+        False,
+        id="first-rule-rows-not-moved",
+    ),
+    pytest.param(
+        _RULE_B_ID,
+        _filter_config(_RULE_A, _RULE_B, separators=_lan_separator(1)),
+        _filter_config(_RULE_A, separators=_lan_separator(1)),
+        True,
+        id="second-rule-leaves-rows-above",
+    ),
+    pytest.param(
+        _RULE_B_ID,
+        _filter_config(_RULE_A, _RULE_B, separators=_lan_separator(1)),
+        _filter_config(_RULE_A, separators=_lan_separator(0)),
+        False,
+        id="second-rule-rows-moved",
+    ),
+    pytest.param(
+        _RULE_A_ID,
+        _filter_config(_RULE_A, _RULE_B),
+        _filter_config(_RULE_B, separators=_EMPTY_LAN_SEPARATORS),
+        True,
+        id="creates-the-empty-separator-list",
+    ),
+    pytest.param(
+        _RULE_A_ID,
+        _filter_config(_RULE_A, _RULE_B, separators=_lan_separator(1)),
+        _filter_config(_RULE_B, separators=_lan_separator(0, "renamed")),
+        False,
+        id="with-another-separator-change",
+    ),
+]
+
+
+@pytest.mark.parametrize(("ridentifier", "before", "after", "ok"), _DELETE_CASES)
+async def test_filter_rule_delete_readback_expects_only_the_separator_shift(
+    ridentifier: str, before: str, after: str, ok: bool
+) -> None:
+    params = {"ridentifier": ridentifier}
+    if ok:
+        result = await _run_filter_op("filter.rule.delete", params, before, after)
+        assert result["status"] == "deleted"
+        return
+    with pytest.raises(
+        RuntimeError, match=r"filter\.rule\.delete: the change was saved.*\(filter\)"
+    ):
+        await _run_filter_op("filter.rule.delete", params, before, after)
+
+
+@pytest.mark.parametrize(
+    ("op", "params"),
+    [
+        ("filter.rule.add", _NEW_RULE_PARAMS),
+        ("filter.rule.delete", {"ridentifier": _RULE_A_ID}),
+    ],
+    ids=["add", "delete"],
+)
+async def test_filter_rule_ops_reject_an_unrelated_change(op: str, params: dict[str, Any]) -> None:
+    before = _CONFIG
+    own = (
+        _save(_CONFIG, revision=7, add=("filter", _NEW_RULE))
+        if op == "filter.rule.add"
+        else _save(_CONFIG, revision=7, drop=_RULE_A)
+    )
+    with pytest.raises(RuntimeError, match=rf"{op}: the change was saved.*\(gateways\)"):
+        await _run_filter_op(op, params, before, own.replace(_LAB_GW, ""))

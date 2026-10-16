@@ -444,18 +444,21 @@ def _is_empty_container(element: Any) -> bool:
     return len(element) == 0 and not (element.text or "").strip() and not element.attrib
 
 
+def _parse_config_for_readback(xml_text: str) -> Any:
+    try:
+        return fromstring(xml_text)
+    except ParseError as exc:
+        raise RuntimeError("config.xml could not be parsed for the full read-back") from exc
+
+
 def _sections_without_object(
-    xml_text: str, *, section: str, item_tag: str, key_tag: str, key: str
+    root: Any, *, section: str, item_tag: str, key_tag: str, key: str
 ) -> dict[str, list[tuple[Any, ...]]]:
-    """Return the top-level sections of *xml_text*, minus the edited object.
+    """Return the top-level sections of the parsed config, minus the edited object.
 
     Every ``<section>/<item_tag>`` whose ``<key_tag>`` text equals *key* is
     dropped first, so the result holds everything the op must NOT change.
     """
-    try:
-        root = fromstring(xml_text)
-    except ParseError as exc:
-        raise RuntimeError("config.xml could not be parsed for the full read-back") from exc
     edited = root.find(section)
     if edited is not None:
         for item in list(edited.findall(item_tag)):
@@ -483,6 +486,7 @@ def assert_only_own_object_changed(
     item_tag: str,
     key_tag: str,
     key: str,
+    expected_side_effects: Callable[[Any, Any], None] | None = None,
 ) -> None:
     """Raise when ``config.xml`` changed anywhere except the edited object.
 
@@ -496,12 +500,24 @@ def assert_only_own_object_changed(
     or this op's save undid a change that was there before. The op's own
     change is saved in both cases. But the config is no longer what the
     operator asked for, so the op fails instead of reporting success.
+
+    An op whose playback is known to change something else as well (the
+    filter-rule ops move the GUI separator rows of the edited interface)
+    passes *expected_side_effects*. It is called with the parsed *before*
+    and *after* trees and must apply exactly those changes to the *before*
+    tree, so the comparison still rejects everything the op did not mean to
+    do. It may also drop from both trees a detail that pfSense may or may
+    not write, such as an empty list element.
     """
+    old_root = _parse_config_for_readback(before)
+    new_root = _parse_config_for_readback(after)
+    if expected_side_effects is not None:
+        expected_side_effects(old_root, new_root)
     old = _sections_without_object(
-        before, section=section, item_tag=item_tag, key_tag=key_tag, key=key
+        old_root, section=section, item_tag=item_tag, key_tag=key_tag, key=key
     )
     new = _sections_without_object(
-        after, section=section, item_tag=item_tag, key_tag=key_tag, key=key
+        new_root, section=section, item_tag=item_tag, key_tag=key_tag, key=key
     )
     changed = sorted(tag for tag in old.keys() | new.keys() if old.get(tag) != new.get(tag))
     if changed:

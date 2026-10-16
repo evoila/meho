@@ -2641,6 +2641,81 @@ async def test_deploy_from_library_cancelled_deploy_removes_partial_vm(
     )
 
 
+class _HeldConnector(_RecordingConnector):
+    """A :class:`_RecordingConnector` that holds chosen calls open.
+
+    ``hold`` maps a 0-based call number to an event. That call waits on the
+    event before it is recorded and served; ``entered[n]`` is set once call
+    ``n`` starts waiting. A call that is cancelled while it waits uses no
+    canned response.
+    """
+
+    def __init__(self, responses: list[Any], *, hold: dict[int, asyncio.Event]) -> None:
+        super().__init__(responses)
+        self._hold = hold
+        self._call_number = 0
+        self.entered = {n: asyncio.Event() for n in hold}
+
+    async def _wait_if_held(self) -> None:
+        n = self._call_number
+        self._call_number += 1
+        if n in self._hold:
+            self.entered[n].set()
+            await self._hold[n].wait()
+
+    async def _get_json(self, target: Any, path: str, **kwargs: Any) -> Any:
+        await self._wait_if_held()
+        return await super()._get_json(target, path, **kwargs)
+
+    async def _post_json(self, target: Any, path: str, **kwargs: Any) -> Any:
+        await self._wait_if_held()
+        return await super()._post_json(target, path, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_real_cancel_cleanup_survives_more_cancels(
+    gate: _GateRecorder,
+) -> None:
+    """A real task cancel mid-deploy, cancelled again during cleanup, still deletes (#3697).
+
+    Call 1 (the deploy POST) and call 2 (the second listing) are held open.
+    The task is cancelled while the POST waits, and cancelled three more
+    times while the cleanup listing waits. The shielded cleanup must still
+    run to the DELETE, and the cancel must reach the caller.
+    """
+    deploy_held = asyncio.Event()
+    listing_held = asyncio.Event()
+    # The cancelled POST uses no response: listing, second listing, DELETE.
+    conn = _HeldConnector(
+        [[], [{"vm": "vm-partial"}], None],
+        hold={1: deploy_held, 2: listing_held},
+    )
+    task = asyncio.create_task(
+        vm_deploy_from_library_composite(
+            operator=_make_operator(),
+            target=object(),
+            params=dict(_DEPLOY_PARAMS_NAMED),
+            connector=conn,  # type: ignore[arg-type]
+        )
+    )
+    await asyncio.wait_for(conn.entered[1].wait(), timeout=5)
+    task.cancel()
+    await asyncio.wait_for(conn.entered[2].wait(), timeout=5)
+    for _ in range(3):
+        task.cancel()
+        await asyncio.sleep(0)
+    assert not task.done()
+    listing_held.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=5)
+    assert task.cancelled()
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("GET", "/api/vcenter/vm"),
+        ("GET", "/api/vcenter/vm"),
+        ("DELETE", "/api/vcenter/vm/vm-partial"),
+    ]
+
+
 @pytest.mark.asyncio
 async def test_deploy_from_library_resolve_error_on_find_http_fault(gate: _GateRecorder) -> None:
     """A 4xx on the content-library find → structured resolve_error, not a bare fault.

@@ -413,6 +413,23 @@ async def test_same_key_replays_without_a_second_write(_fake_stream: AsyncMock) 
     assert data["code"] == "idempotency_key_reused"
 
 
+async def test_same_key_from_another_run_is_refused() -> None:
+    """Two hosted runs of one agent share an owner, but not a replay."""
+    tenant_id = uuid4()
+    person = _human(tenant_id)
+    run_a = await seed_agent_run(tenant_id, identity_sub=person.sub)
+    run_b = await seed_agent_run(tenant_id, identity_sub=person.sub)
+    step = {"activity": "same work", "idempotency_key": "start-1"}
+    with _AmbientRun(run_a), actor_delegation(_AGENT_CLIENT):
+        await _handler_announce(person, step)
+        data = await _announce_error(person, {**step, "scope": "other scope"})
+    assert data["code"] == "idempotency_key_reused"
+    with _AmbientRun(run_b), actor_delegation(_AGENT_CLIENT):
+        data = await _announce_error(person, step)
+    assert data["code"] == "idempotency_key_reused"
+    assert await _row_count(tenant_id) == 1
+
+
 async def test_idempotency_key_is_scoped_per_owner() -> None:
     tenant_id = uuid4()
     first = await _registered_agent(tenant_id)

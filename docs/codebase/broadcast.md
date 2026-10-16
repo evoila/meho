@@ -489,6 +489,11 @@ principal may still declare its own `work_ref`.
   step again returns the first result with `replayed=true` and
   `cursor=null`; nothing new is stored or streamed. The same key for a
   different step gets `idempotency_key_reused`.
+- "Same step" means every field matches: `run_id`, `phase`, `activity`,
+  `target`, `targets`, `scope`, `planned_op_class`, `ttl_minutes`,
+  `work_ref`, and `claim_id` for `update` / `completion`. So a second
+  hosted run of the same agent that reuses a key gets
+  `idempotency_key_reused`, not the first run's claim.
 - Error codes (MCP `error.data.code`, REST `422` `detail.code`):
   `claim_id_not_allowed`, `claim_id_required`, `idempotency_key_required`,
   `server_stamped_field`, `claim_not_found`, `claim_not_owned`,

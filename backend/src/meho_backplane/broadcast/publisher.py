@@ -167,9 +167,27 @@ class AnnouncementPublishResult:
     replayed: bool
 
 
+_STEP_FIELDS = (
+    "run_id",
+    "phase",
+    "activity",
+    "target",
+    "targets",
+    "scope",
+    "planned_op_class",
+    "ttl_minutes",
+    "work_ref",
+)
+
+
 def _same_step(stored: AgentAnnouncementEvent, event: AgentAnnouncementEvent) -> bool:
-    """Whether a retry with the same key asks for the same step."""
-    if stored.phase != event.phase or stored.activity != event.activity:
+    """Whether a retry with the same key asks for the same step.
+
+    The key is scoped per owner, so every field the caller sends must
+    match, including the hosted run: a second run of the same agent that
+    reuses a key must not get the first run's claim back.
+    """
+    if any(getattr(stored, f) != getattr(event, f) for f in _STEP_FIELDS):
         return False
     return event.phase == "start" or stored.claim_id == event.claim_id
 

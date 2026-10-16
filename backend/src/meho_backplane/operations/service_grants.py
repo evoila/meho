@@ -61,7 +61,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, EndpointDescriptor, ServicePrincipalGrant
+from meho_backplane.db.models import (
+    AuditEventClass,
+    AuditLog,
+    EndpointDescriptor,
+    ServicePrincipalGrant,
+)
 from meho_backplane.operations.service_grant_schemas import ServiceGrantCreate, ServiceGrantRead
 
 __all__ = [
@@ -881,6 +886,7 @@ async def _record_grant_use(
     async with sessionmaker() as session:
         row = AuditLog(
             id=audit_id,
+            event_class=AuditEventClass.APPROVAL_DECISION,
             occurred_at=datetime.now(UTC),
             operator_sub=operator.sub,
             tenant_id=operator.tenant_id,

@@ -443,6 +443,7 @@ def test_replay_node_is_frozen() -> None:
         agent_session_id=None,
         work_ref=None,
         policy_decision=None,
+        event_class="legacy_request",
         broadcast_event_id=None,
         depth=0,
         children=[],

@@ -364,6 +364,7 @@ async def test_rotate_refresh_replay_revokes_and_writes_audit(
     assert row.method == REFRESH_REPLAY_AUDIT_METHOD
     assert row.path == REFRESH_REPLAY_AUDIT_PATH
     assert row.status_code == 401
+    assert row.event_class == "security_event"
     assert row.operator_sub == "op-alice"
     assert row.tenant_id == tenant_id
     assert row.payload["session_id"] == str(created.id)

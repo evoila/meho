@@ -111,7 +111,9 @@ func newPreviewCmd() *cobra.Command {
 			"op with no single literal HTTP request to preview comes back " +
 			"`status=\"unavailable\"` (a destructive or approval-gated " +
 			"typed/composite op is the exception — it previews a param-bound " +
-			"request tuple).\n\n" +
+			"request tuple). An approval-gated op that writes a credential " +
+			"(for example `vault.kv.put`) is not previewable and stays " +
+			"`status=\"unavailable\"`, so its secret params never surface.\n\n" +
 			"For such an op the preview prints the plan of what will change " +
 			"(`proposed_effect`) when the plan can be built without contacting " +
 			"the target. When the plan needs the target, the preview says so: " +

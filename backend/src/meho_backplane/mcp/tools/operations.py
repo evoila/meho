@@ -632,7 +632,10 @@ register_mcp_tool(
             "a `preview_hash`. It shows the plan as `proposed_effect` only "
             "when the plan can be built without contacting the target; "
             "otherwise `plan_shown` is false and `plan_note` says the plan "
-            "is shown on the approval request instead. Arguments mirror "
+            "is shown on the approval request instead. An approval-gated op "
+            "that writes a credential (for example `vault.kv.put`) is NOT "
+            'previewable and stays `status="unavailable"`, so its secret '
+            "params never surface. Arguments mirror "
             "`call_operation`: "
             "`connector_id` (required), `op_id` (required), `target` "
             '(optional; bare string `"rdc-vcenter"` or dict '

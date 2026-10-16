@@ -130,7 +130,10 @@ Two honest limits:
   `status: "ok"` with the params and a `preview_hash`. It shows the plan
   (`proposed_effect`) only when the plan does not need the target. When
   the plan needs the target, `plan_shown` is `false` and `plan_note`
-  says the plan is shown on the approval request.
+  says the plan is shown on the approval request. An approval-gated
+  operation that writes a credential (for example `vault.kv.put`) is
+  not previewable. It stays `status: "unavailable"`, so its secret
+  params never surface.
 - It is available over MCP, REST (`POST /api/v1/operations/preview`),
   and the CLI (`meho operation preview <connector_id> <op_id>`).
 

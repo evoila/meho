@@ -659,9 +659,45 @@ The response (`ApprovalResultView`) carries `status`, `resumed`
 (`resumed_at is not None`), `reviewed_by` / `decided_at`, and `result` (the
 captured envelope, or `null` while unready). A consumer polls until
 `status == "approved"` and `result` is populated, then resumes by poll on the
-returned task id. `resume_result` is **internal to this surface** — like
+returned task id. When the approved run failed on an upstream vim fault,
+`result.extras.upstream_fault` carries the fault type and full faultstring
+(#3567), so the owner can see why without the approver-owned
+flight-recorder handle. `resume_result` is **internal to this surface** — like
 `params` it is never projected onto the default read view (`_view`) or a
 broadcast frame.
+
+### Who owns a result handle from an approved run (#3548)
+
+The approved op runs under the **approver's** `Operator`. Before #3548 a
+large result spilled into a handle owned by the approver's `sub`. But
+`/result` serves only the **parker**, so the parker got an envelope with a
+handle it could not open (`handle_not_found`).
+
+Now the parker owns it:
+
+- `_dispatch_resume_with_bound_context` binds
+  `operations.reducer.handle_owner_sub_var` to `request.principal_sub` for
+  the run (token reset in `finally`).
+- `dispatcher._reduce_or_error` uses that value as
+  `reducer_context["operator_sub"]` when it is set. Otherwise it uses the
+  dispatching operator's `sub`, as before.
+- The tenant does not change. The approver can only load rows from its own
+  tenant, so the parker's tenant is the same.
+- Every spill in the run follows the binding, including the child ops of a
+  resumed multi-step (composite) op.
+
+What this means:
+
+- One owner per handle. The parker can page and query it with
+  `result_query`. Any other principal still misses, **including the
+  approver**. The approver still sees the summary and sample rows inline. The
+  approver did not ask for the data.
+- The audit model is unchanged. The run's audit row still names the
+  approver as the actor. The parker's `result_query` reads run under the
+  parker, so they match the parker's `approval.result` row.
+- Only the operator-surface resume does this. A normal dispatch, and the
+  in-process agent-run resume (it already runs as the parking agent), keep
+  handles owned by the caller.
 
 **Relation to the #3027 add-on step event.** `publish_approval_event`
 already durably records the *decision* (`approval.approved` / `.rejected`)
@@ -1464,6 +1500,68 @@ composite's own dispatch audit row. This is enforced in
 
 A direct (non-composite) park is unchanged — `resume_parent` is NULL, so
 the resume keeps the generic re-dispatch of the stored `op_id`.
+
+#### Both resume surfaces read `resume_parent` (#3421)
+
+Two code paths can resume a request that waits for approval, and both
+handle a composite (multi-step operation) sub-op the same way:
+
+- the operator surface, `resume_dispatch_after_approval`
+  (`operations/approval_queue.py`);
+- the in-process agent waiter, `_resume_approved_or_already_resumed`
+  (`agent/approval_wait.py`).
+
+Both call one helper, `composite_resume_binding` in
+`operations/approval_queue.py`. When the row has a `resume_parent`, the
+helper returns the parent composite's `(op_id, params)` and sets
+`composite_resume_var` and `composite_resume_scope_var` to the approved
+sub-op while the parent runs again. When `resume_parent` is NULL it returns
+`None` and sets nothing. Because both paths share it, they cannot drift
+apart. `test_operator_and_agent_surfaces_resume_the_same_row_identically`
+checks that both paths run the same row the same way.
+
+What the agent waiter does:
+
+- **Composite sub-op waiting for approval.** It runs the parent composite
+  again (`_approved=True`) with the row's `connector_id`, the parent `op_id`
+  and the parent params. It keeps the rest of the agent's original call
+  (`work_ref`, …). The approved sub-op clears its gate and runs once. Before
+  #3421 the waiter re-sent the agent's call without clearing the sub-op, so
+  the sub-op created a second request and nothing ran.
+- **Target check.** The re-run uses the target the row saved by id
+  (`rehydrate_resume_target`, the same check the operator surface runs), not
+  the target name from the agent's original call. While the request waited,
+  that name may have moved to another target: the target was renamed, or
+  deleted and a new one created with the same name. Loading by id means the
+  approved write can only run against the original target. If the saved
+  target no longer resolves (soft-deleted or revoked), the waiter returns a
+  `denied` envelope and runs nothing. This check runs before the
+  one-resumer claim, so a refused resume leaves the claim free.
+  Covered by `test_composite_resume_uses_saved_target_when_name_was_reassigned`
+  and `test_composite_resume_fails_closed_when_saved_target_deleted_and_name_reused`
+  (unit) and the two `test_agent_waiter_composite_resume_*` tests (end to
+  end).
+- **Direct request (no `resume_parent`).** It runs the agent's original
+  `call_arguments` again unchanged, as before, including the target name.
+- **Credential-write sub-op.** The row stores only the parent `op_id`; the
+  parent params live in the encrypted custody copy. For a composite sub-op
+  the claim winner consumes that copy to get the parent params. For a direct
+  request it still discards the copy.
+
+One difference stays on purpose: the agent waiter re-enters the composite
+as the **agent**, not as the reviewer. So every other governed sub-op is
+checked against the agent's own grants. If one would need its own approval,
+the multi-gate guard above fails closed
+(`composite_resume_multi_gate_unsupported`) on the agent path too. If the
+agent has no grant for it, that sub-op is denied.
+
+Note: every shipped governed composite is `requires_approval=True` at the
+top level, so an agent's first call makes the composite itself wait for
+approval (`resume_parent` NULL). A sub-op request with `resume_parent` set
+happens later, inside the resumed composite. Today the agent waiter does not
+wait on that second request; an operator surface resumes it. The waiter's
+composite branch makes the agent path correct whenever it does resume such
+a row.
 
 ## MCP elicitation URL-mode (forward-looking)
 

@@ -24,7 +24,7 @@ addressable as a datastore path (`[datastore1] iso/esxi-9.iso`).
 | # | Step | Op (governed id) | Kind |
 |---|------|------------------|------|
 | 1 | Base VM **+ VHV + data disks** | `vmware.composite.vm.create` (`nested_hv: true`, `disks: [...]`, #3093/#3117) | composite |
-| 2 | VHV, 9.x-only alternative | `POST:/VirtualMachine/{moId}/ReconfigVM_Task` | raw ingested (VI-JSON) |
+| 2 | VHV, alternative for an existing VM | `POST:/VirtualMachine/{moId}/ReconfigVM_Task` | raw ingested (VI-JSON) |
 | 3 | Extra disks later (optional) | `POST:/vcenter/vm/{vm}/hardware/disk` | raw ingested |
 | 4 | Resize later (optional) | `PATCH:/vcenter/vm/{vm}/hardware/cpu` (or `vmware.composite.vm.resize`) | raw ingested / composite |
 | 5 | Installer media | `POST:/vcenter/vm/{vm}/hardware/cdrom` | raw ingested |
@@ -34,7 +34,7 @@ Since #3117 the data disks fold into step 1's `disks` param (one governed
 create for the whole VM, storage included); step 3 is now only for adding
 disks to an already-created VM. Steps 3–5 target the powered-off VM step 1
 created; power on last. Step 2 exists only for a VM created *without*
-`nested_hv` on a 9.x fleet. All raw bodies are the **flat `/api` `*Spec`
+`nested_hv`. All raw bodies are the **flat `/api` `*Spec`
 shape** — never the legacy `/rest`-style `{"spec": {...}}` envelope
 (#2973/#3071 class; the one `"spec"` key in step 2 is the vim request
 type's genuine required parameter, not an envelope).
@@ -83,7 +83,7 @@ type's genuine required parameter, not an envelope).
   power-on**, the composite issues the vim `ReconfigVM_Task`
   (`VirtualMachineConfigSpec.nestedHVEnabled=true`) through its governed
   vmomi substrate — the `/sdk/vim25/{release}` mount that is
-  version-correct on vCenter 8.0.x **and** 9.x, unlike the raw step 2 —
+  version-correct on vCenter 8.0.x **and** 9.x —
   and polls the task to terminal. A failed VHV leg rolls the VM back like
   any other post-create step; the `created` envelope echoes the applied
   `nested_hv` state.
@@ -125,7 +125,7 @@ type's genuine required parameter, not an envelope).
   the raw `POST:/vcenter/vm` — its pinned CreateSpec carries all of them
   inline, keyed `guest_os` (required, snake_case).
 
-### 2. VHV — raw VI-JSON `ReconfigVM_Task` (9.x-only alternative)
+### 2. VHV — raw VI-JSON `ReconfigVM_Task` (alternative for an existing VM)
 
 Nested hardware-assisted virtualization (VHV — required for the nested
 ESXi to run 64-bit guests) has **no field on the vSphere Automation REST
@@ -140,7 +140,7 @@ pinned spec).
 documented release-versioned base, so it works on vCenter 8.0.x *and*
 9.x, and the leg is task-polled with the composite's rollback contract.
 Use this raw form only when the VM already exists without VHV (e.g. a
-pre-#3093 create) **and** the target is a 9.x fleet:
+pre-#3093 create):
 
 ```json
 {"moId": "<vm-id>", "body": {"spec": {"nestedHVEnabled": true}}}
@@ -154,14 +154,11 @@ and the same op_id is governance-registered as a composite sub-op
 - Issue against the **powered-off** VM; the 200 body is a Task MoRef
   (`{"type": "Task", "value": "task-…"}`) — confirm completion via the
   `vmware.tasks.recent` typed read or re-read the VM config.
-- **Mount caveat (gap 2):** raw ingested dispatch mounts this op at
-  `/api/VirtualMachine/{moId}/ReconfigVM_Task` — the observed 9.x
-  accommodation (#2466). The documented release-versioned base
-  (`/sdk/vim25/{release}`) is applied only by the typed
-  `_post_vmomi_json` helper inside composites, so this raw step is
-  **9.x-fleet-only**: on vCenter 8.0.x the `/api`-mounted vmomi form
-  404s — on an 8.0.x outer vCenter, `vm.create(nested_hv=true)` is the
-  only governed route.
+- **Mount:** raw ingested dispatch mounts this op on the documented
+  release-versioned base,
+  `/sdk/vim25/{release}/VirtualMachine/{moId}/ReconfigVM_Task` (#3534),
+  so it works on vCenter 8.0.x and 9.x. Unlike the composite helper, the
+  raw call has no `/api` fallback and no task polling.
 
 ### 3. Extra disks later — raw disk add, one call per disk
 
@@ -238,15 +235,14 @@ and rollback contract already live) instead of growing a new op.
    `vcenter.yaml` (neither `Cpu.UpdateSpec` nor `Vm.CreateSpec.cpu`).
    Governed path = `vm.create(nested_hv=true)` (#3093, the composite's
    vim substrate); raw VI-JSON `ReconfigVM_Task` (step 2) is the
-   9.x-only alternative for an already-created VM. When a re-pinned
+   alternative for an already-created VM. When a re-pinned
    spec grows the REST field, the gap lane fails → move the recipe to
    the REST field.
-2. **Raw VI-JSON dispatch mounts on `/api`, not `/sdk/vim25/{release}`.**
-   Works on the 9.x fleet (observed accommodation, #2466); 404s on
-   vCenter 8.0.x. Only typed composite helpers do release-versioned
-   VI-JSON mounting — which is why #3093 routes the recipe's VHV flag
-   through `vm.create` rather than the raw op. Follow-up candidate if
-   8.x nested targets ever need the *raw* vim surface beyond this flag.
+2. **Raw VI-JSON dispatch has no `/api` fallback.** Since #3534 it
+   mounts on `/sdk/vim25/{release}` like the typed helpers (before, it
+   mounted on `/api` and 404ed on vCenter 8.0.x). It does not retry on
+   `/api` and does not poll the task, so `vm.create(nested_hv=true)`
+   stays the primary governed route for the VHV flag.
 3. **Thin provisioning is not expressible on the disk add.**
    `VmdkCreateSpec` = `{name, capacity, storage_policy}`; provisioning
    follows the datastore default / storage policy.
@@ -276,7 +272,7 @@ and rollback contract already live) instead of growing a new op.
 | Claim | Test |
 |-------|------|
 | Recipe REST ops served by pinned spec; flat bodies; VHV/thin gaps; `guest_os` casing + prose enum; ISO backing; `nestedHVEnabled` served | `backend/tests/test_connectors_vmware_rest_nested_esxi_spec_reconcile.py` |
-| Wire shape of every raw call (path/verb/mount/body), 204 handling, `/api` vmomi mount caveat, schema validation of the examples, `VMKERNEL_*` pass-through | `backend/tests/test_connectors_vmware_rest_nested_esxi_recipe.py` |
+| Wire shape of every raw call (path/verb/mount/body), 204 handling, `/sdk/vim25` vmomi mount, schema validation of the examples, `VMKERNEL_*` pass-through | `backend/tests/test_connectors_vmware_rest_nested_esxi_recipe.py` |
 | cdrom composite manifest (update/remove/disconnect only) | `test_cdrom_composite_covers_update_remove_disconnect_only` (reconcile module) |
 | `vm.create(nested_hv=true)` leg: reconfigure-before-power-on ordering, body shape, gating, rollback on leg failure, param-absent byte-identity | `test_vm_create_nested_hv_*` in `backend/tests/test_connectors_vmware_rest_composites_write.py`; vim manifest + pinned-spec lane in `..._composites_l2_ingest_reconcile.py` (#3093) |
 | `vm.create` placement pins (`resource_pool` / `datastore` / `host`) thread into the create body; pin-absent body byte-identity; pinned `VM.PlacementSpec` field set | `test_vm_create_placement_pins_thread_into_the_create_body` / `test_vm_create_without_placement_pins_create_body_is_byte_identical` in `backend/tests/test_connectors_vmware_rest_composites_write.py`; `test_vm_placement_spec_serves_the_composite_placement_pins` (reconcile module) (#3096) |

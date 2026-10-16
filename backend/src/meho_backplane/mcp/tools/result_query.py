@@ -41,6 +41,7 @@ from uuid import UUID
 from pydantic import ValidationError
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.jsonflux.query.json_pointer import MAX_POINTER_LENGTH
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.result_query import (
@@ -93,17 +94,19 @@ async def _result_query_handler(
             data={"reason": "invalid_handle_id", "handle_id": str(raw_handle)},
         ) from exc
 
-    raw_query = arguments.get("query")
-    if raw_query is not None:
-        return await _run_query(operator, handle_id, raw_query)
-
     offset = int(arguments.get("offset", 0))
     limit = int(arguments.get("limit", 50))
+
+    raw_query = arguments.get("query")
+    if raw_query is not None:
+        return await _run_query(operator, handle_id, raw_query, offset, limit)
 
     try:
         return await read_result_window(operator, handle_id, offset, limit)
     except ResultHandleNotFoundError as exc:
         raise _handle_not_found(handle_id) from exc
+    except QueryContractError as exc:
+        raise McpInvalidParamsError(str(exc), data={"reason": "invalid_query"}) from exc
     except ResultQueryOutputTooLargeError as exc:
         raise McpInvalidParamsError(str(exc), data={"reason": "output_too_large"}) from exc
 
@@ -112,6 +115,8 @@ async def _run_query(
     operator: Operator,
     handle_id: UUID,
     raw_query: Any,
+    offset: int,
+    limit: int,
 ) -> dict[str, Any]:
     """Validate the ``query`` argument and run the bounded structured query.
 
@@ -130,7 +135,7 @@ async def _run_query(
             data={"reason": "invalid_query"},
         ) from exc
     try:
-        return await run_result_query(operator, handle_id, spec)
+        return await run_result_query(operator, handle_id, spec, offset=offset, limit=limit)
     except ResultHandleNotFoundError as exc:
         raise _handle_not_found(handle_id) from exc
     except QueryContractError as exc:
@@ -184,7 +189,17 @@ register_mcp_tool(
             "A handle that does not exist, has expired (TTL elapsed), or "
             "belongs to another operator is a recoverable error (`-32602`, "
             "`data.reason=handle_not_found`) — re-run the original operation "
-            "to get a fresh handle. Only use this when "
+            "to get a fresh handle. "
+            "Document handles: when the reduced response has "
+            '`result_record: "document"` (one large object, not a list), read '
+            'one part with `query={"path": "/key/0/name"}` (an RFC '
+            '6901 JSON Pointer; `""` is the whole document). An array '
+            "value pages with `offset` / `limit`; any other value comes back "
+            "in `value`. A rows handle with `omitted_scalar_count` keeps the "
+            "fields that did not fit its inline summary the same way when its "
+            "`fetch_more.drill_in.rationale` says so: read one with "
+            '`query={"path": "/<field name>"}`. `path` cannot be '
+            "combined with the other `query` fields. Only use this when "
             "`fetch_more.drill_in.available` is `true` on the handle; when "
             "it is `false` the full set was not spilled and you must "
             "re-call the operation with narrower params instead."
@@ -226,7 +241,10 @@ register_mcp_tool(
                         "Optional structured query (query mode). When present, "
                         "`offset`/`limit` are ignored and the handle is queried "
                         "server-side as one bounded read-only SELECT. Every "
-                        "referenced field must be a column on the handle."
+                        "referenced field must be a column on the handle. "
+                        "For a document handle, or for the fields a rows handle "
+                        "left out of its inline summary, send only `path` "
+                        "instead; `offset`/`limit` then page an array value."
                     ),
                     "additionalProperties": False,
                     "properties": {
@@ -318,6 +336,20 @@ register_mcp_tool(
                                 "The result flags `truncated` when more rows existed."
                             ),
                         },
+                        "path": {
+                            "type": "string",
+                            "maxLength": MAX_POINTER_LENGTH,
+                            "description": (
+                                "Document handles only: an RFC 6901 JSON Pointer "
+                                "to the value to read, for example "
+                                '`/status/conditions/0`; `""` is the whole '
+                                "document. `~1` means `/` and `~0` means `~` "
+                                "inside a key. An array value pages with the "
+                                "top-level `offset` / `limit`. Cannot be "
+                                "combined with `filter`, `select`, `group_by`, "
+                                "`aggregate`, `order_by`, or `limit`."
+                            ),
+                        },
                     },
                 },
             },
@@ -347,6 +379,23 @@ register_mcp_tool(
                 "coverage_note": {
                     "type": ["string", "null"],
                     "description": "Query mode only. Human-readable coverage caveat when partial.",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Path reads only. The JSON Pointer that was read.",
+                },
+                "value_type": {
+                    "type": "string",
+                    "enum": ["object", "array", "string", "number", "boolean", "null"],
+                    "description": (
+                        "Path reads only. The JSON type of the value at `path`. "
+                        "An `array` pages in `rows`; any other type is in `value`."
+                    ),
+                },
+                "value": {
+                    "description": (
+                        "Path reads only, when `value_type` is not `array`: the value at `path`."
+                    ),
                 },
             },
             "required": [

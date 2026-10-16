@@ -87,13 +87,21 @@ __all__ = [
 #: first 256 chars does not ride the envelope in cleartext.
 _EXC_MESSAGE_CAP: int = 256
 
+#: Cap on ``extras["upstream_message"]`` and on the faultstring in
+#: ``extras["upstream_fault"]`` (#3567). An upstream error body is the
+#: vendor's own diagnosis, and a vim fault often puts the useful text past
+#: the first 256 chars, so the 256-char :data:`_EXC_MESSAGE_CAP` cut it to
+#: a useless fragment. 2 KB fits a full vim faultstring and still bounds a
+#: pathological body. Redaction still runs before this cap.
+_UPSTREAM_MESSAGE_CAP: int = 2048
+
 #: Fail-closed placeholder when Tier-1 redaction itself is unavailable
 #: on the never-raises error path. Returning the raw text instead would
 #: reintroduce exactly the passthrough this sanitizer exists to close.
 _TEXT_WITHHELD: str = "<diagnostic text withheld: redaction unavailable>"
 
 
-def _sanitize_free_text(text: str) -> str:
+def _sanitize_free_text(text: str, *, cap: int = _EXC_MESSAGE_CAP) -> str:
     """Tier-1-redact, then length-cap, one free-text diagnostic string.
 
     Every ``str(exc)`` / upstream-body line a result builder emits
@@ -112,6 +120,9 @@ def _sanitize_free_text(text: str) -> str:
     path. Fail-closed: if redaction itself errors, the text is withheld
     entirely -- this is a never-raises path and an unredacted fallback
     would be the leak.
+
+    *cap* defaults to :data:`_EXC_MESSAGE_CAP`; upstream body text passes
+    the larger :data:`_UPSTREAM_MESSAGE_CAP` (#3567).
     """
     try:
         redacted = redact(text, get_default_policy()).redacted
@@ -119,8 +130,8 @@ def _sanitize_free_text(text: str) -> str:
         return _TEXT_WITHHELD
     if not isinstance(redacted, str):  # pragma: no cover -- str in, str out
         return _TEXT_WITHHELD
-    if len(redacted) > _EXC_MESSAGE_CAP:
-        return redacted[:_EXC_MESSAGE_CAP] + "...<truncated>"
+    if len(redacted) > cap:
+        return redacted[:cap] + "...<truncated>"
     return redacted
 
 
@@ -826,6 +837,10 @@ def result_connector_error(
     ``error`` summary is unchanged (``connector_error: HTTPStatusError``)
     so existing string matchers keep working; the new detail is additive
     in ``extras``.
+
+    #3567: ``extras.upstream_fault`` is set from the response body as above,
+    or from a SOAP fault the ESXi path attached to *exc* (see
+    :func:`_add_attached_upstream_fault`).
     """
     msg = _sanitize_free_text(str(exc))
     extras: dict[str, Any] = {
@@ -836,6 +851,8 @@ def result_connector_error(
     if isinstance(exc, httpx.HTTPStatusError):
         extras["http_status"] = exc.response.status_code
         extras["upstream_message"] = _http_upstream_message(exc.response)
+        _add_upstream_fault(extras, exc.response)
+    _add_attached_upstream_fault(extras, exc)
     return OperationResult(
         status="error",
         op_id=op_id,
@@ -1187,7 +1204,7 @@ def _http_upstream_message(response: httpx.Response) -> str | None:
     JSON, or JSON without a usable ``message``, fall back to the capped
     raw text. ``None`` only when the body is empty. Either branch runs
     through :func:`_sanitize_free_text` -- Tier-1 redaction plus the
-    :data:`_EXC_MESSAGE_CAP` discipline -- so credential-bearing
+    :data:`_UPSTREAM_MESSAGE_CAP` (2 KB, #3567) -- so credential-bearing
     upstream text never reaches the envelope in cleartext. Shared by
     the 403 / 422 / auth-failed builders (the body shape is identical
     across GitHub's 4xx responses).
@@ -1213,14 +1230,124 @@ def _http_upstream_message(response: httpx.Response) -> str | None:
     if isinstance(body, dict):
         message = body.get("message")
         if isinstance(message, str) and message.strip():
-            return _sanitize_free_text(message)
+            return _sanitize_free_text(message, cap=_UPSTREAM_MESSAGE_CAP)
     try:
         text = (response.text or "").strip()
     except httpx.StreamError:
         return None
     if not text:
         return None
-    return _sanitize_free_text(text)
+    return _sanitize_free_text(text, cap=_UPSTREAM_MESSAGE_CAP)
+
+
+def _vi_json_fault(response: httpx.Response) -> tuple[str, str | None] | None:
+    """``(_typeName, faultstring)`` of a VI/JSON vim fault body, else ``None``.
+
+    vCenter's VI/JSON API returns a vim fault as a JSON object whose
+    ``_typeName`` names the fault class (``NotAuthenticated``,
+    ``InvalidLogin``, ...) next to a ``faultstring``. It has no top-level
+    ``message`` key, so :func:`_http_upstream_message` only sees it as raw
+    text.
+    """
+    try:
+        body = response.json()
+    except (ValueError, UnicodeDecodeError, httpx.StreamError):
+        return None
+    if not isinstance(body, dict):
+        return None
+    fault_type = body.get("_typeName")
+    if not isinstance(fault_type, str) or not fault_type.strip():
+        return None
+    faultstring = body.get("faultstring")
+    if not isinstance(faultstring, str) or not faultstring.strip():
+        faultstring = None
+    return fault_type, faultstring
+
+
+def _soap_fault(text: str) -> tuple[str | None, str | None] | None:
+    """``(fault_type, faultstring)`` of a SOAP ``<soapenv:Fault>`` body, else ``None``."""
+    # Imported here, not at module top: the vmware_rest package imports the
+    # operations package, so a top-level import would be circular.
+    from meho_backplane.connectors.vmware_rest.soap import parse_soap_fault
+
+    try:
+        fault = parse_soap_fault(text)
+    except Exception:  # never raise on the error path (e.g. a defusedxml refusal)
+        return None
+    if fault is None or (fault.fault_type is None and fault.faultstring is None):
+        return None
+    return fault.fault_type, fault.faultstring
+
+
+def _http_upstream_fault(response: httpx.Response) -> dict[str, str | None] | None:
+    """Structured ``{type, faultstring}`` of an upstream vim fault body (#3567).
+
+    Two body shapes are recognised: a VI/JSON fault from vCenter
+    (``{"_typeName": ..., "faultstring": ...}``) and a SOAP
+    ``<soapenv:Fault>`` from the ESXi / vim25 SOAP path (parsed by
+    :func:`~meho_backplane.connectors.vmware_rest.soap.parse_soap_fault`).
+    Any other body yields ``None``. The fault type is the most useful field
+    for triage (``NotAuthenticated`` vs ``InvalidLogin`` vs
+    ``InvalidArgument``), so it gets its own field instead of being buried in
+    the capped ``upstream_message`` text. Both values are Tier-1-redacted,
+    then capped, like every other free-text field here. Never raises.
+    """
+    try:
+        text = (response.text or "").strip()
+    except httpx.StreamError:
+        return None
+    if not text:
+        return None
+    parsed = _soap_fault(text) if text.startswith("<") else _vi_json_fault(response)
+    if parsed is None:
+        return None
+    return _upstream_fault_fields(*parsed)
+
+
+def _upstream_fault_fields(
+    fault_type: str | None, faultstring: str | None
+) -> dict[str, str | None]:
+    """Redact, then cap, the two ``upstream_fault`` fields (type at 256, text at 2 KB)."""
+    return {
+        "type": _sanitize_free_text(fault_type) if fault_type is not None else None,
+        "faultstring": (
+            _sanitize_free_text(faultstring, cap=_UPSTREAM_MESSAGE_CAP)
+            if faultstring is not None
+            else None
+        ),
+    }
+
+
+def _add_upstream_fault(extras: dict[str, Any], response: httpx.Response) -> None:
+    """Set ``extras["upstream_fault"]`` when the upstream body is a vim fault.
+
+    The key is added only when a fault was found, so envelopes from other
+    upstreams keep their exact shape.
+    """
+    fault = _http_upstream_fault(response)
+    if fault is not None:
+        extras["upstream_fault"] = fault
+
+
+def _add_attached_upstream_fault(extras: dict[str, Any], exc: BaseException) -> None:
+    """Set ``extras["upstream_fault"]`` from a SOAP fault stored on *exc* (#3567).
+
+    On the ESXi SOAP path the connector parses the fault itself and raises a
+    plain :exc:`RuntimeError` or a ``ConnectorAuthError`` with the parsed fault
+    attached (:func:`~meho_backplane.connectors.vmware_rest.soap.attach_soap_fault`).
+    No :exc:`httpx.HTTPStatusError` reaches the builders there, so this reads the
+    attached fault instead. Same redact-then-cap steps as the HTTP case. Does
+    nothing when no fault is attached, or when the key is already set.
+    """
+    if "upstream_fault" in extras:
+        return
+    # Imported here for the same reason as in :func:`_soap_fault`.
+    from meho_backplane.connectors.vmware_rest.soap import soap_fault_of
+
+    fault = soap_fault_of(exc)
+    if fault is None or (fault.fault_type is None and fault.faultstring is None):
+        return
+    extras["upstream_fault"] = _upstream_fault_fields(fault.fault_type, fault.faultstring)
 
 
 def _http_validation_errors(response: httpx.Response) -> list[Any]:
@@ -1311,6 +1438,7 @@ def result_connector_http_403(
         "upstream_message": upstream_message,
         "permission_headers": permission_headers,
     }
+    _add_upstream_fault(extras, response)
     return OperationResult(
         status="error",
         op_id=op_id,
@@ -1377,6 +1505,7 @@ def result_connector_http_422(
         "upstream_message": upstream_message,
         "validation_errors": validation_errors,
     }
+    _add_upstream_fault(extras, response)
     return OperationResult(
         status="error",
         op_id=op_id,
@@ -1635,6 +1764,9 @@ def result_connector_auth_failed(
     for debugging per #2329), and ``upstream_message`` (the upstream body's
     ``message`` when JSON, else capped raw text, ``None`` when empty --
     shared with the 403/422 builders via :func:`_http_upstream_message`).
+    Like the other upstream-HTTP builders, it also adds ``upstream_fault``
+    (``{type, faultstring}``) when the body is a vim fault, or when the
+    exception carries a parsed SOAP fault from the ESXi path (#3567).
     """
     stage: Literal["establish", "dispatch", "after_relogin"]
     if isinstance(exc, ConnectorAuthError):
@@ -1654,19 +1786,16 @@ def result_connector_auth_failed(
         # The underlying transport error (chained via ``raise ... from``)
         # may carry a useful upstream body message; read it opportunistically.
         underlying = exc.__cause__
-        upstream_message = (
-            _http_upstream_message(underlying.response)
-            if isinstance(underlying, httpx.HTTPStatusError)
-            else None
+        upstream_response: httpx.Response | None = (
+            underlying.response if isinstance(underlying, httpx.HTTPStatusError) else None
         )
     else:
-        response = exc.response
-        status_code = response.status_code
+        upstream_response = exc.response
+        status_code = upstream_response.status_code
         raw_message = None
         target_name = getattr(target, "name", None)
         host = getattr(target, "host", None) or "the target host"
         secret_ref = getattr(target, "secret_ref", None)
-        upstream_message = _http_upstream_message(response)
         # #2400: the HTTPStatusError branch is stage-aware on ``relogin``.
         # ``reestablished`` -- the dispatcher forced a re-login that SUCCEEDED
         # and the fresh session was still rejected (keep the ``session_``
@@ -1679,6 +1808,9 @@ def result_connector_auth_failed(
         else:
             stage = "dispatch"
             cause = f"dispatch_{status_code}"
+    upstream_message = (
+        _http_upstream_message(upstream_response) if upstream_response is not None else None
+    )
     if stage == "after_relogin":
         remediation = _auth_scheme_remediation(target_name)
     elif isinstance(exc, ConnectorAuthError) and exc.remediation:
@@ -1706,6 +1838,9 @@ def result_connector_auth_failed(
         "raw_message": raw_message,
         "upstream_message": upstream_message,
     }
+    if upstream_response is not None:
+        _add_upstream_fault(extras, upstream_response)
+    _add_attached_upstream_fault(extras, exc)
     return OperationResult(
         status="error",
         op_id=op_id,

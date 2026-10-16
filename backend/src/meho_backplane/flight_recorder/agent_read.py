@@ -331,16 +331,18 @@ async def materialize_agent_trace_handle(
         resolved_store = store if store is not None else get_result_handle_store()
         settings = get_settings()
         max_rows = settings.result_handle_max_spill_rows
-        stored_rows = await resolved_store.spill(
-            tenant_id=tenant_id,
-            operator_sub=operator.sub,
-            handle_id=handle_id,
-            op_id=_TRACE_OP_ID,
-            rows=rows,
-            total_rows=total_rows,
-            ttl_seconds=_TRACE_HANDLE_TTL_SECONDS,
-            max_rows=max_rows,
-        )
+        stored_rows = (
+            await resolved_store.spill(
+                tenant_id=tenant_id,
+                operator_sub=operator.sub,
+                handle_id=handle_id,
+                op_id=_TRACE_OP_ID,
+                rows=rows,
+                total_rows=total_rows,
+                ttl_seconds=_TRACE_HANDLE_TTL_SECONDS,
+                max_rows=max_rows,
+            )
+        ).stored_rows
         if not stored_rows:
             # Fail-open: empty trace or unreachable store -> no agent-readable
             # handle. The operator plane still reads the trace.

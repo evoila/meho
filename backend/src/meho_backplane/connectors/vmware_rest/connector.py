@@ -122,10 +122,12 @@ from meho_backplane.connectors.schemas import (
 )
 from meho_backplane.connectors.vmware_rest._mount import (
     API_MOUNT_LEGACY,
+    API_MOUNT_MODERN,
     SESSION_PATH_LEGACY,
     SESSION_PATH_MODERN,
     adapt_filter_params,
     api_mount_for_session_path,
+    is_vmomi_path,
     mounted_path,
     vmomi_mounted_path,
     vmomi_release_from_version,
@@ -142,6 +144,7 @@ from meho_backplane.connectors.vmware_rest.session import (
 from meho_backplane.connectors.vmware_rest.soap import (
     SOAP_CONTENT_TYPE,
     SoapFault,
+    attach_soap_fault,
     build_create_nas_datastore_envelope,
     build_datastore_refresh_envelope,
     build_login_envelope,
@@ -716,9 +719,26 @@ class VmwareRestConnector(HttpConnector):
         reaches ``GET /api/about`` through ``_get_json`` *pre-session*
         — overriding the transport methods would both strip ``.retry``
         and force a spurious session establish on the pre-auth probe.
+
+        Ingested ``vi-json.yaml`` ops (``/{MoType}/{moId}/...``, see
+        :func:`._mount.is_vmomi_path`) are not Automation API paths. On a
+        modern vCenter session they mount on the documented VI-JSON base
+        ``/sdk/vim25/{release}``, the same base :meth:`_post_vmomi_json`
+        uses for the typed reads (#2466). The ``/api`` form 404s on vCenter
+        8.0.x (#3534). When the release can't be derived, or the session
+        is legacy ``/rest`` (vcsim) or ESXi, the path mounts as before.
         """
         await self._session_token(target, operator)
-        session_path = self._session_paths.get(target_cache_key(target), SESSION_PATH_MODERN)
+        cache_key = target_cache_key(target)
+        session_path = self._session_paths.get(cache_key, SESSION_PATH_MODERN)
+        if (
+            is_vmomi_path(path)
+            and self._session_flavors.get(cache_key) != HOST_FLAVOR_ESXI
+            and api_mount_for_session_path(session_path) == API_MOUNT_MODERN
+        ):
+            release = vmomi_release_from_version(await self._about_version(target, operator))
+            if release is not None:
+                return vmomi_mounted_path(release, path)
         return mounted_path(session_path, path)
 
     async def adapt_op_query(
@@ -1276,11 +1296,13 @@ class VmwareRestConnector(HttpConnector):
         sc_resp = await self._soap_post(client, build_service_content_envelope(), extensions)
         sc_fault = parse_soap_fault(sc_resp.text)
         if sc_fault is not None:
-            raise RuntimeError(
+            sc_err = RuntimeError(
                 f"vsphere session establish failed for target {target.name!r}: "
                 f"SOAP RetrieveServiceContent faulted "
                 f"({sc_fault.fault_type or sc_fault.faultcode})"
             )
+            attach_soap_fault(sc_err, sc_fault)
+            raise sc_err
         sc_resp.raise_for_status()
         content = parse_service_content(sc_resp.text)
         pc_ref = content.get("propertyCollector")
@@ -1513,11 +1535,13 @@ class VmwareRestConnector(HttpConnector):
             sc_resp = await self._soap_post(client, build_service_content_envelope(), extensions)
             sc_fault = parse_soap_fault(sc_resp.text)
             if sc_fault is not None:
-                raise RuntimeError(
+                sc_err = RuntimeError(
                     f"vmware pbm session establish failed for target {target.name!r}: "
                     f"SOAP RetrieveServiceContent faulted "
                     f"({sc_fault.fault_type or sc_fault.faultcode})"
                 )
+                attach_soap_fault(sc_err, sc_fault)
+                raise sc_err
             sc_resp.raise_for_status()
             content = parse_service_content(sc_resp.text)
             sm_ref = content.get("sessionManager")
@@ -1688,7 +1712,7 @@ class VmwareRestConnector(HttpConnector):
             raise self._soap_fault_error(
                 fault, target, message=f"vmware pbm {method} failed on target {target.name!r}"
             )
-        raise RuntimeError(
+        defect = RuntimeError(
             f"vmware pbm {method} failed on target {target.name!r}: the request carried "
             f"the vcSessionCookie SOAP header (the vim session cookie the /sdk Login "
             f"minted) but /pbm still rejected it as NotAuthenticated after a fresh login. "
@@ -1696,6 +1720,8 @@ class VmwareRestConnector(HttpConnector):
             f"this is a PBM transport/auth defect in the connector, not a stale or rotated "
             f"credential -- do NOT restage the secret."
         )
+        attach_soap_fault(defect, fault)
+        raise defect
 
     async def pbm_create_tag_profile(
         self,
@@ -1901,9 +1927,14 @@ class VmwareRestConnector(HttpConnector):
         (never the envelope). ``SoapFault`` carries only
         ``faultcode`` / ``faultstring`` / ``fault_type``, none of which echo
         the Login envelope, so the credential cannot leak through either arm.
+
+        Both arms also carry the parsed *fault* (:func:`.soap.attach_soap_fault`),
+        so the error envelope can show ``extras.upstream_fault`` with the fault
+        type and the full faultstring (#3567).
         """
+        err: Exception
         if fault.fault_type in _SOAP_AUTH_FAULT_TYPES:
-            return ConnectorAuthError(
+            err = ConnectorAuthError(
                 message,
                 status_code=401,
                 cause=f"session_establish_{fault.fault_type}",
@@ -1911,9 +1942,12 @@ class VmwareRestConnector(HttpConnector):
                 host=getattr(target, "host", None),
                 secret_ref=getattr(target, "secret_ref", None),
             )
-        fault_type = fault.fault_type or fault.faultcode or "SoapFault"
-        detail = f": {fault.faultstring}" if fault.faultstring else ""
-        return RuntimeError(f"{message}: vim fault {fault_type}{detail}")
+        else:
+            fault_type = fault.fault_type or fault.faultcode or "SoapFault"
+            detail = f": {fault.faultstring}" if fault.faultstring else ""
+            err = RuntimeError(f"{message}: vim fault {fault_type}{detail}")
+        attach_soap_fault(err, fault)
+        return err
 
     def _pooled_client_for(self, cache_key: tuple[str, str]) -> httpx.AsyncClient | None:
         """Return the pooled per-target client whose key carries *cache_key*'s prefix.

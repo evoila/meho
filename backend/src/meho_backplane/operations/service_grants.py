@@ -55,6 +55,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from fnmatch import fnmatchcase
+from glob import escape as glob_escape
 from typing import Any
 
 import structlog
@@ -280,9 +281,16 @@ async def _resolve_descriptor_for_classification(
 
 
 def _orphan_remediation(target_id: uuid.UUID, old_name: str | None) -> str:
-    """Plain-language fix for a grant whose concrete target is gone."""
+    """Plain-language fix for a grant whose concrete target is gone.
+
+    ``target_name_pattern`` is an ``fnmatchcase`` glob, and target names may
+    hold ``*``, ``?`` or ``[``. The suggested pattern escapes them so it
+    matches the old name literally, not a different target.
+    """
     example = (
-        f"target_name_pattern={old_name!r}" if old_name else "target_name_pattern or target_product"
+        f"target_name_pattern={glob_escape(old_name)!r}"
+        if old_name
+        else "target_name_pattern or target_product"
     )
     return (
         f"Target {target_id} no longer exists: it was deleted, or registered "

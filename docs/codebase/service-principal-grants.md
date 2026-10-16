@@ -219,7 +219,9 @@ as **orphaned**:
 - `orphan_remediation` — a plain-language fix: create a new grant with a
   target selector (`target_name_pattern` set to the old target name when MEHO
   still knows it, or `target_product`), which matches by name or product and
-  so survives a new registration; then revoke the orphaned grant.
+  so survives a new registration; then revoke the orphaned grant. The
+  suggested pattern escapes `*`, `?` and `[` in the old name (`glob.escape`),
+  so it matches that name literally and not a look-alike target.
 
 Rules:
 

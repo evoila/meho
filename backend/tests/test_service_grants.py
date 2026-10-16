@@ -12,9 +12,11 @@ filtering (active-only vs full history).
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
+from fnmatch import fnmatchcase
 
 import pytest
 from sqlalchemy import update
@@ -694,6 +696,37 @@ async def test_grant_on_re_registered_target_is_orphaned_with_remediation() -> N
     assert shown.orphaned is True
     # Never auto-revoked: cleanup stays an operator decision.
     assert shown.revoked_at is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("old_name", "lookalike", "expected_pattern"),
+    [
+        ("example[1]", "example1", "example[[]1]"),
+        ("ex*ample", "example", "ex[*]ample"),
+        ("ex?ample", "exXample", "ex[?]ample"),
+    ],
+)
+async def test_orphan_remediation_escapes_glob_characters_in_old_name(
+    old_name: str, lookalike: str, expected_pattern: str
+) -> None:
+    """The suggested selector matches the old name literally, not a look-alike.
+
+    ``target_name_pattern`` is an fnmatch glob. A raw ``example[1]`` would
+    match ``example1`` and miss ``example[1]`` itself.
+    """
+    svc = ServicePrincipalGrantService()
+    old_id = await _seed_target(old_name, deleted=True)
+    entry = await svc.create(_TENANT_ID, _CREATOR, _payload(target_id=old_id))
+    assert entry.orphaned is True
+    remediation = entry.orphan_remediation
+    assert remediation is not None
+    assert f"target_name_pattern={expected_pattern!r}" in remediation
+
+    pattern = re.search(r"target_name_pattern='([^']*)'", remediation)
+    assert pattern is not None
+    assert fnmatchcase(old_name, pattern.group(1))
+    assert not fnmatchcase(lookalike, pattern.group(1))
 
 
 @pytest.mark.asyncio

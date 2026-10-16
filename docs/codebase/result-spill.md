@@ -321,6 +321,8 @@ code-level diagnosis at `v0.13.0` (`f6ee330`):
 - `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES` (256 KiB) bounds a completed
   `call_operation` response the same way (#3641); validated `>= 2048`
   (`RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES`) so the receipt always fits.
+  A call whose receipt could not fit (an unusually long or non-ASCII
+  `op_id`) is refused before it runs with `error_code="receipt_too_large"`.
   Over the ceiling, `delivery="partial"` keeps the handle only when its
   `fetch_more.drill_in.available` is true; a handle whose spill was skipped
   or failed is dropped and the response is `delivery="unavailable"`. Details

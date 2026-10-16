@@ -28,11 +28,17 @@ check), which run before encoding:
   raise the recoverable ``output_too_large`` error instead.
 
 The receipt of a completed operation (``status``, ``op_id``, ``audit_id``,
-``delivery`` and the remediation text) must always reach the caller, so
-the ``call_operation`` ceiling has a floor:
-:data:`~meho_backplane.settings.RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES`.
-:class:`~meho_backplane.settings.Settings` rejects a smaller value at
-startup, before any operation runs.
+``delivery`` and the remediation text) must always reach the caller. Two
+checks make sure it can:
+
+* The ``call_operation`` ceiling has a floor,
+  :data:`~meho_backplane.settings.RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES`.
+  :class:`~meho_backplane.settings.Settings` rejects a smaller value at
+  startup, before any operation runs.
+* The receipt grows with the ``op_id``. :func:`refuse_undeliverable_receipt`
+  runs before dispatch and measures the widest receipt the ``op_id`` can
+  produce, escaping included. A call whose receipt cannot fit the ceiling
+  is refused with ``error_code="receipt_too_large"`` and never runs.
 
 Both REST twins share the same ceiling. REST sends the payload once, so the
 MCP measurement is the larger of the two and the safe bound for both.
@@ -41,11 +47,14 @@ MCP measurement is the larger of the two and the safe bound for both.
 from __future__ import annotations
 
 import json
+import sys
 from typing import Any, Literal
+from uuid import UUID
 
 import structlog
 
 from meho_backplane.connectors.schemas import OperationResult, ResultHandle
+from meho_backplane.operations._errors import result_receipt_too_large
 from meho_backplane.settings import RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES
 
 __all__ = [
@@ -53,6 +62,8 @@ __all__ = [
     "bound_complete_response",
     "handle_is_readable",
     "measure_delivered_wire_bytes",
+    "receipt_wire_bytes",
+    "refuse_undeliverable_receipt",
     "tool_result_text",
 ]
 
@@ -146,6 +157,52 @@ def _trimmed(
     )
 
 
+#: Stand-ins for the receipt fields that are unknown before the operation
+#: runs. Each is the widest JSON text its field can take, so the receipt
+#: measured from them is never smaller than the one a completed run sends.
+_WIDEST_DURATION_MS = -sys.float_info.max  # longest float text, sign included
+_WIDEST_BYTE_COUNT = 2 * sys.maxsize  # two encoded blocks can never add up to more
+_PLACEHOLDER_AUDIT_ID = UUID(int=0)  # every UUID takes 36 characters
+
+
+def receipt_wire_bytes(op_id: str, max_bytes: int) -> int:
+    """Return the most bytes the ``unavailable`` receipt for *op_id* can take.
+
+    The receipt is :func:`bound_complete_response`'s last resort. Its only
+    variable parts are the ``op_id``, the ``audit_id``, ``duration_ms`` and
+    the two byte counts in the remediation text. The ``op_id`` is known
+    before dispatch; the others are filled with the widest value each can
+    take, so the result is an upper bound of the receipt a completed run of
+    this ``op_id`` would send under *max_bytes*. It is measured with the
+    same encoders as the real response, so escaping is counted.
+    """
+    widest = OperationResult(
+        status="ok",
+        op_id=op_id,
+        duration_ms=_WIDEST_DURATION_MS,
+        audit_id=_PLACEHOLDER_AUDIT_ID,
+    )
+    receipt = _trimmed(widest, "unavailable", _WIDEST_BYTE_COUNT, max_bytes)
+    return measure_delivered_wire_bytes(receipt.model_dump(mode="json"))
+
+
+def refuse_undeliverable_receipt(op_id: str, max_bytes: int) -> OperationResult | None:
+    """Refuse a ``call_operation`` whose receipt could not be delivered.
+
+    Runs before dispatch. Returns ``None`` when the widest receipt for
+    *op_id* (see :func:`receipt_wire_bytes`) fits *max_bytes*, which is the
+    case for any realistic ``op_id``. Otherwise returns the
+    ``receipt_too_large`` error envelope and the operation must not run:
+    a completed operation whose receipt cannot be delivered would lose its
+    ``audit_id`` or break the ceiling, and refusing before the run avoids
+    both. Nothing ran, so the call is safe to repeat.
+    """
+    receipt_bytes = receipt_wire_bytes(op_id, max_bytes)
+    if receipt_bytes <= max_bytes:
+        return None
+    return result_receipt_too_large(op_id, receipt_bytes, max_bytes, 0.0)
+
+
 def bound_complete_response(result: OperationResult, max_bytes: int) -> OperationResult:
     """Keep a completed ``call_operation`` response within *max_bytes* on the wire.
 
@@ -164,12 +221,14 @@ def bound_complete_response(result: OperationResult, max_bytes: int) -> Operatio
     The status stays ``ok`` in both cases, so a completed write is never
     reported as an error because its response was too large.
 
-    The receipt is the smallest honest response, and *max_bytes* is at
-    least :data:`RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES`, which holds the
-    receipt for any realistic ``op_id``. The receipt's size is still
-    checked: if it is over the ceiling (an unusually long ``op_id``), it
-    is delivered anyway and a warning is logged, because dropping the
-    ``audit_id`` of a completed write would be worse than the overrun.
+    The receipt is the smallest honest response. It fits by construction:
+    :func:`refuse_undeliverable_receipt` ran before the operation and
+    measured the widest receipt this ``op_id`` can produce against the same
+    *max_bytes*. The final size is still checked. Should it ever be over
+    the ceiling, the receipt is delivered anyway and a warning is logged,
+    because dropping the ``audit_id`` of a completed write would be worse
+    than the overrun. A caller that skipped the pre-check is the only way
+    to reach that branch.
     """
     if result.status != "ok":
         return result

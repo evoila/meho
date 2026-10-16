@@ -107,7 +107,10 @@ from meho_backplane.operations.addon_orchestration import (
     bound_parent_linkage,
     resolve_or_open_orchestration_run,
 )
-from meho_backplane.operations.delivery_budget import bound_complete_response
+from meho_backplane.operations.delivery_budget import (
+    bound_complete_response,
+    refuse_undeliverable_receipt,
+)
 from meho_backplane.operations.dispatch_limits import rate_limited_read_envelope
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.ingest.list_connectors import next_step_for_registered_connector
@@ -1075,6 +1078,15 @@ async def _call_operation_impl(
     op_id = arguments["op_id"]
     params: dict[str, Any] = arguments.get("params") or {}
 
+    # #3641: a completed op must deliver its receipt inside the wire
+    # ceiling. The receipt grows with ``op_id``, so an ``op_id`` whose
+    # receipt could never fit is refused here, before the target is
+    # resolved and before anything runs.
+    wire_max_bytes = get_settings().result_complete_response_wire_max_bytes
+    refusal = refuse_undeliverable_receipt(op_id, wire_max_bytes)
+    if refusal is not None:
+        return refusal.model_dump(mode="json")
+
     if resolved_target is not None:
         structlog.contextvars.bind_contextvars(audit_target_id=str(resolved_target.id))
     else:
@@ -1148,7 +1160,7 @@ async def _call_operation_impl(
     # #3641: terminal wire ceiling, measured on the real MCP encoding. A
     # completed op that is too large to deliver keeps ``status="ok"`` and
     # gets ``delivery="partial"`` / ``"unavailable"`` instead.
-    result = bound_complete_response(result, get_settings().result_complete_response_wire_max_bytes)
+    result = bound_complete_response(result, wire_max_bytes)
     return result.model_dump(mode="json")
 
 

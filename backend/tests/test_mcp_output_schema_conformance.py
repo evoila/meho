@@ -668,6 +668,47 @@ def test_call_operation_over_wire_ceiling_keeps_completed_status(
     assert measure_delivered_wire_bytes(payload) <= RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES
 
 
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+def test_call_operation_refuses_undeliverable_receipt_before_dispatch(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An op_id whose receipt cannot fit the wire ceiling is refused, not run (#3641).
+
+    The ceiling is set to its floor. A 256-character non-ASCII op_id is
+    escaped twice in the ``tools/call`` text block, so even the receipt of
+    a completed run would be over the ceiling. ``call_operation`` returns
+    the ``receipt_too_large`` error envelope before dispatch: no run, no
+    audit row. The envelope still conforms to the declared ``outputSchema``.
+    """
+    monkeypatch.setenv(
+        "RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES",
+        str(RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES),
+    )
+    get_settings.cache_clear()
+    client, _op = client_with_operator
+    dispatch_mock = AsyncMock()
+    with patch.object(meta_tools, "dispatch", new=dispatch_mock):
+        response = _call(
+            client,
+            "call_operation",
+            {
+                "connector_id": "topology-graph-1.x",
+                "op_id": "\u00e9" * 256,
+                "params": {"kind": "vault-role", "name": "conf-call-op-refused"},
+            },
+        )
+    payload = _assert_conforms("call_operation", response)
+    assert payload["status"] == "error", payload
+    assert payload["extras"]["error_code"] == "receipt_too_large"
+    assert payload["extras"]["receipt_bytes"] > RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES
+    assert payload["extras"]["delivery_max_bytes"] == RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES
+    assert payload["audit_id"] is None
+    assert payload["result"] is None
+    assert "did not run" in payload["error"]
+    dispatch_mock.assert_not_awaited()
+
+
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
 def test_preview_operation_unavailable_envelope_conforms(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811

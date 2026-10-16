@@ -352,12 +352,23 @@ completed write is never reported as an error because its response was too
 large. Non-`ok` envelopes are not rewritten. The REST `/call` twin shares the
 same check; REST sends the payload once, so its real size is always smaller.
 
-The receipt must always reach the caller, so the ceiling has a floor:
-`RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES` (2048 bytes, `settings.py`). `Settings`
-rejects a smaller `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES` at startup, before
-any operation runs. The floor holds the receipt for an `op_id` of 256
-characters; `bound_complete_response` still measures the final `unavailable`
-response, and if an unusually long `op_id` pushes it over the ceiling it is
+The receipt must always reach the caller. Two checks make sure it can:
+
+- The ceiling has a floor, `RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES` (2048
+  bytes, `settings.py`). `Settings` rejects a smaller
+  `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES` at startup, before any operation
+  runs. The floor holds the receipt for an ASCII `op_id` of 256 characters.
+- The receipt grows with the `op_id`, and non-ASCII characters cost more
+  because the text block escapes them twice. So `call_operation` runs
+  `refuse_undeliverable_receipt` before dispatch. It measures the widest
+  receipt the `op_id` can produce (`receipt_wire_bytes`: the real `op_id`, the
+  widest possible `audit_id`, `duration_ms` and byte counts, same encoders as
+  the response). A call whose receipt could not fit the ceiling is refused
+  with `status="error"` and `extras.error_code="receipt_too_large"`, and the
+  operation never runs. The refusal says so and that calling again is safe.
+
+`bound_complete_response` still measures the final `unavailable` response. Only
+a caller that skipped the pre-check could push it over the ceiling; then it is
 delivered anyway with a `delivery_receipt_over_ceiling` warning, because
 dropping the `audit_id` of a completed write would be worse.
 

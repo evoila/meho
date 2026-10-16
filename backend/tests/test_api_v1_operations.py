@@ -56,7 +56,7 @@ from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations.result_query import MAX_LIMIT
-from meho_backplane.settings import get_settings
+from meho_backplane.settings import RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES, get_settings
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
 from ._oidc_jwt_helpers import (
@@ -696,6 +696,47 @@ async def test_post_call_absent_target_rides_target_required_envelope(
     body = response.json()
     assert body["status"] == "error"
     assert body["extras"]["error_code"] == "target_required"
+
+
+def test_post_call_refuses_undeliverable_receipt_before_dispatch(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3641: an op_id whose receipt cannot fit the wire ceiling never runs.
+
+    The ceiling is set to its floor. A 256-character non-ASCII op_id is
+    escaped twice in the MCP text block, so even the receipt of a completed
+    run would be over the ceiling. The REST twin shares ``call_operation``,
+    so it returns the same ``receipt_too_large`` envelope (HTTP 200, the
+    dispatcher contract) and the dispatcher is never called.
+    """
+    monkeypatch.setenv(
+        "RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES", str(RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES)
+    )
+    get_settings.cache_clear()
+    dispatch_mock = AsyncMock()
+    monkeypatch.setattr("meho_backplane.operations.meta_tools.dispatch", dispatch_mock)
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/call",
+            json={
+                "connector_id": "ghost-rest-9.0",
+                "op_id": "\u00e9" * 256,
+                "target": None,
+                "params": {},
+            },
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["extras"]["error_code"] == "receipt_too_large"
+    assert body["extras"]["receipt_bytes"] > RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES
+    assert body["extras"]["delivery_max_bytes"] == RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES
+    assert body["audit_id"] is None
+    assert "did not run" in body["error"]
+    dispatch_mock.assert_not_awaited()
 
 
 def test_post_call_unknown_op_returns_200_with_error_envelope(client: TestClient) -> None:

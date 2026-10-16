@@ -26,6 +26,8 @@ from meho_backplane.operations.delivery_budget import (
     bound_complete_response,
     handle_is_readable,
     measure_delivered_wire_bytes,
+    receipt_wire_bytes,
+    refuse_undeliverable_receipt,
     tool_result_text,
 )
 
@@ -181,16 +183,81 @@ def test_over_budget_without_handle_is_unavailable() -> None:
 
 
 def test_unavailable_response_fits_the_floor() -> None:
-    """The receipt fits the smallest allowed ceiling, even with a long op_id."""
+    """The receipt fits the smallest allowed ceiling with a 256-character ASCII op_id."""
     result = _ok(op_id="x" * 256, size=1_000_000)
     bounded = bound_complete_response(result, _LIMIT)
     assert bounded.delivery == "unavailable"
     assert measure_delivered_wire_bytes(bounded.model_dump(mode="json")) <= _LIMIT
 
 
+_AWKWARD_OP_IDS = [
+    "vmware.vm.create",
+    "x" * 256,
+    "\u00e9" * 256,
+    "\U0001f600" * 64,
+    '"\\' * 128,
+    "line\nbreak\ttab" * 20,
+]
+
+
+@pytest.mark.parametrize("op_id", _AWKWARD_OP_IDS)
+def test_receipt_wire_bytes_bounds_the_delivered_receipt(op_id: str) -> None:
+    """The pre-dispatch measurement is never smaller than the receipt a run sends."""
+    for audit_id in (uuid4(), None):
+        result = _ok(op_id=op_id, size=1_000_000).model_copy(update={"audit_id": audit_id})
+        bounded = bound_complete_response(result, _LIMIT)
+        assert bounded.delivery == "unavailable"
+        delivered = measure_delivered_wire_bytes(bounded.model_dump(mode="json"))
+        assert delivered <= receipt_wire_bytes(op_id, _LIMIT)
+
+
+def test_receipt_wire_bytes_counts_escaping() -> None:
+    """Non-ASCII text is escaped twice in the text block, so it costs more than ASCII."""
+    assert receipt_wire_bytes("\u00e9" * 256, _LIMIT) > receipt_wire_bytes("x" * 256, _LIMIT)
+
+
+def test_realistic_op_id_is_not_refused_at_the_floor() -> None:
+    """A 256-character ASCII op_id fits the floor, so the call runs."""
+    assert receipt_wire_bytes("x" * 256, _LIMIT) <= _LIMIT
+    assert refuse_undeliverable_receipt("x" * 256, _LIMIT) is None
+    assert refuse_undeliverable_receipt("vmware.vm.create", _LIMIT) is None
+
+
+def test_non_ascii_op_id_over_the_floor_is_refused_before_the_run() -> None:
+    """The review's case: 256 non-ASCII characters push the receipt past the floor.
+
+    The call is refused with an error envelope and nothing runs. At the
+    default ceiling the same op_id fits and is not refused.
+    """
+    op_id = "\u00e9" * 256
+    refusal = refuse_undeliverable_receipt(op_id, _LIMIT)
+    assert refusal is not None
+    assert refusal.status == "error"
+    assert refusal.op_id == op_id
+    assert refusal.audit_id is None
+    assert refusal.delivery is None
+    assert refusal.result is None
+    assert refusal.extras["error_code"] == "receipt_too_large"
+    assert refusal.extras["receipt_bytes"] == receipt_wire_bytes(op_id, _LIMIT)
+    assert refusal.extras["receipt_bytes"] > _LIMIT
+    assert refusal.extras["delivery_max_bytes"] == _LIMIT
+    assert refusal.error is not None
+    assert refusal.error.startswith("receipt_too_large:")
+    assert "did not run" in refusal.error
+    assert op_id not in refusal.error
+    assert "safe to call again" in refusal.extras["remediation"]
+    assert refuse_undeliverable_receipt(op_id, 262144) is None
+
+
 def test_receipt_over_ceiling_is_still_delivered_and_logged() -> None:
-    """An unrealistic op_id can push the receipt over the floor; the receipt still ships."""
+    """Defensive branch for a caller that skipped the pre-check.
+
+    ``call_operation`` refuses such an op_id before the run, so this branch
+    is unreachable through it. Called directly, the receipt still ships with
+    a warning, because dropping the audit_id of a completed write is worse.
+    """
     result = _ok(op_id="x" * 4096)
+    assert refuse_undeliverable_receipt(result.op_id, _LIMIT) is not None
     with capture_logs() as logs:
         bounded = bound_complete_response(result, _LIMIT)
     assert bounded.status == "ok"

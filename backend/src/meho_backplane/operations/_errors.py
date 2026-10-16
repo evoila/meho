@@ -70,6 +70,7 @@ __all__ = [
     "result_no_connector",
     "result_no_target",
     "result_rate_limited",
+    "result_receipt_too_large",
     "result_target_invalid_type",
     "result_target_required",
     "result_unknown_op",
@@ -540,6 +541,51 @@ def result_rate_limited(
             "limit": limit,
             "retry_after_seconds": retry_after_seconds,
             "reason": reason,
+        },
+    )
+
+
+def result_receipt_too_large(
+    op_id: str, receipt_bytes: int, max_bytes: int, duration_ms: float
+) -> OperationResult:
+    """The receipt of a completed run could not be delivered, so the call is refused.
+
+    #3641. A completed ``call_operation`` must always deliver its receipt
+    (``status``, ``op_id``, ``audit_id``, ``delivery`` and the remediation
+    text) inside ``RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES``. The receipt
+    grows with the ``op_id``, so an unusually long one (or one with many
+    non-ASCII characters, which the text block escapes twice) can push it
+    over the ceiling. ``refuse_undeliverable_receipt`` in
+    :mod:`meho_backplane.operations.delivery_budget` measures the widest
+    receipt for the ``op_id`` before dispatch and returns this envelope
+    instead of running the operation. Nothing ran, so the caller may call
+    again once the ``op_id`` or the ceiling changes.
+
+    The ``op_id`` is not repeated in the message: it already rides the
+    envelope's ``op_id`` field, and repeating a very long id would only
+    make the refusal larger.
+    """
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=(
+            f"receipt_too_large: the receipt for this op_id ({len(op_id)} characters) "
+            f"would take {receipt_bytes} bytes on the wire; the delivery limit is "
+            f"{max_bytes} bytes. The operation did not run. Check the op_id with "
+            "search_operations. If it is correct, an operator must raise "
+            "RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES. See docs/codebase/mcp.md, "
+            '"Response wire ceiling".'
+        ),
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "receipt_too_large",
+            "receipt_bytes": receipt_bytes,
+            "delivery_max_bytes": max_bytes,
+            "remediation": (
+                "The operation did not run, so it is safe to call again. Check the "
+                "op_id with search_operations; if it is correct, an operator must "
+                "raise RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES."
+            ),
         },
     )
 

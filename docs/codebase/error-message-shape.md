@@ -63,6 +63,9 @@ Examples in current use:
 - `no_connector` (dispatcher resolver miss)
 - `target_required` (dispatcher: connector-bound typed/composite op
   invoked with no `target` — #1506)
+- `receipt_too_large` (`call_operation`: the receipt of a completed run
+  could not fit `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES`, so the call is
+  refused before dispatch and nothing runs — #3641)
 - `connector_scope_ambiguous` (connector review/enable-reads: a
   `connector_id` resolves to both a tenant row and a built-in row —
   #1801; the message names the `prefer=tenant|builtin` retry — #2029)

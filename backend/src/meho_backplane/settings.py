@@ -86,8 +86,11 @@ _TRUTHY_ENV_VALUES: Final[frozenset[str]] = frozenset({"1", "true", "yes", "on"}
 #: operation must always deliver its receipt (``status``, ``op_id``,
 #: ``audit_id``, ``delivery`` and the remediation text), so the ceiling can
 #: never be set below the size that receipt takes on the wire. 2 KiB holds
-#: the receipt for an ``op_id`` of 256 characters with room to spare; a
-#: test in ``tests/test_operations_delivery_budget.py`` pins that.
+#: the receipt for an ASCII ``op_id`` of 256 characters with room to spare;
+#: a test in ``tests/test_operations_delivery_budget.py`` pins that. An
+#: ``op_id`` whose receipt would not fit (longer, or escaped non-ASCII
+#: text) is refused before the operation runs
+#: (``operations/delivery_budget.py``, ``refuse_undeliverable_receipt``).
 RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES: Final[int] = 2048
 
 
@@ -630,8 +633,10 @@ class Settings(BaseModel):
         never as an error. The default is generous on purpose; a load
         benchmark may tune it. Must be at least
         :data:`RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES` (2048) so the
-        receipt always fits; a smaller value fails at startup. Default
-        262144 (256 KiB). Env ``RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES``.
+        receipt always fits; a smaller value fails at startup. A call whose
+        receipt could not fit the ceiling (an unusually long ``op_id``) is
+        refused before it runs with ``error_code="receipt_too_large"``.
+        Default 262144 (256 KiB). Env ``RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES``.
     result_query_response_wire_max_bytes:
         Terminal wire ceiling, in bytes, for a ``result_query`` response
         (query, paging and path reads), measured the same way (#3641). A

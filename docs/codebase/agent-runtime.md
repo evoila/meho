@@ -453,10 +453,30 @@ could approve, but the agent run never found out.
 The agent runtime closes that gap with a wrapped `call_operation`. On
 `status="awaiting_approval"`, the wrapper:
 
-1. **Subscribes** to the per-tenant Valkey stream (`meho:feed:{tenant_id}`)
-   via `XREAD BLOCK`, filtered to the request's own `approval_request_id`.
-   The wait is in `meho_backplane/agent/approval_wait.py`; the per-tenant
-   stream is the same one the SSE feed and `meho_broadcast_watch` read.
+1. **Waits** for the decision in `meho_backplane/agent/approval_wait.py`.
+   The stored approval row is the authority; the broadcast is the fast path
+   (#3732):
+   - It reads the stored row first (tenant-scoped, through `get_request`).
+     A decision made before the wait started is returned at once.
+   - While the row is `pending`, it listens on the per-tenant Valkey stream
+     (`meho:feed:{tenant_id}`) with `XREAD BLOCK`, filtered to its own
+     `approval_request_id`. This is the same stream the SSE feed and
+     `meho_broadcast_watch` read.
+   - It reads the stored row again after every Valkey error, and at least
+     every 5 seconds (`_DURABLE_RECHECK_SECONDS`). So a lost broadcast event
+     delays the agent by at most a few seconds; it does not end in a timeout.
+   - Each `XREAD` is cut off locally at the moment the next stored read is
+     due: the 5-second re-check or the deadline, whichever comes first. Its
+     `BLOCK` window ends one second earlier (`_XREAD_REPLY_GRACE_SECONDS`)
+     so a healthy reply lands in time. So a Valkey that accepts the command
+     but stops answering cannot delay a stored read past 5 seconds, and
+     cannot hold the wait for the client's 35-second socket timeout. A
+     cut-off `XREAD` counts as a Valkey error: the row is read at once.
+   - After a Valkey error it reads the row first, then pauses for at most
+     one second (`_XREAD_ERROR_BACKOFF_SECONDS`) before the next `XREAD`.
+     The pause is cut at the deadline. So an error raised late in an
+     `XREAD` cannot delay a stored read past 5 seconds or the deadline.
+   - It reads the row once more before it gives up at the deadline.
 2. **On approval** — re-invokes the dispatcher with `_approved=True` and the
    original in-memory `params` (passed through `call_operation_with_approval`
    in `operations/meta_tools.py`). The dispatcher's gate-bypass path skips
@@ -471,11 +491,17 @@ The agent runtime closes that gap with a wrapped `call_operation`. On
    the model annotated with `extras["error_code"] = "approval_rejected"`
    and `extras["decision"] = "rejected"` plus a rewritten `error` message,
    so the agent's model sees a structured tool result it can reason about.
-4. **On timeout / broadcast outage** — returns the envelope annotated with
-   `extras["error_code"] = "awaiting_approval_timeout"` so the model can
-   distinguish "still pending, timed out" from "decision happened". The
-   durable decision row remains the source of truth; the agent can query
-   approval status or re-issue.
+   **On expiry** the same shape carries `"approval_expired"` /
+   `"expired"`. Neither case runs the operation.
+4. **On timeout** — returns the envelope annotated with
+   `extras["error_code"] = "awaiting_approval_timeout"`. This happens only
+   when the last read still found the row `pending`, or could not read it.
+
+Approval is not proof that the operation worked. On approval the waiter
+still has to win `claim_resume` (one resume per request), and the result the
+agent sees is the dispatcher's own envelope: success, error, or an
+uncertain outcome. If the agent run is cancelled while it waits, the
+cancel propagates and nothing retries later.
 
 The wait cap is `Settings.agent_approval_wait_timeout_seconds` (default
 1800s = 30 min, env `AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS`). It bounds how

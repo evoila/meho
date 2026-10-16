@@ -1044,6 +1044,7 @@ async def _call_operation_impl(
     arguments: dict[str, Any],
     *,
     approved: bool,
+    resolved_target: Any = None,
 ) -> dict[str, Any]:
     """Resolve target + dispatch; shared body for the approved/unapproved entries.
 
@@ -1061,18 +1062,27 @@ async def _call_operation_impl(
     dict form before :func:`~meho_backplane.targets.resolver.resolve_target`
     is called). Passing ``target=None`` is valid for typed operations whose
     handler does not consume a target.
+
+    A caller that already holds the live target row passes it as
+    *resolved_target*; then ``arguments["target"]`` is not read at all. The
+    agent waiter's composite re-entry uses this (#3421): it loads the target
+    the approval row saved by id, so the name the agent used when it parked
+    cannot point at a different target by the time the approval lands.
     """
     connector_id = arguments["connector_id"]
     op_id = arguments["op_id"]
     params: dict[str, Any] = arguments.get("params") or {}
 
-    # #136: target-resolution failures ride the dispatcher envelope (a single
-    # ``extras.error_code`` for the consumer), not an HTTP 400/404.
-    resolved_target, target_error = await _resolve_target_or_error(
-        operator, op_id, arguments.get("target"), bind_audit_target=True
-    )
-    if target_error is not None:
-        return target_error
+    if resolved_target is not None:
+        structlog.contextvars.bind_contextvars(audit_target_id=str(resolved_target.id))
+    else:
+        # #136: target-resolution failures ride the dispatcher envelope (a
+        # single ``extras.error_code`` for the consumer), not an HTTP 400/404.
+        resolved_target, target_error = await _resolve_target_or_error(
+            operator, op_id, arguments.get("target"), bind_audit_target=True
+        )
+        if target_error is not None:
+            return target_error
 
     # work_ref I1-T2 (#1657): bind an explicit per-op ``work_ref`` (the
     # MCP ``call_operation`` tool arg / the REST ``CallOperationBody``
@@ -1170,6 +1180,8 @@ async def call_operation(
 async def call_operation_with_approval(
     operator: Operator,
     arguments: dict[str, Any],
+    *,
+    resolved_target: Any = None,
 ) -> dict[str, Any]:
     """Re-dispatch a previously-parked ``call_operation`` after operator approval.
 
@@ -1196,8 +1208,16 @@ async def call_operation_with_approval(
     the approved op (a single conditional ``UPDATE ... WHERE resumed_at IS
     NULL``; the loser no-ops). This is what closes the double-dispatch the
     unenforced "coexist by design" note (#1117) had left open.
+
+    *resolved_target*: the live target row to dispatch against, when the
+    caller already loaded it. The waiter's composite re-entry passes the
+    target the approval row saved by id (#3421), so ``arguments["target"]``
+    is ignored and no name lookup runs. A direct re-dispatch leaves it
+    ``None`` and resolves the agent's original ``target`` name as before.
     """
-    return await _call_operation_impl(operator, arguments, approved=True)
+    return await _call_operation_impl(
+        operator, arguments, approved=True, resolved_target=resolved_target
+    )
 
 
 async def preview_operation(

@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
@@ -3312,3 +3313,119 @@ async def test_operator_and_agent_surfaces_resume_the_same_row_identically(
     # Both surfaces reset the vars after the re-entry.
     assert composite_resume_var.get() is None
     assert composite_resume_scope_var.get() is None
+
+
+async def _reassign_target_name(original_id: UUID, *, soft_delete: bool) -> UUID:
+    """Move the name ``prod-vcenter`` to a new target while the request waits.
+
+    The original target is renamed (or soft-deleted when *soft_delete* is
+    set), then a fresh target takes the name the agent used when it parked.
+    Returns the new target's id.
+    """
+    async with get_sessionmaker()() as s:
+        original = await s.get(TargetORM, original_id)
+        assert original is not None
+        if soft_delete:
+            original.deleted_at = datetime.now(UTC)
+        else:
+            original.name = "old-vcenter"
+        await s.commit()
+    return await _persist_vmware_target()
+
+
+@pytest.mark.asyncio
+async def test_agent_waiter_composite_resume_runs_against_saved_target_after_rename(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The name the agent parked with now points elsewhere; the saved target wins.
+
+    Same check as the operator surface: the composite re-entry loads the
+    target the approval row saved by id. The power write still fires once,
+    against the original (renamed) target, never against the new one that
+    took over the name.
+    """
+    import meho_backplane.operations.meta_tools as meta_tools_module
+
+    recorder = _RecordingVmwareConnector()
+    await _bootstrap(recorder, stub_embedding_service)
+    original_id = await _persist_vmware_target()
+    await _seed_agent_needs_approval_grant("POST:/vcenter/vm/*")
+    agent = _make_operator(sub=_AGENT_SUB, principal_kind=PrincipalKind.AGENT)
+    params = {"vm": "vm-1", "verb": "on"}
+    request_id, envelope = await _agent_parks_subop(
+        agent=agent,
+        composite_op_id="vmware.composite.vm.power",
+        target_id=original_id,
+        params=params,
+    )
+    impostor_id = await _reassign_target_name(original_id, soft_delete=False)
+    await _approve_as_reviewer(request_id)
+
+    real_dispatch = meta_tools_module.dispatch
+    dispatched_targets: list[tuple[UUID | None, str | None]] = []
+
+    async def _recording_dispatch(**kwargs: Any) -> Any:
+        target = kwargs["target"]
+        dispatched_targets.append((getattr(target, "id", None), getattr(target, "name", None)))
+        return await real_dispatch(**kwargs)
+
+    monkeypatch.setattr(meta_tools_module, "dispatch", _recording_dispatch)
+    resumed = await _resume_approved_or_already_resumed(
+        operator=agent,
+        call_arguments=_agent_call_arguments("vmware.composite.vm.power", params),
+        awaiting_envelope=envelope,
+        approval_request_id=request_id,
+    )
+
+    assert resumed["status"] == "ok", resumed
+    assert dispatched_targets == [(original_id, "old-vcenter")]
+    assert impostor_id not in {tid for tid, _ in dispatched_targets}
+    assert recorder.calls == [("POST", "/vcenter/vm/vm-1/power?action=start")]
+    assert await _approval_row_count() == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_waiter_composite_resume_refuses_deleted_target_with_reused_name(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """The saved target was deleted and its name reused: refuse, run nothing.
+
+    The waiter returns a ``denied`` envelope, fires no write against the new
+    target, parks no second request, and leaves the one-resumer claim free.
+    """
+    recorder = _RecordingVmwareConnector()
+    await _bootstrap(recorder, stub_embedding_service)
+    original_id = await _persist_vmware_target()
+    await _seed_agent_needs_approval_grant("POST:/vcenter/vm/*")
+    agent = _make_operator(sub=_AGENT_SUB, principal_kind=PrincipalKind.AGENT)
+    params = {"vm": "vm-1", "verb": "on"}
+    request_id, envelope = await _agent_parks_subop(
+        agent=agent,
+        composite_op_id="vmware.composite.vm.power",
+        target_id=original_id,
+        params=params,
+    )
+    await _reassign_target_name(original_id, soft_delete=True)
+    await _approve_as_reviewer(request_id)
+
+    resumed = await _resume_approved_or_already_resumed(
+        operator=agent,
+        call_arguments=_agent_call_arguments("vmware.composite.vm.power", params),
+        awaiting_envelope=envelope,
+        approval_request_id=request_id,
+    )
+
+    assert resumed["status"] == "denied", resumed
+    assert resumed["extras"]["error_code"] == "denied"
+    assert str(original_id) in resumed["error"]
+    assert recorder.calls == [], "nothing may run against the target that reused the name"
+    assert await _approval_row_count() == 1
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+    assert row is not None
+    assert row.resumed_at is None

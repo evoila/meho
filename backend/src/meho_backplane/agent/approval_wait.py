@@ -536,9 +536,15 @@ async def _resume_approved_or_already_resumed(
     re-entry runs as the agent principal (the operator surface runs as the
     reviewer); any other governed sub-op is checked against the agent's own
     grants, and one that would need a second approval fails closed
-    (``composite_resume_multi_gate_unsupported``). A direct park
-    (``resume_parent IS NULL``) keeps the re-dispatch of the agent's original
-    *call_arguments*.
+    (``composite_resume_multi_gate_unsupported``). The re-entry dispatches
+    against the target the row saved by id
+    (:func:`~meho_backplane.operations.approval_queue.rehydrate_resume_target`,
+    the operator surface's check), never the name in *call_arguments*: a
+    target renamed, or deleted and re-created under the same name, while the
+    request waited must not receive the approved write. A saved target that
+    no longer resolves fails closed with a ``denied`` envelope before the
+    claim. A direct park (``resume_parent IS NULL``) keeps the re-dispatch of
+    the agent's original *call_arguments*.
 
     Local imports mirror each other (and the wider module convention):
     ``meta_tools`` imports from ``operations.dispatcher`` which imports back
@@ -546,9 +552,41 @@ async def _resume_approved_or_already_resumed(
     would set up an import-time cycle; keeping both inline resolves them
     once at first-call time.
     """
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.operations._audit import parent_audit_id_var
     from meho_backplane.operations.approval_handoff import consume as consume_handoff
     from meho_backplane.operations.approval_handoff import discard as discard_handoff
-    from meho_backplane.operations.approval_queue import claim_resume
+    from meho_backplane.operations.approval_queue import (
+        claim_resume,
+        composite_resume_binding,
+        get_request,
+        rehydrate_resume_target,
+    )
+    from meho_backplane.operations.meta_tools import call_operation_with_approval
+
+    # Load the parked row (tenant-isolated). Its pre-generated
+    # ``approval.request`` audit id is bound below so the resumed dispatch
+    # back-links to it; pre-0053 rows carry ``request_audit_id IS NULL`` →
+    # binds ``None`` (the var's default), the correct no-op for a chain that
+    # never had the anchor. Its ``resume_parent`` (#3421) says whether this is
+    # a composite sub-op park that must re-enter the parent composite.
+    async with get_sessionmaker()() as session:
+        request = await get_request(
+            session,
+            tenant_id=operator.tenant_id,
+            request_id=approval_request_id,
+        )
+
+    # A composite re-entry dispatches against the target the row saved by id,
+    # the same check the operator surface runs, not the name the agent used
+    # when it parked: that name may point at another target by now. A saved
+    # target that no longer resolves fails closed here, before the claim, so
+    # the refused resume does not burn the one-resumer claim.
+    resolved_target: Any = None
+    if request.resume_parent is not None:
+        resolved_target, denied = await rehydrate_resume_target(operator, request)
+        if denied is not None:
+            return cast("dict[str, Any]", denied.model_dump(mode="json"))
 
     if not await claim_resume(approval_request_id):
         _log.info(
@@ -562,32 +600,12 @@ async def _resume_approved_or_already_resumed(
             approval_request_id=approval_request_id,
         )
 
-    from meho_backplane.db.engine import get_sessionmaker
-    from meho_backplane.operations._audit import parent_audit_id_var
-    from meho_backplane.operations.approval_queue import (
-        composite_resume_binding,
-        get_request,
-    )
-    from meho_backplane.operations.meta_tools import call_operation_with_approval
-
-    # Load the parked row (tenant-isolated). Its pre-generated
-    # ``approval.request`` audit id is bound below so the resumed dispatch
-    # back-links to it; pre-0053 rows carry ``request_audit_id IS NULL`` →
-    # binds ``None`` (the var's default), the correct no-op for a chain that
-    # never had the anchor. Its ``resume_parent`` (#3421) says whether this is
-    # a composite sub-op park that must re-enter the parent composite.
-    #
     # Only the claim winner touches the credential-write custody row. A direct
     # park discards it: the agent already owns the original inputs in memory.
     # A composite sub-op park whose row only names the parent consumes it,
     # because the parent's params live only in the encrypted copy. The
     # decrypted parent stays in a local and is never written to the ORM row.
     async with get_sessionmaker()() as session:
-        request = await get_request(
-            session,
-            tenant_id=operator.tenant_id,
-            request_id=approval_request_id,
-        )
         resume_parent = request.resume_parent
         if resume_parent is not None and request.execution_handle is not None:
             handoff = await consume_handoff(
@@ -620,7 +638,10 @@ async def _resume_approved_or_already_resumed(
                 tenant_id=str(operator.tenant_id),
                 subop_op_id=request.op_id,
                 parent_op_id=parent_op_id,
+                target_id=str(request.target_id) if request.target_id else None,
             )
+            # ``target`` is cleared so the stale name is never looked up; the
+            # saved target (or ``None`` for a tenant-wide op) is passed as is.
             return await call_operation_with_approval(
                 operator,
                 {
@@ -628,7 +649,9 @@ async def _resume_approved_or_already_resumed(
                     "connector_id": request.connector_id,
                     "op_id": parent_op_id,
                     "params": parent_params,
+                    "target": None,
                 },
+                resolved_target=resolved_target,
             )
     finally:
         parent_audit_id_var.reset(parent_token)

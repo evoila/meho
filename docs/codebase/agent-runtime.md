@@ -461,9 +461,11 @@ The agent runtime closes that gap with a wrapped `call_operation`. On
    original in-memory `params` (passed through `call_operation_with_approval`
    in `operations/meta_tools.py`). The dispatcher's gate-bypass path skips
    the policy gate; the durable approval-decision row is the authorization.
-   If the parked row is a composite sub-op (`resume_parent` set), the waiter
-   re-dispatches the parent composite with the approved sub-op cleared,
-   through the same helper the operator surface uses (#3421; see
+   If the waiting row is a composite sub-op (`resume_parent` set), the waiter
+   runs the parent composite again with the approved sub-op cleared, through
+   the same helper the operator surface uses. That re-run uses the target the
+   row saved by id, not the target name from the original call, so a renamed
+   or re-created target never receives the approved write (#3421; see
    `docs/codebase/approvals.md`, "Both resume surfaces read `resume_parent`").
 3. **On rejection** — returns the original `awaiting_approval` envelope to
    the model annotated with `extras["error_code"] = "approval_rejected"`

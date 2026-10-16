@@ -137,6 +137,7 @@ __all__ = [
     "list_pending",
     "publish_approval_event",
     "read_approval_result",
+    "rehydrate_resume_target",
     "reject_request",
     "resume_dispatch_after_approval",
 ]
@@ -1108,7 +1109,7 @@ async def resume_dispatch_after_approval(
     if effective_params is None and request.execution_handle is None:
         return _resume_pre0036_denied(operator, request)
 
-    resolved_target, denied = await _rehydrate_resume_target(operator, request)
+    resolved_target, denied = await rehydrate_resume_target(operator, request)
     if denied is not None:
         return denied
 
@@ -1374,7 +1375,7 @@ async def _dispatch_resume_with_bound_context(
     return result
 
 
-async def _rehydrate_resume_target(
+async def rehydrate_resume_target(
     operator: Operator,
     request: ApprovalRequest,
 ) -> tuple[Any, Any]:
@@ -1389,6 +1390,13 @@ async def _rehydrate_resume_target(
     since dispatching with ``target=None`` would let a typed handler that
     derives its connection from ``connector_id`` / ``params`` execute the
     approved privileged write outside the original target scope.
+
+    Shared by the operator surface (:func:`resume_dispatch_after_approval`)
+    and the in-process agent waiter's composite re-entry
+    (:mod:`meho_backplane.agent.approval_wait`, #3421). Loading by the saved
+    ``target_id`` instead of the name the caller used at park time means a
+    target renamed, or deleted and re-created under the same name, while the
+    request waited can never receive the approved write.
     """
     if request.target_id is None:
         return None, None

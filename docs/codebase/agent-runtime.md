@@ -465,11 +465,13 @@ The agent runtime closes that gap with a wrapped `call_operation`. On
    - It reads the stored row again after every Valkey error, and at least
      every 5 seconds (`_DURABLE_RECHECK_SECONDS`). So a lost broadcast event
      delays the agent by at most a few seconds; it does not end in a timeout.
-   - Each `XREAD` is cut off locally one second after its `BLOCK` window
-     (`_XREAD_REPLY_GRACE_SECONDS`), and never past the deadline. So a
-     Valkey that accepts the command but stops answering cannot hold the
-     wait for the client's 35-second socket timeout. A cut-off `XREAD`
-     counts as a Valkey error: the row is read at once.
+   - Each `XREAD` is cut off locally at the moment the next stored read is
+     due: the 5-second re-check or the deadline, whichever comes first. Its
+     `BLOCK` window ends one second earlier (`_XREAD_REPLY_GRACE_SECONDS`)
+     so a healthy reply lands in time. So a Valkey that accepts the command
+     but stops answering cannot delay a stored read past 5 seconds, and
+     cannot hold the wait for the client's 35-second socket timeout. A
+     cut-off `XREAD` counts as a Valkey error: the row is read at once.
    - It reads the row once more before it gives up at the deadline.
 2. **On approval** — re-invokes the dispatcher with `_approved=True` and the
    original in-memory `params` (passed through `call_operation_with_approval`

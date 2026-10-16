@@ -39,6 +39,7 @@ What the tests deliberately do NOT do
 from __future__ import annotations
 
 import asyncio
+import itertools
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
@@ -1139,6 +1140,25 @@ def _stub_stalled_notifier(monkeypatch: pytest.MonkeyPatch) -> tuple[AsyncMock, 
     return client, cancelled
 
 
+def _record_stored_read_times(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Record the loop time at which each stored-row read starts.
+
+    Wraps the real ``get_request`` so the read still runs; the list of
+    timestamps lets a test measure the gap between two reads.
+    """
+    import meho_backplane.operations.approval_queue as approval_queue_module
+
+    real_get_request = approval_queue_module.get_request
+    read_times: list[float] = []
+
+    async def _timed_get_request(*args: Any, **kwargs: Any) -> Any:
+        read_times.append(asyncio.get_running_loop().time())
+        return await real_get_request(*args, **kwargs)
+
+    monkeypatch.setattr(approval_queue_module, "get_request", _timed_get_request)
+    return read_times
+
+
 def _forbid_dispatch(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     """Record every re-dispatch attempt; the caller asserts the list stays empty."""
     import meho_backplane.operations.meta_tools as meta_tools_module
@@ -1248,27 +1268,34 @@ async def test_stalled_notifier_does_not_delay_the_stored_reread(
 
     The blocking client has a 35 s socket timeout. Without the local cut-off a
     hung Valkey would hold each ``XREAD`` that long, far past the re-check
-    interval, so the decision on the stored row would not be seen.
+    interval, so the decision on the stored row would not be seen. The gap
+    between two stored reads must stay within the re-check interval: a
+    cut-off that only fires one reply grace *after* the ``BLOCK`` window
+    would stretch every gap by that grace.
     """
     import meho_backplane.agent.approval_wait as approval_wait_module
 
-    monkeypatch.setattr(approval_wait_module, "_DURABLE_RECHECK_SECONDS", 0.05)
-    monkeypatch.setattr(approval_wait_module, "_XREAD_REPLY_GRACE_SECONDS", 0.05)
+    recheck_s = 0.5
+    monkeypatch.setattr(approval_wait_module, "_DURABLE_RECHECK_SECONDS", recheck_s)
+    monkeypatch.setattr(approval_wait_module, "_XREAD_REPLY_GRACE_SECONDS", 0.2)
     request = await _park_request(requester=_make_operator())
     client, cancelled = _stub_stalled_notifier(monkeypatch)
-    flip = asyncio.create_task(_set_status_later(request.id, ApprovalRequestStatus.APPROVED, 0.1))
+    read_times = _record_stored_read_times(monkeypatch)
+    flip = asyncio.create_task(_set_status_later(request.id, ApprovalRequestStatus.APPROVED, 1.2))
 
-    started = asyncio.get_running_loop().time()
     decision = await wait_for_approval_decision(
         tenant_id=_TENANT_ID, approval_request_id=request.id, timeout_seconds=30.0
     )
-    elapsed = asyncio.get_running_loop().time() - started
     await flip
 
     assert decision == "approved"
-    assert elapsed < 2.0
-    assert client.xread.await_count >= 1
+    assert client.xread.await_count >= 2
     assert cancelled
+    gaps = [later - earlier for earlier, later in itertools.pairwise(read_times)]
+    assert len(gaps) >= 2
+    # Each read takes a few milliseconds itself; allow for that and for
+    # scheduler jitter, but not for a full reply grace on top of the bound.
+    assert max(gaps) < recheck_s + 0.1
 
 
 async def test_stalled_notifier_timeout_honours_the_deadline(
@@ -1290,10 +1317,17 @@ async def test_stalled_notifier_timeout_honours_the_deadline(
 
 
 async def test_default_recheck_interval_is_at_most_five_seconds() -> None:
-    from meho_backplane.agent.approval_wait import _BLOCK_WINDOW_MS, _DURABLE_RECHECK_SECONDS
+    from meho_backplane.agent.approval_wait import (
+        _BLOCK_WINDOW_MS,
+        _DURABLE_RECHECK_SECONDS,
+        _XREAD_REPLY_GRACE_SECONDS,
+    )
 
     assert _DURABLE_RECHECK_SECONDS <= 5.0
     assert _BLOCK_WINDOW_MS <= 5_000
+    # The BLOCK window ends one grace before each read; a grace close to the
+    # interval would leave no room for the broadcast fast path.
+    assert _XREAD_REPLY_GRACE_SECONDS * 2 <= _DURABLE_RECHECK_SECONDS
 
 
 async def test_deadline_reread_returns_late_durable_decision(

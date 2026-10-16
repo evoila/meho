@@ -27,6 +27,7 @@ from uuid import UUID, uuid4
 import msgspec
 import pytest
 import redis.exceptions
+import structlog
 
 import meho_backplane.connectors.result_handle_store as store_module
 from meho_backplane.connectors.result_handle_store import (
@@ -807,7 +808,9 @@ async def test_writer_gate_on_spills_document_record_to_dedicated_client() -> No
     assert doc is not None and doc.document == {"name": "doc"}
 
 
-async def test_result_cache_metrics_are_aggregate_and_logs_carry_no_rows() -> None:
+async def test_result_cache_metrics_are_aggregate_and_logs_carry_no_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from structlog.testing import capture_logs
 
     shared, dedicated = _FakeRedis(), _InfoRedis()
@@ -834,6 +837,9 @@ async def test_result_cache_metrics_are_aggregate_and_logs_carry_no_rows() -> No
         "max_rows": 100,
     }
     tenant, handle = uuid4(), uuid4()
+    # The module logger is cached after its first use. Give the store a
+    # fresh logger so capture_logs sees its events in any test order.
+    monkeypatch.setattr(store_module, "_log", structlog.get_logger(store_module.__name__))
     with capture_logs() as logs:
         assert (
             await store.spill(tenant_id=tenant, handle_id=handle, **spill_kwargs)

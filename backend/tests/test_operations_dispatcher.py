@@ -3494,8 +3494,11 @@ async def test_park_refused_when_preflight_says_write_will_be_denied(
     no approval row is written: the caller gets ``denied`` /
     ``write_capability_denied`` with ``granted`` / ``required`` and the
     write-policy ``doc_ref``, so no person spends an approval on a write
-    that cannot land. When the write is authorized the op parks as before,
-    with no ``write_capability_warning``.
+    that cannot land. The refusal still lands as one ``denied`` audit row
+    on the op's own path (with the refusal details under ``error``) and
+    one ``denied`` broadcast event, exactly like a policy denial. When the
+    write is authorized the op parks as before, with no
+    ``write_capability_warning``.
     """
     from meho_backplane.db.models import ApprovalRequest
     from meho_backplane.operations._preview import (
@@ -3557,7 +3560,34 @@ async def test_park_refused_when_preflight_says_write_will_be_denied(
                     .select_from(ApprovalRequest)
                     .where(ApprovalRequest.op_id == "vault.kv.warn_op")
                 )
+                op_rows = (
+                    (
+                        await fresh.execute(
+                            select(AuditLog).where(AuditLog.path == "vault.kv.warn_op")
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                request_rows = (
+                    (
+                        await fresh.execute(
+                            select(AuditLog).where(AuditLog.path == "approval.request")
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
             assert count == 0
+            assert len(request_rows) == 0
+            assert len(op_rows) == 1
+            assert op_rows[0].payload["result_status"] == "denied"
+            assert op_rows[0].status_code == 403
+            assert op_rows[0].payload["error"]["error_code"] == "write_capability_denied"
+            assert op_rows[0].payload["error"]["granted"] == ["read"]
+            assert op_rows[0].payload["error"]["required"] == ["create", "update"]
+            assert len(captured_events) == 1
+            assert captured_events[0].result_status == "denied"
         else:
             assert result.status == "awaiting_approval"
             approval_request_id = UUID(result.extras["approval_request_id"])

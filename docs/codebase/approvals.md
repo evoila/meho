@@ -1081,7 +1081,10 @@ returns `status="denied"` with `error_code="write_capability_denied"` and
 `extras` `path` / `granted` / `required` / `reason` / `doc_ref` (the write
 policy, `connector-vault-policy.md#6-kv-v2-write-surface`). So no person
 spends an approval on a write the identity cannot perform. The caller adds
-the write grant and calls again. Before #3542 the verdict was only a
+the write grant and calls again. The dispatcher still writes one `denied`
+audit row for the attempt on the op's own path (the refusal details ride
+under `payload["error"]`) and publishes one `denied` broadcast event, the
+same as an ordinary policy denial. Before #3542 the verdict was only a
 warning and the op parked anyway; rows parked then still carry
 `write_capability_warning`, which the console modal shows as a banner.
 

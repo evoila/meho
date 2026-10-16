@@ -2462,8 +2462,11 @@ async def _handle_needs_approval(
     row commit atomically without coupling to any outer transaction.
 
     When the op's park-time permission preflight says the write will be
-    denied, the park is refused with ``write_capability_denied`` and no row
-    is written (#3542, :func:`_preflight_denied_refusal`).
+    denied, the park is refused with ``write_capability_denied`` and no
+    approval row is written (#3542, :func:`_preflight_denied_refusal`). The
+    refusal is still recorded as a ``denied`` audit row through the same
+    writer an ordinary policy denial uses, so the attempt stays in the
+    operation audit trail.
 
     For a ``destructive``-tier op (#3197) the park is gated first by
     :func:`_destructive_binding_refusal`: it refuses (fail-closed, no row
@@ -2534,11 +2537,24 @@ async def _handle_needs_approval(
             return refusal
 
     # #3542: a preflight that says the write will be denied refuses the
-    # park (no row written) instead of asking a person to approve it.
+    # park (no approval row written) instead of asking a person to approve
+    # it. The attempt is still audited as a denial, like a policy denial,
+    # with the capability-only refusal details on the row.
     refusal = _preflight_denied_refusal(
         op_id=op_id, proposed_effect=proposed_effect, duration_ms=duration_ms
     )
     if refusal is not None:
+        await audit_and_broadcast_safe(
+            audit_id=uuid.uuid4(),
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            result_status="denied",
+            duration_ms=duration_ms,
+            error_extras=_error_extras_for_audit(refusal),
+        )
         return refusal
 
     try:

@@ -472,9 +472,7 @@ def test_tools_call_unsupported_filter_returns_invalid_params(
     """Substrate-raised :class:`UnsupportedFilterError` maps to ``-32602``."""
     client, _op = client_with_operator
     mock_query = AsyncMock(
-        side_effect=UnsupportedFilterError(
-            "parent_audit_id filter not supported in v0.2 — column lands with G0.6-T7 (#398)",
-        ),
+        side_effect=UnsupportedFilterError("example_column filter not supported"),
     )
     with patch(_PATCH_TARGET, new=mock_query):
         response = post_mcp(
@@ -483,17 +481,43 @@ def test_tools_call_unsupported_filter_returns_invalid_params(
                 "jsonrpc": "2.0",
                 "id": 22,
                 "method": "tools/call",
-                "params": {
-                    "name": "query_audit",
-                    "arguments": {
-                        "parent_audit_id": "11111111-1111-1111-1111-111111111111",
-                    },
-                },
+                "params": {"name": "query_audit", "arguments": {}},
             },
         )
     body = response.json()
     assert body["error"]["code"] == INVALID_PARAMS
-    assert "parent_audit_id" in body["error"]["message"]
+    assert "example_column" in body["error"]["message"]
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+def test_tools_call_parent_audit_id_is_passed_to_the_substrate(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """#4030: ``parent_audit_id`` is a normal filter, scoped to the JWT tenant."""
+    client, op = client_with_operator
+    mock_query = AsyncMock(return_value=_empty_result())
+    parent_id = UUID("11111111-1111-1111-1111-111111111111")
+    with patch(_PATCH_TARGET, new=mock_query):
+        response = post_mcp(
+            client,
+            {
+                "jsonrpc": "2.0",
+                "id": 23,
+                "method": "tools/call",
+                "params": {
+                    "name": "query_audit",
+                    "arguments": {"parent_audit_id": str(parent_id)},
+                },
+            },
+        )
+    assert "error" not in response.json()
+    filters = mock_query.await_args.args[0]
+    assert filters.parent_audit_id == parent_id
+    assert mock_query.await_args.kwargs["tenant_id"] == op.tenant_id
 
 
 @pytest.mark.parametrize(

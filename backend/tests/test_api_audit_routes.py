@@ -368,14 +368,12 @@ def test_post_query_invalid_cursor_returns_400(client: TestClient) -> None:
     assert "cursor" in resp.json()["detail"].lower()
 
 
-def test_post_query_parent_audit_id_returns_400(client: TestClient) -> None:
+def test_post_query_unsupported_filter_returns_400(client: TestClient) -> None:
     """Substrate-raised :class:`UnsupportedFilterError` maps to 400."""
     key = make_rsa_keypair("kid-A")
     token = _token(key)
     mock_query = AsyncMock(
-        side_effect=UnsupportedFilterError(
-            "parent_audit_id filter not supported in v0.2 — column lands with G0.6-T7 (#398)",
-        ),
+        side_effect=UnsupportedFilterError("example_column filter not supported"),
     )
     with (
         respx.mock as r,
@@ -384,11 +382,33 @@ def test_post_query_parent_audit_id_returns_400(client: TestClient) -> None:
         mock_discovery_and_jwks(r, public_jwks(key))
         resp = client.post(
             "/api/v1/audit/query",
-            json={"parent_audit_id": "55555555-5555-5555-5555-555555555555"},
+            json={},
             headers={"Authorization": f"Bearer {token}"},
         )
     assert resp.status_code == 400
-    assert "parent_audit_id" in resp.json()["detail"]
+    assert "example_column" in resp.json()["detail"]
+
+
+def test_post_query_parent_audit_id_is_passed_to_the_substrate(client: TestClient) -> None:
+    """#4030: ``parent_audit_id`` is a normal filter, scoped to the JWT tenant."""
+    key = make_rsa_keypair("kid-A")
+    token = _token(key)
+    mock_query = AsyncMock(return_value=_empty_result())
+    parent_id = UUID("55555555-5555-5555-5555-555555555555")
+    with (
+        respx.mock as r,
+        patch("meho_backplane.api.v1.audit.query_audit", new=mock_query),
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/audit/query",
+            json={"parent_audit_id": str(parent_id)},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 200
+    filters = mock_query.await_args.args[0]
+    assert filters.parent_audit_id == parent_id
+    assert mock_query.await_args.kwargs["tenant_id"] == _TENANT_A
 
 
 # ---------------------------------------------------------------------------

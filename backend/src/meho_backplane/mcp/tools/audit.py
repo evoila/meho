@@ -188,9 +188,11 @@ _INPUT_SCHEMA: Final[dict[str, Any]] = {
             "type": ["string", "null"],
             "format": "uuid",
             "description": (
-                "Filter to one composite-operation subtree. NOT supported "
-                "in v0.2 — the substrate raises UnsupportedFilterError "
-                "(returned as -32602) until the column lands with G0.6-T7."
+                "Return the rows whose parent is this audit id "
+                "(`audit_log.parent_audit_id`, exact match). Use it to "
+                "find what an approval request led to: its decision row "
+                "and its run row. Returns direct children only, not "
+                "grandchildren."
             ),
         },
         "agent_session_id": {

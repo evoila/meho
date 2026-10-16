@@ -403,12 +403,9 @@ without an in-process harness.
 
 Watch the audit lineage. `meho audit query` (see
 [`cli/internal/cmd/audit/query.go`](../../cli/internal/cmd/audit/query.go))
-exposes the documented filter set; v0.2 rejects
-`--parent-audit-id` with `HTTP 400 UnsupportedFilterError` (the
-column lands with G0.6-T7 [#398](https://github.com/evoila/meho/issues/398) —
-see
-[`audit_query/query.py:135-138`](../../backend/src/meho_backplane/audit_query/query.py)).
-The supported lineage key today is `agent_session_id`. Pull the
+exposes the documented filter set, including `--parent-audit-id`
+for the direct children of one row. The main lineage key for this
+walk is `agent_session_id`. Pull the
 cheap tier's latest row, lift its session id, and walk the cascade
 with `meho audit replay <session-id>`:
 

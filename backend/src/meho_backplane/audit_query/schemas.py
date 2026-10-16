@@ -29,9 +29,9 @@ tasks land the schema additions:
   rows; closing that gap is a separate follow-up.
 * ``parent_audit_id`` — composite-operation lineage column landed by
   G0.6-T7 (#398) via migration ``0006``. Populated on the returned row from
-  ``audit_log.parent_audit_id`` (G8.2-T3 #1011); the *flat filter* on
-  ``parent_audit_id`` still raises :class:`UnsupportedFilterError` (un-gating
-  it is out of scope for #377).
+  ``audit_log.parent_audit_id`` (G8.2-T3 #1011). The flat filter on
+  ``parent_audit_id`` is an exact match that returns the direct children of
+  one row (#4030).
 * ``agent_session_id`` — the MCP-session correlation column landed by
   G8.2-T1 (#1009) via migration ``0014``. Populated on the returned row from
   ``audit_log.agent_session_id``; the filter is un-gated (G8.2-T3 #1011) and

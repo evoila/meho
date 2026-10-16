@@ -26,7 +26,7 @@ this package never inserts, updates, or deletes.
 | `result_status` | `str \| None` | One of `"ok"` / `"error"` / `"denied"`. Maps to status-code ranges. |
 | `since` / `until` | `datetime \| None` | `audit_log.occurred_at` bracket. **Absolute datetimes only** — `"24h"` / `"7d"` shorthand is parsed in the T2 / T3 router. |
 | `audit_id` | `UUID \| None` | Exact-id lookup. |
-| `parent_audit_id` | `UUID \| None` | **Raises `UnsupportedFilterError`** — the flat filter stays gated (un-gating is out of scope for #377). The column itself (#398) *is* read onto the returned row and is walked by the replay CTE. |
+| `parent_audit_id` | `UUID \| None` | `audit_log.parent_audit_id = :value` — **exact match**, so it returns the direct children of one row, not the whole subtree. Uses the `audit_log_parent_audit_id_idx` index. Main use: find the decision row and the run row of one approval request, which are linked only by this column (#4030). The replay CTE walks the full subtree. |
 | `agent_session_id` | `UUID \| None` | `audit_log.agent_session_id = :value`. Un-gated by G8.2-T3 (#1011); the column landed with G8.2-T1 (#1009). |
 | `work_ref` | `str \| None` | `audit_log.work_ref = :value` — **exact match** (a change-ticket reference is an opaque identifier, not a search term, so deterministic equality per #1177, not `ILIKE`). Filterable + surfaced since work_ref I1-T3 (#1658); the column landed with work_ref I1-T1 (#1655, migration `0039`). NULL rows are excluded. |
 | `limit` | `int` (1-1000) | Default 100. |
@@ -54,7 +54,7 @@ Field-to-source mapping:
 | `op_class` | `payload['op_class']` if a string, else `classify_op(op_id)` from `broadcast.events`. For the MCP `call_operation` outer-wrapper row this is `"tool_call"` (G0.15-T3 #1212) — the inner DISPATCH row carries the domain `read` / `write` class. |
 | `result_status` | Derived from `status_code` — 401/403 → `"denied"`, 4xx/5xx else → `"error"`, otherwise `"ok"`. |
 | `principal_name` | `payload['principal_name']` when present (MCP rows since G0.15-T3 #1212; `write_mcp_audit_row` merges `Operator.name` from the validated JWT). HTTP-chassis rows remain `None` — the `verify_jwt_and_bind` middleware does not bind `name` to contextvars, so the audit middleware sees no source for it. |
-| `parent_audit_id` | `audit_log.parent_audit_id` — composite-operation lineage column (G0.6-T7 #398, migration `0006`). Surfaced on the row since G8.2-T3 (#1011); the flat *filter* on it stays gated. |
+| `parent_audit_id` | `audit_log.parent_audit_id` — composite-operation lineage column (G0.6-T7 #398, migration `0006`). Surfaced on the row since G8.2-T3 (#1011); exact-match filterable since #4030. |
 | `agent_session_id` | `audit_log.agent_session_id` — MCP-session correlation column (G8.2-T1 #1009, migration `0014`). Surfaced + filterable since G8.2-T3 (#1011). |
 | `work_ref` | `audit_log.work_ref` — external change-ticket reference (work_ref I1-T1 #1655, migration `0039`). An opaque string (e.g. `"gh:evoila/meho#1"`) correlating a governed operation to the out-of-band change record that authorised it. Surfaced + exact-match-filterable since work_ref I1-T3 (#1658). Bind sources: the request/agent/dispatch boundary (work_ref I1-T2 #1657) and runbook runs (work_ref I3-T1 #1661 — a run's `runbook_runs.work_ref` is bound around each `operation_call` step's dispatch + on the abort row, so the step audit rows inherit the run's change ticket). NULL when no bind source is in scope; system-internal writers leave it NULL by design. |
 | `policy_decision` | `audit_log.policy_decision` — the synchronous policy-gate verdict stamped on the row (#130, migration `0051`). One of the closed `PermissionVerdict` set — `"auto-execute"` / `"needs-approval"` / `"deny"` — or `None` where no gate ran (pre-#130 rows, pre-gate usage errors like unknown-op / invalid-params / connector-resolution failures, and system-internal writers). Populated by both audit writers off the dispatch-scoped `policy_decision_var` contextvar: the parked "request" row carries `"needs-approval"`; the approval "decision" row carries `None` (an operator's approve/reject is not a gate verdict — it is recorded via `result_status`). A consumer reads the verdict directly (`WHERE policy_decision = '<verdict>'`) instead of reconstructing it from `method`+`path`+`payload`. **Verdict catalog:** the persisted set is exactly the three-value `PermissionVerdict` enum. `time_window_violation` / `quota_exceeded` are **not** implemented (no such policy classes exist in code); any external catalog listing them overstates the surface. |
@@ -77,14 +77,12 @@ end of the matching set under the current filter).
 ```text
 query_audit(filters, tenant_id, session)
   │
-  ├─ Validate filters: parent_audit_id → UnsupportedFilterError (flat filter
-  │                     stays gated; agent_session_id is now a usable filter)
-  │
   ├─ Build SELECT audit_log, targets.name
   │     OUTER JOIN targets ON audit_log.target_id = targets.id
   │                       AND targets.tenant_id   = :tenant_id   ← JOIN-scope defence
   │     WHERE audit_log.tenant_id = :tenant_id      ← always first
   │       [+ audit_id = :audit_id]
+  │       [+ parent_audit_id = :parent_audit_id]                ← exact match
   │       [+ agent_session_id = :agent_session_id]
   │       [+ work_ref = :work_ref]                              ← exact match
   │       [+ operator_sub ILIKE :principal]
@@ -343,10 +341,9 @@ Error mapping at the tool boundary:
 * `pydantic.ValidationError` (post-jsonschema, e.g. malformed UUID
   slipping past `format: uuid`) — same mapping.
 * `InvalidCursorError` (substrate, tampered cursor) — same mapping.
-* `UnsupportedFilterError` (substrate, the flat `parent_audit_id`
-  filter, still gated in v0.2) — same mapping with the column-name
-  message. The `agent_session_id` filter is **un-gated** (G8.2-T3
-  #1011) and no longer raises.
+* `UnsupportedFilterError` (substrate) — same mapping with the
+  column-name message. No filter raises it today: `agent_session_id`
+  (G8.2-T3 #1011) and `parent_audit_id` (#4030) are both normal filters.
 * Anything else propagates; the dispatcher's outer try/except turns
   it into JSON-RPC `-32603` Internal Error.
 
@@ -531,13 +528,12 @@ parity with the ``/api/v1/*`` chassis path and the MCP transport path.
   let the `_AUDIT_PAYLOAD_PREFIX` machinery push it into `payload`;
   the handler already reads it out, so no read-side change is needed.
 
-* **`parent_audit_id` flat filter stays gated.** The column is real (#398,
-  migration `0006`) and is now read onto the returned row + walked by the
-  replay CTE, but the *flat* `query_audit(parent_audit_id=...)` filter still
-  raises `UnsupportedFilterError` — un-gating it was deliberately out of scope
-  for G8.2 (#377) to keep the diff surgical. A future task can drop the arm and
-  add a `WHERE parent_audit_id = :parent_audit_id` clause; the column read is
-  already wired.
+* **`parent_audit_id` is a flat filter (#4030).** The column is real (#398,
+  migration `0006`), is read onto the returned row, and is walked by the
+  replay CTE. The flat `query_audit(parent_audit_id=...)` filter is an exact
+  match: it returns direct children only. This is the one way to link an
+  approval request to its decision and run rows when those rows carry no
+  agent session.
 
 * **`agent_session_id` is live.** The column landed with G8.2-T1 (#1009 —
   nullable + indexed); G8.2-T2 writes it from the MCP `Mcp-Session-Id`

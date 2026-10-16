@@ -51,11 +51,13 @@ Filter coverage
   per #1177, not ``ILIKE``); the column is also surfaced on every returned
   ``AuditEntry``. NULL on rows with no bound work_ref, so a ``work_ref``
   filter excludes them.
-* ``parent_audit_id`` is a real column too (G0.6-T7 #398, migration ``0006``)
-  and is surfaced on every returned ``AuditEntry``, but the *flat filter* on
-  it still raises :class:`UnsupportedFilterError` — un-gating that filter is
-  out of scope for G8.2 (#377); replay reads the column directly via its
-  recursive CTE instead.
+* ``parent_audit_id`` is a real column too (G0.6-T7 #398, migration ``0006``,
+  indexed by ``audit_log_parent_audit_id_idx``). The filter narrows to
+  ``audit_log.parent_audit_id = :parent_audit_id`` — exact match, so it
+  returns the *direct* children of one row (for example the decision row and
+  the run row of one approval request), not the whole subtree. Replay walks
+  the full subtree with its recursive CTE. The column is also surfaced on
+  every returned ``AuditEntry``.
 """
 
 from __future__ import annotations
@@ -78,13 +80,15 @@ __all__ = [
 
 
 class UnsupportedFilterError(ValueError):
-    """Raised when a filter targets a field the v0.2 substrate cannot evaluate.
+    """Raised when a filter targets a field the substrate cannot evaluate.
 
     Distinct from a validation error: the field is on
     :class:`AuditQueryFilters` (so router-side validation accepts it) but
     the column it would filter against does not exist yet. The handler
     surfaces this synchronously before issuing any SQL so the caller can
     return a structured 400 / -32602 with the column name in the message.
+    No filter raises it today (``parent_audit_id`` was the last one, #4030);
+    the REST, MCP and console callers keep their mapping for it.
     """
 
 
@@ -139,11 +143,6 @@ async def query_audit(
     keeps no FK on the column per v0.2's soft-FK discipline) resolves to
     ``target_name=None`` rather than leaking the other tenant's target name.
     """
-    if filters.parent_audit_id is not None:
-        raise UnsupportedFilterError(
-            "parent_audit_id filter not supported in v0.2 — column lands with G0.6-T7 (#398)",
-        )
-
     stmt = (
         sa.select(AuditLog, Target.name.label("target_name"))
         .outerjoin(
@@ -197,6 +196,9 @@ def _apply_filters(
     """
     if filters.audit_id is not None:
         stmt = stmt.where(AuditLog.id == filters.audit_id)
+
+    if filters.parent_audit_id is not None:
+        stmt = stmt.where(AuditLog.parent_audit_id == filters.parent_audit_id)
 
     if filters.agent_session_id is not None:
         stmt = stmt.where(AuditLog.agent_session_id == filters.agent_session_id)

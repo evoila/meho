@@ -97,7 +97,9 @@ from meho_backplane.agent.toolset import (
     META_TOOL_NAMES,
     RUNBOOK_EXECUTION_META_TOOL_NAMES,
     MetaToolSpec,
+    ToolsetResolution,
     resolve_agent_tools,
+    resolve_agent_toolset,
     toolset_admits_runbook_execution,
 )
 
@@ -141,6 +143,7 @@ __all__ = [
     "TenantModelPolicy",
     "TierMapping",
     "TokenAcquisitionError",
+    "ToolsetResolution",
     "UnexecutableRunbookReferenceError",
     "agent_invoke_depth_var",
     "anthropic_backend_builder",
@@ -162,6 +165,7 @@ __all__ = [
     "openai_compat_backend_builder",
     "openai_compat_capabilities",
     "resolve_agent_tools",
+    "resolve_agent_toolset",
     "resume_or_surface_awaiting_approval",
     "toolset_admits_runbook_execution",
     "vcf_paif_backend_builder",

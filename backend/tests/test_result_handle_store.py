@@ -87,16 +87,18 @@ async def test_spill_then_fetch_round_trips_full_rows() -> None:
     handle = uuid4()
     rows = _rows(120)
 
-    ok = await store.spill(
-        tenant_id=tenant,
-        operator_sub="op-a",
-        handle_id=handle,
-        op_id="vault.kv.list",
-        rows=rows,
-        total_rows=120,
-        ttl_seconds=3600,
-        max_rows=10000,
-    )
+    ok = (
+        await store.spill(
+            tenant_id=tenant,
+            operator_sub="op-a",
+            handle_id=handle,
+            op_id="vault.kv.list",
+            rows=rows,
+            total_rows=120,
+            ttl_seconds=3600,
+            max_rows=10000,
+        )
+    ).stored_rows
     assert ok == 120
     assert fake.last_ex == 3600
 
@@ -196,16 +198,18 @@ async def test_spill_caps_at_max_rows_and_reports_truncation() -> None:
     store = ResultHandleStore(fake)
     tenant, handle = uuid4(), uuid4()
 
-    ok = await store.spill(
-        tenant_id=tenant,
-        operator_sub="op-a",
-        handle_id=handle,
-        op_id=None,
-        rows=_rows(500),
-        total_rows=500,
-        ttl_seconds=3600,
-        max_rows=100,  # cap below the row count
-    )
+    ok = (
+        await store.spill(
+            tenant_id=tenant,
+            operator_sub="op-a",
+            handle_id=handle,
+            op_id=None,
+            rows=_rows(500),
+            total_rows=500,
+            ttl_seconds=3600,
+            max_rows=100,  # cap below the row count
+        )
+    ).stored_rows
     assert ok == 100
 
     window = await store.fetch_window(
@@ -243,32 +247,36 @@ async def test_spill_skips_degenerate_inputs(
 ) -> None:
     """Empty rows, non-positive TTL, or zero cap → no spill (returns 0)."""
     store = ResultHandleStore(_FakeRedis())
-    ok = await store.spill(
-        tenant_id=uuid4(),
-        operator_sub="op-a",
-        handle_id=uuid4(),
-        op_id=None,
-        rows=rows,
-        total_rows=len(rows),
-        ttl_seconds=ttl,
-        max_rows=max_rows,
-    )
+    ok = (
+        await store.spill(
+            tenant_id=uuid4(),
+            operator_sub="op-a",
+            handle_id=uuid4(),
+            op_id=None,
+            rows=rows,
+            total_rows=len(rows),
+            ttl_seconds=ttl,
+            max_rows=max_rows,
+        )
+    ).stored_rows
     assert ok == 0
 
 
 async def test_store_fails_open_on_unreachable_client() -> None:
     """An unreachable Valkey makes spill return zero and fetch return None."""
     store = ResultHandleStore(_BrokenRedis())
-    ok = await store.spill(
-        tenant_id=uuid4(),
-        operator_sub="op-a",
-        handle_id=uuid4(),
-        op_id=None,
-        rows=_rows(60),
-        total_rows=60,
-        ttl_seconds=3600,
-        max_rows=10000,
-    )
+    ok = (
+        await store.spill(
+            tenant_id=uuid4(),
+            operator_sub="op-a",
+            handle_id=uuid4(),
+            op_id=None,
+            rows=_rows(60),
+            total_rows=60,
+            ttl_seconds=3600,
+            max_rows=10000,
+        )
+    ).stored_rows
     assert ok == 0
 
     window = await store.fetch_window(
@@ -412,18 +420,20 @@ async def test_spill_byte_cap_accepts_exact_prefix_and_rejects_next(
     cap = len(msgspec.json.encode(prefix))
     fake = _FakeRedis()
     store = ResultHandleStore(fake)
-    stored = await store.spill(
-        tenant_id=uuid4(),
-        operator_sub="op",
-        handle_id=uuid4(),
-        op_id="x",
-        rows=rows,
-        total_rows=3,
-        ttl_seconds=60,
-        max_rows=3,
-        max_record_bytes=cap,
-        metadata={"note": "μ"},
-    )
+    stored = (
+        await store.spill(
+            tenant_id=uuid4(),
+            operator_sub="op",
+            handle_id=uuid4(),
+            op_id="x",
+            rows=rows,
+            total_rows=3,
+            ttl_seconds=60,
+            max_rows=3,
+            max_record_bytes=cap,
+            metadata={"note": "μ"},
+        )
+    ).stored_rows
     assert stored == 1
     assert len(next(iter(fake.store.values()))) == cap
     assert (
@@ -439,23 +449,24 @@ async def test_spill_byte_cap_accepts_exact_prefix_and_rejects_next(
             max_record_bytes=cap - 1,
             metadata={"note": "μ"},
         )
-        == 0
-    )
+    ).stored_rows == 0
 
 
 async def test_spill_rejects_wide_first_row_without_writing() -> None:
     fake = _FakeRedis()
-    stored = await ResultHandleStore(fake).spill(
-        tenant_id=uuid4(),
-        operator_sub="op",
-        handle_id=uuid4(),
-        op_id=None,
-        rows=[{"value": "x" * 1000}, {"value": "later"}],
-        total_rows=2,
-        ttl_seconds=60,
-        max_rows=2,
-        max_record_bytes=20,
-    )
+    stored = (
+        await ResultHandleStore(fake).spill(
+            tenant_id=uuid4(),
+            operator_sub="op",
+            handle_id=uuid4(),
+            op_id=None,
+            rows=[{"value": "x" * 1000}, {"value": "later"}],
+            total_rows=2,
+            ttl_seconds=60,
+            max_rows=2,
+            max_record_bytes=20,
+        )
+    ).stored_rows
     assert stored == 0
     assert fake.store == {}
 
@@ -499,17 +510,19 @@ async def test_spill_accounts_for_count_digit_width_and_complete_label(
 
     async def spill_with_cap(rows: list[dict[str, Any]], cap: int) -> tuple[int, bytes]:
         fake = _FakeRedis()
-        stored = await ResultHandleStore(fake).spill(
-            tenant_id=uuid4(),
-            operator_sub="op",
-            handle_id=uuid4(),
-            op_id=None,
-            rows=rows,
-            total_rows=len(rows),
-            ttl_seconds=60,
-            max_rows=len(rows),
-            max_record_bytes=cap,
-        )
+        stored = (
+            await ResultHandleStore(fake).spill(
+                tenant_id=uuid4(),
+                operator_sub="op",
+                handle_id=uuid4(),
+                op_id=None,
+                rows=rows,
+                total_rows=len(rows),
+                ttl_seconds=60,
+                max_rows=len(rows),
+                max_record_bytes=cap,
+            )
+        ).stored_rows
         return stored, next(iter(fake.store.values()), b"")
 
     created = fixed.isoformat()
@@ -564,17 +577,19 @@ async def test_spill_reports_storage_coverage_for_complete_and_capped_prefixes(
 
     async def payload_for(*, max_rows: int, max_record_bytes: int) -> _StoredPayload:
         fake = _FakeRedis()
-        stored = await ResultHandleStore(fake).spill(
-            tenant_id=uuid4(),
-            operator_sub="op",
-            handle_id=uuid4(),
-            op_id=None,
-            rows=rows,
-            total_rows=99,
-            ttl_seconds=60,
-            max_rows=max_rows,
-            max_record_bytes=max_record_bytes,
-        )
+        stored = (
+            await ResultHandleStore(fake).spill(
+                tenant_id=uuid4(),
+                operator_sub="op",
+                handle_id=uuid4(),
+                op_id=None,
+                rows=rows,
+                total_rows=99,
+                ttl_seconds=60,
+                max_rows=max_rows,
+                max_record_bytes=max_record_bytes,
+            )
+        ).stored_rows
         assert stored > 0
         return msgspec.json.decode(next(iter(fake.store.values())), type=_StoredPayload)
 
@@ -610,17 +625,19 @@ async def test_spill_reports_storage_coverage_for_complete_and_capped_prefixes(
 async def test_spill_explicit_nonpositive_byte_cap_skips_without_writing(cap: int) -> None:
     """An explicit disabled/invalid cap never resolves settings or writes a key."""
     fake = _FakeRedis()
-    stored = await ResultHandleStore(fake).spill(
-        tenant_id=uuid4(),
-        operator_sub="op",
-        handle_id=uuid4(),
-        op_id=None,
-        rows=[{"i": 1}],
-        total_rows=1,
-        ttl_seconds=60,
-        max_rows=1,
-        max_record_bytes=cap,
-    )
+    stored = (
+        await ResultHandleStore(fake).spill(
+            tenant_id=uuid4(),
+            operator_sub="op",
+            handle_id=uuid4(),
+            op_id=None,
+            rows=[{"i": 1}],
+            total_rows=1,
+            ttl_seconds=60,
+            max_rows=1,
+            max_record_bytes=cap,
+        )
+    ).stored_rows
     assert stored == 0
     assert fake.store == {}
 
@@ -628,16 +645,18 @@ async def test_spill_explicit_nonpositive_byte_cap_skips_without_writing(cap: in
 async def test_spill_fails_open_for_an_unencodable_row_without_writing() -> None:
     """A real serialization TypeError preserves the no-spill fail-open contract."""
     fake = _FakeRedis()
-    stored = await ResultHandleStore(fake).spill(
-        tenant_id=uuid4(),
-        operator_sub="op",
-        handle_id=uuid4(),
-        op_id=None,
-        rows=[{"unsupported": object()}],
-        total_rows=1,
-        ttl_seconds=60,
-        max_rows=1,
-        max_record_bytes=10_000,
-    )
+    stored = (
+        await ResultHandleStore(fake).spill(
+            tenant_id=uuid4(),
+            operator_sub="op",
+            handle_id=uuid4(),
+            op_id=None,
+            rows=[{"unsupported": object()}],
+            total_rows=1,
+            ttl_seconds=60,
+            max_rows=1,
+            max_record_bytes=10_000,
+        )
+    ).stored_rows
     assert stored == 0
     assert fake.store == {}

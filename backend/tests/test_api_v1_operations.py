@@ -45,7 +45,12 @@ from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
-from meho_backplane.connectors.result_handle_store import SpilledRowSet, SpilledWindow
+from meho_backplane.connectors.result_handle_store import (
+    ResultRecordKindError,
+    SpilledDocument,
+    SpilledRowSet,
+    SpilledWindow,
+)
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.middleware import RequestContextMiddleware
@@ -1388,3 +1393,73 @@ def test_governed_subops_404_for_unregistered_op(
         )
     assert response.status_code == 404, response.text
     assert response.json()["detail"]["reason"] == "no_governed_subops"
+
+
+class _DocumentResultStore:
+    """Fake store holding one document record (#3633)."""
+
+    def __init__(self, handle_id: uuid.UUID, document: Any) -> None:
+        self._handle_id = handle_id
+        self._document = document
+
+    async def fetch_document(
+        self, *, tenant_id: uuid.UUID, operator_sub: str, handle_id: uuid.UUID
+    ) -> SpilledDocument | None:
+        if handle_id != self._handle_id or operator_sub != "op-1":
+            return None
+        return SpilledDocument(document=self._document)
+
+    async def fetch_window(self, *, handle_id: uuid.UUID, **_kwargs: Any) -> SpilledWindow | None:
+        raise ResultRecordKindError(handle_id, "document")
+
+
+def _post_document_read(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, body: dict[str, Any]
+) -> Any:
+    handle = uuid.UUID(body["handle_id"])
+    store = _DocumentResultStore(handle, {"name": "pod-1", "items": [{"i": i} for i in range(5)]})
+    monkeypatch.setattr(result_query_core, "get_result_handle_store", lambda: store)
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        return client.post(
+            "/api/v1/operations/result-query",
+            json=body,
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+
+
+def test_post_result_query_path_pages_an_array(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `path` read over REST pages an array value with offset/limit (#3633)."""
+    body = {"handle_id": str(uuid.uuid4()), "query": {"path": "/items"}, "offset": 3, "limit": 2}
+    response = _post_document_read(client, monkeypatch, body)
+    assert response.status_code == 200
+    assert response.json()["rows"] == [{"i": 3}, {"i": 4}]
+    assert response.json()["total_rows"] == 5
+
+
+@pytest.mark.parametrize(
+    ("query", "reason"),
+    [
+        ({"path": "/name", "limit": 5}, None),
+        ({"path": "/missing"}, "invalid_query"),
+        (None, "invalid_query"),
+    ],
+    ids=["path-with-limit", "unresolvable", "paging-a-document"],
+)
+def test_post_result_query_document_errors_are_422(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    query: dict[str, Any] | None,
+    reason: str | None,
+) -> None:
+    """Path misuse is a 422 on REST, like the MCP `-32602` (#3633)."""
+    body: dict[str, Any] = {"handle_id": str(uuid.uuid4())}
+    if query is not None:
+        body["query"] = query
+    response = _post_document_read(client, monkeypatch, body)
+    assert response.status_code == 422
+    if reason is not None:
+        assert response.json()["detail"]["reason"] == reason

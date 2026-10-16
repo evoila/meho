@@ -42,7 +42,7 @@ from fastapi.testclient import TestClient
 
 import meho_backplane.operations.result_query as result_query_core
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.connectors.result_handle_store import SpilledWindow
+from meho_backplane.connectors.result_handle_store import SpilledDocument, SpilledWindow
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import GraphNode, Tenant
 from meho_backplane.db.models import Target as TargetORM
@@ -504,6 +504,32 @@ def test_result_query_conforms(
     )
     assert payload["returned_rows"] == 5
     assert payload["total_rows"] == 8
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+@pytest.mark.parametrize(("path", "value_type"), [("/items", "array"), ("/name", "string")])
+def test_result_query_path_read_conforms(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    value_type: str,
+) -> None:
+    """A document ``path`` read (#3633) fits the same output schema."""
+    client, _op = client_with_operator
+    handle_id = uuid.uuid4()
+
+    class _StubStore:
+        async def fetch_document(
+            self, *, tenant_id: uuid.UUID, operator_sub: str, handle_id: uuid.UUID
+        ) -> SpilledDocument:
+            return SpilledDocument(document={"name": "doc", "items": [1, {"k": 2}]})
+
+    monkeypatch.setattr(result_query_core, "get_result_handle_store", lambda: _StubStore())
+    payload = _assert_conforms(
+        "result_query",
+        _call(client, "result_query", {"handle_id": str(handle_id), "query": {"path": path}}),
+    )
+    assert payload["value_type"] == value_type
 
 
 # ---------------------------------------------------------------------------

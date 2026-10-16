@@ -582,7 +582,10 @@ register_mcp_tool(
                     "description": (
                         "JSONFlux result handle. Non-null when the raw "
                         "response was set-shaped and spilled out-of-band; "
-                        "drill in via `result_query` with `handle_id`."
+                        "drill in via `result_query` with `handle_id`. "
+                        "A large response with no single list is kept as one "
+                        "document (`result.result_record` is `document`); "
+                        "read it with `query.path`."
                     ),
                 },
                 "extras": {"type": "object"},

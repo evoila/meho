@@ -1133,6 +1133,9 @@ _RKE2_CONFIG_UPDATE_OP = Rke2Op(
             "key NAMES only, never values, never the file body. Does NOT "
             "restart. On a bound violation: {updated: false, error}."
         ),
+        # Credential-class ops get no default scalar copy when changed_keys
+        # spills; these value-free fields stay inline (#3633).
+        "result_scalars": {"keys": ["updated", "path", "restart_required", "error"]},
     },
 )
 

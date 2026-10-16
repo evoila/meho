@@ -27,7 +27,12 @@ from fastapi.testclient import TestClient
 
 import meho_backplane.operations.result_query as result_query_core
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors.result_handle_store import SpilledRowSet, SpilledWindow
+from meho_backplane.connectors.result_handle_store import (
+    ResultRecordKindError,
+    SpilledDocument,
+    SpilledRowSet,
+    SpilledWindow,
+)
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.settings import get_settings
 from tests.mcp_test_fixtures import (
@@ -52,6 +57,26 @@ class _FakeStore:
 
     def __init__(self) -> None:
         self._rows: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+        self._documents: dict[tuple[str, str, str], Any] = {}
+
+    def seed_document(
+        self, *, tenant_id: UUID, operator_sub: str, handle_id: UUID, document: Any
+    ) -> None:
+        self._documents[(str(tenant_id), operator_sub, str(handle_id))] = document
+
+    async def fetch_document(
+        self,
+        *,
+        tenant_id: UUID,
+        operator_sub: str,
+        handle_id: UUID,
+    ) -> SpilledDocument | None:
+        key = (str(tenant_id), operator_sub, str(handle_id))
+        if key in self._rows:
+            raise ResultRecordKindError(handle_id, "rows")
+        if key not in self._documents:
+            return None
+        return SpilledDocument(document=self._documents[key])
 
     def seed(
         self,
@@ -405,3 +430,100 @@ def test_result_query_over_wire_ceiling_is_output_too_large(
     assert body["error"]["code"] == INVALID_PARAMS
     assert body["error"]["data"] == {"reason": "output_too_large", "delivery": "unavailable"}
     assert "1024-byte delivery limit" in body["error"]["message"]
+
+
+def _seed_document(fake_store: _FakeStore, op: Operator, handle: UUID) -> None:
+    fake_store.seed_document(
+        tenant_id=OPERATOR_TENANT_ID,
+        operator_sub=op.sub,
+        handle_id=handle,
+        document={"name": "pod-1", "containers": [{"name": f"c{i}"} for i in range(5)]},
+    )
+
+
+def test_input_schema_advertises_the_path_argument(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """#3633: `query.path` is in the schema and says it excludes the rest."""
+    client, _op = client_with_operator
+    response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    schema = next(t for t in response.json()["result"]["tools"] if t["name"] == "result_query")[
+        "inputSchema"
+    ]
+    path = schema["properties"]["query"]["properties"]["path"]
+    assert path["type"] == "string"
+    assert "Cannot be combined" in path["description"]
+    assert "RFC 6901" in path["description"]
+
+
+def test_path_mode_pages_an_array_with_offset_and_limit(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    fake_store: _FakeStore,
+) -> None:
+    client, op = client_with_operator
+    handle = uuid4()
+    _seed_document(fake_store, op, handle)
+    response = _call(
+        client,
+        {"handle_id": str(handle), "query": {"path": "/containers"}, "offset": 1, "limit": 2},
+    )
+    assert response.status_code == 200
+    payload = _structured(response.json()["result"])
+    assert payload["rows"] == [{"name": "c1"}, {"name": "c2"}]
+    assert payload["total_rows"] == 5
+    assert payload["value_type"] == "array"
+
+
+def test_path_mode_returns_a_single_value(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    fake_store: _FakeStore,
+) -> None:
+    client, op = client_with_operator
+    handle = uuid4()
+    _seed_document(fake_store, op, handle)
+    response = _call(client, {"handle_id": str(handle), "query": {"path": "/name"}})
+    payload = _structured(response.json()["result"])
+    assert payload["value"] == "pod-1"
+    assert payload["value_type"] == "string"
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        {"path": "/name", "select": ["name"]},
+        {"path": "/a~2"},
+        {"path": "/containers/01"},
+        {"path": "/missing"},
+    ],
+    ids=["mixed-with-select", "bad-escape", "leading-zero", "unresolvable"],
+)
+def test_path_mode_errors_are_recoverable_invalid_params(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    fake_store: _FakeStore,
+    query: dict[str, Any],
+) -> None:
+    client, op = client_with_operator
+    handle = uuid4()
+    _seed_document(fake_store, op, handle)
+    body = _call(client, {"handle_id": str(handle), "query": query}).json()
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert body["error"]["data"]["reason"] == "invalid_query"
+
+
+def test_paging_a_document_handle_is_recoverable_invalid_params(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Paging a document handle names the `path` read instead (#3633)."""
+    client, _op = client_with_operator
+    handle = uuid4()
+
+    class _DocumentOnlyStore:
+        async def fetch_window(self, **_kwargs: Any) -> SpilledWindow | None:
+            raise ResultRecordKindError(handle, "document")
+
+    monkeypatch.setattr(result_query_core, "get_result_handle_store", lambda: _DocumentOnlyStore())
+    body = _call(client, {"handle_id": str(handle)}).json()
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert body["error"]["data"]["reason"] == "invalid_query"
+    assert "path" in body["error"]["message"]

@@ -185,16 +185,20 @@ how an operator replays it.
   normal session replay rebuilds the run as one tree. The 10,000 anchor-row
   cap and the 413 `session_too_large` answer apply unchanged.
 - This works for every service principal with a recovered clientId, paired
-  add-on or not. Before #3446 only paired add-ons got it, and an unpaired
-  service account's rows landed with a NULL `agent_session_id`.
+  add-on or not. The clientId comes from the `service-account-<clientId>`
+  username marker or, when the token has no marker, from its `azp` /
+  `client_id` claim (`auth/jwt.py`). Before #3446 only paired add-ons got
+  it, and an unpaired service account's rows landed with a NULL
+  `agent_session_id`.
 - A call **without** a `work_ref` still lands NULL. There is nothing to group
   it by. Find those rows by principal (`meho audit query --principal`).
 
 How an operator replays a client-credential run:
 
-1. `meho audit query --work-ref <ref>` (or
+1. `meho audit query --work-ref <ref> --json` (or
    `GET /api/v1/audit/by-work-ref/{ref}`) — the rows show the shared
-   `agent_session_id`.
+   `agent_session_id`. Use `--json`: the default table does not print
+   that column.
 2. `meho audit replay <session-id>` (or
    `GET /api/v1/audit/sessions/{session_id}/replay`, `tenant_admin`).
 

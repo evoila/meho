@@ -80,9 +80,10 @@ audit row carrying only its own columns. No back-reference column is added to
 - `Operator.client_id` (`auth/operator.py`) — the caller's OAuth `clientId`,
   recovered at JWT verification by `_extract_client_id` (`auth/jwt.py`) from the
   `service-account-<clientId>` username marker (the same #3178 marker the
-  `service` classification keys on). `None` for interactive users and any token
-  without the marker. For a paired add-on it equals
-  `addon_pairing.keycloak_client_id`.
+  `service` classification keys on) or, for a service token without the
+  marker, from its verified `azp` / `client_id` claim (#3446). `None` for
+  interactive users and any token carrying neither. For a paired add-on it
+  equals `addon_pairing.keycloak_client_id`.
 - `AddonPairingService.get_by_client_id(client_id)` (`operations/addon_pairing.py`)
   — the pairing lookup by the globally-unique clientId; returns the row
   (carrying its `tenant_id` for the caller to cross-check).
@@ -131,12 +132,13 @@ would re-scatter replay into per-dispatch roots).
   `GET /api/v1/audit/sessions/{session_id}/replay` renders the tree. A
   first-class "list my orchestration runs" endpoint is a possible follow-up,
   not required by the task.
-- **clientId recovery is username-derived.** `client_id` is stripped from the
-  `service-account-<clientId>` marker, not read from a dedicated `azp` claim.
-  That keeps it consistent with the #3178 service classification and needs no
-  new Keycloak mapper, but a realm that stops emitting the marker would drop
-  the linkage (the dispatch would simply fall back to an independent audit
-  row — fail-open into the pre-#3028 behaviour, never a wrong subtree).
+- **clientId recovery has two sources.** `client_id` is stripped from the
+  `service-account-<clientId>` username marker when present. A service token
+  without the marker (a client without the `profile` scope, or a realm that
+  renamed the mapper) falls back to its verified `azp` / RFC 9068 `client_id`
+  claim (#3446, the same fallback agents use since #3795). A token with
+  neither gets no linkage: the dispatch falls back to an independent audit
+  row — fail-open into the pre-#3028 behaviour, never a wrong subtree.
 - **Run rows are not reaped.** An orchestration run row is small and durable;
   a retention sweep (mirroring approval-request TTLs) is a later concern.
 - **A call without a `work_ref` is not linked.** The `work_ref` names the run;

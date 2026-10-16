@@ -96,14 +96,14 @@ keyed on the bare sub (a deliberate, explicit `tenant_admin` opt-in).
 A registered agent's access token carries the service-account **UUID** in
 `sub`, while a grant is keyed on the `agent:<name>` OAuth clientId. To bridge
 that gap the clientId is surfaced onto `Operator.client_id` from the token's
-`azp` / RFC 9068 `client_id` claim (agent kind only,
+`azp` / RFC 9068 `client_id` claim (agent and service kinds,
 `auth/jwt.py::_extract_client_id`), and the resolver loads rows for
 `principal_sub IN {operator.sub, operator.client_id}`. A `user-agent` grant is
 matched via `operator.sub` (its `azp` is a public client, not `agent:<name>`).
 The clientId is folded in **only** for `principal_kind == agent`, so
 `user` / `service` / `runner` principals are unaffected (a `service`
-principal's `client_id`, populated from the #3178 username marker for add-on
-linkage, is never matched against this table).
+principal's `client_id`, populated from the #3178 username marker or the same
+claim for audit parent-linkage (#3446), is never matched against this table).
 
 ### Resolution algorithm (`auth/permissions.py::resolve_verdict`)
 

@@ -1,0 +1,110 @@
+# Default values for the result-cache subchart (Valkey 9.x).
+#
+# The subchart ships as part of the umbrella `meho` chart; operators override
+# values via the parent chart's `resultCache:` block. Same workload shape as
+# the `broadcast` subchart (single-replica Deployment, no PVC): result
+# handles are short-lived and expire by TTL, so nothing here needs to
+# survive a restart.
+
+# -- Master switch for the subchart. The parent Chart.yaml's `dependencies`
+# entry references this via `condition: resultCache.enabled`.
+enabled: false
+
+image:
+  # -- Image repository. Defaults to upstream Valkey OSS on Docker Hub.
+  repository: valkey/valkey
+  # -- Image tag. Pinned to the same Valkey 9.x alpine variant as the
+  # broadcast subchart; bump on security advisories.
+  tag: "9.0-alpine"
+  # -- Image pull policy.
+  pullPolicy: IfNotPresent
+
+# -- Number of replicas. Capped at 1: no persistence and no Sentinel ship
+# with this chart.
+replicas: 1
+
+# -- Byte ceiling for the store (Valkey `maxmemory`). A generous default; a
+# concurrent-handle load test may tune it. Keep it below the pod memory
+# limit so Valkey refuses writes before the kernel OOM-kills the pod.
+maxmemory: "768mb"
+
+# -- What Valkey does at the ceiling. `noeviction` refuses new result writes
+# (the backplane already treats a refused write as "no stored rows") and
+# never drops a live handle another agent is still reading.
+maxmemoryPolicy: noeviction
+
+# -- Pod-level security context. UID 999 is the upstream Valkey image's
+# default user.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 999
+  fsGroup: 999
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container-level security context. Valkey writes only to the `/data`
+# emptyDir, so the root filesystem stays read-only.
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# -- Container resources. The memory limit is sized above `maxmemory` so
+# Valkey hits its own ceiling first.
+resources:
+  limits:
+    cpu: 500m
+    memory: 1Gi
+    ephemeral-storage: 512Mi
+  requests:
+    cpu: 50m
+    memory: 128Mi
+    ephemeral-storage: 128Mi
+
+service:
+  # -- Service type. ClusterIP: only the in-cluster backplane uses it.
+  type: ClusterIP
+  # -- Service port (Redis-protocol default 6379).
+  port: 6379
+
+# -- Valkey `requirepass` authentication. Same shape as the broadcast
+# subchart: a chart-managed Secret (or `existingSecret`) holds the password,
+# and both the store and the backplane read it through `secretKeyRef`.
+auth:
+  enabled: true
+  # -- Use an operator-supplied Secret instead of a chart-managed one.
+  existingSecret: ""
+  # -- Key holding the requirepass value.
+  existingSecretPasswordKey: requirepass
+  # -- Explicit password. When empty and no `existingSecret` is set, the
+  # chart generates one on first install and keeps it across upgrades.
+  password: ""
+
+# -- The subchart's own ingress NetworkPolicy. Selects the result-cache Pod
+# and admits tcp/<service.port> only from the backplane Pods (and any
+# `extraAllowedSelectors`).
+networkPolicy:
+  enabled: true
+  # -- Labels of the backplane Pods allowed to reach the store. The
+  # `.Release.Name` instance label is added automatically.
+  backplanePodLabels:
+    app.kubernetes.io/name: meho
+  # -- Extra pod selectors (label maps) allowed to reach the store.
+  extraAllowedSelectors: []
+
+# -- Pod-level annotations.
+podAnnotations: {}
+
+# -- Pod-level labels.
+podLabels: {}
+
+# -- Node selector.
+nodeSelector: {}
+
+# -- Tolerations.
+tolerations: []
+
+# -- Affinity rules.
+affinity: {}

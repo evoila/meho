@@ -118,6 +118,24 @@ spec:
                   key: {{ .Values.broadcast.auth.existingSecretPasswordKey }}
             {{- end }}
             {{- end }}
+            {{- if .Values.resultCache.enabled }}
+            # RESULT_CACHE_REDIS_URL points result-handle reads and writes at
+            # the dedicated result-cache store (charts/result-cache). Unset,
+            # the backplane falls back to BROADCAST_REDIS_URL.
+            - name: RESULT_CACHE_REDIS_URL
+              value: "redis://{{ .Release.Name }}-result-cache:{{ .Values.resultCache.service.port }}/0"
+            {{- if .Values.resultCache.auth.enabled }}
+            - name: RESULT_CACHE_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.resultCache.auth.existingSecret | default (printf "%s-result-cache-auth" .Release.Name) }}
+                  key: {{ .Values.resultCache.auth.existingSecretPasswordKey }}
+            {{- end }}
+            # Write new result handles to the dedicated store. Turn on only
+            # after every backplane Pod runs the reader-first code.
+            - name: RESULT_CACHE_WRITER_ENABLED
+              value: {{ .Values.resultCache.writerEnabled | quote }}
+            {{- end }}
             # Other operator-supplied secrets (Keycloak client secret, Vault
             # role bindings) come via ESO-synced Kubernetes Secrets; G2.6
             # wires the references when each surface lands.

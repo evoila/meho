@@ -223,10 +223,12 @@ code-level diagnosis at `v0.13.0` (`f6ee330`):
    `handle.fetch_more.drill_in` in the response: `reason` now names the
    branch.
 2. `result_store_unavailable` → check backplane logs for
-   `result_handle_spill_failed` (carries the Valkey error) and the
-   broadcast service health (`BROADCAST_REDIS_URL`; the store reuses
-   the broadcast client's pool, so a broken broadcast feed and a
-   broken spill store fail together).
+   `result_handle_spill_failed` (carries the Valkey error and the
+   `namespace`) and the health of the store it names: `v2` is the
+   dedicated result-cache store (`RESULT_CACHE_REDIS_URL`), `legacy` the
+   broadcast store (`BROADCAST_REDIS_URL`). A full result-cache store
+   (`noeviction` at `maxmemory`) shows as `OOM command not allowed` and a
+   rising `result_cache_records_total{outcome="rejected"}`.
 3. `no_tenant_context` → the reduce ran outside an authenticated
    dispatch; check the `jsonflux_spill_skipped` warning's
    `has_tenant_id` / `has_operator_sub` / `tenant_id_malformed`
@@ -236,11 +238,49 @@ code-level diagnosis at `v0.13.0` (`f6ee330`):
    a different operator (`sub` mismatch is an intentional
    `handle_not_found`).
 
+## Dedicated result-cache store (#3639)
+
+Result handles used to live only in the broadcast Valkey, next to the
+governance keys (broadcast, rate limits, approval waits). That Valkey has
+no byte ceiling, so many large handles could get it OOM-killed and take
+governance down too. Handles now move to their own Valkey (chart subchart
+`result-cache`, `maxmemory` + `noeviction`; see
+[devops.md](devops.md#result-cache-subchart-chartsresult-cache)).
+
+The move is reader-first, so it is safe during a rolling update:
+
+| Step | Reads | Writes |
+|---|---|---|
+| `RESULT_CACHE_REDIS_URL` unset | `v2` key, then legacy key — both on the broadcast client | legacy key, broadcast client |
+| URL set, `RESULT_CACHE_WRITER_ENABLED=false` | `v2` key on the dedicated client, then legacy key on the broadcast client | legacy key, broadcast client |
+| URL set, writer on | same | `meho:reshandle:v2:{tenant}:{handle}`, dedicated client |
+
+- The fallback read uses the caller's own tenant id, so it never reads
+  another tenant's record. The operator check still runs on whatever
+  record is found.
+- There is no dual write. Legacy keys drain by their own TTL; the store
+  keeps both clients for that time.
+- A failing dedicated client counts as a miss and the read falls back to
+  the legacy key.
+- `RESULT_CACHE_REDIS_PASSWORD` is the dedicated store's `requirepass`.
+  When the URL is unset, the broadcast password is used.
+
+Metrics (aggregate only, no row content, keys, or vendor totals):
+
+- `result_cache_records_total{outcome, namespace}` — writes `admitted` or
+  `rejected` (over the byte cap, refused, or failed), per `v2` / `legacy`.
+- `result_cache_reads_total{source}` — reads found in `v2`, found by the
+  `legacy` fallback, or `miss`.
+- `result_cache_memory_bytes{kind}` — `used` and `max` memory of the
+  dedicated store, sampled from `INFO memory` after each `v2` write.
+
 ## Dependencies
 
-- Valkey via the broadcast fast client
+- Valkey via two clients: the broadcast fast client
   (`meho_backplane.broadcast.client.get_broadcast_client`,
-  `BROADCAST_REDIS_URL`) — shared pool, 5 s socket timeouts, fail-fast.
+  `BROADCAST_REDIS_URL`) for legacy keys, and a dedicated client from
+  `RESULT_CACHE_REDIS_URL` for `v2` keys (the same client when the URL is
+  unset). Both use 5 s socket timeouts and fail fast.
 - `RESULT_HANDLE_MAX_SPILL_ROWS` (default 10000, validated `> 0`) caps
   the per-key value size; `ttl_seconds` (reducer default 3600) bounds
   lifetime server-side.

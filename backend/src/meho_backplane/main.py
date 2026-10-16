@@ -147,6 +147,7 @@ from meho_backplane.checks.evidence_retention import (
 from meho_backplane.checks.runner import start_sensor_runner, stop_sensor_runner
 from meho_backplane.checks.watchdog import start_checks_watchdog, stop_checks_watchdog
 from meho_backplane.connectors.registry import _eager_import_connectors, registered_product_tokens
+from meho_backplane.connectors.result_handle_store import dispose_result_handle_store
 from meho_backplane.db.engine import dispose_engine, get_engine
 from meho_backplane.db.migrations import db_migration_probe
 from meho_backplane.docs_search.readiness_probe import docs_backends_readiness_probe
@@ -352,6 +353,10 @@ async def _run_lifespan_shutdown() -> None:
         await dispose_broadcast_blocking_client()
     except Exception:
         log.exception("dispose_broadcast_blocking_client_failed")
+    try:
+        await dispose_result_handle_store()
+    except Exception:
+        log.exception("dispose_result_handle_store_failed")
 
 
 # code-quality-allow: linear boot-step sequence at the 100-line limit;

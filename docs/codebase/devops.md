@@ -64,7 +64,7 @@ exception that keeps uvicorn's own plain format.
 
 ```
 deploy/charts/meho/
-├── Chart.yaml              # apiVersion v2, kubeVersion >=1.28, dependencies: broadcast
+├── Chart.yaml              # apiVersion v2, kubeVersion >=1.28, dependencies: broadcast, result-cache
 ├── .helmignore             # standard exclusions
 ├── values.yaml             # safe-by-default; required fields are blank
 ├── values.schema.json      # draft-07 typed contract; rejects typos and empty required fields
@@ -75,20 +75,21 @@ deploy/charts/meho/
 │   ├── ingress.yaml        # TLS + cert-manager
 │   ├── configmap.yaml      # non-secret env
 │   ├── serviceaccount.yaml # Pod identity
-│   ├── networkpolicy.yaml  # default-deny + explicit egress (broadcast egress conditional)
+│   ├── networkpolicy.yaml  # default-deny + explicit egress (broadcast / result-cache egress conditional)
 │   ├── migration-job.yaml  # pre-install/pre-upgrade Helm hook (alembic upgrade head)
 │   └── NOTES.txt           # post-install hints
 └── charts/
-    └── broadcast/          # in-tree Valkey 9.x subchart (ADR 0005)
-        ├── Chart.yaml
-        ├── values.yaml
-        └── templates/
-            ├── _helpers.tpl
-            ├── deployment.yaml    # single-replica Recreate; readonly rootfs + emptyDir /data
-            ├── service.yaml       # ClusterIP :6379 (port name "redis")
-            ├── configmap.yaml     # minimal valkey.conf (requirepass Secret-sourced, no persistence)
-            ├── secret.yaml        # chart-managed requirepass Secret (#276)
-            └── networkpolicy.yaml # own ingress policy: 6379 from backplane only (#276)
+    ├── broadcast/          # in-tree Valkey 9.x subchart (ADR 0005)
+    │   ├── Chart.yaml
+    │   ├── values.yaml
+    │   └── templates/
+    │       ├── _helpers.tpl
+    │       ├── deployment.yaml    # single-replica Recreate; readonly rootfs + emptyDir /data
+    │       ├── service.yaml       # ClusterIP :6379 (port name "redis")
+    │       ├── configmap.yaml     # minimal valkey.conf (requirepass Secret-sourced, no persistence)
+    │       ├── secret.yaml        # chart-managed requirepass Secret (#276)
+    │       └── networkpolicy.yaml # own ingress policy: 6379 from backplane only (#276)
+    └── result-cache/       # dedicated Valkey for result handles (#3639), same file set
 ```
 
 ## Chart contract
@@ -449,6 +450,52 @@ kubectl create secret generic meho-postgres \
   --from-literal=url='postgresql+asyncpg://meho:<password>@<host>:5432/meho' \
   --namespace meho
 ```
+
+### Result-cache subchart (`charts/result-cache/`)
+
+A second in-tree Valkey 9.x subchart, off by default
+(`resultCache.enabled: false`). It holds the full rows behind result
+handles, so a burst of large handles can only fill this store, not the
+broadcast store that also holds rate limits and approval waits.
+
+- **Shape.** Same as the broadcast subchart: `valkey/valkey:9.0-alpine`,
+  one-replica `Recreate` Deployment, no PVC (`save ""`, `appendonly no`),
+  read-only root filesystem, `requirepass` from a Secret
+  (`<release>-result-cache-auth` or `resultCache.auth.existingSecret`),
+  ClusterIP Service `<release>-result-cache:6379`, and its own ingress
+  NetworkPolicy (tcp/6379 from the backplane Pods only).
+- **Memory ceiling.** `valkey.conf` sets `maxmemory`
+  (`resultCache.maxmemory`, default `768mb`) and `maxmemory-policy`
+  (`resultCache.maxmemoryPolicy`, default `noeviction`). At the ceiling
+  Valkey refuses new result writes; the backplane treats that as "rows not
+  stored" and still returns the inline sample. The pod memory limit
+  (`1Gi`) sits above the ceiling. The broadcast store is not changed.
+- **Values key.** The parent `Chart.yaml` maps `resultCache:` to the
+  subchart with `alias: resultCache`. An alias also renames
+  `.Chart.Name`, so the subchart helpers pin the resource name to
+  `result-cache`.
+- **Backplane wiring.** When enabled, the backplane Deployment gets
+  `RESULT_CACHE_REDIS_URL`, `RESULT_CACHE_REDIS_PASSWORD` (secretKeyRef),
+  and `RESULT_CACHE_WRITER_ENABLED` (from `resultCache.writerEnabled`),
+  and the parent NetworkPolicy gets an egress rule to the result-cache Pods.
+  How reads and writes move between the two stores:
+  [result-spill.md](result-spill.md#dedicated-result-cache-store-3639).
+
+**Roll order (result-cache).** Every deploy that turns this on (the
+central deploy and any GitOps-managed install) gains one result-cache pod.
+
+1. Set `resultCache.enabled: true` with `resultCache.writerEnabled: false`
+   and roll out. Backplane Pods now read the result-cache store first and
+   fall back to the broadcast store; they still write to the broadcast store.
+2. Check that the backplane can reach the new store. A wrong NetworkPolicy
+   drops the traffic without an error, and every result read on the new
+   store then misses. Check that `result_cache_reads_total` rises and that
+   backplane logs show no `result_handle_fetch_failed` with
+   `namespace=v2`.
+3. Only after every backplane Pod runs this code, set
+   `resultCache.writerEnabled: true` and roll out again. New handles are
+   then written to the result-cache store. Old handles stay readable from
+   the broadcast store until their TTL ends.
 
 ### Metrics scrape wiring (`templates/servicemonitor.yaml`, `templates/prometheusrule.yaml`)
 

@@ -587,6 +587,25 @@ class Settings(BaseModel):
         genuinely larger sets raise it via
         ``RESULT_HANDLE_MAX_SPILL_ROWS``. Read once per reduce through
         :func:`get_settings`'s cache.
+    result_cache_redis_url:
+        Connection URL for the dedicated result-cache Valkey that holds
+        result-handle rows, apart from the broadcast store. Env
+        ``RESULT_CACHE_REDIS_URL``. When unset, :func:`get_settings` uses
+        ``broadcast_redis_url`` (and its password), so reads and writes stay
+        on the broadcast store until the result-cache pod is deployed. Same
+        scheme rules as ``broadcast_redis_url``.
+    result_cache_redis_password:
+        Optional ``requirepass`` for the result-cache store. Env
+        ``RESULT_CACHE_REDIS_PASSWORD`` (chart secretKeyRef). ``None`` means
+        no auth.
+    result_cache_writer_enabled:
+        Writer gate for the result-cache move. ``False`` (default): new
+        result handles are written to the broadcast store under the old key.
+        ``True``: they are written to the result-cache store under the
+        ``meho:reshandle:v2`` keys. Reads always check the result-cache store
+        first and then the broadcast store, so turn this on only after every
+        backplane replica runs that reader code. Env
+        ``RESULT_CACHE_WRITER_ENABLED``.
     result_query_max_output_rows:
         Output-row ceiling on the ``result_query`` structured query surface
         (#3366): a compiled ``SELECT`` over a handle returns at most this many
@@ -1386,6 +1405,9 @@ class Settings(BaseModel):
     checks_evidence_prune_interval_seconds: int = Field(default=604800, ge=60, le=604800)
     checks_evidence_prune_enabled: bool = True
     result_handle_max_spill_rows: int = Field(default=10000, gt=0)
+    result_cache_redis_url: str = Field(default="redis://localhost:6379", min_length=1)
+    result_cache_redis_password: str | None = Field(default=None)
+    result_cache_writer_enabled: bool = Field(default=False)
     result_handle_max_record_bytes: int = Field(default=16777216, gt=0)
     # Bounds captured-JSON catalog work before the reducer serializes or
     # profiles a detected collection. These are deliberately separate from
@@ -1998,6 +2020,18 @@ class Settings(BaseModel):
             ) from exc
         return value
 
+    @field_validator("result_cache_redis_url")
+    @classmethod
+    def _result_cache_url_must_use_supported_scheme(cls, value: str) -> str:
+        """Reject schemes redis-py would refuse, same rule as the broadcast URL."""
+        if not value.startswith(_SUPPORTED_BROADCAST_URL_SCHEMES):
+            supported = ", ".join(_SUPPORTED_BROADCAST_URL_SCHEMES)
+            raise ValueError(
+                f"RESULT_CACHE_REDIS_URL must use a redis-py-supported scheme; "
+                f"supported: {supported}. Got: {value!r}",
+            )
+        return value
+
     @field_validator("broadcast_redis_url")
     @classmethod
     def _broadcast_url_must_use_supported_scheme(cls, value: str) -> str:
@@ -2211,6 +2245,20 @@ def get_settings() -> Settings:
     ``BaseSettings`` is a one-commit refactor.
     """
     vault_namespace_env = os.environ.get("VAULT_NAMESPACE")
+    broadcast_redis_url = os.environ.get("BROADCAST_REDIS_URL", "redis://localhost:6379")
+    # ``or None`` collapses an empty-string env to no-auth, so an
+    # accidentally-blank BROADCAST_REDIS_PASSWORD does not send a
+    # zero-length password on the AUTH command.
+    broadcast_redis_password = os.environ.get("BROADCAST_REDIS_PASSWORD") or None
+    # An unset RESULT_CACHE_REDIS_URL falls back to the broadcast store (URL
+    # and password), so the reader-first result cache is a no-op until the
+    # dedicated pod ships.
+    result_cache_redis_url = os.environ.get("RESULT_CACHE_REDIS_URL") or None
+    if result_cache_redis_url is None:
+        result_cache_redis_url = broadcast_redis_url
+        result_cache_redis_password = broadcast_redis_password
+    else:
+        result_cache_redis_password = os.environ.get("RESULT_CACHE_REDIS_PASSWORD") or None
     return Settings(
         keycloak_issuer_url=os.environ["KEYCLOAK_ISSUER_URL"],  # type: ignore[arg-type]
         keycloak_audience=os.environ["KEYCLOAK_AUDIENCE"],
@@ -2340,14 +2388,8 @@ def get_settings() -> Settings:
             "KB_INGEST_ROOT",
             "/opt/meho/kb-ingest",
         ).strip(),
-        broadcast_redis_url=os.environ.get(
-            "BROADCAST_REDIS_URL",
-            "redis://localhost:6379",
-        ),
-        # ``or None`` collapses an empty-string env to no-auth, so an
-        # accidentally-blank BROADCAST_REDIS_PASSWORD does not send a
-        # zero-length password on the AUTH command.
-        broadcast_redis_password=os.environ.get("BROADCAST_REDIS_PASSWORD") or None,
+        broadcast_redis_url=broadcast_redis_url,
+        broadcast_redis_password=broadcast_redis_password,
         broadcast_retention_hours=int(
             os.environ.get("BROADCAST_RETENTION_HOURS", "24"),
         ),
@@ -2413,6 +2455,11 @@ def get_settings() -> Settings:
         ),
         result_handle_max_spill_rows=int(
             os.environ.get("RESULT_HANDLE_MAX_SPILL_ROWS", "10000"),
+        ),
+        result_cache_redis_url=result_cache_redis_url,
+        result_cache_redis_password=result_cache_redis_password,
+        result_cache_writer_enabled=parse_bool_env(
+            os.environ.get("RESULT_CACHE_WRITER_ENABLED", "false"),
         ),
         result_handle_max_record_bytes=int(
             os.environ.get("RESULT_HANDLE_MAX_RECORD_BYTES", "16777216"),

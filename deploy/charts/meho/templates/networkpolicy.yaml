@@ -88,6 +88,19 @@ spec:
         - port: {{ .Values.broadcast.service.port }}
           protocol: TCP
     {{- end }}
+    {{- if .Values.resultCache.enabled }}
+    # Dedicated result-cache subchart (`charts/result-cache/`). Selectors
+    # match that subchart's `resultCache.selectorLabels`. Without this rule
+    # the backplane cannot reach the store and every result read misses.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: result-cache
+              app.kubernetes.io/instance: {{ .Release.Name }}
+      ports:
+        - port: {{ .Values.resultCache.service.port }}
+          protocol: TCP
+    {{- end }}
     # DNS — UDP/53 to kube-dns / CoreDNS. Without this rule every other
     # egress rule above fails on name resolution. The selector matches the
     # standard `k8s-app: kube-dns` label CoreDNS ships with by default.

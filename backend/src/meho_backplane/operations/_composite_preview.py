@@ -70,8 +70,8 @@ _COMPOSITE_PREVIEW_METHOD: Final[str] = "COMPOSITE"
 #: ``status="ok"`` + a hash and could not tell that the plan was missing.
 PLAN_NOT_SHOWN_NOTE: Final[str] = (
     "This preview does not show what the operation will change. "
-    "The preview never contacts the target, and this operation must read "
-    "the target to build its plan. MEHO builds the plan when you send the "
+    "The preview never contacts the target, so it cannot build the plan "
+    "here. MEHO builds the plan when you send the "
     "call. If the call waits for approval, the plan is shown on the "
     "approval request before anyone approves it."
 )

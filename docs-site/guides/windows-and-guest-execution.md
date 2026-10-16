@@ -57,9 +57,10 @@ controller — the AD cmdlets contact the local directory. Object deletes
 
 **Windows DNS (`windns`).** Read the zones on an AD-integrated DNS server,
 read records, add A and CNAME records, and remove a record set. The
-record removal runs on the governed-delete tier: it previews the exact
-set that would be removed, parks for a human, and is bound to that
-preview before it executes.
+record removal is a permanent delete. You preview it first to get a
+preview hash. The preview does not list the records. MEHO reads them
+when you send the call, and the approver sees them on the approval
+request before it runs.
 
 **Failover Clustering (`wsfc`).** Cluster, node, clustered-role, resource,
 and quorum state, plus cluster validation and guarded role moves. The

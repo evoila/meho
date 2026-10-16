@@ -108,6 +108,7 @@ from meho_backplane.mcp.session_limit import (
     check_mcp_session_cap,
     resolve_mcp_session_cap,
 )
+from meho_backplane.request_usage.collector import note_request_route
 from meho_backplane.settings import Settings, get_settings
 from meho_backplane.version import deployed_version_label
 
@@ -118,6 +119,7 @@ __all__ = [
     "McpRateLimitedError",
     "mcp_session_id_capture_mode",
     "register_method",
+    "registered_methods",
     "router",
 ]
 
@@ -195,6 +197,11 @@ def register_method(name: str, handler: _McpHandler) -> None:
     if name in _DISPATCH:
         raise RuntimeError(f"MCP method {name!r} already registered")
     _DISPATCH[name] = handler
+
+
+def registered_methods() -> frozenset[str]:
+    """Return every registered JSON-RPC method (request usage route catalog, #3734)."""
+    return frozenset(_DISPATCH)
 
 
 class McpInvalidParamsError(Exception):
@@ -1216,6 +1223,11 @@ async def mcp_dispatch(
     # are spec-defined as notification-only, so the server treats it
     # as such regardless of the envelope's id field.
     is_notification = "id" not in payload or jrpc.method.startswith("notifications/")
+    # Request usage (#3734): label this request with its JSON-RPC method.
+    # ``tools/call`` / ``resources/read`` narrow it to the tool or the
+    # resource template once the handler has matched one. An unregistered
+    # method is not in the route catalog, so it is stored as unmatched.
+    note_request_route(f"method:{jrpc.method}")
     response = await _dispatch_to_handler(jrpc, is_notification, operator)
     _maybe_issue_initialize_session_id(request, jrpc.method, is_notification, response)
     return response

@@ -65,6 +65,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
 from meho_backplane.operations._audit import work_ref_var
+from meho_backplane.request_usage.collector import note_request_status
 
 __all__ = ["compute_params_hash", "write_mcp_audit_row"]
 
@@ -281,6 +282,11 @@ async def write_mcp_audit_row(
     log = structlog.get_logger(__name__)
     if audit_id is None:
         audit_id = uuid.uuid4()
+    # #3734 dual write: hand the projected status to the open request usage
+    # boundary (MCP answers HTTP 200 even when the call failed). If this
+    # audit commit fails, the caller turns the call into an internal error,
+    # so the usage outcome becomes a server error too.
+    note_request_status(status_code)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         row = AuditLog(
@@ -308,7 +314,11 @@ async def write_mcp_audit_row(
             **soft_fk_kwargs,
         )
         session.add(row)
-        await session.commit()
+        try:
+            await session.commit()
+        except Exception:
+            note_request_status(500)
+            raise
     log.info(
         "mcp_audit_row_written",
         method=method,

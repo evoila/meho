@@ -194,6 +194,10 @@ from meho_backplane.operations.operation_run_reaper import (
     start_operation_run_reaper,
     stop_operation_run_reaper,
 )
+from meho_backplane.request_usage.retention import (
+    start_request_usage_retention_sweeper,
+    stop_request_usage_retention_sweeper,
+)
 from meho_backplane.retrieval.embedding import get_embedding_service
 from meho_backplane.scheduler import start_scheduler, stop_scheduler
 from meho_backplane.settings import get_settings, parse_bool_env
@@ -491,6 +495,7 @@ class _BackgroundTasks:
     topology_history: asyncio.Task[None] | None
     announcement_retention: asyncio.Task[None] | None
     evidence_retention: asyncio.Task[None] | None
+    request_usage_retention: asyncio.Task[None] | None
     audit_raw_payload_retention: asyncio.Task[None] | None
     grant_expiry: asyncio.Task[None] | None
     approval_expiry: asyncio.Task[None] | None
@@ -551,6 +556,12 @@ def _start_background_tasks() -> _BackgroundTasks:
     evidence_retention: asyncio.Task[None] | None = None
     if settings.checks_evidence_prune_enabled:
         evidence_retention = start_evidence_retention_sweeper()
+    # #3734 — request usage event prune. Runs only when
+    # REQUEST_USAGE_RETENTION_DAYS is set; unset means collection is off,
+    # so there is nothing to prune.
+    request_usage_retention: asyncio.Task[None] | None = None
+    if settings.request_usage_retention_days is not None:
+        request_usage_retention = start_request_usage_retention_sweeper()
     # Security review S19 #307 — audit_log.raw_payload age-off. Gated on
     # RAW_PAYLOAD_PRUNE_ENABLED so operators with an external age-off can skip
     # the loop. ``RETENTION_DAYS=0`` keeps the loop running as a no-op
@@ -643,6 +654,7 @@ def _start_background_tasks() -> _BackgroundTasks:
         topology_history=topology_history,
         announcement_retention=announcement_retention,
         evidence_retention=evidence_retention,
+        request_usage_retention=request_usage_retention,
         audit_raw_payload_retention=audit_raw_payload_retention,
         grant_expiry=grant_expiry,
         approval_expiry=approval_expiry,
@@ -690,6 +702,8 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
         await stop_grant_expiry_sweeper(tasks.grant_expiry)
     if tasks.audit_raw_payload_retention is not None:
         await stop_audit_raw_payload_reaper(tasks.audit_raw_payload_retention)
+    if tasks.request_usage_retention is not None:
+        await stop_request_usage_retention_sweeper(tasks.request_usage_retention)
     if tasks.evidence_retention is not None:
         await stop_evidence_retention_sweeper(tasks.evidence_retention)
     if tasks.announcement_retention is not None:

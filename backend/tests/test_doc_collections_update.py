@@ -400,6 +400,45 @@ async def test_update_endpoint_screen_rejects_non_public(bad_endpoint: str) -> N
 
 
 @pytest.mark.asyncio
+async def test_update_admits_http_endpoint_listed_as_exact_allowlist_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plain http is accepted when the host is an exact allowlist entry (#3573)."""
+    monkeypatch.setenv("MEHO_TARGET_SSRF_ALLOWLIST", "docs.corpus-ns.svc.cluster.local")
+    endpoint = "http://docs.corpus-ns.svc.cluster.local:8080/v1/search"
+    collection = await _insert_collection()
+    await _run_update(
+        collection.id,
+        _make_operator(),
+        DocCollectionUpdate(backend={"type": "corpus-http", "ref": {"endpoint": endpoint}}),
+    )
+    row = await _fetch_row("vmware")
+    assert row.backend == {"type": "corpus-http", "ref": {"endpoint": endpoint}}
+
+
+@pytest.mark.asyncio
+async def test_update_rejects_http_endpoint_inside_allowlisted_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An IP that only falls inside a listed range still needs https (#3573)."""
+    monkeypatch.setenv("MEHO_TARGET_SSRF_ALLOWLIST", "10.0.0.0/8")
+    collection = await _insert_collection()
+    with pytest.raises(DocCollectionEndpointError):
+        await _run_update(
+            collection.id,
+            _make_operator(),
+            DocCollectionUpdate(
+                backend={
+                    "type": "corpus-http",
+                    "ref": {"endpoint": "http://10.20.30.40:8080/v1/search"},
+                }
+            ),
+        )
+    row = await _fetch_row("vmware")
+    assert row.backend == {"type": "corpus-http", "ref": {"endpoint": _CORPUS_URL}}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "bad_answer_endpoint",
     [

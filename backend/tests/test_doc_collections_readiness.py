@@ -55,6 +55,7 @@ import respx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import meho_backplane.targets.ssrf_guard as guard_mod
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.corpus import CorpusStatusResponse, CorpusUnavailable
 from meho_backplane.auth.jwt import clear_jwks_cache
@@ -465,6 +466,57 @@ def test_ready_probe_skips_unconfigured_backend(monkeypatch: pytest.MonkeyPatch)
     assert result.ok is True
     assert result.detail == "no backends configured"
     assert "corpus-http" not in (result.detail or "")
+
+
+@pytest.mark.parametrize(
+    "corpus_url",
+    [
+        "http://docs.corpus-ns.svc.cluster.local:8080/v1/search",  # http, host not allowlisted
+        "https://10.20.30.40/v1/search",  # private host not allowlisted
+    ],
+)
+def test_ready_probe_notes_corpus_url_the_screen_rejects(
+    monkeypatch: pytest.MonkeyPatch, corpus_url: str
+) -> None:
+    """A CORPUS_URL the dial screen would reject is named in ``detail`` (#3573).
+
+    Readiness still passes (``ok=True``): the docs add-on is optional and
+    must not take the backplane out of rotation (#1606).
+    """
+    monkeypatch.delenv("MEHO_TARGET_SSRF_ALLOWLIST", raising=False)
+    monkeypatch.setenv("CORPUS_URL", corpus_url)
+    get_settings.cache_clear()
+    result = docs_backends_readiness_probe()
+    assert result.ok is True
+    assert result.detail is not None
+    assert result.detail.startswith("1 backend(s) configured; CORPUS_URL is rejected")
+    assert "MEHO_TARGET_SSRF_ALLOWLIST" in result.detail
+
+
+def test_ready_probe_never_resolves_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ``/ready`` note stays offline: it never resolves the corpus host (#3573)."""
+
+    def _no_dns(host: str) -> list[object]:
+        raise AssertionError(f"readiness probe must not resolve {host!r}")
+
+    monkeypatch.setattr(guard_mod, "_resolve_addrs", _no_dns)
+    monkeypatch.delenv("MEHO_TARGET_SSRF_ALLOWLIST", raising=False)
+    monkeypatch.setenv("CORPUS_URL", "https://docs.corpus-ns.svc.cluster.local/v1/search")
+    get_settings.cache_clear()
+    result = docs_backends_readiness_probe()
+    assert result.ok is True
+    assert result.detail == "1 backend(s) configured"
+
+
+def test_ready_probe_no_note_for_allowlisted_http_corpus(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An http CORPUS_URL whose host is on the allowlist passes the screen (#3573)."""
+    host = "docs.corpus-ns.svc.cluster.local"
+    monkeypatch.setenv("MEHO_TARGET_SSRF_ALLOWLIST", host)
+    monkeypatch.setenv("CORPUS_URL", f"http://{host}:8080/v1/search")
+    get_settings.cache_clear()
+    result = docs_backends_readiness_probe()
+    assert result.ok is True
+    assert result.detail == "1 backend(s) configured"
 
 
 @pytest.mark.asyncio

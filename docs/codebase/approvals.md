@@ -1742,6 +1742,84 @@ for the agent-run substrate's full shape, including the wait timeout
 (`Settings.agent_approval_wait_timeout_seconds`, default 30 min) and the
 fail-open semantics on broadcast outage.
 
+## An add-on proposes a governed destroy (#3478)
+
+A paired add-on signs in as a **service principal** (client credentials,
+`principal_kind=service`). It **can** drive a destructive op. It cannot run
+the op alone: a human must approve it. It needs no standing grant. This is
+the supported way for an add-on to do two-person deletes without a person
+typing each delete on the CLI.
+
+The rule that confuses people: the destructive tier is DENY **only for
+agent principals**. For service and user principals it waits for approval.
+The rule is recorded in
+[`governed-delete-operations.md`](../decisions/governed-delete-operations.md)
+("Who may propose").
+
+| Principal kind | Destructive op | Code |
+|---|---|---|
+| `agent` | Refused (DENY). Nothing is parked. | `auth/permissions.py:131` `_SAFETY_DEFAULT` + `:154` `_SAFETY_CEILING`; agent branch of `operations/_validate.py:450` `policy_gate` |
+| `service` | Waits for approval. No grant can approve it in advance. | `operations/_validate.py:362` `_non_agent_verdict` (the `destructive` branch); `operations/service_grants.py:758` `consult_and_record_grant` refuses the tier before any grant lookup |
+| `user` | Waits for approval. | `operations/_validate.py:362` `_non_agent_verdict` |
+
+### The round trip
+
+The add-on needs the `operator` role to call `POST /api/v1/operations/call`
+and `/preview`. Paths are under `backend/src/meho_backplane/`.
+
+1. **Preview.** The add-on calls `preview_operation` (REST
+   `POST /api/v1/operations/preview`) with the exact
+   `(connector_id, op_id, target, params)`. The reply carries a
+   `preview_hash`. The reply does **not** carry the blast-radius statement.
+2. **Call with the hash.** The add-on calls `call_operation` with the same
+   values plus `preview_hash` (`operations/meta_tools.py:427`
+   `CallOperationBody.preview_hash`, passed on to `dispatch` at `:1131`).
+3. **Park.** The policy gate returns `NEEDS_APPROVAL`, so the dispatcher
+   reaches `_handle_needs_approval` (`operations/dispatcher.py:2487`). For a
+   destructive op it runs `_destructive_binding_refusal` (`:2364`, called at
+   `:2567`) before it writes any row. That check recomputes the preview hash
+   on the server and needs a valid blast-radius block on `proposed_effect`.
+   A missing or wrong hash, or a missing block, is refused, and no row is
+   written. On success the row stores `preview_hash`, and the blast radius
+   lives on the row's `proposed_effect`. The add-on gets
+   `status="awaiting_approval"` and `extras.approval_request_id`. It should
+   store that id.
+4. **A human approves.** The approver must be a different person: there is
+   no self-approval for this tier, not even with break-glass
+   (`operations/approval_queue.py:1835` `_check_self_approval`). The approve
+   step checks the preview hash again (`:1926`
+   `_check_destructive_preview_binding`). The decision verbs are human-only
+   on every surface, so the add-on cannot approve its own request.
+5. **The op runs under the approver.**
+   `resume_dispatch_after_approval` (`operations/approval_queue.py:1221`)
+   re-runs the dispatch with the **approver's** `Operator`. So the approver's
+   role is what counts when the op runs, and the audit row for the delete
+   names the approver. The result is saved on the row
+   (`_persist_resume_result`, `:1359`). A large result goes into a result
+   handle that the add-on owns (see "Who owns a result handle" above).
+6. **The add-on reads the result.** The add-on polls
+   `GET /api/v1/approvals/{id}/result` (`api/v1/approvals.py:614`,
+   `read_approval_result` at `operations/approval_queue.py:2062`). Only the
+   principal that parked the op may read it; anyone else gets 403
+   `not_request_owner`, even the approver. The reply has `result: null`
+   until the op has run.
+
+A paired add-on can also read the approval outcome from its durable
+step-event stream ([`addon-step-events.md`](addon-step-events.md), #3027).
+That says *whether* the op was approved; `/result` says *what the run
+returned*.
+
+**Pinned by tests:**
+
+- `tests/test_connectors_harbor_robot_delete.py::test_service_principal_proposes_destroy_and_adopts_result`
+  — the full round trip for a service principal, including the `/result`
+  read by the parker and the 403 for the approver.
+- `tests/test_service_principal_grant_gate.py::test_service_principal_destructive_parks_and_grant_never_satisfies`
+  — a destructive op parks for a service principal even with a live
+  matching grant.
+- `tests/test_connectors_harbor_robot_delete.py::test_agent_principal_is_denied`
+  — the same op is refused for an agent principal.
+
 ## Service-principal standing grants + safety_level gate (#3151 / #3152)
 
 The non-agent gate (`_non_agent_verdict`, `operations/_validate.py`) gained

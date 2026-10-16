@@ -234,6 +234,13 @@ written to the audit log. Concretely:
   subject.
 - **The record shows who decided.** The decision names the approver, so
   the audit answers "who signed off on this delete?" without inference.
+- **An add-on can propose a delete.** The tier refuses only agent
+  principals. An add-on that signs in as a service principal previews the
+  delete and calls it with the preview hash. The call waits for a person to
+  approve it; no standing grant can approve it in advance. After approval
+  the delete runs under the approver, and the add-on reads the result with
+  `GET /api/v1/approvals/{id}/result`. Only the caller that started the
+  delete can read that result.
 
 ## Proving which posture a deploy is running
 

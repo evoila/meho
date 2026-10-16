@@ -92,6 +92,9 @@ op and records the use; absent a match, the op parks for a human decision.
 The one exception is the `destructive` tier: `consult_and_record_grant`
 refuses it **before** any grant lookup, so even a stale grant row cannot
 auto-approve a destructive op — the tier always parks for a human.
+Parking is not refusal: a service principal can still propose a
+destructive op and read its result after a human approves. The steps are in
+[`approvals.md`](approvals.md#an-add-on-proposes-a-governed-destroy-3478).
 
 ### The grant (`db/models.py::ServicePrincipalGrant`, `operations/service_grants.py`)
 

@@ -539,9 +539,11 @@ def _apply_principal_name(payload: dict[str, Any], operator: Operator) -> None:
 
     Audit readers (``meho audit show`` / ``query``, the console) read the
     name from this key, the same key the MCP wrapper rows and the approval
-    rows use. On an approved run the operator is the approver, so the name
-    always matches the row's ``operator_sub``. Left out when the token has
-    no ``name`` claim.
+    rows use. The name always belongs to the row's ``operator_sub``. On an
+    approved run that is the approver when a person approves through the
+    console, CLI, REST or MCP, and the agent when MEHO's own agent waits for
+    the approval and resumes the run itself. Left out when the token has no
+    ``name`` claim.
     """
     if operator.name:
         payload["principal_name"] = operator.name

@@ -467,6 +467,42 @@ def test_ready_probe_skips_unconfigured_backend(monkeypatch: pytest.MonkeyPatch)
     assert "corpus-http" not in (result.detail or "")
 
 
+@pytest.mark.parametrize(
+    "corpus_url",
+    [
+        "http://docs.corpus-ns.svc.cluster.local:8080/v1/search",  # http, host not allowlisted
+        "https://10.20.30.40/v1/search",  # private host not allowlisted
+    ],
+)
+def test_ready_probe_notes_corpus_url_the_screen_rejects(
+    monkeypatch: pytest.MonkeyPatch, corpus_url: str
+) -> None:
+    """A CORPUS_URL the dial screen would reject is named in ``detail`` (#3573).
+
+    Readiness still passes (``ok=True``): the docs add-on is optional and
+    must not take the backplane out of rotation (#1606).
+    """
+    monkeypatch.delenv("MEHO_TARGET_SSRF_ALLOWLIST", raising=False)
+    monkeypatch.setenv("CORPUS_URL", corpus_url)
+    get_settings.cache_clear()
+    result = docs_backends_readiness_probe()
+    assert result.ok is True
+    assert result.detail is not None
+    assert result.detail.startswith("1 backend(s) configured; CORPUS_URL is rejected")
+    assert "MEHO_TARGET_SSRF_ALLOWLIST" in result.detail
+
+
+def test_ready_probe_no_note_for_allowlisted_http_corpus(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An http CORPUS_URL whose host is on the allowlist passes the screen (#3573)."""
+    host = "docs.corpus-ns.svc.cluster.local"
+    monkeypatch.setenv("MEHO_TARGET_SSRF_ALLOWLIST", host)
+    monkeypatch.setenv("CORPUS_URL", f"http://{host}:8080/v1/search")
+    get_settings.cache_clear()
+    result = docs_backends_readiness_probe()
+    assert result.ok is True
+    assert result.detail == "1 backend(s) configured"
+
+
 @pytest.mark.asyncio
 async def test_configured_but_unreachable_backend_fails_closed_at_call_time() -> None:
     """A *configured* backend that is unreachable still fails closed — at call time.

@@ -255,7 +255,11 @@ adapters whose `is_configured()` is true (for `corpus-http`,
 `settings.corpus_url` set) and reports `ok=True` unconditionally — the
 docs add-on is optional, and a deploy with no docs backend configured
 must still become Ready. `detail` carries the configured count (the
-observability value of the check). It deliberately does **not** issue a
+observability value of the check). When `CORPUS_URL` is set but the
+corpus destination screen would reject it, `detail` also says so and
+names `MEHO_TARGET_SSRF_ALLOWLIST` (#3573) — `ok` stays `True`. That
+check runs the dial's screen (URL parse, allowlist, a DNS lookup of the
+host) but never contacts the corpus. It deliberately does **not** issue a
 live round-trip — a corpus outage must not flap the backplane out of
 rotation; an unconfigured or unreachable backend instead fails closed at
 call time (`CorpusUnavailable` → 503) and at the explicit per-collection
@@ -372,7 +376,9 @@ The service primitive
   `https` scheme + a public, allowlist-aware host, via the shared target
   SSRF guard (`assert_public_destination_async` — the same
   `MEHO_TARGET_SSRF_ALLOWLIST`-aware guard the connector target dial uses).
-  A non-`https` or private/link-local/metadata endpoint raises
+  Plain `http` is accepted only when the host itself is named on
+  `MEHO_TARGET_SSRF_ALLOWLIST` (#3573, the trusted in-cluster corpus).
+  Any other non-`https` or private/link-local/metadata endpoint raises
   `DocCollectionEndpointError` → `422` (`kind="endpoint_not_allowed"`) and
   is never persisted, closing a credential-capture + SSRF path a
   `tenant_admin` could otherwise open. Absent endpoint (the legacy global

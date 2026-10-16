@@ -93,6 +93,7 @@ __all__ = [
     "TargetDestinationBlockedError",
     "assert_public_destination",
     "assert_public_destination_async",
+    "is_allowlisted",
     "screen_and_resolve",
 ]
 
@@ -155,6 +156,29 @@ def _parse_allowlist() -> tuple[
             )
         hostnames.add(entry.rstrip(".").lower())
     return tuple(networks), frozenset(hostnames)
+
+
+def is_allowlisted(host: str) -> bool:
+    """True when *host* itself is named on :data:`TARGET_SSRF_ALLOWLIST_ENV`.
+
+    *host* is a bare host as :func:`urllib.parse.urlsplit` returns it (no
+    port, no brackets). An IP literal matches when it falls inside an
+    allowlisted range or IP; a hostname matches only when it is listed
+    verbatim (case-insensitive, trailing dot ignored). No DNS lookup: a
+    hostname that merely resolves into an allowlisted range does not count.
+    Callers use this to grant an explicitly trusted host something more
+    than the public-destination screen allows (for example, a plain
+    ``http`` corpus endpoint).
+    """
+    networks, hostnames = _parse_allowlist()
+    candidate = host.strip()
+    if not candidate:
+        return False
+    try:
+        addr = ipaddress.ip_address(candidate)
+    except ValueError:
+        return candidate.rstrip(".").lower() in hostnames
+    return any(addr in network for network in networks)
 
 
 def _is_blocked(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:

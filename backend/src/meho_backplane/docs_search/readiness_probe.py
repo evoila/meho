@@ -37,6 +37,17 @@ reports ``ok=True`` unconditionally and is observability-only: ``detail``
 says how many backends are configured so an operator's single
 ``GET /ready`` answers "is the docs add-on wired?".
 
+Screen note (#3573)
+-------------------
+
+A set ``CORPUS_URL`` that the corpus destination screen would reject
+(wrong scheme, or a private host not on ``MEHO_TARGET_SSRF_ALLOWLIST``)
+still leaves ``ok=True``, but ``detail`` says so. Without the note,
+``/ready`` looks green while every ``search_docs`` call fails with 503.
+The check runs the same screen the dial runs — URL parse, allowlist,
+and a DNS lookup of the host — but never contacts the corpus and needs
+no credential.
+
 Fail-closed is preserved where the backend actually dials: an
 unconfigured or unreachable corpus raises
 :class:`~meho_backplane.auth.corpus.CorpusUnavailable` at call time
@@ -46,8 +57,14 @@ route — readiness of the *collection*, not of the backplane.
 
 from __future__ import annotations
 
+from meho_backplane.auth.corpus import corpus_endpoint_host
 from meho_backplane.docs_search.backends import all_backends
 from meho_backplane.health import ProbeResult
+from meho_backplane.settings import get_settings
+from meho_backplane.targets.ssrf_guard import (
+    TARGET_SSRF_ALLOWLIST_ENV,
+    assert_public_destination,
+)
 
 __all__ = ["PROBE_NAME", "docs_backends_readiness_probe"]
 
@@ -59,16 +76,18 @@ PROBE_NAME = "docs_backends"
 def docs_backends_readiness_probe() -> ProbeResult:
     """Report which search backends are configured — never failing readiness.
 
-    Synchronous (no I/O — :meth:`is_configured` is a config read). The
-    async health sweep (:func:`~meho_backplane.health.run_probes_async`)
-    runs sync probes on a worker thread so a blocking probe can't stall
-    the event loop; this one returns immediately either way. Registered ≠
+    Synchronous. :meth:`is_configured` is a config read; the only I/O is
+    the DNS lookup of the ``CORPUS_URL`` host in the screen note (see the
+    module docstring). The async health sweep
+    (:func:`~meho_backplane.health.run_probes_async`) runs sync probes on
+    a worker thread, so that lookup can't stall the event loop. Registered ≠
     configured (#1606): the
     registry holds every backend that self-registered at import, while
     only the subset whose :meth:`is_configured` is true is actually wired
     on this deploy. Unconfigured backends are **skipped** — the docs
     add-on is optional, so ``ok`` is always ``True`` and ``detail``
-    carries the configured count (or the no-backends note). A configured
+    carries the configured count (or the no-backends note), plus a note
+    when ``CORPUS_URL`` would be rejected by the destination screen. A configured
     backend's actual reachability is asserted where the call dials: the
     search path and the per-collection probe route fail closed with
     :class:`~meho_backplane.auth.corpus.CorpusUnavailable`.
@@ -80,4 +99,28 @@ def docs_backends_readiness_probe() -> ProbeResult:
     configured = [impl for impl in backends.values() if impl.is_configured()]
     if not configured:
         return ProbeResult(name=PROBE_NAME, ok=True, detail="no backends configured")
-    return ProbeResult(name=PROBE_NAME, ok=True, detail=f"{len(configured)} backend(s) configured")
+    detail = f"{len(configured)} backend(s) configured"
+    if not _corpus_url_passes_screen():
+        detail += (
+            "; CORPUS_URL is rejected by the corpus destination screen (use https"
+            f" and a public host, or name the host on {TARGET_SSRF_ALLOWLIST_ENV})"
+        )
+    return ProbeResult(name=PROBE_NAME, ok=True, detail=detail)
+
+
+def _corpus_url_passes_screen() -> bool:
+    """Whether the set ``CORPUS_URL`` would pass the corpus destination screen.
+
+    Runs the same checks as the dial (scheme, host, allowlist, DNS) but
+    never contacts the corpus. An empty ``CORPUS_URL`` passes: there is
+    nothing to dial. A malformed allowlist (``ValueError``) counts as a
+    rejection, because the dial would fail on it too.
+    """
+    url = get_settings().corpus_url
+    if not url:
+        return True
+    try:
+        assert_public_destination(corpus_endpoint_host(url))
+    except ValueError:
+        return False
+    return True

@@ -304,6 +304,39 @@ The legacy global corpus settings remain as the `corpus-http` fallback
 | `corpus_answer_timeout_seconds` (`CORPUS_ANSWER_TIMEOUT_SECONDS`) | `60.0` | Bound on the **answer** request of an opted-in collection (#3911): a grounded answer runs retrieval plus model calls on the corpus side. Keep it below any proxy read timeout in front of the corpus. |
 | `corpus_require_filters` (`CORPUS_REQUIRE_FILTERS`) | `true` | Legacy REQUIRE_FILTERS posture. Note: under the catalogue model the **mandatory** scope is `collection`; `product` / `version` are optional refinements within a collection, so the binary anti-drown guarantee now rides `collection`, not product/version. |
 
+#### Which corpus endpoints meho will dial
+
+Every corpus URL — `CORPUS_URL` and every `backend.ref` endpoint — must
+pass the corpus destination screen. Otherwise each `search_docs` /
+`ask_docs` / `read_docs` call fails with 503, and a `backend.ref`
+endpoint is refused with 422 when you create or update the collection.
+
+| Corpus endpoint | Allowed? | What you must do |
+|---|---|---|
+| `https://` + a public host | Yes | Nothing. |
+| `https://` + a private host (RFC 1918, in-cluster service) | Only with the allowlist | Add the host, or its address range, to `MEHO_TARGET_SSRF_ALLOWLIST`. |
+| `http://` + a host **named** on `MEHO_TARGET_SSRF_ALLOWLIST` | Yes | Name the host itself: the service name (for example `docs.corpus-ns.svc.cluster.local`), or an IP inside a listed range. |
+| `http://` + any other host | No | Use `https`, or name the host on the allowlist. |
+| Any other scheme | No | Use `https` or `http` as above. |
+
+Notes:
+
+- `MEHO_TARGET_SSRF_ALLOWLIST` is the same list the connector target
+  guard reads (Helm value `config.targetSsrfAllowlist`). It takes
+  address ranges, single IPs, and hostnames, separated by commas.
+- For plain `http`, the host in the URL must itself be on the list. A
+  hostname that only *resolves* into a listed range does not count.
+  This keeps plain `http` limited to hosts you have named as trusted.
+- Plain `http` sends the corpus service token without TLS. Use it only
+  inside a network you trust, such as the cluster network.
+- The guard stays on for every other destination. You never need to
+  turn it off.
+
+To check the setting, call `GET /ready`. If `CORPUS_URL` would be
+rejected, the `docs_backends` check says so in its `detail` (readiness
+itself stays green — the docs add-on is optional). For a `backend.ref`
+endpoint, run `meho docs collections probe <key>`.
+
 ### 3. Bring the collection to readiness (probe → enable lifecycle)
 
 Seeding a row does **not** make it searchable. The `status` column is a

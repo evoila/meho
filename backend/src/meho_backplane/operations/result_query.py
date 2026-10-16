@@ -35,15 +35,28 @@ its own recoverable-error shape (MCP: a typed ``-32602`` with
 ``data.reason=handle_not_found``; REST: a ``404`` with a structured
 ``detail``). The caller learns the handle is gone (re-run the operation)
 rather than getting an opaque internal error.
+
+Bounded work
+============
+
+Both cores pass :func:`~meho_backplane.operations.result_read_admission.admit_result_read`
+before they touch the store, so a read that is over the rate cap or finds
+every worker slot busy is refused with a recoverable
+:class:`ResultReadRejectedError` and no Valkey ``GET`` is made. Query mode
+then runs the CPU-heavy part (catalog, compile, register, ``SELECT``,
+encode) on the dedicated worker pool, under one deadline that also covers
+the store fetch.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import threading
 from typing import Any
 from uuid import UUID
 
+import duckdb
 import msgspec
 import pyarrow as pa
 
@@ -62,6 +75,14 @@ from meho_backplane.jsonflux.query.result_catalog import (
     ResultFieldCatalog,
     _build_catalog_from_admitted,
 )
+from meho_backplane.operations.result_read_admission import (
+    ResultReadCapacityError,
+    ResultReadLease,
+    ResultReadRateLimitError,
+    ResultReadRejectedError,
+    admit_result_read,
+    run_on_result_read_executor,
+)
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -71,6 +92,9 @@ __all__ = [
     "ResultQueryOutputTooLargeError",
     "ResultQuerySpec",
     "ResultQueryTimeoutError",
+    "ResultReadCapacityError",
+    "ResultReadRateLimitError",
+    "ResultReadRejectedError",
     "read_result_window",
     "run_result_query",
 ]
@@ -126,17 +150,21 @@ async def read_result_window(
     query path applies, so no agent receives an over-budget page — with a
     paging-specific remediation (read a smaller ``limit``, since paging has no
     ``select`` / ``filter``).
+
+    Raises :class:`ResultReadRejectedError` (rate or capacity) before the
+    store is read when the read is not admitted.
     """
     if operator.tenant_id is None:
         raise ResultHandleNotFoundError(handle_id)
 
-    window = await get_result_handle_store().fetch_window(
-        tenant_id=operator.tenant_id,
-        operator_sub=operator.sub,
-        handle_id=handle_id,
-        offset=offset,
-        limit=limit,
-    )
+    async with admit_result_read(operator):
+        window = await get_result_handle_store().fetch_window(
+            tenant_id=operator.tenant_id,
+            operator_sub=operator.sub,
+            handle_id=handle_id,
+            offset=offset,
+            limit=limit,
+        )
     if window is None:
         raise ResultHandleNotFoundError(handle_id)
 
@@ -168,11 +196,14 @@ async def read_result_window(
 
 
 class ResultQueryTimeoutError(Exception):
-    """A compiled ``result_query`` ``SELECT`` exceeded its wall-time budget.
+    """A ``result_query`` read exceeded its wall-time budget.
 
-    DuckDB has no native Python query timeout, so the core runs
-    ``conn.execute()`` on a worker thread and calls ``conn.interrupt()`` when
-    the ``result_query_timeout_seconds`` budget elapses. Recoverable: the
+    The ``result_query_timeout_seconds`` budget covers the whole read: the
+    store fetch, and the catalog, compile, ``SELECT``, and encode steps on
+    the worker thread. DuckDB has no native Python query timeout, so on
+    expiry the core calls ``conn.interrupt()``; a worker that is still busy
+    keeps its slot until it finishes, but the caller gets this error at
+    once. Recoverable: the
     caller narrows the query (a tighter ``filter``, fewer ``group_by`` keys,
     a lower ``limit``) and retries. Each transport maps it to its own
     recoverable-error shape.
@@ -263,6 +294,84 @@ def _execute_sync(engine: QueryEngine, compiled: CompiledQuery) -> tuple[list[st
     return columns, cursor.fetchall()
 
 
+class _QueryAbandonedError(Exception):
+    """The caller gave up; the worker stops at its next step."""
+
+
+class _EngineGuard:
+    """Lets the event loop interrupt a worker's engine safely.
+
+    The worker opens and closes the engine; the event loop may call
+    :meth:`abandon` at any time. A lock keeps ``interrupt()`` and
+    ``close()`` from running at the same time, and an abandoned guard stops
+    the worker before its next step.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._engine: QueryEngine | None = None
+        self._abandoned = False
+
+    def check(self) -> None:
+        if self._abandoned:
+            raise _QueryAbandonedError
+
+    def open(self) -> QueryEngine:
+        engine = QueryEngine()
+        with self._lock:
+            if self._abandoned:
+                engine.close()
+                raise _QueryAbandonedError
+            self._engine = engine
+        return engine
+
+    def close(self) -> None:
+        with self._lock:
+            engine, self._engine = self._engine, None
+        if engine is not None:
+            engine.close()
+
+    def abandon(self) -> None:
+        with self._lock:
+            self._abandoned = True
+            if self._engine is not None:
+                with contextlib.suppress(duckdb.Error):
+                    self._engine.conn.interrupt()
+
+
+def _query_pipeline_sync(
+    guard: _EngineGuard,
+    rows: list[dict[str, Any]],
+    spec: ResultQuerySpec,
+    max_output_rows: int,
+) -> tuple[list[dict[str, Any]], bool, int, bytes]:
+    """Catalog, compile, register, SELECT, rehydrate, encode (worker thread).
+
+    The field catalog is built from every stored row (the rows passed the
+    reducer's admission guard before they were spilled). The result is
+    capped to ``max_output_rows``; ``truncated`` is ``True`` when the
+    underlying result had more rows. Output rows come from the compiled
+    output plan: flat queries copy the raw stored rows. Returns the rows,
+    the flag, the effective limit, and the rows encoded as JSON bytes.
+    """
+    catalog = _build_catalog_from_admitted(rows)
+    compiled = compile_query(spec, catalog, max_limit=max_output_rows)
+    table = _project_rows(rows, catalog)
+    engine = guard.open()
+    try:
+        engine.conn.register(RESULT_TABLE, table)
+        _, fetched = _execute_sync(engine, compiled)
+    finally:
+        guard.close()
+    guard.check()
+
+    truncated = len(fetched) > compiled.effective_limit
+    capped = fetched[: compiled.effective_limit]
+    result_rows = compiled.output_plan.rehydrate(capped, raw_rows=rows)
+    guard.check()
+    return result_rows, truncated, compiled.effective_limit, msgspec.json.encode(result_rows)
+
+
 async def _run_compiled_query(
     rows: list[dict[str, Any]],
     spec: ResultQuerySpec,
@@ -270,41 +379,29 @@ async def _run_compiled_query(
     *,
     max_output_rows: int,
     timeout_seconds: int,
-) -> tuple[list[dict[str, Any]], bool, int]:
-    """Compile *spec*, run it under the time budget; return rows + flags.
+    lease: ResultReadLease | None = None,
+) -> tuple[list[dict[str, Any]], bool, int, bytes]:
+    """Run :func:`_query_pipeline_sync` on the dedicated pool, time-bounded.
 
-    The field catalog is built from every stored row (the rows passed the
-    reducer's admission guard before they were spilled), the spec is
-    compiled against it, and the explicit projection is registered inline
-    (bounded work). Only the ``SELECT`` execution runs on a worker thread so
-    the event loop can interrupt it on timeout. The result is capped to
-    ``max_output_rows`` and ``truncated`` is ``True`` when the underlying
-    result had more rows than the cap admits. Output rows come from the
-    compiled output plan: flat queries copy the raw stored rows.
+    The whole pipeline runs on a worker thread so the event loop stays
+    free. On timeout (or when the caller is cancelled) the DuckDB query is
+    interrupted and the caller returns at once; the worker keeps *lease*
+    until it finishes. Raises :class:`ResultQueryTimeoutError` on timeout.
     """
-    catalog = _build_catalog_from_admitted(rows)
-    compiled = compile_query(spec, catalog, max_limit=max_output_rows)
-    engine = QueryEngine()
+    guard = _EngineGuard()
     try:
-        engine.conn.register(RESULT_TABLE, _project_rows(rows, catalog))
-
-        loop = asyncio.get_running_loop()
-        future = loop.run_in_executor(None, _execute_sync, engine, compiled)
-        try:
-            _, fetched = await asyncio.wait_for(asyncio.shield(future), timeout_seconds)
-        except TimeoutError as exc:  # asyncio.TimeoutError aliases this on 3.11+
-            with contextlib.suppress(Exception):
-                engine.conn.interrupt()
-            with contextlib.suppress(BaseException):
-                await future
-            raise ResultQueryTimeoutError(handle_id, timeout_seconds) from exc
-    finally:
-        engine.close()
-
-    truncated = len(fetched) > compiled.effective_limit
-    capped = fetched[: compiled.effective_limit]
-    result_rows = compiled.output_plan.rehydrate(capped, raw_rows=rows)
-    return result_rows, truncated, compiled.effective_limit
+        async with asyncio.timeout(timeout_seconds):
+            return await run_on_result_read_executor(
+                lease,
+                _query_pipeline_sync,
+                guard,
+                rows,
+                spec,
+                max_output_rows,
+                on_abandon=guard.abandon,
+            )
+    except TimeoutError as exc:
+        raise ResultQueryTimeoutError(handle_id, timeout_seconds) from exc
 
 
 async def run_result_query(
@@ -326,37 +423,45 @@ async def run_result_query(
     never presented as a whole-inventory total.
 
     Raises :class:`ResultHandleNotFoundError` (unknown / expired /
-    cross-operator handle, or no tenant), :class:`QueryContractError` (a
-    field-vs-schema or value-shape violation), :class:`ResultQueryTimeoutError`
-    (time budget exceeded), or :class:`ResultQueryOutputTooLargeError` (byte
-    budget exceeded). Each transport maps these to its own recoverable-error
-    shape.
+    cross-operator handle, or no tenant), :class:`ResultReadRejectedError`
+    (rate or capacity, raised before the store is read),
+    :class:`QueryContractError` (a field-vs-schema or value-shape violation),
+    :class:`ResultQueryTimeoutError` (time budget exceeded), or
+    :class:`ResultQueryOutputTooLargeError` (byte budget exceeded). Each
+    transport maps these to its own recoverable-error shape.
     """
     if operator.tenant_id is None:
         raise ResultHandleNotFoundError(handle_id)
 
-    row_set = await get_result_handle_store().fetch_rows(
-        tenant_id=operator.tenant_id,
-        operator_sub=operator.sub,
-        handle_id=handle_id,
-    )
-    if row_set is None:
-        raise ResultHandleNotFoundError(handle_id)
-
     settings = get_settings()
-    result_rows, truncated, effective_limit = await _run_compiled_query(
-        row_set.rows,
-        spec,
-        handle_id,
-        max_output_rows=settings.result_query_max_output_rows,
-        timeout_seconds=settings.result_query_timeout_seconds,
-    )
+    timeout_seconds = settings.result_query_timeout_seconds
+    async with admit_result_read(operator) as lease:
+        # One deadline over the fetch and the worker pipeline; the inner
+        # timeout in ``_run_compiled_query`` never outlasts it.
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                row_set = await get_result_handle_store().fetch_rows(
+                    tenant_id=operator.tenant_id,
+                    operator_sub=operator.sub,
+                    handle_id=handle_id,
+                )
+                if row_set is None:
+                    raise ResultHandleNotFoundError(handle_id)
+                _, truncated, effective_limit, encoded_rows = await _run_compiled_query(
+                    row_set.rows,
+                    spec,
+                    handle_id,
+                    max_output_rows=settings.result_query_max_output_rows,
+                    timeout_seconds=timeout_seconds,
+                    lease=lease,
+                )
+        except TimeoutError as exc:
+            raise ResultQueryTimeoutError(handle_id, timeout_seconds) from exc
 
     # Byte cap applied AFTER the row cap: wide/nested rows can overflow the
-    # token budget even under the row ceiling. Encoding also normalizes any
-    # non-JSON-native value (datetime, Decimal) to a JSON-safe form for the
-    # transport layer, in one pass.
-    encoded_rows = msgspec.json.encode(result_rows)
+    # token budget even under the row ceiling. The worker encoded the rows,
+    # which also normalizes any non-JSON-native value (datetime, Decimal) to
+    # a JSON-safe form for the transport layer, in one pass.
     if len(encoded_rows) > settings.result_query_max_output_bytes:
         raise ResultQueryOutputTooLargeError(
             handle_id, len(encoded_rows), settings.result_query_max_output_bytes

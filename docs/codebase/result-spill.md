@@ -115,10 +115,11 @@ Every query result is bounded: output rows are capped at
 `RESULT_QUERY_MAX_OUTPUT_ROWS` (default 500) with an explicit
 `truncated` flag (grouped results capped identically); the serialized
 output is capped at `RESULT_QUERY_MAX_OUTPUT_BYTES` (default 256 KB)
-**after** the row cap, with an actionable over-budget error; and each
-compiled `SELECT` runs under a `RESULT_QUERY_TIMEOUT_SECONDS` (default 5)
-wall-time budget enforced by running `conn.execute()` on a worker thread
-and calling `conn.interrupt()` on expiry.
+**after** the row cap, with an actionable over-budget error; and the whole
+read runs under a `RESULT_QUERY_TIMEOUT_SECONDS` (default 10) wall-time
+budget. The budget covers the store fetch and the worker steps (catalog,
+compile, register, `SELECT`, encode). On expiry the core calls
+`conn.interrupt()` and returns a recoverable timeout error at once.
 
 Because the spill itself is capped at `RESULT_HANDLE_MAX_SPILL_ROWS`, a
 query may run over a subset of the true collection. The result carries
@@ -126,6 +127,45 @@ query may run over a subset of the true collection. The result carries
 plus a `coverage_note` — so a `COUNT` over a capped spill is labelled as
 covering the stored subset, **never** presented as a whole-inventory
 total.
+
+### Admission and the worker pool (#3640)
+
+Both read paths (paging and query) must be admitted **before** the store
+is read. A refused read makes no Valkey `GET`. The checks live in
+`operations/result_read_admission.py` and run in this order:
+
+1. **Rate check** — a fixed-window `INCR` + `EXPIRE` counter per
+   `(tenant, principal, minute)`, key
+   `meho:ratelimit:result_read:{tenant}:{sub}:{bucket}`, on the broadcast
+   Valkey. Paging and query share one counter.
+   `RESULT_QUERY_RATE_PER_MINUTE` (default `0` = off, no Valkey call).
+2. **Worker slot** — a process-wide gate sized to the dedicated worker
+   pool, `RESULT_QUERY_EXECUTOR_WORKERS` (default 4). It does not queue:
+   when every slot is busy the read is refused at once.
+3. **Tenant lease** — at most `RESULT_QUERY_TENANT_CONCURRENCY` (default
+   4) reads of one tenant at the same time in this process. It only binds
+   when it is lower than the worker count.
+
+A refused read raises `ResultReadRateLimitError` (`reason=rate_limited`)
+or `ResultReadCapacityError` (`reason=capacity_exceeded`). MCP answers
+with the recoverable `-32000` rate-limited error and
+`data={reason, retry_after_seconds}`; REST answers `429` with a
+`Retry-After` header.
+
+Query work runs on the dedicated pool (`thread_name_prefix=result-read`),
+not on the event loop's default pool. The app lifespan sizes the pool from
+settings at startup and stops it at shutdown; until then (unit tests that
+call the cores directly) the `Settings` field defaults apply.
+
+**A worker that outlives its request.** A running thread cannot be
+cancelled. When the deadline passes or the caller goes away, the core
+interrupts DuckDB and returns, but the slot and the tenant lease stay held
+until the worker thread finishes; the worker's done-callback releases
+them. A keeper task renews the tenant lease while the worker runs, and the
+request awaits that keeper through `asyncio.shield`, so a cancelled request
+never releases the lease early. Each lease has an owner token (a stale
+release cannot free a newer lease) and a 60 s TTL that reclaims a lease
+nobody renews any more. There is no hard kill of a running worker.
 
 ## Key types
 
@@ -245,9 +285,13 @@ code-level diagnosis at `v0.13.0` (`f6ee330`):
   the per-key value size; `ttl_seconds` (reducer default 3600) bounds
   lifetime server-side.
 - `RESULT_QUERY_MAX_OUTPUT_ROWS` (500) / `RESULT_QUERY_MAX_OUTPUT_BYTES`
-  (256 KB) / `RESULT_QUERY_TIMEOUT_SECONDS` (5) bound a single query's
-  output rows, serialized size, and wall time (#3366); all validated
-  `> 0`.
+  (256 KB) / `RESULT_QUERY_TIMEOUT_SECONDS` (10) bound a single query's
+  output rows, serialized size, and wall time (#3366, #3640); all
+  validated `> 0`.
+- `RESULT_QUERY_EXECUTOR_WORKERS` (4) / `RESULT_QUERY_TENANT_CONCURRENCY`
+  (4), validated `> 0`, and `RESULT_QUERY_RATE_PER_MINUTE` (0 = off),
+  validated `>= 0`, bound how many result reads run at once and how often
+  one principal may read (#3640).
 - `duckdb==1.5.5` / `pyarrow==25.0.1` (pinned) — the sandboxed
   `QueryEngine` the lazy compiled-query path runs inside. The reducer does
   not construct an engine for its catalog, summary, or preview.

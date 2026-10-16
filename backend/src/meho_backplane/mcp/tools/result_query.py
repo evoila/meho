@@ -42,7 +42,7 @@ from pydantic import ValidationError
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
-from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.server import McpInvalidParamsError, McpRateLimitedError
 from meho_backplane.operations.result_query import (
     MAX_LIMIT,
     QueryContractError,
@@ -50,6 +50,7 @@ from meho_backplane.operations.result_query import (
     ResultQueryOutputTooLargeError,
     ResultQuerySpec,
     ResultQueryTimeoutError,
+    ResultReadRejectedError,
     read_result_window,
     run_result_query,
 )
@@ -106,6 +107,8 @@ async def _result_query_handler(
         raise _handle_not_found(handle_id) from exc
     except ResultQueryOutputTooLargeError as exc:
         raise McpInvalidParamsError(str(exc), data={"reason": "output_too_large"}) from exc
+    except ResultReadRejectedError as exc:
+        raise _read_rejected(exc) from exc
 
 
 async def _run_query(
@@ -139,6 +142,16 @@ async def _run_query(
         raise McpInvalidParamsError(str(exc), data={"reason": "query_timeout"}) from exc
     except ResultQueryOutputTooLargeError as exc:
         raise McpInvalidParamsError(str(exc), data={"reason": "output_too_large"}) from exc
+    except ResultReadRejectedError as exc:
+        raise _read_rejected(exc) from exc
+
+
+def _read_rejected(exc: ResultReadRejectedError) -> McpRateLimitedError:
+    """Build the recoverable ``-32000`` error for a refused read (#3640)."""
+    return McpRateLimitedError(
+        str(exc),
+        data={"reason": exc.reason, "retry_after_seconds": exc.retry_after_seconds},
+    )
 
 
 def _handle_not_found(handle_id: UUID) -> McpInvalidParamsError:

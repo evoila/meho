@@ -136,7 +136,7 @@ async def test_kind_switches_are_not_replaced_during_projection() -> None:
     """A value that changes JSON kind survives the projection unchanged."""
     values = [{"nested": "object"}, ["list"], "scalar"]
     _, row_set = await _stored_result([{"value": value} for value in values] * 17)
-    projected, _, _ = await _run_compiled_query(
+    projected, *_ = await _run_compiled_query(
         row_set.rows,
         ResultQuerySpec(select=["value"]),
         uuid4(),
@@ -149,7 +149,7 @@ async def test_kind_switches_are_not_replaced_during_projection() -> None:
 async def test_empty_object_remains_distinguishable() -> None:
     """An empty object must remain an object through query projection."""
     _, row_set = await _stored_result([{"value": {}}] * 51)
-    projected, _, _ = await _run_compiled_query(
+    projected, *_ = await _run_compiled_query(
         row_set.rows,
         ResultQuerySpec(select=["value"]),
         uuid4(),
@@ -162,7 +162,7 @@ async def test_empty_object_remains_distinguishable() -> None:
 async def test_empty_list_remains_distinguishable() -> None:
     """An empty list is already retained through the reducer, store, and query path."""
     _, row_set = await _stored_result([{"value": []}] * 51)
-    projected, _, _ = await _run_compiled_query(
+    projected, *_ = await _run_compiled_query(
         row_set.rows,
         ResultQuerySpec(select=["value"]),
         uuid4(),
@@ -176,7 +176,7 @@ async def test_int64_max_round_trips_through_reducer_store_and_query() -> None:
     """The supported signed-int64 maximum is already preserved and queryable."""
     number = 2**63 - 1
     _, row_set = await _stored_result([{"number": number}] * 51)
-    projected, _, _ = await _run_compiled_query(
+    projected, *_ = await _run_compiled_query(
         row_set.rows,
         ResultQuerySpec(filter=[{"field": "number", "op": "=", "value": number}]),
         uuid4(),
@@ -191,7 +191,7 @@ async def test_integer_overflow_is_preserved_and_explicitly_raw_only(number: int
     """Overflow values stay in the spill, come back raw, and cannot be filtered."""
     row_set = await _stored_rows([{"number": number}] * 51)
     assert row_set.rows[0]["number"] == number
-    projected, _, _ = await _run_compiled_query(
+    projected, *_ = await _run_compiled_query(
         row_set.rows,
         ResultQuerySpec(select=["number"]),
         uuid4(),
@@ -217,7 +217,7 @@ async def test_large_integer_mixed_with_float_keeps_its_exact_value() -> None:
     """
     large = 2**53 + 1
     rows = [{"number": large}, {"number": 1.5}]
-    result, _, _ = await _run_compiled_query(
+    result, *_ = await _run_compiled_query(
         rows,
         ResultQuerySpec(),
         uuid4(),
@@ -237,7 +237,7 @@ async def test_large_integer_mixed_with_float_keeps_its_exact_value() -> None:
 
 async def test_case_distinct_keys_remain_independently_queryable() -> None:
     """A DuckDB registration must not rename one of two case-distinct JSON keys."""
-    result, _, _ = await _run_compiled_query(
+    result, *_ = await _run_compiled_query(
         [{"Foo": "upper", "foo": "lower"}],
         ResultQuerySpec(),
         uuid4(),

@@ -524,10 +524,11 @@ read-only alone is not sufficient).
 (default 500) with an explicit `truncated` flag (grouped results capped
 identically); the serialized output is capped at
 `RESULT_QUERY_MAX_OUTPUT_BYTES` (default 256 KB) **after** the row cap
-with an actionable over-budget error; and each compiled `SELECT` runs
-under a `RESULT_QUERY_TIMEOUT_SECONDS` (default 5) wall-time budget —
-DuckDB exposes no native Python query timeout, so the core runs
-`conn.execute()` on a worker thread and calls `conn.interrupt()` on
+with an actionable over-budget error; and the whole read (store fetch,
+compile, `SELECT`, encode) runs under a `RESULT_QUERY_TIMEOUT_SECONDS`
+(default 10) wall-time budget —
+DuckDB exposes no native Python query timeout, so the core runs the query
+on a dedicated worker pool and calls `conn.interrupt()` on
 expiry (raising `InterruptException`; see the
 [DuckDB Python API](https://duckdb.org/docs/current/clients/python/reference/index.html)).
 The engine's `max_memory` / `threads` ceilings (set in the sandbox above)

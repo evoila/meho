@@ -193,6 +193,10 @@ from meho_backplane.operations.operation_run_reaper import (
     start_operation_run_reaper,
     stop_operation_run_reaper,
 )
+from meho_backplane.operations.result_read_admission import (
+    configure_result_read_admission,
+    shutdown_result_read_admission,
+)
 from meho_backplane.retrieval.embedding import get_embedding_service
 from meho_backplane.scheduler import start_scheduler, stop_scheduler
 from meho_backplane.settings import get_settings, parse_bool_env
@@ -352,6 +356,7 @@ async def _run_lifespan_shutdown() -> None:
         await dispose_broadcast_blocking_client()
     except Exception:
         log.exception("dispose_broadcast_blocking_client_failed")
+    shutdown_result_read_admission()
 
 
 # code-quality-allow: linear boot-step sequence at the 100-line limit;
@@ -448,6 +453,8 @@ async def _run_lifespan_startup() -> None:
     # the raw list. Production-only: tests construct their own reducers
     # via :func:`set_default_reducer`.
     set_default_reducer(JsonFluxReducer())
+    # Result-read worker pool + admission limits from settings (#3640).
+    configure_result_read_admission(get_settings())
     # MCP tool / resource auto-discovery (G0.5-T3, #248). Same shape
     # as connector auto-discovery: top-level register_mcp_tool /
     # register_mcp_resource calls run at module import.

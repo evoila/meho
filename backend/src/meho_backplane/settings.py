@@ -605,12 +605,29 @@ class Settings(BaseModel):
         ``limit``) rather than returning a giant envelope. Default 262144
         (256 KB). Env ``RESULT_QUERY_MAX_OUTPUT_BYTES``.
     result_query_timeout_seconds:
-        Wall-time budget for a single ``result_query`` compiled ``SELECT``.
-        DuckDB exposes no native Python query timeout, so the core runs
-        ``conn.execute()`` on a worker thread and calls ``conn.interrupt()``
-        on expiry (raising ``InterruptException``), surfaced to the caller as
-        a recoverable "narrow and retry" error. Default 5 seconds. Env
+        Wall-time budget for a whole ``result_query`` read (#3640): the
+        store fetch plus the catalog, compile, ``SELECT``, and encode steps
+        on the worker thread. DuckDB exposes no native Python query timeout,
+        so the core calls ``conn.interrupt()`` on expiry and returns a
+        recoverable "narrow and retry" error at once; a worker that is still
+        busy keeps its slot until it finishes. Default 10 seconds. Env
         ``RESULT_QUERY_TIMEOUT_SECONDS``.
+    result_query_executor_workers:
+        Size of the dedicated worker pool that runs ``result_query`` work,
+        and of the process-wide gate both result reads (paging and query)
+        must pass before the store is read (#3640). The gate does not queue:
+        when every slot is busy a read is refused with a recoverable
+        "capacity" error. Default 4. Env ``RESULT_QUERY_EXECUTOR_WORKERS``.
+    result_query_tenant_concurrency:
+        Most result reads one tenant may run at the same time in this
+        process (#3640). Only binds when it is lower than
+        ``result_query_executor_workers``. Default 4. Env
+        ``RESULT_QUERY_TENANT_CONCURRENCY``.
+    result_query_rate_per_minute:
+        Per-``(tenant, principal)`` fixed-window cap on result reads, shared
+        by paging and query and checked before the store is read (#3640).
+        ``0`` (the default) turns the check off, with no Valkey round-trip.
+        Env ``RESULT_QUERY_RATE_PER_MINUTE``.
     jsonflux_sample_byte_budget:
         Upper bound, in serialized JSON bytes, on the inline sample the
         JSONFlux reducer carries on a reduced ``ResultHandle`` (#134).
@@ -1398,7 +1415,11 @@ class Settings(BaseModel):
     # spill row cap above nor the reducer's hardcoded TTL.
     result_query_max_output_rows: int = Field(default=500, gt=0)
     result_query_max_output_bytes: int = Field(default=262144, gt=0)
-    result_query_timeout_seconds: int = Field(default=5, gt=0)
+    result_query_timeout_seconds: int = Field(default=10, gt=0)
+    # #3640 -- admission for the two result-read paths.
+    result_query_executor_workers: int = Field(default=4, gt=0)
+    result_query_tenant_concurrency: int = Field(default=4, gt=0)
+    result_query_rate_per_minute: int = Field(default=0, ge=0)
     jsonflux_sample_byte_budget: int = Field(default=4096, gt=0)
     composite_max_depth: int = Field(default=8, gt=0)
     agent_invoke_max_depth: int = Field(default=4, gt=0)
@@ -2433,7 +2454,16 @@ def get_settings() -> Settings:
             os.environ.get("RESULT_QUERY_MAX_OUTPUT_BYTES", "262144"),
         ),
         result_query_timeout_seconds=int(
-            os.environ.get("RESULT_QUERY_TIMEOUT_SECONDS", "5"),
+            os.environ.get("RESULT_QUERY_TIMEOUT_SECONDS", "10"),
+        ),
+        result_query_executor_workers=int(
+            os.environ.get("RESULT_QUERY_EXECUTOR_WORKERS", "4"),
+        ),
+        result_query_tenant_concurrency=int(
+            os.environ.get("RESULT_QUERY_TENANT_CONCURRENCY", "4"),
+        ),
+        result_query_rate_per_minute=int(
+            os.environ.get("RESULT_QUERY_RATE_PER_MINUTE", "0"),
         ),
         jsonflux_sample_byte_budget=int(
             os.environ.get("JSONFLUX_SAMPLE_BYTE_BUDGET", "4096"),

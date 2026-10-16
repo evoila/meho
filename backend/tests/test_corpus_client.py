@@ -14,6 +14,7 @@ operator JWT must never leak into a structlog event or the 503 detail.
 
 from __future__ import annotations
 
+import ipaddress
 from collections.abc import Iterator
 
 import httpx
@@ -22,6 +23,7 @@ import structlog
 import structlog.testing
 
 import meho_backplane.auth.corpus as corpus_mod
+import meho_backplane.targets.ssrf_guard as guard_mod
 from meho_backplane.auth.corpus import (
     READ_CALLER_HEADER,
     CorpusAnswerError,
@@ -244,6 +246,77 @@ async def test_search_screens_endpoint_and_fails_closed(
     with pytest.raises(CorpusUnavailable) as exc:
         await search_corpus(_make_operator(), "q")
     assert "not an allowed https public destination" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    ("allowlist", "url"),
+    [
+        # The in-cluster shape: the service name itself is on the allowlist.
+        ("docs.corpus-ns.svc.cluster.local", "http://docs.corpus-ns.svc.cluster.local:8080/search"),
+        # A private IP literal listed as a single address: bare, /32, or IPv6 /128.
+        ("10.20.30.40", "http://10.20.30.40:8080/search"),
+        ("10.20.30.40/32", "http://10.20.30.40:8080/search"),
+        ("fd00::10/128", "http://[fd00::10]:8080/search"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_search_admits_http_for_allowlisted_host(
+    monkeypatch: pytest.MonkeyPatch, allowlist: str, url: str
+) -> None:
+    """Plain http is allowed when the host is an exact allowlist entry (#3573)."""
+    monkeypatch.setenv("MEHO_TARGET_SSRF_ALLOWLIST", allowlist)
+    _pin_settings(monkeypatch, corpus_url=url)
+    captured: list[httpx.Request] = []
+    transport = _transport_capturing(captured, httpx.Response(200, json={"results": []}))
+    _patch_async_client(monkeypatch, transport, [])
+
+    await search_corpus(_make_operator(), "q")
+
+    assert str(captured[0].url) == url
+
+
+@pytest.mark.parametrize(
+    ("allowlist", "url"),
+    [
+        # Plain http to a public IP stays rejected; another host is allowlisted.
+        ("docs.corpus-ns.svc.cluster.local", "http://8.8.8.8/search"),
+        # Plain http to a public hostname stays rejected.
+        ("10.0.0.0/8", "http://corpus.example.com/search"),
+        # A private IP outside the allowlisted range stays rejected, even on https.
+        ("10.0.0.0/8", "https://192.168.1.5/search"),
+        # Non-http schemes are never allowed, even for an allowlisted host.
+        ("10.0.0.0/8", "ftp://10.20.30.40/search"),
+        # An IP that only falls inside a listed range needs https for the http opt-in.
+        ("10.0.0.0/8", "http://10.20.30.40:8080/search"),
+        ("10.20.30.0/24", "http://10.20.30.40/search"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_search_keeps_rejecting_non_allowlisted_endpoints(
+    monkeypatch: pytest.MonkeyPatch, allowlist: str, url: str
+) -> None:
+    """The http opt-in covers only exact allowlist entries; everything else fails closed."""
+    monkeypatch.setenv("MEHO_TARGET_SSRF_ALLOWLIST", allowlist)
+    _pin_settings(monkeypatch, corpus_url=url)
+
+    with pytest.raises(CorpusUnavailable) as exc:
+        await search_corpus(_make_operator(), "q")
+    assert "not an allowed https public destination" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_http_host_resolving_into_allowlisted_range_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """For http the host itself must be named; resolving into an allowed range is not enough."""
+    monkeypatch.setenv("MEHO_TARGET_SSRF_ALLOWLIST", "10.0.0.0/8")
+    monkeypatch.setattr(
+        guard_mod, "_resolve_addrs", lambda _host: [ipaddress.ip_address("10.20.30.40")]
+    )
+    _pin_settings(monkeypatch, corpus_url="http://docs.corpus-ns.svc.cluster.local/search")
+
+    with pytest.raises(CorpusUnavailable):
+        await search_corpus(_make_operator(), "q")
 
 
 @pytest.mark.asyncio

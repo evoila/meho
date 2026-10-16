@@ -295,6 +295,33 @@ async def test_rejected_endpoint_persists_no_row(
     assert rows == []
 
 
+def test_http_endpoint_listed_as_exact_allowlist_entry_is_created(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plain http is accepted when the host is an exact allowlist entry (#3573)."""
+    monkeypatch.setenv("MEHO_TARGET_SSRF_ALLOWLIST", "10.20.30.40")
+    key = make_rsa_keypair("kid-A")
+    endpoint = "http://10.20.30.40:8080/v1/search"
+    body = _valid_body(backend={"type": "corpus-http", "ref": {"endpoint": endpoint}})
+    resp = _post(client, key, _admin_token(key), body)
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["backend"]["ref"]["endpoint"] == endpoint
+
+
+def test_http_endpoint_inside_allowlisted_range_is_rejected_at_create(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An IP that only falls inside a listed range still needs https (#3573)."""
+    monkeypatch.setenv("MEHO_TARGET_SSRF_ALLOWLIST", "10.0.0.0/8")
+    key = make_rsa_keypair("kid-A")
+    body = _valid_body(
+        backend={"type": "corpus-http", "ref": {"endpoint": "http://10.20.30.40:8080/v1/search"}}
+    )
+    resp = _post(client, key, _admin_token(key), body)
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["detail"]["kind"] == "endpoint_not_allowed"
+
+
 def test_url_alias_endpoint_is_also_screened(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

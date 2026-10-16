@@ -1,16 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for the opt-in ``/metrics`` + ``/ready`` bearer-token guard (#3499).
+"""Tests for the opt-in ``/metrics`` + ``/ready`` bearer-token guard (#3499, #3594).
 
 Covers :mod:`meho_backplane.metrics_access` and its wiring onto the two
 exposition endpoints:
 
 * **Default-open** — with ``METRICS_AUTH_TOKEN`` unset, ``/metrics`` and
-  ``/ready`` are reachable unauthenticated exactly as before (no 401), so the
-  in-cluster scraper and kubelet readiness probe are undisturbed.
-* **Opt-in guard** — with the token set, ``/metrics`` and ``/ready`` refuse a
-  missing / malformed / mismatched bearer with 401 and admit the correct one.
+  ``/ready`` (full body, ``features`` included) are reachable unauthenticated
+  exactly as before (no 401).
+* **``/metrics`` guard** — with the token set, ``/metrics`` refuses a
+  missing / malformed / mismatched bearer with 401 and admits the correct one.
+* **``/ready`` split** — with the token set, ``/ready`` never answers 401.
+  Without a valid bearer it returns the verdict (``status`` + ``checks``) and
+  leaves out ``features``, so a header-less kubelet readiness probe keeps
+  working. With the correct bearer it returns the full body.
 * **Liveness stays open** — ``/healthz`` is never guarded, so a bearer-less
   liveness path always exists even when the guard is on.
 
@@ -27,6 +31,7 @@ from collections.abc import Iterator
 import pytest
 from fastapi.testclient import TestClient
 
+from meho_backplane.health import ProbeResult, clear_probes, register_probe
 from meho_backplane.main import app
 from meho_backplane.settings import get_settings
 
@@ -69,7 +74,7 @@ def test_ready_open_by_default(client: TestClient) -> None:
     # No probes registered (no lifespan) -> 503, but crucially NOT 401.
     resp = client.get("/ready")
     assert resp.status_code != 401
-    assert "features" in resp.json()
+    assert set(resp.json()) == {"status", "checks", "features"}
 
 
 # ---------------------------------------------------------------------------
@@ -85,15 +90,6 @@ def test_metrics_requires_bearer_when_token_set(
     assert resp.status_code == 401
     assert resp.json()["detail"] == "metrics_auth_required"
     assert resp.headers.get("www-authenticate") == "Bearer"
-
-
-def test_ready_requires_bearer_when_token_set(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _set_token(monkeypatch, _TOKEN)
-    resp = client.get("/ready")
-    assert resp.status_code == 401
-    assert resp.json()["detail"] == "metrics_auth_required"
 
 
 def test_wrong_bearer_denied(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -122,9 +118,8 @@ def test_correct_bearer_admits_metrics(client: TestClient, monkeypatch: pytest.M
 def test_correct_bearer_admits_ready(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     _set_token(monkeypatch, _TOKEN)
     resp = client.get("/ready", headers={"Authorization": f"Bearer {_TOKEN}"})
-    # Admitted past the guard -> the readiness verdict renders (not a 401).
     assert resp.status_code != 401
-    assert "features" in resp.json()
+    assert set(resp.json()) == {"status", "checks", "features"}
 
 
 def test_healthz_never_guarded(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -132,3 +127,45 @@ def test_healthz_never_guarded(client: TestClient, monkeypatch: pytest.MonkeyPat
     resp = client.get("/healthz")
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# Guard on: /ready serves the bare verdict without a valid bearer (#3594)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {"Authorization": "Bearer not-the-token"},
+        {"Authorization": f"Basic {_TOKEN}"},
+        {"Authorization": "Bearer"},
+    ],
+    ids=["no-header", "wrong-bearer", "non-bearer-scheme", "empty-bearer"],
+)
+def test_ready_without_valid_bearer_serves_verdict_only(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, headers: dict[str, str]
+) -> None:
+    _set_token(monkeypatch, _TOKEN)
+    resp = client.get("/ready", headers=headers)
+    # No probes registered (no lifespan) -> 503 not-ready; never 401.
+    assert resp.status_code == 503
+    assert resp.json() == {"status": "not_ready", "checks": []}
+
+
+def test_ready_header_less_probe_gets_200_when_ready(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_token(monkeypatch, _TOKEN)
+    clear_probes()
+    register_probe("stub", lambda: ProbeResult(name="stub", ok=True))
+    try:
+        resp = client.get("/ready")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "ready"
+        assert [c["name"] for c in body["checks"]] == ["stub"]
+        assert "features" not in body
+    finally:
+        clear_probes()

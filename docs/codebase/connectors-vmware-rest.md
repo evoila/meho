@@ -804,12 +804,22 @@ all-missing "void" for the rest of the pod lifetime. Two mechanisms recover it:
   envelope normally, never a loop. Recovers on the *symptom*, independent of
   *why* the session died (idle expiry, `hostd` restart, …), and reads both the
   9.x nested `LocalizedMethodFault` and the 8.0.x flattened fault shapes via
-  `fault_type_name`.
+  `fault_type_name` (a 9.x wrapper with no usable nested class name gives no
+  `fault_type` at all — the wrapper name is never reported as the fault class).
+  *Known tradeoff:* because an all-object `NoPermission` counts as auth-class, a
+  target whose principal really lost all permissions pays one extra login per
+  read, and that read evicts the shared per-target session. This is accepted on
+  purpose: the reset still happens at most once per read (a unit test pins
+  this), and the same symptom is how a stale session shows itself.
 - *(a) Bounded session max-age (defense in depth).* A warm-cached session older
   than `VMWARE_SOAP_SESSION_MAX_AGE_SECONDS` (**default `1200` s / 20 min**) is
   proactively invalidated + re-established **before** its next read, so a
   server-side-expired-but-locally-cached session goes undetected for at most one
-  max-age window even if (b) is somehow bypassed. The default sits **safely
+  max-age window even if (b) is somehow bypassed. The check lives in the
+  **shared** `_session_token` path, so it applies to **every** target this
+  connector caches a session for — vCenter as well as standalone ESXi — not
+  only to standalone ESXi hosts, despite the `SOAP` in the variable name. A
+  proactive cold re-login is safe on both. The default sits **safely
   below** a standalone ESXi host's default SOAP idle timeout
   (`Config.HostAgent.vmacore.soap.sessionTimeout` = `1800` s / 30 min) — the
   max-age is the belt to (b)'s suspenders, so it **must** stay below that idle

@@ -687,6 +687,26 @@ async def test_all_object_nopermission_is_treated_as_auth_and_resets() -> None:
 
 
 @pytest.mark.asyncio
+async def test_persistent_all_object_nopermission_resets_once_then_returns() -> None:
+    """A real full permission loss (NoPermission on both reads) costs one reset
+    and one extra read, then returns the fault-annotated envelope. No loop."""
+    void = _faulted_object_content("HostSystem", "ha-host", {}, {"name": "NoPermission"})
+    conn = _SessionResettingConnector([void, void])
+
+    out = await object_collect_impl(
+        conn,
+        _make_operator(),
+        _Target(),
+        {"type": "HostSystem", "moid": "ha-host", "properties": ["name"]},
+    )
+
+    assert conn.invalidate_calls == 1
+    assert len(conn.post_calls) == 2
+    assert out["properties"] == {}
+    assert out["missing_fault_summary"] == {"NoPermission": 1}
+
+
+@pytest.mark.asyncio
 async def test_partial_per_field_nopermission_does_not_reset() -> None:
     """(#3773 c.4) A partial per-field NoPermission (at least one property back) is a
     real permission outcome, NOT a stale session → no reset, annotated envelope
@@ -944,3 +964,11 @@ def test_object_collect_guidance_says_to_read_the_whole_configuration_ex() -> No
     assert "'configurationEx.<field>'" in hint
     assert "InvalidProperty" in hint
     assert "request 'configurationEx'" in VMWARE_OBJECT_COLLECT_OP.description
+
+
+def test_object_collect_description_names_the_returned_keys() -> None:
+    """The op description lists the same result keys as the response schema."""
+    description = VMWARE_OBJECT_COLLECT_OP.description
+    assert VMWARE_OBJECT_COLLECT_OP.response_schema is not None
+    for key in VMWARE_OBJECT_COLLECT_OP.response_schema["properties"]:
+        assert key in description

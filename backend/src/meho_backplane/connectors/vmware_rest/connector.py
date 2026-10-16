@@ -364,6 +364,15 @@ _VIJSON_NOT_AUTHENTICATED_REMEDIATION: Final[str] = (
     "operations) fail this way when that host's link to vCenter rejects the "
     "session. Check the host's connection state in vCenter, then retry."
 )
+#: HTTP statuses the dispatcher's #2067 recovery would retry by re-running
+#: the **whole** operation. After :meth:`VmwareRestConnector._post_vmomi_json`
+#: has already logged in again for a ``NotAuthenticated`` fault, such a
+#: status on the retried call must not escape as a plain
+#: :class:`httpx.HTTPStatusError`: the dispatcher would log in a third time
+#: and run every earlier step of the operation again (a started guest
+#: program would start twice). vCenter rejects a session with 401; 440 is
+#: the vRLI member of the dispatcher's set and never comes from vCenter.
+_VIJSON_AFTER_RELOGIN_AUTH_STATUSES: Final[frozenset[int]] = frozenset({401})
 #: The one vim ``detail`` fault localName a re-mint of the PBM SOAP session can
 #: recover (#3810). PBM authenticates by the ``vcSessionCookie`` SOAP header
 #: carrying the vim session cookie; once that header is present, a
@@ -555,6 +564,35 @@ def _vijson_auth_error(
         secret_ref=getattr(target, "secret_ref", None),
         remediation=remediation,
         stage="after_relogin" if after_relogin else "call",
+    )
+
+
+def _vijson_relogin_rejected_error(
+    target: VsphereTargetLike,
+    vmomi_path: str,
+    exc: httpx.HTTPStatusError,
+) -> ConnectorAuthError:
+    """Build the final :class:`ConnectorAuthError` for a 401 on the retried call (#3566).
+
+    The connector already logged in again for a ``NotAuthenticated`` fault
+    and the fresh session was rejected with an HTTP auth status. This is
+    the ``after_relogin`` stage with the dispatcher's own
+    ``session_dispatch_<status>_after_relogin`` cause, so the result reads
+    the same as the dispatcher's post-re-login rejection. Raising it (and
+    not the plain status error) stops the dispatcher from re-running the
+    whole operation on top of this retry.
+    """
+    status_code = exc.response.status_code
+    return ConnectorAuthError(
+        f"vmware vi-json POST {vmomi_path} on target {target.name!r} was rejected "
+        f"with HTTP {status_code} after a re-login for vim fault "
+        f"{_VIJSON_RELOGIN_FAULT_TYPE}",
+        status_code=status_code,
+        cause=f"session_dispatch_{status_code}_after_relogin",
+        target_name=getattr(target, "name", None),
+        host=getattr(target, "host", None),
+        secret_ref=getattr(target, "secret_ref", None),
+        stage="after_relogin",
     )
 
 
@@ -877,7 +915,10 @@ class VmwareRestConnector(HttpConnector):
         in again and retries the call once; if the fault comes back, or the
         fault is ``InvalidLogin`` / ``NoPermission`` (which a new session
         cannot fix), it raises :class:`ConnectorAuthError` so the dispatcher
-        returns ``connector_auth_failed``.
+        returns ``connector_auth_failed``. A 401 on the retried call is
+        final too (``after_relogin``): the dispatcher must not re-run the
+        whole operation on top of this retry. A 401 on the first try still
+        propagates to the dispatcher's own recovery.
 
         ``promote_managed_object_not_found`` is intentionally opt-in for a
         typed single-resource read that can safely render a missing MoID
@@ -929,9 +970,16 @@ class VmwareRestConnector(HttpConnector):
             )
         except httpx.HTTPStatusError as exc:
             fault_type = _vijson_auth_fault_type(exc)
-            if fault_type is None:
-                raise
-            raise _vijson_auth_error(fault_type, target, vmomi_path, exc) from exc
+            if fault_type is not None:
+                raise _vijson_auth_error(fault_type, target, vmomi_path, exc) from exc
+            # An HTTP auth status on the retried call is final here. Letting
+            # it escape would make the dispatcher log in again and re-run
+            # the whole operation, so a step that already ran before the
+            # NotAuthenticated fault (a started guest program) would run
+            # twice.
+            if exc.response.status_code in _VIJSON_AFTER_RELOGIN_AUTH_STATUSES:
+                raise _vijson_relogin_rejected_error(target, vmomi_path, exc) from exc
+            raise
 
     async def _post_vmomi_json_vcenter(
         self,

@@ -850,9 +850,18 @@ treats the same auth set as the SOAP path (`_SOAP_AUTH_FAULT_TYPES`:
   cause="vim_fault_<type>")` at once, with no retry: a new session cannot fix
   a rejected credential or a missing privilege (the `#3810` PBM precedent).
   `NoPermission` carries a "grant the privilege, do not restage" remediation.
+- A **401 on the retried call** (after the connector's own re-login) is
+  final too: `ConnectorAuthError(stage="after_relogin",
+  cause="session_dispatch_401_after_relogin")`, the same cause the
+  dispatcher stamps on its own post-re-login rejection. It must not escape
+  as a plain status error, because the dispatcher's `#2067` recovery would
+  then log in a third time and re-run the **whole** operation, so a step
+  that already ran before the fault (the `StartProgramInGuest` of
+  `guest.program.run`) would run twice. A 401 on the **first** try is
+  unchanged and still uses the dispatcher's recovery.
 - Any other fault (`InvalidArgument`, `PlatformConfigFault`, ...) and any
-  other status are unchanged: the plain `httpx.HTTPStatusError` reaches the
-  dispatcher, and a 401 still uses the dispatcher's `#2067` recovery.
+  other status (on the first try or on the retried call) are unchanged: the
+  plain `httpx.HTTPStatusError` reaches the dispatcher.
 
 `ConnectorAuthError.status_code` is the real status (500). The dispatcher's
 existing `except ConnectorAuthError` arm turns it into `connector_auth_failed`;

@@ -3947,8 +3947,8 @@ VM_DEPLOY_FROM_LIBRARY_PARAMETER_SCHEMA: dict[str, Any] = {
                 "unique deploy name (``<name>-meho-<token>``, cut to vCenter's "
                 "80-character limit) and is renamed to this name once the deploy "
                 "succeeds (#3697). A failed deploy finds and deletes only the VM "
-                "with its own deploy name, so an older or another caller's "
-                "same-name VM is never touched."
+                "(or vApp, with its VMs) that carries its own deploy name, so an "
+                "older or another caller's same-name VM is never touched."
             ),
         },
         "network_mappings": {
@@ -4052,8 +4052,8 @@ VM_DEPLOY_FROM_LIBRARY_RESPONSE_SCHEMA: dict[str, Any] = {
                 "supplies the default VM name when ``name`` is omitted (#3697). "
                 "Every non-``deployed`` status is reached before or without a "
                 "successful mutation: when a failed deploy leaves a partial VM "
-                "behind, the composite deletes it and reports the cleanup in "
-                "``issues`` (#3697)."
+                "or vApp behind, the composite removes it and reports the cleanup "
+                "in ``issues`` (#3697)."
             ),
         },
         "vm_id": {
@@ -4093,10 +4093,13 @@ VM_DEPLOY_FROM_LIBRARY_RESPONSE_SCHEMA: dict[str, Any] = {
                 "from the OVF deploy report (errors / warnings / information) or "
                 "the resolution / power-on failure. Empty on a clean deploy. A "
                 "failed deploy adds one ``category='cleanup'`` entry per partial VM "
-                "it found: severity ``info`` when the VM was deleted, ``warning`` "
-                "when it could not be deleted or the check itself faulted (#3697). "
-                "A ``category='rename'`` warning means the deploy succeeded but the "
-                "VM still carries its deploy name; the message names both names."
+                "or vApp it found: severity ``info`` when it was removed, "
+                "``warning`` when it could not be removed, its removal waits for "
+                "an approval request (named in the message), or the check itself "
+                "faulted (#3697). A ``category='rename'`` warning means the deploy "
+                "succeeded but the VM still carries its deploy name; the message "
+                "names both names and, for a parked rename, the approval request "
+                "that renames this VM when approved."
             ),
         },
         "candidates": {

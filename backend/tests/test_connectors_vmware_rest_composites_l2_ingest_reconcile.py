@@ -697,6 +697,7 @@ def test_vm_deploy_from_library_vi_json_sub_op_manifest_is_expected() -> None:
     assert set(_write._VIM_SUB_OPS_VM_DEPLOY_FROM_LIBRARY) == {
         "POST:/VirtualMachine/{moId}/Rename_Task",
         "POST:/VirtualApp/{moId}/Rename_Task",
+        "POST:/VirtualApp/{moId}/Destroy_Task",
         "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
     }
 
@@ -720,12 +721,14 @@ def test_vm_deploy_from_library_vi_json_sub_ops_round_trip_through_ingest() -> N
 
 
 def test_vm_deploy_from_library_vi_json_paths_exist_in_the_pinned_spec() -> None:
-    """Each deploy rename vim sub-op path is a real POST path in the pinned vi-json.yaml.
+    """Each deploy vim sub-op path is a real POST path in the pinned vi-json.yaml.
 
-    ``ManagedEntity.Rename_Task`` is a core vim25 method every managed entity
-    inherits, so the pinned spec must serve it for ``VirtualMachine`` and
-    ``VirtualApp``. Skips when the spec-shelf is not configured, so CI — where
-    the env vars are wired — is the operator-visible signal.
+    ``ManagedEntity.Rename_Task`` and ``Destroy_Task`` are core vim25 methods
+    every managed entity inherits, so the pinned spec must serve the rename
+    for ``VirtualMachine`` and ``VirtualApp`` and the destroy for
+    ``VirtualApp`` (the cleanup of a failed vApp deploy, #3697). Skips when
+    the spec-shelf is not configured, so CI — where the env vars are wired —
+    is the operator-visible signal.
     """
     spec_path = resolve_vi_json_yaml()
     if spec_path is None:

@@ -1888,10 +1888,12 @@ Retires `govc library.deploy` for OVF/OVA appliances (the HoloRouter OVA
 and friends). vSphere Automation REST — no `pyvmomi`. The seven REST
 sub-ops (two finds, the OVF summary, the deploy, power-on, and the cleanup
 listing + delete) are `vcenter.yaml`-served paths, so they reconcile
-through the generic `_SUB_OPS_VM_DEPLOY_FROM_LIBRARY` sweep. The one vim
-leg — the `Rename_Task` that gives the finished VM its requested name
-(#3697, no REST rename exists) — rides the governed VI-JSON seam and lives
-in the `_VIM_SUB_OPS_VM_DEPLOY_FROM_LIBRARY` lane.
+through the generic `_SUB_OPS_VM_DEPLOY_FROM_LIBRARY` sweep. The vim legs
+— the `Rename_Task` that gives the finished VM its requested name (#3697,
+no REST rename exists), the vApp `Destroy_Task` that cleans up a failed
+vApp deploy, and the property read that polls them and finds such a vApp
+— ride the governed VI-JSON seam and live in the
+`_VIM_SUB_OPS_VM_DEPLOY_FROM_LIBRARY` lane.
 
 **Item resolution.** `library_item` (an id) is a passthrough. Otherwise
 `library_item_name` is resolved to an id via
@@ -1969,21 +1971,33 @@ gives its VM a name nobody else uses:
    the requested name.
 3. When the deploy call faults (`deploy_error`), reports `succeeded=false`
    (`deploy_failed`), or is cancelled because the caller went away, the
-   composite lists VMs by the deploy name (`GET:/vcenter/vm`, un-gated).
-   Every VM it finds, plus a `VirtualMachine` the `DeploymentResult` names,
-   is deleted with the same best-effort `DELETE:/vcenter/vm/{vm}`
-   `vm.create` uses for its rollback (`_rollback_created_vm`, gated like
-   every write sub-op). An older VM with the requested name, or a same-name
-   VM another caller created meanwhile, never carries the deploy name, so it
-   is never touched.
-4. Each VM gets a `cleanup` issue: `info` when it was deleted, `warning` when
-   the delete faulted or was not authorized. A faulted listing is a `warning`
-   that names the deploy name, so the operator can look for the VM by hand.
+   composite looks the deploy name up twice, both un-gated reads: the VM
+   listing (`GET:/vcenter/vm`), and the target resource pool's child
+   resource pools (`RetrievePropertiesEx` on `ResourcePool.resourcePool`,
+   then the `name` of every `VirtualApp` child). The second lookup matters
+   for an OVF with several VMs: vCenter deploys it as a **vApp** that
+   carries the deploy name, while its VMs carry the OVF's own names, so the
+   VM listing alone would miss them. Every VM found, plus the entity the
+   `DeploymentResult` names (a `VirtualMachine` or a `VirtualApp`), is
+   removed: a VM with the best-effort `DELETE:/vcenter/vm/{vm}`
+   (`_delete_leftover_vm`), a vApp with its own governed vim
+   `POST:/VirtualApp/{moId}/Destroy_Task` (`_destroy_leftover_vapp`,
+   task-polled), which destroys the vApp and every VM in it. An older VM
+   with the requested name, or a same-name VM another caller created
+   meanwhile, never carries the deploy name, so it is never touched.
+4. Each VM or vApp gets a `cleanup` issue: `info` when it was removed,
+   `warning` when the removal faulted, was denied, or waits for approval
+   (the message then names the approval request). A faulted lookup is a
+   `warning` that names the deploy name (and the pool, for the vApp
+   lookup), so the operator can look for it by hand.
 5. On every failure path the cleanup runs as a shielded task (the audit
    middleware's drain pattern, `_drain_deploy_cleanup`): a caller cancel
-   during the listing or the delete does not stop it. A cancel seen during
+   during the lookups or the removal does not stop it. A cancel seen during
    the cleanup is re-raised once the cleanup is done, and the cleanup
-   outcome is logged because no envelope reaches the caller.
+   outcome is logged because no envelope reaches the caller. A cleanup
+   that raises something other than a transport fault (for example a JSON
+   parsing error) becomes a `cleanup` warning; it never replaces the deploy
+   failure and never hides a cancel.
 6. A success renames the VM (or vApp) to the final name through the
    governed vim `Rename_Task` (`POST:/VirtualMachine/{moId}/Rename_Task` or
    `POST:/VirtualApp/{moId}/Rename_Task`, task-polled, 600 s bound). The
@@ -1991,11 +2005,24 @@ gives its VM a name nobody else uses:
    fault, a task fault (for example the requested name now exists) or a poll
    timeout leaves `status='deployed'` with a `rename` warning that names
    both names. A success issues no listing and no delete.
+7. **Approvals after the VM exists never re-run the deploy.** A sub-op park
+   normally records its parent composite, and approving it re-runs that
+   composite from the top (#3351). For the rename, the power-on and the
+   cleanup removals that would deploy a second VM, so these writes pass
+   `standalone=True` to `enforce_subop_policy`: the approval request
+   carries no parent and the ingested op's own params (`{"vm": ...}` for
+   the REST delete and power-on, `{"moId": ..., "body": ...}` for the vim
+   rename and destroy). Approving it dispatches that one op on the existing
+   VM. The same switch now protects `vm.create`'s rollback delete
+   (`_rollback_created_vm`). See the `enforce_subop_policy` section in
+   `docs/architecture/operations-substrate.md`.
 
 Operator note: service principals that run `vm.deploy_from_library`
-unattended need a grant for the rename op too (it is listed on the
-governed-subops discovery surface); without it the VM keeps its deploy name
-and the envelope carries the `rename` warning.
+unattended need grants for the rename op (and, to clean up a failed vApp
+deploy, the vApp destroy op) too; both are listed on the governed-subops
+discovery surface. Without a grant the step parks as its own approval
+request: the VM keeps its deploy name (or stays behind) until a human
+approves that request, and the envelope says which request to approve.
 
 **Synchronous-deploy long timeout (#3076).** Both library-item deploys —
 the OVF `POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy`

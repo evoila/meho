@@ -501,6 +501,7 @@ async def enforce_subop_policy(
     requires_approval: bool,
     target: Any,
     params: dict[str, Any],
+    standalone: bool = False,
 ) -> OperationResult | None:
     """Re-apply the dispatcher policy/approval gate around a direct-session sub-op.
 
@@ -535,6 +536,21 @@ async def enforce_subop_policy(
     "top-level-sufficiency" alternative, and the call-site example are
     documented in ``docs/architecture/operations-substrate.md`` under
     "Preserving write-composite policy on the direct path".
+
+    ``standalone`` changes only what an approval **resumes** (#3697). By
+    default a parked sub-op records its parent composite, and approving
+    it re-runs that composite from the top with this one sub-op
+    pre-cleared. That is right while the composite has not changed
+    anything yet. It is wrong for a follow-on write that runs *after*
+    the composite's main effect exists — the rename of a deployed VM, or
+    the delete that cleans up a failed deploy — because the re-run would
+    repeat the main effect (deploy a second VM). With ``standalone=True``
+    the park records no parent: approving it dispatches *op_id* itself,
+    with *params*, through the generic path. The caller must therefore
+    pass *params* in the dispatchable shape of the ingested *op_id* (its
+    path variables plus a ``body`` key), not identity-only gate params.
+    A standalone park is also allowed during a parent resume, because it
+    never re-enters the parent; the multi-gate guard below is skipped.
     """
     # Lazy imports: this module is imported by the dispatcher, so a
     # top-level import of the policy/approval machinery (which imports
@@ -607,7 +623,7 @@ async def enforce_subop_policy(
         # ``dangerous`` + ``requires_approval=False``, which the USER reviewer
         # auto-executes in the single resume pass. Refuse instead of parking.
         resume_scope = composite_resume_scope_var.get()
-        if resume_scope is not None:
+        if resume_scope is not None and not standalone:
             approved_op_id, _approved_hash = resume_scope
             composite_ctx = composite_dispatch_var.get()
             composite_op_id = composite_ctx[0] if composite_ctx is not None else "<unknown>"
@@ -683,8 +699,10 @@ async def enforce_subop_policy(
                 proposed_effect=proposed_effect,
                 # #3351: record the parent composite so the approval-resume
                 # re-enters it (this sub-op's key + gate params are not a
-                # dispatchable descriptor call). ``None`` outside a composite.
-                resume_parent=_resume_parent_for_current_composite(),
+                # dispatchable descriptor call). ``None`` outside a composite,
+                # and for a standalone park (#3697), whose approval dispatches
+                # the sub-op itself.
+                resume_parent=None if standalone else _resume_parent_for_current_composite(),
             )
             await session.commit()
         # Publish AFTER commit so a broadcast can never outlive a failed

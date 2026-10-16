@@ -91,6 +91,7 @@ import asyncio
 import re
 import secrets
 import time
+from functools import partial
 from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
 import httpx
@@ -347,6 +348,9 @@ _OP_RETRIEVE_PROPERTIES = "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
 # ``ManagedEntity.Rename_Task`` (no REST rename exists in the pinned spec).
 _OP_RENAME_VM_TASK = "POST:/VirtualMachine/{moId}/Rename_Task"
 _OP_RENAME_VAPP_TASK = "POST:/VirtualApp/{moId}/Rename_Task"
+# A failed vApp deploy is cleaned up with the vApp's own ``Destroy_Task``,
+# which destroys the vApp and every VM in it (no REST vApp delete exists).
+_OP_DESTROY_VAPP_TASK = "POST:/VirtualApp/{moId}/Destroy_Task"
 # Concrete runtime path for the config read: the PropertyCollector is a
 # singleton whose moId is the literal ``propertyCollector`` (the same
 # concrete path the typed reads + read composites POST). ``ReconfigVM_Task``
@@ -1081,11 +1085,14 @@ _SUB_OPS_VM_DEPLOY_FROM_LIBRARY: tuple[str, ...] = (
     _OP_DELETE_VM,
 )
 #: vm.deploy_from_library's vim leg (#3697): the ``Rename_Task`` that gives
-#: the finished VM (or vApp) its requested name, plus the task-poll read.
+#: the finished VM (or vApp) its requested name, the ``Destroy_Task`` that
+#: removes a vApp a failed deploy left (with its VMs), and the property
+#: read that polls the tasks and finds such a vApp by its deploy name.
 _VIM_SUB_OPS_VM_DEPLOY_FROM_LIBRARY: tuple[str, ...] = (
     _OP_RETRIEVE_PROPERTIES,
     _OP_RENAME_VM_TASK,
     _OP_RENAME_VAPP_TASK,
+    _OP_DESTROY_VAPP_TASK,
 )
 # vm.import_from_library (#3229) REST sub-ops: the shared name-resolution find
 # actions, the optional power-on, and the content-library download-session flow
@@ -1251,6 +1258,7 @@ async def _write_sub_op(
     params: dict[str, Any],
     *,
     timeout: Any = httpx.USE_CLIENT_DEFAULT,
+    standalone: bool = False,
 ) -> tuple[OperationResult | None, Any]:
     """Gate then issue one *write* sub-call directly on the connector session.
 
@@ -1275,6 +1283,13 @@ async def _write_sub_op(
     every write sub-op keeps the connector's 30s client default unchanged;
     only the two synchronous library-item deploys pass an explicit long
     ceiling (:data:`_LIBRARY_ITEM_DEPLOY_TIMEOUT`, #3076).
+
+    ``standalone`` marks a follow-on write that runs after the composite's
+    main effect exists (a cleanup delete, a power-on): a park then records
+    no parent composite, so approving it dispatches this sub-op alone
+    instead of re-running the composite (#3697). *params* must then be
+    the ingested op's dispatchable params — true for every REST write
+    sub-op here, whose gate params are the path variables plus the body.
     """
     gate = await enforce_subop_policy(
         operator=operator,
@@ -1284,6 +1299,7 @@ async def _write_sub_op(
         requires_approval=_WRITE_REQUIRES_APPROVAL,
         target=target,
         params=params,
+        **_standalone_kwargs(standalone),
     )
     if gate is not None:
         return gate, None
@@ -1304,6 +1320,7 @@ async def _write_vmomi_sub_op(
     vmomi_path: str,
     body: dict[str, Any],
     params: dict[str, Any],
+    standalone: bool = False,
 ) -> tuple[OperationResult | None, Any]:
     """Gate then issue one *mutating* vim (VI-JSON) sub-call on the connector session.
 
@@ -1337,6 +1354,12 @@ async def _write_vmomi_sub_op(
     substituted, e.g. ``/VirtualMachine/vm-1/ReconfigVM_Task``); ``op_id``
     is the placeholder governance key so a per-``(principal, op, target)``
     grant matches regardless of which VM the write targets.
+
+    ``standalone`` is the same follow-on-write switch as on
+    :func:`_write_sub_op` (#3697): the park records no parent composite
+    and its approval dispatches the ingested vim op itself, so *params*
+    must then be ``{"moId": ..., "body": ...}`` — the shape the ingested
+    ``vi-json.yaml`` op takes — rather than identity-only gate params.
     """
     gate = await enforce_subop_policy(
         operator=operator,
@@ -1346,11 +1369,21 @@ async def _write_vmomi_sub_op(
         requires_approval=_WRITE_REQUIRES_APPROVAL,
         target=target,
         params=params,
+        **_standalone_kwargs(standalone),
     )
     if gate is not None:
         return gate, None
     payload = await connector._post_vmomi_json(target, vmomi_path, operator=operator, json=body)
     return None, payload
+
+
+def _standalone_kwargs(standalone: bool) -> dict[str, bool]:
+    """The seam keyword for a standalone park; empty on the default path (#3697).
+
+    Passed only when set, so the many test doubles that stand in for
+    :func:`enforce_subop_policy` with the original keyword set keep working.
+    """
+    return {"standalone": True} if standalone else {}
 
 
 def _rolled_back(
@@ -1645,12 +1678,15 @@ async def _rollback_created_vm(
     the create flow failed, and a denied/queued rollback sub-op or a
     transport error must not mask the original failure. A gate result from
     the seam is ignored here for the same reason (the rollback DELETE is a
-    cleanup, not an operator-requested action). Returns ``True`` only when
-    the DELETE was issued and did not fault, so a caller can report whether
-    the VM is really gone.
+    cleanup, not an operator-requested action). The DELETE parks standalone
+    (#3697): the VM already exists, so approving the park must delete it,
+    not re-run the create. Returns ``True`` only when the DELETE was issued
+    and did not fault, so a caller can report whether the VM is really gone.
     """
     try:
-        gate, _ = await _write_sub_op(connector, target, operator, _OP_DELETE_VM, {"vm": vm_id})
+        gate, _ = await _write_sub_op(
+            connector, target, operator, _OP_DELETE_VM, {"vm": vm_id}, standalone=True
+        )
     except httpx.HTTPError:
         return False
     return gate is None
@@ -2979,14 +3015,15 @@ async def _power_on_deployed_vm(
 ) -> tuple[bool, dict[str, Any] | None]:
     """Best-effort power-on of a freshly deployed VM; ``(powered_on, issue?)``.
 
-    A power-on fault (or, defensively, a parked gate that cannot occur once
-    the deploy write cleared the same posture) never demotes the already-
+    A power-on fault or a parked / denied gate never demotes the already-
     successful deploy — it returns ``(False, issue)`` so the caller keeps
-    ``status='deployed'`` and folds the issue into the report.
+    ``status='deployed'`` and folds the issue into the report. The VM
+    exists by now, so the power-on parks standalone (#3697): approving
+    it starts this VM instead of re-running the deploy.
     """
     try:
         gate, _ = await _write_sub_op(
-            connector, target, operator, _power_vm_op_id("start"), {"vm": vm_id}
+            connector, target, operator, _power_vm_op_id("start"), {"vm": vm_id}, standalone=True
         )
     except httpx.HTTPError as exc:
         return False, _deploy_issue(
@@ -2994,9 +3031,23 @@ async def _power_on_deployed_vm(
         )
     if gate is not None:
         return False, _deploy_issue(
-            "power_on", "warning", "deploy succeeded but the follow-on power-on was not authorized"
+            "power_on",
+            "warning",
+            f"deploy succeeded but the follow-on power-on {_gate_outcome(gate)}",
         )
     return True, None
+
+
+def _gate_outcome(gate: OperationResult) -> str:
+    """Plain words for a parked or denied follow-on write, for an issue message.
+
+    A standalone park (#3697) names its approval request, so the operator
+    knows that approving it finishes the step on the existing VM.
+    """
+    request_id = gate.extras.get("approval_request_id")
+    if gate.status == "awaiting_approval" and request_id is not None:
+        return f"waits for approval request {request_id}"
+    return "was not authorized"
 
 
 #: vCenter caps a VM display name at 80 characters.
@@ -3004,9 +3055,13 @@ _VM_NAME_MAX_LENGTH: Final[int] = 80
 #: The ``DeploymentResult.resource_id.type`` of a deployed vApp; anything else
 #: is treated as a ``VirtualMachine``.
 _VAPP_RESOURCE_TYPE: Final[str] = "VirtualApp"
-# Default wall-clock bound for the deploy's Rename_Task poll (#3697) — the
-# 600s convention; module-global so tests can zero it.
-_VM_DEPLOY_RENAME_TASK_TIMEOUT_SECONDS = 600.0
+# Default wall-clock bound for the deploy's Rename_Task and the cleanup's
+# vApp Destroy_Task polls (#3697) — the 600s convention; module-global so
+# tests can zero it.
+_VM_DEPLOY_TASK_TIMEOUT_SECONDS = 600.0
+#: ``ResourcePool.resourcePool`` — the child resource pools, which is where
+#: a vApp deployed into a pool shows up (a vApp is a kind of resource pool).
+_PROP_RESOURCE_POOL_CHILDREN: Final[str] = "resourcePool"
 
 
 def _new_deploy_token() -> str:
@@ -3105,13 +3160,17 @@ async def _rename_deployed_vm(
     power-on: a parked/denied gate, a transport fault, a task fault or a poll
     timeout returns a ``rename`` warning issue that names both names, and
     the composite still reports ``deployed`` — the VM is complete, it only
-    carries the deploy name.
+    carries the deploy name. The VM exists by now, so the rename parks
+    standalone with the ingested op's own params: approving it renames
+    this VM instead of re-running the deploy (which would create a second
+    VM and rename that one).
     """
     if resource_type == _VAPP_RESOURCE_TYPE:
         op_id, mo_type = _OP_RENAME_VAPP_TASK, _VAPP_RESOURCE_TYPE
     else:
         op_id, mo_type = _OP_RENAME_VM_TASK, "VirtualMachine"
     prefix = f"deployed as {deploy_name!r}; rename to {name!r}"
+    body = {"newName": name}
     try:
         gate, task_payload = await _write_vmomi_sub_op(
             connector,
@@ -3119,17 +3178,18 @@ async def _rename_deployed_vm(
             operator,
             op_id=op_id,
             vmomi_path=f"/{mo_type}/{vm_id}/Rename_Task",
-            body={"newName": name},
-            params={"vm": vm_id, "name": name},
+            body=body,
+            params={"moId": vm_id, "body": body},
+            standalone=True,
         )
         if gate is not None:
-            return _deploy_issue("rename", "warning", f"{prefix} was not authorized")
+            return _deploy_issue("rename", "warning", f"{prefix} {_gate_outcome(gate)}")
         outcome = await poll_vim_task(
             connector,
             target,
             operator,
             task=_unwrap_value(task_payload),
-            timeout_seconds=_VM_DEPLOY_RENAME_TASK_TIMEOUT_SECONDS,
+            timeout_seconds=_VM_DEPLOY_TASK_TIMEOUT_SECONDS,
         )
     except httpx.HTTPError as exc:
         return _deploy_issue("rename", "warning", f"{prefix} failed: {exc}")
@@ -3143,7 +3203,7 @@ async def _rename_deployed_vm(
         return _deploy_issue(
             "rename",
             "warning",
-            f"{prefix} did not finish within {int(_VM_DEPLOY_RENAME_TASK_TIMEOUT_SECONDS)}s",
+            f"{prefix} did not finish within {int(_VM_DEPLOY_TASK_TIMEOUT_SECONDS)}s",
         )
     return None
 
@@ -3154,23 +3214,31 @@ async def _clean_up_failed_deploy(
     operator: Operator,
     *,
     deploy_name: str,
-    reported_vm_id: str | None = None,
+    resource_pool_id: str,
+    reported: tuple[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Delete the VM a failed deploy left behind; return one issue per VM (#3697).
+    """Delete what a failed deploy left behind; return one issue per entity (#3697).
 
-    The deploy ran under the unique *deploy_name*, so one ``GET:/vcenter/vm``
-    listing by that name finds exactly the VM this deploy created. The VM the
-    ``DeploymentResult`` names (*reported_vm_id*) is added when present. Each
-    one is removed with the same best-effort ``DELETE:/vcenter/vm/{vm}``
-    ``vm.create`` uses for its rollback (:func:`_rollback_created_vm`). The
-    issues say which VMs were removed (``info``) and which could not be
-    (``warning``); a faulted listing is a ``warning`` too, naming
-    *deploy_name* so the operator can look for the VM by hand.
+    The deploy ran under the unique *deploy_name*, so two name lookups find
+    exactly what this deploy created: one ``GET:/vcenter/vm`` listing for a
+    VM, and one read of the target pool's child resource pools for a vApp
+    (an OVF with several VMs deploys as a vApp that carries the deploy name;
+    its VMs carry the OVF's own names, so the VM listing alone would miss
+    them). The entity the ``DeploymentResult`` names (*reported*, as
+    ``(id, type)``) is added when present. A VM is removed with
+    ``DELETE:/vcenter/vm/{vm}``; a vApp with its own ``Destroy_Task``, which
+    destroys the vApp and every VM in it. Both are governed writes that park
+    standalone: an approval removes the entity, it never re-runs the deploy.
+    The issues say what was removed (``info``) and what is still there
+    (``warning``); a faulted lookup is a ``warning`` too, naming
+    *deploy_name* so the operator can look for it by hand.
     """
     issues: list[dict[str, Any]] = []
-    leftovers: set[str] = set()
-    if reported_vm_id is not None:
-        leftovers.add(reported_vm_id)
+    vm_ids: set[str] = set()
+    vapp_ids: set[str] = set()
+    if reported is not None:
+        reported_id, reported_type = reported
+        (vapp_ids if reported_type == _VAPP_RESOURCE_TYPE else vm_ids).add(reported_id)
     try:
         rows = await _resolve_vm_list(
             connector=connector,
@@ -3188,23 +3256,183 @@ async def _clean_up_failed_deploy(
             )
         )
     else:
-        leftovers |= {row["vm"] for row in rows if isinstance(row.get("vm"), str)}
-    for vm_id in sorted(leftovers):
-        if await _rollback_created_vm(
-            connector=connector, target=target, operator=operator, vm_id=vm_id
-        ):
-            issues.append(
-                _deploy_issue("cleanup", "info", f"removed VM {vm_id} left by the failed deploy")
+        vm_ids |= {row["vm"] for row in rows if isinstance(row.get("vm"), str)}
+    try:
+        vapp_ids |= set(
+            await _find_vapps_named(
+                connector, target, operator, resource_pool_id=resource_pool_id, name=deploy_name
             )
-        else:
-            issues.append(
-                _deploy_issue(
-                    "cleanup",
-                    "warning",
-                    f"could not remove VM {vm_id} left by the failed deploy; delete it by hand",
-                )
+        )
+    except httpx.HTTPError as exc:
+        issues.append(
+            _deploy_issue(
+                "cleanup",
+                "warning",
+                f"could not list vApps named {deploy_name!r} under resource pool "
+                f"{resource_pool_id!r} after the failed deploy ({type(exc).__name__}); "
+                "look for it by hand",
             )
+        )
+    for vm_id in sorted(vm_ids):
+        issues.append(await _delete_leftover_vm(connector, target, operator, vm_id=vm_id))
+    for vapp_id in sorted(vapp_ids):
+        issues.append(await _destroy_leftover_vapp(connector, target, operator, vapp_id=vapp_id))
     return issues
+
+
+async def _find_vapps_named(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    resource_pool_id: str,
+    name: str,
+) -> list[str]:
+    """Ids of the vApps directly under *resource_pool_id* whose name is *name* (#3697).
+
+    Two un-gated ``RetrievePropertiesEx`` reads: the pool's ``resourcePool``
+    children (a vApp is a child resource pool of the pool it was deployed
+    into), then the ``name`` of every child that is a ``VirtualApp``. No
+    read leaves the named objects (no traversal). An unexpected shape
+    yields no match; a transport fault raises for the caller.
+    """
+    children_read = await connector._post_vmomi_json(
+        target,
+        _VMOMI_RETRIEVE_PROPERTIES_PATH,
+        operator=operator,
+        json=_build_single_prop_retrieve_params(
+            _RESOURCE_POOL_MO_TYPE, resource_pool_id, _PROP_RESOURCE_POOL_CHILDREN
+        ),
+    )
+    children = _extract_single_prop(children_read, _PROP_RESOURCE_POOL_CHILDREN)
+    vapp_ids = [
+        child["value"]
+        for child in (children if isinstance(children, list) else [])
+        if isinstance(child, dict)
+        and child.get("type") == _VAPP_RESOURCE_TYPE
+        and isinstance(child.get("value"), str)
+    ]
+    if not vapp_ids:
+        return []
+    names_read = await connector._post_vmomi_json(
+        target,
+        _VMOMI_RETRIEVE_PROPERTIES_PATH,
+        operator=operator,
+        json=retrieve_properties_body(_VAPP_RESOURCE_TYPE, vapp_ids, ["name"]),
+    )
+    return [moid for moid, vapp_name in _entity_names(names_read).items() if vapp_name == name]
+
+
+def _entity_names(retrieve_result: Any) -> dict[str, str]:
+    """``{moid: name}`` off a multi-object ``RetrievePropertiesEx`` result reading ``name``."""
+    payload = _unwrap_value(retrieve_result)
+    objects = payload.get("objects", []) if isinstance(payload, dict) else payload
+    names: dict[str, str] = {}
+    if not isinstance(objects, list):
+        return names
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        ref = obj.get("obj")
+        moid = ref.get("value") if isinstance(ref, dict) else None
+        if not isinstance(moid, str):
+            continue
+        for entry in obj.get("propSet", []) or []:
+            if isinstance(entry, dict) and entry.get("name") == "name":
+                value = unwrap_vim_value(entry.get("val"))
+                if isinstance(value, str):
+                    names[moid] = value
+    return names
+
+
+async def _delete_leftover_vm(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    vm_id: str,
+) -> dict[str, Any]:
+    """Delete one VM a failed deploy left; the ``cleanup`` issue for it (#3697).
+
+    The same best-effort ``DELETE:/vcenter/vm/{vm}`` ``vm.create`` uses for
+    its rollback, parked standalone so an approval deletes this VM.
+    """
+    what = f"VM {vm_id} left by the failed deploy"
+    try:
+        gate, _ = await _write_sub_op(
+            connector, target, operator, _OP_DELETE_VM, {"vm": vm_id}, standalone=True
+        )
+    except httpx.HTTPError as exc:
+        return _deploy_issue(
+            "cleanup",
+            "warning",
+            f"could not remove {what} ({type(exc).__name__}); delete it by hand",
+        )
+    if gate is not None:
+        return _deploy_issue(
+            "cleanup", "warning", f"{what} is still there; its removal {_gate_outcome(gate)}"
+        )
+    return _deploy_issue("cleanup", "info", f"removed {what}")
+
+
+async def _destroy_leftover_vapp(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    vapp_id: str,
+) -> dict[str, Any]:
+    """Destroy one vApp a failed deploy left, with its VMs; the issue for it (#3697).
+
+    The governed vim ``VirtualApp.Destroy_Task`` (``_write_vmomi_sub_op``,
+    parked standalone with the ingested op's params), task-polled under the
+    deploy's task bound. A fresh deploy is powered off, so the destroy needs
+    no power-off first.
+    """
+    what = f"vApp {vapp_id} and its VMs left by the failed deploy"
+    try:
+        gate, task_payload = await _write_vmomi_sub_op(
+            connector,
+            target,
+            operator,
+            op_id=_OP_DESTROY_VAPP_TASK,
+            vmomi_path=f"/{_VAPP_RESOURCE_TYPE}/{vapp_id}/Destroy_Task",
+            body={},
+            params={"moId": vapp_id, "body": {}},
+            standalone=True,
+        )
+        if gate is not None:
+            return _deploy_issue(
+                "cleanup", "warning", f"{what} are still there; their removal {_gate_outcome(gate)}"
+            )
+        outcome = await poll_vim_task(
+            connector,
+            target,
+            operator,
+            task=_unwrap_value(task_payload),
+            timeout_seconds=_VM_DEPLOY_TASK_TIMEOUT_SECONDS,
+        )
+    except httpx.HTTPError as exc:
+        return _deploy_issue(
+            "cleanup",
+            "warning",
+            f"could not remove {what} ({type(exc).__name__}); delete them by hand",
+        )
+    if outcome.state == TASK_STATE_ERROR:
+        return _deploy_issue(
+            "cleanup",
+            "warning",
+            f"could not remove {what}: {outcome.error_message or '<no fault reported>'}; "
+            "delete them by hand",
+        )
+    if outcome.timed_out:
+        return _deploy_issue(
+            "cleanup",
+            "warning",
+            f"removal of {what} did not finish within "
+            f"{int(_VM_DEPLOY_TASK_TIMEOUT_SECONDS)}s; check vCenter by hand",
+        )
+    return _deploy_issue("cleanup", "info", f"removed {what}")
 
 
 async def _drain_deploy_cleanup(
@@ -3220,8 +3448,9 @@ async def _drain_deploy_cleanup(
     and the cancel itself. A cancellation seen during the drain is re-raised
     once the cleanup is done, so the disconnect stays honoured; the cleanup
     outcome is logged then, because no envelope reaches the caller. A
-    cleanup fault is never raised over the deploy's result: it becomes a
-    ``cleanup`` warning issue.
+    cleanup fault is never raised over the deploy's result: the shield
+    re-raises the task's exception, which is caught here and becomes a
+    ``cleanup`` warning issue (a cancel seen before it is still re-raised).
     """
     task = asyncio.ensure_future(cleanup)
     cancelled = False
@@ -3229,7 +3458,12 @@ async def _drain_deploy_cleanup(
         try:
             await asyncio.shield(task)
         except asyncio.CancelledError:
-            cancelled = True
+            # The caller was cancelled; the shielded task runs on. (A task
+            # cancelled from outside is done, which ends the loop.)
+            if not task.cancelled():
+                cancelled = True
+        except Exception:  # the task failed; its exception is read below
+            break
     if task.cancelled():
         issues = [
             _deploy_issue("cleanup", "warning", "the cleanup was cancelled; check vCenter by hand")
@@ -3292,13 +3526,18 @@ async def vm_deploy_from_library_composite(
     deployed under a unique name (``<name>-meho-<token>``,
     :func:`_deploy_vm_name`); without ``name`` the OVF default name is read
     first, and the deploy is refused when there is none. When the deploy
-    faults, reports ``succeeded=false``, or is cancelled, the composite lists
-    VMs by that unique name, deletes them plus the VM the ``DeploymentResult``
-    names, and adds a ``cleanup`` issue per VM (``info`` = removed,
-    ``warning`` = still there). The cleanup is shielded from a caller cancel
-    on every failure path. A success renames the VM to the requested name
-    (vim ``Rename_Task``, best-effort — a ``rename`` warning when it fails)
-    and never deletes anything.
+    faults, reports ``succeeded=false``, or is cancelled, the composite looks
+    up that unique name twice — the VM listing, and the target pool's child
+    vApps (a multi-VM OVF deploys as a vApp whose VMs carry other names) —
+    deletes what it finds plus the entity the ``DeploymentResult`` names (a
+    vApp is destroyed with its VMs), and adds a ``cleanup`` issue per entity
+    (``info`` = removed, ``warning`` = still there). The cleanup is shielded
+    from a caller cancel on every failure path. A success renames the VM to
+    the requested name (vim ``Rename_Task``, best-effort — a ``rename``
+    warning when it fails) and never deletes anything. Every write after the
+    VM exists (rename, power-on, cleanup) parks standalone: approving such a
+    request finishes that step on the existing VM and never re-runs the
+    deploy.
     """
     try:
         item_id, resolution_error = await _resolve_deploy_library_item(
@@ -3334,6 +3573,14 @@ async def vm_deploy_from_library_composite(
     # #3697: deploy under a unique name, so a failed deploy can find the VM it
     # created — and only that one. A successful deploy renames it to ``name``.
     deploy_name = _deploy_vm_name(name, _new_deploy_token())
+    cleanup = partial(
+        _clean_up_failed_deploy,
+        connector,
+        target,
+        operator,
+        deploy_name=deploy_name,
+        resource_pool_id=str(params["resource_pool"]),
+    )
     deploy_params = {
         "ovfLibraryItemId": item_id,
         **_build_ovf_deploy_body(params, eula_field, name=deploy_name),
@@ -3349,9 +3596,7 @@ async def vm_deploy_from_library_composite(
             timeout=_LIBRARY_ITEM_DEPLOY_TIMEOUT,
         )
     except httpx.HTTPError as exc:
-        cleanup_issues = await _drain_deploy_cleanup(
-            _clean_up_failed_deploy(connector, target, operator, deploy_name=deploy_name)
-        )
+        cleanup_issues = await _drain_deploy_cleanup(cleanup())
         return _deploy_failure(
             "deploy_error",
             library_item_id=item_id,
@@ -3368,9 +3613,7 @@ async def vm_deploy_from_library_composite(
         # The caller went away mid-deploy. Remove a partial VM before the
         # cancellation unwinds (#3697); no envelope reaches the caller, so
         # the outcome is logged.
-        cleanup_issues = await _drain_deploy_cleanup(
-            _clean_up_failed_deploy(connector, target, operator, deploy_name=deploy_name)
-        )
+        cleanup_issues = await _drain_deploy_cleanup(cleanup())
         _log.warning(
             "vmware_deploy_from_library_cancelled",
             deploy_name=deploy_name,
@@ -3392,18 +3635,12 @@ async def vm_deploy_from_library_composite(
     vm_id = resource.get("id") if isinstance(resource, dict) else None
     resource_type = resource.get("type") if isinstance(resource, dict) else None
     if not result.get("succeeded"):
-        reported_vm_id = (
-            vm_id if isinstance(vm_id, str) and resource_type == "VirtualMachine" else None
+        reported = (
+            (vm_id, resource_type)
+            if isinstance(vm_id, str) and isinstance(resource_type, str)
+            else None
         )
-        issues += await _drain_deploy_cleanup(
-            _clean_up_failed_deploy(
-                connector,
-                target,
-                operator,
-                deploy_name=deploy_name,
-                reported_vm_id=reported_vm_id,
-            )
-        )
+        issues += await _drain_deploy_cleanup(cleanup(reported=reported))
         return _deploy_failure("deploy_failed", library_item_id=item_id, issues=issues)
     if not isinstance(vm_id, str):
         raise RuntimeError(

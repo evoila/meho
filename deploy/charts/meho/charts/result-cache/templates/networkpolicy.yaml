@@ -37,6 +37,10 @@ spec:
               {{- toYaml . | nindent 14 }}
         {{- end }}
       ports:
-        - port: {{ .Values.service.port }}
+        # The policy is checked against the Pod port, not the Service port.
+        # Valkey always listens on 6379 (see configmap.yaml and the
+        # containerPort in deployment.yaml); `service.port` only changes
+        # the Service's front port.
+        - port: 6379
           protocol: TCP
 {{- end }}

@@ -92,13 +92,16 @@ spec:
     # Dedicated result-cache subchart (`charts/result-cache/`). Selectors
     # match that subchart's `resultCache.selectorLabels`. Without this rule
     # the backplane cannot reach the store and every result read misses.
+    # The port is the Pod port (Valkey always listens on 6379), not
+    # `resultCache.service.port`: the policy is checked after the Service
+    # forwards the connection to the Pod.
     - to:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: result-cache
               app.kubernetes.io/instance: {{ .Release.Name }}
       ports:
-        - port: {{ .Values.resultCache.service.port }}
+        - port: 6379
           protocol: TCP
     {{- end }}
     # DNS — UDP/53 to kube-dns / CoreDNS. Without this rule every other

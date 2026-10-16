@@ -83,8 +83,8 @@ auth:
   password: ""
 
 # -- The subchart's own ingress NetworkPolicy. Selects the result-cache Pod
-# and admits tcp/<service.port> only from the backplane Pods (and any
-# `extraAllowedSelectors`).
+# and admits tcp/6379 (the Pod port, whatever `service.port` is) only from
+# the backplane Pods (and any `extraAllowedSelectors`).
 networkPolicy:
   enabled: true
   # -- Labels of the backplane Pods allowed to reach the store. The

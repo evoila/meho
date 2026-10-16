@@ -65,6 +65,7 @@ __all__ = [
     "result_connector_vault_write_forbidden",
     "result_denied",
     "result_handler_unreachable",
+    "result_idempotency_key_conflict",
     "result_invalid_op_schema",
     "result_invalid_params",
     "result_no_connector",
@@ -704,6 +705,8 @@ def result_awaiting_approval(
     op_id: str,
     approval_request_id: uuid.UUID,
     duration_ms: float,
+    *,
+    reused: bool = False,
 ) -> OperationResult:
     """Policy gate issued a ``needs-approval`` verdict; pending row created.
 
@@ -722,14 +725,49 @@ def result_awaiting_approval(
     this value; callers that only handled ``"ok"`` / ``"error"`` /
     ``"denied"`` will treat it as an unrecognised status and surface it
     as a pending call, which is the correct semantics.
+
+    *reused* (#3486) is ``True`` when an ``idempotency_key`` retry got an
+    existing request back instead of a new one. It adds
+    ``extras["approval_request_reused"] = True``; the key is absent
+    otherwise, so a new park's envelope is unchanged.
     """
+    extras: dict[str, Any] = {
+        "error_code": "awaiting_approval",
+        "approval_request_id": str(approval_request_id),
+    }
+    if reused:
+        extras["approval_request_reused"] = True
     return OperationResult(
         status="awaiting_approval",
         op_id=op_id,
         error=f"awaiting_approval: {op_id!r} requires approval before execution",
         duration_ms=duration_ms,
+        extras=extras,
+    )
+
+
+def result_idempotency_key_conflict(
+    op_id: str,
+    approval_request_id: uuid.UUID,
+    duration_ms: float,
+) -> OperationResult:
+    """The ``idempotency_key`` is held by a live request for a different call (#3486).
+
+    The same principal already has a ``pending`` or ``approved`` request
+    with this key, but for another ``op_id`` / ``connector_id`` / target /
+    params / ``preview_hash`` / ``work_ref``. Nothing is parked or run.
+    ``extras["approval_request_id"]`` names the request that holds the key.
+    """
+    return OperationResult(
+        status="denied",
+        op_id=op_id,
+        error=(
+            "denied: idempotency_key is already used by another approval request "
+            "for a different call; send the identical call, or use a new key"
+        ),
+        duration_ms=duration_ms,
         extras={
-            "error_code": "awaiting_approval",
+            "error_code": "idempotency_key_conflict",
             "approval_request_id": str(approval_request_id),
         },
     )

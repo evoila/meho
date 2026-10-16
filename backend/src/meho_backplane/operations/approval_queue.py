@@ -80,10 +80,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from enum import StrEnum
 from typing import Any, Final, cast
 
 import structlog
 from sqlalchemy import CursorResult, and_, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.delegation import resolve_actor_sub
@@ -124,14 +126,17 @@ __all__ = [
     "ApprovalNotFoundError",
     "ApprovalRequestAlreadyDecidedError",
     "ApprovalRequestExpiredError",
+    "ApprovalResultState",
     "DelegatedReasonInvalidError",
     "Delegation",
+    "IdempotencyKeyConflictError",
     "NonHumanApprovalError",
     "ParamsMismatchError",
     "PreviewBindingMissingError",
     "ResultAccessForbiddenError",
     "SelfApprovalForbiddenError",
     "UnauthorizedApprovalError",
+    "approval_result_state",
     "approve_request",
     "claim_resume",
     "composite_resume_binding",
@@ -228,6 +233,26 @@ class ParamsMismatchError(ApprovalError):
         super().__init__(
             f"params hash mismatch on approval_request {request_id}; "
             "original params must be supplied unchanged"
+        )
+
+
+class IdempotencyKeyConflictError(ApprovalError):
+    """An ``idempotency_key`` is already used by a different call (#3486).
+
+    Raised by :func:`create_pending_request` when the same principal sends a
+    key that a live (``pending`` or ``approved``) request already holds, but
+    the new call is not the same call: a different ``op_id``,
+    ``connector_id``, target, params, ``preview_hash`` or ``work_ref``.
+    Returning the old request would tell the caller that the wrong call is
+    waiting for approval, so the new call is refused and nothing is parked.
+    """
+
+    def __init__(self, request_id: uuid.UUID) -> None:
+        self.request_id = request_id
+        super().__init__(
+            f"idempotency_key is already used by approval_request {request_id} "
+            "for a different call; send the identical call to get that request "
+            "back, or use a new key"
         )
 
 
@@ -517,6 +542,136 @@ def _record_delegation(
     )
 
 
+class ApprovalResultState(StrEnum):
+    """Whether an approved request has run yet (#3486).
+
+    Read off the row, never stored. ``status`` keeps its closed four-state
+    contract; this field adds the run phase next to it, so a client that
+    lists or shows requests can tell "approved, not run yet" from
+    "approved and run" without polling the owner-only ``/result`` read.
+
+    * :attr:`NOT_STARTED` -- approved, and no resumer has claimed the run
+      yet (``resumed_at IS NULL``).
+    * :attr:`STARTED` -- a resumer claimed the run (``resumed_at`` is set),
+      but no result is stored. Either the op is still running, or the run
+      ended without a stored result: the in-process agent resume returns
+      its result to the agent and does not store it, and the result write is
+      best-effort.
+    * :attr:`EXECUTED` -- the stored result has ``status == "ok"``.
+    * :attr:`FAILED` -- a result is stored and its ``status`` is not ``ok``.
+    """
+
+    NOT_STARTED = "not_started"
+    STARTED = "started"
+    EXECUTED = "executed"
+    FAILED = "failed"
+
+
+def approval_result_state(request: ApprovalRequest) -> ApprovalResultState | None:
+    """Return the run phase of *request*, or ``None`` when it is not approved (#3486)."""
+    if request.status != ApprovalRequestStatus.APPROVED.value:
+        return None
+    if request.resume_result is not None:
+        if request.resume_result.get("status") == "ok":
+            return ApprovalResultState.EXECUTED
+        return ApprovalResultState.FAILED
+    if request.resumed_at is not None:
+        return ApprovalResultState.STARTED
+    return ApprovalResultState.NOT_STARTED
+
+
+#: Statuses in which a request still holds its ``idempotency_key`` (#3486).
+#: Must match the partial unique index predicate of migration ``0105``.
+_IDEMPOTENT_LIVE_STATUSES: Final[tuple[str, ...]] = (
+    ApprovalRequestStatus.PENDING.value,
+    ApprovalRequestStatus.APPROVED.value,
+)
+
+
+async def _find_idempotent_request(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    principal_sub: str,
+    idempotency_key: str,
+) -> ApprovalRequest | None:
+    """Return the live request that holds *idempotency_key* for this principal.
+
+    Scoped to the tenant **and** the principal, so a key never matches
+    another tenant's or another requester's request.
+    """
+    stmt = select(ApprovalRequest).where(
+        ApprovalRequest.tenant_id == tenant_id,
+        ApprovalRequest.principal_sub == principal_sub,
+        ApprovalRequest.idempotency_key == idempotency_key,
+        ApprovalRequest.status.in_(_IDEMPOTENT_LIVE_STATUSES),
+    )
+    return (await session.execute(stmt)).scalars().first()
+
+
+def _reuse_idempotent_request(
+    existing: ApprovalRequest,
+    *,
+    op_id: str,
+    connector_id: str,
+    target_id: uuid.UUID | None,
+    params_hash: str,
+    preview_hash: str | None,
+) -> ApprovalRequest:
+    """Return *existing* for a retry, or refuse when the call differs (#3486).
+
+    The retry must be the identical call. ``work_ref`` is compared too, so
+    two runs under different change tickets never share one request.
+    """
+    same_call = (
+        existing.op_id == op_id
+        and existing.connector_id == connector_id
+        and existing.target_id == target_id
+        and existing.params_hash == params_hash
+        and existing.preview_hash == preview_hash
+        and existing.work_ref == work_ref_var.get()
+    )
+    if not same_call:
+        raise IdempotencyKeyConflictError(existing.id)
+    _log.info(
+        "approval_request_reused",
+        approval_request_id=str(existing.id),
+        op_id=op_id,
+        connector_id=connector_id,
+        principal_sub=existing.principal_sub,
+        tenant_id=str(existing.tenant_id),
+    )
+    existing._reused = True  # type: ignore[attr-defined]
+    return existing
+
+
+async def _insert_idempotent_request(
+    session: AsyncSession, request: ApprovalRequest, *, idempotency_key: str
+) -> ApprovalRequest | None:
+    """Insert *request* in a savepoint; return the winner if a racer got there first.
+
+    The partial unique index (migration ``0105``) makes the second of two
+    racing inserts fail. That insert's savepoint rolls back, the outer
+    transaction stays usable, and the row the other request committed is
+    returned. Returns ``None`` when *request* itself was inserted.
+    """
+    try:
+        async with session.begin_nested():
+            session.add(request)
+            await session.flush()
+    except IntegrityError:
+        existing = await _find_idempotent_request(
+            session,
+            tenant_id=request.tenant_id,
+            principal_sub=request.principal_sub,
+            idempotency_key=idempotency_key,
+        )
+        if existing is None:
+            raise
+        return existing
+    return None
+
+
 def _now() -> datetime:
     """Return the current UTC datetime. Isolated for testing."""
     return datetime.now(UTC)
@@ -681,6 +836,7 @@ async def create_pending_request(
     expires_at: datetime | None = None,
     preview_hash: str | None = None,
     resume_parent: dict[str, Any] | None = None,
+    idempotency_key: str | None = None,
 ) -> ApprovalRequest:
     """Insert a pending :class:`ApprovalRequest` row + one audit row.
 
@@ -728,14 +884,45 @@ async def create_pending_request(
             composite ``_approved=True`` with the approved sub-op pre-cleared.
             ``None`` for a direct-op park (the generic re-dispatch of
             ``op_id`` is used).
+        idempotency_key: Optional client-chosen retry key (#3486). When the
+            same principal in the same tenant already has a ``pending`` or
+            ``approved`` request with this key, that request is returned
+            instead of a new one: no new row, no new audit row. The
+            returned row carries the transient attr ``_reused = True`` (and
+            no ``_audit_id``), so the caller does not publish a second
+            ``approval.pending`` event. ``None`` keeps the old behaviour.
 
     Returns:
-        The flushed :class:`ApprovalRequest` row.
+        The flushed :class:`ApprovalRequest` row (new, or reused).
+
+    Raises:
+        IdempotencyKeyConflictError: *idempotency_key* is held by a live
+            request for a different call.
     """
     target_id: uuid.UUID | None = None
     raw_tid = getattr(target, "id", None) if target is not None else None
     if isinstance(raw_tid, uuid.UUID):
         target_id = raw_tid
+
+    def _reuse(existing: ApprovalRequest) -> ApprovalRequest:
+        return _reuse_idempotent_request(
+            existing,
+            op_id=op_id,
+            connector_id=connector_id,
+            target_id=target_id,
+            params_hash=params_hash,
+            preview_hash=preview_hash,
+        )
+
+    if idempotency_key is not None:
+        existing = await _find_idempotent_request(
+            session,
+            tenant_id=operator.tenant_id,
+            principal_sub=operator.sub,
+            idempotency_key=idempotency_key,
+        )
+        if existing is not None:
+            return _reuse(existing)
 
     if proposed_effect is None:
         proposed_effect = {
@@ -809,9 +996,15 @@ async def create_pending_request(
         agent_session_id=resolve_agent_session_id(),
         request_audit_id=request_audit_id,
         resume_parent=stored_resume_parent,
+        idempotency_key=idempotency_key,
     )
-    session.add(request)
-    await session.flush()
+    if idempotency_key is None:
+        session.add(request)
+        await session.flush()
+    else:
+        winner = await _insert_idempotent_request(session, request, idempotency_key=idempotency_key)
+        if winner is not None:
+            return _reuse(winner)
     if handoff_payload is not None:
         request.execution_handle = store_handoff(
             session, request.id, request.tenant_id, handoff_payload

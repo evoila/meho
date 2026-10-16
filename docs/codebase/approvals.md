@@ -824,6 +824,109 @@ for the paired add-on that requested the approval
 approved?"; the `/result` surface answers "what did the approved re-dispatch
 produce?" — complementary, not a duplicate.
 
+## Retry-safe approval requests, binding identity, and run phase (#3486)
+
+A durable client, such as an add-on that drives a two-person governed
+delete, retries after a crash or restart. Three things make that safe.
+
+### 1. Send an `idempotency_key` so a retry gets the same request
+
+`call_operation` (REST `POST /api/v1/operations/call`, MCP `call_operation`)
+takes an optional `idempotency_key` (1 to 200 characters,
+`CallOperationBody.idempotency_key`). It only matters when the call waits
+for approval.
+
+- **First call.** The new `approval_request` row stores the key
+  (`idempotency_key` column, migration `0105`).
+- **Retry of the identical call.** If the same principal in the same tenant
+  has a `pending` or `approved` request with this key,
+  `create_pending_request` returns that request. The reply is the normal
+  `awaiting_approval` envelope (HTTP 200) with the **same**
+  `extras.approval_request_id` and `extras.approval_request_reused: true`.
+  No new row, no new `approval.request` audit row, no second
+  `approval.pending` event. The first row's audit record stands.
+- **Same key, different call.** "Identical" means the same `op_id`,
+  `connector_id`, target, `params_hash`, `preview_hash`, and `work_ref`. If
+  any of them differs, the call is refused with `status="denied"` and
+  `extras.error_code="idempotency_key_conflict"`, and
+  `extras.approval_request_id` names the request that holds the key. Nothing
+  is parked. The refusal writes a `denied` audit row.
+- **When the key is free again.** A `rejected` or `expired` request no
+  longer holds its key, so the same key parks a new request. An `approved`
+  request keeps its key even after it ran: a retry then returns the request
+  that already ran, so the op is never run twice.
+- **Who can match.** The key is scoped to `(tenant_id, principal_sub)`. Two
+  requesters, or two runs with different `work_ref` values, never share one
+  request. Without a key, nothing changes: every call that waits for
+  approval makes a new request.
+
+**Races.** A partial unique index,
+`approval_request_idempotency_key_idx` on `(tenant_id, principal_sub,
+idempotency_key) WHERE idempotency_key IS NOT NULL AND status IN
+('pending', 'approved')`, makes sure two racing calls cannot both insert.
+The losing insert runs in a savepoint (`_insert_idempotent_request`). When
+the index refuses it, the savepoint rolls back and the winner's row is
+returned the same way as a normal retry.
+
+**What does not change.** The lookup runs inside `create_pending_request`,
+after every park gate in `_handle_needs_approval`. So a retry still goes
+through the policy gate, the destructive-tier `preview_hash` check (#3197),
+and the permission preflight. A retry with a stale `preview_hash` is refused
+with `preview_hash_mismatch`, as before. The key is not used for the
+sub-op requests a composite (multi-step) op makes, and not on the resume
+path. Tenant isolation and the one-resumer latch (`resumed_at`) are
+unchanged.
+
+### 2. `preview_hash` on list and show
+
+`ApprovalRequestView` (`GET /api/v1/approvals` and `GET
+/api/v1/approvals/{id}`) now carries `preview_hash`, the destructive-tier
+binding stored at park time. With `op_id`, `target_id`, and `params_hash`, a
+client can match a request to the row it previewed. It is `null` for a
+non-destructive request. The field is additive.
+
+### 3. `result_state`: has the approved op run yet?
+
+`status` keeps its four values (`pending` / `approved` / `rejected` /
+`expired`), so the migration `0023` `CHECK` constraint and every existing
+client are unchanged. Next to it, the list and show views carry
+`result_state`, worked out from the row by `approval_result_state` (it is
+not stored):
+
+| `result_state` | Meaning |
+|---|---|
+| `null` | `status` is not `approved`. |
+| `not_started` | Approved. No resumer has claimed the run yet (`resumed_at IS NULL`). |
+| `started` | A resumer claimed the run (`resumed_at` is set), but no result is stored yet. The op may still be running. |
+| `executed` | The stored result (`resume_result`) has `status == "ok"`. |
+| `failed` | A result is stored and its `status` is not `ok`. |
+
+So a client that lists or shows requests can tell "approved, not run yet"
+from "approved and run" without polling the owner-only `/result` read. The
+result body itself stays on `/result` only; the views show the phase, not
+the payload.
+
+Limits of `started`: the in-process agent-run resume returns its result to
+the agent and does not store it, and the result write is best-effort. In
+those cases the row stays `started`. An add-on's request is resumed by an
+operator surface (`resume_dispatch_after_approval`), which stores the
+result, so it reaches `executed` or `failed`.
+
+### The add-on governed-destroy round trip (#3478)
+
+For the add-on that proposes a destructive op: send an `idempotency_key`
+with the `call_operation` that carries the `preview_hash`. Derive the key
+from something stable on your side, for example your run id plus the row
+you want to delete. If you crash before you store the
+`approval_request_id`, send the identical call again with the same key. You
+get the same request back. Then watch `result_state` on `GET
+/api/v1/approvals/{id}`, and read the result body from `/result` once it is
+`executed` or `failed`.
+
+**Pinned by tests:** `tests/test_approval_idempotent_park.py` (retry,
+scoping, conflict, race, `result_state` on the REST list and show) and
+`tests/migrations/test_migration_0105_add_approval_request_idempotency_key.py`.
+
 ## `proposed_effect` builder hook (#1437)
 
 `ApprovalRequest.proposed_effect` holds what the reviewer sees in the

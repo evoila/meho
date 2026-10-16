@@ -499,7 +499,7 @@ principal may still declare its own `work_ref`.
   `server_stamped_field`, `claim_not_found`, `claim_not_owned`,
   `claim_completed`, `idempotency_key_reused`.
 - The checks and the INSERT share one transaction. Three partial unique
-  indexes (migration `0105`) catch two requests that race: one retry key
+  indexes (migration `0106`) catch two requests that race: one retry key
   per owner, one `start` per claim, one `completion` per claim.
 
 A claim is **advisory**. It tells others what an agent intends. It is
@@ -533,7 +533,7 @@ costs the durable record; both legs are fail-loud. Columns: `id` (UUID
 PK), `tenant_id` (FK), `principal_sub`, `activity`, `target`, `scope`,
 `targets` (JSONB), `phase`, `planned_op_class`, `ttl_minutes`,
 `work_ref`, `run_id`, `created_at` (the event's `ts`), plus the trusted
-claim columns from migration `0105` (#3736): `claim_id`, `owner_sub`,
+claim columns from migration `0106` (#3736): `claim_id`, `owner_sub`,
 `actor_sub`, `admission`, `idempotency_key`. Indexes:
 `(tenant_id, created_at DESC)` (recent backfill + prune) and
 `(tenant_id, work_ref)` (filter). This is the split Kubernetes draws

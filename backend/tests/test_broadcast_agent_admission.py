@@ -4,7 +4,7 @@
 """Trusted admission and claim rules for intentional announcements (#3736).
 
 Covers the task's acceptance criteria with the real admission check and
-the real database (the test SQLite schema has migration ``0105``
+the real database (the test SQLite schema has migration ``0106``
 applied). Only the Valkey ``XADD`` and the rate limiter are faked.
 
 * Forged client fields (``run_id``, a person's token, an OAuth client id

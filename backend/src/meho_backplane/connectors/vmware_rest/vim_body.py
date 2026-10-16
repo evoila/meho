@@ -81,6 +81,10 @@ _ARRAY_OF_PREFIX: Final[str] = "ArrayOf"
 #: ``_typeName`` of a vim managed-object reference.
 MOREF_TYPE_NAME: Final[str] = "ManagedObjectReference"
 
+#: ``_typeName`` of the 9.x fault wrapper. It is not a fault class, so
+#: :func:`fault_type_name` never returns it.
+_LOCALIZED_METHOD_FAULT: Final[str] = "LocalizedMethodFault"
+
 # ``_typeName`` values of the RetrievePropertiesEx body trio + options
 # (spec-verified against the pinned ``vi-json.yaml``:
 # ``RetrievePropertiesExRequestType.specSet`` items are
@@ -226,7 +230,11 @@ def fault_type_name(fault: Any) -> str | None:
     Returns the concrete fault class **name only** -- never any fault text
     (``faultstring`` / ``faultMessage`` / ``localizedMessage``) or payload
     field, which can echo a property value or a private identifier (#3708).
-    ``None`` when *fault* is not a dict or carries no usable type name.
+    ``None`` when *fault* is not a dict or carries no usable type name. Also
+    ``None`` for a degenerate 9.x wrapper whose nested ``fault`` has no usable
+    ``_typeName`` (or that has no nested ``fault`` at all): the wrapper name
+    ``LocalizedMethodFault`` is not a fault class, so it is never reported as
+    one.
     """
     if not isinstance(fault, dict):
         return None
@@ -235,7 +243,8 @@ def fault_type_name(fault: Any) -> str | None:
         nested_name = _fault_type_name(nested)
         if nested_name is not None:
             return nested_name
-    return _fault_type_name(fault)
+    type_name = _fault_type_name(fault)
+    return None if type_name == _LOCALIZED_METHOD_FAULT else type_name
 
 
 def method_fault_type(body_text: str) -> str | None:

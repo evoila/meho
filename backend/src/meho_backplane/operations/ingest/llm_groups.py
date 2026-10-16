@@ -29,9 +29,28 @@ The function persists nothing until both passes complete, then writes
 proposed groups (``review_status='staged'``) + per-op ``group_id``
 assignments + one ``meho_connector_llm_grouping`` audit row in a
 single transaction. Re-running on a fully-grouped connector is a
-no-op (every op already has ``group_id`` set, no LLM call fires);
-re-running on a partially-grouped connector runs only Pass 2 on the
-unassigned rows against the existing :class:`OperationGroup` rows.
+no-op (every op already has ``group_id`` set, no LLM call fires).
+
+Re-running on a partially-grouped connector (#3713):
+
+* Groups owned by a typed registrar -- any group that holds a
+  ``source_kind='typed'`` op -- are never Pass-2 candidates. Ingested
+  ops are not filed into those curated single-purpose groups.
+  Composite ops do not make a group typed: hand-written composites
+  live in the shared semantic groups (``vm``, ``storage``, ...), and
+  those groups still take ingested ops.
+* If no other group exists, the run is a full grouping run (Pass 1
+  over every unassigned op, then Pass 2). Existing group keys are
+  reserved: a proposal that reuses one is dropped.
+* Otherwise Pass 2 files the unassigned ops into the existing non-typed
+  groups. Ops still left over then get an "extend" Pass 1: the model
+  sees the existing groups and may propose new groups (or none) for
+  the leftovers, followed by a Pass 2 over the leftovers against the
+  new groups only.
+
+The result carries one :class:`GroupSummary` per group in scope: how
+many ops this run added to it, and how many typed, composite, and
+ingested ops it now holds.
 
 Per :file:`docs/codebase/spec-ingestion.md` and the T3 task body in
 issue #404: this pass is non-optional for v0.2. Raw semantic+BM25
@@ -60,8 +79,9 @@ operator-facing framing.
 from __future__ import annotations
 
 import time
+from collections import Counter
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from uuid import UUID
 
 import structlog
@@ -82,6 +102,7 @@ from meho_backplane.operations.ingest._llm_grouping_internals import (
     PASS1_MAX_OUTPUT_TOKENS,
     PASS2_MAX_OUTPUT_TOKENS,
     PROPOSE_GROUPS_SYSTEM_PROMPT,
+    GroupMembership,
     GroupProposal,
     LlmClient,
     LlmJsonResult,
@@ -91,6 +112,7 @@ from meho_backplane.operations.ingest._llm_grouping_internals import (
     expected_llm_call_count,
     extract_json_object,
     load_existing_groups,
+    load_group_membership,
     load_unassigned_ops,
     parse_assignment_response,
     parse_proposal_response,
@@ -98,12 +120,14 @@ from meho_backplane.operations.ingest._llm_grouping_internals import (
     render_propose_groups_prompt,
     strip_code_fences,
 )
+from meho_backplane.operations.ingest.exceptions import LlmOutputInvalid
 
 __all__ = [
     "DEFAULT_GROUPING_BATCH_SIZE",
     "DEFAULT_MAX_GROUPS",
     "DEFAULT_MIN_GROUPS",
     "GroupProposal",
+    "GroupSummary",
     "GroupingConfig",
     "GroupingResult",
     "LlmClient",
@@ -126,6 +150,36 @@ _log = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
+class GroupSummary:
+    """Per-group outcome of one grouping run.
+
+    Attributes
+    ----------
+    group_key:
+        The group's key.
+    created:
+        ``True`` when this run created the group.
+    operations_added:
+        How many ops this run assigned to the group.
+    typed_operation_count:
+        Typed ops (``source_kind='typed'``) in the group after the run.
+        Above zero means a typed registrar owns the group.
+    composite_operation_count:
+        Hand-written composite ops in the group after the run. They do
+        not make the group typed.
+    ingested_operation_count:
+        Spec-ingested ops in the group after the run.
+    """
+
+    group_key: str
+    created: bool
+    operations_added: int
+    typed_operation_count: int
+    composite_operation_count: int
+    ingested_operation_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class GroupingResult:
     """Counts + timings returned by :func:`run_llm_grouping`.
 
@@ -138,8 +192,8 @@ class GroupingResult:
         connector that was grouped.
     groups_created:
         Number of brand-new :class:`OperationGroup` rows inserted by
-        this pass. Zero on a re-run that found existing groups (the
-        partial-regrouping path).
+        this pass. On a re-run this counts the new groups the
+        "extend" Pass 1 proposed for leftover ops.
     operations_assigned:
         Number of :class:`EndpointDescriptor` rows whose ``group_id``
         was set by this pass.
@@ -151,12 +205,17 @@ class GroupingResult:
     llm_call_count:
         Total LLM calls issued. ``1 + ceil(op_count / batch_size)``
         on a full grouping run (1 Pass-1 + N Pass-2 batches). Zero
-        on a no-op re-run that found every op already grouped.
+        on a no-op re-run that found every op already grouped. A
+        re-run with leftover ops adds one "extend" Pass-1 call, plus
+        Pass-2 batches for the leftovers when it proposed groups.
     llm_duration_ms:
         Wall-clock time spent inside
         ``await llm_client.generate_json(...)``, summed across both
         passes. Excludes DB time and prompt-render time so operators
         can monitor the LLM-side cost component independently.
+    groups:
+        One :class:`GroupSummary` per group in the connector scope,
+        sorted by ``group_key``. Empty on a no-op run.
     """
 
     connector_id: str
@@ -165,6 +224,7 @@ class GroupingResult:
     operations_unassigned: int
     llm_call_count: int
     llm_duration_ms: float
+    groups: tuple[GroupSummary, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,6 +287,9 @@ class _PhaseTotals:
     groups_created: int = 0
     operations_assigned: int = 0
     operations_unassigned: int = 0
+    added_by_key: Counter[str] = field(default_factory=Counter)
+    created_keys: set[str] = field(default_factory=set)
+    groups: tuple[GroupSummary, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,9 +325,12 @@ async def _propose_groups_via_llm(
     operations: Sequence[EndpointDescriptor],
     config: GroupingConfig,
     totals: _PhaseTotals,
+    existing_groups: Sequence[GroupProposal] = (),
 ) -> list[GroupProposal]:
     """Run Pass 1 against the LLM and return the validated proposals.
 
+    With *existing_groups* set, the prompt runs in "extend" mode (see
+    :func:`render_propose_groups_prompt`) and may return no groups.
     Updates *totals* in place with the LLM-call count and duration.
     Pass-1 output that fails schema validation raises
     :class:`LlmOutputInvalid`; the orchestrator does not catch it,
@@ -279,6 +345,7 @@ async def _propose_groups_via_llm(
         operations=operations,
         min_groups=config.min_groups,
         max_groups=config.max_groups,
+        existing_groups=existing_groups,
     )
     t0 = time.monotonic()
     raw_pass1 = await llm_client.generate_json(
@@ -410,30 +477,51 @@ def _apply_assignments_to_rows(
     group_key_to_id: dict[str, UUID],
     totals: _PhaseTotals,
 ) -> None:
-    """Mutate each :class:`EndpointDescriptor`'s ``group_id`` per *assignment_map*.
+    """Set each :class:`EndpointDescriptor`'s ``group_id`` per *assignment_map*.
 
-    Updates *totals.operations_assigned* and
-    *totals.operations_unassigned* in place. The orchestrator's
-    surrounding transaction is what makes the mutations durable.
-
-    Ops the LLM omitted from its Pass-2 response (``op_id`` absent from
-    *assignment_map*) and ops explicitly mapped to
-    :data:`NONE_GROUP_KEY` are both counted exactly once as
-    ``operations_unassigned``. This preserves the
-    ``operations_assigned + operations_unassigned == len(operations)``
-    reconciliation invariant the audit row depends on.
+    Counts every assigned op in *totals.added_by_key*. Ops the LLM
+    omitted, mapped to :data:`NONE_GROUP_KEY`, or mapped to a key not in
+    *group_key_to_id* keep ``group_id=NULL``. The orchestrator derives
+    ``operations_assigned`` / ``operations_unassigned`` from the final
+    row state, so an op is counted exactly once even when it goes
+    through two assignment rounds.
     """
     for op_row in operations:
         assigned_key = assignment_map.get(op_row.op_id)
         if assigned_key is None or assigned_key == NONE_GROUP_KEY:
-            totals.operations_unassigned += 1
             continue
         group_uuid = group_key_to_id.get(assigned_key)
         if group_uuid is None:  # pragma: no cover -- guarded by parser
-            totals.operations_unassigned += 1
             continue
         op_row.group_id = group_uuid
-        totals.operations_assigned += 1
+        totals.added_by_key[assigned_key] += 1
+
+
+async def _assign_and_apply(
+    llm_client: LlmClient,
+    *,
+    triple: _ConnectorTriple,
+    operations: Sequence[EndpointDescriptor],
+    groups: Sequence[GroupProposal],
+    group_key_to_id: dict[str, UUID],
+    config: GroupingConfig,
+    totals: _PhaseTotals,
+) -> None:
+    """Run Pass 2 for *operations* against *groups* and apply the result."""
+    assignment_map = await _assign_ops_in_batches(
+        llm_client,
+        triple=triple,
+        operations=operations,
+        groups=groups,
+        config=config,
+        totals=totals,
+    )
+    _apply_assignments_to_rows(
+        operations=operations,
+        assignment_map=assignment_map,
+        group_key_to_id=group_key_to_id,
+        totals=totals,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -476,68 +564,116 @@ def _project_persisted_groups(
     ]
 
 
-async def _resolve_groups_for_pass2(
+async def _create_groups_and_assign(
     session: AsyncSession,
     llm_client: LlmClient,
     *,
     triple: _ConnectorTriple,
-    unassigned_ops: Sequence[EndpointDescriptor],
+    operations: Sequence[EndpointDescriptor],
+    existing_groups: Sequence[GroupProposal],
+    reserved_keys: set[str],
     config: GroupingConfig,
     totals: _PhaseTotals,
-) -> tuple[list[GroupProposal], dict[str, UUID]]:
-    """Return the groups Pass 2 will assign against, plus their UUIDs.
+) -> None:
+    """Propose new groups for *operations* (Pass 1), persist them, then assign (Pass 2).
 
-    Full grouping path -- no existing groups in scope: run Pass 1 to
-    propose them, persist as ``staged``, flush, return.
+    *existing_groups* empty -- a full grouping run. Otherwise an
+    "extend" run that lists the existing groups and may propose none.
+    A proposal whose key is in *reserved_keys* (any group already in
+    the connector scope, typed ones included) is dropped, so this never
+    renames or collides with a persisted group.
 
-    Partial regrouping path -- existing groups present: skip Pass 1
-    entirely, project the existing rows into :class:`GroupProposal`
-    instances, return.
+    The extend run is best effort: if its Pass-1 output is invalid, the
+    leftovers stay ungrouped and the assignments already made into the
+    existing groups still commit. On a full run the error propagates.
     """
-    existing_groups = await load_existing_groups(
+    _log.info(
+        "llm_grouping_pass1_start",
+        connector_id=triple.connector_id,
+        op_count=len(operations),
+        extend=bool(existing_groups),
+        min_groups=config.min_groups,
+        max_groups=config.max_groups,
+    )
+    try:
+        proposals = await _propose_groups_via_llm(
+            llm_client,
+            triple=triple,
+            operations=operations,
+            config=config,
+            totals=totals,
+            existing_groups=existing_groups,
+        )
+    except LlmOutputInvalid as exc:
+        if not existing_groups:
+            raise
+        _log.warning(
+            "llm_grouping_extend_pass1_invalid",
+            connector_id=triple.connector_id,
+            leftover_op_count=len(operations),
+            error=str(exc),
+        )
+        return
+    clashing = [p.group_key for p in proposals if p.group_key in reserved_keys]
+    if clashing:
+        _log.warning(
+            "llm_grouping_pass1_reserved_keys_dropped",
+            connector_id=triple.connector_id,
+            group_keys=clashing,
+        )
+    proposals = [p for p in proposals if p.group_key not in reserved_keys]
+    _log.info(
+        "llm_grouping_pass1_complete",
+        connector_id=triple.connector_id,
+        proposed_group_count=len(proposals),
+    )
+    if not proposals:
+        return
+    persisted_rows = _persist_proposed_groups(session, triple=triple, proposals=proposals)
+    await session.flush()
+    totals.groups_created += len(persisted_rows)
+    totals.created_keys.update(row.group_key for row in persisted_rows)
+    await _assign_and_apply(
+        llm_client,
+        triple=triple,
+        operations=operations,
+        groups=proposals,
+        group_key_to_id={row.group_key: row.id for row in persisted_rows},
+        config=config,
+        totals=totals,
+    )
+
+
+async def _summarise_groups(
+    session: AsyncSession,
+    *,
+    triple: _ConnectorTriple,
+    totals: _PhaseTotals,
+) -> tuple[GroupSummary, ...]:
+    """Build one :class:`GroupSummary` per group in scope, after the run."""
+    await session.flush()
+    groups = await load_existing_groups(
         session,
         product=triple.product,
         version=triple.version,
         impl_id=triple.impl_id,
         tenant_id=triple.tenant_id,
     )
-    if existing_groups:
-        _log.info(
-            "llm_grouping_partial_regrouping",
-            connector_id=triple.connector_id,
-            existing_group_count=len(existing_groups),
-            unassigned_op_count=len(unassigned_ops),
+    membership = await load_group_membership(session, group_ids=[g.id for g in groups])
+    summaries = []
+    for group in groups:
+        members = membership.get(group.id, GroupMembership())
+        summaries.append(
+            GroupSummary(
+                group_key=group.group_key,
+                created=group.group_key in totals.created_keys,
+                operations_added=totals.added_by_key[group.group_key],
+                typed_operation_count=members.typed,
+                composite_operation_count=members.composite,
+                ingested_operation_count=members.ingested,
+            )
         )
-        groups = _project_persisted_groups(existing_groups)
-        return groups, {row.group_key: row.id for row in existing_groups}
-
-    _log.info(
-        "llm_grouping_pass1_start",
-        connector_id=triple.connector_id,
-        op_count=len(unassigned_ops),
-        min_groups=config.min_groups,
-        max_groups=config.max_groups,
-    )
-    groups = await _propose_groups_via_llm(
-        llm_client,
-        triple=triple,
-        operations=unassigned_ops,
-        config=config,
-        totals=totals,
-    )
-    _log.info(
-        "llm_grouping_pass1_complete",
-        connector_id=triple.connector_id,
-        proposed_group_count=len(groups),
-    )
-    persisted_rows = _persist_proposed_groups(
-        session,
-        triple=triple,
-        proposals=groups,
-    )
-    await session.flush()
-    totals.groups_created = len(persisted_rows)
-    return groups, {row.group_key: row.id for row in persisted_rows}
+    return tuple(summaries)
 
 
 # ---------------------------------------------------------------------------
@@ -554,6 +690,7 @@ def _build_result(triple: _ConnectorTriple, totals: _PhaseTotals) -> GroupingRes
         operations_unassigned=totals.operations_unassigned,
         llm_call_count=totals.llm_call_count,
         llm_duration_ms=totals.llm_duration_ms,
+        groups=totals.groups,
     )
 
 
@@ -579,6 +716,7 @@ async def _write_grouping_audit_row(
             "operations_unassigned": totals.operations_unassigned,
             "llm_call_count": totals.llm_call_count,
             "batch_size": config.batch_size,
+            "operations_added_by_group": dict(sorted(totals.added_by_key.items())),
         },
     )
 
@@ -592,35 +730,70 @@ async def _drive_two_pass_grouping(
     config: GroupingConfig,
     totals: _PhaseTotals,
 ) -> None:
-    """Run Pass-1 + Pass-2 + apply ORM mutations against *session*.
+    """Group *unassigned_ops* and apply the ORM mutations against *session*.
 
-    Side-effects only: persists :class:`OperationGroup` rows (Pass 1),
-    sets ``group_id`` on each :class:`EndpointDescriptor` (Pass 2),
-    and updates *totals* in place. The orchestrator commits after this
-    returns so the entire pass is atomic.
+    Side-effects only: persists new :class:`OperationGroup` rows, sets
+    ``group_id`` on each assigned :class:`EndpointDescriptor`, and
+    updates *totals* in place. The orchestrator commits after this
+    returns so the entire pass is atomic. See the module docstring for
+    the branch rules.
     """
-    groups, group_key_to_id = await _resolve_groups_for_pass2(
+    existing_groups = await load_existing_groups(
         session,
-        llm_client,
-        triple=triple,
-        unassigned_ops=unassigned_ops,
-        config=config,
-        totals=totals,
+        product=triple.product,
+        version=triple.version,
+        impl_id=triple.impl_id,
+        tenant_id=triple.tenant_id,
     )
-    assignment_map = await _assign_ops_in_batches(
-        llm_client,
-        triple=triple,
-        operations=unassigned_ops,
-        groups=groups,
-        config=config,
-        totals=totals,
-    )
-    _apply_assignments_to_rows(
-        operations=unassigned_ops,
-        assignment_map=assignment_map,
-        group_key_to_id=group_key_to_id,
-        totals=totals,
-    )
+    membership = await load_group_membership(session, group_ids=[g.id for g in existing_groups])
+    candidates = [g for g in existing_groups if membership.get(g.id, GroupMembership()).typed == 0]
+    reserved_keys = {g.group_key for g in existing_groups}
+
+    if not candidates:
+        await _create_groups_and_assign(
+            session,
+            llm_client,
+            triple=triple,
+            operations=unassigned_ops,
+            existing_groups=(),
+            reserved_keys=reserved_keys,
+            config=config,
+            totals=totals,
+        )
+    else:
+        _log.info(
+            "llm_grouping_partial_regrouping",
+            connector_id=triple.connector_id,
+            existing_group_count=len(existing_groups),
+            candidate_group_count=len(candidates),
+            unassigned_op_count=len(unassigned_ops),
+        )
+        candidate_proposals = _project_persisted_groups(candidates)
+        await _assign_and_apply(
+            llm_client,
+            triple=triple,
+            operations=unassigned_ops,
+            groups=candidate_proposals,
+            group_key_to_id={g.group_key: g.id for g in candidates},
+            config=config,
+            totals=totals,
+        )
+        leftovers = [op for op in unassigned_ops if op.group_id is None]
+        if leftovers:
+            await _create_groups_and_assign(
+                session,
+                llm_client,
+                triple=triple,
+                operations=leftovers,
+                existing_groups=candidate_proposals,
+                reserved_keys=reserved_keys,
+                config=config,
+                totals=totals,
+            )
+
+    totals.operations_assigned = sum(totals.added_by_key.values())
+    totals.operations_unassigned = len(unassigned_ops) - totals.operations_assigned
+    totals.groups = await _summarise_groups(session, triple=triple, totals=totals)
 
 
 async def run_llm_grouping(

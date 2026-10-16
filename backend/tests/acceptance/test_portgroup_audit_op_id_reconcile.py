@@ -75,9 +75,12 @@ def test_portgroup_audit_sub_op_constants_are_the_reconciled_rest_keys() -> None
     shelf.
     """
     assert _read._OP_LIST_NETWORK == "GET:/vcenter/network"
+    # #3802: the per-portgroup ``GET:/vcenter/vm`` leg is gone (the VM list
+    # resource has no ``networks`` filter). The parent switch, VLAN and
+    # connected VMs come from a vim PropertyCollector read instead.
     assert _read._SUB_OPS_NETWORK_PORTGROUP_AUDIT == (
         "GET:/vcenter/network",
-        "GET:/vcenter/vm",
+        "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
     )
     # #2970: no DVS-list constant exists any more -- the pinned spec serves
     # no distributed-switch list resource (the plural path #1602 repointed
@@ -87,15 +90,20 @@ def test_portgroup_audit_sub_op_constants_are_the_reconciled_rest_keys() -> None
 
 
 def test_portgroup_audit_sub_ops_resolve_against_pinned_vcenter_spec() -> None:
-    """Every audit sub-op_id is emitted by parsing the canonical vcenter.yaml.
+    """Every audit REST sub-op_id is emitted by parsing the canonical vcenter.yaml.
 
     Parses the pinned ``vcenter.yaml`` through the real
-    :func:`parse_openapi` and asserts each
+    :func:`parse_openapi` and asserts each ``GET`` (REST)
     ``_SUB_OPS_NETWORK_PORTGROUP_AUDIT`` op_id appears in the emitted
     descriptor set. Parser op_ids are byte-for-byte the strings written
     to ``endpoint_descriptor.op_id`` and the strings
     :func:`preflight_l2_dependencies` queries on, so parser coverage ==
     pre-flight resolution for this composite.
+
+    The ``POST`` (vim) legs are served by ``vi-json.yaml``, not
+    ``vcenter.yaml``; the exhaustive read lane
+    (``tests/test_connectors_vmware_rest_composites_read_reconcile.py``)
+    checks them against that spec.
 
     Skips when the spec shelf is unconfigured (sandbox); CI wires the
     env vars and runs it for real.
@@ -115,7 +123,7 @@ def test_portgroup_audit_sub_ops_resolve_against_pinned_vcenter_spec() -> None:
     )
     ingested_op_ids = {row.op_id for row in rows}
 
-    required = set(_read._SUB_OPS_NETWORK_PORTGROUP_AUDIT)
+    required = {op for op in _read._SUB_OPS_NETWORK_PORTGROUP_AUDIT if op.startswith("GET:")}
     missing = required - ingested_op_ids
     assert not missing, (
         "vmware.composite.network.portgroup.audit declares sub-op_ids the "

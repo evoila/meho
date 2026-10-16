@@ -1120,7 +1120,7 @@ async def test_expand_step_refresh_writes_no_source_scope() -> None:
 
     New rows land with ``source_scope`` NULL (unresolved), even though
     refresh knows which target saw them: ``target_id`` is not a scope.
-    A row that already has a scope (the ``0105`` ``global`` backfill)
+    A row that already has a scope (the ``0106`` ``global`` backfill)
     keeps it and its provenance through an adopting refresh.
     """
     _register_fake()
@@ -1137,7 +1137,7 @@ async def test_expand_step_refresh_writes_no_source_scope() -> None:
                 properties={},
                 discovered_by="faketopo",
                 source_scope="global",
-                source_scope_provenance="migration:0105",
+                source_scope_provenance="migration:0106",
             )
         )
         await session.commit()
@@ -1153,4 +1153,4 @@ async def test_expand_step_refresh_writes_no_source_scope() -> None:
     vm_b = await _load_node(tenant_id, "vm-b")
     assert vm_b.target_id == target.id, "the auto row is still adopted"
     assert vm_b.source_scope == "global"
-    assert vm_b.source_scope_provenance == "migration:0105"
+    assert vm_b.source_scope_provenance == "migration:0106"

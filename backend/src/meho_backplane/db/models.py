@@ -2023,7 +2023,7 @@ def _ck_source_scope(column: str) -> str:
     matches a hyphen); and ``ltrim`` with the lowercase hex alphabet
     (anything left over is a bad character). ``substr`` / ``replace`` /
     ``ltrim`` mean the same on PostgreSQL and SQLite. Mirrored verbatim
-    in migration ``0105``.
+    in migration ``0106``.
     """
     return (
         f"{column} IS NULL "
@@ -2128,16 +2128,16 @@ class GraphNode(Base):
       (the spec's soft-delete signal -- the row stays queryable for
       G9.3 history replay but is filtered out of default queries).
     * ``source_scope`` -- Text NULL with the portable
-      ``ck_graph_node_source_scope`` CHECK (migration ``0105``,
+      ``ck_graph_node_source_scope`` CHECK (migration ``0106``,
       #3739). Says where the node's name is unique: ``global``,
       ``target:<uuid>`` or ``legacy:<uuid>`` (see
       :data:`SOURCE_SCOPE_PATTERN`). ``NULL`` means not resolved yet:
       the row predates source-qualified identity, and ``target_id``
       only names the last target that saw it, so readers must not
       treat it as the scope. Nothing writes this column yet except the
-      ``0105`` backfill; the staged cut-over owns the writers.
+      ``0106`` backfill; the staged cut-over owns the writers.
     * ``source_scope_provenance`` -- Text NULL. What set
-      ``source_scope`` (``migration:0105`` for the backfill). Lets the
+      ``source_scope`` (``migration:0106`` for the backfill). Lets the
       later repair tell a mechanical value from a rediscovered one.
 
     Indexes on :class:`GraphNode`:
@@ -2151,7 +2151,7 @@ class GraphNode(Base):
       unique index, so adding ``source_scope`` as a fourth key column
       would let two unresolved rows share a name.
     * ``graph_node_tenant_scope_kind_name_idx`` -- non-unique b-tree on
-      ``(tenant_id, source_scope, kind, name)`` (migration ``0105``).
+      ``(tenant_id, source_scope, kind, name)`` (migration ``0106``).
       Serves per-scope lookups and the "unresolved rows" scan.
 
     The model deliberately ships with no helper methods -- write paths

@@ -299,12 +299,12 @@ as a warning callout next to the counts (#2210).
 
 A node is keyed by `(tenant_id, kind, name)`, so two targets that report
 the same name (two clusters with a `default` namespace) collapse into one
-row. Migration `0105` is the first, expand-only step of the fix. It adds
+row. Migration `0106` is the first, expand-only step of the fix. It adds
 the place to record where a name is unique, and changes no writer.
 
 - **Columns.** `graph_node.source_scope` (nullable text) and
   `graph_node.source_scope_provenance` (nullable text: what set the
-  scope; the backfill writes `migration:0105`).
+  scope; the backfill writes `migration:0106`).
 - **Vocabulary** (`SOURCE_SCOPE_PATTERN` in `db/models.py`):
   - `global` — the name means the same thing for the whole tenant.
   - `target:<uuid>` — the name is unique only inside one target
@@ -332,14 +332,14 @@ the place to record where a name is unique, and changes no writer.
   on `(tenant_id, source_scope, kind, name)` is added for scope lookups.
 - **Writers unchanged.** Refresh, seeding and bulk import still write
   `NULL`, so rows written before the cut-over also read as `unresolved`.
-- **Downgrade.** Keeps every row and drops only what `0105` added. It
-  refuses when `source_scope` holds a value `0105` did not write (any
+- **Downgrade.** Keeps every row and drops only what `0106` added. It
+  refuses when `source_scope` holds a value `0106` did not write (any
   `target:` / `legacy:` value, or a value from another writer): the old
   schema cannot hold it, so recover by rolling forward.
 - **Not in this step.** Writing scoped nodes, splitting or repairing
   rows, dropping the old key and changing path answers belong to the
   staged cut-over (#3749) and the path work (#3760).
-- **Tests.** `tests/migrations/test_migration_0105_add_graph_node_source_scope.py`
+- **Tests.** `tests/migrations/test_migration_0106_add_graph_node_source_scope.py`
   (SQLite), `tests/integration/test_topology_source_scope_migration.py`
   (PostgreSQL: NULL uniqueness, upgrade/downgrade, refusal) and the
   legacy-read tests in `tests/integration/test_topology_query.py`.

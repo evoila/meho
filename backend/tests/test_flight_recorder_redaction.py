@@ -466,7 +466,7 @@ def test_non_utf8_json_typed_body_is_uncertain() -> None:
 
 @pytest.mark.parametrize(
     "content_type",
-    ["text/plain", "application/x-www-form-urlencoded", "text/html", "application/xml"],
+    ["text/plain", "application/x-www-form-urlencoded", "text/html"],
 )
 def test_known_non_json_content_type_is_uncertain(content_type: str) -> None:
     out = redact_body("password=PLACEHOLDER-pw123456", content_type=content_type)

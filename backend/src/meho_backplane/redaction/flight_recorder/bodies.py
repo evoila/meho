@@ -62,6 +62,18 @@ parse error). A content-type that is *known* to be non-JSON
 carry credentials the JSON path config cannot address, and the ops whose
 bodies *are* credentials are already hard-excluded by family
 (:mod:`.families`).
+
+XML fault digest
+----------------
+An XML body (``text/xml``, ``application/xml``, ``*+xml``) is still never
+recorded, but it is not dropped bare either. The engine records a small
+digest in its place (:func:`._xml_digest.xml_fault_digest`): the omitted
+marker, a SHA-256 of the captured bytes, and the count of each fault
+**type name** in the body (Task #3708). That keeps a vim25 SOAP answer's
+faults -- for example ``missingSet`` ``NoPermission`` on every property --
+visible after the fact. Fault text is never read. The outcome stays
+``uncertain``: the body was not proven clean, so the trace stays
+operator-only.
 """
 
 from __future__ import annotations
@@ -74,6 +86,7 @@ from typing import Any, Final
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from meho_backplane.redaction.flight_recorder._content import scrub_content
+from meho_backplane.redaction.flight_recorder._xml_digest import xml_fault_digest
 from meho_backplane.redaction.flight_recorder.verdict import (
     BODY_OMITTED_MARKER,
     BODY_PATH_MARKER,
@@ -182,6 +195,9 @@ def redact_body(
     if _is_empty_body(body):
         return RedactionOutcome(value=None, reasons=("empty body",))
 
+    if isinstance(body, (str, bytes, bytearray)) and _is_xml_content_type(content_type):
+        return _xml_digest_outcome(body, content_type, truncated=truncated)
+
     parsed, parse_reason = _parse_body(body, content_type)
     if parse_reason is not None:
         return RedactionOutcome(
@@ -216,6 +232,24 @@ def redact_body(
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
+
+
+def _xml_digest_outcome(
+    body: str | bytes | bytearray, content_type: str | None, *, truncated: bool
+) -> RedactionOutcome:
+    """Stand an XML body in with its fault-type digest; always uncertain."""
+    base = _content_type_base(content_type)
+    try:
+        value: Any = xml_fault_digest(body, BODY_OMITTED_MARKER)
+    except Exception:  # the digest is best-effort; fall back to the bare marker
+        value = BODY_OMITTED_MARKER
+    reasons = [
+        f"XML body (content-type {base!r}): body not recorded, kept a digest of "
+        "fault type names and a SHA-256 hash (fail-closed)"
+    ]
+    if truncated:
+        reasons.append("body was truncated: fault types after the cut are not counted")
+    return RedactionOutcome(value=value, uncertain=True, reasons=tuple(reasons))
 
 
 def _is_empty_body(body: Any) -> bool:
@@ -293,6 +327,11 @@ def _content_type_base(content_type: str | None) -> str:
 def _is_json_content_type(content_type: str | None) -> bool:
     base = _content_type_base(content_type)
     return base == "application/json" or base.endswith("+json") or base == "text/json"
+
+
+def _is_xml_content_type(content_type: str | None) -> bool:
+    base = _content_type_base(content_type)
+    return base in ("text/xml", "application/xml") or base.endswith("+xml")
 
 
 def _is_known_non_json(base: str) -> bool:

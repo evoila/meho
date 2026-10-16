@@ -76,7 +76,9 @@ async def _result_query_handler(
     optional ``query`` argument:
 
     * absent → paging mode: delegate the ``[offset : offset+limit]`` window
-      to the shared :func:`read_result_window` core (unchanged, #3179).
+      to the shared :func:`read_result_window` core (#3179). A page that
+      runs past the time budget (#3640) is the same recoverable
+      ``query_timeout`` as a query.
     * present → query mode: validate it into a
       :class:`~meho_backplane.jsonflux.query.contract.ResultQuerySpec` and
       delegate to :func:`run_result_query`, which compiles it to one bounded
@@ -108,6 +110,8 @@ async def _result_query_handler(
         raise _handle_not_found(handle_id) from exc
     except QueryContractError as exc:
         raise McpInvalidParamsError(str(exc), data={"reason": "invalid_query"}) from exc
+    except ResultQueryTimeoutError as exc:
+        raise McpInvalidParamsError(str(exc), data={"reason": "query_timeout"}) from exc
     except ResultQueryOutputTooLargeError as exc:
         raise McpInvalidParamsError(str(exc), data={"reason": "output_too_large"}) from exc
     except ResultReadRejectedError as exc:

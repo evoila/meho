@@ -132,9 +132,12 @@ Every query result is bounded: output rows are capped at
 output is capped at `RESULT_QUERY_MAX_OUTPUT_BYTES` (default 256 KB)
 **after** the row cap, with an actionable over-budget error; and the whole
 read runs under a `RESULT_QUERY_TIMEOUT_SECONDS` (default 10) wall-time
-budget. The budget covers the store fetch and the worker steps (catalog,
-compile, register, `SELECT`, encode). On expiry the core calls
-`conn.interrupt()` and returns a recoverable timeout error at once.
+budget. The budget covers the store fetch and the worker job (decode of
+the stored record, catalog, compile, register, `SELECT`, encode). On
+expiry the core calls `conn.interrupt()` and returns a recoverable timeout
+error at once. Paging and `path` reads run under the same budget; their
+timeout error names the way out for that surface (a smaller `limit`, or a
+smaller part of the document).
 
 Because the spill itself is capped at `RESULT_HANDLE_MAX_SPILL_ROWS`, a
 query may run over a subset of the true collection. The result carries
@@ -145,8 +148,9 @@ total.
 
 ### Admission and the worker pool (#3640)
 
-Both read paths (paging and query) must be admitted **before** the store
-is read. A refused read makes no Valkey `GET`. The checks live in
+Every read path (paging, query, and a `path` read) must be admitted
+**before** the store is read. A refused read makes no Valkey `GET`. The
+checks live in
 `operations/result_read_admission.py` and run in this order:
 
 1. **Rate check** — a fixed-window `INCR` + `EXPIRE` counter per
@@ -167,10 +171,17 @@ with the recoverable `-32000` rate-limited error and
 `data={reason, retry_after_seconds}`; REST answers `429` with a
 `Retry-After` header.
 
-Query work runs on the dedicated pool (`thread_name_prefix=result-read`),
-not on the event loop's default pool. The app lifespan sizes the pool from
-settings at startup and stops it at shutdown; until then (unit tests that
-call the cores directly) the `Settings` field defaults apply.
+After admission, only the Valkey `GET` runs on the event loop
+(`ResultHandleStore.fetch_record`). Everything after it is one job on the
+dedicated pool (`thread_name_prefix=result-read`), not on the event loop's
+default pool: decoding the record and checking its owner
+(`decode_window` / `decode_rows` / `decode_document`), then the shaping
+for that path (a page slice and its size check; the query pipeline; a
+JSON Pointer resolve). So a large record cannot block the loop while it
+decodes, and the deadline above bounds the decode too. The app lifespan
+sizes the pool from settings at startup and stops it at shutdown; until
+then (unit tests that call the cores directly) the `Settings` field
+defaults apply.
 
 **A worker that outlives its request.** A running thread cannot be
 cancelled. When the deadline passes or the caller goes away, the core

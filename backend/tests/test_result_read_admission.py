@@ -3,15 +3,18 @@
 
 """Admission, worker pool, deadline, and drain for the result reads (#3640).
 
-Drives :mod:`meho_backplane.operations.result_read_admission` through the two
-read cores in :mod:`meho_backplane.operations.result_query` against a fake
-store (no Valkey), and checks the error mapping on the MCP tool and the REST
-route. What these tests pin:
+Drives :mod:`meho_backplane.operations.result_read_admission` through the
+read cores in :mod:`meho_backplane.operations.result_query` against the
+production store over an in-memory client (no Valkey), and checks the error
+mapping on the MCP tool and the REST route. What these tests pin:
 
 * the dedicated pool is sized from ``result_query_executor_workers``
 * admission runs before the store is read: a refused read makes no fetch
 * the per-tenant cap and the per-principal rate check refuse extra reads
-* one deadline covers the store fetch, not only the ``SELECT``
+* one deadline covers the store fetch on every read path (paging, query,
+  ``path``), not only the ``SELECT``
+* the record decode runs on the worker pool: a slow decode leaves the
+  event loop free and keeps its slot until it finishes
 * a worker that outlives its request keeps its slot until it finishes
 * a lease nobody renews is reclaimed by its TTL; owner tokens stop a stale
   release from freeing a newer lease
@@ -23,6 +26,7 @@ import asyncio
 import threading
 import types
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import pytest
@@ -32,11 +36,11 @@ import meho_backplane.operations.result_query as rq
 import meho_backplane.operations.result_read_admission as admission
 from meho_backplane.api.v1 import operations as rest_operations
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors.result_handle_store import SpilledRowSet, SpilledWindow
-from meho_backplane.mcp.server import McpRateLimitedError
+from meho_backplane.mcp.server import McpInvalidParamsError, McpRateLimitedError
 from meho_backplane.mcp.tools import result_query as mcp_result_query
 from meho_backplane.operations.result_query import ResultQuerySpec
 from meho_backplane.settings import Settings
+from tests._result_store_helpers import MemoryResultStore
 
 _TENANT = uuid.UUID("00000000-0000-0000-0000-0000000036a0")
 _OTHER_TENANT = uuid.UUID("00000000-0000-0000-0000-0000000036a1")
@@ -75,31 +79,34 @@ def _rows(n: int = 5) -> list[dict[str, Any]]:
     return [{"id": i, "name": f"vm-{i}"} for i in range(n)]
 
 
-class _GatedStore:
-    """Fake store whose fetches wait on *gate* and count their calls."""
+def _store(gate: asyncio.Event | None = None, delay: float = 0.0) -> MemoryResultStore:
+    """The production store over an in-memory client, serving rows for any handle.
 
-    def __init__(self, gate: asyncio.Event | None = None, delay: float = 0.0) -> None:
-        self.gate = gate
-        self.delay = delay
-        self.fetch_rows_calls = 0
-        self.fetch_window_calls = 0
+    *gate* and *delay* hold every ``GET``; ``store.client.get_calls`` counts
+    them, which is how a test shows a refused read never reached the store.
+    """
+    store = MemoryResultStore()
+    store.seed_any_handle(operator_sub="op-a", rows=_rows())
+    store.client.gate = gate
+    store.client.delay = delay
+    return store
 
-    async def _wait(self) -> None:
-        if self.gate is not None:
-            await self.gate.wait()
-        if self.delay:
-            await asyncio.sleep(self.delay)
 
-    async def fetch_rows(self, **_: Any) -> SpilledRowSet:
-        self.fetch_rows_calls += 1
-        await self._wait()
-        return SpilledRowSet(rows=_rows(), total_rows=5, stored_rows=5)
+#: One read per path, each over a fresh handle. The ``path`` read needs a
+#: document record, which ``_seed_for`` stores under that handle.
+_READS: dict[str, Callable[[Operator, uuid.UUID], Awaitable[dict[str, Any]]]] = {
+    "paging": lambda op, h: rq.read_result_window(op, h, 0, 2),
+    "query": lambda op, h: rq.run_result_query(op, h, ResultQuerySpec()),
+    "path": lambda op, h: rq.run_result_query(op, h, ResultQuerySpec(path="/name")),
+}
+#: The store method each path decodes its record with.
+_DECODERS = {"paging": "decode_window", "query": "decode_rows", "path": "decode_document"}
 
-    async def fetch_window(self, *, offset: int, limit: int, **_: Any) -> SpilledWindow:
-        self.fetch_window_calls += 1
-        await self._wait()
-        return SpilledWindow(
-            rows=_rows()[offset : offset + limit], total_rows=5, stored_rows=5, truncated=False
+
+def _seed_for(store: MemoryResultStore, path: str, handle_id: uuid.UUID) -> None:
+    if path == "path":
+        store.seed_document(
+            tenant_id=_TENANT, operator_sub="op-a", handle_id=handle_id, document={"name": "vm"}
         )
 
 
@@ -141,7 +148,7 @@ def _fresh_admission() -> Any:
     admission.shutdown_result_read_admission()
 
 
-def _install(monkeypatch: pytest.MonkeyPatch, store: _GatedStore, timeout: int = 10) -> None:
+def _install(monkeypatch: pytest.MonkeyPatch, store: MemoryResultStore, timeout: int = 10) -> None:
     monkeypatch.setattr(rq, "get_result_handle_store", lambda: store)
     monkeypatch.setattr(rq, "get_settings", lambda: _core_settings(timeout))
 
@@ -176,7 +183,7 @@ def test_unconfigured_pool_uses_the_setting_default() -> None:
 
 
 async def test_query_runs_on_the_dedicated_pool(monkeypatch: pytest.MonkeyPatch) -> None:
-    _install(monkeypatch, _GatedStore())
+    _install(monkeypatch, _store())
     seen: list[str] = []
     real = rq._execute_sync
 
@@ -199,17 +206,17 @@ async def test_query_overflow_is_refused_before_fetch_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     gate = asyncio.Event()
-    store = _GatedStore(gate)
+    store = _store(gate)
     _install(monkeypatch, store)
     tasks = [
         asyncio.create_task(rq.run_result_query(_operator(), uuid.uuid4(), ResultQuerySpec()))
         for _ in range(4)
     ]
-    await _wait_until(lambda: store.fetch_rows_calls == 4)
+    await _wait_until(lambda: store.client.get_calls == 4)
 
     with pytest.raises(rq.ResultReadCapacityError):
         await rq.run_result_query(_operator(sub="op-b"), uuid.uuid4(), ResultQuerySpec())
-    assert store.fetch_rows_calls == 4
+    assert store.client.get_calls == 4
 
     gate.set()
     results = await asyncio.gather(*tasks)
@@ -221,17 +228,17 @@ async def test_paging_overflow_is_refused_before_fetch_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     gate = asyncio.Event()
-    store = _GatedStore(gate)
+    store = _store(gate)
     _install(monkeypatch, store)
     tasks = [
         asyncio.create_task(rq.read_result_window(_operator(), uuid.uuid4(), 0, 2))
         for _ in range(4)
     ]
-    await _wait_until(lambda: store.fetch_window_calls == 4)
+    await _wait_until(lambda: store.client.get_calls == 4)
 
     with pytest.raises(rq.ResultReadCapacityError):
         await rq.read_result_window(_operator(), uuid.uuid4(), 0, 2)
-    assert store.fetch_window_calls == 4
+    assert store.client.get_calls == 4
 
     gate.set()
     await asyncio.gather(*tasks)
@@ -245,25 +252,25 @@ async def test_tenant_cap_admits_four_and_refuses_the_fifth(
         _settings(result_query_executor_workers=8, result_query_tenant_concurrency=4)
     )
     gate = asyncio.Event()
-    store = _GatedStore(gate)
+    store = _store(gate)
     _install(monkeypatch, store)
     tasks = [
         asyncio.create_task(rq.run_result_query(_operator(), uuid.uuid4(), ResultQuerySpec()))
         for _ in range(4)
     ]
-    await _wait_until(lambda: store.fetch_rows_calls == 4)
+    await _wait_until(lambda: store.client.get_calls == 4)
 
     with pytest.raises(rq.ResultReadCapacityError) as excinfo:
         await rq.run_result_query(_operator(), uuid.uuid4(), ResultQuerySpec())
     assert excinfo.value.scope == "tenant"
     assert excinfo.value.reason == "capacity_exceeded"
-    assert store.fetch_rows_calls == 4
+    assert store.client.get_calls == 4
 
     # Another tenant still has room in the process-wide gate.
     other = asyncio.create_task(
         rq.run_result_query(_operator(tenant_id=_OTHER_TENANT), uuid.uuid4(), ResultQuerySpec())
     )
-    await _wait_until(lambda: store.fetch_rows_calls == 5)
+    await _wait_until(lambda: store.client.get_calls == 5)
 
     gate.set()
     await asyncio.gather(*tasks, other)
@@ -275,7 +282,7 @@ async def test_rate_check_is_shared_by_paging_and_query(
     admission.configure_result_read_admission(_settings(result_query_rate_per_minute=2))
     valkey = _FakeValkey()
     monkeypatch.setattr(admission, "get_broadcast_client", lambda: valkey)
-    store = _GatedStore()
+    store = _store()
     _install(monkeypatch, store)
 
     await rq.read_result_window(_operator(), uuid.uuid4(), 0, 2)
@@ -285,10 +292,12 @@ async def test_rate_check_is_shared_by_paging_and_query(
 
     assert excinfo.value.reason == "rate_limited"
     assert 0 < excinfo.value.retry_after_seconds <= 60
-    assert (store.fetch_window_calls, store.fetch_rows_calls) == (1, 1)
+    assert store.client.get_calls == 2
     assert _state().gate.in_use == 0
     # Another principal has its own counter.
-    await rq.run_result_query(_operator(sub="op-b"), uuid.uuid4(), ResultQuerySpec())
+    other_handle = uuid.uuid4()
+    store.seed(tenant_id=_TENANT, operator_sub="op-b", handle_id=other_handle, rows=_rows())
+    await rq.run_result_query(_operator(sub="op-b"), other_handle, ResultQuerySpec())
 
 
 async def test_rate_check_off_makes_no_valkey_call(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -296,7 +305,7 @@ async def test_rate_check_off_makes_no_valkey_call(monkeypatch: pytest.MonkeyPat
         raise AssertionError("rate check must not reach Valkey when the cap is 0")
 
     monkeypatch.setattr(admission, "get_broadcast_client", _no_client)
-    _install(monkeypatch, _GatedStore())
+    _install(monkeypatch, _store())
     await rq.read_result_window(_operator(), uuid.uuid4(), 0, 2)
 
 
@@ -305,15 +314,92 @@ async def test_rate_check_off_makes_no_valkey_call(monkeypatch: pytest.MonkeyPat
 # ---------------------------------------------------------------------------
 
 
-async def test_slow_fetch_rows_hits_the_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
-    store = _GatedStore(delay=30)
+@pytest.mark.parametrize("path", list(_READS), ids=list(_READS))
+async def test_slow_fetch_hits_the_deadline_on_every_path(
+    monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    """A store fetch past the budget is a timeout on paging, query, and ``path``."""
+    store = _store(delay=30)
     _install(monkeypatch, store, timeout=1)
+    handle_id = uuid.uuid4()
+    _seed_for(store, path, handle_id)
     async with asyncio.timeout(5):
-        with pytest.raises(rq.ResultQueryTimeoutError):
-            await rq.run_result_query(_operator(), uuid.uuid4(), ResultQuerySpec())
-    assert store.fetch_rows_calls == 1
+        with pytest.raises(rq.ResultQueryTimeoutError) as excinfo:
+            await _READS[path](_operator(), handle_id)
+    assert excinfo.value.timeout_seconds == 1
+    assert "limit" in str(excinfo.value)
+    assert store.client.get_calls == 1
     # No worker was started, so the slot is free at once.
     assert _state().gate.in_use == 0
+    assert _state().leases.count(_TENANT) == 0
+
+
+def _blocking_decoder(
+    monkeypatch: pytest.MonkeyPatch, store: MemoryResultStore, name: str
+) -> tuple[threading.Event, threading.Event]:
+    """Make the store's *name* decoder block until *release* is set."""
+    started, release = threading.Event(), threading.Event()
+    real = getattr(store, name)
+
+    def _blocked(raw: bytes, **kwargs: Any) -> Any:
+        started.set()
+        release.wait(10)
+        return real(raw, **kwargs)
+
+    monkeypatch.setattr(store, name, _blocked)
+    return started, release
+
+
+@pytest.mark.parametrize("path", list(_READS), ids=list(_READS))
+async def test_slow_decode_runs_off_the_loop_and_keeps_its_slot(
+    monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    """The record decode is worker work: the loop stays free while it blocks.
+
+    While the decoder blocks, the event loop still runs (another read is
+    admitted and completes at once), the slot and the tenant lease stay
+    held, and a cancelled request leaves them held until the decoder
+    finishes.
+    """
+    store = _store()
+    _install(monkeypatch, store)
+    handle_id = uuid.uuid4()
+    _seed_for(store, path, handle_id)
+    started, release = _blocking_decoder(monkeypatch, store, _DECODERS[path])
+
+    task = asyncio.create_task(_READS[path](_operator(), handle_id))
+    await _wait_until(started.is_set)
+    # A read on another path (its decoder is not blocked) goes through at once.
+    probe = "query" if path == "paging" else "paging"
+    async with asyncio.timeout(5):
+        await _READS[probe](_operator(tenant_id=_OTHER_TENANT), uuid.uuid4())
+    assert _state().gate.in_use == 1
+    assert _state().leases.count(_TENANT) == 1
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert _state().gate.in_use == 1
+    assert _state().leases.count(_TENANT) == 1
+
+    release.set()
+    await _wait_until(lambda: _state().gate.in_use == 0)
+    assert _state().leases.count(_TENANT) == 0
+
+
+async def test_timed_out_decode_returns_at_once_and_drains_later(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store()
+    _install(monkeypatch, store, timeout=1)
+    _, release = _blocking_decoder(monkeypatch, store, "decode_window")
+    async with asyncio.timeout(5):
+        with pytest.raises(rq.ResultQueryTimeoutError):
+            await rq.read_result_window(_operator(), uuid.uuid4(), 0, 2)
+    assert _state().gate.in_use == 1
+
+    release.set()
+    await _wait_until(lambda: _state().gate.in_use == 0)
     assert _state().leases.count(_TENANT) == 0
 
 
@@ -340,7 +426,7 @@ def _blocking_execute(
 async def test_cancelled_query_keeps_its_lease_until_the_worker_drains(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _install(monkeypatch, _GatedStore())
+    _install(monkeypatch, _store())
     started, release = _blocking_execute(monkeypatch)
     task = asyncio.create_task(rq.run_result_query(_operator(), uuid.uuid4(), ResultQuerySpec()))
     await _wait_until(started.is_set)
@@ -360,7 +446,7 @@ async def test_cancelled_query_keeps_its_lease_until_the_worker_drains(
 async def test_timed_out_query_returns_at_once_and_drains_later(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _install(monkeypatch, _GatedStore(), timeout=1)
+    _install(monkeypatch, _store(), timeout=1)
     _, release = _blocking_execute(monkeypatch)
     async with asyncio.timeout(5):
         with pytest.raises(rq.ResultQueryTimeoutError):
@@ -379,7 +465,7 @@ async def test_draining_worker_renews_its_tenant_lease(monkeypatch: pytest.Monke
     admission.configure_result_read_admission(
         _settings(result_query_executor_workers=4, result_query_tenant_concurrency=1)
     )
-    _install(monkeypatch, _GatedStore())
+    _install(monkeypatch, _store())
     started, release = _blocking_execute(monkeypatch)
     task = asyncio.create_task(rq.run_result_query(_operator(), uuid.uuid4(), ResultQuerySpec()))
     await _wait_until(started.is_set)
@@ -466,3 +552,41 @@ async def test_rest_maps_a_refused_read_to_429(
     assert excinfo.value.headers == {"Retry-After": "12"}
     assert isinstance(excinfo.value.detail, dict)
     assert excinfo.value.detail["reason"] == "rate_limited"
+
+
+@pytest.mark.parametrize("arguments", [{}, {"query": {}}], ids=["paging", "query"])
+async def test_mcp_maps_a_timed_out_read_to_query_timeout(
+    monkeypatch: pytest.MonkeyPatch, arguments: dict[str, Any]
+) -> None:
+    handle_id = uuid.uuid4()
+
+    async def _expire(*_: Any, **__: Any) -> Any:
+        raise rq.ResultQueryTimeoutError(
+            handle_id, 10, remediation=rq.ResultQueryTimeoutError.PAGING_REMEDIATION
+        )
+
+    monkeypatch.setattr(mcp_result_query, "read_result_window", _expire)
+    monkeypatch.setattr(mcp_result_query, "run_result_query", _expire)
+    with pytest.raises(McpInvalidParamsError) as excinfo:
+        await mcp_result_query._result_query_handler(
+            _operator(), {"handle_id": str(handle_id), **arguments}
+        )
+    assert excinfo.value.data == {"reason": "query_timeout"}
+    assert "lower `limit`" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("query", [None, ResultQuerySpec()], ids=["paging", "query"])
+async def test_rest_maps_a_timed_out_read_to_422(
+    monkeypatch: pytest.MonkeyPatch, query: ResultQuerySpec | None
+) -> None:
+    async def _expire(*_: Any, **__: Any) -> Any:
+        raise rq.ResultQueryTimeoutError(uuid.uuid4(), 10)
+
+    monkeypatch.setattr(rest_operations, "read_result_window", _expire)
+    monkeypatch.setattr(rest_operations, "run_result_query", _expire)
+    body = rest_operations.ResultQueryBody(handle_id=uuid.uuid4(), query=query)
+    with pytest.raises(HTTPException) as excinfo:
+        await rest_operations.post_result_query(body, _operator())
+    assert excinfo.value.status_code == 422
+    assert isinstance(excinfo.value.detail, dict)
+    assert excinfo.value.detail["reason"] == "query_timeout"

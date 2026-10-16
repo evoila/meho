@@ -31,6 +31,7 @@ import redis.exceptions
 import meho_backplane.connectors.result_handle_store as store_module
 from meho_backplane.connectors.result_handle_store import (
     ResultHandleStore,
+    ResultRecordKindError,
     SpilledRowSet,
     SpilledWindow,
 )
@@ -307,6 +308,43 @@ async def test_corrupt_payload_is_a_miss() -> None:
         limit=10,
     )
     assert window is None
+
+
+async def test_fetch_record_and_decoders_split_the_read() -> None:
+    """The raw ``GET`` and the decode are separate steps (#3640).
+
+    ``fetch_record`` returns the stored bytes with no operator check; the
+    sync decoders apply the owner check and the record-kind rules, so the
+    read core can run them on its worker pool.
+    """
+    fake = _FakeRedis()
+    store = ResultHandleStore(fake)
+    tenant, handle = uuid4(), uuid4()
+    await store.spill(
+        tenant_id=tenant,
+        operator_sub="op-a",
+        handle_id=handle,
+        op_id="vault.kv.list",
+        rows=_rows(3),
+        total_rows=3,
+        ttl_seconds=60,
+        max_rows=100,
+    )
+
+    raw = await store.fetch_record(tenant_id=tenant, handle_id=handle)
+    assert raw is not None
+    assert await store.fetch_record(tenant_id=tenant, handle_id=uuid4()) is None
+
+    rows = store.decode_rows(raw, operator_sub="op-a", handle_id=handle)
+    assert rows is not None and [r["i"] for r in rows.rows] == [0, 1, 2]
+    window = store.decode_window(raw, operator_sub="op-a", handle_id=handle, offset=1, limit=1)
+    assert window is not None and [r["i"] for r in window.rows] == [1]
+    # Another operator and a corrupt value are the same miss.
+    assert store.decode_rows(raw, operator_sub="op-b", handle_id=handle) is None
+    assert store.decode_rows(b"{", operator_sub="op-a", handle_id=handle) is None
+    # A rows record with nothing beside its rows has no document to read.
+    with pytest.raises(ResultRecordKindError):
+        store.decode_document(raw, operator_sub="op-a", handle_id=handle)
 
 
 def test_key_shape_is_tenant_scoped() -> None:

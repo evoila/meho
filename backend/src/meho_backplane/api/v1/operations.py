@@ -411,7 +411,9 @@ async def post_result_query(
     signal across the operator boundary. A malformed ``handle_id`` (not a
     UUID) or an out-of-range ``offset`` / ``limit`` is a ``422`` at the
     Pydantic layer before the handler runs. A read refused by the result-read
-    rate or capacity check (#3640) is a ``429`` with ``Retry-After``.
+    rate or capacity check (#3640) is a ``429`` with ``Retry-After``; a page
+    that runs past the time budget is a ``422`` with
+    ``reason="query_timeout"``, the same as a query.
     """
     if body.query is not None:
         return await _run_result_query_body(operator, body)
@@ -430,6 +432,11 @@ async def post_result_query(
         raise HTTPException(
             status_code=422,
             detail={"message": str(exc), "reason": "invalid_query"},
+        ) from exc
+    except ResultQueryTimeoutError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": str(exc), "reason": "query_timeout"},
         ) from exc
     except ResultQueryOutputTooLargeError as exc:
         raise HTTPException(

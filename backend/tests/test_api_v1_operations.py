@@ -45,18 +45,13 @@ from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
-from meho_backplane.connectors.result_handle_store import (
-    ResultRecordKindError,
-    SpilledDocument,
-    SpilledRowSet,
-    SpilledWindow,
-)
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations.result_query import MAX_LIMIT
 from meho_backplane.settings import get_settings
+from tests._result_store_helpers import MemoryResultStore
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
 from ._oidc_jwt_helpers import (
@@ -838,66 +833,10 @@ def test_get_descriptor_unknown_id_returns_404(client: TestClient) -> None:
 # ---------------------------------------------------------------------------
 
 
-class _FakeResultStore:
-    """In-memory result-handle store the route reads windows out of.
-
-    Keyed by ``(tenant_id, operator_sub, handle_id)`` so the tests can assert
-    the route threads the operator identity from the JWT — never the body —
-    exactly as the MCP ``result_query`` tool's fake does. The two surfaces
-    share the transport-neutral core, so mirroring the fake keeps their
-    scoping + not-found behaviour provably identical.
-    """
-
-    def __init__(self) -> None:
-        self._rows: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
-
-    def seed(
-        self,
-        *,
-        tenant_id: uuid.UUID,
-        operator_sub: str,
-        handle_id: uuid.UUID,
-        rows: list[dict[str, Any]],
-    ) -> None:
-        self._rows[(str(tenant_id), operator_sub, str(handle_id))] = rows
-
-    async def fetch_window(
-        self,
-        *,
-        tenant_id: uuid.UUID,
-        operator_sub: str,
-        handle_id: uuid.UUID,
-        offset: int,
-        limit: int,
-    ) -> SpilledWindow | None:
-        rows = self._rows.get((str(tenant_id), operator_sub, str(handle_id)))
-        if rows is None:
-            return None
-        window = rows[offset : offset + limit] if limit > 0 else []
-        return SpilledWindow(
-            rows=window,
-            total_rows=len(rows),
-            stored_rows=len(rows),
-            truncated=False,
-        )
-
-    async def fetch_rows(
-        self,
-        *,
-        tenant_id: uuid.UUID,
-        operator_sub: str,
-        handle_id: uuid.UUID,
-    ) -> SpilledRowSet | None:
-        rows = self._rows.get((str(tenant_id), operator_sub, str(handle_id)))
-        if rows is None:
-            return None
-        return SpilledRowSet(rows=rows, total_rows=len(rows), stored_rows=len(rows))
-
-
 @pytest.fixture
-def fake_result_store(monkeypatch: pytest.MonkeyPatch) -> _FakeResultStore:
+def fake_result_store(monkeypatch: pytest.MonkeyPatch) -> MemoryResultStore:
     """Replace the production store getter (on the shared core) with a fake."""
-    store = _FakeResultStore()
+    store = MemoryResultStore()
     monkeypatch.setattr(result_query_core, "get_result_handle_store", lambda: store)
     return store
 
@@ -913,7 +852,7 @@ def test_post_result_query_requires_authentication(client: TestClient) -> None:
 
 def test_post_result_query_returns_window_beyond_inline_sample(
     client: TestClient,
-    fake_result_store: _FakeResultStore,
+    fake_result_store: MemoryResultStore,
 ) -> None:
     """A >50-row spilled set is fully retrievable over REST by paging.
 
@@ -957,7 +896,7 @@ def test_post_result_query_returns_window_beyond_inline_sample(
 
 def test_post_result_query_defaults_offset_and_limit(
     client: TestClient,
-    fake_result_store: _FakeResultStore,
+    fake_result_store: MemoryResultStore,
 ) -> None:
     """Omitting offset/limit windows [0:50] — the documented defaults."""
     handle = uuid.uuid4()
@@ -986,7 +925,7 @@ def test_post_result_query_defaults_offset_and_limit(
 
 def test_post_result_query_paging_over_budget_returns_422(
     client: TestClient,
-    fake_result_store: _FakeResultStore,
+    fake_result_store: MemoryResultStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A paging window over the byte budget -> 422 with reason=output_too_large.
@@ -1021,7 +960,7 @@ def test_post_result_query_paging_over_budget_returns_422(
 
 def test_post_result_query_unknown_handle_returns_typed_404(
     client: TestClient,
-    fake_result_store: _FakeResultStore,
+    fake_result_store: MemoryResultStore,
 ) -> None:
     """An unknown/expired handle -> 404 with reason=handle_not_found.
 
@@ -1046,7 +985,7 @@ def test_post_result_query_unknown_handle_returns_typed_404(
 
 def test_post_result_query_cross_operator_is_a_miss(
     client: TestClient,
-    fake_result_store: _FakeResultStore,
+    fake_result_store: MemoryResultStore,
 ) -> None:
     """A handle spilled by a different operator in the same tenant -> 404.
 
@@ -1075,7 +1014,7 @@ def test_post_result_query_cross_operator_is_a_miss(
 
 def test_post_result_query_cross_tenant_is_a_miss(
     client: TestClient,
-    fake_result_store: _FakeResultStore,
+    fake_result_store: MemoryResultStore,
 ) -> None:
     """A handle spilled under a different tenant -> 404 (tenant scoping).
 
@@ -1104,7 +1043,7 @@ def test_post_result_query_cross_tenant_is_a_miss(
 
 def test_post_result_query_invalid_uuid_returns_422(
     client: TestClient,
-    fake_result_store: _FakeResultStore,
+    fake_result_store: MemoryResultStore,
 ) -> None:
     """A malformed handle_id is a 422 at the Pydantic layer (before the handler)."""
     key = make_rsa_keypair("kid-A")
@@ -1120,7 +1059,7 @@ def test_post_result_query_invalid_uuid_returns_422(
 
 def test_post_result_query_negative_offset_returns_422(
     client: TestClient,
-    fake_result_store: _FakeResultStore,
+    fake_result_store: MemoryResultStore,
 ) -> None:
     """offset < 0 is rejected at the Pydantic bound (ge=0)."""
     key = make_rsa_keypair("kid-A")
@@ -1136,7 +1075,7 @@ def test_post_result_query_negative_offset_returns_422(
 
 def test_post_result_query_zero_limit_returns_422(
     client: TestClient,
-    fake_result_store: _FakeResultStore,
+    fake_result_store: MemoryResultStore,
 ) -> None:
     """limit < 1 is rejected at the Pydantic bound (ge=1)."""
     key = make_rsa_keypair("kid-A")
@@ -1152,7 +1091,7 @@ def test_post_result_query_zero_limit_returns_422(
 
 def test_post_result_query_over_max_limit_returns_422(
     client: TestClient,
-    fake_result_store: _FakeResultStore,
+    fake_result_store: MemoryResultStore,
 ) -> None:
     """limit above the shared MAX_LIMIT ceiling is rejected (le=MAX_LIMIT)."""
     key = make_rsa_keypair("kid-A")
@@ -1168,7 +1107,7 @@ def test_post_result_query_over_max_limit_returns_422(
 
 def test_post_result_query_rejects_extra_body_field(
     client: TestClient,
-    fake_result_store: _FakeResultStore,
+    fake_result_store: MemoryResultStore,
 ) -> None:
     """#3366 relaxed this to reject only *genuinely* unknown body fields.
 
@@ -1202,7 +1141,7 @@ def test_post_result_query_rejects_extra_body_field(
 
 def test_post_result_query_query_mode_filters_server_side(
     client: TestClient,
-    fake_result_store: _FakeResultStore,
+    fake_result_store: MemoryResultStore,
 ) -> None:
     """A ``query`` body filters + aggregates server-side (REST twin of MCP)."""
     handle = uuid.uuid4()
@@ -1245,7 +1184,7 @@ def test_post_result_query_query_mode_filters_server_side(
 
 def test_post_result_query_query_mode_unknown_field_is_422(
     client: TestClient,
-    fake_result_store: _FakeResultStore,
+    fake_result_store: MemoryResultStore,
 ) -> None:
     """A field not on the handle's schema is a 422 with reason=invalid_query."""
     handle = uuid.uuid4()
@@ -1269,7 +1208,7 @@ def test_post_result_query_query_mode_unknown_field_is_422(
 
 def test_post_result_query_query_mode_bad_operator_is_422(
     client: TestClient,
-    fake_result_store: _FakeResultStore,
+    fake_result_store: MemoryResultStore,
 ) -> None:
     """An operator outside the allow-list fails Pydantic body validation (422)."""
     key = make_rsa_keypair("kid-A")
@@ -1361,29 +1300,16 @@ def test_governed_subops_404_for_unregistered_op(
     assert response.json()["detail"]["reason"] == "no_governed_subops"
 
 
-class _DocumentResultStore:
-    """Fake store holding one document record (#3633)."""
-
-    def __init__(self, handle_id: uuid.UUID, document: Any) -> None:
-        self._handle_id = handle_id
-        self._document = document
-
-    async def fetch_document(
-        self, *, tenant_id: uuid.UUID, operator_sub: str, handle_id: uuid.UUID
-    ) -> SpilledDocument | None:
-        if handle_id != self._handle_id or operator_sub != "op-1":
-            return None
-        return SpilledDocument(document=self._document)
-
-    async def fetch_window(self, *, handle_id: uuid.UUID, **_kwargs: Any) -> SpilledWindow | None:
-        raise ResultRecordKindError(handle_id, "document")
-
-
 def _post_document_read(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, body: dict[str, Any]
 ) -> Any:
-    handle = uuid.UUID(body["handle_id"])
-    store = _DocumentResultStore(handle, {"name": "pod-1", "items": [{"i": i} for i in range(5)]})
+    store = MemoryResultStore()
+    store.seed_document(
+        tenant_id=uuid.UUID(DEFAULT_TENANT_ID),
+        operator_sub="op-1",
+        handle_id=uuid.UUID(body["handle_id"]),
+        document={"name": "pod-1", "items": [{"i": i} for i in range(5)]},
+    )
     monkeypatch.setattr(result_query_core, "get_result_handle_store", lambda: store)
     key = make_rsa_keypair("kid-A")
     with respx.mock as mock_router:

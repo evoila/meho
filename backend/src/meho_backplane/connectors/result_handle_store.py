@@ -482,19 +482,17 @@ class ResultHandleStore:
         )
         return True
 
-    async def _load(
-        self,
-        *,
-        tenant_id: UUID,
-        operator_sub: str,
-        handle_id: UUID,
-    ) -> _StoredPayload | None:
-        """Read and decode the record for *handle_id*, or ``None`` on a miss.
+    async def fetch_record(self, *, tenant_id: UUID, handle_id: UUID) -> bytes | None:
+        """Read the raw record under the handle key, or ``None`` on a miss.
 
-        A miss covers an unknown or expired key, another operator's record,
-        an unreachable store, and an undecodable value. They are deliberately
-        the same answer so the store leaks no existence signal across the
-        operator boundary (the #304 isolation contract).
+        Only the Valkey ``GET`` runs here, on the event loop. Decoding the
+        record and checking the operator are the sync ``decode_*`` methods,
+        so the read core can run them on its worker pool under its deadline
+        (#3640) instead of on the loop. A miss covers an unknown or expired
+        key and an unreachable store; the decoders fold another operator's
+        record and an undecodable value into the same ``None`` so the store
+        leaks no existence signal across the operator boundary (the #304
+        isolation contract).
         """
         try:
             raw = await self._client.get(_key(tenant_id, handle_id))
@@ -508,48 +506,39 @@ class ResultHandleStore:
             return None
         if raw is None:
             return None
+        return _to_bytes(raw)
+
+    @staticmethod
+    def _decode(raw: bytes, *, operator_sub: str, handle_id: UUID) -> _StoredPayload | None:
+        """Decode a raw record for *operator_sub*; ``None`` on a miss (sync)."""
         try:
-            payload = msgspec.json.decode(_to_bytes(raw), type=_StoredPayload)
+            payload = msgspec.json.decode(raw, type=_StoredPayload)
         except (msgspec.DecodeError, msgspec.ValidationError) as exc:
-            _log.warning(
-                "result_handle_decode_failed",
-                handle_id=str(handle_id),
-                tenant_id=str(tenant_id),
-                error=str(exc),
-            )
+            _log.warning("result_handle_decode_failed", handle_id=str(handle_id), error=str(exc))
             return None
         if payload.operator_sub != operator_sub:
             return None
         return payload
 
-    async def fetch_window(
+    def decode_window(
         self,
+        raw: bytes,
         *,
-        tenant_id: UUID,
         operator_sub: str,
         handle_id: UUID,
         offset: int,
         limit: int,
     ) -> SpilledWindow | None:
-        """Return the ``[offset : offset+limit]`` slice of a spilled handle.
+        """The ``[offset : offset+limit]`` slice of a raw record (sync).
 
-        Returns ``None`` when the handle is unknown, expired, belongs to
-        a different operator, or the store is unreachable — the four
-        cases the MCP tool surfaces to the agent as the same typed
-        "handle not found or expired" miss (cross-operator access is
-        deliberately indistinguishable from "not found" so the store
-        leaks no existence signal across the operator boundary).
-
-        ``offset`` past ``stored_rows`` yields an empty ``rows`` list with
-        the metadata still populated, so a paging caller learns it has
-        reached the end without a separate count call.
-
-        Raises :class:`ResultRecordKindError` when the handle holds a
-        document record, which has no rows to page.
+        ``None`` when the record belongs to another operator or does not
+        decode. ``offset`` past ``stored_rows`` yields an empty ``rows`` list
+        with the metadata still populated, so a paging caller learns it has
+        reached the end without a separate count call. Raises
+        :class:`ResultRecordKindError` for a document record, which has no
+        rows to page.
         """
-        payload = await self._load(
-            tenant_id=tenant_id, operator_sub=operator_sub, handle_id=handle_id
-        )
+        payload = self._decode(raw, operator_sub=operator_sub, handle_id=handle_id)
         if payload is None:
             return None
         if payload.record_kind == _DOCUMENT_RECORD:
@@ -563,35 +552,17 @@ class ResultHandleStore:
             truncated=payload.stored_rows < payload.total_rows,
         )
 
-    async def fetch_rows(
-        self,
-        *,
-        tenant_id: UUID,
-        operator_sub: str,
-        handle_id: UUID,
+    def decode_rows(
+        self, raw: bytes, *, operator_sub: str, handle_id: UUID
     ) -> SpilledRowSet | None:
-        """Return the **full** authorized row set of a spilled handle.
+        """The full authorized row set of a raw record (sync).
 
-        The sibling of :meth:`fetch_window` for the ``result_query`` query
-        surface (#3366): where ``fetch_window`` serves an
-        ``[offset:offset+limit]`` slice for paging, this returns every stored
-        row so the core can register them in a hardened DuckDB engine and run
-        one bounded, compiled ``SELECT`` over the set.
-
-        Reuses ``fetch_window``'s isolation and non-disclosure model exactly:
-        the tenant scopes the key, the stored ``operator_sub`` is checked so
-        another operator in the same tenant gets the same miss (``None``) as a
-        stranger, and an unknown / expired / cross-operator handle or an
-        unreachable store all return ``None`` — the four cases the read tools
-        surface as one typed "handle not found or expired", leaking no
-        existence signal across the operator boundary.
-
-        Raises :class:`ResultRecordKindError` when the handle holds a
-        document record: a relational query needs rows.
+        Every stored row, so the query core can register them in a hardened
+        DuckDB engine and run one bounded ``SELECT``. Same ``None``-on-miss
+        rule as :meth:`decode_window`. Raises :class:`ResultRecordKindError`
+        for a document record: a relational query needs rows.
         """
-        payload = await self._load(
-            tenant_id=tenant_id, operator_sub=operator_sub, handle_id=handle_id
-        )
+        payload = self._decode(raw, operator_sub=operator_sub, handle_id=handle_id)
         if payload is None:
             return None
         if payload.record_kind == _DOCUMENT_RECORD:
@@ -602,6 +573,66 @@ class ResultHandleStore:
             stored_rows=payload.stored_rows,
         )
 
+    def decode_document(
+        self, raw: bytes, *, operator_sub: str, handle_id: UUID
+    ) -> SpilledDocument | None:
+        """The document a ``path`` read resolves against (sync).
+
+        For a document record that is the whole retained payload. For a rows
+        record it is the dict of top-level fields the reducer left out of the
+        inline summary (#3633), when the spill kept one. Same ``None``-on-miss
+        rule as :meth:`decode_window`. Raises :class:`ResultRecordKindError`
+        when the handle holds rows and nothing beside them.
+        """
+        payload = self._decode(raw, operator_sub=operator_sub, handle_id=handle_id)
+        if payload is None:
+            return None
+        if payload.record_kind != _DOCUMENT_RECORD and payload.document is None:
+            raise ResultRecordKindError(handle_id, _ROWS_RECORD)
+        return SpilledDocument(document=payload.document)
+
+    async def fetch_window(
+        self,
+        *,
+        tenant_id: UUID,
+        operator_sub: str,
+        handle_id: UUID,
+        offset: int,
+        limit: int,
+    ) -> SpilledWindow | None:
+        """:meth:`fetch_record` then :meth:`decode_window`, both on the loop.
+
+        Returns ``None`` when the handle is unknown, expired, belongs to a
+        different operator, or the store is unreachable — the four cases the
+        read tools surface as the same typed "handle not found or expired"
+        miss. The admitted read core uses the two steps separately so the
+        decode runs on its worker pool; this one-call form serves the other
+        callers.
+        """
+        raw = await self.fetch_record(tenant_id=tenant_id, handle_id=handle_id)
+        if raw is None:
+            return None
+        return self.decode_window(
+            raw, operator_sub=operator_sub, handle_id=handle_id, offset=offset, limit=limit
+        )
+
+    async def fetch_rows(
+        self,
+        *,
+        tenant_id: UUID,
+        operator_sub: str,
+        handle_id: UUID,
+    ) -> SpilledRowSet | None:
+        """:meth:`fetch_record` then :meth:`decode_rows`, both on the loop.
+
+        The sibling of :meth:`fetch_window` for the ``result_query`` query
+        surface (#3366), with the same isolation and ``None``-on-miss rules.
+        """
+        raw = await self.fetch_record(tenant_id=tenant_id, handle_id=handle_id)
+        if raw is None:
+            return None
+        return self.decode_rows(raw, operator_sub=operator_sub, handle_id=handle_id)
+
     async def fetch_document(
         self,
         *,
@@ -609,23 +640,14 @@ class ResultHandleStore:
         operator_sub: str,
         handle_id: UUID,
     ) -> SpilledDocument | None:
-        """Return the document a ``path`` read resolves against.
+        """:meth:`fetch_record` then :meth:`decode_document`, both on the loop.
 
-        For a document record that is the whole retained payload. For a rows
-        record it is the dict of top-level fields the reducer left out of the
-        inline summary (#3633), when the spill kept one. Same isolation and
-        ``None``-on-miss rules as :meth:`fetch_rows`. Raises
-        :class:`ResultRecordKindError` when the handle holds rows and nothing
-        beside them: a ``path`` read then has nothing to resolve against.
+        Same isolation and ``None``-on-miss rules as :meth:`fetch_rows`.
         """
-        payload = await self._load(
-            tenant_id=tenant_id, operator_sub=operator_sub, handle_id=handle_id
-        )
-        if payload is None:
+        raw = await self.fetch_record(tenant_id=tenant_id, handle_id=handle_id)
+        if raw is None:
             return None
-        if payload.record_kind != _DOCUMENT_RECORD and payload.document is None:
-            raise ResultRecordKindError(handle_id, _ROWS_RECORD)
-        return SpilledDocument(document=payload.document)
+        return self.decode_document(raw, operator_sub=operator_sub, handle_id=handle_id)
 
 
 #: Process-wide singleton. Lazily built from the broadcast Valkey client

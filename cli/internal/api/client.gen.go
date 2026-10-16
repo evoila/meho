@@ -8269,6 +8269,12 @@ type ServiceGrantListResponse struct {
 // Exposes “revoked_at“ / “revoked_by_sub“ / “revoked_reason“ so
 // callers can tell a live grant from a revoked one in the history, and why
 // it was revoked.
+//
+// “orphaned“ / “orphan_remediation“ are filled in by the service when
+// it reads the grant (see
+// :func:`~meho_backplane.operations.service_grants.classify_orphaned_grants`);
+// building the shape straight from an ORM row leaves them at the
+// not-orphaned default.
 type ServiceGrantRead struct {
 	ConnectorId       string              `json:"connector_id"`
 	CreatedAt         time.Time           `json:"created_at"`
@@ -8276,6 +8282,8 @@ type ServiceGrantRead struct {
 	ExpiresAt         *time.Time          `json:"expires_at"`
 	Id                openapi_types.UUID  `json:"id"`
 	OpId              string              `json:"op_id"`
+	OrphanRemediation *string             `json:"orphan_remediation"`
+	Orphaned          *bool               `json:"orphaned,omitempty"`
 	PrincipalSub      string              `json:"principal_sub"`
 	Reason            string              `json:"reason"`
 	RevokedAt         *time.Time          `json:"revoked_at"`

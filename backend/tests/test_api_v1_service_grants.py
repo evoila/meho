@@ -218,6 +218,62 @@ def test_create_rejects_target_id_with_selector(client: TestClient) -> None:
     assert response.status_code == 422, response.text
 
 
+def test_list_flags_orphaned_grant_with_remediation(client: TestClient) -> None:
+    """A grant whose target was deleted lists as orphaned (#3430); a selector grant does not."""
+    import asyncio
+    from datetime import UTC, datetime
+
+    from meho_backplane.db.models import Target
+
+    target_id = uuid.uuid4()
+
+    async def _seed_deleted_target() -> None:
+        async with get_sessionmaker()() as session, session.begin():
+            session.add(
+                Target(
+                    id=target_id,
+                    tenant_id=_TENANT_A,
+                    name="old-appliance",
+                    aliases=[],
+                    product="vmware",
+                    host="old-appliance.test",
+                    port=443,
+                    deleted_at=datetime.now(UTC),
+                )
+            )
+
+    asyncio.run(_seed_deleted_target())
+    key = make_rsa_keypair("kid-orphan")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key, role=TenantRole.OPERATOR)}"}
+        base_body = {
+            "principal_sub": "svc:orphan-bot",
+            "op_id": "vmware.composite.vm.create",
+            "connector_id": "vmware-rest-9.0",
+            "reason": "unattended build",
+        }
+        orphan = client.post(
+            _BASE, headers=headers, json={**base_body, "target_id": str(target_id)}
+        )
+        assert orphan.status_code == 201, orphan.text
+        selector = client.post(
+            _BASE, headers=headers, json={**base_body, "target_name_pattern": "old-appliance"}
+        )
+        assert selector.status_code == 201, selector.text
+
+        listed = client.get(_BASE, headers=headers, params={"principal_sub": "svc:orphan-bot"})
+    assert listed.status_code == 200, listed.text
+    by_id = {g["id"]: g for g in listed.json()["grants"]}
+    orphan_row = by_id[orphan.json()["id"]]
+    assert orphan_row["orphaned"] is True
+    assert "target_name_pattern='old-appliance'" in orphan_row["orphan_remediation"]
+    assert orphan_row["revoked_at"] is None
+    selector_row = by_id[selector.json()["id"]]
+    assert selector_row["orphaned"] is False
+    assert selector_row["orphan_remediation"] is None
+
+
 def _create_grant(client: TestClient, headers: dict[str, str], op_id: str) -> str:
     body = {
         "principal_sub": "svc:deploy-bot",

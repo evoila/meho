@@ -126,6 +126,8 @@ async def _service_row(grant: ServiceGrantRead, tenant_id: UUID) -> dict[str, ob
         effect = "revoked"
     elif grant.expires_at is not None and grant.expires_at <= datetime.now(UTC):
         effect = "expired"
+    elif grant.orphaned:
+        effect = "orphaned"
     return {
         "id": str(grant.id),
         "kind": "service",
@@ -138,6 +140,7 @@ async def _service_row(grant: ServiceGrantRead, tenant_id: UUID) -> dict[str, ob
             else (selector or "targetless")
         ),
         "effect": effect,
+        "remediation": grant.orphan_remediation,
         "created_by": grant.created_by_sub,
         "expires_at": grant.expires_at,
     }

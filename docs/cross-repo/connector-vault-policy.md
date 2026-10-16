@@ -330,8 +330,10 @@ path **before** an operator approves the parked write.
 > **Check the target's `vault_role` first.** A write runs under the
 > operator's token, logged in with the `extras.vault_role` of the vault
 > target it is dispatched on. When the target sets none, the role comes
-> from the deployment's fallback chain (check-runner role, per-tenant
-> role, then the global default; see §6.3 for the exact order). So before
+> from the deployment's fallback chain: for a check run, the check-runner
+> role or, when that is unset, the global default; for every other
+> operator, the per-tenant role, then the global default (see §6.3 for
+> the exact order). So before
 > you add the stanza below, check which target the write ran on. Another
 > registered vault target may already have a role that can write this
 > path. If so, run the same write on that target. No policy change is
@@ -485,16 +487,21 @@ role the token logs in under is picked in this order (first match wins):
 
 1. the dispatch target's `extras.vault_role`, when the target sets one
    (evoila/meho#3274);
-2. the dedicated check-runner role (`VAULT_CHECK_RUNNER_ROLE`,
-   evoila/meho#2757), only for the synthetic background-dispatch operator;
+2. for the synthetic background-dispatch operator (a check run) only: the
+   dedicated check-runner role (`VAULT_CHECK_RUNNER_ROLE`,
+   evoila/meho#2757). When that variable is unset, a check run uses the
+   deployment-global `VAULT_OIDC_ROLE` directly and **skips step 3**;
 3. a per-tenant role from `VAULT_OIDC_ROLE_BY_TENANT` matching the
-   operator's tenant (evoila/meho#3852);
+   operator's tenant (evoila/meho#3852). A check run never reaches this
+   step;
 4. the deployment-global `VAULT_OIDC_ROLE` (usually `meho-mcp`).
 
 So the write identity is the operator's JWT together with the role this
 chain selects. When you diagnose a denied write on a target without a
 `vault_role`, check steps 2–4 for the acting operator before you edit a
-policy: the role was not necessarily `meho-mcp`. There is no separate
+policy: the role was not necessarily `meho-mcp`. For a check run, the
+per-tenant map does not matter; only the check-runner role or the global
+default can apply. There is no separate
 service-account identity for agent
 writes in this model — an *agent-initiated* `vault.kv.put` still parks and
 executes under a human operator's token (the dispatcher's at park time,

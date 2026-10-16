@@ -575,6 +575,7 @@ def test_write_forbidden_names_target_without_role_override() -> None:
     assert out.error is not None
     assert "dispatched on target 'vault-main', which sets no vault_role override" in out.error
     assert "fallback chain" in out.error
+    assert "or the global default when it is unset" in out.error
     assert "under vault_role" not in out.error
     assert "default role was used" not in out.error
 

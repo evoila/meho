@@ -1841,7 +1841,8 @@ def _vault_write_target_clause(target_name: str | None, vault_role: str | None) 
     return (
         f" It was dispatched on target {target_name!r}, which sets no vault_role "
         f"override, so the role came from the deployment's fallback chain "
-        f"(check-runner role, per-tenant role, then the global default)."
+        f"(for a check run: the check-runner role, or the global default when "
+        f"it is unset; otherwise: the per-tenant role, then the global default)."
     )
 
 

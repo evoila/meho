@@ -286,6 +286,8 @@ async def test_no_builder_echo_scrubs_secret_param_keys() -> None:
         "sddcManagerApiKey",
         "ssh_private_key",
         "kubeconfig",
+        "PassWord",
+        "passWord",
     ],
 )
 async def test_no_builder_echo_masks_every_key_the_broadcast_scrub_flags(key: str) -> None:

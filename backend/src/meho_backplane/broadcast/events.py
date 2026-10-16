@@ -1058,11 +1058,20 @@ def _is_secret_param_name(name: str) -> bool:
     """True when *name* is a secret-shaped param/field name.
 
     Normalises camelCase and kebab-case to snake_case tokens, then
-    checks single tokens and adjacent pairs. Shared by the runtime
-    scrub below and the classifier-coverage test's parameter-schema
-    sweep so both layers agree on what "secret-bearing" means.
+    checks single tokens and adjacent pairs. The name is also checked
+    once without the camelCase split, so an odd-cased whole word still
+    matches as one token. Shared by the runtime scrub below and the
+    classifier-coverage test's parameter-schema sweep so both layers
+    agree on what "secret-bearing" means.
     """
-    normalised = _CAMEL_BOUNDARY.sub("_", name).replace("-", "_").replace(".", "_").lower()
+    flat = name.replace("-", "_").replace(".", "_")
+    return _tokens_are_secret(_CAMEL_BOUNDARY.sub("_", flat).lower()) or _tokens_are_secret(
+        flat.lower()
+    )
+
+
+def _tokens_are_secret(normalised: str) -> bool:
+    """Apply the token rules to an already-normalised snake_case name."""
     tokens = [token for token in normalised.split("_") if token]
     if not tokens:
         return False

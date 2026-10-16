@@ -1113,6 +1113,32 @@ def _stub_notifier_outage(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     return client
 
 
+def _stub_stalled_notifier(monkeypatch: pytest.MonkeyPatch) -> tuple[AsyncMock, list[bool]]:
+    """A notifier that accepts ``XREAD`` but never answers (Valkey hung).
+
+    Unlike :func:`_stub_quiet_notifier` it ignores the BLOCK window. Only the
+    wait's own local cut-off can end a call. Returns the mock and a list that
+    grows by one entry each time a stalled call is cancelled by that cut-off.
+    """
+    cancelled: list[bool] = []
+
+    async def _xread(*_args: object, **_kwargs: object) -> object:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+        return None
+
+    client = AsyncMock()
+    client.xread = AsyncMock(side_effect=_xread)
+    monkeypatch.setattr(
+        "meho_backplane.agent.approval_wait.get_broadcast_blocking_client",
+        lambda: client,
+    )
+    return client, cancelled
+
+
 def _forbid_dispatch(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     """Record every re-dispatch attempt; the caller asserts the list stays empty."""
     import meho_backplane.operations.meta_tools as meta_tools_module
@@ -1213,6 +1239,54 @@ async def test_durable_recheck_interval_bounds_a_lost_event(
     assert elapsed < 2.0
     assert blocks
     assert max(blocks) <= 50
+
+
+async def test_stalled_notifier_does_not_delay_the_stored_reread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ``XREAD`` that never answers is cut off; the row is still re-read on time.
+
+    The blocking client has a 35 s socket timeout. Without the local cut-off a
+    hung Valkey would hold each ``XREAD`` that long, far past the re-check
+    interval, so the decision on the stored row would not be seen.
+    """
+    import meho_backplane.agent.approval_wait as approval_wait_module
+
+    monkeypatch.setattr(approval_wait_module, "_DURABLE_RECHECK_SECONDS", 0.05)
+    monkeypatch.setattr(approval_wait_module, "_XREAD_REPLY_GRACE_SECONDS", 0.05)
+    request = await _park_request(requester=_make_operator())
+    client, cancelled = _stub_stalled_notifier(monkeypatch)
+    flip = asyncio.create_task(_set_status_later(request.id, ApprovalRequestStatus.APPROVED, 0.1))
+
+    started = asyncio.get_running_loop().time()
+    decision = await wait_for_approval_decision(
+        tenant_id=_TENANT_ID, approval_request_id=request.id, timeout_seconds=30.0
+    )
+    elapsed = asyncio.get_running_loop().time() - started
+    await flip
+
+    assert decision == "approved"
+    assert elapsed < 2.0
+    assert client.xread.await_count >= 1
+    assert cancelled
+
+
+async def test_stalled_notifier_timeout_honours_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the defaults, a hung ``XREAD`` cannot push the wait past its deadline."""
+    request = await _park_request(requester=_make_operator())
+    _client, cancelled = _stub_stalled_notifier(monkeypatch)
+
+    started = asyncio.get_running_loop().time()
+    decision = await wait_for_approval_decision(
+        tenant_id=_TENANT_ID, approval_request_id=request.id, timeout_seconds=0.3
+    )
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert decision == "timeout"
+    assert elapsed < 1.5
+    assert cancelled
 
 
 async def test_default_recheck_interval_is_at_most_five_seconds() -> None:

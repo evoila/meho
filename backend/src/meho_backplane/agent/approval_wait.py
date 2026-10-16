@@ -44,6 +44,12 @@ authority. The wait reads it:
   :data:`_DURABLE_RECHECK_SECONDS` while the row stays ``pending``;
 * once more before it returns ``"timeout"``.
 
+Each ``XREAD`` is also cut off locally (:func:`asyncio.timeout`) shortly
+after its server-side ``BLOCK`` window. A Valkey that accepts the command
+but never answers would otherwise hold the wait for the client's full
+socket timeout, well past the next stored-row read and the deadline. A
+cut-off ``XREAD`` counts as a notifier error: the row is read at once.
+
 So a ``"timeout"`` means the row was still ``pending`` (or could not be
 read) at the deadline. This is a bounded fallback, not a polling service:
 one primary-key read per interval, only while an agent waits.
@@ -132,6 +138,13 @@ _DURABLE_RECHECK_SECONDS: Final[float] = 5.0
 #: often"; mirrors the ``meho_broadcast_watch`` per-call default with the
 #: orders-of-magnitude longer overall wait wrapped around it.
 _BLOCK_WINDOW_MS: Final[int] = 5_000
+
+#: How long after its ``BLOCK`` window an ``XREAD`` may still answer before
+#: the wait cuts it off locally and reads the stored row instead. Covers the
+#: reply's network latency on a healthy server; bounds the stall when the
+#: server accepted the command but never answers. The local cut-off never
+#: passes the overall deadline (the loop shortens ``BLOCK`` to leave room).
+_XREAD_REPLY_GRACE_SECONDS: Final[float] = 1.0
 
 #: Upper bound on entries returned per ``XREAD`` invocation. The wait only
 #: cares about the single matching ``approval.{approved,rejected}`` entry,
@@ -230,7 +243,7 @@ async def _xread_one_iteration(
     tenant_id: uuid.UUID,
     remaining: float,
 ) -> tuple[ApprovalDecision | None, str, bool]:
-    """Run one ``XREAD BLOCK`` iteration.
+    """Run one ``XREAD BLOCK`` iteration, cut off locally if the reply stalls.
 
     Returns ``(decision-or-None, new-cursor, notifier_failed)``. The outcomes
     the caller folds into the surrounding while-loop:
@@ -242,9 +255,14 @@ async def _xread_one_iteration(
       tenant doesn't re-process the same entries).
     * ``(None, cursor, False)`` — BLOCK timed out empty; the loop re-issues
       with the same cursor.
-    * ``(None, cursor, True)`` — a recoverable broadcast error fired; the
-      caller re-reads the stored row before it loops again.
+    * ``(None, cursor, True)`` — a recoverable broadcast error fired, or the
+      reply stalled past the local cut-off; the caller re-reads the stored
+      row before it loops again.
 
+    The local cut-off is the ``BLOCK`` window plus
+    :data:`_XREAD_REPLY_GRACE_SECONDS`, never more than *remaining*. Without
+    it a Valkey that accepts ``XREAD`` but never answers holds the call for
+    the client's socket timeout (35 s), far past the next stored-row read.
     A :class:`~redis.exceptions.RedisError` (Valkey unreachable, malformed
     response) or :class:`OSError` (socket-layer hiccup) is logged + folded
     into the "loop again" branch with a small back-off sleep — the same
@@ -252,12 +270,14 @@ async def _xread_one_iteration(
     :class:`asyncio.CancelledError` propagates verbatim so the agent loop
     tears down cleanly when the run is cancelled.
     """
+    reply_timeout_s = min(block_ms / 1000 + _XREAD_REPLY_GRACE_SECONDS, remaining)
     try:
-        raw_response = await client.xread(
-            {stream_key: cursor},
-            block=block_ms,
-            count=_XREAD_COUNT,
-        )
+        async with asyncio.timeout(reply_timeout_s):
+            raw_response = await client.xread(
+                {stream_key: cursor},
+                block=block_ms,
+                count=_XREAD_COUNT,
+            )
     except asyncio.CancelledError:
         _log.info(
             "approval_wait_cancelled",
@@ -265,6 +285,17 @@ async def _xread_one_iteration(
             tenant_id=str(tenant_id),
         )
         raise
+    except TimeoutError:
+        # Must precede the ``OSError`` branch: ``TimeoutError`` is an
+        # ``OSError`` subclass. redis-py disconnects the connection on any
+        # exception raised mid-read, so the next ``XREAD`` starts clean.
+        _log.warning(
+            "approval_wait_xread_stalled",
+            approval_request_id=target_request_id,
+            tenant_id=str(tenant_id),
+            reply_timeout_seconds=reply_timeout_s,
+        )
+        return (None, cursor, True)
     except (RedisError, OSError) as exc:
         _log.warning(
             "approval_wait_xread_error",
@@ -356,7 +387,10 @@ async def wait_for_approval_decision(
     ``approval.{approved,rejected,expired}`` event for *approval_request_id*
     arrives, a re-read of the row shows a decision, or *timeout_seconds*
     passes. The row is re-read after every notifier error, at least every
-    :data:`_DURABLE_RECHECK_SECONDS`, and once more at the deadline.
+    :data:`_DURABLE_RECHECK_SECONDS`, and once more at the deadline. Each
+    ``XREAD`` is cut off locally shortly after its ``BLOCK`` window, so a
+    Valkey that stops answering delays a re-read by at most
+    :data:`_XREAD_REPLY_GRACE_SECONDS` and never past the deadline.
 
     Args:
         tenant_id: The operator's tenant. Scopes both the Valkey stream and
@@ -406,10 +440,15 @@ async def wait_for_approval_decision(
     cursor: str = "$"
 
     while (remaining := deadline - time.monotonic()) > 0:
-        # Cap each iteration's BLOCK at the per-iteration window, the
-        # remaining wall-clock and the next stored-row re-read; the integer
-        # cast guards against a sub-1ms tail.
-        block_s = min(remaining, next_recheck - time.monotonic())
+        # Cap each iteration's BLOCK at the per-iteration window, the next
+        # stored-row re-read, and the remaining wall-clock minus the reply
+        # grace (so the local cut-off below the deadline still leaves the
+        # server window time to answer); the integer cast guards against a
+        # sub-1ms tail.
+        block_s = min(
+            remaining - _XREAD_REPLY_GRACE_SECONDS,
+            next_recheck - time.monotonic(),
+        )
         block_ms = max(1, min(_BLOCK_WINDOW_MS, int(block_s * 1000)))
         decision, cursor, notifier_failed = await _xread_one_iteration(
             client,

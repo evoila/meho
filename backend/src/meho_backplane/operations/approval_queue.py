@@ -672,6 +672,46 @@ async def _insert_idempotent_request(
     return None
 
 
+async def _expire_if_overdue(
+    session: AsyncSession, existing: ApprovalRequest, *, operator: Operator
+) -> ApprovalRequest | None:
+    """Expire *existing* when it is ``pending`` and past its deadline (#3486).
+
+    The sweeper may not have run yet (or may be off). Such a row can no
+    longer be approved, so a retry must not get it back. It is locked and
+    expired here, in the caller's transaction, the same way
+    :func:`expire_stale_requests` does it. That frees the key, so the
+    caller then parks a new request.
+
+    Returns the expired row, or ``None`` when *existing* is still usable
+    (``approved``, or ``pending`` and within its deadline). Also ``None``
+    when a concurrent decision or sweep changed the row first: the normal
+    insert path then sorts it out.
+    """
+    if existing.status != ApprovalRequestStatus.PENDING.value:
+        return None
+    cutoff = _now()
+    default_ttl = _resolve_default_ttl()
+    if not _deadline_has_passed(existing, cutoff, default_ttl):
+        return None
+    stmt = (
+        select(ApprovalRequest)
+        .where(
+            ApprovalRequest.id == existing.id,
+            ApprovalRequest.status == ApprovalRequestStatus.PENDING.value,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    locked = (await session.execute(stmt)).scalars().first()
+    if locked is None:
+        return None
+    await _expire_request(
+        session, locked, operator=operator, cutoff=cutoff, default_ttl=default_ttl
+    )
+    return locked
+
+
 def _now() -> datetime:
     """Return the current UTC datetime. Isolated for testing."""
     return datetime.now(UTC)
@@ -890,7 +930,12 @@ async def create_pending_request(
             instead of a new one: no new row, no new audit row. The
             returned row carries the transient attr ``_reused = True`` (and
             no ``_audit_id``), so the caller does not publish a second
-            ``approval.pending`` event. ``None`` keeps the old behaviour.
+            ``approval.pending`` event. A ``pending`` request already past
+            its deadline is not returned: it is expired in this
+            transaction and a new request is parked. The new row then
+            carries the expired one as ``_expired_request`` (else
+            ``None``), so the caller can publish ``approval.expired``
+            after commit. ``None`` keeps the old behaviour.
 
     Returns:
         The flushed :class:`ApprovalRequest` row (new, or reused).
@@ -914,6 +959,7 @@ async def create_pending_request(
             preview_hash=preview_hash,
         )
 
+    expired_request: ApprovalRequest | None = None
     if idempotency_key is not None:
         existing = await _find_idempotent_request(
             session,
@@ -922,7 +968,9 @@ async def create_pending_request(
             idempotency_key=idempotency_key,
         )
         if existing is not None:
-            return _reuse(existing)
+            expired_request = await _expire_if_overdue(session, existing, operator=operator)
+            if expired_request is None:
+                return _reuse(existing)
 
     if proposed_effect is None:
         proposed_effect = {
@@ -1005,6 +1053,7 @@ async def create_pending_request(
         winner = await _insert_idempotent_request(session, request, idempotency_key=idempotency_key)
         if winner is not None:
             return _reuse(winner)
+    request._expired_request = expired_request  # type: ignore[attr-defined]
     if handoff_payload is not None:
         request.execution_handle = store_handoff(
             session, request.id, request.tenant_id, handoff_payload
@@ -1940,41 +1989,60 @@ async def expire_stale_requests(
     rows = list(result.scalars().all())
 
     for request in rows:
-        # Backfill a legacy null deadline to the coalesced value so the
-        # decision audit row and the persisted row agree on when it expired.
-        if request.expires_at is None and default_ttl is not None:
-            request.expires_at = request.created_at + default_ttl
-        request.status = ApprovalRequestStatus.EXPIRED.value
-        request.decided_at = cutoff
-        await discard_handoff(session, request.id, request.tenant_id)
-        await session.flush()
-
-        expire_audit_id = uuid.uuid4()
-        await _write_audit_row(
-            session,
-            audit_id=expire_audit_id,
-            operator=operator,
-            request=request,
-            path="approval.decision",
-            status_code=_DECISION_STATUS_CODE_EXPIRED,
-            duration_ms=0.0,
-            extra_payload={"decision": "expired", "expires_at": str(request.expires_at)},
+        await _expire_request(
+            session, request, operator=operator, cutoff=cutoff, default_ttl=default_ttl
         )
-
-        _log.info(
-            "approval_request_expired",
-            approval_request_id=str(request.id),
-            op_id=request.op_id,
-            tenant_id=str(operator.tenant_id),
-        )
-        # Expose the audit_id as a transient attr so the caller can
-        # publish the ``approval.expired`` broadcast event AFTER commit.
-        # See create_pending_request / approve_request / reject_request
-        # for the same publish-after-commit invariant: a publish-before-
-        # commit would surface a phantom event if the commit fails.
-        request._audit_id = expire_audit_id  # type: ignore[attr-defined]
 
     return rows
+
+
+async def _expire_request(
+    session: AsyncSession,
+    request: ApprovalRequest,
+    *,
+    operator: Operator,
+    cutoff: datetime,
+    default_ttl: timedelta | None,
+) -> None:
+    """Move one locked, overdue ``pending`` row to ``expired`` + audit it.
+
+    Shared by :func:`expire_stale_requests` and the idempotent retry path
+    of :func:`create_pending_request` (#3486), so both write the same
+    decision audit row. The caller holds the row lock and owns the commit.
+    """
+    # Backfill a legacy null deadline to the coalesced value so the
+    # decision audit row and the persisted row agree on when it expired.
+    if request.expires_at is None and default_ttl is not None:
+        request.expires_at = request.created_at + default_ttl
+    request.status = ApprovalRequestStatus.EXPIRED.value
+    request.decided_at = cutoff
+    await discard_handoff(session, request.id, request.tenant_id)
+    await session.flush()
+
+    expire_audit_id = uuid.uuid4()
+    await _write_audit_row(
+        session,
+        audit_id=expire_audit_id,
+        operator=operator,
+        request=request,
+        path="approval.decision",
+        status_code=_DECISION_STATUS_CODE_EXPIRED,
+        duration_ms=0.0,
+        extra_payload={"decision": "expired", "expires_at": str(request.expires_at)},
+    )
+
+    _log.info(
+        "approval_request_expired",
+        approval_request_id=str(request.id),
+        op_id=request.op_id,
+        tenant_id=str(operator.tenant_id),
+    )
+    # Expose the audit_id as a transient attr so the caller can
+    # publish the ``approval.expired`` broadcast event AFTER commit.
+    # See create_pending_request / approve_request / reject_request
+    # for the same publish-after-commit invariant: a publish-before-
+    # commit would surface a phantom event if the commit fails.
+    request._audit_id = expire_audit_id  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------

@@ -2628,6 +2628,15 @@ async def _handle_needs_approval(
         # Publish AFTER commit so a phantom event cannot outlive a failed
         # transaction (the helper is fail-open: a broadcast outage does
         # not block the durable decision).
+        expired_request = getattr(request, "_expired_request", None)
+        if expired_request is not None:
+            await publish_approval_event(
+                tenant_id=operator.tenant_id,
+                request=expired_request,
+                decision="expired",
+                principal_sub=operator.sub,
+                audit_id=expired_request._audit_id,
+            )
         await publish_approval_event(
             tenant_id=operator.tenant_id,
             request=request,

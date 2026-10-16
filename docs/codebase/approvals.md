@@ -855,6 +855,17 @@ for approval.
   longer holds its key, so the same key parks a new request. An `approved`
   request keeps its key even after it ran: a retry then returns the request
   that already ran, so the op is never run twice.
+- **A late retry.** A request can pass its deadline (`expires_at`) while
+  it is still `pending`, because the expiry sweeper runs only every few
+  minutes, or not at all when it is off. Such a request can no longer be
+  approved, so a retry does not get it back. Instead, `create_pending_request`
+  locks it and expires it in the same transaction (`_expire_if_overdue`,
+  the same steps and the same `approval.decision` audit row as
+  `expire_stale_requests`). Then it parks a new request with the same key.
+  The reply carries the new `approval_request_id` and no
+  `approval_request_reused`. After commit the dispatcher publishes
+  `approval.expired` for the old request and `approval.pending` for the
+  new one.
 - **Who can match.** The key is scoped to `(tenant_id, principal_sub)`. Two
   requesters, or two runs with different `work_ref` values, never share one
   request. Without a key, nothing changes: every call that waits for

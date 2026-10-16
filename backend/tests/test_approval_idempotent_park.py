@@ -12,7 +12,8 @@ second approval request. This suite pins:
   the first one's ``approval_request_id`` back.
 * **The key is scoped.** A different principal, a different tenant, or no
   key at all still gets its own request. The same key with a different call
-  is refused (``idempotency_key_conflict``). A rejected request frees the key.
+  is refused (``idempotency_key_conflict``). A rejected request frees the key,
+  and so does a pending one past its deadline, even before the sweeper runs.
 * **A race cannot create two.** The partial unique index (migration 0105)
   makes the losing insert return the winner's row.
 * **List/show carry ``preview_hash`` and ``result_state``.** A client can
@@ -24,7 +25,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -313,6 +314,90 @@ async def test_rejected_request_frees_the_key() -> None:
     second = await _park_direct()
     assert second.id != first.id
     assert await _approval_row_count() == 2
+
+
+@pytest.mark.asyncio
+async def test_overdue_pending_request_is_expired_and_a_new_one_parks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retry after the deadline, before the sweeper runs, gets a new request.
+
+    The old row can no longer be approved, so handing it back would leave
+    the client stuck. The retry expires it (with a decision audit row) and
+    parks a new request with the same key.
+    """
+    first = await _park_direct()
+    assert first.expires_at is not None
+    late = first.expires_at + timedelta(seconds=1)
+    monkeypatch.setattr(approval_queue_module, "_now", lambda: late)
+
+    second = await _park_direct()
+
+    assert second.id != first.id
+    assert getattr(second, "_reused", False) is False
+    assert second._expired_request.id == first.id  # type: ignore[attr-defined]
+    assert await _approval_row_count() == 2
+    async with get_sessionmaker()() as s:
+        old = await s.get(ApprovalRequest, first.id)
+        assert old is not None
+        assert old.status == ApprovalRequestStatus.EXPIRED.value
+        decisions = (
+            (await s.execute(select(AuditLog).where(AuditLog.path == "approval.decision")))
+            .scalars()
+            .all()
+        )
+    assert [row.payload["decision"] for row in decisions] == ["expired"]
+
+    # The new request is the one that can still be decided.
+    async with get_sessionmaker()() as s:
+        approved = await approve_request(s, second.id, operator=_operator(sub="op-approver"))
+        await s.commit()
+    assert approved.status == ApprovalRequestStatus.APPROVED.value
+
+
+@pytest.mark.asyncio
+async def test_call_after_the_deadline_parks_again_and_announces_the_expiry(
+    embedding: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through ``call_operation``: a late retry gets a new id, not a stuck one."""
+    _register_recording_connector()
+    register_preview_builder(_OP_ID, _blast_radius_builder)
+    await _seed_target(name="gh-prod")
+    await _insert_destructive_descriptor(embedding=embedding)
+    published: list[tuple[str, uuid.UUID]] = []
+
+    async def _record(**kwargs: Any) -> None:
+        published.append((kwargs["decision"], kwargs["request"].id))
+
+    monkeypatch.setattr(approval_queue_module, "publish_approval_event", _record)
+
+    requester = _operator(sub="op-requester")
+    args = {"connector_id": _CONNECTOR_ID, "op_id": _OP_ID, "target": "gh-prod", "params": _PARAMS}
+    preview = await preview_operation(requester, args)
+    bound = {**args, "preview_hash": preview["preview_hash"], "idempotency_key": _KEY}
+    first = await call_operation(requester, bound)
+    first_id = uuid.UUID(first["extras"]["approval_request_id"])
+
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, first_id)
+        assert row is not None and row.expires_at is not None
+        late = row.expires_at + timedelta(seconds=1)
+    monkeypatch.setattr(approval_queue_module, "_now", lambda: late)
+
+    second = await call_operation(requester, bound)
+    assert second["status"] == "awaiting_approval", second
+    second_id = uuid.UUID(second["extras"]["approval_request_id"])
+    assert second_id != first_id
+    assert "approval_request_reused" not in second["extras"]
+    assert published == [("pending", first_id), ("expired", first_id), ("pending", second_id)]
+
+
+@pytest.mark.asyncio
+async def test_pending_request_within_its_deadline_is_still_reused() -> None:
+    first = await _park_direct()
+    second = await _park_direct()
+    assert second.id == first.id
+    assert getattr(second, "_expired_request", None) is None
 
 
 @pytest.mark.asyncio

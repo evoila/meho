@@ -45,7 +45,12 @@ from meho_backplane.retrieval.embedding import (
     DEFAULT_EMBEDDING_MODEL,
 )
 
-__all__ = ["Settings", "get_settings", "parse_bool_env"]
+__all__ = [
+    "RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES",
+    "Settings",
+    "get_settings",
+    "parse_bool_env",
+]
 
 #: Driver schemes accepted on ``DATABASE_URL``. Both are async — the
 #: backplane refuses to construct a sync engine because every database
@@ -76,6 +81,14 @@ _SUPPORTED_BROADCAST_URL_SCHEMES: Final[tuple[str, ...]] = (
 #: (including the empty string and "disabled") is treated as ``False``
 #: so a misconfigured env var never silently enables a guarded surface.
 _TRUTHY_ENV_VALUES: Final[frozenset[str]] = frozenset({"1", "true", "yes", "on"})
+
+#: Floor for ``RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES`` (#3641). A completed
+#: operation must always deliver its receipt (``status``, ``op_id``,
+#: ``audit_id``, ``delivery`` and the remediation text), so the ceiling can
+#: never be set below the size that receipt takes on the wire. 2 KiB holds
+#: the receipt for an ``op_id`` of 256 characters with room to spare; a
+#: test in ``tests/test_operations_delivery_budget.py`` pins that.
+RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES: Final[int] = 2048
 
 
 def parse_bool_env(value: str | None) -> bool:
@@ -615,8 +628,10 @@ class Settings(BaseModel):
         ``status="ok"`` and is returned with ``delivery="partial"`` (receipt
         plus result handle) or ``delivery="unavailable"`` (receipt only),
         never as an error. The default is generous on purpose; a load
-        benchmark may tune it. Default 262144 (256 KiB). Env
-        ``RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES``.
+        benchmark may tune it. Must be at least
+        :data:`RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES` (2048) so the
+        receipt always fits; a smaller value fails at startup. Default
+        262144 (256 KiB). Env ``RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES``.
     result_query_response_wire_max_bytes:
         Terminal wire ceiling, in bytes, for a ``result_query`` response
         (query, paging and path reads), measured the same way (#3641). A
@@ -2177,6 +2192,24 @@ class Settings(BaseModel):
                 raise ValueError(
                     f"AGENT_RUNS_DISABLED_TENANTS entries must be UUIDs; got {chunk!r}"
                 ) from exc
+        return value
+
+    @field_validator("result_complete_response_wire_max_bytes")
+    @classmethod
+    def _complete_response_ceiling_must_hold_the_receipt(cls, value: int) -> int:
+        """Reject a ``call_operation`` wire ceiling the receipt cannot fit (#3641).
+
+        A completed operation always delivers its receipt, so a ceiling
+        below :data:`RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES` could never
+        be honoured. Failing at startup keeps the ceiling a real bound
+        instead of one the receipt silently bypasses.
+        """
+        if value < RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES:
+            raise ValueError(
+                "RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES must be at least "
+                f"{RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES} bytes so the receipt of a "
+                f"completed operation always fits. Got: {value}"
+            )
         return value
 
     @field_validator("vault_oidc_role_by_tenant")

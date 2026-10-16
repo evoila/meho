@@ -318,6 +318,13 @@ code-level diagnosis at `v0.13.0` (`f6ee330`):
   `> 0`.
 - `RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES` (2 MiB) bounds a whole read-back
   response on the wire (#3641); validated `> 0`.
+- `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES` (256 KiB) bounds a completed
+  `call_operation` response the same way (#3641); validated `>= 2048`
+  (`RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES`) so the receipt always fits.
+  Over the ceiling, `delivery="partial"` keeps the handle only when its
+  `fetch_more.drill_in.available` is true; a handle whose spill was skipped
+  or failed is dropped and the response is `delivery="unavailable"`. Details
+  in `docs/codebase/mcp.md`, "Response wire ceiling".
 - `duckdb==1.5.5` / `pyarrow==25.0.1` (pinned) — the sandboxed
   `QueryEngine` the lazy compiled-query path runs inside. The reducer does
   not construct an engine for its catalog, summary, or preview.

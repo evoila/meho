@@ -31,7 +31,11 @@ import pytest
 from cryptography.fernet import Fernet
 from pydantic import ValidationError
 
-from meho_backplane.settings import Settings, get_settings
+from meho_backplane.settings import (
+    RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES,
+    Settings,
+    get_settings,
+)
 
 
 def _settings_kwargs(database_url: str) -> dict[str, object]:
@@ -922,6 +926,30 @@ def test_result_query_bounds_reject_non_positive(field: str) -> None:
             database_url="sqlite+aiosqlite:///:memory:",
             **{field: 0},
         )
+
+
+@pytest.mark.parametrize("value", [1, 64, RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES - 1])
+def test_complete_response_ceiling_below_floor_is_rejected(value: int) -> None:
+    """A ceiling the completed-operation receipt cannot fit fails at startup (#3641)."""
+    with pytest.raises(ValidationError, match="receipt of a completed operation"):
+        Settings(
+            keycloak_issuer_url="https://keycloak.test/realms/meho",
+            keycloak_audience="meho-backplane",
+            vault_addr="https://vault.test",
+            database_url="sqlite+aiosqlite:///:memory:",
+            result_complete_response_wire_max_bytes=value,
+        )
+
+
+def test_complete_response_ceiling_at_floor_is_accepted() -> None:
+    settings = Settings(
+        keycloak_issuer_url="https://keycloak.test/realms/meho",
+        keycloak_audience="meho-backplane",
+        vault_addr="https://vault.test",
+        database_url="sqlite+aiosqlite:///:memory:",
+        result_complete_response_wire_max_bytes=RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES,
+    )
+    assert settings.result_complete_response_wire_max_bytes == 2048
 
 
 @pytest.mark.parametrize(("value", "expected"), [(None, 16777216), ("4096", 4096)])

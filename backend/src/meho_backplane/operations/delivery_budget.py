@@ -21,11 +21,18 @@ check), which run before encoding:
 
 * :func:`bound_complete_response` -- ``call_operation``. A completed
   operation whose response is too large keeps ``status="ok"`` and gets the
-  ``delivery`` state ``partial`` (the receipt and the result handle still
-  fit) or ``unavailable`` (only the receipt fits). It is never relabelled
-  as an error and never cut silently.
+  ``delivery`` state ``partial`` (the receipt and a readable result handle
+  still fit) or ``unavailable`` (only the receipt fits). It is never
+  relabelled as an error and never cut silently.
 * :mod:`meho_backplane.operations.result_query` -- the read-back paths
   raise the recoverable ``output_too_large`` error instead.
+
+The receipt of a completed operation (``status``, ``op_id``, ``audit_id``,
+``delivery`` and the remediation text) must always reach the caller, so
+the ``call_operation`` ceiling has a floor:
+:data:`~meho_backplane.settings.RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES`.
+:class:`~meho_backplane.settings.Settings` rejects a smaller value at
+startup, before any operation runs.
 
 Both REST twins share the same ceiling. REST sends the payload once, so the
 MCP measurement is the larger of the two and the safe bound for both.
@@ -36,13 +43,20 @@ from __future__ import annotations
 import json
 from typing import Any, Literal
 
-from meho_backplane.connectors.schemas import OperationResult
+import structlog
+
+from meho_backplane.connectors.schemas import OperationResult, ResultHandle
+from meho_backplane.settings import RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES
 
 __all__ = [
+    "RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES",
     "bound_complete_response",
+    "handle_is_readable",
     "measure_delivered_wire_bytes",
     "tool_result_text",
 ]
+
+_log = structlog.get_logger(__name__)
 
 
 def tool_result_text(result: Any) -> str:
@@ -81,6 +95,21 @@ def measure_delivered_wire_bytes(result: Any, *, structured: bool = True) -> int
     if structured:
         total += len(_transport_encode(result))
     return total
+
+
+def handle_is_readable(handle: ResultHandle | None) -> bool:
+    """Return whether ``result_query`` can read the rows behind *handle*.
+
+    A handle alone does not prove its rows were stored: the reducer also
+    mints handles whose spill was skipped or failed, and marks them with
+    ``fetch_more.drill_in.available=False``. Only a handle whose drill-in
+    is available can be read back.
+    """
+    return (
+        handle is not None
+        and handle.fetch_more is not None
+        and handle.fetch_more.drill_in.available
+    )
 
 
 _PARTIAL_REMEDIATION = (
@@ -124,22 +153,41 @@ def bound_complete_response(result: OperationResult, max_bytes: int) -> Operatio
     the receipt must reach the caller. An in-budget response is returned
     unchanged. Otherwise the inline ``result`` and the extras are dropped:
 
-    * ``delivery="partial"`` when a result handle exists and the envelope
-      with the handle and ``audit_id`` fits -- the caller reads the full
-      set through ``result_query``;
+    * ``delivery="partial"`` when the result handle can be read back
+      through ``result_query`` (see :func:`handle_is_readable`) and the
+      envelope with the handle and ``audit_id`` fits;
     * ``delivery="unavailable"`` otherwise -- the envelope keeps only the
-      receipt and the remediation text.
+      receipt and the remediation text. A handle whose rows were never
+      stored is dropped too, so the caller is never sent to a read that
+      cannot work.
 
     The status stays ``ok`` in both cases, so a completed write is never
     reported as an error because its response was too large.
+
+    The receipt is the smallest honest response, and *max_bytes* is at
+    least :data:`RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES`, which holds the
+    receipt for any realistic ``op_id``. The receipt's size is still
+    checked: if it is over the ceiling (an unusually long ``op_id``), it
+    is delivered anyway and a warning is logged, because dropping the
+    ``audit_id`` of a completed write would be worse than the overrun.
     """
     if result.status != "ok":
         return result
     size = measure_delivered_wire_bytes(result.model_dump(mode="json"))
     if size <= max_bytes:
         return result
-    if result.handle is not None:
+    if handle_is_readable(result.handle):
         partial = _trimmed(result, "partial", size, max_bytes)
         if measure_delivered_wire_bytes(partial.model_dump(mode="json")) <= max_bytes:
             return partial
-    return _trimmed(result, "unavailable", size, max_bytes)
+    receipt = _trimmed(result, "unavailable", size, max_bytes)
+    receipt_size = measure_delivered_wire_bytes(receipt.model_dump(mode="json"))
+    if receipt_size > max_bytes:
+        _log.warning(
+            "delivery_receipt_over_ceiling",
+            op_id=result.op_id,
+            audit_id=str(result.audit_id) if result.audit_id is not None else None,
+            receipt_bytes=receipt_size,
+            delivery_max_bytes=max_bytes,
+        )
+    return receipt

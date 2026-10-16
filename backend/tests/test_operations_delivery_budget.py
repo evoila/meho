@@ -11,10 +11,20 @@ from uuid import uuid4
 
 import pytest
 from fastapi.responses import JSONResponse
+from structlog.testing import capture_logs
 
-from meho_backplane.connectors.schemas import OperationResult, ResultHandle
+from meho_backplane.connectors.schemas import (
+    DrillInUnavailableReason,
+    FetchMore,
+    FetchMoreDrillIn,
+    FetchMoreNativePagination,
+    OperationResult,
+    ResultHandle,
+)
 from meho_backplane.operations.delivery_budget import (
+    RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES,
     bound_complete_response,
+    handle_is_readable,
     measure_delivered_wire_bytes,
     tool_result_text,
 )
@@ -49,21 +59,49 @@ def test_escaping_is_counted() -> None:
     assert text_only == len(json.dumps(json.dumps(_AWKWARD), ensure_ascii=False).encode())
 
 
-def _handle() -> ResultHandle:
+def _fetch_more(drill_in: FetchMoreDrillIn) -> FetchMore:
+    return FetchMore(
+        drill_in=drill_in,
+        native_pagination=FetchMoreNativePagination(
+            available=False, rationale="op has no pagination hint"
+        ),
+    )
+
+
+def _readable_drill_in() -> FetchMoreDrillIn:
+    return FetchMoreDrillIn(
+        available=True,
+        rationale="Call result_query with the handle id.",
+        mcp_tool="result_query",
+        example_call={"tool": "result_query", "args": {"offset": 0, "limit": 50}},
+    )
+
+
+def _unreadable_drill_in(reason: DrillInUnavailableReason) -> FetchMoreDrillIn:
+    return FetchMoreDrillIn(
+        available=False, rationale="Re-call with narrower params.", reason=reason
+    )
+
+
+def _handle(*, fetch_more: FetchMore | None = None, summary_size: int = 10) -> ResultHandle:
+    """A handle as the reducer mints it: stored rows, readable through ``result_query``."""
     return ResultHandle(
         handle_id=uuid4(),
-        summary_md="# 500 rows",
+        summary_md="#" * summary_size,
         schema_={"type": "array"},
         total_rows=500,
         sample_rows=[{"k": "v"}],
         ttl_seconds=3600,
+        fetch_more=fetch_more or _fetch_more(_readable_drill_in()),
     )
 
 
-def _ok(*, handle: ResultHandle | None = None, size: int = 50_000) -> OperationResult:
+def _ok(
+    *, handle: ResultHandle | None = None, size: int = 50_000, op_id: str = "vmware.vm.create"
+) -> OperationResult:
     return OperationResult(
         status="ok",
-        op_id="vmware.vm.create",
+        op_id=op_id,
         result={"blob": "x" * size},
         duration_ms=12.0,
         handle=handle,
@@ -73,12 +111,15 @@ def _ok(*, handle: ResultHandle | None = None, size: int = 50_000) -> OperationR
     )
 
 
+_LIMIT = RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES
+
+
 def test_in_budget_response_is_unchanged() -> None:
     result = _ok(size=10)
     assert bound_complete_response(result, 262144) is result
 
 
-def test_over_budget_with_handle_is_partial() -> None:
+def test_over_budget_with_readable_handle_is_partial() -> None:
     """Receipt and handle fit: delivery is partial, status stays ok."""
     result = _ok(handle=_handle())
     bounded = bound_complete_response(result, 4096)
@@ -95,14 +136,40 @@ def test_over_budget_with_handle_is_partial() -> None:
 
 def test_over_budget_without_room_for_handle_is_unavailable() -> None:
     """When even receipt plus handle is too large, only the receipt remains."""
-    result = _ok(handle=_handle())
-    bounded = bound_complete_response(result, 64)
+    result = _ok(handle=_handle(summary_size=4096))
+    bounded = bound_complete_response(result, _LIMIT)
     assert bounded.status == "ok"
     assert bounded.delivery == "unavailable"
     assert bounded.handle is None
     assert bounded.audit_id == result.audit_id
     assert bounded.result is None
     assert "audit" in bounded.extras["remediation"]
+    assert measure_delivered_wire_bytes(bounded.model_dump(mode="json")) <= _LIMIT
+
+
+@pytest.mark.parametrize(
+    "reason", ["result_store_unavailable", "no_tenant_context", "admission_limit_exceeded"]
+)
+def test_over_budget_with_unreadable_handle_is_unavailable(
+    reason: DrillInUnavailableReason,
+) -> None:
+    """A handle whose rows were never stored cannot be read; no result_query advice."""
+    handle = _handle(fetch_more=_fetch_more(_unreadable_drill_in(reason)))
+    assert not handle_is_readable(handle)
+    bounded = bound_complete_response(_ok(handle=handle), 4096)
+    assert bounded.status == "ok"
+    assert bounded.delivery == "unavailable"
+    assert bounded.handle is None
+    assert "result_query" not in bounded.extras["remediation"]
+    assert "audit" in bounded.extras["remediation"]
+    assert "Do not re-invoke" in bounded.extras["remediation"]
+
+
+def test_handle_without_fetch_more_is_not_readable() -> None:
+    """Only the reducer's drill-in proves a stored result; a bare handle does not."""
+    assert not handle_is_readable(None)
+    assert not handle_is_readable(_handle(fetch_more=None).model_copy(update={"fetch_more": None}))
+    assert handle_is_readable(_handle())
 
 
 def test_over_budget_without_handle_is_unavailable() -> None:
@@ -113,9 +180,33 @@ def test_over_budget_without_handle_is_unavailable() -> None:
     assert bounded.audit_id == result.audit_id
 
 
+def test_unavailable_response_fits_the_floor() -> None:
+    """The receipt fits the smallest allowed ceiling, even with a long op_id."""
+    result = _ok(op_id="x" * 256, size=1_000_000)
+    bounded = bound_complete_response(result, _LIMIT)
+    assert bounded.delivery == "unavailable"
+    assert measure_delivered_wire_bytes(bounded.model_dump(mode="json")) <= _LIMIT
+
+
+def test_receipt_over_ceiling_is_still_delivered_and_logged() -> None:
+    """An unrealistic op_id can push the receipt over the floor; the receipt still ships."""
+    result = _ok(op_id="x" * 4096)
+    with capture_logs() as logs:
+        bounded = bound_complete_response(result, _LIMIT)
+    assert bounded.status == "ok"
+    assert bounded.delivery == "unavailable"
+    assert bounded.audit_id == result.audit_id
+    assert bounded.op_id == result.op_id
+    assert measure_delivered_wire_bytes(bounded.model_dump(mode="json")) > _LIMIT
+    warnings = [entry for entry in logs if entry["event"] == "delivery_receipt_over_ceiling"]
+    assert len(warnings) == 1
+    assert warnings[0]["log_level"] == "warning"
+    assert warnings[0]["delivery_max_bytes"] == _LIMIT
+
+
 @pytest.mark.parametrize("status", ["error", "denied", "awaiting_approval"])
 def test_non_ok_responses_are_not_rewritten(status: str) -> None:
     result = OperationResult(
         status=status, op_id="vmware.vm.create", error="e" * 10_000, duration_ms=1.0
     )
-    assert bound_complete_response(result, 64) is result
+    assert bound_complete_response(result, _LIMIT) is result

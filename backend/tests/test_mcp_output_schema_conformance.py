@@ -40,9 +40,11 @@ import jsonschema
 import pytest
 from fastapi.testclient import TestClient
 
+import meho_backplane.operations.meta_tools as meta_tools
 import meho_backplane.operations.result_query as result_query_core
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.result_handle_store import SpilledDocument, SpilledWindow
+from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import GraphNode, Tenant
 from meho_backplane.db.models import Target as TargetORM
@@ -58,7 +60,8 @@ from meho_backplane.operations.addon_capability_schemas import (
 from meho_backplane.operations.addon_pairing import AddonPairingService
 from meho_backplane.operations.addon_pairing_contract import BACKPLANE_CONTRACT_VERSION
 from meho_backplane.operations.addon_pairing_schemas import PairAddonRequest
-from meho_backplane.settings import get_settings
+from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
+from meho_backplane.settings import RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES, get_settings
 from meho_backplane.topology.schemas import TopologyEdge, TopologyEdgeEndpoint
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
@@ -617,15 +620,32 @@ def test_call_operation_over_wire_ceiling_keeps_completed_status(
 ) -> None:
     """A completed write over the response wire ceiling stays ``ok`` (#3641).
 
-    The write ran and its audit row committed, so the envelope keeps
-    ``status="ok"`` and the ``audit_id`` receipt, drops the inline result,
-    and says ``delivery="unavailable"`` (this op mints no handle). It still
-    conforms to the declared ``outputSchema``.
+    The ceiling is set to its floor, the smallest value ``Settings`` accepts.
+    The real dispatch runs and its result is padded past that floor on the
+    way back, because this op's own response is far below it. The write ran
+    and its audit row committed, so the envelope keeps ``status="ok"`` and
+    the ``audit_id`` receipt, drops the inline result, and says
+    ``delivery="unavailable"`` (this op mints no handle). It still conforms
+    to the declared ``outputSchema`` and fits the ceiling.
     """
-    monkeypatch.setenv("RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES", "64")
+    monkeypatch.setenv(
+        "RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES",
+        str(RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES),
+    )
     get_settings.cache_clear()
     client, _op = client_with_operator
-    with patch(_PUBLISH_NODES, new=AsyncMock()):
+    real_dispatch = meta_tools.dispatch
+
+    async def padded_dispatch(*args: Any, **kwargs: Any) -> OperationResult:
+        result = await real_dispatch(*args, **kwargs)
+        assert isinstance(result.result, dict)
+        padding = {"padding": "x" * (2 * RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES)}
+        return result.model_copy(update={"result": {**result.result, **padding}})
+
+    with (
+        patch(_PUBLISH_NODES, new=AsyncMock()),
+        patch.object(meta_tools, "dispatch", new=padded_dispatch),
+    ):
         response = _call(
             client,
             "call_operation",
@@ -644,7 +664,8 @@ def test_call_operation_over_wire_ceiling_keeps_completed_status(
     assert "handle" in payload and payload["handle"] is None
     assert payload["result"] is None
     assert "Do not re-invoke" in payload["extras"]["remediation"]
-    assert payload["extras"]["delivery_max_bytes"] == 64
+    assert payload["extras"]["delivery_max_bytes"] == RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES
+    assert measure_delivered_wire_bytes(payload) <= RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)

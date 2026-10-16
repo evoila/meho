@@ -338,16 +338,28 @@ count. The MCP dispatcher builds the text block with the same
 When an `ok` response is over the ceiling, `bound_complete_response` drops the
 inline `result` and the extras and keeps the status `ok`:
 
-- `delivery="partial"` when the receipt and the `handle` still fit. The caller
-  reads the result through `result_query`.
+- `delivery="partial"` when the `handle` can be read back and the receipt with
+  the handle still fits. The caller reads the result through `result_query`. A
+  handle counts as readable only when its `fetch_more.drill_in.available` is
+  true: the reducer also mints handles whose rows were never stored (store
+  down, no tenant context, admission limit), and those cannot be read.
 - `delivery="unavailable"` otherwise. Only the `audit_id` receipt and the
-  remediation text remain.
+  remediation text remain; an unreadable handle is dropped too.
 
 `extras.remediation` says the operation already ran and must not be re-invoked;
 `extras.delivered_bytes` and `extras.delivery_max_bytes` give the numbers. A
 completed write is never reported as an error because its response was too
 large. Non-`ok` envelopes are not rewritten. The REST `/call` twin shares the
 same check; REST sends the payload once, so its real size is always smaller.
+
+The receipt must always reach the caller, so the ceiling has a floor:
+`RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES` (2048 bytes, `settings.py`). `Settings`
+rejects a smaller `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES` at startup, before
+any operation runs. The floor holds the receipt for an `op_id` of 256
+characters; `bound_complete_response` still measures the final `unavailable`
+response, and if an unusually long `op_id` pushes it over the ceiling it is
+delivered anyway with a `delivery_receipt_over_ceiling` warning, because
+dropping the `audit_id` of a completed write would be worse.
 
 ## Agent-surface scoping (working vs. operator, #3154)
 

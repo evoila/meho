@@ -516,6 +516,86 @@ def test_write_forbidden_omits_clauses_when_path_and_identity_absent() -> None:
     assert out.extras["identity_hint"] is None
 
 
+def test_write_forbidden_names_target_role_retarget_before_policy_stanza() -> None:
+    """#3716: the retarget fix comes first, the §6.1 stanza second.
+
+    The write runs under the operator's token and the dispatch target's
+    ``vault_role``, so the cheapest fix is to run the same write on a vault
+    target whose role can already write the path. The policy stanza is the
+    fallback, and it still carries the do-NOT-widen warning.
+    """
+    from meho_backplane.operations._errors import result_connector_vault_write_forbidden
+
+    out = result_connector_vault_write_forbidden(
+        "vault.kv.put",
+        _make_forbidden("targets/op-x/prod"),
+        duration_ms=1.0,
+        write_path="secret/data/targets/op-x/prod",
+        identity_hint="op-x",
+    )
+    assert out.error is not None
+    retarget_at = out.error.index("(1) check the target's vault_role")
+    stanza_at = out.error.index("(2) Otherwise add the per-operator write-capability stanza (§6.1)")
+    assert retarget_at < stanza_at
+    assert "dispatch the same write there (no policy change)" in out.error
+    warning_at = out.error.index("Do NOT widen the backplane's shared Vault policy")
+    assert stanza_at < warning_at
+
+
+def test_write_forbidden_names_acting_target_and_role_when_passed() -> None:
+    """#3716: target name + vault_role appear in the summary when passed."""
+    from meho_backplane.operations._errors import result_connector_vault_write_forbidden
+
+    out = result_connector_vault_write_forbidden(
+        "vault.kv.put",
+        _make_forbidden("targets/op-x/prod"),
+        duration_ms=1.0,
+        write_path="secret/data/targets/op-x/prod",
+        identity_hint="op-x",
+        target_name="vault-main",
+        vault_role="meho-writer",
+    )
+    assert out.error is not None
+    assert "dispatched on target 'vault-main' under vault_role 'meho-writer'" in out.error
+
+
+def test_write_forbidden_names_target_without_role_override() -> None:
+    """#3716: a target with no vault_role is named; the note says no override was
+    set and does not claim which role was used (the login role resolver has a
+    check-runner and a per-tenant tier before the global default)."""
+    from meho_backplane.operations._errors import result_connector_vault_write_forbidden
+
+    out = result_connector_vault_write_forbidden(
+        "vault.kv.put",
+        _make_forbidden("targets/op-x/prod"),
+        duration_ms=1.0,
+        write_path="secret/data/targets/op-x/prod",
+        target_name="vault-main",
+    )
+    assert out.error is not None
+    assert "dispatched on target 'vault-main', which sets no vault_role override" in out.error
+    assert "fallback chain" in out.error
+    assert "or the global default when it is unset" in out.error
+    assert "under vault_role" not in out.error
+    assert "default role was used" not in out.error
+
+
+def test_write_forbidden_omits_target_clause_when_not_passed() -> None:
+    """#3716: no target name → no target/role clause (role alone is ignored)."""
+    from meho_backplane.operations._errors import result_connector_vault_write_forbidden
+
+    out = result_connector_vault_write_forbidden(
+        "vault.kv.put",
+        _make_forbidden("targets/op-x/prod"),
+        duration_ms=1.0,
+        write_path="secret/data/targets/op-x/prod",
+        vault_role="meho-writer",
+    )
+    assert out.error is not None
+    assert "dispatched on target" not in out.error
+    assert "'meho-writer'" not in out.error
+
+
 def test_write_forbidden_caps_oversized_message() -> None:
     """A pathological hvac message is capped like the read sibling."""
     from meho_backplane.operations._errors import result_connector_vault_write_forbidden

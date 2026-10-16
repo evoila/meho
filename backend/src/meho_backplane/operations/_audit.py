@@ -541,7 +541,7 @@ def _apply_principal_name(payload: dict[str, Any], operator: Operator) -> None:
     name from this key, the same key the MCP wrapper rows and the approval
     rows use. The name always belongs to the row's ``operator_sub``. On an
     approved run that is the approver when a person approves through the
-    console, CLI, REST or MCP, and the agent when MEHO's own agent waits for
+    console, CLI or REST, and the agent when MEHO's own agent waits for
     the approval and resumes the run itself. Left out when the token has no
     ``name`` claim.
     """

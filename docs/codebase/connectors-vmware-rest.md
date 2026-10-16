@@ -2072,17 +2072,30 @@ gives its VM a name nobody else uses:
    fault, a task fault (for example the requested name now exists) or a poll
    timeout leaves `status='deployed'` with a `rename` warning that names
    both names. A success issues no listing and no delete.
-7. **Approvals after the VM exists never re-run the deploy.** A sub-op park
-   normally records its parent composite, and approving it re-runs that
-   composite from the top (#3351). For the rename, the power-on and the
-   cleanup removals that would deploy a second VM, so these writes pass
-   `standalone=True` to `enforce_subop_policy`: the approval request
-   carries no parent and the ingested op's own params (`{"vm": ...}` for
-   the REST delete and power-on, `{"moId": ..., "body": ...}` for the vim
-   rename and destroy). Approving it dispatches that one op on the existing
-   VM. The same switch now protects `vm.create`'s rollback delete
-   (`_rollback_created_vm`). See the `enforce_subop_policy` section in
-   `docs/architecture/operations-substrate.md`.
+7. **Approvals never deploy twice.** A sub-op park records its parent
+   composite, and approving it re-enters that composite through its own
+   built-in code (#3351) — never through an ingested descriptor of the
+   sub-op, so the resume works on a fresh boot with nothing ingested. What
+   keeps the re-entry from repeating the deploy is the **resume state** the
+   park saves (`resume_state` on `enforce_subop_policy`, stored on the
+   approval row under `resume_parent.state` and read back through
+   `composite_resume_state`):
+   - the deploy sub-op saves its deploy name, so a resumed deploy runs
+     under the same name and the approved sub-op's params hash still
+     matches (a fresh token would leave it parked again);
+   - the rename and the power-on save the deployed VM (`deployed`: id,
+     type, item, final name, the step, the issues so far) and pass
+     `after_main_effect=True`; the resume continues at that step on the
+     existing VM (`_finish_deploy`). A parked rename stops the first run
+     there — the power-on is left to that park's resume, so approving one
+     request finishes the deploy, and a `power_on` warning says so;
+   - the cleanup removals save the failed deploy (`failed`: status, item,
+     the reported entity, the issues before the cleanup); the resume
+     re-runs the cleanup on what is still there (`_fail_deploy`).
+   `vm.create`'s rollback delete saves its rollback the same way
+   (`_roll_back_created_vm`), and `vm.import_from_library`'s follow-on
+   power-on saves the import's envelope. See the `enforce_subop_policy`
+   section in `docs/architecture/operations-substrate.md`.
 
 Operator note: service principals that run `vm.deploy_from_library`
 unattended need grants for the rename op (and, to clean up a failed vApp
@@ -2090,6 +2103,7 @@ deploy, the vApp destroy op) too; both are listed on the governed-subops
 discovery surface. Without a grant the step parks as its own approval
 request: the VM keeps its deploy name (or stays behind) until a human
 approves that request, and the envelope says which request to approve.
+Approving it finishes that step on the existing VM.
 
 **Synchronous-deploy long timeout (#3076).** Both library-item deploys —
 the OVF `POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy`

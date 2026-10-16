@@ -45,11 +45,12 @@ from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import (
     SelfApprovalForbiddenError,
     approve_request,
-    resume_dispatch_after_approval,
+    composite_resume_binding,
 )
 from meho_backplane.operations.composite import (
     composite_dispatch_var,
     composite_resume_scope_var,
+    composite_resume_state,
     composite_resume_var,
     enforce_subop_policy,
 )
@@ -435,22 +436,26 @@ async def test_subop_resume_scope_guard_fails_closed_on_second_gate(
 
 
 @pytest.mark.asyncio
-async def test_standalone_subop_park_resumes_the_subop_not_the_parent(
-    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+async def test_subop_park_saves_resume_state_on_the_parent_and_binds_it_on_resume(
+    session: AsyncSession,
 ) -> None:
-    """A standalone park records no parent; its approval dispatches the sub-op alone (#3697).
+    """A park's ``resume_state`` rides on ``resume_parent`` and comes back on resume (#3697).
 
     A follow-on write that runs after the composite's main effect exists
     (the rename of a deployed VM, the delete that cleans up a failed deploy)
-    must not re-run the composite on approval — that would deploy a second
-    VM. With ``standalone=True`` the row carries ``resume_parent IS NULL``
-    and the sub-op's own dispatchable params, so the resume re-dispatches
-    the sub-op's ``op_id`` exactly once and never the parent composite.
+    still records its parent composite — the resume must go through the
+    composite's built-in code, never through an ingested descriptor of the
+    sub-op, so it works with nothing ingested. What keeps the re-entry from
+    repeating the main effect is the state the park saved: the resume
+    binding hands it back through ``composite_resume_state``, keyed by the
+    parent, and only for the block.
     """
     parent_op_id = "vmware.composite.vm.deploy_from_library"
+    parent_params = {"library_item": "li-1", "resource_pool": "resgroup-8"}
     rename_op_id = "POST:/VirtualMachine/{moId}/Rename_Task"
     rename_params = {"moId": "vm-ovf-9", "body": {"newName": "router-01"}}
-    token = composite_dispatch_var.set((parent_op_id, {"library_item": "li-1"}))
+    state = {"deploy_name": "router-01-meho-0123456789", "deployed": {"vm_id": "vm-ovf-9"}}
+    token = composite_dispatch_var.set((parent_op_id, parent_params))
     try:
         result = await enforce_subop_policy(
             operator=_operator(),
@@ -460,7 +465,8 @@ async def test_standalone_subop_park_resumes_the_subop_not_the_parent(
             requires_approval=True,
             target=None,
             params=rename_params,
-            standalone=True,
+            resume_state=state,
+            after_main_effect=True,
         )
     finally:
         composite_dispatch_var.reset(token)
@@ -472,50 +478,40 @@ async def test_standalone_subop_park_resumes_the_subop_not_the_parent(
     assert row is not None
     assert row.op_id == rename_op_id
     assert row.params == rename_params
-    assert row.resume_parent is None
+    # The parent composite is recorded, with the saved state alongside.
+    assert row.resume_parent == {"op_id": parent_op_id, "params": parent_params, "state": state}
 
-    reviewer = Operator(
-        sub="ops-reviewer-sub",
-        name="Ops Reviewer",
-        email=None,
-        raw_jwt="<test-raw-jwt>",
-        tenant_id=_TENANT_ID,
-        tenant_role=TenantRole.OPERATOR,
-        principal_kind=PrincipalKind.USER,
-    )
-    await approve_request(session, request_id, operator=reviewer)
-    await session.commit()
-
-    dispatched: list[tuple[str, dict[str, Any]]] = []
-
-    async def _fake_dispatch(**kwargs: Any) -> str:
-        dispatched.append((kwargs["op_id"], kwargs["params"]))
-        assert kwargs["_approved"] is True
-        return "ok"
-
-    monkeypatch.setattr("meho_backplane.operations.dispatcher.dispatch", _fake_dispatch)
-    await session.refresh(row)
-    outcome = await resume_dispatch_after_approval(operator=reviewer, request=row)
-    assert outcome == "ok"
-    # Exactly one dispatch: the rename itself. The deploy composite never re-runs.
-    assert dispatched == [(rename_op_id, rename_params)]
+    with composite_resume_binding(
+        subop_op_id=row.op_id,
+        subop_params_hash=row.params_hash,
+        resume_parent=row.resume_parent,
+    ) as parent_call:
+        # The resume dispatches the parent composite, not the sub-op's key.
+        assert parent_call == (parent_op_id, parent_params)
+        assert composite_resume_state(parent_op_id) == state
+        # A nested composite does not see the state its parent saved.
+        assert composite_resume_state("vmware.composite.vm.power") is None
+    assert composite_resume_state(parent_op_id) is None
 
 
 @pytest.mark.asyncio
-async def test_standalone_subop_park_is_allowed_during_a_parent_resume(
+async def test_after_main_effect_park_is_allowed_during_a_parent_resume(
     session: AsyncSession,
 ) -> None:
-    """A standalone park during a parent resume parks instead of failing closed (#3697).
+    """A park after the main effect during a parent resume parks instead of failing closed (#3697).
 
-    The multi-gate guard refuses a second *parent-resuming* park because its
-    resume would re-run the earlier legs. A standalone park never re-enters
-    the parent, so it is safe to write while the resume scope is set — the
-    deploy that was approved runs once, and its rename waits on its own row.
+    The multi-gate guard refuses a second park whose resume would re-run the
+    earlier legs. A park whose saved state continues the composite at this
+    step repeats nothing, so it is safe to write while the resume scope is
+    set — the deploy that was approved runs once, and its rename waits on
+    its own row, parent and state included.
     """
     approved = ("POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy", "approvedhash")
+    parent_params = {"library_item": "li-1"}
+    state = {"deploy_name": "router-01-meho-0123456789", "deployed": {"step": "rename"}}
     before = await session.scalar(select(func.count()).select_from(ApprovalRequest))
     dispatch_token = composite_dispatch_var.set(
-        ("vmware.composite.vm.deploy_from_library", {"library_item": "li-1"})
+        ("vmware.composite.vm.deploy_from_library", parent_params)
     )
     scope_token = composite_resume_scope_var.set(approved)
     resume_token = composite_resume_var.set(None)
@@ -528,7 +524,8 @@ async def test_standalone_subop_park_is_allowed_during_a_parent_resume(
             requires_approval=True,
             target=None,
             params={"moId": "vm-ovf-9", "body": {"newName": "router-01"}},
-            standalone=True,
+            resume_state=state,
+            after_main_effect=True,
         )
     finally:
         composite_resume_var.reset(resume_token)
@@ -541,7 +538,11 @@ async def test_standalone_subop_park_is_allowed_during_a_parent_resume(
     assert after == before + 1
     row = await session.get(ApprovalRequest, uuid.UUID(result.extras["approval_request_id"]))
     assert row is not None
-    assert row.resume_parent is None
+    assert row.resume_parent == {
+        "op_id": "vmware.composite.vm.deploy_from_library",
+        "params": parent_params,
+        "state": state,
+    }
 
 
 # ===========================================================================

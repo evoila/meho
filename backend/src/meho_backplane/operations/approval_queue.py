@@ -726,8 +726,9 @@ async def create_pending_request(
             dispatchable descriptor call, so
             :func:`resume_dispatch_after_approval` re-dispatches this parent
             composite ``_approved=True`` with the approved sub-op pre-cleared.
-            ``None`` for a direct-op park (the generic re-dispatch of
-            ``op_id`` is used).
+            An optional ``"state"`` key carries what the sub-op saved for
+            that re-entry (#3697). ``None`` for a direct-op park (the
+            generic re-dispatch of ``op_id`` is used).
 
     Returns:
         The flushed :class:`ApprovalRequest` row.
@@ -1453,6 +1454,12 @@ def composite_resume_binding(
       instead of parking (#3351 review B1).
     * ``resume_parent`` is ``None`` (a direct park) — yields ``None`` and sets
       nothing; the caller keeps its generic re-dispatch.
+
+    A ``state`` the sub-op saved at park time (#3697) is bound on
+    :data:`~meho_backplane.operations.composite.composite_resume_state_var`
+    for the block, keyed by the parent's ``op_id``, so the re-entered
+    composite can reuse what its first run chose or continue at the parked
+    step instead of repeating its main effect.
     """
     if resume_parent is None:
         yield None
@@ -1460,15 +1467,22 @@ def composite_resume_binding(
 
     from meho_backplane.operations.composite import (
         composite_resume_scope_var,
+        composite_resume_state_var,
         composite_resume_var,
     )
 
+    parent_op_id = str(resume_parent["op_id"])
     approved_subop = (subop_op_id, subop_params_hash)
+    saved_state = resume_parent.get("state")
     resume_token = composite_resume_var.set(approved_subop)
     scope_token = composite_resume_scope_var.set(approved_subop)
+    state_token = composite_resume_state_var.set(
+        (parent_op_id, cast(dict[str, Any], saved_state)) if saved_state is not None else None
+    )
     try:
-        yield str(resume_parent["op_id"]), cast(dict[str, Any], resume_parent["params"])
+        yield parent_op_id, cast(dict[str, Any], resume_parent["params"])
     finally:
+        composite_resume_state_var.reset(state_token)
         composite_resume_scope_var.reset(scope_token)
         composite_resume_var.reset(resume_token)
 

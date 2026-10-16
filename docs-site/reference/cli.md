@@ -4406,6 +4406,7 @@ meho service-principals grants revoke <grant-id> [flags]
 - `--backplane` — backplane URL (defaults to the URL from `meho login`)
 - `--confirm` — confirm revocation
 - `--json` — emit a machine-readable result JSON
+- `--reason` — optional reason for the revoke, stored on the grant and the audit row
 
 #### `meho service-principals grants show`
 

@@ -50,6 +50,10 @@ from meho_backplane.connectors.pfsense.ops_filter_rule import (
     rule_matches_mgmt_flow,
 )
 from meho_backplane.connectors.pfsense.ops_read import parse_gateways_xml
+from meho_backplane.connectors.pfsense.ops_user_write import (
+    pfsense_user_disable,
+    pfsense_user_enable,
+)
 from meho_backplane.connectors.pfsense.ops_write import (
     pfsense_gateway_add,
     pfsense_route_static_add,
@@ -814,6 +818,8 @@ async def test_filter_rule_add_and_gateway_add_without_the_lock_lose_a_change() 
         pfsense_route_static_delete,
         pfsense_gateway_delete,
         pfsense_alias_member_remove,
+        pfsense_user_disable,
+        pfsense_user_enable,
     ],
     ids=lambda h: h.__name__,
 )

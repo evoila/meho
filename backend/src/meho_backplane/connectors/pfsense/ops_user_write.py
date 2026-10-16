@@ -51,6 +51,18 @@ After the write the handler reads ``config.xml`` again. It reports success
 only when the user's flag has the new value AND no other user's flag
 changed. Otherwise it raises.
 
+One edit at a time
+------------------
+
+Both handlers carry the
+:func:`~meho_backplane.connectors.pfsense.ops_write.serialized_config_write`
+decorator, like every other op that edits ``config.xml`` (#3544). It holds
+the appliance's write lock from the first ``config.xml`` read to the last
+read-back. ``write_config()`` saves the whole in-memory ``$config``, so a
+user write that overlapped with, say, a gateway add on the same pfSense
+could save an old copy and undo the other change. The lock makes the two
+run one after the other.
+
 Input safety
 ------------
 
@@ -82,6 +94,7 @@ from meho_backplane.connectors.pfsense.ops_write import (
     _apply_playback,
     _php_squote,
     _read_config_xml,
+    serialized_config_write,
 )
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 
@@ -285,6 +298,7 @@ async def _set_user_disabled(
     return {**result, "status": wanted, "applied": True, "verified": True}
 
 
+@serialized_config_write
 async def pfsense_user_disable(
     self: PfSenseConnector,
     target: Any,
@@ -295,6 +309,7 @@ async def pfsense_user_disable(
     return await _set_user_disabled(self, target, params, operator, disable=True)
 
 
+@serialized_config_write
 async def pfsense_user_enable(
     self: PfSenseConnector,
     target: Any,

@@ -617,8 +617,9 @@ allowlist is rejected before a single SSH round-trip; `_php_squote` escapes
 defensively on top.
 
 **One edit at a time.** Every handler that plays back a `write_config()`
-fragment (the two adds here, the five deletes in `ops_delete.py`, and the two
-filter-rule ops) is wrapped by `serialized_config_write`. The wrapper holds
+fragment (the two adds here, the five deletes in `ops_delete.py`, the two
+filter-rule ops, and the two user writes in `ops_user_write.py`) is wrapped by
+`serialized_config_write`. The wrapper holds
 one `asyncio.Lock` per SSH host on the connector from the first `config.xml`
 read to the read-back. `write_config()` saves the whole in-memory `$config`,
 so without the lock two overlapping ops on one appliance could each save an
@@ -633,9 +634,10 @@ applies nothing — a pre-staged gateway is inert config until referenced.
 
 ### One config edit at a time, and a full read-back (#3544)
 
-Nine of the ops that edit `config.xml` (the two `add` ops above, the five
-governed deletes, and the two filter-rule ops below) follow the same pattern.
-The two user writes (#3937) do not yet; see "User writes" below.
+Every op that edits `config.xml` (the two `add` ops above, the five governed
+deletes, the two filter-rule ops, and the two user writes below) holds the
+same lock. Nine of them also run the full read-back; the two user writes
+(#3937) check every user's flag instead, see "User writes" below.
 The playback fragment loads the
 whole config into `$config`, edits it, and `write_config()` saves the whole
 config again. So two of these ops that overlap on one pfSense can save an old
@@ -802,9 +804,17 @@ the account, its password, its groups and its certificates stay.
   CI unit shards install `php-cli` and set `MEHO_REQUIRE_PHP=1`, so these
   tests fail instead of skip when php is missing. Without php on a developer
   machine they skip.
+- **One edit at a time.** Both handlers carry the `serialized_config_write`
+  decorator, like every other op that edits `config.xml`. They hold the
+  appliance's write lock from the first `config.xml` read to the read-back,
+  so a user write and, say, a gateway add on the same pfSense run one after
+  the other and neither undoes the other. The tests run a user write together
+  with a gateway add on one fake appliance and check that both changes
+  survive; a control test shows the unlocked handlers really lose a change.
 - **Not done.** VPN sessions that are already open are not closed. The ops do
-  not yet hold the shared config-write lock or run the full read-back that
-  #3544 added for the other config writes. That is separate work.
+  not run the full read-back (`assert_only_own_object_changed`) that the
+  other config writes use; they check only the user list. That is separate
+  work.
 
 ## Known issues
 

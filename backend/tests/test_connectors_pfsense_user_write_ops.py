@@ -17,6 +17,10 @@ Three layers:
   changes; every password hash, key, group and certificate stays the same.
   The fragment's own guards (uid 0, unknown name, duplicate name) write
   nothing.
+* **One edit at a time**: a user write that overlaps with another config
+  write on the same appliance (a gateway add) runs after it, and both changes
+  survive. A control test shows the unlocked handlers really lose a change on
+  the same fake, so the first test proves the lock and not the fake.
 * **Metadata**: ``dangerous`` + requires approval, ``users`` group, the
   response schema, and the broadcast class.
 * **Governed flow** (full ``call_operation`` dispatch): the call waits for
@@ -28,6 +32,7 @@ All config.xml fixtures are synthetic: no lab names, hosts or addresses.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import os
@@ -37,6 +42,7 @@ import subprocess
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID
@@ -49,9 +55,17 @@ import meho_backplane.connectors.pfsense  # noqa: F401 -- import for registry si
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors.pfsense import PFSENSE_OPS, PfSenseConnector
+from meho_backplane.connectors.pfsense.ops_read import parse_gateways_xml
 from meho_backplane.connectors.pfsense.ops_user_write import (
     USER_WRITE_OPS,
+    _user_rows,
     build_user_flag_playback,
+    pfsense_user_disable,
+    pfsense_user_enable,
+)
+from meho_backplane.connectors.pfsense.ops_write import (
+    pfsense_gateway_add,
+    serialized_config_write,
 )
 from meho_backplane.connectors.registry import all_connectors_v2, register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
@@ -558,6 +572,124 @@ async def test_results_never_carry_secret_fields() -> None:
     text = json.dumps(results)
     for secret in (_SECRET_HASH, _SECRET_KEY, _SECRET_PSK, "bcrypt", "authorizedkeys", "ipsecpsk"):
         assert secret not in text
+
+
+# ===========================================================================
+# Part B2 -- one config edit at a time (#3544 lock on the user writes)
+# ===========================================================================
+
+_GATEWAY_NAME = "LAB_GW"
+_GATEWAY_ITEM = (
+    f"<gateway_item><interface>lan</interface><gateway>10.0.0.254</gateway>"
+    f"<name>{_GATEWAY_NAME}</name><weight>1</weight><ipprotocol>inet</ipprotocol>"
+    f"<descr>meho: gateway {_GATEWAY_NAME}</descr></gateway_item>"
+)
+_GATEWAY_PARAMS = {"name": _GATEWAY_NAME, "interface": "lan", "gateway": "10.0.0.254"}
+_CONFIG_WITH_GATEWAYS = _CONFIG_VPN_ON.replace("<system>", "<gateways></gateways><system>", 1)
+
+# playback script name -> (text the fragment finds in the $config it loaded,
+# text it saves instead)
+_EDITS: dict[str, tuple[str, str]] = {
+    "meho_user_disable_vpn_guest_1": (_VPN_ON, _VPN_OFF),
+    "meho_user_enable_old_user": (_OTHER_OFF, _OTHER_ON),
+    f"meho_gateway_add_{_GATEWAY_NAME}": ("<gateways>", f"<gateways>{_GATEWAY_ITEM}"),
+}
+
+
+class _FakePfSense:
+    """In-memory config.xml whose playback saves the copy it loaded at start.
+
+    This is the real pfSense behaviour: ``write_config()`` saves the whole
+    ``$config`` the fragment loaded, so two overlapping edits lose one.
+    """
+
+    def __init__(self, config: str) -> None:
+        self.config = config
+        self.in_flight = 0
+        self.max_in_flight = 0
+
+    async def run(self, target: Any, command: str, operator: Any = None) -> Any:
+        del target, operator
+        await asyncio.sleep(0)
+        if command == "cat /cf/conf/config.xml":
+            return _proc(self.config)
+        if command.startswith("pfSsh.php playback "):
+            self.in_flight += 1
+            self.max_in_flight = max(self.max_in_flight, self.in_flight)
+            loaded = self.config  # the fragment's $config, loaded when it starts
+            for _ in range(3):
+                await asyncio.sleep(0)  # the other op's reads and writes land here
+            old, new = _EDITS[command.removeprefix("pfSsh.php playback ")]
+            self.config = loaded.replace(old, new, 1)
+            self.in_flight -= 1
+        return _proc("")
+
+
+def _user_rows_of(config: str) -> dict[str, bool]:
+    return {row["name"]: row["disabled"] for row in _user_rows(config)}
+
+
+async def test_user_disable_and_gateway_add_on_one_appliance_serialize() -> None:
+    """A gateway add started during a user disable must not undo it, or vice versa."""
+    fake = _FakePfSense(_CONFIG_WITH_GATEWAYS)
+    connector = PfSenseConnector()
+    target = SimpleNamespace(name="pf-a", host="pf.example.invalid")
+    with patch.object(connector, "_run_command", side_effect=fake.run):
+        user, gateway = await asyncio.gather(
+            connector.user_disable(target, {"name": "vpn.guest-1"}),
+            connector.gateway_add(target, dict(_GATEWAY_PARAMS)),
+        )
+    assert user["status"] == "disabled"
+    assert user["verified"] is True
+    assert gateway["applied"] is True
+    assert fake.max_in_flight == 1
+    assert _user_rows_of(fake.config) == {"admin": False, "vpn.guest-1": True, "old_user": True}
+    assert [g["name"] for g in parse_gateways_xml(fake.config)] == [_GATEWAY_NAME]
+
+
+async def test_user_enable_and_user_disable_on_one_appliance_serialize() -> None:
+    """Two user writes on one appliance run one after the other; both flags land."""
+    fake = _FakePfSense(_CONFIG_VPN_ON)
+    connector = PfSenseConnector()
+    target = SimpleNamespace(name="pf-a", host="pf.example.invalid")
+    with patch.object(connector, "_run_command", side_effect=fake.run):
+        disabled, enabled = await asyncio.gather(
+            connector.user_disable(target, {"name": "vpn.guest-1"}),
+            connector.user_enable(target, {"name": "old_user"}),
+        )
+    assert (disabled["status"], enabled["status"]) == ("disabled", "enabled")
+    assert fake.max_in_flight == 1
+    assert _user_rows_of(fake.config) == {"admin": False, "vpn.guest-1": True, "old_user": False}
+
+
+async def test_user_disable_and_gateway_add_without_the_lock_lose_a_change() -> None:
+    """Control: the fake really loses an update, so the tests above prove the lock."""
+    unlocked_user_disable = pfsense_user_disable.__wrapped__  # type: ignore[attr-defined]
+    unlocked_gateway_add = pfsense_gateway_add.__wrapped__  # type: ignore[attr-defined]
+    fake = _FakePfSense(_CONFIG_WITH_GATEWAYS)
+    connector = PfSenseConnector()
+    target = SimpleNamespace(name="pf-a", host="pf.example.invalid")
+    with patch.object(connector, "_run_command", side_effect=fake.run):
+        results = await asyncio.gather(
+            unlocked_user_disable(connector, target, {"name": "vpn.guest-1"}),
+            unlocked_gateway_add(connector, target, dict(_GATEWAY_PARAMS)),
+            return_exceptions=True,
+        )
+    assert fake.max_in_flight == 2
+    assert any(isinstance(r, RuntimeError) for r in results)
+    user_off = _user_rows_of(fake.config)["vpn.guest-1"]
+    gateways = len(parse_gateways_xml(fake.config))
+    assert (user_off, gateways) in {(True, 0), (False, 1)}
+
+
+@pytest.mark.parametrize(
+    "handler", [pfsense_user_disable, pfsense_user_enable], ids=lambda h: h.__name__
+)
+def test_both_user_writes_hold_the_config_write_lock(handler: Any) -> None:
+    """Both handlers are wrapped by the same decorator as the other config writes."""
+    inner = handler.__wrapped__
+    assert inner.__name__ == handler.__name__
+    assert handler.__code__ is serialized_config_write(inner).__code__
 
 
 # ===========================================================================

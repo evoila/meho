@@ -116,7 +116,8 @@ preview_dispatch(operator, connector_id, op_id, target, params)
                      tenant, op).redacted   ◄── SAME pipeline the response path uses
         ▼
 {status: ok, op_id, connector_id, source_kind, method,
- resolved_path, query, redacted_body, preview_hash [, proposed_effect]}
+ resolved_path, query, redacted_body, preview_hash
+ [, proposed_effect | plan_shown, plan_note]}
 ```
 
 The HTTP transport (`HttpConnector._post_json` / `_request_json`) is
@@ -124,7 +125,10 @@ The HTTP transport (`HttpConnector._post_json` / `_request_json`) is
 event, no policy-gate park. The synthetic-preview branch keeps this
 contract — it reuses `build_proposed_effect` with **no connector instance**,
 so a pure builder (e.g. `vault.kv.delete`) populates while a live-read
-blast-radius builder declines rather than dialling out. The policy gate
+blast-radius builder declines rather than dialling out. A declined plan is
+not silent (#4028): the envelope carries `plan_shown=false` and a plain
+`plan_note` that says the plan is built at send time and shown on the
+approval request. The policy gate
 (dispatch Step 4) is deliberately skipped — a preview reveals only what
 *would* be sent (and the body is redacted), so it carries no side effect to
 authorize, the same posture as `search_operations` over the same
@@ -134,7 +138,7 @@ descriptors. Both surfaces stay `OPERATOR`-gated at the route / tool layer.
 
 | `status` | meaning | extra fields |
 |---|---|---|
-| `ok` | request (or synthetic preview) resolved | `method`, `resolved_path`, `query` (object/null), `redacted_body` (object/null), `source_kind`, `preview_hash` (#3197 — SHA-256 over the resolved-request projection; the caller presents it on a `destructive`-tier `call_operation` and the dispatcher recomputes + matches it before parking the approval), and — on a governed-tier synthetic preview whose builder populated — `proposed_effect` (#3312, the reused park-time effect block; unhashed, so it never perturbs the `preview_hash` binding) |
+| `ok` | request (or synthetic preview) resolved | `method`, `resolved_path`, `query` (object/null), `redacted_body` (object/null), `source_kind`, `preview_hash` (#3197 — SHA-256 over the resolved-request projection; the caller presents it on a `destructive`-tier `call_operation` and the dispatcher recomputes + matches it before parking the approval), and — on a governed-tier synthetic preview whose builder populated — `proposed_effect` (#3312, the reused park-time effect block; unhashed, so it never perturbs the `preview_hash` binding). Every synthetic preview also carries `plan_shown` (#4028): `true` with `proposed_effect`, or `false` with a plain `plan_note` when the builder needs the target and declined (both unhashed) |
 | `error` | structured failure | `error` (`"<code>: …"`), `extras.error_code` (`unknown_op` / `invalid_params` / `invalid_op_schema` / `no_connector` / `ambiguous_connector` / `dispatch_error`) + per-code detail (`invalid_op_schema` carries `extras.missing_ref`, #3095) |
 | `unavailable` | not an HTTP-ingested op **and** not previewable in a governed tier (destructive, or non-credential-class requires_approval — a credential-class op like `vault.kv.put` stays here so its secret params never surface) | `source_kind`, `extras.error_code=preview_unavailable`, `extras.reason=not_ingested` |
 
@@ -232,8 +236,12 @@ named-pattern catalogue and policy resolution.
   the reused park-time `proposed_effect`. That effect is built egress-free
   (no connector instance), so a live-read blast-radius builder — which needs
   a connector to enumerate children — declines and the synthetic preview
-  carries only the params-bound projection; the rich blast radius still
-  lands at park time, where the connector is resolved.
+  carries only the params-bound projection plus `plan_shown=false` and a
+  `plan_note` (#4028), so it never looks like a complete preview; the rich
+  blast radius still lands at park time, where the connector is resolved.
+  Building that plan at preview time would make the preview contact the
+  target (and the dispatcher re-runs the preview inside the destructive
+  gate), so it is left as a possible follow-up, not shipped.
 
 ## References
 

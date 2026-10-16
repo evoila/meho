@@ -1053,7 +1053,8 @@ narrow-waist contract.
   real call would and returns the literal would-be request
   (`method` / `resolved_path` / `query` / redacted `body`) plus a
   `preview_hash` **instead of dispatching** — nothing is sent, no audit
-  row is written. The `preview_hash` is the binding a
+  row is written. The summary also prints the plan (`proposed_effect`)
+  when the preview has one, or the `plan_note` when it does not (#4028). The `preview_hash` is the binding a
   `safety_level='destructive'` op requires (#3197): the dispatcher
   fail-closes a destructive `call` with `status=denied` /
   `error_code=preview_binding_required` unless it carries a

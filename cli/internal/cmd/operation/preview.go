@@ -32,6 +32,12 @@ import (
 // `extras.error_code` describe why no preview (and no hash) was produced.
 // `query` / `redacted_body` / `extras` stay `json.RawMessage` so the
 // renderer pretty-prints them without imposing a per-vendor shape.
+//
+// A destructive or approval-gated typed/composite op previews as
+// `method="COMPOSITE"` (#3198 / #3312). Its envelope carries the plan as
+// `proposed_effect` when the plan can be built without the target, and
+// `plan_shown` / `plan_note` say when it cannot (#4028). Kept here so
+// `--json` does not drop them.
 type PreviewResult struct {
 	Status       string          `json:"status"`
 	OpID         string          `json:"op_id"`
@@ -42,8 +48,13 @@ type PreviewResult struct {
 	Query        json.RawMessage `json:"query,omitempty"`
 	RedactedBody json.RawMessage `json:"redacted_body,omitempty"`
 	PreviewHash  string          `json:"preview_hash"`
-	Error        *string         `json:"error"`
-	Extras       json.RawMessage `json:"extras,omitempty"`
+	// ProposedEffect is the plan of what the op will change (#4028).
+	ProposedEffect json.RawMessage `json:"proposed_effect,omitempty"`
+	// PlanShown is nil on an ingested preview, which has no plan slot.
+	PlanShown *bool           `json:"plan_shown,omitempty"`
+	PlanNote  string          `json:"plan_note,omitempty"`
+	Error     *string         `json:"error"`
+	Extras    json.RawMessage `json:"extras,omitempty"`
 }
 
 // newPreviewCmd returns the `meho operation preview` command — the
@@ -98,8 +109,16 @@ func newPreviewCmd() *cobra.Command {
 			"input faults (unknown op, invalid params, unresolvable target) ride " +
 			"the envelope as `status=\"error\"` — HTTP is 200. A typed/composite " +
 			"op with no single literal HTTP request to preview comes back " +
-			"`status=\"unavailable\"` (the destructive-tier composite is the " +
-			"exception — it previews a param-bound request tuple).",
+			"`status=\"unavailable\"` (a destructive or approval-gated " +
+			"typed/composite op is the exception — it previews a param-bound " +
+			"request tuple). An approval-gated op that writes a credential " +
+			"(for example `vault.kv.put`) is not previewable and stays " +
+			"`status=\"unavailable\"`, so its secret params never surface.\n\n" +
+			"For such an op the preview prints the plan of what will change " +
+			"(`proposed_effect`) when the plan can be built without contacting " +
+			"the target. When the plan needs the target, the preview says so: " +
+			"the plan is built when you send the call and is shown on the " +
+			"approval request.",
 		Args:          cobra.ExactArgs(2),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -265,6 +284,15 @@ func printPreviewResult(w io.Writer, connectorID, opID string, r *PreviewResult)
 	if len(r.RedactedBody) > 0 && string(r.RedactedBody) != "null" {
 		fmt.Fprintln(w, "  body (redacted):")
 		printPrettyOrRaw(w, r.RedactedBody)
+	}
+	if len(r.ProposedEffect) > 0 && string(r.ProposedEffect) != "null" {
+		fmt.Fprintln(w, "  plan (proposed_effect):")
+		printPrettyOrRaw(w, r.ProposedEffect)
+	} else if r.PlanShown != nil && !*r.PlanShown {
+		fmt.Fprintln(w, "  plan: not shown in this preview")
+		if r.PlanNote != "" {
+			fmt.Fprintf(w, "    %s\n", r.PlanNote)
+		}
 	}
 	// The hash is the load-bearing output — print it prominently, last,
 	// with the exact flag to thread it into a governed call.

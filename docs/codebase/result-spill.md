@@ -135,6 +135,16 @@ compiled `SELECT` runs under a `RESULT_QUERY_TIMEOUT_SECONDS` (default 5)
 wall-time budget enforced by running `conn.execute()` on a worker thread
 and calling `conn.interrupt()` on expiry.
 
+`RESULT_QUERY_MAX_OUTPUT_BYTES` is the query-domain shaping budget: it
+checks the `rows` before encoding. A second, terminal check (#3641) runs on
+the finished response of all three read modes (query, paging and `path`
+reads): `RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES`
+(default 2 MiB) against the size the MCP `tools/call` wire really carries
+(text block plus `structuredContent`, escaping included, measured by
+`operations/delivery_budget.py`). A response over it is refused with the same
+recoverable `output_too_large` error, now carrying `delivery=unavailable`
+(MCP `data`, REST `detail`). Nothing is cut; the caller narrows the read.
+
 Because the spill itself is capped at `RESULT_HANDLE_MAX_SPILL_ROWS`, a
 query may run over a subset of the true collection. The result carries
 `coverage`: `complete` when `stored_rows == total_rows`, else `partial`
@@ -173,7 +183,7 @@ call's `offset` / `limit` (items that are not objects come back as
 (missing member, `-`, a leading-zero or out-of-range index) is a
 recoverable `QueryContractError`. So is a `path` read on a rows handle,
 or paging / a relational query on a document handle. The same output
-byte budget applies.
+byte budget applies, and so does the terminal wire check (#3641).
 
 ## Key types
 
@@ -348,6 +358,17 @@ Metrics (aggregate only, no row content, keys, or vendor totals):
   (256 KB) / `RESULT_QUERY_TIMEOUT_SECONDS` (5) bound a single query's
   output rows, serialized size, and wall time (#3366); all validated
   `> 0`.
+- `RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES` (2 MiB) bounds a whole read-back
+  response on the wire (#3641); validated `> 0`.
+- `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES` (256 KiB) bounds a completed
+  `call_operation` response the same way (#3641); validated `>= 2048`
+  (`RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES`) so the receipt always fits.
+  A call whose receipt could not fit (an unusually long or non-ASCII
+  `op_id`) is refused before it runs with `error_code="receipt_too_large"`.
+  Over the ceiling, `delivery="partial"` keeps the handle only when its
+  `fetch_more.drill_in.available` is true; a handle whose spill was skipped
+  or failed is dropped and the response is `delivery="unavailable"`. Details
+  in `docs/codebase/mcp.md`, "Response wire ceiling".
 - `duckdb==1.5.5` / `pyarrow==25.0.1` (pinned) — the sandboxed
   `QueryEngine` the lazy compiled-query path runs inside. The reducer does
   not construct an engine for its catalog, summary, or preview.

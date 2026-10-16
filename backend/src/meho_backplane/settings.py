@@ -45,7 +45,12 @@ from meho_backplane.retrieval.embedding import (
     DEFAULT_EMBEDDING_MODEL,
 )
 
-__all__ = ["Settings", "get_settings", "parse_bool_env"]
+__all__ = [
+    "RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES",
+    "Settings",
+    "get_settings",
+    "parse_bool_env",
+]
 
 #: Driver schemes accepted on ``DATABASE_URL``. Both are async — the
 #: backplane refuses to construct a sync engine because every database
@@ -76,6 +81,17 @@ _SUPPORTED_BROADCAST_URL_SCHEMES: Final[tuple[str, ...]] = (
 #: (including the empty string and "disabled") is treated as ``False``
 #: so a misconfigured env var never silently enables a guarded surface.
 _TRUTHY_ENV_VALUES: Final[frozenset[str]] = frozenset({"1", "true", "yes", "on"})
+
+#: Floor for ``RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES`` (#3641). A completed
+#: operation must always deliver its receipt (``status``, ``op_id``,
+#: ``audit_id``, ``delivery`` and the remediation text), so the ceiling can
+#: never be set below the size that receipt takes on the wire. 2 KiB holds
+#: the receipt for an ASCII ``op_id`` of 256 characters with room to spare;
+#: a test in ``tests/test_operations_delivery_budget.py`` pins that. An
+#: ``op_id`` whose receipt would not fit (longer, or escaped non-ASCII
+#: text) is refused before the operation runs
+#: (``operations/delivery_budget.py``, ``refuse_undeliverable_receipt``).
+RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES: Final[int] = 2048
 
 
 def parse_bool_env(value: str | None) -> bool:
@@ -616,13 +632,38 @@ class Settings(BaseModel):
         ``result_handle_max_spill_rows`` (how many rows are *stored*): this
         bounds how many a single query *returns*.
     result_query_max_output_bytes:
-        Serialized-output ceiling, in JSON bytes, applied to a
-        ``result_query`` query result **after** the row cap. A wide or
-        deeply-nested projection can blow the MCP result token budget even
+        Query-domain shaping budget: a ceiling, in JSON bytes, on the
+        ``rows`` of a ``result_query`` read (query and paging), checked
+        **before** the response is encoded for the wire and **after** the
+        row cap. A wide or deeply-nested projection can be too large even
         under 500 rows, so an over-budget result fails closed with an
         actionable error (narrow ``select``, add a ``filter``, or lower
-        ``limit``) rather than returning a giant envelope. Default 262144
+        ``limit``) rather than returning a giant envelope. Distinct from,
+        and lower than, the terminal ``result_query_response_wire_max_bytes``
+        ceiling, which measures the whole encoded response. Default 262144
         (256 KB). Env ``RESULT_QUERY_MAX_OUTPUT_BYTES``.
+    result_complete_response_wire_max_bytes:
+        Terminal wire ceiling, in bytes, for a completed ``call_operation``
+        response (#3641). Measured after encoding, on the real MCP
+        ``tools/call`` wire: the text block plus the ``structuredContent``
+        copy, escaping included. An ``ok`` response over the ceiling keeps
+        ``status="ok"`` and is returned with ``delivery="partial"`` (receipt
+        plus result handle) or ``delivery="unavailable"`` (receipt only),
+        never as an error. The default is generous on purpose; a load
+        benchmark may tune it. Must be at least
+        :data:`RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES` (2048) so the
+        receipt always fits; a smaller value fails at startup. A call whose
+        receipt could not fit the ceiling (an unusually long ``op_id``) is
+        refused before it runs with ``error_code="receipt_too_large"``.
+        Default 262144 (256 KiB). Env ``RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES``.
+    result_query_response_wire_max_bytes:
+        Terminal wire ceiling, in bytes, for a ``result_query`` response
+        (query, paging and path reads), measured the same way (#3641). A
+        response over it fails with the recoverable ``output_too_large``
+        error. Higher than ``result_query_max_output_bytes`` because it
+        counts the whole encoded response, not just the rows. The default is generous on
+        purpose; a load benchmark may tune it. Default 2097152 (2 MiB). Env
+        ``RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES``.
     result_query_timeout_seconds:
         Wall-time budget for a single ``result_query`` compiled ``SELECT``.
         DuckDB exposes no native Python query timeout, so the core runs
@@ -1419,7 +1460,13 @@ class Settings(BaseModel):
     # are the query interface's own resource ceilings; it inherits neither the
     # spill row cap above nor the reducer's hardcoded TTL.
     result_query_max_output_rows: int = Field(default=500, gt=0)
+    # Query-domain shaping budget (rows only, checked before encoding).
     result_query_max_output_bytes: int = Field(default=262144, gt=0)
+    # #3641 -- terminal wire ceilings, measured after encoding on the MCP
+    # wire (text block + structuredContent). Generous defaults; a benchmark
+    # may tune them.
+    result_complete_response_wire_max_bytes: int = Field(default=262144, gt=0)
+    result_query_response_wire_max_bytes: int = Field(default=2097152, gt=0)
     result_query_timeout_seconds: int = Field(default=5, gt=0)
     jsonflux_sample_byte_budget: int = Field(default=4096, gt=0)
     composite_max_depth: int = Field(default=8, gt=0)
@@ -2186,6 +2233,24 @@ class Settings(BaseModel):
                 ) from exc
         return value
 
+    @field_validator("result_complete_response_wire_max_bytes")
+    @classmethod
+    def _complete_response_ceiling_must_hold_the_receipt(cls, value: int) -> int:
+        """Reject a ``call_operation`` wire ceiling the receipt cannot fit (#3641).
+
+        A completed operation always delivers its receipt, so a ceiling
+        below :data:`RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES` could never
+        be honoured. Failing at startup keeps the ceiling a real bound
+        instead of one the receipt silently bypasses.
+        """
+        if value < RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES:
+            raise ValueError(
+                "RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES must be at least "
+                f"{RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES} bytes so the receipt of a "
+                f"completed operation always fits. Got: {value}"
+            )
+        return value
+
     @field_validator("vault_oidc_role_by_tenant")
     @classmethod
     def _vault_oidc_role_by_tenant_must_be_uuid_role_csv(cls, value: str) -> str:
@@ -2478,6 +2543,12 @@ def get_settings() -> Settings:
         ),
         result_query_max_output_bytes=int(
             os.environ.get("RESULT_QUERY_MAX_OUTPUT_BYTES", "262144"),
+        ),
+        result_complete_response_wire_max_bytes=int(
+            os.environ.get("RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES", "262144"),
+        ),
+        result_query_response_wire_max_bytes=int(
+            os.environ.get("RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES", "2097152"),
         ),
         result_query_timeout_seconds=int(
             os.environ.get("RESULT_QUERY_TIMEOUT_SECONDS", "5"),

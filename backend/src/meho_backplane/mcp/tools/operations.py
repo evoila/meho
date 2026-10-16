@@ -564,7 +564,10 @@ register_mcp_tool(
                     "type": ["string", "null"],
                     "enum": ["complete", "partial", "unavailable", None],
                     "description": (
-                        "Response delivery state, separate from whether the operation executed."
+                        "Response delivery state, separate from whether the operation executed. "
+                        "`partial`: the response was too large to deliver; read the result "
+                        "through `result_query` with `handle`. `unavailable`: no result was "
+                        "delivered. In both cases the operation already ran; do not re-invoke it."
                     ),
                 },
                 # ``handle`` was missing from the declared properties

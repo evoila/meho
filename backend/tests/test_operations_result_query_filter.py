@@ -89,11 +89,14 @@ class _FakeStore:
         )
 
 
-def _stub_settings(*, rows: int = 500, out_bytes: int = 262144, timeout: int = 5) -> Any:
+def _stub_settings(
+    *, rows: int = 500, out_bytes: int = 262144, timeout: int = 5, wire_bytes: int = 2097152
+) -> Any:
     return types.SimpleNamespace(
         result_query_max_output_rows=rows,
         result_query_max_output_bytes=out_bytes,
         result_query_timeout_seconds=timeout,
+        result_query_response_wire_max_bytes=wire_bytes,
     )
 
 
@@ -453,3 +456,58 @@ async def test_paging_window_in_budget_is_unchanged(monkeypatch: pytest.MonkeyPa
     assert result["returned_rows"] == 10
     assert result["rows"] == rows
     assert result["truncated"] is False
+
+
+# ---------------------------------------------------------------------------
+# Terminal wire ceiling, measured after encoding (#3641)
+# ---------------------------------------------------------------------------
+
+
+async def test_query_wire_ceiling_is_separate_from_row_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rows inside the shaping budget can still be over the wire ceiling.
+
+    The rows pass the pre-encode ``result_query_max_output_bytes`` check; the
+    whole encoded response is over ``result_query_response_wire_max_bytes``,
+    so the read is refused, not cut.
+    """
+    rows = [{"id": i, "note": 'say "hi"'} for i in range(20)]
+    _install(monkeypatch, _FakeStore(rows), _stub_settings(out_bytes=262144, wire_bytes=1024))
+    with pytest.raises(rq.ResultQueryOutputTooLargeError) as exc:
+        await rq.run_result_query(_operator(), uuid.uuid4(), ResultQuerySpec())
+    msg = str(exc.value)
+    assert "delivery limit" in msg and "delivery unavailable" in msg
+    assert exc.value.max_bytes == 1024
+    assert exc.value.output_bytes > 1024
+    assert "select" in msg.lower()
+
+
+async def test_paging_wire_ceiling_names_paging_remediation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [{"id": i, "note": "\u00e9t\u00e9"} for i in range(20)]
+    _install(monkeypatch, _FakeStore(rows), _stub_settings(out_bytes=262144, wire_bytes=1024))
+    with pytest.raises(rq.ResultQueryOutputTooLargeError) as exc:
+        await rq.read_result_window(_operator(), uuid.uuid4(), offset=0, limit=20)
+    msg = str(exc.value).lower()
+    assert "delivery limit" in msg
+    assert "limit" in msg and "select" not in msg
+
+
+async def test_wire_ceiling_uses_the_real_encoded_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ceiling compares the measured wire size, not the rows' size."""
+    from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
+
+    rows = _sample_rows(10)
+    handle = uuid.uuid4()
+    _install(monkeypatch, _FakeStore(rows), _stub_settings())
+    payload = await rq.read_result_window(_operator(), handle, offset=0, limit=10)
+    exact = measure_delivered_wire_bytes(payload)
+
+    _install(monkeypatch, _FakeStore(rows), _stub_settings(wire_bytes=exact))
+    assert await rq.read_result_window(_operator(), handle, offset=0, limit=10) == payload
+
+    _install(monkeypatch, _FakeStore(rows), _stub_settings(wire_bytes=exact - 1))
+    with pytest.raises(rq.ResultQueryOutputTooLargeError):
+        await rq.read_result_window(_operator(), handle, offset=0, limit=10)

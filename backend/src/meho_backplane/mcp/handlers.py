@@ -113,6 +113,7 @@ from meho_backplane.mcp.registry import (
 )
 from meho_backplane.mcp.server import McpInvalidParamsError, register_method
 from meho_backplane.operations._audit import resolve_broadcast_lineage
+from meho_backplane.operations.delivery_budget import tool_result_text
 
 __all__ = [
     "handle_resources_list",
@@ -467,7 +468,7 @@ async def handle_tools_call(
         # while the server logs 200. The text block is kept alongside per
         # the spec's backwards-compatibility recommendation.
         response: dict[str, Any] = {
-            "content": [{"type": "text", "text": json.dumps(result)}],
+            "content": [{"type": "text", "text": tool_result_text(result)}],
             "isError": False,
         }
         if defn.outputSchema is not None:

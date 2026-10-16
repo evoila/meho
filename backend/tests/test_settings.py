@@ -31,7 +31,11 @@ import pytest
 from cryptography.fernet import Fernet
 from pydantic import ValidationError
 
-from meho_backplane.settings import Settings, get_settings
+from meho_backplane.settings import (
+    RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES,
+    Settings,
+    get_settings,
+)
 
 
 def _settings_kwargs(database_url: str) -> dict[str, object]:
@@ -927,6 +931,8 @@ def test_result_query_bounds_default_when_unset(
         "RESULT_QUERY_MAX_OUTPUT_ROWS",
         "RESULT_QUERY_MAX_OUTPUT_BYTES",
         "RESULT_QUERY_TIMEOUT_SECONDS",
+        "RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES",
+        "RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES",
     ):
         monkeypatch.delenv(var, raising=False)
     get_settings.cache_clear()
@@ -935,6 +941,8 @@ def test_result_query_bounds_default_when_unset(
         assert settings.result_query_max_output_rows == 500
         assert settings.result_query_max_output_bytes == 262144
         assert settings.result_query_timeout_seconds == 5
+        assert settings.result_complete_response_wire_max_bytes == 262144
+        assert settings.result_query_response_wire_max_bytes == 2097152
     finally:
         get_settings.cache_clear()
 
@@ -952,12 +960,16 @@ def test_result_query_bounds_read_from_env(
     monkeypatch.setenv("RESULT_QUERY_MAX_OUTPUT_ROWS", "250")
     monkeypatch.setenv("RESULT_QUERY_MAX_OUTPUT_BYTES", "131072")
     monkeypatch.setenv("RESULT_QUERY_TIMEOUT_SECONDS", "9")
+    monkeypatch.setenv("RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES", "65536")
+    monkeypatch.setenv("RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES", "524288")
     get_settings.cache_clear()
     try:
         settings = get_settings()
         assert settings.result_query_max_output_rows == 250
         assert settings.result_query_max_output_bytes == 131072
         assert settings.result_query_timeout_seconds == 9
+        assert settings.result_complete_response_wire_max_bytes == 65536
+        assert settings.result_query_response_wire_max_bytes == 524288
     finally:
         get_settings.cache_clear()
 
@@ -968,6 +980,8 @@ def test_result_query_bounds_read_from_env(
         "result_query_max_output_rows",
         "result_query_max_output_bytes",
         "result_query_timeout_seconds",
+        "result_complete_response_wire_max_bytes",
+        "result_query_response_wire_max_bytes",
     ],
 )
 def test_result_query_bounds_reject_non_positive(field: str) -> None:
@@ -980,6 +994,30 @@ def test_result_query_bounds_reject_non_positive(field: str) -> None:
             database_url="sqlite+aiosqlite:///:memory:",
             **{field: 0},
         )
+
+
+@pytest.mark.parametrize("value", [1, 64, RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES - 1])
+def test_complete_response_ceiling_below_floor_is_rejected(value: int) -> None:
+    """A ceiling the completed-operation receipt cannot fit fails at startup (#3641)."""
+    with pytest.raises(ValidationError, match="receipt of a completed operation"):
+        Settings(
+            keycloak_issuer_url="https://keycloak.test/realms/meho",
+            keycloak_audience="meho-backplane",
+            vault_addr="https://vault.test",
+            database_url="sqlite+aiosqlite:///:memory:",
+            result_complete_response_wire_max_bytes=value,
+        )
+
+
+def test_complete_response_ceiling_at_floor_is_accepted() -> None:
+    settings = Settings(
+        keycloak_issuer_url="https://keycloak.test/realms/meho",
+        keycloak_audience="meho-backplane",
+        vault_addr="https://vault.test",
+        database_url="sqlite+aiosqlite:///:memory:",
+        result_complete_response_wire_max_bytes=RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES,
+    )
+    assert settings.result_complete_response_wire_max_bytes == 2048
 
 
 @pytest.mark.parametrize(("value", "expected"), [(None, 16777216), ("4096", 4096)])

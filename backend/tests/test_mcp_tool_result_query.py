@@ -34,6 +34,7 @@ from meho_backplane.connectors.result_handle_store import (
     SpilledWindow,
 )
 from meho_backplane.mcp.schemas import INVALID_PARAMS
+from meho_backplane.settings import get_settings
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
@@ -400,6 +401,37 @@ def test_query_mode_bad_operator_is_invalid_params(
     assert body["error"]["code"] == INVALID_PARAMS
 
 
+# ---------------------------------------------------------------------------
+# #3641 — terminal wire ceiling, measured after encoding
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("query", [None, {"select": ["id", "severity"]}])
+def test_result_query_over_wire_ceiling_is_output_too_large(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    fake_store: _FakeStore,
+    monkeypatch: pytest.MonkeyPatch,
+    query: dict[str, Any] | None,
+) -> None:
+    """A read inside the row budget but over the wire ceiling is refused.
+
+    Both modes (paging and query) map it to ``data.reason=output_too_large``
+    with ``data.delivery=unavailable``: nothing is delivered, nothing is cut.
+    """
+    monkeypatch.setenv("RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES", "1024")
+    get_settings.cache_clear()
+    client, op = client_with_operator
+    handle = uuid4()
+    _seed(fake_store, op, handle)
+    args: dict[str, Any] = {"handle_id": str(handle)}
+    if query is not None:
+        args["query"] = query
+    body = _call(client, args).json()
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert body["error"]["data"] == {"reason": "output_too_large", "delivery": "unavailable"}
+    assert "1024-byte delivery limit" in body["error"]["message"]
+
+
 def _seed_document(fake_store: _FakeStore, op: Operator, handle: UUID) -> None:
     fake_store.seed_document(
         tenant_id=OPERATOR_TENANT_ID,
@@ -495,3 +527,21 @@ def test_paging_a_document_handle_is_recoverable_invalid_params(
     assert body["error"]["code"] == INVALID_PARAMS
     assert body["error"]["data"]["reason"] == "invalid_query"
     assert "path" in body["error"]["message"]
+
+
+def test_path_read_over_wire_ceiling_is_output_too_large(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    fake_store: _FakeStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `path` read over the wire ceiling is refused like the other read modes."""
+    monkeypatch.setenv("RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES", "256")
+    get_settings.cache_clear()
+    client, op = client_with_operator
+    handle = uuid4()
+    _seed_document(fake_store, op, handle)
+    body = _call(client, {"handle_id": str(handle), "query": {"path": "/containers"}}).json()
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert body["error"]["data"] == {"reason": "output_too_large", "delivery": "unavailable"}
+    assert "256-byte delivery limit" in body["error"]["message"]
+    assert "Point `path` at a smaller part" in body["error"]["message"]

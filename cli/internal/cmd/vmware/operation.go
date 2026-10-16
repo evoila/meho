@@ -145,12 +145,14 @@ func strDeref(s *string) string {
 //	meho vmware operation call <op_id> \
 //	  [--target <slug>]                        # vCenter target slug
 //	  [--params '<json>' | @<file>]            # operation params
+//	  [--preview-hash <hash>]                  # needed for a destructive op
 //	  [--json]                                 # machine-readable output
 //	  [--backplane <url>]                      # override the backplane URL
 func newOperationCallCmd() *cobra.Command {
 	var (
 		targetName        string
 		paramsFlag        string
+		previewHash       string
 		jsonOut           bool
 		backplaneOverride string
 	)
@@ -164,6 +166,10 @@ func newOperationCallCmd() *cobra.Command {
 			"'{\"vm\":\"vm-101\"}'`).\n\n" +
 			"--target names the vCenter target slug; --params accepts inline\n" +
 			"JSON or @<file>; --json emits the OperationResult envelope.\n\n" +
+			"A destructive op needs --preview-hash: run `meho operation preview\n" +
+			"vmware-rest-9.0 <op_id>` with the same --target and --params first, then\n" +
+			"pass its preview_hash here. The call then waits until a second\n" +
+			"person approves it.\n\n" +
 			"Exit codes mirror meho operation call:\n" +
 			"  - 0   status == ok\n" +
 			"  - 1   status == error / denied\n" +
@@ -177,13 +183,15 @@ func newOperationCallCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runOperationCall(cmd, args[0], targetName, paramsFlag, jsonOut, backplaneOverride)
+			return runOperationCall(cmd, args[0], targetName, paramsFlag, previewHash, jsonOut, backplaneOverride)
 		},
 	}
 	cmd.Flags().StringVar(&targetName, "target", "",
 		"target slug to dispatch against (required for ops that read a target)")
 	cmd.Flags().StringVar(&paramsFlag, "params", "",
 		"operation params as inline JSON or @<file>; omitted means no params")
+	cmd.Flags().StringVar(&previewHash, "preview-hash", "",
+		"preview_hash from a prior `meho operation preview` of the same op, target and params; required for a destructive op")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit the full OperationResult envelope as JSON instead of the human render")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
@@ -191,7 +199,7 @@ func newOperationCallCmd() *cobra.Command {
 	return cmd
 }
 
-func runOperationCall(cmd *cobra.Command, opID, targetName, paramsFlag string, jsonOut bool, backplaneOverride string) error {
+func runOperationCall(cmd *cobra.Command, opID, targetName, paramsFlag, previewHash string, jsonOut bool, backplaneOverride string) error {
 	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
@@ -200,7 +208,7 @@ func runOperationCall(cmd *cobra.Command, opID, targetName, paramsFlag string, j
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(err.Error()), jsonOut)
 	}
-	r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, params)
+	r, err := conn.CallWithPreviewHash(cmd.Context(), backplaneURL, opID, targetName, params, previewHash)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}

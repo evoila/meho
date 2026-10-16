@@ -488,6 +488,11 @@ _WRITE_OPS: Final[frozenset[str]] = frozenset(
         "keycloak.group.update_attributes",
         "keycloak.group.member.add",
         "keycloak.group.member.remove",
+        # pfSense user flag writes (#3937): ``.disable`` / ``.enable`` are not
+        # write suffixes, and a suffix would also relabel the flat ``meho_``
+        # mirror. The params carry only a user name, so plain ``write``.
+        "pfsense.user.disable",
+        "pfsense.user.enable",
         # keycloak per-user session logout (#3851): a mutation (it ends live
         # sessions) whose ``.logout`` suffix is not a write suffix. Its params
         # are a user id or username only, so plain ``write``.

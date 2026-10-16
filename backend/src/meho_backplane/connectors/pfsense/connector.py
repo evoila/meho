@@ -45,7 +45,9 @@ bound-method shim on :class:`PfSenseConnector` that delegates to the
 pure handler function in that module. The dispatcher shim does not
 change. #3954 adds the allow-listed config reads ``pfsense.user.list``
 and ``pfsense.route.static.list`` via
-:mod:`~meho_backplane.connectors.pfsense.ops_config_reads`.
+:mod:`~meho_backplane.connectors.pfsense.ops_config_reads`. #3937 adds
+the governed user writes ``pfsense.user.disable`` / ``pfsense.user.enable``
+via :mod:`~meho_backplane.connectors.pfsense.ops_user_write`.
 """
 
 from __future__ import annotations
@@ -269,7 +271,11 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "certificate data), and a returned value with a known secret shape "
         "is redacted; a secret typed in plain words into ``descr`` can still "
         "show, the same limit as ``pfsense.config.show``. Use it instead of "
-        "``pfsense.config.show`` for any question about users."
+        "``pfsense.config.show`` for any question about users. To turn one "
+        "user off or on again (for example a VPN user after an event ends), "
+        "use ``pfsense.user.disable`` / ``pfsense.user.enable``: they change "
+        "only that user's ``disabled`` flag, a second person must approve, "
+        "and the built-in admin account is refused."
     ),
 }
 
@@ -730,6 +736,42 @@ class PfSenseConnector(SshConnector):
         )
 
         return await _pfsense_user_list(self, target, params, operator)
+
+    async def user_disable(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.user.disable`` (#3937).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_user_write.pfsense_user_disable`.
+        Sets the ``disabled`` flag of ONE local user (needs approval).
+        """
+        from meho_backplane.connectors.pfsense.ops_user_write import (
+            pfsense_user_disable as _pfsense_user_disable,
+        )
+
+        return await _pfsense_user_disable(self, target, params, operator)
+
+    async def user_enable(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.user.enable`` (#3937).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_user_write.pfsense_user_enable`.
+        Clears the ``disabled`` flag of ONE local user (needs approval).
+        """
+        from meho_backplane.connectors.pfsense.ops_user_write import (
+            pfsense_user_enable as _pfsense_user_enable,
+        )
+
+        return await _pfsense_user_enable(self, target, params, operator)
 
     async def route_static_list(
         self,

@@ -944,3 +944,13 @@ def test_object_collect_guidance_says_to_read_the_whole_configuration_ex() -> No
     assert "'configurationEx.<field>'" in hint
     assert "InvalidProperty" in hint
     assert "request 'configurationEx'" in VMWARE_OBJECT_COLLECT_OP.description
+
+
+def test_object_collect_guidance_covers_distributed_portgroup_reads() -> None:
+    """#3534: DVS / dvportgroup config reads go through object.collect, fetched whole."""
+    llm_instructions = VMWARE_OBJECT_COLLECT_OP.llm_instructions
+    assert llm_instructions is not None
+    assert "DistributedVirtualPortgroup" in llm_instructions["when_to_use"]
+    hint = llm_instructions["parameter_hints"]["properties"]
+    assert "['config.defaultPortConfig']" in hint
+    assert "'config.defaultPortConfig.vlan'" in hint

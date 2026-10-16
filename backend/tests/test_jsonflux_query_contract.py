@@ -38,6 +38,11 @@ from meho_backplane.jsonflux.query.contract import (
     compile_query,
 )
 from meho_backplane.jsonflux.query.engine import QueryEngine
+from meho_backplane.jsonflux.query.json_pointer import (
+    JsonPointerError,
+    parse_json_pointer,
+    resolve_json_pointer,
+)
 from meho_backplane.jsonflux.query.result_catalog import (
     AdmissionGuard,
     ResultFieldCatalog,
@@ -508,3 +513,78 @@ def test_drop_payload_executes_inert() -> None:
         assert engine.conn.execute(f"DESCRIBE {RESULT_TABLE}").fetchall()
     finally:
         engine.close()
+
+
+# ---------------------------------------------------------------------------
+# RFC 6901 JSON Pointer (#3633)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("pointer", "tokens"),
+    [
+        ("", []),
+        ("/", [""]),
+        ("/foo/0", ["foo", "0"]),
+        ("/a~1b", ["a/b"]),
+        ("/m~0n", ["m~n"]),
+        # Decode order matters: "~01" is "~" + "1", never "/".
+        ("/~01", ["~1"]),
+    ],
+)
+def test_parse_json_pointer_decodes_tokens(pointer: str, tokens: list[str]) -> None:
+
+    assert parse_json_pointer(pointer) == tokens
+
+
+@pytest.mark.parametrize("pointer", ["foo", "/a~", "/a~2", "/~x/b"])
+def test_parse_json_pointer_rejects_bad_syntax(pointer: str) -> None:
+
+    with pytest.raises(JsonPointerError):
+        parse_json_pointer(pointer)
+
+
+def test_resolve_json_pointer_follows_the_rfc_examples() -> None:
+    """The RFC 6901 section 5 example document."""
+
+    doc = {
+        "foo": ["bar", "baz"],
+        "": 0,
+        "a/b": 1,
+        "c%d": 2,
+        "e^f": 3,
+        "g|h": 4,
+        "i\\j": 5,
+        'k"l': 6,
+        " ": 7,
+        "m~n": 8,
+    }
+    cases = {
+        "": doc,
+        "/foo": ["bar", "baz"],
+        "/foo/0": "bar",
+        "/": 0,
+        "/a~1b": 1,
+        "/c%d": 2,
+        "/e^f": 3,
+        "/g|h": 4,
+        "/i\\j": 5,
+        '/k"l': 6,
+        "/ ": 7,
+        "/m~0n": 8,
+    }
+    for pointer, expected in cases.items():
+        assert resolve_json_pointer(doc, parse_json_pointer(pointer)) == expected, pointer
+
+
+@pytest.mark.parametrize("pointer", ["/foo/-", "/foo/01", "/foo/2", "/foo/+1", "/nope", "/foo/0/x"])
+def test_resolve_json_pointer_rejects_unresolvable_steps(pointer: str) -> None:
+
+    with pytest.raises(JsonPointerError):
+        resolve_json_pointer({"foo": ["bar", "baz"]}, parse_json_pointer(pointer))
+
+
+def test_compile_query_refuses_a_path_spec() -> None:
+    """A ``path`` read is never compiled to SQL (#3633)."""
+    with pytest.raises(QueryContractError, match="path"):
+        compile_query(ResultQuerySpec(path="/a"), ["a"], max_limit=10)

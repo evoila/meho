@@ -77,6 +77,7 @@ from meho_backplane.redaction.resolver import get_default_policy
 __all__ = [
     "BroadcastEvent",
     "classify_op",
+    "is_secret_param_name",
     "redact_payload",
     "scrub_broadcast_params",
     "scrub_secret_named_values",
@@ -1070,6 +1071,17 @@ def _is_secret_param_name(name: str) -> bool:
     if tokens[-1] in _SECRET_NAME_TOKENS_FINAL:
         return True
     return any(pair in _SECRET_NAME_TOKEN_PAIRS for pair in itertools.pairwise(tokens))
+
+
+def is_secret_param_name(name: str) -> bool:
+    """Public entry to :func:`_is_secret_param_name`.
+
+    The approval-park params echo
+    (:func:`~meho_backplane.operations._preview._redact_echoed_params`)
+    uses it to decide which param values to mask, so the echo and the
+    broadcast scrub cannot disagree on what a secret-named param is.
+    """
+    return _is_secret_param_name(name)
 
 
 def _scrub_secret_named_keys(node: Any) -> tuple[Any, bool]:

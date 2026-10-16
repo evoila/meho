@@ -79,7 +79,7 @@ from typing import TYPE_CHECKING, Any, Final, Protocol
 
 import structlog
 
-from meho_backplane.broadcast.events import classify_op
+from meho_backplane.broadcast.events import classify_op, is_secret_param_name
 from meho_backplane.redaction import apply_connector_boundary_redaction
 
 if TYPE_CHECKING:
@@ -131,39 +131,6 @@ PREVIEW_REASON_NOT_POPULATED = "connector_did_not_populate"
 #: scrub sentinel (:data:`~meho_backplane.connectors.keycloak.redaction.REDACTED`).
 _PARAM_REDACTED = "***REDACTED***"
 
-#: Param key names whose value is secret material regardless of its
-#: string shape, scrubbed by exact (case-insensitive) key match before the
-#: echo is stored. The connector-boundary redaction engine matches secret
-#: *value* shapes (JWTs, bearer tokens, labelled ``key=value`` strings in a
-#: single leaf) but walks Mappings key-by-key without inspecting the key
-#: itself -- so a structured ``{"password": "hunter2"}`` param slips
-#: through it. This set closes that gap for the generic echo: a
-#: secret-by-key-name param never lands verbatim in the durable approval
-#: row even when its value carries no recognisable secret signature. Kept
-#: deliberately narrow (the well-known credential param spellings); a
-#: connector whose params need richer scrubbing registers a bespoke
-#: builder (e.g. the keycloak write preview, #1857) that owns its own
-#: field discipline.
-_SECRET_PARAM_KEYS: frozenset[str] = frozenset(
-    {
-        "password",
-        "passwd",
-        "pwd",
-        "secret",
-        "client_secret",
-        "secret_id",
-        "token",
-        "api_key",
-        "apikey",
-        "access_token",
-        "refresh_token",
-        "auth_token",
-        "session_token",
-        "private_key",
-        "credentials",
-    }
-)
-
 #: Truncation bound for the reviewer-facing ``preview_error`` reason. A
 #: builder fault is normally a one-line message; the cap keeps a
 #: pathological exception repr (an HTTP error echoing a response body)
@@ -188,12 +155,16 @@ def _preview_failure_reason(exc: Exception) -> str:
 def _scrub_secret_param_keys(value: Any) -> Any:
     """Replace secret-by-name param values with :data:`_PARAM_REDACTED`.
 
-    Walks dicts + lists recursively. For every dict, a key matching
-    :data:`_SECRET_PARAM_KEYS` (case-insensitively) has its whole value
-    replaced -- scalar or subtree -- so a nested ``{"credentials": [...]}``
-    leaks no element. Every other value is walked so a secret keyed deep
-    inside the params tree is still caught. Scalars pass through. The input
-    is never mutated; a new structure is returned.
+    Walks dicts + lists recursively. For every dict, a key that
+    :func:`~meho_backplane.broadcast.events.is_secret_param_name` marks as
+    secret has its whole value replaced -- scalar or subtree -- so a nested
+    ``{"credentials": [...]}`` leaks no element. This is the same name check
+    the broadcast params scrub uses, so a param the broadcast path flags as
+    secret is always masked here too (``password``, ``admin_password``,
+    ``rootPassword``, ``client_secret``, ``api_key``, ...). Every other
+    value is walked so a secret keyed deep inside the params tree is still
+    caught. Scalars pass through. The input is never mutated; a new
+    structure is returned.
 
     This is the key-name half of the generic echo's redaction; the
     value-shape half is :func:`apply_connector_boundary_redaction`.
@@ -202,7 +173,7 @@ def _scrub_secret_param_keys(value: Any) -> Any:
         return {
             key: (
                 _PARAM_REDACTED
-                if isinstance(key, str) and key.lower() in _SECRET_PARAM_KEYS
+                if isinstance(key, str) and is_secret_param_name(key)
                 else _scrub_secret_param_keys(item)
             )
             for key, item in value.items()
@@ -224,7 +195,8 @@ def _redact_echoed_params(
     Two passes, both reusing the existing redaction discipline:
 
     1. **Key-name scrub** (:func:`_scrub_secret_param_keys`) -- masks
-       values keyed by a well-known credential name. The connector-boundary
+       values keyed by a secret-shaped name, using the same name check as
+       the broadcast params scrub. The connector-boundary
        engine walks Mappings key-by-key but matches secret *value* shapes
        only, so a structured ``{"password": "hunter2"}`` would otherwise
        echo verbatim.

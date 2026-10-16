@@ -3481,6 +3481,79 @@ async def test_park_merges_permission_preflight_onto_identifier_default(
 
 
 @pytest.mark.asyncio
+async def test_park_params_echo_masks_secret_named_params(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A parked op's ``params_echo`` never stores a secret-named param value (#3808).
+
+    The params carry secret values under names the old exact-name list
+    missed (``vcsa_root_password``, camelCase ``adminPassword``,
+    ``sddcManagerApiKey``). The broadcast scrub flags them as secret, and
+    the echo on the stored approval row masks the same keys, so the two
+    paths agree. Non-secret params stay readable.
+    """
+    from meho_backplane.broadcast.events import scrub_broadcast_params
+    from meho_backplane.db.models import ApprovalRequest
+
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    target = _FakeTarget(product="vault")
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.secret_params_op",
+        handler=_module_handler_returning_dict,
+        summary="Dangerous op whose params carry secret values.",
+        description="Parks for approval; the echo must mask the secret values.",
+        parameter_schema={"type": "object"},
+        safety_level="dangerous",
+        requires_approval=True,
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+    secret_values = ["FAKE-root-pw-0001", "FAKE-nsx-pw-0002", "FAKE-api-key-0003"]
+    params: dict[str, Any] = {
+        "appliance": "fake-appliance-01",
+        "vcsa_root_password": secret_values[0],
+        "nsx": {"adminPassword": secret_values[1], "size": "medium"},
+        "sddcManagerApiKey": secret_values[2],
+    }
+    # The broadcast scrub (the source of ``broadcast_params_secret_detected``)
+    # flags these params as secret.
+    _scrubbed, secret_detected = scrub_broadcast_params(params)
+    assert secret_detected is True
+
+    result = await dispatch(
+        operator=_make_operator(principal_kind=PrincipalKind.USER),
+        connector_id="vault-1.x",
+        op_id="vault.kv.secret_params_op",
+        target=target,
+        params=params,
+    )
+    assert result.status == "awaiting_approval"
+    approval_request_id = UUID(result.extras["approval_request_id"])
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        row = await fresh.get(ApprovalRequest, approval_request_id)
+        assert row is not None
+        echo = row.proposed_effect["params_echo"]
+        assert echo == {
+            "appliance": "fake-appliance-01",
+            "vcsa_root_password": "***REDACTED***",
+            "nsx": {"adminPassword": "***REDACTED***", "size": "medium"},
+            "sddcManagerApiKey": "***REDACTED***",
+        }
+        stored = repr(row.proposed_effect)
+        for value in secret_values:
+            assert value not in stored
+    # The park's broadcast carries no secret value either.
+    broadcast = repr([event.payload for event in captured_events])
+    for value in secret_values:
+        assert value not in broadcast
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("will_be_denied", [True, False])
 async def test_park_stamps_write_capability_warning_when_denied(
     stub_embedding_service: AsyncMock,

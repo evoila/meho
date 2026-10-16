@@ -5,13 +5,16 @@ operators reading both see the same conventions. The parent chart maps its
 `resultCache:` values here through a dependency `alias`, and an alias also
 renames `.Chart.Name`; the name is therefore pinned to `result-cache` so
 resource names stay DNS-safe and match the parent's egress rule and URL.
+There is no `nameOverride`: the parent chart builds the Service host, the
+Secret name, and the egress selector from the same fixed name, and the
+parent values.schema.json rejects the key.
 */}}
 
 {{/*
 Expand the name of the subchart.
 */}}
 {{- define "resultCache.name" -}}
-{{- default "result-cache" .Values.nameOverride | trunc 63 | trimSuffix "-" }}
+result-cache
 {{- end }}
 
 {{/*
@@ -19,8 +22,7 @@ Fully-qualified name. The parent's release name is the prefix so multiple
 MEHO installations on a single namespace remain distinct.
 */}}
 {{- define "resultCache.fullname" -}}
-{{- $name := default "result-cache" .Values.nameOverride }}
-{{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" }}
+{{- printf "%s-result-cache" .Release.Name | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*

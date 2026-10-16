@@ -742,7 +742,7 @@ the existing exactly-one-resumer substrate rather than duplicating it:
    (#3079) — persists the re-dispatch's reduced result envelope onto
    `approval_request.resume_result` (nullable JSON, migration `0096`) right
    after the dispatch returns. Only the resumer that **won**
-   `claim_resume` (#2293) reaches the capture (`_persist_resume_result`), so
+   `claim_resume` (#2293) reaches the capture (`persist_resume_result`), so
    it runs at most once per approved request; a loser that no-ops
    `already_resumed` leaves the winner's result untouched. The stored value
    is `OperationResult.model_dump(mode="json")` — the **same** reduced /
@@ -859,7 +859,7 @@ for approval.
   it is still `pending`, because the expiry sweeper runs only every few
   minutes, or not at all when it is off. Such a request can no longer be
   approved, so a retry does not get it back. Instead, `create_pending_request`
-  locks it and expires it in the same transaction (`_expire_if_overdue`,
+  locks it and expires it in the same transaction (`_lock_and_expire_pending`,
   the same steps and the same `approval.decision` audit row as
   `expire_stale_requests`). Like the sweeper, it records the expiry under
   the system identity `system:approval-expiry` (`expiry_operator` in
@@ -881,6 +881,15 @@ idempotency_key) WHERE idempotency_key IS NOT NULL AND status IN
 The losing insert runs in a savepoint (`_insert_idempotent_request`). When
 the index refuses it, the savepoint rolls back and the winner's row is
 returned the same way as a normal retry.
+
+Two late retries can also race to expire the same overdue request. Only one
+gets the row lock. When the other's locked re-read finds no `pending` row,
+the row changed under it: another retry expired it and parked a replacement,
+or a sweep, reject or approve got there first. `_resolve_idempotent_request`
+then looks the key up again and returns what holds it now, for example the
+replacement as a reused request. It never returns the expired row it read
+first. `tests/integration/test_approval_idempotent_retry_pg.py` runs this
+race on a real Postgres.
 
 **What does not change.** The lookup runs inside `create_pending_request`,
 after every park gate in `_handle_needs_approval`. So a retry still goes
@@ -920,11 +929,13 @@ from "approved and run" without polling the owner-only `/result` read. The
 result body itself stays on `/result` only; the views show the phase, not
 the payload.
 
-Limits of `started`: the in-process agent-run resume returns its result to
-the agent and does not store it, and the result write is best-effort. In
-those cases the row stays `started`. An add-on's request is resumed by an
-operator surface (`resume_dispatch_after_approval`), which stores the
-result, so it reaches `executed` or `failed`.
+Both resume paths store the result (`persist_resume_result`): the operator
+surface (`resume_dispatch_after_approval`) and the in-process agent waiter
+(`_resume_approved_or_already_resumed` in `agent/approval_wait.py`). So a
+request the agent resumed also reaches `executed` or `failed`. Limits of
+`started`: the result write is best-effort, and a re-dispatch that raised
+instead of returning an envelope stores nothing. In those cases the row
+stays `started`.
 
 ### The add-on governed-destroy round trip (#3478)
 
@@ -938,7 +949,9 @@ get the same request back. Then watch `result_state` on `GET
 `executed` or `failed`.
 
 **Pinned by tests:** `tests/test_approval_idempotent_park.py` (retry,
-scoping, conflict, race, `result_state` on the REST list and show) and
+scoping, conflict, race, `result_state` on the REST list and show after both
+resume paths), `tests/integration/test_approval_idempotent_retry_pg.py` (two
+late retries on a real Postgres) and
 `tests/migrations/test_migration_0105_add_approval_request_idempotency_key.py`.
 
 ## `proposed_effect` builder hook (#1437)

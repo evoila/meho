@@ -556,9 +556,10 @@ class ApprovalResultState(StrEnum):
       yet (``resumed_at IS NULL``).
     * :attr:`STARTED` -- a resumer claimed the run (``resumed_at`` is set),
       but no result is stored. Either the op is still running, or the run
-      ended without a stored result: the in-process agent resume returns
-      its result to the agent and does not store it, and the result write is
-      best-effort.
+      ended without a stored result: the result write is best-effort, and a
+      re-dispatch that raised instead of returning an envelope stores
+      nothing. Both resume paths (operator surfaces and the in-process
+      agent waiter) store the envelope they get back.
     * :attr:`EXECUTED` -- the stored result has ``status == "ok"``.
     * :attr:`FAILED` -- a result is stored and its ``status`` is not ``ok``.
     """
@@ -699,32 +700,32 @@ def expiry_operator(tenant_id: uuid.UUID) -> Operator:
     )
 
 
-async def _expire_if_overdue(
+def _is_overdue_pending(existing: ApprovalRequest) -> bool:
+    """True when *existing* is ``pending`` and past its deadline (#3486)."""
+    if existing.status != ApprovalRequestStatus.PENDING.value:
+        return False
+    return _deadline_has_passed(existing, _now(), _resolve_default_ttl())
+
+
+async def _lock_and_expire_pending(
     session: AsyncSession, existing: ApprovalRequest
 ) -> ApprovalRequest | None:
-    """Expire *existing* when it is ``pending`` and past its deadline (#3486).
+    """Lock the overdue *existing* row and expire it; ``None`` if it changed (#3486).
 
-    The sweeper may not have run yet (or may be off). Such a row can no
-    longer be approved, so a retry must not get it back. It is locked and
-    expired here, in the caller's transaction, the same way
+    The sweeper may not have run yet (or may be off). An overdue ``pending``
+    row can no longer be approved, so a retry must not get it back. It is
+    locked and expired here, in the caller's transaction, the same way
     :func:`expire_stale_requests` does it and under the same
     :func:`expiry_operator` identity, so the decision audit row names the
-    system, not the requester. That frees the key, so the caller then
-    parks a new request.
+    system, not the requester. That frees the key for a new request.
 
-    Returns the expired row, or ``None`` when *existing* is still usable
-    (``approved``, or ``pending`` and within its deadline). Also ``None``
-    when a concurrent sweep or reject changed the row between the first
-    read and the locked re-read. In that rare case the caller returns the
-    stale *existing* row as reused; the next retry finds the key free and
-    parks a new request.
+    Returns ``None`` when the locked re-read finds no ``pending`` row with
+    this id: a concurrent sweep, reject, approve, or another retry changed
+    it between the caller's first read and this lock. The caller must then
+    look the key up again instead of using the stale row.
     """
-    if existing.status != ApprovalRequestStatus.PENDING.value:
-        return None
     cutoff = _now()
     default_ttl = _resolve_default_ttl()
-    if not _deadline_has_passed(existing, cutoff, default_ttl):
-        return None
     stmt = (
         select(ApprovalRequest)
         .where(
@@ -745,6 +746,50 @@ async def _expire_if_overdue(
         default_ttl=default_ttl,
     )
     return locked
+
+
+async def _resolve_idempotent_request(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    principal_sub: str,
+    idempotency_key: str,
+) -> tuple[ApprovalRequest | None, ApprovalRequest | None]:
+    """Find what *idempotency_key* holds right now: ``(live, expired)`` (#3486).
+
+    * ``(row, None)``: a usable request holds the key (``approved``, or
+      ``pending`` within its deadline). The caller returns it for the retry.
+    * ``(None, row)``: the key was held by an overdue ``pending`` request.
+      This call expired it; the caller parks a new request with the key.
+    * ``(None, None)``: the key is free.
+
+    When the locked re-read in :func:`_lock_and_expire_pending` misses, the
+    row changed under us: a sweep or reject freed the key, an approve kept
+    it live, or another retry already expired the row and parked its
+    replacement. The key is looked up again so the caller gets that current
+    state (the replacement, for example), never the stale first read. Each
+    repeat follows a committed change to the row it saw, so the loop ends.
+    """
+    while True:
+        existing = await _find_idempotent_request(
+            session,
+            tenant_id=tenant_id,
+            principal_sub=principal_sub,
+            idempotency_key=idempotency_key,
+        )
+        if existing is None:
+            return None, None
+        if not _is_overdue_pending(existing):
+            return existing, None
+        expired = await _lock_and_expire_pending(session, existing)
+        if expired is not None:
+            return None, expired
+        _log.info(
+            "approval_request_idempotency_key_rechecked",
+            approval_request_id=str(existing.id),
+            principal_sub=principal_sub,
+            tenant_id=str(tenant_id),
+        )
 
 
 def _now() -> datetime:
@@ -996,16 +1041,14 @@ async def create_pending_request(
 
     expired_request: ApprovalRequest | None = None
     if idempotency_key is not None:
-        existing = await _find_idempotent_request(
+        live, expired_request = await _resolve_idempotent_request(
             session,
             tenant_id=operator.tenant_id,
             principal_sub=operator.sub,
             idempotency_key=idempotency_key,
         )
-        if existing is not None:
-            expired_request = await _expire_if_overdue(session, existing)
-            if expired_request is None:
-                return _reuse(existing)
+        if live is not None:
+            return _reuse(live)
 
     if proposed_effect is None:
         proposed_effect = {
@@ -1618,14 +1661,17 @@ async def resume_dispatch_after_approval(
 def _dump_result_envelope(result: Any) -> dict[str, Any] | None:
     """Project a re-dispatch result into a JSON dict for durable storage (#3209).
 
-    The winning resume path returns an
+    The operator resume path returns an
     :class:`~meho_backplane.connectors.schemas.OperationResult` (a Pydantic
     model). ``model_dump(mode="json")`` yields the reduced / handle-shaped
     envelope — the same one the approver sees inline, so a set-shaped response
-    is already a JSONFlux ``handle`` (v0.1-spec §4), never a raw body. Returns
-    ``None`` when the value is not a dumpable model (defence-in-depth; a
-    non-model result is simply not captured rather than raising).
+    is already a JSONFlux ``handle`` (v0.1-spec §4), never a raw body. The
+    in-process agent resume already holds that dump as a plain dict (#3486);
+    it is stored as is. Returns ``None`` for anything else (defence-in-depth;
+    an unknown result shape is simply not captured rather than raising).
     """
+    if isinstance(result, dict):
+        return result
     dump = getattr(result, "model_dump", None)
     if dump is None:
         return None
@@ -1633,14 +1679,18 @@ def _dump_result_envelope(result: Any) -> dict[str, Any] | None:
     return projection if isinstance(projection, dict) else None
 
 
-async def _persist_resume_result(request_id: uuid.UUID, result: Any) -> None:
+async def persist_resume_result(request_id: uuid.UUID, result: Any) -> None:
     """Store the approved re-dispatch's reduced result envelope on the row (#3209).
 
     Called on the exactly-one-resumer winning path only, so it runs at most
-    once per approved request. The stored value is the reduced /
-    handle-shaped ``OperationResult`` envelope; the originating consumer reads
-    it back — principal-scoped — via ``GET /api/v1/approvals/{id}/result`` to
-    resume a non-idempotent parked op (VCF ``bringup.start``) by poll.
+    once per approved request: by :func:`_dispatch_resume_with_bound_context`
+    for the operator surfaces, and by the in-process agent waiter
+    (:mod:`meho_backplane.agent.approval_wait`) after its re-dispatch (#3486),
+    so a request the agent resumed also moves off ``started`` on the list and
+    show views. The stored value is the reduced / handle-shaped
+    ``OperationResult`` envelope; the originating consumer reads it back —
+    principal-scoped — via ``GET /api/v1/approvals/{id}/result`` to resume a
+    non-idempotent parked op (VCF ``bringup.start``) by poll.
 
     Fail-soft: the dispatch's own synchronous audit row already committed
     inside :func:`~meho_backplane.operations.dispatcher.dispatch` (the
@@ -1830,7 +1880,7 @@ async def _dispatch_resume_with_bound_context(
     # instead of a second submit (#3209). Reached only by the exactly-one-resumer
     # winner, so the capture runs at most once; fail-soft, never breaks the
     # approve path.
-    await _persist_resume_result(request.id, result)
+    await persist_resume_result(request.id, result)
     return result
 
 

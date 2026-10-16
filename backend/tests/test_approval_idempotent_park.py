@@ -15,10 +15,14 @@ second approval request. This suite pins:
   is refused (``idempotency_key_conflict``). A rejected request frees the key,
   and so does a pending one past its deadline, even before the sweeper runs.
 * **A race cannot create two.** The partial unique index (migration 0105)
-  makes the losing insert return the winner's row.
+  makes the losing insert return the winner's row. A retry that loses the
+  race to expire an overdue request gets the replacement, not the expired
+  row (the real two-connection race runs on Postgres in
+  ``tests/integration/test_approval_idempotent_retry_pg.py``).
 * **List/show carry ``preview_hash`` and ``result_state``.** A client can
   match a request to the row it previewed, and tell "approved, not run yet"
-  from "approved and run" without polling ``/result``.
+  from "approved and run" without polling ``/result``. Both resume paths
+  store the outcome: the operator surface and the in-process agent waiter.
 """
 
 from __future__ import annotations
@@ -36,6 +40,8 @@ from sqlalchemy import func, select
 
 import meho_backplane.audit as _audit_module
 import meho_backplane.operations.approval_queue as approval_queue_module
+import meho_backplane.operations.meta_tools as meta_tools_module
+from meho_backplane.agent.approval_wait import _resume_approved_or_already_resumed
 from meho_backplane.api.v1.approvals import _view
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
@@ -434,6 +440,54 @@ async def test_racing_insert_returns_the_winner(monkeypatch: pytest.MonkeyPatch)
     assert await _request_audit_count() == 1
 
 
+@pytest.mark.asyncio
+async def test_retry_that_loses_the_expiry_race_gets_the_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retry that read an overdue row another retry already expired gets the new row.
+
+    Sequence: two retries read the same overdue ``pending`` row. The first
+    locks it, expires it, parks a replacement and commits. The second then
+    finds no ``pending`` row under the lock. It must look the key up again
+    and return the replacement, never the expired row the client could no
+    longer get approved.
+    """
+    first = await _park_direct()
+    assert first.expires_at is not None
+    monkeypatch.setattr(
+        approval_queue_module, "_now", lambda: first.expires_at + timedelta(seconds=1)
+    )
+    replacement = await _park_direct()
+    assert replacement.id != first.id
+
+    # ``first`` is detached and still reads ``pending``: exactly what the
+    # losing retry saw before the winner committed.
+    real_find = approval_queue_module._find_idempotent_request
+    calls = {"n": 0}
+
+    async def _stale_first_read(*args: Any, **kwargs: Any) -> ApprovalRequest | None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return first
+        return await real_find(*args, **kwargs)
+
+    monkeypatch.setattr(approval_queue_module, "_find_idempotent_request", _stale_first_read)
+    loser = await _park_direct()
+
+    assert loser.id == replacement.id
+    assert getattr(loser, "_reused", False) is True
+    assert calls["n"] == 2
+    assert await _approval_row_count() == 2
+    assert await _request_audit_count() == 2
+    async with get_sessionmaker()() as s:
+        decisions = (
+            (await s.execute(select(AuditLog).where(AuditLog.path == "approval.decision")))
+            .scalars()
+            .all()
+        )
+    assert len(decisions) == 1
+
+
 # ---------------------------------------------------------------------------
 # result_state on the row
 # ---------------------------------------------------------------------------
@@ -534,6 +588,55 @@ async def test_list_and_show_tell_approved_from_executed(embedding: list[float])
     assert retry["extras"]["approval_request_id"] == request_id
     assert retry["extras"]["approval_request_reused"] is True
     assert await _approval_row_count() == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("envelope", "expected"),
+    [
+        ({"status": "ok", "op_id": "POST:/vms", "result": {"id": "vm-7"}}, "executed"),
+        ({"status": "error", "op_id": "POST:/vms", "error": "upstream 500"}, "failed"),
+    ],
+)
+async def test_agent_resume_moves_list_and_show_off_started(
+    monkeypatch: pytest.MonkeyPatch, envelope: dict[str, Any], expected: str
+) -> None:
+    """The in-process agent resume stores its outcome like the operator resume does.
+
+    Before, only ``resume_dispatch_after_approval`` stored the result, so a
+    request the agent waiter resumed stayed ``started`` forever and a client
+    could not tell it from one still running.
+    """
+    row = await _park_direct(key=None)
+    async with get_sessionmaker()() as s:
+        await approve_request(s, row.id, operator=_operator(sub="op-approver"))
+        await s.commit()
+
+    async def _redispatch(_operator: Any, _arguments: dict[str, Any]) -> dict[str, Any]:
+        return envelope
+
+    monkeypatch.setattr(meta_tools_module, "call_operation_with_approval", _redispatch)
+    resumed = await _resume_approved_or_already_resumed(
+        operator=_operator(sub="op-requester"),
+        call_arguments={
+            "connector_id": "gh-rest-3",
+            "op_id": "POST:/vms",
+            "params": {"name": "web-01"},
+            "target": None,
+        },
+        awaiting_envelope={"op_id": "POST:/vms", "extras": {}},
+        approval_request_id=row.id,
+    )
+    assert resumed == envelope
+
+    key = make_rsa_keypair("kid-3486-agent")
+    headers = _headers(key, sub="op-approver")
+    shown = await _get_json(f"/api/v1/approvals/{row.id}", headers, key)
+    assert shown["status"] == "approved"
+    assert shown["result_state"] == expected
+    listed = await _get_json("/api/v1/approvals?status=approved", headers, key)
+    (row_view,) = [v for v in listed if v["id"] == str(row.id)]
+    assert row_view["result_state"] == expected
 
 
 @pytest.mark.asyncio

@@ -2823,15 +2823,44 @@ they never park.
   `distributed-switches` path exists only under the NSX-scoped
   `/vcenter/namespace-management/` tree — there is **no** generic DVS
   list resource in the pinned REST spec at all — so the audit's DVS-list
-  step was dropped entirely. `dvs_name` is now always `null` (the
-  generic `Network` summary carries no parent-DVS field to join on, so
-  the name index was never consulted with a hit anyway), `dvs` stays
-  best-effort from the portgroup row itself, and `filter_dvs` is
-  accepted but inert.
+  step was dropped entirely.
+  **#3802 update:** the audit now reads each portgroup's details from
+  the portgroup managed object, not from the REST lists. The old
+  per-portgroup `GET:/vcenter/vm?filter.networks=...` call was wrong:
+  the VM list resource has no `networks` filter, so vCenter ignored it
+  and every row got the whole VM inventory. After the
+  `GET:/vcenter/network` listing, the composite makes three batched
+  vim `RetrievePropertiesEx` reads:
+  1. every `DistributedVirtualPortgroup`: `config.distributedVirtualSwitch`
+     (the parent switch, gives `dvs`), the whole
+     `config.defaultPortConfig` (gives `vlan`), and `vm` (the VMs with a
+     network adapter on that portgroup);
+  2. the parent switches' `name` (gives `dvs_name`), using the switch
+     type from the returned reference (`VmwareDistributedVirtualSwitch`);
+  3. the connected VMs' `name` + `runtime.powerState` (gives `vm_names`
+     / `vm_count`; powered-on only unless `include_disconnected_vms`).
+  Each read sends at most 50 objects per call, so a normal inventory
+  is not paged. If vCenter still pages an answer (returns a `token`),
+  the audit fails with an error instead of returning rows with missing
+  VMs or portgroups. The same happens when a call succeeds but vCenter
+  could not read a property on one object (a `missingSet` entry with a
+  fault, for example no permission on a VM's `name`): the audit fails
+  with an error that names the property path and the fault type name,
+  instead of dropping that VM and reporting a wrong count. A property
+  that is simply unset (a portgroup with no switch, VLAN or VMs) has no
+  `missingSet` entry and gives a null or empty field.
+  `vlan` is `{mode: "access", vlan_id}` or `{mode: "trunk", ranges}`
+  (the same view `network.portgroup.vlan.set` returns), or `null` for a
+  private VLAN. The port config is read whole, never as the deep
+  `config.defaultPortConfig.vlan` path: that path is a subclass-only
+  field and vCenter 8.0.x answers it with HTTP 500 (#3534 documents the
+  same rule for `vmware.object.collect`). `filter_dvs` now works: it
+  keeps the portgroups whose parent switch moid or name matches.
   A build-time guard
   (`tests/acceptance/test_portgroup_audit_op_id_reconcile.py`) parses
-  the pinned `vcenter.yaml` and asserts every audit sub-op_id is emitted
-  by the ingest. The vendor-licensed spec-shelf is not provisioned in
+  the pinned `vcenter.yaml` and asserts every REST (`GET`) audit
+  sub-op_id is emitted by the ingest; the vim leg is checked against
+  `vi-json.yaml` by the exhaustive read lane. The vendor-licensed spec-shelf is not provisioned in
   public-repo CI, so that guard **skips** there (the #1602 convention);
   it runs wherever the spec-shelf is wired — an operator deploy or a
   spec-shelf-backed run — which is where a future drift surfaces.

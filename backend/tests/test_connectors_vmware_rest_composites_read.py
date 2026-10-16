@@ -1278,12 +1278,17 @@ class _InventoryConnector(_RecordingConnector):
         mount_prefix: str = "/api",
         inventory: dict[str, dict[str, dict[str, Any]]] = _PG_INVENTORY,
         paged_type: str | None = None,
+        unreadable: tuple[str, str, str, Any] | None = None,
     ) -> None:
         super().__init__([listing], mount_prefix=mount_prefix)
         self._inventory = inventory
         # When set, every read of this object type answers with a ``token``,
         # the way vCenter does when it pages a result.
         self._paged_type = paged_type
+        # ``(mo_type, moid, path, fault)``: the call succeeds, but this one
+        # property lands in the object's ``missingSet`` with that fault,
+        # the way vCenter reports a property it could not read.
+        self._unreadable = unreadable
 
     async def _post_vmomi_json(
         self,
@@ -1307,6 +1312,14 @@ class _InventoryConnector(_RecordingConnector):
         for obj_spec in spec["objectSet"]:
             moid = obj_spec["obj"]["value"]
             props = self._inventory[mo_type][moid]
+            missing: list[dict[str, Any]] = []
+            if self._unreadable and self._unreadable[:2] == (mo_type, moid):
+                _, _, bad_path, fault = self._unreadable
+                if bad_path in path_set:
+                    props = {name: val for name, val in props.items() if name != bad_path}
+                    missing.append(
+                        {"_typeName": "MissingProperty", "path": bad_path, "fault": fault}
+                    )
             objects.append(
                 {
                     "obj": vim_moref(mo_type, moid),
@@ -1315,6 +1328,7 @@ class _InventoryConnector(_RecordingConnector):
                         for name in path_set
                         if name in props
                     ],
+                    "missingSet": missing,
                 }
             )
         result: dict[str, Any] = {"_typeName": "RetrieveResult", "objects": objects}
@@ -1501,6 +1515,101 @@ async def test_network_portgroup_audit_fails_on_a_paged_answer(paged_type: str) 
 
     with pytest.raises(RuntimeError, match="paged"):
         await _run_audit(conn, {})
+
+
+# The two VI-JSON shapes of a ``missingSet`` fault: 9.x wraps the concrete
+# fault in a ``LocalizedMethodFault``; 8.0.x flattens it onto ``fault``.
+_NO_PERMISSION_NESTED = {
+    "_typeName": "LocalizedMethodFault",
+    "fault": {"_typeName": "NoPermission", "object": vim_moref(_VM_TYPE, "vm-1")},
+    "localizedMessage": "Permission to perform this operation was denied.",
+}
+_NO_PERMISSION_FLAT = {"_typeName": "NoPermission", "object": vim_moref(_VM_TYPE, "vm-1")}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mo_type", "moid", "path"),
+    [
+        (_VM_TYPE, "vm-1", "name"),
+        (_VM_TYPE, "vm-5", "runtime.powerState"),
+        (_VDS_TYPE, "dvs-2", "name"),
+        (_DVPG_TYPE, "dvportgroup-11", "vm"),
+        (_DVPG_TYPE, "dvportgroup-12", "config.distributedVirtualSwitch"),
+    ],
+)
+async def test_network_portgroup_audit_fails_when_a_property_cannot_be_read(
+    mo_type: str, moid: str, path: str
+) -> None:
+    """A property vCenter could not read fails the audit; it never shrinks a count.
+
+    The HTTP call succeeds, but one object answers with the property in
+    ``missingSet`` and a ``NoPermission`` fault. Dropping that VM, switch
+    or portgroup would report a wrong VM count or a null switch, so the
+    audit raises instead. The message names the path and the fault type,
+    never the fault text.
+    """
+    conn = _InventoryConnector(_PG_LISTING, unreadable=(mo_type, moid, path, _NO_PERMISSION_NESTED))
+
+    with pytest.raises(RuntimeError, match="could not read") as excinfo:
+        await _run_audit(conn, {"include_disconnected_vms": True})
+
+    message = str(excinfo.value)
+    assert mo_type in message
+    assert f"{path} (NoPermission)" in message
+    assert "denied" not in message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fault", "expected"),
+    [
+        (_NO_PERMISSION_FLAT, "name (NoPermission)"),
+        ({"_typeName": "SystemError", "reason": "boom"}, "name (SystemError)"),
+        (None, "name (unknown fault)"),
+    ],
+)
+async def test_network_portgroup_audit_reads_the_fault_type_of_an_unreadable_vm(
+    fault: Any, expected: str
+) -> None:
+    """The 8.0.x flat fault shape and a fault without a type name also fail the audit."""
+    conn = _InventoryConnector(_PG_LISTING, unreadable=(_VM_TYPE, "vm-2", "name", fault))
+
+    with pytest.raises(RuntimeError, match="could not read") as excinfo:
+        await _run_audit(conn, {})
+
+    assert expected in str(excinfo.value)
+    assert "boom" not in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_network_portgroup_audit_unreadable_vm_in_a_later_chunk_still_fails() -> None:
+    """An unreadable VM in the third chunk of 50 fails the audit, after the first chunks passed."""
+    vm_moids = [f"vm-{n}" for n in range(1, 121)]
+    inventory: dict[str, dict[str, dict[str, Any]]] = {
+        _DVPG_TYPE: {
+            "dvportgroup-11": {
+                "config.distributedVirtualSwitch": vim_moref(_VDS_TYPE, "dvs-1"),
+                "config.defaultPortConfig": _access_port_config(110),
+                "vm": _moref_array(_VM_TYPE, vm_moids),
+            },
+        },
+        _VDS_TYPE: {"dvs-1": {"name": "DSwitch-Prod"}},
+        _VM_TYPE: {
+            moid: {"name": f"name-{moid}", "runtime.powerState": "poweredOn"} for moid in vm_moids
+        },
+    }
+    conn = _InventoryConnector(
+        _PG_LISTING[:1],
+        inventory=inventory,
+        unreadable=(_VM_TYPE, "vm-111", "runtime.powerState", _NO_PERMISSION_NESTED),
+    )
+
+    with pytest.raises(RuntimeError, match=r"runtime\.powerState \(NoPermission\)"):
+        await _run_audit(conn, {})
+
+    vm_reads = [moids for mo_type, moids, _ in _read_targets(conn) if mo_type == _VM_TYPE]
+    assert vm_reads == [vm_moids[0:50], vm_moids[50:100], vm_moids[100:120]]
 
 
 @pytest.mark.asyncio

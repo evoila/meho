@@ -138,6 +138,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
 )
 from meho_backplane.connectors.vmware_rest.typed_ops import _int_or_none
 from meho_backplane.connectors.vmware_rest.vim_body import (
+    fault_type_name,
     retrieve_properties_body,
     unwrap_vim_value,
 )
@@ -1007,6 +1008,12 @@ async def _retrieve_props_by_moid(
     inventory from paging (same size as ``_teardown_reads.read_many``).
     If an answer still carries a ``token``, this raises instead of
     returning rows with missing objects.
+
+    A successful call can also carry a property vCenter could not read
+    (a ``missingSet`` entry with a fault, e.g. no permission). This raises
+    on that too, so a caller never counts an object as absent because its
+    data was unreadable. An unset property (no ``missingSet`` entry) is
+    fine: it is simply absent from the returned dict.
     """
     by_moid: dict[str, dict[str, Any]] = {}
     for start in range(0, len(moids), _RETRIEVE_CHUNK):
@@ -1026,8 +1033,43 @@ async def _retrieve_props_by_moid(
                 f"{len(chunk)} {mo_type} objects (it returned a token), so the "
                 "answer is incomplete; refusing to return partial results"
             )
+        unreadable = _unreadable_properties(result)
+        if unreadable:
+            detail = ", ".join(sorted(set(unreadable)))
+            raise RuntimeError(
+                f"vCenter could not read {len(unreadable)} of the requested "
+                f"{mo_type} properties: {detail}; refusing to return partial results"
+            )
         by_moid.update(_extract_props_by_moid(result))
     return by_moid
+
+
+def _unreadable_properties(retrieve_result: Any) -> list[str]:
+    """``"<path> (<fault type>)"`` for every ``missingSet`` entry in the answer.
+
+    The HTTP call can succeed while vCenter still could not read a
+    property on one of the objects (no permission, a system error, an
+    object that vanished). Such a property is not in ``propSet``; it is
+    in the object's ``missingSet`` with a fault. A property that is simply
+    unset is left out of ``propSet`` with no ``missingSet`` entry, so this
+    returns nothing for it. Only the fault **type name** is kept, never
+    the fault text, which can echo a private identifier (#3708).
+    """
+    payload = _unwrap_value(retrieve_result)
+    objects = payload.get("objects", []) if isinstance(payload, dict) else payload
+    unreadable: list[str] = []
+    if not isinstance(objects, list):
+        return unreadable
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        for entry in obj.get("missingSet", []) or []:
+            path = entry.get("path") if isinstance(entry, dict) else None
+            if not isinstance(path, str):
+                continue
+            fault_type = fault_type_name(entry.get("fault")) or "unknown fault"
+            unreadable.append(f"{path} ({fault_type})")
+    return unreadable
 
 
 def _moref_value(ref: Any) -> str | None:
@@ -1130,7 +1172,10 @@ async def network_portgroup_audit_composite(
        ``name`` + ``runtime.powerState``.
 
     Each vim read sends at most 50 objects per call. A paged answer (a
-    ``token``) fails the audit instead of dropping objects.
+    ``token``) or a property vCenter could not read (a ``missingSet``
+    fault, e.g. no permission on a VM's ``name``) fails the audit instead
+    of dropping objects and reporting a wrong count. An unset property
+    (no switch, VLAN or VMs reported) is fine.
 
     #3802: the old per-portgroup ``GET:/vcenter/vm`` call, filtered by
     network, is gone. The VM list resource has no network filter, so

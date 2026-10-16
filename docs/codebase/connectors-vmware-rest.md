@@ -2742,7 +2742,13 @@ they never park.
   Each read sends at most 50 objects per call, so a normal inventory
   is not paged. If vCenter still pages an answer (returns a `token`),
   the audit fails with an error instead of returning rows with missing
-  VMs or portgroups.
+  VMs or portgroups. The same happens when a call succeeds but vCenter
+  could not read a property on one object (a `missingSet` entry with a
+  fault, for example no permission on a VM's `name`): the audit fails
+  with an error that names the property path and the fault type name,
+  instead of dropping that VM and reporting a wrong count. A property
+  that is simply unset (a portgroup with no switch, VLAN or VMs) has no
+  `missingSet` entry and gives a null or empty field.
   `vlan` is `{mode: "access", vlan_id}` or `{mode: "trunk", ranges}`
   (the same view `network.portgroup.vlan.set` returns), or `null` for a
   private VLAN. The port config is read whole, never as the deep

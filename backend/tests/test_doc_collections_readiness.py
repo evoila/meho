@@ -55,6 +55,7 @@ import respx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import meho_backplane.targets.ssrf_guard as guard_mod
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.corpus import CorpusStatusResponse, CorpusUnavailable
 from meho_backplane.auth.jwt import clear_jwks_cache
@@ -490,6 +491,21 @@ def test_ready_probe_notes_corpus_url_the_screen_rejects(
     assert result.detail is not None
     assert result.detail.startswith("1 backend(s) configured; CORPUS_URL is rejected")
     assert "MEHO_TARGET_SSRF_ALLOWLIST" in result.detail
+
+
+def test_ready_probe_never_resolves_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ``/ready`` note stays offline: it never resolves the corpus host (#3573)."""
+
+    def _no_dns(host: str) -> list[object]:
+        raise AssertionError(f"readiness probe must not resolve {host!r}")
+
+    monkeypatch.setattr(guard_mod, "_resolve_addrs", _no_dns)
+    monkeypatch.delenv("MEHO_TARGET_SSRF_ALLOWLIST", raising=False)
+    monkeypatch.setenv("CORPUS_URL", "https://docs.corpus-ns.svc.cluster.local/v1/search")
+    get_settings.cache_clear()
+    result = docs_backends_readiness_probe()
+    assert result.ok is True
+    assert result.detail == "1 backend(s) configured"
 
 
 def test_ready_probe_no_note_for_allowlisted_http_corpus(monkeypatch: pytest.MonkeyPatch) -> None:

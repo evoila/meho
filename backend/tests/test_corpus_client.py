@@ -253,15 +253,17 @@ async def test_search_screens_endpoint_and_fails_closed(
     [
         # The in-cluster shape: the service name itself is on the allowlist.
         ("docs.corpus-ns.svc.cluster.local", "http://docs.corpus-ns.svc.cluster.local:8080/search"),
-        # A private IP literal inside an allowlisted range.
-        ("10.0.0.0/8", "http://10.20.30.40:8080/search"),
+        # A private IP literal listed as a single address: bare, /32, or IPv6 /128.
+        ("10.20.30.40", "http://10.20.30.40:8080/search"),
+        ("10.20.30.40/32", "http://10.20.30.40:8080/search"),
+        ("fd00::10/128", "http://[fd00::10]:8080/search"),
     ],
 )
 @pytest.mark.asyncio
 async def test_search_admits_http_for_allowlisted_host(
     monkeypatch: pytest.MonkeyPatch, allowlist: str, url: str
 ) -> None:
-    """Plain http is allowed when the host is named on the allowlist (#3573)."""
+    """Plain http is allowed when the host is an exact allowlist entry (#3573)."""
     monkeypatch.setenv("MEHO_TARGET_SSRF_ALLOWLIST", allowlist)
     _pin_settings(monkeypatch, corpus_url=url)
     captured: list[httpx.Request] = []
@@ -284,13 +286,16 @@ async def test_search_admits_http_for_allowlisted_host(
         ("10.0.0.0/8", "https://192.168.1.5/search"),
         # Non-http schemes are never allowed, even for an allowlisted host.
         ("10.0.0.0/8", "ftp://10.20.30.40/search"),
+        # An IP that only falls inside a listed range needs https for the http opt-in.
+        ("10.0.0.0/8", "http://10.20.30.40:8080/search"),
+        ("10.20.30.0/24", "http://10.20.30.40/search"),
     ],
 )
 @pytest.mark.asyncio
 async def test_search_keeps_rejecting_non_allowlisted_endpoints(
     monkeypatch: pytest.MonkeyPatch, allowlist: str, url: str
 ) -> None:
-    """The http opt-in covers only allowlisted hosts; everything else still fails closed."""
+    """The http opt-in covers only exact allowlist entries; everything else fails closed."""
     monkeypatch.setenv("MEHO_TARGET_SSRF_ALLOWLIST", allowlist)
     _pin_settings(monkeypatch, corpus_url=url)
 

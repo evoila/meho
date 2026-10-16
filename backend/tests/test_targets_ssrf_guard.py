@@ -290,15 +290,24 @@ def test_allowlist_bare_ip_entry(_guard_live: pytest.MonkeyPatch) -> None:
         TargetCreate(**_create_kwargs(host="192.168.7.11"))
 
 
-def test_is_allowlisted_matches_only_named_hosts(_guard_live: pytest.MonkeyPatch) -> None:
-    """``is_allowlisted`` matches listed names and in-range IPs, with no DNS (#3573)."""
+def test_is_allowlisted_matches_only_exact_entries(_guard_live: pytest.MonkeyPatch) -> None:
+    """``is_allowlisted`` matches exact names and single-IP entries, with no DNS (#3573)."""
     _patch_resolver(_guard_live, "10.20.30.40")
-    _guard_live.setenv(TARGET_SSRF_ALLOWLIST_ENV, "10.0.0.0/8,Docs.Corpus.Internal.")
-    assert is_allowlisted("10.20.30.40")
+    _guard_live.setenv(
+        TARGET_SSRF_ALLOWLIST_ENV,
+        "10.0.0.0/8,192.168.7.10,192.168.7.20/32,fd00::10/128,Docs.Corpus.Internal.",
+    )
+    # Single-address entries: bare IP, /32, and IPv6 /128.
+    assert is_allowlisted("192.168.7.10")
+    assert is_allowlisted("192.168.7.20")
+    assert is_allowlisted("fd00::10")
     assert is_allowlisted("docs.corpus.internal")
     assert is_allowlisted("docs.corpus.internal.")
     # A name that only resolves into an allowlisted range is not named.
     assert not is_allowlisted("other.corpus.internal")
+    # An IP that only falls inside a wider listed range is not an exact entry.
+    assert not is_allowlisted("10.20.30.40")
+    assert not is_allowlisted("10.0.0.0")
     assert not is_allowlisted("192.168.1.1")
     assert not is_allowlisted(_PUBLIC_IP)
     assert not is_allowlisted("")

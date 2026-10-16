@@ -315,7 +315,7 @@ endpoint is refused with 422 when you create or update the collection.
 |---|---|---|
 | `https://` + a public host | Yes | Nothing. |
 | `https://` + a private host (RFC 1918, in-cluster service) | Only with the allowlist | Add the host, or its address range, to `MEHO_TARGET_SSRF_ALLOWLIST`. |
-| `http://` + a host **named** on `MEHO_TARGET_SSRF_ALLOWLIST` | Yes | Name the host itself: the service name (for example `docs.corpus-ns.svc.cluster.local`), or an IP inside a listed range. |
+| `http://` + a host listed as an **exact entry** on `MEHO_TARGET_SSRF_ALLOWLIST` | Yes | List the host itself: the service name (for example `docs.corpus-ns.svc.cluster.local`), or the single IP (bare, `/32`, or `/128`). An IP that only falls inside a listed range does not count. |
 | `http://` + any other host | No | Use `https`, or name the host on the allowlist. |
 | Any other scheme | No | Use `https` or `http` as above. |
 
@@ -324,7 +324,8 @@ Notes:
 - `MEHO_TARGET_SSRF_ALLOWLIST` is the same list the connector target
   guard reads (Helm value `config.targetSsrfAllowlist`). It takes
   address ranges, single IPs, and hostnames, separated by commas.
-- For plain `http`, the host in the URL must itself be on the list. A
+- For plain `http`, the host in the URL must itself be an exact entry
+  on the list. An IP inside a listed range does not count, and a
   hostname that only *resolves* into a listed range does not count.
   This keeps plain `http` limited to hosts you have named as trusted.
 - Plain `http` sends the corpus service token without TLS. Use it only

@@ -24,9 +24,10 @@ credential-capture + SSRF path). Two controls close it here:
   so a corpus URL cannot be pointed at ``http://``, loopback, RFC 1918
   space, or ``169.254.169.254``. On-prem corpora on private space are
   opted back in via ``MEHO_TARGET_SSRF_ALLOWLIST`` (the same allowlist
-  the connector target-dial guard reads). A host named on that
-  allowlist may also use plain ``http`` (#3573) — the in-cluster corpus
-  shape; every other host still needs ``https``.
+  the connector target-dial guard reads). A host listed as an exact
+  entry on that allowlist (a hostname, or a single IP) may also use
+  plain ``http`` (#3573) — the in-cluster corpus shape; every other host
+  still needs ``https``.
 * **Configured downstream credential.** The bearer presented to the
   corpus is ``settings.corpus_service_token`` — a dedicated, corpus-scoped
   service credential owned by the deployment, not the operator's inbound
@@ -210,8 +211,9 @@ def corpus_endpoint_host(url: str) -> str:
     Parses *url* and returns the host component the transport will dial.
     Rejects — with :class:`CorpusEndpointBlockedError` — any URL that names
     no host, or whose scheme is not ``https``. One exception (#3573): plain
-    ``http`` is allowed when the host itself is named on
-    ``MEHO_TARGET_SSRF_ALLOWLIST`` (see
+    ``http`` is allowed when the host is an exact entry on
+    ``MEHO_TARGET_SSRF_ALLOWLIST`` — a hostname listed verbatim, or a
+    single IP; an IP that only falls inside a listed range does not count (see
     :func:`~meho_backplane.targets.ssrf_guard.is_allowlisted`). That is the
     trusted in-cluster corpus an operator has already declared; any other
     host can never be a plaintext (`http://`) destination.
@@ -228,7 +230,7 @@ def corpus_endpoint_host(url: str) -> str:
         return host
     raise CorpusEndpointBlockedError(
         "corpus endpoint must be an https:// URL, or an http:// URL whose host "
-        f"is named on {TARGET_SSRF_ALLOWLIST_ENV}"
+        f"is listed as an exact entry on {TARGET_SSRF_ALLOWLIST_ENV}"
     )
 
 

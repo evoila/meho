@@ -44,9 +44,13 @@ A set ``CORPUS_URL`` that the corpus destination screen would reject
 (wrong scheme, or a private host not on ``MEHO_TARGET_SSRF_ALLOWLIST``)
 still leaves ``ok=True``, but ``detail`` says so. Without the note,
 ``/ready`` looks green while every ``search_docs`` call fails with 503.
-The check runs the same screen the dial runs — URL parse, allowlist,
-and a DNS lookup of the host — but never contacts the corpus and needs
-no credential.
+The check is offline: it parses the URL, checks the scheme against the
+allowlist, and screens the host only when it is an IP literal. It never
+does a DNS lookup, never contacts the corpus, and needs no credential,
+so a slow DNS server cannot slow down ``/ready``. A hostname under
+``https`` is not checked here; the dial and
+``meho docs collections probe`` still catch a name that resolves to a
+blocked address.
 
 Fail-closed is preserved where the backend actually dials: an
 unconfigured or unreachable corpus raises
@@ -56,6 +60,8 @@ route — readiness of the *collection*, not of the backplane.
 """
 
 from __future__ import annotations
+
+import ipaddress
 
 from meho_backplane.auth.corpus import corpus_endpoint_host
 from meho_backplane.docs_search.backends import all_backends
@@ -76,11 +82,11 @@ PROBE_NAME = "docs_backends"
 def docs_backends_readiness_probe() -> ProbeResult:
     """Report which search backends are configured — never failing readiness.
 
-    Synchronous. :meth:`is_configured` is a config read; the only I/O is
-    the DNS lookup of the ``CORPUS_URL`` host in the screen note (see the
-    module docstring). The async health sweep
+    Synchronous and free of I/O: :meth:`is_configured` is a config read,
+    and the ``CORPUS_URL`` screen note is an offline check (no DNS lookup,
+    see the module docstring). The async health sweep
     (:func:`~meho_backplane.health.run_probes_async`) runs sync probes on
-    a worker thread, so that lookup can't stall the event loop. Registered ≠
+    a worker thread; this one returns immediately either way. Registered ≠
     configured (#1606): the
     registry holds every backend that self-registered at import, while
     only the subset whose :meth:`is_configured` is true is actually wired
@@ -111,16 +117,23 @@ def docs_backends_readiness_probe() -> ProbeResult:
 def _corpus_url_passes_screen() -> bool:
     """Whether the set ``CORPUS_URL`` would pass the corpus destination screen.
 
-    Runs the same checks as the dial (scheme, host, allowlist, DNS) but
-    never contacts the corpus. An empty ``CORPUS_URL`` passes: there is
-    nothing to dial. A malformed allowlist (``ValueError``) counts as a
-    rejection, because the dial would fail on it too.
+    Offline only: checks the scheme and host against the allowlist, and
+    screens the host only when it is an IP literal (no DNS lookup for a
+    literal). A hostname is not resolved, so it passes here; the dial
+    still screens it. An empty ``CORPUS_URL`` passes: there is nothing to
+    dial. A malformed allowlist (``ValueError``) counts as a rejection,
+    because the dial would fail on it too.
     """
     url = get_settings().corpus_url
     if not url:
         return True
     try:
-        assert_public_destination(corpus_endpoint_host(url))
+        host = corpus_endpoint_host(url)
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            return True
+        assert_public_destination(host)
     except ValueError:
         return False
     return True

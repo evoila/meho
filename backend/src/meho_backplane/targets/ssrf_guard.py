@@ -159,16 +159,21 @@ def _parse_allowlist() -> tuple[
 
 
 def is_allowlisted(host: str) -> bool:
-    """True when *host* itself is named on :data:`TARGET_SSRF_ALLOWLIST_ENV`.
+    """True when *host* itself is an exact entry on :data:`TARGET_SSRF_ALLOWLIST_ENV`.
 
     *host* is a bare host as :func:`urllib.parse.urlsplit` returns it (no
-    port, no brackets). An IP literal matches when it falls inside an
-    allowlisted range or IP; a hostname matches only when it is listed
-    verbatim (case-insensitive, trailing dot ignored). No DNS lookup: a
-    hostname that merely resolves into an allowlisted range does not count.
-    Callers use this to grant an explicitly trusted host something more
-    than the public-destination screen allows (for example, a plain
-    ``http`` corpus endpoint).
+    port, no brackets). Only an exact entry counts:
+
+    * a hostname matches when it is listed verbatim (case-insensitive,
+      trailing dot ignored);
+    * an IP literal matches when it is listed as a single address: a bare
+      IP entry, or a ``/32`` (IPv4) or ``/128`` (IPv6) entry.
+
+    An IP that only falls inside a wider listed range does not count, and
+    there is no DNS lookup, so a hostname that merely resolves into a listed
+    range does not count either. Callers use this to grant an explicitly
+    named host something more than the public-destination screen allows
+    (for example, a plain ``http`` corpus endpoint).
     """
     networks, hostnames = _parse_allowlist()
     candidate = host.strip()
@@ -178,7 +183,10 @@ def is_allowlisted(host: str) -> bool:
         addr = ipaddress.ip_address(candidate)
     except ValueError:
         return candidate.rstrip(".").lower() in hostnames
-    return any(addr in network for network in networks)
+    return any(
+        network.prefixlen == network.max_prefixlen and network.network_address == addr
+        for network in networks
+    )
 
 
 def _is_blocked(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:

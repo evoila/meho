@@ -143,7 +143,7 @@ Each pass uses its own static system-prompt template so the Anthropic Messages A
 ### Idempotency
 
 - **No unassigned ops** → true no-op, zero LLM calls, no audit row.
-- **Existing groups present but some ops still unassigned** → Pass 1 skipped, Pass 2 only runs against the unassigned-op subset using the existing groups verbatim. The "partial-regrouping" branch.
+- **Existing groups present but some ops still unassigned** → the "partial-regrouping" branch. Groups that hold typed ops are never targets. Composite ops do not make a group typed. If only typed groups exist, both passes run. Otherwise Pass 2 files the unassigned ops into the other existing groups, and an "extend" Pass 1 may propose new groups for the ops that are left over (#3713). See `docs/codebase/spec-ingestion.md`.
 - **Fully fresh connector** → both passes run, all groups + assignments persist in one transaction.
 
 ### The `LlmClient` Protocol seam

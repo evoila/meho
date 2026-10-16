@@ -5285,18 +5285,36 @@ type GovernedSubopsResponse struct {
 // :attr:`AGENT`, so every existing caller is unaffected.
 type GrantPrincipalKind string
 
+// GroupSummaryModel Pydantic projection of
+// :class:`~meho_backplane.operations.ingest.llm_groups.GroupSummary`.
+//
+// One row per group: how many ops this run added to it, and how many
+// typed, composite, and ingested ops it holds now.
+// “typed_operation_count > 0“ means a typed registrar owns the
+// group; grouping never files ingested ops into such a group.
+// Composite ops do not make a group typed.
+type GroupSummaryModel struct {
+	CompositeOperationCount int    `json:"composite_operation_count"`
+	Created                 bool   `json:"created"`
+	GroupKey                string `json:"group_key"`
+	IngestedOperationCount  int    `json:"ingested_operation_count"`
+	OperationsAdded         int    `json:"operations_added"`
+	TypedOperationCount     int    `json:"typed_operation_count"`
+}
+
 // GroupingResultModel Pydantic projection of
 // :class:`~meho_backplane.operations.ingest.llm_groups.GroupingResult`.
 //
 // Mirrors the dataclass; rendered alongside :class:`IngestionResultModel`
 // in the ingest response so the operator sees both counts.
 type GroupingResultModel struct {
-	ConnectorId          string  `json:"connector_id"`
-	GroupsCreated        int     `json:"groups_created"`
-	LlmCallCount         int     `json:"llm_call_count"`
-	LlmDurationMs        float32 `json:"llm_duration_ms"`
-	OperationsAssigned   int     `json:"operations_assigned"`
-	OperationsUnassigned int     `json:"operations_unassigned"`
+	ConnectorId          string               `json:"connector_id"`
+	Groups               *[]GroupSummaryModel `json:"groups,omitempty"`
+	GroupsCreated        int                  `json:"groups_created"`
+	LlmCallCount         int                  `json:"llm_call_count"`
+	LlmDurationMs        float32              `json:"llm_duration_ms"`
+	OperationsAssigned   int                  `json:"operations_assigned"`
+	OperationsUnassigned int                  `json:"operations_unassigned"`
 }
 
 // HTTPValidationError defines model for HTTPValidationError.

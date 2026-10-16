@@ -8,8 +8,21 @@ You will see {{ op_count }} operations below. Each has:
   - summary (one-line from the vendor's OpenAPI spec)
   - tags (raw OpenAPI tags from the spec)
 
+{% if existing_groups %}
+This connector already has these operation groups:
+{% for group in existing_groups -%}
+- {{ group.group_key }} ({{ group.name }}): {{ group.when_to_use }}
+{% endfor %}
+
+The operations below did NOT fit any of those groups. Your task: propose at
+most {{ max_groups }} NEW operation GROUPS for them. Do not repeat or rename an
+existing group, and do not reuse an existing group_key. Only propose a group
+when several of the operations below share it. If none of them need a new
+group, return an empty array: []. Anchor your
+{% else %}
 Your task: propose between {{ min_groups }} and {{ max_groups }} operation GROUPS
 that organize these operations into agent-actionable categories. Anchor your
+{% endif %}
 groupings on the existing OpenAPI tags and top-level path families where
 sensible, but you are free to override the spec's tags when a more
 agent-actionable taxonomy is apparent. For each group, produce:

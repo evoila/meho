@@ -161,8 +161,8 @@ shipped the schema; T3-T5 layer CLI / preamble / seed on top.
    operator's tenant. Filters by `tenant_id` (resolved from the JWT
    claim by G0.1's contextvar binding). Optional `?kind=operational`
    query param mirrors the CLI's `meho conventions list --kind`
-   verb. Ordering is `priority DESC, created_at ASC` -- the same
-   key T4's preamble assembler will use, so the list view surfaces
+   verb. Ordering is `priority DESC, created_at ASC, id ASC` -- the
+   same key T4's preamble assembler uses, so the list view surfaces
    conventions in the order T4 considers them.
 
 5. **GET /api/v1/conventions/{slug}** (T2) -- single-row lookup by
@@ -208,6 +208,64 @@ shipped the schema; T3-T5 layer CLI / preamble / seed on top.
    joins the eager-import + autouse-fixture reload shape every
    other resource follows.
 
+9. **MCP resource** `meho://tenant-conventions/index` (#3755) -- a
+   bounded list of the caller's own conventions, without bodies. The
+   URI names no tenant: the tenant comes from the caller's token. It is
+   the one convention URI that shows up in `resources/list`, so a
+   client can find conventions without knowing a slug. Minimum role is
+   `read_only`. Each page has at most `INDEX_PAGE_SIZE` (25) entries.
+   An entry carries `slug`, `title`, `kind`, `priority`, `updated_at`,
+   `availability`, and `uri` (the per-slug resource above, which is
+   where the body lives). The page also carries `revision`, `total`,
+   `next_uri`, `preamble_budget` (`max_tokens`, `estimated_tokens`,
+   `over_budget`), and a fixed `note`.
+
+   `availability` says what MEHO sends in the MCP `initialize`
+   instructions, using the same packer as `budget_status`:
+
+   | Value | Meaning |
+   |---|---|
+   | `included` | operational, in the conventions band |
+   | `dropped` | operational, fits alone but lost the room to higher-priority entries |
+   | `dropped_oversize` | operational, too large even as the only entry |
+   | `not_in_preamble` | `workflow` or `reference`; never sent in `initialize` |
+
+   `included` describes what MEHO sends, not what a client did. The
+   `note` says so, and the page has no field that claims a client read,
+   subscribed to, or applied anything. The server advertises the
+   `resources` capability with `subscribe: false`; listing the index
+   loads nothing into a prompt.
+
+   **Paging.** `next_uri` is `meho://tenant-conventions/index/{cursor}`.
+   The cursor is base64url JSON with the tenant id, the `revision`, and
+   the next offset. `revision` is a short SHA-256 digest over every
+   row's `(id, updated_at)` in index order (`priority DESC, created_at
+   ASC, id ASC`), so a walk across pages reads one snapshot:
+
+   - If any convention changed since page one, the next page is refused
+     ("the convention index changed") and the client reads the first
+     page again. Rows are never skipped or repeated silently.
+   - A broken cursor, a cursor for another tenant, and an offset past
+     the end all get one and the same "invalid cursor" message, so the
+     answer tells the caller nothing about other tenants. The tenant
+     check runs before the revision check.
+   - The cursor is not signed. It carries no secret, and every read
+     still filters on the token's tenant, so a hand-made cursor can only
+     reach the caller's own conventions.
+
+   One page comes from one query. `index_page` reads the tenant's rows
+   once and computes the revision, the page, and each entry's
+   availability from that one result, running the same in-memory packer
+   (`render_conventions`) that `initialize` and `budget_status` use. So
+   a page never mixes two states of the table: a convention deleted
+   while the page is built is either listed with its real availability
+   or not listed at all, never listed as `dropped`. The page shape and
+   cursor live in
+   [`conventions/index.py`](../../backend/src/meho_backplane/conventions/index.py);
+   the query and availability in `ConventionsService.index_page`; the
+   resource adapter (error mapping and URIs) in
+   [`mcp/resources/tenant_conventions.py`](../../backend/src/meho_backplane/mcp/resources/tenant_conventions.py).
+
 ## Session-preamble assembler (T4)
 
 [`backend/src/meho_backplane/conventions/preamble.py`](../../backend/src/meho_backplane/conventions/preamble.py)
@@ -228,10 +286,12 @@ the conventions budget. Behaviour for the conventions band:
   [locked-decisions.md](../decisions/locked-decisions.md) -- workflow
   and reference rules are reference material the operator surfaces
   on demand and never enter the session preamble.
-- **Orders deterministically: `priority DESC, created_at ASC`.**
-  Highest priority wins; ties broken by oldest-first. Same key the
-  list API + `meho conventions list` CLI use, so all three surfaces
-  display rules in the same order.
+- **Orders deterministically: `priority DESC, created_at ASC, id ASC`.**
+  Highest priority wins; ties broken by oldest-first, then by `id`
+  so the order is total even when two rows share a creation time.
+  Same key the list API, `meho conventions list` CLI, and the
+  convention index resource use, so every surface displays rules in
+  the same order and reports the same inclusion.
 - **Packs greedily; drops entries WHOLE on overflow
   (skip-and-fill).** For each entry in order, the band is rendered
   with that entry added and the whole text is estimated. If it is
@@ -573,7 +633,7 @@ sub-document to the response when the convention is
   preamble after the priority-ranked pack against
   `DEFAULT_MAX_PREAMBLE_TOKENS`; `False` when it was dropped.
 * `position` — 1-based index of the slug in the assembled
-  preamble's packed order (`priority DESC, created_at ASC`).
+  preamble's packed order (`priority DESC, created_at ASC, id ASC`).
   `None` when `included=False`.
 * `token_count` — the convention's own rendered block cost
   (heading + body).

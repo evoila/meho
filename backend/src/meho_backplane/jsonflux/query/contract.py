@@ -21,13 +21,25 @@ raw-SQL contract would therefore force MEHO to build and maintain a SQL
 parser to close holes that compiling from a fixed template avoids by
 construction. Here the unsafe forms are simply **not expressible**: there
 is no ``sql=`` field, every referenced field is checked against the
-handle's known column set (unknown field → rejected, Kubernetes
+handle's result field catalog (unknown field → rejected, Kubernetes
 field-selector style), operators and aggregate functions are fixed
 allow-lists, and every caller value is bound as a DuckDB prepared-statement
 parameter — never string-interpolated. The only value ever interpolated
 into the SQL text is the ``LIMIT`` (a validated, bounded integer) and the
-column identifiers (each an exact match of a real column, double-quoted
-with embedded quotes escaped).
+column identifiers (each a catalog-generated internal name or a
+compiler-generated alias, double-quoted with embedded quotes escaped).
+
+Output plan (#3635)
+===================
+
+Caller field names never reach the SQL text. Each exact, case-sensitive
+field name resolves through the :class:`ResultFieldCatalog` to its
+generated internal column, so ``Foo`` and ``foo`` stay distinct. Every
+output column gets a generated alias, and :class:`OutputPlan` maps cursor
+rows to public names by position. A flat (non-aggregate, non-grouped)
+query selects only the hidden row ordinal (:data:`ROW_ORDINAL`); the
+output is then rebuilt from the raw stored rows, so values come back
+exactly as captured, not as the relational projection typed them.
 
 Bounds
 ======
@@ -56,13 +68,16 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from meho_backplane.jsonflux.query.json_pointer import MAX_POINTER_LENGTH, parse_json_pointer
+from meho_backplane.jsonflux.query.result_catalog import ResultField, ResultFieldCatalog
 
 __all__ = [
     "RESULT_TABLE",
+    "ROW_ORDINAL",
     "Aggregate",
     "CompiledQuery",
     "FilterPredicate",
     "OrderBy",
+    "OutputPlan",
     "QueryContractError",
     "ResultQuerySpec",
     "compile_query",
@@ -73,6 +88,31 @@ __all__ = [
 #: — a fixed wire constant, kept as a literal here so the vendored
 #: ``jsonflux`` package needs no ``operations`` import.
 RESULT_TABLE = "result"
+
+#: Hidden column holding each row's position in the stored row list. A flat
+#: query selects only this column and the output is rebuilt from raw rows.
+ROW_ORDINAL = "_rr_ord"
+
+#: Prefix for generated output aliases (``_rr_o_0``, ``_rr_o_1``, ...).
+_OUTPUT_ALIAS_PREFIX = "_rr_o_"
+
+#: The DuckDB type the explicit projection uses for each catalog scalar
+#: family. Filter literals are checked against it before binding.
+_FAMILY_COLUMN_TYPES: dict[str, str] = {
+    "boolean": "BOOLEAN",
+    "integer": "BIGINT",
+    "number": "DOUBLE",
+    "string": "VARCHAR",
+}
+
+#: Plain-language text for each catalog reason a field cannot be queried.
+_NOT_QUERYABLE_REASONS: dict[str, str] = {
+    "null_only": "it holds only null values",
+    "mixed_non_null_kinds": "its values have more than one JSON kind",
+    "container_value": "its values are objects or lists",
+    "integer_out_of_int64_range": "it has integers outside the 64-bit range",
+    "non_finite_number": "it has non-finite numbers",
+}
 
 #: Filter operators the compiler will emit. A fixed allow-list: a value
 #: outside it is rejected at model construction (``Literal``), so an
@@ -292,12 +332,47 @@ class ResultQuerySpec(BaseModel):
         return not (self.filter or self.select or self.group_by or self.aggregate or self.order_by)
 
 
+class OutputPlan(BaseModel):
+    """How to turn fetched cursor rows into the public output rows.
+
+    Grouped and aggregate queries map each cursor position to its public
+    name in ``columns`` (names are unique; the compiler rejects duplicates).
+    Flat queries (``ordinal=True``) fetch only :data:`ROW_ORDINAL` and copy
+    the raw stored row: the whole row when ``select`` is ``None``, else the
+    requested keys that the row actually has (absent stays absent).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    columns: tuple[str, ...] = ()
+    ordinal: bool = False
+    select: tuple[str, ...] | None = None
+
+    def rehydrate(
+        self,
+        fetched: Sequence[Sequence[Any]],
+        raw_rows: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Build the public output rows from *fetched* cursor rows."""
+        if not self.ordinal:
+            return [{name: record[i] for i, name in enumerate(self.columns)} for record in fetched]
+        output: list[dict[str, Any]] = []
+        for record in fetched:
+            raw = raw_rows[record[0]]
+            if self.select is None:
+                output.append(dict(raw))
+            else:
+                output.append({key: raw[key] for key in self.select if key in raw})
+        return output
+
+
 class CompiledQuery(BaseModel):
     """The output of :func:`compile_query`: one SELECT + its bound params.
 
     ``effective_limit`` is the output-row ceiling actually applied (after
     clamping ``spec.limit`` to ``max_limit``); the core caps the returned
     rows to it and reports ``truncated`` when the underlying result had more.
+    ``output_plan`` maps the fetched rows to public output rows.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -305,6 +380,7 @@ class CompiledQuery(BaseModel):
     sql: str
     params: list[Any]
     effective_limit: int
+    output_plan: OutputPlan
 
 
 def _quote_ident(name: str) -> str:
@@ -319,7 +395,7 @@ def _quote_ident(name: str) -> str:
     return f'"{escaped}"'
 
 
-def _require_known(field: str, known: set[str]) -> None:
+def _require_known(field: str, known: Mapping[str, ResultField]) -> None:
     """Reject a field that is not a column on the handle's schema."""
     if field not in known:
         suggestions = sorted(known)[:_MAX_KNOWN_SUGGESTIONS]
@@ -331,12 +407,29 @@ def _require_known(field: str, known: set[str]) -> None:
         )
 
 
+def _require_queryable(field: str, known: Mapping[str, ResultField], role: str) -> str:
+    """Return the quoted internal column for a field used in SQL.
+
+    A field the catalog marks non-queryable is rejected before any SQL runs.
+    It can still be returned with ``select``, which reads the raw rows.
+    """
+    _require_known(field, known)
+    entry = known[field]
+    if not entry.queryable:
+        reason = entry.reason or "unknown"
+        text = _NOT_QUERYABLE_REASONS.get(reason, reason)
+        raise QueryContractError(
+            f"field {field!r} cannot be used in {role}: {text} (reason: {reason}). "
+            "Return it with `select`, or read the raw rows by paging (`offset` / `limit`)."
+        )
+    return _quote_ident(entry.column)
+
+
 def _validate_filter_literal(field: str, column_type: str, value: Any) -> None:
     """Reject a value whose Python kind cannot represent a scalar column type.
 
-    This guard intentionally recognizes only canonical scalar types reported
-    by DuckDB ``DESCRIBE``. Other types retain the existing parameter-binding
-    behavior until catalog-aware field admission can make a fuller decision.
+    *column_type* is the DuckDB type the projection uses for the field's
+    catalog scalar family; only those canonical scalar types are recognized.
     """
     normalized = column_type.upper()
     if normalized == "BOOLEAN":
@@ -370,15 +463,15 @@ def _validate_filter_literal(field: str, column_type: str, value: Any) -> None:
 
 def _build_where(
     predicates: Sequence[FilterPredicate],
-    known: set[str],
+    known: Mapping[str, ResultField],
     params: list[Any],
-    column_types: Mapping[str, str] | None,
 ) -> str:
     """Compile the predicate list into a parameterized ``WHERE`` body."""
     terms: list[str] = []
     for pred in predicates:
-        _require_known(pred.field, known)
-        ident = _quote_ident(pred.field)
+        ident = _require_queryable(pred.field, known, "`filter`")
+        family = known[pred.field].scalar_family
+        column_type = _FAMILY_COLUMN_TYPES.get(family) if family is not None else None
         if pred.op in _VALUELESS_OPERATORS:
             if pred.value is not None:
                 raise QueryContractError(
@@ -390,7 +483,6 @@ def _build_where(
                 raise QueryContractError(
                     f"operator 'IN' on field {pred.field!r} needs a non-empty list value."
                 )
-            column_type = column_types.get(pred.field) if column_types is not None else None
             if column_type is not None:
                 for value in pred.value:
                     _validate_filter_literal(pred.field, column_type, value)
@@ -402,7 +494,6 @@ def _build_where(
                 raise QueryContractError(
                     f"operator {pred.op!r} on field {pred.field!r} needs a scalar value."
                 )
-            column_type = column_types.get(pred.field) if column_types is not None else None
             if column_type is not None:
                 _validate_filter_literal(pred.field, column_type, pred.value)
             terms.append(f"{ident} {pred.op} ?")
@@ -417,28 +508,39 @@ def _aggregate_alias(agg: Aggregate) -> str:
     return f"{agg.func.lower()}_{agg.field}"
 
 
-def _build_aggregate_projection(spec: ResultQuerySpec, known: set[str]) -> tuple[str, str]:
-    """Compile the SELECT list + GROUP BY body for an aggregate query.
+def _output_alias(position: int) -> str:
+    """Generated SQL alias for the output column at *position*."""
+    return _quote_ident(f"{_OUTPUT_ALIAS_PREFIX}{position}")
+
+
+def _build_grouped_projection(
+    spec: ResultQuerySpec, known: Mapping[str, ResultField]
+) -> tuple[str, str, OutputPlan]:
+    """Compile the SELECT list + GROUP BY body for a grouped/aggregate query.
 
     Output columns are the ``group_by`` keys followed by the aggregate
     expressions; ``select`` is not allowed alongside ``aggregate`` (the
-    output shape is fully determined by the keys + aggregates).
+    output shape is fully determined by the keys + aggregates). Each output
+    column gets a generated alias; the public names go into the output plan
+    in the same order, and two equal public names are rejected.
     """
-    if spec.select:
+    if spec.aggregate and spec.select:
         raise QueryContractError(
             "`select` is not allowed with `aggregate`: the output columns are the "
             "`group_by` keys plus the aggregates."
         )
     select_parts: list[str] = []
-    seen_aliases: set[str] = set()
+    group_parts: list[str] = []
+    public_names: list[str] = []
     for col in spec.group_by:
-        _require_known(col, known)
-        if col in seen_aliases:
+        ident = _require_queryable(col, known, "`group_by`")
+        if col in public_names:
             raise QueryContractError(
                 f"duplicate output column {col!r}; each output column must be distinct."
             )
-        seen_aliases.add(col)
-        select_parts.append(_quote_ident(col))
+        group_parts.append(ident)
+        select_parts.append(f"{ident} AS {_output_alias(len(public_names))}")
+        public_names.append(col)
     for agg in spec.aggregate:
         if agg.func == "COUNT" and agg.field is None:
             expr = "COUNT(*)"
@@ -447,56 +549,45 @@ def _build_aggregate_projection(spec: ResultQuerySpec, known: set[str]) -> tuple
                 raise QueryContractError(
                     f"aggregate {agg.func} requires a `field` (only COUNT may omit it)."
                 )
-            _require_known(agg.field, known)
-            expr = f"{agg.func}({_quote_ident(agg.field)})"
+            expr = f"{agg.func}({_require_queryable(agg.field, known, '`aggregate`')})"
         alias = _aggregate_alias(agg)
-        if alias in seen_aliases:
+        if alias in public_names:
             raise QueryContractError(
                 f"duplicate aggregate output {alias!r}; each aggregate must be distinct."
             )
-        seen_aliases.add(alias)
-        select_parts.append(f"{expr} AS {_quote_ident(alias)}")
-    group_sql = ", ".join(_quote_ident(col) for col in spec.group_by)
-    return ", ".join(select_parts), group_sql
+        select_parts.append(f"{expr} AS {_output_alias(len(public_names))}")
+        public_names.append(alias)
+    plan = OutputPlan(columns=tuple(public_names))
+    return ", ".join(select_parts), ", ".join(group_parts), plan
 
 
-def _build_projection(spec: ResultQuerySpec, known: set[str]) -> tuple[str, str]:
-    """Compile the SELECT list and GROUP BY body for any spec.
+def _build_projection(
+    spec: ResultQuerySpec, known: Mapping[str, ResultField]
+) -> tuple[str, str, OutputPlan]:
+    """Compile the SELECT list, GROUP BY body, and output plan for any spec.
 
-    Three shapes: aggregate (keys + aggregates), plain ``group_by`` (the
-    distinct key combinations), or a flat projection (``select`` columns, or
-    ``*`` when omitted).
+    Grouped and aggregate queries project the keys and aggregates. A flat
+    query projects only the hidden row ordinal; the output plan rebuilds
+    each row from the raw stored rows (``select`` keys, or the whole row).
+    A ``select`` field only needs to exist: it is read raw, so a field that
+    cannot be queried can still be returned.
     """
-    if spec.aggregate:
-        return _build_aggregate_projection(spec, known)
-    if spec.group_by:
-        seen_group_keys: set[str] = set()
-        for col in spec.group_by:
-            _require_known(col, known)
-            if col in seen_group_keys:
-                raise QueryContractError(
-                    f"duplicate output column {col!r}; each output column must be distinct."
-                )
-            seen_group_keys.add(col)
-        cols = ", ".join(_quote_ident(col) for col in spec.group_by)
-        return cols, cols
-    if spec.select:
-        for col in spec.select:
-            _require_known(col, known)
-        return ", ".join(_quote_ident(col) for col in spec.select), ""
-    return "*", ""
+    if spec.aggregate or spec.group_by:
+        return _build_grouped_projection(spec, known)
+    for col in spec.select:
+        _require_known(col, known)
+    plan = OutputPlan(ordinal=True, select=tuple(spec.select) if spec.select else None)
+    return _quote_ident(ROW_ORDINAL), "", plan
 
 
-def _build_order(spec: ResultQuerySpec, known: set[str]) -> str:
-    """Compile the ``ORDER BY`` body, validating each term against the schema.
+def _build_order(spec: ResultQuerySpec, known: Mapping[str, ResultField]) -> list[str]:
+    """Compile the ``ORDER BY`` terms, validating each against the schema.
 
     In a grouped/aggregated query, an order-by column must be one of the
     ``group_by`` keys (ordering by a non-grouped raw column is not valid
     SQL); the check is done here so the caller gets a clear contract error
     rather than an opaque DuckDB binder error.
     """
-    if not spec.order_by:
-        return ""
     grouped = bool(spec.group_by or spec.aggregate)
     group_cols = set(spec.group_by)
     parts: list[str] = []
@@ -507,43 +598,46 @@ def _build_order(spec: ResultQuerySpec, known: set[str]) -> str:
                 f"cannot order by {term.field!r} in a grouped query: order only by a "
                 "`group_by` key."
             )
-        parts.append(f"{_quote_ident(term.field)} {'DESC' if term.direction == 'desc' else 'ASC'}")
-    return ", ".join(parts)
+        ident = _require_queryable(term.field, known, "`order_by`")
+        parts.append(f"{ident} {'DESC' if term.direction == 'desc' else 'ASC'}")
+    return parts
 
 
 def compile_query(
     spec: ResultQuerySpec,
-    columns: Sequence[str],
+    catalog: ResultFieldCatalog,
     *,
     max_limit: int,
-    column_types: Mapping[str, str] | None = None,
 ) -> CompiledQuery:
     """Compile *spec* into one parameterized, read-only ``SELECT``.
 
-    *columns* is the handle's known column set (from the registered table's
-    ``DESCRIBE``); every referenced field is checked against it. *max_limit*
-    is the output-row ceiling (single-sourced in
+    *catalog* is the handle's result field catalog, built from every stored
+    row. Every referenced field must be an exact, case-sensitive catalog
+    name; a field used in ``filter`` / ``order_by`` / ``group_by`` /
+    ``aggregate`` must also be queryable, and resolves to its generated
+    internal column. *max_limit* is the output-row ceiling (single-sourced in
     :mod:`meho_backplane.operations.result_query`); ``spec.limit`` is clamped
     to it. The statement selects one extra row over the ceiling so the core
     can set ``truncated`` when the underlying result had more rows than fit.
 
-    Raises :class:`QueryContractError` on any field-vs-schema or
-    value-shape violation. When present, *column_types* contains exact
-    ``DESCRIBE`` types for a subset of *columns* and validates recognized
-    scalar filter literals without coercion. The returned SQL is always a
-    single ``SELECT`` over :data:`RESULT_TABLE` with no trailing statement
-    separator.
+    Raises :class:`QueryContractError` on any field-vs-catalog or
+    value-shape violation. Filter literals are checked against the field's
+    scalar family without coercion. The returned SQL is always a single
+    ``SELECT`` over :data:`RESULT_TABLE` with no trailing statement separator.
     """
     if spec.path is not None:
         raise QueryContractError(
             "a `path` read is not a relational query and cannot be compiled to SQL."
         )
-    known = set(columns)
+    known = {entry.name: entry for entry in catalog.fields}
     params: list[Any] = []
 
-    where_sql = _build_where(spec.filter, known, params, column_types)
-    select_sql, group_sql = _build_projection(spec, known)
-    order_sql = _build_order(spec, known)
+    where_sql = _build_where(spec.filter, known, params)
+    select_sql, group_sql, output_plan = _build_projection(spec, known)
+    order_parts = _build_order(spec, known)
+    if output_plan.ordinal:
+        # Stored order breaks ties, so a flat result is deterministic.
+        order_parts.append(_quote_ident(ROW_ORDINAL))
 
     effective_limit = max_limit if spec.limit is None else min(spec.limit, max_limit)
     # +1 so the core can detect "more rows existed than the ceiling admits"
@@ -556,8 +650,13 @@ def compile_query(
         sql += f" WHERE {where_sql}"
     if group_sql:
         sql += f" GROUP BY {group_sql}"
-    if order_sql:
-        sql += f" ORDER BY {order_sql}"
+    if order_parts:
+        sql += f" ORDER BY {', '.join(order_parts)}"
     sql += f" LIMIT {fetch_limit}"
 
-    return CompiledQuery(sql=sql, params=params, effective_limit=effective_limit)
+    return CompiledQuery(
+        sql=sql,
+        params=params,
+        effective_limit=effective_limit,
+        output_plan=output_plan,
+    )

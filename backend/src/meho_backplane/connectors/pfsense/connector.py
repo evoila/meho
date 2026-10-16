@@ -239,7 +239,8 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "either for a governed teardown -- ``pfsense.route.static.delete`` "
         "(delete one route by canonical network) and ``pfsense.gateway.delete`` "
         "(delete one gateway by name, refused fail-closed while any static "
-        "route / gateway group / default-gateway setting still uses it). The "
+        "route / gateway group / default-gateway setting / filter rule / "
+        "interface binding still uses it). The "
         "two ``add`` ops are ``caution`` / no-approval and idempotent (re-adding "
         "an existing gateway name or route network is a reported no-op); the "
         "two teardown ops are GOVERNED DESTRUCTIVE deletes (``destructive``, "
@@ -848,7 +849,8 @@ class PfSenseConnector(SshConnector):
         :func:`~meho_backplane.connectors.pfsense.ops_delete.pfsense_gateway_delete`.
         Governed destructive delete of one gateway by exact name, fail-closed on
         any live reference (static route / gateway group / default-gateway
-        setting) -- the inverse of ``pfsense.gateway.add``
+        setting / filter rule / interface binding) -- the inverse of
+        ``pfsense.gateway.add``
         (``safety_level=destructive`` / ``requires_approval=True``).
         """
         from meho_backplane.connectors.pfsense.ops_delete import (

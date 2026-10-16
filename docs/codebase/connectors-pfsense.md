@@ -78,7 +78,9 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
   (`parse_nat_port_forwards_xml` / `parse_aliases_xml`), the fail-closed
   reference scans (`find_alias_references` — nested aliases + filter / NAT
   port-forward / outbound / 1:1 rules; `find_gateway_references` — static
-  routes + gateway groups + default-gateway setting), the canonical route
+  routes + gateway groups + default-gateway setting + filter rules that
+  policy-route out the gateway + interface `<gateway>` / `<gatewayv6>`
+  bindings), the canonical route
   matcher (`_match_static_routes_canonical`) and member-token split
   (`_alias_members`), the delete/remove-by-identity `pfSsh.php playback`
   fragment builders (`_build_nat_delete_playback` / `_build_alias_delete_playback`

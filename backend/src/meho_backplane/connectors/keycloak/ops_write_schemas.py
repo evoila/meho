@@ -76,7 +76,19 @@ _WHEN_TO_USE_USER_WRITE = (
     "your identity. Create keys on ``username`` (idempotent on a 409); "
     "reset keys on the user UUID (``id``) or ``username`` for resolution. "
     "``keycloak.user.delete`` removes a user for good (destructive: a second "
-    "person must approve, preview first)."
+    "person must approve, preview first). ``keycloak.user.logout`` ends all "
+    "live sessions of one user now (requires approval)."
+)
+
+_WHEN_TO_USE_USER_LOGOUT = (
+    "Use to end all live sessions of one user right now "
+    "(``keycloak.user.logout``), so their refresh tokens stop working at "
+    "once — for example when a seat must be cut at the end of an event or "
+    "when someone leaves. Requires approval. Key on the user UUID (``id``) "
+    "or ``username``. This does not change the password: use "
+    "``keycloak.user.reset_password`` to rotate the credential. It signs out "
+    "one user only, never the whole realm. Safe to run twice: a user with "
+    "no sessions is still a success."
 )
 
 _WHEN_TO_USE_ROLE_MAPPING_WRITE = (
@@ -525,4 +537,46 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
     # Governed user / group / client deletes (#3944) — rows in
     # ``ops_write_delete_schemas``, handlers in ``ops_write_delete``.
     *DELETE_WRITE_OPS,
+    # Per-user session logout (#3851).
+    KeycloakOp(
+        op_id="keycloak.user.logout",
+        handler_attr="user_logout",
+        summary="End all live sessions of one Keycloak user (approval-gated).",
+        description=(
+            "POSTs ``.../users/{id}/logout``. Keycloak removes every session "
+            "of the user, so their refresh tokens stop working at once. Keys "
+            "on the user UUID (``id``) or ``username`` for resolution. Safe "
+            "to run twice (204 either way). Does not touch the password and "
+            "never signs out other users. requires_approval=True."
+        ),
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "pattern": _UUID_PATTERN,
+                    "description": "User internal UUID.",
+                },
+                "username": {
+                    "type": "string",
+                    "description": "Username (resolved to UUID if id absent).",
+                },
+            },
+            "anyOf": [{"required": ["id"]}, {"required": ["username"]}],
+            "additionalProperties": False,
+        },
+        response_schema=_WRITE_CONFIRM_SCHEMA,
+        group_key="user_write",
+        tags=("write", "user", "session", "keycloak"),
+        safety_level="caution",
+        requires_approval=True,
+        llm_instructions={
+            "when_to_use": _WHEN_TO_USE_USER_LOGOUT,
+            "parameter_hints": {
+                "id": "User internal UUID (from keycloak.user.list).",
+                "username": "Username; resolved to UUID when id is absent.",
+            },
+            "output_shape": "``{id, username, logged_out}`` — no credential material.",
+        },
+    ),
 )

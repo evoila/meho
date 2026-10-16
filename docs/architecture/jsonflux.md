@@ -499,8 +499,13 @@ paging (`handle_id`/`offset`/`limit`) is unchanged and backward-compatible.
 ([`jsonflux/query/contract.py`](../../backend/src/meho_backplane/jsonflux/query/contract.py))
 turns the typed grammar into exactly one parameterized read-only `SELECT`
 over the single registered table. Every referenced field is checked
-against the handle's known columns (unknown field → rejected, Kubernetes
-field-selector style); operators and aggregate functions are fixed
+against the handle's result field catalog, built from every stored row
+(unknown field → rejected, Kubernetes field-selector style; a field the
+catalog cannot query is rejected in predicates but can still be returned
+with `select`). Caller field names never reach the SQL: each resolves to
+a generated column name, and flat results are copied from the raw stored
+rows (see [`docs/codebase/result-spill.md`](../codebase/result-spill.md));
+operators and aggregate functions are fixed
 allow-lists; caller values bind as DuckDB prepared-statement parameters,
 never string-interpolated. The unsafe forms are simply **not
 expressible** — there is no `sql=` argument on any transport. This is a

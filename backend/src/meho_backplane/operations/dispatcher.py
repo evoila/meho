@@ -2442,6 +2442,44 @@ def _preflight_denied_refusal(
     return result_write_capability_denied(op_id, preflight, duration_ms)
 
 
+async def _audit_denied_and_return(
+    result: OperationResult,
+    *,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    params: dict[str, Any],
+    params_hash: str,
+    duration_ms: float,
+) -> OperationResult:
+    """Write the ``denied`` audit row for a refused park, then return the result.
+
+    The one audit path for a ``write_capability_denied`` refusal (#3542),
+    shared by the dispatcher park (:func:`_handle_needs_approval`) and the
+    composite sub-op gate (``composite.enforce_subop_policy``). The row lands
+    on the refused op's own path with the refusal details under
+    ``payload["error"]``, like an ordinary policy denial. For a sub-op the
+    row carries the parent operation's audit id through
+    :data:`~meho_backplane.operations._audit.parent_audit_id_var`, which the
+    composite branch binds for the whole handler body. Needed because the
+    dispatcher passes a handler-returned :class:`OperationResult` straight
+    through without an audit write, so without this row a refused step would
+    leave no record at all.
+    """
+    await audit_and_broadcast_safe(
+        audit_id=uuid.uuid4(),
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        params=params,
+        params_hash=params_hash,
+        result_status="denied",
+        duration_ms=duration_ms,
+        error_extras=_error_extras_for_audit(result),
+    )
+    return result
+
+
 async def _handle_needs_approval(
     *,
     op_id: str,
@@ -2544,18 +2582,15 @@ async def _handle_needs_approval(
         op_id=op_id, proposed_effect=proposed_effect, duration_ms=duration_ms
     )
     if refusal is not None:
-        await audit_and_broadcast_safe(
-            audit_id=uuid.uuid4(),
+        return await _audit_denied_and_return(
+            refusal,
             operator=operator,
             descriptor=descriptor,
             target=target,
             params=params,
             params_hash=params_hash,
-            result_status="denied",
             duration_ms=duration_ms,
-            error_extras=_error_extras_for_audit(refusal),
         )
-        return refusal
 
     try:
         sessionmaker = get_sessionmaker()

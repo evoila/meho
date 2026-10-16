@@ -525,10 +525,13 @@ async def test_subop_park_refused_when_preflight_says_write_will_be_denied(
 
     The composite seam reuses the dispatcher's ``_preflight_denied_refusal``,
     so a governed sub-op gets the same ``write_capability_denied`` refusal as
-    a top-level dispatch, and no approval row is written.
+    a top-level dispatch, and no approval row is written. The refusal is
+    still recorded: one ``denied`` audit row on the sub-op's path, through
+    the same writer the dispatcher park uses.
     """
     from typing import Any
 
+    from meho_backplane.db.models import AuditLog
     from meho_backplane.operations._preview import (
         _PERMISSION_PREFLIGHTS,
         PreviewContext,
@@ -565,3 +568,8 @@ async def test_subop_park_refused_when_preflight_says_write_will_be_denied(
     assert result.extras["granted"] == ["read"]
     count = await session.scalar(select(func.count()).select_from(ApprovalRequest))
     assert count == 0
+    rows = (await session.execute(select(AuditLog).where(AuditLog.path == op_id))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].status_code == 403
+    assert rows[0].payload["result_status"] == "denied"
+    assert rows[0].payload["error"]["error_code"] == "write_capability_denied"

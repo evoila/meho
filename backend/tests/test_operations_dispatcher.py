@@ -304,6 +304,34 @@ async def _module_composite_handler_terminal_error(
     }
 
 
+async def _module_composite_handler_gated_subop(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any] | OperationResult:
+    """Composite handler with one approval-gated write step (#3542).
+
+    The step goes through the direct-session sub-op gate
+    (``enforce_subop_policy``), like the shipped write composites. When the
+    gate returns a result (parked, denied, refused) the handler returns it as
+    is and never runs the write.
+    """
+    from meho_backplane.operations.composite import enforce_subop_policy
+
+    gate = await enforce_subop_policy(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.gated_step",
+        safety_level="caution",
+        requires_approval=True,
+        target=target,
+        params={"path": params.get("path", "?")},
+    )
+    if gate is not None:
+        return gate
+    return {"parent": "ok", "step": "ran"}
+
+
 async def _module_composite_handler_warning_only(
     operator: Operator,
     target: Any,
@@ -3597,6 +3625,117 @@ async def test_park_refused_when_preflight_says_write_will_be_denied(
                 assert "write_capability_warning" not in row.proposed_effect
     finally:
         _PERMISSION_PREFLIGHTS.pop("vault.kv.warn_op", None)
+
+
+@pytest.mark.asyncio
+async def test_composite_with_refused_step_writes_one_denied_audit_row(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A parent operation with a refused step leaves one denial audit record (#3542).
+
+    The composite's gated step has a permission preflight that says the write
+    will be denied. The sub-op gate refuses the park and the parent returns
+    that result as is. The dispatcher writes no audit row for a
+    handler-returned result, so the gate records the refusal itself: exactly
+    one ``denied`` audit row, on the step's path, linked to the parent
+    operation's audit id. No approval request and no approval-request audit
+    row are written.
+    """
+    from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
+    from meho_backplane.operations._preview import (
+        _PERMISSION_PREFLIGHTS,
+        PreviewContext,
+        register_permission_preflight,
+    )
+
+    async def _preflight(ctx: PreviewContext) -> dict[str, Any]:
+        return {
+            "check": "vault.capabilities-self",
+            "path": f"secret/data/{ctx.params.get('path', '?')}",
+            "required": ["create", "update"],
+            "granted": ["read"],
+            "will_be_denied": True,
+        }
+
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    target = _FakeTarget(product="vault")
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as s:
+        s.add(
+            EndpointDescriptor(
+                id=uuid.uuid4(),
+                tenant_id=None,
+                product="vault",
+                version="1.x",
+                impl_id="vault",
+                op_id="vault.composite.gated_write",
+                source_kind="composite",
+                method=None,
+                path=None,
+                handler_ref=(
+                    "tests.test_operations_dispatcher._module_composite_handler_gated_subop"
+                ),
+                summary="Composite with one gated write step.",
+                description="The step parks for approval unless its preflight refuses.",
+                tags=[],
+                parameter_schema={"type": "object"},
+                response_schema=None,
+                llm_instructions=None,
+                safety_level="safe",
+                requires_approval=False,
+                is_enabled=True,
+                embedding=stub_embedding_service.encode_one.return_value,
+                custom_description=None,
+                custom_notes=None,
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+        await s.commit()
+    register_permission_preflight("vault.kv.gated_step", _preflight)
+    try:
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id="vault-1.x",
+            op_id="vault.composite.gated_write",
+            target=target,
+            params={"path": "meho/test/x"},
+        )
+    finally:
+        _PERMISSION_PREFLIGHTS.pop("vault.kv.gated_step", None)
+
+    assert result.status == "denied"
+    assert result.op_id == "vault.kv.gated_step"
+    assert result.extras["error_code"] == "write_capability_denied"
+    assert result.extras["granted"] == ["read"]
+
+    async with sessionmaker() as fresh:
+        approval_count = await fresh.scalar(select(func.count()).select_from(ApprovalRequest))
+        rows = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.method == "DISPATCH")))
+            .scalars()
+            .all()
+        )
+        request_rows = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.path == "approval.request")))
+            .scalars()
+            .all()
+        )
+    assert approval_count == 0
+    assert request_rows == []
+    # Exactly one denial record for the whole parent operation.
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.path == "vault.kv.gated_step"
+    assert row.status_code == 403
+    assert row.payload["result_status"] == "denied"
+    assert row.payload["error"]["error_code"] == "write_capability_denied"
+    assert row.payload["error"]["required"] == ["create", "update"]
+    # The step's row points at the parent operation's audit id.
+    assert row.parent_audit_id is not None
+    assert len(captured_events) == 1
+    assert captured_events[0].result_status == "denied"
 
 
 # ---------------------------------------------------------------------------

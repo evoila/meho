@@ -33,21 +33,24 @@ no-op (every op already has ``group_id`` set, no LLM call fires).
 
 Re-running on a partially-grouped connector (#3713):
 
-* Groups owned by a typed registrar -- any group that holds a typed
-  or composite op -- are never Pass-2 candidates. Ingested ops are not
-  filed into those curated single-purpose groups.
+* Groups owned by a typed registrar -- any group that holds a
+  ``source_kind='typed'`` op -- are never Pass-2 candidates. Ingested
+  ops are not filed into those curated single-purpose groups.
+  Composite ops do not make a group typed: hand-written composites
+  live in the shared semantic groups (``vm``, ``storage``, ...), and
+  those groups still take ingested ops.
 * If no other group exists, the run is a full grouping run (Pass 1
   over every unassigned op, then Pass 2). Existing group keys are
   reserved: a proposal that reuses one is dropped.
-* Otherwise Pass 2 files the unassigned ops into the existing ingested
+* Otherwise Pass 2 files the unassigned ops into the existing non-typed
   groups. Ops still left over then get an "extend" Pass 1: the model
   sees the existing groups and may propose new groups (or none) for
   the leftovers, followed by a Pass 2 over the leftovers against the
   new groups only.
 
 The result carries one :class:`GroupSummary` per group in scope: how
-many ops this run added to it, and how many typed vs ingested ops it
-now holds.
+many ops this run added to it, and how many typed, composite, and
+ingested ops it now holds.
 
 Per :file:`docs/codebase/spec-ingestion.md` and the T3 task body in
 issue #404: this pass is non-optional for v0.2. Raw semantic+BM25
@@ -159,8 +162,11 @@ class GroupSummary:
     operations_added:
         How many ops this run assigned to the group.
     typed_operation_count:
-        Typed or composite ops in the group after the run. Above zero
-        means a typed registrar owns the group.
+        Typed ops (``source_kind='typed'``) in the group after the run.
+        Above zero means a typed registrar owns the group.
+    composite_operation_count:
+        Hand-written composite ops in the group after the run. They do
+        not make the group typed.
     ingested_operation_count:
         Spec-ingested ops in the group after the run.
     """
@@ -169,6 +175,7 @@ class GroupSummary:
     created: bool
     operations_added: int
     typed_operation_count: int
+    composite_operation_count: int
     ingested_operation_count: int
 
 
@@ -662,6 +669,7 @@ async def _summarise_groups(
                 created=group.group_key in totals.created_keys,
                 operations_added=totals.added_by_key[group.group_key],
                 typed_operation_count=members.typed,
+                composite_operation_count=members.composite,
                 ingested_operation_count=members.ingested,
             )
         )

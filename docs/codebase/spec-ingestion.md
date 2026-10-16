@@ -323,13 +323,17 @@ Idempotency:
 * Existing groups present but some ops still unassigned → the
   "partial-regrouping" branch (#3713):
   * **Typed groups are never targets.** A group that holds any
-    `source_kind` `typed` or `composite` op belongs to a typed
-    registrar. It is a curated, single-purpose surface, so Pass 2 never
-    files an ingested op into it. The signal is the group's members,
-    not its key shape; `operation_group` has no source column.
+    `source_kind='typed'` op belongs to a typed registrar. It is a
+    curated, single-purpose surface, so Pass 2 never files an ingested
+    op into it. The signal is the group's members, not its key shape;
+    `operation_group` has no source column.
+  * **Composite ops do not make a group typed.** Hand-written
+    composites are filed into the shared semantic groups (`vm`,
+    `cluster`, `storage`, ...). Those groups stay Pass-2 targets, so
+    ingested ops can still fill them.
   * **Only typed groups exist** → the run is a full grouping run
     (Pass 1 + Pass 2) over the unassigned ops.
-  * **Ingested groups exist** → Pass 2 runs over the unassigned ops
+  * **Non-typed groups exist** → Pass 2 runs over the unassigned ops
     against those groups (persisted keys are projected without
     re-validation, #3685). Ops still left over get an "extend" Pass 1:
     the prompt lists the existing groups and asks for at most
@@ -339,8 +343,8 @@ Idempotency:
     scope (typed keys included) is dropped, so no persisted group is
     renamed or duplicated.
 * `GroupingResult.groups` carries one `GroupSummary` per group in
-  scope: `operations_added` this run, `created`, and how many typed vs
-  ingested ops the group now holds. The ingest job result and
+  scope: `operations_added` this run, `created`, and how many typed,
+  composite, and ingested ops the group now holds. The ingest job result and
   `meho connector ingest` show it; the CLI prints a warning for a typed
   group that also holds ingested ops.
 
@@ -2068,7 +2072,7 @@ run_llm_grouping
 │  └─ early return GroupingResult(...zeros...) if none
 ├─ _drive_two_pass_grouping
 │  ├─ load_existing_groups + load_group_membership
-│  ├─ candidates = groups with no typed/composite member
+│  ├─ candidates = groups with no typed member (composites allowed)
 │  ├─ if no candidates → _create_groups_and_assign(all unassigned ops)
 │  ├─ else
 │  │  ├─ _assign_and_apply(unassigned ops, candidates)   # Pass 2

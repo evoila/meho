@@ -618,21 +618,19 @@ async def load_existing_groups(
     return list(result.scalars().all())
 
 
-#: ``source_kind`` values of code-shipped operations (typed handlers and
-#: hand-written composites). Every other value is a spec-ingested op.
-_CODE_SHIPPED_SOURCE_KINDS: Final[frozenset[str]] = frozenset({"typed", "composite"})
-
-
 @dataclass(frozen=True, slots=True)
 class GroupMembership:
-    """How many typed and how many ingested operations sit in one group.
+    """How many typed, composite, and ingested operations sit in one group.
 
-    ``typed`` counts code-shipped ops (``source_kind`` ``typed`` or
-    ``composite``); ``ingested`` counts spec-ingested ops. A group with
-    ``typed > 0`` is owned by a typed registrar.
+    Each field counts the members with that ``source_kind``. Only
+    ``typed > 0`` means a typed registrar owns the group. Composites do
+    not: hand-written composites are filed into the shared semantic
+    groups (``vm``, ``storage``, ...), and those groups must still take
+    ingested ops.
     """
 
     typed: int = 0
+    composite: int = 0
     ingested: int = 0
 
 
@@ -641,7 +639,7 @@ async def load_group_membership(
     *,
     group_ids: Sequence[UUID],
 ) -> dict[UUID, GroupMembership]:
-    """Count typed vs ingested member operations for each group in *group_ids*.
+    """Count typed, composite, and ingested member ops for each group in *group_ids*.
 
     One ``GROUP BY`` query. Groups with no members are absent from the
     returned dict; callers treat a missing key as ``GroupMembership()``.
@@ -653,14 +651,16 @@ async def load_group_membership(
         .where(EndpointDescriptor.group_id.in_(list(group_ids)))
         .group_by(EndpointDescriptor.group_id, EndpointDescriptor.source_kind)
     )
-    typed: dict[UUID, int] = {}
-    ingested: dict[UUID, int] = {}
+    counts: dict[UUID, dict[str, int]] = {}
     for group_id, source_kind, count in (await session.execute(stmt)).all():
-        bucket = typed if source_kind in _CODE_SHIPPED_SOURCE_KINDS else ingested
-        bucket[group_id] = bucket.get(group_id, 0) + count
+        counts.setdefault(group_id, {})[source_kind] = count
     return {
-        group_id: GroupMembership(typed=typed.get(group_id, 0), ingested=ingested.get(group_id, 0))
-        for group_id in typed.keys() | ingested.keys()
+        group_id: GroupMembership(
+            typed=by_kind.get("typed", 0),
+            composite=by_kind.get("composite", 0),
+            ingested=by_kind.get("ingested", 0),
+        )
+        for group_id, by_kind in counts.items()
     }
 
 

@@ -8,12 +8,14 @@ Covers the partial-regrouping rules in
 
 * a group that holds a typed op is never a Pass-2 candidate, so no
   ingested op is filed into it;
+* a group that holds only a composite op is still a candidate (composites
+  share the normal semantic groups);
 * when only typed groups exist, the run is a full grouping run and
   creates new groups;
 * ops that fit no existing group get an "extend" Pass 1 that may
   create new groups for them;
 * the result reports, per group, how many ops the run added and how
-  many typed vs ingested ops the group holds.
+  many typed, composite, and ingested ops the group holds.
 """
 
 from __future__ import annotations
@@ -46,6 +48,7 @@ _VERSION = "9.0"
 _IMPL = "vmware-rest"
 _TYPED_GROUP_KEY = "vmware-object-collect"
 _TYPED_OP_ID = "vmware.object.collect"
+_COMPOSITE_OP_ID = "vmware.composite.inventory.summary"
 _OPERATOR_SUB = "op-test-regroup"
 _OPERATOR_TENANT = uuid.UUID("00000000-0000-0000-0000-00000000b0b0")
 
@@ -102,9 +105,11 @@ async def _seed(
     embedding_service: Any,
     *,
     ingested_group: bool,
+    composite_in_ingested_group: bool = False,
 ) -> None:
     """Seed a typed group with one typed op, the 5 small-corpus ops, and
-    optionally an empty ingested group ``inventory``."""
+    optionally an ingested group ``inventory`` (empty, or holding one
+    composite op)."""
     await register_ingested_operations(
         product=_PRODUCT,
         version=_VERSION,
@@ -144,18 +149,35 @@ async def _seed(
         )
         if ingested_group:
             proposal = parse_proposal_response(small_corpus.STUB_PROPOSE_RESPONSE)[0]
-            session.add(
-                OperationGroup(
-                    tenant_id=None,
-                    product=_PRODUCT,
-                    version=_VERSION,
-                    impl_id=_IMPL,
-                    group_key=proposal.group_key,
-                    name=proposal.name,
-                    when_to_use=proposal.when_to_use,
-                    review_status="staged",
-                )
+            inventory_group = OperationGroup(
+                tenant_id=None,
+                product=_PRODUCT,
+                version=_VERSION,
+                impl_id=_IMPL,
+                group_key=proposal.group_key,
+                name=proposal.name,
+                when_to_use=proposal.when_to_use,
+                review_status="staged",
             )
+            session.add(inventory_group)
+            if composite_in_ingested_group:
+                await session.flush()
+                session.add(
+                    EndpointDescriptor(
+                        tenant_id=None,
+                        product=_PRODUCT,
+                        version=_VERSION,
+                        impl_id=_IMPL,
+                        op_id=_COMPOSITE_OP_ID,
+                        source_kind="composite",
+                        handler_ref="tests:composite_handler",
+                        summary="Summarise the inventory",
+                        group_id=inventory_group.id,
+                        tags=[],
+                        parameter_schema={"type": "object", "properties": {}},
+                        safety_level="safe",
+                    )
+                )
         await session.commit()
 
 
@@ -217,6 +239,7 @@ async def test_only_typed_groups_runs_full_grouping_and_leaves_typed_group_alone
         created=False,
         operations_added=0,
         typed_operation_count=1,
+        composite_operation_count=0,
         ingested_operation_count=0,
     )
     inventory = _summary(result, "inventory")
@@ -271,7 +294,8 @@ async def test_regroup_extends_with_new_groups_for_leftovers(
     assert "already has these operation groups" in stub.prompts[1]
     assert "- inventory (Inventory)" in stub.prompts[1]
     # The leftover Pass 2 offers only the new group.
-    assert '"group_key": "inventory"' not in stub.prompts[2]
+    assert "- inventory (" not in stub.prompts[2]
+    assert "- vm_lifecycle (" in stub.prompts[2]
 
     inventory = _summary(result, "inventory")
     assert (inventory.created, inventory.operations_added) == (False, 2)
@@ -291,6 +315,51 @@ async def test_regroup_extends_with_new_groups_for_leftovers(
             .all()
         )
     assert sorted(keys) == ["inventory", "vm_lifecycle", _TYPED_GROUP_KEY]
+
+
+@pytest.mark.asyncio
+async def test_group_with_composite_op_still_takes_ingested_ops(
+    stub_embedding_service: Any,
+) -> None:
+    """A snake_case group holding one composite op is a Pass-2 target.
+
+    Composites live in the shared semantic groups (``vm``, ``storage``,
+    ...). They must not make the group typed, or regrouping could never
+    fill those groups.
+    """
+    await _seed(stub_embedding_service, ingested_group=True, composite_in_ingested_group=True)
+    first_pass2 = json.dumps(
+        {
+            "GET:/api/vcenter/cluster": "inventory",
+            "GET:/api/vcenter/vm": "inventory",
+            "POST:/api/vcenter/vm": "inventory",
+            "DELETE:/api/vcenter/vm/{vm}": "inventory",
+            "POST:/api/vcenter/vm/{vm}/snapshot": "inventory",
+        }
+    )
+    stub = _StubLlm([first_pass2])
+
+    result = await _run(stub)
+
+    # The first call is Pass 2, and it offers the composite's group.
+    assert len(stub.prompts) == 1
+    assert stub.prompts[0].startswith("Assign each operation")
+    assert "- inventory (Inventory)" in stub.prompts[0]
+    assert _TYPED_GROUP_KEY not in stub.prompts[0]
+    assert result.groups_created == 0
+    assert result.operations_assigned == 5
+    assert result.operations_unassigned == 0
+    assert await _group_of("POST:/api/vcenter/vm") == "inventory"
+
+    inventory = _summary(result, "inventory")
+    assert inventory == GroupSummary(
+        group_key="inventory",
+        created=False,
+        operations_added=5,
+        typed_operation_count=0,
+        composite_operation_count=1,
+        ingested_operation_count=5,
+    )
 
 
 @pytest.mark.asyncio

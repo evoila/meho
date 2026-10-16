@@ -29133,6 +29133,10 @@
             "type": "integer",
             "title": "Typed Operation Count"
           },
+          "composite_operation_count": {
+            "type": "integer",
+            "title": "Composite Operation Count"
+          },
           "ingested_operation_count": {
             "type": "integer",
             "title": "Ingested Operation Count"
@@ -29144,10 +29148,11 @@
           "created",
           "operations_added",
           "typed_operation_count",
+          "composite_operation_count",
           "ingested_operation_count"
         ],
         "title": "GroupSummaryModel",
-        "description": "Pydantic projection of\n:class:`~meho_backplane.operations.ingest.llm_groups.GroupSummary`.\n\nOne row per group: how many ops this run added to it, and how many\ntyped vs ingested ops it holds now. ``typed_operation_count > 0``\nmeans a typed registrar owns the group; grouping never files\ningested ops into such a group."
+        "description": "Pydantic projection of\n:class:`~meho_backplane.operations.ingest.llm_groups.GroupSummary`.\n\nOne row per group: how many ops this run added to it, and how many\ntyped, composite, and ingested ops it holds now.\n``typed_operation_count > 0`` means a typed registrar owns the\ngroup; grouping never files ingested ops into such a group.\nComposite ops do not make a group typed."
       },
       "GroupingResultModel": {
         "properties": {

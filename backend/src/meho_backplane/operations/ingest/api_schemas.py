@@ -684,9 +684,10 @@ class GroupSummaryModel(BaseModel):
     :class:`~meho_backplane.operations.ingest.llm_groups.GroupSummary`.
 
     One row per group: how many ops this run added to it, and how many
-    typed vs ingested ops it holds now. ``typed_operation_count > 0``
-    means a typed registrar owns the group; grouping never files
-    ingested ops into such a group.
+    typed, composite, and ingested ops it holds now.
+    ``typed_operation_count > 0`` means a typed registrar owns the
+    group; grouping never files ingested ops into such a group.
+    Composite ops do not make a group typed.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -695,6 +696,7 @@ class GroupSummaryModel(BaseModel):
     created: bool
     operations_added: int
     typed_operation_count: int
+    composite_operation_count: int
     ingested_operation_count: int
 
 

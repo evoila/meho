@@ -773,12 +773,14 @@ func TestPrintIngestSummaryNonDryRun(t *testing.T) {
 
 // TestPrintIngestSummaryGroupLines checks the per-group lines: groups
 // that gained ops or were created get a line, untouched groups do not,
-// and a typed group that also holds ingested ops gets a warning (#3713).
+// a typed group that also holds ingested ops gets a warning, and a group
+// with a composite op is not treated as typed (#3713).
 func TestPrintIngestSummaryGroupLines(t *testing.T) {
 	groups := []api.GroupSummaryModel{
 		{GroupKey: "inventory", OperationsAdded: 2, IngestedOperationCount: 40},
 		{GroupKey: "vm_lifecycle", Created: true, OperationsAdded: 3, IngestedOperationCount: 3},
 		{GroupKey: "events", IngestedOperationCount: 12},
+		{GroupKey: "storage", OperationsAdded: 4, CompositeOperationCount: 7, IngestedOperationCount: 30},
 		{GroupKey: "vmware-object-collect", TypedOperationCount: 1, IngestedOperationCount: 78},
 	}
 	r := &api.IngestResponse{
@@ -796,6 +798,7 @@ func TestPrintIngestSummaryGroupLines(t *testing.T) {
 	for _, want := range []string{
 		"    inventory: +2 ops\n",
 		"    vm_lifecycle: +3 ops (new group)\n",
+		"    storage: +4 ops\n",
 		"    warning: typed group vmware-object-collect also holds 78 ingested op(s)\n",
 	} {
 		if !strings.Contains(out, want) {
@@ -804,6 +807,9 @@ func TestPrintIngestSummaryGroupLines(t *testing.T) {
 	}
 	if strings.Contains(out, "events") {
 		t.Errorf("a group with no change must not get a line:\n%s", out)
+	}
+	if strings.Contains(out, "typed group storage") {
+		t.Errorf("a composite op must not make a group typed:\n%s", out)
 	}
 }
 

@@ -747,6 +747,7 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 // line per group that gained ops or was created. It also warns about a
 // typed group (one that holds typed operations) that holds ingested
 // operations too, so an operator sees a mixed group before enabling it.
+// Composite operations do not make a group typed.
 func printGroupingGroups(w io.Writer, groups []api.GroupSummaryModel) {
 	for _, g := range groups {
 		if g.OperationsAdded > 0 || g.Created {

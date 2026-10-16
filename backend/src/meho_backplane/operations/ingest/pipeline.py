@@ -470,6 +470,7 @@ class IngestionPipelineResult:
                         created=g.created,
                         operations_added=g.operations_added,
                         typed_operation_count=g.typed_operation_count,
+                        composite_operation_count=g.composite_operation_count,
                         ingested_operation_count=g.ingested_operation_count,
                     )
                     for g in self.grouping.groups

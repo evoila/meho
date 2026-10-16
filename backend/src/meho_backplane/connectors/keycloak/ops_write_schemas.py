@@ -36,7 +36,10 @@ _WHEN_TO_USE_REALM_WRITE = (
     "update the managed realm's top-level config "
     "(``keycloak.realm.update``). Both require human approval. Pass the "
     "RealmRepresentation under ``representation``. Re-running a create is "
-    "idempotent (a 409 already-exists is treated as success)."
+    "idempotent (a 409 already-exists is treated as success). "
+    "``keycloak.realm.delete`` removes a whole realm for good (destructive: a "
+    "second person must approve, preview first); disabling it with "
+    "``keycloak.realm.update`` and ``enabled: false`` is the reversible choice."
 )
 
 _WHEN_TO_USE_CLIENT_WRITE = (

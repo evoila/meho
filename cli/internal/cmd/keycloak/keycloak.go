@@ -33,6 +33,7 @@
 //   - `meho keycloak user delete (--id|--username)`
 //   - `meho keycloak group delete (--id|--name) [--delete-subgroups]`
 //   - `meho keycloak client delete (--id|--client-id)`
+//   - `meho keycloak realm delete --realm R` (#3886)
 //
 // #3851 adds `meho keycloak user logout (--id|--username)` (approval-gated):
 // it ends all live sessions of one user.

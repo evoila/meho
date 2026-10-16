@@ -922,6 +922,133 @@
         }
       }
     },
+    "resultCache": {
+      "type": "object",
+      "description": "Dedicated result-cache subchart values (Valkey 9.x, `charts/result-cache/`). Holds the full rows behind result handles, apart from the broadcast store, so a burst of large handles cannot take broadcast, rate limits, or approval waits down with it. Off by default. When `resultCache.enabled` is true the subchart renders, the backplane gets `RESULT_CACHE_REDIS_URL` (+ password), and the parent NetworkPolicy gains an egress rule to it. `writerEnabled` sets `RESULT_CACHE_WRITER_ENABLED`; turn it on only after every backplane Pod runs the reader-first code.",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["repository", "tag"],
+          "properties": {
+            "repository": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*$"
+            },
+            "tag": { "type": "string", "minLength": 1 },
+            "pullPolicy": {
+              "type": "string",
+              "enum": ["Always", "IfNotPresent", "Never"]
+            }
+          }
+        },
+        "maxmemory": {
+          "type": "string",
+          "pattern": "^[0-9]+(b|kb|mb|gb|k|m|g)?$",
+          "description": "Valkey `maxmemory` byte ceiling (for example `768mb`). Keep it below `resources.limits.memory`."
+        },
+        "maxmemoryPolicy": {
+          "type": "string",
+          "enum": ["noeviction", "allkeys-lru", "volatile-lru", "allkeys-lfu", "volatile-lfu", "allkeys-random", "volatile-random", "volatile-ttl"],
+          "description": "Valkey `maxmemory-policy`. Default `noeviction`: refuse new result writes at the ceiling, never drop a live handle."
+        },
+        "writerEnabled": {
+          "type": "boolean",
+          "description": "Sets `RESULT_CACHE_WRITER_ENABLED`. When false (default) new result handles are still written to the broadcast store; reads already check this store first. Turn on only after the reader-first backplane is rolled out everywhere."
+        },
+        "replicas": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1,
+          "description": "The result-cache subchart runs one replica: no persistence and no Sentinel ship with it."
+        },
+        "podSecurityContext": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "securityContext": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "resources": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "limits": { "$ref": "#/definitions/resourceQuantities" },
+            "requests": { "$ref": "#/definitions/resourceQuantities" }
+          }
+        },
+        "service": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "port"],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["ClusterIP", "NodePort", "LoadBalancer", "ExternalName"]
+            },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+          }
+        },
+        "auth": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "existingSecret": { "type": "string" },
+            "existingSecretPasswordKey": { "type": "string", "minLength": 1 },
+            "password": { "type": "string" }
+          }
+        },
+        "networkPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "backplanePodLabels": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            },
+            "extraAllowedSelectors": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+              }
+            }
+          }
+        },
+        "podAnnotations": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "podLabels": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "nodeSelector": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "tolerations": {
+          "type": "array",
+          "items": { "type": "object" }
+        },
+        "affinity": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "global": {
+          "type": "object",
+          "description": "Helm injects the parent chart's `.Values.global` into every subchart's values namespace. The key must be permitted by the schema; the contents are arbitrary (operators use it to pass shared values across subcharts).",
+          "additionalProperties": true
+        }
+      }
+    },
     "migrationJob": {
       "type": "object",
       "description": "Pre-install / pre-upgrade migration Job (Helm hook) running `python -m meho_backplane.db.migrate` before the Deployment rolls forward.",

@@ -375,6 +375,74 @@ def test_result_handle_max_spill_rows_env_override_takes_effect(
 
 
 # ---------------------------------------------------------------------------
+# #3639 — dedicated result-cache store URL, password, and writer gate
+# ---------------------------------------------------------------------------
+
+
+def _clear_result_cache_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "RESULT_CACHE_REDIS_URL",
+        "RESULT_CACHE_REDIS_PASSWORD",
+        "RESULT_CACHE_WRITER_ENABLED",
+        "BROADCAST_REDIS_URL",
+        "BROADCAST_REDIS_PASSWORD",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_result_cache_falls_back_to_broadcast_store_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset ``RESULT_CACHE_REDIS_URL`` → broadcast URL and password, writer off."""
+    _base_env(monkeypatch)
+    _clear_result_cache_env(monkeypatch)
+    monkeypatch.setenv("BROADCAST_REDIS_URL", "redis://broadcast.test:6379/0")
+    monkeypatch.setenv("BROADCAST_REDIS_PASSWORD", "bc-pass")
+    get_settings.cache_clear()
+    try:
+        s = get_settings()
+        assert s.result_cache_redis_url == s.broadcast_redis_url
+        assert s.result_cache_redis_password == "bc-pass"
+        assert s.result_cache_writer_enabled is False
+    finally:
+        get_settings.cache_clear()
+
+
+def test_result_cache_env_overrides_take_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A set URL uses its own password (not the broadcast one) and the gate parses."""
+    _base_env(monkeypatch)
+    _clear_result_cache_env(monkeypatch)
+    monkeypatch.setenv("BROADCAST_REDIS_PASSWORD", "bc-pass")
+    monkeypatch.setenv("RESULT_CACHE_REDIS_URL", "redis://result-cache.test:6379/0")
+    monkeypatch.setenv("RESULT_CACHE_WRITER_ENABLED", "true")
+    get_settings.cache_clear()
+    try:
+        s = get_settings()
+        assert s.result_cache_redis_url == "redis://result-cache.test:6379/0"
+        assert s.result_cache_redis_password is None
+        assert s.result_cache_writer_enabled is True
+    finally:
+        get_settings.cache_clear()
+    monkeypatch.setenv("RESULT_CACHE_REDIS_PASSWORD", "rc-pass")
+    get_settings.cache_clear()
+    try:
+        assert get_settings().result_cache_redis_password == "rc-pass"
+    finally:
+        get_settings.cache_clear()
+
+
+def test_result_cache_url_rejects_unsupported_scheme() -> None:
+    """``valkey://`` (and other non-redis-py schemes) fail at construction."""
+    with pytest.raises(ValidationError, match="RESULT_CACHE_REDIS_URL"):
+        Settings(
+            **_settings_kwargs("sqlite+aiosqlite:///:memory:"),  # type: ignore[arg-type]
+            result_cache_redis_url="valkey://result-cache.test:6379",
+        )
+
+
+# ---------------------------------------------------------------------------
 # #3178 — service-account marker claim / prefix env round-trips
 # ---------------------------------------------------------------------------
 

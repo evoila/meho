@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "resultCache.fullname" . }}-config
+  labels:
+    {{- include "resultCache.labels" . | nindent 4 }}
+data:
+  # Minimal Valkey config for the result-handle store.
+  #
+  # * `bind 0.0.0.0` — listen on the Pod IP. Access is gated by this
+  #   subchart's own ingress NetworkPolicy (backplane Pods only) and by
+  #   `requirepass` (sourced from a Secret at start-up, never written here).
+  # * `protected-mode` stays on while auth is enabled.
+  # * `save ""` / `appendonly no` — no persistence. Result handles expire by
+  #   TTL; a restart only loses handles that would expire soon anyway.
+  # * `maxmemory` + `maxmemory-policy` — an explicit byte ceiling. With the
+  #   default `noeviction`, Valkey refuses new writes at the ceiling instead
+  #   of growing until the pod is OOM-killed. The backplane treats a refused
+  #   write as "rows not stored" and still returns the inline sample.
+  # * `dir /data` — the emptyDir-backed writable mount, so
+  #   readOnlyRootFilesystem: true holds.
+  valkey.conf: |
+    bind 0.0.0.0
+    protected-mode {{ if .Values.auth.enabled }}yes{{ else }}no{{ end }}
+    port 6379
+    dir /data
+    save ""
+    appendonly no
+    maxmemory {{ .Values.maxmemory }}
+    maxmemory-policy {{ .Values.maxmemoryPolicy }}

@@ -27,6 +27,7 @@ from uuid import UUID, uuid4
 import msgspec
 import pytest
 import redis.exceptions
+import structlog
 
 import meho_backplane.connectors.result_handle_store as store_module
 from meho_backplane.connectors.result_handle_store import (
@@ -660,3 +661,345 @@ async def test_spill_fails_open_for_an_unencodable_row_without_writing() -> None
     ).stored_rows
     assert stored == 0
     assert fake.store == {}
+
+
+# ---------------------------------------------------------------------------
+# #3639 — dedicated result-cache store: reader-first reads + writer gate
+# ---------------------------------------------------------------------------
+
+
+class _InfoRedis(_FakeRedis):
+    """Fake dedicated client that also answers ``INFO memory``."""
+
+    async def info(self, section: str | None = None) -> dict[str, Any]:
+        assert section == "memory"
+        return {"used_memory": 4096, "maxmemory": 805306368}
+
+
+def _payload(operator_sub: str, rows: list[dict[str, Any]]) -> bytes:
+    return msgspec.json.encode(
+        store_module._StoredPayload(
+            operator_sub=operator_sub,
+            op_id="vault.kv.list",
+            rows=rows,
+            total_rows=len(rows),
+            stored_rows=len(rows),
+            created_at="2026-01-01T00:00:00+00:00",
+        )
+    )
+
+
+def _metric(name: str, labels: dict[str, str]) -> float:
+    from prometheus_client import REGISTRY
+
+    return REGISTRY.get_sample_value(name, labels=labels) or 0.0
+
+
+async def test_reader_first_returns_v2_record_from_dedicated_client() -> None:
+    shared, dedicated = _FakeRedis(), _FakeRedis()
+    store = ResultHandleStore(shared, dedicated_client=dedicated)
+    tenant, handle = uuid4(), uuid4()
+    dedicated.store[store_module._v2_key(tenant, handle)] = _payload("op-a", _rows(3))
+
+    rows = await store.fetch_rows(tenant_id=tenant, operator_sub="op-a", handle_id=handle)
+    window = await store.fetch_window(
+        tenant_id=tenant, operator_sub="op-a", handle_id=handle, offset=0, limit=10
+    )
+
+    assert rows is not None and [r["i"] for r in rows.rows] == [0, 1, 2]
+    assert window is not None and len(window.rows) == 3
+    assert store_module._v2_key(tenant, handle).startswith("meho:reshandle:v2:")
+
+
+async def test_reader_falls_back_to_legacy_key_for_same_tenant_only() -> None:
+    shared, dedicated = _FakeRedis(), _FakeRedis()
+    store = ResultHandleStore(shared, dedicated_client=dedicated)
+    tenant, other_tenant, handle = uuid4(), uuid4(), uuid4()
+    shared.store[store_module._key(tenant, handle)] = _payload("op-a", _rows(2))
+    before = _metric("result_cache_reads_total", {"source": "legacy"})
+
+    same = await store.fetch_rows(tenant_id=tenant, operator_sub="op-a", handle_id=handle)
+    other = await store.fetch_rows(tenant_id=other_tenant, operator_sub="op-a", handle_id=handle)
+
+    assert same is not None and same.stored_rows == 2
+    assert other is None
+    assert _metric("result_cache_reads_total", {"source": "legacy"}) == before + 1
+
+
+async def test_reader_falls_back_to_legacy_when_dedicated_client_fails() -> None:
+    shared = _FakeRedis()
+    store = ResultHandleStore(shared, dedicated_client=_BrokenRedis())  # type: ignore[arg-type]
+    tenant, handle = uuid4(), uuid4()
+    shared.store[store_module._key(tenant, handle)] = _payload("op-a", _rows(1))
+
+    window = await store.fetch_window(
+        tenant_id=tenant, operator_sub="op-a", handle_id=handle, offset=0, limit=5
+    )
+
+    assert window is not None and window.stored_rows == 1
+
+
+async def test_writer_gate_off_spills_legacy_key_on_shared_client() -> None:
+    shared, dedicated = _FakeRedis(), _FakeRedis()
+    store = ResultHandleStore(shared, dedicated_client=dedicated, writer_enabled=False)
+    tenant, handle = uuid4(), uuid4()
+
+    stored = await store.spill(
+        tenant_id=tenant,
+        operator_sub="op-a",
+        handle_id=handle,
+        op_id="vault.kv.list",
+        rows=_rows(4),
+        total_rows=4,
+        ttl_seconds=60,
+        max_rows=100,
+    )
+
+    assert stored.stored_rows == 4
+    assert list(shared.store) == [store_module._key(tenant, handle)]
+    assert dedicated.store == {}
+    assert not any(":v2:" in key for key in shared.store)
+
+
+async def test_writer_gate_on_spills_v2_key_on_dedicated_client() -> None:
+    shared, dedicated = _FakeRedis(), _InfoRedis()
+    store = ResultHandleStore(shared, dedicated_client=dedicated, writer_enabled=True)
+    tenant, handle = uuid4(), uuid4()
+
+    stored = await store.spill(
+        tenant_id=tenant,
+        operator_sub="op-a",
+        handle_id=handle,
+        op_id="vault.kv.list",
+        rows=_rows(4),
+        total_rows=4,
+        ttl_seconds=60,
+        max_rows=100,
+    )
+
+    assert stored.stored_rows == 4
+    assert list(dedicated.store) == [store_module._v2_key(tenant, handle)]
+    assert dedicated.last_ex == 60
+    assert shared.store == {}
+    window = await store.fetch_window(
+        tenant_id=tenant, operator_sub="op-a", handle_id=handle, offset=0, limit=10
+    )
+    assert window is not None and window.stored_rows == 4
+
+
+async def test_writer_gate_on_spills_document_record_to_dedicated_client() -> None:
+    shared, dedicated = _FakeRedis(), _InfoRedis()
+    store = ResultHandleStore(shared, dedicated_client=dedicated, writer_enabled=True)
+    tenant, handle = uuid4(), uuid4()
+
+    stored = await store.spill_document(
+        tenant_id=tenant,
+        operator_sub="op-a",
+        handle_id=handle,
+        op_id="vault.kv.read",
+        document={"name": "doc"},
+        ttl_seconds=60,
+    )
+
+    assert stored is True
+    assert list(dedicated.store) == [store_module._v2_key(tenant, handle)]
+    assert shared.store == {}
+    doc = await store.fetch_document(tenant_id=tenant, operator_sub="op-a", handle_id=handle)
+    assert doc is not None and doc.document == {"name": "doc"}
+
+
+async def test_result_cache_metrics_are_aggregate_and_logs_carry_no_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from structlog.testing import capture_logs
+
+    shared, dedicated = _FakeRedis(), _InfoRedis()
+    store = ResultHandleStore(shared, dedicated_client=dedicated, writer_enabled=True)
+    broken = ResultHandleStore(
+        _FakeRedis(),  # type: ignore[arg-type]
+        dedicated_client=_BrokenRedis(),  # type: ignore[arg-type]
+        writer_enabled=True,
+    )
+    secret_rows = [{"name": "row-content-must-not-leak", "value": "sensitive-cell"}]
+    admitted = {"outcome": "admitted", "namespace": "v2"}
+    rejected = {"outcome": "rejected", "namespace": "v2"}
+    before_admitted = _metric("result_cache_records_total", admitted)
+    before_rejected = _metric("result_cache_records_total", rejected)
+    before_v2 = _metric("result_cache_reads_total", {"source": "v2"})
+    before_miss = _metric("result_cache_reads_total", {"source": "miss"})
+
+    spill_kwargs: dict[str, Any] = {
+        "operator_sub": "op-a",
+        "op_id": "vault.kv.list",
+        "rows": secret_rows,
+        "total_rows": 1,
+        "ttl_seconds": 60,
+        "max_rows": 100,
+    }
+    tenant, handle = uuid4(), uuid4()
+    # The module logger is cached after its first use. Give the store a
+    # fresh logger so capture_logs sees its events in any test order.
+    monkeypatch.setattr(store_module, "_log", structlog.get_logger(store_module.__name__))
+    with capture_logs() as logs:
+        assert (
+            await store.spill(tenant_id=tenant, handle_id=handle, **spill_kwargs)
+        ).stored_rows == 1
+        assert (
+            await broken.spill(tenant_id=tenant, handle_id=uuid4(), **spill_kwargs)
+        ).stored_rows == 0
+        await store.fetch_rows(tenant_id=tenant, operator_sub="op-a", handle_id=handle)
+        await store.fetch_rows(tenant_id=tenant, operator_sub="op-a", handle_id=uuid4())
+
+    assert _metric("result_cache_records_total", admitted) == before_admitted + 1
+    assert _metric("result_cache_records_total", rejected) == before_rejected + 1
+    assert _metric("result_cache_reads_total", {"source": "v2"}) == before_v2 + 1
+    assert _metric("result_cache_reads_total", {"source": "miss"}) == before_miss + 1
+    assert _metric("result_cache_memory_bytes", {"kind": "used"}) == 4096
+    assert _metric("result_cache_memory_bytes", {"kind": "max"}) == 805306368
+    rendered = json.dumps(logs, default=str)
+    assert logs
+    assert "row-content-must-not-leak" not in rendered
+    assert "sensitive-cell" not in rendered
+
+
+class _OomRedis(_InfoRedis):
+    """Dedicated client at its ``maxmemory`` ceiling with ``noeviction``.
+
+    Valkey answers every write with an OOM error but still serves reads
+    and ``INFO``.
+    """
+
+    async def set(self, *_a: Any, **_k: Any) -> None:
+        raise redis.exceptions.OutOfMemoryError(
+            "OOM command not allowed when used memory > 'maxmemory'."
+        )
+
+
+class _SharedValkey(_FakeRedis):
+    """Working shared client: result-handle keys, rate-limit counters, streams."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.counters: dict[str, int] = {}
+        self.streams: dict[str, list[dict[str, Any]]] = {}
+
+    def pipeline(self, transaction: bool = True) -> Any:
+        from tests.test_broadcast_announce_rate_limit import _FakePipeline
+
+        return _FakePipeline(self.counters)
+
+    async def xadd(self, name: str, fields: dict[str, Any], **_k: Any) -> str:
+        entries = self.streams.setdefault(name, [])
+        entries.append(fields)
+        return f"1700000000000-{len(entries) - 1}"
+
+
+async def test_full_result_cache_does_not_block_broadcast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A full result cache must not stop broadcast publish or the announce limit.
+
+    The dedicated store refuses the write (``noeviction`` at ``maxmemory``).
+    The spill fails open, and the shared Valkey still takes the
+    rate-limit counter and the announcement.
+    """
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from meho_backplane.broadcast import AgentAnnouncementEvent
+    from meho_backplane.broadcast import publisher as publisher_module
+    from meho_backplane.broadcast.publisher import publish_agent_announcement
+    from meho_backplane.broadcast.rate_limit import enforce_announce_rate_limit
+
+    shared, full = _SharedValkey(), _OomRedis()
+    store = ResultHandleStore(shared, dedicated_client=full, writer_enabled=True)
+    rejected = {"outcome": "rejected", "namespace": "v2"}
+    before_rejected = _metric("result_cache_records_total", rejected)
+    tenant = uuid4()
+
+    stored = await store.spill(
+        tenant_id=tenant,
+        operator_sub="op-a",
+        handle_id=uuid4(),
+        op_id="vault.kv.list",
+        rows=_rows(4),
+        total_rows=4,
+        ttl_seconds=60,
+        max_rows=100,
+    )
+
+    assert stored.stored_rows == 0
+    assert _metric("result_cache_records_total", rejected) == before_rejected + 1
+    assert full.store == {}
+    assert shared.store == {}
+
+    # rate_limit.py and publisher.py import get_broadcast_client by name,
+    # so patch each module's own reference.
+    monkeypatch.setattr("meho_backplane.broadcast.rate_limit.get_broadcast_client", lambda: shared)
+    monkeypatch.setattr(
+        "meho_backplane.broadcast.rate_limit.get_settings",
+        lambda: SimpleNamespace(broadcast_announce_rate_per_minute=10),
+    )
+    monkeypatch.setattr(publisher_module, "get_broadcast_client", lambda: shared)
+    monkeypatch.setattr(publisher_module, "_persist_agent_announcement", AsyncMock())
+
+    await enforce_announce_rate_limit(tenant, "op-a")
+    entry_id = await publish_agent_announcement(
+        AgentAnnouncementEvent(
+            tenant_id=tenant,
+            principal_sub="op-a",
+            activity="investigating",
+            phase="start",
+            ts=datetime.now(UTC),
+        )
+    )
+
+    assert list(shared.counters.values()) == [1]
+    assert entry_id == "1700000000000-0"
+    assert [len(entries) for entries in shared.streams.values()] == [1]
+
+
+async def test_get_result_handle_store_reuses_broadcast_client_when_urls_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset ``RESULT_CACHE_REDIS_URL`` → one shared client, writer gate off."""
+    import meho_backplane.broadcast.client as broadcast_client
+
+    shared = _FakeRedis()
+    monkeypatch.delenv("RESULT_CACHE_REDIS_URL", raising=False)
+    monkeypatch.delenv("RESULT_CACHE_WRITER_ENABLED", raising=False)
+    monkeypatch.setattr(broadcast_client, "get_broadcast_client", lambda: shared)
+    get_settings.cache_clear()
+    store_module.reset_result_handle_store_for_testing()
+    try:
+        store = store_module.get_result_handle_store()
+        assert store._client is shared
+        assert store._dedicated is shared
+        assert store._writer_enabled is False
+    finally:
+        store_module.reset_result_handle_store_for_testing()
+        get_settings.cache_clear()
+
+
+async def test_get_result_handle_store_builds_dedicated_client_and_disposes_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import meho_backplane.broadcast.client as broadcast_client
+
+    shared = _FakeRedis()
+    monkeypatch.setenv("RESULT_CACHE_REDIS_URL", "redis://result-cache.test:6379/0")
+    monkeypatch.setenv("RESULT_CACHE_WRITER_ENABLED", "true")
+    monkeypatch.setattr(broadcast_client, "get_broadcast_client", lambda: shared)
+    get_settings.cache_clear()
+    store_module.reset_result_handle_store_for_testing()
+    try:
+        store = store_module.get_result_handle_store()
+        assert store._client is shared
+        assert store._dedicated is not shared
+        assert store._writer_enabled is True
+        await store_module.dispose_result_handle_store()
+        assert store_module._STORE is None
+    finally:
+        store_module.reset_result_handle_store_for_testing()
+        get_settings.cache_clear()

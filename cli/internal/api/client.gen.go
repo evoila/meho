@@ -1414,9 +1414,10 @@ type ApprovalRequestView struct {
 	//   yet (``resumed_at IS NULL``).
 	// * :attr:`STARTED` -- a resumer claimed the run (``resumed_at`` is set),
 	//   but no result is stored. Either the op is still running, or the run
-	//   ended without a stored result: the in-process agent resume returns
-	//   its result to the agent and does not store it, and the result write is
-	//   best-effort.
+	//   ended without a stored result: the result write is best-effort, and a
+	//   re-dispatch that raised instead of returning an envelope stores
+	//   nothing. Both resume paths (operator surfaces and the in-process
+	//   agent waiter) store the envelope they get back.
 	// * :attr:`EXECUTED` -- the stored result has ``status == "ok"``.
 	// * :attr:`FAILED` -- a result is stored and its ``status`` is not ``ok``.
 	ResultState    *ApprovalResultState `json:"result_state,omitempty"`
@@ -1478,9 +1479,10 @@ type ApprovalRequestView struct {
 //     yet (“resumed_at IS NULL“).
 //   - :attr:`STARTED` -- a resumer claimed the run (“resumed_at“ is set),
 //     but no result is stored. Either the op is still running, or the run
-//     ended without a stored result: the in-process agent resume returns
-//     its result to the agent and does not store it, and the result write is
-//     best-effort.
+//     ended without a stored result: the result write is best-effort, and a
+//     re-dispatch that raised instead of returning an envelope stores
+//     nothing. Both resume paths (operator surfaces and the in-process
+//     agent waiter) store the envelope they get back.
 //   - :attr:`EXECUTED` -- the stored result has “status == "ok"“.
 //   - :attr:`FAILED` -- a result is stored and its “status“ is not “ok“.
 type ApprovalResultState string

@@ -110,8 +110,11 @@ Two artifacts ship in the backend image:
    build time by the **Tailwind 4 standalone CLI binary**. The
    Dockerfile downloads the CLI by URL with a SHA256 check (mirroring
    the `kubeconform` install pattern in
-   [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)),
-   selects the right arch by `$TARGETPLATFORM`, then runs:
+   [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)).
+   The download has a 30-second socket time limit and tries up to five
+   times, so a stalled connection fails the build in minutes instead of
+   hanging until the CI job limit (#4167). The step selects the right
+   arch by `$TARGETPLATFORM`, then runs:
 
    ```bash
    tailwindcss \

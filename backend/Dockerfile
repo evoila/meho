@@ -186,36 +186,68 @@ ARG TAILWIND_SHA_ARM64=8f48dcb72be3b351c10563c5329b4638ba8516820dc3b3a1609625a16
 # either way -- so dropping curl removes one moving part without weakening
 # the supply-chain story. `sha256sum` ships in coreutils, which the slim
 # image already includes.
-RUN set -eux; \
-    case "${TARGETPLATFORM:-linux/amd64}" in \
-      linux/amd64) TW_ARCH=linux-x64; TW_SHA="${TAILWIND_SHA_AMD64}" ;; \
-      linux/arm64) TW_ARCH=linux-arm64; TW_SHA="${TAILWIND_SHA_ARM64}" ;; \
-      *) echo "Unsupported TARGETPLATFORM=${TARGETPLATFORM}" >&2; exit 1 ;; \
-    esac; \
-    python -c "import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])" \
-      "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VER}/tailwindcss-${TW_ARCH}" \
-      /tmp/tailwindcss; \
-    echo "${TW_SHA}  /tmp/tailwindcss" | sha256sum -c -; \
-    install -m 0755 /tmp/tailwindcss /usr/local/bin/tailwindcss; \
-    rm /tmp/tailwindcss; \
-    UI_SP="$(/app/.venv/bin/python -c 'import os, sysconfig; print(os.path.join(sysconfig.get_paths()["purelib"], "meho_backplane", "ui"))')"; \
-    test -f "${UI_SP}/static/src/styles.css"; \
-    mkdir -p "${UI_SP}/static/dist"; \
-    tailwindcss \
-      -i "${UI_SP}/static/src/styles.css" \
-      -o "${UI_SP}/static/dist/tailwind.css" \
-      --minify; \
-    CSS="${UI_SP}/static/dist/tailwind.css"; \
-    test -s "${CSS}"; \
-    CSS_BYTES="$(wc -c < "${CSS}")"; \
-    if [ "${CSS_BYTES}" -lt 61440 ]; then \
-      echo "ERROR: compiled tailwind bundle is only ${CSS_BYTES} B (< 60 KB floor) -- the @source content scan reached (near) no templates and shipped a preflight-only bundle. See evoila/meho#3647." >&2; \
-      exit 1; \
-    fi; \
-    for cls in '\.btn' '\.card' '\.navbar' 'bg-base' 'badge-error'; do \
-      grep -q "${cls}" "${CSS}" \
-        || { echo "ERROR: compiled tailwind bundle is missing selector '${cls}' -- the @source content scan reached no templates. See evoila/meho#3647." >&2; exit 1; }; \
-    done
+#
+# The download has a time limit and retries. A plain `urlretrieve` call has
+# no time limit: when the connection stops sending data, it waits forever,
+# and the image job only ends when GitHub cancels it at its 45-minute limit
+# (#4167 -- nine runs in two days, each stalled on this one download while
+# the other platform's copy finished in seconds). The `timeout=` below is a
+# socket time limit, so it fires both on a slow connect and on a read that
+# stops receiving data. Five tries with a short growing pause bound the
+# worst case to a few minutes; after the last failed try the build stops
+# with a clear error instead of hanging.
+#
+# This step is a Dockerfile heredoc (not a `\`-continued one-liner) only so
+# the Python download script can be written as a plain multi-line script.
+RUN <<'EOF'
+set -eux
+case "${TARGETPLATFORM:-linux/amd64}" in
+  linux/amd64) TW_ARCH=linux-x64; TW_SHA="${TAILWIND_SHA_AMD64}" ;;
+  linux/arm64) TW_ARCH=linux-arm64; TW_SHA="${TAILWIND_SHA_ARM64}" ;;
+  *) echo "Unsupported TARGETPLATFORM=${TARGETPLATFORM}" >&2; exit 1 ;;
+esac
+python - "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VER}/tailwindcss-${TW_ARCH}" /tmp/tailwindcss <<'PY'
+import shutil
+import sys
+import time
+import urllib.request
+from http.client import HTTPException
+
+url, dest = sys.argv[1], sys.argv[2]
+attempts = 5
+for attempt in range(1, attempts + 1):
+    try:
+        with urllib.request.urlopen(url, timeout=30) as resp, open(dest, "wb") as out:
+            shutil.copyfileobj(resp, out)
+        break
+    except (OSError, HTTPException) as exc:
+        print(f"tailwind download try {attempt}/{attempts} failed: {exc!r}", file=sys.stderr)
+        if attempt == attempts:
+            sys.exit(1)
+        time.sleep(5 * attempt)
+PY
+echo "${TW_SHA}  /tmp/tailwindcss" | sha256sum -c -
+install -m 0755 /tmp/tailwindcss /usr/local/bin/tailwindcss
+rm /tmp/tailwindcss
+UI_SP="$(/app/.venv/bin/python -c 'import os, sysconfig; print(os.path.join(sysconfig.get_paths()["purelib"], "meho_backplane", "ui"))')"
+test -f "${UI_SP}/static/src/styles.css"
+mkdir -p "${UI_SP}/static/dist"
+tailwindcss \
+  -i "${UI_SP}/static/src/styles.css" \
+  -o "${UI_SP}/static/dist/tailwind.css" \
+  --minify
+CSS="${UI_SP}/static/dist/tailwind.css"
+test -s "${CSS}"
+CSS_BYTES="$(wc -c < "${CSS}")"
+if [ "${CSS_BYTES}" -lt 61440 ]; then
+  echo "ERROR: compiled tailwind bundle is only ${CSS_BYTES} B (< 60 KB floor) -- the @source content scan reached (near) no templates and shipped a preflight-only bundle. See evoila/meho#3647." >&2
+  exit 1
+fi
+for cls in '\.btn' '\.card' '\.navbar' 'bg-base' 'badge-error'; do
+  grep -q "${cls}" "${CSS}" \
+    || { echo "ERROR: compiled tailwind bundle is missing selector '${cls}' -- the @source content scan reached no templates. See evoila/meho#3647." >&2; exit 1; }
+done
+EOF
 
 # ---------- Runtime ----------------------------------------------------------
 FROM python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015 AS runtime

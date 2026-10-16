@@ -15,6 +15,8 @@ table:
   (:mod:`meho_backplane.api.v1.service_grants`) dispatches through. Create
   IS the review (``reason`` required, deny-by-default absent a match, no
   wildcards, delete-shaped ops refused), list, and revoke (soft-delete).
+  Every read flags **orphaned** grants (#3430): a concrete ``target_id``
+  that no longer points at a live target (:func:`classify_orphaned_grants`).
 
 * **Enforcement** — :func:`consult_and_record_grant`, called by the
   non-agent policy gate
@@ -49,9 +51,11 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from fnmatch import fnmatchcase
+from glob import escape as glob_escape
 from typing import Any
 
 import structlog
@@ -66,12 +70,14 @@ from meho_backplane.db.models import (
     AuditLog,
     EndpointDescriptor,
     ServicePrincipalGrant,
+    Target,
 )
 from meho_backplane.operations.service_grant_schemas import ServiceGrantCreate, ServiceGrantRead
 
 __all__ = [
     "GrantValidationError",
     "ServicePrincipalGrantService",
+    "classify_orphaned_grants",
     "consult_and_record_grant",
     "count_live_grants_for_principal",
     "delete_shaped_refusal_reason",
@@ -276,6 +282,103 @@ async def _resolve_descriptor_for_classification(
 
 
 # ---------------------------------------------------------------------------
+# Orphaned-grant classification (read time, #3430)
+# ---------------------------------------------------------------------------
+
+
+def _orphan_remediation(target_id: uuid.UUID, old_name: str | None) -> str:
+    """Plain-language fix for a grant whose concrete target is gone.
+
+    ``target_name_pattern`` is an ``fnmatchcase`` glob, and target names may
+    hold ``*``, ``?`` or ``[``. The suggested pattern escapes them so it
+    matches the old name literally, not a different target.
+    """
+    example = (
+        f"target_name_pattern={glob_escape(old_name)!r}"
+        if old_name
+        else "target_name_pattern or target_product"
+    )
+    return (
+        f"Target {target_id} no longer exists: it was deleted, or registered "
+        "again under a new id. This grant can never match, so the op waits for "
+        "approval. To fix it, create a new grant with a target selector (for "
+        f"example {example}), which matches by name or product and survives a "
+        "new registration. Then revoke this grant."
+    )
+
+
+async def classify_orphaned_grants(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    entries: Sequence[ServiceGrantRead],
+) -> list[ServiceGrantRead]:
+    """Flag grants whose concrete ``target_id`` no longer resolves (#3430).
+
+    A grant is **orphaned** when it is not revoked, carries a concrete
+    ``target_id``, and no live (``deleted_at IS NULL``) target with that id
+    exists in the tenant. That happens when the target was deleted, or when
+    it was registered again: the new registration gets a new id, so the old
+    grant never matches again (:func:`find_live_grant` matches ``target_id``
+    exactly).
+
+    This is a read-time check only. It never revokes or changes a grant;
+    cleanup stays an operator decision. Selector and targetless grants are
+    never orphaned (they do not point at one target id). One query finds the
+    live targets; a second, only when something is orphaned, reads the old
+    target names (soft-deleted rows keep them) for the remediation hint.
+    """
+    candidate_ids = {
+        entry.target_id
+        for entry in entries
+        if entry.target_id is not None and entry.revoked_at is None
+    }
+    if not candidate_ids:
+        return list(entries)
+
+    live_ids = set(
+        (
+            await session.execute(
+                select(Target.id).where(
+                    Target.tenant_id == tenant_id,
+                    Target.id.in_(candidate_ids),
+                    Target.deleted_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    missing_ids = candidate_ids - live_ids
+    if not missing_ids:
+        return list(entries)
+
+    old_names: dict[uuid.UUID, str] = {
+        row.id: row.name
+        for row in (
+            await session.execute(
+                select(Target.id, Target.name).where(
+                    Target.tenant_id == tenant_id,
+                    Target.id.in_(missing_ids),
+                )
+            )
+        ).all()
+    }
+    classified: list[ServiceGrantRead] = []
+    for entry in entries:
+        if entry.target_id in missing_ids and entry.revoked_at is None:
+            entry = entry.model_copy(
+                update={
+                    "orphaned": True,
+                    "orphan_remediation": _orphan_remediation(
+                        entry.target_id, old_names.get(entry.target_id)
+                    ),
+                }
+            )
+        classified.append(entry)
+    return classified
+
+
+# ---------------------------------------------------------------------------
 # CRUD service (operator-only REST surface)
 # ---------------------------------------------------------------------------
 
@@ -360,6 +463,7 @@ class ServicePrincipalGrantService:
             await session.refresh(row)
             entry = ServiceGrantRead.model_validate(row)
             await session.commit()
+            (entry,) = await classify_orphaned_grants(session, tenant_id, [entry])
 
         self._log.info(
             "service_grant_created",
@@ -479,9 +583,12 @@ class ServicePrincipalGrantService:
                 )
             )
             row = result.scalar_one_or_none()
-        if row is None:
-            return None
-        return ServiceGrantRead.model_validate(row)
+            if row is None:
+                return None
+            (entry,) = await classify_orphaned_grants(
+                session, tenant_id, [ServiceGrantRead.model_validate(row)]
+            )
+        return entry
 
     async def list_(
         self,
@@ -499,6 +606,8 @@ class ServicePrincipalGrantService:
         ``True`` returns the full history (revoked rows included).
         ``include_expired=True`` preserves the historic list behavior;
         ``False`` returns only rows that have not reached their expiry.
+        Each entry carries the read-time ``orphaned`` flag (#3430, see
+        :func:`classify_orphaned_grants`).
         """
         if limit < 0:
             raise ValueError(f"limit must be >= 0; got {limit}")
@@ -530,7 +639,9 @@ class ServicePrincipalGrantService:
                 )
             result = await session.execute(stmt)
             rows = result.scalars().all()
-        return [ServiceGrantRead.model_validate(row) for row in rows]
+            return await classify_orphaned_grants(
+                session, tenant_id, [ServiceGrantRead.model_validate(row) for row in rows]
+            )
 
 
 # ---------------------------------------------------------------------------

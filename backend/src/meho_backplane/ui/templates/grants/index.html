@@ -61,7 +61,7 @@
               <td class="max-w-sm break-all font-mono text-xs">{{ grant.op }}</td>
               <td class="max-w-xs break-all font-mono text-xs">{{ grant.connector }}</td>
               <td class="max-w-xs break-all text-xs">{{ grant.target }}</td>
-              <td><span class="badge badge-sm {% if grant.effect in ('revoked', 'expired') %}badge-error{% else %}badge-success{% endif %}">{{ grant.effect }}</span></td>
+              <td><span class="badge badge-sm {% if grant.effect in ('revoked', 'expired') %}badge-error{% elif grant.effect == 'orphaned' %}badge-warning{% else %}badge-success{% endif %}">{{ grant.effect }}</span>{% if grant.remediation %}<p class="mt-1 max-w-xs text-xs" data-grant-remediation>{{ grant.remediation }}</p>{% endif %}</td>
               <td class="whitespace-nowrap text-xs">{{ grant.expires_at or "permanent" }}</td>
               <td class="max-w-xs break-all text-xs">{{ grant.created_by }}</td>
               {% if can_write %}

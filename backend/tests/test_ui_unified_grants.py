@@ -373,3 +373,41 @@ def test_independent_offsets_filter_and_limit_are_enforced() -> None:
     assert "principal=shared" in page.text
     assert "limit=1" in page.text
     assert invalid_limit.status_code == 422
+
+
+def test_console_marks_orphaned_service_grant_with_remediation() -> None:
+    """A service grant on a deleted target shows as orphaned with the fix (#3430)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    target_id = _seed_target(_TENANT_A, "rebuilt-appliance")
+    grant_id = uuid.uuid4()
+
+    async def _do() -> None:
+        async with get_sessionmaker()() as session, session.begin():
+            target = await session.get(Target, target_id)
+            assert target is not None
+            target.deleted_at = datetime.now(UTC)
+            session.add(
+                ServicePrincipalGrant(
+                    id=grant_id,
+                    tenant_id=_TENANT_A,
+                    principal_sub="service:rebuild",
+                    op_id="POST:/vcenter/vm?action=start",
+                    connector_id="vmware-rest-9.0",
+                    target_id=target_id,
+                    reason="old incarnation",
+                    created_by_sub=_OP_A,
+                )
+            )
+
+    asyncio.run(_do())
+    client, mock, _ = _admin_client()
+    try:
+        response = client.get("/ui/grants")
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    row = response.text.split(f'data-grant-id="{grant_id}"', 1)[1].split("</tr>", 1)[0]
+    assert "badge-warning" in row
+    assert "orphaned" in row
+    assert "data-grant-remediation" in row
+    assert "target_name_pattern=&#39;rebuilt-appliance&#39;" in row

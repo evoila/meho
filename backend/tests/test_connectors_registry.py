@@ -400,6 +400,10 @@ def test_lifespan_calls_eager_import_connectors() -> None:
                     # hits the real get_settings() -> KeyError on
                     # KEYCLOAK_ISSUER_URL (this test pins no env).
                     raw_payload_prune_enabled=False,
+                    # #3734 request usage prune starts when retention is set
+                    # (not None). A bare MagicMock attribute is not None, so
+                    # pin it to None (collection off) for the same reason.
+                    request_usage_retention_days=None,
                 ),
             ),
             patch("meho_backplane.main.start_memory_expiry_sweeper"),
@@ -574,6 +578,10 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
                     # hits the real get_settings() -> KeyError on
                     # KEYCLOAK_ISSUER_URL (this test pins no env).
                     raw_payload_prune_enabled=False,
+                    # #3734 request usage prune starts when retention is set
+                    # (not None). A bare MagicMock attribute is not None, so
+                    # pin it to None (collection off) for the same reason.
+                    request_usage_retention_days=None,
                 ),
             ),
             patch("meho_backplane.main.start_memory_expiry_sweeper"),

@@ -112,8 +112,16 @@ _current_boundary: ContextVar[_BoundaryState | None] = ContextVar(
 
 
 def collection_enabled() -> bool:
-    """Return whether request usage collection is on (retention is set)."""
-    return get_settings().request_usage_retention_days is not None
+    """Return whether request usage collection is on (retention is set).
+
+    Settings that cannot load count as "off": usage collection must never
+    be the reason a request fails (for example a public route served
+    before the rest of the configuration is valid).
+    """
+    try:
+        return get_settings().request_usage_retention_days is not None
+    except Exception:
+        return False
 
 
 def note_request_route(route: str) -> None:

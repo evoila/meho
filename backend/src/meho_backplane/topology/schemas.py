@@ -28,12 +28,23 @@ from __future__ import annotations
 
 from datetime import datetime
 from types import MappingProxyType
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    computed_field,
+    field_serializer,
+    model_validator,
+)
+
+from meho_backplane.db.models import SOURCE_SCOPE_GLOBAL, SOURCE_SCOPE_PATTERN
 
 __all__ = [
+    "ScopeStatus",
     "TopologyDiffEntry",
     "TopologyDiffResult",
     "TopologyEdge",
@@ -45,6 +56,14 @@ __all__ = [
     "TopologyTimelineEntry",
     "TopologyTimelineResult",
 ]
+
+
+#: How sure MEHO is about where a node's name is unique (#3739):
+#: ``global`` (tenant-wide), ``target`` (one target), ``legacy`` (a
+#: pre-migration row kept apart) or ``unresolved`` (no scope recorded --
+#: the row predates source-qualified identity and MEHO does not know
+#: which source it belongs to).
+ScopeStatus = Literal["global", "target", "legacy", "unresolved"]
 
 
 def _deep_freeze(value: Any) -> Any:
@@ -97,6 +116,13 @@ class TopologyNode(BaseModel):
     every ``parent_node_id`` in a closure result is itself a row of
     that result. Additive with ``None`` defaults so pre-#2538
     constructors and payloads stay valid.
+
+    ``source_scope`` (#3739) is the stored ``graph_node.source_scope``:
+    ``global``, ``target:<uuid>``, ``legacy:<uuid>`` or ``None``.
+    ``scope_status`` is derived from it. ``unresolved`` means the row
+    has no scope yet and the reader does not know which source the
+    name belongs to; it never falls back to the last target that saw
+    the row.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -110,6 +136,19 @@ class TopologyNode(BaseModel):
     via_edge_kind: str | None
     parent_node_id: UUID | None = None
     via_edge_id: UUID | None = None
+    source_scope: Annotated[str, StringConstraints(pattern=SOURCE_SCOPE_PATTERN)] | None = None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def scope_status(self) -> ScopeStatus:
+        """Where the name is unique, or ``unresolved`` when not recorded."""
+        if self.source_scope is None:
+            return "unresolved"
+        if self.source_scope == SOURCE_SCOPE_GLOBAL:
+            return "global"
+        if self.source_scope.startswith("target:"):
+            return "target"
+        return "legacy"
 
     @model_validator(mode="after")
     def _freeze_properties(self) -> TopologyNode:

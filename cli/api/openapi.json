@@ -35256,6 +35256,24 @@
             "format": "uuid",
             "nullable": true,
             "title": "Via Edge Id"
+          },
+          "source_scope": {
+            "type": "string",
+            "pattern": "^(?:global|(?:target|legacy):[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",
+            "nullable": true,
+            "title": "Source Scope"
+          },
+          "scope_status": {
+            "type": "string",
+            "enum": [
+              "global",
+              "target",
+              "legacy",
+              "unresolved"
+            ],
+            "title": "Scope Status",
+            "description": "Where the name is unique, or ``unresolved`` when not recorded.",
+            "readOnly": true
           }
         },
         "type": "object",
@@ -35265,10 +35283,11 @@
           "name",
           "source",
           "depth",
-          "via_edge_kind"
+          "via_edge_kind",
+          "scope_status"
         ],
         "title": "TopologyNode",
-        "description": "One ``graph_node`` row reached during a traversal.\n\n``depth`` is the distance from the query root: the root itself is\ndepth ``0``, its immediate dependents/dependencies are depth ``1``,\ntransitive ones depth ``2``, and so on. ``via_edge_kind`` is the\n``graph_edge.kind`` of the edge used to reach this node, or\n``None`` for the root (which is reached by no edge). ``source``\nis ``'auto'`` (probe-derived) or ``'curated'`` (operator-seeded /\npromoted; #2536) \u2014 mirrors :attr:`TopologyEdge.source`.\n\n``parent_node_id`` / ``via_edge_id`` (#2538) are the chain\nprovenance: the ``graph_node.id`` the walk stepped from and the\n``graph_edge.id`` it walked to reach this node, both ``None`` on\nthe root row. They let a caller reconstruct the exact dependency\nchain from the flat closure list without follow-up edge lookups \u2014\nevery ``parent_node_id`` in a closure result is itself a row of\nthat result. Additive with ``None`` defaults so pre-#2538\nconstructors and payloads stay valid."
+        "description": "One ``graph_node`` row reached during a traversal.\n\n``depth`` is the distance from the query root: the root itself is\ndepth ``0``, its immediate dependents/dependencies are depth ``1``,\ntransitive ones depth ``2``, and so on. ``via_edge_kind`` is the\n``graph_edge.kind`` of the edge used to reach this node, or\n``None`` for the root (which is reached by no edge). ``source``\nis ``'auto'`` (probe-derived) or ``'curated'`` (operator-seeded /\npromoted; #2536) \u2014 mirrors :attr:`TopologyEdge.source`.\n\n``parent_node_id`` / ``via_edge_id`` (#2538) are the chain\nprovenance: the ``graph_node.id`` the walk stepped from and the\n``graph_edge.id`` it walked to reach this node, both ``None`` on\nthe root row. They let a caller reconstruct the exact dependency\nchain from the flat closure list without follow-up edge lookups \u2014\nevery ``parent_node_id`` in a closure result is itself a row of\nthat result. Additive with ``None`` defaults so pre-#2538\nconstructors and payloads stay valid.\n\n``source_scope`` (#3739) is the stored ``graph_node.source_scope``:\n``global``, ``target:<uuid>``, ``legacy:<uuid>`` or ``None``.\n``scope_status`` is derived from it. ``unresolved`` means the row\nhas no scope yet and the reader does not know which source the\nname belongs to; it never falls back to the last target that saw\nthe row."
       },
       "TopologyPath": {
         "properties": {

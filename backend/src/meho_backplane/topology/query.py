@@ -196,9 +196,9 @@ def _row_to_node(row: Row[Any]) -> TopologyNode:
     """Map a traversal result row to a :class:`TopologyNode`.
 
     The recursive CTE projects exactly ``id, kind, name, source,
-    properties, depth, via_edge_kind, parent_node_id, via_edge_id``;
-    ``is_cycle`` / ``path`` are CYCLE-clause bookkeeping filtered out
-    in SQL and never selected into the row. ``properties`` arrives as
+    source_scope, properties, depth, via_edge_kind, parent_node_id,
+    via_edge_id``; ``is_cycle`` / ``path`` are CYCLE-clause bookkeeping
+    filtered out in SQL and never selected into the row. ``properties`` arrives as
     a ``dict`` from JSONB on asyncpg (or a JSON string on the rare
     passthrough); the model's validator freezes it.
     """
@@ -208,6 +208,7 @@ def _row_to_node(row: Row[Any]) -> TopologyNode:
         kind=mapping["kind"],
         name=mapping["name"],
         source=mapping["source"],
+        source_scope=mapping["source_scope"],
         properties=mapping["properties"] or {},
         depth=mapping["depth"],
         via_edge_kind=mapping["via_edge_kind"],
@@ -261,6 +262,7 @@ _TRAVERSAL_SQL_REVERSE = text(
             n.kind          AS kind,
             n.name          AS name,
             n.source        AS source,
+            n.source_scope  AS source_scope,
             n.properties    AS properties,
             0               AS depth,
             CAST(NULL AS text) AS via_edge_kind,
@@ -276,6 +278,7 @@ _TRAVERSAL_SQL_REVERSE = text(
             n.kind,
             n.name,
             n.source,
+            n.source_scope,
             n.properties,
             w.depth + 1,
             e.kind,
@@ -294,12 +297,12 @@ _TRAVERSAL_SQL_REVERSE = text(
               OR (n.last_seen IS NOT NULL AND e.last_seen IS NOT NULL)
           )
     ) CYCLE id SET is_cycle USING path
-    SELECT id, kind, name, source, properties, depth, via_edge_kind,
-           parent_node_id, via_edge_id
+    SELECT id, kind, name, source, source_scope, properties, depth,
+           via_edge_kind, parent_node_id, via_edge_id
     FROM (
         SELECT DISTINCT ON (id)
-            id, kind, name, source, properties, depth, via_edge_kind,
-            parent_node_id, via_edge_id
+            id, kind, name, source, source_scope, properties, depth,
+            via_edge_kind, parent_node_id, via_edge_id
         FROM walk
         WHERE depth <= :depth
           AND NOT is_cycle
@@ -323,6 +326,7 @@ _TRAVERSAL_SQL_FORWARD = text(
             n.kind          AS kind,
             n.name          AS name,
             n.source        AS source,
+            n.source_scope  AS source_scope,
             n.properties    AS properties,
             0               AS depth,
             CAST(NULL AS text) AS via_edge_kind,
@@ -338,6 +342,7 @@ _TRAVERSAL_SQL_FORWARD = text(
             n.kind,
             n.name,
             n.source,
+            n.source_scope,
             n.properties,
             w.depth + 1,
             e.kind,
@@ -356,12 +361,12 @@ _TRAVERSAL_SQL_FORWARD = text(
               OR (n.last_seen IS NOT NULL AND e.last_seen IS NOT NULL)
           )
     ) CYCLE id SET is_cycle USING path
-    SELECT id, kind, name, source, properties, depth, via_edge_kind,
-           parent_node_id, via_edge_id
+    SELECT id, kind, name, source, source_scope, properties, depth,
+           via_edge_kind, parent_node_id, via_edge_id
     FROM (
         SELECT DISTINCT ON (id)
-            id, kind, name, source, properties, depth, via_edge_kind,
-            parent_node_id, via_edge_id
+            id, kind, name, source, source_scope, properties, depth,
+            via_edge_kind, parent_node_id, via_edge_id
         FROM walk
         WHERE depth <= :depth
           AND NOT is_cycle
@@ -700,7 +705,7 @@ _PATH_SQL = text(
 # sequence.
 _PATH_NODES_SQL = text(
     """
-    SELECT id, kind, name, source, properties
+    SELECT id, kind, name, source, source_scope, properties
     FROM graph_node
     WHERE tenant_id = :tenant_id
       AND id = ANY(:node_ids)
@@ -733,6 +738,7 @@ def _build_path_nodes(
                 kind=m["kind"],
                 name=m["name"],
                 source=m["source"],
+                source_scope=m["source_scope"],
                 properties=m["properties"] or {},
                 depth=position,
                 via_edge_kind=None if position == 0 else edge_kinds[position - 1],

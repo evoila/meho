@@ -1107,3 +1107,50 @@ async def test_auto_node_reconcile_unchanged_by_source_column() -> None:
     assert vm_a.source == "auto"
     assert vm_a.target_id == target.id, "auto nodes are still adopted"
     assert vm_a.properties == {"power": "on"}, "auto nodes still take probe properties"
+
+
+# ---------------------------------------------------------------------------
+# Source scope expand step (#3739)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_expand_step_refresh_writes_no_source_scope() -> None:
+    """Refresh stays a legacy writer until the staged cut-over.
+
+    New rows land with ``source_scope`` NULL (unresolved), even though
+    refresh knows which target saw them: ``target_id`` is not a scope.
+    A row that already has a scope (the ``0105`` ``global`` backfill)
+    keeps it and its provenance through an adopting refresh.
+    """
+    _register_fake()
+    tenant_id, target = await _seed_tenant_and_target()
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        session.add(
+            GraphNode(
+                id=uuid.uuid4(),
+                tenant_id=tenant_id,
+                kind="vm",
+                name="vm-b",
+                target_id=None,
+                properties={},
+                discovered_by="faketopo",
+                source_scope="global",
+                source_scope_provenance="migration:0105",
+            )
+        )
+        await session.commit()
+
+    _FakeConnector.hints = _hints_3n2e()
+    with patch(_PUBLISH, new=AsyncMock()):
+        await refresh_target_topology(target, _operator(tenant_id))
+
+    vm_a = await _load_node(tenant_id, "vm-a")
+    assert vm_a.target_id == target.id
+    assert vm_a.source_scope is None
+    assert vm_a.source_scope_provenance is None
+    vm_b = await _load_node(tenant_id, "vm-b")
+    assert vm_b.target_id == target.id, "the auto row is still adopted"
+    assert vm_b.source_scope == "global"
+    assert vm_b.source_scope_provenance == "migration:0105"

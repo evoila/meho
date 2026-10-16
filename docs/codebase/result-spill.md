@@ -133,7 +133,8 @@ output is capped at `RESULT_QUERY_MAX_OUTPUT_BYTES` (default 256 KB)
 **after** the row cap, with an actionable over-budget error; and the whole
 read runs under a `RESULT_QUERY_TIMEOUT_SECONDS` (default 10) wall-time
 budget. The budget covers the store fetch and the worker job (decode of
-the stored record, catalog, compile, register, `SELECT`, encode). On
+the stored record, catalog, compile, register, `SELECT`, encode, and the
+wire-size check on the finished response). On
 expiry the core calls `conn.interrupt()` and returns a recoverable timeout
 error at once. Paging and `path` reads run under the same budget; their
 timeout error names the way out for that surface (a smaller `limit`, or a
@@ -187,8 +188,10 @@ dedicated pool (`thread_name_prefix=result-read`), not on the event loop's
 default pool: decoding the record and checking its owner
 (`decode_window` / `decode_rows` / `decode_document`), then the shaping
 for that path (a page slice and its size check; the query pipeline; a
-JSON Pointer resolve). So a large record cannot block the loop while it
-decodes, and the deadline above bounds the decode too. The app lifespan
+JSON Pointer resolve), and last the terminal wire check (#3641) on the
+finished response, which encodes it again. So a large record cannot block
+the loop while it decodes or while its response is measured, and the
+deadline above bounds both. The app lifespan
 sizes the pool from settings at startup and stops it at shutdown; until
 then (unit tests that call the cores directly) the `Settings` field
 defaults apply.

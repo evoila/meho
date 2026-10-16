@@ -46,11 +46,12 @@ before it touches the store, so a read that is over the rate cap or finds
 every worker slot busy is refused with a recoverable
 :class:`ResultReadRejectedError` and no Valkey ``GET`` is made. The ``GET``
 then runs on the event loop and everything after it — decoding the record,
-the operator check, and the CPU-heavy shaping (for a query: catalog,
-compile, register, ``SELECT``, encode) — runs as one job on the dedicated
-worker pool. One deadline (``result_query_timeout_seconds``) covers the
-``GET`` and the job, so no step can hold the event loop or a worker slot
-past the budget without the caller hearing about it.
+the operator check, the CPU-heavy shaping (for a query: catalog, compile,
+register, ``SELECT``, encode), and the wire-size check on the finished
+response — runs as one job on the dedicated worker pool. One deadline
+(``result_query_timeout_seconds``) covers the ``GET`` and the job, so no
+step can hold the event loop or a worker slot past the budget without the
+caller hearing about it.
 """
 
 from __future__ import annotations
@@ -222,9 +223,10 @@ class ResultQueryTimeoutError(Exception):
     """A result read exceeded its wall-time budget.
 
     The ``result_query_timeout_seconds`` budget covers the whole read on
-    every path (paging, query, ``path``): the store fetch, the decode, and
-    the shaping steps on the worker thread (for a query: catalog, compile,
-    ``SELECT``, encode). DuckDB has no native Python query timeout, so on
+    every path (paging, query, ``path``): the store fetch, the decode, the
+    shaping steps on the worker thread (for a query: catalog, compile,
+    ``SELECT``, encode), and the wire-size check on the finished response.
+    DuckDB has no native Python query timeout, so on
     expiry the core calls ``conn.interrupt()``; a worker that is still busy
     keeps its slot until it finishes, but the caller gets this error at
     once. Recoverable: the remediation names the way out for the caller's
@@ -444,7 +446,8 @@ async def _run_admitted_read[T](
     The order is fixed: admission first (no store access on a refusal),
     then the Valkey ``GET`` on the event loop, then ``work(raw, guard)`` as
     one job on the dedicated worker pool. *work* decodes the record (the
-    operator check included) and shapes the answer; it calls
+    operator check included), shapes the answer, and checks its wire size;
+    it calls
     ``guard.check()`` between its steps so an abandoned job stops early.
     ``result_query_timeout_seconds`` covers the ``GET`` and the job
     together. On expiry — or when the caller is cancelled — the job is
@@ -516,9 +519,7 @@ async def run_result_query(
     max_output_rows = settings.result_query_max_output_rows
     max_bytes = settings.result_query_max_output_bytes
 
-    def work(
-        raw: bytes, guard: _WorkerGuard
-    ) -> tuple[SpilledRowSet, list[dict[str, Any]], bool, int]:
+    def work(raw: bytes, guard: _WorkerGuard) -> dict[str, Any]:
         row_set = store.decode_rows(raw, operator_sub=operator.sub, handle_id=handle_id)
         if row_set is None:
             raise ResultHandleNotFoundError(handle_id)
@@ -533,12 +534,24 @@ async def run_result_query(
         if len(encoded_rows) > max_bytes:
             raise ResultQueryOutputTooLargeError(handle_id, len(encoded_rows), max_bytes)
         json_safe_rows: list[dict[str, Any]] = msgspec.json.decode(encoded_rows)
-        return row_set, json_safe_rows, truncated, effective_limit
+        guard.check()
+        payload = _query_payload(handle_id, row_set, json_safe_rows, truncated, effective_limit)
+        # The wire check encodes the whole response again, so it is worker
+        # work under the same deadline, like the paging and ``path`` reads.
+        _check_wire_ceiling(payload, handle_id, ResultQueryOutputTooLargeError.QUERY_REMEDIATION)
+        return payload
 
-    row_set, json_safe_rows, truncated, effective_limit = await _run_admitted_read(
-        operator, handle_id, store, work
-    )
+    return await _run_admitted_read(operator, handle_id, store, work)
 
+
+def _query_payload(
+    handle_id: UUID,
+    row_set: SpilledRowSet,
+    rows: list[dict[str, Any]],
+    truncated: bool,
+    effective_limit: int,
+) -> dict[str, Any]:
+    """Shape the query response with its coverage metadata (worker thread)."""
     partial = row_set.stored_rows < row_set.total_rows
     coverage_note = (
         (
@@ -549,21 +562,18 @@ async def run_result_query(
         if partial
         else None
     )
-
-    payload = {
+    return {
         "handle_id": str(handle_id),
-        "rows": json_safe_rows,
+        "rows": rows,
         "offset": 0,
         "limit": effective_limit,
-        "returned_rows": len(json_safe_rows),
+        "returned_rows": len(rows),
         "total_rows": row_set.total_rows,
         "stored_rows": row_set.stored_rows,
         "truncated": truncated,
         "coverage": "partial" if partial else "complete",
         "coverage_note": coverage_note,
     }
-    _check_wire_ceiling(payload, handle_id, ResultQueryOutputTooLargeError.QUERY_REMEDIATION)
-    return payload
 
 
 #: Remediation for an over-budget or timed-out ``path`` read.

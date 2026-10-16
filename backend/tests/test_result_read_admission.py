@@ -15,6 +15,8 @@ mapping on the MCP tool and the REST route. What these tests pin:
   ``path``), not only the ``SELECT``
 * the record decode runs on the worker pool: a slow decode leaves the
   event loop free and keeps its slot until it finishes
+* the response build and its wire-size check run on the worker pool too,
+  under the same deadline
 * a worker that outlives its request keeps its slot until it finishes
 * a lease nobody renews is reclaimed by its TTL; owner tokens stop a stale
   release from freeing a newer lease
@@ -402,6 +404,80 @@ async def test_timed_out_decode_returns_at_once_and_drains_later(
     release.set()
     await _wait_until(lambda: _state().gate.in_use == 0)
     assert _state().leases.count(_TENANT) == 0
+
+
+def _blocking_wire_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[threading.Event, threading.Event]:
+    """Make the first wire-size measurement block until *release* is set.
+
+    Only the first call blocks, so a probe read on another path can go
+    through while the first read's response is still being measured.
+    """
+    started, release = threading.Event(), threading.Event()
+    real = rq.measure_delivered_wire_bytes
+
+    def _blocked(result: Any, **kwargs: Any) -> int:
+        if not started.is_set():
+            started.set()
+            release.wait(10)
+        return real(result, **kwargs)
+
+    monkeypatch.setattr(rq, "measure_delivered_wire_bytes", _blocked)
+    return started, release
+
+
+@pytest.mark.parametrize("path", list(_READS), ids=list(_READS))
+async def test_slow_wire_check_runs_off_the_loop_and_keeps_its_slot(
+    monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    """The response build and its wire check are worker work on every path.
+
+    The wire check encodes the whole response again. While it blocks, the
+    event loop still runs (a read on another path completes at once), the
+    slot and the tenant lease stay held, and a cancelled request leaves
+    them held until the check finishes.
+    """
+    store = _store()
+    _install(monkeypatch, store)
+    handle_id = uuid.uuid4()
+    _seed_for(store, path, handle_id)
+    started, release = _blocking_wire_check(monkeypatch)
+
+    task = asyncio.create_task(_READS[path](_operator(), handle_id))
+    await _wait_until(started.is_set)
+    probe = "query" if path == "paging" else "paging"
+    async with asyncio.timeout(5):
+        await _READS[probe](_operator(tenant_id=_OTHER_TENANT), uuid.uuid4())
+    assert _state().gate.in_use == 1
+    assert _state().leases.count(_TENANT) == 1
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert _state().gate.in_use == 1
+    assert _state().leases.count(_TENANT) == 1
+
+    release.set()
+    await _wait_until(lambda: _state().gate.in_use == 0)
+    assert _state().leases.count(_TENANT) == 0
+
+
+async def test_timed_out_wire_check_returns_at_once_and_drains_later(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A query whose wire check runs past the budget is a timeout, not a hang."""
+    _install(monkeypatch, _store(), timeout=1)
+    _, release = _blocking_wire_check(monkeypatch)
+    async with asyncio.timeout(5):
+        with pytest.raises(rq.ResultQueryTimeoutError):
+            await rq.run_result_query(_operator(), uuid.uuid4(), ResultQuerySpec())
+    assert _state().gate.in_use == 1
+    assert _state().leases.count(_TENANT) == 1
+
+    release.set()
+    await _wait_until(lambda: _state().leases.count(_TENANT) == 0)
+    assert _state().gate.in_use == 0
 
 
 # ---------------------------------------------------------------------------

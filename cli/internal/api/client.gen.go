@@ -1374,9 +1374,17 @@ type ApprovalRequestStatus string
 
 // ApprovalRequestView Read-only view of an :class:`~meho_backplane.db.models.ApprovalRequest`.
 type ApprovalRequestView struct {
-	ConnectorId    string                 `json:"connector_id"`
-	CreatedAt      string                 `json:"created_at"`
-	DecidedAt      *string                `json:"decided_at"`
+	ConnectorId string  `json:"connector_id"`
+	CreatedAt   string  `json:"created_at"`
+	DecidedAt   *string `json:"decided_at"`
+
+	// Delegation Who told the approver to decide, read off the decision audit row (#3692).
+	//
+	// Present only when the decision ``reason`` ended with the
+	// ``Instructed-by:`` / ``Instruction:`` / ``Refs:`` trailer block. The
+	// approver is still ``reviewed_by``; ``instructed_by`` is the other human
+	// whose written instruction they acted on.
+	Delegation     *DelegationView        `json:"delegation,omitempty"`
 	ExpiresAt      *string                `json:"expires_at"`
 	Id             openapi_types.UUID     `json:"id"`
 	OpId           string                 `json:"op_id"`
@@ -1486,7 +1494,7 @@ type ApproveRequestBody struct {
 	// Params The original dispatch params, unchanged. The hash must match the stored params_hash on the approval request.
 	Params *map[string]interface{} `json:"params,omitempty"`
 
-	// Reason Optional human-readable approval reason (recorded in the audit row).
+	// Reason Optional human-readable approval reason (recorded in the audit row). End it with Instructed-by: / Instruction: / Refs: lines when another human instructed this decision.
 	Reason *string `json:"reason,omitempty"`
 }
 
@@ -4200,7 +4208,7 @@ type DecideRequestBody struct {
 	// Decision One of 'approved' / 'rejected'.
 	Decision string `json:"decision"`
 
-	// Reason Optional rationale recorded on the decision audit row.
+	// Reason Optional rationale recorded on the decision audit row. End it with Instructed-by: / Instruction: / Refs: lines when another human instructed this decision.
 	Reason *string `json:"reason,omitempty"`
 }
 
@@ -4258,6 +4266,18 @@ type DecideResponseBody_DispatchResult struct {
 // than silently de-duplicated.
 type DeclareCapabilitiesRequest struct {
 	Capabilities []CapabilityDeclaration `json:"capabilities"`
+}
+
+// DelegationView Who told the approver to decide, read off the decision audit row (#3692).
+//
+// Present only when the decision “reason“ ended with the
+// “Instructed-by:“ / “Instruction:“ / “Refs:“ trailer block. The
+// approver is still “reviewed_by“; “instructed_by“ is the other human
+// whose written instruction they acted on.
+type DelegationView struct {
+	InstructedBy string   `json:"instructed_by"`
+	Instruction  string   `json:"instruction"`
+	Refs         []string `json:"refs"`
 }
 
 // DeprecateTemplateResponse Response for “meho_runbook_deprecate_template“ -- the now-deprecated coordinates.
@@ -6719,7 +6739,7 @@ type RefreshResult struct {
 
 // RejectRequestBody POST body for “…/reject“.
 type RejectRequestBody struct {
-	// Reason Optional human-readable rejection reason (recorded in the audit row).
+	// Reason Optional human-readable rejection reason (recorded in the audit row). End it with Instructed-by: / Instruction: / Refs: lines when another human instructed this decision.
 	Reason *string `json:"reason,omitempty"`
 }
 

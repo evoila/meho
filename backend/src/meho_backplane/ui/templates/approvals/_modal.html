@@ -191,6 +191,19 @@
               <time datetime="{{ decision_ts }}" class="font-mono text-xs">{{ decision_ts }}</time>
             </p>
           {% endif %}
+          {#- Delegated decision (#3692): the approver acted on another human's
+              written instruction. Read off the decision audit row; absent for an
+              ordinary decision. -#}
+          {% if request.delegation %}
+            <dl class="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-left text-sm" data-testid="approval-delegation">
+              <dt class="opacity-70">Instructed by</dt>
+              <dd class="font-mono [overflow-wrap:anywhere]">{{ request.delegation.instructed_by }}</dd>
+              <dt class="opacity-70">Instruction</dt>
+              <dd class="[overflow-wrap:anywhere]">&ldquo;{{ request.delegation.instruction }}&rdquo;</dd>
+              <dt class="opacity-70">Refs</dt>
+              <dd class="font-mono [overflow-wrap:anywhere]">{{ request.delegation.refs | join(", ") }}</dd>
+            </dl>
+          {% endif %}
         </div>
       </div>
     {% endif %}
@@ -509,19 +522,22 @@
         the shared reason via ``hx-include``, and disables itself during dispatch
         exactly as the single-click form did before (#1693 / #1754). -#}
     <div class="modal-action mt-4 flex-col items-stretch gap-3" x-data="{ armed: '' }">
-      <label class="form-control w-full max-w-xs self-start">
+      <label class="form-control w-full max-w-md self-start">
         <span class="label-text text-xs">Reason <span class="opacity-60">(optional)</span></span>
-        {# Single shared reason input; each confirm form pulls it via
-           hx-include so the operator types it once. #}
-        <input
-          type="text"
+        {# Single shared reason field; each confirm form pulls it via
+           hx-include so the operator types it once. A textarea, not a text
+           input: the delegated-decision trailer (``Instructed-by:`` /
+           ``Instruction:`` / ``Refs:``) is one line per field
+           and a text input drops the line breaks on paste. #}
+        <textarea
           id="meho-approval-reason"
           name="reason"
+          rows="3"
           maxlength="2000"
-          class="input input-bordered input-sm"
+          class="textarea textarea-bordered textarea-sm"
           placeholder="Recorded on the decision audit row"
           aria-label="Decision reason"
-        />
+        ></textarea>
       </label>
 
       {# Phase 1 -- resting armers. ``type="button"``: the first click only sets

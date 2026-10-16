@@ -263,6 +263,43 @@ So a break-glass self-approval is visible three ways — the live posture
 on `/ready`, a WARNING log at the moment it happens, and the
 requester-equals-approver decision row on the permanent ledger.
 
+## Deciding on someone else's written instruction
+
+Sometimes you approve or reject a request because another person told
+you to, in writing. You still decide as yourself. MEHO records who told
+you, their exact words, and where the work is tracked.
+
+End your reason with three lines, after a blank line:
+
+```bash
+meho approvals approve 4b1c… --reason "Ran the cleanup in the change window.
+
+Instructed-by: lead@example.com
+Instruction: \"please run the cleanup tonight\"
+Refs: #12, CHG-9"
+```
+
+- **Instructed-by:** the person who told you (their login or email).
+- **Instruction:** their words, in quotes, exactly as they wrote them.
+- **Refs:** the issue or change ticket, comma-separated.
+
+The same lines work in the console reason box and in the REST
+`reason` field.
+
+If you write `Instructed-by:` but leave out `Instruction:` or `Refs:`,
+MEHO refuses the decision with a 422 error and the request stays
+pending. Add the missing line and try again. A reason can be at most
+2000 characters.
+
+**Where it shows up afterwards:**
+
+- `meho approvals show <id>` prints `Instructed by`, `Instruction` and
+  `Refs` under `Reviewed by`.
+- The console shows the same three lines on the decided request.
+- The audit log keeps your full reason. The decision row also has a
+  `delegation` block with the three values, and the backplane writes a
+  WARNING log event named `approval_delegated_decision`.
+
 ## Which one should I use?
 
 | Situation | Use |

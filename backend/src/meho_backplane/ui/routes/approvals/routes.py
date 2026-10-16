@@ -130,15 +130,20 @@ from meho_backplane.operations.approval_context import (
     resolve_reviewer_context,
 )
 from meho_backplane.operations.approval_queue import (
+    MAX_REASON_LENGTH,
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
     ApprovalRequestExpiredError,
+    DelegatedReasonInvalidError,
+    Delegation,
     PreviewBindingMissingError,
     SelfApprovalForbiddenError,
     UnauthorizedApprovalError,
     approve_request,
+    get_decision_delegation,
     get_request,
     list_pending,
+    parse_delegation,
     publish_approval_event,
     reject_request,
     resume_dispatch_after_approval,
@@ -221,8 +226,9 @@ _SINGLE_OPERATOR_DOCS_URL: Final[str] = (
 
 #: Optional human reason length accepted on the deny form. The audit row
 #: stores it verbatim; bounding the wire shape protects the form-body
-#: parse against a paste-from-clipboard accident.
-_MAX_REASON_LENGTH: Final[int] = 2000
+#: parse against a paste-from-clipboard accident. Shared with the REST
+#: bodies so both surfaces accept the same reasons (#3692).
+_MAX_REASON_LENGTH: Final[int] = MAX_REASON_LENGTH
 
 #: Module-level ``Depends`` closure for the operator-session gate. Built
 #: once (rather than inline) to satisfy ruff B008, matching the convention
@@ -343,7 +349,7 @@ async def _get_request_or_404(session: UISessionContext, request_id: uuid.UUID) 
 
 async def _get_request_with_context_or_404(
     session: UISessionContext, request_id: uuid.UUID
-) -> tuple[ApprovalRequest, ReviewerContext]:
+) -> tuple[ApprovalRequest, ReviewerContext, Delegation | None]:
     """Fetch one request + its resolved reviewer context in one session (#3353).
 
     The redacted, human-legible judging context (resolved target name,
@@ -353,7 +359,9 @@ async def _get_request_with_context_or_404(
     the CLI's ``GET /api/v1/approvals/{id}`` uses -- so the modal and
     ``meho approvals show`` render the same contract and never drift.
     Fail-open: the resolver never raises, so a resolution miss just yields
-    an empty context and the modal keeps the raw ids.
+    an empty context and the modal keeps the raw ids. The delegated-decision
+    block (#3692) is read off the decision audit row in the same session so
+    the decided banner shows who instructed the approver.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as db_session:
@@ -369,7 +377,8 @@ async def _get_request_with_context_or_404(
                 detail="approval_request_not_found",
             ) from exc
         reviewer_context = await resolve_reviewer_context(db_session, row)
-    return row, reviewer_context
+        delegation = await get_decision_delegation(db_session, row)
+    return row, reviewer_context, delegation
 
 
 def _is_self_approval_blocked(operator: Operator, request: ApprovalRequest) -> bool:
@@ -631,12 +640,14 @@ async def _render_detail_modal(
     bare error to the actionable single-operator guidance (#2669).
     """
     operator = await _resolve_operator(session)
-    approval, reviewer_context = await _get_request_with_context_or_404(session, request_id)
+    approval, reviewer_context, delegation = await _get_request_with_context_or_404(
+        session, request_id
+    )
 
     self_approval_blocked = _is_self_approval_blocked(operator, approval)
     csrf_token = mint_csrf_token(str(session.session_id))
     context: dict[str, object] = {
-        "request": project_request_to_view(approval),
+        "request": project_request_to_view(approval, delegation),
         # Redacted reviewer context (#3353), resolved from the shared
         # resolver so the modal renders the same substance ``meho approvals
         # show`` does. Always present in this context (StrictUndefined-safe)
@@ -726,7 +737,9 @@ async def _decide(
         )
 
     context: dict[str, object] = {
-        "request": project_request_to_view(approval),
+        # The reason already passed validation in the service, so this
+        # re-parse cannot raise; it shows the delegation on the outcome card.
+        "request": project_request_to_view(approval, parse_delegation(reason)),
         "decision": decision,
     }
     response = get_templates().TemplateResponse(request, "approvals/_decided.html", context)
@@ -818,5 +831,12 @@ async def _commit_decision(
                 "binding and cannot be approved. Re-file it via a fresh "
                 "preview + call."
             ),
+        ) from exc
+    except DelegatedReasonInvalidError as exc:
+        # #3692: the reason names who instructed the decision but the
+        # trailer block is incomplete; the message says what is missing.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
         ) from exc
     return request

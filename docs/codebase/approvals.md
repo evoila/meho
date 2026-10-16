@@ -469,6 +469,82 @@ routed to `NEEDS_APPROVAL`, re-running the gate on resume would re-queue
 the call instead of executing it, so the bypass is what lets the
 approved op run.
 
+## Delegated decisions: the reason-line convention (#3692)
+
+Sometimes an approver decides because **another person told them to, in
+writing**. The approver still decides under their own identity
+(`reviewed_by`). The decision reason records the other person, their
+words, and where the work is tracked. It uses three `Key: value` lines
+at the end of the reason, in the style of git trailers
+(`Signed-off-by:`):
+
+```text
+Ran the delete after sign-off in the change window.
+
+Instructed-by: lead@example.com
+Instruction: "please run the cleanup tonight"
+Refs: #12, CHG-9
+```
+
+Rules (`parse_delegation` in `operations/approval_queue.py`, pure and
+deterministic):
+
+- A reason is **delegated** when any line starts with `Instructed-by:`.
+  Keys are case-insensitive.
+- The trailer lines must be the **last paragraph** of the reason (after
+  a blank line), and every line in that paragraph must be `Key: value`.
+  Other keys in the block are ignored.
+- `Instructed-by:`, `Instruction:` and `Refs:` must all be present and
+  non-empty. `Refs:` is comma-separated. Surrounding double quotes on
+  the instruction are removed; the words inside are kept as written.
+- A key may appear only once.
+
+If a delegated reason breaks a rule, `DelegatedReasonInvalidError` is
+raised **before** any state change, so the row stays `pending` and no
+decision audit row is written. Both `approve_request` and
+`reject_request` call the parser, so every decide surface gets the same
+check:
+
+| Surface | Refusal |
+|---|---|
+| REST `/approve`, `/reject`, `/decide` | 422, `detail` starts with `delegated_reason_invalid:` |
+| Console approve / deny | the modal re-renders with a 422 banner naming what is missing |
+| CLI `meho approvals approve` / `reject --reason` | posts to `/decide`; prints the 422 body |
+
+**On the ledger.** There is no new column and no migration (the same
+choice as the #2087 break-glass audit). A valid delegated decision adds
+a `delegation` object to the `approval.decision` audit row's payload,
+next to the verbatim `reason`:
+
+```json
+{"decision": "approved", "reviewed_by": "<approver sub>",
+ "reason": "Ran the delete ...\n\nInstructed-by: ...",
+ "delegation": {"instructed_by": "lead@example.com",
+                "instruction": "please run the cleanup tonight",
+                "refs": ["#12", "CHG-9"]}}
+```
+
+It also emits the WARNING log event `approval_delegated_decision`
+(`approval_request_id`, `op_id`, `decision`, `reviewed_by`,
+`instructed_by`, `tenant_id`). Find delegated decisions on the ledger by
+filtering `approval.decision` rows whose payload has a `delegation` key.
+
+**On the read surfaces.** `get_decision_delegation` reads the block back
+from the decision audit row. `GET /api/v1/approvals/{id}` carries it as
+the optional `delegation` field of `ApprovalRequestView` (the list view
+leaves it `null`). `meho approvals show` and the `approve` / `reject`
+summary print `Instructed by` / `Instruction` / `Refs`. The console shows
+the same three lines on the decided modal and on the outcome card right
+after a decision (`project_request_to_view(row, delegation)`).
+
+**Reason length.** All three REST bodies (`ApproveRequestBody`,
+`RejectRequestBody`, `DecideRequestBody`) and the console form cap
+`reason` at `MAX_REASON_LENGTH` (2000 characters). A longer reason is a
+422.
+
+`work_ref` is unchanged: it stays the requester-side change ref. The
+`Refs:` values may match it, but they do not have to.
+
 ## Single-operator tenants: use an agent-requester, not break-glass (#1738)
 
 The self-approval guard enforces requester != approver on the stable

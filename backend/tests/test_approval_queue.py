@@ -45,6 +45,7 @@ import pytest
 from cryptography.fernet import Fernet
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from structlog.testing import capture_logs
 
 from meho_backplane.auth.delegation import actor_delegation
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
@@ -64,6 +65,8 @@ from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
     ApprovalRequestExpiredError,
+    DelegatedReasonInvalidError,
+    Delegation,
     NonHumanApprovalError,
     ParamsMismatchError,
     SelfApprovalForbiddenError,
@@ -72,7 +75,9 @@ from meho_backplane.operations.approval_queue import (
     approve_request,
     create_pending_request,
     expire_stale_requests,
+    get_decision_delegation,
     list_pending,
+    parse_delegation,
     reject_request,
     resume_dispatch_after_approval,
 )
@@ -3598,3 +3603,180 @@ async def test_resume_dispatch_after_approval_wins_free_claim_and_stamps(
     assert result.status == "ok"
     assert dispatch_calls == 1
     assert await _reload_resumed_at(request.id) is not None
+
+
+# ---------------------------------------------------------------------------
+# #3692 -- delegated-decision reason trailers
+# ---------------------------------------------------------------------------
+
+_DELEGATED_REASON = (
+    "Ran the delete after sign-off in the change window.\n"
+    "\n"
+    "Instructed-by: lead@example.com\n"
+    'Instruction: "please approve the cleanup tonight"\n'
+    "Refs: #12, CHG-9"
+)
+
+
+def test_parse_delegation_returns_none_for_ordinary_reason() -> None:
+    assert parse_delegation("") is None
+    assert parse_delegation("rollback window approved") is None
+    # A key that only looks similar is not the marker.
+    assert parse_delegation("ok\n\nInstructed: lead@example.com") is None
+
+
+def test_parse_delegation_parses_trailer_block() -> None:
+    assert parse_delegation(_DELEGATED_REASON) == Delegation(
+        instructed_by="lead@example.com",
+        instruction="please approve the cleanup tonight",
+        refs=("#12", "CHG-9"),
+    )
+
+
+def test_parse_delegation_keys_are_case_insensitive_and_extra_keys_ignored() -> None:
+    reason = (
+        "INSTRUCTED-BY: lead@example.com\n"
+        "instruction: approve it\n"
+        "Signed-off-by: someone\n"
+        "refs:  #7 ,"
+    )
+    assert parse_delegation(reason) == Delegation(
+        instructed_by="lead@example.com", instruction="approve it", refs=("#7",)
+    )
+
+
+def test_parse_delegation_is_deterministic() -> None:
+    assert parse_delegation(_DELEGATED_REASON) == parse_delegation(_DELEGATED_REASON)
+
+
+@pytest.mark.parametrize(
+    ("reason", "needle"),
+    [
+        ("ok\n\nInstructed-by: lead@example.com\nRefs: #12", "Instruction"),
+        ('ok\n\nInstructed-by: lead@example.com\nInstruction: "go"', "Refs"),
+        ('ok\n\nInstructed-by: lead@example.com\nInstruction: ""\nRefs: #1', "Instruction"),
+        ('ok\n\nInstructed-by:\nInstruction: "go"\nRefs: #1', "Instructed-by"),
+        ('ok\n\nInstructed-by: a\nInstruction: "go"\nRefs: , ,', "Refs"),
+        # Marker not inside the final block.
+        ('Instructed-by: a\nInstruction: "go"\nRefs: #1\n\nmore words', "one block"),
+        # No blank line between the rationale and the trailers.
+        ('Ran it.\nInstructed-by: a\nInstruction: "go"\nRefs: #1', "one block"),
+        (
+            'ok\n\nInstructed-by: a\nInstructed-by: b\nInstruction: "go"\nRefs: #1',
+            "more than once",
+        ),
+    ],
+)
+def test_parse_delegation_rejects_incomplete_block(reason: str, needle: str) -> None:
+    with pytest.raises(DelegatedReasonInvalidError) as excinfo:
+        parse_delegation(reason)
+    assert needle in str(excinfo.value)
+
+
+async def _park_for_delegation(session: AsyncSession) -> uuid.UUID:
+    pending = await create_pending_request(
+        session,
+        operator=_make_operator(sub="agent-sub"),
+        connector_id="vault-1.x",
+        op_id="vault.kv.put",
+        target=None,
+        params={"name": "test"},
+        params_hash=compute_params_hash({"name": "test"}),
+    )
+    await session.commit()
+    return pending.id
+
+
+async def _decision_payloads() -> list[dict[str, Any]]:
+    async with get_sessionmaker()() as s:
+        rows = (
+            (await s.execute(select(AuditLog).where(AuditLog.path == "approval.decision")))
+            .scalars()
+            .all()
+        )
+    return [row.payload for row in rows]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decision", ["approved", "rejected"])
+async def test_delegated_decision_writes_structured_block_and_warns(
+    session: AsyncSession, decision: str
+) -> None:
+    """A valid delegated decision stores the block on the audit row and logs a WARNING."""
+    request_id = await _park_for_delegation(session)
+    reviewer = _make_operator(sub="reviewer-sub")
+
+    with capture_logs() as captured:
+        async with get_sessionmaker()() as s2:
+            if decision == "approved":
+                row = await approve_request(
+                    s2, request_id, operator=reviewer, reason=_DELEGATED_REASON
+                )
+            else:
+                row = await reject_request(
+                    s2, request_id, operator=reviewer, reason=_DELEGATED_REASON
+                )
+            await s2.commit()
+
+    assert row.status == decision
+    # The approver is still the reviewer of record.
+    assert row.reviewed_by == "reviewer-sub"
+    (payload,) = await _decision_payloads()
+    assert payload["reason"] == _DELEGATED_REASON
+    assert payload["delegation"]["instructed_by"] == "lead@example.com"
+    assert payload["delegation"] == {
+        "instructed_by": "lead@example.com",
+        "instruction": "please approve the cleanup tonight",
+        "refs": ["#12", "CHG-9"],
+    }
+    events = [e for e in captured if e["event"] == "approval_delegated_decision"]
+    assert len(events) == 1
+    assert events[0]["log_level"] == "warning"
+    assert events[0]["instructed_by"] == "lead@example.com"
+    assert events[0]["reviewed_by"] == "reviewer-sub"
+    assert events[0]["decision"] == decision
+
+    async with get_sessionmaker()() as s3:
+        reloaded = await s3.get(ApprovalRequest, request_id)
+        assert reloaded is not None
+        assert await get_decision_delegation(s3, reloaded) == parse_delegation(_DELEGATED_REASON)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decision", ["approved", "rejected"])
+async def test_incomplete_delegated_reason_refuses_and_leaves_row_pending(
+    session: AsyncSession, decision: str
+) -> None:
+    """Fail-closed: no state change and no audit row when the block is incomplete."""
+    request_id = await _park_for_delegation(session)
+    reviewer = _make_operator(sub="reviewer-sub")
+    bad = "ok\n\nInstructed-by: lead@example.com\nRefs: #12"
+
+    async with get_sessionmaker()() as s2:
+        with pytest.raises(DelegatedReasonInvalidError):
+            if decision == "approved":
+                await approve_request(s2, request_id, operator=reviewer, reason=bad)
+            else:
+                await reject_request(s2, request_id, operator=reviewer, reason=bad)
+        await s2.rollback()
+
+    async with get_sessionmaker()() as s3:
+        reloaded = await s3.get(ApprovalRequest, request_id)
+        assert reloaded is not None
+        assert reloaded.status == ApprovalRequestStatus.PENDING.value
+    assert await _decision_payloads() == []
+
+
+@pytest.mark.asyncio
+async def test_ordinary_decision_has_no_delegation_block(session: AsyncSession) -> None:
+    request_id = await _park_for_delegation(session)
+    reviewer = _make_operator(sub="reviewer-sub")
+    with capture_logs() as captured:
+        async with get_sessionmaker()() as s2:
+            row = await reject_request(s2, request_id, operator=reviewer, reason="wrong cluster")
+            await s2.commit()
+    (payload,) = await _decision_payloads()
+    assert "delegation" not in payload
+    assert not [e for e in captured if e["event"] == "approval_delegated_decision"]
+    async with get_sessionmaker()() as s3:
+        assert await get_decision_delegation(s3, row) is None

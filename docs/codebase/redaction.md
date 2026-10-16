@@ -773,7 +773,18 @@ the **whole subtree**. Underneath, the same credential-shape net runs
 over every surviving leaf, so a shaped secret at an *undeclared* nested
 path is still caught. JSON is the only structurally-redactable shape:
 a str/bytes body is parsed when the content-type is JSON or unknown;
-anything else fails closed (see F2 uncertainty). One structural rule runs
+anything else fails closed (see F2 uncertainty). An XML body (`text/xml`,
+`application/xml`, `*+xml`, for example a vim25 SOAP answer) is never
+recorded either, but it is not dropped bare: `_xml_digest.py` records a
+digest in its place — `{"omitted": <marker>, "content_sha256": <hex>,
+"fault_types": {<type name>: <count>}}` (#3708). The fault types come
+from each vim `fault` element (`missingSet[].fault`, task errors) and each
+`soapenv:Fault/detail` child; the `LocalizedMethodFault` wrapper is
+skipped. Only type names are read, never fault text, and a name that is
+not identifier-shaped is dropped. The parse uses `defusedxml` and streams,
+so a body cut at the size cap still counts the faults before the cut. This
+lets an operator see, for example, that every property of a host came back
+in `missingSet` with `NoPermission`. One structural rule runs
 without any per-connector config: every property `value` inside an OVF
 `PropertyParams` block (`additional_parameters[] {type: "PropertyParams",
 properties: [{id, value}]}`) is redacted — those are OVF property inputs
@@ -836,6 +847,7 @@ operator-only visibility. Uncertainty triggers:
 | --- | --- |
 | headers not a mapping | no headers recorded, uncertain |
 | unparseable / binary / unknown non-JSON body | body omitted, uncertain |
+| XML body | body omitted, fault-type digest + SHA-256 recorded, uncertain |
 | malformed JSON | body omitted, uncertain |
 | truncated mid-token (`truncated=True`) | parsed prefix scrubbed, still uncertain (a split secret matches no shape) |
 | body-path config fault at match time | body omitted, uncertain |

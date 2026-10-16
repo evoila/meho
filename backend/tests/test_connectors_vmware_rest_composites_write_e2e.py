@@ -438,6 +438,9 @@ def _benign_responses_for(composite_op_id: str) -> dict[str, Any]:
         # deploy_from_library: id passthrough → no finds; the synchronous OVF
         # deploy returns a DeploymentResult that succeeds → status='deployed'.
         "vmware.composite.vm.deploy_from_library": {
+            # No ``name`` in the benign params: the OVF summary supplies the
+            # default VM name the deploy name is built from (#3697).
+            "/vcenter/ovf/library-item/li-1?action=filter": {"name": "ovf-default"},
             "/vcenter/ovf/library-item/li-1?action=deploy": {
                 "succeeded": True,
                 "resource_id": {"type": "VirtualMachine", "id": "vm-benign"},
@@ -517,6 +520,10 @@ def _benign_vmomi_for(composite_op_id: str) -> dict[str, Any]:
         },
         "vmware.composite.host.evacuate": {
             "/HostSystem/host-1/EnterMaintenanceMode_Task": _vmomi_task_moref("t-enter-benign"),
+        },
+        # #3697: the deployed VM is renamed from its unique deploy name.
+        "vmware.composite.vm.deploy_from_library": {
+            "/VirtualMachine/vm-benign/Rename_Task": _vmomi_task_moref("t-rename-benign"),
         },
         "vmware.composite.host.detach_from_vds": {
             "DistributedVirtualSwitch": _vmomi_retrieve_result(
@@ -1600,10 +1607,14 @@ async def test_deploy_from_library_queue_approve_resume_with_2681_envelope(
        ``status='deployed'``.
     """
     recorder = _RecordingVmwareConnector()
+    recorder.responses["/vcenter/ovf/library-item/li-1?action=filter"] = {"name": "ovf-default"}
     recorder.responses["/vcenter/ovf/library-item/li-1?action=deploy"] = {
         "succeeded": True,
         "resource_id": {"type": "VirtualMachine", "id": "vm-ovf-9"},
     }
+    recorder.vmomi_responses["/VirtualMachine/vm-ovf-9/Rename_Task"] = _vmomi_task_moref(
+        "t-rename-9"
+    )
     await _bootstrap(recorder, stub_embedding_service)
 
     target_id = uuid.uuid4()
@@ -1684,8 +1695,16 @@ async def test_deploy_from_library_queue_approve_resume_with_2681_envelope(
     assert result2.status == "ok", result2.error
     assert result2.result["status"] == "deployed"
     assert result2.result["vm_id"] == "vm-ovf-9"
-    # The synchronous OVF deploy fired exactly once, on the approved resume.
-    assert recorder.calls == [("POST", "/vcenter/ovf/library-item/li-1?action=deploy")]
+    # The synchronous OVF deploy fired exactly once, on the approved resume,
+    # after the un-gated OVF summary read (#3697: no ``name`` in the params).
+    assert recorder.calls == [
+        ("POST", "/vcenter/ovf/library-item/li-1?action=filter"),
+        ("POST", "/vcenter/ovf/library-item/li-1?action=deploy"),
+    ]
+    assert recorder.vmomi_calls[0] == (
+        "/VirtualMachine/vm-ovf-9/Rename_Task",
+        {"newName": "ovf-default"},
+    )
 
 
 # ===========================================================================

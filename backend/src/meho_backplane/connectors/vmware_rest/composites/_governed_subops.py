@@ -56,7 +56,9 @@ _VMWARE_REST_CONNECTOR_ID: Final[str] = "vmware-rest-9.0"
 _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.vm.create": _write._SUB_OPS_VM_CREATE + _write._VIM_SUB_OPS_VM_CREATE,
     "vmware.composite.vm.clone": _write._SUB_OPS_VM_CLONE,
-    "vmware.composite.vm.deploy_from_library": _write._SUB_OPS_VM_DEPLOY_FROM_LIBRARY,
+    "vmware.composite.vm.deploy_from_library": (
+        _write._SUB_OPS_VM_DEPLOY_FROM_LIBRARY + _write._VIM_SUB_OPS_VM_DEPLOY_FROM_LIBRARY
+    ),
     "vmware.composite.vm.import_from_library": (
         _write._SUB_OPS_VM_IMPORT_FROM_LIBRARY + _write._VIM_SUB_OPS_VM_IMPORT_FROM_LIBRARY
     ),

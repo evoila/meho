@@ -173,16 +173,18 @@ def test_write_composite_sub_op_tuples_are_all_discovered() -> None:
 def test_vm_deploy_from_library_sub_op_manifest_is_expected() -> None:
     """Pin the deploy_from_library manifest so a drift can't shrink the reconcile.
 
-    All six sub-ops are ``vcenter.yaml``-served REST paths (the OVF deploy,
+    All seven REST sub-ops are ``vcenter.yaml``-served paths (the OVF deploy,
     both content-library find actions used for name resolution, the
-    power-on, and the #3697 failed-deploy cleanup: the same-name VM listing
-    and the VM delete), so — unlike the vim-shaped writes — they reconcile
-    through the generic ``_SUB_OPS_*`` sweep above rather than a
-    ``_VIM_SUB_OPS_*`` lane.
+    power-on, and the #3697 failed-deploy cleanup: the OVF summary that
+    supplies the default VM name, the listing by the unique deploy name, and
+    the VM delete), so they reconcile through the generic ``_SUB_OPS_*``
+    sweep above. The #3697 rename is vim and lives in the separate
+    ``_VIM_SUB_OPS_VM_DEPLOY_FROM_LIBRARY`` lane below.
     """
     assert set(_write._SUB_OPS_VM_DEPLOY_FROM_LIBRARY) == {
         "POST:/content/library?action=find",
         "POST:/content/library/item?action=find",
+        "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=filter",
         "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy",
         "POST:/vcenter/vm/{vm}/power?action=start",
         "GET:/vcenter/vm",
@@ -675,6 +677,65 @@ def test_vm_import_from_library_vi_json_paths_exist_in_the_pinned_spec() -> None
         assert _vi_json_path_item_has_post(spec_text, path), (
             f"{path!r} is not a POST path item in the pinned vi-json.yaml — the "
             "import vi-json sub-op targets a path the spec does not serve"
+        )
+
+
+# ---------------------------------------------------------------------------
+# vm.deploy_from_library VI-JSON sub-op reconciliation (#3697)
+# ---------------------------------------------------------------------------
+#
+# The deploy runs under a unique name and renames the finished VM (or vApp)
+# to the requested name through the core vim ``ManagedEntity.Rename_Task``
+# (the pinned vcenter.yaml serves no REST rename), task-polled via
+# ``PropertyCollector.RetrievePropertiesEx``. Declared in
+# ``_write._VIM_SUB_OPS_VM_DEPLOY_FROM_LIBRARY`` (deliberately NOT in the
+# ``_SUB_OPS_*`` namespace, so the vcenter.yaml sweep above skips them).
+
+
+def test_vm_deploy_from_library_vi_json_sub_op_manifest_is_expected() -> None:
+    """Pin the deploy rename vim manifest so a drift can't shrink the reconcile."""
+    assert set(_write._VIM_SUB_OPS_VM_DEPLOY_FROM_LIBRARY) == {
+        "POST:/VirtualMachine/{moId}/Rename_Task",
+        "POST:/VirtualApp/{moId}/Rename_Task",
+        "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    }
+
+
+def test_vm_deploy_from_library_vi_json_sub_ops_round_trip_through_ingest() -> None:
+    """The deploy rename vim op_ids are byte-for-byte what the parser emits."""
+    required = set(_write._VIM_SUB_OPS_VM_DEPLOY_FROM_LIBRARY)
+    spec = _build_vcenter_fixture(required)
+    spec_bytes = json.dumps(spec).encode()
+    spec_url = "https://specs.example.test/vi-json.yaml"
+
+    with _GETADDRINFO_PATCH, respx.mock(assert_all_called=False) as router:
+        router.get(spec_url).mock(
+            return_value=httpx.Response(
+                200, content=spec_bytes, headers={"content-type": "application/json"}
+            )
+        )
+        rows = parse_openapi(spec_url, spec_source="spec:vi-json.yaml")
+    ingested_op_ids = {row.op_id for row in rows}
+    assert required <= ingested_op_ids
+
+
+def test_vm_deploy_from_library_vi_json_paths_exist_in_the_pinned_spec() -> None:
+    """Each deploy rename vim sub-op path is a real POST path in the pinned vi-json.yaml.
+
+    ``ManagedEntity.Rename_Task`` is a core vim25 method every managed entity
+    inherits, so the pinned spec must serve it for ``VirtualMachine`` and
+    ``VirtualApp``. Skips when the spec-shelf is not configured, so CI — where
+    the env vars are wired — is the operator-visible signal.
+    """
+    spec_path = resolve_vi_json_yaml()
+    if spec_path is None:
+        pytest.skip(VCENTER_SPEC_REASON)
+    spec_text = spec_path.read_text(encoding="utf-8")
+    for op_id in _write._VIM_SUB_OPS_VM_DEPLOY_FROM_LIBRARY:
+        _, _, path = op_id.partition(":")
+        assert _vi_json_path_item_has_post(spec_text, path), (
+            f"{path!r} is not a POST path item in the pinned vi-json.yaml — the "
+            "deploy rename vi-json sub-op targets a path the spec does not serve"
         )
 
 

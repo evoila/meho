@@ -972,3 +972,13 @@ def test_object_collect_description_names_the_returned_keys() -> None:
     assert VMWARE_OBJECT_COLLECT_OP.response_schema is not None
     for key in VMWARE_OBJECT_COLLECT_OP.response_schema["properties"]:
         assert key in description
+
+
+def test_object_collect_guidance_covers_distributed_portgroup_reads() -> None:
+    """#3534: DVS / dvportgroup config reads go through object.collect, fetched whole."""
+    llm_instructions = VMWARE_OBJECT_COLLECT_OP.llm_instructions
+    assert llm_instructions is not None
+    assert "DistributedVirtualPortgroup" in llm_instructions["when_to_use"]
+    hint = llm_instructions["parameter_hints"]["properties"]
+    assert "['config.defaultPortConfig']" in hint
+    assert "'config.defaultPortConfig.vlan'" in hint

@@ -493,6 +493,14 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     vCenter 8.0.x rejects a path into a cluster's `configurationEx`
     (`configurationEx.rule` / `.group` / `.drsConfig`), so they request
     `configurationEx` and pick the field from the result (#3617).
+    **Use it for distributed switch and distributed portgroup config
+    reads** (type `DistributedVirtualPortgroup` /
+    `VmwareDistributedVirtualSwitch`, for example the VLAN and security
+    policy under `config.defaultPortConfig`). Read polymorphic fields
+    whole: `config.defaultPortConfig` is declared as the base
+    `DVPortSetting`, so a path into a subclass-only field
+    (`config.defaultPortConfig.vlan`) fails with `InvalidProperty`. The
+    hint in `parameter_hints.properties` says this (#3534).
   - **`vmware.tasks.recent`** (`typed_ops_tasks_recent.py`, handler
     `tasks_recent`) — recent vCenter Task objects for change-window
     monitoring (distinct from `event.tail`, which reads the *event*
@@ -609,6 +617,20 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    fingerprint-probe path is keyed literally (`GET:/api/about`). The reconcile
    lane `test_connectors_vmware_rest_8_0_spec_reconcile.py` pins the two specs
    to an identical served-op_id set, so they are re-keyed in lock-step (#3614).
+   **8.0 tasks-list body (#3700).** `POST /cis/tasks?action=list` (list
+   vCenter tasks) is not in the shipped minimal; it comes with a full-surface
+   re-ingest. The 8.0 spec gives it a flat body (`exclude_result` /
+   `return_all` at the top), which vCenter 8.0.3 rejects with HTTP 400.
+   `ingest_corrections.py` replaces the body at ingest time with the
+   two-level shape the 9.0 spec already has:
+   `{filter_spec: {services | tasks | operations | status | targets | users},
+   result_spec: {return_all, exclude_result}}`. The corrected schema refuses
+   the flat body and an empty filter before any request is sent: vCenter 8.0.3
+   needs a non-empty `filter_spec.services` or `filter_spec.tasks` list. The
+   row's `llm_instructions` says the same. The 9.0 catalog is left as
+   ingested. The reconcile lane above pins the corrected body shape, against
+   a fixture always and against the pinned vendor 8.0 U3 spec when the shelf
+   has it.
 3. The same import triggers the side-effect import of
    `meho_backplane.connectors.vmware_rest.composites`, whose
    `__init__` calls
@@ -834,6 +856,51 @@ all-missing "void" for the rest of the pod lifetime. Two mechanisms recover it:
   unit tests when tried). Age is tracked with `time.monotonic` (immune to
   wall-clock steps) in `_session_established_at`, dropped alongside the token on
   `invalidate_session` / `aclose`.
+
+**VI-JSON 500 auth faults on vCenter (`#3566`).** On the vCenter VI-JSON
+path, vCenter reports a vim method fault as **HTTP 500** with the fault object
+as the JSON body (`{"_typeName": "NotAuthenticated", "faultstring": ...}`).
+`_post_vmomi_json` now reads that body (`vim_body.method_fault_type`) and
+treats the same auth set as the SOAP path (`_SOAP_AUTH_FAULT_TYPES`:
+`InvalidLogin` / `NoPermission` / `NotAuthenticated`) as auth-class:
+
+- `NotAuthenticated` → `invalidate_session(target)`, a new login, and **one**
+  retry of the same call. This is the guest-operations case: vCenter passes
+  guest calls on to the ESXi host, and the host-gateway token tied to the
+  session can go stale while vCenter-local calls (`RetrievePropertiesEx`) on
+  the same session still work (Broadcom KB 440879). A new session gets a new
+  token. The rejected call never ran, so the retry is safe for a write too.
+  The retry covers **only the failing call**, not the whole dispatch, so the
+  earlier steps of a multi-step operation (for example `StartProgramInGuest`
+  before the `ListProcessesInGuest` polls of `guest.program.run`) never run
+  twice. A recovered call returns normally, so the dispatcher writes one
+  success audit row and no error row. If the fault comes back on the fresh
+  session it raises `ConnectorAuthError(stage="after_relogin",
+  cause="vim_fault_NotAuthenticated_after_relogin")` with a "do not restage,
+  check the host connection" remediation.
+- `InvalidLogin` / `NoPermission` → `ConnectorAuthError(stage="call",
+  cause="vim_fault_<type>")` at once, with no retry: a new session cannot fix
+  a rejected credential or a missing privilege (the `#3810` PBM precedent).
+  `NoPermission` carries a "grant the privilege, do not restage" remediation.
+- A **401 on the retried call** (after the connector's own re-login) is
+  final too: `ConnectorAuthError(stage="after_relogin",
+  cause="session_dispatch_401_after_relogin")`, the same cause the
+  dispatcher stamps on its own post-re-login rejection. It must not escape
+  as a plain status error, because the dispatcher's `#2067` recovery would
+  then log in a third time and re-run the **whole** operation, so a step
+  that already ran before the fault (the `StartProgramInGuest` of
+  `guest.program.run`) would run twice. A 401 on the **first** try is
+  unchanged and still uses the dispatcher's recovery.
+- Any other fault (`InvalidArgument`, `PlatformConfigFault`, ...) and any
+  other status (on the first try or on the retried call) are unchanged: the
+  plain `httpx.HTTPStatusError` reaches the dispatcher.
+
+`ConnectorAuthError.status_code` is the real status (500). The dispatcher's
+existing `except ConnectorAuthError` arm turns it into `connector_auth_failed`;
+`ConnectorAuthError.stage` (`establish` by default) makes the summary say
+which step was rejected (see `error-message-shape.md`). The ESXi SOAP path
+(`_soap_fault_error`) still raises the establish-stage error for a mid-call
+fault and recovers on the next dispatch, not within the call.
 
 ### fingerprint() / probe()
 
@@ -1242,10 +1309,11 @@ through vim `VirtualMachine.ReconfigVM_Task`. This is the connector's first
 `ReconfigureComputeResource_Task`, #2895) ride. `vm.create`'s optional
 `nested_hv` leg (#3093) rides the same two seams:
 `VirtualMachineConfigSpec.nestedHVEnabled` has no REST expression (pinned by
-the #3087 recipe lanes) and *raw* VI-JSON dispatch mounts on `/api` — a
-9.x-fleet accommodation that 404s on vCenter 8.0.x (#2466) — so the
-substrate's `/sdk/vim25/{release}` mount is the only cross-version governed
-path to the flag. `vm.create`'s pre-9.0 create arm (#3099) rides them too:
+the #3087 recipe lanes) and *raw* VI-JSON dispatch then mounted on `/api` — a
+9.x-fleet accommodation that 404s on vCenter 8.0.x (#2466; raw dispatch moved to
+`/sdk/vim25` in #3534, but still has no `/api` fallback or task polling) — so the
+substrate's `/sdk/vim25/{release}` mount is the governed cross-version path to
+the flag. `vm.create`'s pre-9.0 create arm (#3099) rides them too:
 `Folder.CreateVM_Task` replaces the vendor-defective 8.0.x REST create,
 gated under its canonical vi-json op_id and polled through
 `poll_vim_task` like the sibling vim writes.
@@ -1607,8 +1675,7 @@ vSphere itself refuses to delete a portgroup with connected ports
 **Why these calls work on vCenter 8.0.x.** The vim calls go through the
 documented `/sdk/vim25/{release}` VI-JSON base (`_post_vmomi_json`), the same
 path the `vm.destroy` vim arm, `vm.disk.grow` and the portgroup writes already
-use on 8.0.3. The ingested `/api` vim bindings are not used (they 404 on 8.0.x,
-#3534). The pinned REST spec has no delete for portgroups, folders or datastore
+use on 8.0.3. The composites do not call the ingested vim bindings directly. The pinned REST spec has no delete for portgroups, folders or datastore
 files, so vim is the only option there. The content-library calls are REST on
 `/api`; vCenter 8.0 and 9.0 serve the same paths (only the path parameter names
 differ), and `vm.deploy_from_library` already uses the same find / item reads
@@ -2690,6 +2757,20 @@ they never park.
   POST sub-ops, and the mutating `vm.disk.grow` write route through
   `_post_vmomi_json`; only the vSphere Automation `GET /vcenter/*` legs
   still use `mount_op_path`.
+- **Ingested vi-json ops mount on `/sdk/vim25/{release}` too (#3534)** —
+  the generic ops ingested from `vi-json.yaml`
+  (`GET:/DistributedVirtualPortgroup/{moId}/config`,
+  `POST:/PropertyCollector/{moId}/RetrievePropertiesEx`, ...) reach the
+  wire through `mount_op_path`. It tells them apart from Automation paths
+  by the PascalCase managed-object type in the first segment
+  (`_mount.is_vmomi_path`). On a modern vCenter session they mount on
+  `/sdk/vim25/{release}` (release from the same cached `_about_version`).
+  Before #3534 they mounted on `/api` and answered a bare 404 on vCenter
+  8.0.x. Limits: there is no `/api` 404 fallback on this path (the hook
+  returns one path); when the release can't be derived the op keeps the
+  `/api` form; legacy `/rest` (vcsim) and ESXi sessions are unchanged.
+  For managed-object property reads, `vmware.object.collect` stays the
+  preferred op: it builds the PropertyCollector body for the caller.
 - **All hand-authored composites shipped** — T5 (#508) ships 5 read;
   #2080 + #2135 add two more reads (`host.network_uplinks` /
   `host.vsan_health`, later re-shipped as typed ops in #2258); T6

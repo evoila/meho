@@ -330,6 +330,64 @@ asked for. The cap counts characters, not bytes, and applies to strings
 only; other representation keys stay unchecked
 (`additionalProperties: true`).
 
+### Updates read, merge, then write (#3941)
+
+`keycloak.client.update` and `keycloak.realm.update` take a partial
+representation. Keycloak's `PUT` on a client or a realm is **not** a real
+partial update. For some fields that are missing from the body, Keycloak
+writes its own default:
+
+- Client `PUT`: authorization services are turned off when
+  `authorizationServicesEnabled` is missing
+  (`ClientResource.updateAuthorizationSettings`). When `webOrigins` is
+  missing, Keycloak builds it from the redirect URIs
+  (`RepresentationToModel.defaultWebOrigins`). A dogfood run also saw an
+  update that sent only `{"enabled": false}` change `frontchannelLogout`
+  and the groups mapper's `multivalued` setting. In the Keycloak 26.3
+  code a missing `frontchannelLogout` keeps its current value, so the
+  exact source of that change is not known.
+- Realm `PUT`: the OAuth 2.0 device-code lifespan and polling interval and
+  the CIBA and PAR settings go back to their defaults when missing, and an
+  `attributes` map removes every realm attribute it does not list.
+
+So both ops do this (`connectors/keycloak/ops_write_merge.py`):
+
+1. `GET` the current client or realm.
+2. Put the caller's fields on top. A map field (`attributes`,
+   `smtpServer`) is merged key by key. A list field (`redirectUris`,
+   `webOrigins`, `protocolMappers`) is replaced only when the caller
+   sends it. So protocol mappers stay as they are unless the caller sends
+   them.
+3. `PUT` the full representation back.
+4. `GET` it again and compare with step 1. The result carries
+   `changed_fields` (what the caller sent), `unrequested_changes` (fields
+   that changed without being sent; a key inside a sent map shows as
+   `attributes.<key>`) and `read_back_checked`. Only field names are
+   reported, never values, so a client `secret` or SMTP password never
+   reaches the result. List order is ignored in the compare, because
+   Keycloak keeps many lists as sets. The key-by-key compare also runs
+   when the whole map is missing or `null` before or after the write; a
+   map that is not there counts as empty. So a key the caller did not
+   send that is gone after the write, or that appeared after the write,
+   is reported. A missing key never counts as equal to a key holding
+   `null`.
+
+**Limit: an update cannot remove a key inside a map.** Because maps merge
+key by key, `realm.update` cannot remove a realm attribute or an
+`smtpServer` key, and `client.update` cannot remove a client attribute.
+Leaving the key out keeps it. Sending `null` for the key does not remove
+it either: Keycloak 26.3 stores the null. To empty a list, send `[]`.
+
+The read-back is best effort: if it fails, or returns something that is
+not an object, the write already happened, so the op still returns `ok`
+with `read_back_checked: false`. A realm
+rename (a new `realm` in the representation) is read back under the new
+name.
+
+The approval preview for both ops is the generic params echo: the
+approver sees the fields the caller sent. With read-merge-write those are
+exactly the fields that will change.
+
 ### User logout (#3851)
 
 `keycloak.user.logout` ends every live session of one user. Keycloak then

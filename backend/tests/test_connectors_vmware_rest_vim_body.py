@@ -28,6 +28,7 @@ import pytest
 from meho_backplane.connectors.vmware_rest.vim_body import (
     fault_message,
     fault_type_name,
+    method_fault_type,
     unwrap_vim_value,
 )
 
@@ -296,3 +297,34 @@ def test_fault_type_name_reads_both_wire_shapes() -> None:
     )
     assert fault_type_name({"_typeName": "InvalidProperty"}) == "InvalidProperty"
     assert fault_type_name(None) is None
+
+
+# ---------------------------------------------------------------------------
+# method_fault_type: the VI-JSON 500 fault-body parser (#3566)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        (
+            '{"_typeName":"NotAuthenticated","object":{"type":"GuestProcessManager",'
+            '"value":"guestOperationsProcessManager"},"privilegeId":"",'
+            '"faultstring":"The session is not authenticated."}',
+            "NotAuthenticated",
+        ),
+        ('{"_typeName":"InvalidLogin","faultstring":"x"}', "InvalidLogin"),
+        ('{"_typeName":"NoPermission","privilegeId":"System.View"}', "NoPermission"),
+        ('{"_typeName":"InvalidArgument","faultstring":"bad"}', "InvalidArgument"),
+        # Not a fault body: empty, not JSON, not an object, no / blank _typeName.
+        ("", None),
+        ("<html>500 Internal Server Error</html>", None),
+        ('["NotAuthenticated"]', None),
+        ('"NotAuthenticated"', None),
+        ('{"faultstring":"no type"}', None),
+        ('{"_typeName":"  "}', None),
+        ('{"_typeName":7}', None),
+    ],
+)
+def test_method_fault_type_truth_table(body: str, expected: str | None) -> None:
+    assert method_fault_type(body) == expected

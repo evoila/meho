@@ -182,6 +182,9 @@ VAULT_AUTH_USERPASS_WRITE_LLM_INSTRUCTIONS: dict[str, Any] = {
         "naming the failure class ('VaultAuthBackendNotMountedError' when "
         "userpass is not enabled at the mount)."
     ),
+    # Credential-class ops get no default scalar copy when token_policies
+    # spills; these value-free fields stay inline (#3633).
+    "result_scalars": {"keys": ["username", "mount", "written"]},
 }
 
 

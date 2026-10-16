@@ -46,6 +46,7 @@ failed its type guard against live 8.0.x (proven: ``vm.create``'s DVPG
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:
@@ -57,6 +58,7 @@ __all__ = [
     "VIM_VALUE_KEY",
     "fault_message",
     "fault_type_name",
+    "method_fault_type",
     "retrieve_properties_body",
     "unwrap_vim_value",
     "vim_moref",
@@ -243,6 +245,26 @@ def fault_type_name(fault: Any) -> str | None:
             return nested_name
     type_name = _fault_type_name(fault)
     return None if type_name == _LOCALIZED_METHOD_FAULT else type_name
+
+
+def method_fault_type(body_text: str) -> str | None:
+    """Concrete fault class of a VI-JSON method-fault response body (#3566).
+
+    When a vim method fails, VI-JSON answers HTTP 500 with the fault
+    DataObject itself as the JSON body, for example
+    ``{"_typeName": "NotAuthenticated", "faultstring": "..."}``. This reads
+    that top-level ``_typeName``. Returns ``None`` when the body is empty,
+    is not JSON, is not a JSON object, or has no usable ``_typeName`` -- the
+    caller then keeps its normal error path. Returns the class **name
+    only**, never fault text.
+    """
+    try:
+        payload = json.loads(body_text)
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return _fault_type_name(payload)
 
 
 def fault_message(error: Any) -> str | None:

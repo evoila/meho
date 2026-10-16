@@ -30,9 +30,10 @@ class EndpointDescriptorProto(BaseModel):
     Each field maps 1:1 to a column on
     :class:`meho_backplane.db.models.EndpointDescriptor`. Fields the
     parser cannot populate (``tenant_id``, ``embedding``, ``group_id``,
-    ``source_kind``, ``handler_ref``, ``llm_instructions``, ``custom_*``)
-    are owned by T2 (registration) / T3 (LLM grouping) / T4 (operator
-    review).
+    ``source_kind``, ``handler_ref``, ``custom_*``) are owned by T2
+    (registration) / T3 (LLM grouping) / T4 (operator review). The parser
+    leaves ``llm_instructions`` as ``None``; only a connector-owned spec
+    correction (:mod:`.spec_corrections`) sets it.
 
     ``parameter_schema`` is a JSON Schema 2020-12 object with one
     property per OpenAPI parameter. Each property carries an
@@ -103,3 +104,9 @@ class EndpointDescriptorProto(BaseModel):
     hints set it to ``True``. Operators can also flip it during review
     (T4) for ops that should pause the dispatcher for out-of-band
     approval."""
+
+    llm_instructions: dict[str, object] | None = None
+    """Agent guidance for this operation. ``None`` from the parser. A
+    connector-owned spec correction may set it; registration then stores
+    it on a new row, or on an existing row that has none yet (an
+    operator's own edit is never replaced)."""

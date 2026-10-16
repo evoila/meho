@@ -628,9 +628,26 @@ from the payload is skipped silently; a reserved bookkeeping key
 never be shadowed by a vendor field; and a non-scalar value (nested
 dict / list) is skipped with a warning — copying an unbounded vendor
 object inline would defeat the reduction the hint rides on. `None`
-values are preserved (shape stability across poll states). The hint is
-purely additive: an op without it keeps the bookkeeping-only summary,
-byte-identical to the pre-#3084 shape.
+values are preserved (shape stability across poll states).
+
+Since #3633 the hint is no longer the only way. Without a hint, a
+non-credential op keeps its scalar siblings by default (bounded to 32
+keys and 1 KB of JSON text in total, and no single value over 512 bytes;
+anything that does not fit is counted under `omitted_scalar_count`). The
+budget stays well under the 4 KB reduction threshold, so the inline
+summary is always smaller than the response it replaces. A value that did
+not fit is stored with the rows, and `result_query` reads it back with
+`query={"path": "/<field name>"}`; the handle's drill-in rationale names
+that read when the count is above zero and the store kept the value. A
+value that leaves no room for the rows under the per-record cap is
+dropped, the rows are still stored, and the rationale says the value is
+not retrievable. With a hint, the listed keys are kept on top of
+the default copy, outside that budget. Credential-class ops
+(`credential_read` / `credential_mint` / `credential_write`) get no
+default copy: for them the hint is still the only path, so a secret-shaped
+scalar is never copied by accident. The registry sweep in
+`tests/test_operations_jsonflux_conformance.py` fails the build when a
+typed "one list + scalars" op would drop a scalar on reduction.
 
 ### Bounded object identity — `result_objects` (#3425)
 

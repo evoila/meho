@@ -706,6 +706,9 @@ async def test_execute_mutating_kv_op_parks_without_approval(
     ran.
     """
     fake = install_fake_client(monkeypatch)
+    # The park-time preflight must see a write grant, or the park is
+    # refused before any row is written (#3542).
+    fake.sys.default_capabilities = ["create", "read", "update"]
     result = await _dispatch_vault(op_id, params, approved=False)
 
     assert result.status == "awaiting_approval", result.error

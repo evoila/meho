@@ -1306,6 +1306,11 @@ _SCRIPT_RUN_OP = LinuxOp(
             "{stdout, total, stderr, exit_code, interpreter, used_sudo}. stdout "
             "is a line list; large output spills to a result_query handle."
         ),
+        # This op is credential-class (its params can carry secrets), so the
+        # reducer does not keep scalar siblings by default. exit_code is the
+        # success signal and stderr is capped at _STDERR_CAP, so keep them
+        # inline when stdout spills (#3549).
+        "result_scalars": {"keys": ["exit_code", "stderr", "interpreter", "used_sudo"]},
     },
 )
 

@@ -239,7 +239,7 @@ $ meho bind9 record remove esx-dc6.evba.lab \
 | --- | --- | --- |
 | `record get <fqdn>` | `bind9.record.get` | `--type` defaults to `A`; supported: `A` / `AAAA` / `CNAME` / `MX` / `TXT`. Resolution is via `dig @localhost`, so views + cache hits behave as the rest of the world sees them. |
 | `record add <fqdn> <ip>` | `bind9.record.add` | `safety_level=caution`, `op_class=write`. Routes through the atomic-apply primitive. `--zone` is optional; the handler resolves the owning zone via longest-suffix match. `--type` accepts `A` or `AAAA` only — CNAME / MX / TXT writes are out of scope for v0.2. |
-| `record remove <fqdn>` | `bind9.record.remove` | `safety_level=destructive`, `requires_approval=True`, `op_class=write` (governed since #3247). Clears **every** A + AAAA rdataset at `<fqdn>` — a whole-name clear. Runs only through preview → park → distinct-human approval → audited resume; a bare call is refused `preview_binding_required`. To retire a single record instead, use `bind9.record.delete`. |
+| `record remove <fqdn>` | `bind9.record.remove` | `safety_level=destructive`, `requires_approval=True`, `op_class=write` (governed since #3247). Clears **every** A + AAAA rdataset at `<fqdn>` — a whole-name clear. A second person must approve it. `meho bind9 record remove` previews first and sends the call with the `preview_hash`, so the result is `status=awaiting_approval`; the removal runs once a second person approves. If the preview fails, the command stops and sends nothing. A bare `call_operation` without the hash is refused `preview_binding_required`. To retire a single record instead, use `bind9.record.delete`. |
 
 `record add` is the **1:1 replacement** for the consumer's
 `bind9-dns.sh --add-a-record …` invocation. The wrapper composed a

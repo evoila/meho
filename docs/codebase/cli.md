@@ -1174,6 +1174,15 @@ delete`) use them: without
 `--preview-hash` the verb only previews and prints the hash (nothing is
 deleted, nothing waits for approval); run again with `--preview-hash <hash>`
 and the request waits until a second person approves it.
+
+`Connector.PreviewAndCall` does both steps in one run: it previews, then
+sends the call with the hash. If the preview is not `status=ok` with a
+hash, it sends no call and returns the preview, and
+`Connector.RenderPreviewFailure` prints why (exit 1).
+`meho harbor robot delete` and `meho bind9 record remove` use it (#4014),
+so each run ends in `awaiting_approval`. The escape-hatch verbs
+`meho harbor operation call` and `meho vmware operation call` take a
+`--preview-hash` flag with the same meaning as on `meho operation call`.
 The fourth route `GET /api/v1/operations/{descriptor_id}` (tenant-
 admin diagnostic for `llm_instructions` inspection) is deferred — the
 G0.6-T13 DoD was "three CLI verbs", not four.

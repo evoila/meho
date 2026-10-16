@@ -2214,3 +2214,31 @@ def test_delegated_reason_missing_instruction_is_refused_in_modal(action: str) -
     assert "Request approved" not in body
     assert "Request denied" not in body
     assert _request_status(rid) == ApprovalRequestStatus.PENDING.value
+
+
+def test_pending_modal_reason_field_is_multiline() -> None:
+    """The shared reason field is a textarea, so a pasted trailer keeps its line breaks.
+
+    A single-line text input joins the ``Instructed-by:`` / ``Instruction:`` /
+    ``Refs:`` lines on paste, and the parser then records an ordinary reason
+    with no delegation. Both confirm forms must still pull the field by id.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    before, after = body.split('id="meho-approval-reason"')
+    assert before.rsplit("<", 1)[1].strip().startswith("textarea")
+    reason_field = after.split(">")[0]
+    assert 'name="reason"' in reason_field
+    assert 'maxlength="2000"' in reason_field
+    assert all('name="reason"' not in tag.split(">")[0] for tag in body.split("<input")[1:])
+    assert body.count('hx-include="#meho-approval-reason"') == 2

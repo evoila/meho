@@ -155,13 +155,20 @@ _DRILL_IN_UNAVAILABLE_RATIONALES: dict[DrillInUnavailableReason, str] = {
 
 
 def _drill_in_available_rationale(
-    handle_id: UUID, stored_rows: int, total_rows: int, omitted_fields: int = 0
+    handle_id: UUID,
+    stored_rows: int,
+    total_rows: int,
+    omitted_fields: int = 0,
+    omitted_fields_stored: bool = False,
 ) -> str:
     """Agent-facing prose for a spilled handle the read-back tool can serve.
 
     *omitted_fields* (#3633) is the number of top-level scalar fields the
-    inline summary left out (``omitted_scalar_count``). They are stored
-    with the rows, so the prose names the ``path`` read that returns them.
+    inline summary left out (``omitted_scalar_count``). When the store kept
+    them with the rows (*omitted_fields_stored*) the prose names the
+    ``path`` read that returns them; otherwise it says they are not
+    retrievable from this handle, so the agent is never sent to a read
+    that fails.
     """
     tail_note = (
         ""
@@ -171,15 +178,7 @@ def _drill_in_available_rationale(
             "spilled; rows past that are not retrievable."
         )
     )
-    omitted_note = (
-        ""
-        if omitted_fields <= 0
-        else (
-            f" {omitted_fields} top-level field(s) did not fit the inline summary "
-            "(``omitted_scalar_count``); they are kept with the rows. Read one with "
-            '``query={"path": "/<field name>"}`` or all of them with ``query={"path": ""}``.'
-        )
-    )
+    omitted_note = _omitted_fields_note(omitted_fields, omitted_fields_stored)
     return (
         f"The full result set ({total_rows} rows) is retrievable over MCP "
         f"via the ``{_RESULT_QUERY_TOOL}`` tool or over REST via "
@@ -189,6 +188,24 @@ def _drill_in_available_rationale(
         f"``select`` / ``group_by`` / ``aggregate`` / ``order_by`` / "
         f"``limit``) to have the backplane return just the matching rows or "
         f"the per-group counts instead of the whole set.{tail_note}{omitted_note}"
+    )
+
+
+def _omitted_fields_note(omitted_fields: int, stored: bool) -> str:
+    """The drill-in sentence about fields the inline summary left out (#3633)."""
+    if omitted_fields <= 0:
+        return ""
+    if stored:
+        return (
+            f" {omitted_fields} top-level field(s) did not fit the inline summary "
+            "(``omitted_scalar_count``); they are kept with the rows. Read one with "
+            '``query={"path": "/<field name>"}`` or all of them with ``query={"path": ""}``.'
+        )
+    return (
+        f" {omitted_fields} top-level field(s) did not fit the inline summary "
+        "(``omitted_scalar_count``) and were too large to keep with the rows, so "
+        "they are not retrievable from this handle; a ``path`` read fails. "
+        "Re-run the operation with params that shrink those fields to see them."
     )
 
 
@@ -363,6 +380,10 @@ class _SpillOutcome:
 
     stored_rows: int | None = None
     skip_reason: DrillInUnavailableReason | None = None
+    #: The omitted scalar fields (#3633) were kept with the rows, so a
+    #: ``path`` read on the handle returns them. Only meaningful when
+    #: ``stored_rows`` is set.
+    omitted_fields_stored: bool = False
 
 
 class JsonFluxReducer:
@@ -752,8 +773,10 @@ class JsonFluxReducer:
         *omitted_scalars* (#3633) are the payload's top-level scalars the
         default rule left out of the inline summary. They are stored with
         the rows so ``result_query`` can read them back with a ``path``; a
-        set too large for the record cap is dropped by the store (logged)
-        and the rows are still kept.
+        set that leaves no room for the rows under the record cap is
+        dropped by the store (logged) and the rows are still kept. The
+        outcome's ``omitted_fields_stored`` says which happened, so the
+        drill-in prose only advertises the ``path`` read when it works.
 
         Returns a :class:`_SpillOutcome`: ``stored_rows`` when the rows
         were persisted (so :meth:`_assemble` can build the drill-in
@@ -796,7 +819,7 @@ class JsonFluxReducer:
             if self._max_spill_rows is not None
             else get_settings().result_handle_max_spill_rows
         )
-        stored_rows = await store.spill(
+        spilled = await store.spill(
             tenant_id=tenant_id,
             operator_sub=str(operator_sub),
             handle_id=materialized.handle_id,
@@ -807,9 +830,11 @@ class JsonFluxReducer:
             max_rows=max_rows,
             document=omitted_scalars or None,
         )
-        if not stored_rows:
+        if not spilled.stored_rows:
             return self._skip("result_store_unavailable", materialized, context)
-        return _SpillOutcome(stored_rows=stored_rows)
+        return _SpillOutcome(
+            stored_rows=spilled.stored_rows, omitted_fields_stored=spilled.document_stored
+        )
 
     @staticmethod
     def _skip(
@@ -1712,7 +1737,11 @@ def _build_drill_in(
     return FetchMoreDrillIn(
         available=True,
         rationale=_drill_in_available_rationale(
-            handle_id, spill_outcome.stored_rows, total_rows, omitted_fields
+            handle_id,
+            spill_outcome.stored_rows,
+            total_rows,
+            omitted_fields,
+            spill_outcome.omitted_fields_stored,
         ),
         mcp_tool=_RESULT_QUERY_TOOL,
         example_call={

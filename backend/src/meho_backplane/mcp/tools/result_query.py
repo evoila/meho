@@ -195,9 +195,10 @@ register_mcp_tool(
             'one part with `query={"path": "/key/0/name"}` (an RFC '
             '6901 JSON Pointer; `""` is the whole document). An array '
             "value pages with `offset` / `limit`; any other value comes back "
-            "in `value`. A rows handle with `omitted_scalar_count` kept the "
-            "fields that did not fit its inline summary the same way: read one "
-            'with `query={"path": "/<field name>"}`. `path` cannot be '
+            "in `value`. A rows handle with `omitted_scalar_count` keeps the "
+            "fields that did not fit its inline summary the same way when its "
+            "`fetch_more.drill_in.rationale` says so: read one with "
+            '`query={"path": "/<field name>"}`. `path` cannot be '
             "combined with the other `query` fields. Only use this when "
             "`fetch_more.drill_in.available` is `true` on the handle; when "
             "it is `false` the full set was not spilled and you must "

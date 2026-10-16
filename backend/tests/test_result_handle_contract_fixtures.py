@@ -80,16 +80,18 @@ async def _stored_rows(rows: list[dict[str, Any]]) -> SpilledRowSet:
     """Persist raw rows through the store for raw-only overflow coverage."""
     tenant_id, handle_id = uuid4(), uuid4()
     store = ResultHandleStore(_MemoryClient())
-    assert await store.spill(
-        tenant_id=tenant_id,
-        operator_sub="fixture-operator",
-        handle_id=handle_id,
-        op_id="example.read",
-        rows=rows,
-        total_rows=len(rows),
-        ttl_seconds=3600,
-        max_rows=1000,
-    )
+    assert (
+        await store.spill(
+            tenant_id=tenant_id,
+            operator_sub="fixture-operator",
+            handle_id=handle_id,
+            op_id="example.read",
+            rows=rows,
+            total_rows=len(rows),
+            ttl_seconds=3600,
+            max_rows=1000,
+        )
+    ).stored_rows
     row_set = await store.fetch_rows(
         tenant_id=tenant_id,
         operator_sub="fixture-operator",

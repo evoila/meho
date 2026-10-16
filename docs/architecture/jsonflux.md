@@ -633,7 +633,10 @@ budget stays well under the 4 KB reduction threshold, so the inline
 summary is always smaller than the response it replaces. A value that did
 not fit is stored with the rows, and `result_query` reads it back with
 `query={"path": "/<field name>"}`; the handle's drill-in rationale names
-that read when the count is above zero. With a hint, the listed keys are kept on top of
+that read when the count is above zero and the store kept the value. A
+value that leaves no room for the rows under the per-record cap is
+dropped, the rows are still stored, and the rationale says the value is
+not retrievable. With a hint, the listed keys are kept on top of
 the default copy, outside that budget. Credential-class ops
 (`credential_read` / `credential_mint` / `credential_write`) get no
 default copy: for them the hint is still the only path, so a secret-shaped

@@ -88,6 +88,7 @@ from meho_backplane.settings import get_settings
 __all__ = [
     "ResultHandleStore",
     "ResultRecordKindError",
+    "SpillResult",
     "SpilledDocument",
     "SpilledRowSet",
     "SpilledWindow",
@@ -171,6 +172,21 @@ class SpilledDocument(msgspec.Struct, frozen=True):
     document: Any
 
 
+class SpillResult(msgspec.Struct, frozen=True):
+    """What :meth:`ResultHandleStore.spill` kept.
+
+    ``stored_rows`` is the number of rows retrievable via
+    :meth:`ResultHandleStore.fetch_window`; ``0`` means nothing was stored.
+    ``document_stored`` is ``True`` only when the omitted fields passed as
+    *document* were kept beside the rows, so a ``path`` read on the handle
+    works. The reducer uses it to advertise that read only when it works
+    (#3633).
+    """
+
+    stored_rows: int
+    document_stored: bool = False
+
+
 class ResultRecordKindError(QueryContractError):
     """The handle holds the other record kind than the read asked for.
 
@@ -218,28 +234,47 @@ class _StoredPayload(msgspec.Struct):
     document: Any = None
 
 
-def _drop_document_over_cap(
-    baseline: _StoredPayload, max_record_bytes: int, *, handle_id: UUID, tenant_id: UUID
+def _without_document(
+    baseline: _StoredPayload, *, handle_id: UUID, tenant_id: UUID, max_record_bytes: int
 ) -> tuple[_StoredPayload, int]:
-    """Return *baseline* and its encoded size, without its document if that alone breaks the cap.
-
-    The omitted fields a rows record carries (#3633) must never cost the
-    caller its rows, so a set too large for the record cap is dropped with a
-    warning and the rows are stored as before.
-    """
-    size = len(msgspec.json.encode(baseline))
-    if baseline.document is None or size <= max_record_bytes:
-        return baseline, size
+    """Return *baseline* without its document, and the new encoded size (logged)."""
     _log.warning(
         "result_handle_omitted_fields_dropped",
         handle_id=str(handle_id),
         tenant_id=str(tenant_id),
         op_id=baseline.op_id,
-        record_bytes=size,
+        record_bytes=len(msgspec.json.encode(baseline)),
         max_record_bytes=max_record_bytes,
     )
     baseline = msgspec.structs.replace(baseline, document=None)
     return baseline, len(msgspec.json.encode(baseline))
+
+
+def _select_record(
+    baseline: _StoredPayload,
+    candidates: list[dict[str, Any]],
+    captured_rows: int,
+    max_record_bytes: int,
+    *,
+    handle_id: UUID,
+    tenant_id: UUID,
+) -> tuple[_StoredPayload, list[dict[str, Any]]]:
+    """Return the record base and the longest row prefix that fit the cap together.
+
+    The omitted fields a rows record carries (#3633) must never cost the
+    caller its rows. When they leave no room for even the first row --
+    because they alone break the cap, or because they fit but the first row
+    no longer does beside them -- they are dropped with a warning and the
+    rows are selected again without them.
+    """
+    size = len(msgspec.json.encode(baseline))
+    selected = _rows_within_cap(candidates, captured_rows, size, max_record_bytes)
+    if not selected and baseline.document is not None:
+        baseline, size = _without_document(
+            baseline, handle_id=handle_id, tenant_id=tenant_id, max_record_bytes=max_record_bytes
+        )
+        selected = _rows_within_cap(candidates, captured_rows, size, max_record_bytes)
+    return baseline, selected
 
 
 def _rows_within_cap(
@@ -293,32 +328,34 @@ class ResultHandleStore:
         max_record_bytes: int | None = None,
         metadata: dict[str, Any] | None = None,
         document: dict[str, Any] | None = None,
-    ) -> int:
+    ) -> SpillResult:
         """Persist a row-capped, byte-capped prefix of *rows* under the handle key.
 
-        Returns the positive stored-row count when rows were stored and are retrievable via
-        :meth:`fetch_window`, ``0`` when the spill was skipped or
-        failed (Valkey unreachable, serialization error, empty input). A
-        zero return is non-fatal: the caller keeps the inline sample
-        and leaves the handle's drill-in surface marked unavailable.
+        Returns a :class:`SpillResult` whose ``stored_rows`` is the positive
+        count of rows retrievable via :meth:`fetch_window`, or ``0`` when the
+        spill was skipped or failed (Valkey unreachable, serialization
+        error, empty input). A zero count is non-fatal: the caller keeps the
+        inline sample and leaves the handle's drill-in surface marked
+        unavailable.
 
         *document* (#3633) carries the payload's top-level fields that did
         not fit the inline summary, so :meth:`fetch_document` can serve them
-        back. It is written before the rows and counts against the same
-        record cap. When it does not fit the cap on its own it is dropped
-        with a warning and the rows are stored as before, so a large sibling
-        can never cost the caller its rows.
+        back. It counts against the same record cap as the rows. When it
+        leaves no room for even the first row it is dropped with a warning
+        and the rows are stored as before, so a large sibling can never cost
+        the caller its rows; ``document_stored`` tells the caller which
+        happened.
 
         The TTL is enforced server-side by Valkey (``SET ... EX``); no
         sweeper is needed and a crashed process leaves no orphaned key
         past the TTL.
         """
         if not rows or ttl_seconds <= 0 or max_rows <= 0:
-            return 0
+            return SpillResult(stored_rows=0)
         if max_record_bytes is None:
             max_record_bytes = get_settings().result_handle_max_record_bytes
         if max_record_bytes <= 0:
-            return 0
+            return SpillResult(stored_rows=0)
         created_at = datetime.now(UTC).isoformat()
         metadata = metadata or {}
         candidates = rows[:max_rows]
@@ -336,19 +373,23 @@ class ResultHandleStore:
                 metadata=metadata,
                 document=document,
             )
-            baseline, size = _drop_document_over_cap(
-                baseline, max_record_bytes, handle_id=handle_id, tenant_id=tenant_id
+            baseline, selected = _select_record(
+                baseline,
+                candidates,
+                captured_rows,
+                max_record_bytes,
+                handle_id=handle_id,
+                tenant_id=tenant_id,
             )
-            selected = _rows_within_cap(candidates, captured_rows, size, max_record_bytes)
             if not selected:
-                return 0
+                return SpillResult(stored_rows=0)
             coverage = "complete" if len(selected) == captured_rows else "partial"
             payload = msgspec.structs.replace(
                 baseline, rows=selected, stored_rows=len(selected), storage_coverage=coverage
             )
             encoded = msgspec.json.encode(payload)
             if len(encoded) > max_record_bytes:
-                return 0
+                return SpillResult(stored_rows=0)
             await self._client.set(_key(tenant_id, handle_id), encoded, ex=ttl_seconds)
         except (redis.RedisError, msgspec.EncodeError, TypeError, OSError) as exc:
             # Fail-open: a reduce must never fail because the spill
@@ -360,7 +401,7 @@ class ResultHandleStore:
                 op_id=op_id,
                 error=str(exc),
             )
-            return 0
+            return SpillResult(stored_rows=0)
         _log.info(
             "result_handle_spilled",
             handle_id=str(handle_id),
@@ -369,8 +410,9 @@ class ResultHandleStore:
             stored_rows=len(selected),
             total_rows=total_rows,
             ttl_seconds=ttl_seconds,
+            document_stored=payload.document is not None,
         )
-        return len(selected)
+        return SpillResult(stored_rows=len(selected), document_stored=payload.document is not None)
 
     async def spill_document(
         self,

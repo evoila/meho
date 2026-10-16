@@ -22,7 +22,12 @@ threshold (>50 rows or >4 KB by default), the caller gets back:
   reduction. The skipped values are not lost: they are stored with the
   rows, and `result_query` reads one back with `query={"path":
   "/<field name>"}` (or all of them with `path: ""`). The drill-in
-  rationale says so when the count is above zero. Credential-class ops do not get this default copy;
+  rationale names that read when the count is above zero and the store
+  kept the fields. When they leave no room for the rows under the
+  per-record cap, the store drops them, keeps the rows, and reports
+  `document_stored=False`; the rationale then says the fields are not
+  retrievable from the handle instead of naming a read that fails.
+  Credential-class ops do not get this default copy;
   they keep only the scalars their `result_scalars` hint lists (#3084).
   Lists and objects are never copied by default (objects need the
   bounded `result_objects` hint); and
@@ -164,9 +169,9 @@ byte budget applies.
      reason `admission_limit_exceeded`;
    - no usable `tenant_id`/`operator_sub` (absent or non-UUID) →
      skip, reason `no_tenant_context`;
-   - `ResultHandleStore.spill()` returns `False` (Valkey unreachable,
-     write rejected, or the guard `ttl/max_rows <= 0` / empty rows) →
-     skip, reason `result_store_unavailable`;
+   - `ResultHandleStore.spill()` reports `stored_rows == 0` (Valkey
+     unreachable, write rejected, or the guard `ttl/max_rows <= 0` /
+     empty rows) → skip, reason `result_store_unavailable`;
    - otherwise → `stored_rows = min(total_rows,
      RESULT_HANDLE_MAX_SPILL_ROWS)`.
 3. `_assemble()` builds the inline summary + handle; the drill-in
@@ -218,7 +223,7 @@ code-level diagnosis at `v0.13.0` (`f6ee330`):
   dispatch, so `no_tenant_context` cannot fire there (it covers
   non-dispatch reduces and malformed context only). A 5-of-300 sample
   with no working `result_query` route on a live deploy means
-  `ResultHandleStore.spill()` returned `False` — Valkey (the broadcast
+  `ResultHandleStore.spill()` stored no rows — Valkey (the broadcast
   service the store piggybacks on, `BROADCAST_REDIS_URL`) unreachable
   from the backplane pod, or the write rejected.
 - **What was actually wrong user-side:** before #1629 both skip causes

@@ -36,6 +36,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.result_handle_store import (
     ResultHandleStore,
     ResultRecordKindError,
+    SpillResult,
     _StoredPayload,
 )
 from meho_backplane.operations.result_document import document_outline, json_text_bytes
@@ -529,16 +530,18 @@ async def test_pointer_that_does_not_resolve_is_a_contract_error(
 
 async def test_path_on_a_rows_handle_is_a_contract_error(store: ResultHandleStore) -> None:
     handle_id = uuid.uuid4()
-    stored = await store.spill(
-        tenant_id=_TENANT,
-        operator_sub="op-a",
-        handle_id=handle_id,
-        op_id="x.list",
-        rows=[{"i": 1}],
-        total_rows=1,
-        ttl_seconds=60,
-        max_rows=10,
-    )
+    stored = (
+        await store.spill(
+            tenant_id=_TENANT,
+            operator_sub="op-a",
+            handle_id=handle_id,
+            op_id="x.list",
+            rows=[{"i": 1}],
+            total_rows=1,
+            ttl_seconds=60,
+            max_rows=10,
+        )
+    ).stored_rows
     assert stored == 1
 
     with pytest.raises(QueryContractError, match="holds rows"):
@@ -563,6 +566,7 @@ async def test_path_reads_a_field_the_rows_summary_left_out(
     assert handle is not None
     assert "stderr" not in reduced
     assert reduced["omitted_scalar_count"] == 1
+    assert '"path": "/<field name>"' in handle.fetch_more.drill_in.rationale
 
     one = await run_result_query(_operator(), handle.handle_id, ResultQuerySpec(path="/stderr"))
     assert one["value"] == stderr
@@ -585,7 +589,7 @@ async def test_omitted_fields_over_the_record_cap_are_dropped_but_rows_stay(
     """Omitted fields never cost the caller its rows: too big for the cap, they go."""
     handle_id = uuid.uuid4()
 
-    stored = await store.spill(
+    spilled = await store.spill(
         tenant_id=_TENANT,
         operator_sub="op-a",
         handle_id=handle_id,
@@ -598,11 +602,92 @@ async def test_omitted_fields_over_the_record_cap_are_dropped_but_rows_stay(
         document={"big": "b" * 5_000},
     )
 
-    assert stored == 2
+    assert spilled == SpillResult(stored_rows=2, document_stored=False)
     window = await read_result_window(_operator(), handle_id, offset=0, limit=5)
     assert window["returned_rows"] == 2
     with pytest.raises(QueryContractError, match="holds rows"):
         await run_result_query(_operator(), handle_id, ResultQuerySpec(path="/big"))
+
+
+async def test_omitted_fields_that_leave_no_room_for_a_row_are_dropped(
+    store: ResultHandleStore,
+) -> None:
+    """Boundary: the omitted fields fit the cap alone but not beside the first row.
+
+    The rows store fine on their own. Adding fields that fit the cap by
+    themselves used to leave too little room for the first row, so nothing
+    was stored at all. Now the store retries without the fields, keeps the
+    rows, and reports the fields as not stored.
+    """
+    cap = 2_000
+    rows = [{"v": "r" * 200} for _ in range(3)]
+    fields = {"note": "n" * 1_600}
+    created_at = "2026-01-01T00:00:00.000001+00:00"
+    with_fields = _StoredPayload(
+        "op-a", "x.list", [], 3, 0, created_at, 3, "partial", document=fields
+    )
+    assert len(msgspec.json.encode(with_fields)) <= cap
+    first_row = msgspec.structs.replace(with_fields, rows=rows[:1], stored_rows=1)
+    assert len(msgspec.json.encode(first_row)) > cap
+
+    def _spill(handle_id: uuid.UUID, document: dict[str, Any] | None) -> Any:
+        return store.spill(
+            tenant_id=_TENANT,
+            operator_sub="op-a",
+            handle_id=handle_id,
+            op_id="x.list",
+            rows=rows,
+            total_rows=3,
+            ttl_seconds=60,
+            max_rows=10,
+            max_record_bytes=cap,
+            document=document,
+        )
+
+    assert await _spill(uuid.uuid4(), None) == SpillResult(stored_rows=3, document_stored=False)
+
+    handle_id = uuid.uuid4()
+    assert await _spill(handle_id, fields) == SpillResult(stored_rows=3, document_stored=False)
+    window = await read_result_window(_operator(), handle_id, offset=0, limit=5)
+    assert window["returned_rows"] == 3
+    with pytest.raises(QueryContractError, match="holds rows"):
+        await run_result_query(_operator(), handle_id, ResultQuerySpec(path="/note"))
+
+
+async def test_rationale_does_not_promise_a_path_read_the_store_dropped(
+    result_reducer_cls: type[Any], store: ResultHandleStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end: a sibling too large for the record cap is reported as lost.
+
+    The rows are stored and the handle pages, but the omitted field was not
+    kept beside them. The drill-in rationale must say so instead of naming a
+    ``path`` read that fails.
+    """
+    monkeypatch.setenv("RESULT_HANDLE_MAX_RECORD_BYTES", "2000")
+    get_settings.cache_clear()
+    reducer = result_reducer_cls(store=store)
+    payload = {
+        "stdout": [{"line": f"l{i}"} for i in range(60)],
+        "stderr": "e" * 5_000,
+        "exit_code": 1,
+    }
+
+    reduced, handle = await reducer.reduce(payload, None, dict(_CONTEXT, op_id="k8s.exec"))
+
+    assert handle is not None
+    assert "stderr" not in reduced
+    assert reduced["omitted_scalar_count"] == 1
+    drill_in = handle.fetch_more.drill_in
+    assert drill_in.available is True
+    assert "1 top-level field(s) did not fit the inline summary" in drill_in.rationale
+    assert "not retrievable from this handle" in drill_in.rationale
+    assert '"path": "/<field name>"' not in drill_in.rationale
+
+    window = await read_result_window(_operator(), handle.handle_id, offset=0, limit=5)
+    assert window["returned_rows"] == 5
+    assert window["total_rows"] == 60
+    with pytest.raises(QueryContractError, match="holds rows"):
+        await run_result_query(_operator(), handle.handle_id, ResultQuerySpec(path="/stderr"))
 
 
 async def test_relational_query_on_a_document_is_a_contract_error(

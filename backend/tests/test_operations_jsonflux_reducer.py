@@ -46,7 +46,7 @@ from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
-from meho_backplane.connectors.result_handle_store import ResultHandleStore
+from meho_backplane.connectors.result_handle_store import ResultHandleStore, SpillResult
 from meho_backplane.connectors.schemas import (
     FetchMore,
     FetchMoreDrillIn,
@@ -903,7 +903,7 @@ async def test_admission_rejection_does_not_serialize_or_spill_raw_graph(
     monkeypatch.setattr(reducer_module, "_serialize", fail_serialize)
 
     class _ThrowingStore:
-        async def spill(self, **_: object) -> bool:
+        async def spill(self, **_: object) -> SpillResult:
             raise AssertionError("rejected graph reached spill")
 
     guard = AdmissionGuard(max_decoded_bytes=1024, max_depth=2, max_nodes=100)
@@ -1540,7 +1540,7 @@ class _FakeStore:
         ttl_seconds: int,
         max_rows: int,
         document: dict[str, Any] | None = None,
-    ) -> int:
+    ) -> SpillResult:
         stored = rows[:max_rows]
         self.spills.append(
             {
@@ -1557,7 +1557,7 @@ class _FakeStore:
         )
         self._rows[(str(tenant_id), str(handle_id))] = stored
         self._totals[(str(tenant_id), str(handle_id))] = total_rows
-        return len(stored)
+        return SpillResult(stored_rows=len(stored), document_stored=document is not None)
 
     async def fetch_window(
         self,
@@ -1754,8 +1754,8 @@ async def test_reduce_store_rejection_reports_result_store_unavailable() -> None
     """
 
     class _DownStore:
-        async def spill(self, **_kwargs: Any) -> int:
-            return 0
+        async def spill(self, **_kwargs: Any) -> SpillResult:
+            return SpillResult(stored_rows=0)
 
     reducer = JsonFluxReducer(sample_size=5, store=_DownStore(), max_spill_rows=10000)
     rows = [{"id": f"seg-{i}"} for i in range(60)]
@@ -1926,8 +1926,8 @@ async def test_k8s_logs_shape_store_down_states_the_reason() -> None:
     """
 
     class _DownStore:
-        async def spill(self, **_kwargs: Any) -> int:
-            return 0
+        async def spill(self, **_kwargs: Any) -> SpillResult:
+            return SpillResult(stored_rows=0)
 
     reducer = JsonFluxReducer(sample_size=5, store=_DownStore(), max_spill_rows=10000)
     context = {

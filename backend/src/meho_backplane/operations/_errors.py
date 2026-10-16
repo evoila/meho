@@ -1832,6 +1832,18 @@ def result_connector_vault_forbidden(
 _VAULT_WRITE_POLICY_DOC = "docs/cross-repo/connector-vault-policy.md"
 
 
+def _vault_write_target_clause(target_name: str | None, vault_role: str | None) -> str:
+    """Name the acting vault target and its role, or ``""`` when unknown (#3716)."""
+    if not target_name:
+        return ""
+    if vault_role:
+        return f" It was dispatched on target {target_name!r} under vault_role {vault_role!r}."
+    return (
+        f" It was dispatched on target {target_name!r}, which sets no vault_role, "
+        f"so the default role was used."
+    )
+
+
 def result_connector_vault_write_forbidden(
     op_id: str,
     exc: BaseException,
@@ -1839,6 +1851,8 @@ def result_connector_vault_write_forbidden(
     *,
     write_path: str | None,
     identity_hint: str | None = None,
+    target_name: str | None = None,
+    vault_role: str | None = None,
 ) -> OperationResult:
     """A KV-v2 write was denied by Vault RBAC (post-approval write-identity gap).
 
@@ -1866,10 +1880,16 @@ def result_connector_vault_write_forbidden(
     path is the op's own authorization path (rendered by the caller via
     :func:`~meho_backplane.connectors.vault.ops.vault_kv_write_target_path`),
     and the identity hint is the dispatching / reviewing operator's ``sub``.
-    The remediation points at the write-capability stanza (§6.1) and the
-    ``sys/capabilities-self`` probe (§6.2) of the policy doc, and repeats
-    the do-NOT-widen-the-shared-policy warning: the grant is per-operator
-    templated, not a role-wide widen.
+    The remediation names two fixes, cheapest first (#3716). The write runs
+    under the operator's token logged in with the dispatch target's
+    ``extras["vault_role"]`` (#3274), so the first fix is to check that role
+    and run the same write on a vault target whose role can already write
+    the path — no policy change. Only when no such target exists does it
+    point at the write-capability stanza (§6.1) and the
+    ``sys/capabilities-self`` probe (§6.2), and repeat the
+    do-NOT-widen-the-shared-policy warning: the grant is per-operator
+    templated, not a role-wide widen. ``target_name`` / ``vault_role`` name
+    the acting target and its role in the text when the caller knows them.
 
     ``extras`` carries the machine-usable fields
     (``error_code`` / ``path`` / ``identity_hint`` / ``doc_ref`` /
@@ -1886,6 +1906,7 @@ def result_connector_vault_write_forbidden(
     identity_clause = (
         f" The write dispatched under identity {identity_hint!r}." if identity_hint else ""
     )
+    target_clause = _vault_write_target_clause(target_name, vault_role)
     # #3274: the capability + path kind is op-aware. A version soft-delete
     # (``vault.kv.delete``) authorizes with ``update`` on the ``/delete/``
     # path; ``put`` / ``patch`` with ``create``/``update`` on the ``/data/``
@@ -1901,13 +1922,18 @@ def result_connector_vault_write_forbidden(
     summary = (
         f"vault_write_identity_forbidden: Vault denied the KV-v2 write{path_clause} "
         f"(permission denied). The approval handshake succeeded, but the identity "
-        f"the connector dispatched the write with {capability_clause}.{identity_clause} "
-        f"This is a deploy write-identity gap, not a bug in the approve→execute flow: "
-        f"add the per-operator write-capability stanza (§6.1) so the "
-        f"dispatching/reviewing operator's token can write the path, and verify it "
-        f"with the 'sys/capabilities-self' probe (§6.2). Do NOT widen the backplane's "
-        f"shared Vault policy — the write grant is per-operator templated. See "
-        f"{_VAULT_WRITE_POLICY_DOC} §6 for the write-identity contract."
+        f"the connector dispatched the write with {capability_clause}.{identity_clause}"
+        f"{target_clause} "
+        f"This is a deploy write-identity gap, not a bug in the approve→execute flow. "
+        f"Fix it in this order: (1) check the target's vault_role — the write runs "
+        f"under the operator's token and the vault_role of the target it is "
+        f"dispatched on, so another registered vault target may already hold this "
+        f"path under a broader role; dispatch the same write there (no policy "
+        f"change). (2) Otherwise add the per-operator write-capability stanza (§6.1) "
+        f"so the dispatching/reviewing operator's token can write the path, and "
+        f"verify it with the 'sys/capabilities-self' probe (§6.2). Do NOT widen the "
+        f"backplane's shared Vault policy — the write grant is per-operator "
+        f"templated. See {_VAULT_WRITE_POLICY_DOC} §6 for the write-identity contract."
     )
     if msg:
         # hvac renders Forbidden as "permission denied, on POST <url>" — the

@@ -1341,6 +1341,7 @@ async def _run_branch_with_error_handling(
             VAULT_KV_WRITE_CAPABILITIES,
             vault_kv_write_target_path,
         )
+        from meho_backplane.connectors.vault.target_auth import resolve_vault_target_auth
 
         if op_id in VAULT_KV_WRITE_CAPABILITIES:
             try:
@@ -1356,6 +1357,10 @@ async def _run_branch_with_error_handling(
                 duration_ms,
                 write_path=write_path,
                 identity_hint=operator.sub,
+                # #3716: name the acting target + role so the remediation can
+                # point at a retarget before a policy edit.
+                target_name=getattr(target, "name", None),
+                vault_role=resolve_vault_target_auth(target).role,
             )
         else:
             expected_secret_ref: str | None = None

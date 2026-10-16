@@ -2784,7 +2784,8 @@ async def test_dispatch_kv_write_forbidden_uses_write_identity_error(
     )
 
     operator = _make_operator(sub="op-writer")
-    target = _FakeTarget(product="vault")
+    target = _FakeTarget(product="vault", name="vault-main")
+    target.extras = {"vault_role": "meho-writer"}  # type: ignore[attr-defined]
 
     result = await dispatch(
         operator=operator,
@@ -2800,6 +2801,8 @@ async def test_dispatch_kv_write_forbidden_uses_write_identity_error(
     # Data path rendered from mount default + params; identity is the caller.
     assert result.extras["path"] == "secret/data/meho/test/x"
     assert result.extras["identity_hint"] == "op-writer"
+    # #3716: the acting target and its vault_role are named in the text.
+    assert "target 'vault-main' under vault_role 'meho-writer'" in result.error
     # NOT mislabelled as the read-path credential-resolution cause.
     assert "connector_vault_forbidden" not in result.error
     assert result.extras["error_code"] != "connector_vault_forbidden"

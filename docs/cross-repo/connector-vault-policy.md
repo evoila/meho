@@ -327,6 +327,14 @@ path **before** an operator approves the parked write.
 
 ### 6.1 Write-capability policy stanza
 
+> **Check the target's `vault_role` first.** A write runs under the
+> operator's token, logged in with the `extras.vault_role` of the vault
+> target it is dispatched on (falling back to the default role when the
+> target sets none; see §6.3). So before you add the stanza below, check
+> which target the write ran on. Another registered vault target may
+> already have a role that can write this path. If so, run the same write
+> on that target. No policy change is needed.
+
 Like the §2 reads, KV-v2 writes are scoped per operator through ACL
 policy templating. KV-v2 authorizes each write against a **different**
 path prefix: `vault.kv.put` / `vault.kv.patch` write the value under
@@ -470,8 +478,11 @@ Expected outcomes:
 
 The read path (§2–§5) and the write path use the **same** federated
 identity model: every KV op runs under the acting **operator's**
-OIDC-federated Vault token (the `meho-mcp` role), never a shared god-mode
-backplane token. There is no separate service-account identity for agent
+OIDC-federated Vault token, never a shared god-mode backplane token. The
+token logs in under the dispatch target's `extras.vault_role` when the
+target sets one (evoila/meho#3274), and under the deployment's default role
+(usually `meho-mcp`) otherwise. So the write identity is the operator's JWT together with the
+target's role. There is no separate service-account identity for agent
 writes in this model — an *agent-initiated* `vault.kv.put` still parks and
 executes under a human operator's token (the dispatcher's at park time,
 the reviewer's on approved re-dispatch; see the §6.2 reviewer-token
@@ -505,8 +516,11 @@ logs:
   is the write-specific `error_code: "vault_write_identity_forbidden"` with
   `path` (the denied `secret/data/<path>`), `identity_hint` (the acting
   operator's `sub`), and `doc_ref` pointing back at this §6. It names the
-  §6.1 write stanza as the fix and repeats the do-NOT-widen-the-shared-policy
-  warning (the grant is per-operator templated, not role-wide).
+  acting target and its `vault_role` when known, and lists two fixes in
+  order: first, run the same write on a vault target whose `vault_role`
+  can already write the path (no policy change); second, add the §6.1
+  write stanza. It repeats the do-NOT-widen-the-shared-policy warning
+  (the grant is per-operator templated, not role-wide).
 
 To verify the contract for a given operator + target before wiring an
 approval flow, run the §6.2 `sys/capabilities-self` probe under **that

@@ -534,6 +534,19 @@ def _resolve_target_id(target: Any) -> uuid.UUID | None:
     return raw if isinstance(raw, uuid.UUID) else None
 
 
+def _apply_principal_name(payload: dict[str, Any], operator: Operator) -> None:
+    """Store the caller's display name in ``payload["principal_name"]`` (#4029).
+
+    Audit readers (``meho audit show`` / ``query``, the console) read the
+    name from this key, the same key the MCP wrapper rows and the approval
+    rows use. On an approved run the operator is the approver, so the name
+    always matches the row's ``operator_sub``. Left out when the token has
+    no ``name`` claim.
+    """
+    if operator.name:
+        payload["principal_name"] = operator.name
+
+
 class AuditCommitError(RuntimeError):
     """The DISPATCH audit row could not be committed.
 
@@ -592,6 +605,7 @@ async def write_audit_row(
         redaction_policy_id=redaction_policy_id,
         handle_metadata=handle_metadata,
     )
+    _apply_principal_name(payload, operator)
     target_id = _resolve_target_id(target)
     parent_audit_id = parent_audit_id_var.get()
     # G11.4-T5 #1074 -- read the agent-session lineage key off the

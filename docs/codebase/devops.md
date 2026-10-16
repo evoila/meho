@@ -473,7 +473,16 @@ broadcast store that also holds rate limits and approval waits.
 - **Values key.** The parent `Chart.yaml` maps `resultCache:` to the
   subchart with `alias: resultCache`. An alias also renames
   `.Chart.Name`, so the subchart helpers pin the resource name to
-  `result-cache`.
+  `result-cache`. There is no `nameOverride`: the backplane URL, the
+  Secret reference, and the egress selector all use the fixed name, and
+  the schema rejects the key.
+- **Ports.** `resultCache.service.port` only changes the Service's front
+  port. Valkey always listens on 6379, and both NetworkPolicies admit
+  that Pod port, so a custom Service port does not block the traffic.
+- **Config changes roll the pod.** The pod template carries a
+  `checksum/config` annotation over the ConfigMap. A new `maxmemory` or
+  `maxmemoryPolicy` therefore restarts the pod on upgrade; Valkey reads
+  its config at start-up only.
 - **Backplane wiring.** When enabled, the backplane Deployment gets
   `RESULT_CACHE_REDIS_URL`, `RESULT_CACHE_REDIS_PASSWORD` (secretKeyRef),
   and `RESULT_CACHE_WRITER_ENABLED` (from `resultCache.writerEnabled`),

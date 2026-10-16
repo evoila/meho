@@ -64,6 +64,7 @@ __all__ = [
     "VI_JSON_MOUNT_PREFIX",
     "adapt_filter_params",
     "api_mount_for_session_path",
+    "is_vmomi_path",
     "mounted_path",
     "vmomi_mounted_path",
     "vmomi_release_from_version",
@@ -130,6 +131,21 @@ def mounted_path(session_path: str, descriptor_path: str) -> str:
     mount = api_mount_for_session_path(session_path)
     normalised = descriptor_path if descriptor_path.startswith("/") else f"/{descriptor_path}"
     return f"{mount}{normalised}"
+
+
+def is_vmomi_path(descriptor_path: str) -> bool:
+    """Return ``True`` when *descriptor_path* is a spec-relative VI-JSON path.
+
+    ``vi-json.yaml`` paths start with a PascalCase managed-object type
+    (``/DistributedVirtualPortgroup/{moId}/config``,
+    ``/PropertyCollector/{moId}/RetrievePropertiesEx``). Every vSphere
+    Automation path in ``vcenter.yaml`` starts with a lower-case segment
+    (``/vcenter``, ``/appliance``, ``/cis`` ...), and an already-mounted
+    path starts with ``/api``, ``/rest`` or ``/sdk``. So the case of the
+    first character tells the two spec families apart without a lookup.
+    """
+    first = descriptor_path.lstrip("/")[:1]
+    return first.isascii() and first.isupper()
 
 
 def vmomi_release_from_version(version: str | None) -> str | None:

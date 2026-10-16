@@ -25,11 +25,9 @@ intercepting at the httpx transport layer:
   ``tests/test_connectors_vmware_rest_nested_esxi_spec_reconcile.py``);
 * the recipe's example params **validate** against the parsed schemas the
   dispatcher enforces (``validate_params``);
-* the raw VI-JSON dispatch mounts ``ReconfigVM_Task`` on the **``/api``
-  prefix** — the observed 9.x accommodation (#2466), pinned deliberately:
-  raw ingested dispatch has no release-versioned ``/sdk/vim25`` mounting
-  (that lives only in the typed ``_post_vmomi_json`` helper), which is a
-  documented caveat of the recipe's VHV step (404s on vCenter 8.0.x);
+* the raw VI-JSON dispatch mounts ``ReconfigVM_Task`` on the documented
+  release-versioned ``/sdk/vim25/{release}`` base (#3534), the same base the
+  typed ``_post_vmomi_json`` helper uses;
 * ``vmware.composite.vm.create`` passes an ESXi ``VMKERNEL_*`` guest-OS
   identifier through to the create body **verbatim**.
 
@@ -425,26 +423,24 @@ async def test_cdrom_add_posts_flat_create_spec_with_iso_backing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_vhv_reconfigure_dispatches_vi_json_op_on_the_api_mount() -> None:
-    """VHV: raw ``ReconfigVM_Task`` dispatch rides the ``/api``-mounted vmomi form.
+async def test_vhv_reconfigure_dispatches_vi_json_op_on_the_sdk_vim25_mount() -> None:
+    """VHV: raw ``ReconfigVM_Task`` dispatch rides the ``/sdk/vim25/{release}`` mount.
 
     Two recipe facts pinned at once:
 
     * the body is ``{"spec": {"nestedHVEnabled": true}}`` — ``spec`` here is
       the vim request type's genuine required parameter (reconcile module),
       not a #2973 envelope — and the 200 body is the Task MoRef to poll;
-    * raw ingested dispatch mounts the vmomi path at ``/api/VirtualMachine/...``
-      via ``mount_op_path``. That is the observed 9.x accommodation (#2466);
-      the release-versioned ``/sdk/vim25/{release}`` base is applied only by
-      the typed ``_post_vmomi_json`` composite helper, so the recipe's raw
-      VHV step documents "9.x fleet only — 404s on vCenter 8.0.x" as a
-      named caveat. If this pin ever fails because ``mount_op_path`` learned
-      vmomi-aware mounting, upgrade the recipe caveat away.
+    * raw ingested dispatch mounts the vmomi path on the documented
+      release-versioned VI-JSON base ``/sdk/vim25/{release}`` via
+      ``mount_op_path`` (#3534), the same base the typed ``_post_vmomi_json``
+      helper uses, so the raw step works on vCenter 8.0.x as well as 9.x.
     """
     connector = VmwareRestConnector(session_loader=_stub_loader)
     async with respx.mock(base_url=_BASE_URL) as mock:
         mock.post("/api/session").respond(200, json="tok-nested")
-        route = mock.post("/api/VirtualMachine/vm-42/ReconfigVM_Task").respond(
+        mock.get("/api/about").respond(200, json={"version": "8.0.3"})
+        route = mock.post("/sdk/vim25/8.0.3.0/VirtualMachine/vm-42/ReconfigVM_Task").respond(
             200, json={"type": "Task", "value": "task-1701"}
         )
 
@@ -454,7 +450,7 @@ async def test_vhv_reconfigure_dispatches_vi_json_op_on_the_api_mount() -> None:
 
     assert payload == {"type": "Task", "value": "task-1701"}
     request = route.calls.last.request
-    assert request.url.path == "/api/VirtualMachine/vm-42/ReconfigVM_Task"
+    assert request.url.path == "/sdk/vim25/8.0.3.0/VirtualMachine/vm-42/ReconfigVM_Task"
     assert json.loads(request.content) == {"spec": {"nestedHVEnabled": True}}
 
 

@@ -62,7 +62,9 @@ def test_catalog_preserves_null_missing_containers_and_case_distinct_keys() -> N
     [
         ([{"value": None}], "null_only"),
         ([{"value": 2**63}], "integer_out_of_int64_range"),
-        ([{"value": 1}, {"value": 1.5}], "mixed_non_null_kinds"),
+        ([{"value": 2**53 + 1}, {"value": 1.5}], "mixed_non_null_kinds"),
+        ([{"value": -(2**53) - 1}, {"value": 1.5}], "mixed_non_null_kinds"),
+        ([{"value": 1}, {"value": "1"}], "mixed_non_null_kinds"),
     ],
 )
 def test_catalog_marks_unsafe_families_raw_only(rows: list[dict[str, object]], reason: str) -> None:
@@ -70,6 +72,17 @@ def test_catalog_marks_unsafe_families_raw_only(rows: list[dict[str, object]], r
     field = build_catalog(rows, guard=AdmissionGuard()).fields[0]
     assert field.queryable is False
     assert field.reason == reason
+
+
+@pytest.mark.parametrize("whole", [0, 3, 2**53, -(2**53)])
+def test_catalog_treats_whole_and_decimal_numbers_as_one_number_field(whole: int) -> None:
+    """Integers that a float holds exactly join decimals in one queryable field."""
+    rows: list[dict[str, object]] = [{"value": whole}, {"value": 12.5}, {"value": None}]
+    field = build_catalog(rows, guard=AdmissionGuard()).fields[0]
+    assert field.queryable is True
+    assert field.reason is None
+    assert field.scalar_family == "number"
+    assert field.kinds == frozenset({"integer", "number", "null"})
 
 
 def test_admission_guard_counts_depth_nodes_unicode_and_active_cycles() -> None:

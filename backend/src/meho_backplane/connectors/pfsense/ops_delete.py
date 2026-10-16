@@ -32,8 +32,9 @@ created, symmetrically and governed, verified by read-back:
   ``pfsense.gateway.add``. Delete ONE ``gateways/gateway_item`` by exact
   ``name``, with a fail-closed dependency guard (``referenced``, mirroring
   ``alias.delete``): refuses -- naming every referrer -- when the gateway
-  is still used by any static route, gateway group, or default-gateway
-  setting, so a gateway is never pulled out from under a live route.
+  is still used by any static route, gateway group, default-gateway
+  setting, filter rule, or interface binding, so a gateway is never pulled
+  out from under a live consumer.
 * ``pfsense.alias.member.remove`` (#3313) -- remove ONE member (host /
   network entry) from a firewall alias **without deleting the alias** (the
   shared-alias case: an alias shared across environments keeps its other
@@ -528,9 +529,10 @@ def _match_static_routes_canonical(xml_text: str, network: str) -> list[dict[str
 def find_gateway_references(xml_text: str, gateway_name: str) -> list[dict[str, Any]]:
     """Return the config objects that reference *gateway_name* (fail-closed guard).
 
-    Scans the reference surface pfSense's own gateway-delete guard checks, so a
+    Scans the places in ``config.xml`` listed below that name a gateway, so a
     delete that would pull a gateway out from under a live consumer is refused
-    here too -- **before** any mutation:
+    **before** any mutation. Not checked yet: DNS server gateway settings
+    (``<system><dnsNgw>``), which pfSense's own delete check also refuses on.
 
     * **Static routes** (``<staticroutes><route>``) -- a route whose
       ``<gateway>`` names this gateway.
@@ -540,10 +542,18 @@ def find_gateway_references(xml_text: str, gateway_name: str) -> list[dict[str, 
     * **Default-gateway setting** -- the modern ``<gateways><defaultgw4>`` /
       ``<defaultgw6>`` pointer, or the legacy per-item ``<defaultgw/>`` flag on
       the ``gateway_item`` itself.
+    * **Filter rules** (``<filter><rule>``) -- a rule whose ``<gateway>``
+      policy-routes traffic out this gateway.
+    * **Interface gateway bindings** (``<interfaces><wan|lan|optN>``) -- an
+      interface whose ``<gateway>`` or ``<gatewayv6>`` names this gateway as
+      its upstream. pfSense's own GUI silently clears the owning interface's
+      binding on delete; here it is refused instead, so the operator repoints
+      it on purpose.
 
     Returns one ``{kind, id, descr}`` row per referrer so the refusal can name
-    every one (``id`` is the route's network, the group name, or the
-    default-gateway setting key). An empty list means the gateway is safe to
+    every one (``id`` is the route's network, the group name, the
+    default-gateway setting key, the filter rule's ``tracker``, or the
+    interface key such as ``opt1``). An empty list means the gateway is safe to
     delete. Returns an empty list on parse failure (the handler's own read /
     parse guards catch a broken config first).
     """
@@ -593,7 +603,38 @@ def find_gateway_references(xml_text: str, gateway_name: str) -> list[dict[str, 
             if _child_text(item, "name") == gateway_name and item.find("defaultgw") is not None:
                 refs.append({"kind": "default_gateway", "id": "gateway_item_flag", "descr": None})
 
+    refs.extend(_filter_rule_gateway_refs(root, gateway_name))
+    refs.extend(_interface_gateway_refs(root, gateway_name))
     return refs
+
+
+def _filter_rule_gateway_refs(root: Any, gateway_name: str) -> list[dict[str, Any]]:
+    """Return a ``filter_rule`` row for each firewall rule policy-routed via *gateway_name*."""
+    filter_root = root.find("filter")
+    if filter_root is None:
+        return []
+    return [
+        _reference_row("filter_rule", rule)
+        for rule in filter_root.findall("rule")
+        if _child_text(rule, "gateway") == gateway_name
+    ]
+
+
+def _interface_gateway_refs(root: Any, gateway_name: str) -> list[dict[str, Any]]:
+    """Return an ``interface_gateway`` row for each interface bound to *gateway_name*.
+
+    One row per interface, even when both its IPv4 ``<gateway>`` and IPv6
+    ``<gatewayv6>`` name the gateway. ``id`` is the interface key (``wan``,
+    ``lan``, ``optN``); ``descr`` is the interface's friendly name.
+    """
+    if_root = root.find("interfaces")
+    if if_root is None:
+        return []
+    return [
+        {"kind": "interface_gateway", "id": iface.tag, "descr": _child_text(iface, "descr")}
+        for iface in if_root
+        if gateway_name in (_child_text(iface, "gateway"), _child_text(iface, "gatewayv6"))
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1123,10 +1164,11 @@ async def pfsense_gateway_delete(
     Sequence: validate ``name`` -> read ``config.xml`` -> match gateways by
     exact name. **Fail-closed pre-checks:** 0 matches -> ``not_found``, >1 ->
     ``ambiguous``; then a **dependency check** (mirrors ``alias.delete``) --
-    if any static route, gateway group, or default-gateway setting still uses
-    the gateway, refuse with ``referenced`` and name every referrer, deleting
-    nothing (so a gateway is never pulled out from under a live route). Only a
-    single, unreferenced gateway is deleted: stage + play back the
+    if any static route, gateway group, default-gateway setting, filter rule,
+    or interface binding still uses the gateway, refuse with ``referenced``
+    and name every referrer, deleting nothing (so a gateway is never pulled
+    out from under a live route). Only a single, unreferenced gateway is
+    deleted: stage + play back the
     delete-by-name fragment (persists only on a single removal, then
     ``system_routing_configure()``), then read ``config.xml`` back and verify
     the gateway is **absent** *and* the count dropped by **exactly one**. Runs
@@ -1205,9 +1247,7 @@ async def pfsense_gateway_delete(
     # this; only the read-back below can. The delete fragment is idempotent (it
     # re-matches the gateway by name and persists only on a single removal), so
     # a non-persisting read-back is retried once and re-verified before we fail
-    # closed. (The referenced-guard completeness gap in
-    # ``find_gateway_references`` is a distinct latent defect tracked in #3315,
-    # not addressed here.)
+    # closed.
     max_attempts = 2
     for attempt in range(1, max_attempts + 1):
         await _apply_playback(
@@ -1846,8 +1886,9 @@ _GATEWAY_DELETE_WHEN_TO_USE = (
     "of ``pfsense.gateway.add``, for a governed environment teardown. GOVERNED "
     "DESTRUCTIVE DELETE. Fail-closed dependency check (mirrors "
     "``pfsense.alias.delete``): refuses (``referenced``) when the gateway is "
-    "still used by any static route, gateway group, or default-gateway "
-    "setting, naming every referrer -- remove or repoint those first so a "
+    "still used by any static route, gateway group, default-gateway "
+    "setting, filter rule, or interface binding, naming every referrer -- "
+    "remove or repoint those first so a "
     "gateway is never pulled out from under a live route. Also refuses on 0 "
     "matches (``not_found``) or >1 (``ambiguous``). Deletes exactly one gateway "
     "(``write_config`` + ``system_routing_configure``) and verifies the count "
@@ -1940,7 +1981,8 @@ _GATEWAY_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
             "description": (
                 "Exact name of the ONE gateway to delete. Refused "
                 "(``referenced``) when still used by any static route, gateway "
-                "group, or default-gateway setting; ``not_found`` when absent."
+                "group, default-gateway setting, filter rule, or interface "
+                "binding; ``not_found`` when absent."
             ),
         },
     },
@@ -1986,8 +2028,9 @@ _GATEWAY_DELETE_LLM_INSTRUCTIONS: dict[str, Any] = {
         "``{op_class: 'delete', resource: 'gateway', status, name, matched, "
         "removed, references, reference_count, gateways_before, gateways_after, "
         "verified, guidance}``. On ``referenced``, ``references`` names every "
-        "static route / gateway group / default-gateway setting still using "
-        "the gateway. On ``deleted``, ``removed`` carries the deleted gateway "
+        "static route / gateway group / default-gateway setting / filter "
+        "rule / interface binding still using the gateway. On ``deleted``, "
+        "``removed`` carries the deleted gateway "
         "and ``verified`` is true."
     ),
 }
@@ -2174,8 +2217,9 @@ DELETE_OPS: tuple[PfSenseOp, ...] = (
             "teardown. safety_level=destructive (same tier + gate as "
             "``pfsense.nat.delete``). Fail-closed dependency check (mirrors "
             "``pfsense.alias.delete``): refuses (``referenced``) when the "
-            "gateway is still used by any static route, gateway group, or "
-            "default-gateway setting -- naming every referrer -- so a gateway is "
+            "gateway is still used by any static route, gateway group, "
+            "default-gateway setting, filter rule, or interface binding -- "
+            "naming every referrer -- so a gateway is "
             "never pulled out from under a live route. Also refuses on 0 "
             "matches (``not_found``) or >1 (``ambiguous``). The blast-radius "
             "statement names the gateway + its reference count. Deletes exactly "

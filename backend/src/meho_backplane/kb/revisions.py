@@ -24,7 +24,8 @@ embedding with no transaction open, and then publishes head, revision
 and passages in one short transaction. :func:`get_revision` is the exact
 read: it filters on tenant, entry and revision together, so a foreign,
 deleted or mismatched id finds nothing. :func:`delete_entry_rows`
-removes passages, revisions and the head in one transaction.
+locks the head like a write does, then removes passages, revisions and
+the head in one transaction.
 
 Two writes to the same entry at the same moment must not mix. On
 PostgreSQL the publish step locks the head row first (``SELECT ... FOR
@@ -333,28 +334,27 @@ async def _publish(
     return doc, plan.revision_id
 
 
-async def _lock_head(session: AsyncSession, tenant_id: uuid.UUID, slug: str) -> None:
-    """Lock the entry's head row for this transaction on PostgreSQL.
+async def _lock_head(session: AsyncSession, tenant_id: uuid.UUID, slug: str) -> list[uuid.UUID]:
+    """Lock the entry's head row for this transaction; return the head ids.
 
-    A second writer to the same entry waits here until the first one
-    commits, then reads the committed head. SQLite has no row lock;
-    there the snapshot check in :func:`_publish` catches an overlap
-    instead. A first write has no row to lock; the unique natural key
-    on ``documents`` makes a second first-write fail, and
+    On PostgreSQL this is ``SELECT ... FOR UPDATE``. A second writer or
+    a delete of the same entry waits here until the first transaction
+    commits, and every later statement in this transaction then sees
+    the rows that transaction committed. SQLite has no row lock; there
+    the snapshot check in :func:`_publish` catches an overlap instead.
+    A first write has no row to lock; the unique natural key on
+    ``documents`` makes a second first-write fail, and
     :func:`write_entry` reruns it.
     """
-    conn = await session.connection()
-    if conn.dialect.name != "postgresql":
-        return
-    await session.execute(
-        select(Document.id)
-        .where(
-            Document.tenant_id == tenant_id,
-            Document.source == KB_SOURCE,
-            Document.source_id == slug,
-        )
-        .with_for_update()
+    stmt = select(Document.id).where(
+        Document.tenant_id == tenant_id,
+        Document.source == KB_SOURCE,
+        Document.source_id == slug,
     )
+    conn = await session.connection()
+    if conn.dialect.name == "postgresql":
+        stmt = stmt.with_for_update()
+    return list((await session.scalars(stmt)).all())
 
 
 async def _refresh_passage_metadata(
@@ -457,37 +457,36 @@ async def get_revision(
 
 
 async def delete_entry_rows(tenant_id: uuid.UUID, slug: str) -> bool:
-    """Delete one kb entry's revisions and head row in one transaction.
+    """Delete one kb entry's passages, revisions and head row in one transaction.
 
-    Returns whether a head row existed. When any statement fails the
-    whole transaction rolls back: the entry stays fully readable and
-    the caller sees the error and can retry. There is no state where
-    the head is gone but a revision can still be read.
+    Returns whether a head row existed. The head is locked first, like
+    a write locks it. A delete that overlaps a write therefore waits
+    until that write has committed and then removes the passages and
+    the revision that write added, so no passage of a deleted entry
+    stays searchable. Every delete uses the same locked head ids.
+
+    When any statement fails the whole transaction rolls back: the
+    entry stays fully readable and the caller sees the error and can
+    retry. There is no state where the head is gone but a revision or
+    a passage can still be read.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        entry_ids = select(Document.id).where(
-            Document.tenant_id == tenant_id,
-            Document.source == KB_SOURCE,
-            Document.source_id == slug,
-        )
-        for entry_id in (await session.scalars(entry_ids)).all():
+        entry_ids = await _lock_head(session, tenant_id, slug)
+        for entry_id in entry_ids:
             await session.execute(delete(Document).where(*_passage_filter(tenant_id, entry_id)))
-        await session.execute(
-            delete(KbRevision).where(
-                KbRevision.tenant_id == tenant_id,
-                KbRevision.entry_id.in_(entry_ids),
+        if entry_ids:
+            await session.execute(
+                delete(KbRevision).where(
+                    KbRevision.tenant_id == tenant_id,
+                    KbRevision.entry_id.in_(entry_ids),
+                )
             )
-        )
-        result = await session.execute(
-            delete(Document).where(
-                Document.tenant_id == tenant_id,
-                Document.source == KB_SOURCE,
-                Document.source_id == slug,
+            await session.execute(
+                delete(Document).where(
+                    Document.tenant_id == tenant_id,
+                    Document.id.in_(entry_ids),
+                )
             )
-        )
         await session.commit()
-    # DML execute() is typed ``Result[Any]``; ``rowcount`` lives on the
-    # concrete ``CursorResult`` every supported driver returns.
-    rowcount: int = result.rowcount  # type: ignore[attr-defined]
-    return rowcount > 0
+    return bool(entry_ids)

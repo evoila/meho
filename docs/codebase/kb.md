@@ -319,9 +319,14 @@ body, now with `revision_id` so a caller can cite that exact body.
 
 ### Delete path — `delete_entry`
 
-`kb/revisions.py::delete_entry_rows` deletes the entry's passage rows,
-its `kb_revision` rows and then the head `documents` row in one
-transaction. The passages are the searchable evidence, so search and
+`kb/revisions.py::delete_entry_rows` first locks the head row, the
+same way a write does (`SELECT ... FOR UPDATE` on PostgreSQL). Then it
+deletes the entry's passage rows, its `kb_revision` rows and the head
+`documents` row in one transaction, all by the locked head id. A delete
+that overlaps a write waits until that write has committed, so it also
+removes the passages and the revision the write added. Without the
+lock, the new passages could stay searchable and cite a head that no
+longer exists. The passages are the searchable evidence, so search and
 every exact read stop at the same commit. If a statement or the commit
 fails, the transaction rolls back: the entry and its revisions stay
 readable, the error propagates, and the caller can retry. The

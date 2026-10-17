@@ -31,15 +31,23 @@ lives in :mod:`tests.test_retrieval_embedding`.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import uuid
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import Document, KbRevision
+from meho_backplane.kb import revisions
+from meho_backplane.kb.schemas import KB_PASSAGE_SOURCE
 from meho_backplane.kb.service import KbService
-from meho_backplane.retrieval.indexer import index_document
+from meho_backplane.retrieval.indexer import compute_body_hash, index_document
 from meho_backplane.retrieval.retriever import retrieve
 from tests._kb_embedding_stub import StubPassageTokenizer
 
@@ -329,6 +337,97 @@ async def test_kb_search_ranks_current_passages_without_duplicates(pg_engine: No
     assert long_body[best.locator.start : best.locator.end] == best.text
     assert best.locator.revision_id == entry.revision_id
     assert by_slug["legacy-entry"].passages == []
+
+
+async def _wait_for_a_lock_waiter(timeout: float = 10.0) -> None:
+    """Return once one database session is waiting for a row lock."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    async with get_sessionmaker()() as session:
+        while loop.time() < deadline:
+            waiting = await session.scalar(
+                text("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock'")
+            )
+            if waiting:
+                return
+            await asyncio.sleep(0.05)
+    raise AssertionError("no database session started to wait for a lock")
+
+
+async def _count_rows(tenant_id: uuid.UUID) -> tuple[int, int, int]:
+    """Return the tenant's (kb heads, kb passages, revisions) counts."""
+    async with get_sessionmaker()() as session:
+        heads = await session.scalar(
+            select(func.count())
+            .select_from(Document)
+            .where(Document.tenant_id == tenant_id, Document.source == "kb")
+        )
+        passages = await session.scalar(
+            select(func.count())
+            .select_from(Document)
+            .where(Document.tenant_id == tenant_id, Document.source == KB_PASSAGE_SOURCE)
+        )
+        revs = await session.scalar(
+            select(func.count()).select_from(KbRevision).where(KbRevision.tenant_id == tenant_id)
+        )
+    return int(heads or 0), int(passages or 0), int(revs or 0)
+
+
+@_skip_no_docker
+@pytest.mark.asyncio
+async def test_delete_that_waits_for_a_write_removes_what_the_write_added(
+    pg_engine: None,
+) -> None:
+    """A delete that overlaps a write also removes the rows that write committed.
+
+    The write is paused inside its transaction, after it swapped the
+    passage rows and added the revision, and before it commits. The
+    delete starts while the write holds the head lock, so it waits.
+    When the write commits, the delete must remove the new passages and
+    the new revision too, not only the rows it saw before it waited.
+    Otherwise the new body stays searchable and cites a head that no
+    longer exists.
+    """
+    tenant_id = uuid.UUID(TENANT_A_ID)
+    service = KbService()
+    fake = _make_stub_embedding_service()
+    slug = "swap-entry"
+    new_body = "New body mentions freshtermxyz."
+    new_hash = compute_body_hash(new_body)
+
+    write_paused = asyncio.Event()
+    release_write = asyncio.Event()
+    real_snapshot_in = revisions._snapshot_in
+
+    async def pausing_snapshot_in(session: AsyncSession, tenant_id: uuid.UUID, slug: str) -> Any:
+        snapshot = await real_snapshot_in(session, tenant_id, slug)
+        # Only the write's read-back of its own uncommitted rows sees the new body.
+        if snapshot.body_hash == new_hash:
+            write_paused.set()
+            await asyncio.wait_for(release_write.wait(), timeout=10)
+        return snapshot
+
+    with (
+        patch("meho_backplane.retrieval.indexer.get_embedding_service", return_value=fake),
+        patch("meho_backplane.retrieval.retriever.get_embedding_service", return_value=fake),
+    ):
+        await service.create_entry(tenant_id, slug, "Old body mentions oldtermxyz.")
+        with patch.object(revisions, "_snapshot_in", pausing_snapshot_in):
+            write = asyncio.create_task(service.create_entry(tenant_id, slug, new_body))
+            await asyncio.wait_for(write_paused.wait(), timeout=10)
+            deletion = asyncio.create_task(service.delete_entry(tenant_id, slug))
+            await _wait_for_a_lock_waiter()
+            assert not deletion.done()
+            release_write.set()
+            written, _ = await asyncio.wait_for(write, timeout=10)
+            assert await asyncio.wait_for(deletion, timeout=10) is True
+
+        assert written.body == new_body
+        assert await service.get_entry(tenant_id, slug) is None
+        assert await retrieve(tenant_id, "freshtermxyz", source="kb", limit=50) == []
+        assert await retrieve(tenant_id, "oldtermxyz", source="kb", limit=50) == []
+
+    assert await _count_rows(tenant_id) == (0, 0, 0)
 
 
 # ---------------------------------------------------------------------------

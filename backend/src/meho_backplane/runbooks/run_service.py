@@ -113,6 +113,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
+    AuditEventClass,
     AuditLog,
     EndpointDescriptor,
     RunbookRun,
@@ -1321,7 +1322,7 @@ class RunbookRunService:
         # with a change ticket.
         if hasattr(AuditLog, "work_ref"):
             kwargs["work_ref"] = work_ref
-        return AuditLog(**kwargs)
+        return AuditLog(event_class=AuditEventClass.OPERATION_EXECUTION, **kwargs)
 
 
 # ---------------------------------------------------------------------------

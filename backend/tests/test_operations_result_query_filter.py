@@ -22,8 +22,8 @@ import pytest
 
 import meho_backplane.operations.result_query as rq
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors.result_handle_store import SpilledRowSet, SpilledWindow
 from meho_backplane.jsonflux.query.contract import QueryContractError, ResultQuerySpec
+from tests._result_store_helpers import MemoryResultStore
 
 _TENANT = uuid.UUID("00000000-0000-0000-0000-0000000000ff")
 
@@ -44,49 +44,16 @@ def _operator(sub: str = "op-a", tenant_id: uuid.UUID | None = _TENANT) -> Opera
     return Operator(**fields)
 
 
-class _FakeStore:
-    """In-memory stand-in returning a fixed row set for one operator."""
-
-    def __init__(
-        self,
-        rows: list[dict[str, Any]],
-        *,
-        total_rows: int | None = None,
-        owner_sub: str = "op-a",
-    ) -> None:
-        self._rows = rows
-        self._total = total_rows if total_rows is not None else len(rows)
-        self._owner = owner_sub
-
-    async def fetch_rows(
-        self,
-        *,
-        tenant_id: uuid.UUID,
-        operator_sub: str,
-        handle_id: uuid.UUID,
-    ) -> SpilledRowSet | None:
-        if operator_sub != self._owner:
-            return None
-        return SpilledRowSet(rows=self._rows, total_rows=self._total, stored_rows=len(self._rows))
-
-    async def fetch_window(
-        self,
-        *,
-        tenant_id: uuid.UUID,
-        operator_sub: str,
-        handle_id: uuid.UUID,
-        offset: int,
-        limit: int,
-    ) -> SpilledWindow | None:
-        if operator_sub != self._owner:
-            return None
-        window = self._rows[offset : offset + limit] if limit > 0 else []
-        return SpilledWindow(
-            rows=window,
-            total_rows=self._total,
-            stored_rows=len(self._rows),
-            truncated=False,
-        )
+def _store(
+    rows: list[dict[str, Any]],
+    *,
+    total_rows: int | None = None,
+    owner_sub: str = "op-a",
+) -> MemoryResultStore:
+    """In-memory store serving one fixed row set, for any handle, to one operator."""
+    store = MemoryResultStore()
+    store.seed_any_handle(operator_sub=owner_sub, rows=rows, total_rows=total_rows)
+    return store
 
 
 def _stub_settings(
@@ -100,7 +67,7 @@ def _stub_settings(
     )
 
 
-def _install(monkeypatch: pytest.MonkeyPatch, store: _FakeStore, settings: Any) -> None:
+def _install(monkeypatch: pytest.MonkeyPatch, store: MemoryResultStore, settings: Any) -> None:
     monkeypatch.setattr(rq, "get_result_handle_store", lambda: store)
     monkeypatch.setattr(rq, "get_settings", lambda: settings)
 
@@ -117,7 +84,7 @@ def _sample_rows(n: int) -> list[dict[str, Any]]:
 
 
 async def test_filter_returns_only_matching_rows(monkeypatch: pytest.MonkeyPatch) -> None:
-    _install(monkeypatch, _FakeStore(_sample_rows(20)), _stub_settings())
+    _install(monkeypatch, _store(_sample_rows(20)), _stub_settings())
     result = await rq.run_result_query(
         _operator(),
         uuid.uuid4(),
@@ -129,7 +96,7 @@ async def test_filter_returns_only_matching_rows(monkeypatch: pytest.MonkeyPatch
 
 
 async def test_group_by_aggregate_returns_counts(monkeypatch: pytest.MonkeyPatch) -> None:
-    _install(monkeypatch, _FakeStore(_sample_rows(30)), _stub_settings())
+    _install(monkeypatch, _store(_sample_rows(30)), _stub_settings())
     result = await rq.run_result_query(
         _operator(),
         uuid.uuid4(),
@@ -151,7 +118,7 @@ def _cpu_rows() -> list[dict[str, Any]]:
 async def test_mixed_whole_and_decimal_numbers_filter_and_sort(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _install(monkeypatch, _FakeStore(_cpu_rows()), _stub_settings())
+    _install(monkeypatch, _store(_cpu_rows()), _stub_settings())
     result = await rq.run_result_query(
         _operator(),
         uuid.uuid4(),
@@ -167,7 +134,7 @@ async def test_mixed_whole_and_decimal_numbers_filter_and_sort(
 
 
 async def test_mixed_whole_and_decimal_numbers_sum(monkeypatch: pytest.MonkeyPatch) -> None:
-    _install(monkeypatch, _FakeStore(_cpu_rows()), _stub_settings())
+    _install(monkeypatch, _store(_cpu_rows()), _stub_settings())
     result = await rq.run_result_query(
         _operator(),
         uuid.uuid4(),
@@ -179,7 +146,7 @@ async def test_mixed_whole_and_decimal_numbers_sum(monkeypatch: pytest.MonkeyPat
 async def test_mixed_whole_and_decimal_numbers_flat_query_keeps_integers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _install(monkeypatch, _FakeStore(_cpu_rows()), _stub_settings())
+    _install(monkeypatch, _store(_cpu_rows()), _stub_settings())
     result = await rq.run_result_query(_operator(), uuid.uuid4(), ResultQuerySpec())
     assert result["rows"] == _cpu_rows()
     assert [type(row["cpu"]) for row in result["rows"]] == [int, float, int]
@@ -191,7 +158,7 @@ async def test_mixed_whole_and_decimal_numbers_flat_query_keeps_integers(
 
 
 async def test_row_cap_truncates_and_flags(monkeypatch: pytest.MonkeyPatch) -> None:
-    _install(monkeypatch, _FakeStore(_sample_rows(60)), _stub_settings(rows=10))
+    _install(monkeypatch, _store(_sample_rows(60)), _stub_settings(rows=10))
     result = await rq.run_result_query(_operator(), uuid.uuid4(), ResultQuerySpec())
     assert result["returned_rows"] == 10
     assert result["limit"] == 10
@@ -199,14 +166,14 @@ async def test_row_cap_truncates_and_flags(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 async def test_under_cap_is_not_truncated(monkeypatch: pytest.MonkeyPatch) -> None:
-    _install(monkeypatch, _FakeStore(_sample_rows(5)), _stub_settings(rows=10))
+    _install(monkeypatch, _store(_sample_rows(5)), _stub_settings(rows=10))
     result = await rq.run_result_query(_operator(), uuid.uuid4(), ResultQuerySpec())
     assert result["returned_rows"] == 5
     assert result["truncated"] is False
 
 
 async def test_caller_limit_below_cap_is_honoured(monkeypatch: pytest.MonkeyPatch) -> None:
-    _install(monkeypatch, _FakeStore(_sample_rows(60)), _stub_settings(rows=500))
+    _install(monkeypatch, _store(_sample_rows(60)), _stub_settings(rows=500))
     result = await rq.run_result_query(_operator(), uuid.uuid4(), ResultQuerySpec(limit=3))
     assert result["returned_rows"] == 3
     assert result["truncated"] is True
@@ -219,7 +186,7 @@ async def test_caller_limit_below_cap_is_honoured(monkeypatch: pytest.MonkeyPatc
 
 async def test_output_byte_cap_rejects_wide_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     wide = [{"id": i, "blob": "x" * 5000} for i in range(50)]
-    _install(monkeypatch, _FakeStore(wide), _stub_settings(out_bytes=2048))
+    _install(monkeypatch, _store(wide), _stub_settings(out_bytes=2048))
     with pytest.raises(rq.ResultQueryOutputTooLargeError) as exc:
         await rq.run_result_query(_operator(), uuid.uuid4(), ResultQuerySpec())
     # The error is actionable: it names the remedy (narrow the result).
@@ -230,7 +197,7 @@ async def test_output_byte_cap_lets_narrow_projection_through(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     wide = [{"id": i, "blob": "x" * 5000} for i in range(50)]
-    _install(monkeypatch, _FakeStore(wide), _stub_settings(out_bytes=2048))
+    _install(monkeypatch, _store(wide), _stub_settings(out_bytes=2048))
     result = await rq.run_result_query(
         _operator(), uuid.uuid4(), ResultQuerySpec(select=["id"], limit=20)
     )
@@ -247,7 +214,7 @@ async def test_field_after_sample_window_is_queryable(monkeypatch: pytest.Monkey
     """A field first seen deep in the row set is a valid filter/select target."""
     rows: list[dict[str, Any]] = [{"stable": i} for i in range(300)]
     rows.append({"stable": 300, "late": "row-301"})
-    _install(monkeypatch, _FakeStore(rows), _stub_settings())
+    _install(monkeypatch, _store(rows), _stub_settings())
     result = await rq.run_result_query(
         _operator(),
         uuid.uuid4(),
@@ -262,7 +229,7 @@ async def test_field_after_sample_window_is_queryable(monkeypatch: pytest.Monkey
 async def test_case_distinct_keys_coexist(monkeypatch: pytest.MonkeyPatch) -> None:
     """``Foo`` and ``foo`` stay distinct keys in flat and grouped output."""
     rows = [{"Foo": "upper", "foo": "lower"}, {"Foo": "upper", "foo": "other"}]
-    _install(monkeypatch, _FakeStore(rows), _stub_settings())
+    _install(monkeypatch, _store(rows), _stub_settings())
 
     flat = await rq.run_result_query(
         _operator(),
@@ -299,7 +266,7 @@ async def test_flat_query_rehydrates_raw_values(monkeypatch: pytest.MonkeyPatch)
         {"id": 1, "enabled": "false", "spec": {"Nested": [1, None]}, "maybe": None},
         {"id": 2, "enabled": True, "spec": "flat"},
     ]
-    _install(monkeypatch, _FakeStore(rows), _stub_settings())
+    _install(monkeypatch, _store(rows), _stub_settings())
 
     whole = await rq.run_result_query(_operator(), uuid.uuid4(), ResultQuerySpec())
     assert whole["rows"] == rows
@@ -337,7 +304,7 @@ async def test_wall_time_budget_interrupts_a_slow_query(
     ``execute`` then raises ``InterruptException`` and the core surfaces the
     recoverable :class:`ResultQueryTimeoutError`.
     """
-    _install(monkeypatch, _FakeStore(_sample_rows(400)), _stub_settings(timeout=1))
+    _install(monkeypatch, _store(_sample_rows(400)), _stub_settings(timeout=1))
 
     def _slow(engine: Any, _compiled: Any) -> tuple[list[str], list[Any]]:
         cur = engine.conn.execute(
@@ -358,7 +325,7 @@ async def test_wall_time_budget_interrupts_a_slow_query(
 async def test_partial_coverage_when_spill_was_capped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = _FakeStore(_sample_rows(60), total_rows=500)
+    store = _store(_sample_rows(60), total_rows=500)
     _install(monkeypatch, store, _stub_settings())
     result = await rq.run_result_query(
         _operator(),
@@ -377,7 +344,7 @@ async def test_partial_coverage_when_spill_was_capped(
 async def test_complete_coverage_when_whole_set_stored(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _install(monkeypatch, _FakeStore(_sample_rows(30)), _stub_settings())
+    _install(monkeypatch, _store(_sample_rows(30)), _stub_settings())
     result = await rq.run_result_query(
         _operator(), uuid.uuid4(), ResultQuerySpec(aggregate=[{"func": "COUNT"}])
     )
@@ -391,13 +358,13 @@ async def test_complete_coverage_when_whole_set_stored(
 
 
 async def test_no_tenant_is_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
-    _install(monkeypatch, _FakeStore(_sample_rows(5)), _stub_settings())
+    _install(monkeypatch, _store(_sample_rows(5)), _stub_settings())
     with pytest.raises(rq.ResultHandleNotFoundError):
         await rq.run_result_query(_operator(tenant_id=None), uuid.uuid4(), ResultQuerySpec())
 
 
 async def test_cross_operator_is_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
-    _install(monkeypatch, _FakeStore(_sample_rows(5), owner_sub="op-a"), _stub_settings())
+    _install(monkeypatch, _store(_sample_rows(5), owner_sub="op-a"), _stub_settings())
     with pytest.raises(rq.ResultHandleNotFoundError):
         await rq.run_result_query(_operator(sub="op-b"), uuid.uuid4(), ResultQuerySpec())
 
@@ -405,7 +372,7 @@ async def test_cross_operator_is_not_found(monkeypatch: pytest.MonkeyPatch) -> N
 async def test_unknown_field_surfaces_contract_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _install(monkeypatch, _FakeStore(_sample_rows(5)), _stub_settings())
+    _install(monkeypatch, _store(_sample_rows(5)), _stub_settings())
     with pytest.raises(QueryContractError):
         await rq.run_result_query(
             _operator(), uuid.uuid4(), ResultQuerySpec(select=["does_not_exist"])
@@ -439,7 +406,7 @@ async def test_paging_window_over_byte_cap_raises(monkeypatch: pytest.MonkeyPatc
     the query path does, so no agent ever receives an over-budget page.
     """
     wide = [{"id": i, "blob": "x" * 5000} for i in range(50)]
-    _install(monkeypatch, _FakeStore(wide), _stub_settings(out_bytes=2048))
+    _install(monkeypatch, _store(wide), _stub_settings(out_bytes=2048))
     with pytest.raises(rq.ResultQueryOutputTooLargeError) as exc:
         await rq.read_result_window(_operator(), uuid.uuid4(), offset=0, limit=50)
     # Paging remediation names a smaller `limit` — never `select` / `filter`.
@@ -451,7 +418,7 @@ async def test_paging_window_over_byte_cap_raises(monkeypatch: pytest.MonkeyPatc
 async def test_paging_window_in_budget_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
     """An in-budget window is returned verbatim — the byte check is transparent."""
     rows = _sample_rows(10)
-    _install(monkeypatch, _FakeStore(rows), _stub_settings(out_bytes=262144))
+    _install(monkeypatch, _store(rows), _stub_settings(out_bytes=262144))
     result = await rq.read_result_window(_operator(), uuid.uuid4(), offset=0, limit=50)
     assert result["returned_rows"] == 10
     assert result["rows"] == rows
@@ -473,7 +440,7 @@ async def test_query_wire_ceiling_is_separate_from_row_budget(
     so the read is refused, not cut.
     """
     rows = [{"id": i, "note": 'say "hi"'} for i in range(20)]
-    _install(monkeypatch, _FakeStore(rows), _stub_settings(out_bytes=262144, wire_bytes=1024))
+    _install(monkeypatch, _store(rows), _stub_settings(out_bytes=262144, wire_bytes=1024))
     with pytest.raises(rq.ResultQueryOutputTooLargeError) as exc:
         await rq.run_result_query(_operator(), uuid.uuid4(), ResultQuerySpec())
     msg = str(exc.value)
@@ -487,7 +454,7 @@ async def test_paging_wire_ceiling_names_paging_remediation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     rows = [{"id": i, "note": "\u00e9t\u00e9"} for i in range(20)]
-    _install(monkeypatch, _FakeStore(rows), _stub_settings(out_bytes=262144, wire_bytes=1024))
+    _install(monkeypatch, _store(rows), _stub_settings(out_bytes=262144, wire_bytes=1024))
     with pytest.raises(rq.ResultQueryOutputTooLargeError) as exc:
         await rq.read_result_window(_operator(), uuid.uuid4(), offset=0, limit=20)
     msg = str(exc.value).lower()
@@ -501,13 +468,13 @@ async def test_wire_ceiling_uses_the_real_encoded_size(monkeypatch: pytest.Monke
 
     rows = _sample_rows(10)
     handle = uuid.uuid4()
-    _install(monkeypatch, _FakeStore(rows), _stub_settings())
+    _install(monkeypatch, _store(rows), _stub_settings())
     payload = await rq.read_result_window(_operator(), handle, offset=0, limit=10)
     exact = measure_delivered_wire_bytes(payload)
 
-    _install(monkeypatch, _FakeStore(rows), _stub_settings(wire_bytes=exact))
+    _install(monkeypatch, _store(rows), _stub_settings(wire_bytes=exact))
     assert await rq.read_result_window(_operator(), handle, offset=0, limit=10) == payload
 
-    _install(monkeypatch, _FakeStore(rows), _stub_settings(wire_bytes=exact - 1))
+    _install(monkeypatch, _store(rows), _stub_settings(wire_bytes=exact - 1))
     with pytest.raises(rq.ResultQueryOutputTooLargeError):
         await rq.read_result_window(_operator(), handle, offset=0, limit=10)

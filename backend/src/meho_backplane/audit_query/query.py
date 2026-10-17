@@ -51,6 +51,11 @@ Filter coverage
   per #1177, not ``ILIKE``); the column is also surfaced on every returned
   ``AuditEntry``. NULL on rows with no bound work_ref, so a ``work_ref``
   filter excludes them.
+* ``event_class`` is a real column (#3733, migration ``0106``). The filter
+  narrows to ``audit_log.event_class = :event_class`` -- exact match on the
+  closed vocabulary. With no filter every class is returned, so old callers
+  see the same rows. Rows written before the column existed carry
+  ``legacy_request``.
 * ``parent_audit_id`` is a real column too (G0.6-T7 #398, migration ``0006``)
   and is surfaced on every returned ``AuditEntry``, but the *flat filter* on
   it still raises :class:`UnsupportedFilterError` — un-gating that filter is
@@ -204,6 +209,9 @@ def _apply_filters(
     if filters.work_ref is not None:
         stmt = stmt.where(AuditLog.work_ref == filters.work_ref)
 
+    if filters.event_class is not None:
+        stmt = stmt.where(AuditLog.event_class == filters.event_class.value)
+
     if filters.principal is not None:
         escaped = _escape_like_literal(filters.principal)
         stmt = stmt.where(
@@ -342,6 +350,7 @@ def _build_audit_entry(row: AuditLog, target_name: str | None) -> AuditEntry:
         agent_session_id=row.agent_session_id,
         work_ref=row.work_ref,
         policy_decision=row.policy_decision,
+        event_class=row.event_class,
         broadcast_event_id=None,
     )
 

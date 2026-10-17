@@ -9,9 +9,32 @@ and the three Pydantic value types around it: `AuditQueryFilters` (input),
 `AuditEntry` (one row), `AuditQueryResult` (page + forward-only cursor).
 
 The substrate is **read-only**. Audit-log rows are written by
-`meho_backplane.audit.AuditMiddleware` (HTTP chassis routes) and
-`meho_backplane.mcp.audit.write_mcp_audit_row` (MCP tool/resource handlers);
-this package never inserts, updates, or deletes.
+`meho_backplane.audit.AuditMiddleware` (HTTP chassis routes),
+`meho_backplane.mcp.audit.write_mcp_audit_row` (MCP tool/resource handlers),
+the dispatcher, the approval queue and the domain writers; this package never
+inserts, updates, or deletes.
+
+### Event class (#3733)
+
+Every row carries `event_class`, a closed set enforced by the database
+CHECK `ck_audit_log_event_class` (migration `0106`). Each writer sets the
+class it knows. Nothing is guessed from `method` / `path`.
+
+| Class | Written by |
+|---|---|
+| `operation_execution` | Dispatch rows that ran (`ok` or `error`), runbook abort, gateway command mint / result, satellite effect rows, topology / ingest / add-on writes, sweepers and reapers. |
+| `policy_decision` | Dispatch rows a gate refused (`denied`, rate limit, unqualified target version) and the `approval.request` park row. |
+| `approval_decision` | `approval.decision` rows (approve, reject, expire) and the standing-grant auto-approval row. |
+| `security_event` | Refresh-token replay, broken satellite effect chain, un-reported gateway mint alarm. |
+| `legacy_request` | Every row written before `0106` (server default; old rows are not reclassified), the REST and MCP request wrapper rows, and the `approval.result` read row. |
+
+The column default stays `legacy_request`, so a row from an older MEHO
+version during a rolling upgrade is also `legacy_request`. New code never
+relies on the default: `tests/test_audit_event_class.py` scans the source
+and fails on any `AuditLog(...)` call without `event_class=`. The shared
+helpers (`operations._audit.write_audit_row`,
+`memory.audit.write_internal_audit_row`, `approval_queue._write_audit_row`)
+take `event_class` as a required argument.
 
 ## Key types
 
@@ -29,6 +52,7 @@ this package never inserts, updates, or deletes.
 | `parent_audit_id` | `UUID \| None` | **Raises `UnsupportedFilterError`** — the flat filter stays gated (un-gating is out of scope for #377). The column itself (#398) *is* read onto the returned row and is walked by the replay CTE. |
 | `agent_session_id` | `UUID \| None` | `audit_log.agent_session_id = :value`. Un-gated by G8.2-T3 (#1011); the column landed with G8.2-T1 (#1009). |
 | `work_ref` | `str \| None` | `audit_log.work_ref = :value` — **exact match** (a change-ticket reference is an opaque identifier, not a search term, so deterministic equality per #1177, not `ILIKE`). Filterable + surfaced since work_ref I1-T3 (#1658); the column landed with work_ref I1-T1 (#1655, migration `0039`). NULL rows are excluded. |
+| `event_class` | `AuditEventClass \| None` | `audit_log.event_class = :value` — exact match on the closed set (#3733). `None` applies no class filter, so a query without it returns every class, the same rows as before. Old rows match `legacy_request`. |
 | `limit` | `int` (1-1000) | Default 100. |
 | `cursor` | `str \| None` | Opaque forward-only cursor produced by a prior page. |
 
@@ -53,11 +77,12 @@ Field-to-source mapping:
 | `op_id` | `payload['op_id']` if a string, else `f"http.{method.lower()}:{path}"`. |
 | `op_class` | `payload['op_class']` if a string, else `classify_op(op_id)` from `broadcast.events`. For the MCP `call_operation` outer-wrapper row this is `"tool_call"` (G0.15-T3 #1212) — the inner DISPATCH row carries the domain `read` / `write` class. |
 | `result_status` | Derived from `status_code` — 401/403 → `"denied"`, 4xx/5xx else → `"error"`, otherwise `"ok"`. |
-| `principal_name` | `payload['principal_name']` when present (MCP rows since G0.15-T3 #1212; `write_mcp_audit_row` merges `Operator.name` from the validated JWT). HTTP-chassis rows remain `None` — the `verify_jwt_and_bind` middleware does not bind `name` to contextvars, so the audit middleware sees no source for it. |
+| `principal_name` | `payload['principal_name']` when present. Three writers set it from `Operator.name` (the token's `name` claim): MCP rows (#1212, `write_mcp_audit_row`), approval request and decision rows (#3300), and `DISPATCH` operation run rows (#4029, `operations/_audit.py:write_audit_row`). The name always belongs to the row's `operator_sub`. On an approved run that is the approver when a person approves through the console, CLI or REST (`resume_dispatch_after_approval`), and the agent when MEHO's own agent waits for the approval and resumes the run itself (`agent/approval_wait.py:_resume_approved_or_already_resumed`). It is `None` when the token has no name. HTTP-chassis rows remain `None` — the `verify_jwt_and_bind` middleware does not bind `name` to contextvars, so the audit middleware sees no source for it. |
 | `parent_audit_id` | `audit_log.parent_audit_id` — composite-operation lineage column (G0.6-T7 #398, migration `0006`). Surfaced on the row since G8.2-T3 (#1011); the flat *filter* on it stays gated. |
 | `agent_session_id` | `audit_log.agent_session_id` — MCP-session correlation column (G8.2-T1 #1009, migration `0014`). Surfaced + filterable since G8.2-T3 (#1011). |
 | `work_ref` | `audit_log.work_ref` — external change-ticket reference (work_ref I1-T1 #1655, migration `0039`). An opaque string (e.g. `"gh:evoila/meho#1"`) correlating a governed operation to the out-of-band change record that authorised it. Surfaced + exact-match-filterable since work_ref I1-T3 (#1658). Bind sources: the request/agent/dispatch boundary (work_ref I1-T2 #1657) and runbook runs (work_ref I3-T1 #1661 — a run's `runbook_runs.work_ref` is bound around each `operation_call` step's dispatch + on the abort row, so the step audit rows inherit the run's change ticket). NULL when no bind source is in scope; system-internal writers leave it NULL by design. |
 | `policy_decision` | `audit_log.policy_decision` — the synchronous policy-gate verdict stamped on the row (#130, migration `0051`). One of the closed `PermissionVerdict` set — `"auto-execute"` / `"needs-approval"` / `"deny"` — or `None` where no gate ran (pre-#130 rows, pre-gate usage errors like unknown-op / invalid-params / connector-resolution failures, and system-internal writers). Populated by both audit writers off the dispatch-scoped `policy_decision_var` contextvar: the parked "request" row carries `"needs-approval"`; the approval "decision" row carries `None` (an operator's approve/reject is not a gate verdict — it is recorded via `result_status`). A consumer reads the verdict directly (`WHERE policy_decision = '<verdict>'`) instead of reconstructing it from `method`+`path`+`payload`. **Verdict catalog:** the persisted set is exactly the three-value `PermissionVerdict` enum. `time_window_violation` / `quota_exceeded` are **not** implemented (no such policy classes exist in code); any external catalog listing them overstates the surface. |
+| `event_class` | `audit_log.event_class` — what kind of accountable event the row records (#3733, migration `0106`). See [Event class](#event-class-3733). |
 | `broadcast_event_id` | **None in v0.2** — FK direction is reversed: `BroadcastEvent.audit_id` points at the audit row. |
 
 The three computed fields use exactly the same rules
@@ -87,6 +112,7 @@ query_audit(filters, tenant_id, session)
   │       [+ audit_id = :audit_id]
   │       [+ agent_session_id = :agent_session_id]
   │       [+ work_ref = :work_ref]                              ← exact match
+  │       [+ event_class = :event_class]                        ← exact match
   │       [+ operator_sub ILIKE :principal]
   │       [+ occurred_at >= :since]
   │       [+ occurred_at <= :until]
@@ -107,7 +133,7 @@ query_audit(filters, tenant_id, session)
   │   ├─ op_class = payload['op_class'] if str else classify_op(op_id)
   │   ├─ result_status = _derive_result_status(status_code)
   │   ├─ principal_name = payload['principal_name'] if str
-  │   │                  else None   # MCP rows since G0.15-T3 #1212
+  │   │                  else None   # MCP, approval and DISPATCH rows
   │   │                              # carry it in payload; HTTP-chassis
   │   │                              # rows still have no source
   │   └─ AuditEntry(... real cols ..., op_id, op_class, result_status,
@@ -115,6 +141,7 @@ query_audit(filters, tenant_id, session)
   │                 agent_session_id=row.agent_session_id,
   │                 work_ref=row.work_ref,
   │                 policy_decision=row.policy_decision,
+  │                 event_class=row.event_class,
   │                 principal_name=principal_name, broadcast_event_id=None)
   │
   └─ next_cursor = encode_cursor(CursorPosition(ts=last.ts, id=last.id))
@@ -518,12 +545,18 @@ parity with the ``/api/v1/*`` chassis path and the MCP transport path.
 
 ## Known issues / v0.2 gaps
 
-* **`principal_name` populates for MCP rows; HTTP-chassis rows still
-  return `None`.** Since G0.15-T3 (#1212) the MCP audit writer
-  (`mcp/audit.py:write_mcp_audit_row`) merges `Operator.name` into
-  `payload['principal_name']` whenever the JWT carries it, and the
-  audit-query handler reads that key off the JSON column into the
-  returned `AuditEntry`. The HTTP audit middleware
+* **`principal_name` populates for MCP, approval and `DISPATCH` rows;
+  HTTP-chassis rows still return `None`.** The MCP audit writer
+  (`mcp/audit.py:write_mcp_audit_row`, #1212), the approval row writer
+  (`operations/approval_queue.py:_write_audit_row`, #3300) and the
+  operation run writer (`operations/_audit.py:write_audit_row`, #4029)
+  put `Operator.name` into `payload['principal_name']` whenever the JWT
+  carries it, and the audit-query handler reads that key off the JSON
+  column into the returned `AuditEntry`. A run row is the only row of an
+  approved run, so it must carry the name itself. The name always
+  belongs to the row's `operator_sub`: the approver when a person
+  approves through the console, CLI or REST, and the agent when
+  MEHO's own agent waits for the approval and resumes the run itself. The HTTP audit middleware
   (`meho_backplane.audit._write_audit_row`) reads `operator_sub` from
   contextvars but never the JWT `name` claim, so HTTP rows remain
   `principal_name=None`. Closing the HTTP gap is a small write-path

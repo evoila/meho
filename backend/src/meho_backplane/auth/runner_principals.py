@@ -66,7 +66,7 @@ from meho_backplane.auth.keycloak_admin import (
 )
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import RunnerPrincipal
+from meho_backplane.db.models import AuditEventClass, RunnerPrincipal
 from meho_backplane.memory.audit import INTERNAL_METHOD, write_internal_audit_row
 from meho_backplane.scheduler.vault_credentials import (
     SchedulerVaultNotConfiguredError,
@@ -590,6 +590,7 @@ class RunnerPrincipalService:
         # clock, distinct from the liveness dead-man flip. Written after the
         # DB commit so it records only a completed revocation.
         await write_internal_audit_row(
+            event_class=AuditEventClass.OPERATION_EXECUTION,
             operator_sub=_REVOKE_AUDIT_SUB,
             tenant_id=tenant_id,
             method=INTERNAL_METHOD,

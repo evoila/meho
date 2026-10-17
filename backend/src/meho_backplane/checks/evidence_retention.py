@@ -56,7 +56,7 @@ import structlog
 from sqlalchemy import delete
 
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import SensorResult
+from meho_backplane.db.models import AuditEventClass, SensorResult
 from meho_backplane.memory.audit import (
     INTERNAL_METHOD,
     write_internal_audit_row,
@@ -131,6 +131,7 @@ async def _write_prune_audit_row(
     """
     try:
         await write_internal_audit_row(
+            event_class=AuditEventClass.OPERATION_EXECUTION,
             operator_sub=SYSTEM_OPERATOR_SUB,
             tenant_id=EVIDENCE_RETENTION_SYSTEM_TENANT_ID,
             method=INTERNAL_METHOD,

@@ -33,7 +33,7 @@ import structlog
 from sqlalchemy import CursorResult, func, literal, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGroup
+from meho_backplane.db.models import AuditEventClass, AuditLog, EndpointDescriptor, OperationGroup
 from meho_backplane.operations.ingest.api_schemas import EditOpWarning
 from meho_backplane.operations.ingest.connector_registration import (
     resolved_auto_shim_class,
@@ -408,6 +408,7 @@ async def write_audit_row(
     audit_id = uuid.uuid4()
     row = AuditLog(
         id=audit_id,
+        event_class=AuditEventClass.OPERATION_EXECUTION,
         occurred_at=datetime.now(UTC),
         operator_sub=operator_sub,
         tenant_id=operator_tenant_id,

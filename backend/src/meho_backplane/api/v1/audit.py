@@ -280,6 +280,7 @@ async def query(
         parent_audit_id=body.parent_audit_id,
         agent_session_id=body.agent_session_id,
         work_ref=body.work_ref,
+        event_class=body.event_class,
         limit=body.limit,
         cursor=body.cursor,
     )

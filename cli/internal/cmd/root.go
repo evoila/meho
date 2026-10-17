@@ -10,6 +10,7 @@ package cmd
 import (
 	"context"
 	"net/http"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -71,14 +72,22 @@ import (
 // to pick the process exit code (auth_expired → 2, unreachable → 3,
 // unexpected → 4, generic → 1).
 func Execute() error {
-	return newRootCmd().Execute()
+	return newRootCmdFor(os.Args[1:]).Execute()
 }
 
-// newRootCmd constructs a fresh root command. A constructor (rather
-// than a package-level var) keeps the command tree free of mutable
-// global state, which matters for tests: every test gets its own
-// independent tree and can swap stdout/stderr via SetOut / SetErr.
+// newRootCmd builds the command tree for the process's own arguments.
 func newRootCmd() *cobra.Command {
+	return newRootCmdFor(os.Args[1:])
+}
+
+// newRootCmdFor constructs a fresh root command for args (the command
+// line without the program name). A constructor (rather than a
+// package-level var) keeps the command tree free of mutable global
+// state, which matters for tests: every test gets its own independent
+// tree and can swap stdout/stderr via SetOut / SetErr. args only
+// decides whether the dynamic command discovery fetch runs; cobra
+// parses the real arguments in Execute.
+func newRootCmdFor(args []string) *cobra.Command {
 	root := &cobra.Command{
 		Use:   "meho",
 		Short: "Operator CLI for the MEHO governance backplane",
@@ -117,6 +126,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newVersionCmd())
 	root.AddCommand(newLoginCmd())
 	root.AddCommand(newStatusCmd())
+	root.AddCommand(newDoctorCmd())
 
 	// G4.3-T2 (#441) -- retrieval-quality + migration-decision tooling.
 	// `meho retrieval eval` ships first; sibling verbs (usage T5b #464,
@@ -608,9 +618,21 @@ func newRootCmd() *cobra.Command {
 	// backplane URL comes from the same config.json `meho login`
 	// writes — operators with no login persist no URL and skip the
 	// discovery fetch entirely.
-	registerDynamicSubcommands(root)
+	//
+	// `meho doctor` is left out: it must make exactly the network calls
+	// it reports, and none at all with --no-network.
+	if !invokesDoctor(root, args) {
+		registerDynamicSubcommands(root)
+	}
 
 	return root
+}
+
+// invokesDoctor reports whether args select the built-in `doctor`
+// command (global flags before the verb are fine).
+func invokesDoctor(root *cobra.Command, args []string) bool {
+	c, _, err := root.Find(args)
+	return err == nil && c != nil && c.Parent() == root && c.Name() == "doctor"
 }
 
 // registerDynamicSubcommands runs the discovery fetch and grafts

@@ -361,6 +361,19 @@ def test_happy_path_returns_full_federation_response(
     # build-time pinned MCP revision (G0.14-T13 #1202).
     from meho_backplane.mcp.schemas import PROTOCOL_VERSION
 
+    # #3666: the surface summary depends on which MCP tools the process has
+    # registered, which this test does not control. Pin its shape here; the
+    # content is pinned by tests/test_mcp_tool_meho_status.py.
+    summary = body.pop("surface_summary")
+    assert set(summary) == {
+        "expected_working_tools",
+        "listed_working_tools",
+        "missing_working_tools",
+        "operator_surface_listed",
+    }
+    # No ``scope`` claim on the token → not elevated.
+    assert summary["operator_surface_listed"] is False
+
     assert body == {
         # #2746: OperatorIdentity now carries tenant_id + tenant_role, so the
         # federation health response echoes the caller's tenant identity too.
@@ -387,6 +400,8 @@ def test_happy_path_returns_full_federation_response(
         },
         # #3025: the add-on pairing facet — empty on an unpaired backplane.
         "pairings": [],
+        # #3666: the token carries no ``scope`` claim, so no scopes are granted.
+        "granted_scopes": [],
     }
 
     # Vault was hit with the configured role / mount and the operator's

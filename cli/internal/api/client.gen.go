@@ -5475,6 +5475,13 @@ type HTTPValidationError struct {
 // contract-compatible with this backplane build, and its last liveness
 // heartbeat. The list is empty when nothing is paired; the empty-default
 // keeps response decoders generated against the pre-#3025 shape working.
+//
+// “granted_scopes“ (#3666) lists the OAuth scope names on the caller's
+// token, sorted. It carries scope names only, never token material.
+// “surface_summary“ (#3666) compares the working-surface tools the
+// server registers with the ones this session lists
+// (:class:`SurfaceSummary`). Both have empty defaults so older response
+// decoders keep working; the handler always fills them.
 type HealthResponse struct {
 	// Db Database migration status.
 	//
@@ -5488,9 +5495,10 @@ type HealthResponse struct {
 	// ``bool | None`` for forward compatibility with response decoders
 	// that were generated against the chassis-stage shape, but the
 	// handler now always populates it from the probe.
-	Db                  DbStatus `json:"db"`
-	McpProtocolVersion  *string  `json:"mcp_protocol_version,omitempty"`
-	McpSessionIdCapture string   `json:"mcp_session_id_capture"`
+	Db                  DbStatus  `json:"db"`
+	GrantedScopes       *[]string `json:"granted_scopes,omitempty"`
+	McpProtocolVersion  *string   `json:"mcp_protocol_version,omitempty"`
+	McpSessionIdCapture string    `json:"mcp_session_id_capture"`
 
 	// Operator Operator identity surface exposed to the CLI and MCP ``meho_status``.
 	//
@@ -5536,6 +5544,21 @@ type HealthResponse struct {
 	// replica's claim stamp advances, so alert on the minimum across
 	// replicas, not per pod.
 	SensorRunner *SensorRunnerStatus `json:"sensor_runner,omitempty"`
+
+	// SurfaceSummary Which working-surface MCP tools this session should see, and which it does.
+	//
+	// ``expected_working_tools`` is every tool the server registers on the
+	// working surface, sorted. ``listed_working_tools`` is the part of that
+	// set this session's ``tools/list`` returns. ``missing_working_tools`` is
+	// the difference: tools hidden from this session by its tenant role, a
+	// tenant capability it lacks, or an add-on that is not paired.
+	// ``operator_surface_listed`` is ``True`` when the session also sees the
+	// operator planes (its token carries the ``mcp:admin`` scope).
+	//
+	// A client compares its own ``tools/list`` result against
+	// ``listed_working_tools``. A tool the server lists but the client does not
+	// see is a gap on the client side (``meho doctor`` reports it).
+	SurfaceSummary *SurfaceSummary `json:"surface_summary,omitempty"`
 
 	// Vault Federation-chain status for the deployment's credential backend.
 	//
@@ -8704,6 +8727,26 @@ type SurfaceResultSurface string
 
 // SurfaceResultVerdict defines model for SurfaceResult.Verdict.
 type SurfaceResultVerdict string
+
+// SurfaceSummary Which working-surface MCP tools this session should see, and which it does.
+//
+// “expected_working_tools“ is every tool the server registers on the
+// working surface, sorted. “listed_working_tools“ is the part of that
+// set this session's “tools/list“ returns. “missing_working_tools“ is
+// the difference: tools hidden from this session by its tenant role, a
+// tenant capability it lacks, or an add-on that is not paired.
+// “operator_surface_listed“ is “True“ when the session also sees the
+// operator planes (its token carries the “mcp:admin“ scope).
+//
+// A client compares its own “tools/list“ result against
+// “listed_working_tools“. A tool the server lists but the client does not
+// see is a gap on the client side (“meho doctor“ reports it).
+type SurfaceSummary struct {
+	ExpectedWorkingTools  *[]string `json:"expected_working_tools,omitempty"`
+	ListedWorkingTools    *[]string `json:"listed_working_tools,omitempty"`
+	MissingWorkingTools   *[]string `json:"missing_working_tools,omitempty"`
+	OperatorSurfaceListed *bool     `json:"operator_surface_listed,omitempty"`
+}
 
 // Target Full read shape — returned by GET /targets/{name} and the resolver.
 //

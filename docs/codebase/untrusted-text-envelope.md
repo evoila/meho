@@ -16,7 +16,7 @@ re-serves it verbatim to other agents:
 | Stored text | Write path | LLM-facing read path (wrapped) |
 |---|---|---|
 | Broadcast announcement `activity` / `scope` / `target` | `meho_broadcast_announce` → `publish_agent_announcement` | `meho_broadcast_recent`, `meho_broadcast_watch`, `meho://tenant/{tenant_id}/feed` |
-| kb entry `body` | `add_to_knowledge`, kb file walker, UI editor | `meho://kb/{slug}`, `meho://kb/id/{entry}/revision/{revision}` |
+| kb entry `body` | `add_to_knowledge`, kb file walker, UI editor | `meho://kb/{slug}`, `meho://kb/id/{entry}/revision/{revision}`, `search_knowledge` hits (snippet, each passage `text`, each `locator.heading_path` title) |
 | memory entry `body` | `add_to_memory` | `meho://memory/{scope}/{slug}` |
 | Docs-corpus chunk `content` (federated, external — **not** agent-authored) | External `meho-docs` corpus (federated ingestion, outside MEHO) | `search_docs` payload, `ask_docs` citations + synthesis prompt, `read_docs` text, `meho://docs/{collection}/{product}/{version}/{chunk_id}` |
 
@@ -99,10 +99,12 @@ there to admin-authored tenant conventions).
   HTML injection is a different sink with its own defence.
 * The SSE feed (`GET /api/v1/feed`) streams to the frontend, same
   reasoning.
-* kb/memory **search snippets** (200-char excerpts from
-  `search_knowledge` / `search_memory`) are served unwrapped today;
-  the full-body resources are the drill-down path. Wrapping snippets
-  is a possible follow-up.
+* memory **search snippets** (200-char excerpts from
+  `search_memory`) are served unwrapped today; the full-body resource
+  is the drill-down path. Wrapping them is a possible follow-up.
+  `search_knowledge` is wrapped since #3761: `_hit_payload` in
+  `mcp/tools/knowledge.py` wraps the snippet, each passage `text` and
+  each heading title in `locator.heading_path`.
 
 ## Advisories
 

@@ -78,7 +78,7 @@ broadcast hook (G6.1-T3) classify the row correctly:
 
 The ingest route additionally binds ``audit_inserted_count`` /
 ``audit_updated_count`` / ``audit_skipped_count`` /
-``audit_error_count`` so the audit_log payload (and the broadcast
+``audit_error_count`` / ``audit_conflict_count`` so the audit_log payload (and the broadcast
 ``params``) carries the per-call summary required by the
 acceptance criteria -- the file contents are **never** in the
 payload, only the counters.
@@ -541,8 +541,9 @@ async def ingest_kb(
     unimplemented baseline field.
 
     Walks the supplied directory via
-    :meth:`KbService.ingest_directory` and returns the four-bucket
-    :class:`KbIngestionResult`. The directory is **confined to**
+    :meth:`KbService.ingest_directory` and returns the five-bucket
+    :class:`KbIngestionResult` (files sharing a slug are listed in
+    ``conflicts`` and not written). The directory is **confined to**
     ``KB_INGEST_ROOT`` (default ``/opt/meho/kb-ingest``): a path
     resolving outside it (``..`` traversal or escaping symlink) raises
     :class:`~meho_backplane.kb.KbIngestRootError`, mapped to a **400**
@@ -553,9 +554,8 @@ async def ingest_kb(
     ``not_a_directory`` (also 400).
 
     Binds ``audit_op_id="kb.ingest"`` + ``audit_op_class="write"``
-    plus the four ``KbIngestionResult`` counters in the audit
-    payload (NOT the file contents -- the task body's audit
-    contract). ``audit_dry_run`` flags dry-run calls so an operator
+    plus the five result counters in the audit payload (NOT the
+    file contents or paths). ``audit_dry_run`` flags dry-run calls so an operator
     can grep their audit log for trial vs real ingests.
     """
     structlog.contextvars.bind_contextvars(
@@ -623,5 +623,6 @@ async def ingest_kb(
         audit_updated_count=result.updated_count,
         audit_skipped_count=result.skipped_count,
         audit_error_count=result.error_count,
+        audit_conflict_count=result.conflict_count,
     )
     return result

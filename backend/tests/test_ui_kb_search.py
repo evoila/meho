@@ -718,6 +718,7 @@ def test_kb_search_post_empty_query_has_more_computed() -> None:
     from datetime import datetime
 
     from meho_backplane.kb.schemas import KbEntry as _KbEntry
+    from meho_backplane.kb.schemas import KbProvenance as _KbProvenance
     from meho_backplane.ui.routes.kb.routes import _DEFAULT_PAGE_LIMIT
 
     _seed_tenant(_TENANT_A, "tenant-a")
@@ -731,6 +732,7 @@ def test_kb_search_post_empty_query_has_more_computed() -> None:
             slug=f"entry-{i:03d}",
             body="body",
             metadata={},
+            provenance=_KbProvenance(state="legacy"),
             tenant_id=_TENANT_A,
             created_at=_now,
             updated_at=_now,

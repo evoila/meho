@@ -113,8 +113,10 @@ KB_IGNORE_FILENAME: str = ".kb-ignore"
 class KbFileRecord:
     """One discovered Markdown file, ready to feed into ``index_document``.
 
-    ``path`` is the absolute path to the source file (useful for
-    error messages and metadata enrichment); ``slug`` is the
+    ``path`` is the absolute path to the source file (used to read
+    it; never stored or returned); ``relative_path`` is the same file
+    relative to the kb root with POSIX separators -- the value stored
+    as provenance and used in error messages; ``slug`` is the
     operator-facing identifier the kb service uses as
     ``documents.source_id``; ``body`` is the file content with
     front-matter stripped; ``metadata`` is the front-matter dict
@@ -126,6 +128,7 @@ class KbFileRecord:
     """
 
     path: Path
+    relative_path: str
     slug: str
     body: str
     metadata: dict[str, object]
@@ -162,7 +165,7 @@ def walk_kb_directory(
       terminates iteration. Use this shape when a single bad file
       should abort the run.
     * ``errors`` is a list (best-effort mode) -- per-file failures
-      are caught, formatted as ``"<path>: <reason>"``, and appended
+      are caught, formatted as ``"<relative path>: <reason>"``, and appended
       to the supplied list; the walker continues with the next
       file. Use this shape from :meth:`KbService.ingest_directory`
       where a single bad file must not abort a 44-entry corpus.
@@ -187,11 +190,10 @@ def walk_kb_directory(
     Yields
     ------
     KbFileRecord
-        One per discovered ingestible file, in lexicographic order
-        within each directory (the order :func:`Path.rglob` produces
-        on a sorted filesystem is platform-dependent, so callers that
-        need deterministic ordering should sort the iterator output
-        explicitly).
+        One per discovered ingestible file, sorted by POSIX relative
+        path. :func:`Path.rglob` returns files in whatever order the
+        filesystem lists them, so the walker sorts before yielding --
+        the same tree always yields the same sequence.
     """
     log = structlog.get_logger()
     root = root.resolve()
@@ -199,17 +201,17 @@ def walk_kb_directory(
         raise NotADirectoryError(f"kb root is not a directory: {root}")
 
     ignore_patterns = _read_ignore_patterns(root)
-    for path in root.rglob("*.md"):
+    candidates = sorted((path.relative_to(root).as_posix(), path) for path in root.rglob("*.md"))
+    for rel, path in candidates:
         if not path.is_file():
             continue
         if _is_hidden(path, root):
             continue
-        rel = path.relative_to(root).as_posix()
         if _is_ignored(rel, ignore_patterns):
-            log.debug("kb_file_ignored", path=str(path), patterns=ignore_patterns)
+            log.debug("kb_file_ignored", path=rel, patterns=ignore_patterns)
             continue
         try:
-            yield _build_record(path)
+            yield _build_record(path, rel)
         except (UnicodeDecodeError, KbFileParseError, ValueError, OSError) as exc:
             # ValueError covers InvalidKbSlugError (subclass).
             # OSError covers PermissionError + other read-time
@@ -221,7 +223,7 @@ def walk_kb_directory(
             # and continue.
             if errors is None:
                 raise
-            errors.append(f"{path}: {exc}")
+            errors.append(f"{rel}: {exc}")
 
 
 def _read_ignore_patterns(root: Path) -> tuple[str, ...]:
@@ -288,8 +290,11 @@ def _is_ignored(rel_path: str, patterns: tuple[str, ...]) -> bool:
     return False
 
 
-def _build_record(path: Path) -> KbFileRecord:
+def _build_record(path: Path, rel: str) -> KbFileRecord:
     """Read *path*, extract front-matter, return a :class:`KbFileRecord`.
+
+    *rel* is the root-relative POSIX path; error messages name it
+    instead of the absolute host path.
 
     The read is UTF-8 with strict decoding -- a binary file
     masquerading as ``.md`` raises :class:`UnicodeDecodeError`,
@@ -312,13 +317,13 @@ def _build_record(path: Path) -> KbFileRecord:
             exc.object,
             exc.start,
             exc.end,
-            f"could not decode {path} as UTF-8: {exc.reason}",
+            f"could not decode {rel} as UTF-8: {exc.reason}",
         ) from exc
 
     try:
         post = frontmatter.loads(raw)
     except yaml.YAMLError as exc:
-        raise KbFileParseError(f"front-matter parse error in {path}: {exc}") from exc
+        raise KbFileParseError(f"front-matter parse error in {rel}: {exc}") from exc
 
     metadata = dict(post.metadata)
     body = post.content
@@ -329,4 +334,10 @@ def _build_record(path: Path) -> KbFileRecord:
     else:
         slug = validate_slug(path.stem)
 
-    return KbFileRecord(path=path, slug=slug, body=body, metadata=metadata)
+    return KbFileRecord(
+        path=path,
+        relative_path=rel,
+        slug=slug,
+        body=body,
+        metadata=metadata,
+    )

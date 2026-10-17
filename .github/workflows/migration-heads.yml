@@ -73,10 +73,12 @@ concurrency:
 jobs:
   check:
     name: Migration chain (single head)
-    # Untrusted-PR runner isolation (F06, meho-internal#268): the job runs
-    # PR-controlled code (the check script), needs no internal route or
-    # credential, so a fork PR goes to a disposable GitHub-hosted runner.
-    # Same shape as migration-compat.yml.
+    # A pull request from a fork runs on a disposable GitHub-hosted
+    # runner, not on the internal pool. The job runs the check script as
+    # it is on the pull request branch, so a fork controls that code. It
+    # needs no internal route or credential, so the hosted runner is
+    # enough. Same shape as migration-compat.yml; see docs/codebase/
+    # devops.md "Untrusted pull-request isolation".
     runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'meho-runners-ci' }}
     timeout-minutes: 5
     steps:

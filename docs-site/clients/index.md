@@ -68,6 +68,9 @@ client and the operator's workstation trusts the deployment's CA. The
 one-time realm work is in
 [Keycloak realm setup](../install/keycloak-realm.md); the CA-trust step
 is in [TLS and ingress](../install/tls-ingress.md#your-workstation-os-trust-store).
+The Claude Desktop and Claude Code pages each start with a short
+"Before you start: trust your deployment's CA" step that also says where
+to get the root CA file.
 
 ## Remote Custom Connector — not applicable
 

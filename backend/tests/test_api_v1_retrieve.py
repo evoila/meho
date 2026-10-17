@@ -220,6 +220,12 @@ def test_retrieve_route_returns_200_with_hits_and_duration(
     # this, a broad source="memory" retrieve would leak other principals'
     # user-scoped rows in the same tenant.
     assert call_kwargs["principal_sub"] == "op-1"
+    # No source means Memory rows are candidates, so the route applies the
+    # Memory service's typed eligibility (#3741) for the same principal.
+    eligibility = call_kwargs["memory_eligibility"]
+    assert eligibility.principal_sub == "op-1"
+    assert eligibility.tenant_id == tenant_id
+    assert len(eligibility.kinds) == 5
 
 
 def test_retrieve_route_passes_source_and_kind_filters(
@@ -255,6 +261,8 @@ def test_retrieve_route_passes_source_and_kind_filters(
     call_kwargs = fake_retrieve.await_args.kwargs
     assert call_kwargs["source"] == "kb"
     assert call_kwargs["kind"] == "kb-entry"
+    # A non-Memory source has no Memory candidates, so no eligibility.
+    assert call_kwargs["memory_eligibility"] is None
 
 
 # ---------------------------------------------------------------------------

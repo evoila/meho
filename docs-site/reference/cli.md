@@ -640,7 +640,7 @@ meho audit query [flags]
 - `--limit` — max rows per page (1..1000, server default 100 when omitted)
 - `--op-class` — narrow to one op-class (read|write|credential_read|audit_query|other)
 - `--op-id` — narrow to one op-id (glob with * wildcards)
-- `--parent-audit-id` — narrow to the composite-op subtree under this audit-id
+- `--parent-audit-id` — narrow to the rows whose parent is this audit-id (UUID); e.g. the decision and run rows of one approval request
 - `--principal` — narrow to one operator (JWT subject; partial-match supported)
 - `--result-status` — narrow to one result-status (ok|error|denied)
 - `--session-id` — narrow to one agent session (UUID); the flat companion to `meho audit replay`
@@ -859,7 +859,7 @@ meho bind9 record get <fqdn> [flags]
 
 #### `meho bind9 record remove`
 
-Remove the A/AAAA records at an FQDN (atomic-apply)
+Remove the A/AAAA records at an FQDN (a second person must approve)
 
 ```
 meho bind9 record remove <fqdn> [flags]
@@ -1450,6 +1450,19 @@ meho docs search <query> [flags]
 - `--product` — optional vendor-product refinement within a single collection
 - `--version` — optional product-version refinement within a single collection
 
+## `meho doctor`
+
+Check this machine's MEHO client setup and say which layer is broken
+
+```
+meho doctor [flags]
+```
+
+- `--backplane` — backplane URL to check (defaults to the URL saved by the last `meho login`)
+- `--json` — emit one JSON document on stdout instead of the human report
+- `--no-network` — run only the offline layer; make no network call
+- `--plugin-root` — path to the installed Claude Code plugin (defaults to $CLAUDE_PLUGIN_ROOT, then a search under ~/.claude/plugins)
+
 ## `meho event-source`
 
 Operate the MEHO event_source registry (add / list / describe / update / delete)
@@ -1803,6 +1816,7 @@ meho harbor operation call <op_id> [flags]
 - `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit the full OperationResult envelope as JSON
 - `--params` — params as inline JSON or @<file>
+- `--preview-hash` — preview_hash from a prior `meho operation preview` of the same op, target and params; required for a destructive op
 - `--target` — Harbor target slug
 
 #### `meho harbor operation search`
@@ -1907,7 +1921,7 @@ meho harbor robot create [flags]
 
 #### `meho harbor robot delete`
 
-Delete a project-scoped robot account from Harbor
+Delete a project-scoped robot account from Harbor (a second person must approve)
 
 ```
 meho harbor robot delete [flags]
@@ -3680,14 +3694,14 @@ meho promote <scope>/<slug> [flags]
 
 ## `meho recall`
 
-Fetch a memory by natural key or via retrieval (GET /api/v1/memory or /api/v1/retrieve)
+Fetch a memory by natural key or search memories (GET /api/v1/memory or POST /api/v1/memory/search)
 
 ```
 meho recall <scope>/<slug> [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by `meho login`)
-- `--json` — emit raw MemoryEntry / RetrieveResponse JSON instead of human output
+- `--json` — emit raw MemoryEntry / MemorySearchResponse JSON instead of human output
 - `--limit` — max hits to return in --query mode (1..50, server default 10 when omitted)
 - `--query` — run hybrid retrieval against memories with this query; mutually exclusive with the <scope>/<slug> positional
 - `--scope` — narrow --query mode to one scope: user|user-tenant|user-target|tenant|target
@@ -3750,7 +3764,7 @@ meho retrieval retire-checklist [flags]
 
 ### `meho retrieval usage`
 
-Read audit-log-backed retrieval usage telemetry (daily buckets per surface)
+Read retrieval usage telemetry (daily buckets per surface)
 
 ```
 meho retrieval usage [flags]
@@ -5877,6 +5891,7 @@ meho vmware operation call <op_id> [flags]
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit the full OperationResult envelope as JSON instead of the human render
 - `--params` — operation params as inline JSON or @<file>; omitted means no params
+- `--preview-hash` — preview_hash from a prior `meho operation preview` of the same op, target and params; required for a destructive op
 - `--target` — target slug to dispatch against (required for ops that read a target)
 
 #### `meho vmware operation search`

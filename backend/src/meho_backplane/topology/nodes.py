@@ -69,7 +69,9 @@ from meho_backplane.db.models import (
     KIND_SLUG_MAX_LENGTH,
     KIND_SLUG_MIN_LENGTH,
     KIND_SLUG_PATTERN,
+    SOURCE_SCOPE_GLOBAL,
     WELL_KNOWN_NODE_KINDS,
+    AuditEventClass,
     AuditLog,
     GraphHistoryChangeKind,
     GraphNode,
@@ -77,6 +79,8 @@ from meho_backplane.db.models import (
 )
 from meho_backplane.operations._audit import resolve_broadcast_lineage
 from meho_backplane.topology.history import node_snapshot, record_node_change
+from meho_backplane.topology.identity_mode import NOT_LEGACY_SCOPE, read_identity_mode
+from meho_backplane.topology.resolvers import AmbiguousNodeError
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -222,6 +226,7 @@ def _build_audit_row(
     """
     return AuditLog(
         id=audit_id,
+        event_class=AuditEventClass.OPERATION_EXECUTION,
         occurred_at=datetime.now(UTC),
         operator_sub=operator.sub,
         actor_sub=resolve_actor_sub(),
@@ -307,9 +312,42 @@ async def _publish(
         )
 
 
-# code-quality-allow: pre-existing >100-line function (210 lines on
-# main, ~140 of them contract docstring); #2536 adds only the
-# source='curated' stamp + promotion flip.
+async def _find_seed_target(
+    session: AsyncSession, *, tenant_id: uuid.UUID, kind: str, name: str
+) -> GraphNode | None:
+    """The row a seed of ``(kind, name)`` merges into, or ``None`` to insert.
+
+    ``legacy:`` rows are skipped: they were set aside by the #3749 scope
+    cut-over and must not be revived by a seed. After the cut-over the
+    same ``(kind, name)`` can exist in several scopes; then the seed
+    cannot know which one is meant and raises
+    :class:`~meho_backplane.topology.resolvers.AmbiguousNodeError`.
+    """
+    rows = list(
+        (
+            await session.execute(
+                select(GraphNode).where(
+                    GraphNode.tenant_id == tenant_id,
+                    GraphNode.kind == kind,
+                    GraphNode.name == name,
+                    NOT_LEGACY_SCOPE,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if len(rows) > 1:
+        raise AmbiguousNodeError(
+            name, [kind], scopes=sorted(r.source_scope or "unresolved" for r in rows)
+        )
+    return rows[0] if rows else None
+
+
+# Pre-existing >100-line function (210 lines on main, ~140 of them
+# contract docstring); #2536 adds only the source='curated' stamp +
+# promotion flip; #3749 adds the identity-mode read and scoped insert.
+# code-quality-allow: long contract docstring, see the note above.
 async def create_or_get_node(
     session: AsyncSession,
     operator: Operator,
@@ -413,12 +451,10 @@ async def create_or_get_node(
     audit_id = uuid.uuid4()
 
     async with session.begin():
-        existing_stmt = select(GraphNode).where(
-            GraphNode.tenant_id == operator.tenant_id,
-            GraphNode.kind == canonical_kind,
-            GraphNode.name == name,
+        scoped = await read_identity_mode(session, lock=True) == "scoped"
+        existing = await _find_seed_target(
+            session, tenant_id=operator.tenant_id, kind=canonical_kind, name=name
         )
-        existing = (await session.execute(existing_stmt)).scalar_one_or_none()
 
         now = datetime.now(UTC)
         seed_props: dict[str, Any] = {
@@ -440,6 +476,10 @@ async def create_or_get_node(
                 discovered_by=operator.sub,
                 first_seen=now,
                 last_seen=now,
+                # Scoped mode (#3749): an operator seed names a thing for
+                # the whole tenant. Legacy mode keeps NULL, as before.
+                source_scope=SOURCE_SCOPE_GLOBAL if scoped else None,
+                source_scope_provenance="curated" if scoped else None,
             )
             session.add(node)
             await session.flush()

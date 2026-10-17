@@ -278,19 +278,25 @@ from sqlalchemy.types import TypeDecorator, TypeEngine
 from meho_backplane.checks.assertions import CheckState
 
 __all__ = [
+    "AUDIT_EVENT_CLASSES",
     "EVENT_OUTBOX_NOTIFY_CHANNEL",
+    "KB_REVISION_ORIGINS",
     "KIND_SLUG_MAX_LENGTH",
     "KIND_SLUG_MIN_LENGTH",
     "KIND_SLUG_PATTERN",
     "KIND_SLUG_RE",
+    "SOURCE_SCOPE_GLOBAL",
+    "SOURCE_SCOPE_PATTERN",
     "WELL_KNOWN_NODE_KINDS",
     "AgentRun",
     "AgentRunStatus",
     "AgentRunTrigger",
+    "AuditEventClass",
     "AuditLog",
     "Base",
     "BroadcastOverride",
     "BudgetWindowKind",
+    "ConventionHistoryChangeKind",
     "DispatchTrace",
     "DispatchTraceSpan",
     "Document",
@@ -303,7 +309,9 @@ __all__ = [
     "GraphNode",
     "GraphNodeHistory",
     "IdentityBudget",
+    "KbRevision",
     "OperationGroup",
+    "RequestUsageEvent",
     "RunbookRun",
     "RunbookRunStepState",
     "RunbookTemplate",
@@ -412,14 +420,53 @@ class Base(DeclarativeBase):
     """
 
 
-class AuditLog(Base):
-    """One row per authenticated request, written synchronously before response.
+class AuditEventClass(StrEnum):
+    """What kind of accountable event one ``audit_log`` row records (#3733).
 
-    The :class:`~meho_backplane.audit.AuditMiddleware` constructs an
-    instance, populates every field from the request / response /
-    contextvars, and commits before yielding the response back to
-    the ASGI send chain. Read-only by every other consumer in v0.1
-    (no UPDATE / DELETE paths exist).
+    The set is closed. The database CHECK ``ck_audit_log_event_class``
+    rejects any other value, so a new class needs a code change and a
+    migration together.
+
+    * :attr:`OPERATION_EXECUTION` -- an action ran: a dispatched operation
+      (success or failure), or a MEHO-internal action such as a topology
+      edit, a retention sweep or a reaper.
+    * :attr:`POLICY_DECISION` -- a gate decided about a call before it ran:
+      a policy deny, a rate-limit refusal, or a park for approval.
+    * :attr:`APPROVAL_DECISION` -- a person (or a standing grant) approved,
+      rejected, or let an approval request expire.
+    * :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a
+      refresh-token replay or a broken satellite effect chain.
+    * :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every
+      row written before migration ``0106`` reads as this class; it is never
+      guessed from ``method`` / ``path``. The REST and MCP request wrapper
+      rows also keep this class until they are retired.
+    """
+
+    OPERATION_EXECUTION = "operation_execution"
+    POLICY_DECISION = "policy_decision"
+    APPROVAL_DECISION = "approval_decision"
+    SECURITY_EVENT = "security_event"
+    LEGACY_REQUEST = "legacy_request"
+
+
+#: Closed tuple mirrored in migration ``0106``'s CHECK constraint.
+AUDIT_EVENT_CLASSES: tuple[str, ...] = tuple(c.value for c in AuditEventClass)
+
+
+def _ck_event_class_in(values: tuple[str, ...]) -> str:
+    """Render the ``event_class IN (...)`` CHECK body for ``audit_log``."""
+    return f"event_class IN ({', '.join(f"'{v}'" for v in values)})"
+
+
+class AuditLog(Base):
+    """One durable accountability record, written synchronously.
+
+    Every writer declares its :class:`AuditEventClass` on ``event_class``
+    (see ``tests/test_audit_event_class.py`` for the writer inventory).
+    The :class:`~meho_backplane.audit.AuditMiddleware` writes one row per
+    authenticated request (class ``legacy_request``); the dispatcher,
+    the approval queue and the domain writers write classified rows.
+    Read-only by every other consumer (no UPDATE / DELETE paths exist).
 
     Field semantics are documented on the module docstring; this
     class deliberately ships with no helper methods — the audit row
@@ -593,8 +640,25 @@ class AuditLog(Base):
         nullable=True,
         default=None,
     )
+    # What kind of accountable event this row records (#3733). Closed
+    # vocabulary :class:`AuditEventClass`, DB-enforced by the CHECK below.
+    # NOT NULL. The server default ``legacy_request`` is what every row
+    # written before migration ``0106`` reads as, and what a row from an
+    # older MEHO version writes during a rolling upgrade. There is no
+    # Python-side default on purpose: every writer in this codebase passes
+    # the class it knows, and the writer-inventory test fails on any
+    # ``AuditLog(...)`` call that does not.
+    event_class: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=sa.text("'legacy_request'"),
+    )
 
     __table_args__ = (
+        sa.CheckConstraint(
+            _ck_event_class_in(AUDIT_EVENT_CLASSES),
+            name="ck_audit_log_event_class",
+        ),
         # Verdict vocabulary is the closed ``PermissionVerdict`` set. The
         # literal mirrors ``_PERMISSION_VERDICTS`` (defined later in this
         # module, after the enum) rather than referencing it — this
@@ -983,6 +1047,86 @@ class Document(Base):
             "documents_body_hash_idx",
             "body_hash",
             postgresql_using="btree",
+        ),
+    )
+
+
+#: Closed set for :attr:`KbRevision.origin`. ``write`` rows were stored
+#: by a kb write. ``backfill-current`` rows were copied from the current
+#: kb entry by migration ``0110``; they are not historical versions.
+KB_REVISION_ORIGINS: tuple[str, ...] = ("write", "backfill-current")
+
+
+class KbRevision(Base):
+    """One retained, immutable body of a kb entry.
+
+    The :class:`Document` row with ``source="kb"`` stays the latest
+    head: it is what search and ``meho://kb/{slug}`` read, and a new
+    body overwrites it. Each time a kb write changes the body, the
+    service also adds one row here in the same transaction. The row
+    is never updated, so an older body stays readable by its revision
+    id after the head moves on. It ends only when the entry is
+    deleted (explicit delete, or a cascade from the ``documents`` row).
+
+    Columns:
+
+    * ``id`` -- the revision UUID used in
+      ``meho://kb/id/{entry}/revision/{revision}``.
+    * ``tenant_id`` -- owning tenant; every read filters on it.
+    * ``entry_id`` -- the ``documents.id`` of the kb entry (the entry
+      UUID). ``ON DELETE CASCADE`` so no revision outlives its entry.
+    * ``revision_number`` -- 1, 2, 3, ... per entry. The highest number
+      is the current revision. Unique per entry.
+    * ``body`` / ``body_hash`` -- the stored text and its SHA-256 hex.
+    * ``provenance`` -- the provenance block of the write (see
+      :mod:`meho_backplane.kb.provenance`); ``None`` when not recorded.
+    * ``origin`` -- one of :data:`KB_REVISION_ORIGINS`.
+    * ``embedding_model`` / ``chunker_version`` -- which embedding
+      model and chunking rule indexed this body. ``None`` on backfill
+      rows, because the migration cannot know them.
+    * ``created_at`` -- when the revision was stored.
+    """
+
+    __tablename__ = "kb_revision"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    entry_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    revision_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    body_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    # ``none_as_null`` stores ``None`` as SQL ``NULL``, matching migration 0110.
+    provenance: Mapped[dict[str, object] | None] = mapped_column(
+        JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql"),
+        nullable=True,
+    )
+    origin: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding_model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    chunker_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "kb_revision_entry_number_idx",
+            "entry_id",
+            "revision_number",
+            unique=True,
+        ),
+        sa.CheckConstraint(
+            "origin IN ('write', 'backfill-current')",
+            name="ck_kb_revision_origin",
         ),
     )
 
@@ -1991,6 +2135,48 @@ def _ck_in(column: str, values: tuple[str, ...]) -> str:
     return f"{column} IN ({', '.join(f"'{v}'" for v in values)})"
 
 
+#: :attr:`GraphNode.source_scope` value for a node whose name means the
+#: same thing for the whole tenant, whichever source reported it (#3739).
+SOURCE_SCOPE_GLOBAL: Final[str] = "global"
+
+#: The full :attr:`GraphNode.source_scope` grammar (#3739). Three forms:
+#:
+#: * ``global`` -- the name is tenant-wide (see :data:`SOURCE_SCOPE_GLOBAL`).
+#: * ``target:<uuid>`` -- the name is only unique inside one target; the
+#:   UUID is that target's ``targets.id``.
+#: * ``legacy:<uuid>`` -- a pre-migration row kept apart from scoped rows;
+#:   the UUID is the row's own ``graph_node.id``, so two legacy rows never
+#:   collide.
+#:
+#: UUIDs are canonical lowercase text. ``NULL`` means "not resolved yet".
+SOURCE_SCOPE_PATTERN: Final[str] = (
+    r"^(?:global|(?:target|legacy):"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
+)
+
+
+def _ck_source_scope(column: str) -> str:
+    """Render the portable CHECK body for :data:`SOURCE_SCOPE_PATTERN`.
+
+    Regex CHECKs are not portable, so the UUID form is checked in four
+    portable steps: the 7-character prefix (``=`` is case-sensitive on
+    both dialects, unlike SQLite ``LIKE``); the ``LIKE`` layout (length
+    and hyphen positions); exactly four hyphens (``_`` in ``LIKE`` also
+    matches a hyphen); and ``ltrim`` with the lowercase hex alphabet
+    (anything left over is a bad character). ``substr`` / ``replace`` /
+    ``ltrim`` mean the same on PostgreSQL and SQLite. Mirrored verbatim
+    in migration ``0108``.
+    """
+    return (
+        f"{column} IS NULL "
+        f"OR {column} = 'global' "
+        f"OR (substr({column}, 1, 7) IN ('target:', 'legacy:') "
+        f"AND {column} LIKE '_______________-____-____-____-____________' "
+        f"AND length(replace({column}, '-', '')) = 39 "
+        f"AND ltrim(substr({column}, 8), '0123456789abcdef-') = '')"
+    )
+
+
 def _ck_kind_shape(column: str) -> str:
     """Render the portable minimal shape CHECK for an open kind column.
 
@@ -2083,6 +2269,20 @@ class GraphNode(Base):
       out once a node has been absent past the configured threshold
       (the spec's soft-delete signal -- the row stays queryable for
       G9.3 history replay but is filtered out of default queries).
+    * ``source_scope`` -- Text NULL with the portable
+      ``ck_graph_node_source_scope`` CHECK (migration ``0108``,
+      #3739). Says where the node's name is unique: ``global``,
+      ``target:<uuid>`` or ``legacy:<uuid>`` (see
+      :data:`SOURCE_SCOPE_PATTERN`). ``NULL`` means not resolved yet:
+      the row predates source-qualified identity, and ``target_id``
+      only names the last target that saw it, so readers must not
+      treat it as the scope. Writers fill it only after the staged
+      scope cut-over (#3749, :mod:`meho_backplane.topology.scope_repair`),
+      which also makes it ``NOT NULL`` at the database level. This
+      declaration keeps the pre-cut-over shape that fresh installs have.
+    * ``source_scope_provenance`` -- Text NULL. What set
+      ``source_scope`` (``migration:0108`` for the backfill). Lets the
+      later repair tell a mechanical value from a rediscovered one.
 
     Indexes on :class:`GraphNode`:
 
@@ -2090,7 +2290,15 @@ class GraphNode(Base):
       ``(tenant_id, kind, name)``. Enforces the "one (kind, name) per
       tenant" invariant at the DB layer. Named index only; no
       ``unique=True`` on the column triple to avoid PG auto-generating
-      a duplicate anonymous index alongside it.
+      a duplicate anonymous index alongside it. It stays in place until
+      the staged cut-over: PostgreSQL treats NULLs as distinct in a
+      unique index, so adding ``source_scope`` as a fourth key column
+      would let two unresolved rows share a name. The cut-over (#3749)
+      drops it and makes ``graph_node_tenant_scope_kind_name_idx``
+      unique instead.
+    * ``graph_node_tenant_scope_kind_name_idx`` -- non-unique b-tree on
+      ``(tenant_id, source_scope, kind, name)`` (migration ``0108``).
+      Serves per-scope lookups and the "unresolved rows" scan.
 
     The model deliberately ships with no helper methods -- write paths
     land in T3's refresh service, read paths in T4's recursive-CTE
@@ -2134,6 +2342,12 @@ class GraphNode(Base):
         nullable=True,
         default=None,
     )
+    source_scope: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    source_scope_provenance: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
         Index(
@@ -2144,6 +2358,14 @@ class GraphNode(Base):
             unique=True,
             postgresql_using="btree",
         ),
+        Index(
+            "graph_node_tenant_scope_kind_name_idx",
+            "tenant_id",
+            "source_scope",
+            "kind",
+            "name",
+            postgresql_using="btree",
+        ),
         sa.CheckConstraint(
             _ck_kind_shape("kind"),
             name="ck_graph_node_kind",
@@ -2151,6 +2373,10 @@ class GraphNode(Base):
         sa.CheckConstraint(
             _ck_in("source", _GRAPH_SOURCES),
             name="ck_graph_node_source",
+        ),
+        sa.CheckConstraint(
+            _ck_source_scope("source_scope"),
+            name="ck_graph_node_source_scope",
         ),
     )
 
@@ -3110,6 +3336,19 @@ class TenantConvention(Base):
     )
 
 
+class ConventionHistoryChangeKind(StrEnum):
+    """What one :class:`TenantConventionHistory` row records (#3747).
+
+    Mirrored by the CHECK ``ck_tenant_convention_history_change_kind``
+    (migration ``0109``). Rows written before ``0109`` have ``NULL``; the
+    kind is never guessed for them.
+    """
+
+    CREATED = "created"
+    UPDATED = "updated"
+    DELETED = "deleted"
+
+
 class TenantConventionHistory(Base):
     """One row per edit to a :class:`TenantConvention`.
 
@@ -3184,17 +3423,29 @@ class TenantConventionHistory(Base):
         nullable=False,
         default=lambda: datetime.now(UTC),
     )
-    # Nullable -- migration-seeded rows have no audit_log row to point
-    # at. T2's CRUD writes populate ``audit_id`` from the audit
-    # middleware's contextvar so G8's audit-query path can join
-    # history back to the originating request.
+    # Nullable. Legacy link to the REST request wrapper row: rows written
+    # before #3747 carry it; new rows leave it ``NULL`` because the
+    # history row itself is the record of the edit (see ``change_kind``
+    # and ``request_id``). Migration-seeded rows never had one.
     audit_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(),
         nullable=True,
         default=None,
     )
+    # Nullable (#3747, migration ``0109``). ``created`` / ``updated`` /
+    # ``deleted`` -- what this edit was. ``NULL`` on rows written before
+    # ``0109``; never guessed.
+    change_kind: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # Nullable (#3747). The request correlation id of the call that made
+    # the edit; links the row to the request usage event. ``NULL`` when
+    # the call had no usable request id, and on rows before ``0109``.
+    request_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True, default=None)
 
     __table_args__ = (
+        sa.CheckConstraint(
+            "change_kind IN ('created', 'updated', 'deleted')",
+            name="ck_tenant_convention_history_change_kind",
+        ),
         Index(
             "tenant_convention_history_convention_idx",
             "convention_id",
@@ -4655,9 +4906,11 @@ class AddonOrchestrationRun(Base):
     Schema decisions
     ----------------
 
-    * ``keycloak_client_id`` -- Text NOT NULL. The paired principal's OAuth
-      clientId, equal to :attr:`AddonPairing.keycloak_client_id`. The linkage
-      key: a run belongs to exactly one paired principal.
+    * ``keycloak_client_id`` -- Text NOT NULL. The service principal's OAuth
+      clientId (for a paired add-on, equal to
+      :attr:`AddonPairing.keycloak_client_id`; unpaired client-credential
+      principals open runs too since #3446). The linkage key: a run belongs to
+      exactly one principal.
     * ``work_ref`` -- Text NOT NULL. The external change-ticket ref the run
       groups under. Together with ``keycloak_client_id`` it uniquely names a
       run (``addon_orchestration_run_client_work_ref_idx``), which is both the
@@ -6229,6 +6482,13 @@ class ApprovalRequest(Base):
         nullable=True,
         default=None,
     )
+    # Client-chosen retry key (#3486). Sent as ``idempotency_key`` on
+    # ``call_operation``. While this row is ``pending`` or ``approved``, the
+    # same principal sending the same key gets this row back instead of a
+    # new one. The partial unique index below enforces it, so two racing
+    # requests cannot both insert. NULL when no key was sent and on pre-0105
+    # rows. Added by migration ``0105``.
+    idempotency_key: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     # Parent composite to re-enter on resume when this row parks a composite
     # sub-op (#3351). ``{"op_id": ..., "params": ...}`` captured at park time;
     # NULL for direct-op parks (generic re-dispatch of ``op_id``) and pre-0099
@@ -6260,6 +6520,22 @@ class ApprovalRequest(Base):
             "approval_request_work_ref_idx",
             "work_ref",
             postgresql_using="btree",
+        ),
+        # Matches migration 0105 (#3486): at most one live (pending or
+        # approved) row per (tenant, principal, idempotency_key).
+        Index(
+            "approval_request_idempotency_key_idx",
+            "tenant_id",
+            "principal_sub",
+            "idempotency_key",
+            unique=True,
+            postgresql_using="btree",
+            postgresql_where=sa.text(
+                "idempotency_key IS NOT NULL AND status IN ('pending', 'approved')"
+            ),
+            sqlite_where=sa.text(
+                "idempotency_key IS NOT NULL AND status IN ('pending', 'approved')"
+            ),
         ),
         sa.CheckConstraint(
             _ck_in("status", _APPROVAL_REQUEST_STATUSES),
@@ -8455,3 +8731,54 @@ class DispatchTraceSpan(Base):
             postgresql_using="btree",
         ),
     )
+
+
+class RequestUsageEvent(Base):
+    """One privacy-bounded usage event at the REST or MCP boundary (#3734).
+
+    Routine activity (a list, a search, a resource read) is usage, not an
+    accountable action. This table keeps it apart from ``audit_log``. It is
+    written by :mod:`meho_backplane.request_usage.collector` and only when
+    ``REQUEST_USAGE_RETENTION_DAYS`` is set; the retention job deletes rows
+    older than that window. During the dual-write phase the wrapper
+    ``audit_log`` rows are still written too.
+
+    The row holds only opaque ids and bounded labels. It never holds a
+    request body, a query string, tool arguments, a prompt, a token, or a
+    target name. ``route`` is a route template or a registered MCP tool /
+    resource template / method name, never a concrete path.
+
+    * ``kind`` -- ``request_finished`` (one per boundary) or
+      ``context_selected`` (optional; says context was picked, never that
+      it was followed).
+    * ``tenant_id`` -- soft reference, same as ``audit_log.tenant_id``.
+    * ``outcome`` -- bounded code (``ok`` / ``client_error`` / ``denied``
+      / ``not_found`` / ``rate_limited`` / ``server_error``); ``NULL`` on
+      ``context_selected``.
+    * ``correlation_id`` -- opaque id that links a ``context_selected``
+      event to later evaluation data; ``NULL`` on ``request_finished``.
+
+    Indexes are declared in migration ``0108``:
+    ``(tenant_id, occurred_at)`` for tenant-scoped window reads, and
+    ``occurred_at`` for the retention delete.
+    """
+
+    __tablename__ = "request_usage_event"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    session_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    run_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    request_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    correlation_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    transport: Mapped[str] = mapped_column(Text, nullable=False)
+    route: Mapped[str] = mapped_column(Text, nullable=False)
+    outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
+    duration_ms: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)

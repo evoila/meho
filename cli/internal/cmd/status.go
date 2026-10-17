@@ -4,17 +4,21 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/auth"
 	"github.com/evoila/meho/cli/internal/output"
+	"github.com/evoila/meho/cli/internal/version"
 )
 
 // newStatusCmd returns the `meho status` subcommand.
@@ -60,6 +64,10 @@ func newStatusCmd() *cobra.Command {
 			"machine-parseable JSON document on stdout (one JSON object per " +
 			"line in --watch mode) — agents (and the meho install.sh smoke " +
 			"test) consume this shape.\n\n" +
+			"status also compares the CLI version with the backplane's " +
+			"/version endpoint. When they are too far apart (supported: same " +
+			"minor version, or the CLI one minor version behind) it prints a " +
+			"one-line warning on stderr with the release to install.\n\n" +
 			"Exit codes: 0 success, 2 auth_expired, 3 unreachable, 4 " +
 			"unexpected response shape, 5 insufficient_role (--watch only).",
 		Args:         cobra.NoArgs,
@@ -154,10 +162,32 @@ func runOneShot(cmd *cobra.Command, backplaneURL string, jsonOut bool) error {
 			jsonOut)
 	}
 
+	printVersionSkew(cmd.Context(), client.HTTPClient(), backplaneURL, cmd.ErrOrStderr())
+
 	if jsonOut {
 		return output.PrintJSON(cmd.OutOrStdout(), resp.JSON200)
 	}
 	return output.PrintHealth(cmd.OutOrStdout(), resp.JSON200)
+}
+
+// versionCheckTimeout caps the GET /version call so a slow backplane
+// never holds up `meho login` or `meho status`.
+const versionCheckTimeout = 3 * time.Second
+
+// printVersionSkew compares this CLI's version with the backplane's
+// GET /version and writes a one-line warning to w when they are too
+// far apart. Best effort: any error is ignored, so the check never
+// makes login or status fail.
+func printVersionSkew(ctx context.Context, client *http.Client, backplaneURL string, w io.Writer) {
+	ctx, cancel := context.WithTimeout(ctx, versionCheckTimeout)
+	defer cancel()
+	bp, err := version.FetchBackplane(ctx, client, backplaneURL)
+	if err != nil {
+		return
+	}
+	if msg := version.SkewWarning(version.Get().Version, bp); msg != "" {
+		fmt.Fprintln(w, msg)
+	}
 }
 
 // resolveBackplaneURL picks the backplane to talk to. Priority:

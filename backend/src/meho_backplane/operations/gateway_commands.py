@@ -65,6 +65,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.runner_write_allowlist import load_runner_allowlist
 from meho_backplane.db.models import (
+    AuditEventClass,
     AuditLog,
     EndpointDescriptor,
     GatewayCommand,
@@ -332,6 +333,7 @@ async def _write_gateway_audit_row(
     """
     row = AuditLog(
         id=audit_id,
+        event_class=AuditEventClass.OPERATION_EXECUTION,
         occurred_at=datetime.now(UTC),
         operator_sub=operator.sub,
         tenant_id=operator.tenant_id,

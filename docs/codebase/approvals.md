@@ -545,6 +545,52 @@ after a decision (`project_request_to_view(row, delegation)`).
 `work_ref` is unchanged: it stays the requester-side change ref. The
 `Refs:` values may match it, but they do not have to.
 
+### Delegated decisions are allowed only on lab-class deployments (#3693)
+
+On production, an approve or reject must be the approver's own call.
+A decision made on someone else's instruction is allowed only on a
+lab-class deployment. MEHO has no environment object, so the deployment
+says which class it is with one boot switch, like the self-approval
+switch:
+
+| Setting | Env var | Helm value | Default |
+|---|---|---|---|
+| `Settings.approval_allow_delegated_decision` | `APPROVAL_ALLOW_DELEGATED_DECISION` | `config.approvalAllowDelegatedDecision` | `false` (production) |
+
+The switch is read from the environment at boot. No request field,
+header, or parameter can change it.
+
+How the check runs (`_check_delegated_allowed` in
+`operations/approval_queue.py`):
+
+- Both `approve_request` and `reject_request` call it right after
+  `parse_delegation`, before any state change. So it covers REST, CLI,
+  and console at once. There is no MCP decision path.
+- An ordinary decision (no `Instructed-by:` line) always passes, on
+  every deployment.
+- An incomplete delegation block is still a 422 (`delegated_reason_invalid`),
+  checked first.
+- A valid delegation block with the switch off raises
+  `DelegatedDecisionForbiddenError`. The row stays `pending` and no
+  decision audit row is written. MEHO logs the WARNING event
+  `approval_delegated_decision_refused` (`approval_request_id`, `op_id`,
+  `decision`, `operator_sub`, `instructed_by`, `tenant_id`).
+- With the switch on, the decision goes through and is recorded as
+  described above.
+
+How a refusal reads:
+
+| Surface | Refusal |
+|---|---|
+| REST `/approve`, `/reject`, `/decide` | 403, `detail` starts with `delegated_decision_forbidden:` |
+| Console approve / deny | the modal re-renders with a 403 banner |
+| CLI `meho approvals approve` / `reject --reason` | posts to `/decide`; prints the 403 body |
+
+`GET /ready` shows the stance in
+`features.approval_queue.delegated_decision_posture`:
+`"production_own_hand_only"` (switch off) or
+`"lab_class_delegation_allowed"` (switch on).
+
 ## Single-operator tenants: use an agent-requester, not break-glass (#1738)
 
 The self-approval guard enforces requester != approver on the stable
@@ -742,7 +788,7 @@ the existing exactly-one-resumer substrate rather than duplicating it:
    (#3079) — persists the re-dispatch's reduced result envelope onto
    `approval_request.resume_result` (nullable JSON, migration `0096`) right
    after the dispatch returns. Only the resumer that **won**
-   `claim_resume` (#2293) reaches the capture (`_persist_resume_result`), so
+   `claim_resume` (#2293) reaches the capture (`persist_resume_result`), so
    it runs at most once per approved request; a loser that no-ops
    `already_resumed` leaves the winner's result untouched. The stored value
    is `OperationResult.model_dump(mode="json")` — the **same** reduced /
@@ -823,6 +869,141 @@ for the paired add-on that requested the approval
 (`AddonStepEventService.record_if_owned_committed`). That answers "was it
 approved?"; the `/result` surface answers "what did the approved re-dispatch
 produce?" — complementary, not a duplicate.
+
+## Retry-safe approval requests, binding identity, and run phase (#3486)
+
+A durable client, such as an add-on that drives a two-person governed
+delete, retries after a crash or restart. Three things make that safe.
+
+### 1. Send an `idempotency_key` so a retry gets the same request
+
+`call_operation` (REST `POST /api/v1/operations/call`, MCP `call_operation`)
+takes an optional `idempotency_key` (1 to 200 characters,
+`CallOperationBody.idempotency_key`). It only matters when the call waits
+for approval.
+
+- **First call.** The new `approval_request` row stores the key
+  (`idempotency_key` column, migration `0105`).
+- **Retry of the identical call.** If the same principal in the same tenant
+  has a `pending` or `approved` request with this key,
+  `create_pending_request` returns that request. The reply is the normal
+  `awaiting_approval` envelope (HTTP 200) with the **same**
+  `extras.approval_request_id` and `extras.approval_request_reused: true`.
+  No new row, no new `approval.request` audit row, no second
+  `approval.pending` event. The first row's audit record stands.
+- **Same key, different call.** "Identical" means the same `op_id`,
+  `connector_id`, target, `params_hash`, `preview_hash`, and `work_ref`. If
+  any of them differs, the call is refused with `status="denied"` and
+  `extras.error_code="idempotency_key_conflict"`, and
+  `extras.approval_request_id` names the request that holds the key. Nothing
+  is parked. The refusal writes a `denied` audit row.
+- **When the key is free again.** A `rejected` or `expired` request no
+  longer holds its key, so the same key parks a new request. An `approved`
+  request keeps its key even after it ran: a retry then returns the request
+  that already ran, so the op is never run twice.
+- **A late retry.** A request can pass its deadline (`expires_at`) while
+  it is still `pending`, because the expiry sweeper runs only every few
+  minutes, or not at all when it is off. Such a request can no longer be
+  approved, so a retry does not get it back. Instead, `create_pending_request`
+  locks it and expires it in the same transaction (`_lock_and_expire_pending`,
+  the same steps and the same `approval.decision` audit row as
+  `expire_stale_requests`). Like the sweeper, it records the expiry under
+  the system identity `system:approval-expiry` (`expiry_operator` in
+  `approval_queue.py`), not under the requester. Then it parks a new
+  request with the same key.
+  The reply carries the new `approval_request_id` and no
+  `approval_request_reused`. After commit the dispatcher publishes
+  `approval.expired` for the old request and `approval.pending` for the
+  new one.
+- **Who can match.** The key is scoped to `(tenant_id, principal_sub)`. Two
+  requesters, or two runs with different `work_ref` values, never share one
+  request. Without a key, nothing changes: every call that waits for
+  approval makes a new request.
+
+**Races.** A partial unique index,
+`approval_request_idempotency_key_idx` on `(tenant_id, principal_sub,
+idempotency_key) WHERE idempotency_key IS NOT NULL AND status IN
+('pending', 'approved')`, makes sure two racing calls cannot both insert.
+The losing insert runs in a savepoint (`_insert_idempotent_request`). When
+the index refuses it, the savepoint rolls back and the winner's row is
+returned the same way as a normal retry.
+
+Two late retries can also race to expire the same overdue request. Only one
+gets the row lock. When the other's locked re-read finds no `pending` row,
+the row changed under it: another retry expired it and parked a replacement,
+or a sweep, reject or approve got there first. `_resolve_idempotent_request`
+then looks the key up again and returns what holds it now, for example the
+replacement as a reused request. It never returns the expired row it read
+first. That second lookup refreshes the row the session already holds
+(`populate_existing`). This matters when an approve commits while the late
+retry waits for the lock: the row is now `approved`, and the retry returns
+it. With the cached `pending` state it would try to expire the row again,
+miss again, and never return.
+`tests/integration/test_approval_idempotent_retry_pg.py` runs both races
+(two late retries; a late retry against an approve) on a real Postgres.
+
+**What does not change.** The lookup runs inside `create_pending_request`,
+after every park gate in `_handle_needs_approval`. So a retry still goes
+through the policy gate, the destructive-tier `preview_hash` check (#3197),
+and the permission preflight. A retry with a stale `preview_hash` is refused
+with `preview_hash_mismatch`, as before. The key is not used for the
+sub-op requests a composite (multi-step) op makes, and not on the resume
+path. Tenant isolation and the one-resumer latch (`resumed_at`) are
+unchanged.
+
+### 2. `preview_hash` on list and show
+
+`ApprovalRequestView` (`GET /api/v1/approvals` and `GET
+/api/v1/approvals/{id}`) now carries `preview_hash`, the destructive-tier
+binding stored at park time. With `op_id`, `target_id`, and `params_hash`, a
+client can match a request to the row it previewed. It is `null` for a
+non-destructive request. The field is additive.
+
+### 3. `result_state`: has the approved op run yet?
+
+`status` keeps its four values (`pending` / `approved` / `rejected` /
+`expired`), so the migration `0023` `CHECK` constraint and every existing
+client are unchanged. Next to it, the list and show views carry
+`result_state`, worked out from the row by `approval_result_state` (it is
+not stored):
+
+| `result_state` | Meaning |
+|---|---|
+| `null` | `status` is not `approved`. |
+| `not_started` | Approved. No resumer has claimed the run yet (`resumed_at IS NULL`). |
+| `started` | A resumer claimed the run (`resumed_at` is set), but no result is stored yet. The op may still be running. |
+| `executed` | The stored result (`resume_result`) has `status == "ok"`. |
+| `failed` | A result is stored and its `status` is not `ok`. |
+
+So a client that lists or shows requests can tell "approved, not run yet"
+from "approved and run" without polling the owner-only `/result` read. The
+result body itself stays on `/result` only; the views show the phase, not
+the payload.
+
+Both resume paths store the result (`persist_resume_result`): the operator
+surface (`resume_dispatch_after_approval`) and the in-process agent waiter
+(`_resume_approved_or_already_resumed` in `agent/approval_wait.py`). So a
+request the agent resumed also reaches `executed` or `failed`. Limits of
+`started`: the result write is best-effort, and a re-dispatch that raised
+instead of returning an envelope stores nothing. In those cases the row
+stays `started`.
+
+### The add-on governed-destroy round trip (#3478)
+
+For the add-on that proposes a destructive op: send an `idempotency_key`
+with the `call_operation` that carries the `preview_hash`. Derive the key
+from something stable on your side, for example your run id plus the row
+you want to delete. If you crash before you store the
+`approval_request_id`, send the identical call again with the same key. You
+get the same request back. Then watch `result_state` on `GET
+/api/v1/approvals/{id}`, and read the result body from `/result` once it is
+`executed` or `failed`.
+
+**Pinned by tests:** `tests/test_approval_idempotent_park.py` (retry,
+scoping, conflict, race, `result_state` on the REST list and show after both
+resume paths), `tests/integration/test_approval_idempotent_retry_pg.py` (two
+late retries, and a late retry against an approve, on a real Postgres) and
+`tests/migrations/test_migration_0105_add_approval_request_idempotency_key.py`.
 
 ## `proposed_effect` builder hook (#1437)
 
@@ -914,10 +1095,20 @@ Three invariants make the hook safe to wire on the park path:
    expected to return identity-only / scrubbed summaries. The generic
    params-echo default (#1856) scrubs the echoed params with **two**
    passes that reuse the existing redaction discipline:
-   `_scrub_secret_param_keys` masks values keyed by a well-known
-   credential name (`password` / `client_secret` / `token` / … —
-   recursively, since the connector-boundary engine walks Mappings
-   key-by-key without inspecting the *key*), then
+   `_scrub_secret_param_keys` masks values keyed by a secret-shaped
+   name (`password` / `admin_password` / `rootPassword` /
+   `client_secret` / `api_key` / … — recursively, since the
+   connector-boundary engine walks Mappings key-by-key without inspecting
+   the *key*). It uses `broadcast.events.is_secret_param_name`, the same
+   name check as the broadcast params scrub, so any param the broadcast
+   path flags as secret is also masked in the echo (#3808). It walks the
+   same containers too: every mapping and every sequence other than a
+   string (a list or a tuple). It also uses the same value rule: only a
+   string, mapping or sequence value is masked.
+   A bare boolean, number or `null` under a secret-shaped name (for
+   example `bind_secret_id: false` or `secret_id_ttl: 600`) stays
+   visible, because it is a setting, not a secret, and the approver
+   needs to see it. Then
    `apply_connector_boundary_redaction` (the same per-`(connector_id,
    tenant, op)` pipeline the response path and the dispatch-request
    preview run) catches secret *value* shapes (JWTs, bearer tokens,
@@ -1450,7 +1641,7 @@ a phantom event cannot outlive a failed transaction:
 | Create | `approval.pending` | `create_pending_request` (dispatcher parks a `needs-approval` verdict). | `operations/dispatcher.py::_handle_needs_approval` |
 | Approve | `approval.approved` | `approve_request` succeeds. | `api/v1/approvals.py` (REST), `mcp/tools/approvals.py` (MCP) |
 | Reject | `approval.rejected` | `reject_request` succeeds. | `api/v1/approvals.py` (REST), `mcp/tools/approvals.py` (MCP) |
-| Expire | `approval.expired` | `expire_stale_requests` (periodic sweeper) per expired row. | `operations/approval_expiry.py::_sweep_one_tenant` (commits then publishes per returned row's `_audit_id`) |
+| Expire | `approval.expired` | `expire_stale_requests` (periodic sweeper) per expired row, or a late retry with the same idempotency key that finds its request still `pending` past the deadline. Both use the `system:approval-expiry` identity. | `operations/approval_expiry.py::_sweep_one_tenant` (commits then publishes per returned row's `_audit_id`); `operations/dispatcher.py::_handle_needs_approval` (publishes the `_expired_request` before the new `approval.pending`) |
 
 Payload: `approval_request_id`, `decision`, `connector_id`,
 `approval_op_id`. The event's `audit_id` field is the decision row's
@@ -1731,6 +1922,84 @@ params. See [agent-runtime.md § Awaiting-approval resume](agent-runtime.md#awai
 for the agent-run substrate's full shape, including the wait timeout
 (`Settings.agent_approval_wait_timeout_seconds`, default 30 min) and the
 fail-open semantics on broadcast outage.
+
+## An add-on proposes a governed destroy (#3478)
+
+A paired add-on signs in as a **service principal** (client credentials,
+`principal_kind=service`). It **can** drive a destructive op. It cannot run
+the op alone: a human must approve it. It needs no standing grant. This is
+the supported way for an add-on to do two-person deletes without a person
+typing each delete on the CLI.
+
+The rule that confuses people: the destructive tier is DENY **only for
+agent principals**. For service and user principals it waits for approval.
+The rule is recorded in
+[`governed-delete-operations.md`](../decisions/governed-delete-operations.md)
+("Who may propose").
+
+| Principal kind | Destructive op | Code |
+|---|---|---|
+| `agent` | Refused (DENY). Nothing is parked. | `auth/permissions.py:131` `_SAFETY_DEFAULT` + `:154` `_SAFETY_CEILING`; agent branch of `operations/_validate.py:450` `policy_gate` |
+| `service` | Waits for approval. No grant can approve it in advance. | `operations/_validate.py:362` `_non_agent_verdict` (the `destructive` branch); `operations/service_grants.py:758` `consult_and_record_grant` refuses the tier before any grant lookup |
+| `user` | Waits for approval. | `operations/_validate.py:362` `_non_agent_verdict` |
+
+### The round trip
+
+The add-on needs the `operator` role to call `POST /api/v1/operations/call`
+and `/preview`. Paths are under `backend/src/meho_backplane/`.
+
+1. **Preview.** The add-on calls `preview_operation` (REST
+   `POST /api/v1/operations/preview`) with the exact
+   `(connector_id, op_id, target, params)`. The reply carries a
+   `preview_hash`. The reply does **not** carry the blast-radius statement.
+2. **Call with the hash.** The add-on calls `call_operation` with the same
+   values plus `preview_hash` (`operations/meta_tools.py:427`
+   `CallOperationBody.preview_hash`, passed on to `dispatch` at `:1131`).
+3. **Park.** The policy gate returns `NEEDS_APPROVAL`, so the dispatcher
+   reaches `_handle_needs_approval` (`operations/dispatcher.py:2487`). For a
+   destructive op it runs `_destructive_binding_refusal` (`:2364`, called at
+   `:2567`) before it writes any row. That check recomputes the preview hash
+   on the server and needs a valid blast-radius block on `proposed_effect`.
+   A missing or wrong hash, or a missing block, is refused, and no row is
+   written. On success the row stores `preview_hash`, and the blast radius
+   lives on the row's `proposed_effect`. The add-on gets
+   `status="awaiting_approval"` and `extras.approval_request_id`. It should
+   store that id.
+4. **A human approves.** The approver must be a different person: there is
+   no self-approval for this tier, not even with break-glass
+   (`operations/approval_queue.py:1835` `_check_self_approval`). The approve
+   step checks the preview hash again (`:1926`
+   `_check_destructive_preview_binding`). The decision verbs are human-only
+   on every surface, so the add-on cannot approve its own request.
+5. **The op runs under the approver.**
+   `resume_dispatch_after_approval` (`operations/approval_queue.py:1221`)
+   re-runs the dispatch with the **approver's** `Operator`. So the approver's
+   role is what counts when the op runs, and the audit row for the delete
+   names the approver. The result is saved on the row
+   (`_persist_resume_result`, `:1359`). A large result goes into a result
+   handle that the add-on owns (see "Who owns a result handle" above).
+6. **The add-on reads the result.** The add-on polls
+   `GET /api/v1/approvals/{id}/result` (`api/v1/approvals.py:614`,
+   `read_approval_result` at `operations/approval_queue.py:2062`). Only the
+   principal that parked the op may read it; anyone else gets 403
+   `not_request_owner`, even the approver. The reply has `result: null`
+   until the op has run.
+
+A paired add-on can also read the approval outcome from its durable
+step-event stream ([`addon-step-events.md`](addon-step-events.md), #3027).
+That says *whether* the op was approved; `/result` says *what the run
+returned*.
+
+**Pinned by tests:**
+
+- `tests/test_connectors_harbor_robot_delete.py::test_service_principal_proposes_destroy_and_adopts_result`
+  — the full round trip for a service principal, including the `/result`
+  read by the parker and the 403 for the approver.
+- `tests/test_service_principal_grant_gate.py::test_service_principal_destructive_parks_and_grant_never_satisfies`
+  — a destructive op parks for a service principal even with a live
+  matching grant.
+- `tests/test_connectors_harbor_robot_delete.py::test_agent_principal_is_denied`
+  — the same op is refused for an agent principal.
 
 ## Service-principal standing grants + safety_level gate (#3151 / #3152)
 

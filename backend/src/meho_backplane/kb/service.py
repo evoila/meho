@@ -23,6 +23,34 @@ successful files preceding it. The dominant ingest cost is the
 embedding compute, not the SQL round-trip, so the per-file commit
 overhead is invisible in real corpus sizes.
 
+Write policies
+--------------
+
+Two write paths with two different rules:
+
+* **Directory ingest** (:meth:`ingest_directory`) reads every file
+  first, in sorted relative-path order, and finds every slug claimed
+  by more than one file *before* it writes anything. Those files are
+  reported as conflicts and not written, so an existing entry with a
+  conflicting slug stays unchanged. Filesystem listing order can no
+  longer decide which file wins.
+* **Direct create** (:meth:`create_entry`) is an explicit replace:
+  the caller names one slug and the newest write wins. The route
+  records ``audit_created`` so a replace is visible in the audit log.
+  There is no expected-revision check; that waits for a real
+  multi-writer workflow.
+
+Both paths stamp a provenance block (source kind, relative path,
+write time) through :mod:`meho_backplane.kb.provenance`. No absolute
+host path is stored.
+
+Both paths write through :func:`meho_backplane.kb.revisions.write_entry`:
+the ``documents`` row stays the latest head, and each changed body is
+also kept as an immutable ``kb_revision`` row in the same transaction.
+:meth:`KbService.get_revision` reads one exact revision;
+:meth:`KbService.delete_entry` removes the head and its revisions
+together.
+
 Tenant scoping
 --------------
 
@@ -49,81 +77,52 @@ Search adaptation
 
 :meth:`search_entries` wraps
 :func:`~meho_backplane.retrieval.retriever.retrieve` with
-``source=KB_SOURCE`` pinned. The :class:`RetrievalHit` shape is
-adapted to :class:`KbEntrySearchHit` (source_id renamed to slug,
-body truncated to a snippet). The full body is recoverable through
-:meth:`get_entry` keyed on the returned slug; the snippet exists so
-agent flows can ``search → decide → fetch`` without round-tripping
-every full body on every search.
+``source=KB_SOURCE`` pinned, which ranks the passage rows of each
+entry's current revision (#3761). The ranked passages are grouped by
+entry: one :class:`KbEntrySearchHit` per entry, best entry first, with
+up to :data:`_MAX_PASSAGES_PER_HIT` matching passages and their exact
+locators. A long entry therefore returns the part that matched, not
+the whole body. An entry indexed before passages existed still comes
+back as one whole-body hit with no passages.
 """
 
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
-import structlog
-from sqlalchemy import delete, select
+from sqlalchemy import select
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Document
 from meho_backplane.kb.attribution import merge_attribution
-from meho_backplane.kb.file_walker import walk_kb_directory
+from meho_backplane.kb.directory_ingest import KbIngestRootError
+from meho_backplane.kb.directory_ingest import ingest_directory as _ingest_directory
+from meho_backplane.kb.passages import revision_uri
+from meho_backplane.kb.provenance import read_provenance, stamp_provenance
+from meho_backplane.kb.revisions import (
+    current_revision_id,
+    delete_entry_rows,
+    get_revision,
+    write_entry,
+)
 from meho_backplane.kb.schemas import (
-    KB_KIND_ENTRY,
+    KB_PASSAGE_SOURCE,
     KB_SOURCE,
+    META_KB_PASSAGE,
     KbEntry,
+    KbEntryRevision,
     KbEntrySearchHit,
     KbIngestionResult,
+    KbPassageEvidence,
+    KbPassageLocator,
     validate_slug,
 )
-from meho_backplane.retrieval.indexer import compute_body_hash, index_document
-from meho_backplane.retrieval.retriever import retrieve
-from meho_backplane.settings import get_settings
+from meho_backplane.retrieval.retriever import CANDIDATE_LIMIT, RetrievalHit, retrieve
 
 __all__ = ["KbIngestRootError", "KbService"]
-
-
-class KbIngestRootError(ValueError):
-    """The requested ingest directory resolves outside ``KB_INGEST_ROOT``.
-
-    Raised by :meth:`KbService.ingest_directory` before any file is
-    read when the supplied directory -- after :meth:`Path.resolve`
-    follows every symlink and normalises ``..`` segments -- does not
-    land within the configured :attr:`~meho_backplane.settings.Settings.kb_ingest_root`.
-    This is the path-traversal / local-file-inclusion guard for the
-    privileged bulk-ingest surface (#101 rows L8 + L14): a
-    ``tenant_admin`` cannot point the ingest at an arbitrary ``.md``
-    file elsewhere on the backplane host.
-
-    Subclass of :class:`ValueError` -- same parent as
-    :class:`~meho_backplane.kb.schemas.InvalidKbSlugError` -- so a
-    caller treating it as an input-shape problem can use one ``except``
-    clause. The route layer maps it to a structured 400.
-    """
-
-
-def _resolve_within_ingest_root(directory: Path) -> Path:
-    """Resolve *directory* and confirm it lands within ``KB_INGEST_ROOT``.
-
-    Both the configured root and the requested directory are resolved
-    -- :meth:`Path.resolve` follows symlinks and collapses ``..`` --
-    so a traversal payload (``<root>/../../etc``) and an escaping
-    symlink (a link inside the root pointing at ``/etc``) both resolve
-    outside the root and are rejected. Returns the resolved directory
-    (the walker re-resolves idempotently); raises
-    :class:`KbIngestRootError` when it escapes the root (#101 L8 + L14).
-    """
-    root = Path(get_settings().kb_ingest_root).resolve()
-    resolved = directory.resolve()
-    if not resolved.is_relative_to(root):
-        raise KbIngestRootError(
-            f"kb_ingest_path_outside_root: {directory} resolves to "
-            f"{resolved}, which is outside the configured ingest root "
-            f"{root}"
-        )
-    return resolved
 
 
 #: First-N characters of a body returned in :class:`KbEntrySearchHit.snippet`
@@ -140,8 +139,9 @@ _SNIPPET_CHARS: int = 200
 #: stream the whole table back to a casual ``meho kb list``.
 DEFAULT_LIST_LIMIT: int = 100
 
-
-_IngestAction = Literal["inserted", "updated", "skipped"]
+#: Most passages one search hit carries. The rest of the entry stays
+#: readable through a locator's ``uri``.
+_MAX_PASSAGES_PER_HIT: int = 3
 
 
 class KbService:
@@ -168,161 +168,14 @@ class KbService:
         *,
         dry_run: bool = False,
     ) -> KbIngestionResult:
-        """Walk *directory*, ingest every ``.md`` file under it.
+        """Ingest every ``.md`` file under *directory* (see :mod:`.directory_ingest`).
 
-        Idempotent: a second call against an unchanged corpus
-        produces ``skipped_count == <total files>`` because the body-
-        hash short-circuit from G0.4-T3 skips re-embedding. A
-        single-file body change between calls produces
-        ``updated_count == 1, skipped_count == <total - 1>``.
-
-        Per-file errors (binary file, unreadable bytes, invalid
-        slug, malformed front-matter) are caught, counted, and
-        appended to :attr:`KbIngestionResult.errors`. The ingestion
-        run continues with the remaining files -- one bad file does
-        not abort a 44-entry corpus.
-
-        Parameters
-        ----------
-        directory
-            Path to the kb directory. Confined to ``KB_INGEST_ROOT``
-            by :func:`_resolve_within_ingest_root` (raises
-            :class:`KbIngestRootError` on escape, #101). Must exist and
-            be a directory; otherwise :class:`NotADirectoryError` /
-            :class:`FileNotFoundError` propagates.
-        tenant_id
-            The tenant on whose behalf the corpus is being ingested.
-            Bound by the caller from the operator's JWT.
-        dry_run
-            When ``True``, walk the directory and classify every
-            file by the action it would take (insert / update /
-            skip) but do not write to the DB. The returned counters
-            reflect what would happen; ``errors`` still surfaces any
-            walk-time failures (read error, parse error, slug error).
-            Useful for ``meho kb ingest --dry-run`` (T4) before a
-            destructive run.
+        Sorted pre-walk; slugs claimed by two or more files are reported
+        as conflicts and not written; per-file errors are counted and
+        the run continues. Raises :class:`KbIngestRootError` when
+        *directory* resolves outside ``KB_INGEST_ROOT`` (#101).
         """
-        log = structlog.get_logger()
-        # Confine to KB_INGEST_ROOT before any read; dry-run too (#101).
-        resolved = _resolve_within_ingest_root(directory)
-        inserted = 0
-        updated = 0
-        skipped = 0
-        errors: list[str] = []
-
-        for record in walk_kb_directory(resolved, errors=errors):
-            try:
-                action = await self._ingest_one(
-                    tenant_id=tenant_id,
-                    slug=record.slug,
-                    body=record.body,
-                    metadata=record.metadata,
-                    source_path=record.path,
-                    dry_run=dry_run,
-                )
-            except Exception as exc:
-                # Database / embedding failures land here. The
-                # ingestion run is a best-effort bulk operation;
-                # per-file failures get counted and the next file
-                # proceeds. The walker's own per-file errors
-                # (read / parse / slug) are caught inside
-                # ``walk_kb_directory`` and appended directly to
-                # ``errors``; this catch covers post-walk failures
-                # in the index path only.
-                log.exception(
-                    "kb_ingest_file_failed",
-                    path=str(record.path),
-                    tenant_id=str(tenant_id),
-                )
-                errors.append(f"{record.path}: {type(exc).__name__}: {exc}")
-                continue
-
-            if action == "inserted":
-                inserted += 1
-            elif action == "updated":
-                updated += 1
-            else:
-                skipped += 1
-
-        log.info(
-            "kb_ingest_completed",
-            tenant_id=str(tenant_id),
-            directory=str(directory),
-            inserted=inserted,
-            updated=updated,
-            skipped=skipped,
-            errors=len(errors),
-            dry_run=dry_run,
-        )
-        return KbIngestionResult(
-            inserted_count=inserted,
-            updated_count=updated,
-            skipped_count=skipped,
-            error_count=len(errors),
-            errors=errors,
-        )
-
-    async def _ingest_one(
-        self,
-        *,
-        tenant_id: uuid.UUID,
-        slug: str,
-        body: str,
-        metadata: dict[str, object],
-        source_path: Path,
-        dry_run: bool,
-    ) -> _IngestAction:
-        """Classify the action for one file, then perform it unless *dry_run*.
-
-        Returns ``"inserted"`` / ``"updated"`` / ``"skipped"`` per
-        the comparison between the incoming body's SHA-256 hash and
-        any existing row's. Enriches the metadata with the source
-        path before delegating to
-        :func:`~meho_backplane.retrieval.indexer.index_document` so
-        the audit trail in ``documents.metadata`` records where the
-        file came from.
-
-        The classification SELECT is one extra round-trip per file
-        compared to calling ``index_document`` directly; the cost is
-        the price of the precise (inserted / updated / skipped)
-        breakdown the acceptance criteria require. v0.2.next can
-        collapse this into a single round-trip if the helper
-        exposes the action in its return shape.
-        """
-        sessionmaker = get_sessionmaker()
-        new_hash = compute_body_hash(body)
-        async with sessionmaker() as session:
-            existing = await session.execute(
-                select(Document.id, Document.body_hash).where(
-                    Document.tenant_id == tenant_id,
-                    Document.source == KB_SOURCE,
-                    Document.source_id == slug,
-                )
-            )
-            row = existing.one_or_none()
-
-        if row is None:
-            action: _IngestAction = "inserted"
-        elif row.body_hash == new_hash:
-            action = "skipped"
-        else:
-            action = "updated"
-
-        if dry_run:
-            return action
-
-        enriched_metadata: dict[str, Any] = dict(metadata)
-        enriched_metadata["source_path"] = str(source_path)
-
-        await index_document(
-            tenant_id=tenant_id,
-            source=KB_SOURCE,
-            source_id=slug,
-            kind=KB_KIND_ENTRY,
-            body=body,
-            metadata=enriched_metadata,
-        )
-        return action
+        return await _ingest_directory(directory, tenant_id, dry_run=dry_run)
 
     async def list_entries(
         self,
@@ -371,7 +224,7 @@ class KbService:
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
             stmt = (
-                select(Document)
+                select(Document, current_revision_id())
                 .where(
                     Document.tenant_id == tenant_id,
                     Document.source == KB_SOURCE,
@@ -384,9 +237,9 @@ class KbService:
                 stmt = stmt.where(Document.source_id.like(filter_pattern))
 
             result = await session.execute(stmt)
-            rows = result.scalars().all()
+            rows = result.all()
 
-        return [_doc_to_entry(row) for row in rows]
+        return [_doc_to_entry(doc, revision_id) for doc, revision_id in rows]
 
     async def get_entry(self, tenant_id: uuid.UUID, slug: str) -> KbEntry | None:
         """Return the full :class:`KbEntry` for *(tenant_id, slug)*; ``None`` if absent.
@@ -401,16 +254,33 @@ class KbService:
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
             result = await session.execute(
-                select(Document).where(
+                select(Document, current_revision_id()).where(
                     Document.tenant_id == tenant_id,
                     Document.source == KB_SOURCE,
                     Document.source_id == slug,
                 )
             )
-            row = result.scalar_one_or_none()
+            row = result.one_or_none()
         if row is None:
             return None
-        return _doc_to_entry(row)
+        doc, revision_id = row
+        return _doc_to_entry(doc, revision_id)
+
+    async def get_revision(
+        self,
+        tenant_id: uuid.UUID,
+        entry_id: uuid.UUID,
+        revision_id: uuid.UUID,
+    ) -> KbEntryRevision | None:
+        """Return one retained revision of an entry; ``None`` when not visible.
+
+        Backs ``meho://kb/id/{entry}/revision/{revision}``. The revision
+        must belong to *entry_id* and both must belong to *tenant_id*.
+        A foreign, deleted, mismatched or unknown id gives ``None`` --
+        the caller cannot tell these cases apart. Role checks stay with
+        the caller, as for every other method here.
+        """
+        return await get_revision(tenant_id, entry_id, revision_id)
 
     async def create_entry(
         self,
@@ -432,6 +302,15 @@ class KbService:
         Used by ``POST /api/v1/kb`` (T2) and the MCP
         ``add_to_knowledge`` meta-tool (T3). RBAC (``tenant_admin``)
         enforced by the route layer.
+
+        This is the explicit replace path: last write wins. A second
+        create for the same slug replaces body and metadata with no
+        expected-revision check; the route maps ``created=False`` to
+        HTTP 200 and records ``audit_created`` so the replace is
+        auditable. Directory ingest follows a different rule (see
+        :meth:`ingest_directory`). Every write stamps a provenance
+        block with ``source_kind="direct"`` and no relative path,
+        replacing any ``provenance`` key the caller sent.
 
         Cross-principal writes are wiki-like (any ``tenant_admin`` may
         overwrite any other principal's slug in-tenant -- intended, no
@@ -468,16 +347,25 @@ class KbService:
             actor_sub=actor_sub,
             created=created,
         )
+        if merged is None:
+            # No caller metadata and no actor: keep the existing keys,
+            # as ``index_document(metadata=None)`` would, but still
+            # record this write's provenance.
+            merged = dict(existing.metadata) if existing is not None else {}
+        merged = stamp_provenance(
+            merged,
+            source_kind="direct",
+            relative_path=None,
+            ingested_at=datetime.now(UTC),
+        )
 
-        doc = await index_document(
+        doc, revision_id = await write_entry(
             tenant_id=tenant_id,
-            source=KB_SOURCE,
-            source_id=slug,
-            kind=KB_KIND_ENTRY,
+            slug=slug,
             body=body,
             metadata=merged,
         )
-        return _doc_to_entry(doc), created
+        return _doc_to_entry(doc, revision_id), created
 
     async def delete_entry(self, tenant_id: uuid.UUID, slug: str) -> bool:
         """Delete the kb entry matching *(tenant_id, slug)*. Return whether it existed.
@@ -487,6 +375,12 @@ class KbService:
         enforced by the route layer -- this method assumes the
         caller is already authorised.
 
+        The entry's retained revisions are deleted in the same
+        transaction as the head row, so the body stops being searchable
+        and every ``meho://kb/id/...`` read of it stops working at the
+        same moment. If the delete fails, nothing is removed and the
+        error propagates; the caller can retry.
+
         Returns
         -------
         bool
@@ -494,24 +388,7 @@ class KbService:
             matched the natural key. The route layer translates
             ``False`` to 404.
         """
-        sessionmaker = get_sessionmaker()
-        async with sessionmaker() as session:
-            stmt = delete(Document).where(
-                Document.tenant_id == tenant_id,
-                Document.source == KB_SOURCE,
-                Document.source_id == slug,
-            )
-            result = await session.execute(stmt)
-            await session.commit()
-        # SQLAlchemy 2.x types DML execute() as ``Result[Any]`` whose
-        # ``rowcount`` is only typed on the concrete ``CursorResult``
-        # subclass. Casting through ``CursorResult`` is heavier than
-        # the simple ``getattr`` probe; the DML execute path always
-        # returns a cursor-shaped result on every supported driver
-        # (asyncpg + aiosqlite both honour the contract) so a bare
-        # access is correct at runtime, the cast just silences mypy.
-        rowcount: int = result.rowcount  # type: ignore[attr-defined]
-        return rowcount > 0
+        return await delete_entry_rows(tenant_id, slug)
 
     async def search_entries(
         self,
@@ -524,11 +401,11 @@ class KbService:
         """Hybrid BM25 + cosine retrieval scoped to *tenant_id*'s kb corpus.
 
         Wraps :func:`~meho_backplane.retrieval.retriever.retrieve`
-        with ``source=KB_SOURCE`` pinned. The
-        :class:`~meho_backplane.retrieval.retriever.RetrievalHit`
-        shape is adapted to :class:`KbEntrySearchHit` (slug instead
-        of source_id, snippet instead of full body, kb-shaped
-        vocabulary).
+        with ``source=KB_SOURCE`` pinned. The ranked passage rows are
+        grouped into one :class:`KbEntrySearchHit` per entry (see
+        :func:`_group_by_entry`): slug, snippet, metadata, the best
+        passage's scores, and the matching passages with their exact
+        revision locators.
 
         Parameters
         ----------
@@ -551,9 +428,15 @@ class KbService:
             slice. Values must be JSON scalars -- the substrate's
             ``@>`` containment is shape-flat-only by contract.
         limit
-            Maximum hits to return. Default 10; capped at 50 by the
-            substrate (and the API surface).
+            Maximum entries to return. Default 10; capped at 50 by the
+            API surface. Up to
+            :data:`~meho_backplane.retrieval.retriever.CANDIDATE_LIMIT`
+            passages are ranked to fill them.
         """
+        if limit < 0:
+            raise ValueError(f"limit must be >= 0; got {limit}")
+        if limit == 0:
+            return []
         kind_filter: str | None = None
         metadata_filters: dict[str, Any] | None = None
         if filters is not None:
@@ -569,31 +452,92 @@ class KbService:
             residual = {k: v for k, v in filters.items() if k != "kind"}
             metadata_filters = residual or None
 
-        hits = await retrieve(
+        ranked = await retrieve(
             tenant_id=tenant_id,
             query=query,
             source=KB_SOURCE,
             kind=kind_filter,
-            limit=limit,
+            limit=CANDIDATE_LIMIT,
             metadata_filters=metadata_filters,
         )
-        return [
-            KbEntrySearchHit(
-                slug=hit.source_id,
-                snippet=_make_snippet(hit.body),
-                metadata=hit.doc_metadata,
-                fused_score=hit.fused_score,
-                bm25_score=hit.bm25_score,
-                cosine_score=hit.cosine_score,
-                bm25_rank=hit.bm25_rank,
-                cosine_rank=hit.cosine_rank,
+        return _group_by_entry(ranked, limit)
+
+
+def _group_by_entry(ranked: list[RetrievalHit], limit: int) -> list[KbEntrySearchHit]:
+    """Fold ranked passage rows into one hit per entry, best entry first.
+
+    A hit takes its scores from its best passage and keeps up to
+    :data:`_MAX_PASSAGES_PER_HIT` passages in rank order. A legacy
+    whole-body head row becomes a hit with no passages.
+    """
+    groups: dict[str, tuple[RetrievalHit, list[KbPassageEvidence]]] = {}
+    for hit in ranked:
+        locator = _locator(hit)
+        slug = hit.source_id if locator is None else str(hit.doc_metadata[META_KB_PASSAGE]["slug"])
+        if slug not in groups:
+            if len(groups) == limit:
+                continue
+            groups[slug] = (hit, [])
+        evidence = groups[slug][1]
+        if locator is not None and len(evidence) < _MAX_PASSAGES_PER_HIT:
+            evidence.append(
+                KbPassageEvidence(
+                    text=hit.body,
+                    locator=locator,
+                    fused_score=hit.fused_score,
+                    bm25_rank=hit.bm25_rank,
+                    cosine_rank=hit.cosine_rank,
+                )
             )
-            for hit in hits
-        ]
+    return [_entry_hit(slug, best, evidence) for slug, (best, evidence) in groups.items()]
 
 
-def _doc_to_entry(doc: Document) -> KbEntry:
-    """Adapt a :class:`Document` ORM row to a :class:`KbEntry`.
+def _locator(hit: RetrievalHit) -> KbPassageLocator | None:
+    """Return the passage locator of *hit*, or ``None`` for a legacy head row."""
+    if hit.source != KB_PASSAGE_SOURCE:
+        return None
+    raw = hit.doc_metadata[META_KB_PASSAGE]
+    if not isinstance(raw, dict):
+        return None
+    entry_id = uuid.UUID(str(raw["entry_id"]))
+    revision_id = uuid.UUID(str(raw["revision_id"]))
+    return KbPassageLocator(
+        entry_id=entry_id,
+        revision_id=revision_id,
+        passage_id=hit.source_id,
+        ordinal=int(raw["ordinal"]),
+        passage_count=int(raw["passage_count"]),
+        heading_path=[str(title) for title in raw["heading_path"]],
+        start=int(raw["start"]),
+        end=int(raw["end"]),
+        chunker_version=str(raw["chunker_version"]),
+        embedding_model=str(raw["embedding_model"]),
+        uri=revision_uri(entry_id, revision_id),
+    )
+
+
+def _entry_hit(
+    slug: str, best: RetrievalHit, evidence: list[KbPassageEvidence]
+) -> KbEntrySearchHit:
+    """Build the hit for one entry from its best row and its passages."""
+    metadata = {k: v for k, v in best.doc_metadata.items() if k != META_KB_PASSAGE}
+    complete = bool(evidence) and len(evidence) == evidence[0].locator.passage_count
+    return KbEntrySearchHit(
+        slug=slug,
+        snippet=_make_snippet(evidence[0].text if evidence else best.body),
+        metadata=metadata,
+        fused_score=best.fused_score,
+        bm25_score=best.bm25_score,
+        cosine_score=best.cosine_score,
+        bm25_rank=best.bm25_rank,
+        cosine_rank=best.cosine_rank,
+        passages=evidence,
+        coverage="complete" if complete else "partial",
+    )
+
+
+def _doc_to_entry(doc: Document, revision_id: uuid.UUID | None) -> KbEntry:
+    """Adapt a :class:`Document` ORM row and its current revision id to a :class:`KbEntry`.
 
     The kb-shaped vocabulary renames ``source_id`` to ``slug`` and
     drops the ``source`` / ``kind`` / ``body_hash`` / ``tokens`` /
@@ -606,8 +550,10 @@ def _doc_to_entry(doc: Document) -> KbEntry:
         slug=doc.source_id,
         body=doc.body,
         metadata=doc.doc_metadata,
+        provenance=read_provenance(doc.doc_metadata),
         created_at=doc.created_at,
         updated_at=doc.updated_at,
+        revision_id=revision_id,
     )
 
 

@@ -158,6 +158,8 @@ def _seed_node(
     first_seen: datetime | None = None,
     last_seen: datetime | None = None,
     properties: dict[str, object] | None = None,
+    source: str = "auto",
+    source_scope: str | None = None,
 ) -> uuid.UUID:
     """Insert one ``graph_node`` row and return its id."""
     node_id = uuid.uuid4()
@@ -172,10 +174,12 @@ def _seed_node(
                     kind=kind,
                     name=name,
                     target_id=target_id,
+                    source=source,
                     properties=properties or {},
                     discovered_by=discovered_by,
                     first_seen=first_seen or datetime.now(UTC),
                     last_seen=last_seen if last_seen is not None else datetime.now(UTC),
+                    source_scope=source_scope,
                 ),
             )
 
@@ -795,6 +799,44 @@ def test_drawer_renders_node_properties_and_edges() -> None:
     # The empty HTMX mount slots are ``empty:hidden`` so they don't inject
     # phantom gaps into the ``space-y-3`` drawer rhythm while unfilled.
     assert "empty:hidden" in body
+
+
+def test_drawer_hides_edges_with_a_legacy_scoped_end() -> None:
+    """The drawer skips a curated edge to a row the scope cut-over set aside.
+
+    The row itself still opens (repair access), but the edge is not a
+    live relationship on either end (#3749).
+    """
+    _seed_tenant_row(_TENANT_A, "tenant-a")
+    host_id = _seed_node(tenant_id=_TENANT_A, kind="host", name="host-1")
+    vm_id = _seed_node(tenant_id=_TENANT_A, kind="vm", name="vm-on-host-1")
+    set_aside_id = _seed_node(
+        tenant_id=_TENANT_A,
+        kind="vault-role",
+        name="legacy-vault-role",
+        source="curated",
+        source_scope=f"legacy:{uuid.uuid4()}",
+    )
+    _seed_edge(tenant_id=_TENANT_A, from_node_id=vm_id, to_node_id=host_id, kind="runs-on")
+    _seed_edge(
+        tenant_id=_TENANT_A,
+        from_node_id=set_aside_id,
+        to_node_id=host_id,
+        kind="authenticates-via",
+        source="curated",
+    )
+
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        on_host = client.get(f"/ui/topology/node/{host_id}")
+        on_set_aside = client.get(f"/ui/topology/node/{set_aside_id}")
+    assert on_host.status_code == 200, on_host.text
+    assert "vm-on-host-1" in on_host.text and "runs-on" in on_host.text
+    assert "legacy-vault-role" not in on_host.text
+    assert "authenticates-via" not in on_host.text
+    assert on_set_aside.status_code == 200, on_set_aside.text
+    assert "authenticates-via" not in on_set_aside.text
 
 
 def test_drawer_renders_recent_ops_for_target_backed_node() -> None:

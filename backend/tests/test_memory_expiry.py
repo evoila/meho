@@ -46,7 +46,7 @@ from pydantic import ValidationError
 from sqlalchemy import select
 
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, Document, Tenant
+from meho_backplane.db.models import AuditEventClass, AuditLog, Document, Tenant
 from meho_backplane.memory import expiry
 from meho_backplane.memory.audit import (
     INTERNAL_METHOD,
@@ -516,6 +516,7 @@ async def test_write_internal_audit_row_persists_expected_columns() -> None:
     """The direct-call writer commits the exact column shape the sweeper relies on."""
     tenant_id = await _seed_tenant()
     audit_id = await write_internal_audit_row(
+        event_class=AuditEventClass.OPERATION_EXECUTION,
         operator_sub=SYSTEM_OPERATOR_SUB,
         tenant_id=tenant_id,
         method=INTERNAL_METHOD,
@@ -535,6 +536,7 @@ async def test_write_internal_audit_row_persists_expected_columns() -> None:
     assert row.path == MEMORY_EXPIRE_PATH
     assert row.tenant_id == tenant_id
     assert row.status_code == 200
+    assert row.event_class == AuditEventClass.OPERATION_EXECUTION
     assert row.payload == {"expired_count": 3, "scopes": ["memory-user"]}
     # Decimal round-trip preserves the float through string conversion.
     assert float(row.duration_ms) == 12.5

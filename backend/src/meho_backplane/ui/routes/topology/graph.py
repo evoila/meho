@@ -67,6 +67,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from meho_backplane.db.models import WELL_KNOWN_NODE_KINDS, GraphEdge, GraphNode
+from meho_backplane.topology.identity_mode import not_legacy_scope
 from meho_backplane.topology.query import TopologyNodeListEntry, list_nodes
 from meho_backplane.ui.auth.middleware import UISessionContext
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
@@ -153,7 +154,10 @@ async def _fetch_edges_for_nodes(
     Tenant-scoped on the edge AND on both endpoint joins
     (defence-in-depth, matching the T1 drawer ``_fetch_edges`` shape).
     Soft-deleted edges (``last_seen IS NULL``) are excluded so the
-    view shows the live snapshot, not stale relationships.
+    view shows the live snapshot, not stale relationships. So are edges
+    with a ``legacy:`` scoped end (#3749): the scope cut-over set that
+    row aside, and the edge is not a relationship the graph answers
+    with, even when the row itself is listed for repair.
 
     The endpoint filter (``IN node_ids``) keeps the returned set
     bounded by the table-cap ceiling: with ``len(node_ids) <= 500``
@@ -180,6 +184,8 @@ async def _fetch_edges_for_nodes(
             GraphEdge.tenant_id == tenant_id,
             from_alias.tenant_id == tenant_id,
             to_alias.tenant_id == tenant_id,
+            not_legacy_scope(from_alias.source_scope),
+            not_legacy_scope(to_alias.source_scope),
             GraphEdge.last_seen.is_not(None),
             GraphEdge.from_node_id.in_(node_ids),
             GraphEdge.to_node_id.in_(node_ids),

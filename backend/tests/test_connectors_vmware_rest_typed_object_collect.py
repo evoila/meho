@@ -24,6 +24,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
@@ -687,6 +688,26 @@ async def test_all_object_nopermission_is_treated_as_auth_and_resets() -> None:
 
 
 @pytest.mark.asyncio
+async def test_persistent_all_object_nopermission_resets_once_then_returns() -> None:
+    """A real full permission loss (NoPermission on both reads) costs one reset
+    and one extra read, then returns the fault-annotated envelope. No loop."""
+    void = _faulted_object_content("HostSystem", "ha-host", {}, {"name": "NoPermission"})
+    conn = _SessionResettingConnector([void, void])
+
+    out = await object_collect_impl(
+        conn,
+        _make_operator(),
+        _Target(),
+        {"type": "HostSystem", "moid": "ha-host", "properties": ["name"]},
+    )
+
+    assert conn.invalidate_calls == 1
+    assert len(conn.post_calls) == 2
+    assert out["properties"] == {}
+    assert out["missing_fault_summary"] == {"NoPermission": 1}
+
+
+@pytest.mark.asyncio
 async def test_partial_per_field_nopermission_does_not_reset() -> None:
     """(#3773 c.4) A partial per-field NoPermission (at least one property back) is a
     real permission outcome, NOT a stale session → no reset, annotated envelope
@@ -845,6 +866,84 @@ async def test_flattened_8_0_x_partial_fault_surfaces_type_without_reset() -> No
 
 
 # ---------------------------------------------------------------------------
+# #3777 — a session reset leaves a marker: a result key and a log event
+# ---------------------------------------------------------------------------
+
+_RESET_PROPS = ["summary.overallStatus", "runtime.powerState"]
+
+
+async def _collect_capturing_logs(results: list[Any]) -> tuple[dict[str, Any], list[Any]]:
+    conn = _SessionResettingConnector(results)
+    with capture_logs() as logs:
+        out = await object_collect_impl(
+            conn,
+            _make_operator(),
+            _Target(),
+            {"type": "HostSystem", "moid": "ha-host", "properties": _RESET_PROPS},
+        )
+    return out, logs
+
+
+def _reset_events(logs: list[Any]) -> list[Any]:
+    return [e for e in logs if e["event"] == "vmware_object_collect_auth_reset"]
+
+
+@pytest.mark.asyncio
+async def test_session_reset_marks_result_and_logs_fault_class_only() -> None:
+    """(#3777) The reset ran: the result has session_health_reset=1 and one
+    log event names the target and the fault class, never fault text."""
+    void = _faulted_object_content(
+        "HostSystem", "ha-host", {}, dict.fromkeys(_RESET_PROPS, "NotAuthenticated")
+    )
+    recovered = _object_content(
+        "HostSystem",
+        "ha-host",
+        {"summary.overallStatus": "green", "runtime.powerState": "poweredOn"},
+        [],
+    )
+
+    out, logs = await _collect_capturing_logs([void, recovered])
+
+    assert out["session_health_reset"] == 1
+    (event,) = _reset_events(logs)
+    assert event["target"] == "vc-test"
+    assert event["missing_fault_types"] == ["NotAuthenticated"]
+    assert validate_params(VMWARE_OBJECT_COLLECT_OP.response_schema, out) == []
+
+
+@pytest.mark.asyncio
+async def test_session_reset_marker_present_when_retry_is_still_void() -> None:
+    """(#3777) The reset ran but the retry is still void: the marker is still set."""
+    void = _faulted_object_content(
+        "HostSystem", "ha-host", {}, dict.fromkeys(_RESET_PROPS, "NotAuthenticated")
+    )
+
+    out, logs = await _collect_capturing_logs([void, void])
+
+    assert out["session_health_reset"] == 1
+    assert len(_reset_events(logs)) == 1
+
+
+@pytest.mark.asyncio
+async def test_clean_read_has_no_reset_marker_and_validates() -> None:
+    """(#3777) A clean read: no session_health_reset key, no reset event, and
+    the result still matches the response schema (the key is not required)."""
+    clean = _object_content(
+        "HostSystem",
+        "ha-host",
+        {"summary.overallStatus": "green", "runtime.powerState": "poweredOn"},
+        [],
+    )
+
+    out, logs = await _collect_capturing_logs([clean])
+
+    assert "session_health_reset" not in out
+    assert _reset_events(logs) == []
+    assert "session_health_reset" not in VMWARE_OBJECT_COLLECT_OP.response_schema["required"]
+    assert validate_params(VMWARE_OBJECT_COLLECT_OP.response_schema, out) == []
+
+
+# ---------------------------------------------------------------------------
 # The bound — oversized / malformed requests are structured invalid_params
 # ---------------------------------------------------------------------------
 
@@ -944,6 +1043,14 @@ def test_object_collect_guidance_says_to_read_the_whole_configuration_ex() -> No
     assert "'configurationEx.<field>'" in hint
     assert "InvalidProperty" in hint
     assert "request 'configurationEx'" in VMWARE_OBJECT_COLLECT_OP.description
+
+
+def test_object_collect_description_names_the_returned_keys() -> None:
+    """The op description lists the same result keys as the response schema."""
+    description = VMWARE_OBJECT_COLLECT_OP.description
+    assert VMWARE_OBJECT_COLLECT_OP.response_schema is not None
+    for key in VMWARE_OBJECT_COLLECT_OP.response_schema["properties"]:
+        assert key in description
 
 
 def test_object_collect_guidance_covers_distributed_portgroup_reads() -> None:

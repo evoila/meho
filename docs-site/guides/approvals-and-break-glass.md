@@ -234,6 +234,13 @@ written to the audit log. Concretely:
   subject.
 - **The record shows who decided.** The decision names the approver, so
   the audit answers "who signed off on this delete?" without inference.
+- **An add-on can propose a delete.** The tier refuses only agent
+  principals. An add-on that signs in as a service principal previews the
+  delete and calls it with the preview hash. The call waits for a person to
+  approve it; no standing grant can approve it in advance. After approval
+  the delete runs under the approver, and the add-on reads the result with
+  `GET /api/v1/approvals/{id}/result`. Only the caller that started the
+  delete can read that result.
 
 ## Proving which posture a deploy is running
 
@@ -248,6 +255,10 @@ curl -s https://<your-backplane>/ready | jq .features.approval_queue.effective_p
 # "four_eyes_enforced"            → the default; self-approval is OFF
 # "single_operator_break_glass"   → APPROVAL_ALLOW_SELF_APPROVAL=true is set
 ```
+
+If the deploy sets `METRICS_AUTH_TOKEN`, `/ready` only returns the
+`features` block when you send that token. Add
+`-H "Authorization: Bearer <metrics-token>"` to the `curl` call.
 
 **Did a specific write self-approve?** Two signals:
 
@@ -282,6 +293,28 @@ Refs: #12, CHG-9"
 - **Instructed-by:** the person who told you (their login or email).
 - **Instruction:** their words, in quotes, exactly as they wrote them.
 - **Refs:** the issue or change ticket, comma-separated.
+
+!!! warning "Only on lab-class deployments"
+    On production, MEHO refuses a decision made on someone else's
+    instruction. You must decide on your own judgement. A lab-class
+    deployment turns this on at install time with
+    `config.approvalAllowDelegatedDecision: "true"` (env var
+    `APPROVAL_ALLOW_DELEGATED_DECISION`). The default is `"false"`.
+    No request can change it.
+
+    When it is off, MEHO answers with a 403 error whose message starts
+    with `delegated_decision_forbidden:`. The request stays pending.
+    Remove the three lines and decide yourself, or ask the person who
+    instructed you to decide. MEHO also writes a WARNING log event named
+    `approval_delegated_decision_refused`.
+
+    Check the stance of a deploy on `/ready`:
+
+    ```bash
+    curl -s https://<your-backplane>/ready | jq .features.approval_queue.delegated_decision_posture
+    # "production_own_hand_only"      → the default; delegated decisions are refused
+    # "lab_class_delegation_allowed"  → APPROVAL_ALLOW_DELEGATED_DECISION=true is set
+    ```
 
 The same lines work in the console reason box and in the REST
 `reason` field.

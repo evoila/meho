@@ -63,12 +63,12 @@ from datetime import UTC, datetime, timedelta
 import structlog
 from sqlalchemy import select
 
-from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Tenant
 from meho_backplane.metrics import note_loop_tick
 from meho_backplane.operations.approval_queue import (
     expire_stale_requests,
+    expiry_operator,
     publish_approval_event,
 )
 from meho_backplane.settings import get_settings
@@ -80,30 +80,6 @@ __all__ = [
 ]
 
 _log = structlog.get_logger(__name__)
-
-#: The acting identity for sweeper-driven expiries. A stable synthetic
-#: sub makes swept expiries filterable in audit queries and distinct from
-#: operator-driven decisions — the same pattern the topology scheduler
-#: (``system:topology-scheduler``) and connector system contexts use.
-_SYSTEM_OPERATOR_SUB = "system:approval-expiry"
-
-
-def _system_operator(tenant_id: uuid.UUID) -> Operator:
-    """Build the synthetic per-tenant operator the sweep expires rows as.
-
-    ``raw_jwt`` is the empty string — the sweep forwards no token
-    downstream. ``OPERATOR`` role satisfies the ``>= operator`` floor
-    :func:`~meho_backplane.operations.approval_queue.expire_stale_requests`
-    enforces on the acting identity.
-    """
-    return Operator(
-        sub=_SYSTEM_OPERATOR_SUB,
-        name=None,
-        email=None,
-        raw_jwt="",
-        tenant_id=tenant_id,
-        tenant_role=TenantRole.OPERATOR,
-    )
 
 
 async def _sweep_one_tenant(
@@ -120,7 +96,7 @@ async def _sweep_one_tenant(
     transaction commits (fail-open) so a phantom event cannot outlive a
     rolled-back expiry.
     """
-    operator = _system_operator(tenant_id)
+    operator = expiry_operator(tenant_id)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         try:

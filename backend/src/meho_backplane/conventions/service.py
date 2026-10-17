@@ -3,8 +3,8 @@
 
 """``ConventionsService`` -- session-threaded CRUD over tenant conventions.
 
-G10.12-T0 (#1894). Lifts the budget gate, history-row + pre-allocated
-audit-id pairing, and the preamble-feedback logic that previously
+G10.12-T0 (#1894). Lifts the budget gate, the history row, and the
+preamble-feedback logic that previously
 lived inline in :mod:`meho_backplane.api.v1.conventions` into a thin
 service both the REST surface and the in-process console BFF (T1/T2
 #1838) can call without re-deriving the arithmetic.
@@ -19,17 +19,21 @@ session provenance:
 
 * the REST handler threads its request-scoped
   :func:`~meho_backplane.db.engine.get_session` dependency, so the
-  audit middleware's pre-allocated-id soft-FK and the post-write
-  read-your-own-writes preamble preview share one transaction;
+  history row and the post-write read-your-own-writes preamble preview
+  share one transaction;
 * the cookie-authed BFF UI opens its own in-process session and
   threads it the same way.
 
-The pre-allocated-audit-id seam (``bind_preallocated_audit_id``) is
-therefore exercised identically by both callers: the service mints
-the uuid, binds it onto the structlog contextvar the
-:class:`~meho_backplane.audit.AuditMiddleware` reads, and writes the
-paired ``tenant_convention_history`` row carrying that same id in the
-same transaction.
+Domain provenance (#3747)
+-------------------------
+
+The ``tenant_convention_history`` row is the record of the edit. It
+says what the edit was (``change_kind``: ``created`` / ``updated`` /
+``deleted``), who made it (``actor_sub``) and when (``ts``), and keeps
+the request correlation id (``request_id``) so it links to the request
+usage event. It no longer points at the REST request wrapper row in
+``audit_log``: new rows leave ``audit_id`` ``NULL``. Rows written before
+#3747 keep their ``audit_id``.
 
 Error vocabulary
 ----------------
@@ -64,7 +68,6 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.audit import bind_preallocated_audit_id
 from meho_backplane.auth.operator import Operator
 from meho_backplane.conventions._internal import (
     ConventionConflictError,
@@ -98,7 +101,12 @@ from meho_backplane.conventions.schemas import (
     ConventionUpdate,
     PreambleInclusion,
 )
-from meho_backplane.db.models import TenantConvention, TenantConventionHistory
+from meho_backplane.db.models import (
+    ConventionHistoryChangeKind,
+    TenantConvention,
+    TenantConventionHistory,
+)
+from meho_backplane.request_usage.collector import current_request_id
 
 __all__ = [
     "ConventionConflictError",
@@ -115,9 +123,8 @@ class ConventionsService:
     Plain class (mirrors :class:`MemoryService`'s shape) with no held
     state -- every method takes the ``session`` to operate on, so both
     the REST request-scoped session and a UI in-process session thread
-    through the same code path. The pre-allocated-audit-id seam, the
-    history-row pairing, and the budget arithmetic live here once; the
-    consumers never re-derive them.
+    through the same code path. The history row and the budget
+    arithmetic live here once; the consumers never re-derive them.
     """
 
     async def _load_convention(
@@ -361,20 +368,17 @@ class ConventionsService:
     ) -> Convention:
         """Create one convention; writes one history row in the same transaction.
 
-        Sequence: budget gate -> pre-allocate audit_id -> insert
-        convention + history rows -> conflict mapping on duplicate
-        ``(tenant_id, slug)`` -> preamble-status feedback. The CREATE
-        history row has ``body_before=NULL``; ``body_after=body.body``,
-        and carries the pre-allocated ``audit_id`` soft-FK that the
-        audit middleware honours for the matching audit row.
+        Sequence: budget gate -> insert convention + history rows ->
+        conflict mapping on duplicate ``(tenant_id, slug)`` ->
+        preamble-status feedback. The CREATE history row has
+        ``change_kind=created``, ``body_before=NULL`` and
+        ``body_after=body.body``.
 
         Raises :class:`OverBudgetError` (route: 422) and
         :class:`ConventionConflictError` (route: 409).
         """
         enforce_budget(body.title, body.body, body.kind)
 
-        audit_id = uuid.uuid4()
-        bind_preallocated_audit_id(audit_id)
         now = datetime.now(UTC)
         convention = TenantConvention(
             id=uuid.uuid4(),
@@ -395,7 +399,8 @@ class ConventionsService:
             body_after=body.body,
             actor_sub=operator.sub,
             ts=now,
-            audit_id=audit_id,
+            change_kind=ConventionHistoryChangeKind.CREATED.value,
+            request_id=current_request_id(),
         )
         session.add_all([convention, history])
         try:
@@ -460,8 +465,6 @@ class ConventionsService:
         new_title, new_body, new_priority = resolve_patch_fields(body, existing)
         enforce_patch_budget(body, new_title, new_body, existing)
 
-        audit_id = uuid.uuid4()
-        bind_preallocated_audit_id(audit_id)
         now = datetime.now(UTC)
         body_before = existing.body
 
@@ -477,7 +480,8 @@ class ConventionsService:
             body_after=new_body,
             actor_sub=operator.sub,
             ts=now,
-            audit_id=audit_id,
+            change_kind=ConventionHistoryChangeKind.UPDATED.value,
+            request_id=current_request_id(),
         )
         session.add(history)
         await session.flush()
@@ -513,11 +517,10 @@ class ConventionsService:
 
         **Non-idempotent**: raises :class:`ConventionNotFoundError` (route:
         404) on a missing / cross-tenant slug rather than a silent
-        no-op -- the history + audit row pairing requires a real row to
-        delete from; an idempotent 204-on-missing would produce an
-        audit row with no history counterpart. The history row carries
-        ``body_after=<final body>`` -- a legible last-known state for
-        forensics.
+        no-op -- the history row records a real delete, so a missing row
+        has nothing to record. The history row carries
+        ``change_kind=deleted`` and ``body_after=<final body>`` -- a
+        legible last-known state for forensics.
         """
         existing = await self._load_convention(
             session=session,
@@ -527,8 +530,6 @@ class ConventionsService:
         if existing is None:
             raise ConventionNotFoundError(slug)
 
-        audit_id = uuid.uuid4()
-        bind_preallocated_audit_id(audit_id)
         now = datetime.now(UTC)
         convention_id = existing.id
 
@@ -539,7 +540,8 @@ class ConventionsService:
             body_after=existing.body,
             actor_sub=operator.sub,
             ts=now,
-            audit_id=audit_id,
+            change_kind=ConventionHistoryChangeKind.DELETED.value,
+            request_id=current_request_id(),
         )
         session.add(history)
         # Flush the history row before the DELETE -- SQLAlchemy 2.x's

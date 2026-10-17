@@ -40,6 +40,7 @@ import pytest
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.mcp import registry as mcp_registry
 from meho_backplane.mcp.registry import ToolDefinition
+from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
 from tests.mcp_test_fixtures import (
     client_with_operator,  # noqa: F401 -- pytest-discovered fixture
     isolated_registry,  # noqa: F401 -- pytest-discovered autouse fixture
@@ -75,6 +76,7 @@ EXPECTED_DECLARING_TOOLS: frozenset[str] = frozenset(
         "query_audit",
         "query_topology",
         "result_query",
+        "search_memory",
         "search_operations",
     }
 )
@@ -208,6 +210,21 @@ def test_declaring_tool_result_carries_matching_structured_content(
         "hard-fails every conforming MCP client (#2774)"
     )
     assert result["structuredContent"] == json.loads(result["content"][0]["text"])
+
+    # #3641: the delivery budget measures exactly these two blocks as they
+    # sit in the response body. Both encoded blocks are found verbatim in the
+    # raw bytes, and the measurement is their summed length (no factor).
+    text_block = _body_encode(result["content"][0]["text"])
+    structured_block = _body_encode(result["structuredContent"])
+    assert text_block in response.content
+    assert structured_block in response.content
+    measured = measure_delivered_wire_bytes(result["structuredContent"])
+    assert measured == len(text_block) + len(structured_block)
+
+
+def _body_encode(value: Any) -> bytes:
+    """Encode *value* as the JSON-RPC response body writes it."""
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
 def test_non_declaring_tool_result_has_no_structured_content(

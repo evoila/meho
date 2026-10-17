@@ -113,6 +113,8 @@ from meho_backplane.mcp.registry import (
 )
 from meho_backplane.mcp.server import McpInvalidParamsError, register_method
 from meho_backplane.operations._audit import resolve_broadcast_lineage
+from meho_backplane.operations.delivery_budget import tool_result_text
+from meho_backplane.request_usage.collector import note_request_route
 
 __all__ = [
     "handle_resources_list",
@@ -342,6 +344,8 @@ async def handle_tools_call(
             status_code = 404
             raise McpInvalidParamsError(f"unknown tool: {name!r}")
         defn, handler = entry
+        # Request usage (#3734): label the request with the registered tool.
+        note_request_route(f"tool:{name}")
         audit_payload["op_class"] = defn.op_class
         broadcast_omit_args = defn.broadcast_omit_args
 
@@ -467,7 +471,7 @@ async def handle_tools_call(
         # while the server logs 200. The text block is kept alongside per
         # the spec's backwards-compatibility recommendation.
         response: dict[str, Any] = {
-            "content": [{"type": "text", "text": json.dumps(result)}],
+            "content": [{"type": "text", "text": tool_result_text(result)}],
             "isError": False,
         }
         if defn.outputSchema is not None:
@@ -762,6 +766,9 @@ async def handle_resources_read(
             status_code = 404
             raise McpInvalidParamsError(f"resource not found: {uri!r}")
         defn, handler, bound_params = match
+        # Request usage (#3734): label the request with the matched
+        # template, never the concrete URI (it can carry free text).
+        note_request_route(f"resource:{defn.uriTemplate}")
 
         # G0.5-T9: query-bearing resources (``meho://retrieve/{query}``)
         # opt out of persisting the concrete URI — its variable portion is

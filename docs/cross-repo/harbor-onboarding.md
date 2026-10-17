@@ -315,6 +315,12 @@ The minted secret is printed once. If `--json` is used, it appears in
 Dispatches `harbor.robot.delete` (typed op). Required flags:
 `--project`, `--id` (numeric). Irreversible.
 
+The op is on the destructive risk level, so a second person must
+approve it. The command first previews the delete, then sends it with
+the `preview_hash`. The result is `status=awaiting_approval`; the delete
+runs when a second person approves it. If the preview fails, the command
+stops, shows the reason, and sends nothing.
+
 ### `meho harbor operation search`
 
 Hybrid BM25 + cosine RRF search across all `harbor-rest-2.x` ops.
@@ -335,6 +341,11 @@ meho harbor operation call harbor.health --target prod-harbor
 meho harbor operation call harbor.project.list \
   --target prod-harbor --json | jq '.result[].name'
 ```
+
+A destructive op needs `--preview-hash`. Run
+`meho operation preview harbor-rest-2.x <op_id>` with the same
+`--target` and `--params` first, then pass its `preview_hash`. The call
+then waits until a second person approves it.
 
 ## Agent meta-tool path
 

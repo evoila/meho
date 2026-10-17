@@ -9,9 +9,52 @@ and the three Pydantic value types around it: `AuditQueryFilters` (input),
 `AuditEntry` (one row), `AuditQueryResult` (page + forward-only cursor).
 
 The substrate is **read-only**. Audit-log rows are written by
-`meho_backplane.audit.AuditMiddleware` (HTTP chassis routes) and
-`meho_backplane.mcp.audit.write_mcp_audit_row` (MCP tool/resource handlers);
-this package never inserts, updates, or deletes.
+`meho_backplane.audit.AuditMiddleware` (HTTP chassis routes),
+`meho_backplane.mcp.audit.write_mcp_audit_row` (MCP tool/resource handlers),
+the dispatcher, the approval queue and the domain writers; this package never
+inserts, updates, or deletes.
+
+### Event class (#3733)
+
+Every row carries `event_class`, a closed set enforced by the database
+CHECK `ck_audit_log_event_class` (migration `0106`). Each writer sets the
+class it knows. Nothing is guessed from `method` / `path`.
+
+| Class | Written by |
+|---|---|
+| `operation_execution` | Dispatch rows that ran (`ok` or `error`), runbook abort, gateway command mint / result, satellite effect rows, topology / ingest / add-on writes, sweepers and reapers. |
+| `policy_decision` | Dispatch rows a gate refused (`denied`, rate limit, unqualified target version) and the `approval.request` park row. |
+| `approval_decision` | `approval.decision` rows (approve, reject, expire) and the standing-grant auto-approval row. |
+| `security_event` | Refresh-token replay, broken satellite effect chain, un-reported gateway mint alarm. |
+| `legacy_request` | Every row written before `0106` (server default; old rows are not reclassified), the REST and MCP request wrapper rows, and the `approval.result` read row. |
+
+### Class counters and execution-only traces (#3747)
+
+- `count_event_classes(filters, *, tenant_id, session)` returns one row
+  count per class for the same filters as `query_audit`, except
+  `event_class`, `cursor` and `limit`. Every class is a key, `0` when it
+  has no rows. Old rows count as `legacy_request`.
+- Without `since` it counts only the last 24 hours
+  (`DEFAULT_COUNT_WINDOW`). The audit log keeps every row, so an open
+  count would read the whole tenant history on every console load. The
+  result (`EventClassCounts`) carries the `since` it used; the REST
+  answer and the console strip show it.
+- `POST /api/v1/audit/class-counts` and the console counter strip
+  (above the result list on `/ui/audit`) use it. The console also has a
+  "Record type" filter and shows each row's class as a badge.
+- Only an `operation_execution` row resolves to the flight recorder. The
+  trace route answers `trace_present=false` (with `event_class` in the
+  body) for any other class, and the console drawer says "not an
+  operation run" instead of a trace pane. A decision or history view
+  never offers an execution trace.
+
+The column default stays `legacy_request`, so a row from an older MEHO
+version during a rolling upgrade is also `legacy_request`. New code never
+relies on the default: `tests/test_audit_event_class.py` scans the source
+and fails on any `AuditLog(...)` call without `event_class=`. The shared
+helpers (`operations._audit.write_audit_row`,
+`memory.audit.write_internal_audit_row`, `approval_queue._write_audit_row`)
+take `event_class` as a required argument.
 
 ## Key types
 
@@ -26,9 +69,10 @@ this package never inserts, updates, or deletes.
 | `result_status` | `str \| None` | One of `"ok"` / `"error"` / `"denied"`. Maps to status-code ranges. |
 | `since` / `until` | `datetime \| None` | `audit_log.occurred_at` bracket. **Absolute datetimes only** — `"24h"` / `"7d"` shorthand is parsed in the T2 / T3 router. |
 | `audit_id` | `UUID \| None` | Exact-id lookup. |
-| `parent_audit_id` | `UUID \| None` | **Raises `UnsupportedFilterError`** — the flat filter stays gated (un-gating is out of scope for #377). The column itself (#398) *is* read onto the returned row and is walked by the replay CTE. |
+| `parent_audit_id` | `UUID \| None` | `audit_log.parent_audit_id = :value` — **exact match**, so it returns the direct children of one row, not the whole subtree. Uses the `audit_log_parent_audit_id_idx` index. Main use: find the decision row and the run row of one approval request, which are linked only by this column (#4030). The replay CTE walks the full subtree. |
 | `agent_session_id` | `UUID \| None` | `audit_log.agent_session_id = :value`. Un-gated by G8.2-T3 (#1011); the column landed with G8.2-T1 (#1009). |
 | `work_ref` | `str \| None` | `audit_log.work_ref = :value` — **exact match** (a change-ticket reference is an opaque identifier, not a search term, so deterministic equality per #1177, not `ILIKE`). Filterable + surfaced since work_ref I1-T3 (#1658); the column landed with work_ref I1-T1 (#1655, migration `0039`). NULL rows are excluded. |
+| `event_class` | `AuditEventClass \| None` | `audit_log.event_class = :value` — exact match on the closed set (#3733). `None` applies no class filter, so a query without it returns every class, the same rows as before. Old rows match `legacy_request`. |
 | `limit` | `int` (1-1000) | Default 100. |
 | `cursor` | `str \| None` | Opaque forward-only cursor produced by a prior page. |
 
@@ -53,11 +97,12 @@ Field-to-source mapping:
 | `op_id` | `payload['op_id']` if a string, else `f"http.{method.lower()}:{path}"`. |
 | `op_class` | `payload['op_class']` if a string, else `classify_op(op_id)` from `broadcast.events`. For the MCP `call_operation` outer-wrapper row this is `"tool_call"` (G0.15-T3 #1212) — the inner DISPATCH row carries the domain `read` / `write` class. |
 | `result_status` | Derived from `status_code` — 401/403 → `"denied"`, 4xx/5xx else → `"error"`, otherwise `"ok"`. |
-| `principal_name` | `payload['principal_name']` when present (MCP rows since G0.15-T3 #1212; `write_mcp_audit_row` merges `Operator.name` from the validated JWT). HTTP-chassis rows remain `None` — the `verify_jwt_and_bind` middleware does not bind `name` to contextvars, so the audit middleware sees no source for it. |
-| `parent_audit_id` | `audit_log.parent_audit_id` — composite-operation lineage column (G0.6-T7 #398, migration `0006`). Surfaced on the row since G8.2-T3 (#1011); the flat *filter* on it stays gated. |
+| `principal_name` | `payload['principal_name']` when present. Three writers set it from `Operator.name` (the token's `name` claim): MCP rows (#1212, `write_mcp_audit_row`), approval request and decision rows (#3300), and `DISPATCH` operation run rows (#4029, `operations/_audit.py:write_audit_row`). The name always belongs to the row's `operator_sub`. On an approved run that is the approver when a person approves through the console, CLI or REST (`resume_dispatch_after_approval`), and the agent when MEHO's own agent waits for the approval and resumes the run itself (`agent/approval_wait.py:_resume_approved_or_already_resumed`). It is `None` when the token has no name. HTTP-chassis rows remain `None` — the `verify_jwt_and_bind` middleware does not bind `name` to contextvars, so the audit middleware sees no source for it. |
+| `parent_audit_id` | `audit_log.parent_audit_id` — composite-operation lineage column (G0.6-T7 #398, migration `0006`). Surfaced on the row since G8.2-T3 (#1011); exact-match filterable since #4030. |
 | `agent_session_id` | `audit_log.agent_session_id` — MCP-session correlation column (G8.2-T1 #1009, migration `0014`). Surfaced + filterable since G8.2-T3 (#1011). |
 | `work_ref` | `audit_log.work_ref` — external change-ticket reference (work_ref I1-T1 #1655, migration `0039`). An opaque string (e.g. `"gh:evoila/meho#1"`) correlating a governed operation to the out-of-band change record that authorised it. Surfaced + exact-match-filterable since work_ref I1-T3 (#1658). Bind sources: the request/agent/dispatch boundary (work_ref I1-T2 #1657) and runbook runs (work_ref I3-T1 #1661 — a run's `runbook_runs.work_ref` is bound around each `operation_call` step's dispatch + on the abort row, so the step audit rows inherit the run's change ticket). NULL when no bind source is in scope; system-internal writers leave it NULL by design. |
 | `policy_decision` | `audit_log.policy_decision` — the synchronous policy-gate verdict stamped on the row (#130, migration `0051`). One of the closed `PermissionVerdict` set — `"auto-execute"` / `"needs-approval"` / `"deny"` — or `None` where no gate ran (pre-#130 rows, pre-gate usage errors like unknown-op / invalid-params / connector-resolution failures, and system-internal writers). Populated by both audit writers off the dispatch-scoped `policy_decision_var` contextvar: the parked "request" row carries `"needs-approval"`; the approval "decision" row carries `None` (an operator's approve/reject is not a gate verdict — it is recorded via `result_status`). A consumer reads the verdict directly (`WHERE policy_decision = '<verdict>'`) instead of reconstructing it from `method`+`path`+`payload`. **Verdict catalog:** the persisted set is exactly the three-value `PermissionVerdict` enum. `time_window_violation` / `quota_exceeded` are **not** implemented (no such policy classes exist in code); any external catalog listing them overstates the surface. |
+| `event_class` | `audit_log.event_class` — what kind of accountable event the row records (#3733, migration `0106`). See [Event class](#event-class-3733). |
 | `broadcast_event_id` | **None in v0.2** — FK direction is reversed: `BroadcastEvent.audit_id` points at the audit row. |
 
 The three computed fields use exactly the same rules
@@ -77,16 +122,15 @@ end of the matching set under the current filter).
 ```text
 query_audit(filters, tenant_id, session)
   │
-  ├─ Validate filters: parent_audit_id → UnsupportedFilterError (flat filter
-  │                     stays gated; agent_session_id is now a usable filter)
-  │
   ├─ Build SELECT audit_log, targets.name
   │     OUTER JOIN targets ON audit_log.target_id = targets.id
   │                       AND targets.tenant_id   = :tenant_id   ← JOIN-scope defence
   │     WHERE audit_log.tenant_id = :tenant_id      ← always first
   │       [+ audit_id = :audit_id]
+  │       [+ parent_audit_id = :parent_audit_id]                ← exact match
   │       [+ agent_session_id = :agent_session_id]
   │       [+ work_ref = :work_ref]                              ← exact match
+  │       [+ event_class = :event_class]                        ← exact match
   │       [+ operator_sub ILIKE :principal]
   │       [+ occurred_at >= :since]
   │       [+ occurred_at <= :until]
@@ -107,7 +151,7 @@ query_audit(filters, tenant_id, session)
   │   ├─ op_class = payload['op_class'] if str else classify_op(op_id)
   │   ├─ result_status = _derive_result_status(status_code)
   │   ├─ principal_name = payload['principal_name'] if str
-  │   │                  else None   # MCP rows since G0.15-T3 #1212
+  │   │                  else None   # MCP, approval and DISPATCH rows
   │   │                              # carry it in payload; HTTP-chassis
   │   │                              # rows still have no source
   │   └─ AuditEntry(... real cols ..., op_id, op_class, result_status,
@@ -115,6 +159,7 @@ query_audit(filters, tenant_id, session)
   │                 agent_session_id=row.agent_session_id,
   │                 work_ref=row.work_ref,
   │                 policy_decision=row.policy_decision,
+  │                 event_class=row.event_class,
   │                 principal_name=principal_name, broadcast_event_id=None)
   │
   └─ next_cursor = encode_cursor(CursorPosition(ts=last.ts, id=last.id))
@@ -167,22 +212,63 @@ Two-step shape:
 query, not a filtered list. It reuses `query._build_audit_entry` so a replay
 node and a `query_audit` row for the same audit id agree field-for-field.
 
+### Client-credential runs (#3446)
+
+What anchors the rows of a run by a client-credential service principal
+(a `PrincipalKind.SERVICE` token, for example an automation add-on), and
+how an operator replays it.
+
+- Such a caller usually has no MCP session and no in-process agent loop, so
+  neither normal source of `agent_session_id` applies.
+- The run is named by its `work_ref`. When the caller passes a `work_ref`
+  to `call_operation` (the field, or the `Meho-Work-Ref` header), MEHO opens
+  one orchestration run per `(clientId, work_ref)` in the caller's tenant
+  (`operations/addon_orchestration.py`). Opening writes one start row:
+  `method=ORCHESTRATION`, `path=addon.orchestration`, no parent.
+- Every call of that run gets the run's `session_id` as its
+  `agent_session_id`, and the start row as its `parent_audit_id`. So the
+  normal session replay rebuilds the run as one tree. The 10,000 anchor-row
+  cap and the 413 `session_too_large` answer apply unchanged.
+- This works for every service principal with a recovered clientId, paired
+  add-on or not. The clientId comes from the `service-account-<clientId>`
+  username marker or, when the token has no marker, from its `azp` /
+  `client_id` claim (`auth/jwt.py`). Before #3446 only paired add-ons got
+  it, and an unpaired service account's rows landed with a NULL
+  `agent_session_id`.
+- A call **without** a `work_ref` still lands NULL. There is nothing to group
+  it by. Find those rows by principal (`meho audit query --principal`).
+
+How an operator replays a client-credential run:
+
+1. `meho audit query --work-ref <ref> --json` (or
+   `GET /api/v1/audit/by-work-ref/{ref}`) — the rows show the shared
+   `agent_session_id`. Use `--json`: the default table does not print
+   that column.
+2. `meho audit replay <session-id>` (or
+   `GET /api/v1/audit/sessions/{session_id}/replay`, `tenant_admin`).
+
+Design and tests: [`addon-parent-linkage.md`](addon-parent-linkage.md),
+`tests/test_client_credential_replay.py`.
+
 ## REST surface (G8.1-T2 #466, G8.2-T4 #1012)
 
-The six routes under `backend/src/meho_backplane/api/v1/audit.py` are the
-operator-facing entry into the substrate. The first five dispatch through
-`query_audit`; the sixth (replay) dispatches through `replay_session`. All
+The routes under `backend/src/meho_backplane/api/v1/audit.py` (plus
+class-counts in `api/v1/audit_counts.py`) are the operator-facing entry
+into the substrate. The query routes dispatch through `query_audit`,
+class-counts through `count_event_classes`, and replay through
+`replay_session`. All
 pass `tenant_id=operator.tenant_id` (from the JWT) — the substrate's
 tenant-scoping invariant is enforced one layer up.
 
 | Route | Filter shape | Notes |
 |---|---|---|
 | `POST /api/v1/audit/query` | Body is `AuditQueryRequest`; `since` / `until` are strings parsed at the router via `parse_duration` (`"24h"` / `"7d"` / ISO-8601). Client-supplied `tenant_id` (or any other unknown field) is rejected with 422 `extra_forbidden` (`AuditQueryRequest.model_config` sets `extra="forbid"`, G0.9-T2 / #729); the route never reads tenant from the body — it always passes `operator.tenant_id` from the JWT to the substrate. | Full-filter surface. |
+| `POST /api/v1/audit/class-counts` | Body is `AuditClassCountsRequest`: the `AuditQueryRequest` filters without `event_class`, `limit` and `cursor` (those fields are a 422). 200 body is `AuditClassCounts` (`{counts, total, since}`), one count per event class (#3747). Without `since` only the last 24 hours count; `since` echoes the window start. | Counters. |
 | `GET /api/v1/audit/who-touched/{target}` | Path param becomes `filters.target`; `since` query defaults to `"24h"`. | Pre-canned shortcut. |
 | `GET /api/v1/audit/by-work-ref/{ref}` | Path param (`{ref:path}` converter — a work_ref carries embedded slashes, `#` is percent-encoded) becomes `filters.work_ref` (exact match); `since` query has **no** default window (a change-ticket lookup wants the whole governed history of the ref, not just the last 24h). The "show every write authorised by ticket X" lookup (work_ref I1-T3 #1658). | Pre-canned shortcut. |
 | `GET /api/v1/audit/my-recent` | `filters.principal = operator.sub`; `since` query defaults to `"24h"`. | Pre-canned shortcut. |
 | `GET /api/v1/audit/show/{audit_id}` | `filters.audit_id = <path>`, `limit=1`. Substrate returns 0 rows for cross-tenant lookups → router raises **404** (not 403) so existence never leaks. | Single-row fetch. |
-| `GET /api/v1/audit/{audit_id}/trace` | The dispatch flight-recorder read (#3215). Audit-existence check via the same tenant-scoped substrate (`audit_id`, `limit=1`) → **404** (not 403) on a missing / cross-tenant row, matching `show`. Then `flight_recorder.load_trace(audit_id, tenant_id)` loads the trace header + ordered spans (tenant-scoped again as defence in depth). 200 body is `AuditTraceResult` (`{audit_id, trace_present, trace}`); an audit row with **no** captured trace is a `200` with `trace_present=false` (capture is opt-in/best-effort, not an error), and `trace.redaction_uncertain` surfaces the F5 degrade flag. Operator plane keeps full access independent of the agent gate. | Flight-recorder trace (#3215). |
+| `GET /api/v1/audit/{audit_id}/trace` | The dispatch flight-recorder read (#3215). Audit-existence check via the same tenant-scoped substrate (`audit_id`, `limit=1`) → **404** (not 403) on a missing / cross-tenant row, matching `show`. Then `flight_recorder.load_trace(audit_id, tenant_id)` loads the trace header + ordered spans (tenant-scoped again as defence in depth). Only an `operation_execution` row reads a trace (#3747); any other class answers `trace_present=false` without a trace read. 200 body is `AuditTraceResult` (`{audit_id, trace_present, trace, event_class}`); an audit row with **no** captured trace is a `200` with `trace_present=false` (capture is opt-in/best-effort, not an error), and `trace.redaction_uncertain` surfaces the F5 degrade flag. Operator plane keeps full access independent of the agent gate. | Flight-recorder trace (#3215). |
 | `GET /api/v1/audit/sessions/{session_id}/replay` | Dispatches `replay_session(session_id, tenant_id=operator.tenant_id, ...)`. 200 body is `AuditReplayResult` (`{root: [ReplayNode], session_id, tenant_id, row_count, excluded_null_session_count}`). Unknown / foreign session → `root=[]` / `row_count=0` (**not** 404 — same non-leakage as `show`). `row_count > 10_000` → **413** `{"detail": "session_too_large", "row_count": n}` from a count-first guard run *before* the recursive tree build. **`tenant_admin`-gated (#1843)** — see RBAC below. | Per-session replay (G8.2-T4). |
 
 The replay route's **413 cap** is a cheap tenant-scoped
@@ -305,10 +391,9 @@ Error mapping at the tool boundary:
 * `pydantic.ValidationError` (post-jsonschema, e.g. malformed UUID
   slipping past `format: uuid`) — same mapping.
 * `InvalidCursorError` (substrate, tampered cursor) — same mapping.
-* `UnsupportedFilterError` (substrate, the flat `parent_audit_id`
-  filter, still gated in v0.2) — same mapping with the column-name
-  message. The `agent_session_id` filter is **un-gated** (G8.2-T3
-  #1011) and no longer raises.
+* `UnsupportedFilterError` (substrate) — same mapping with the
+  column-name message. No filter raises it today: `agent_session_id`
+  (G8.2-T3 #1011) and `parent_audit_id` (#4030) are both normal filters.
 * Anything else propagates; the dispatcher's outer try/except turns
   it into JSON-RPC `-32603` Internal Error.
 
@@ -480,12 +565,18 @@ parity with the ``/api/v1/*`` chassis path and the MCP transport path.
 
 ## Known issues / v0.2 gaps
 
-* **`principal_name` populates for MCP rows; HTTP-chassis rows still
-  return `None`.** Since G0.15-T3 (#1212) the MCP audit writer
-  (`mcp/audit.py:write_mcp_audit_row`) merges `Operator.name` into
-  `payload['principal_name']` whenever the JWT carries it, and the
-  audit-query handler reads that key off the JSON column into the
-  returned `AuditEntry`. The HTTP audit middleware
+* **`principal_name` populates for MCP, approval and `DISPATCH` rows;
+  HTTP-chassis rows still return `None`.** The MCP audit writer
+  (`mcp/audit.py:write_mcp_audit_row`, #1212), the approval row writer
+  (`operations/approval_queue.py:_write_audit_row`, #3300) and the
+  operation run writer (`operations/_audit.py:write_audit_row`, #4029)
+  put `Operator.name` into `payload['principal_name']` whenever the JWT
+  carries it, and the audit-query handler reads that key off the JSON
+  column into the returned `AuditEntry`. A run row is the only row of an
+  approved run, so it must carry the name itself. The name always
+  belongs to the row's `operator_sub`: the approver when a person
+  approves through the console, CLI or REST, and the agent when
+  MEHO's own agent waits for the approval and resumes the run itself. The HTTP audit middleware
   (`meho_backplane.audit._write_audit_row`) reads `operator_sub` from
   contextvars but never the JWT `name` claim, so HTTP rows remain
   `principal_name=None`. Closing the HTTP gap is a small write-path
@@ -493,13 +584,12 @@ parity with the ``/api/v1/*`` chassis path and the MCP transport path.
   let the `_AUDIT_PAYLOAD_PREFIX` machinery push it into `payload`;
   the handler already reads it out, so no read-side change is needed.
 
-* **`parent_audit_id` flat filter stays gated.** The column is real (#398,
-  migration `0006`) and is now read onto the returned row + walked by the
-  replay CTE, but the *flat* `query_audit(parent_audit_id=...)` filter still
-  raises `UnsupportedFilterError` — un-gating it was deliberately out of scope
-  for G8.2 (#377) to keep the diff surgical. A future task can drop the arm and
-  add a `WHERE parent_audit_id = :parent_audit_id` clause; the column read is
-  already wired.
+* **`parent_audit_id` is a flat filter (#4030).** The column is real (#398,
+  migration `0006`), is read onto the returned row, and is walked by the
+  replay CTE. The flat `query_audit(parent_audit_id=...)` filter is an exact
+  match: it returns direct children only. This is the one way to link an
+  approval request to its decision and run rows when those rows carry no
+  agent session.
 
 * **`agent_session_id` is live.** The column landed with G8.2-T1 (#1009 —
   nullable + indexed); G8.2-T2 writes it from the MCP `Mcp-Session-Id`

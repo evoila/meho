@@ -95,6 +95,8 @@ from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
     ApprovalRequestExpiredError,
+    ApprovalResultState,
+    DelegatedDecisionForbiddenError,
     DelegatedReasonInvalidError,
     Delegation,
     ParamsMismatchError,
@@ -102,6 +104,7 @@ from meho_backplane.operations.approval_queue import (
     ResultAccessForbiddenError,
     SelfApprovalForbiddenError,
     UnauthorizedApprovalError,
+    approval_result_state,
     approve_request,
     get_decision_delegation,
     get_request,
@@ -214,8 +217,17 @@ class ApprovalRequestView(BaseModel):
     connector_id: str
     target_id: uuid.UUID | None
     params_hash: str
+    #: Preview-result-hash binding (#3197) stored at park time (#3486). Lets a
+    #: client match a request to the destructive row it previewed. ``None``
+    #: for a non-destructive request. Additive.
+    preview_hash: str | None = None
     proposed_effect: dict[str, Any]
     status: ApprovalRequestStatus
+    #: Run phase of an approved request (#3486): ``not_started`` /
+    #: ``started`` / ``executed`` / ``failed``. ``None`` unless ``status`` is
+    #: ``approved``. Read off the row; ``status`` keeps its four values.
+    #: Additive; a client that ignores it is unaffected.
+    result_state: ApprovalResultState | None = None
     reviewed_by: str | None
     #: Reviewer display name, resolved alongside ``reviewed_by`` (#3300).
     #: ``None`` before a decision or when the deciding token carried no
@@ -387,8 +399,10 @@ def _view(
         connector_id=row.connector_id,
         target_id=row.target_id,
         params_hash=row.params_hash,
+        preview_hash=row.preview_hash,
         proposed_effect=row.proposed_effect,
         status=ApprovalRequestStatus(row.status),
+        result_state=approval_result_state(row),
         reviewed_by=row.reviewed_by,
         reviewed_by_name=row.reviewed_by_name,
         decided_at=row.decided_at.isoformat() if row.decided_at else None,
@@ -413,6 +427,14 @@ def _delegated_reason_http_error(exc: DelegatedReasonInvalidError) -> HTTPExcept
     return HTTPException(
         status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
         detail=f"delegated_reason_invalid: {exc}",
+    )
+
+
+def _delegated_forbidden_http_error(exc: DelegatedDecisionForbiddenError) -> HTTPException:
+    """Map a delegated decision on a non-lab deployment to 403 (#3693)."""
+    return HTTPException(
+        status_code=http_status.HTTP_403_FORBIDDEN,
+        detail=f"delegated_decision_forbidden: {exc}",
     )
 
 
@@ -513,6 +535,8 @@ async def _capture_operator_decision(
         ) from exc
     except DelegatedReasonInvalidError as exc:
         raise _delegated_reason_http_error(exc) from exc
+    except DelegatedDecisionForbiddenError as exc:
+        raise _delegated_forbidden_http_error(exc) from exc
     return request
 
 
@@ -752,6 +776,8 @@ async def _record_approval_decision(
         ) from exc
     except DelegatedReasonInvalidError as exc:
         raise _delegated_reason_http_error(exc) from exc
+    except DelegatedDecisionForbiddenError as exc:
+        raise _delegated_forbidden_http_error(exc) from exc
     return request
 
 
@@ -904,6 +930,8 @@ async def reject_approval_request(
         ) from exc
     except DelegatedReasonInvalidError as exc:
         raise _delegated_reason_http_error(exc) from exc
+    except DelegatedDecisionForbiddenError as exc:
+        raise _delegated_forbidden_http_error(exc) from exc
 
     return RejectResponseBody(
         approval_request_id=request_id,

@@ -38,7 +38,9 @@ Each `AuditEntry` carries the forensic fields you filter and pivot on:
 | `result_status` | `ok` / `error` / `denied` |
 | `policy_decision` | the gate verdict: `auto-execute`, `needs-approval`, or `deny` |
 | `agent_session_id` | the originating agent's MCP session id — the key for session tracing |
+| `parent_audit_id` | the id of the row that caused this one. An approval's decision row and run row point at the approval request row. |
 | `work_ref` | an external change-ticket reference, when one was stamped |
+| `event_class` | what kind of record it is: `operation_execution`, `policy_decision`, `approval_decision`, `security_event`, or `legacy_request` (every row from before this field existed) |
 | `method` / `path` / `status_code` / `duration_ms` / `payload` | the request particulars |
 
 ## The filter surface
@@ -58,9 +60,20 @@ shortcuts over the same substrate.
 (operator-sub substring), `op_id` (glob, e.g. `vault.*`), `op_class`
 (`read` / `write` / `credential_read` / `audit_query`), `result_status`,
 `since` / `until` (ISO-8601 **or** shorthand: `30m`, `24h`, `7d`, `2w`),
-`audit_id`, `agent_session_id`, `work_ref`, `limit` (default 100, max
+`audit_id`, `parent_audit_id`, `agent_session_id`, `work_ref`, `limit` (default 100, max
 1000), and `cursor`. Calling it with **no** filters returns the most
 recent 100 rows of your tenant — bounded, never the whole ledger.
+
+The REST route `POST /api/v1/audit/query` also accepts `event_class`. It
+returns only rows of that class. Without it you get every class, as before.
+`POST /api/v1/audit/class-counts` takes the same filters and returns how
+many rows of each class match. Without `since` it counts only the last
+24 hours. The answer's `since` field says where the counted window starts.
+The console audit page shows the same counts, with the same window, and has
+a "Record type" filter.
+
+Only an `operation_execution` row has a flight-recorder trace. For any
+other class, the trace route answers `trace_present: false`.
 
 ```bash
 # "Did anyone read a Vault secret before the outage?"
@@ -68,6 +81,11 @@ meho audit query --op-class credential_read --since 24h --result-status ok
 
 # "Show me every denied write this week."
 meho audit query --op-class write --result-status denied --since 7d
+
+# "What happened because of this approval request?"
+# Returns the decision row and the run row. It works even when the
+# rows have no agent session.
+meho audit query --parent-audit-id <request-row-id>
 ```
 
 The agent surface returns the same rows, sorted newest-first, in a paged
@@ -169,7 +187,7 @@ broadcast the credential's path.
 | Symptom | What it means | Fix |
 |---|---|---|
 | `broadcast_event_id` is `null` on every row | Working as designed — it is a v0.2 placeholder; the FK lives on the broadcast event's `audit_id`. | Pivot broadcast → audit: read the event's `audit_id`, then `meho audit show <id>`. |
-| `query_audit` with `parent_audit_id` returns `-32602` | The composite-subtree filter is not wired in this version. | Use `agent_session_id` + `shape="tree"` (or `meho audit replay`) for lineage instead. |
+| `parent_audit_id` returns fewer rows than the full tree | The filter returns direct children only, not grandchildren. | Run it again with a child's `id`, or use `meho audit replay` for a whole session. |
 | `shape="tree"` rejected with `-32602` naming your session | The tree path is **self-session only** for operators — the `agent_session_id` must equal your own MCP session id. | To replay another session, use the tenant_admin `meho audit replay <session-id>`. |
 | A replay is refused with `session_too_large` | The session exceeds the 10,000-row replay cap. | Narrow with `--since` / `--until` and page the flat `meho audit query --session-id …` shape. |
 | `meho audit query --since Tuesday` errors | `since` / `until` want ISO-8601 or the duration shorthand, not prose. | Use `--since 3d` or `--since 2026-07-28T00:00:00Z`. |

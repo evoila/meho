@@ -27,11 +27,14 @@ import pytest
 from pydantic import ValidationError
 
 from meho_backplane.retrieval.eval.corpus import (
+    KB_PASSAGE_FIXTURE_VERSION,
     CorpusValidationError,
     KbCorpusQuery,
     MemoryCorpusQuery,
     OperationCorpusQuery,
     load_corpus,
+    load_kb_passage_fixtures,
+    parse_kb_passage_fixtures,
 )
 
 # ---------------------------------------------------------------------------
@@ -372,3 +375,95 @@ class _FakeRoot:
 
     def joinpath(self, name: str) -> Path:
         return self._root / name
+
+
+# ---------------------------------------------------------------------------
+# KB passage benchmark fixtures (#3765)
+# ---------------------------------------------------------------------------
+
+
+_TINY_FIXTURE = """
+version: 1
+entries:
+  - slug: a
+    language: en
+    status: current
+    body: |
+      # A
+
+      ## Ports
+
+      The port is 7443.
+  - slug: a-old
+    language: en
+    status: stale
+    body: |
+      ## Ports
+
+      The port was 80.
+queries:
+  - id: q1
+    scenario: stale
+    language: en
+    query: which port
+    expected_slugs: [a]
+    expected_heading: Ports
+    answer_terms: ["7443"]
+    harmful_slugs: [a-old]
+"""
+
+
+def test_kb_passage_fixtures_are_versioned_and_cover_every_stratum() -> None:
+    """The shipped file loads, matches the code version, and pairs en/de per scenario."""
+    fixtures = load_kb_passage_fixtures()
+    assert fixtures.version == KB_PASSAGE_FIXTURE_VERSION
+    strata = {(q.scenario, q.language) for q in fixtures.queries}
+    scenarios = {"middle_passage", "end_passage", "duplicate", "conflict", "stale", "no_match"}
+    assert strata == {(s, lang) for s in scenarios for lang in ("en", "de")}
+    statuses = {e.status for e in fixtures.entries}
+    assert statuses == {"current", "stale", "conflicting"}
+
+
+def test_kb_passage_fixture_answers_sit_in_the_middle_or_end() -> None:
+    """middle/end queries point at a section that is not the first one in the body."""
+    fixtures = load_kb_passage_fixtures()
+    bodies = {e.slug: e.body for e in fixtures.entries}
+    for q in fixtures.queries:
+        if q.scenario not in ("middle_passage", "end_passage"):
+            continue
+        body = bodies[q.expected_slugs[0]]
+        at = body.index(f"## {q.expected_heading}") / len(body)
+        assert at > (0.4 if q.scenario == "middle_passage" else 0.7), q.id
+
+
+def test_parse_kb_passage_fixtures_accepts_a_consistent_file() -> None:
+    fixtures = parse_kb_passage_fixtures(_TINY_FIXTURE)
+    assert [q.id for q in fixtures.queries] == ["q1"]
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    [
+        ("version: 1", "version: 2", "fixture version 2"),
+        ("expected_slugs: [a]", "expected_slugs: [a-old]", "is not a current entry"),
+        ("expected_heading: Ports", "expected_heading: Missing", "has no heading"),
+        ('answer_terms: ["7443"]', 'answer_terms: ["9999"]', "does not contain"),
+        ("harmful_slugs: [a-old]", "harmful_slugs: [a]", "not a stale or conflicting"),
+        ("harmful_slugs: [a-old]", "harmful_slugs: []", "needs harmful_slugs"),
+        ("scenario: stale", "scenario: no_match", "no expected values"),
+        ("language: en\n    query", "language: fr\n    query", "language"),
+    ],
+)
+def test_parse_kb_passage_fixtures_rejects_inconsistent_files(
+    old: str, new: str, message: str
+) -> None:
+    """A broken fixture fails at load time and the message names the problem."""
+    assert old in _TINY_FIXTURE
+    with pytest.raises(CorpusValidationError) as exc:
+        parse_kb_passage_fixtures(_TINY_FIXTURE.replace(old, new))
+    assert message in str(exc.value)
+
+
+def test_parse_kb_passage_fixtures_rejects_bad_yaml() -> None:
+    with pytest.raises(CorpusValidationError, match="failed to parse"):
+        parse_kb_passage_fixtures("version: [1")

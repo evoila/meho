@@ -65,11 +65,13 @@ __all__ = [
     "result_connector_vault_write_forbidden",
     "result_denied",
     "result_handler_unreachable",
+    "result_idempotency_key_conflict",
     "result_invalid_op_schema",
     "result_invalid_params",
     "result_no_connector",
     "result_no_target",
     "result_rate_limited",
+    "result_receipt_too_large",
     "result_target_invalid_type",
     "result_target_required",
     "result_unknown_op",
@@ -545,6 +547,51 @@ def result_rate_limited(
     )
 
 
+def result_receipt_too_large(
+    op_id: str, receipt_bytes: int, max_bytes: int, duration_ms: float
+) -> OperationResult:
+    """The receipt of a completed run could not be delivered, so the call is refused.
+
+    #3641. A completed ``call_operation`` must always deliver its receipt
+    (``status``, ``op_id``, ``audit_id``, ``delivery`` and the remediation
+    text) inside ``RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES``. The receipt
+    grows with the ``op_id``, so an unusually long one (or one with many
+    non-ASCII characters, which the text block escapes twice) can push it
+    over the ceiling. ``refuse_undeliverable_receipt`` in
+    :mod:`meho_backplane.operations.delivery_budget` measures the widest
+    receipt for the ``op_id`` before dispatch and returns this envelope
+    instead of running the operation. Nothing ran, so the caller may call
+    again once the ``op_id`` or the ceiling changes.
+
+    The ``op_id`` is not repeated in the message: it already rides the
+    envelope's ``op_id`` field, and repeating a very long id would only
+    make the refusal larger.
+    """
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=(
+            f"receipt_too_large: the receipt for this op_id ({len(op_id)} characters) "
+            f"would take {receipt_bytes} bytes on the wire; the delivery limit is "
+            f"{max_bytes} bytes. The operation did not run. Check the op_id with "
+            "search_operations. If it is correct, an operator must raise "
+            "RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES. See docs/codebase/mcp.md, "
+            '"Response wire ceiling".'
+        ),
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "receipt_too_large",
+            "receipt_bytes": receipt_bytes,
+            "delivery_max_bytes": max_bytes,
+            "remediation": (
+                "The operation did not run, so it is safe to call again. Check the "
+                "op_id with search_operations; if it is correct, an operator must "
+                "raise RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES."
+            ),
+        },
+    )
+
+
 def result_composite_resume_multi_gate_unsupported(
     *,
     composite_op_id: str,
@@ -704,6 +751,8 @@ def result_awaiting_approval(
     op_id: str,
     approval_request_id: uuid.UUID,
     duration_ms: float,
+    *,
+    reused: bool = False,
 ) -> OperationResult:
     """Policy gate issued a ``needs-approval`` verdict; pending row created.
 
@@ -722,14 +771,49 @@ def result_awaiting_approval(
     this value; callers that only handled ``"ok"`` / ``"error"`` /
     ``"denied"`` will treat it as an unrecognised status and surface it
     as a pending call, which is the correct semantics.
+
+    *reused* (#3486) is ``True`` when an ``idempotency_key`` retry got an
+    existing request back instead of a new one. It adds
+    ``extras["approval_request_reused"] = True``; the key is absent
+    otherwise, so a new park's envelope is unchanged.
     """
+    extras: dict[str, Any] = {
+        "error_code": "awaiting_approval",
+        "approval_request_id": str(approval_request_id),
+    }
+    if reused:
+        extras["approval_request_reused"] = True
     return OperationResult(
         status="awaiting_approval",
         op_id=op_id,
         error=f"awaiting_approval: {op_id!r} requires approval before execution",
         duration_ms=duration_ms,
+        extras=extras,
+    )
+
+
+def result_idempotency_key_conflict(
+    op_id: str,
+    approval_request_id: uuid.UUID,
+    duration_ms: float,
+) -> OperationResult:
+    """The ``idempotency_key`` is held by a live request for a different call (#3486).
+
+    The same principal already has a ``pending`` or ``approved`` request
+    with this key, but for another ``op_id`` / ``connector_id`` / target /
+    params / ``preview_hash`` / ``work_ref``. Nothing is parked or run.
+    ``extras["approval_request_id"]`` names the request that holds the key.
+    """
+    return OperationResult(
+        status="denied",
+        op_id=op_id,
+        error=(
+            "denied: idempotency_key is already used by another approval request "
+            "for a different call; send the identical call, or use a new key"
+        ),
+        duration_ms=duration_ms,
         extras={
-            "error_code": "awaiting_approval",
+            "error_code": "idempotency_key_conflict",
             "approval_request_id": str(approval_request_id),
         },
     )
@@ -1980,6 +2064,20 @@ def result_connector_vault_forbidden(
 _VAULT_WRITE_POLICY_DOC = "docs/cross-repo/connector-vault-policy.md"
 
 
+def _vault_write_target_clause(target_name: str | None, vault_role: str | None) -> str:
+    """Name the acting vault target and its role, or ``""`` when unknown (#3716)."""
+    if not target_name:
+        return ""
+    if vault_role:
+        return f" It was dispatched on target {target_name!r} under vault_role {vault_role!r}."
+    return (
+        f" It was dispatched on target {target_name!r}, which sets no vault_role "
+        f"override, so the role came from the deployment's fallback chain "
+        f"(for a check run: the check-runner role, or the global default when "
+        f"it is unset; otherwise: the per-tenant role, then the global default)."
+    )
+
+
 def result_connector_vault_write_forbidden(
     op_id: str,
     exc: BaseException,
@@ -1987,6 +2085,8 @@ def result_connector_vault_write_forbidden(
     *,
     write_path: str | None,
     identity_hint: str | None = None,
+    target_name: str | None = None,
+    vault_role: str | None = None,
 ) -> OperationResult:
     """A KV-v2 write was denied by Vault RBAC (post-approval write-identity gap).
 
@@ -2014,10 +2114,16 @@ def result_connector_vault_write_forbidden(
     path is the op's own authorization path (rendered by the caller via
     :func:`~meho_backplane.connectors.vault.ops.vault_kv_write_target_path`),
     and the identity hint is the dispatching / reviewing operator's ``sub``.
-    The remediation points at the write-capability stanza (§6.1) and the
-    ``sys/capabilities-self`` probe (§6.2) of the policy doc, and repeats
-    the do-NOT-widen-the-shared-policy warning: the grant is per-operator
-    templated, not a role-wide widen.
+    The remediation names two fixes, cheapest first (#3716). The write runs
+    under the operator's token logged in with the dispatch target's
+    ``extras["vault_role"]`` (#3274), so the first fix is to check that role
+    and run the same write on a vault target whose role can already write
+    the path — no policy change. Only when no such target exists does it
+    point at the write-capability stanza (§6.1) and the
+    ``sys/capabilities-self`` probe (§6.2), and repeat the
+    do-NOT-widen-the-shared-policy warning: the grant is per-operator
+    templated, not a role-wide widen. ``target_name`` / ``vault_role`` name
+    the acting target and its role in the text when the caller knows them.
 
     ``extras`` carries the machine-usable fields
     (``error_code`` / ``path`` / ``identity_hint`` / ``doc_ref`` /
@@ -2034,6 +2140,7 @@ def result_connector_vault_write_forbidden(
     identity_clause = (
         f" The write dispatched under identity {identity_hint!r}." if identity_hint else ""
     )
+    target_clause = _vault_write_target_clause(target_name, vault_role)
     # #3274: the capability + path kind is op-aware. A version soft-delete
     # (``vault.kv.delete``) authorizes with ``update`` on the ``/delete/``
     # path; ``put`` / ``patch`` with ``create``/``update`` on the ``/data/``
@@ -2049,13 +2156,18 @@ def result_connector_vault_write_forbidden(
     summary = (
         f"vault_write_identity_forbidden: Vault denied the KV-v2 write{path_clause} "
         f"(permission denied). The approval handshake succeeded, but the identity "
-        f"the connector dispatched the write with {capability_clause}.{identity_clause} "
-        f"This is a deploy write-identity gap, not a bug in the approve→execute flow: "
-        f"add the per-operator write-capability stanza (§6.1) so the "
-        f"dispatching/reviewing operator's token can write the path, and verify it "
-        f"with the 'sys/capabilities-self' probe (§6.2). Do NOT widen the backplane's "
-        f"shared Vault policy — the write grant is per-operator templated. See "
-        f"{_VAULT_WRITE_POLICY_DOC} §6 for the write-identity contract."
+        f"the connector dispatched the write with {capability_clause}.{identity_clause}"
+        f"{target_clause} "
+        f"This is a deploy write-identity gap, not a bug in the approve→execute flow. "
+        f"Fix it in this order: (1) check the target's vault_role — the write runs "
+        f"under the operator's token and the vault_role of the target it is "
+        f"dispatched on, so another registered vault target may already hold this "
+        f"path under a broader role; dispatch the same write there (no policy "
+        f"change). (2) Otherwise add the per-operator write-capability stanza (§6.1) "
+        f"so the dispatching/reviewing operator's token can write the path, and "
+        f"verify it with the 'sys/capabilities-self' probe (§6.2). Do NOT widen the "
+        f"backplane's shared Vault policy — the write grant is per-operator "
+        f"templated. See {_VAULT_WRITE_POLICY_DOC} §6 for the write-identity contract."
     )
     if msg:
         # hvac renders Forbidden as "permission denied, on POST <url>" — the

@@ -476,12 +476,14 @@ class _PathPrefixStubLlmClient:
     # vcenter.yaml families the single-spec canary shipped with; the
     # last six cover vi-json.yaml's Managed-Object surface (per-MO
     # method calls accessed via ``/<ManagedObjectType>/{moId}/<Method>``
-    # paths). Pass-1 runs exactly once during the two-spec ingest --
+    # paths). The full Pass-1 runs once during the two-spec ingest --
     # against the first ``ingest()`` call's unassigned-op set, which
     # carries only vcenter ops -- so the static taxonomy must declare
     # the vi-json groups up front. The second ``ingest()`` call's
     # partial-regrouping path picks up these same keys verbatim when
-    # Pass-2 classifies vi-json ops.
+    # Pass-2 classifies vi-json ops. Its "extend" Pass-1 for leftovers
+    # gets this same response; every key already exists, so all of
+    # them are dropped (#3713).
     _PROPOSE_RESPONSE: str = json.dumps(
         [
             {
@@ -1107,8 +1109,8 @@ def _canary_corpus(
     ``vi-json.yaml`` under the same connector triple. The second call
     exercises the auto-shim idempotency branch
     (``connector_registered=False``) plus the LLM-grouping pass's
-    partial-regrouping path (Pass 1 skipped, Pass 2 assigns the new
-    ops to the existing taxonomy).
+    partial-regrouping path (Pass 2 assigns the new ops to the existing
+    taxonomy; the "extend" Pass 1 for leftovers adds no group).
 
     Module scope is the load-bearing choice (PR #2995 review finding
     B1): a full two-spec ingest costs ~164 s on CI runners, and the
@@ -1851,20 +1853,24 @@ async def test_canary_llm_call_count_matches_documented_contract(
 
     Two-spec mode: the vcenter ingest issues Pass-1 (exactly once)
     plus ~26 Pass-2 batches; the vi-json ingest sees existing groups
-    so Pass-1 is skipped (partial-regrouping path) and only ~44
-    Pass-2 batches run (~2,195 ops at ``batch_size=50``). Aggregate
-    ``1 + ~26 + ~44 = ~71`` calls.
+    so it takes the partial-regrouping path: ~44 Pass-2 batches
+    (~2,195 ops at ``batch_size=50``), then one "extend" Pass-1 for the
+    ops the stub left unassigned (#3713). The stub's static taxonomy
+    only repeats existing keys, so every proposal is dropped and no
+    extra Pass-2 batch runs. Aggregate ``2 + ~26 + ~44 = ~72`` calls.
 
     Bounds are wide enough to survive vendor spec churn.
     """
     stub_client = ingested_canary.stub_client
     call_count = len(stub_client.calls)
-    # Pass-1 is exactly one call by construction -- it runs in the
-    # first ingest call's grouping phase; the vi-json ingest's
-    # grouping phase takes the partial-regrouping branch (Pass-1
-    # skipped because vcenter groups already exist).
+    # The first ingest's grouping phase runs one full Pass-1. In
+    # two-spec mode the vi-json ingest takes the partial-regrouping
+    # branch and adds one "extend" Pass-1 for its leftover ops (#3713).
     propose_calls = [c for c in stub_client.calls if c["phase"] == "propose"]
-    assert len(propose_calls) == 1, f"expected exactly 1 Pass-1 call; got {len(propose_calls)}"
+    expected_propose = 2 if ingested_canary.two_spec_mode else 1
+    assert len(propose_calls) == expected_propose, (
+        f"expected exactly {expected_propose} Pass-1 call(s); got {len(propose_calls)}"
+    )
     assign_calls = [c for c in stub_client.calls if c["phase"] == "assign"]
     if ingested_canary.two_spec_mode:
         # Pass-2 across both specs: ceil(1275/50)=26 + ceil(2195/50)=44 = 70

@@ -103,6 +103,7 @@ from meho_backplane.operations.ingest.api_schemas import (
     AffectedSensorModel,
     DroppedOpModel,
     GroupingResultModel,
+    GroupSummaryModel,
     IngestionResultModel,
     SafetyChangeModel,
     SpecSource,
@@ -464,6 +465,17 @@ class IngestionPipelineResult:
                 operations_unassigned=self.grouping.operations_unassigned,
                 llm_call_count=self.grouping.llm_call_count,
                 llm_duration_ms=self.grouping.llm_duration_ms,
+                groups=[
+                    GroupSummaryModel(
+                        group_key=g.group_key,
+                        created=g.created,
+                        operations_added=g.operations_added,
+                        typed_operation_count=g.typed_operation_count,
+                        composite_operation_count=g.composite_operation_count,
+                        ingested_operation_count=g.ingested_operation_count,
+                    )
+                    for g in self.grouping.groups
+                ],
             )
         return ingestion_model, grouping_model
 

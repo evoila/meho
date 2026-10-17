@@ -1055,18 +1055,18 @@ async def test_agent_flow_search_and_add_memory_round_trip(
     )
     hits = search_result["hits"]
     assert hits, f"search_memory returned no hits for {distinctive_phrase!r}"
-    slugs = [hit["entry"]["slug"] for hit in hits]
+    slugs = [hit["slug"] for hit in hits]
     assert distinctive_slug in slugs, (
         f"add_to_memory + search_memory round-trip failed; hits did not include "
         f"{distinctive_slug!r}. Got {slugs}"
     )
 
     # G0.9.1-T4 (#776): search must return real timestamps, not epoch.
-    matching_hit = next(hit for hit in hits if hit["entry"]["slug"] == distinctive_slug)
+    matching_hit = next(hit for hit in hits if hit["slug"] == distinctive_slug)
     written_created = datetime.fromisoformat(add_result["created_at"])
     written_updated = datetime.fromisoformat(add_result["updated_at"])
-    searched_created = datetime.fromisoformat(matching_hit["entry"]["created_at"])
-    searched_updated = datetime.fromisoformat(matching_hit["entry"]["updated_at"])
+    searched_created = datetime.fromisoformat(matching_hit["created_at"])
+    searched_updated = datetime.fromisoformat(matching_hit["updated_at"])
     # The write path and the search path read from the same row; the
     # column values must match exactly. Using ``==`` rather than a
     # tolerance because both timestamps originate from the same UPDATE

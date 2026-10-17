@@ -309,14 +309,29 @@ func printGrantList(w io.Writer, grants []api.ServiceGrantRead) {
 		fmt.Fprintln(w, "no service-principal grants in this tenant")
 		return
 	}
-	fmt.Fprintf(w, "%-36s %-28s %-28s %-22s %s\n", "ID", "PRINCIPAL", "OP_ID", "CONNECTOR", "EXPIRES_AT")
+	fmt.Fprintf(w, "%-36s %-28s %-28s %-22s %-25s %s\n", "ID", "PRINCIPAL", "OP_ID", "CONNECTOR", "EXPIRES_AT", "ORPHANED")
+	orphans := 0
 	for _, grant := range grants {
 		exp := "-"
 		if grant.ExpiresAt != nil {
 			exp = grant.ExpiresAt.UTC().Format(time.RFC3339)
 		}
-		fmt.Fprintf(w, "%-36s %-28s %-28s %-22s %s\n", grant.Id.String(), grant.PrincipalSub, grant.OpId, grant.ConnectorId, exp)
+		orphaned := "-"
+		if isOrphaned(grant) {
+			orphaned = "yes"
+			orphans++
+		}
+		fmt.Fprintf(w, "%-36s %-28s %-28s %-22s %-25s %s\n", grant.Id.String(), grant.PrincipalSub, grant.OpId, grant.ConnectorId, exp, orphaned)
 	}
+	if orphans > 0 {
+		fmt.Fprintf(w, "\n%d grant(s) are orphaned: their target was deleted or registered again under a new id, so they never match.\nRun `meho service-principals grants show <grant-id>` to see how to fix each one.\n", orphans)
+	}
+}
+
+// isOrphaned reports the server's read-time orphan flag: the grant's concrete
+// target no longer exists, so the grant can never match a dispatch.
+func isOrphaned(grant api.ServiceGrantRead) bool {
+	return grant.Orphaned != nil && *grant.Orphaned
 }
 
 func printGrantDetail(w io.Writer, grant *api.ServiceGrantRead) {
@@ -334,6 +349,12 @@ func printGrantDetail(w io.Writer, grant *api.ServiceGrantRead) {
 		exp = grant.ExpiresAt.UTC().Format(time.RFC3339)
 	}
 	fmt.Fprintf(w, "id:                  %s\nprincipal_sub:       %s\nop_id:               %s\nconnector_id:        %s\ntarget:              %s\nreason:              %s\nexpires_at:          %s\ncreated_by:          %s\n", grant.Id.String(), grant.PrincipalSub, grant.OpId, grant.ConnectorId, target, grant.Reason, exp, grant.CreatedBySub)
+	if isOrphaned(*grant) {
+		fmt.Fprintln(w, "orphaned:            yes")
+		if grant.OrphanRemediation != nil {
+			fmt.Fprintf(w, "remediation:         %s\n", *grant.OrphanRemediation)
+		}
+	}
 }
 
 func renderGrantEntry(w io.Writer, grant *api.ServiceGrantRead, jsonOut bool, verb string) error {

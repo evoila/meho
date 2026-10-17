@@ -43,7 +43,7 @@ from pydantic import ValidationError
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.jsonflux.query.json_pointer import MAX_POINTER_LENGTH
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
-from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.server import McpInvalidParamsError, McpRateLimitedError
 from meho_backplane.operations.result_query import (
     MAX_LIMIT,
     QueryContractError,
@@ -51,6 +51,7 @@ from meho_backplane.operations.result_query import (
     ResultQueryOutputTooLargeError,
     ResultQuerySpec,
     ResultQueryTimeoutError,
+    ResultReadRejectedError,
     read_result_window,
     run_result_query,
 )
@@ -75,7 +76,9 @@ async def _result_query_handler(
     optional ``query`` argument:
 
     * absent → paging mode: delegate the ``[offset : offset+limit]`` window
-      to the shared :func:`read_result_window` core (unchanged, #3179).
+      to the shared :func:`read_result_window` core (#3179). A page that
+      runs past the time budget (#3640) is the same recoverable
+      ``query_timeout`` as a query.
     * present → query mode: validate it into a
       :class:`~meho_backplane.jsonflux.query.contract.ResultQuerySpec` and
       delegate to :func:`run_result_query`, which compiles it to one bounded
@@ -107,8 +110,14 @@ async def _result_query_handler(
         raise _handle_not_found(handle_id) from exc
     except QueryContractError as exc:
         raise McpInvalidParamsError(str(exc), data={"reason": "invalid_query"}) from exc
+    except ResultQueryTimeoutError as exc:
+        raise McpInvalidParamsError(str(exc), data={"reason": "query_timeout"}) from exc
     except ResultQueryOutputTooLargeError as exc:
-        raise McpInvalidParamsError(str(exc), data={"reason": "output_too_large"}) from exc
+        raise McpInvalidParamsError(
+            str(exc), data={"reason": "output_too_large", "delivery": "unavailable"}
+        ) from exc
+    except ResultReadRejectedError as exc:
+        raise _read_rejected(exc) from exc
 
 
 async def _run_query(
@@ -143,7 +152,19 @@ async def _run_query(
     except ResultQueryTimeoutError as exc:
         raise McpInvalidParamsError(str(exc), data={"reason": "query_timeout"}) from exc
     except ResultQueryOutputTooLargeError as exc:
-        raise McpInvalidParamsError(str(exc), data={"reason": "output_too_large"}) from exc
+        raise McpInvalidParamsError(
+            str(exc), data={"reason": "output_too_large", "delivery": "unavailable"}
+        ) from exc
+    except ResultReadRejectedError as exc:
+        raise _read_rejected(exc) from exc
+
+
+def _read_rejected(exc: ResultReadRejectedError) -> McpRateLimitedError:
+    """Build the recoverable ``-32000`` error for a refused read (#3640)."""
+    return McpRateLimitedError(
+        str(exc),
+        data={"reason": exc.reason, "retry_after_seconds": exc.retry_after_seconds},
+    )
 
 
 def _handle_not_found(handle_id: UUID) -> McpInvalidParamsError:

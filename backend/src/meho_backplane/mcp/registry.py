@@ -97,6 +97,8 @@ __all__ = [
     "has_addon_gated_tools",
     "register_mcp_resource",
     "register_mcp_tool",
+    "registered_resource_templates",
+    "registered_tool_names",
     "role_at_least",
     "surface_visible",
 ]
@@ -673,6 +675,16 @@ def register_mcp_resource(
 def get_tool(name: str) -> tuple[ToolDefinition, ToolHandler] | None:
     """Return ``(definition, handler)`` for *name*, or ``None`` if unregistered."""
     return _TOOLS.get(name)
+
+
+def registered_tool_names() -> frozenset[str]:
+    """Return the name of every registered tool (request usage route catalog, #3734)."""
+    return frozenset(_TOOLS)
+
+
+def registered_resource_templates() -> frozenset[str]:
+    """Return every registered resource ``uriTemplate`` (request usage route catalog, #3734)."""
+    return frozenset(_RESOURCES)
 
 
 def get_resource_for_uri(

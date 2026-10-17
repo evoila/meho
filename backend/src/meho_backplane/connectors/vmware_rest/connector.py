@@ -384,8 +384,12 @@ _VIJSON_AFTER_RELOGIN_AUTH_STATUSES: Final[frozenset[int]] = frozenset({401})
 #: ``NoPermission`` (principal lacks the privilege) — genuine rejections a fresh
 #: session cannot fix — a ``NotAuthenticated`` is a session-liveness signal.
 _PBM_REMINT_FAULT_TYPE: Final[str] = "NotAuthenticated"
-#: ``probe_method`` stamped on a standalone-ESXi fingerprint.
-_ESXI_SOAP_PROBE = "GET /api/about (400) -> soap-retrieveservicecontent"
+#: ``probe_method`` stamped on a standalone-ESXi fingerprint (#3710). It names
+#: the call that proves reachability -- the authenticated
+#: ``SessionManager.currentSession`` read over SOAP -- and ends in ``(live)``:
+#: every ESXi probe makes that call to the host, even on a warm session cache.
+#: The ESXi probe never answers from cache, so there is no ``(cached)`` form.
+_ESXI_SOAP_PROBE = "GET /api/about (400) -> soap-currentsession (live)"
 
 # JSON-RPC 2.0 discriminator ESXi's ``/api`` handler stamps on its error
 # bodies. Recognising it (or the "Unsupported content type" message text)
@@ -2368,8 +2372,8 @@ class VmwareRestConnector(HttpConnector):
         ``_about_versions`` (exact, e.g. ``9.1.0``); product is stamped
         ``esxi`` (the same slug ``product_from_line_id`` maps ``embeddedEsx`` /
         ``esx`` to and ``classify_host_target`` keys off). ``probe_method``
-        names the ``GET /api/about`` 400 → SOAP ``RetrieveServiceContent``
-        chain (``about.apiType == "HostAgent"``).
+        names the ``GET /api/about`` 400 → SOAP ``currentSession`` liveness
+        read chain and ends in ``(live)`` (:data:`_ESXI_SOAP_PROBE`).
 
         #3773(d)/#3710 — reachability is **confirmed with one lightweight
         authenticated read** routed through the (b)-protected object.collect
@@ -2384,13 +2388,17 @@ class VmwareRestConnector(HttpConnector):
         """
         cache_key = target_cache_key(target)
         version = self._about_versions.get(cache_key)
-        if not await self._esxi_session_is_live(target, operator):
+        live, session_reset = await self._esxi_session_is_live(target, operator)
+        # #3777: mark a probe that had to log in again, so it can be told
+        # apart from one that reused a warm session.
+        reset_marker = {"session_health_reset": 1} if session_reset else {}
+        if not live:
             return self._unreachable_fingerprint(
                 target,
                 probed_at,
                 _ESXI_SOAP_PROBE,
                 "authenticated liveness read returned no session (stale/void SOAP session)",
-                extras={"session_flavor": HOST_FLAVOR_ESXI, "version": version},
+                extras={"session_flavor": HOST_FLAVOR_ESXI, "version": version, **reset_marker},
             )
         return FingerprintResult(
             vendor="vmware",
@@ -2406,10 +2414,13 @@ class VmwareRestConnector(HttpConnector):
                 "api_version": self._esxi_api_versions.get(cache_key),
                 "api_type": "HostAgent",
                 "session_flavor": HOST_FLAVOR_ESXI,
+                **reset_marker,
             },
         )
 
-    async def _esxi_session_is_live(self, target: VsphereTargetLike, operator: Operator) -> bool:
+    async def _esxi_session_is_live(
+        self, target: VsphereTargetLike, operator: Operator
+    ) -> tuple[bool, bool]:
         """Confirm the ESXi SOAP session is live with one authenticated read (#3773d/#3710).
 
         Reads the single ``SessionManager.currentSession`` property off the
@@ -2419,13 +2430,22 @@ class VmwareRestConnector(HttpConnector):
         read is deliberately tiny (one property on the already-cached moid) so
         the probe stays lightweight.
 
-        Returns ``True`` when ``currentSession`` comes back (the session is
+        Returns ``(live, session_reset)``. ``live`` is ``True`` when
+        ``currentSession`` comes back (the session is
         live, or was healed by the reset); ``False`` when the moid is unknown,
         the property is still missing after the reset (a genuinely dead session
         the re-login could not recover), or the read raises (auth rejected /
         transport / re-login failure). ``fingerprint`` maps ``False`` to a
         ``reachable=False`` result — this is the whole of the #3710 masking
         close, so a failure here must degrade to "unreachable", never propagate.
+
+        ``session_reset`` is ``True`` when the read had to drop the session and
+        log in again (#3777). That re-login also logs a
+        ``vmware_esxi_probe_session_relogin`` event with the target name and the
+        fault class names that caused it (names only, never fault text). Both
+        survive a retried read that raises: the helper reports the reset
+        through ``on_reset`` before the retry, so the marker and the event
+        are kept with ``live=False`` when the second read fails.
         """
         # Local import: connector.py is imported by the object.collect module's
         # TYPE_CHECKING block only, so a module-level import here would risk an
@@ -2443,19 +2463,44 @@ class VmwareRestConnector(HttpConnector):
             # report reachable without a live authenticated read). SessionManager
             # is always present on a real endpoint, so this is a dead-in-practice
             # edge.
-            return False
+            return False, False
+        reset_fault_types: list[str] = []
+
+        def _record_reset(fault_types: list[str]) -> None:
+            reset_fault_types.extend(fault_types)
+
+        live = False
         try:
             (
                 read_props,
                 _missing,
                 _missing_properties,
                 _fault_counts,
+                _,
             ) = await _collect_with_auth_health_reset(
-                self, operator, target, "SessionManager", sm_moid, ["currentSession"]
+                self,
+                operator,
+                target,
+                "SessionManager",
+                sm_moid,
+                ["currentSession"],
+                on_reset=_record_reset,
             )
         except (ConnectorAuthError, CredentialsReadError, httpx.HTTPError, OSError, RuntimeError):
-            return False
-        return "currentSession" in read_props
+            # The retried read failed, so the session is not live. If the
+            # reset ran before the failure, the marker and the event below
+            # still record it.
+            pass
+        else:
+            live = "currentSession" in read_props
+        if reset_fault_types:
+            _log.info(
+                "vmware_esxi_probe_session_relogin",
+                target=target.name,
+                fault_types=reset_fault_types,
+                live=live,
+            )
+        return live, bool(reset_fault_types)
 
     async def _fingerprint_via_service_versions(
         self,

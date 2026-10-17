@@ -80,18 +80,21 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from enum import StrEnum
 from typing import Any, Final, cast
 
 import structlog
 from sqlalchemy import CursorResult, and_, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.delegation import resolve_actor_sub
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.db.models import (
     ApprovalRequest,
     ApprovalRequestStatus,
+    AuditEventClass,
     AuditLog,
 )
 from meho_backplane.operations._audit import (
@@ -119,25 +122,31 @@ from meho_backplane.operations.approval_handoff import (
 from meho_backplane.operations.reducer import handle_owner_sub_var
 
 __all__ = [
+    "EXPIRY_OPERATOR_SUB",
     "MAX_REASON_LENGTH",
     "ApprovalError",
     "ApprovalNotFoundError",
     "ApprovalRequestAlreadyDecidedError",
     "ApprovalRequestExpiredError",
+    "ApprovalResultState",
+    "DelegatedDecisionForbiddenError",
     "DelegatedReasonInvalidError",
     "Delegation",
+    "IdempotencyKeyConflictError",
     "NonHumanApprovalError",
     "ParamsMismatchError",
     "PreviewBindingMissingError",
     "ResultAccessForbiddenError",
     "SelfApprovalForbiddenError",
     "UnauthorizedApprovalError",
+    "approval_result_state",
     "approve_request",
     "claim_resume",
     "composite_resume_binding",
     "consume_remote_write_approval",
     "create_pending_request",
     "expire_stale_requests",
+    "expiry_operator",
     "find_remote_write_approval",
     "get_decision_delegation",
     "get_request",
@@ -228,6 +237,26 @@ class ParamsMismatchError(ApprovalError):
         super().__init__(
             f"params hash mismatch on approval_request {request_id}; "
             "original params must be supplied unchanged"
+        )
+
+
+class IdempotencyKeyConflictError(ApprovalError):
+    """An ``idempotency_key`` is already used by a different call (#3486).
+
+    Raised by :func:`create_pending_request` when the same principal sends a
+    key that a live (``pending`` or ``approved``) request already holds, but
+    the new call is not the same call: a different ``op_id``,
+    ``connector_id``, target, params, ``preview_hash`` or ``work_ref``.
+    Returning the old request would tell the caller that the wrong call is
+    waiting for approval, so the new call is refused and nothing is parked.
+    """
+
+    def __init__(self, request_id: uuid.UUID) -> None:
+        self.request_id = request_id
+        super().__init__(
+            f"idempotency_key is already used by approval_request {request_id} "
+            "for a different call; send the identical call to get that request "
+            "back, or use a new key"
         )
 
 
@@ -380,6 +409,31 @@ class DelegatedReasonInvalidError(ApprovalError):
         )
 
 
+class DelegatedDecisionForbiddenError(ApprovalError):
+    """A delegated decision was made on a deployment that is not lab-class.
+
+    Raised by :func:`approve_request` and :func:`reject_request` when the
+    decision ``reason`` carries a valid delegation block (#3692) and the
+    deployment has not set ``Settings.approval_allow_delegated_decision``
+    (#3693). On production an approve or reject must be the approver's own
+    call, not one made on another person's instruction. The switch is read
+    from the environment at boot, so no request field can change the
+    outcome. The route layer maps this to 403.
+    """
+
+    def __init__(self, request_id: uuid.UUID, *, operator_sub: str, instructed_by: str) -> None:
+        self.request_id = request_id
+        self.operator_sub = operator_sub
+        self.instructed_by = instructed_by
+        super().__init__(
+            f"operator {operator_sub!r} may not decide approval_request "
+            f"{request_id} on the instruction of {instructed_by!r}: delegated "
+            "decisions are allowed only on lab-class deployments "
+            "(APPROVAL_ALLOW_DELEGATED_DECISION=true). Decide on your own "
+            "judgement, without the Instructed-by: block"
+        )
+
+
 #: Upper bound on a decision ``reason``, shared by the REST bodies and the
 #: console form. The audit row stores the reason verbatim; the bound keeps a
 #: paste accident from landing a huge free-text blob on the ledger.
@@ -517,6 +571,302 @@ def _record_delegation(
     )
 
 
+def _check_delegated_allowed(
+    delegation: Delegation | None,
+    *,
+    request: ApprovalRequest,
+    operator: Operator,
+    decision: str,
+) -> None:
+    """Refuse a delegated decision unless the deployment is lab-class (#3693).
+
+    An ordinary decision (*delegation* is ``None``) always passes. A
+    delegated one passes only when ``Settings.approval_allow_delegated_decision``
+    is set. Settings are imported lazily, like :func:`_check_self_approval`.
+
+    Raises:
+        DelegatedDecisionForbiddenError: Delegated decision on a deployment
+            without the lab-class switch.
+    """
+    if delegation is None:
+        return
+
+    from meho_backplane.settings import get_settings
+
+    if get_settings().approval_allow_delegated_decision:
+        return
+    _log.warning(
+        "approval_delegated_decision_refused",
+        approval_request_id=str(request.id),
+        op_id=request.op_id,
+        decision=decision,
+        operator_sub=operator.sub,
+        instructed_by=delegation.instructed_by,
+        tenant_id=str(operator.tenant_id),
+    )
+    raise DelegatedDecisionForbiddenError(
+        request.id, operator_sub=operator.sub, instructed_by=delegation.instructed_by
+    )
+
+
+class ApprovalResultState(StrEnum):
+    """Whether an approved request has run yet (#3486).
+
+    Read off the row, never stored. ``status`` keeps its closed four-state
+    contract; this field adds the run phase next to it, so a client that
+    lists or shows requests can tell "approved, not run yet" from
+    "approved and run" without polling the owner-only ``/result`` read.
+
+    * :attr:`NOT_STARTED` -- approved, and no resumer has claimed the run
+      yet (``resumed_at IS NULL``).
+    * :attr:`STARTED` -- a resumer claimed the run (``resumed_at`` is set),
+      but no result is stored. Either the op is still running, or the run
+      ended without a stored result: the result write is best-effort, and a
+      re-dispatch that raised instead of returning an envelope stores
+      nothing. Both resume paths (operator surfaces and the in-process
+      agent waiter) store the envelope they get back.
+    * :attr:`EXECUTED` -- the stored result has ``status == "ok"``.
+    * :attr:`FAILED` -- a result is stored and its ``status`` is not ``ok``.
+    """
+
+    NOT_STARTED = "not_started"
+    STARTED = "started"
+    EXECUTED = "executed"
+    FAILED = "failed"
+
+
+def approval_result_state(request: ApprovalRequest) -> ApprovalResultState | None:
+    """Return the run phase of *request*, or ``None`` when it is not approved (#3486)."""
+    if request.status != ApprovalRequestStatus.APPROVED.value:
+        return None
+    if request.resume_result is not None:
+        if request.resume_result.get("status") == "ok":
+            return ApprovalResultState.EXECUTED
+        return ApprovalResultState.FAILED
+    if request.resumed_at is not None:
+        return ApprovalResultState.STARTED
+    return ApprovalResultState.NOT_STARTED
+
+
+#: Statuses in which a request still holds its ``idempotency_key`` (#3486).
+#: Must match the partial unique index predicate of migration ``0105``.
+_IDEMPOTENT_LIVE_STATUSES: Final[tuple[str, ...]] = (
+    ApprovalRequestStatus.PENDING.value,
+    ApprovalRequestStatus.APPROVED.value,
+)
+
+
+async def _find_idempotent_request(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    principal_sub: str,
+    idempotency_key: str,
+) -> ApprovalRequest | None:
+    """Return the live request that holds *idempotency_key* for this principal.
+
+    Scoped to the tenant **and** the principal, so a key never matches
+    another tenant's or another requester's request.
+
+    ``populate_existing`` refreshes a row the session already holds. The
+    retry loop in :func:`_resolve_idempotent_request` calls this again after
+    its locked re-read missed; by then the row may have been approved on
+    another connection. Without the refresh the session would keep the
+    cached ``pending`` state, treat the row as overdue again, and loop.
+    """
+    stmt = (
+        select(ApprovalRequest)
+        .where(
+            ApprovalRequest.tenant_id == tenant_id,
+            ApprovalRequest.principal_sub == principal_sub,
+            ApprovalRequest.idempotency_key == idempotency_key,
+            ApprovalRequest.status.in_(_IDEMPOTENT_LIVE_STATUSES),
+        )
+        .execution_options(populate_existing=True)
+    )
+    return (await session.execute(stmt)).scalars().first()
+
+
+def _reuse_idempotent_request(
+    existing: ApprovalRequest,
+    *,
+    op_id: str,
+    connector_id: str,
+    target_id: uuid.UUID | None,
+    params_hash: str,
+    preview_hash: str | None,
+) -> ApprovalRequest:
+    """Return *existing* for a retry, or refuse when the call differs (#3486).
+
+    The retry must be the identical call. ``work_ref`` is compared too, so
+    two runs under different change tickets never share one request.
+    """
+    same_call = (
+        existing.op_id == op_id
+        and existing.connector_id == connector_id
+        and existing.target_id == target_id
+        and existing.params_hash == params_hash
+        and existing.preview_hash == preview_hash
+        and existing.work_ref == work_ref_var.get()
+    )
+    if not same_call:
+        raise IdempotencyKeyConflictError(existing.id)
+    _log.info(
+        "approval_request_reused",
+        approval_request_id=str(existing.id),
+        op_id=op_id,
+        connector_id=connector_id,
+        principal_sub=existing.principal_sub,
+        tenant_id=str(existing.tenant_id),
+    )
+    existing._reused = True  # type: ignore[attr-defined]
+    return existing
+
+
+async def _insert_idempotent_request(
+    session: AsyncSession, request: ApprovalRequest, *, idempotency_key: str
+) -> ApprovalRequest | None:
+    """Insert *request* in a savepoint; return the winner if a racer got there first.
+
+    The partial unique index (migration ``0105``) makes the second of two
+    racing inserts fail. That insert's savepoint rolls back, the outer
+    transaction stays usable, and the row the other request committed is
+    returned. Returns ``None`` when *request* itself was inserted.
+    """
+    try:
+        async with session.begin_nested():
+            session.add(request)
+            await session.flush()
+    except IntegrityError:
+        existing = await _find_idempotent_request(
+            session,
+            tenant_id=request.tenant_id,
+            principal_sub=request.principal_sub,
+            idempotency_key=idempotency_key,
+        )
+        if existing is None:
+            raise
+        return existing
+    return None
+
+
+#: The acting identity for every expiry: the sweeper and the late-retry path
+#: of :func:`create_pending_request`. A stable synthetic sub makes expiries
+#: filterable in audit queries and distinct from operator-driven decisions,
+#: the same pattern the topology scheduler (``system:topology-scheduler``)
+#: and connector system contexts use.
+EXPIRY_OPERATOR_SUB: Final = "system:approval-expiry"
+
+
+def expiry_operator(tenant_id: uuid.UUID) -> Operator:
+    """Build the synthetic per-tenant operator that expires requests.
+
+    ``raw_jwt`` is the empty string: an expiry forwards no token
+    downstream. ``OPERATOR`` role satisfies the ``>= operator`` floor
+    :func:`expire_stale_requests` enforces on the acting identity.
+    """
+    return Operator(
+        sub=EXPIRY_OPERATOR_SUB,
+        name=None,
+        email=None,
+        raw_jwt="",
+        tenant_id=tenant_id,
+        tenant_role=TenantRole.OPERATOR,
+    )
+
+
+def _is_overdue_pending(existing: ApprovalRequest) -> bool:
+    """True when *existing* is ``pending`` and past its deadline (#3486)."""
+    if existing.status != ApprovalRequestStatus.PENDING.value:
+        return False
+    return _deadline_has_passed(existing, _now(), _resolve_default_ttl())
+
+
+async def _lock_and_expire_pending(
+    session: AsyncSession, existing: ApprovalRequest
+) -> ApprovalRequest | None:
+    """Lock the overdue *existing* row and expire it; ``None`` if it changed (#3486).
+
+    The sweeper may not have run yet (or may be off). An overdue ``pending``
+    row can no longer be approved, so a retry must not get it back. It is
+    locked and expired here, in the caller's transaction, the same way
+    :func:`expire_stale_requests` does it and under the same
+    :func:`expiry_operator` identity, so the decision audit row names the
+    system, not the requester. That frees the key for a new request.
+
+    Returns ``None`` when the locked re-read finds no ``pending`` row with
+    this id: a concurrent sweep, reject, approve, or another retry changed
+    it between the caller's first read and this lock. The caller must then
+    look the key up again instead of using the stale row.
+    """
+    cutoff = _now()
+    default_ttl = _resolve_default_ttl()
+    stmt = (
+        select(ApprovalRequest)
+        .where(
+            ApprovalRequest.id == existing.id,
+            ApprovalRequest.status == ApprovalRequestStatus.PENDING.value,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    locked = (await session.execute(stmt)).scalars().first()
+    if locked is None:
+        return None
+    await _expire_request(
+        session,
+        locked,
+        operator=expiry_operator(locked.tenant_id),
+        cutoff=cutoff,
+        default_ttl=default_ttl,
+    )
+    return locked
+
+
+async def _resolve_idempotent_request(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    principal_sub: str,
+    idempotency_key: str,
+) -> tuple[ApprovalRequest | None, ApprovalRequest | None]:
+    """Find what *idempotency_key* holds right now: ``(live, expired)`` (#3486).
+
+    * ``(row, None)``: a usable request holds the key (``approved``, or
+      ``pending`` within its deadline). The caller returns it for the retry.
+    * ``(None, row)``: the key was held by an overdue ``pending`` request.
+      This call expired it; the caller parks a new request with the key.
+    * ``(None, None)``: the key is free.
+
+    When the locked re-read in :func:`_lock_and_expire_pending` misses, the
+    row changed under us: a sweep or reject freed the key, an approve kept
+    it live, or another retry already expired the row and parked its
+    replacement. The key is looked up again so the caller gets that current
+    state (the replacement, for example), never the stale first read. Each
+    repeat follows a committed change to the row it saw, so the loop ends.
+    """
+    while True:
+        existing = await _find_idempotent_request(
+            session,
+            tenant_id=tenant_id,
+            principal_sub=principal_sub,
+            idempotency_key=idempotency_key,
+        )
+        if existing is None:
+            return None, None
+        if not _is_overdue_pending(existing):
+            return existing, None
+        expired = await _lock_and_expire_pending(session, existing)
+        if expired is not None:
+            return None, expired
+        _log.info(
+            "approval_request_idempotency_key_rechecked",
+            approval_request_id=str(existing.id),
+            principal_sub=principal_sub,
+            tenant_id=str(tenant_id),
+        )
+
+
 def _now() -> datetime:
     """Return the current UTC datetime. Isolated for testing."""
     return datetime.now(UTC)
@@ -561,6 +911,7 @@ async def _write_audit_row(
     session: AsyncSession,
     *,
     audit_id: uuid.UUID,
+    event_class: AuditEventClass,
     operator: Operator,
     request: ApprovalRequest,
     path: str,
@@ -569,6 +920,12 @@ async def _write_audit_row(
     extra_payload: dict[str, Any] | None = None,
 ) -> None:
     """Insert one ``audit_log`` row for an approval queue event.
+
+    *event_class* (#3733) is declared by each caller:
+    ``policy_decision`` for the ``approval.request`` row (the gate decided
+    the call needs approval), ``approval_decision`` for an approve, reject
+    or expiry ``approval.decision`` row, and ``legacy_request`` for the
+    ``approval.result`` read row.
 
     Uses ``method='APPROVAL'`` and the provided *path* (``'approval.request'``
     or ``'approval.decision'``). The payload carries the
@@ -594,7 +951,8 @@ async def _write_audit_row(
     }
     # Hoist the acting operator's display name so the name-aware audit views
     # resolve the approval row's ``operator_sub`` to a human name (#3300) --
-    # the same ``payload['principal_name']`` shape dispatch rows carry (#1212).
+    # the same ``payload['principal_name']`` shape the MCP wrapper rows (#1212)
+    # and the DISPATCH run rows (#4029) carry.
     # ``operator`` is the requester on a "request" row / the reviewer on a
     # "decision" row, so the name always pairs with ``operator_sub``. Omitted
     # when the token had no name (resolver fails open to the raw sub); display
@@ -644,6 +1002,7 @@ async def _write_audit_row(
         target_id=request.target_id,
         parent_audit_id=parent_audit_id,
         agent_session_id=request.agent_session_id,
+        event_class=event_class,
         method="APPROVAL",
         path=path,
         status_code=status_code,
@@ -681,6 +1040,7 @@ async def create_pending_request(
     expires_at: datetime | None = None,
     preview_hash: str | None = None,
     resume_parent: dict[str, Any] | None = None,
+    idempotency_key: str | None = None,
 ) -> ApprovalRequest:
     """Insert a pending :class:`ApprovalRequest` row + one audit row.
 
@@ -726,17 +1086,53 @@ async def create_pending_request(
             dispatchable descriptor call, so
             :func:`resume_dispatch_after_approval` re-dispatches this parent
             composite ``_approved=True`` with the approved sub-op pre-cleared.
-            An optional ``"state"`` key carries what the sub-op saved for
-            that re-entry (#3697). ``None`` for a direct-op park (the
-            generic re-dispatch of ``op_id`` is used).
+            ``None`` for a direct-op park (the generic re-dispatch of
+            ``op_id`` is used).
+        idempotency_key: Optional client-chosen retry key (#3486). When the
+            same principal in the same tenant already has a ``pending`` or
+            ``approved`` request with this key, that request is returned
+            instead of a new one: no new row, no new audit row. The
+            returned row carries the transient attr ``_reused = True`` (and
+            no ``_audit_id``), so the caller does not publish a second
+            ``approval.pending`` event. A ``pending`` request already past
+            its deadline is not returned: it is expired in this
+            transaction and a new request is parked. The new row then
+            carries the expired one as ``_expired_request`` (else
+            ``None``), so the caller can publish ``approval.expired``
+            after commit. ``None`` keeps the old behaviour.
 
     Returns:
-        The flushed :class:`ApprovalRequest` row.
+        The flushed :class:`ApprovalRequest` row (new, or reused).
+
+    Raises:
+        IdempotencyKeyConflictError: *idempotency_key* is held by a live
+            request for a different call.
     """
     target_id: uuid.UUID | None = None
     raw_tid = getattr(target, "id", None) if target is not None else None
     if isinstance(raw_tid, uuid.UUID):
         target_id = raw_tid
+
+    def _reuse(existing: ApprovalRequest) -> ApprovalRequest:
+        return _reuse_idempotent_request(
+            existing,
+            op_id=op_id,
+            connector_id=connector_id,
+            target_id=target_id,
+            params_hash=params_hash,
+            preview_hash=preview_hash,
+        )
+
+    expired_request: ApprovalRequest | None = None
+    if idempotency_key is not None:
+        live, expired_request = await _resolve_idempotent_request(
+            session,
+            tenant_id=operator.tenant_id,
+            principal_sub=operator.sub,
+            idempotency_key=idempotency_key,
+        )
+        if live is not None:
+            return _reuse(live)
 
     if proposed_effect is None:
         proposed_effect = {
@@ -810,9 +1206,16 @@ async def create_pending_request(
         agent_session_id=resolve_agent_session_id(),
         request_audit_id=request_audit_id,
         resume_parent=stored_resume_parent,
+        idempotency_key=idempotency_key,
     )
-    session.add(request)
-    await session.flush()
+    if idempotency_key is None:
+        session.add(request)
+        await session.flush()
+    else:
+        winner = await _insert_idempotent_request(session, request, idempotency_key=idempotency_key)
+        if winner is not None:
+            return _reuse(winner)
+    request._expired_request = expired_request  # type: ignore[attr-defined]
     if handoff_payload is not None:
         request.execution_handle = store_handoff(
             session, request.id, request.tenant_id, handoff_payload
@@ -823,6 +1226,7 @@ async def create_pending_request(
     await _write_audit_row(
         session,
         audit_id=request_audit_id,
+        event_class=AuditEventClass.POLICY_DECISION,
         operator=operator,
         request=request,
         path="approval.request",
@@ -926,13 +1330,16 @@ async def approve_request(
             carries no ``preview_hash`` binding (#3197).
         DelegatedReasonInvalidError: *reason* names an instructing human
             (``Instructed-by:``) but its trailer block is incomplete (#3692).
+        DelegatedDecisionForbiddenError: *reason* is a valid delegated
+            decision but the deployment is not lab-class (#3693).
     """
     request = await _load_pending_for_approval(
         session, request_id, operator=operator, params=params
     )
-    # Validate before any state change so a bad delegated reason leaves the
-    # row pending (#3692).
+    # Validate before any state change so a bad or forbidden delegated
+    # reason leaves the row pending (#3692, #3693).
     delegation = parse_delegation(reason)
+    _check_delegated_allowed(delegation, request=request, operator=operator, decision="approved")
 
     now = _now()
     request.status = ApprovalRequestStatus.APPROVED.value
@@ -953,6 +1360,7 @@ async def approve_request(
     await _write_audit_row(
         session,
         audit_id=approve_audit_id,
+        event_class=AuditEventClass.APPROVAL_DECISION,
         operator=operator,
         request=request,
         path="approval.decision",
@@ -1003,6 +1411,8 @@ async def reject_request(
         ApprovalRequestAlreadyDecidedError: Row is not ``pending``.
         DelegatedReasonInvalidError: *reason* names an instructing human
             (``Instructed-by:``) but its trailer block is incomplete (#3692).
+        DelegatedDecisionForbiddenError: *reason* is a valid delegated
+            decision but the deployment is not lab-class (#3693).
     """
     _check_reviewer_role(operator)
 
@@ -1014,6 +1424,7 @@ async def reject_request(
     if request.status != ApprovalRequestStatus.PENDING.value:
         raise ApprovalRequestAlreadyDecidedError(request_id, request.status)
     delegation = parse_delegation(reason)
+    _check_delegated_allowed(delegation, request=request, operator=operator, decision="rejected")
 
     now = _now()
     request.status = ApprovalRequestStatus.REJECTED.value
@@ -1034,6 +1445,7 @@ async def reject_request(
     await _write_audit_row(
         session,
         audit_id=reject_audit_id,
+        event_class=AuditEventClass.APPROVAL_DECISION,
         operator=operator,
         request=request,
         path="approval.decision",
@@ -1342,14 +1754,17 @@ async def resume_dispatch_after_approval(
 def _dump_result_envelope(result: Any) -> dict[str, Any] | None:
     """Project a re-dispatch result into a JSON dict for durable storage (#3209).
 
-    The winning resume path returns an
+    The operator resume path returns an
     :class:`~meho_backplane.connectors.schemas.OperationResult` (a Pydantic
     model). ``model_dump(mode="json")`` yields the reduced / handle-shaped
     envelope — the same one the approver sees inline, so a set-shaped response
-    is already a JSONFlux ``handle`` (v0.1-spec §4), never a raw body. Returns
-    ``None`` when the value is not a dumpable model (defence-in-depth; a
-    non-model result is simply not captured rather than raising).
+    is already a JSONFlux ``handle`` (v0.1-spec §4), never a raw body. The
+    in-process agent resume already holds that dump as a plain dict (#3486);
+    it is stored as is. Returns ``None`` for anything else (defence-in-depth;
+    an unknown result shape is simply not captured rather than raising).
     """
+    if isinstance(result, dict):
+        return result
     dump = getattr(result, "model_dump", None)
     if dump is None:
         return None
@@ -1357,14 +1772,18 @@ def _dump_result_envelope(result: Any) -> dict[str, Any] | None:
     return projection if isinstance(projection, dict) else None
 
 
-async def _persist_resume_result(request_id: uuid.UUID, result: Any) -> None:
+async def persist_resume_result(request_id: uuid.UUID, result: Any) -> None:
     """Store the approved re-dispatch's reduced result envelope on the row (#3209).
 
     Called on the exactly-one-resumer winning path only, so it runs at most
-    once per approved request. The stored value is the reduced /
-    handle-shaped ``OperationResult`` envelope; the originating consumer reads
-    it back — principal-scoped — via ``GET /api/v1/approvals/{id}/result`` to
-    resume a non-idempotent parked op (VCF ``bringup.start``) by poll.
+    once per approved request: by :func:`_dispatch_resume_with_bound_context`
+    for the operator surfaces, and by the in-process agent waiter
+    (:mod:`meho_backplane.agent.approval_wait`) after its re-dispatch (#3486),
+    so a request the agent resumed also moves off ``started`` on the list and
+    show views. The stored value is the reduced / handle-shaped
+    ``OperationResult`` envelope; the originating consumer reads it back —
+    principal-scoped — via ``GET /api/v1/approvals/{id}/result`` to resume a
+    non-idempotent parked op (VCF ``bringup.start``) by poll.
 
     Fail-soft: the dispatch's own synchronous audit row already committed
     inside :func:`~meho_backplane.operations.dispatcher.dispatch` (the
@@ -1454,12 +1873,6 @@ def composite_resume_binding(
       instead of parking (#3351 review B1).
     * ``resume_parent`` is ``None`` (a direct park) — yields ``None`` and sets
       nothing; the caller keeps its generic re-dispatch.
-
-    A ``state`` the sub-op saved at park time (#3697) is bound on
-    :data:`~meho_backplane.operations.composite.composite_resume_state_var`
-    for the block, keyed by the parent's ``op_id``, so the re-entered
-    composite can reuse what its first run chose or continue at the parked
-    step instead of repeating its main effect.
     """
     if resume_parent is None:
         yield None
@@ -1467,22 +1880,15 @@ def composite_resume_binding(
 
     from meho_backplane.operations.composite import (
         composite_resume_scope_var,
-        composite_resume_state_var,
         composite_resume_var,
     )
 
-    parent_op_id = str(resume_parent["op_id"])
     approved_subop = (subop_op_id, subop_params_hash)
-    saved_state = resume_parent.get("state")
     resume_token = composite_resume_var.set(approved_subop)
     scope_token = composite_resume_scope_var.set(approved_subop)
-    state_token = composite_resume_state_var.set(
-        (parent_op_id, cast(dict[str, Any], saved_state)) if saved_state is not None else None
-    )
     try:
-        yield parent_op_id, cast(dict[str, Any], resume_parent["params"])
+        yield str(resume_parent["op_id"]), cast(dict[str, Any], resume_parent["params"])
     finally:
-        composite_resume_state_var.reset(state_token)
         composite_resume_scope_var.reset(scope_token)
         composite_resume_var.reset(resume_token)
 
@@ -1567,7 +1973,7 @@ async def _dispatch_resume_with_bound_context(
     # instead of a second submit (#3209). Reached only by the exactly-one-resumer
     # winner, so the capture runs at most once; fail-soft, never breaks the
     # approve path.
-    await _persist_resume_result(request.id, result)
+    await persist_resume_result(request.id, result)
     return result
 
 
@@ -1761,41 +2167,61 @@ async def expire_stale_requests(
     rows = list(result.scalars().all())
 
     for request in rows:
-        # Backfill a legacy null deadline to the coalesced value so the
-        # decision audit row and the persisted row agree on when it expired.
-        if request.expires_at is None and default_ttl is not None:
-            request.expires_at = request.created_at + default_ttl
-        request.status = ApprovalRequestStatus.EXPIRED.value
-        request.decided_at = cutoff
-        await discard_handoff(session, request.id, request.tenant_id)
-        await session.flush()
-
-        expire_audit_id = uuid.uuid4()
-        await _write_audit_row(
-            session,
-            audit_id=expire_audit_id,
-            operator=operator,
-            request=request,
-            path="approval.decision",
-            status_code=_DECISION_STATUS_CODE_EXPIRED,
-            duration_ms=0.0,
-            extra_payload={"decision": "expired", "expires_at": str(request.expires_at)},
+        await _expire_request(
+            session, request, operator=operator, cutoff=cutoff, default_ttl=default_ttl
         )
-
-        _log.info(
-            "approval_request_expired",
-            approval_request_id=str(request.id),
-            op_id=request.op_id,
-            tenant_id=str(operator.tenant_id),
-        )
-        # Expose the audit_id as a transient attr so the caller can
-        # publish the ``approval.expired`` broadcast event AFTER commit.
-        # See create_pending_request / approve_request / reject_request
-        # for the same publish-after-commit invariant: a publish-before-
-        # commit would surface a phantom event if the commit fails.
-        request._audit_id = expire_audit_id  # type: ignore[attr-defined]
 
     return rows
+
+
+async def _expire_request(
+    session: AsyncSession,
+    request: ApprovalRequest,
+    *,
+    operator: Operator,
+    cutoff: datetime,
+    default_ttl: timedelta | None,
+) -> None:
+    """Move one locked, overdue ``pending`` row to ``expired`` + audit it.
+
+    Shared by :func:`expire_stale_requests` and the idempotent retry path
+    of :func:`create_pending_request` (#3486), so both write the same
+    decision audit row. The caller holds the row lock and owns the commit.
+    """
+    # Backfill a legacy null deadline to the coalesced value so the
+    # decision audit row and the persisted row agree on when it expired.
+    if request.expires_at is None and default_ttl is not None:
+        request.expires_at = request.created_at + default_ttl
+    request.status = ApprovalRequestStatus.EXPIRED.value
+    request.decided_at = cutoff
+    await discard_handoff(session, request.id, request.tenant_id)
+    await session.flush()
+
+    expire_audit_id = uuid.uuid4()
+    await _write_audit_row(
+        session,
+        audit_id=expire_audit_id,
+        event_class=AuditEventClass.APPROVAL_DECISION,
+        operator=operator,
+        request=request,
+        path="approval.decision",
+        status_code=_DECISION_STATUS_CODE_EXPIRED,
+        duration_ms=0.0,
+        extra_payload={"decision": "expired", "expires_at": str(request.expires_at)},
+    )
+
+    _log.info(
+        "approval_request_expired",
+        approval_request_id=str(request.id),
+        op_id=request.op_id,
+        tenant_id=str(operator.tenant_id),
+    )
+    # Expose the audit_id as a transient attr so the caller can
+    # publish the ``approval.expired`` broadcast event AFTER commit.
+    # See create_pending_request / approve_request / reject_request
+    # for the same publish-after-commit invariant: a publish-before-
+    # commit would surface a phantom event if the commit fails.
+    request._audit_id = expire_audit_id  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
@@ -2109,6 +2535,7 @@ async def read_approval_result(
     await _write_audit_row(
         session,
         audit_id=uuid.uuid4(),
+        event_class=AuditEventClass.LEGACY_REQUEST,
         operator=operator,
         request=request,
         path="approval.result",

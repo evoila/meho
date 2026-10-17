@@ -556,6 +556,17 @@ config:
   # (docs-site "Do real work → Approvals and break-glass") and
   # `docs/codebase/approvals.md`.
   approvalAllowSelfApproval: "false"
+  # -- Lab-class switch for **delegated** approval decisions (#3693).
+  # Rendered into `APPROVAL_ALLOW_DELEGATED_DECISION`. A delegated decision
+  # is an approve or reject whose reason ends with an `Instructed-by:`
+  # block: the approver acts on another person's written instruction.
+  # Default `"false"` (fail-closed, production): MEHO refuses every
+  # delegated decision with 403 `delegated_decision_forbidden`, so an
+  # approve or reject is always the approver's own call. Set `"true"` ONLY
+  # on a lab-class deployment. Ordinary decisions are never affected.
+  # `GET /ready` → `features.approval_queue.delegated_decision_posture`
+  # shows the stance. See `docs/codebase/approvals.md`.
+  approvalAllowDelegatedDecision: "false"
   # -- Operator-console (`/ui/*`) OAuth client_id (#2594, Goal #336). The
   # browser BFF login (`GET /ui/auth/login`) runs an OAuth 2.1
   # authorization-code + PKCE grant server-side against the operator's
@@ -1088,6 +1099,67 @@ broadcast:
     password: ""
   # -- Broadcast subchart's own ingress NetworkPolicy (subchart
   # `networkPolicy` block). Admits tcp/6379 only from the backplane Pods.
+  networkPolicy:
+    enabled: true
+    backplanePodLabels:
+      app.kubernetes.io/name: meho
+    extraAllowedSelectors: []
+
+# Dedicated result-cache store (`charts/result-cache/`, Valkey 9.x). Holds
+# the full rows behind result handles, apart from the broadcast store above,
+# so a burst of large handles can only fill this store. Off by default.
+# Roll order: enable the store with `writerEnabled: false`, roll out, check
+# the backplane can reach it, then set `writerEnabled: true`.
+resultCache:
+  enabled: false
+  # -- Sets RESULT_CACHE_WRITER_ENABLED on the backplane. While false, new
+  # result handles are written to the broadcast store; reads already check
+  # this store first and then the broadcast store.
+  writerEnabled: false
+  image:
+    repository: valkey/valkey
+    tag: "9.0-alpine"
+    pullPolicy: IfNotPresent
+  # -- Replica count. Capped at 1 (no persistence, no Sentinel).
+  replicas: 1
+  # -- Valkey `maxmemory` byte ceiling. Generous default; a load test may
+  # tune it. Keep it below `resources.limits.memory`.
+  maxmemory: "768mb"
+  # -- Valkey `maxmemory-policy`. `noeviction` refuses new result writes at
+  # the ceiling instead of dropping live handles.
+  maxmemoryPolicy: noeviction
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+    fsGroup: 999
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+  resources:
+    limits:
+      cpu: 500m
+      memory: 1Gi
+      ephemeral-storage: 512Mi
+    requests:
+      cpu: 50m
+      memory: 128Mi
+      ephemeral-storage: 128Mi
+  service:
+    type: ClusterIP
+    port: 6379
+  # -- Valkey requirepass authentication. Same shape as `broadcast.auth`.
+  auth:
+    enabled: true
+    existingSecret: ""
+    existingSecretPasswordKey: requirepass
+    password: ""
+  # -- The subchart's own ingress NetworkPolicy. Admits tcp/6379 only from
+  # the backplane Pods.
   networkPolicy:
     enabled: true
     backplanePodLabels:

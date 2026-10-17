@@ -149,6 +149,7 @@ __all__ = [
     "VM_DISK_GROW_RESPONSE_SCHEMA",
     "VM_MIGRATE_PARAMETER_SCHEMA",
     "VM_MIGRATE_RESPONSE_SCHEMA",
+    "VM_MOID_PATTERN",
     "VM_NIC_REPOINT_PARAMETER_SCHEMA",
     "VM_NIC_REPOINT_RESPONSE_SCHEMA",
     "VM_POWER_BULK_PARAMETER_SCHEMA",
@@ -448,8 +449,9 @@ DATASTORE_USAGE_PARAMETER_SCHEMA: dict[str, Any] = {
 
 #: ``vmware.composite.network.portgroup.audit`` parameter schema.
 #:
-#: Lists distributed portgroups with host membership + connected-VM
-#: aggregation. All sub-ops are vCenter REST.
+#: Lists distributed portgroups with parent switch, VLAN and connected-VM
+#: aggregation. The listing is vCenter REST; the per-portgroup details are
+#: vim PropertyCollector reads (#3802).
 NETWORK_PORTGROUP_AUDIT_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -457,22 +459,20 @@ NETWORK_PORTGROUP_AUDIT_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "minLength": 1,
             "description": (
-                "Accepted but inert (#2970 degradation): this only ever "
-                "scoped the distributed-switch listing that fed the "
-                "``dvs_name`` enrichment, and the pinned vcenter.yaml "
-                "serves no DVS list resource, so that step was dropped. "
-                "The generic network resource has no per-DVS filter "
-                "either, so the returned portgroup set was never "
-                "narrowed by this value."
+                "Keep only the portgroups whose parent distributed "
+                "switch matches this value. Matches the switch "
+                "managed-object ID (for example 'dvs-21') or its "
+                "display name."
             ),
         },
         "include_disconnected_vms": {
             "type": "boolean",
             "default": False,
             "description": (
-                "When true, the VM aggregation includes VMs whose power "
-                "state is OFF or whose NIC is disconnected. Default "
-                "false returns only actively-connected VMs."
+                "When true, also count VMs that are not powered on. "
+                "Default false counts only powered-on VMs. A VM counts "
+                "when it has a network adapter on the portgroup, even if "
+                "that adapter is disconnected."
             ),
         },
     },
@@ -725,30 +725,76 @@ NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA: dict[str, Any] = {
                     },
                     "dvs": {
                         "type": ["string", "null"],
-                        "description": "Parent DVS managed-object ID, if present.",
+                        "description": (
+                            "Parent distributed switch managed-object ID, "
+                            "read from the portgroup's "
+                            "``config.distributedVirtualSwitch``. ``null`` "
+                            "when vCenter does not report it (for example, "
+                            "no read permission on the switch)."
+                        ),
                     },
                     "dvs_name": {
                         "type": ["string", "null"],
                         "description": (
-                            "Always ``null`` (#2970 degradation): the "
-                            "DVS listing that resolved display names is "
-                            "not served by the pinned spec. Key retained "
-                            "for response-envelope stability."
+                            "Display name of the parent distributed switch. "
+                            "``null`` when the switch is unknown."
                         ),
                     },
                     "type": {
                         "type": ["string", "null"],
                         "description": "Portgroup type from the listing row.",
                     },
+                    "vlan": {
+                        "type": ["object", "null"],
+                        "properties": {
+                            "mode": {"type": "string", "enum": ["access", "trunk"]},
+                            "vlan_id": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 4094,
+                                "description": "The access VLAN ID (mode 'access').",
+                            },
+                            "ranges": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "start": {"type": "integer"},
+                                        "end": {"type": "integer"},
+                                    },
+                                    "required": ["start", "end"],
+                                },
+                                "description": (
+                                    "The trunk VLAN ranges (mode 'trunk'), "
+                                    "sorted, with touching ranges merged."
+                                ),
+                            },
+                        },
+                        "required": ["mode"],
+                        "description": (
+                            "The portgroup's default VLAN, from "
+                            "``config.defaultPortConfig.vlan``: "
+                            "``{mode: 'access', vlan_id}`` or "
+                            "``{mode: 'trunk', ranges}``. ``null`` for a "
+                            "private VLAN or a shape vCenter did not report."
+                        ),
+                    },
                     "vm_count": {
                         "type": "integer",
                         "minimum": 0,
-                        "description": "Number of VMs attached to this portgroup.",
+                        "description": (
+                            "Number of VMs with a network adapter on this "
+                            "portgroup (powered-on only unless "
+                            "include_disconnected_vms is true)."
+                        ),
                     },
                     "vm_names": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Names of VMs attached to this portgroup.",
+                        "description": (
+                            "Names of the VMs with a network adapter on this "
+                            "portgroup, from the portgroup's ``vm`` property."
+                        ),
                     },
                 },
                 "required": ["id", "vm_count", "vm_names"],
@@ -1232,20 +1278,32 @@ VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA: dict[str, Any] = {
 }
 
 
+#: vCenter VM moid shape, e.g. ``vm-42``. A VM name does not match.
+VM_MOID_PATTERN: str = r"^vm-[0-9]+$"
+
+
 #: ``vmware.composite.vm.destroy`` parameter schema (#3198).
 #:
 #: The first governed destructive delete. A single required ``vm`` moid —
 #: the destroy takes no ``force`` flag: a powered-on VM is refused
 #: (``status='not_powered_off'``), never implicitly powered off, and the
 #: mandatory human approval is the confirmation, not a param.
+#:
+#: ``vm`` must match :data:`VM_MOID_PATTERN` (#3479). A VM name fails schema
+#: validation with ``invalid_params`` before the blast-radius preview runs.
+#: The composite does not look a name up: two VMs can share a name, so the
+#: caller reads the inventory and passes the moid.
 VM_DESTROY_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "vm": {
             "type": "string",
             "minLength": 1,
+            "pattern": VM_MOID_PATTERN,
             "description": (
-                "Target VM moid to permanently destroy. The VM must be "
+                "vCenter moid of the VM to permanently destroy, like "
+                "'vm-42'. Not the VM name: look the moid up with an "
+                "inventory read first. The VM must be "
                 "POWERED_OFF — a running VM is refused with "
                 "``status='not_powered_off'`` (no implicit power-off)."
             ),
@@ -1334,14 +1392,18 @@ VM_POWER_BULK_PARAMETER_SCHEMA: dict[str, Any] = {
 #: Single-VM power verb. Hard verbs (``on`` / ``off`` / ``reset``) hit
 #: ``POST:/vcenter/vm/{vm}/power``; soft verbs (``guest_shutdown`` /
 #: ``guest_reboot``) hit ``POST:/vcenter/vm/{vm}/guest/power`` and require
-#: running VMware Tools.
+#: running VMware Tools. ``vm`` must match :data:`VM_MOID_PATTERN` (#3479).
 VM_POWER_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "vm": {
             "type": "string",
             "minLength": 1,
-            "description": "VM moid to act on.",
+            "pattern": VM_MOID_PATTERN,
+            "description": (
+                "vCenter moid of the VM to act on, like 'vm-42'. Not the "
+                "VM name: look the moid up with an inventory read first."
+            ),
         },
         "verb": {
             "type": "string",

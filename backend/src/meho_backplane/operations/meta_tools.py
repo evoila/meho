@@ -107,9 +107,14 @@ from meho_backplane.operations.addon_orchestration import (
     bound_parent_linkage,
     resolve_or_open_orchestration_run,
 )
+from meho_backplane.operations.delivery_budget import (
+    bound_complete_response,
+    refuse_undeliverable_receipt,
+)
 from meho_backplane.operations.dispatch_limits import rate_limited_read_envelope
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.ingest.list_connectors import next_step_for_registered_connector
+from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import (
     AmbiguousTargetError,
     TargetNotFoundError,
@@ -435,6 +440,22 @@ class CallOperationBody(BaseModel):
             "the approval fail-closed unless it matches the server-recomputed "
             "preview hash. Ignored for every non-destructive op. None default "
             "keeps a bare call_operation byte-identical to pre-#3197."
+        ),
+    )
+    idempotency_key: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        description=(
+            "Optional retry key for a call that waits for approval (#3486). "
+            "If you send the same key again with the identical call, MEHO "
+            "returns the approval request it already made (same "
+            "approval_request_id, extras.approval_request_reused=true) "
+            "instead of a second one. The key belongs to you: another "
+            "principal's key never matches. It is free again once that "
+            "request is rejected or expires. The same key with a different "
+            "call is refused with idempotency_key_conflict. Ignored when the "
+            "call does not wait for approval."
         ),
     )
     async_: bool = Field(
@@ -1073,6 +1094,15 @@ async def _call_operation_impl(
     op_id = arguments["op_id"]
     params: dict[str, Any] = arguments.get("params") or {}
 
+    # #3641: a completed op must deliver its receipt inside the wire
+    # ceiling. The receipt grows with ``op_id``, so an ``op_id`` whose
+    # receipt could never fit is refused here, before the target is
+    # resolved and before anything runs.
+    wire_max_bytes = get_settings().result_complete_response_wire_max_bytes
+    refusal = refuse_undeliverable_receipt(op_id, wire_max_bytes)
+    if refusal is not None:
+        return refusal.model_dump(mode="json")
+
     if resolved_target is not None:
         structlog.contextvars.bind_contextvars(audit_target_id=str(resolved_target.id))
     else:
@@ -1102,15 +1132,15 @@ async def _call_operation_impl(
         work_ref_token = work_ref_var.set(work_ref_arg)
     try:
         async with AsyncExitStack() as linkage_stack:
-            # #3028 out-of-process parent-linkage: when a paired add-on service
-            # principal dispatches under a ``work_ref``, group its per-step
-            # dispatches into one audit-replay subtree by binding the
-            # orchestration run's synthesized ``session_id`` + anchor
-            # ``parent_audit_id`` around the dispatch. Resolution reads the
-            # *effective* work_ref (the arg above or an ambient ``Meho-Work-Ref``
-            # header) and returns ``None`` for any non-paired caller, so the
-            # pre-#3028 behaviour (an independent audit row) is untouched for
-            # users, agents, and unpaired service principals.
+            # #3028 / #3446 out-of-process parent-linkage: when a
+            # client-credential service principal (paired add-on or not)
+            # dispatches under a ``work_ref``, group its per-step dispatches
+            # into one audit-replay subtree by binding the orchestration run's
+            # synthesized ``session_id`` + anchor ``parent_audit_id`` around the
+            # dispatch. Resolution reads the *effective* work_ref (the arg above
+            # or an ambient ``Meho-Work-Ref`` header) and returns ``None`` for
+            # users and agents, so their behaviour (an independent audit row)
+            # is untouched.
             effective_work_ref = work_ref_var.get()
             if effective_work_ref:
                 linkage_run = await resolve_or_open_orchestration_run(operator, effective_work_ref)
@@ -1129,6 +1159,9 @@ async def _call_operation_impl(
                 # ``params``, so it stays out of ``params_hash`` and the op's
                 # parameter_schema. ``None`` for a non-destructive call.
                 preview_hash=arguments.get("preview_hash"),
+                # #3486: retry key for a parked call, a MEHO dispatch control
+                # like ``preview_hash`` -- never part of ``params``.
+                idempotency_key=arguments.get("idempotency_key"),
             )
     finally:
         if work_ref_token is not None:
@@ -1143,6 +1176,10 @@ async def _call_operation_impl(
         tenant_id=str(operator.tenant_id),
         approved=approved,
     )
+    # #3641: terminal wire ceiling, measured on the real MCP encoding. A
+    # completed op that is too large to deliver keeps ``status="ok"`` and
+    # gets ``delivery="partial"`` / ``"unavailable"`` instead.
+    result = bound_complete_response(result, wire_max_bytes)
     return result.model_dump(mode="json")
 
 

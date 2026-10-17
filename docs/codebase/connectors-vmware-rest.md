@@ -826,12 +826,33 @@ all-missing "void" for the rest of the pod lifetime. Two mechanisms recover it:
   envelope normally, never a loop. Recovers on the *symptom*, independent of
   *why* the session died (idle expiry, `hostd` restart, …), and reads both the
   9.x nested `LocalizedMethodFault` and the 8.0.x flattened fault shapes via
-  `fault_type_name`.
+  `fault_type_name` (a 9.x wrapper with no usable nested class name gives no
+  `fault_type` at all — the wrapper name is never reported as the fault class).
+  *Known tradeoff:* because an all-object `NoPermission` counts as auth-class, a
+  target whose principal really lost all permissions pays one extra login per
+  read, and that read evicts the shared per-target session. This is accepted on
+  purpose: the reset still happens at most once per read (a unit test pins
+  this), and the same symptom is how a stale session shows itself.
+- *Recovery markers (`#3777`).* Each (b) reset logs a
+  `vmware_object_collect_auth_reset` event (target name + fault class names,
+  never fault text), and `object.collect` adds `session_health_reset: 1` to its
+  result (not in `required`, absent on a normal read; the result also lands in
+  the audit row). When the probe liveness read below had to log in again, the
+  fingerprint `extras` carry `session_health_reset: 1` and a
+  `vmware_esxi_probe_session_relogin` event logs the target, the fault class
+  names and whether the session came back (`live`). This holds even when the
+  retried read raises (re-login refused, transport error): the helper reports
+  the reset to the probe before the retry, so the unreachable fingerprint still
+  carries the marker and the event says `live=False`.
 - *(a) Bounded session max-age (defense in depth).* A warm-cached session older
   than `VMWARE_SOAP_SESSION_MAX_AGE_SECONDS` (**default `1200` s / 20 min**) is
   proactively invalidated + re-established **before** its next read, so a
   server-side-expired-but-locally-cached session goes undetected for at most one
-  max-age window even if (b) is somehow bypassed. The default sits **safely
+  max-age window even if (b) is somehow bypassed. The check lives in the
+  **shared** `_session_token` path, so it applies to **every** target this
+  connector caches a session for — vCenter as well as standalone ESXi — not
+  only to standalone ESXi hosts, despite the `SOAP` in the variable name. A
+  proactive cold re-login is safe on both. The default sits **safely
   below** a standalone ESXi host's default SOAP idle timeout
   (`Config.HostAgent.vmacore.soap.sessionTimeout` = `1800` s / 30 min) — the
   max-age is the belt to (b)'s suspenders, so it **must** stay below that idle
@@ -935,8 +956,8 @@ pre-#2765 left every vCenter target permanently `reachable=False`.
    `reachable=True`, `product="esxi"`, `version` = the `about.version` the
    unauthenticated `RetrieveServiceContent` already returned (cached in
    `_about_versions`, exact e.g. `9.1.0`), `extras.api_type == "HostAgent"`,
-   and `probe_method` names the `GET /api/about` 400 → SOAP
-   `RetrieveServiceContent` chain. So a standalone ESXi target now
+   and `probe_method` is `GET /api/about (400) -> soap-currentsession (live)`
+   (see the liveness bullet below). So a standalone ESXi target now
    fingerprints reachable instead of dead-ending on the vAPI-only
    `/api/about`.
    - **Liveness read (`#3773d` / `#3710`).** Reachability is **confirmed with
@@ -952,6 +973,15 @@ pre-#2765 left every vCenter target permanently `reachable=False`.
      `reachable=False` ("stale/void SOAP session") instead of masking the
      outage. A missing SessionManager moid or a read failure degrades to
      unreachable, never propagates.
+   - **The ESXi probe is always live (`#3710`).** Every ESXi probe sends
+     exactly one SOAP call to the host — the `currentSession` read — even
+     when the session cache is warm (no new `RetrieveServiceContent` or
+     `Login` is needed then). `probe_method` ends in `(live)` to say so:
+     `reachable` comes from a call made during this probe. A `(cached)`
+     ending would mean the answer came from earlier data without asking the
+     host. The ESXi probe never does that, so it never reports `(cached)`.
+     Note that `version` still comes from the `about.version` cached at login
+     time; only reachability is checked live.
 
 `probe(target)` delegates to `fingerprint()` and folds the boolean
 reachable flag into a `ProbeResult`. Failure modes (TCP `ConnectError`,
@@ -1563,6 +1593,18 @@ Op id: `vmware.composite.vm.destroy` (the reconcile string the teardown
 tooling matches; group `vm`, tags `composite / write / vm / lifecycle /
 destroy / destructive`). Params: one required `vm` moid — no `force` flag,
 because the mandatory human approval *is* the confirmation.
+
+**`vm` must be a moid, not a name (#3479).** `vm.destroy` and `vm.power`
+both declare `"pattern": "^vm-[0-9]+$"` on `vm` (`schemas.VM_MOID_PATTERN`).
+A VM name such as `web-01` fails schema validation, so `preview_operation`
+and `call_operation` return `invalid_params` with a `validation_errors` entry
+at `$.vm` (`validator: "pattern"`). This happens before any vCenter read. Before
+the pattern, a name made the `vm.destroy` preview read 404, and the call was
+denied as `blast_radius_required`, which hid the real cause. For `vm.power` a
+name failed later at vCenter with a 404. The composites do not look a name up:
+two VMs can have the same name, and a destroy must not guess. The caller reads
+the inventory (for example `GET:/vcenter/vm` with `filter.names`) and passes
+the moid.
 
 The destructive tier is enforced generically (see
 [`approvals.md`](approvals.md#first-governed-delete-vmwarecompositevmdestroy-3198)):
@@ -2896,15 +2938,44 @@ they never park.
   `distributed-switches` path exists only under the NSX-scoped
   `/vcenter/namespace-management/` tree — there is **no** generic DVS
   list resource in the pinned REST spec at all — so the audit's DVS-list
-  step was dropped entirely. `dvs_name` is now always `null` (the
-  generic `Network` summary carries no parent-DVS field to join on, so
-  the name index was never consulted with a hit anyway), `dvs` stays
-  best-effort from the portgroup row itself, and `filter_dvs` is
-  accepted but inert.
+  step was dropped entirely.
+  **#3802 update:** the audit now reads each portgroup's details from
+  the portgroup managed object, not from the REST lists. The old
+  per-portgroup `GET:/vcenter/vm?filter.networks=...` call was wrong:
+  the VM list resource has no `networks` filter, so vCenter ignored it
+  and every row got the whole VM inventory. After the
+  `GET:/vcenter/network` listing, the composite makes three batched
+  vim `RetrievePropertiesEx` reads:
+  1. every `DistributedVirtualPortgroup`: `config.distributedVirtualSwitch`
+     (the parent switch, gives `dvs`), the whole
+     `config.defaultPortConfig` (gives `vlan`), and `vm` (the VMs with a
+     network adapter on that portgroup);
+  2. the parent switches' `name` (gives `dvs_name`), using the switch
+     type from the returned reference (`VmwareDistributedVirtualSwitch`);
+  3. the connected VMs' `name` + `runtime.powerState` (gives `vm_names`
+     / `vm_count`; powered-on only unless `include_disconnected_vms`).
+  Each read sends at most 50 objects per call, so a normal inventory
+  is not paged. If vCenter still pages an answer (returns a `token`),
+  the audit fails with an error instead of returning rows with missing
+  VMs or portgroups. The same happens when a call succeeds but vCenter
+  could not read a property on one object (a `missingSet` entry with a
+  fault, for example no permission on a VM's `name`): the audit fails
+  with an error that names the property path and the fault type name,
+  instead of dropping that VM and reporting a wrong count. A property
+  that is simply unset (a portgroup with no switch, VLAN or VMs) has no
+  `missingSet` entry and gives a null or empty field.
+  `vlan` is `{mode: "access", vlan_id}` or `{mode: "trunk", ranges}`
+  (the same view `network.portgroup.vlan.set` returns), or `null` for a
+  private VLAN. The port config is read whole, never as the deep
+  `config.defaultPortConfig.vlan` path: that path is a subclass-only
+  field and vCenter 8.0.x answers it with HTTP 500 (#3534 documents the
+  same rule for `vmware.object.collect`). `filter_dvs` now works: it
+  keeps the portgroups whose parent switch moid or name matches.
   A build-time guard
   (`tests/acceptance/test_portgroup_audit_op_id_reconcile.py`) parses
-  the pinned `vcenter.yaml` and asserts every audit sub-op_id is emitted
-  by the ingest. The vendor-licensed spec-shelf is not provisioned in
+  the pinned `vcenter.yaml` and asserts every REST (`GET`) audit
+  sub-op_id is emitted by the ingest; the vim leg is checked against
+  `vi-json.yaml` by the exhaustive read lane. The vendor-licensed spec-shelf is not provisioned in
   public-repo CI, so that guard **skips** there (the #1602 convention);
   it runs wherever the spec-shelf is wired — an operator deploy or a
   spec-shelf-backed run — which is where a future drift surfaces.

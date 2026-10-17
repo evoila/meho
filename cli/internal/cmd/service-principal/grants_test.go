@@ -13,6 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/auth"
 )
 
@@ -92,6 +95,31 @@ func TestPrintGrantListEmpty(t *testing.T) {
 	printGrantList(&output, nil)
 	if !strings.Contains(output.String(), "no service-principal grants") {
 		t.Errorf("output: %q", output.String())
+	}
+}
+
+func TestPrintGrantListAndDetailShowOrphaned(t *testing.T) {
+	orphaned, live := true, false
+	remediation := "Target x no longer exists. Then revoke this grant."
+	orphan := api.ServiceGrantRead{Id: uuid.MustParse(testGrantID), PrincipalSub: "svc", OpId: "op", ConnectorId: "c", Orphaned: &orphaned, OrphanRemediation: &remediation}
+	healthy := api.ServiceGrantRead{Id: uuid.New(), PrincipalSub: "svc", OpId: "op", ConnectorId: "c", Orphaned: &live}
+
+	var list bytes.Buffer
+	printGrantList(&list, []api.ServiceGrantRead{orphan, healthy})
+	if !strings.Contains(list.String(), "ORPHANED") || !strings.Contains(list.String(), "1 grant(s) are orphaned") {
+		t.Errorf("list output: %q", list.String())
+	}
+
+	var detail bytes.Buffer
+	printGrantDetail(&detail, &orphan)
+	if !strings.Contains(detail.String(), "orphaned:            yes") || !strings.Contains(detail.String(), remediation) {
+		t.Errorf("detail output: %q", detail.String())
+	}
+
+	var healthyDetail bytes.Buffer
+	printGrantDetail(&healthyDetail, &healthy)
+	if strings.Contains(healthyDetail.String(), "orphaned") {
+		t.Errorf("healthy grant must not show orphaned: %q", healthyDetail.String())
 	}
 }
 

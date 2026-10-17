@@ -20,6 +20,13 @@ seam rather than a parallel mechanism.
 Surface: `GET /api/v1/audit/reflex` (operator role min; `tenant_filter`
 gated behind `platform_admin`) and `meho audit reflex`.
 
+Since #3734, `compute_reflex_report` also takes `source="request_usage"`.
+Then the meta-tool calls come from privacy-bounded request usage events
+(see [request-usage.md](request-usage.md)) instead of the MCP envelope
+rows. Dispatch rows still come from `audit_log`. The route reads
+`source="request_usage"` since #3747; when usage collection is off, the
+meta-tool counts are zero.
+
 ## Key types
 
 ### `compute_reflex_report(...)` (`meho_backplane.reflex.adoption`)

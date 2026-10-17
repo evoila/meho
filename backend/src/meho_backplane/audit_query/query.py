@@ -51,40 +51,59 @@ Filter coverage
   per #1177, not ``ILIKE``); the column is also surfaced on every returned
   ``AuditEntry``. NULL on rows with no bound work_ref, so a ``work_ref``
   filter excludes them.
-* ``parent_audit_id`` is a real column too (G0.6-T7 #398, migration ``0006``)
-  and is surfaced on every returned ``AuditEntry``, but the *flat filter* on
-  it still raises :class:`UnsupportedFilterError` — un-gating that filter is
-  out of scope for G8.2 (#377); replay reads the column directly via its
-  recursive CTE instead.
+* ``event_class`` is a real column (#3733, migration ``0106``). The filter
+  narrows to ``audit_log.event_class = :event_class`` -- exact match on the
+  closed vocabulary. With no filter every class is returned, so old callers
+  see the same rows. Rows written before the column existed carry
+  ``legacy_request``.
+* ``parent_audit_id`` is a real column too (G0.6-T7 #398, migration ``0006``,
+  indexed by ``audit_log_parent_audit_id_idx``). The filter narrows to
+  ``audit_log.parent_audit_id = :parent_audit_id`` — exact match, so it
+  returns the *direct* children of one row (for example the decision row and
+  the run row of one approval request), not the whole subtree. Replay walks
+  the full subtree with its recursive CTE. The column is also surfaced on
+  every returned ``AuditEntry``.
 """
 
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
+from typing import Any, Final
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.broadcast.events import classify_op
-from meho_backplane.db.models import AuditLog, Target
+from meho_backplane.db.models import AuditEventClass, AuditLog, Target
 
 from .cursor import CursorPosition, decode_cursor, encode_cursor
-from .schemas import AuditEntry, AuditQueryFilters, AuditQueryResult
+from .schemas import AuditEntry, AuditQueryFilters, AuditQueryResult, EventClassCounts
 
 __all__ = [
+    "DEFAULT_COUNT_WINDOW",
     "UnsupportedFilterError",
+    "count_event_classes",
     "query_audit",
 ]
 
 
+#: Time window the class counters use when the caller sets no ``since``.
+#: The audit log keeps every row, so an unbounded count would scan the
+#: whole tenant history on every console page load.
+DEFAULT_COUNT_WINDOW: Final[timedelta] = timedelta(hours=24)
+
+
 class UnsupportedFilterError(ValueError):
-    """Raised when a filter targets a field the v0.2 substrate cannot evaluate.
+    """Raised when a filter targets a field the substrate cannot evaluate.
 
     Distinct from a validation error: the field is on
     :class:`AuditQueryFilters` (so router-side validation accepts it) but
     the column it would filter against does not exist yet. The handler
     surfaces this synchronously before issuing any SQL so the caller can
     return a structured 400 / -32602 with the column name in the message.
+    No filter raises it today (``parent_audit_id`` was the last one, #4030);
+    the REST, MCP and console callers keep their mapping for it.
     """
 
 
@@ -139,11 +158,6 @@ async def query_audit(
     keeps no FK on the column per v0.2's soft-FK discipline) resolves to
     ``target_name=None`` rather than leaking the other tenant's target name.
     """
-    if filters.parent_audit_id is not None:
-        raise UnsupportedFilterError(
-            "parent_audit_id filter not supported in v0.2 — column lands with G0.6-T7 (#398)",
-        )
-
     stmt = (
         sa.select(AuditLog, Target.name.label("target_name"))
         .outerjoin(
@@ -177,16 +191,51 @@ async def query_audit(
     return AuditQueryResult(rows=entries, next_cursor=next_cursor)
 
 
+async def count_event_classes(
+    filters: AuditQueryFilters,
+    *,
+    tenant_id: uuid.UUID,
+    session: AsyncSession,
+    now: datetime | None = None,
+) -> EventClassCounts:
+    """Count the rows that match *filters*, per event class (#3747).
+
+    Uses the same tenant scope and filters as :func:`query_audit`, except
+    ``event_class``, ``cursor`` and ``limit``: the counters show every
+    class, so an operator sees what a class filter would return before
+    picking it. ``counts`` has one key per :class:`AuditEventClass`, in
+    the enum order, with ``0`` for a class that has no rows. Old rows
+    count as ``legacy_request``; nothing is reclassified.
+
+    When ``filters.since`` is not set, only the last
+    :data:`DEFAULT_COUNT_WINDOW` is counted. The returned ``since`` is the
+    start of the window that was counted, so callers can show it.
+    """
+    since = filters.since
+    if since is None:
+        since = (now or datetime.now(UTC)) - DEFAULT_COUNT_WINDOW
+    unpaged = filters.model_copy(update={"event_class": None, "cursor": None, "since": since})
+    stmt: sa.Select[Any] = (
+        sa.select(AuditLog.event_class, sa.func.count())
+        .where(AuditLog.tenant_id == tenant_id)
+        .group_by(AuditLog.event_class)
+    )
+    stmt = _apply_filters(stmt, unpaged, tenant_id=tenant_id)
+    found: dict[str, int] = dict((await session.execute(stmt)).tuples().all())
+    counts = {member.value: int(found.get(member.value, 0)) for member in AuditEventClass}
+    return EventClassCounts(counts=counts, since=since)
+
+
 # A flat chain of independent `if filters.X is not None` guards — one per
 # optional filter field — is the clearest shape for optional filter application;
 # splitting it into sub-helpers would fragment cohesive logic for no readability
 # code-quality-allow: gain (C901 is inherent to the optional-field count).
 def _apply_filters(
-    stmt: sa.Select[tuple[AuditLog, str]],
+    stmt: sa.Select[Any],
     filters: AuditQueryFilters,
     *,
     tenant_id: uuid.UUID,
-) -> sa.Select[tuple[AuditLog, str]]:
+) -> sa.Select[Any]:
     """Apply every set column filter (and the cursor) to *stmt*.
 
     Extracted from :func:`query_audit` so the handler stays a readable
@@ -198,11 +247,17 @@ def _apply_filters(
     if filters.audit_id is not None:
         stmt = stmt.where(AuditLog.id == filters.audit_id)
 
+    if filters.parent_audit_id is not None:
+        stmt = stmt.where(AuditLog.parent_audit_id == filters.parent_audit_id)
+
     if filters.agent_session_id is not None:
         stmt = stmt.where(AuditLog.agent_session_id == filters.agent_session_id)
 
     if filters.work_ref is not None:
         stmt = stmt.where(AuditLog.work_ref == filters.work_ref)
+
+    if filters.event_class is not None:
+        stmt = stmt.where(AuditLog.event_class == filters.event_class.value)
 
     if filters.principal is not None:
         escaped = _escape_like_literal(filters.principal)
@@ -342,6 +397,7 @@ def _build_audit_entry(row: AuditLog, target_name: str | None) -> AuditEntry:
         agent_session_id=row.agent_session_id,
         work_ref=row.work_ref,
         policy_decision=row.policy_decision,
+        event_class=row.event_class,
         broadcast_event_id=None,
     )
 

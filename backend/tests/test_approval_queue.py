@@ -65,6 +65,7 @@ from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
     ApprovalRequestExpiredError,
+    DelegatedDecisionForbiddenError,
     DelegatedReasonInvalidError,
     Delegation,
     NonHumanApprovalError,
@@ -710,6 +711,9 @@ async def test_approve_request_writes_decision_audit_row(session: AsyncSession) 
     assert len(decision_rows) == 1
     assert decision_rows[0].status_code == 200
     assert decision_rows[0].payload["decision"] == "approved"
+    # #3733: the park is a gate decision; the approve is an approval decision.
+    assert request_rows[0].event_class == "policy_decision"
+    assert decision_rows[0].event_class == "approval_decision"
 
 
 @pytest.mark.asyncio
@@ -3673,6 +3677,13 @@ def test_parse_delegation_rejects_incomplete_block(reason: str, needle: str) -> 
     assert needle in str(excinfo.value)
 
 
+@pytest.fixture
+def allow_delegation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mark the deployment lab-class so delegated decisions are allowed (#3693)."""
+    monkeypatch.setenv("APPROVAL_ALLOW_DELEGATED_DECISION", "true")
+    get_settings.cache_clear()
+
+
 async def _park_for_delegation(session: AsyncSession) -> uuid.UUID:
     pending = await create_pending_request(
         session,
@@ -3699,6 +3710,7 @@ async def _decision_payloads() -> list[dict[str, Any]]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("decision", ["approved", "rejected"])
+@pytest.mark.usefixtures("allow_delegation")
 async def test_delegated_decision_writes_structured_block_and_warns(
     session: AsyncSession, decision: str
 ) -> None:
@@ -3780,3 +3792,108 @@ async def test_ordinary_decision_has_no_delegation_block(session: AsyncSession) 
     assert not [e for e in captured if e["event"] == "approval_delegated_decision"]
     async with get_sessionmaker()() as s3:
         assert await get_decision_delegation(s3, row) is None
+
+
+# ---------------------------------------------------------------------------
+# #3693 -- delegated decisions only on lab-class deployments
+# ---------------------------------------------------------------------------
+
+
+def test_delegated_decision_setting_defaults_to_false() -> None:
+    """Fail-closed: a deployment is production unless it says otherwise."""
+    assert get_settings().approval_allow_delegated_decision is False
+
+
+async def _decide(request_id: uuid.UUID, decision: str, operator: Operator, reason: str) -> Any:
+    async with get_sessionmaker()() as s2:
+        if decision == "approved":
+            row = await approve_request(
+                s2,
+                request_id,
+                operator=operator,
+                params={"name": "test"},
+                reason=reason,
+            )
+        else:
+            row = await reject_request(s2, request_id, operator=operator, reason=reason)
+        await s2.commit()
+    return row
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decision", ["approved", "rejected"])
+@pytest.mark.parametrize(
+    "reviewer",
+    [
+        _make_operator(sub="reviewer-sub"),
+        _make_operator(sub="admin-sub", role=TenantRole.TENANT_ADMIN, approver=True),
+    ],
+    ids=["operator", "tenant-admin-approver"],
+)
+async def test_delegated_decision_refused_on_production(
+    session: AsyncSession, decision: str, reviewer: Operator
+) -> None:
+    """Setting off: a delegated decision is refused, logged, and changes nothing.
+
+    No caller input clears the guard -- not a stronger role, not the
+    ``approver`` capability, not matching params. Only the boot setting does.
+    """
+    request_id = await _park_for_delegation(session)
+
+    with capture_logs() as captured, pytest.raises(DelegatedDecisionForbiddenError) as excinfo:
+        await _decide(request_id, decision, reviewer, _DELEGATED_REASON)
+
+    assert "APPROVAL_ALLOW_DELEGATED_DECISION" in str(excinfo.value)
+    assert excinfo.value.instructed_by == "lead@example.com"
+    events = [e for e in captured if e["event"] == "approval_delegated_decision_refused"]
+    assert len(events) == 1
+    assert events[0]["log_level"] == "warning"
+    assert events[0]["decision"] == decision
+    assert events[0]["operator_sub"] == reviewer.sub
+    assert events[0]["instructed_by"] == "lead@example.com"
+    assert events[0]["approval_request_id"] == str(request_id)
+    assert not [e for e in captured if e["event"] == "approval_delegated_decision"]
+
+    async with get_sessionmaker()() as s3:
+        reloaded = await s3.get(ApprovalRequest, request_id)
+        assert reloaded is not None
+        assert reloaded.status == ApprovalRequestStatus.PENDING.value
+    assert await _decision_payloads() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decision", ["approved", "rejected"])
+@pytest.mark.usefixtures("allow_delegation")
+async def test_delegated_decision_allowed_on_lab_class(
+    session: AsyncSession, decision: str
+) -> None:
+    """Setting on: the same delegated decision goes through and is recorded."""
+    request_id = await _park_for_delegation(session)
+
+    with capture_logs() as captured:
+        row = await _decide(request_id, decision, _make_operator(), _DELEGATED_REASON)
+
+    assert row.status == decision
+    (payload,) = await _decision_payloads()
+    assert payload["delegation"]["instructed_by"] == "lead@example.com"
+    assert not [e for e in captured if e["event"] == "approval_delegated_decision_refused"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decision", ["approved", "rejected"])
+async def test_ordinary_decision_unaffected_by_delegated_decision_guard(
+    session: AsyncSession, decision: str
+) -> None:
+    """Setting off: a decision without the delegation block is not gated."""
+    request_id = await _park_for_delegation(session)
+    row = await _decide(request_id, decision, _make_operator(), "checked the diff")
+    assert row.status == decision
+
+
+@pytest.mark.asyncio
+async def test_invalid_delegated_decision_reason_wins_over_guard(session: AsyncSession) -> None:
+    """Setting off: an incomplete block is still a 422-class error, not a 403."""
+    request_id = await _park_for_delegation(session)
+    bad = "ok\n\nInstructed-by: lead@example.com\nRefs: #12"
+    with pytest.raises(DelegatedReasonInvalidError):
+        await _decide(request_id, "rejected", _make_operator(), bad)

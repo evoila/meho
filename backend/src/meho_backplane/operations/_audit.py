@@ -43,7 +43,7 @@ from meho_backplane.broadcast import (
 )
 from meho_backplane.broadcast.events import scrub_broadcast_params
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, EndpointDescriptor
+from meho_backplane.db.models import AuditEventClass, AuditLog, EndpointDescriptor
 from meho_backplane.operations._errors import status_code_for_result
 
 __all__ = [
@@ -226,8 +226,14 @@ def resolve_agent_session_id() -> uuid.UUID | None:
       the same session anchor its envelope rows get from
       :func:`~meho_backplane.mcp.audit.write_mcp_audit_row`.
 
-    Returns ``None`` outside both contexts (chassis HTTP, system sweeps)
-    — the correct value for the nullable column. A bound-but-malformed
+    A client-credential service principal that dispatches over the REST
+    chassis with a ``work_ref`` reaches the first source too:
+    ``call_operation`` binds :data:`agent_session_id_var` to the session id
+    of the principal's orchestration run for that work_ref
+    (:mod:`meho_backplane.operations.addon_orchestration`, #3446).
+
+    Returns ``None`` outside these contexts (chassis HTTP without such a
+    binding, system sweeps) — the correct value for the nullable column. A bound-but-malformed
     ``mcp_session_id`` is a programming error (the binder only binds
     canonical UUID strings); it is logged and treated as unbound, the
     same fail-soft posture :func:`meho_backplane.mcp.audit._resolve_uuid_contextvar`
@@ -528,6 +534,21 @@ def _resolve_target_id(target: Any) -> uuid.UUID | None:
     return raw if isinstance(raw, uuid.UUID) else None
 
 
+def _apply_principal_name(payload: dict[str, Any], operator: Operator) -> None:
+    """Store the caller's display name in ``payload["principal_name"]`` (#4029).
+
+    Audit readers (``meho audit show`` / ``query``, the console) read the
+    name from this key, the same key the MCP wrapper rows and the approval
+    rows use. The name always belongs to the row's ``operator_sub``. On an
+    approved run that is the approver when a person approves through the
+    console, CLI or REST, and the agent when MEHO's own agent waits for
+    the approval and resumes the run itself. Left out when the token has no
+    ``name`` claim.
+    """
+    if operator.name:
+        payload["principal_name"] = operator.name
+
+
 class AuditCommitError(RuntimeError):
     """The DISPATCH audit row could not be committed.
 
@@ -541,9 +562,12 @@ class AuditCommitError(RuntimeError):
     """
 
 
+# code-quality-allow: was 99 lines on main before #3733; the required
+# event_class argument adds a few lines. Splitting it is out of scope here.
 async def write_audit_row(
     *,
     audit_id: uuid.UUID,
+    event_class: AuditEventClass,
     operator: Operator,
     descriptor: EndpointDescriptor,
     target: Any,
@@ -576,6 +600,10 @@ async def write_audit_row(
     *error_extras* (#2680) is the error row's structured envelope,
     forwarded to :func:`_build_audit_payload` where it lands under
     ``payload["error"]``. ``None`` on every non-error write.
+
+    *event_class* (#3733) is declared by the caller, which knows what
+    happened: ``operation_execution`` when the operation ran (``ok`` or
+    ``error``), ``policy_decision`` when a gate refused it before it ran.
     """
     sessionmaker = get_sessionmaker()
     payload = _build_audit_payload(
@@ -586,6 +614,7 @@ async def write_audit_row(
         redaction_policy_id=redaction_policy_id,
         handle_metadata=handle_metadata,
     )
+    _apply_principal_name(payload, operator)
     target_id = _resolve_target_id(target)
     parent_audit_id = parent_audit_id_var.get()
     # G11.4-T5 #1074 -- read the agent-session lineage key off the
@@ -628,6 +657,7 @@ async def write_audit_row(
             target_id=target_id,
             parent_audit_id=parent_audit_id,
             agent_session_id=agent_session_id,
+            event_class=event_class,
             method="DISPATCH",
             path=descriptor.op_id,
             status_code=status_code_for_result(result_status),
@@ -709,9 +739,12 @@ async def publish_broadcast(
     await publish_event(event)
 
 
+# code-quality-allow: was 107 lines on main before #3733; the required
+# event_class argument adds a few lines. Splitting it is out of scope here.
 async def audit_and_broadcast_safe(
     *,
     audit_id: uuid.UUID,
+    event_class: AuditEventClass,
     operator: Operator,
     descriptor: EndpointDescriptor,
     target: Any,
@@ -762,10 +795,14 @@ async def audit_and_broadcast_safe(
     passed to :func:`publish_broadcast`: the broadcast frame stays
     params-only, so the error detail rides the audit ledger alone.
     ``None`` on every non-error write.
+
+    *event_class* (#3733) is forwarded to :func:`write_audit_row`; see
+    there for which class each caller declares.
     """
     try:
         await write_audit_row(
             audit_id=audit_id,
+            event_class=event_class,
             operator=operator,
             descriptor=descriptor,
             target=target,
@@ -842,10 +879,14 @@ async def audit_rejection_safe(
     The request changed nothing, so a missing audit row for a rejected call
     is a monitoring gap, not a correctness one -- the opposite of the
     write-class success path's fail-closed ``require_audit`` contract.
+
+    The row is always ``event_class='policy_decision'`` (#3733): a gate
+    refused the call and nothing ran.
     """
     try:
         await write_audit_row(
             audit_id=audit_id,
+            event_class=AuditEventClass.POLICY_DECISION,
             operator=operator,
             descriptor=descriptor,
             target=target,

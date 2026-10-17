@@ -232,7 +232,7 @@ func newRecordRemoveCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "remove <fqdn>",
-		Short: "Remove the A/AAAA records at an FQDN (atomic-apply)",
+		Short: "Remove the A/AAAA records at an FQDN (a second person must approve)",
 		Long: "remove dispatches bind9.record.remove against the connector_id=\n" +
 			"\"bind9-ssh-9.x\" connector. Removes the A and AAAA rdatasets\n" +
 			"at <fqdn> via the same atomic-apply primitive as record.add\n" +
@@ -244,6 +244,11 @@ func newRecordRemoveCmd() *cobra.Command {
 			"--view disambiguates a split-horizon nameserver where the\n" +
 			"same zone is declared in more than one view (same semantics\n" +
 			"as `record add`).\n\n" +
+			"bind9.record.remove is on the destructive risk level. So the command\n" +
+			"first previews the removal, then sends it with the preview_hash. The\n" +
+			"request then waits until a second person approves it (status=\n" +
+			"awaiting_approval). Approving it runs the removal. If the preview\n" +
+			"fails, the command stops and shows why; nothing is sent.\n\n" +
 			"Exit codes mirror meho operation call.",
 		Example: "  meho bind9 record remove esx-dc6.evba.lab --zone evba.lab --target vcf-router-bind9\n" +
 			"  meho bind9 record remove host.evba.lab --view internal --target vcf-router-bind9",
@@ -277,9 +282,12 @@ func runRecordRemove(cmd *cobra.Command, fqdn, zone, view, targetName string, js
 	if view != "" {
 		params["view"] = view
 	}
-	r, err := conn.Call(cmd.Context(), backplaneURL, "bind9.record.remove", targetName, params)
+	r, p, err := conn.PreviewAndCall(cmd.Context(), backplaneURL, "bind9.record.remove", targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
+	}
+	if r == nil {
+		return conn.RenderPreviewFailure(cmd, "bind9.record.remove", p, jsonOut)
 	}
 	return conn.Render(cmd, "bind9.record.remove", r, jsonOut, printWriteResult)
 }

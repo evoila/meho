@@ -322,8 +322,90 @@ rather than publish a schema its payloads violate. `call_operation` exposes an
 audit receipt. Its nullable `delivery` is about response shaping, not how much
 upstream data a result handle retained: `complete` means the shaped response was
 delivered, `unavailable` means execution completed but shaping failed and callers
-must inspect audit/status evidence without re-invoking it, and `partial` is
-reserved for later delivery-budget handling.
+must inspect audit/status evidence without re-invoking it, and `partial` means
+the response was too large to deliver but the `handle` still reaches the caller.
+
+### Response wire ceiling (#3641)
+
+A completed `call_operation` response is also checked against a wire ceiling,
+`RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES` (default 256 KiB). The size is measured
+on the real `tools/call` wire by `measure_delivered_wire_bytes`
+(`operations/delivery_budget.py`): the encoded text block plus the encoded
+`structuredContent` copy, escaping included. It is a byte count, not a token
+count. The MCP dispatcher builds the text block with the same
+`tool_result_text` function, so the measurement cannot drift from what is sent.
+
+When an `ok` response is over the ceiling, `bound_complete_response` drops the
+inline `result` and the extras and keeps the status `ok`:
+
+- `delivery="partial"` when the `handle` can be read back and the receipt with
+  the handle still fits. The caller reads the result through `result_query`. A
+  handle counts as readable only when its `fetch_more.drill_in.available` is
+  true: the reducer also mints handles whose rows were never stored (store
+  down, no tenant context, admission limit), and those cannot be read.
+- `delivery="unavailable"` otherwise. Only the `audit_id` receipt and the
+  remediation text remain; an unreadable handle is dropped too.
+
+`extras.remediation` says the operation already ran and must not be re-invoked;
+`extras.delivered_bytes` and `extras.delivery_max_bytes` give the numbers. A
+completed write is never reported as an error because its response was too
+large. Non-`ok` envelopes are not rewritten. The REST `/call` twin shares the
+same check; REST sends the payload once, so its real size is always smaller.
+
+The receipt must always reach the caller. Two checks make sure it can:
+
+- The ceiling has a floor, `RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES` (2048
+  bytes, `settings.py`). `Settings` rejects a smaller
+  `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES` at startup, before any operation
+  runs. The floor holds the receipt for an ASCII `op_id` of 256 characters.
+- The receipt grows with the `op_id`, and non-ASCII characters cost more
+  because the text block escapes them twice. So `call_operation` runs
+  `refuse_undeliverable_receipt` before dispatch. It measures the widest
+  receipt the `op_id` can produce (`receipt_wire_bytes`: the real `op_id`, the
+  widest possible `audit_id`, `duration_ms` and byte counts, same encoders as
+  the response). A call whose receipt could not fit the ceiling is refused
+  with `status="error"` and `extras.error_code="receipt_too_large"`, and the
+  operation never runs. The refusal says so and that calling again is safe.
+
+`bound_complete_response` still measures the final `unavailable` response. Only
+a caller that skipped the pre-check could push it over the ceiling; then it is
+delivered anyway with a `delivery_receipt_over_ceiling` warning, because
+dropping the `audit_id` of a completed write would be worse.
+
+### Reading result handles, and the call receipt
+
+A large `call_operation` result comes back as a `handle`. Three facts
+shape what the caller sees and how it reads more:
+
+- **Result field catalog (#3631, #3635).** The handle's `schema_` comes
+  from a catalog built over every captured row, not from the first row or
+  the sample. It has one property per top-level key, sorted by name. When
+  `result_query` runs a query, it builds the same catalog from the stored
+  rows and checks each field the query names. A field with mixed kinds,
+  objects, lists, only nulls, or integers past 64 bits cannot be used in
+  `filter`, `order_by`, `group_by`, or `aggregate`, but `select` still
+  returns it. Two cases still count as one kind: nulls next to one
+  scalar kind (the field is nullable, not mixed), and whole numbers next
+  to decimals, which query as one decimal column as long as every whole
+  number is within ±2^53. A flat query returns the stored rows exactly
+  as captured.
+- **`path` reads (#3633).** A large payload with no single list is kept
+  whole as a document record. `result_query` reads part of it with
+  `query={"path": "<RFC 6901 JSON Pointer>"}` (`""` is the whole
+  document; `~1` means `/` and `~0` means `~`). `path` cannot be combined
+  with the other query fields. The `result_query` `outputSchema` covers
+  both the rows shape and the `path` shape.
+- **The `audit_id` receipt (#3636).** `call_operation` returns
+  `audit_id` only after the dispatch audit row commits (`delivery` is
+  explained above, under "Response wire ceiling"). If the operation ran but its result could
+  not be shaped, the call stays `ok` with `delivery="unavailable"` and
+  the `audit_id`, so the caller knows not to run it again.
+
+The full rules, bounds, and errors are in
+[`result-spill.md`](result-spill.md). Tests:
+`tests/test_mcp_tool_result_query.py`,
+`tests/test_mcp_output_schema_conformance.py`, and
+`tests/test_result_reduction_properties.py`.
 
 ## Agent-surface scoping (working vs. operator, #3154)
 
@@ -452,7 +534,7 @@ add-on-family gate.
 | `meho_runbook_next` | operator | — | Advance one step of an in-progress run (opacity contract). |
 | `meho_runbook_show_template` | operator | — | Read a runbook template's full body. |
 | `meho_runbook_start` | operator | — | Start a new runbook run (self-assigned). |
-| `meho_status` | read_only | — | Return caller identity + backplane dependency status. |
+| `meho_status` | read_only | — | Return caller identity + backplane dependency status, plus `granted_scopes` and `surface_summary` (#3666). |
 | `preview_operation` | operator | — | Preview an operation without running it. |
 | `query_topology` | operator | — | Query the topology graph (dependents, blast radius, timeline). |
 | `read_docs` | operator | `meho-docs` | Read the text around a docs hit, its whole page or its section, through the hit's `read_handle` (#3948). |

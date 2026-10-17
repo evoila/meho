@@ -45,7 +45,12 @@ from meho_backplane.retrieval.embedding import (
     DEFAULT_EMBEDDING_MODEL,
 )
 
-__all__ = ["Settings", "get_settings", "parse_bool_env"]
+__all__ = [
+    "RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES",
+    "Settings",
+    "get_settings",
+    "parse_bool_env",
+]
 
 #: Driver schemes accepted on ``DATABASE_URL``. Both are async — the
 #: backplane refuses to construct a sync engine because every database
@@ -76,6 +81,17 @@ _SUPPORTED_BROADCAST_URL_SCHEMES: Final[tuple[str, ...]] = (
 #: (including the empty string and "disabled") is treated as ``False``
 #: so a misconfigured env var never silently enables a guarded surface.
 _TRUTHY_ENV_VALUES: Final[frozenset[str]] = frozenset({"1", "true", "yes", "on"})
+
+#: Floor for ``RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES`` (#3641). A completed
+#: operation must always deliver its receipt (``status``, ``op_id``,
+#: ``audit_id``, ``delivery`` and the remediation text), so the ceiling can
+#: never be set below the size that receipt takes on the wire. 2 KiB holds
+#: the receipt for an ASCII ``op_id`` of 256 characters with room to spare;
+#: a test in ``tests/test_operations_delivery_budget.py`` pins that. An
+#: ``op_id`` whose receipt would not fit (longer, or escaped non-ASCII
+#: text) is refused before the operation runs
+#: (``operations/delivery_budget.py``, ``refuse_undeliverable_receipt``).
+RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES: Final[int] = 2048
 
 
 def parse_bool_env(value: str | None) -> bool:
@@ -571,6 +587,14 @@ class Settings(BaseModel):
         (no writes, nothing to prune) while a running loop still heartbeats;
         ``enabled=False`` skips starting the loop entirely. Read once at
         lifespan startup; toggling post-start requires a pod restart.
+    request_usage_retention_days:
+        How many days request usage events are kept (#3734). These are the
+        privacy-bounded ``request_usage_event`` rows written at the REST and
+        MCP boundary. **Unset (the default) turns collection off**: no
+        events are written and requests are never slowed or blocked by it.
+        When set, one event is written per request and a daily job deletes
+        events older than this many days. Range ``[1, 3650]``. Env var
+        ``REQUEST_USAGE_RETENTION_DAYS``; an empty value counts as unset.
     result_handle_max_spill_rows:
         Upper bound on how many rows the reducer spills into the
         :class:`~meho_backplane.connectors.result_handle_store.ResultHandleStore`
@@ -587,6 +611,25 @@ class Settings(BaseModel):
         genuinely larger sets raise it via
         ``RESULT_HANDLE_MAX_SPILL_ROWS``. Read once per reduce through
         :func:`get_settings`'s cache.
+    result_cache_redis_url:
+        Connection URL for the dedicated result-cache Valkey that holds
+        result-handle rows, apart from the broadcast store. Env
+        ``RESULT_CACHE_REDIS_URL``. When unset, :func:`get_settings` uses
+        ``broadcast_redis_url`` (and its password), so reads and writes stay
+        on the broadcast store until the result-cache pod is deployed. Same
+        scheme rules as ``broadcast_redis_url``.
+    result_cache_redis_password:
+        Optional ``requirepass`` for the result-cache store. Env
+        ``RESULT_CACHE_REDIS_PASSWORD`` (chart secretKeyRef). ``None`` means
+        no auth.
+    result_cache_writer_enabled:
+        Writer gate for the result-cache move. ``False`` (default): new
+        result handles are written to the broadcast store under the old key.
+        ``True``: they are written to the result-cache store under the
+        ``meho:reshandle:v2`` keys. Reads always check the result-cache store
+        first and then the broadcast store, so turn this on only after every
+        backplane replica runs that reader code. Env
+        ``RESULT_CACHE_WRITER_ENABLED``.
     result_query_max_output_rows:
         Output-row ceiling on the ``result_query`` structured query surface
         (#3366): a compiled ``SELECT`` over a handle returns at most this many
@@ -597,20 +640,62 @@ class Settings(BaseModel):
         ``result_handle_max_spill_rows`` (how many rows are *stored*): this
         bounds how many a single query *returns*.
     result_query_max_output_bytes:
-        Serialized-output ceiling, in JSON bytes, applied to a
-        ``result_query`` query result **after** the row cap. A wide or
-        deeply-nested projection can blow the MCP result token budget even
+        Query-domain shaping budget: a ceiling, in JSON bytes, on the
+        ``rows`` of a ``result_query`` read (query and paging), checked
+        **before** the response is encoded for the wire and **after** the
+        row cap. A wide or deeply-nested projection can be too large even
         under 500 rows, so an over-budget result fails closed with an
         actionable error (narrow ``select``, add a ``filter``, or lower
-        ``limit``) rather than returning a giant envelope. Default 262144
+        ``limit``) rather than returning a giant envelope. Distinct from,
+        and lower than, the terminal ``result_query_response_wire_max_bytes``
+        ceiling, which measures the whole encoded response. Default 262144
         (256 KB). Env ``RESULT_QUERY_MAX_OUTPUT_BYTES``.
+    result_complete_response_wire_max_bytes:
+        Terminal wire ceiling, in bytes, for a completed ``call_operation``
+        response (#3641). Measured after encoding, on the real MCP
+        ``tools/call`` wire: the text block plus the ``structuredContent``
+        copy, escaping included. An ``ok`` response over the ceiling keeps
+        ``status="ok"`` and is returned with ``delivery="partial"`` (receipt
+        plus result handle) or ``delivery="unavailable"`` (receipt only),
+        never as an error. The default is generous on purpose; a load
+        benchmark may tune it. Must be at least
+        :data:`RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES` (2048) so the
+        receipt always fits; a smaller value fails at startup. A call whose
+        receipt could not fit the ceiling (an unusually long ``op_id``) is
+        refused before it runs with ``error_code="receipt_too_large"``.
+        Default 262144 (256 KiB). Env ``RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES``.
+    result_query_response_wire_max_bytes:
+        Terminal wire ceiling, in bytes, for a ``result_query`` response
+        (query, paging and path reads), measured the same way (#3641). A
+        response over it fails with the recoverable ``output_too_large``
+        error. Higher than ``result_query_max_output_bytes`` because it
+        counts the whole encoded response, not just the rows. The default is generous on
+        purpose; a load benchmark may tune it. Default 2097152 (2 MiB). Env
+        ``RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES``.
     result_query_timeout_seconds:
-        Wall-time budget for a single ``result_query`` compiled ``SELECT``.
-        DuckDB exposes no native Python query timeout, so the core runs
-        ``conn.execute()`` on a worker thread and calls ``conn.interrupt()``
-        on expiry (raising ``InterruptException``), surfaced to the caller as
-        a recoverable "narrow and retry" error. Default 5 seconds. Env
+        Wall-time budget for a whole ``result_query`` read (#3640): the
+        store fetch plus the catalog, compile, ``SELECT``, and encode steps
+        on the worker thread. DuckDB exposes no native Python query timeout,
+        so the core calls ``conn.interrupt()`` on expiry and returns a
+        recoverable "narrow and retry" error at once; a worker that is still
+        busy keeps its slot until it finishes. Default 10 seconds. Env
         ``RESULT_QUERY_TIMEOUT_SECONDS``.
+    result_query_executor_workers:
+        Size of the dedicated worker pool that runs ``result_query`` work,
+        and of the process-wide gate both result reads (paging and query)
+        must pass before the store is read (#3640). The gate does not queue:
+        when every slot is busy a read is refused with a recoverable
+        "capacity" error. Default 4. Env ``RESULT_QUERY_EXECUTOR_WORKERS``.
+    result_query_tenant_concurrency:
+        Most result reads one tenant may run at the same time in this
+        process (#3640). Only binds when it is lower than
+        ``result_query_executor_workers``. Default 4. Env
+        ``RESULT_QUERY_TENANT_CONCURRENCY``.
+    result_query_rate_per_minute:
+        Per-``(tenant, principal)`` fixed-window cap on result reads, shared
+        by paging and query and checked before the store is read (#3640).
+        ``0`` (the default) turns the check off, with no Valkey round-trip.
+        Env ``RESULT_QUERY_RATE_PER_MINUTE``.
     jsonflux_sample_byte_budget:
         Upper bound, in serialized JSON bytes, on the inline sample the
         JSONFlux reducer carries on a reduced ``ResultHandle`` (#134).
@@ -986,6 +1071,18 @@ class Settings(BaseModel):
         ``docs/codebase/approvals.md``. Reject is always allowed
         regardless of this flag — an operator withdrawing their own
         pending request is never a privilege escalation.
+    approval_allow_delegated_decision:
+        Lab-class switch for **delegated** approval decisions (#3693).
+        A delegated decision is an approve or reject whose ``reason``
+        ends with an ``Instructed-by:`` block (#3692): the approver acts
+        on another person's written instruction. Default ``False``
+        (fail-closed, production): every delegated decision is refused
+        with
+        :class:`~meho_backplane.operations.approval_queue.DelegatedDecisionForbiddenError`,
+        so on production an approve or reject is always the approver's
+        own call. Set ``APPROVAL_ALLOW_DELEGATED_DECISION=true`` only on
+        a lab-class deployment. Ordinary decisions are never affected.
+        Read at boot only; no request field can change it.
     openai_api_key:
         Bearer token the OpenAI-compatible backend builder
         (G11.5-T3 #1077) authenticates with. Empty (the default) is
@@ -1385,7 +1482,13 @@ class Settings(BaseModel):
     checks_evidence_retention_days: int = Field(default=7, ge=0, le=3650)
     checks_evidence_prune_interval_seconds: int = Field(default=604800, ge=60, le=604800)
     checks_evidence_prune_enabled: bool = True
+    # Request usage events (#3734). ``None`` = collection off. There is no
+    # default window on purpose: the operator chooses how long to keep them.
+    request_usage_retention_days: int | None = Field(default=None, ge=1, le=3650)
     result_handle_max_spill_rows: int = Field(default=10000, gt=0)
+    result_cache_redis_url: str = Field(default="redis://localhost:6379", min_length=1)
+    result_cache_redis_password: str | None = Field(default=None)
+    result_cache_writer_enabled: bool = Field(default=False)
     result_handle_max_record_bytes: int = Field(default=16777216, gt=0)
     # Bounds captured-JSON catalog work before the reducer serializes or
     # profiles a detected collection. These are deliberately separate from
@@ -1397,8 +1500,18 @@ class Settings(BaseModel):
     # are the query interface's own resource ceilings; it inherits neither the
     # spill row cap above nor the reducer's hardcoded TTL.
     result_query_max_output_rows: int = Field(default=500, gt=0)
+    # Query-domain shaping budget (rows only, checked before encoding).
     result_query_max_output_bytes: int = Field(default=262144, gt=0)
-    result_query_timeout_seconds: int = Field(default=5, gt=0)
+    result_query_timeout_seconds: int = Field(default=10, gt=0)
+    # #3640 -- admission for the two result-read paths.
+    result_query_executor_workers: int = Field(default=4, gt=0)
+    result_query_tenant_concurrency: int = Field(default=4, gt=0)
+    result_query_rate_per_minute: int = Field(default=0, ge=0)
+    # #3641 -- terminal wire ceilings, measured after encoding on the MCP
+    # wire (text block + structuredContent). Generous defaults; a benchmark
+    # may tune them.
+    result_complete_response_wire_max_bytes: int = Field(default=262144, gt=0)
+    result_query_response_wire_max_bytes: int = Field(default=2097152, gt=0)
     jsonflux_sample_byte_budget: int = Field(default=4096, gt=0)
     composite_max_depth: int = Field(default=8, gt=0)
     agent_invoke_max_depth: int = Field(default=4, gt=0)
@@ -1426,6 +1539,10 @@ class Settings(BaseModel):
     # docs/codebase/approvals.md "Single-operator tenants: use an
     # agent-requester, not break-glass".
     approval_allow_self_approval: bool = False
+    # #3693 -- delegated approval decisions (an ``Instructed-by:`` block in
+    # the reason, #3692) are allowed only on lab-class deployments. Default
+    # False is fail-closed: production refuses them.
+    approval_allow_delegated_decision: bool = False
     # #2322 (G0.31 #2364) -- approval-TTL lifecycle. Every parked approval
     # is stamped ``expires_at = created_at + APPROVAL_DEFAULT_TTL_SECONDS``
     # (default 14 days); an explicit caller override is honoured but capped
@@ -1801,13 +1918,14 @@ class Settings(BaseModel):
     # shared ingress and, unauthenticated, leak operational metrics and the
     # effective four-eyes / feature-gate posture to anyone who can reach it.
     # Empty ("", the default) leaves both endpoints **open** — behaviour is
-    # unchanged, so the in-cluster scraper and the kubelet readiness probe
-    # keep working with no config change. Set it to a shared secret to
-    # require ``Authorization: Bearer <token>`` on both endpoints
-    # (constant-time compared in :mod:`meho_backplane.metrics_access`); a
-    # deployment that turns it on must then hand the same token to the
-    # scraper (Prometheus ``bearer_token`` / ServiceMonitor
-    # ``bearerTokenSecret``) and to the readiness probe (``httpHeaders``).
+    # unchanged. Set it to a shared secret to require
+    # ``Authorization: Bearer <token>`` on ``/metrics`` (constant-time
+    # compared in :mod:`meho_backplane.metrics_access`); a deployment that
+    # turns it on must then hand the same token to the scraper (Prometheus
+    # ``bearer_token`` / ServiceMonitor ``bearerTokenSecret``). ``/ready``
+    # never answers 401 (#3594): without the bearer it still returns the
+    # readiness verdict but leaves out the ``features`` block, so the
+    # kubelet readiness probe needs no header.
     # ``/healthz`` (pure liveness, no posture) is deliberately never guarded,
     # so a bearer-less liveness path always exists. A **source-CIDR** allow
     # was considered and rejected: behind the shared ingress the app sees the
@@ -1998,6 +2116,18 @@ class Settings(BaseModel):
             ) from exc
         return value
 
+    @field_validator("result_cache_redis_url")
+    @classmethod
+    def _result_cache_url_must_use_supported_scheme(cls, value: str) -> str:
+        """Reject schemes redis-py would refuse, same rule as the broadcast URL."""
+        if not value.startswith(_SUPPORTED_BROADCAST_URL_SCHEMES):
+            supported = ", ".join(_SUPPORTED_BROADCAST_URL_SCHEMES)
+            raise ValueError(
+                f"RESULT_CACHE_REDIS_URL must use a redis-py-supported scheme; "
+                f"supported: {supported}. Got: {value!r}",
+            )
+        return value
+
     @field_validator("broadcast_redis_url")
     @classmethod
     def _broadcast_url_must_use_supported_scheme(cls, value: str) -> str:
@@ -2152,6 +2282,24 @@ class Settings(BaseModel):
                 ) from exc
         return value
 
+    @field_validator("result_complete_response_wire_max_bytes")
+    @classmethod
+    def _complete_response_ceiling_must_hold_the_receipt(cls, value: int) -> int:
+        """Reject a ``call_operation`` wire ceiling the receipt cannot fit (#3641).
+
+        A completed operation always delivers its receipt, so a ceiling
+        below :data:`RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES` could never
+        be honoured. Failing at startup keeps the ceiling a real bound
+        instead of one the receipt silently bypasses.
+        """
+        if value < RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES:
+            raise ValueError(
+                "RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES must be at least "
+                f"{RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES} bytes so the receipt of a "
+                f"completed operation always fits. Got: {value}"
+            )
+        return value
+
     @field_validator("vault_oidc_role_by_tenant")
     @classmethod
     def _vault_oidc_role_by_tenant_must_be_uuid_role_csv(cls, value: str) -> str:
@@ -2211,6 +2359,26 @@ def get_settings() -> Settings:
     ``BaseSettings`` is a one-commit refactor.
     """
     vault_namespace_env = os.environ.get("VAULT_NAMESPACE")
+    broadcast_redis_url = os.environ.get("BROADCAST_REDIS_URL", "redis://localhost:6379")
+    # ``or None`` collapses an empty-string env to no-auth, so an
+    # accidentally-blank BROADCAST_REDIS_PASSWORD does not send a
+    # zero-length password on the AUTH command.
+    broadcast_redis_password = os.environ.get("BROADCAST_REDIS_PASSWORD") or None
+    # An unset RESULT_CACHE_REDIS_URL falls back to the broadcast store (URL
+    # and password), so the reader-first result cache is a no-op until the
+    # dedicated pod ships.
+    result_cache_redis_url = os.environ.get("RESULT_CACHE_REDIS_URL") or None
+    if result_cache_redis_url is None:
+        result_cache_redis_url = broadcast_redis_url
+        result_cache_redis_password = broadcast_redis_password
+    else:
+        result_cache_redis_password = os.environ.get("RESULT_CACHE_REDIS_PASSWORD") or None
+    # An unset or blank REQUEST_USAGE_RETENTION_DAYS keeps request usage
+    # collection off (#3734).
+    request_usage_retention_raw = os.environ.get("REQUEST_USAGE_RETENTION_DAYS", "").strip()
+    request_usage_retention_days = (
+        int(request_usage_retention_raw) if request_usage_retention_raw else None
+    )
     return Settings(
         keycloak_issuer_url=os.environ["KEYCLOAK_ISSUER_URL"],  # type: ignore[arg-type]
         keycloak_audience=os.environ["KEYCLOAK_AUDIENCE"],
@@ -2340,14 +2508,8 @@ def get_settings() -> Settings:
             "KB_INGEST_ROOT",
             "/opt/meho/kb-ingest",
         ).strip(),
-        broadcast_redis_url=os.environ.get(
-            "BROADCAST_REDIS_URL",
-            "redis://localhost:6379",
-        ),
-        # ``or None`` collapses an empty-string env to no-auth, so an
-        # accidentally-blank BROADCAST_REDIS_PASSWORD does not send a
-        # zero-length password on the AUTH command.
-        broadcast_redis_password=os.environ.get("BROADCAST_REDIS_PASSWORD") or None,
+        broadcast_redis_url=broadcast_redis_url,
+        broadcast_redis_password=broadcast_redis_password,
         broadcast_retention_hours=int(
             os.environ.get("BROADCAST_RETENTION_HOURS", "24"),
         ),
@@ -2411,8 +2573,14 @@ def get_settings() -> Settings:
         checks_evidence_prune_enabled=parse_bool_env(
             os.environ.get("CHECKS_EVIDENCE_PRUNE_ENABLED", "true"),
         ),
+        request_usage_retention_days=request_usage_retention_days,
         result_handle_max_spill_rows=int(
             os.environ.get("RESULT_HANDLE_MAX_SPILL_ROWS", "10000"),
+        ),
+        result_cache_redis_url=result_cache_redis_url,
+        result_cache_redis_password=result_cache_redis_password,
+        result_cache_writer_enabled=parse_bool_env(
+            os.environ.get("RESULT_CACHE_WRITER_ENABLED", "false"),
         ),
         result_handle_max_record_bytes=int(
             os.environ.get("RESULT_HANDLE_MAX_RECORD_BYTES", "16777216"),
@@ -2432,8 +2600,23 @@ def get_settings() -> Settings:
         result_query_max_output_bytes=int(
             os.environ.get("RESULT_QUERY_MAX_OUTPUT_BYTES", "262144"),
         ),
+        result_complete_response_wire_max_bytes=int(
+            os.environ.get("RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES", "262144"),
+        ),
+        result_query_response_wire_max_bytes=int(
+            os.environ.get("RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES", "2097152"),
+        ),
         result_query_timeout_seconds=int(
-            os.environ.get("RESULT_QUERY_TIMEOUT_SECONDS", "5"),
+            os.environ.get("RESULT_QUERY_TIMEOUT_SECONDS", "10"),
+        ),
+        result_query_executor_workers=int(
+            os.environ.get("RESULT_QUERY_EXECUTOR_WORKERS", "4"),
+        ),
+        result_query_tenant_concurrency=int(
+            os.environ.get("RESULT_QUERY_TENANT_CONCURRENCY", "4"),
+        ),
+        result_query_rate_per_minute=int(
+            os.environ.get("RESULT_QUERY_RATE_PER_MINUTE", "0"),
         ),
         jsonflux_sample_byte_budget=int(
             os.environ.get("JSONFLUX_SAMPLE_BYTE_BUDGET", "4096"),
@@ -2466,6 +2649,11 @@ def get_settings() -> Settings:
         # unless this break-glass switch is explicitly enabled.
         approval_allow_self_approval=parse_bool_env(
             os.environ.get("APPROVAL_ALLOW_SELF_APPROVAL", "false"),
+        ),
+        # #3693 — fail-closed default: delegated decisions refused unless
+        # this lab-class switch is explicitly enabled.
+        approval_allow_delegated_decision=parse_bool_env(
+            os.environ.get("APPROVAL_ALLOW_DELEGATED_DECISION", "false"),
         ),
         # #2322 — approval-TTL default + sweeper knobs.
         approval_default_ttl_seconds=int(

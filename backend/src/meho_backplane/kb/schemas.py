@@ -44,20 +44,29 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import datetime
-from typing import Final
+from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict
 
 __all__ = [
     "KB_KIND_ENTRY",
+    "KB_KIND_PASSAGE",
+    "KB_PASSAGE_SOURCE",
     "KB_SOURCE",
     "META_CREATED_BY_SUB",
+    "META_KB_PASSAGE",
     "META_LAST_UPDATED_BY_SUB",
+    "META_PROVENANCE",
     "SLUG_PATTERN",
     "InvalidKbSlugError",
     "KbEntry",
+    "KbEntryRevision",
     "KbEntrySearchHit",
+    "KbIngestConflict",
     "KbIngestionResult",
+    "KbPassageEvidence",
+    "KbPassageLocator",
+    "KbProvenance",
     "validate_slug",
 ]
 
@@ -85,10 +94,36 @@ KB_SOURCE: Final[str] = "kb"
 META_CREATED_BY_SUB: Final[str] = "created_by_sub"
 META_LAST_UPDATED_BY_SUB: Final[str] = "last_updated_by_sub"
 
+#: Metadata key that holds where an entry came from. The service owns
+#: this key: it writes it on every directory ingest and every direct
+#: create, and it replaces any value a caller or a front-matter block
+#: supplies. The stored value is a small dict with ``source_kind``
+#: (``"directory"`` or ``"direct"``), ``relative_path`` (the file path
+#: relative to the ingest directory, never an absolute host path; ``None``
+#: for direct writes) and ``ingested_at`` (UTC ISO-8601 time of the
+#: write). Rows written before this key existed have no value here; the
+#: read side reports them as ``state="legacy"`` instead of guessing.
+META_PROVENANCE: Final[str] = "provenance"
+
 #: The ``documents.kind`` value every kb entry carries. Distinct from
 #: future kb-adjacent rows (kb-index, kb-collection) that would each
 #: pick their own ``kind`` value within the ``source='kb'`` namespace.
 KB_KIND_ENTRY: Final[str] = "kb-entry"
+
+#: ``documents.source`` and ``documents.kind`` of a kb passage row
+#: (#3761). Each passage is one heading-aware piece of the **current**
+#: revision of an entry. Search ranks these rows: the retriever maps a
+#: query for ``source="kb"`` (or ``kind="kb-entry"``) to them, and an
+#: entry's head row stops being a search candidate once the entry has
+#: passages. The same literals live in the retriever's SQL.
+KB_PASSAGE_SOURCE: Final[str] = "kb-passage"
+KB_KIND_PASSAGE: Final[str] = "kb-passage"
+
+#: Metadata key that holds a passage's locator on its ``documents``
+#: row: entry, revision, slug, ordinal, heading path, offsets and the
+#: chunker / model that made it. The service owns it; a caller value
+#: under this key is replaced on the passage rows.
+META_KB_PASSAGE: Final[str] = "kb_passage"
 
 #: Slug regex. Anchored start + end. Lowercase letter as the leading
 #: character; lowercase letter or digit as the trailing character;
@@ -127,6 +162,25 @@ def validate_slug(slug: str) -> str:
     return slug
 
 
+class KbProvenance(BaseModel):
+    """Where a kb entry came from, as read back from its metadata.
+
+    ``state="recorded"`` means the service stored provenance when it
+    wrote the entry; the other fields are then set (``relative_path``
+    stays ``None`` for direct writes). ``state="legacy"`` means the
+    entry was written before provenance was stored, or the stored value
+    is not in the expected shape; every other field is ``None``. Legacy
+    rows are not rewritten -- the next write records real provenance.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    state: Literal["recorded", "legacy"]
+    source_kind: Literal["directory", "direct"] | None = None
+    relative_path: str | None = None
+    ingested_at: datetime | None = None
+
+
 class KbEntry(BaseModel):
     """One kb entry -- mirrors a row in the ``documents`` table.
 
@@ -135,7 +189,12 @@ class KbEntry(BaseModel):
     operator-facing identifier (``documents.source_id`` on the SQL
     side); the underlying ``Document.id`` UUID is also surfaced for
     cross-correlation with audit-log rows and future MCP resource
-    URIs.
+    URIs. ``id`` is the entry UUID.
+
+    ``revision_id`` is the retained revision that holds this body. Pass
+    it with ``id`` to ``meho://kb/id/{entry}/revision/{revision}`` to
+    read this exact body later, even after the entry changes. It is
+    ``None`` only for a row that has no stored revision.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -145,8 +204,84 @@ class KbEntry(BaseModel):
     slug: str
     body: str
     metadata: dict[str, object]
+    provenance: KbProvenance
     created_at: datetime
     updated_at: datetime
+    revision_id: uuid.UUID | None = None
+
+
+class KbEntryRevision(BaseModel):
+    """One retained, immutable body of a kb entry.
+
+    Returned by :meth:`KbService.get_revision`. ``entry_id`` is the
+    entry UUID (``KbEntry.id``) and ``revision_id`` the revision UUID.
+    ``revision_number`` counts up from 1 per entry. ``body`` and
+    ``body_hash`` never change after the revision is stored.
+
+    ``origin="backfill-current"`` means the revision was copied from
+    the entry's body when retained revisions were first added. It is
+    the body the entry had at that time, not a historical version, and
+    ``embedding_model`` / ``chunker_version`` are ``None`` because they
+    were not recorded. ``origin="write"`` revisions record both.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    entry_id: uuid.UUID
+    revision_id: uuid.UUID
+    tenant_id: uuid.UUID
+    slug: str
+    revision_number: int
+    body: str
+    body_hash: str
+    provenance: KbProvenance
+    origin: Literal["write", "backfill-current"]
+    embedding_model: str | None
+    chunker_version: str | None
+    created_at: datetime
+
+
+class KbPassageLocator(BaseModel):
+    """Where one passage sits in one retained revision.
+
+    ``start`` / ``end`` are Unicode code-point offsets into the
+    revision body: ``body[start:end]`` is exactly the passage text.
+    ``uri`` reads that revision (``meho://kb/id/{entry}/revision/{revision}``).
+    ``passage_id`` is an opaque id of this passage in this indexing
+    generation; do not parse it. A locator a client sends back is
+    untrusted input and the server checks it again.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    entry_id: uuid.UUID
+    revision_id: uuid.UUID
+    passage_id: str
+    ordinal: int
+    passage_count: int
+    heading_path: list[str]
+    start: int
+    end: int
+    chunker_version: str
+    embedding_model: str
+    uri: str
+
+
+class KbPassageEvidence(BaseModel):
+    """One passage that matched a search, with its exact locator.
+
+    ``text`` is the whole passage (never cut), so it is always the
+    complete ``body[start:end]`` of the revision. Scores are the
+    passage's own retrieval scores.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    text: str
+    locator: KbPassageLocator
+    fused_score: float
+    bm25_rank: int | None
+    cosine_rank: int | None
 
 
 class KbEntrySearchHit(BaseModel):
@@ -160,11 +295,17 @@ class KbEntrySearchHit(BaseModel):
     ``cosine_score=None``) means the hit only appeared in the other
     signal's top-:data:`~meho_backplane.retrieval.retriever.CANDIDATE_LIMIT`.
 
-    ``snippet`` is the first ~200 characters of the body -- enough to
-    let an operator (or the agent's downstream reasoning) decide
-    whether a full ``get_entry`` is warranted. The full body is
-    available through :meth:`KbService.get_entry` keyed on the
-    returned ``slug``.
+    ``passages`` (#3761) are the matching passages of the entry's
+    current revision, best first, each with its exact locator. The
+    scores on the hit are those of its best passage. ``coverage`` is
+    ``"complete"`` when ``passages`` hold every passage of the revision
+    (the whole body is in the hit) and ``"partial"`` otherwise; read
+    the rest through a locator's ``uri``. An entry indexed before
+    passages existed has no passages yet; its hit has an empty list,
+    ``coverage="partial"`` and the old whole-body scores.
+
+    ``snippet`` is the first ~200 characters of the best passage (or of
+    the body, for an entry without passages).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -177,13 +318,31 @@ class KbEntrySearchHit(BaseModel):
     cosine_score: float | None
     bm25_rank: int | None
     cosine_rank: int | None
+    passages: list[KbPassageEvidence] = []
+    coverage: Literal["complete", "partial"] = "partial"
+
+
+class KbIngestConflict(BaseModel):
+    """Two or more files in one directory ingest claim the same slug.
+
+    ``relative_paths`` lists every file that claims ``slug``, sorted,
+    relative to the ingest directory. None of these files is written,
+    and an existing entry with this slug stays unchanged. The operator
+    fixes the conflict (rename a file or change its ``slug:``
+    front-matter) and runs the ingest again.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    slug: str
+    relative_paths: list[str]
 
 
 class KbIngestionResult(BaseModel):
     """Summary of one :meth:`KbService.ingest_directory` run.
 
-    The four counters partition every discovered ``.md`` file into
-    exactly one of four buckets:
+    The five counters partition every discovered ``.md`` file into
+    exactly one of five buckets:
 
     * ``inserted_count`` -- file's slug had no prior row in the tenant;
       a new document row was created and embedded.
@@ -199,9 +358,17 @@ class KbIngestionResult(BaseModel):
       front-matter). The matching error message is appended to
       :attr:`errors`; the ingestion run continues with the remaining
       files.
+    * ``conflict_count`` -- the file shares its slug with at least one
+      other file in the same run. No file in that group is written;
+      :attr:`conflicts` lists each group once.
 
     Sum invariant: ``inserted_count + updated_count + skipped_count
-    + error_count == <total discovered .md files>``.
+    + error_count + conflict_count == <total discovered .md files>``.
+
+    The run walks files in sorted relative-path order, so the same
+    directory gives the same counters, ``errors`` order and
+    ``conflicts`` order on every run, whatever order the filesystem
+    lists the files in.
 
     The ``errors`` list is bounded in practice by the corpus size --
     no per-file error string exceeds ~200 chars (the file path plus a
@@ -216,4 +383,6 @@ class KbIngestionResult(BaseModel):
     updated_count: int
     skipped_count: int
     error_count: int
+    conflict_count: int
     errors: list[str]
+    conflicts: list[KbIngestConflict]

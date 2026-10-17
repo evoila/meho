@@ -27,12 +27,14 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.mcp.resources.memory import _memory_entry_handler
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.memory.schemas import MemoryScope
 from meho_backplane.memory.service import MemoryService
@@ -441,3 +443,194 @@ def test_memory_resource_hidden_from_read_only_operator(
     templates = response.json()["result"]["resourceTemplates"]
     uri_templates = {t["uriTemplate"] for t in templates}
     assert "meho://memory/{scope}/{slug}" not in uri_templates
+
+
+# ---------------------------------------------------------------------------
+# Canonical selected read — meho://memory/id/{document_uuid}
+# ---------------------------------------------------------------------------
+
+
+def _read(client: TestClient, uri: str) -> dict[str, object]:
+    response = post_mcp(
+        client,
+        {"jsonrpc": "2.0", "id": 1, "method": "resources/read", "params": {"uri": uri}},
+    )
+    assert response.status_code == 200
+    body: dict[str, object] = response.json()
+    return body
+
+
+def _admin_like(op: Operator) -> Operator:
+    """Same operator, tenant_admin role, for seeding tenant-shared rows."""
+    return Operator(
+        sub=op.sub,
+        name=op.name,
+        email=op.email,
+        raw_jwt=op.raw_jwt,
+        tenant_id=op.tenant_id,
+        tenant_role=TenantRole.TENANT_ADMIN,
+    )
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+def test_resources_templates_list_exposes_canonical_memory_locator(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """The canonical id template is listed and describes the selected read."""
+    client, _op = client_with_operator
+    response = post_mcp(
+        client,
+        {"jsonrpc": "2.0", "id": 1, "method": "resources/templates/list"},
+    )
+    templates = {t["uriTemplate"]: t for t in response.json()["result"]["resourceTemplates"]}
+    canonical = templates["meho://memory/id/{document_uuid}"]
+    assert canonical["mimeType"] == "text/markdown"
+    assert "required_role" not in canonical
+    assert "locator" in canonical["description"]
+    assert "search_memory" in canonical["description"]
+    assert "UNTRUSTED_AGENT_TEXT" in canonical["description"]
+    # The legacy template points callers at the locator.
+    assert "locator" in templates["meho://memory/{scope}/{slug}"]["description"]
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+@pytest.mark.asyncio
+async def test_resources_read_by_locator_hydrates_target_and_user_target_rows(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stub_embedding: AsyncMock,
+) -> None:
+    """Target and user-target rows, unreachable by scope/slug, read through the locator."""
+    client, op = client_with_operator
+    service = MemoryService()
+    target_row = await service.remember(
+        _admin_like(op),
+        scope=MemoryScope.TARGET,
+        body="Target note.",
+        slug="disk-layout",
+        target_name="infra-1",
+    )
+    user_target_row = await service.remember(
+        op,
+        scope=MemoryScope.USER_TARGET,
+        body="My target note.",
+        slug="my-disk-note",
+        target_name="infra-1",
+    )
+
+    for row, scope in ((target_row, "target"), (user_target_row, "user-target")):
+        locator = f"meho://memory/id/{row.id}"
+        body = _read(client, locator)
+        assert "error" not in body
+        result = body["result"]
+        assert isinstance(result, dict)
+        block = result["contents"][0]
+        assert block["uri"] == locator
+        payload = json.loads(block["text"])
+        assert payload["id"] == str(row.id)
+        assert payload["scope"] == scope
+        assert payload["target_name"] == "infra-1"
+        assert payload["locator"] == locator
+        assert payload["body"].startswith(BLOCK_START)
+
+    # The legacy scope/slug form still does not resolve target rows.
+    legacy = _read(client, "meho://memory/target/disk-layout")
+    error = legacy["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == INVALID_PARAMS
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+@pytest.mark.asyncio
+async def test_resources_read_by_locator_shares_one_not_found_answer(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stub_embedding: AsyncMock,
+) -> None:
+    """Malformed, unknown, deleted, expired, foreign, and other-owner ids look the same."""
+    client, op = client_with_operator
+    service = MemoryService()
+    other = Operator(
+        sub="other-operator",
+        name=None,
+        email=None,
+        raw_jwt="not-a-real-jwt",
+        tenant_id=op.tenant_id,
+        tenant_role=TenantRole.OPERATOR,
+    )
+    foreign = Operator(
+        sub="foreign-op",
+        name=None,
+        email=None,
+        raw_jwt="not-a-real-jwt",
+        tenant_id=uuid.uuid4(),
+        tenant_role=TenantRole.TENANT_ADMIN,
+    )
+    other_row = await service.remember(
+        other, scope=MemoryScope.USER_TARGET, body="x", target_name="infra-1"
+    )
+    foreign_row = await service.remember(
+        foreign, scope=MemoryScope.TARGET, body="x", target_name="t"
+    )
+    expired_row = await service.remember(
+        op,
+        scope=MemoryScope.USER,
+        body="x",
+        expires_at=datetime.now(UTC) - timedelta(hours=1),
+    )
+    deleted_row = await service.remember(op, scope=MemoryScope.USER, body="x")
+    assert await service.forget(op, scope=MemoryScope.USER, slug=deleted_row.slug)
+
+    raw_ids = [
+        "not-a-uuid",
+        str(uuid.uuid4()),
+        str(deleted_row.id),
+        str(expired_row.id),
+        str(foreign_row.id),
+        str(other_row.id),
+    ]
+    for raw_id in raw_ids:
+        body = _read(client, f"meho://memory/id/{raw_id}")
+        error = body["error"]
+        assert isinstance(error, dict)
+        assert error["code"] == INVALID_PARAMS
+        # Identical message apart from echoing the caller's own input.
+        assert error["message"] == f"memory entry not found: id={raw_id!r}"
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+@pytest.mark.asyncio
+async def test_legacy_read_returns_canonical_locator_and_forwards_id_uris(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stub_embedding: AsyncMock,
+) -> None:
+    """A legacy read carries the locator; the legacy handler forwards ``id`` URIs."""
+    client, op = client_with_operator
+    service = MemoryService()
+    stored = await service.remember(op, scope=MemoryScope.USER, body="note", slug="legacy-note")
+
+    body = _read(client, "meho://memory/user/legacy-note")
+    result = body["result"]
+    assert isinstance(result, dict)
+    payload = json.loads(result["contents"][0]["text"])
+    assert payload["locator"] == f"meho://memory/id/{stored.id}"
+
+    # Whatever the template order, an id URI caught by {scope}/{slug}
+    # still runs the canonical read.
+    forwarded = await _memory_entry_handler(op, {"scope": "id", "slug": str(stored.id)})
+    assert forwarded["id"] == str(stored.id)
+    assert forwarded["locator"] == f"meho://memory/id/{stored.id}"

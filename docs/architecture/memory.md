@@ -57,6 +57,7 @@ Each scope's `documents` row carries:
 |---|---|---|
 | `remember(operator, scope, body, slug=None, metadata=None, expires_at=None, target_name=None) -> MemoryEntry` | `validate_slug` (or `auto_slug` when `slug` is `None`) + `encode_source_id` + `build_metadata` + `index_document` (G0.4-T3). Body-hash short-circuit means a same-body re-remember costs only an `updated_at` bump. | `POST /api/v1/memory`, `add_to_memory`, `meho remember` |
 | `forget(operator, scope, slug, target_name=None) -> bool` | Natural-key `select` + `delete`. Returns whether a row existed (idempotent — re-forgetting an already-absent slug is `False`, not an error). | `DELETE /api/v1/memory/{scope}/{slug}`, `meho forget` |
+| `read_by_id(operator, document_id) -> MemoryEntry \| None` | Fetch by `documents.id`. Runs the same checks as `recall` on the row's own natural key (tenant, owner, target name, expiry), so the id grants nothing by itself. Every miss returns `None`. | `meho://memory/id/{document_uuid}` (the `locator` on every search hit) |
 | `recall(operator, scope, slug, target_name=None) -> MemoryEntry \| None` | Natural-key `select`. Collapses "not found" and "RBAC denied" into the same `None` return — see the info-leak section below. Read-side expiry filter (rows with past `expires_at` surface as `None` until G5.2's reaper deletes them). | `GET /api/v1/memory/{scope}/{slug}`, `meho://memory/{scope}/{slug}`, `meho recall <scope>/<slug>` |
 | `list_memories(operator, scope=None, slug_pattern=None, tag=None, include_expired=False, limit=100) -> list[MemoryEntry]` | `select(Document)` scoped to `source="memory"` and the operator's `visible_kinds`, ordered `updated_at desc`. SQL-side filter on `tenant_id` + `kind`; in-process filter on `user_sub` (user-scoped RBAC), `slug_pattern` (substring), `tag` (membership in `metadata.tags`), and `expires_at` (`include_expired=False` default). | `GET /api/v1/memory`, `meho list` |
 | `search_memories(operator, query, scope=None, limit=10) -> list[MemoryEntrySearchHit]` | `retrieve()` (G0.4-T4) with `source="memory"` pinned and optional `kind=memory-<scope>`. Adapts `RetrievalHit` → `MemoryEntrySearchHit` (slug instead of source_id, per-signal `bm25_score` / `cosine_score` / ranks carried). Post-filters via `MemoryRbacResolver.can_read` so an operator's search never surfaces another operator's user-scoped row. | `search_memory` (MCP), `meho recall --query` |
@@ -115,11 +116,15 @@ Every route binds two contextvars **before** the service call so the chassis [`A
 
 The tool descriptions are load-bearing agent UX — `add_to_memory` is called by every agent session that learns something worth retaining. The descriptions name the lifecycle contract (default 7-day TTL on user scope per [G5.2-T2 #624](https://github.com/evoila/meho/issues/624), `--persist` opt-out at the CLI / explicit `expires_at: null` at the API) so an agent learns it from the tool definition itself rather than guessing.
 
-### MCP resource (T3 #423)
+### MCP resources
 
-[`backend/src/meho_backplane/mcp/resources/memory.py`](../../backend/src/meho_backplane/mcp/resources/memory.py) — `meho://memory/{scope}/{slug}` (`operator` role, `mimeType: text/markdown`). The fetch-by-slug companion to `search_memory`: the agent calls `resources/read` with a hit's `(scope, slug)` to get the full body. A malformed scope / slug or a slug absent in the operator's tenant collapses to `-32602` "not found" (same info-leak shape as the REST `GET` route).
+[`backend/src/meho_backplane/mcp/resources/memory.py`](../../backend/src/meho_backplane/mcp/resources/memory.py) registers two templates.
 
-The URI template is a v0.2 simple-expansion shape — `target_name` is **not** in the template. Tenant- and target-scoped reads still need it; the v0.2 resource is shaped for the user-flavoured scopes where the operator's own `sub` provides the disambiguation. A future polish would extend the template or add a query-parameter form; for now the resource serves the most-called shape (the agent reading back its own user-scoped memories).
+`meho://memory/id/{document_uuid}` is the **canonical selected read**. Every `search_memory` hit carries it as `locator`. It works for every scope, including `target` and `user-target`. The service checks tenant, owner, target name, and expiry again on each read. A malformed, unknown, deleted, expired, foreign, or other-owner id all return the same `-32602` "memory entry not found" error.
+
+`meho://memory/{scope}/{slug}` (T3 #423) is the older form, kept for compatibility: (`operator` role, `mimeType: text/markdown`). The fetch-by-slug companion to `search_memory`: the agent calls `resources/read` with a hit's `(scope, slug)` to get the full body. A malformed scope / slug or a slug absent in the operator's tenant collapses to `-32602` "not found" (same info-leak shape as the REST `GET` route).
+
+The scope/slug template has no `target_name`, so it resolves `user`, `user-tenant`, and `tenant` entries only. `target` and `user-target` entries are read through the locator.
 
 ### CLI (T4 #424)
 
@@ -146,7 +151,7 @@ The verbs are **top-level** (not nested under `meho memory ...`) per the consume
 Per CLAUDE.md postulate 5, the agent never sees vendor-specific tools. The memory flow is:
 
 1. When the agent starts a session in a tenant, `search_memory(scope=user)` and `search_memory(scope=user-tenant)` for relevant context (the operator's preferences, the lab's conventions). The agent surface is two read tools; the implicit recipe is "search first, ask the operator second".
-2. The agent picks a hit by slug, then `resources/read` on `meho://memory/{scope}/{slug}` for the full body if the snippet isn't enough.
+2. The agent picks a hit. The hit already carries the entry; its `locator` (`meho://memory/id/{document_uuid}`) is the stable way to read that entry again with `resources/read`.
 3. When the agent (or the operator working with it) learns something durable — a preference, a tenant convention, a target gotcha — it `search_memory` first to avoid duplicates, then `add_to_memory` at the narrowest appropriate scope. Same-slug re-add merges in place via the body-hash short-circuit.
 4. Promotion to a broader scope (e.g. "this user-tenant memory is actually useful tenant-wide") is **operator-initiated only** — the agent does not have a `promote_memory` tool. G5.2's `meho promote` CLI verb is the human-authorised path; AI-suggested promotion is explicitly disallowed per consumer-needs.md §G5 "Out of scope".
 

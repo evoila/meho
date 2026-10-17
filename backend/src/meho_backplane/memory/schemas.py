@@ -29,18 +29,34 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 __all__ = [
+    "MEMORY_ID_URI_TEMPLATE",
     "SLUG_PATTERN",
     "MemoryEntry",
     "MemoryEntryCreate",
     "MemoryEntrySearchHit",
     "MemoryScope",
     "kind_for_scope",
+    "memory_locator",
     "scope_for_kind",
     "validate_slug",
 ]
+
+
+#: The canonical selected-read URI for one memory entry. Search hits
+#: carry it as ``locator``; ``resources/read`` on it returns the full
+#: entry. The ``{document_uuid}`` is the ``documents.id`` of the row.
+#: It names a row but grants nothing: every read re-checks tenant,
+#: owner, target, and expiry in
+#: :meth:`~meho_backplane.memory.service.MemoryService.read_by_id`.
+MEMORY_ID_URI_TEMPLATE: str = "meho://memory/id/{document_uuid}"
+
+
+def memory_locator(document_id: UUID) -> str:
+    """Return the canonical selected-read URI for *document_id*."""
+    return MEMORY_ID_URI_TEMPLATE.format(document_uuid=document_id)
 
 
 #: Regex anchoring the slug character set the service accepts.
@@ -225,3 +241,13 @@ class MemoryEntrySearchHit(BaseModel):
     cosine_score: float | None
     bm25_rank: int | None
     cosine_rank: int | None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def locator(self) -> str:
+        """Canonical selected-read URI (``meho://memory/id/{document_uuid}``).
+
+        Built from the row id only, so it never carries a target name
+        or owner. Read it with ``resources/read`` to get the full entry.
+        """
+        return memory_locator(self.entry.id)

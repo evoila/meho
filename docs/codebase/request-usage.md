@@ -134,7 +134,7 @@ not deleted or reclassified.
 The reflex advisory ("did this agent session read the broadcast feed?")
 reads both the `meho_broadcast_recent` wrapper row and the session's
 `tool:meho_broadcast_recent` usage event, so it works before and after the
-cutover. Migration `0111` adds the `session_id` index it uses.
+cutover. Migration `0112` adds the `session_id` index it uses.
 
 ## Context selection
 

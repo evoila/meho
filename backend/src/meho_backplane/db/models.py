@@ -8758,7 +8758,7 @@ class RequestUsageEvent(Base):
     * ``correlation_id`` -- opaque id that links a ``context_selected``
       event to later evaluation data; ``NULL`` on ``request_finished``.
 
-    Indexes are declared in migrations ``0107`` and ``0111``:
+    Indexes are declared in migrations ``0107`` and ``0112``:
     ``(tenant_id, occurred_at)`` for tenant-scoped window reads,
     ``occurred_at`` for the retention delete, and ``session_id`` for the
     reflex advisory's "did this session read the feed" check (#3757).

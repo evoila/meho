@@ -75,7 +75,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
-from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
 from meho_backplane.memory.rbac import (
     InvalidPromotionStepError,
     PermissionDeniedError,
@@ -152,7 +152,7 @@ async def _meho_memory_promote_handler(
         raise McpInvalidParamsError(f"{_TOOL_NAME}: {exc}") from exc
     except PermissionDeniedError as exc:
         del exc
-        raise McpInvalidParamsError(f"{_TOOL_NAME}: insufficient_promotion_authority") from None
+        raise McpPermissionDeniedError(f"{_TOOL_NAME}: insufficient_promotion_authority") from None
     except NotImplementedError as exc:
         raise McpInvalidParamsError(f"{_TOOL_NAME}: not_implemented: {exc}") from exc
     except ValueError as exc:

@@ -137,6 +137,7 @@ from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mc
 from meho_backplane.mcp.server import (
     McpInternalError,
     McpInvalidParamsError,
+    McpPermissionDeniedError,
     McpRateLimitedError,
 )
 from meho_backplane.targets.resolver import AmbiguousTargetError, TargetNotFoundError
@@ -275,7 +276,7 @@ async def _with_target_or_error(
         except TargetDeniedError as exc:
             denied: dict[str, Any] = exc.detail if isinstance(exc.detail, dict) else {}
             reason = str(denied.get("reason", ""))
-            raise McpInvalidParamsError(
+            raise McpPermissionDeniedError(
                 f"{tool}: denied: {reason}",
                 data={
                     "error_code": "denied",

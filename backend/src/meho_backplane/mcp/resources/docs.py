@@ -126,7 +126,7 @@ from meho_backplane.mcp.registry import (
     ResourceTemplateDefinition,
     register_mcp_resource,
 )
-from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
 from meho_backplane.untrusted_text import wrap_untrusted_text
 
 #: Same capability gate as the ``search_docs`` tool — the resource is the
@@ -179,7 +179,7 @@ async def _docs_chunk_handler(
                 data={"known_collections": exc.known_keys},
             ) from exc
         except CollectionForbiddenError as exc:
-            raise McpInvalidParamsError(f"docs chunk: {exc}") from exc
+            raise McpPermissionDeniedError(f"docs chunk: {exc}") from exc
         except CollectionDisabledError as exc:
             raise McpInvalidParamsError(
                 f"docs chunk: {exc}",

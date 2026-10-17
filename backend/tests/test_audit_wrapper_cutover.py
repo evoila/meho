@@ -38,8 +38,11 @@ from sqlalchemy import select
 
 import meho_backplane
 from meho_backplane import audit_cutover
+from meho_backplane.api.v1 import search_docs as search_docs_api
 from meho_backplane.api.v1.approvals import router as approvals_router
+from meho_backplane.api.v1.memory import router as memory_router
 from meho_backplane.api.v1.operations import router as operations_router
+from meho_backplane.api.v1.retrieve_usage import router as retrieve_usage_router
 from meho_backplane.audit import AuditMiddleware, _write_audit_row
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.base import Connector
@@ -52,10 +55,15 @@ from meho_backplane.db.models import (
     AuditEventClass,
     AuditLog,
 )
+from meho_backplane.docs_search.target_scope import TargetDeniedError
 from meho_backplane.main import app as production_app
 from meho_backplane.mcp.audit import write_mcp_audit_row
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
+from meho_backplane.mcp.tools import docs as docs_tools
+from meho_backplane.memory.rbac import PermissionDeniedError
+from meho_backplane.memory.schemas import MemoryScope
+from meho_backplane.memory.service import MemoryService
 from meho_backplane.middleware import RequestContextMiddleware, verify_jwt_and_bind
 from meho_backplane.operations import _audit as dispatch_audit
 from meho_backplane.operations import register_typed_operation, reset_dispatcher_caches
@@ -371,18 +379,25 @@ class _Caller:
         )
 
 
-@pytest.fixture
-def rest(cutover_on: None) -> Iterator[tuple[TestClient, _Caller]]:
+def _rest_client() -> tuple[TestClient, _Caller]:
     """REST app with the real audit middleware and the CLI-facing routers."""
     rest_app = FastAPI()
     rest_app.add_middleware(AuditMiddleware)
     rest_app.add_middleware(RequestContextMiddleware)
     rest_app.include_router(operations_router)
     rest_app.include_router(approvals_router)
+    rest_app.include_router(search_docs_api.router)
+    rest_app.include_router(memory_router)
+    rest_app.include_router(retrieve_usage_router)
     rest_app.include_router(_probe)
     caller = _Caller()
     rest_app.dependency_overrides[verify_jwt_and_bind] = caller
-    yield TestClient(rest_app, raise_server_exceptions=False), caller
+    return TestClient(rest_app, raise_server_exceptions=False), caller
+
+
+@pytest.fixture
+def rest(cutover_on: None) -> Iterator[tuple[TestClient, _Caller]]:
+    yield _rest_client()
 
 
 def _call_body(op_id: str) -> dict[str, Any]:
@@ -694,3 +709,132 @@ async def test_mcp_without_cutover_keeps_legacy_wrapper_rows(
     assert _shape(await _audit_rows()) == [
         ("legacy_request", "MCP", "/mcp/tools/call/test.cutover_read"),
     ]
+
+
+# ===========================================================================
+# Refusals raised inside a handler (REST and MCP)
+# ===========================================================================
+#
+# A handler can refuse a call after the route or tool gates passed: the
+# caller's permission rows deny the docs target, the caller may not promote
+# a memory, or a resource URI names another tenant. REST answers 403; MCP
+# answers ``-32602`` through ``McpPermissionDeniedError``. Both fronts write
+# one ``policy_decision`` row with the switch on, and one ``legacy_request``
+# row with it off.
+
+_FOREIGN_TENANT = uuid.UUID("00000000-0000-0000-0000-00000000f0f0")
+_DOCS_CAPABILITIES = frozenset({"meho-docs", "meho-docs:vmware"})
+_TENANT_RESOURCES = ("info", "feed", "conventions/team-rule")
+
+
+@pytest.fixture(params=[True, False], ids=["retired", "legacy"])
+def retired(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> Iterator[bool]:
+    """Run the test with the switch on and with it off."""
+    monkeypatch.setenv("REQUEST_USAGE_RETENTION_DAYS", "30")
+    monkeypatch.setenv("AUDIT_WRAPPER_ROWS_RETIRED", "true" if request.param else "false")
+    get_settings.cache_clear()
+    yield request.param
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def handler_refusals(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the docs target check and the memory promote check refuse."""
+
+    async def _deny_target(*_args: Any, **_kwargs: Any) -> Any:
+        raise TargetDeniedError("vc1", "verdict=deny")
+
+    async def _deny_promote(*_args: Any, **_kwargs: Any) -> Any:
+        raise PermissionDeniedError(MemoryScope.TENANT, "insufficient_promotion_authority")
+
+    monkeypatch.setattr(search_docs_api, "apply_target_default", _deny_target)
+    monkeypatch.setattr(docs_tools, "apply_target_default", _deny_target)
+    monkeypatch.setattr(MemoryService, "promote", _deny_promote)
+
+
+def _expected_rows(retired: bool, paths: list[tuple[str, str]]) -> list[tuple[str, str, str]]:
+    row_class = "policy_decision" if retired else "legacy_request"
+    return [(row_class, method, path) for method, path in paths]
+
+
+@pytest.mark.usefixtures("handler_refusals")
+async def test_rest_handler_refusals_write_one_decision_row(retired: bool) -> None:
+    client, caller = _rest_client()
+    caller.role = TenantRole.TENANT_ADMIN
+    docs = client.post(
+        "/api/v1/search_docs",
+        json={"query": "upgrade", "collection": "vmware", "target": "vc1"},
+    )
+    assert docs.status_code == 403
+    promote = client.post("/api/v1/memory/user-tenant/team-rule/promote", json={"to": "tenant"})
+    assert promote.status_code == 403
+    caller.role = TenantRole.OPERATOR
+    usage = client.get(f"/api/v1/retrieve/usage?tenant_filter={_FOREIGN_TENANT}")
+    assert usage.status_code == 403
+
+    rows = await _audit_rows()
+    assert _shape(rows) == _expected_rows(
+        retired,
+        [
+            ("POST", "/api/v1/search_docs"),
+            ("POST", "/api/v1/memory/user-tenant/team-rule/promote"),
+            ("GET", "/api/v1/retrieve/usage"),
+        ],
+    )
+    assert {row.status_code for row in rows} == {403}
+
+
+@pytest.mark.usefixtures("handler_refusals")
+async def test_mcp_handler_refusals_write_one_decision_row(retired: bool) -> None:
+    op = build_operator(TenantRole.TENANT_ADMIN).model_copy(
+        update={"capabilities": _DOCS_CAPABILITIES},
+    )
+
+    async def _fake_verify() -> Operator:
+        structlog.contextvars.bind_contextvars(operator_sub=op.sub, tenant_id=str(op.tenant_id))
+        return op
+
+    production_app.dependency_overrides[verify_mcp_jwt_and_bind] = _fake_verify
+    try:
+        with TestClient(production_app) as client:
+            docs = _tool_call(
+                client,
+                "search_docs",
+                {"query": "upgrade", "collection": "vmware", "target": "vc1"},
+                1,
+            )
+            assert docs["error"]["message"].startswith("search_docs: denied")
+            promote = _tool_call(
+                client,
+                "meho_memory_promote",
+                {"source_scope": "user-tenant", "slug": "team-rule", "to": "tenant"},
+                2,
+            )
+            assert promote["error"]["message"].endswith("insufficient_promotion_authority")
+            for call_id, resource in enumerate(_TENANT_RESOURCES, start=3):
+                read = post_mcp(
+                    client,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": call_id,
+                        "method": "resources/read",
+                        "params": {"uri": f"meho://tenant/{_FOREIGN_TENANT}/{resource}"},
+                    },
+                )
+                assert "cross-tenant" in read.json()["error"]["message"]
+    finally:
+        production_app.dependency_overrides.pop(verify_mcp_jwt_and_bind, None)
+
+    rows = await _audit_rows()
+    assert _shape(rows) == _expected_rows(
+        retired,
+        [
+            ("MCP", "/mcp/tools/call/search_docs"),
+            ("MCP", "/mcp/tools/call/meho_memory_promote"),
+            *[
+                ("MCP", f"/mcp/resources/read/meho://tenant/{_FOREIGN_TENANT}/{resource}")
+                for resource in _TENANT_RESOURCES
+            ],
+        ],
+    )
+    assert {row.status_code for row in rows} == {403}

@@ -95,10 +95,16 @@ from meho_backplane.mcp.registry import (
     register_mcp_resource,
     register_mcp_tool,
 )
-from meho_backplane.mcp.server import McpInvalidParamsError, register_method, router
+from meho_backplane.mcp.server import (
+    McpInvalidParamsError,
+    McpPermissionDeniedError,
+    register_method,
+    router,
+)
 
 __all__ = [
     "McpInvalidParamsError",
+    "McpPermissionDeniedError",
     "ResourceHandler",
     "ResourceTemplateDefinition",
     "ToolDefinition",

@@ -54,7 +54,7 @@ from meho_backplane.checks.service import (
     SensorResultsCursorError,
 )
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
-from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
 
 #: Canonical operation identifiers bound into ``audit_op_id`` per tool.
 #: The same identifiers the REST routes use so a row's op_id is
@@ -215,7 +215,7 @@ async def _create_handler(
             payload=payload,
         )
     except SensorIdentitySubForbiddenError as exc:
-        raise McpInvalidParamsError(exc.error_code) from exc
+        raise McpPermissionDeniedError(exc.error_code) from exc
     except SensorOperationNotFoundError as exc:
         raise McpInvalidParamsError(exc.error_code) from exc
     except SensorRequiresSafeOperationError as exc:

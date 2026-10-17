@@ -118,7 +118,11 @@ from meho_backplane.mcp.registry import (
     role_at_least,
     surface_visible,
 )
-from meho_backplane.mcp.server import McpInvalidParamsError, register_method
+from meho_backplane.mcp.server import (
+    McpInvalidParamsError,
+    McpPermissionDeniedError,
+    register_method,
+)
 from meho_backplane.operations._audit import resolve_broadcast_lineage
 from meho_backplane.operations.delivery_budget import tool_result_text
 from meho_backplane.request_usage.collector import note_request_route, note_request_status
@@ -487,7 +491,7 @@ async def handle_tools_call(
         if defn.outputSchema is not None:
             response["structuredContent"] = result
         return response
-    except McpInvalidParamsError:
+    except McpInvalidParamsError as exc:
         # Class-wide audit-status correction (#1481). A tool handler can
         # raise ``McpInvalidParamsError`` *after* all the explicit
         # pre-dispatch gates (name/arguments/unknown-tool/RBAC/schema)
@@ -505,7 +509,7 @@ async def handle_tools_call(
         # is corrected.
         if status_code == 500:
             status_code = 403
-            handler_rejected = True
+            handler_rejected = not isinstance(exc, McpPermissionDeniedError)
         raise
     finally:
         try:
@@ -708,8 +712,9 @@ def _decision_status(status_code: int, *, handler_rejected: bool) -> int:
 
     A handler that rejects its arguments is projected to ``403`` on the
     row and the broadcast (#1481), but it is a validation failure, not a
-    policy refusal. Only the explicit role / capability / surface / add-on
-    gates are refusals, so the decision sees such a rejection as ``400``.
+    policy refusal, so the decision sees it as ``400``. Refusals are the
+    explicit role / capability / surface / add-on gates and a handler that
+    raises :class:`McpPermissionDeniedError`; those keep their ``403``.
     """
     return 400 if handler_rejected else status_code
 
@@ -896,7 +901,7 @@ async def handle_resources_read(
                 },
             ],
         }
-    except McpInvalidParamsError:
+    except McpInvalidParamsError as exc:
         # Class-wide audit-status correction (#1481), mirroring
         # :func:`handle_tools_call`. A resource handler that raises
         # ``McpInvalidParamsError`` after the explicit gates leaves
@@ -907,7 +912,7 @@ async def handle_resources_read(
         # through untouched.
         if status_code == 500:
             status_code = 403
-            handler_rejected = True
+            handler_rejected = not isinstance(exc, McpPermissionDeniedError)
         raise
     finally:
         # #3757: resources are reads. After the cutover only a refused

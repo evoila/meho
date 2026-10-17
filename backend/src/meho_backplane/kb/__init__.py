@@ -19,10 +19,13 @@ Module map (Initiative #331 wave structure):
   a kb directory into a stream of ``(slug, body, metadata)`` tuples,
   with front-matter override + hidden-file skip + ``.kb-ignore``
   glob support (T1).
-* :mod:`meho_backplane.kb.service` -- :class:`KbService` with the six
+* :mod:`meho_backplane.kb.service` -- :class:`KbService` with the
   per-tenant operations every later wave consumes: ``ingest_directory``
-  / ``list_entries`` / ``get_entry`` / ``create_entry`` /
-  ``delete_entry`` / ``search_entries`` (T1).
+  / ``list_entries`` / ``get_entry`` / ``get_revision`` /
+  ``create_entry`` / ``delete_entry`` / ``search_entries`` (T1).
+* :mod:`meho_backplane.kb.revisions` -- retained, immutable revisions
+  (``kb_revision`` table) written with the ``documents`` head row, the
+  exact revision read, and the delete that removes both (#3753).
 
 The HTTP surface (5 routes under ``/api/v1/kb*``) lands in T2 #416;
 the MCP meta-tools (``search_knowledge`` / ``add_to_knowledge`` +
@@ -37,6 +40,7 @@ from meho_backplane.kb.schemas import (
     SLUG_PATTERN,
     InvalidKbSlugError,
     KbEntry,
+    KbEntryRevision,
     KbEntrySearchHit,
     KbIngestionResult,
     validate_slug,
@@ -49,6 +53,7 @@ __all__ = [
     "SLUG_PATTERN",
     "InvalidKbSlugError",
     "KbEntry",
+    "KbEntryRevision",
     "KbEntrySearchHit",
     "KbIngestRootError",
     "KbIngestionResult",

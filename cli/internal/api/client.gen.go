@@ -5930,7 +5930,12 @@ type IngestionResultModel struct {
 // operator-facing identifier (“documents.source_id“ on the SQL
 // side); the underlying “Document.id“ UUID is also surfaced for
 // cross-correlation with audit-log rows and future MCP resource
-// URIs.
+// URIs. “id“ is the entry UUID.
+//
+// “revision_id“ is the retained revision that holds this body. Pass
+// it with “id“ to “meho://kb/id/{entry}/revision/{revision}“ to
+// read this exact body later, even after the entry changes. It is
+// “None“ only for a row that has no stored revision.
 type KbEntry struct {
 	Body      string                 `json:"body"`
 	CreatedAt time.Time              `json:"created_at"`
@@ -5945,10 +5950,11 @@ type KbEntry struct {
 	// entry was written before provenance was stored, or the stored value
 	// is not in the expected shape; every other field is ``None``. Legacy
 	// rows are not rewritten -- the next write records real provenance.
-	Provenance KbProvenance       `json:"provenance"`
-	Slug       string             `json:"slug"`
-	TenantId   openapi_types.UUID `json:"tenant_id"`
-	UpdatedAt  time.Time          `json:"updated_at"`
+	Provenance KbProvenance        `json:"provenance"`
+	RevisionId *openapi_types.UUID `json:"revision_id"`
+	Slug       string              `json:"slug"`
+	TenantId   openapi_types.UUID  `json:"tenant_id"`
+	UpdatedAt  time.Time           `json:"updated_at"`
 }
 
 // KbEntryCreate POST body for “/api/v1/kb“ -- create / re-index one entry.

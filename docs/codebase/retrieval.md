@@ -201,6 +201,19 @@ So a caller sending
 reaches the substrate as `kind="kb-entry"` plus
 `metadata_filters={"source_kind": "evoila-distilled"}`.
 
+### What search indexes for kb, and what an exact read returns
+
+Retrieval only reads the `documents` table. For kb, that is the
+**latest head** of each entry; older bodies are never searched. Older
+bodies live in `kb_revision` (see [`kb.md`](./kb.md)). They are only
+reachable by an exact read, `meho://kb/id/{entry}/revision/{revision}`,
+which checks tenant, entry and revision together. A search hit's
+`source_id` is the slug; `meho://kb/{slug}` then returns the latest
+body plus its `id` (entry UUID) and `revision_id`, which together name
+that exact body for a later citation. Deleting a kb entry removes the
+head (so search stops finding it) and its revisions in one
+transaction.
+
 ## Dependencies
 
 - **pgvector** — `vector(384)` column on `documents.embedding`; the

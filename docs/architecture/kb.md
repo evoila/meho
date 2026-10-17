@@ -42,7 +42,8 @@ There is no separate per-operation handler module — the issue's draft outline 
 | `list_entries(tenant_id, *, filter_pattern=None, limit=100, offset=0) -> list[KbEntry]` | Direct `select(Document)` scoped to `source="kb"`, slug-sorted. `filter_pattern` is a forwarded SQL `LIKE`. Pure list, no retrieval. | `GET /api/v1/kb`, `meho kb list` |
 | `get_entry(tenant_id, slug) -> KbEntry \| None` | Natural-key `select`. Slug is **not** re-validated here (the route/CLI does it); a malformed slug just yields `None`. | `GET /api/v1/kb/{slug}`, `meho kb show`, `meho://kb/{slug}` |
 | `create_entry(tenant_id, slug, body, metadata=None) -> KbEntry` | `validate_slug` then `index_document`. Body-hash short-circuit means a same-body re-add costs only an `updated_at` bump. `metadata=None` preserves an existing row's metadata; `{}` clears it. | `POST /api/v1/kb`, `add_to_knowledge` |
-| `delete_entry(tenant_id, slug) -> bool` | Natural-key `delete`. Returns whether a row existed. | `DELETE /api/v1/kb/{slug}`, `meho kb delete` |
+| `get_revision(tenant_id, entry_id, revision_id) -> KbEntryRevision \| None` | Exact read of one retained, never-changed body in `kb_revision`. `None` for a foreign, mismatched, unknown or deleted id. | `meho://kb/id/{entry}/revision/{revision}` |
+| `delete_entry(tenant_id, slug) -> bool` | Deletes the entry and all its retained revisions in one transaction. Returns whether a row existed. | `DELETE /api/v1/kb/{slug}`, `meho kb delete` |
 | `search_entries(tenant_id, query, *, filters=None, limit=10) -> list[KbEntrySearchHit]` | `retrieve()` (G0.4-T4) with `source="kb"` pinned. Adapts `RetrievalHit` → `KbEntrySearchHit` (slug instead of source_id, a ~200-char snippet instead of full body). `filters` consumes only the `"kind"` key in v0.2; other keys are reserved. | `POST /api/v1/retrieve` (CLI search verb), `search_knowledge` |
 
 The snippet/full-body split is the load-bearing agent recipe: `search → decide on a slug → fetch the full body` without round-tripping every full body on every search.
@@ -77,6 +78,8 @@ The tool descriptions are load-bearing agent UX (`search_knowledge` is one of th
 ### MCP resource (T3 #417)
 
 [`backend/src/meho_backplane/mcp/resources/kb.py`](../../backend/src/meho_backplane/mcp/resources/kb.py) — `meho://kb/{slug}` (`operator` role, `mimeType: text/markdown`). The fetch-by-slug companion to `search_knowledge`: the agent calls `resources/read` with a hit's slug to get the full body. A malformed slug or a slug absent in the operator's tenant collapses to `-32602` "not found" (cross-tenant reads do not reveal the foreign tenant's existence). `resources/subscribe` is advertised `false` in v0.2.
+
+`meho://kb/id/{entry}/revision/{revision}` (#3753, `operator` role, `mimeType: text/markdown`) reads one exact stored body by entry UUID and revision UUID. `meho://kb/{slug}`, `add_to_knowledge` and `GET /api/v1/kb/{slug}` return both ids (`id`, `revision_id`). Each write that changes a body keeps the old body in `kb_revision`, so the exact read returns the same bytes after later overwrites, until the entry is deleted. The body is wrapped in the untrusted-content envelope. Every failure (malformed, unknown, mismatched, other-tenant or deleted id) answers `-32602` `kb revision not found`. See [`docs/codebase/kb.md`](../codebase/kb.md).
 
 ### CLI (T4 #418)
 

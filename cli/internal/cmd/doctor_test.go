@@ -166,6 +166,52 @@ func TestDoctor_OfflineLayer_VendoredDrift(t *testing.T) {
 	}
 }
 
+// TestDoctor_OfflineLayer_InstalledPackageBroken covers a cache whose
+// lock matches the plugin lock, so the shim skips the install, while
+// the installed mcp-remote package is missing or unreadable. The shim
+// cannot start from such a cache, so the lock check must fail.
+func TestDoctor_OfflineLayer_InstalledPackageBroken(t *testing.T) {
+	withTempXDG(t)
+	home := t.TempDir()
+	root := filepath.Join(t.TempDir(), "plugin")
+	cache := filepath.Join(t.TempDir(), "mcp-remote")
+	fakePlugin(t, root, cache, "0.1.39")
+	t.Setenv("MEHO_PLUGIN_CACHE", cache)
+	pkg := filepath.Join(cache, "node_modules", "mcp-remote", "package.json")
+
+	cases := []struct {
+		name    string
+		content *string
+		wantSub string
+	}{
+		{"package.json missing", nil, "cannot read"},
+		{"package.json malformed", ptr("not json"), "not valid JSON"},
+		{"package.json without version", ptr(`{"name":"mcp-remote"}`), "has no version"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.content == nil {
+				if err := os.Remove(pkg); err != nil && !errors.Is(err, os.ErrNotExist) {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(pkg, []byte(*tc.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			r := &doctorReport{}
+			runOfflineChecks(r, doctorOptions{pluginRoot: root}, offlineDeps(t, home))
+			c := findCheck(t, r, "vendored lock")
+			if c.Status != doctorFail || !strings.Contains(c.Detail, "installed package is broken") || !strings.Contains(c.Detail, tc.wantSub) {
+				t.Errorf("broken install not reported: %+v", c)
+			}
+			if !strings.Contains(c.Hint, "delete "+cache) {
+				t.Errorf("hint must say how to repair: %q", c.Hint)
+			}
+		})
+	}
+}
+
+func ptr(s string) *string { return &s }
+
 func TestDoctor_OfflineLayer_BadConfigAndCA(t *testing.T) {
 	withTempXDG(t)
 	bad := filepath.Join(t.TempDir(), "bad.pem")
@@ -260,6 +306,80 @@ func TestDoctor_CredentialStore(t *testing.T) {
 			}
 			if errors.Is(tc.keyringErr, keyring.ErrNotFound) && strings.Contains(c.Detail, "unavailable") {
 				t.Errorf("ErrNotFound must not read as unavailable: %q", c.Detail)
+			}
+		})
+	}
+}
+
+// TestDoctor_CredentialStore_BrokenFile covers a credentials file that
+// exists but cannot be read or parsed. auth's fallback store returns
+// that error from every Load unless the keyring holds a usable entry,
+// so the doctor must fail the check in the same cases and only warn
+// when the keyring entry carries the login.
+func TestDoctor_CredentialStore_BrokenFile(t *testing.T) {
+	const bp = "https://backplane.example"
+	const fileMarker = "FILE-SECRET-NEVER-SHOWN"
+	keyringEntry, err := json.Marshal(auth.StoredToken{BackplaneURL: bp, AccessToken: jwtMarker, RefreshToken: "r", SavedAt: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name       string
+		disable    string
+		unreadable bool
+		keyringErr error
+		keyringVal string
+		wantStatus string
+		wantState  string
+	}{
+		{"forced file; malformed", "1", false, nil, "", doctorFail, "store=file-forced:"},
+		{"forced file; unreadable", "1", true, nil, "", doctorFail, "store=file-forced:"},
+		{"keyring empty; malformed file", "", false, keyring.ErrNotFound, "", doctorFail, "store=file-fallback:"},
+		{"keyring unavailable; malformed file", "", false, errors.New("dbus: no session bus"), "", doctorFail, "store=keyring-unavailable:"},
+		{"keyring entry usable; malformed file", "", false, nil, string(keyringEntry), doctorWarn, "store=keyring:"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.unreadable && os.Geteuid() == 0 {
+				t.Skip("root can read a 0000 file")
+			}
+			xdg := withTempXDG(t)
+			t.Setenv("MEHO_KEYRING_DISABLE", tc.disable)
+			credsPath := filepath.Join(xdg, "meho", "credentials.json")
+			if err := os.MkdirAll(filepath.Dir(credsPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			mode := os.FileMode(0o600)
+			if tc.unreadable {
+				mode = 0
+			}
+			if err := os.WriteFile(credsPath, []byte(`{"entries":{"x":{"access_token":"`+fileMarker+`"`), mode); err != nil {
+				t.Fatal(err)
+			}
+			deps := offlineDeps(t, t.TempDir())
+			deps.keyringGet = func(string, string) (string, error) {
+				if tc.keyringErr != nil {
+					return "", tc.keyringErr
+				}
+				return tc.keyringVal, nil
+			}
+			c := checkCredentialStore(deps, bp)
+			if c.Status != tc.wantStatus || !strings.HasPrefix(c.Detail, tc.wantState) {
+				t.Fatalf("status=%s detail=%q hint=%q; want %s with state %q", c.Status, c.Detail, c.Hint, tc.wantStatus, tc.wantState)
+			}
+			if !strings.Contains(c.Detail, "cannot be read") || !strings.Contains(c.Detail, credsPath) {
+				t.Errorf("detail must name the broken file: %q", c.Detail)
+			}
+			if !strings.Contains(c.Hint, "fix or delete the file") {
+				t.Errorf("hint must say how to repair: %q", c.Hint)
+			}
+			if tc.wantStatus == doctorWarn && !strings.Contains(c.Detail, "a login is stored") {
+				t.Errorf("a usable keyring entry must still count as a stored login: %q", c.Detail)
+			}
+			for _, secret := range []string{fileMarker, jwtMarker} {
+				if strings.Contains(c.Detail+c.Hint, secret) {
+					t.Errorf("credential leaked: %q", c.Detail+c.Hint)
+				}
 			}
 		})
 	}

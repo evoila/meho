@@ -142,37 +142,72 @@ func checkCredentialStore(deps doctorDeps, backplaneURL string) doctorCheck {
 	if backplaneURL != "" {
 		service, user = auth.KeyForBackplane(backplaneURL)
 	}
-	var fileTok auth.StoredToken
-	fileHas := false
+	var fp fileProbe
 	if backplaneURL != "" {
-		var ferr error
-		fileTok, ferr = file.Load(service, user)
-		fileHas = ferr == nil
+		fp = probeFile(file, service, user)
 	}
 
 	if deps.getenv("MEHO_KEYRING_DISABLE") != "" {
-		return storeResult(storeFileForced, file.Describe()+" (MEHO_KEYRING_DISABLE is set)", fileHas, backplaneURL)
+		if fp.err != nil {
+			return brokenFile(storeFileForced, file, fp.err, backplaneURL)
+		}
+		return storeResult(storeFileForced, file.Describe()+" (MEHO_KEYRING_DISABLE is set)", fp.has, backplaneURL)
 	}
 	raw, kerr := deps.keyringGet(service, user)
 	switch {
 	case kerr == nil:
-		return keyringHit(raw, file, fileTok, fileHas, backplaneURL)
-	case errors.Is(kerr, keyring.ErrNotFound) && fileHas:
+		return keyringHit(raw, file, fp, backplaneURL)
+	case fp.err != nil && errors.Is(kerr, keyring.ErrNotFound):
+		return brokenFile(storeFileFallback, file, fp.err, backplaneURL)
+	case fp.err != nil:
+		return brokenFile(storeKeyringUnavailable, file, fp.err, backplaneURL)
+	case errors.Is(kerr, keyring.ErrNotFound) && fp.has:
 		return storeResult(storeFileFallback,
 			file.Describe()+" (the keyring works, but the login was too big for it or was saved to the file)", true, backplaneURL)
 	case errors.Is(kerr, keyring.ErrNotFound):
 		return storeResult(storeKeyring, "OS keyring", false, backplaneURL)
 	default:
 		return storeResult(storeKeyringUnavailable,
-			fmt.Sprintf("%s (no OS keyring backend: %v)", file.Describe(), kerr), fileHas, backplaneURL)
+			fmt.Sprintf("%s (no OS keyring backend: %v)", file.Describe(), kerr), fp.has, backplaneURL)
 	}
+}
+
+// fileProbe is what the credentials file holds for the login key. err
+// is set only when the file exists but cannot be read or parsed; a
+// missing file or a missing entry is "has == false, err == nil".
+type fileProbe struct {
+	tok auth.StoredToken
+	has bool
+	err error
+}
+
+func probeFile(file auth.TokenStore, service, user string) fileProbe {
+	tok, err := file.Load(service, user)
+	switch {
+	case err == nil:
+		return fileProbe{tok: tok, has: true}
+	case errors.Is(err, auth.ErrTokenNotFound):
+		return fileProbe{}
+	default:
+		return fileProbe{err: err}
+	}
+}
+
+// brokenFile reports a credentials file the CLI would read but cannot.
+// auth's fallback store returns this error from every Load when the
+// keyring holds no usable entry, so `meho login` and every other
+// command fail the same way until the file is fixed.
+func brokenFile(state string, file auth.TokenStore, err error, backplaneURL string) doctorCheck {
+	return offline("credential store", doctorFail,
+		fmt.Sprintf("store=%s: %s cannot be read: %v", state, file.Describe(), err),
+		"fix or delete the file, then run `meho login "+backplaneURL+"`")
 }
 
 // keyringHit describes the store when the keyring holds an entry for
 // the login key. The entry is parsed only to apply auth.SecondaryWins,
 // the rule the CLI's own store uses when the keyring and the file both
 // hold a login; no field of it is kept or reported.
-func keyringHit(raw string, file auth.TokenStore, fileTok auth.StoredToken, fileHas bool, backplaneURL string) doctorCheck {
+func keyringHit(raw string, file auth.TokenStore, fp fileProbe, backplaneURL string) doctorCheck {
 	if backplaneURL == "" {
 		return storeResult(storeKeyring, "OS keyring", true, "")
 	}
@@ -182,11 +217,18 @@ func keyringHit(raw string, file auth.TokenStore, fileTok auth.StoredToken, file
 			"run `meho login "+backplaneURL+"` to save it again")
 	}
 	switch {
-	case fileHas && auth.SecondaryWins(keyringTok, fileTok):
+	case fp.err != nil:
+		// Same rule as auth's fallback store: a usable keyring entry
+		// is used even when the file is broken. The file still needs
+		// a fix, so this is a warning, not a pass.
+		return offline("credential store", doctorWarn,
+			fmt.Sprintf("store=%s: OS keyring; a login is stored, but the %s cannot be read: %v", storeKeyring, file.Describe(), fp.err),
+			"the CLI uses the keyring entry; fix or delete the file so it does not fail later")
+	case fp.has && auth.SecondaryWins(keyringTok, fp.tok):
 		return storeResult(storeFileFallback,
 			file.Describe()+" (both stores hold a login; the CLI uses the file entry because it is newer or still has a refresh token)",
 			true, backplaneURL)
-	case fileHas:
+	case fp.has:
 		return storeResult(storeKeyring, "OS keyring (the file also holds a login that the CLI does not use)", true, backplaneURL)
 	}
 	return storeResult(storeKeyring, "OS keyring", true, backplaneURL)
@@ -416,21 +458,41 @@ func checkVendoredLock(root string, p pluginSettings) doctorCheck {
 		return offline("vendored lock", doctorWarn, "mcp-remote "+pin+" pinned; the cached lock differs from the plugin lock",
 			"the plugin re-installs on its next start; if that fails, delete "+p.cacheDir)
 	}
-	installed := ""
-	if data, rerr := os.ReadFile(filepath.Join(p.cacheDir, "node_modules", "mcp-remote", "package.json")); rerr == nil {
-		var pkg struct {
-			Version string `json:"version"`
-		}
-		if json.Unmarshal(data, &pkg) == nil {
-			installed = pkg.Version
-		}
+	// A matching lock makes the shim skip the install, so what sits
+	// under node_modules now is what the shim will start.
+	installed, err := installedMcpRemoteVersion(p.cacheDir)
+	if err != nil {
+		return offline("vendored lock", doctorFail,
+			fmt.Sprintf("mcp-remote %s pinned and the cached lock matches, but the installed package is broken: %v", pin, err),
+			"delete "+p.cacheDir+" so the plugin re-installs from the lock file")
 	}
-	if installed != "" && installed != pin {
+	if installed != pin {
 		return offline("vendored lock", doctorFail,
 			fmt.Sprintf("mcp-remote %s pinned but %s is installed in the cache", pin, installed),
 			"delete "+p.cacheDir+" so the plugin re-installs from the lock file")
 	}
 	return offline("vendored lock", doctorOK, "mcp-remote "+pin+" pinned; cached lock matches the plugin lock", "")
+}
+
+// installedMcpRemoteVersion reads the version of the mcp-remote package
+// installed in the cache. A missing or unreadable package.json means the
+// install is incomplete even when the lock file matches.
+func installedMcpRemoteVersion(cacheDir string) (string, error) {
+	path := filepath.Join(cacheDir, "node_modules", "mcp-remote", "package.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("cannot read %s: %w", path, err)
+	}
+	var pkg struct {
+		Version string `json:"version"`
+	}
+	if json.Unmarshal(data, &pkg) != nil {
+		return "", fmt.Errorf("%s is not valid JSON", path)
+	}
+	if pkg.Version == "" {
+		return "", fmt.Errorf("%s has no version", path)
+	}
+	return pkg.Version, nil
 }
 
 func checkCache(root string, p pluginSettings) doctorCheck {

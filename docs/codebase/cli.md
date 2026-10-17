@@ -873,7 +873,12 @@ edits a file.
   the same rule the CLI's store applies on read (the entry with a
   refresh token wins, then the newer one), so it names the store the
   CLI really uses. The keyring value is parsed only for that rule and
-  never reported; an entry that is not valid JSON is a failure.
+  never reported; an entry that is not valid JSON is a failure. A
+  credentials file that exists but cannot be read or parsed is a
+  failure too, because the CLI's store returns that error from every
+  read, so `meho login` would fail on it as well. The one exception
+  mirrors the store: a usable keyring entry still counts, and the
+  broken file is only a warning.
 - **plugin shim** — finds the Claude Code plugin: `--plugin-root`, then
   `CLAUDE_PLUGIN_ROOT`, then a bounded search under `~/.claude/plugins`
   for `bin/meho-mcp-remote` next to a `package-lock.json`.
@@ -886,7 +891,9 @@ edits a file.
 - **vendored lock** — mirrors the shim's `cmp -s` test: the cached
   `package-lock.json` must match the plugin's committed one byte for
   byte, and the installed `mcp-remote` must match the version pinned in
-  the lock.
+  the lock. A matching lock makes the shim skip the install, so a
+  missing or unreadable `node_modules/mcp-remote/package.json` is a
+  failure with a hint to delete the cache directory.
 - **cache** — `node_modules/mcp-remote` present in the cache dir.
 - **CA bundle** — `MEHO_CA_CERT`, `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`
   must be readable PEM files with at least one certificate.

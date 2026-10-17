@@ -1170,10 +1170,11 @@ async def test_integration_ready_to_retire_via_route(
     base = datetime.now(UTC) - timedelta(days=40)
     for op in ("op-A", "op-B", "op-C"):
         for week_offset in range(MIN_OPERATOR_STREAK_WEEKS + 1):
-            await _seed_audit_row(
-                operator_sub=op,
+            # The route reads request usage events (#3747).
+            await seed_usage_event(
+                principal_sub=op,
                 tenant_id=UUID("00000000-0000-0000-0000-00000000a0a0"),
-                path=f"{MCP_TOOL_PATH_PREFIX}search_knowledge",
+                route="tool:search_knowledge",
                 occurred_at=base + timedelta(days=7 * week_offset),
             )
 
@@ -1204,10 +1205,11 @@ async def test_integration_review_manually_via_route(
     base = datetime.now(UTC) - timedelta(days=40)
     for op in ("op-A", "op-B", "op-C"):
         for week_offset in range(MIN_OPERATOR_STREAK_WEEKS + 1):
-            await _seed_audit_row(
-                operator_sub=op,
+            # The route reads request usage events (#3747).
+            await seed_usage_event(
+                principal_sub=op,
                 tenant_id=UUID("00000000-0000-0000-0000-00000000a0a0"),
-                path=f"{MCP_TOOL_PATH_PREFIX}search_knowledge",
+                route="tool:search_knowledge",
                 occurred_at=base + timedelta(days=7 * week_offset),
             )
 

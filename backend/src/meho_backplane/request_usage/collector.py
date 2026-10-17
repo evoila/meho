@@ -78,6 +78,7 @@ __all__ = [
     "RequestUsageBoundary",
     "build_route_catalog",
     "collection_enabled",
+    "current_request_id",
     "note_context_selected",
     "note_request_fallback_status",
     "note_request_route",
@@ -230,6 +231,16 @@ def _uuid_or_none(raw: object) -> uuid.UUID | None:
         return uuid.UUID(raw)
     except ValueError:
         return None
+
+
+def current_request_id() -> uuid.UUID | None:
+    """Return the current request's correlation id, or ``None``.
+
+    The same value a ``request_finished`` event stores as ``request_id``,
+    so a domain record that keeps it can be linked to the usage event
+    (#3747). A request id that is not a UUID becomes ``None``.
+    """
+    return _uuid_or_none(structlog.contextvars.get_contextvars().get("request_id"))
 
 
 def _route_label(scope: Scope, state: _BoundaryState, transport: Transport) -> str:

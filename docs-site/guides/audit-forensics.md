@@ -66,6 +66,12 @@ recent 100 rows of your tenant — bounded, never the whole ledger.
 
 The REST route `POST /api/v1/audit/query` also accepts `event_class`. It
 returns only rows of that class. Without it you get every class, as before.
+`POST /api/v1/audit/class-counts` takes the same filters and returns how
+many rows of each class match. The console audit page shows the same
+counts and has a "Record type" filter.
+
+Only an `operation_execution` row has a flight-recorder trace. For any
+other class, the trace route answers `trace_present: false`.
 
 ```bash
 # "Did anyone read a Vault secret before the outage?"

@@ -135,6 +135,7 @@ async def reflex_endpoint(
             since=since_dt,
             until=until_dt,
             tenant_id=target_tenant,
+            source="request_usage",
         )
 
     # The broadcast event's ``row_count`` reflects the aggregate the

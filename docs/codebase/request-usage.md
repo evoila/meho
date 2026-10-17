@@ -17,8 +17,9 @@ What is true today:
 - This is the **dual-write** phase: the wrapper `audit_log` rows for REST
   and MCP are still written. They are removed in a later task (#3757).
 - The retrieval usage, retirement checklist and reflex adoption reports
-  can read these events (`source="request_usage"`). Their routes keep
-  reading `audit_log` until the reader cutover (#3747).
+  read these events (`source="request_usage"`). Their REST and console
+  routes switched to them in #3747. When collection is off, those
+  reports show zero activity.
 
 ## What an event holds (and what it never holds)
 

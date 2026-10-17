@@ -28,6 +28,21 @@ class it knows. Nothing is guessed from `method` / `path`.
 | `security_event` | Refresh-token replay, broken satellite effect chain, un-reported gateway mint alarm. |
 | `legacy_request` | Every row written before `0106` (server default; old rows are not reclassified), the REST and MCP request wrapper rows, and the `approval.result` read row. |
 
+### Class counters and execution-only traces (#3747)
+
+- `count_event_classes(filters, *, tenant_id, session)` returns one row
+  count per class for the same filters as `query_audit`, except
+  `event_class`, `cursor` and `limit`. Every class is a key, `0` when it
+  has no rows. Old rows count as `legacy_request`.
+- `POST /api/v1/audit/class-counts` and the console counter strip
+  (above the result list on `/ui/audit`) use it. The console also has a
+  "Record type" filter and shows each row's class as a badge.
+- Only an `operation_execution` row resolves to the flight recorder. The
+  trace route answers `trace_present=false` (with `event_class` in the
+  body) for any other class, and the console drawer says "not an
+  operation run" instead of a trace pane. A decision or history view
+  never offers an execution trace.
+
 The column default stays `legacy_request`, so a row from an older MEHO
 version during a rolling upgrade is also `legacy_request`. New code never
 relies on the default: `tests/test_audit_event_class.py` scans the source
@@ -232,20 +247,23 @@ Design and tests: [`addon-parent-linkage.md`](addon-parent-linkage.md),
 
 ## REST surface (G8.1-T2 #466, G8.2-T4 #1012)
 
-The six routes under `backend/src/meho_backplane/api/v1/audit.py` are the
-operator-facing entry into the substrate. The first five dispatch through
-`query_audit`; the sixth (replay) dispatches through `replay_session`. All
+The routes under `backend/src/meho_backplane/api/v1/audit.py` (plus
+class-counts in `api/v1/audit_counts.py`) are the operator-facing entry
+into the substrate. The query routes dispatch through `query_audit`,
+class-counts through `count_event_classes`, and replay through
+`replay_session`. All
 pass `tenant_id=operator.tenant_id` (from the JWT) — the substrate's
 tenant-scoping invariant is enforced one layer up.
 
 | Route | Filter shape | Notes |
 |---|---|---|
 | `POST /api/v1/audit/query` | Body is `AuditQueryRequest`; `since` / `until` are strings parsed at the router via `parse_duration` (`"24h"` / `"7d"` / ISO-8601). Client-supplied `tenant_id` (or any other unknown field) is rejected with 422 `extra_forbidden` (`AuditQueryRequest.model_config` sets `extra="forbid"`, G0.9-T2 / #729); the route never reads tenant from the body — it always passes `operator.tenant_id` from the JWT to the substrate. | Full-filter surface. |
+| `POST /api/v1/audit/class-counts` | Body is `AuditClassCountsRequest`: the `AuditQueryRequest` filters without `event_class`, `limit` and `cursor` (those fields are a 422). 200 body is `AuditClassCounts` (`{counts, total}`), one count per event class (#3747). | Counters. |
 | `GET /api/v1/audit/who-touched/{target}` | Path param becomes `filters.target`; `since` query defaults to `"24h"`. | Pre-canned shortcut. |
 | `GET /api/v1/audit/by-work-ref/{ref}` | Path param (`{ref:path}` converter — a work_ref carries embedded slashes, `#` is percent-encoded) becomes `filters.work_ref` (exact match); `since` query has **no** default window (a change-ticket lookup wants the whole governed history of the ref, not just the last 24h). The "show every write authorised by ticket X" lookup (work_ref I1-T3 #1658). | Pre-canned shortcut. |
 | `GET /api/v1/audit/my-recent` | `filters.principal = operator.sub`; `since` query defaults to `"24h"`. | Pre-canned shortcut. |
 | `GET /api/v1/audit/show/{audit_id}` | `filters.audit_id = <path>`, `limit=1`. Substrate returns 0 rows for cross-tenant lookups → router raises **404** (not 403) so existence never leaks. | Single-row fetch. |
-| `GET /api/v1/audit/{audit_id}/trace` | The dispatch flight-recorder read (#3215). Audit-existence check via the same tenant-scoped substrate (`audit_id`, `limit=1`) → **404** (not 403) on a missing / cross-tenant row, matching `show`. Then `flight_recorder.load_trace(audit_id, tenant_id)` loads the trace header + ordered spans (tenant-scoped again as defence in depth). 200 body is `AuditTraceResult` (`{audit_id, trace_present, trace}`); an audit row with **no** captured trace is a `200` with `trace_present=false` (capture is opt-in/best-effort, not an error), and `trace.redaction_uncertain` surfaces the F5 degrade flag. Operator plane keeps full access independent of the agent gate. | Flight-recorder trace (#3215). |
+| `GET /api/v1/audit/{audit_id}/trace` | The dispatch flight-recorder read (#3215). Audit-existence check via the same tenant-scoped substrate (`audit_id`, `limit=1`) → **404** (not 403) on a missing / cross-tenant row, matching `show`. Then `flight_recorder.load_trace(audit_id, tenant_id)` loads the trace header + ordered spans (tenant-scoped again as defence in depth). Only an `operation_execution` row reads a trace (#3747); any other class answers `trace_present=false` without a trace read. 200 body is `AuditTraceResult` (`{audit_id, trace_present, trace, event_class}`); an audit row with **no** captured trace is a `200` with `trace_present=false` (capture is opt-in/best-effort, not an error), and `trace.redaction_uncertain` surfaces the F5 degrade flag. Operator plane keeps full access independent of the agent gate. | Flight-recorder trace (#3215). |
 | `GET /api/v1/audit/sessions/{session_id}/replay` | Dispatches `replay_session(session_id, tenant_id=operator.tenant_id, ...)`. 200 body is `AuditReplayResult` (`{root: [ReplayNode], session_id, tenant_id, row_count, excluded_null_session_count}`). Unknown / foreign session → `root=[]` / `row_count=0` (**not** 404 — same non-leakage as `show`). `row_count > 10_000` → **413** `{"detail": "session_too_large", "row_count": n}` from a count-first guard run *before* the recursive tree build. **`tenant_admin`-gated (#1843)** — see RBAC below. | Per-session replay (G8.2-T4). |
 
 The replay route's **413 cap** is a cheap tenant-scoped

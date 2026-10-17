@@ -242,6 +242,7 @@ async def retire_checklist_endpoint(
             tenant_id=target_tenant,
             blocker_counts=blocker_counts,
             baseline_overrides=body.baseline_overrides,
+            source="request_usage",
         )
 
     structlog.contextvars.bind_contextvars(audit_row_count=len(report.surfaces))

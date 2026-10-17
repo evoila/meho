@@ -36,8 +36,25 @@
     duration_error  -- str | None: inline since/until parse error
     filter_error    -- str | None: inline unsupported-filter error
     page_size       -- int: rows requested per page
+    class_counts    -- list[dict]: per record type (event class) counters for
+                       the same filters, ignoring the record type filter
+                       (#3747); each has value / label / count. Old rows count
+                       as "Legacy row"; they are never reclassified.
 -#}
 <div id="audit-results-inner" class="space-y-4">
+  {% if class_counts %}
+    <ul class="flex flex-wrap gap-2" aria-label="Rows per record type">
+      {% for item in class_counts %}
+        <li
+          class="badge badge-outline gap-1{% if item.value == event_class_filter %} badge-primary{% endif %}"
+          data-event-class="{{ item.value }}"
+        >
+          <span>{{ item.label }}</span>
+          <span class="font-mono">{{ item.count }}</span>
+        </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
   {% if duration_error %}
     <div role="alert" class="alert alert-warning">
       <span>

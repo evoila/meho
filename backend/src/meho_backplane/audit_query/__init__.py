@@ -7,6 +7,8 @@ The package exposes the consumer-facing surface T2 (REST), T3 (CLI), and T4
 (MCP) dispatch through:
 
 * :func:`query_audit` — tenant-scoped paginated query handler.
+* :func:`count_event_classes` — per-event-class row counts for the same
+  filters (#3747), the counters the REST route and the console show.
 * :func:`replay_session` — per-session parent/child replay tree (G8.2-T3).
   The **reconstruct-sense** replay: rebuild what the agent saw by walking
   ``agent_session_id`` + ``parent_audit_id`` lineage in chronological order.
@@ -42,7 +44,7 @@ from __future__ import annotations
 from .cursor import CursorPosition, InvalidCursorError, decode_cursor, encode_cursor
 from .duration import DurationParseError, parse_duration
 from .policy_replay import PolicyReplayResult, PolicyReplayStatus, replay_policy
-from .query import UnsupportedFilterError, query_audit
+from .query import UnsupportedFilterError, count_event_classes, query_audit
 from .replay import replay_session
 from .schemas import (
     AuditEntry,
@@ -64,6 +66,7 @@ __all__ = [
     "PolicyReplayStatus",
     "ReplayNode",
     "UnsupportedFilterError",
+    "count_event_classes",
     "decode_cursor",
     "encode_cursor",
     "parse_duration",

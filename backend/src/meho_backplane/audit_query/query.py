@@ -68,18 +68,20 @@ Filter coverage
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.broadcast.events import classify_op
-from meho_backplane.db.models import AuditLog, Target
+from meho_backplane.db.models import AuditEventClass, AuditLog, Target
 
 from .cursor import CursorPosition, decode_cursor, encode_cursor
 from .schemas import AuditEntry, AuditQueryFilters, AuditQueryResult
 
 __all__ = [
     "UnsupportedFilterError",
+    "count_event_classes",
     "query_audit",
 ]
 
@@ -181,16 +183,42 @@ async def query_audit(
     return AuditQueryResult(rows=entries, next_cursor=next_cursor)
 
 
+async def count_event_classes(
+    filters: AuditQueryFilters,
+    *,
+    tenant_id: uuid.UUID,
+    session: AsyncSession,
+) -> dict[str, int]:
+    """Count the rows that match *filters*, per event class (#3747).
+
+    Uses the same tenant scope and filters as :func:`query_audit`, except
+    ``event_class``, ``cursor`` and ``limit``: the counters show every
+    class, so an operator sees what a class filter would return before
+    picking it. The result has one key per :class:`AuditEventClass`, in
+    the enum order, with ``0`` for a class that has no rows. Old rows
+    count as ``legacy_request``; nothing is reclassified.
+    """
+    unpaged = filters.model_copy(update={"event_class": None, "cursor": None})
+    stmt: sa.Select[Any] = (
+        sa.select(AuditLog.event_class, sa.func.count())
+        .where(AuditLog.tenant_id == tenant_id)
+        .group_by(AuditLog.event_class)
+    )
+    stmt = _apply_filters(stmt, unpaged, tenant_id=tenant_id)
+    found: dict[str, int] = dict((await session.execute(stmt)).tuples().all())
+    return {member.value: int(found.get(member.value, 0)) for member in AuditEventClass}
+
+
 # A flat chain of independent `if filters.X is not None` guards — one per
 # optional filter field — is the clearest shape for optional filter application;
 # splitting it into sub-helpers would fragment cohesive logic for no readability
 # code-quality-allow: gain (C901 is inherent to the optional-field count).
 def _apply_filters(
-    stmt: sa.Select[tuple[AuditLog, str]],
+    stmt: sa.Select[Any],
     filters: AuditQueryFilters,
     *,
     tenant_id: uuid.UUID,
-) -> sa.Select[tuple[AuditLog, str]]:
+) -> sa.Select[Any]:
     """Apply every set column filter (and the cursor) to *stmt*.
 
     Extracted from :func:`query_audit` so the handler stays a readable

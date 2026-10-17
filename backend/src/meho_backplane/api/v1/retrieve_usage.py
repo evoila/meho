@@ -164,6 +164,7 @@ async def usage_endpoint(
             until=now,
             surfaces=surfaces,
             tenant_id=target_tenant,
+            source="request_usage",
         )
 
     # ``audit_row_count`` becomes the broadcast event's ``row_count``

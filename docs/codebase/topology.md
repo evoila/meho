@@ -299,12 +299,12 @@ as a warning callout next to the counts (#2210).
 
 A node is keyed by `(tenant_id, kind, name)`, so two targets that report
 the same name (two clusters with a `default` namespace) collapse into one
-row. Migration `0106` is the first, expand-only step of the fix. It adds
+row. Migration `0107` is the first, expand-only step of the fix. It adds
 the place to record where a name is unique, and changes no writer.
 
 - **Columns.** `graph_node.source_scope` (nullable text) and
   `graph_node.source_scope_provenance` (nullable text: what set the
-  scope; the backfill writes `migration:0106`).
+  scope; the backfill writes `migration:0107`).
 - **Vocabulary** (`SOURCE_SCOPE_PATTERN` in `db/models.py`):
   - `global` — the name means the same thing for the whole tenant.
   - `target:<uuid>` — the name is unique only inside one target
@@ -326,7 +326,7 @@ the place to record where a name is unique, and changes no writer.
   node id, so same-named rows never clash. It is the input for the later
   repair step. No ORM model reads it yet. The upgrade creates the table
   only when it is absent and adds rows only for nodes that have none, so
-  a row records the first time `0106` saw the node.
+  a row records the first time `0107` saw the node.
 - **Old key kept.** `graph_node_tenant_kind_name_idx` stays unique on
   `(tenant_id, kind, name)`. PostgreSQL treats NULLs as distinct in a
   unique index, so a fourth nullable key alone would let two unresolved
@@ -339,13 +339,13 @@ the place to record where a name is unique, and changes no writer.
   cannot be re-taken later, because a refresh moves `target_id` to the
   last target that saw the row; keeping the table is how the repair
   input is exported before the columns go. A re-upgrade keeps it as is.
-  Downgrade refuses when `source_scope` holds a value `0106` did not
+  Downgrade refuses when `source_scope` holds a value `0107` did not
   write (any `target:` / `legacy:` value, or a value from another
   writer): the old schema cannot hold it, so recover by rolling forward.
 - **Not in this step.** Writing scoped nodes, splitting or repairing
   rows, dropping the old key and changing path answers belong to the
   staged cut-over (#3749) and the path work (#3760).
-- **Tests.** `tests/migrations/test_migration_0106_add_graph_node_source_scope.py`
+- **Tests.** `tests/migrations/test_migration_0107_add_graph_node_source_scope.py`
   (SQLite), `tests/integration/test_topology_source_scope_migration.py`
   (PostgreSQL: NULL uniqueness, upgrade/downgrade, refusal) and the
   legacy-read tests in `tests/integration/test_topology_query.py`.

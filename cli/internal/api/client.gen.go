@@ -9652,9 +9652,11 @@ type TopologyHistoryResult struct {
 // name belongs to; it never falls back to the last target that saw
 // the row.
 //
-// “last_seen“ (#3760) is when MEHO last saw this node in a refresh
-// (“None“ when the latest refresh no longer reported it). It is not
-// the vendor's own time. “via_edge_source“ / “via_edge_last_seen“
+// “last_seen“ (#3760) is MEHO's own time, not the vendor's: the last
+// refresh that reported an “auto“ node, or when an operator entered
+// a “curated“ node (a later refresh that also observes it moves it
+// forward). “None“ means the latest refresh no longer reported the
+// row. “via_edge_source“ / “via_edge_last_seen“
 // are the same facts for the edge walked to reach the node, and
 // “via_relation_class“ is that edge's relation class (see
 // :mod:`meho_backplane.topology.evidence`). All are “None“ on the

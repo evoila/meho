@@ -23,12 +23,21 @@ login fails until you add it.
 
 ### 1. Check if you need this step
 
-Run this on your machine. Use your backplane host in place of
-`meho.example.com`. On Windows, type `curl.exe` in place of `curl`.
+Run the command for your shell. Use your backplane host in place of
+`meho.example.com`.
 
-```bash
-curl -sS -o /dev/null https://meho.example.com/healthz && echo trusted
-```
+- **macOS and Linux** (bash or zsh):
+
+    ```bash
+    curl -sS -o /dev/null https://meho.example.com/healthz && echo trusted
+    ```
+
+- **Windows** (PowerShell; type `curl.exe`, because plain `curl` is a
+  PowerShell alias for a different command):
+
+    ```powershell
+    curl.exe -sS -o NUL https://meho.example.com/healthz; if ($LASTEXITCODE -eq 0) { "trusted" }
+    ```
 
 - It prints `trusted`: your machine already trusts the deployment. Skip
   to the [next section](#the-one-command-path-the-meho-plugin).
@@ -45,17 +54,28 @@ team's password manager, or a plain-HTTP link such as
 `http://ca.example.internal/root.pem`. Ask your deployer where it is.
 You do not need access to the secrets store or to the cluster.
 
-Save the file as `internal-ca.pem`, then check that it is the right
-file. Compare its SHA-256 fingerprint with the one your deployer
-published:
+Save the file as `internal-ca.pem`. For a plain-HTTP link:
 
 ```bash
 curl -fsS -o internal-ca.pem http://ca.example.internal/root.pem
+```
+
+Then check that it is the right file before you trust it. You need the
+expected fingerprint from a place you already trust, such as your
+team's password manager or an internal docs page you log in to. Do not
+take it from the same plain-HTTP page as the file: someone who can swap
+the file can also swap a fingerprint shown next to it. If you have no
+trusted source for the fingerprint, stop and ask your deployer.
+
+Print the file's SHA-256 fingerprint and compare it with the expected
+one (on Windows, run this in Git Bash, which includes `openssl`):
+
+```bash
 openssl x509 -in internal-ca.pem -noout -subject -fingerprint -sha256
 ```
 
-If the fingerprints do not match, stop and ask your deployer. Always do
-this check when the file came over plain HTTP.
+If the fingerprints do not match, stop and ask your deployer. Do not go
+on to step 3 until they match.
 
 ### 3. Trust the root CA
 

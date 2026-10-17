@@ -506,9 +506,14 @@ store. Good places:
 - a plain-HTTP link, for example `http://ca.example.internal/root.pem`.
 
 Publish only the root certificate (public by design), never a private
-key. Also publish its SHA-256 fingerprint through one of the trusted
-channels above, so operators can check a file they downloaded over plain
-HTTP:
+key.
+
+Also publish its SHA-256 fingerprint, and do it through a channel the
+operator already trusts: the team's password manager, or a docs page
+behind a login. Do not publish the fingerprint only next to a plain-HTTP
+download. Someone who can replace that file can also replace a
+fingerprint shown beside it. Operators must compare the file against
+this fingerprint before they import it:
 
 ```bash
 openssl x509 -in root.pem -noout -subject -fingerprint -sha256

@@ -528,7 +528,7 @@ dot-separated numeric counter (`v1.0.0-rc.1`, `v1.0.0-rc.2`, …):
   `v1.0.0-rc.N` promotes to `v1.0.0`, never to `v1.0.1`.
 - `N` only increments. A re-cut is always `rc.N+1`, never a moved tag:
   `cli-release.yml` tolerates a re-pushed tag (concurrency group,
-  L63–69), but a moved tag leaves the image alias, chart version and
+  L65–71), but a moved tag leaves the image alias, chart version and
   Release assets pointing at bytes no tag describes any more.
 - No other identifiers (`-beta`, `-alpha`, `-rc1`). Every
   tag-consuming workflow derives the version by stripping the leading

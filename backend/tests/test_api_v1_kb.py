@@ -66,7 +66,12 @@ from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
-from meho_backplane.kb.schemas import KbEntry, KbIngestionResult
+from meho_backplane.kb.schemas import (
+    KbEntry,
+    KbIngestConflict,
+    KbIngestionResult,
+    KbProvenance,
+)
 from meho_backplane.kb.service import KbIngestRootError
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.settings import get_settings
@@ -221,6 +226,7 @@ def _make_entry(slug: str = "k8s-ingress", body: str = "ingress troubleshooting"
         slug=slug,
         body=body,
         metadata={"path": f"/tmp/{slug}.md"},
+        provenance=KbProvenance(state="legacy"),
         created_at=datetime(2026, 1, 1, tzinfo=UTC),
         updated_at=datetime(2026, 1, 2, tzinfo=UTC),
     )
@@ -757,7 +763,9 @@ def test_ingest_directory_returns_result(client: TestClient) -> None:
         updated_count=1,
         skipped_count=5,
         error_count=0,
+        conflict_count=0,
         errors=[],
+        conflicts=[],
     )
     fake_ingest = AsyncMock(return_value=fake_result)
     with (
@@ -789,7 +797,9 @@ def test_ingest_dry_run_forwards_flag(client: TestClient) -> None:
         updated_count=0,
         skipped_count=0,
         error_count=0,
+        conflict_count=0,
         errors=[],
+        conflicts=[],
     )
     fake_ingest = AsyncMock(return_value=fake_result)
     with (
@@ -806,6 +816,75 @@ def test_ingest_dry_run_forwards_flag(client: TestClient) -> None:
     assert response.status_code == 200
     call_kwargs = fake_ingest.await_args.kwargs
     assert call_kwargs["dry_run"] is True
+
+
+@pytest.mark.asyncio
+async def test_ingest_reports_slug_conflicts_and_audits_count(client: TestClient) -> None:
+    """Conflicts reach the response body; the audit row carries only the count."""
+    tenant_a = uuid.uuid4()
+    key, token = _admin_token(tenant_id=tenant_a)
+    fake_result = KbIngestionResult(
+        inserted_count=1,
+        updated_count=0,
+        skipped_count=0,
+        error_count=0,
+        conflict_count=2,
+        errors=[],
+        conflicts=[KbIngestConflict(slug="dup", relative_paths=["a/dup.md", "b/dup.md"])],
+    )
+    fake_ingest = AsyncMock(return_value=fake_result)
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.kb.KbService.ingest_directory", fake_ingest),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/kb/ingest",
+            json={"directory": "/tmp/kb"},
+            headers=_authed(token),
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["conflict_count"] == 2
+    assert body["conflicts"] == [{"slug": "dup", "relative_paths": ["a/dup.md", "b/dup.md"]}]
+    rows = await _audit_rows_for_path("/api/v1/kb/ingest")
+    assert len(rows) == 1
+    assert rows[0].payload["conflict_count"] == 2
+    assert "a/dup.md" not in json.dumps(rows[0].payload)
+
+
+def test_show_returns_provenance_block(client: TestClient) -> None:
+    """``GET /api/v1/kb/{slug}`` carries the typed provenance next to metadata."""
+    tenant_a = uuid.uuid4()
+    key, token = _operator_token(tenant_id=tenant_a)
+    entry = _make_entry().model_copy(
+        update={
+            "provenance": KbProvenance(
+                state="recorded",
+                source_kind="directory",
+                relative_path="ops/k8s-ingress.md",
+                ingested_at=datetime(2026, 1, 3, tzinfo=UTC),
+            )
+        }
+    )
+    with (
+        respx.mock as mock_router,
+        patch(
+            "meho_backplane.api.v1.kb.KbService.get_entry",
+            AsyncMock(return_value=entry),
+        ),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get("/api/v1/kb/k8s-ingress", headers=_authed(token))
+
+    assert response.status_code == 200
+    assert response.json()["provenance"] == {
+        "state": "recorded",
+        "source_kind": "directory",
+        "relative_path": "ops/k8s-ingress.md",
+        "ingested_at": "2026-01-03T00:00:00Z",
+    }
 
 
 def test_ingest_both_directory_and_tarball_returns_422(client: TestClient) -> None:
@@ -876,7 +955,9 @@ def test_ingest_directory_with_empty_tarball_url_succeeds(
         updated_count=0,
         skipped_count=0,
         error_count=0,
+        conflict_count=0,
         errors=[],
+        conflicts=[],
     )
     fake_ingest = AsyncMock(return_value=fake_result)
     with (
@@ -1136,7 +1217,9 @@ async def test_ingest_writes_audit_row_with_counters_not_file_contents(
         updated_count=2,
         skipped_count=32,
         error_count=0,
+        conflict_count=0,
         errors=[],
+        conflicts=[],
     )
     fake_ingest = AsyncMock(return_value=fake_result)
     with (
@@ -1160,6 +1243,7 @@ async def test_ingest_writes_audit_row_with_counters_not_file_contents(
     assert payload["updated_count"] == 2
     assert payload["skipped_count"] == 32
     assert payload["error_count"] == 0
+    assert payload["conflict_count"] == 0
     # The directory path may surface as an audit_* contextvar in a future
     # iteration but the file contents NEVER do; pin the negative
     # assertion against a body-shaped value that could have leaked.

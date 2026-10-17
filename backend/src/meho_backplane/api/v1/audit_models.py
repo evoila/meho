@@ -135,13 +135,15 @@ class AuditClassCounts(BaseModel):
     ``policy_decision``, ``approval_decision``, ``security_event``,
     ``legacy_request``), ``0`` when a class has no rows. Old rows count
     as ``legacy_request``; they are never reclassified. ``total`` is the
-    sum.
+    sum. ``since`` is the start of the counted window: the request's
+    ``since``, or 24 hours ago when the request set none.
     """
 
     model_config = ConfigDict(frozen=True)
 
     counts: dict[str, int]
     total: int
+    since: datetime
 
 
 class AuditReplayResult(BaseModel):

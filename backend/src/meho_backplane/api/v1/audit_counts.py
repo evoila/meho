@@ -6,7 +6,9 @@
 Takes the same filters as ``POST /api/v1/audit/query`` (without
 ``event_class``, ``limit`` and ``cursor``) and answers one row count per
 event class through :func:`~meho_backplane.audit_query.count_event_classes`.
-Old rows count as ``legacy_request``; nothing is reclassified.
+Old rows count as ``legacy_request``; nothing is reclassified. Without
+``since`` only the last 24 hours are counted, and the answer says which
+window it counted.
 
 Same posture as the query routes in :mod:`meho_backplane.api.v1.audit`:
 ``operator`` role minimum, tenant from the JWT (never the body), and the
@@ -46,7 +48,7 @@ async def class_counts(
     except DurationParseError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     async with get_sessionmaker()() as session:
-        counts = await count_event_classes(filters, tenant_id=operator.tenant_id, session=session)
-    total = sum(counts.values())
+        result = await count_event_classes(filters, tenant_id=operator.tenant_id, session=session)
+    total = sum(result.counts.values())
     structlog.contextvars.bind_contextvars(audit_row_count=total)
-    return AuditClassCounts(counts=counts, total=total)
+    return AuditClassCounts(counts=result.counts, total=total, since=result.since)

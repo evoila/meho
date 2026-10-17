@@ -485,6 +485,10 @@ def test_audit_bad_since_renders_inline_error_not_500() -> None:
     assert "Could not parse the time window" in body
 
 
+#: A ``since`` filter older than :data:`_BASE`, so the counters see every seeded row.
+_SINCE_BEFORE_BASE = "2000-01-01T00:00:00Z"
+
+
 def _seed_one_row_per_class() -> None:
     """Seed one execution, one decision and two legacy rows in tenant A."""
     _seed_audit_row(
@@ -516,15 +520,25 @@ def test_audit_event_class_filter_and_counters() -> None:
     with respx.mock(assert_all_called=False):
         client = _authenticated_client(session_id)
         page = client.get("/ui/audit")
-        filtered = client.get("/ui/audit/results?event_class=policy_decision")
+        counted = client.get(f"/ui/audit/results?since={_SINCE_BEFORE_BASE}")
+        filtered = client.get(
+            f"/ui/audit/results?event_class=policy_decision&since={_SINCE_BEFORE_BASE}"
+        )
 
     assert page.status_code == 200, page.text
     assert 'name="event_class"' in page.text
     assert "Legacy row" in page.text
-    assert ">1<" in _count_badge(page.text, "operation_execution")
-    assert ">1<" in _count_badge(page.text, "policy_decision")
-    assert ">0<" in _count_badge(page.text, "security_event")
-    assert ">2<" in _count_badge(page.text, "legacy_request")
+    # With no since filter the counters cover only the last 24 hours, so
+    # the seeded rows (older than that) are not counted, and the page says so.
+    assert ">0<" in _count_badge(page.text, "legacy_request")
+    assert "last 24 hours" in page.text
+
+    assert counted.status_code == 200, counted.text
+    assert ">1<" in _count_badge(counted.text, "operation_execution")
+    assert ">1<" in _count_badge(counted.text, "policy_decision")
+    assert ">0<" in _count_badge(counted.text, "security_event")
+    assert ">2<" in _count_badge(counted.text, "legacy_request")
+    assert "last 24 hours" not in counted.text
 
     assert filtered.status_code == 200, filtered.text
     assert "vault.kv.put" in filtered.text

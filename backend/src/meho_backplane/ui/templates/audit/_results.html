@@ -40,6 +40,8 @@
                        the same filters, ignoring the record type filter
                        (#3747); each has value / label / count. Old rows count
                        as "Legacy row"; they are never reclassified.
+    class_counts_since -- str | None: start of the counted window. With no
+                       "since" filter only the last 24 hours are counted.
 -#}
 <div id="audit-results-inner" class="space-y-4">
   {% if class_counts %}
@@ -54,6 +56,9 @@
         </li>
       {% endfor %}
     </ul>
+    <p class="text-xs opacity-70" data-testid="class-counts-window">
+      Counted since {{ class_counts_since }}{% if not since_filter %} (last 24 hours; set "since" to count further back){% endif %}.
+    </p>
   {% endif %}
   {% if duration_error %}
     <div role="alert" class="alert alert-warning">

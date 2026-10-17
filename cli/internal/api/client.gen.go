@@ -1683,9 +1683,11 @@ type AssignmentDocumentResponse struct {
 // “policy_decision“, “approval_decision“, “security_event“,
 // “legacy_request“), “0“ when a class has no rows. Old rows count
 // as “legacy_request“; they are never reclassified. “total“ is the
-// sum.
+// sum. “since“ is the start of the counted window: the request's
+// “since“, or 24 hours ago when the request set none.
 type AuditClassCounts struct {
 	Counts map[string]int `json:"counts"`
+	Since  time.Time      `json:"since"`
 	Total  int            `json:"total"`
 }
 

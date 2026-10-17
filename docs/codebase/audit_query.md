@@ -34,6 +34,11 @@ class it knows. Nothing is guessed from `method` / `path`.
   count per class for the same filters as `query_audit`, except
   `event_class`, `cursor` and `limit`. Every class is a key, `0` when it
   has no rows. Old rows count as `legacy_request`.
+- Without `since` it counts only the last 24 hours
+  (`DEFAULT_COUNT_WINDOW`). The audit log keeps every row, so an open
+  count would read the whole tenant history on every console load. The
+  result (`EventClassCounts`) carries the `since` it used; the REST
+  answer and the console strip show it.
 - `POST /api/v1/audit/class-counts` and the console counter strip
   (above the result list on `/ui/audit`) use it. The console also has a
   "Record type" filter and shows each row's class as a badge.
@@ -258,7 +263,7 @@ tenant-scoping invariant is enforced one layer up.
 | Route | Filter shape | Notes |
 |---|---|---|
 | `POST /api/v1/audit/query` | Body is `AuditQueryRequest`; `since` / `until` are strings parsed at the router via `parse_duration` (`"24h"` / `"7d"` / ISO-8601). Client-supplied `tenant_id` (or any other unknown field) is rejected with 422 `extra_forbidden` (`AuditQueryRequest.model_config` sets `extra="forbid"`, G0.9-T2 / #729); the route never reads tenant from the body — it always passes `operator.tenant_id` from the JWT to the substrate. | Full-filter surface. |
-| `POST /api/v1/audit/class-counts` | Body is `AuditClassCountsRequest`: the `AuditQueryRequest` filters without `event_class`, `limit` and `cursor` (those fields are a 422). 200 body is `AuditClassCounts` (`{counts, total}`), one count per event class (#3747). | Counters. |
+| `POST /api/v1/audit/class-counts` | Body is `AuditClassCountsRequest`: the `AuditQueryRequest` filters without `event_class`, `limit` and `cursor` (those fields are a 422). 200 body is `AuditClassCounts` (`{counts, total, since}`), one count per event class (#3747). Without `since` only the last 24 hours count; `since` echoes the window start. | Counters. |
 | `GET /api/v1/audit/who-touched/{target}` | Path param becomes `filters.target`; `since` query defaults to `"24h"`. | Pre-canned shortcut. |
 | `GET /api/v1/audit/by-work-ref/{ref}` | Path param (`{ref:path}` converter — a work_ref carries embedded slashes, `#` is percent-encoded) becomes `filters.work_ref` (exact match); `since` query has **no** default window (a change-ticket lookup wants the whole governed history of the ref, not just the last 24h). The "show every write authorised by ticket X" lookup (work_ref I1-T3 #1658). | Pre-canned shortcut. |
 | `GET /api/v1/audit/my-recent` | `filters.principal = operator.sub`; `since` query defaults to `"24h"`. | Pre-canned shortcut. |

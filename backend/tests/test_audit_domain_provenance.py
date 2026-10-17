@@ -41,7 +41,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.api.v1.audit import router as audit_router
 from meho_backplane.api.v1.audit_counts import router as audit_counts_router
 from meho_backplane.audit import AuditMiddleware
-from meho_backplane.audit_query import AuditQueryFilters, count_event_classes
+from meho_backplane.audit_query import (
+    DEFAULT_COUNT_WINDOW,
+    AuditQueryFilters,
+    count_event_classes,
+)
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.conventions.schemas import ConventionCreate, ConventionKind, ConventionUpdate
@@ -176,13 +180,15 @@ async def test_count_event_classes_counts_every_class_and_keeps_legacy(
     await _seed_audit_row(tenant_id=_TENANT_A, event_class=None)
     await _seed_audit_row(tenant_id=_TENANT_B, event_class=AuditEventClass.SECURITY_EVENT)
 
-    counts = await count_event_classes(
+    result = await count_event_classes(
         AuditQueryFilters(event_class=AuditEventClass.POLICY_DECISION),
         tenant_id=_TENANT_A,
         session=session,
+        now=_BASE + timedelta(hours=1),
     )
 
-    assert counts == {
+    assert result.since == _BASE + timedelta(hours=1) - DEFAULT_COUNT_WINDOW
+    assert result.counts == {
         "operation_execution": 1,
         "policy_decision": 1,
         "approval_decision": 1,
@@ -200,14 +206,35 @@ async def test_count_event_classes_applies_the_other_filters(session: AsyncSessi
         tenant_id=_TENANT_A, event_class=AuditEventClass.OPERATION_EXECUTION, second=100
     )
 
-    counts = await count_event_classes(
+    result = await count_event_classes(
         AuditQueryFilters(since=_BASE + timedelta(seconds=50)),
         tenant_id=_TENANT_A,
         session=session,
     )
 
-    assert counts["operation_execution"] == 1
-    assert sum(counts.values()) == 1
+    assert result.since == _BASE + timedelta(seconds=50)
+    assert result.counts["operation_execution"] == 1
+    assert sum(result.counts.values()) == 1
+
+
+async def test_count_event_classes_without_since_counts_only_the_default_window(
+    session: AsyncSession,
+) -> None:
+    """With no ``since``, a row older than the default window is not counted."""
+    await _seed_audit_row(
+        tenant_id=_TENANT_A, event_class=AuditEventClass.OPERATION_EXECUTION, second=0
+    )
+    await _seed_audit_row(
+        tenant_id=_TENANT_A, event_class=AuditEventClass.OPERATION_EXECUTION, second=7200
+    )
+    now = _BASE + DEFAULT_COUNT_WINDOW + timedelta(hours=1)
+
+    result = await count_event_classes(
+        AuditQueryFilters(), tenant_id=_TENANT_A, session=session, now=now
+    )
+
+    assert result.since == now - DEFAULT_COUNT_WINDOW
+    assert result.counts["operation_execution"] == 1
 
 
 async def test_class_counts_route_answers_per_class_counts(client: TestClient) -> None:
@@ -219,6 +246,11 @@ async def test_class_counts_route_answers_per_class_counts(client: TestClient) -
     with respx.mock as r:
         mock_discovery_and_jwks(r, public_jwks(key))
         resp = client.post(
+            "/api/v1/audit/class-counts",
+            json={"since": "2026-08-01T00:00:00Z"},
+            headers={"Authorization": f"Bearer {_token(key)}"},
+        )
+        default_window = client.post(
             "/api/v1/audit/class-counts",
             json={},
             headers={"Authorization": f"Bearer {_token(key)}"},
@@ -234,6 +266,15 @@ async def test_class_counts_route_answers_per_class_counts(client: TestClient) -
     assert body["counts"]["policy_decision"] == 1
     assert body["counts"]["legacy_request"] == 1
     assert body["total"] == 2
+    assert body["since"].startswith("2026-08-01T00:00:00")
+    # Without since, only the last 24 hours count, and the answer says so.
+    assert default_window.status_code == 200, default_window.text
+    echoed = datetime.fromisoformat(default_window.json()["since"])
+    assert datetime.now(UTC) - echoed >= DEFAULT_COUNT_WINDOW
+    assert datetime.now(UTC) - echoed < DEFAULT_COUNT_WINDOW + timedelta(minutes=5)
+    # The seeded rows are older than the window; only the first request's
+    # own audit row is new enough to count.
+    assert default_window.json()["counts"]["policy_decision"] == 0
     # The counters always show every class, so a class filter is refused.
     assert rejected.status_code == 422
 

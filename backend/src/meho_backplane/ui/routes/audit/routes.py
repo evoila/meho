@@ -625,6 +625,7 @@ async def _build_results_context(
         "filter_error": None,
         "page_size": _PAGE_SIZE,
         "class_counts": [],
+        "class_counts_since": None,
     }
     if event_class and event_class not in _EVENT_CLASS_LABELS:
         context["filter_error"] = f"Unknown event class '{event_class}'."
@@ -679,21 +680,22 @@ async def _build_results_context(
     context["next_cursor"] = result.next_cursor
     context["has_more"] = result.next_cursor is not None
     if include_counts:
-        context["class_counts"] = await _class_counts(filters, tenant_id=session.tenant_id)
+        context.update(await _class_counts(filters, tenant_id=session.tenant_id))
     return context
 
 
-async def _class_counts(
-    filters: AuditQueryFilters, *, tenant_id: uuid.UUID
-) -> list[dict[str, object]]:
-    """Return the per-class counters for *filters*, labelled for the template."""
+async def _class_counts(filters: AuditQueryFilters, *, tenant_id: uuid.UUID) -> dict[str, object]:
+    """Return the per-class counters for *filters* and the counted window start."""
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as db_session:
-        counts = await count_event_classes(filters, tenant_id=tenant_id, session=db_session)
-    return [
-        {"value": value, "label": _EVENT_CLASS_LABELS[value], "count": count}
-        for value, count in counts.items()
-    ]
+        result = await count_event_classes(filters, tenant_id=tenant_id, session=db_session)
+    return {
+        "class_counts": [
+            {"value": value, "label": _EVENT_CLASS_LABELS[value], "count": count}
+            for value, count in result.counts.items()
+        ],
+        "class_counts_since": result.since.strftime("%Y-%m-%d %H:%M UTC"),
+    }
 
 
 async def _results_handler(

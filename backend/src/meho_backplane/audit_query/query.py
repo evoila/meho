@@ -68,7 +68,8 @@ Filter coverage
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from datetime import UTC, datetime, timedelta
+from typing import Any, Final
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -77,13 +78,20 @@ from meho_backplane.broadcast.events import classify_op
 from meho_backplane.db.models import AuditEventClass, AuditLog, Target
 
 from .cursor import CursorPosition, decode_cursor, encode_cursor
-from .schemas import AuditEntry, AuditQueryFilters, AuditQueryResult
+from .schemas import AuditEntry, AuditQueryFilters, AuditQueryResult, EventClassCounts
 
 __all__ = [
+    "DEFAULT_COUNT_WINDOW",
     "UnsupportedFilterError",
     "count_event_classes",
     "query_audit",
 ]
+
+
+#: Time window the class counters use when the caller sets no ``since``.
+#: The audit log keeps every row, so an unbounded count would scan the
+#: whole tenant history on every console page load.
+DEFAULT_COUNT_WINDOW: Final[timedelta] = timedelta(hours=24)
 
 
 class UnsupportedFilterError(ValueError):
@@ -188,17 +196,25 @@ async def count_event_classes(
     *,
     tenant_id: uuid.UUID,
     session: AsyncSession,
-) -> dict[str, int]:
+    now: datetime | None = None,
+) -> EventClassCounts:
     """Count the rows that match *filters*, per event class (#3747).
 
     Uses the same tenant scope and filters as :func:`query_audit`, except
     ``event_class``, ``cursor`` and ``limit``: the counters show every
     class, so an operator sees what a class filter would return before
-    picking it. The result has one key per :class:`AuditEventClass`, in
+    picking it. ``counts`` has one key per :class:`AuditEventClass`, in
     the enum order, with ``0`` for a class that has no rows. Old rows
     count as ``legacy_request``; nothing is reclassified.
+
+    When ``filters.since`` is not set, only the last
+    :data:`DEFAULT_COUNT_WINDOW` is counted. The returned ``since`` is the
+    start of the window that was counted, so callers can show it.
     """
-    unpaged = filters.model_copy(update={"event_class": None, "cursor": None})
+    since = filters.since
+    if since is None:
+        since = (now or datetime.now(UTC)) - DEFAULT_COUNT_WINDOW
+    unpaged = filters.model_copy(update={"event_class": None, "cursor": None, "since": since})
     stmt: sa.Select[Any] = (
         sa.select(AuditLog.event_class, sa.func.count())
         .where(AuditLog.tenant_id == tenant_id)
@@ -206,7 +222,8 @@ async def count_event_classes(
     )
     stmt = _apply_filters(stmt, unpaged, tenant_id=tenant_id)
     found: dict[str, int] = dict((await session.execute(stmt)).tuples().all())
-    return {member.value: int(found.get(member.value, 0)) for member in AuditEventClass}
+    counts = {member.value: int(found.get(member.value, 0)) for member in AuditEventClass}
+    return EventClassCounts(counts=counts, since=since)
 
 
 # A flat chain of independent `if filters.X is not None` guards — one per

@@ -23309,15 +23309,21 @@
           "total": {
             "type": "integer",
             "title": "Total"
+          },
+          "since": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Since"
           }
         },
         "type": "object",
         "required": [
           "counts",
-          "total"
+          "total",
+          "since"
         ],
         "title": "AuditClassCounts",
-        "description": "200 body for ``POST /api/v1/audit/class-counts`` (#3747).\n\n``counts`` has one key per event class (``operation_execution``,\n``policy_decision``, ``approval_decision``, ``security_event``,\n``legacy_request``), ``0`` when a class has no rows. Old rows count\nas ``legacy_request``; they are never reclassified. ``total`` is the\nsum."
+        "description": "200 body for ``POST /api/v1/audit/class-counts`` (#3747).\n\n``counts`` has one key per event class (``operation_execution``,\n``policy_decision``, ``approval_decision``, ``security_event``,\n``legacy_request``), ``0`` when a class has no rows. Old rows count\nas ``legacy_request``; they are never reclassified. ``total`` is the\nsum. ``since`` is the start of the counted window: the request's\n``since``, or 24 hours ago when the request set none."
       },
       "AuditClassCountsRequest": {
         "properties": {

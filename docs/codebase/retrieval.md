@@ -282,6 +282,69 @@ lowest-ranked hits are left out, `delivery` is `partial` and
 `omitted_hits` says how many. A passage is never cut. Snippets,
 passage texts and heading titles are wrapped as untrusted text.
 
+### Offline KB passage benchmark (#3765)
+
+Before anyone changes a retrieval default (model, prefixes, reranker),
+the change must win on a held-out benchmark. The benchmark lives in the
+existing eval package and runs only offline. It adds no route, index,
+model, migration or setting, and nothing in it can change a production
+default.
+
+**Fixtures** (`retrieval/eval/kb_passage_fixtures.yaml`, loaded by
+`load_kb_passage_fixtures` in `corpus.py`). Synthetic long Markdown
+entries and queries, all made up. The file has a `version`; the loader
+refuses a version the code does not know. Each query has a `scenario`
+and a `language` (`en`, `de`):
+
+| Scenario | What it checks |
+|---|---|
+| `middle_passage` / `end_passage` | the answer sits in the middle or at the end of a long body |
+| `duplicate` | two entries hold the same answer; either one is correct |
+| `conflict` | a current-looking entry contradicts the reviewed one |
+| `stale` | an outdated entry gives an old answer |
+| `no_match` | the corpus has no answer |
+
+The loader checks the file: every expected entry is current, has the
+expected heading and holds every answer term; every harmful entry is
+stale or conflicting. A broken fixture fails at load time.
+
+**Candidates** (`passage_bench.py`, `CandidateSpec`). A candidate names
+what it changes: `embedding_model`, `query_prefix`, `passage_prefix`,
+`reranker`. `BASELINE_CANDIDATE` is the unchanged default.
+`reembed_corpus=True` is required whenever the model or the passage
+prefix changes, also for a model with the same vector size (for example
+`intfloat/multilingual-e5-small`, 384 dimensions, which needs
+`"query: "` / `"passage: "` prefixes and cuts text at 512 tokens).
+Vectors from two models are not comparable.
+
+**Searches.** `run_passage_bench` takes `(CandidateSpec, search)` pairs;
+the first must be the baseline. Two search builders ship:
+
+- `retrieve_search` runs the production `retrieve(source="kb")` and
+  reads slug and heading path from the `kb_passage` locator. The
+  fixtures must be ingested into the tenant first.
+- `embedding_search` splits every fixture entry with `chunk_markdown`,
+  embeds the **whole** corpus with the candidate's model and passage
+  prefix, and ranks by cosine. The window shrinks by the prefix's
+  tokens, so prefix plus passage still fits. Queries get the query
+  prefix. For a real run pass `EmbeddingService(model, cache_dir).encode`
+  and its `passage_tokenizer()`. Tests pass a fake encoder, so no model
+  is downloaded.
+
+**Scores**, per query, then grouped by `(scenario, language)`:
+
+- `source_citation` / `mrr` — a correct entry in the top `k`, and its rank.
+- `selected_reference` — the first correct passage sits under the
+  expected heading (the passage an agent would cite).
+- `answer_support` — share of answer terms in that passage.
+- `harm_rate` — a stale or conflicting entry ranks above the first
+  correct passage. For `no_match`, any returned evidence counts as harm;
+  retrieval has no score cutoff, so the baseline is expected to be 1.0.
+- `latency_p95_ms`, `bytes_mean`, `bytes_p95`, `calls`.
+
+The report (`PassageBenchReport`) holds only labels and numbers. It
+never holds a query or a body, and it never averages across groups.
+
 ## Dependencies
 
 - **pgvector** — `vector(384)` column on `documents.embedding`; the
@@ -336,6 +399,8 @@ passage texts and heading titles are wrapped as untrusted text.
 - PG JSONB containment + GIN indexing: <https://www.postgresql.org/docs/16/datatype-json.html#JSON-CONTAINMENT> and <https://www.postgresql.org/docs/16/datatype-json.html#JSON-INDEXING>.
 - pgvector: <https://github.com/pgvector/pgvector>.
 - KB passage index: #3761 (Initiative #3730).
+- Offline KB passage benchmark: #3765 (Initiative #3730).
+- multilingual-e5-small model card (prefixes, 512-token limit): <https://huggingface.co/intfloat/multilingual-e5-small>.
 - fastembed tokenizer loading (0.9.0, `fastembed/common/preprocessor_utils.py`, `load_tokenizer`): <https://github.com/qdrant/fastembed>.
 - Hugging Face `tokenizers` (`no_truncation`, `no_padding`, post-processor): <https://huggingface.co/docs/tokenizers/api/tokenizer>.
 - BGE small model card (512-token window): <https://huggingface.co/BAAI/bge-small-en-v1.5>.

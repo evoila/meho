@@ -1,0 +1,373 @@
+# MEHO retrieval eval — synthetic KB passage benchmark fixtures (#3765).
+#
+# Every product, command, error code and number below is made up.
+# Nothing here comes from a real knowledge base, ticket, or prompt.
+#
+# Schema: meho_backplane.retrieval.eval.corpus.KbPassageFixtures.
+#
+# Editing rules:
+# * Bump `version` when you change an entry body, a query, or an
+#   expected reference. Reports carry the version, so two reports are
+#   only comparable when the version matches.
+# * Each query has one `scenario` and one `language`. Reports group by
+#   both, so add queries in pairs (one `en`, one `de`) per scenario.
+# * `expected_slugs` lists the entries that hold the answer. The first
+#   is preferred; any listed entry is a correct source.
+# * `expected_heading` is the last heading above the answer. The
+#   passage an agent would cite must sit under this heading.
+# * `answer_terms` must appear in the answer passage. They stand in for
+#   "the agent could answer the task from this passage".
+# * `harmful_slugs` are stale or conflicting entries. Ranking one above
+#   the first correct passage counts as harm.
+# * `no_match` queries have no answer in the corpus.
+
+version: 1
+
+entries:
+  - slug: nimbus-gateway-runbook
+    language: en
+    status: current
+    body: |
+      # Nimbus gateway runbook
+
+      This runbook covers day-to-day work on the Nimbus storage gateway.
+      It is written for operators who already know the basic setup.
+
+      ## Overview
+
+      The Nimbus gateway caches object storage for local clients. It runs
+      as one service per host. Each gateway keeps a local cache disk and a
+      small metadata database. The gateway forwards writes to the object
+      store in the background.
+
+      ## Install
+
+      Install the package from the internal mirror. Start the service with
+      the default profile first. Check that the service answers on the
+      health endpoint before you add clients. Keep the default cache size
+      until you have measured real traffic.
+
+      ## Network ports
+
+      Clients talk to the gateway on port 7443. The admin interface listens
+      on port 7444 and must stay on the management network. The gateway
+      opens outbound connections to the object store only.
+
+      ## Certificate rotation
+
+      The gateway certificate is valid for one year. Renew it with the
+      command nimbus-ctl cert renew --days 90 and then reload the service
+      with nimbus-ctl reload. Clients keep their sessions during a reload.
+      Check the new expiry date with nimbus-ctl cert show.
+
+      ## Monitoring
+
+      The gateway exposes metrics on port 9310 under the path /metrics. The
+      most useful values are cache hit ratio, upload queue length and disk
+      free space. Alert when the upload queue grows for more than one hour.
+
+      ## Upgrade
+
+      Upgrade one gateway at a time. Drain clients first, then install the
+      new package, then start the service. Read the release notes for
+      changes to the cache format before you upgrade.
+
+      ## Troubleshooting
+
+      Most problems show up as slow uploads or rejected writes. Look at the
+      service log first. Error E-417 means the cache disk is full. Free
+      space under /var/nimbus/cache and the gateway resumes uploads on its
+      own. Error E-503 means the object store is not reachable.
+
+  - slug: nimbus-gateway-monitoring-notes
+    language: en
+    status: current
+    body: |
+      # Nimbus gateway monitoring notes
+
+      Short notes collected while setting up dashboards.
+
+      ## Dashboards
+
+      Build one dashboard per site. Put cache hit ratio at the top, then
+      upload queue length, then disk free space.
+
+      ## Monitoring
+
+      The gateway exposes metrics on port 9310 under the path /metrics. The
+      most useful values are cache hit ratio, upload queue length and disk
+      free space. Alert when the upload queue grows for more than one hour.
+
+  - slug: orbit-backup-retention
+    language: en
+    status: current
+    body: |
+      # Orbit backup agent retention
+
+      This page explains how long the Orbit backup agent keeps restore
+      points and how to change it.
+
+      ## Scope
+
+      The rules apply to every Orbit agent from release 4 onward. Older
+      agents are no longer supported.
+
+      ## Schedules
+
+      The agent takes one full backup per week and one incremental backup
+      per day. Schedules are set per backup job in the job file.
+
+      ## Retention policy
+
+      Restore points are kept for 30 days by default. Change the period
+      with the setting retention_days in the job file, then restart the
+      agent. The agent deletes expired restore points during the nightly
+      cleanup run.
+
+      ## Storage use
+
+      Expect the backup store to hold about five full backups per job at
+      the default retention. Watch free space on the backup store weekly.
+
+  - slug: orbit-backup-retention-2024
+    language: en
+    status: stale
+    body: |
+      # Orbit backup agent retention (old release)
+
+      Notes for release 3 of the Orbit backup agent.
+
+      ## Retention policy
+
+      Restore points are kept for 7 days by default. Change the period with
+      the command line flag --keep-days and restart the agent. The agent
+      deletes expired restore points at once.
+
+  - slug: orbit-backup-team-tips
+    language: en
+    status: conflicting
+    body: |
+      # Orbit backup team tips
+
+      Tips shared in a team channel. Not reviewed.
+
+      ## Retention policy
+
+      Restore points are kept for 30 days by default. To change it, edit the
+      setting keep_points in the agent config and run orbit-agent sync.
+      There is no need to restart the agent.
+
+  - slug: nimbus-gateway-betrieb
+    language: de
+    status: current
+    body: |
+      # Nimbus Gateway Betriebshandbuch
+
+      Dieses Handbuch beschreibt den täglichen Betrieb des Nimbus Speicher
+      Gateways. Es richtet sich an Betreiber, die die Grundeinrichtung
+      bereits kennen.
+
+      ## Überblick
+
+      Das Nimbus Gateway hält Objektspeicher für lokale Clients im Cache.
+      Pro Host läuft ein Dienst. Jedes Gateway hat eine lokale Cache Platte
+      und eine kleine Metadaten Datenbank.
+
+      ## Installation
+
+      Installieren Sie das Paket aus dem internen Spiegel. Starten Sie den
+      Dienst zuerst mit dem Standardprofil. Prüfen Sie den Health Endpunkt,
+      bevor Sie Clients anbinden.
+
+      ## Zertifikat erneuern
+
+      Das Zertifikat des Gateways ist ein Jahr gültig. Erneuern Sie es mit
+      dem Befehl nimbus-ctl cert renew --days 90 und laden Sie den Dienst
+      danach mit nimbus-ctl reload neu. Clients behalten ihre Sitzungen.
+
+      ## Überwachung
+
+      Das Gateway liefert Metriken auf Port 9310 unter dem Pfad /metrics.
+      Wichtig sind die Trefferquote des Caches, die Länge der Upload
+      Warteschlange und der freie Plattenplatz.
+
+      ## Aktualisierung
+
+      Aktualisieren Sie immer nur ein Gateway gleichzeitig. Leiten Sie die
+      Clients vorher um und lesen Sie die Versionshinweise.
+
+      ## Fehlerbehebung
+
+      Die meisten Probleme zeigen sich als langsame Uploads. Prüfen Sie
+      zuerst das Dienstprotokoll. Der Fehler E-417 bedeutet, dass die Cache
+      Platte voll ist. Geben Sie Platz unter /var/nimbus/cache frei, dann
+      setzt das Gateway die Uploads selbst fort.
+
+  - slug: nimbus-gateway-ueberwachung-notizen
+    language: de
+    status: current
+    body: |
+      # Nimbus Gateway Notizen zur Überwachung
+
+      Kurze Notizen aus dem Aufbau der Dashboards.
+
+      ## Dashboards
+
+      Bauen Sie ein Dashboard pro Standort. Oben steht die Trefferquote des
+      Caches, darunter die Upload Warteschlange.
+
+      ## Überwachung
+
+      Das Gateway liefert Metriken auf Port 9310 unter dem Pfad /metrics.
+      Wichtig sind die Trefferquote des Caches, die Länge der Upload
+      Warteschlange und der freie Plattenplatz.
+
+  - slug: orbit-sicherung-aufbewahrung
+    language: de
+    status: current
+    body: |
+      # Orbit Sicherungsagent Aufbewahrung
+
+      Diese Seite erklärt, wie lange der Orbit Sicherungsagent
+      Wiederherstellungspunkte aufbewahrt und wie man das ändert.
+
+      ## Geltungsbereich
+
+      Die Regeln gelten für alle Orbit Agenten ab Version 4.
+
+      ## Zeitpläne
+
+      Der Agent erstellt pro Woche eine Vollsicherung und pro Tag eine
+      inkrementelle Sicherung.
+
+      ## Aufbewahrungsrichtlinie
+
+      Wiederherstellungspunkte werden standardmäßig 30 Tage aufbewahrt.
+      Ändern Sie die Dauer mit der Einstellung retention_days in der
+      Auftragsdatei und starten Sie den Agenten neu.
+
+      ## Speicherbedarf
+
+      Rechnen Sie mit etwa fünf Vollsicherungen pro Auftrag.
+
+  - slug: orbit-sicherung-aufbewahrung-alt
+    language: de
+    status: stale
+    body: |
+      # Orbit Sicherungsagent Aufbewahrung (alte Version)
+
+      Notizen zu Version 3 des Orbit Sicherungsagenten.
+
+      ## Aufbewahrungsrichtlinie
+
+      Wiederherstellungspunkte werden standardmäßig 7 Tage aufbewahrt.
+      Ändern Sie die Dauer mit dem Schalter --keep-days.
+
+  - slug: orbit-sicherung-team-tipps
+    language: de
+    status: conflicting
+    body: |
+      # Orbit Sicherung Tipps aus dem Team
+
+      Tipps aus einem Team Kanal. Nicht geprüft.
+
+      ## Aufbewahrungsrichtlinie
+
+      Wiederherstellungspunkte werden standardmäßig 30 Tage aufbewahrt.
+      Zum Ändern bearbeiten Sie die Einstellung keep_points und führen
+      orbit-agent sync aus. Ein Neustart ist nicht nötig.
+
+queries:
+  - id: en-middle-cert-renew
+    scenario: middle_passage
+    language: en
+    query: how do I renew the Nimbus gateway certificate
+    expected_slugs: [nimbus-gateway-runbook]
+    expected_heading: Certificate rotation
+    answer_terms: ["nimbus-ctl cert renew", "nimbus-ctl reload"]
+
+  - id: de-middle-cert-renew
+    scenario: middle_passage
+    language: de
+    query: wie erneuere ich das Zertifikat des Nimbus Gateways
+    expected_slugs: [nimbus-gateway-betrieb]
+    expected_heading: Zertifikat erneuern
+    answer_terms: ["nimbus-ctl cert renew", "nimbus-ctl reload"]
+
+  - id: en-end-error-e417
+    scenario: end_passage
+    language: en
+    query: what does Nimbus error E-417 mean and how do I fix it
+    expected_slugs: [nimbus-gateway-runbook]
+    expected_heading: Troubleshooting
+    answer_terms: ["cache disk is full", "/var/nimbus/cache"]
+
+  - id: de-end-error-e417
+    scenario: end_passage
+    language: de
+    query: was bedeutet der Nimbus Fehler E-417
+    expected_slugs: [nimbus-gateway-betrieb]
+    expected_heading: Fehlerbehebung
+    answer_terms: ["Platte voll ist", "/var/nimbus/cache"]
+
+  - id: en-duplicate-metrics-port
+    scenario: duplicate
+    language: en
+    query: which port does the Nimbus gateway expose metrics on
+    expected_slugs: [nimbus-gateway-runbook, nimbus-gateway-monitoring-notes]
+    expected_heading: Monitoring
+    answer_terms: ["9310", "/metrics"]
+
+  - id: de-duplicate-metrics-port
+    scenario: duplicate
+    language: de
+    query: auf welchem Port liefert das Nimbus Gateway Metriken
+    expected_slugs: [nimbus-gateway-betrieb, nimbus-gateway-ueberwachung-notizen]
+    expected_heading: Überwachung
+    answer_terms: ["9310", "/metrics"]
+
+  - id: en-conflict-retention-setting
+    scenario: conflict
+    language: en
+    query: which setting changes the Orbit backup retention period
+    expected_slugs: [orbit-backup-retention]
+    expected_heading: Retention policy
+    answer_terms: ["retention_days"]
+    harmful_slugs: [orbit-backup-team-tips]
+
+  - id: de-conflict-retention-setting
+    scenario: conflict
+    language: de
+    query: mit welcher Einstellung ändere ich die Aufbewahrung der Orbit Sicherung
+    expected_slugs: [orbit-sicherung-aufbewahrung]
+    expected_heading: Aufbewahrungsrichtlinie
+    answer_terms: ["retention_days"]
+    harmful_slugs: [orbit-sicherung-team-tipps]
+
+  - id: en-stale-retention-days
+    scenario: stale
+    language: en
+    query: how many days does Orbit keep restore points by default
+    expected_slugs: [orbit-backup-retention]
+    expected_heading: Retention policy
+    answer_terms: ["30 days"]
+    harmful_slugs: [orbit-backup-retention-2024]
+
+  - id: de-stale-retention-days
+    scenario: stale
+    language: de
+    query: wie viele Tage bewahrt Orbit Wiederherstellungspunkte standardmäßig auf
+    expected_slugs: [orbit-sicherung-aufbewahrung]
+    expected_heading: Aufbewahrungsrichtlinie
+    answer_terms: ["30 Tage"]
+    harmful_slugs: [orbit-sicherung-aufbewahrung-alt]
+
+  - id: en-no-match-printer
+    scenario: no_match
+    language: en
+    query: how do I install the Quasar label printer driver
+
+  - id: de-no-match-printer
+    scenario: no_match
+    language: de
+    query: wie installiere ich den Treiber für den Quasar Etikettendrucker

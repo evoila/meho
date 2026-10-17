@@ -18,11 +18,17 @@ filters on tenant, entry and revision together, so a foreign, deleted
 or mismatched id finds nothing. :func:`delete_entry_rows` removes the
 revisions and the head in one transaction.
 
-Two writes to the same entry at the same moment can both try to add
-the next revision number. The unique index on
-``(entry_id, revision_number)`` makes the second one fail with an
-``IntegrityError``; its transaction rolls back (head included) and the
-caller can retry. No revision is lost or silently replaced.
+Two writes to the same entry at the same moment must not mix. On
+PostgreSQL :func:`write_entry` locks the head row first (``SELECT ...
+FOR UPDATE``), so the second writer waits for the first to commit and
+then reads the committed head. SQLite (dev and test) has no row lock,
+so before a revision is added the head's stored ``body_hash`` is read
+again. When another write changed the body in between, the write
+raises and runs again from the start against the current head. The
+unique index on ``(entry_id, revision_number)`` is the last guard; a
+clash there also triggers a rerun. A revision is only ever stored for
+the body the head really holds, and the id that is returned always
+names the body that was written.
 """
 
 from __future__ import annotations
@@ -31,7 +37,9 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any, Final
 
+import structlog
 from sqlalchemy import ScalarSelect, delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.engine import get_sessionmaker
@@ -58,6 +66,15 @@ __all__ = [
 #: unit; a passage chunker would get a new value here.
 CHUNKER_VERSION: Final[str] = "whole-body-v1"
 
+#: How often one write runs again after another write to the same
+#: entry got in between. Each rerun reads the current head, so two
+#: tries cover one overlap; the third is slack.
+_WRITE_ATTEMPTS: Final[int] = 3
+
+
+class _StaleHeadError(RuntimeError):
+    """The head's stored body changed after this write read it."""
+
 
 async def write_entry(
     *,
@@ -69,9 +86,39 @@ async def write_entry(
     """Upsert the head row and its current revision in one transaction.
 
     Returns the head row and the id of the revision that holds its body.
+    When another write to the same entry gets in between, this write is
+    rolled back and run again against the current head (see the module
+    docstring). After :data:`_WRITE_ATTEMPTS` failed tries the last
+    error propagates.
     """
+    log = structlog.get_logger()
+    for attempt in range(1, _WRITE_ATTEMPTS + 1):
+        try:
+            return await _write_once(tenant_id=tenant_id, slug=slug, body=body, metadata=metadata)
+        except (IntegrityError, _StaleHeadError) as exc:
+            if attempt == _WRITE_ATTEMPTS:
+                raise
+            log.info(
+                "kb_write_rerun",
+                tenant_id=str(tenant_id),
+                slug=slug,
+                attempt=attempt,
+                reason=type(exc).__name__,
+            )
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+async def _write_once(
+    *,
+    tenant_id: uuid.UUID,
+    slug: str,
+    body: str,
+    metadata: dict[str, Any],
+) -> tuple[Document, uuid.UUID]:
+    """One try of :func:`write_entry`: lock, upsert, record, commit."""
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
+        await _lock_head(session, tenant_id, slug)
         doc = await index_document(
             tenant_id=tenant_id,
             source=KB_SOURCE,
@@ -86,11 +133,36 @@ async def write_entry(
     return doc, revision_id
 
 
+async def _lock_head(session: AsyncSession, tenant_id: uuid.UUID, slug: str) -> None:
+    """Lock the entry's head row for this transaction on PostgreSQL.
+
+    A second writer to the same entry waits here until the first one
+    commits, then reads the committed head. SQLite has no row lock;
+    there :func:`_record_revision` catches an overlap instead. A first
+    write has no row to lock; the unique natural key on ``documents``
+    makes a second first-write fail, and :func:`write_entry` reruns it.
+    """
+    conn = await session.connection()
+    if conn.dialect.name != "postgresql":
+        return
+    await session.execute(
+        select(Document.id)
+        .where(
+            Document.tenant_id == tenant_id,
+            Document.source == KB_SOURCE,
+            Document.source_id == slug,
+        )
+        .with_for_update()
+    )
+
+
 async def _record_revision(session: AsyncSession, doc: Document) -> uuid.UUID:
     """Add a revision when *doc*'s body differs from its latest revision.
 
     Returns the latest revision id when the body is unchanged, otherwise
-    the id of the new revision.
+    the id of the new revision. Raises :class:`_StaleHeadError` when the
+    head row no longer holds *doc*'s body, which happens when an
+    unchanged-body write read the head before another write changed it.
     """
     latest = (
         await session.execute(
@@ -103,6 +175,12 @@ async def _record_revision(session: AsyncSession, doc: Document) -> uuid.UUID:
     if latest is not None and latest.body_hash == doc.body_hash:
         latest_id: uuid.UUID = latest.id
         return latest_id
+
+    # A column select bypasses the identity map, so this is the hash the
+    # database holds now, not the one the ORM row was loaded with.
+    stored_hash = await session.scalar(select(Document.body_hash).where(Document.id == doc.id))
+    if stored_hash != doc.body_hash:
+        raise _StaleHeadError(f"kb entry {doc.id} changed during write")
 
     provenance = doc.doc_metadata.get(META_PROVENANCE)
     revision = KbRevision(

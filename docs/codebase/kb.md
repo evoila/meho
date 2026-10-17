@@ -174,6 +174,15 @@ to the caller's `errors` list rather than raising.
    version. Then it commits head and revision together. An unchanged
    body reuses the latest revision. Changing a body back to an older
    text adds a new revision; it does not reuse the old one.
+   Two writes to the same entry at the same time do not mix. On
+   PostgreSQL the session locks the head row first (`SELECT ... FOR
+   UPDATE`), so the second writer waits and then reads the committed
+   head. Before a revision is added, the head's stored `body_hash` is
+   read again; if another write changed the body in between (possible
+   on SQLite, which has no row lock), or the next `revision_number` is
+   already taken, the write rolls back and runs again from the start,
+   up to three times. The returned `revision_id` always names the body
+   that was written.
 6. Return `(_doc_to_entry(doc, revision_id), created)`. The REST route maps
    `created` to **HTTP 201** (fresh slug) vs **200** (in-place
    overwrite) and records `audit_created`; the MCP / UI callers
@@ -345,10 +354,10 @@ Transports that call into this service:
 - The console detail page reads `metadata["path"]` for its "source
   path" field, a key no writer sets. It shows nothing for every row.
 - Legacy rows keep their absolute `source_path` until re-ingested.
-- Two writes to the same entry at the same moment can both pick the
-  same next `revision_number`. The unique index makes the second fail
-  with an `IntegrityError` and roll back (head included); the caller
-  retries. Nothing is lost or silently replaced.
+- A write that overlaps other writes to the same entry three times in
+  a row gives up and raises the last error (`IntegrityError` or the
+  stale-head error). Nothing is stored for the failed write; the caller
+  can retry.
 - Search hits do not carry `revision_id` yet; passage search with
   stable citations is a separate task (#3761).
 

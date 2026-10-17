@@ -7,6 +7,8 @@ Checks that:
 
 * an overwrite keeps the earlier body readable and byte-identical;
 * an unchanged body does not add a revision;
+* a write that overlaps another write to the same entry never pairs
+  the head with a revision of a different body;
 * the latest read (``get_entry`` / ``list_entries``) stays the head and
   names its current revision;
 * the exact read hides foreign, mismatched and unknown ids;
@@ -16,10 +18,12 @@ Checks that:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -117,6 +121,61 @@ async def test_unchanged_body_reuses_the_current_revision() -> None:
     again, _ = await service.create_entry(tenant, "same-body", "body", {"tag": "x"})
     assert again.revision_id == first.revision_id
     assert await _revision_count(first.id) == 1
+
+
+@pytest.mark.asyncio
+async def test_overlapping_writes_keep_head_and_returned_revision_in_step() -> None:
+    """An unchanged-body write that read the head before another write changed it.
+
+    The first write is paused after it read body ``A`` and before it
+    writes anything. A second write then stores body ``B`` and commits.
+    When the first write resumes, it must not store its stale ``A`` as
+    a revision of a head that holds ``B``. It runs again against the
+    current head, so head and returned revision both say ``A``.
+    """
+    service = KbService()
+    tenant = uuid.uuid4()
+    first, _ = await service.create_entry(tenant, "overlap", "A")
+
+    first_flush_reached = asyncio.Event()
+    release_first_flush = asyncio.Event()
+    real_flush = AsyncSession.flush
+    flushes = 0
+
+    async def gated_flush(self: AsyncSession, *args: Any, **kwargs: Any) -> None:
+        nonlocal flushes
+        flushes += 1
+        if flushes == 1:
+            first_flush_reached.set()
+            await asyncio.wait_for(release_first_flush.wait(), timeout=10)
+        await real_flush(self, *args, **kwargs)
+
+    with patch.object(AsyncSession, "flush", gated_flush):
+        stale = asyncio.create_task(service.create_entry(tenant, "overlap", "A", {"tag": "late"}))
+        await asyncio.wait_for(first_flush_reached.wait(), timeout=10)
+        other, _ = await service.create_entry(tenant, "overlap", "B")
+        release_first_flush.set()
+        resumed, _ = await asyncio.wait_for(stale, timeout=10)
+
+    head = await service.get_entry(tenant, "overlap")
+    assert head is not None
+    assert head.body == "A"
+    assert head.metadata["tag"] == "late"
+    assert resumed.body == "A"
+    assert resumed.revision_id is not None
+    assert head.revision_id == resumed.revision_id
+
+    current = await service.get_revision(tenant, head.id, resumed.revision_id)
+    assert current is not None
+    assert current.body == head.body
+    assert current.revision_number == 3
+
+    assert other.revision_id is not None
+    kept = await service.get_revision(tenant, first.id, other.revision_id)
+    assert kept is not None
+    assert kept.body == "B"
+    assert kept.revision_number == 2
+    assert await _revision_count(first.id) == 3
 
 
 @pytest.mark.asyncio

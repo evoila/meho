@@ -4096,7 +4096,7 @@
           "operations"
         ],
         "summary": "Post Result Query",
-        "description": "Read a ``[offset : offset+limit]`` window of a JSONFlux result handle.\n\nDelegates to :func:`read_result_window` \u2014 the same transport-neutral\ncore the MCP ``result_query`` tool wraps \u2014 so REST and MCP share the\ntenant/principal scoping and not-found semantics exactly. The tenant +\nprincipal come from the JWT-validated :class:`Operator`; the body carries\nno tenant, by design.\n\nCloses the REST dead-end #3179 named: ``POST /api/v1/operations/call``\ncan *mint* a reduced ``handle`` for any set-shaped result over the\n50-row / 4 KB thresholds, but before this route a REST consumer had no\nway to read it back and had to fail closed or hand the drill-in to a\nhuman over MCP.\n\nA handle that is unknown, expired (TTL elapsed), or belongs to a\ndifferent operator is a ``404`` with a structured ``detail`` carrying\n``reason=\"handle_not_found\"`` \u2014 the recoverable-miss twin of the MCP\ntool's ``-32602`` / ``data.reason=handle_not_found`` (the caller re-runs\nthe operation for a fresh handle). Cross-operator access is deliberately\nindistinguishable from \"not found\" so the store leaks no existence\nsignal across the operator boundary. A malformed ``handle_id`` (not a\nUUID) or an out-of-range ``offset`` / ``limit`` is a ``422`` at the\nPydantic layer before the handler runs.",
+        "description": "Read a ``[offset : offset+limit]`` window of a JSONFlux result handle.\n\nDelegates to :func:`read_result_window` \u2014 the same transport-neutral\ncore the MCP ``result_query`` tool wraps \u2014 so REST and MCP share the\ntenant/principal scoping and not-found semantics exactly. The tenant +\nprincipal come from the JWT-validated :class:`Operator`; the body carries\nno tenant, by design.\n\nCloses the REST dead-end #3179 named: ``POST /api/v1/operations/call``\ncan *mint* a reduced ``handle`` for any set-shaped result over the\n50-row / 4 KB thresholds, but before this route a REST consumer had no\nway to read it back and had to fail closed or hand the drill-in to a\nhuman over MCP.\n\nA handle that is unknown, expired (TTL elapsed), or belongs to a\ndifferent operator is a ``404`` with a structured ``detail`` carrying\n``reason=\"handle_not_found\"`` \u2014 the recoverable-miss twin of the MCP\ntool's ``-32602`` / ``data.reason=handle_not_found`` (the caller re-runs\nthe operation for a fresh handle). Cross-operator access is deliberately\nindistinguishable from \"not found\" so the store leaks no existence\nsignal across the operator boundary. A malformed ``handle_id`` (not a\nUUID) or an out-of-range ``offset`` / ``limit`` is a ``422`` at the\nPydantic layer before the handler runs. A read refused by the result-read\nrate or capacity check (#3640) is a ``429`` with ``Retry-After``; a page\nthat runs past the time budget is a ``422`` with\n``reason=\"query_timeout\"``, the same as a query.",
         "operationId": "post_result_query_api_v1_operations_result_query_post",
         "parameters": [
           {
@@ -22806,6 +22806,11 @@
             "type": "string",
             "title": "Params Hash"
           },
+          "preview_hash": {
+            "type": "string",
+            "nullable": true,
+            "title": "Preview Hash"
+          },
           "proposed_effect": {
             "additionalProperties": true,
             "type": "object",
@@ -22813,6 +22818,10 @@
           },
           "status": {
             "$ref": "#/components/schemas/ApprovalRequestStatus"
+          },
+          "result_state": {
+            "$ref": "#/components/schemas/ApprovalResultState",
+            "nullable": true
           },
           "reviewed_by": {
             "type": "string",
@@ -22873,6 +22882,17 @@
         ],
         "title": "ApprovalRequestView",
         "description": "Read-only view of an :class:`~meho_backplane.db.models.ApprovalRequest`."
+      },
+      "ApprovalResultState": {
+        "type": "string",
+        "enum": [
+          "not_started",
+          "started",
+          "executed",
+          "failed"
+        ],
+        "title": "ApprovalResultState",
+        "description": "Whether an approved request has run yet (#3486).\n\nRead off the row, never stored. ``status`` keeps its closed four-state\ncontract; this field adds the run phase next to it, so a client that\nlists or shows requests can tell \"approved, not run yet\" from\n\"approved and run\" without polling the owner-only ``/result`` read.\n\n* :attr:`NOT_STARTED` -- approved, and no resumer has claimed the run\n  yet (``resumed_at IS NULL``).\n* :attr:`STARTED` -- a resumer claimed the run (``resumed_at`` is set),\n  but no result is stored. Either the op is still running, or the run\n  ended without a stored result: the result write is best-effort, and a\n  re-dispatch that raised instead of returning an envelope stores\n  nothing. Both resume paths (operator surfaces and the in-process\n  agent waiter) store the envelope they get back.\n* :attr:`EXECUTED` -- the stored result has ``status == \"ok\"``.\n* :attr:`FAILED` -- a result is stored and its ``status`` is not ``ok``."
       },
       "ApprovalResultView": {
         "properties": {
@@ -23297,7 +23317,7 @@
           "legacy_request"
         ],
         "title": "AuditEventClass",
-        "description": "What kind of accountable event one ``audit_log`` row records (#3733).\n\nThe set is closed. The database CHECK ``ck_audit_log_event_class``\nrejects any other value, so a new class needs a code change and a\nmigration together.\n\n* :attr:`OPERATION_EXECUTION` -- an action ran: a dispatched operation\n  (success or failure), or a MEHO-internal action such as a topology\n  edit, a retention sweep or a reaper.\n* :attr:`POLICY_DECISION` -- a gate decided about a call before it ran:\n  a policy deny, a rate-limit refusal, or a park for approval.\n* :attr:`APPROVAL_DECISION` -- a person (or a standing grant) approved,\n  rejected, or let an approval request expire.\n* :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a\n  refresh-token replay or a broken satellite effect chain.\n* :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every\n  row written before migration ``0105`` reads as this class; it is never\n  guessed from ``method`` / ``path``. The REST and MCP request wrapper\n  rows also keep this class until they are retired."
+        "description": "What kind of accountable event one ``audit_log`` row records (#3733).\n\nThe set is closed. The database CHECK ``ck_audit_log_event_class``\nrejects any other value, so a new class needs a code change and a\nmigration together.\n\n* :attr:`OPERATION_EXECUTION` -- an action ran: a dispatched operation\n  (success or failure), or a MEHO-internal action such as a topology\n  edit, a retention sweep or a reaper.\n* :attr:`POLICY_DECISION` -- a gate decided about a call before it ran:\n  a policy deny, a rate-limit refusal, or a park for approval.\n* :attr:`APPROVAL_DECISION` -- a person (or a standing grant) approved,\n  rejected, or let an approval request expire.\n* :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a\n  refresh-token replay or a broken satellite effect chain.\n* :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every\n  row written before migration ``0106`` reads as this class; it is never\n  guessed from ``method`` / ``path``. The REST and MCP request wrapper\n  rows also keep this class until they are retired."
       },
       "AuditQueryRequest": {
         "properties": {
@@ -25904,6 +25924,14 @@
             "nullable": true,
             "title": "Preview Hash",
             "description": "Preview-result-hash binding for the destructive tier (#3197). The hash a prior preview_operation of the identical (connector_id, op_id, target, params) returned. REQUIRED for a safety_level='destructive' op \u2014 the dispatcher refuses to park the approval fail-closed unless it matches the server-recomputed preview hash. Ignored for every non-destructive op. None default keeps a bare call_operation byte-identical to pre-#3197."
+          },
+          "idempotency_key": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Idempotency Key",
+            "description": "Optional retry key for a call that waits for approval (#3486). If you send the same key again with the identical call, MEHO returns the approval request it already made (same approval_request_id, extras.approval_request_reused=true) instead of a second one. The key belongs to you: another principal's key never matches. It is free again once that request is rejected or expires. The same key with a different call is refused with idempotency_key_conflict. Ignored when the call does not wait for approval."
           },
           "async": {
             "type": "boolean",

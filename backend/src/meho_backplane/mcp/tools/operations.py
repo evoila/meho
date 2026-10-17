@@ -529,6 +529,20 @@ register_mcp_tool(
                         "Ignored for every non-destructive op."
                     ),
                 },
+                "idempotency_key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "description": (
+                        "Optional retry key for a call that waits for approval. "
+                        "Send the same key with the identical call again (for "
+                        "example after a restart) and you get the same "
+                        "`approval_request_id` back "
+                        "(`extras.approval_request_reused: true`) instead of a "
+                        "second approval request. The same key with a different "
+                        "call is refused with `idempotency_key_conflict`."
+                    ),
+                },
             },
             "required": ["connector_id", "op_id"],
             "additionalProperties": False,

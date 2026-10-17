@@ -51,7 +51,7 @@ Filter coverage
   per #1177, not ``ILIKE``); the column is also surfaced on every returned
   ``AuditEntry``. NULL on rows with no bound work_ref, so a ``work_ref``
   filter excludes them.
-* ``event_class`` is a real column (#3733, migration ``0105``). The filter
+* ``event_class`` is a real column (#3733, migration ``0106``). The filter
   narrows to ``audit_log.event_class = :event_class`` -- exact match on the
   closed vocabulary. With no filter every class is returned, so old callers
   see the same rows. Rows written before the column existed carry

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for Alembic migration ``0105_add_audit_log_event_class`` (#3733).
+"""Tests for Alembic migration ``0106_add_audit_log_event_class`` (#3733).
 
 The migration adds ``audit_log.event_class``: NOT NULL, server default
 ``legacy_request``, and a CHECK that allows only the five known classes.
@@ -33,8 +33,8 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0105"
-_DOWN_REVISION = "0104"
+_REVISION = "0106"
+_DOWN_REVISION = "0105"
 
 
 @pytest.fixture
@@ -43,7 +43,7 @@ def alembic_cfg(
     tmp_path: Path,
 ) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0105.db"
+    db_path = tmp_path / "migration_0106.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
@@ -63,7 +63,7 @@ def alembic_cfg(
 
 
 def _insert_old_row(sync_url: str, *, method: str, path: str) -> str:
-    """Insert one audit row with the pre-0105 columns only; return its id."""
+    """Insert one audit row with the pre-0106 columns only; return its id."""
     row_id = uuid.uuid4().hex
     eng = sa_create_engine(sync_url)
     try:
@@ -106,7 +106,7 @@ def _audit_log_columns(sync_url: str) -> dict[str, dict[str, object]]:
 def test_old_rows_read_as_legacy_request_without_guessing(
     alembic_cfg: tuple[Config, str],
 ) -> None:
-    """Rows written before 0105 all read ``legacy_request`` after it."""
+    """Rows written before 0106 all read ``legacy_request`` after it."""
     cfg, sync_url = alembic_cfg
     command.upgrade(cfg, _DOWN_REVISION)
     # One row looks like a dispatch, one like an approval, one like HTTP. The
@@ -147,7 +147,7 @@ def test_database_rejects_an_unknown_class(alembic_cfg: tuple[Config, str]) -> N
 
 
 def test_downgrade_drops_the_column_and_round_trips(alembic_cfg: tuple[Config, str]) -> None:
-    """``downgrade 0104`` drops ``event_class``; ``upgrade 0105`` restores it."""
+    """``downgrade 0105`` drops ``event_class``; ``upgrade 0106`` restores it."""
     cfg, sync_url = alembic_cfg
     command.upgrade(cfg, _REVISION)
     row_id = _insert_old_row(sync_url, method="GET", path="/api/v1/targets")

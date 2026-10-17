@@ -431,7 +431,7 @@ class AuditEventClass(StrEnum):
     * :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a
       refresh-token replay or a broken satellite effect chain.
     * :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every
-      row written before migration ``0105`` reads as this class; it is never
+      row written before migration ``0106`` reads as this class; it is never
       guessed from ``method`` / ``path``. The REST and MCP request wrapper
       rows also keep this class until they are retired.
     """
@@ -443,7 +443,7 @@ class AuditEventClass(StrEnum):
     LEGACY_REQUEST = "legacy_request"
 
 
-#: Closed tuple mirrored in migration ``0105``'s CHECK constraint.
+#: Closed tuple mirrored in migration ``0106``'s CHECK constraint.
 AUDIT_EVENT_CLASSES: tuple[str, ...] = tuple(c.value for c in AuditEventClass)
 
 
@@ -637,7 +637,7 @@ class AuditLog(Base):
     # What kind of accountable event this row records (#3733). Closed
     # vocabulary :class:`AuditEventClass`, DB-enforced by the CHECK below.
     # NOT NULL. The server default ``legacy_request`` is what every row
-    # written before migration ``0105`` reads as, and what a row from an
+    # written before migration ``0106`` reads as, and what a row from an
     # older MEHO version writes during a rolling upgrade. There is no
     # Python-side default on purpose: every writer in this codebase passes
     # the class it knows, and the writer-inventory test fails on any
@@ -6286,6 +6286,13 @@ class ApprovalRequest(Base):
         nullable=True,
         default=None,
     )
+    # Client-chosen retry key (#3486). Sent as ``idempotency_key`` on
+    # ``call_operation``. While this row is ``pending`` or ``approved``, the
+    # same principal sending the same key gets this row back instead of a
+    # new one. The partial unique index below enforces it, so two racing
+    # requests cannot both insert. NULL when no key was sent and on pre-0105
+    # rows. Added by migration ``0105``.
+    idempotency_key: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     # Parent composite to re-enter on resume when this row parks a composite
     # sub-op (#3351). ``{"op_id": ..., "params": ...}`` captured at park time;
     # NULL for direct-op parks (generic re-dispatch of ``op_id``) and pre-0099
@@ -6317,6 +6324,22 @@ class ApprovalRequest(Base):
             "approval_request_work_ref_idx",
             "work_ref",
             postgresql_using="btree",
+        ),
+        # Matches migration 0105 (#3486): at most one live (pending or
+        # approved) row per (tenant, principal, idempotency_key).
+        Index(
+            "approval_request_idempotency_key_idx",
+            "tenant_id",
+            "principal_sub",
+            "idempotency_key",
+            unique=True,
+            postgresql_using="btree",
+            postgresql_where=sa.text(
+                "idempotency_key IS NOT NULL AND status IN ('pending', 'approved')"
+            ),
+            sqlite_where=sa.text(
+                "idempotency_key IS NOT NULL AND status IN ('pending', 'approved')"
+            ),
         ),
         sa.CheckConstraint(
             _ck_in("status", _APPROVAL_REQUEST_STATUSES),

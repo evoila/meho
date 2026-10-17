@@ -22,6 +22,13 @@ criteria map onto the tests here as:
   connector returns a structured, agent-reasonable error (ModelRetry), not a
   crash.
 
+The #3737 tests (governed discovery and result-handle tools) cover: the
+pinned configured surface for ``{}`` and the legacy ``None`` two-tool
+fallback; missing versus disabled outcomes; the role floor at resolution and
+again at call time; the MCP input schema enforced before the handler; the
+registered MCP handler reused with the run's operator; a JSONFlux handle
+returned unchanged; and the connector allow-list on ``preview_operation``.
+
 The wrapped handlers are stubbed so these tests stay offline (no DB, no
 network): the adapter's contract is *which* tools register and *how* they
 thread the operator, not what the handlers do once called.
@@ -34,15 +41,22 @@ from uuid import UUID
 
 import pytest
 from pydantic_ai import ModelRetry, RunContext
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 import meho_backplane.agent.toolset as toolset_mod
+import meho_backplane.agent.toolset_discovery as toolset_discovery
+from meho_backplane.agent import AgentDefinition, PydanticAgentRun
 from meho_backplane.agent.toolset import (
     META_TOOL_NAMES,
     RUNBOOK_EXECUTION_META_TOOL_NAMES,
     resolve_agent_tools,
+    resolve_agent_toolset,
     toolset_admits_runbook_execution,
 )
+from meho_backplane.agent.toolset_discovery import DISCOVERY_META_TOOL_NAMES
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.mcp.registry import ToolSurface, get_tool
 
 _TENANT_A = UUID("11111111-1111-1111-1111-111111111111")
 
@@ -357,6 +371,220 @@ def test_meta_tool_catalog_has_no_runbook_execution_tool() -> None:
 def test_no_toolset_admits_runbook_execution_today(spec: Any) -> None:
     """With an empty capability catalog every spec answers ``False``."""
     assert toolset_admits_runbook_execution(spec) is False
+
+
+# ---------------------------------------------------------------------------
+# Governed discovery and result-handle tools (#3737)
+# ---------------------------------------------------------------------------
+
+#: The configured surface for an empty spec (``{}``), in catalog order. A
+#: change here changes what every configured hosted agent can reach, so it is
+#: pinned on purpose.
+_CONFIGURED_SURFACE: list[str] = [
+    "list_operation_groups",
+    "search_operations",
+    "call_operation",
+    "meho_connector_list",
+    "list_targets",
+    "preview_operation",
+    "result_query",
+    "broadcast_announce",
+    "broadcast_recent",
+    "broadcast_watch",
+]
+
+_DISCOVERY_TOOLS: frozenset[str] = frozenset(DISCOVERY_META_TOOL_NAMES)
+
+
+def test_empty_configured_spec_resolves_pinned_surface() -> None:
+    """Regression fixture: ``{}`` resolves exactly the pinned configured surface."""
+    tools = resolve_agent_tools({}, _make_operator())
+    assert [t.name for t in tools] == _CONFIGURED_SURFACE
+
+
+def test_configured_definition_resolves_search_plus_four_governed_tools() -> None:
+    """A configured definition gets ``search_operations`` plus the four adapters."""
+    assert {
+        "meho_connector_list",
+        "list_targets",
+        "preview_operation",
+        "result_query",
+    } == _DISCOVERY_TOOLS
+    spec = {"meta_tools": ["search_operations", *DISCOVERY_META_TOOL_NAMES]}
+    tools = resolve_agent_tools(spec, _make_operator())
+    assert _tool_names(tools) == {"search_operations"} | _DISCOVERY_TOOLS
+
+
+def test_configured_surface_has_no_runbook_approval_or_admin_tools() -> None:
+    """Out of scope by design: no runbook, approval, or operator-plane tool."""
+    names = set(META_TOOL_NAMES)
+    assert not any("runbook" in name or "approval" in name for name in names)
+    for name in names:
+        entry = get_tool(name)
+        if entry is not None:
+            assert entry[0].surface is ToolSurface.WORKING, name
+
+
+async def test_legacy_none_definition_keeps_two_tool_fallback() -> None:
+    """Regression fixture: ``toolset=None`` still gets only the legacy two tools."""
+    captured: dict[str, list[str]] = {}
+
+    def inspect_surface(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        captured["tool_names"] = sorted(td.name for td in info.function_tools)
+        return ModelResponse(parts=[TextPart("inspected")])
+
+    model = FunctionModel(inspect_surface)
+    runtime = PydanticAgentRun(model_factory=lambda: model)
+    definition = AgentDefinition(name="legacy", system_prompt="legacy", request_limit=2)
+    operator = _make_operator()
+    agent = runtime._build_agent(definition, operator)
+    await agent.run("which tools?", deps=operator)
+
+    assert captured["tool_names"] == ["call_operation_tool", "list_operation_groups_tool"]
+
+
+def test_missing_and_disabled_tools_are_reported_apart() -> None:
+    """An unknown name is ``missing``; a known but unregistered tool is ``disabled``."""
+    spec = {"meta_tools": ["list_targets", "result_query", "no_such_tool"]}
+    resolution = resolve_agent_toolset(spec, _make_operator())
+
+    assert [t.name for t in resolution.tools] == ["list_targets", "result_query"]
+    assert resolution.missing == ("no_such_tool",)
+    assert resolution.disabled["meho_connector_list"] == "not_in_allow_list"
+    assert "no_such_tool" not in resolution.disabled
+
+    read_only = _make_operator(role=TenantRole.READ_ONLY, sub="op-read-only")
+    denied = resolve_agent_toolset(spec, read_only)
+    assert denied.tools == []
+    assert denied.missing == ("no_such_tool",)
+    assert denied.disabled["list_targets"] == "role_below_floor"
+    assert denied.disabled["result_query"] == "role_below_floor"
+
+
+def test_read_only_role_gets_no_governed_discovery_tool() -> None:
+    """The four adapters keep the MCP tools' OPERATOR floor."""
+    read_only = _make_operator(role=TenantRole.READ_ONLY, sub="op-read-only")
+    tools = resolve_agent_tools({}, read_only)
+    assert not (_tool_names(tools) & _DISCOVERY_TOOLS)
+
+
+@pytest.mark.parametrize("name", DISCOVERY_META_TOOL_NAMES)
+def test_bridged_tool_matches_mcp_definition(name: str) -> None:
+    """Each adapter publishes the MCP wire schema and keeps the MCP role floor."""
+    entry = get_tool(name)
+    assert entry is not None
+    definition, _handler = entry
+    (spec,) = [m for m in toolset_mod._META_TOOL_CATALOG if m.name == name]
+    assert spec.parameter_schema == definition.to_wire()["inputSchema"]
+    assert spec.parameter_schema is not definition.inputSchema
+    assert spec.required_role == definition.required_role
+
+
+async def test_bridged_tools_reuse_registered_mcp_handlers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The adapters call the handler the MCP surface registered, with the run's operator."""
+    seen: list[tuple[str, str, dict[str, Any]]] = []
+
+    def fake_get_tool(name: str) -> Any:
+        entry = get_tool(name)
+        assert entry is not None
+        definition, _handler = entry
+
+        async def _fake(operator: Operator, arguments: dict[str, Any]) -> dict[str, Any]:
+            seen.append((name, operator.sub, arguments))
+            return {"from": name}
+
+        return definition, _fake
+
+    monkeypatch.setattr(toolset_discovery, "get_tool", fake_get_tool)
+    specs = {s.name: s for s in toolset_discovery.build_discovery_meta_tools()}
+    operator = _make_operator(sub="op-distinct-principal")
+
+    assert await specs["meho_connector_list"].handler(operator, {"status": "enabled"}) == {
+        "from": "meho_connector_list"
+    }
+    assert await specs["list_targets"].handler(operator, {"limit": 10}) == {"from": "list_targets"}
+    assert seen == [
+        ("meho_connector_list", "op-distinct-principal", {"status": "enabled"}),
+        ("list_targets", "op-distinct-principal", {"limit": 10}),
+    ]
+
+
+async def test_governed_handler_returns_jsonflux_handle_unchanged() -> None:
+    """A reduced page with a result handle reaches the model as the handler built it."""
+    entry = get_tool("list_targets")
+    assert entry is not None
+    reduced = {
+        "row_count": 120,
+        "next_cursor": "t-120",
+        "handle": {"handle_id": "00000000-0000-0000-0000-000000000001"},
+    }
+
+    async def _handler(operator: Operator, arguments: dict[str, Any]) -> dict[str, Any]:
+        return reduced
+
+    wrapped = toolset_discovery._governed_handler(entry[0], _handler)
+    assert await wrapped(_make_operator(), {"limit": 120}) is reduced
+
+
+async def test_governed_handler_enforces_mcp_input_schema() -> None:
+    """Arguments outside the MCP schema never reach the handler (page-size bound)."""
+    entry = get_tool("list_targets")
+    assert entry is not None
+
+    async def _never(operator: Operator, arguments: dict[str, Any]) -> dict[str, Any]:
+        raise AssertionError("handler must not run for schema-invalid arguments")
+
+    wrapped = toolset_discovery._governed_handler(entry[0], _never)
+    with pytest.raises(ModelRetry, match="invalid arguments"):
+        await wrapped(_make_operator(), {"limit": 10_000})
+    with pytest.raises(ModelRetry, match="invalid arguments"):
+        await wrapped(_make_operator(), {"unexpected": True})
+
+
+async def test_governed_handler_rechecks_role_at_call_time() -> None:
+    """A model tool call under a role below the floor is refused before the handler."""
+    entry = get_tool("result_query")
+    assert entry is not None
+
+    async def _never(operator: Operator, arguments: dict[str, Any]) -> dict[str, Any]:
+        raise AssertionError("handler must not run for a denied role")
+
+    wrapped = toolset_discovery._governed_handler(entry[0], _never)
+    read_only = _make_operator(role=TenantRole.READ_ONLY, sub="op-read-only")
+    with pytest.raises(ModelRetry, match="forbidden"):
+        await wrapped(read_only, {"handle_id": "00000000-0000-0000-0000-000000000001"})
+
+
+async def test_registered_tool_rechecks_role_against_call_operator() -> None:
+    """A tool registered for one identity cannot run under a lower-role identity."""
+    tools = resolve_agent_tools({"meta_tools": ["list_targets"]}, _make_operator())
+    (tool,) = tools
+    read_only = _make_operator(role=TenantRole.READ_ONLY, sub="op-read-only")
+    with pytest.raises(ModelRetry, match="forbidden"):
+        await tool.function(_make_run_context(read_only), limit=5)
+
+
+async def test_result_query_handler_error_reaches_model_as_retry() -> None:
+    """The real MCP handler's typed error becomes tool feedback, not a crash."""
+    tools = resolve_agent_tools({"meta_tools": ["result_query"]}, _make_operator())
+    (tool,) = tools
+    with pytest.raises(ModelRetry, match="not a valid UUID"):
+        await tool.function(_make_run_context(_make_operator()), handle_id="not-a-uuid")
+
+
+async def test_preview_operation_respects_connector_allow_list() -> None:
+    """``preview_operation`` cannot look at a connector the agent may not call."""
+    spec = {"meta_tools": ["preview_operation"], "connectors": ["vault-1.x"]}
+    tools = resolve_agent_tools(spec, _make_operator())
+    (tool,) = tools
+    with pytest.raises(ModelRetry, match="not in this agent's allowed connectors"):
+        await tool.function(
+            _make_run_context(_make_operator()),
+            connector_id="vmware-rest-9.0",
+            op_id="GET:/api/vcenter/cluster",
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -17,7 +17,7 @@ inserts, updates, or deletes.
 ### Event class (#3733)
 
 Every row carries `event_class`, a closed set enforced by the database
-CHECK `ck_audit_log_event_class` (migration `0105`). Each writer sets the
+CHECK `ck_audit_log_event_class` (migration `0106`). Each writer sets the
 class it knows. Nothing is guessed from `method` / `path`.
 
 | Class | Written by |
@@ -26,7 +26,7 @@ class it knows. Nothing is guessed from `method` / `path`.
 | `policy_decision` | Dispatch rows a gate refused (`denied`, rate limit, unqualified target version) and the `approval.request` park row. |
 | `approval_decision` | `approval.decision` rows (approve, reject, expire) and the standing-grant auto-approval row. |
 | `security_event` | Refresh-token replay, broken satellite effect chain, un-reported gateway mint alarm. |
-| `legacy_request` | Every row written before `0105` (server default; old rows are not reclassified), the REST and MCP request wrapper rows, and the `approval.result` read row. |
+| `legacy_request` | Every row written before `0106` (server default; old rows are not reclassified), the REST and MCP request wrapper rows, and the `approval.result` read row. |
 
 The column default stays `legacy_request`, so a row from an older MEHO
 version during a rolling upgrade is also `legacy_request`. New code never
@@ -82,7 +82,7 @@ Field-to-source mapping:
 | `agent_session_id` | `audit_log.agent_session_id` — MCP-session correlation column (G8.2-T1 #1009, migration `0014`). Surfaced + filterable since G8.2-T3 (#1011). |
 | `work_ref` | `audit_log.work_ref` — external change-ticket reference (work_ref I1-T1 #1655, migration `0039`). An opaque string (e.g. `"gh:evoila/meho#1"`) correlating a governed operation to the out-of-band change record that authorised it. Surfaced + exact-match-filterable since work_ref I1-T3 (#1658). Bind sources: the request/agent/dispatch boundary (work_ref I1-T2 #1657) and runbook runs (work_ref I3-T1 #1661 — a run's `runbook_runs.work_ref` is bound around each `operation_call` step's dispatch + on the abort row, so the step audit rows inherit the run's change ticket). NULL when no bind source is in scope; system-internal writers leave it NULL by design. |
 | `policy_decision` | `audit_log.policy_decision` — the synchronous policy-gate verdict stamped on the row (#130, migration `0051`). One of the closed `PermissionVerdict` set — `"auto-execute"` / `"needs-approval"` / `"deny"` — or `None` where no gate ran (pre-#130 rows, pre-gate usage errors like unknown-op / invalid-params / connector-resolution failures, and system-internal writers). Populated by both audit writers off the dispatch-scoped `policy_decision_var` contextvar: the parked "request" row carries `"needs-approval"`; the approval "decision" row carries `None` (an operator's approve/reject is not a gate verdict — it is recorded via `result_status`). A consumer reads the verdict directly (`WHERE policy_decision = '<verdict>'`) instead of reconstructing it from `method`+`path`+`payload`. **Verdict catalog:** the persisted set is exactly the three-value `PermissionVerdict` enum. `time_window_violation` / `quota_exceeded` are **not** implemented (no such policy classes exist in code); any external catalog listing them overstates the surface. |
-| `event_class` | `audit_log.event_class` — what kind of accountable event the row records (#3733, migration `0105`). See [Event class](#event-class-3733). |
+| `event_class` | `audit_log.event_class` — what kind of accountable event the row records (#3733, migration `0106`). See [Event class](#event-class-3733). |
 | `broadcast_event_id` | **None in v0.2** — FK direction is reversed: `BroadcastEvent.audit_id` points at the audit row. |
 
 The three computed fields use exactly the same rules

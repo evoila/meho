@@ -920,7 +920,7 @@ def test_vault_check_runner_role_blank_normalises_to_none(
 def test_result_query_bounds_default_when_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Unset → the documented defaults (500 rows / 256 KB / 5 s).
+    """Unset → the documented defaults (500 rows / 256 KB / 10 s / 4 / 4 / 0).
 
     ``Settings`` is a plain ``BaseModel``, so a field only reads its env var
     if ``get_settings`` hand-maps it. This pins that each knob's default flows
@@ -931,6 +931,9 @@ def test_result_query_bounds_default_when_unset(
         "RESULT_QUERY_MAX_OUTPUT_ROWS",
         "RESULT_QUERY_MAX_OUTPUT_BYTES",
         "RESULT_QUERY_TIMEOUT_SECONDS",
+        "RESULT_QUERY_EXECUTOR_WORKERS",
+        "RESULT_QUERY_TENANT_CONCURRENCY",
+        "RESULT_QUERY_RATE_PER_MINUTE",
         "RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES",
         "RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES",
     ):
@@ -940,7 +943,10 @@ def test_result_query_bounds_default_when_unset(
         settings = get_settings()
         assert settings.result_query_max_output_rows == 500
         assert settings.result_query_max_output_bytes == 262144
-        assert settings.result_query_timeout_seconds == 5
+        assert settings.result_query_timeout_seconds == 10
+        assert settings.result_query_executor_workers == 4
+        assert settings.result_query_tenant_concurrency == 4
+        assert settings.result_query_rate_per_minute == 0
         assert settings.result_complete_response_wire_max_bytes == 262144
         assert settings.result_query_response_wire_max_bytes == 2097152
     finally:
@@ -953,13 +959,16 @@ def test_result_query_bounds_read_from_env(
     """Each knob's env var is hand-mapped in ``get_settings`` (not inert).
 
     A field without a constructor mapping stays at its default forever — the
-    silent-inert trap #3366 called out. This proves all three env vars reach
+    silent-inert trap #3366 called out. This proves every env var reaches
     the constructed ``Settings``.
     """
     _base_env(monkeypatch)
     monkeypatch.setenv("RESULT_QUERY_MAX_OUTPUT_ROWS", "250")
     monkeypatch.setenv("RESULT_QUERY_MAX_OUTPUT_BYTES", "131072")
     monkeypatch.setenv("RESULT_QUERY_TIMEOUT_SECONDS", "9")
+    monkeypatch.setenv("RESULT_QUERY_EXECUTOR_WORKERS", "8")
+    monkeypatch.setenv("RESULT_QUERY_TENANT_CONCURRENCY", "2")
+    monkeypatch.setenv("RESULT_QUERY_RATE_PER_MINUTE", "120")
     monkeypatch.setenv("RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES", "65536")
     monkeypatch.setenv("RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES", "524288")
     get_settings.cache_clear()
@@ -968,6 +977,9 @@ def test_result_query_bounds_read_from_env(
         assert settings.result_query_max_output_rows == 250
         assert settings.result_query_max_output_bytes == 131072
         assert settings.result_query_timeout_seconds == 9
+        assert settings.result_query_executor_workers == 8
+        assert settings.result_query_tenant_concurrency == 2
+        assert settings.result_query_rate_per_minute == 120
         assert settings.result_complete_response_wire_max_bytes == 65536
         assert settings.result_query_response_wire_max_bytes == 524288
     finally:
@@ -980,6 +992,8 @@ def test_result_query_bounds_read_from_env(
         "result_query_max_output_rows",
         "result_query_max_output_bytes",
         "result_query_timeout_seconds",
+        "result_query_executor_workers",
+        "result_query_tenant_concurrency",
         "result_complete_response_wire_max_bytes",
         "result_query_response_wire_max_bytes",
     ],

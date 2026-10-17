@@ -43,7 +43,6 @@ from fastapi.testclient import TestClient
 import meho_backplane.operations.meta_tools as meta_tools
 import meho_backplane.operations.result_query as result_query_core
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.connectors.result_handle_store import SpilledDocument, SpilledWindow
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import GraphNode, Tenant
@@ -63,6 +62,7 @@ from meho_backplane.operations.addon_pairing_schemas import PairAddonRequest
 from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
 from meho_backplane.settings import RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES, get_settings
 from meho_backplane.topology.schemas import TopologyEdge, TopologyEdgeEndpoint
+from tests._result_store_helpers import MemoryResultStore
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     client_with_operator,  # noqa: F401 -- pytest-discovered fixture
@@ -476,31 +476,19 @@ def test_result_query_conforms(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Window read-back over a stubbed store; handler shaping is real."""
-    client, _op = client_with_operator
+    client, op = client_with_operator
     handle_id = uuid.uuid4()
-    rows = [{"i": i} for i in range(8)]
-
-    class _StubStore:
-        async def fetch_window(
-            self,
-            *,
-            tenant_id: uuid.UUID,
-            operator_sub: str,
-            handle_id: uuid.UUID,
-            offset: int,
-            limit: int,
-        ) -> SpilledWindow:
-            window = rows[offset : offset + limit]
-            return SpilledWindow(
-                rows=window,
-                total_rows=len(rows),
-                stored_rows=len(rows),
-                truncated=False,
-            )
+    store = MemoryResultStore()
+    store.seed(
+        tenant_id=op.tenant_id,
+        operator_sub=op.sub,
+        handle_id=handle_id,
+        rows=[{"i": i} for i in range(8)],
+    )
 
     # Patch the shared core's store getter — the windowed read moved there in
     # #3179 and the MCP handler now delegates to it.
-    monkeypatch.setattr(result_query_core, "get_result_handle_store", lambda: _StubStore())
+    monkeypatch.setattr(result_query_core, "get_result_handle_store", lambda: store)
     payload = _assert_conforms(
         "result_query",
         _call(client, "result_query", {"handle_id": str(handle_id), "limit": 5}),
@@ -518,16 +506,16 @@ def test_result_query_path_read_conforms(
     value_type: str,
 ) -> None:
     """A document ``path`` read (#3633) fits the same output schema."""
-    client, _op = client_with_operator
+    client, op = client_with_operator
     handle_id = uuid.uuid4()
-
-    class _StubStore:
-        async def fetch_document(
-            self, *, tenant_id: uuid.UUID, operator_sub: str, handle_id: uuid.UUID
-        ) -> SpilledDocument:
-            return SpilledDocument(document={"name": "doc", "items": [1, {"k": 2}]})
-
-    monkeypatch.setattr(result_query_core, "get_result_handle_store", lambda: _StubStore())
+    store = MemoryResultStore()
+    store.seed_document(
+        tenant_id=op.tenant_id,
+        operator_sub=op.sub,
+        handle_id=handle_id,
+        document={"name": "doc", "items": [1, {"k": 2}]},
+    )
+    monkeypatch.setattr(result_query_core, "get_result_handle_store", lambda: store)
     payload = _assert_conforms(
         "result_query",
         _call(client, "result_query", {"handle_id": str(handle_id), "query": {"path": path}}),

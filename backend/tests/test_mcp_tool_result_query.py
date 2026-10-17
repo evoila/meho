@@ -27,14 +27,9 @@ from fastapi.testclient import TestClient
 
 import meho_backplane.operations.result_query as result_query_core
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors.result_handle_store import (
-    ResultRecordKindError,
-    SpilledDocument,
-    SpilledRowSet,
-    SpilledWindow,
-)
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.settings import get_settings
+from tests._result_store_helpers import MemoryResultStore
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
@@ -47,89 +42,15 @@ from tests.mcp_test_fixtures import (
 pytestmark = pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
 
 
-class _FakeStore:
-    """In-memory store the handler reads windows out of.
-
-    Keyed by ``(tenant_id, operator_sub, handle_id)`` so the test can
-    assert the handler threads the operator identity from the JWT, not
-    the arguments.
-    """
-
-    def __init__(self) -> None:
-        self._rows: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
-        self._documents: dict[tuple[str, str, str], Any] = {}
-
-    def seed_document(
-        self, *, tenant_id: UUID, operator_sub: str, handle_id: UUID, document: Any
-    ) -> None:
-        self._documents[(str(tenant_id), operator_sub, str(handle_id))] = document
-
-    async def fetch_document(
-        self,
-        *,
-        tenant_id: UUID,
-        operator_sub: str,
-        handle_id: UUID,
-    ) -> SpilledDocument | None:
-        key = (str(tenant_id), operator_sub, str(handle_id))
-        if key in self._rows:
-            raise ResultRecordKindError(handle_id, "rows")
-        if key not in self._documents:
-            return None
-        return SpilledDocument(document=self._documents[key])
-
-    def seed(
-        self,
-        *,
-        tenant_id: UUID,
-        operator_sub: str,
-        handle_id: UUID,
-        rows: list[dict[str, Any]],
-    ) -> None:
-        self._rows[(str(tenant_id), operator_sub, str(handle_id))] = rows
-
-    async def fetch_window(
-        self,
-        *,
-        tenant_id: UUID,
-        operator_sub: str,
-        handle_id: UUID,
-        offset: int,
-        limit: int,
-    ) -> SpilledWindow | None:
-        rows = self._rows.get((str(tenant_id), operator_sub, str(handle_id)))
-        if rows is None:
-            return None
-        window = rows[offset : offset + limit] if limit > 0 else []
-        return SpilledWindow(
-            rows=window,
-            total_rows=len(rows),
-            stored_rows=len(rows),
-            truncated=False,
-        )
-
-    async def fetch_rows(
-        self,
-        *,
-        tenant_id: UUID,
-        operator_sub: str,
-        handle_id: UUID,
-    ) -> SpilledRowSet | None:
-        rows = self._rows.get((str(tenant_id), operator_sub, str(handle_id)))
-        if rows is None:
-            return None
-        return SpilledRowSet(rows=rows, total_rows=len(rows), stored_rows=len(rows))
-
-
 @pytest.fixture
-def fake_store(monkeypatch: pytest.MonkeyPatch) -> _FakeStore:
+def fake_store(monkeypatch: pytest.MonkeyPatch) -> MemoryResultStore:
     """Replace the production store getter with an in-memory fake.
 
     Patched on the shared core module (:mod:`meho_backplane.operations.
     result_query`) where the getter is now called (#3179) rather than on the
     MCP tool module — the MCP handler delegates the windowed read to the core.
     """
-    store = _FakeStore()
+    store = MemoryResultStore()
     monkeypatch.setattr(result_query_core, "get_result_handle_store", lambda: store)
     return store
 
@@ -170,7 +91,7 @@ def test_tools_list_exposes_result_query(
 
 def test_result_query_returns_window_beyond_inline_sample(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-    fake_store: _FakeStore,
+    fake_store: MemoryResultStore,
 ) -> None:
     """A >50-row spilled set is fully retrievable over MCP by paging."""
     client, op = client_with_operator
@@ -202,7 +123,7 @@ def test_result_query_returns_window_beyond_inline_sample(
 
 def test_result_query_unknown_handle_is_recoverable_invalid_params(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-    fake_store: _FakeStore,
+    fake_store: MemoryResultStore,
 ) -> None:
     client, _op = client_with_operator
     response = _call(client, {"handle_id": str(uuid4()), "offset": 0, "limit": 10})
@@ -214,7 +135,7 @@ def test_result_query_unknown_handle_is_recoverable_invalid_params(
 
 def test_result_query_paging_over_budget_is_recoverable_invalid_params(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-    fake_store: _FakeStore,
+    fake_store: MemoryResultStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A paging window over the byte budget maps to a recoverable -32602.
@@ -234,7 +155,9 @@ def test_result_query_paging_over_budget_is_recoverable_invalid_params(
     monkeypatch.setattr(
         result_query_core,
         "get_settings",
-        lambda: SimpleNamespace(result_query_max_output_bytes=2048),
+        lambda: SimpleNamespace(
+            result_query_max_output_bytes=2048, result_query_timeout_seconds=10
+        ),
     )
     response = _call(client, {"handle_id": str(handle), "offset": 0, "limit": 50})
     assert response.status_code == 200
@@ -247,7 +170,7 @@ def test_result_query_paging_over_budget_is_recoverable_invalid_params(
 
 def test_result_query_cross_operator_is_a_miss(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-    fake_store: _FakeStore,
+    fake_store: MemoryResultStore,
 ) -> None:
     """A handle spilled by a different operator surfaces as not-found."""
     client, _op = client_with_operator
@@ -266,7 +189,7 @@ def test_result_query_cross_operator_is_a_miss(
 
 def test_result_query_invalid_uuid_is_invalid_params(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-    fake_store: _FakeStore,
+    fake_store: MemoryResultStore,
 ) -> None:
     client, _op = client_with_operator
     response = _call(client, {"handle_id": "not-a-uuid"})
@@ -277,7 +200,7 @@ def test_result_query_invalid_uuid_is_invalid_params(
 
 def test_result_query_rejects_extra_argument(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-    fake_store: _FakeStore,
+    fake_store: MemoryResultStore,
 ) -> None:
     """#3366 relaxed this to reject only *genuinely* unknown args.
 
@@ -320,7 +243,7 @@ def test_input_schema_advertises_the_query_argument(
     assert schema["properties"]["query"]["properties"]["aggregate"]["maxItems"] == 8
 
 
-def _seed(fake_store: _FakeStore, op: Operator, handle: UUID) -> None:
+def _seed(fake_store: MemoryResultStore, op: Operator, handle: UUID) -> None:
     rows = [
         {"id": i, "severity": "high" if i % 2 else "low", "project": f"p{i % 3}"} for i in range(30)
     ]
@@ -329,7 +252,7 @@ def _seed(fake_store: _FakeStore, op: Operator, handle: UUID) -> None:
 
 def test_query_mode_filters_server_side(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-    fake_store: _FakeStore,
+    fake_store: MemoryResultStore,
 ) -> None:
     client, op = client_with_operator
     handle = uuid4()
@@ -350,7 +273,7 @@ def test_query_mode_filters_server_side(
 
 def test_query_mode_aggregates_server_side(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-    fake_store: _FakeStore,
+    fake_store: MemoryResultStore,
 ) -> None:
     client, op = client_with_operator
     handle = uuid4()
@@ -372,7 +295,7 @@ def test_query_mode_aggregates_server_side(
 
 def test_query_mode_unknown_field_is_recoverable_invalid_params(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-    fake_store: _FakeStore,
+    fake_store: MemoryResultStore,
 ) -> None:
     client, op = client_with_operator
     handle = uuid4()
@@ -385,7 +308,7 @@ def test_query_mode_unknown_field_is_recoverable_invalid_params(
 
 def test_query_mode_bad_operator_is_invalid_params(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-    fake_store: _FakeStore,
+    fake_store: MemoryResultStore,
 ) -> None:
     client, op = client_with_operator
     handle = uuid4()
@@ -409,7 +332,7 @@ def test_query_mode_bad_operator_is_invalid_params(
 @pytest.mark.parametrize("query", [None, {"select": ["id", "severity"]}])
 def test_result_query_over_wire_ceiling_is_output_too_large(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-    fake_store: _FakeStore,
+    fake_store: MemoryResultStore,
     monkeypatch: pytest.MonkeyPatch,
     query: dict[str, Any] | None,
 ) -> None:
@@ -432,7 +355,7 @@ def test_result_query_over_wire_ceiling_is_output_too_large(
     assert "1024-byte delivery limit" in body["error"]["message"]
 
 
-def _seed_document(fake_store: _FakeStore, op: Operator, handle: UUID) -> None:
+def _seed_document(fake_store: MemoryResultStore, op: Operator, handle: UUID) -> None:
     fake_store.seed_document(
         tenant_id=OPERATOR_TENANT_ID,
         operator_sub=op.sub,
@@ -458,7 +381,7 @@ def test_input_schema_advertises_the_path_argument(
 
 def test_path_mode_pages_an_array_with_offset_and_limit(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-    fake_store: _FakeStore,
+    fake_store: MemoryResultStore,
 ) -> None:
     client, op = client_with_operator
     handle = uuid4()
@@ -476,7 +399,7 @@ def test_path_mode_pages_an_array_with_offset_and_limit(
 
 def test_path_mode_returns_a_single_value(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-    fake_store: _FakeStore,
+    fake_store: MemoryResultStore,
 ) -> None:
     client, op = client_with_operator
     handle = uuid4()
@@ -499,7 +422,7 @@ def test_path_mode_returns_a_single_value(
 )
 def test_path_mode_errors_are_recoverable_invalid_params(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-    fake_store: _FakeStore,
+    fake_store: MemoryResultStore,
     query: dict[str, Any],
 ) -> None:
     client, op = client_with_operator
@@ -515,14 +438,13 @@ def test_paging_a_document_handle_is_recoverable_invalid_params(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Paging a document handle names the `path` read instead (#3633)."""
-    client, _op = client_with_operator
+    client, op = client_with_operator
     handle = uuid4()
-
-    class _DocumentOnlyStore:
-        async def fetch_window(self, **_kwargs: Any) -> SpilledWindow | None:
-            raise ResultRecordKindError(handle, "document")
-
-    monkeypatch.setattr(result_query_core, "get_result_handle_store", lambda: _DocumentOnlyStore())
+    store = MemoryResultStore()
+    store.seed_document(
+        tenant_id=OPERATOR_TENANT_ID, operator_sub=op.sub, handle_id=handle, document={"k": 1}
+    )
+    monkeypatch.setattr(result_query_core, "get_result_handle_store", lambda: store)
     body = _call(client, {"handle_id": str(handle)}).json()
     assert body["error"]["code"] == INVALID_PARAMS
     assert body["error"]["data"]["reason"] == "invalid_query"
@@ -531,7 +453,7 @@ def test_paging_a_document_handle_is_recoverable_invalid_params(
 
 def test_path_read_over_wire_ceiling_is_output_too_large(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-    fake_store: _FakeStore,
+    fake_store: MemoryResultStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A `path` read over the wire ceiling is refused like the other read modes."""

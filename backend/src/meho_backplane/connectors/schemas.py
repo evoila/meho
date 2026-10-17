@@ -241,6 +241,16 @@ class FetchMoreDrillIn(BaseModel):
             "only when ``available=True``."
         ),
     )
+    stored_rows: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "How many rows the store kept and ``result_query`` can read. "
+            "Smaller than the handle's ``total_rows`` when the store's row "
+            "or byte cap kept only the first rows (#3632). Populated only "
+            "when ``available=True``."
+        ),
+    )
 
     @model_validator(mode="after")
     def _freeze_example_call(self) -> "FetchMoreDrillIn":

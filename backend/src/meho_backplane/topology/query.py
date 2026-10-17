@@ -132,6 +132,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final, Literal
 from uuid import UUID
@@ -139,10 +140,12 @@ from uuid import UUID
 from sqlalchemy import DateTime, bindparam, text
 from sqlalchemy import Uuid as SAUuid
 from sqlalchemy.engine import Row
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import GraphNode
 from meho_backplane.topology.evidence import relation_class_kind_filter
 from meho_backplane.topology.resolvers import (
     AmbiguousNodeError,
@@ -177,8 +180,15 @@ from meho_backplane.topology.timeline_cursor import (
 # ``from meho_backplane.topology.query import AmbiguousNodeError`` call
 # site without churn.
 __all__ = [
+    "CLOSURE_MAX_BYTES",
+    "CLOSURE_MAX_NODES",
+    "CLOSURE_TIME_BUDGET_MS",
     "AmbiguousNodeError",
+    "BoundedClosure",
+    "ClosureBudget",
+    "ClosureLimit",
     "TopologyNodeListEntry",
+    "bounded_closure",
     "find_dependencies",
     "find_dependents",
     "find_path",
@@ -274,6 +284,17 @@ def _row_to_node(row: Row[Any]) -> TopologyNode:
 # live-inventory view on demand. The anchor row is never filtered —
 # the caller named it explicitly, and G0.18-T4's NodeNotFoundError
 # contract owns anchor existence.
+#
+# Bounds (#3764): ``deduped`` adds ``row_bytes`` (the stored bytes of the
+# node's kind, name, scope and properties) and ``sized`` a running total
+# in the answer order ``(depth, name, id)``. ``:byte_budget`` keeps the
+# rows whose running total *before* them is within the budget, so exactly
+# one row past the budget comes back (with its properties left out) and
+# the caller can see that the byte limit applied. ``:row_limit`` caps the
+# rows sent to Python. Both are NULL for the unbounded verbs (``LIMIT
+# NULL`` is ``LIMIT ALL``). PostgreSQL still walks the whole closure
+# before it sorts, so the time budget (``statement_timeout``, set by
+# :func:`bounded_closure`) is what bounds that work.
 _TRAVERSAL_SQL_REVERSE = text(
     """
     WITH RECURSIVE walk AS (
@@ -330,21 +351,38 @@ _TRAVERSAL_SQL_REVERSE = text(
               CAST(:include_stale AS boolean)
               OR (n.last_seen IS NOT NULL AND e.last_seen IS NOT NULL)
           )
-    ) CYCLE id SET is_cycle USING path
-    SELECT id, kind, name, source, source_scope, properties, last_seen, depth,
-           via_edge_kind, parent_node_id, via_edge_id, via_edge_source,
-           via_edge_last_seen
-    FROM (
+    ) CYCLE id SET is_cycle USING path,
+    deduped AS (
         SELECT DISTINCT ON (id)
             id, kind, name, source, source_scope, properties, last_seen, depth,
             via_edge_kind, parent_node_id, via_edge_id, via_edge_source,
-            via_edge_last_seen
+            via_edge_last_seen,
+            octet_length(kind) + octet_length(name)
+                + COALESCE(octet_length(source_scope), 0)
+                + COALESCE(octet_length(CAST(properties AS text)), 0) AS row_bytes
         FROM walk
         WHERE depth <= :depth
           AND NOT is_cycle
         ORDER BY id, depth, name, parent_node_id, via_edge_id
-    ) deduped
-    ORDER BY depth, name
+    ),
+    sized AS (
+        SELECT deduped.*,
+               SUM(row_bytes) OVER (ORDER BY depth, name, id) AS cumulative_bytes
+        FROM deduped
+    )
+    SELECT id, kind, name, source, source_scope,
+           CASE
+               WHEN CAST(:byte_budget AS bigint) IS NULL
+                    OR cumulative_bytes <= CAST(:byte_budget AS bigint)
+               THEN properties
+           END AS properties,
+           last_seen, depth, via_edge_kind, parent_node_id, via_edge_id,
+           via_edge_source, via_edge_last_seen, cumulative_bytes
+    FROM sized
+    WHERE CAST(:byte_budget AS bigint) IS NULL
+       OR cumulative_bytes - row_bytes <= CAST(:byte_budget AS bigint)
+    ORDER BY depth, name, id
+    LIMIT :row_limit
     """
 )
 
@@ -353,7 +391,8 @@ _TRAVERSAL_SQL_REVERSE = text(
 # the two join columns differ from the reverse statement; everything
 # else (tenant scoping, kind pin, kind filter, depth bound, CYCLE
 # guard, closure-wide DISTINCT ON dedupe, ordering, §6 superseded-edge
-# exclusion, #2538 chain provenance + staleness opt-out) is identical.
+# exclusion, #2538 chain provenance + staleness opt-out, #3764 byte and
+# row bounds) is identical.
 _TRAVERSAL_SQL_FORWARD = text(
     """
     WITH RECURSIVE walk AS (
@@ -410,21 +449,38 @@ _TRAVERSAL_SQL_FORWARD = text(
               CAST(:include_stale AS boolean)
               OR (n.last_seen IS NOT NULL AND e.last_seen IS NOT NULL)
           )
-    ) CYCLE id SET is_cycle USING path
-    SELECT id, kind, name, source, source_scope, properties, last_seen, depth,
-           via_edge_kind, parent_node_id, via_edge_id, via_edge_source,
-           via_edge_last_seen
-    FROM (
+    ) CYCLE id SET is_cycle USING path,
+    deduped AS (
         SELECT DISTINCT ON (id)
             id, kind, name, source, source_scope, properties, last_seen, depth,
             via_edge_kind, parent_node_id, via_edge_id, via_edge_source,
-            via_edge_last_seen
+            via_edge_last_seen,
+            octet_length(kind) + octet_length(name)
+                + COALESCE(octet_length(source_scope), 0)
+                + COALESCE(octet_length(CAST(properties AS text)), 0) AS row_bytes
         FROM walk
         WHERE depth <= :depth
           AND NOT is_cycle
         ORDER BY id, depth, name, parent_node_id, via_edge_id
-    ) deduped
-    ORDER BY depth, name
+    ),
+    sized AS (
+        SELECT deduped.*,
+               SUM(row_bytes) OVER (ORDER BY depth, name, id) AS cumulative_bytes
+        FROM deduped
+    )
+    SELECT id, kind, name, source, source_scope,
+           CASE
+               WHEN CAST(:byte_budget AS bigint) IS NULL
+                    OR cumulative_bytes <= CAST(:byte_budget AS bigint)
+               THEN properties
+           END AS properties,
+           last_seen, depth, via_edge_kind, parent_node_id, via_edge_id,
+           via_edge_source, via_edge_last_seen, cumulative_bytes
+    FROM sized
+    WHERE CAST(:byte_budget AS bigint) IS NULL
+       OR cumulative_bytes - row_bytes <= CAST(:byte_budget AS bigint)
+    ORDER BY depth, name, id
+    LIMIT :row_limit
     """
 )
 
@@ -457,6 +513,77 @@ async def _resolve_endpoint_id(
     return node.id
 
 
+#: Bounds for :func:`bounded_closure` (#3764). The ``query_topology``
+#: closure answer stops at whichever comes first: this many nodes (root
+#: included), this many stored bytes of node kind, name, scope and
+#: properties, or this much database time for the traversal statement.
+CLOSURE_MAX_NODES: Final[int] = 2000
+CLOSURE_MAX_BYTES: Final[int] = 4 * 1024 * 1024
+CLOSURE_TIME_BUDGET_MS: Final[int] = 5000
+
+#: Why a bounded closure stopped early (#3764). ``hop_limit``: more nodes
+#: exist past the requested depth. ``node_limit`` / ``byte_limit``: the
+#: answer is the first part of the closure in ``(depth, name, id)`` order.
+#: ``time_budget``: the traversal ran out of time and returned no nodes.
+ClosureLimit = Literal["hop_limit", "node_limit", "byte_limit", "time_budget"]
+
+#: PostgreSQL's ``query_canceled`` SQLSTATE, raised when
+#: ``statement_timeout`` stops a statement (PG 16 manual, Appendix A).
+_QUERY_CANCELED_SQLSTATE: Final[str] = "57014"
+
+# ``set_config(..., true)`` is ``SET LOCAL`` with a bind parameter: the
+# timeout ends with the transaction (PG 16 manual §9.28.1).
+_SET_STATEMENT_TIMEOUT_SQL = text("SELECT set_config('statement_timeout', :timeout_ms, true)")
+
+
+@dataclass(frozen=True, slots=True)
+class ClosureBudget:
+    """The limits one bounded closure runs under (#3764)."""
+
+    max_nodes: int = CLOSURE_MAX_NODES
+    max_bytes: int = CLOSURE_MAX_BYTES
+    time_budget_ms: int = CLOSURE_TIME_BUDGET_MS
+
+
+@dataclass(frozen=True, slots=True)
+class BoundedClosure:
+    """A closure answer with the limit that stopped it, if any (#3764).
+
+    ``nodes`` keeps the :func:`find_dependents` order ``(depth, name,
+    id)`` with the root first. When a limit applied, ``nodes`` is the
+    first part of the full closure in that order, never a sample from the
+    middle. ``limit_hit`` is ``None`` only when the closure is complete
+    within ``depth``. ``root`` is the anchor the resolver picked; it is
+    known even when the time budget ran out and ``nodes`` is empty.
+    """
+
+    root: TopologyNode
+    nodes: tuple[TopologyNode, ...]
+    limit_hit: ClosureLimit | None
+    depth: int
+    budget: ClosureBudget
+
+
+def _anchor_root(anchor: GraphNode) -> TopologyNode:
+    """The depth-0 row for *anchor*, built from the resolved ORM row."""
+    return TopologyNode(
+        id=anchor.id,
+        kind=anchor.kind,
+        name=anchor.name,
+        source=anchor.source,
+        source_scope=anchor.source_scope,
+        properties=anchor.properties or {},
+        last_seen=anchor.last_seen,
+        depth=0,
+        via_edge_kind=None,
+    )
+
+
+def _is_statement_timeout(exc: DBAPIError) -> bool:
+    """True when PostgreSQL cancelled the statement (``statement_timeout``)."""
+    return getattr(exc.orig, "sqlstate", None) == _QUERY_CANCELED_SQLSTATE
+
+
 async def _traverse(
     operator: Operator,
     name_or_alias: str,
@@ -467,7 +594,10 @@ async def _traverse(
     relation_class: str | None,
     include_stale: bool,
     reverse: bool,
-) -> list[TopologyNode]:
+    row_limit: int | None = None,
+    byte_budget: int | None = None,
+    timeout_ms: int | None = None,
+) -> tuple[TopologyNode, list[Row[Any]] | None]:
     """Shared dependents/dependencies recursive-CTE traversal.
 
     Picks the reverse or forward literal statement and runs it
@@ -487,6 +617,12 @@ async def _traverse(
       reads as "safe to delete" for the pre-destructive blast-radius
       use case and is the RDC #789 N2 false-negative this resolution
       closes.
+
+    Returns the anchor as a depth-0 row plus the raw result rows.
+    ``row_limit`` / ``byte_budget`` / ``timeout_ms`` (#3764) are the
+    bounds :func:`bounded_closure` passes; the unbounded verbs leave them
+    ``None``. When ``timeout_ms`` is set and PostgreSQL cancels the
+    statement, the rows are ``None`` instead of an exception.
     """
     sql = _TRAVERSAL_SQL_REVERSE if reverse else _TRAVERSAL_SQL_FORWARD
     tenant_id = str(operator.tenant_id)
@@ -510,21 +646,117 @@ async def _traverse(
         # cut-over a ``(kind, name)`` pair can exist in several
         # scopes, and the resolver refuses rather than guessing).
         anchor = await resolve_node(session, operator.tenant_id, name_or_alias, kind)
-        result = await session.execute(
-            sql,
-            {
-                "anchor_id": str(anchor.id),
-                "tenant_id": tenant_id,
-                "depth": depth,
-                "kind_filter": kind_filter,
-                "class_kinds": class_kinds,
-                "class_excluded_kinds": class_excluded_kinds,
-                "include_stale": include_stale,
-            },
-        )
-        rows = result.fetchall()
+        root = _anchor_root(anchor)
+        if timeout_ms is not None:
+            await session.execute(_SET_STATEMENT_TIMEOUT_SQL, {"timeout_ms": str(timeout_ms)})
+        try:
+            result = await session.execute(
+                sql,
+                {
+                    "anchor_id": str(anchor.id),
+                    "tenant_id": tenant_id,
+                    "depth": depth,
+                    "kind_filter": kind_filter,
+                    "class_kinds": class_kinds,
+                    "class_excluded_kinds": class_excluded_kinds,
+                    "include_stale": include_stale,
+                    "row_limit": row_limit,
+                    "byte_budget": byte_budget,
+                },
+            )
+        except DBAPIError as exc:
+            if timeout_ms is None or not _is_statement_timeout(exc):
+                raise
+            return root, None
+        rows = list(result.fetchall())
 
-    return [_row_to_node(row) for row in rows]
+    return root, rows
+
+
+async def _unbounded_closure(
+    operator: Operator, name_or_alias: str, **kwargs: Any
+) -> list[TopologyNode]:
+    """Run :func:`_traverse` with no bounds and map every row."""
+    _root, rows = await _traverse(operator, name_or_alias, **kwargs)
+    return [_row_to_node(row) for row in rows or []]
+
+
+def _cut_closure_rows(
+    rows: Sequence[Row[Any]], *, depth: int, budget: ClosureBudget
+) -> tuple[list[TopologyNode], ClosureLimit | None]:
+    """Keep the rows within *depth* and *budget*; name the limit that stopped them.
+
+    *rows* come from a walk one hop deeper than *depth*, capped at
+    ``max_nodes + 1`` rows and one row past the byte budget, all in
+    ``(depth, name, id)`` order. So a row past *depth* means more nodes
+    exist beyond the hop limit, and a row past either budget means the
+    node or byte limit cut the closure. The root is always kept, even when
+    it alone is over the byte budget (its properties are then left out).
+    """
+    kept: list[TopologyNode] = []
+    for row in rows:
+        mapping = row._mapping
+        if mapping["depth"] > depth:
+            return kept, "hop_limit"
+        over_bytes = mapping["cumulative_bytes"] > budget.max_bytes
+        if kept and over_bytes:
+            return kept, "byte_limit"
+        if len(kept) >= budget.max_nodes:
+            return kept, "node_limit"
+        kept.append(_row_to_node(row))
+        if over_bytes:
+            return kept, "byte_limit"
+    return kept, None
+
+
+async def bounded_closure(
+    operator: Operator,
+    name_or_alias: str,
+    *,
+    reverse: bool,
+    kind: str | None = None,
+    depth: int = _DEFAULT_DEPTH,
+    kind_filter: str | None = None,
+    relation_class: str | None = None,
+    include_stale: bool = True,
+    budget: ClosureBudget | None = None,
+) -> BoundedClosure:
+    """Dependents (``reverse=True``) or dependencies closure under limits (#3764).
+
+    Same traversal, filters, ordering, tenant scope and anchor contract
+    as :func:`find_dependents` / :func:`find_dependencies`, but the walk
+    is bounded before rows reach Python:
+
+    * a ``statement_timeout`` of ``budget.time_budget_ms`` bounds the
+      database work; when it fires the answer has no nodes and
+      ``limit_hit="time_budget"``;
+    * at most ``budget.max_nodes`` nodes and ``budget.max_bytes`` stored
+      bytes come back; the answer is then the first part of the closure;
+    * the walk goes one hop past *depth* so the answer can say whether
+      nodes exist beyond it (``limit_hit="hop_limit"``).
+
+    The result never claims a complete closure when a limit applied.
+    """
+    budget = budget or ClosureBudget()
+    if budget.max_nodes < 1 or budget.max_bytes < 1 or budget.time_budget_ms < 1:
+        raise ValueError("closure budget limits must be positive")
+    root, rows = await _traverse(
+        operator,
+        name_or_alias,
+        depth=depth + 1,
+        kind=kind,
+        kind_filter=kind_filter,
+        relation_class=relation_class,
+        include_stale=include_stale,
+        reverse=reverse,
+        row_limit=budget.max_nodes + 1,
+        byte_budget=budget.max_bytes,
+        timeout_ms=budget.time_budget_ms,
+    )
+    if rows is None:
+        return BoundedClosure(root, (), "time_budget", depth, budget)
+    nodes, limit_hit = _cut_closure_rows(rows, depth=depth, budget=budget)
+    return BoundedClosure(root, tuple(nodes), limit_hit, depth, budget)
 
 
 async def find_dependents(
@@ -593,7 +825,7 @@ async def find_dependents(
       *Not* equivalent to "safe to delete" — the call has produced no
       blast-radius signal.
     """
-    return await _traverse(
+    return await _unbounded_closure(
         operator,
         name_or_alias,
         depth=depth,
@@ -628,7 +860,7 @@ async def find_dependencies(
     :func:`find_dependents` for the full contract). An empty return
     list is structurally impossible.
     """
-    return await _traverse(
+    return await _unbounded_closure(
         operator,
         name_or_alias,
         depth=depth,

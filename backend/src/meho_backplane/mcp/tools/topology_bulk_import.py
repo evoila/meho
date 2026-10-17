@@ -54,6 +54,7 @@ from __future__ import annotations
 
 from typing import Any, Final
 
+from meho_backplane.audit_cutover import note_preview
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.topology.ops import TOPOLOGY_BULK_IMPORT_OP_ID
 from meho_backplane.connectors.topology.schemas import (
@@ -127,6 +128,8 @@ async def _bulk_import_dry_run(
     :class:`BulkImportValidationError` becomes a -32602 carrying every
     row's structured diagnostic on ``error.data``.
     """
+    # A dry run changes nothing, so the call needs no audit row (#3757).
+    note_preview()
     rows = build_bulk_import_rows(rows_params)
     sessionmaker = get_sessionmaker()
     try:

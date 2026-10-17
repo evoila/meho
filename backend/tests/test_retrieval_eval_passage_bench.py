@@ -4,8 +4,9 @@
 """Behavioural tests for :mod:`meho_backplane.retrieval.eval.passage_bench` (#3765).
 
 No test here loads an embedding model. Searches are either scripted
-(exact hits per query) or :func:`embedding_search` with a fake hashed
-bag-of-words encoder and a word counter.
+(exact hits per query, standing in for an injected production retrieve)
+or :func:`embedding_search` with a fake hashed bag-of-words encoder and
+a word counter.
 """
 
 from __future__ import annotations
@@ -37,11 +38,15 @@ from meho_backplane.retrieval.retriever import RetrievalHit
 
 _E5 = CandidateSpec(
     name="e5-small",
+    search_method="cosine",
     embedding_model="intfloat/multilingual-e5-small",
     query_prefix="query: ",
     passage_prefix="passage: ",
     reembed_corpus=True,
 )
+
+#: The default model, but ranked by cosine only. A candidate, not the baseline.
+_COSINE = CandidateSpec(name="cosine-only", search_method="cosine")
 
 
 def _words(text: str) -> list[str]:
@@ -76,10 +81,12 @@ def _clock() -> Any:
 
 
 def _scripted(hits_by_query: dict[str, list[PassageHit]]) -> PassageSearch:
+    """Exact hits per query, labelled as the production retrieve path."""
+
     async def search(query: str, k: int) -> PassageSearchResult:
         return PassageSearchResult(hits_by_query.get(query, []))
 
-    return search
+    return PassageSearch("retrieve", search)
 
 
 def _hit(slug: str, heading: str, text: str) -> PassageHit:
@@ -108,7 +115,9 @@ def _stratum(strata: list[PassageStratum], scenario: str, language: str) -> Pass
 def test_baseline_is_the_unchanged_default() -> None:
     assert BASELINE_CANDIDATE.is_baseline
     assert BASELINE_CANDIDATE.embedding_model == DEFAULT_EMBEDDING_MODEL
+    assert BASELINE_CANDIDATE.search_method == "retrieve"
     assert not _E5.is_baseline
+    assert not _COSINE.is_baseline  # same model, but not the production ranking
 
 
 def test_same_dimension_model_still_requires_reembed() -> None:
@@ -137,6 +146,32 @@ async def test_first_candidate_must_be_the_baseline() -> None:
         await run_passage_bench([])
     with pytest.raises(ValueError, match="unique"):
         await run_passage_bench([(BASELINE_CANDIDATE, search), (BASELINE_CANDIDATE, search)])
+
+
+async def test_cosine_only_search_is_a_candidate_not_the_baseline() -> None:
+    fixtures = load_kb_passage_fixtures()
+    cosine = await embedding_search(
+        _COSINE, encode=_fake_encode, count=_count, window=40, fixtures=fixtures
+    )
+    assert cosine.method == "cosine"
+    with pytest.raises(ValueError, match="search_method='cosine'"):
+        await embedding_search(
+            BASELINE_CANDIDATE, encode=_fake_encode, count=_count, window=40, fixtures=fixtures
+        )
+    with pytest.raises(ValueError, match="baseline"):
+        await run_passage_bench([(_COSINE, cosine)], fixtures=fixtures)
+    with pytest.raises(ValueError, match="ranks by 'cosine'"):
+        await run_passage_bench([(BASELINE_CANDIDATE, cosine)], fixtures=fixtures)
+    with pytest.raises(ValueError, match="ranks by 'retrieve'"):
+        await run_passage_bench(
+            [(BASELINE_CANDIDATE, _perfect(fixtures)), (_COSINE, _perfect(fixtures))],
+            fixtures=fixtures,
+        )
+    report = await run_passage_bench(
+        [(BASELINE_CANDIDATE, _perfect(fixtures)), (_COSINE, cosine)], fixtures=fixtures
+    )
+    assert [c.baseline for c in report.candidates] == [True, False]
+    assert [c.candidate.search_method for c in report.candidates] == ["retrieve", "cosine"]
 
 
 # ---------------------------------------------------------------------------
@@ -193,12 +228,41 @@ async def test_harmful_entry_above_correct_passage_is_harm() -> None:
     assert s.answer_support == 0.0
 
 
+@pytest.mark.parametrize(
+    ("sections", "harm"),
+    [
+        pytest.param(["wrong", "stale"], 1.0, id="wrong-section-then-stale-no-correct-passage"),
+        pytest.param(["wrong", "stale", "correct"], 1.0, id="stale-above-correct-passage"),
+        pytest.param(["wrong", "correct", "stale"], 0.0, id="correct-passage-above-stale"),
+    ],
+)
+async def test_harm_compares_against_the_first_correct_passage_not_the_source(
+    sections: list[str], harm: float
+) -> None:
+    """A hit from the right entry but the wrong section does not shield a stale answer."""
+    fixtures = load_kb_passage_fixtures()
+    q = next(q for q in fixtures.queries if q.id == "en-stale-retention-days")
+    hits = {
+        "wrong": _hit(q.expected_slugs[0], "Scope", "release 4"),
+        "stale": _hit(q.harmful_slugs[0], "Retention policy", "kept for 7 days"),
+        "correct": _hit(q.expected_slugs[0], q.expected_heading or "", " ".join(q.answer_terms)),
+    }
+    search = _scripted({q.query: [hits[name] for name in sections]})
+    report = await run_passage_bench([(BASELINE_CANDIDATE, search)], fixtures=fixtures)
+    s = _stratum(report.candidates[0].strata, "stale", "en")
+    assert s.harm_rate == harm
+    assert s.source_citation == 1.0 and s.mrr == 1.0  # the source is right either way
+    assert s.selected_reference == 0.0  # the first hit from that source is the wrong section
+
+
 async def test_report_holds_no_query_or_body_text() -> None:
     fixtures = load_kb_passage_fixtures()
-    baseline = await embedding_search(
-        BASELINE_CANDIDATE, encode=_fake_encode, count=_count, window=40, fixtures=fixtures
+    cosine = await embedding_search(
+        _COSINE, encode=_fake_encode, count=_count, window=40, fixtures=fixtures
     )
-    report = await run_passage_bench([(BASELINE_CANDIDATE, baseline)], fixtures=fixtures)
+    report = await run_passage_bench(
+        [(BASELINE_CANDIDATE, _perfect(fixtures)), (_COSINE, cosine)], fixtures=fixtures
+    )
     dumped = report.model_dump_json()
     for q in fixtures.queries:
         assert q.query not in dumped
@@ -207,7 +271,7 @@ async def test_report_holds_no_query_or_body_text() -> None:
             if len(line.strip()) > 20:
                 assert line.strip() not in dumped
     assert report.fixture_version == fixtures.version
-    assert len(report.candidates[0].strata) == 12
+    assert [len(c.strata) for c in report.candidates] == [12, 12]
 
 
 async def test_baseline_and_candidate_run_offline_without_loading_a_model(
@@ -220,15 +284,18 @@ async def test_baseline_and_candidate_run_offline_without_loading_a_model(
 
     monkeypatch.setattr(EmbeddingService, "_ensure_loaded", _no_model)
     fixtures = load_kb_passage_fixtures()
-    base = await embedding_search(
-        BASELINE_CANDIDATE, encode=_fake_encode, count=_count, window=40, fixtures=fixtures
+    cosine = await embedding_search(
+        _COSINE, encode=_fake_encode, count=_count, window=40, fixtures=fixtures
     )
-    cand = await embedding_search(
+    e5 = await embedding_search(
         _E5, encode=_fake_encode, count=_count, window=40, fixtures=fixtures
     )
-    report = await run_passage_bench([(BASELINE_CANDIDATE, base), (_E5, cand)], fixtures=fixtures)
-    assert [c.baseline for c in report.candidates] == [True, False]
-    mid = _stratum(report.candidates[0].strata, "middle_passage", "en")
+    report = await run_passage_bench(
+        [(BASELINE_CANDIDATE, _perfect(fixtures)), (_COSINE, cosine), (_E5, e5)],
+        fixtures=fixtures,
+    )
+    assert [c.baseline for c in report.candidates] == [True, False, False]
+    mid = _stratum(report.candidates[1].strata, "middle_passage", "en")
     assert mid.source_citation == 1.0
 
 
@@ -252,7 +319,7 @@ async def test_embedding_search_reembeds_corpus_with_matching_prefixes() -> None
     assert len(corpus) > len(fixtures.entries)  # every entry, split into passages
     assert all(t.startswith("passage: ") for t in corpus)
     assert all(_count(t) <= 30 for t in corpus)  # the prefix still fits the window
-    result = await search("renew certificate", 3)
+    result = await search.run("renew certificate", 3)
     assert calls[1] == ["query: renew certificate"]
     assert len(result.hits) == 3 and result.calls == 1
 
@@ -260,7 +327,10 @@ async def test_embedding_search_reembeds_corpus_with_matching_prefixes() -> None
 async def test_embedding_search_refuses_reranker() -> None:
     with pytest.raises(ValueError, match="reranker"):
         await embedding_search(
-            CandidateSpec(name="r", reranker="x"), encode=_fake_encode, count=_count, window=40
+            CandidateSpec(name="r", search_method="cosine", reranker="x"),
+            encode=_fake_encode,
+            count=_count,
+            window=40,
         )
 
 
@@ -295,7 +365,8 @@ async def test_retrieve_search_maps_passage_and_legacy_rows() -> None:
         ]
 
     search = retrieve_search(tenant_id=tenant, retrieve_fn=fake_retrieve)
-    result = await search("q", 4)
+    assert search.method == "retrieve"
+    result = await search.run("q", 4)
     assert seen == {"tenant_id": tenant, "query": "q", "source": "kb", "limit": 4}
     assert result.hits == [
         PassageHit("a", ("A", "Ports"), "p1"),

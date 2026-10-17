@@ -309,23 +309,33 @@ expected heading and holds every answer term; every harmful entry is
 stale or conflicting. A broken fixture fails at load time.
 
 **Candidates** (`passage_bench.py`, `CandidateSpec`). A candidate names
-what it changes: `embedding_model`, `query_prefix`, `passage_prefix`,
-`reranker`. `BASELINE_CANDIDATE` is the unchanged default.
+what it changes: `search_method`, `embedding_model`, `query_prefix`,
+`passage_prefix`, `reranker`. `search_method` is how it ranks:
+`"retrieve"` is the production path (keyword plus vector search with
+rank fusion), `"cosine"` ranks by vector similarity only.
+`BASELINE_CANDIDATE` is the unchanged default: default model, no
+prefixes, no reranker, `search_method="retrieve"`. A cosine-only run of
+the default model is a candidate of its own, never the baseline.
 `reembed_corpus=True` is required whenever the model or the passage
 prefix changes, also for a model with the same vector size (for example
 `intfloat/multilingual-e5-small`, 384 dimensions, which needs
 `"query: "` / `"passage: "` prefixes and cuts text at 512 tokens).
 Vectors from two models are not comparable.
 
-**Searches.** `run_passage_bench` takes `(CandidateSpec, search)` pairs;
-the first must be the baseline. Two search builders ship:
+**Searches.** `run_passage_bench` takes `(CandidateSpec, PassageSearch)`
+pairs. A `PassageSearch` carries its `method` and the search function;
+the run refuses a pair whose spec and search disagree on the method.
+The first pair must be the baseline, so its search must be the
+production `"retrieve"` path. Two search builders ship:
 
 - `retrieve_search` runs the production `retrieve(source="kb")` and
   reads slug and heading path from the `kb_passage` locator. The
-  fixtures must be ingested into the tenant first.
+  fixtures must be ingested into the tenant first. Tests inject a fake
+  `retrieve_fn` or a scripted search labelled `"retrieve"`.
 - `embedding_search` splits every fixture entry with `chunk_markdown`,
   embeds the **whole** corpus with the candidate's model and passage
-  prefix, and ranks by cosine. The window shrinks by the prefix's
+  prefix, and ranks by cosine only. Its candidate must set
+  `search_method="cosine"`. The window shrinks by the prefix's
   tokens, so prefix plus passage still fits. Queries get the query
   prefix. For a real run pass `EmbeddingService(model, cache_dir).encode`
   and its `passage_tokenizer()`. Tests pass a fake encoder, so no model
@@ -338,8 +348,12 @@ the first must be the baseline. Two search builders ship:
   expected heading (the passage an agent would cite).
 - `answer_support` — share of answer terms in that passage.
 - `harm_rate` — a stale or conflicting entry ranks above the first
-  correct passage. For `no_match`, any returned evidence counts as harm;
-  retrieval has no score cutoff, so the baseline is expected to be 1.0.
+  correct answer passage (an expected entry under the expected heading).
+  A hit from the right entry but the wrong section does not count as
+  correct, so a stale answer below it is still harm. With no correct
+  answer passage in the top `k`, any harmful hit counts. For `no_match`,
+  any returned evidence counts as harm; retrieval has no score cutoff,
+  so the baseline is expected to be 1.0.
 - `latency_p95_ms`, `bytes_mean`, `bytes_p95`, `calls`.
 
 The report (`PassageBenchReport`) holds only labels and numbers. It

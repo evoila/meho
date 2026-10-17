@@ -19,13 +19,18 @@ How a run works
 ---------------
 
 1. The caller passes a list of ``(CandidateSpec, PassageSearch)``
-   pairs. The first one must be the default baseline.
+   pairs. The first one must be the default baseline: the default
+   model, no prefixes, no reranker, and the production search method
+   (``search_method="retrieve"``, keyword plus vector search with rank
+   fusion). A spec and its search must agree on the method.
 2. For each candidate, every fixture query runs once through its
    search. The run times each call and counts bytes and calls.
 3. Each query is scored: correct source, correct cited passage, answer
-   terms in that passage, and harm (a stale or conflicting entry ranked
-   above the first correct passage, or any evidence for a ``no_match``
-   query).
+   terms in that passage, and harm. Harm means a stale or conflicting
+   entry ranked above the first correct answer passage (an expected
+   entry under the expected heading). When no correct answer passage
+   is returned, any stale or conflicting entry counts as harm. For a
+   ``no_match`` query, any evidence counts as harm.
 4. Scores are grouped by ``(scenario, language)``. The report holds
    only labels and numbers, never a query or a body.
 
@@ -33,11 +38,14 @@ Two search builders are included:
 
 * :func:`retrieve_search` runs the production
   :func:`~meho_backplane.retrieval.retriever.retrieve` with
-  ``source="kb"``. It needs the fixtures ingested into a tenant.
+  ``source="kb"``. It needs the fixtures ingested into a tenant. It is
+  the only search method a baseline may use.
 * :func:`embedding_search` re-embeds the whole fixture corpus in memory
-  with the candidate's model and prefixes, then ranks by cosine. It
-  needs only an ``encode`` function, so tests pass a fake one and no
-  model is downloaded.
+  with the candidate's model and prefixes, then ranks by cosine only.
+  That is not the production ranking, so its candidate must say
+  ``search_method="cosine"`` and can never be the baseline. It needs
+  only an ``encode`` function, so tests pass a fake one and no model is
+  downloaded.
 """
 
 from __future__ import annotations
@@ -47,6 +55,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
@@ -75,6 +84,7 @@ __all__ = [
     "PassageSearch",
     "PassageSearchResult",
     "PassageStratum",
+    "SearchMethod",
     "embedding_search",
     "retrieve_search",
     "run_passage_bench",
@@ -98,14 +108,30 @@ class PassageSearchResult:
     calls: int = 1
 
 
-#: A search under test: ``(query, k) -> ranked passages``.
-PassageSearch = Callable[[str, int], Awaitable[PassageSearchResult]]
+#: How a search ranks passages. ``"retrieve"`` is the production path:
+#: keyword plus vector search with rank fusion. ``"cosine"`` ranks by
+#: vector similarity only.
+SearchMethod = Literal["retrieve", "cosine"]
+
+
+@dataclass(frozen=True)
+class PassageSearch:
+    """A search under test: its ranking method and ``(query, k) -> ranked passages``."""
+
+    method: SearchMethod
+    run: Callable[[str, int], Awaitable[PassageSearchResult]]
+
 
 Encode = Callable[[list[str]], Awaitable[list[list[float]]]]
 
 
 class CandidateSpec(BaseModel):
     """What a candidate changes compared with the default retrieval.
+
+    ``search_method`` names how the candidate ranks. The production
+    path (``"retrieve"``) combines keyword and vector search. A
+    cosine-only ranking is a change of its own and is never the
+    baseline, even with the default model.
 
     ``reembed_corpus`` must be ``True`` whenever the model or the
     passage prefix differs from the default. This holds even when the
@@ -116,6 +142,7 @@ class CandidateSpec(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     name: str
+    search_method: SearchMethod = "retrieve"
     embedding_model: str = DEFAULT_EMBEDDING_MODEL
     query_prefix: str = ""
     passage_prefix: str = ""
@@ -137,7 +164,8 @@ class CandidateSpec(BaseModel):
     def is_baseline(self) -> bool:
         """``True`` when this is the unchanged default retrieval."""
         return (
-            self.embedding_model == DEFAULT_EMBEDDING_MODEL
+            self.search_method == "retrieve"
+            and self.embedding_model == DEFAULT_EMBEDDING_MODEL
             and self.query_prefix == ""
             and self.passage_prefix == ""
             and self.reranker is None
@@ -211,6 +239,28 @@ def _unique_slugs(hits: Sequence[PassageHit]) -> list[str]:
     return slugs
 
 
+def _under_expected_heading(hit: PassageHit, query: KbPassageQuery) -> bool:
+    return hit.heading_path[-1:] == (query.expected_heading,)
+
+
+def _harm(query: KbPassageQuery, hits: list[PassageHit]) -> float:
+    """``1.0`` when a harmful entry ranks above the first correct answer passage.
+
+    The correct answer passage is a hit from an expected entry under the
+    expected heading. A hit from an expected entry but the wrong section
+    does not count: it does not answer the task, so a stale answer below
+    it is still harmful. Without any correct answer passage, every
+    harmful hit counts.
+    """
+    expected = set(query.expected_slugs)
+    correct = next(
+        (i for i, h in enumerate(hits) if h.slug in expected and _under_expected_heading(h, query)),
+        len(hits),
+    )
+    harmful = set(query.harmful_slugs)
+    return 1.0 if any(h.slug in harmful for h in hits[:correct]) else 0.0
+
+
 def _score(
     query: KbPassageQuery, hits: list[PassageHit], latency_ms: float, calls: int, k: int
 ) -> _QueryScore:
@@ -219,19 +269,17 @@ def _score(
         harm = 1.0 if hits else 0.0
         return _QueryScore(None, None, None, None, harm, latency_ms, size, calls)
     expected = set(query.expected_slugs)
-    harmful = set(query.harmful_slugs)
     first = next((i for i, h in enumerate(hits) if h.slug in expected), None)
     slugs = _unique_slugs(hits)
     source = coverage_at_k(slugs, query.expected_slugs, k=k)
     rr = reciprocal_rank(slugs, query.expected_slugs)
+    harm = _harm(query, hits)
     if first is None:
-        harm = 1.0 if any(h.slug in harmful for h in hits) else 0.0
         return _QueryScore(source, rr, 0.0, 0.0, harm, latency_ms, size, calls)
     cited = hits[first]
-    selected = 1.0 if cited.heading_path[-1:] == (query.expected_heading,) else 0.0
+    selected = 1.0 if _under_expected_heading(cited, query) else 0.0
     text = cited.text.casefold()
     answer = mean_metric(1.0 if t.casefold() in text else 0.0 for t in query.answer_terms)
-    harm = 1.0 if any(h.slug in harmful for h in hits[:first]) else 0.0
     return _QueryScore(source, rr, selected, answer, harm, latency_ms, size, calls)
 
 
@@ -267,7 +315,7 @@ async def _run_candidate(
     groups: dict[tuple[str, str], list[_QueryScore]] = {}
     for query in fixtures.queries:
         started = clock()
-        result = await search(query.query, k)
+        result = await search.run(query.query, k)
         latency_ms = (clock() - started) * 1000.0
         score = _score(query, result.hits[:k], latency_ms, result.calls, k)
         groups.setdefault((query.scenario, query.language), []).append(score)
@@ -288,10 +336,20 @@ async def run_passage_bench(
     ------
     ValueError
         The list is empty, the first candidate is not the default
-        baseline, or two candidates share a name.
+        baseline (default settings on the production ``"retrieve"``
+        search), a spec and its search disagree on the search method,
+        or two candidates share a name.
     """
     if not candidates or not candidates[0][0].is_baseline:
-        raise ValueError("the first candidate must be the default baseline")
+        raise ValueError(
+            "the first candidate must be the default baseline on the production retrieve search"
+        )
+    for spec, search in candidates:
+        if spec.search_method != search.method:
+            raise ValueError(
+                f"candidate {spec.name!r} says search_method={spec.search_method!r} "
+                f"but its search ranks by {search.method!r}"
+            )
     names = [spec.name for spec, _ in candidates]
     if len(set(names)) != len(names):
         raise ValueError("candidate names must be unique")
@@ -305,9 +363,11 @@ def retrieve_search(
 ) -> PassageSearch:
     """Search through the production ``retrieve(source="kb")`` path.
 
-    Passage rows carry their slug and heading path in the
-    ``kb_passage`` metadata (#3761). A legacy whole-entry row has its
-    slug as ``source_id`` and no heading path.
+    This is the ``"retrieve"`` search method: keyword plus vector search
+    with rank fusion, as production runs it. Passage rows carry their
+    slug and heading path in the ``kb_passage`` metadata (#3761). A
+    legacy whole-entry row has its slug as ``source_id`` and no heading
+    path.
     """
     rfn: RetrieveCallable = retrieve_fn if retrieve_fn is not None else retrieve
 
@@ -322,7 +382,7 @@ def retrieve_search(
                 out.append(PassageHit(hit.source_id, (), hit.body))
         return PassageSearchResult(out)
 
-    return search
+    return PassageSearch("retrieve", search)
 
 
 async def embedding_search(
@@ -335,6 +395,10 @@ async def embedding_search(
 ) -> PassageSearch:
     """Re-embed the whole fixture corpus for *candidate*; return a cosine search.
 
+    This ranks by vector similarity only, without the keyword search and
+    rank fusion of the production path. The candidate must say so with
+    ``search_method="cosine"``; such a candidate is never the baseline.
+
     Every entry is split with the production chunker. The window is
     made smaller by the passage prefix's tokens, so ``prefix + passage``
     still fits the model. Passages get ``passage_prefix`` and queries get
@@ -345,8 +409,13 @@ async def embedding_search(
     Raises
     ------
     ValueError
-        The candidate names a reranker; this search does not run one.
+        The candidate does not declare ``search_method="cosine"``, or it
+        names a reranker; this search does not run one.
     """
+    if candidate.search_method != "cosine":
+        raise ValueError(
+            f"candidate {candidate.name!r} must set search_method='cosine' for embedding_search"
+        )
     if candidate.reranker is not None:
         raise ValueError("embedding_search does not run a reranker; pass your own search")
     fx = fixtures if fixtures is not None else load_kb_passage_fixtures()
@@ -367,7 +436,7 @@ async def embedding_search(
         ]
         return PassageSearchResult(hits)
 
-    return search
+    return PassageSearch("cosine", search)
 
 
 def _cosine(a: list[float], b: list[float]) -> float:

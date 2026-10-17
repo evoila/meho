@@ -18,7 +18,9 @@
 # * `answer_terms` must appear in the answer passage. They stand in for
 #   "the agent could answer the task from this passage".
 # * `harmful_slugs` are stale or conflicting entries. Ranking one above
-#   the first correct passage counts as harm.
+#   the first correct passage (an expected entry under the expected
+#   heading) counts as harm. Without any correct passage in the results,
+#   any harmful entry counts as harm.
 # * `no_match` queries have no answer in the corpus.
 
 version: 1

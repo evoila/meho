@@ -232,6 +232,9 @@ def test_resources_read_returns_retrieval_hit_shape(
     # without it a user-scoped memory row written by another principal in
     # the same tenant would leak here.
     assert call_kwargs["principal_sub"] == op.sub
+    # Every source is searched, so the Memory eligibility (#3741) applies.
+    assert call_kwargs["memory_eligibility"].principal_sub == op.sub
+    assert call_kwargs["memory_eligibility"].tenant_id == op.tenant_id
 
 
 def test_resources_read_empty_query_is_invalid_params(

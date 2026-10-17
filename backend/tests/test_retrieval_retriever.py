@@ -364,6 +364,7 @@ async def test_retrieve_threads_metadata_filters_to_candidate_helpers() -> None:
         kind: str | None,
         metadata_filters_json: str | None,
         principal_sub: str | None,
+        memory_kinds: list[str] | None = None,
     ) -> list[Any]:
         captured_bm25["metadata_filters_json"] = metadata_filters_json
         return []
@@ -376,6 +377,7 @@ async def test_retrieve_threads_metadata_filters_to_candidate_helpers() -> None:
         kind: str | None,
         metadata_filters_json: str | None,
         principal_sub: str | None,
+        memory_kinds: list[str] | None = None,
     ) -> list[Any]:
         captured_cosine["metadata_filters_json"] = metadata_filters_json
         return []
@@ -439,6 +441,7 @@ async def test_retrieve_passes_none_metadata_filters_by_default() -> None:
         kind: str | None,
         metadata_filters_json: str | None,
         principal_sub: str | None,
+        memory_kinds: list[str] | None = None,
     ) -> list[Any]:
         captured_bm25["metadata_filters_json"] = metadata_filters_json
         return []
@@ -487,6 +490,7 @@ async def test_retrieve_normalises_empty_dict_to_none() -> None:
         kind: str | None,
         metadata_filters_json: str | None,
         principal_sub: str | None,
+        memory_kinds: list[str] | None = None,
     ) -> list[Any]:
         captured["metadata_filters_json"] = metadata_filters_json
         return []
@@ -536,6 +540,7 @@ async def test_retrieve_serialises_metadata_filters_with_sorted_keys() -> None:
         kind: str | None,
         metadata_filters_json: str | None,
         principal_sub: str | None,
+        memory_kinds: list[str] | None = None,
     ) -> list[Any]:
         payloads.append(metadata_filters_json)
         return []

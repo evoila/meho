@@ -95,6 +95,7 @@ from meho_backplane.mcp.registry import (
     register_mcp_resource,
 )
 from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.memory.rbac import MemoryRbacResolver
 from meho_backplane.retrieval.retriever import retrieve
 
 #: Default hit ceiling for the resource read. The URI template carries no
@@ -166,6 +167,9 @@ async def _retrieve_handler(
         query=query,
         limit=_DEFAULT_LIMIT,
         principal_sub=operator.sub,
+        # Every source is searched, so Memory rows are candidates: apply the
+        # Memory service's typed eligibility in the candidate SQL (#3741).
+        memory_eligibility=MemoryRbacResolver().eligibility(operator),
     )
 
     structlog.contextvars.bind_contextvars(audit_hit_count=len(hits))

@@ -59,7 +59,7 @@ Each scope's `documents` row carries:
 | `forget(operator, scope, slug, target_name=None) -> bool` | Natural-key `select` + `delete`. Returns whether a row existed (idempotent — re-forgetting an already-absent slug is `False`, not an error). | `DELETE /api/v1/memory/{scope}/{slug}`, `meho forget` |
 | `recall(operator, scope, slug, target_name=None) -> MemoryEntry \| None` | Natural-key `select`. Collapses "not found" and "RBAC denied" into the same `None` return — see the info-leak section below. Read-side expiry filter (rows with past `expires_at` surface as `None` until G5.2's reaper deletes them). | `GET /api/v1/memory/{scope}/{slug}`, `meho://memory/{scope}/{slug}`, `meho recall <scope>/<slug>` |
 | `list_memories(operator, scope=None, slug_pattern=None, tag=None, include_expired=False, limit=100) -> list[MemoryEntry]` | `select(Document)` scoped to `source="memory"` and the operator's `visible_kinds`, ordered `updated_at desc`. SQL-side filter on `tenant_id` + `kind`; in-process filter on `user_sub` (user-scoped RBAC), `slug_pattern` (substring), `tag` (membership in `metadata.tags`), and `expires_at` (`include_expired=False` default). | `GET /api/v1/memory`, `meho list` |
-| `search_memories(operator, query, scope=None, limit=10) -> list[MemoryEntrySearchHit]` | `retrieve()` (G0.4-T4) with `source="memory"` pinned and optional `kind=memory-<scope>`. Adapts `RetrievalHit` → `MemoryEntrySearchHit` (slug instead of source_id, per-signal `bm25_score` / `cosine_score` / ranks carried). Post-filters via `MemoryRbacResolver.can_read` so an operator's search never surfaces another operator's user-scoped row. | `search_memory` (MCP), `meho recall --query` |
+| `search_memories(operator, query, scope=None, limit=10) -> list[MemoryEntrySearchHit]` | One `retrieve()` (G0.4-T4) call with `source="memory"` and a frozen `MemoryEligibility` (tenant, principal, visible kinds; narrowed by `scope`). The SQL drops ineligible and expired rows before ranking (#3741), so there is no Python post-filter. Adapts `RetrievalHit` → `MemoryEntrySearchHit` (slug instead of source_id, per-signal `bm25_score` / `cosine_score` / ranks carried). | `search_memory` (MCP), `POST /api/v1/memory/search`, `meho recall --query` |
 
 The `recall` 404-vs-403 collapse is load-bearing: a caller cannot distinguish "no such memory" from "you don't have access" by the response shape. For user-flavoured scopes the operator's `sub` is in the `source_id` encoding, so another operator trying to recall someone else's slug gets `None` at the natural-key layer before RBAC is even consulted. The HTTP route (T2) renders both as 404, the MCP resource returns the same JSON-RPC `-32602` for both.
 
@@ -100,7 +100,7 @@ All four converge on `MemoryService`. None is a wrapper for another — each is 
 | `GET /api/v1/memory/{scope}/{slug}` | `operator` | Fetch one memory by natural key (`recall`). Optional `target_name` query param required for `user-target` / `target` scopes. 404 on both "not found" *and* "RBAC-denied" — the info-leak avoidance is the whole point of this surface shape. |
 | `DELETE /api/v1/memory/{scope}/{slug}` | `operator` | Idempotent: 204 whether the row existed or not (a 404-on-missing would let an operator probe for a slug they can't read). |
 
-There is **no memory search route** at `/api/v1/memory/search`. Memory-scoped search rides the G0.4-T5 `POST /api/v1/retrieve` route with `source="memory"` and optional `kind=memory-<scope>` — the same shape kb uses for its search.
+`POST /api/v1/memory/search` (`read_only` and up, #3741) runs `MemoryService.search_memories`, the same call the MCP `search_memory` tool makes. Body `{query, scope?, limit?}` (query 1-256 chars, limit 1-50, default 10; no scope = all five scopes). Response `{"hits": [MemoryEntrySearchHit]}` with no count, so "no match" and "only rows you may not see" look the same. Audit op id `memory.search`, class `read`.
 
 Every route binds two contextvars **before** the service call so the chassis [`AuditMiddleware`](../../backend/src/meho_backplane/audit.py) and the publish-on-write broadcast hook classify the row correctly: `audit_op_id` (one of `memory.remember` / `memory.list` / `memory.recall` / `memory.forget`) + `audit_op_class` (`"read"` for `memory.list` / `memory.recall`, `"write"` for the other two). The op-class is bound explicitly because the broadcast classifier's suffix table would not match `memory.recall` (no `.list` / `.get` / `.info` suffix), `memory.remember` (no `.create` suffix), or `memory.forget` (no `.delete` suffix) and they would fall through to the `other` bucket. `remember` / `forget` additionally bind `audit_scope` + `audit_slug` so the audit payload carries the natural-key coordinates. The body itself is **never** bound — the audit row is for the operation, not the content.
 
@@ -123,13 +123,13 @@ The URI template is a v0.2 simple-expansion shape — `target_name` is **not** i
 
 ### CLI (T4 #424)
 
-[`cli/internal/cmd/memory/`](../../cli/internal/cmd/memory/) — four **top-level** Cobra verbs. Each wraps one REST route (or, for `recall --query`, the retrieve route) and renders human-readable output or `--json`. Auth piggybacks on the token `meho login` wrote.
+[`cli/internal/cmd/memory/`](../../cli/internal/cmd/memory/) — four **top-level** Cobra verbs. Each wraps one REST route (`recall --query` uses `POST /api/v1/memory/search`) and renders human-readable output or `--json`. Auth piggybacks on the token `meho login` wrote.
 
 | Verb | Backend call | Role |
 |---|---|---|
 | `meho remember "body" [--scope SCOPE] [--slug SLUG] [--target NAME] [--tag T] [--ttl 7d] [--persist] [--json]` | `POST /api/v1/memory` | `operator` |
 | `meho recall <scope>/<slug> [--target NAME] [--json]` | `GET /api/v1/memory/{scope}/{slug}` | `operator` |
-| `meho recall --query "search terms" [--scope SCOPE] [--limit N] [--json]` | `POST /api/v1/retrieve` (`source="memory"` pinned) | `operator` |
+| `meho recall --query "search terms" [--scope SCOPE] [--limit N] [--json]` | `POST /api/v1/memory/search` | `read_only` |
 | `meho forget <scope>/<slug> [--target NAME] [--confirm] [--json]` | `DELETE /api/v1/memory/{scope}/{slug}` | `operator` |
 | `meho list [--scope SCOPE] [--tag T] [--include-expired] [--slug-pattern P] [--limit N] [--json]` | `GET /api/v1/memory` | `operator` |
 

@@ -63,8 +63,8 @@ Optional filters
 ``source`` (e.g. ``"kb"`` vs ``"memory"``) and ``kind``
 (e.g. ``"kb-entry"`` vs ``"memory-user"``) narrow within a tenant.
 G4's ``meho kb search`` calls ``retrieve(source="kb")``; G5's
-``meho recall`` calls ``retrieve(source="memory", kind="memory-user")``
-to scope to per-operator memories.
+Memory search calls ``retrieve(source="memory", memory_eligibility=...)``
+so Memory eligibility and expiry run inside the candidate SQL (#3741).
 
 ``metadata_filters`` (G4.4-T1 / #1177) narrows further by
 ``documents.doc_metadata`` JSONB containment. A flat ``{key: scalar}``
@@ -102,7 +102,7 @@ from datetime import datetime
 from typing import Any
 
 import structlog
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -113,6 +113,7 @@ from meho_backplane.retrieval.embedding import get_embedding_service
 __all__ = [
     "CANDIDATE_LIMIT",
     "RRF_K",
+    "MemoryEligibility",
     "RetrievalFacets",
     "RetrievalHit",
     "list_retrieval_facets",
@@ -201,6 +202,35 @@ class RetrievalHit(BaseModel):
     cosine_rank: int | None
 
 
+class MemoryEligibility(BaseModel):
+    """Which Memory rows one caller may rank, applied inside the candidate SQL.
+
+    The Memory service builds this (see
+    :meth:`meho_backplane.memory.rbac.MemoryRbacResolver.eligibility`); the
+    substrate only reads it. It is frozen, so nobody can widen it after it
+    is built. When :func:`retrieve` gets one, a ``source='memory'`` row is a
+    candidate only if all of these hold, before any ``LIMIT``:
+
+    * the row is in ``tenant_id`` (the substrate's tenant predicate);
+    * its ``kind`` is in ``kinds`` (the visible kinds, narrowed to one kind
+      when the caller picked a scope);
+    * a user-scoped kind carries ``user_sub == principal_sub``; tenant and
+      target kinds are shared with every principal in the tenant;
+    * its expiry is unset or a valid timestamp later than the database
+      server's ``now()`` (see :data:`_MEMORY_EXPIRY_PREDICATE_SQL`).
+
+    The expiry rule runs for every Memory candidate, with or without an
+    eligibility value, so no retrieve caller can rank an expired memory.
+    Rows from other sources are not affected.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    tenant_id: uuid.UUID
+    principal_sub: str = Field(min_length=1)
+    kinds: tuple[str, ...] = Field(min_length=1)
+
+
 # `retrieve` was already over the 100-line block limit on main: its length is
 # the parameter/contract docstring, not branching (executable body ~15 lines,
 # McCabe trivial). #1797 adds one parameter + a concise doc note, not
@@ -214,6 +244,7 @@ async def retrieve(
     session: AsyncSession | None = None,
     metadata_filters: dict[str, Any] | None = None,
     principal_sub: str | None = None,
+    memory_eligibility: MemoryEligibility | None = None,
 ) -> list[RetrievalHit]:
     """Hybrid BM25 + cosine retrieval with RRF fusion. Tenant-scoped.
 
@@ -267,6 +298,15 @@ async def retrieve(
         kinds and non-memory sources are unaffected. ``None`` (default)
         disables it for callers that scope by ``user_sub`` themselves or
         query non-principal sources.
+    memory_eligibility
+        The Memory service's typed eligibility for this caller (#3741).
+        When set, ``source='memory'`` candidates are limited to its
+        ``kinds`` and its ``principal_sub`` drives the per-principal
+        predicate, both inside the candidate SQL, so an ineligible row can
+        never take a candidate slot. Its ``tenant_id`` must equal
+        *tenant_id*, and *principal_sub* must be ``None`` or the same
+        value; a mismatch raises :class:`ValueError`. Memory expiry is
+        always enforced in SQL, even when this is ``None``.
 
     Returns
     -------
@@ -305,10 +345,11 @@ async def retrieve(
     SQLite path
     -----------
 
-    The PG-only ``to_tsvector`` / ``plainto_tsquery`` / ``<=>``
-    operators do not have SQLite analogues. The helper's behaviour
-    against SQLite is undefined; unit tests should mock the
-    embedding service and either pre-stage hits in the
+    There is no supported fallback: the Memory eligibility and expiry
+    predicates exist only in the PostgreSQL candidate SQL. The PG-only
+    ``to_tsvector`` / ``plainto_tsquery`` / ``<=>`` operators do not
+    have SQLite analogues. The helper's behaviour against SQLite is
+    undefined; unit tests should mock the embedding service and either pre-stage hits in the
     PG-real path (T6's integration test) or assert the RRF fusion
     math against a synthetic per-signal candidate set (this
     module's unit tests below).
@@ -322,15 +363,54 @@ async def retrieve(
     # filtering benefit. Treat ``{}`` as ``None`` at the boundary.
     if metadata_filters is not None and not metadata_filters:
         metadata_filters = None
+    memory_kinds = _memory_kinds_for(tenant_id, principal_sub, memory_eligibility)
+    if memory_eligibility is not None:
+        principal_sub = memory_eligibility.principal_sub
     if session is not None:
         return await _retrieve_in_session(
-            session, tenant_id, query, source, kind, limit, metadata_filters, principal_sub
+            session,
+            tenant_id,
+            query,
+            source,
+            kind,
+            limit,
+            metadata_filters,
+            principal_sub,
+            memory_kinds,
         )
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as owned_session:
         return await _retrieve_in_session(
-            owned_session, tenant_id, query, source, kind, limit, metadata_filters, principal_sub
+            owned_session,
+            tenant_id,
+            query,
+            source,
+            kind,
+            limit,
+            metadata_filters,
+            principal_sub,
+            memory_kinds,
         )
+
+
+def _memory_kinds_for(
+    tenant_id: uuid.UUID,
+    principal_sub: str | None,
+    memory_eligibility: MemoryEligibility | None,
+) -> list[str] | None:
+    """Check *memory_eligibility* against the call and return its kinds bind.
+
+    ``None`` means "no Memory kind limit" (the caller passed no
+    eligibility). A tenant or principal that does not match the call is a
+    programming error, so it fails loudly instead of quietly picking one.
+    """
+    if memory_eligibility is None:
+        return None
+    if memory_eligibility.tenant_id != tenant_id:
+        raise ValueError("memory_eligibility.tenant_id does not match tenant_id")
+    if principal_sub is not None and principal_sub != memory_eligibility.principal_sub:
+        raise ValueError("principal_sub does not match memory_eligibility.principal_sub")
+    return list(memory_eligibility.kinds)
 
 
 async def _retrieve_in_session(
@@ -342,6 +422,7 @@ async def _retrieve_in_session(
     limit: int,
     metadata_filters: dict[str, Any] | None,
     principal_sub: str | None,
+    memory_kinds: list[str] | None,
 ) -> list[RetrievalHit]:
     """Inner implementation -- runs the two candidate queries + RRF fusion.
 
@@ -369,11 +450,20 @@ async def _retrieve_in_session(
     )
 
     bm25_rows = await _bm25_candidates(
-        session, tenant_id, query, source, kind, metadata_filters_json, principal_sub
+        session, tenant_id, query, source, kind, metadata_filters_json, principal_sub, memory_kinds
     )
     cosine_rows = await _cosine_candidates(
-        session, tenant_id, embedding_literal, source, kind, metadata_filters_json, principal_sub
+        session,
+        tenant_id,
+        embedding_literal,
+        source,
+        kind,
+        metadata_filters_json,
+        principal_sub,
+        memory_kinds,
     )
+    if memory_kinds is not None and source in (None, _MEMORY_SOURCE):
+        await _log_unreadable_memory_expiry(session, tenant_id, principal_sub, memory_kinds)
 
     # Log keys (not values) so structlog never carries tenant-shaped
     # metadata into the application log. The audit payload uses the
@@ -461,12 +551,64 @@ _PRINCIPAL_PREDICATE_SQL: str = """
             OR metadata ->> 'user_sub' = :principal_sub
           )"""
 
+#: Memory eligibility predicate (#3741), inlined verbatim into both
+#: candidate queries so it runs **before** each signal's ``LIMIT``. An
+#: expired or ineligible Memory row can therefore never take a candidate
+#: slot from an eligible one. Rows from other sources pass untouched.
+#:
+#: * ``:memory_kinds`` -- the :class:`MemoryEligibility` kinds, or NULL
+#:   when the caller passed no eligibility (no kind limit).
+#: * Expiry uses the database server's ``now()`` (transaction start), never
+#:   a client clock, and is enforced for every Memory row:
+#:
+#:   - missing key or JSON ``null`` -> not expired (legacy rows and
+#:     persistent memories);
+#:   - the value must look like an ISO 8601 timestamp (the shape regex) and
+#:     be valid ``timestamptz`` input (``pg_input_is_valid``, PostgreSQL 16+,
+#:     never raises). This rejects ``now``, ``today``, ``epoch``,
+#:     ``infinity`` and garbage, which are then treated as **expired**;
+#:   - a value with an offset (``Z`` / ``+00:00`` / ``+05:30``) is compared
+#:     as the instant it names;
+#:   - a value without an offset is read as UTC, the same rule
+#:     :func:`meho_backplane.memory._internal.metadata_datetime` uses. It
+#:     is cast to ``timestamp`` (not ``timestamptz``) so the session
+#:     ``TimeZone`` cannot change the answer.
+#:
+#: ``CASE`` evaluates its arms in order, so the casts only ever see input
+#: the guards accepted -- a malformed value cannot abort the query.
+#: Same literal-``text()`` discipline as :data:`_PRINCIPAL_PREDICATE_SQL`;
+#: :func:`_assert_predicate_inlined` pins the copies together.
+_MEMORY_ELIGIBILITY_PREDICATE_SQL: str = r"""
+      AND (
+        source <> 'memory'
+        OR (
+          (CAST(:memory_kinds AS text[]) IS NULL
+           OR kind = ANY(CAST(:memory_kinds AS text[])))
+          AND CASE
+            WHEN metadata ->> 'expires_at' IS NULL THEN true
+            WHEN metadata ->> 'expires_at'
+                 !~ '^\d{4}-\d\d-\d\d[T ]\d\d:\d\d(:\d\d([.]\d{1,6})?)?(Z|[+-]\d\d(:?\d\d)?)?$'
+              THEN false
+            WHEN NOT pg_input_is_valid(metadata ->> 'expires_at', 'timestamptz') THEN false
+            WHEN metadata ->> 'expires_at' ~ '(Z|[+-]\d\d(:?\d\d)?)$'
+              THEN CAST(metadata ->> 'expires_at' AS timestamptz) > now()
+            ELSE CAST(metadata ->> 'expires_at' AS timestamp) > timezone('UTC', now())
+          END
+        )
+      )"""
+
+#: The ISO 8601 shape check, shared by the eligibility predicate and the
+#: unreadable-expiry diagnostic query. Pinned by :func:`_assert_predicate_inlined`.
+_MEMORY_EXPIRY_SHAPE_SQL: str = (
+    r"'^\d{4}-\d\d-\d\d[T ]\d\d:\d\d(:\d\d([.]\d{1,6})?)?(Z|[+-]\d\d(:?\d\d)?)?$'"
+)
+
 # BM25 candidate query. Fully-literal ``text("...")`` (no f-string) so the
 # ``avoid-sqlalchemy-text`` SAST rule stays clean; the per-principal
 # predicate is inlined verbatim from :data:`_PRINCIPAL_PREDICATE_SQL` and
 # pinned to it at module load by :func:`_assert_predicate_inlined`.
 _BM25_CANDIDATES_SQL = text(
-    """
+    r"""
     SELECT id, ts_rank_cd(
         to_tsvector('english', body),
         plainto_tsquery('english', :query)
@@ -483,6 +625,23 @@ _BM25_CANDIDATES_SQL = text(
         OR kind NOT IN ('memory-user', 'memory-user-tenant', 'memory-user-target')
         OR metadata ->> 'user_sub' = :principal_sub
       )
+      AND (
+        source <> 'memory'
+        OR (
+          (CAST(:memory_kinds AS text[]) IS NULL
+           OR kind = ANY(CAST(:memory_kinds AS text[])))
+          AND CASE
+            WHEN metadata ->> 'expires_at' IS NULL THEN true
+            WHEN metadata ->> 'expires_at'
+                 !~ '^\d{4}-\d\d-\d\d[T ]\d\d:\d\d(:\d\d([.]\d{1,6})?)?(Z|[+-]\d\d(:?\d\d)?)?$'
+              THEN false
+            WHEN NOT pg_input_is_valid(metadata ->> 'expires_at', 'timestamptz') THEN false
+            WHEN metadata ->> 'expires_at' ~ '(Z|[+-]\d\d(:?\d\d)?)$'
+              THEN CAST(metadata ->> 'expires_at' AS timestamptz) > now()
+            ELSE CAST(metadata ->> 'expires_at' AS timestamp) > timezone('UTC', now())
+          END
+        )
+      )
       AND to_tsvector('english', body) @@ plainto_tsquery('english', :query)
     ORDER BY score DESC
     LIMIT :limit
@@ -492,7 +651,7 @@ _BM25_CANDIDATES_SQL = text(
 # Cosine candidate query -- same literal-``text`` convention and the same
 # inlined per-principal predicate as the BM25 statement above.
 _COSINE_CANDIDATES_SQL = text(
-    """
+    r"""
     SELECT id, 1 - (embedding <=> CAST(:emb AS vector)) AS score
     FROM documents
     WHERE tenant_id = :tenant_id
@@ -506,14 +665,65 @@ _COSINE_CANDIDATES_SQL = text(
         OR kind NOT IN ('memory-user', 'memory-user-tenant', 'memory-user-target')
         OR metadata ->> 'user_sub' = :principal_sub
       )
+      AND (
+        source <> 'memory'
+        OR (
+          (CAST(:memory_kinds AS text[]) IS NULL
+           OR kind = ANY(CAST(:memory_kinds AS text[])))
+          AND CASE
+            WHEN metadata ->> 'expires_at' IS NULL THEN true
+            WHEN metadata ->> 'expires_at'
+                 !~ '^\d{4}-\d\d-\d\d[T ]\d\d:\d\d(:\d\d([.]\d{1,6})?)?(Z|[+-]\d\d(:?\d\d)?)?$'
+              THEN false
+            WHEN NOT pg_input_is_valid(metadata ->> 'expires_at', 'timestamptz') THEN false
+            WHEN metadata ->> 'expires_at' ~ '(Z|[+-]\d\d(:?\d\d)?)$'
+              THEN CAST(metadata ->> 'expires_at' AS timestamptz) > now()
+            ELSE CAST(metadata ->> 'expires_at' AS timestamp) > timezone('UTC', now())
+          END
+        )
+      )
     ORDER BY embedding <=> CAST(:emb AS vector)
     LIMIT :limit
     """
 )
 
 
+#: Upper bound for the unreadable-expiry diagnostic count. The log line
+#: says "at least this many" past the cap, so the query stays cheap.
+_UNREADABLE_EXPIRY_LOG_CAP: int = 100
+
+# Diagnostic count of Memory rows the caller could otherwise see but whose
+# ``expires_at`` the eligibility predicate rejects as unreadable. Same
+# tenant / kind / principal limits as the candidate queries, so the number
+# never covers rows the caller is not allowed to know about. Bounded by
+# ``LIMIT :cap``. Literal ``text()`` like the statements above.
+_UNREADABLE_EXPIRY_COUNT_SQL = text(
+    r"""
+    SELECT count(*) AS unreadable
+    FROM (
+      SELECT 1
+      FROM documents
+      WHERE tenant_id = :tenant_id
+        AND source = 'memory'
+        AND kind = ANY(CAST(:memory_kinds AS text[]))
+        AND (
+          kind NOT IN ('memory-user', 'memory-user-tenant', 'memory-user-target')
+          OR metadata ->> 'user_sub' = :principal_sub
+        )
+        AND metadata ->> 'expires_at' IS NOT NULL
+        AND NOT (
+          metadata ->> 'expires_at'
+            ~ '^\d{4}-\d\d-\d\d[T ]\d\d:\d\d(:\d\d([.]\d{1,6})?)?(Z|[+-]\d\d(:?\d\d)?)?$'
+          AND pg_input_is_valid(metadata ->> 'expires_at', 'timestamptz')
+        )
+      LIMIT :cap
+    ) AS unreadable_rows
+    """
+)
+
+
 def _assert_predicate_inlined() -> None:
-    """Fail at import if a candidate query drifts from the predicate constant.
+    """Fail at import if a candidate query drifts from the predicate constants.
 
     The per-principal predicate lives once in
     :data:`_PRINCIPAL_PREDICATE_SQL` (the value the isolation test asserts
@@ -524,18 +734,26 @@ def _assert_predicate_inlined() -> None:
     not mirrored to the other is a loud ``ImportError`` rather than a
     silent isolation regression.
     """
-    needle = " ".join(_PRINCIPAL_PREDICATE_SQL.split())
+    principal = " ".join(_PRINCIPAL_PREDICATE_SQL.split())
+    eligibility = " ".join(_MEMORY_ELIGIBILITY_PREDICATE_SQL.split())
     for name, statement in (
         ("_BM25_CANDIDATES_SQL", _BM25_CANDIDATES_SQL),
         ("_COSINE_CANDIDATES_SQL", _COSINE_CANDIDATES_SQL),
     ):
         haystack = " ".join(str(statement.text).split())
-        if needle not in haystack:
+        if principal not in haystack or eligibility not in haystack:
             raise AssertionError(
-                f"{name} no longer contains the per-principal predicate "
-                "verbatim; it must stay byte-equivalent to "
-                "_PRINCIPAL_PREDICATE_SQL (see retriever.py)."
+                f"{name} no longer contains the per-principal and Memory "
+                "eligibility predicates verbatim; they must stay "
+                "byte-equivalent to _PRINCIPAL_PREDICATE_SQL and "
+                "_MEMORY_ELIGIBILITY_PREDICATE_SQL (see retriever.py)."
             )
+    for name, sql in (
+        ("_MEMORY_ELIGIBILITY_PREDICATE_SQL", _MEMORY_ELIGIBILITY_PREDICATE_SQL),
+        ("_UNREADABLE_EXPIRY_COUNT_SQL", str(_UNREADABLE_EXPIRY_COUNT_SQL.text)),
+    ):
+        if _MEMORY_EXPIRY_SHAPE_SQL not in sql:
+            raise AssertionError(f"{name} no longer contains _MEMORY_EXPIRY_SHAPE_SQL verbatim.")
 
 
 _assert_predicate_inlined()
@@ -549,6 +767,7 @@ async def _bm25_candidates(
     kind: str | None,
     metadata_filters_json: str | None,
     principal_sub: str | None,
+    memory_kinds: list[str] | None = None,
 ) -> Sequence[Any]:
     """Top :data:`CANDIDATE_LIMIT` BM25 candidates by ``ts_rank_cd``.
 
@@ -564,7 +783,9 @@ async def _bm25_candidates(
     mandatory per-principal predicate (:data:`_PRINCIPAL_PREDICATE_SQL`,
     inlined verbatim into :data:`_BM25_CANDIDATES_SQL`) is the last
     ``WHERE`` arm so ``source='memory'`` user-scoped rows the caller does
-    not own are excluded regardless of ``metadata_filters``.
+    not own are excluded regardless of ``metadata_filters``. The Memory
+    eligibility predicate (:data:`_MEMORY_ELIGIBILITY_PREDICATE_SQL`) follows
+    it, so expired or out-of-kind Memory rows are gone before ``LIMIT``.
     """
     result = await session.execute(
         _BM25_CANDIDATES_SQL,
@@ -575,6 +796,7 @@ async def _bm25_candidates(
             "kind": kind,
             "metadata_filters": metadata_filters_json,
             "principal_sub": principal_sub,
+            "memory_kinds": memory_kinds,
             "limit": CANDIDATE_LIMIT,
         },
     )
@@ -589,6 +811,7 @@ async def _cosine_candidates(
     kind: str | None,
     metadata_filters_json: str | None,
     principal_sub: str | None,
+    memory_kinds: list[str] | None = None,
 ) -> Sequence[Any]:
     """Top :data:`CANDIDATE_LIMIT` cosine candidates by pgvector distance.
 
@@ -602,7 +825,8 @@ async def _cosine_candidates(
     multi-key filter narrows both signals symmetrically; the mandatory
     per-principal predicate (:data:`_PRINCIPAL_PREDICATE_SQL`) is inlined
     verbatim into :data:`_COSINE_CANDIDATES_SQL` too, so neither signal
-    can surface a user-scoped memory row the caller does not own.
+    can surface a user-scoped memory row the caller does not own. The
+    Memory eligibility predicate is inlined the same way.
     """
     result = await session.execute(
         _COSINE_CANDIDATES_SQL,
@@ -613,10 +837,43 @@ async def _cosine_candidates(
             "kind": kind,
             "metadata_filters": metadata_filters_json,
             "principal_sub": principal_sub,
+            "memory_kinds": memory_kinds,
             "limit": CANDIDATE_LIMIT,
         },
     )
     return result.all()
+
+
+async def _log_unreadable_memory_expiry(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    principal_sub: str | None,
+    memory_kinds: list[str],
+) -> None:
+    """Log how many eligible-looking Memory rows had an unreadable expiry.
+
+    Those rows are already excluded by the candidate SQL. This only tells
+    an operator that some stored ``expires_at`` values need repair. The log
+    carries a capped count and the tenant id -- never a raw value, row id,
+    or principal.
+    """
+    result = await session.execute(
+        _UNREADABLE_EXPIRY_COUNT_SQL,
+        {
+            "tenant_id": str(tenant_id),
+            "memory_kinds": memory_kinds,
+            "principal_sub": principal_sub,
+            "cap": _UNREADABLE_EXPIRY_LOG_CAP,
+        },
+    )
+    unreadable = int(result.scalar_one())
+    if unreadable:
+        structlog.get_logger().warning(
+            "memory_expiry_unreadable_excluded",
+            tenant_id=str(tenant_id),
+            excluded_count=unreadable,
+            count_capped=unreadable >= _UNREADABLE_EXPIRY_LOG_CAP,
+        )
 
 
 async def _hydrate_hits(

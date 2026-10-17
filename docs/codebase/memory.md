@@ -199,68 +199,73 @@ are the real DB column values.
 
 ### Read path — search (`search_memories`)
 
-1. Translate the optional `MemoryScope` arg into a `kind` filter.
-2. Build a `metadata_filters` dict from the RBAC predicate
-   (`_metadata_filters_for_scope`). User-flavoured scopes
-   (`USER` / `USER_TENANT` / `USER_TARGET`) push
-   `{"user_sub": operator.sub}` into the substrate;
-   tenant/target-flavoured scopes pass `None` (within-tenant
-   RBAC is unconditional, and the substrate's `tenant_id`
-   predicate already enforces the tenant boundary).
-3. Call `meho_backplane.retrieval.retriever.retrieve` with
-   `source='memory'`, `kind=...`, `metadata_filters=...`, and
-   `principal_sub=operator.sub`. The `principal_sub` argument is
-   belt-and-suspenders: this path already pushes the `user_sub`
-   predicate down via `metadata_filters`, but the substrate's
-   mandatory per-principal predicate (the #1797 cross-principal-leak
-   fix — see `docs/codebase/retrieval.md`) re-enforces it at the
-   boundary, so a future change to `_metadata_filters_for_scope`
-   cannot silently reopen the leak. The
-   retriever runs a hybrid BM25 + cosine query, fuses with
-   Reciprocal Rank Fusion, and SELECTs the full `documents` row
-   for the top-fused ids. The `metadata_filters` dict is
-   translated to a PG `documents.doc_metadata @> :jsonb`
-   containment predicate that fires *before* the
-   50-candidate-per-signal budget is allocated — pre-migration
-   the budget could be burned on RBAC-invisible rows belonging
-   to other operators, returning an under-filled or empty result
-   even when matching memories existed deeper in the corpus.
-4. The `RetrievalHit` model carries every `documents` column the
-   downstream caller needs — including `created_at` /
-   `updated_at` — so memory does not re-query the table.
-5. For each hit, `_hit_to_search_result` extracts the
-   `MemoryEntry` fields, drops expired rows (range predicate;
-   see "Expiry note" below), and projects to a
-   `MemoryEntrySearchHit` that passes the substrate timestamps
-   through to `entry.created_at` / `entry.updated_at` verbatim.
-   RBAC is **not** rechecked here — the push-down at step 3
-   guarantees the rows are already operator-visible.
+Rule: **eligibility first, ranking second** (#3741). A memory the
+caller may not see, or one that has expired, must never take a
+candidate slot from one they may see.
 
-**Cross-scope (`scope=None`) fan-out (G4.4-T2 / #1179).** The
-substrate's `metadata_filters` is flat `@>` containment; it
-cannot express the conditional "user_sub must match for
-user-flavoured kinds, no predicate for tenant/target-flavoured
-kinds" predicate in a single call. `search_memories` resolves
-this by issuing one `retrieve` per visible `MemoryScope` and
-merging the per-call ranked lists on `fused_score` descending.
-RRF is rank-based and scale-invariant, so per-call scores live
-in the same `[0, 2/(RRF_K+1)]` envelope and cross-kind
-comparison is a total-order sort without renormalisation. The
-cost is a fixed 5× retrieve-volume increase on the cross-scope
-path; correctness (no candidate-budget burn on invisible rows)
-wins over volume on a workload that's already off the request
-hot path.
+1. `MemoryRbacResolver.eligibility(operator, scope)` builds one frozen
+   `MemoryEligibility` (defined in `retrieval/retriever.py`): the
+   operator's `tenant_id`, their `sub`, and the visible kinds. With
+   `scope=None` that is all five kinds (the documented default); a
+   scope narrows it to that one kind.
+2. `search_memories` makes **one** `retrieve(source="memory",
+   memory_eligibility=..., limit=limit)` call. The query is embedded
+   once, and all scopes rank in one pool. (The old per-kind fan-out
+   and the `metadata_filters` work-around are gone.)
+3. Both candidate SQL statements (BM25 and cosine) apply, before
+   their `LIMIT`:
+   * the tenant predicate;
+   * `kind = ANY(:memory_kinds)`;
+   * the per-principal predicate: a user-scoped kind needs
+     `metadata->>'user_sub' = principal`; tenant and target kinds are
+     shared across the tenant;
+   * the expiry predicate (below).
+4. The service maps each hit to a `MemoryEntrySearchHit`. It does
+   **not** filter again in Python, so a page is never under-filled.
+   Only a hit with an unknown kind is dropped (defensive).
 
-**Expiry note.** `expires_at > now()` is a *range* predicate
-and the T1 substrate (#1177) only expresses scalar containment
-via `@>`. `expires_at` therefore stays as a post-retrieval
-filter in `_hit_to_search_result` until a future Initiative
-broadens the substrate to support range predicates. The
-substrate-minimalism postulate forbids broadening T1's shape
-for one consumer; the `MEMORY_USER_DEFAULT_TTL_DAYS` setting
-plus the daily expiry reaper (`memory/expiry.py`) keep the
-expired-row pool small enough that the post-retrieval drop is
-a tolerable cost in practice.
+"No match" and "only rows you may not see" give the same answer: an
+empty `hits` list, with no count.
+
+**Expiry predicate (PostgreSQL 16).** It uses the database's `now()`,
+never a client clock, and runs for every `source='memory'` row in
+*every* `retrieve` call, even without an eligibility value:
+
+| Stored `expires_at` | Result |
+|---|---|
+| key missing, or JSON `null` | never expires (legacy rows, persistent memories) |
+| ISO 8601 with offset (`+00:00`, `Z`, `+05:30`) | compared as the instant it names |
+| ISO 8601 without offset | read as UTC (same as `metadata_datetime`), cast to `timestamp` so the session time zone cannot change it |
+| anything else (`now`, `today`, `epoch`, `infinity`, numbers, bad dates) | treated as expired, excluded |
+
+A guarded `CASE` checks the ISO shape with a regex and then
+`pg_input_is_valid(value, 'timestamptz')` before any cast, so a bad
+value can never abort the query. When a Memory search excludes
+unreadable values, the retriever logs
+`memory_expiry_unreadable_excluded` with the tenant id and a count
+capped at 100 — never a raw value. The count is limited to rows the
+caller could otherwise see.
+
+There is no SQLite fallback for search: the rules exist only in the
+PostgreSQL SQL. `tests/integration/test_memory_eligibility_pg.py`
+proves them on `pgvector/pgvector:pg16`.
+
+**Same front, same answer.** Three callers share this path:
+
+* MCP `search_memory` → `MemoryService.search_memories`.
+* REST `POST /api/v1/memory/search` (body `{query, scope?, limit?}`,
+  response `{hits: [MemoryEntrySearchHit]}` — the MCP shape) →
+  the same service call. Open to `read_only`, like other memory reads.
+  Audit op id `memory.search`, class `read`; the query text is not
+  stored.
+* CLI `meho recall --query` → the REST route above. `--scope`
+  narrows; no `--scope` searches all visible scopes. `--json` prints
+  the `MemorySearchResponse`.
+
+Generic `POST /api/v1/retrieve` and the `meho://retrieve/{query}`
+resource pass the same `MemoryEligibility` whenever Memory rows can
+be candidates (`source="memory"` or no source), so an all-source
+query cannot go around these rules. Other sources are unchanged.
 
 **G0.9.1-T4 (#776) fix.** Before v0.3.2 the search path substituted
 `EPOCH = datetime(1970, 1, 1, tzinfo=UTC)` for both timestamps and
@@ -288,18 +293,16 @@ marker.
   the embedding inline (no async-indexer fan-out in v0.3).
 * `meho_backplane.retrieval.retriever.retrieve` — read channel for
   `search_memories`. Returns a `RetrievalHit` list with the full
-  ORM row's fields, including the timestamps.
+  ORM row's fields, including the timestamps. Owns the
+  `MemoryEligibility` type and the SQL that enforces it.
 * `meho_backplane.memory.rbac.MemoryRbacResolver` — the scope ×
-  role matrix. Applied at write boundaries and at the
-  `list_memories` in-process filter. `search_memories` no longer
-  consults the resolver post-retrieval; G4.4-T2 (#1179) pushed
-  the `user_sub` predicate into the substrate via
-  `metadata_filters` so the SQL layer eliminates RBAC-invisible
-  rows before the candidate budget is allocated.
+  role matrix. Applied at write boundaries, at the `list_memories`
+  in-process filter, and — through `eligibility()` — as the input
+  the search SQL enforces before ranking.
 * `meho_backplane.memory.expiry` — background reaper for rows past
-  `doc_metadata.expires_at`. The read-side filter in
-  `list_memories` / `search_memories` masks expired rows in the
-  window between expiry and reap.
+  `doc_metadata.expires_at`. Between expiry and reap, `recall` /
+  `list_memories` hide expired rows in Python and search hides them
+  in SQL.
 * `meho_backplane.settings.Settings.memory_user_default_ttl_days` —
   env-var-controlled (`MEMORY_USER_DEFAULT_TTL_DAYS`), default 7. The
   shared `resolve_default_expires_at` resolver is the only reader;
@@ -320,9 +323,14 @@ marker.
   (single-digit RPS per tenant); a future re-architecture would
   hand off to a background indexer queue.
 * **Hybrid retrieval has no SQLite analogue.** `search_memories`
-  exercises PG-only operators (`@@`, `<=>`); the unit tests mock
-  the retrieve helper and the PG-real contract lives in
+  exercises PG-only operators (`@@`, `<=>`, `pg_input_is_valid`); the
+  unit tests mock the retrieve helper and the PG-real contract lives
+  in `tests/integration/test_memory_eligibility_pg.py` and
   `tests/acceptance/test_g51_memory_canary.py`.
+* **The expiry sweeper still compares strings.** `memory/expiry.py`
+  deletes rows by a text `<` against `now()` in ISO form. That is only
+  right for UTC values; search no longer depends on it, because the
+  search SQL parses the timestamp itself.
 * The MCP `add_to_memory` body field underwent a rename
   `content` -> `body` to align with `add_to_knowledge` and the REST
   `POST /api/v1/memory` body schema. G0.9.1-T7 (#779) shipped the
@@ -351,6 +359,8 @@ marker.
   `add_to_memory` path; lifts the resolver into `memory/ttl.py`.
 * Task #624 (G5.2-T2) — original default-TTL contract for the REST
   surface.
+* #3741 — Memory eligibility before ranking, `POST /api/v1/memory/search`,
+  CLI recall on the Memory service.
 * G0.9.1-T4 #776 — `search_memory` timestamp passthrough fix
   (the path documented under "Read path — search" above).
 * Best-practices: `python_best_practices.md` (don't duplicate

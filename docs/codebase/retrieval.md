@@ -14,8 +14,9 @@ This is the shared read path for:
 
 - **G4 `meho kb search`** — `retrieve(source="kb")`, surfaced via
   `KbService.search_entries` and the `search_knowledge` MCP tool.
-- **G5 `meho recall`** — `retrieve(source="memory", kind="memory-user")`,
-  surfaced via the memory service's `search_memory` path.
+- **G5 `meho recall --query`** — `retrieve(source="memory",
+  memory_eligibility=...)` through `MemoryService.search_memories`
+  (REST `POST /api/v1/memory/search` and the `search_memory` MCP tool).
 - **`POST /api/v1/retrieve`** — operator-facing diagnostic surface +
   cross-language consumer entrypoint.
 
@@ -72,6 +73,20 @@ Filter parameters narrow the candidate set in both signals symmetrically:
   #1797 cross-principal-leak fix: before it, `POST /api/v1/retrieve
   {source:"memory"}` and the MCP retrieve resource returned other
   principals' user-scoped memories within the same tenant.
+- `memory_eligibility` — a frozen `MemoryEligibility` (tenant,
+  principal, visible Memory kinds) built by
+  `MemoryRbacResolver.eligibility()` (#3741). When set, `source='memory'`
+  candidates are limited to its kinds and its principal drives the
+  per-principal predicate, inside both candidate queries, before
+  `LIMIT`. A tenant or principal that does not match the call raises
+  `ValueError`. Generic `POST /api/v1/retrieve` and the MCP retrieve
+  resource pass it whenever Memory rows can be candidates.
+- **Memory expiry is always enforced in SQL.** Every `source='memory'`
+  row must have no `expires_at`, or a valid ISO 8601 timestamp later
+  than the database `now()`. Malformed values, `now`, `epoch`, and
+  `infinity` are excluded through a guarded `CASE` with
+  `pg_input_is_valid` (PostgreSQL 16+), so they cannot abort the query.
+  Full table in `docs/codebase/memory.md`.
 
 ### `list_retrieval_facets(...)` (`meho_backplane.retrieval.retriever`)
 

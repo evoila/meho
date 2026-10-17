@@ -56,6 +56,7 @@ reason since the 1990s.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Sequence
 from typing import Final, Literal
 
@@ -68,6 +69,7 @@ __all__ = [
     "Verdict",
     "coverage_at_k",
     "mean_metric",
+    "percentile",
     "precision_at_k",
     "reciprocal_rank",
     "verdict",
@@ -260,6 +262,26 @@ def mean_metric(values: Iterable[float]) -> float:
     if not values_list:
         return 0.0
     return sum(values_list) / len(values_list)
+
+
+def percentile(values: Iterable[float], pct: float) -> float:
+    """Nearest-rank percentile of *values*; ``0.0`` for an empty input.
+
+    Used for p95 latency and byte counts in the KB passage benchmark
+    (#3765). Nearest rank always returns a measured value, never an
+    interpolated one, which keeps small-sample reports honest.
+
+    Raises
+    ------
+    ValueError
+        *pct* is not in ``(0, 100]``.
+    """
+    if not 0 < pct <= 100:
+        raise ValueError(f"pct must be in (0, 100]; got {pct}")
+    ordered = sorted(values)
+    if not ordered:
+        return 0.0
+    return ordered[math.ceil(pct / 100 * len(ordered)) - 1]
 
 
 def verdict(

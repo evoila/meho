@@ -280,6 +280,7 @@ from meho_backplane.checks.assertions import CheckState
 __all__ = [
     "AUDIT_EVENT_CLASSES",
     "EVENT_OUTBOX_NOTIFY_CHANNEL",
+    "KB_REVISION_ORIGINS",
     "KIND_SLUG_MAX_LENGTH",
     "KIND_SLUG_MIN_LENGTH",
     "KIND_SLUG_PATTERN",
@@ -308,6 +309,7 @@ __all__ = [
     "GraphNode",
     "GraphNodeHistory",
     "IdentityBudget",
+    "KbRevision",
     "OperationGroup",
     "RequestUsageEvent",
     "RunbookRun",
@@ -1048,6 +1050,86 @@ class Document(Base):
             "documents_body_hash_idx",
             "body_hash",
             postgresql_using="btree",
+        ),
+    )
+
+
+#: Closed set for :attr:`KbRevision.origin`. ``write`` rows were stored
+#: by a kb write. ``backfill-current`` rows were copied from the current
+#: kb entry by migration ``0110``; they are not historical versions.
+KB_REVISION_ORIGINS: tuple[str, ...] = ("write", "backfill-current")
+
+
+class KbRevision(Base):
+    """One retained, immutable body of a kb entry.
+
+    The :class:`Document` row with ``source="kb"`` stays the latest
+    head: it is what search and ``meho://kb/{slug}`` read, and a new
+    body overwrites it. Each time a kb write changes the body, the
+    service also adds one row here in the same transaction. The row
+    is never updated, so an older body stays readable by its revision
+    id after the head moves on. It ends only when the entry is
+    deleted (explicit delete, or a cascade from the ``documents`` row).
+
+    Columns:
+
+    * ``id`` -- the revision UUID used in
+      ``meho://kb/id/{entry}/revision/{revision}``.
+    * ``tenant_id`` -- owning tenant; every read filters on it.
+    * ``entry_id`` -- the ``documents.id`` of the kb entry (the entry
+      UUID). ``ON DELETE CASCADE`` so no revision outlives its entry.
+    * ``revision_number`` -- 1, 2, 3, ... per entry. The highest number
+      is the current revision. Unique per entry.
+    * ``body`` / ``body_hash`` -- the stored text and its SHA-256 hex.
+    * ``provenance`` -- the provenance block of the write (see
+      :mod:`meho_backplane.kb.provenance`); ``None`` when not recorded.
+    * ``origin`` -- one of :data:`KB_REVISION_ORIGINS`.
+    * ``embedding_model`` / ``chunker_version`` -- which embedding
+      model and chunking rule indexed this body. ``None`` on backfill
+      rows, because the migration cannot know them.
+    * ``created_at`` -- when the revision was stored.
+    """
+
+    __tablename__ = "kb_revision"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    entry_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    revision_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    body_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    # ``none_as_null`` stores ``None`` as SQL ``NULL``, matching migration 0110.
+    provenance: Mapped[dict[str, object] | None] = mapped_column(
+        JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql"),
+        nullable=True,
+    )
+    origin: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding_model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    chunker_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "kb_revision_entry_number_idx",
+            "entry_id",
+            "revision_number",
+            unique=True,
+        ),
+        sa.CheckConstraint(
+            "origin IN ('write', 'backfill-current')",
+            name="ck_kb_revision_origin",
         ),
     )
 

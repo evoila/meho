@@ -30014,6 +30014,12 @@
             "type": "string",
             "format": "date-time",
             "title": "Updated At"
+          },
+          "revision_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Revision Id"
           }
         },
         "type": "object",
@@ -30028,7 +30034,7 @@
           "updated_at"
         ],
         "title": "KbEntry",
-        "description": "One kb entry -- mirrors a row in the ``documents`` table.\n\nReturned by :meth:`KbService.get_entry`, :meth:`KbService.create_entry`,\nand (in list form) :meth:`KbService.list_entries`. ``slug`` is the\noperator-facing identifier (``documents.source_id`` on the SQL\nside); the underlying ``Document.id`` UUID is also surfaced for\ncross-correlation with audit-log rows and future MCP resource\nURIs."
+        "description": "One kb entry -- mirrors a row in the ``documents`` table.\n\nReturned by :meth:`KbService.get_entry`, :meth:`KbService.create_entry`,\nand (in list form) :meth:`KbService.list_entries`. ``slug`` is the\noperator-facing identifier (``documents.source_id`` on the SQL\nside); the underlying ``Document.id`` UUID is also surfaced for\ncross-correlation with audit-log rows and future MCP resource\nURIs. ``id`` is the entry UUID.\n\n``revision_id`` is the retained revision that holds this body. Pass\nit with ``id`` to ``meho://kb/id/{entry}/revision/{revision}`` to\nread this exact body later, even after the entry changes. It is\n``None`` only for a row that has no stored revision."
       },
       "KbEntryCreate": {
         "properties": {

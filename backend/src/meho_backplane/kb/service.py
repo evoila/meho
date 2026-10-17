@@ -44,6 +44,13 @@ Both paths stamp a provenance block (source kind, relative path,
 write time) through :mod:`meho_backplane.kb.provenance`. No absolute
 host path is stored.
 
+Both paths write through :func:`meho_backplane.kb.revisions.write_entry`:
+the ``documents`` row stays the latest head, and each changed body is
+also kept as an immutable ``kb_revision`` row in the same transaction.
+:meth:`KbService.get_revision` reads one exact revision;
+:meth:`KbService.delete_entry` removes the head and its revisions
+together.
+
 Tenant scoping
 --------------
 
@@ -85,7 +92,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Document
@@ -93,15 +100,20 @@ from meho_backplane.kb.attribution import merge_attribution
 from meho_backplane.kb.directory_ingest import KbIngestRootError
 from meho_backplane.kb.directory_ingest import ingest_directory as _ingest_directory
 from meho_backplane.kb.provenance import read_provenance, stamp_provenance
+from meho_backplane.kb.revisions import (
+    current_revision_id,
+    delete_entry_rows,
+    get_revision,
+    write_entry,
+)
 from meho_backplane.kb.schemas import (
-    KB_KIND_ENTRY,
     KB_SOURCE,
     KbEntry,
+    KbEntryRevision,
     KbEntrySearchHit,
     KbIngestionResult,
     validate_slug,
 )
-from meho_backplane.retrieval.indexer import index_document
 from meho_backplane.retrieval.retriever import retrieve
 
 __all__ = ["KbIngestRootError", "KbService"]
@@ -202,7 +214,7 @@ class KbService:
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
             stmt = (
-                select(Document)
+                select(Document, current_revision_id())
                 .where(
                     Document.tenant_id == tenant_id,
                     Document.source == KB_SOURCE,
@@ -215,9 +227,9 @@ class KbService:
                 stmt = stmt.where(Document.source_id.like(filter_pattern))
 
             result = await session.execute(stmt)
-            rows = result.scalars().all()
+            rows = result.all()
 
-        return [_doc_to_entry(row) for row in rows]
+        return [_doc_to_entry(doc, revision_id) for doc, revision_id in rows]
 
     async def get_entry(self, tenant_id: uuid.UUID, slug: str) -> KbEntry | None:
         """Return the full :class:`KbEntry` for *(tenant_id, slug)*; ``None`` if absent.
@@ -232,16 +244,33 @@ class KbService:
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
             result = await session.execute(
-                select(Document).where(
+                select(Document, current_revision_id()).where(
                     Document.tenant_id == tenant_id,
                     Document.source == KB_SOURCE,
                     Document.source_id == slug,
                 )
             )
-            row = result.scalar_one_or_none()
+            row = result.one_or_none()
         if row is None:
             return None
-        return _doc_to_entry(row)
+        doc, revision_id = row
+        return _doc_to_entry(doc, revision_id)
+
+    async def get_revision(
+        self,
+        tenant_id: uuid.UUID,
+        entry_id: uuid.UUID,
+        revision_id: uuid.UUID,
+    ) -> KbEntryRevision | None:
+        """Return one retained revision of an entry; ``None`` when not visible.
+
+        Backs ``meho://kb/id/{entry}/revision/{revision}``. The revision
+        must belong to *entry_id* and both must belong to *tenant_id*.
+        A foreign, deleted, mismatched or unknown id gives ``None`` --
+        the caller cannot tell these cases apart. Role checks stay with
+        the caller, as for every other method here.
+        """
+        return await get_revision(tenant_id, entry_id, revision_id)
 
     async def create_entry(
         self,
@@ -320,15 +349,13 @@ class KbService:
             ingested_at=datetime.now(UTC),
         )
 
-        doc = await index_document(
+        doc, revision_id = await write_entry(
             tenant_id=tenant_id,
-            source=KB_SOURCE,
-            source_id=slug,
-            kind=KB_KIND_ENTRY,
+            slug=slug,
             body=body,
             metadata=merged,
         )
-        return _doc_to_entry(doc), created
+        return _doc_to_entry(doc, revision_id), created
 
     async def delete_entry(self, tenant_id: uuid.UUID, slug: str) -> bool:
         """Delete the kb entry matching *(tenant_id, slug)*. Return whether it existed.
@@ -338,6 +365,12 @@ class KbService:
         enforced by the route layer -- this method assumes the
         caller is already authorised.
 
+        The entry's retained revisions are deleted in the same
+        transaction as the head row, so the body stops being searchable
+        and every ``meho://kb/id/...`` read of it stops working at the
+        same moment. If the delete fails, nothing is removed and the
+        error propagates; the caller can retry.
+
         Returns
         -------
         bool
@@ -345,24 +378,7 @@ class KbService:
             matched the natural key. The route layer translates
             ``False`` to 404.
         """
-        sessionmaker = get_sessionmaker()
-        async with sessionmaker() as session:
-            stmt = delete(Document).where(
-                Document.tenant_id == tenant_id,
-                Document.source == KB_SOURCE,
-                Document.source_id == slug,
-            )
-            result = await session.execute(stmt)
-            await session.commit()
-        # SQLAlchemy 2.x types DML execute() as ``Result[Any]`` whose
-        # ``rowcount`` is only typed on the concrete ``CursorResult``
-        # subclass. Casting through ``CursorResult`` is heavier than
-        # the simple ``getattr`` probe; the DML execute path always
-        # returns a cursor-shaped result on every supported driver
-        # (asyncpg + aiosqlite both honour the contract) so a bare
-        # access is correct at runtime, the cast just silences mypy.
-        rowcount: int = result.rowcount  # type: ignore[attr-defined]
-        return rowcount > 0
+        return await delete_entry_rows(tenant_id, slug)
 
     async def search_entries(
         self,
@@ -443,8 +459,8 @@ class KbService:
         ]
 
 
-def _doc_to_entry(doc: Document) -> KbEntry:
-    """Adapt a :class:`Document` ORM row to a :class:`KbEntry`.
+def _doc_to_entry(doc: Document, revision_id: uuid.UUID | None) -> KbEntry:
+    """Adapt a :class:`Document` ORM row and its current revision id to a :class:`KbEntry`.
 
     The kb-shaped vocabulary renames ``source_id`` to ``slug`` and
     drops the ``source`` / ``kind`` / ``body_hash`` / ``tokens`` /
@@ -460,6 +476,7 @@ def _doc_to_entry(doc: Document) -> KbEntry:
         provenance=read_provenance(doc.doc_metadata),
         created_at=doc.created_at,
         updated_at=doc.updated_at,
+        revision_id=revision_id,
     )
 
 

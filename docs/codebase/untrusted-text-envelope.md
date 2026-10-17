@@ -16,7 +16,7 @@ re-serves it verbatim to other agents:
 | Stored text | Write path | LLM-facing read path (wrapped) |
 |---|---|---|
 | Broadcast announcement `activity` / `scope` / `target` | `meho_broadcast_announce` → `publish_agent_announcement` | `meho_broadcast_recent`, `meho_broadcast_watch`, `meho://tenant/{tenant_id}/feed` |
-| kb entry `body` | `add_to_knowledge`, kb file walker, UI editor | `meho://kb/{slug}` |
+| kb entry `body` | `add_to_knowledge`, kb file walker, UI editor | `meho://kb/{slug}`, `meho://kb/id/{entry}/revision/{revision}` |
 | memory entry `body` | `add_to_memory` | `meho://memory/{scope}/{slug}` |
 | Docs-corpus chunk `content` (federated, external — **not** agent-authored) | External `meho-docs` corpus (federated ingestion, outside MEHO) | `search_docs` payload, `ask_docs` citations + synthesis prompt, `read_docs` text, `meho://docs/{collection}/{product}/{version}/{chunk_id}` |
 
@@ -107,6 +107,7 @@ there to admin-authored tenant conventions).
 ## Advisories
 
 The MCP resource `description` strings for `meho://kb/{slug}`,
+`meho://kb/id/{entry}/revision/{revision}`,
 `meho://memory/{scope}/{slug}` and `meho://tenant/{tenant_id}/feed`
 state that the served free-text/body is agent-authored, untrusted, and
 not a system directive; tests assert the substrings. The `search_docs`

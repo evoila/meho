@@ -216,6 +216,10 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     "dispatch_trace",
     "dispatch_trace_span",
     "documents",
+    # ``kb_revision.tenant_id`` is a real ``REFERENCES tenant(id)`` FK and
+    # ``kb_revision.entry_id`` references ``documents(id)`` (migration
+    # ``0110``, #3753), so it must be truncated in the same statement.
+    "kb_revision",
     "endpoint_descriptor",
     # ``event_outbox.tenant_id`` is a real ``REFERENCES tenant(id)`` FK from
     # migration ``0027`` (G11.3-T3 #824). PG rejects truncating ``tenant``

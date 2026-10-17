@@ -536,7 +536,7 @@ principal may still declare its own `work_ref`.
   UPDATE`) until commit, so two steps on one claim run one after the
   other: an `update` that waits behind a `completion` sees the completion
   row and gets `claim_completed`. Three partial unique indexes
-  (migration `0106`) back this up and also catch two requests that race
+  (migration `0108`) back this up and also catch two requests that race
   on the same retry key: one retry key per owner, one `start` per claim,
   one `completion` per claim. The lock is a PostgreSQL feature; SQLite
   (dev/test) drops it and relies on the indexes. The PostgreSQL test is
@@ -581,7 +581,7 @@ Columns: `id` (UUID
 PK), `tenant_id` (FK), `principal_sub`, `activity`, `target`, `scope`,
 `targets` (JSONB), `phase`, `planned_op_class`, `ttl_minutes`,
 `work_ref`, `run_id`, `created_at` (the event's `ts`), plus the trusted
-claim columns from migration `0106` (#3736): `claim_id`, `owner_sub`,
+claim columns from migration `0108` (#3736): `claim_id`, `owner_sub`,
 `actor_sub`, `admission`, `idempotency_key`, `stream_entry_id`. Indexes:
 `(tenant_id, created_at DESC)` (recent backfill + prune) and
 `(tenant_id, work_ref)` (filter). This is the split Kubernetes draws

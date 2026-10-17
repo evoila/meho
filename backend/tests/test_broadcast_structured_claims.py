@@ -46,6 +46,7 @@ from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.mcp.tools.broadcast import _handler_recent
 from meho_backplane.settings import get_settings
 from meho_backplane.untrusted_text import wrap_untrusted_text
+from tests.broadcast_admission_helpers import fake_stream_write, patch_agent_admission
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     build_operator,
@@ -78,6 +79,9 @@ def _isolated_broadcast_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[None
     monkeypatch.setenv("BROADCAST_ANNOUNCE_RATE_PER_MINUTE", "0")
     get_settings.cache_clear()
     reset_broadcast_client_for_testing()
+    # Publishing needs a trusted agent identity (#3736); admit every caller
+    # as an agent principal here (admission has its own test file).
+    patch_agent_admission(monkeypatch)
     with patch(
         "meho_backplane.mcp.tools.broadcast.enforce_announce_rate_limit",
         new=AsyncMock(return_value=None),
@@ -398,7 +402,7 @@ def test_announce_echoes_declared_claims_and_publishes_them(
     """The ack echoes declared claims; the XADD'd JSON carries them typed."""
     client, op = client_with_operator
     bc = get_broadcast_client()
-    with patch.object(bc, "xadd", new=AsyncMock(return_value="1747800000000-0")) as xa:
+    with fake_stream_write(bc, AsyncMock(return_value="1747800000000-0")) as xa:
         resp = post_mcp(
             client,
             _tools_call(
@@ -409,7 +413,6 @@ def test_announce_echoes_declared_claims_and_publishes_them(
                     "planned_op_class": "write",
                     "ttl_minutes": 30,
                     "work_ref": "gh:evoila/meho#123",
-                    "run_id": str(_RUN_ID),
                     "phase": "start",
                 },
             ),
@@ -423,7 +426,9 @@ def test_announce_echoes_declared_claims_and_publishes_them(
     assert result["planned_op_class"] == "write"
     assert result["ttl_minutes"] == 30
     assert result["work_ref"] == "gh:evoila/meho#123"
-    assert result["run_id"] == str(_RUN_ID)
+    # #3736: an agent principal has no hosted run, so no run_id is stamped.
+    assert "run_id" not in result
+    assert result["owner_sub"] == f"agent:{op.sub}"
 
     announce_payloads = [
         json.loads(call.args[1]["event"])
@@ -437,25 +442,40 @@ def test_announce_echoes_declared_claims_and_publishes_them(
     assert decoded["planned_op_class"] == "write"
     assert decoded["ttl_minutes"] == 30
     assert decoded["work_ref"] == "gh:evoila/meho#123"
-    assert decoded["run_id"] == str(_RUN_ID)
+    assert decoded["run_id"] is None
+    assert decoded["claim_id"] == result["claim_id"]
+    assert decoded["owner_sub"] == f"agent:{op.sub}"
+    assert decoded["admission"] == "agent_principal"
     assert decoded["tenant_id"] == str(op.tenant_id)
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
-def test_bare_announce_keeps_pre_v2_ack_shape(
+def test_bare_announce_returns_stamped_claim_ack(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """No claims → the ack stays the bare ``{event_id, cursor}`` shape."""
+    """No declared claims → the ack carries only the server-stamped claim keys (#3736)."""
     client, _op = client_with_operator
     bc = get_broadcast_client()
-    with patch.object(bc, "xadd", new=AsyncMock(return_value="1747800000000-7")):
+    with fake_stream_write(bc, AsyncMock(return_value="1747800000000-7")):
         resp = post_mcp(
             client,
             _tools_call("meho_broadcast_announce", {"activity": "investigating"}),
         )
     result = _result_dict(resp)
-    # No declared claims -> only the two identity keys (no claim echoes).
-    assert set(result) == {"event_id", "cursor"}
+    # No declared claims -> only the ids plus the server-stamped claim fields.
+    assert set(result) == {
+        "event_id",
+        "cursor",
+        "claim_id",
+        "phase",
+        "owner_sub",
+        "admission",
+        "ttl_minutes",
+        "replayed",
+    }
+    assert result["phase"] == "start"
+    assert result["ttl_minutes"] == 30  # product default when none is sent
+    assert result["replayed"] is False
     assert result["cursor"] == "1747800000000-7"
     # T2 (#2547): event_id is a genuine UUID, distinct from the cursor.
     assert result["event_id"] != result["cursor"]

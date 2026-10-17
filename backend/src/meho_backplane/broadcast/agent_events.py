@@ -131,12 +131,16 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 __all__ = [
     "ACTIVITY_MAX_CHARS",
+    "ADMISSION_SOURCE_VALUES",
+    "IDEMPOTENCY_KEY_MAX_CHARS",
     "MAX_TARGETS",
     "PLANNED_OP_CLASS_VALUES",
     "TARGET_MAX_CHARS",
+    "TTL_DEFAULT_MINUTES",
     "TTL_MAX_MINUTES",
     "TTL_MIN_MINUTES",
     "WORK_REF_MAX_CHARS",
+    "AdmissionSource",
     "AgentAnnouncementEvent",
     "PlannedOpClass",
 ]
@@ -180,6 +184,23 @@ WORK_REF_MAX_CHARS: Final[int] = 256
 #: band.
 TTL_MIN_MINUTES: Final[int] = 1
 TTL_MAX_MINUTES: Final[int] = 1440
+
+#: Claim lifetime the server sets when a trusted publisher sends no
+#: ``ttl_minutes`` (#3736). Every new claim gets a finite lifetime, so a
+#: forgotten claim stops looking active after half an hour.
+TTL_DEFAULT_MINUTES: Final[int] = 30
+
+#: Cap on the caller-chosen ``idempotency_key`` (#3736). The key is
+#: opaque to MEHO; the cap only keeps one bad caller from storing a
+#: very large string on every row.
+IDEMPOTENCY_KEY_MAX_CHARS: Final[int] = 128
+
+#: How MEHO checked the publisher's identity (#3736). ``hosted_run``: the
+#: call came from inside a live MEHO-hosted agent run. ``agent_principal``:
+#: the token belongs to a registered, not-revoked agent principal. ``None``
+#: only on legacy entries written before trusted admission existed.
+AdmissionSource = Literal["hosted_run", "agent_principal"]
+ADMISSION_SOURCE_VALUES: Final[tuple[str, ...]] = get_args(AdmissionSource)
 
 #: The op-class an agent may *declare* it is about to run: the
 #: :func:`meho_backplane.broadcast.events.classify_op` output taxonomy
@@ -289,6 +310,25 @@ class AgentAnnouncementEvent(BaseModel):
       doesn't provide this -- chasing client-side clock skew across
       every JWT-issuing edge would defeat the team-coordination
       signal.
+
+    Trusted claim fields (#3736). The server sets all of these from the
+    checked identity; the caller cannot set them:
+
+    * ``claim_id`` -- the logical claim UUID. Minted by the server on a
+      ``start`` and repeated on every ``update`` / ``completion`` of the
+      same claim. TRUSTED UUID.
+    * ``owner_sub`` -- the trusted agent identity that owns the claim
+      (the hosted run's acting agent, or the registered agent
+      principal's client id). Only this owner may update or complete
+      the claim. TRUSTED, server-set.
+    * ``actor_sub`` -- the RFC 8693 actor (the agent acting for a human)
+      when the publish came from a delegated hosted run, else ``None``.
+    * ``admission`` -- how MEHO checked the identity (see
+      :data:`AdmissionSource`).
+
+    An entry without ``claim_id`` / ``owner_sub`` is a legacy entry. It is
+    history only: it can never be updated or completed as a claim (see
+    :attr:`is_trusted_claim`).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -331,6 +371,19 @@ class AgentAnnouncementEvent(BaseModel):
     run_id: UUID | None = None
     phase: Literal["start", "update", "completion"] = "update"
     ts: datetime
+    claim_id: UUID | None = None
+    owner_sub: str | None = None
+    actor_sub: str | None = None
+    admission: AdmissionSource | None = None
+
+    @property
+    def is_trusted_claim(self) -> bool:
+        """Whether this entry is a claim from a checked agent identity (#3736).
+
+        Legacy entries (written before trusted admission) carry no
+        ``claim_id`` / ``owner_sub`` and are history, never a claim.
+        """
+        return self.claim_id is not None and self.owner_sub is not None
 
     @computed_field  # type: ignore[prop-decorator]
     @property

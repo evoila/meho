@@ -24,6 +24,16 @@ read path uniformly. The kb-shaped vocabulary (slug, snippet,
 source, source_id)` natural-key contract is enforced inside the
 service so every later transport stays consistent.
 
+Each kb entry has two parts:
+
+- The **head**: one `documents` row. Search and `meho://kb/{slug}` read
+  it. A new body overwrites it.
+- The **retained revisions**: `kb_revision` rows. Every write that
+  changes the body adds one, in the same transaction as the head. A
+  revision is never changed, so an earlier body stays readable by its
+  id through `meho://kb/id/{entry}/revision/{revision}` until the entry
+  is deleted (#3753).
+
 The kb is **durable team knowledge** in contrast to `memory` which is
 ephemeral session / policy state — the two-system split is
 deliberate, and the MCP tool descriptions teach the model when to
@@ -38,7 +48,9 @@ session notes and per-target settings).
 Frozen Pydantic value object that mirrors one `documents` row in
 kb-shaped vocabulary: `id`, `tenant_id`, `slug` (renamed from
 `source_id`), `body`, `metadata`, `provenance`, `created_at`,
-`updated_at`. `provenance` is a typed `KbProvenance` read from
+`updated_at`, `revision_id`. `id` is the entry UUID; `revision_id` is
+the revision that holds this body (`None` only for a row with no
+stored revision). `provenance` is a typed `KbProvenance` read from
 `metadata["provenance"]` (see "Provenance" below). The
 substrate columns the kb does not expose (`source`, `kind`,
 `body_hash`, `tokens`, `embedding`) stay invisible to callers. Write
@@ -46,6 +58,26 @@ attribution rides `metadata` as `created_by_sub` /
 `last_updated_by_sub` (see "Cross-principal write & delete semantics"
 below) rather than as dedicated columns — no schema migration, and the
 keys surface on every read surface that already returns `metadata`.
+
+### `KbRevision` (`db/models.py`) and `KbEntryRevision` (`kb/schemas.py`)
+
+`KbRevision` is the ORM row in `kb_revision` (migration `0109`):
+`id` (revision UUID), `tenant_id`, `entry_id` (the `documents.id`,
+`ON DELETE CASCADE`), `revision_number` (1, 2, 3, ... per entry; unique
+per entry; the highest is current), `body`, `body_hash`, `provenance`
+(the write's provenance block, or `NULL`), `origin`, `embedding_model`,
+`chunker_version` (`whole-body-v1` today) and `created_at`.
+
+`origin` is `write` for a row stored by a kb write, or
+`backfill-current` for the one row migration `0109` copied from each
+entry that existed then. A backfill row is the body the entry had at
+migration time, not a historical version, and its `embedding_model` /
+`chunker_version` are `NULL` because they were never recorded. The
+migration does not invent older versions.
+
+`KbEntryRevision` is the frozen read model `get_revision` returns: the
+same fields plus the entry's `slug`, with `provenance` as a typed
+`KbProvenance`.
 
 ### `KbEntrySearchHit` (`kb/schemas.py`)
 
@@ -92,14 +124,15 @@ it and exits non-zero.
 
 Stateless, method-scoped service. Every public method opens its own
 `AsyncSession` via `get_sessionmaker()` and commits synchronously
-before returning. Six verbs:
+before returning. Seven verbs:
 
 | Verb | What it does | Throws |
 |---|---|---|
 | `create_entry(tenant_id, slug, body, metadata=None, *, actor_sub=None)` | Insert or replace one entry (explicit last-write-wins); returns `(entry, created)`. Validates slug, stamps attribution and `direct` provenance, delegates to `index_document`. | `InvalidKbSlugError` on bad slug |
-| `get_entry(tenant_id, slug)` | Natural-key SELECT; returns `KbEntry` or `None`. | – |
+| `get_entry(tenant_id, slug)` | Natural-key SELECT; returns the latest `KbEntry` (with its current `revision_id`) or `None`. | – |
+| `get_revision(tenant_id, entry_id, revision_id)` | Exact retained read. Returns `KbEntryRevision` only when the revision belongs to the entry and both belong to the tenant; otherwise `None`, without saying why. | – |
 | `list_entries(tenant_id, filter_pattern=None, limit=100, offset=0)` | List entries; slug-sorted; SQL `LIKE` pattern forwarded verbatim. | `ValueError` on negative `limit`/`offset` |
-| `delete_entry(tenant_id, slug)` | Delete by natural key; returns whether a row existed. | – |
+| `delete_entry(tenant_id, slug)` | Delete the head and all its revisions in one transaction; returns whether a row existed. | Database errors propagate; nothing is removed |
 | `search_entries(tenant_id, query, filters=None, limit=10)` | Hybrid BM25 + cosine retrieval with `source=KB_SOURCE` pinned. | – |
 | `ingest_directory(directory, tenant_id, dry_run=False)` | Read every `.md` file in sorted order, report slug conflicts without writing them, ingest the rest; idempotent. Per-file failures counted, run continues. | `KbIngestRootError` outside `KB_INGEST_ROOT` |
 
@@ -129,11 +162,19 @@ to the caller's `errors` list rather than raising.
    no metadata and no actor, the existing metadata is kept.
 4. `stamp_provenance(..., source_kind="direct")` replaces any
    caller-sent `provenance` key with the service's own block.
-5. `index_document(tenant_id, source='kb', source_id=slug,
-   kind='kb-entry', body, metadata=merged)` — substrate's upsert path.
-   The `documents.body_hash` short-circuit means an unchanged body
-   pays zero embedding cost (just an `updated_at` bump).
-6. Return `(_doc_to_entry(doc), created)`. The REST route maps
+5. `kb/revisions.py::write_entry` opens one session and runs
+   `index_document(tenant_id, source='kb', source_id=slug,
+   kind='kb-entry', body, metadata=merged, session=session)` — the
+   substrate's upsert path. The `documents.body_hash` short-circuit
+   means an unchanged body pays zero embedding cost (just an
+   `updated_at` bump). In the same session it compares the head's
+   `body_hash` with the latest revision's. If they differ (or there is
+   no revision), it adds a new `KbRevision` with the next number, the
+   provenance block, the configured embedding model and the chunker
+   version. Then it commits head and revision together. An unchanged
+   body reuses the latest revision. Changing a body back to an older
+   text adds a new revision; it does not reuse the old one.
+6. Return `(_doc_to_entry(doc, revision_id), created)`. The REST route maps
    `created` to **HTTP 201** (fresh slug) vs **200** (in-place
    overwrite) and records `audit_created`; the MCP / UI callers
    discard it.
@@ -195,7 +236,8 @@ hit's `doc_metadata` is the same JSONB column).
    - SELECT existing row by natural key.
    - Compute `compute_body_hash(body)` and compare.
    - Classify as `inserted` / `updated` / `skipped`.
-   - On `dry_run=False`, call `index_document` with the front-matter
+   - On `dry_run=False`, call `write_entry` (same as `create_entry`,
+     so a changed body also stores a revision) with the front-matter
      metadata plus a `directory` provenance block (relative path and
      one `ingested_at` timestamp for the whole run).
 5. Per-file commits — a failing file in the middle of the corpus
@@ -228,7 +270,40 @@ file replaces their metadata (dropping `source_path`).
 Both are natural SQL — no retrieval. `get_entry` is a natural-key
 SELECT; `list_entries` is `SELECT ... WHERE tenant_id=? AND
 source='kb' ORDER BY source_id LIMIT ? OFFSET ?`, with an optional
-`AND source_id LIKE :pattern` clause.
+`AND source_id LIKE :pattern` clause. Both add a correlated subquery
+(`current_revision_id()`) for the highest-numbered revision, which
+fills `KbEntry.revision_id`. They always return the latest body.
+
+### Read path — `get_revision` (exact selected read)
+
+`meho://kb/id/{entry}/revision/{revision}` (MCP, `operator` role,
+checked by the registry) parses both UUIDs, then calls
+`KbService.get_revision`. The service joins `kb_revision` to
+`documents` and filters on revision id, entry id, `tenant_id` on both
+tables, and `source='kb'`. The handler wraps `body` in the
+`<<UNTRUSTED_AGENT_TEXT` envelope, like the slug read. A malformed
+UUID, an unknown id, a revision of a different entry, another
+tenant's revision and a deleted entry all answer `-32602` with the
+same message, `kb revision not found`.
+
+The legacy `meho://kb/{slug}` read is unchanged: it returns the latest
+body, now with `revision_id` so a caller can cite that exact body.
+`add_to_knowledge` and `GET /api/v1/kb/{slug}` return the same field.
+
+### Delete path — `delete_entry`
+
+`kb/revisions.py::delete_entry_rows` deletes the entry's `kb_revision`
+rows and then the `documents` row in one transaction. The head row is
+the searchable evidence (body and embedding), so search and every
+exact read stop at the same commit. If a statement or the commit
+fails, the transaction rolls back: the entry and its revisions stay
+readable, the error propagates, and the caller can retry. The
+`ON DELETE CASCADE` on `entry_id` also covers any other path that
+deletes a kb `documents` row. A later create with the same slug gets a
+new entry UUID and starts again at revision 1.
+
+There is no automatic retention or age-off for revisions. They last
+until the entry is deleted.
 
 ### Read path — `search_entries`
 
@@ -252,9 +327,9 @@ are structurally impossible.
 Direct:
 
 - `meho_backplane.db.engine.get_sessionmaker` for the async session.
-- `meho_backplane.db.models.Document` ORM type.
+- `meho_backplane.db.models.Document` and `KbRevision` ORM types.
 - `meho_backplane.retrieval.indexer.{index_document, compute_body_hash}`
-  for the write path.
+  for the write path (through `kb/revisions.py`).
 - `meho_backplane.retrieval.retriever.retrieve` for `search_entries`.
 - `python-frontmatter` (transitive via `kb/file_walker.py`) for
   `.md` front-matter parsing.
@@ -270,6 +345,12 @@ Transports that call into this service:
 - The console detail page reads `metadata["path"]` for its "source
   path" field, a key no writer sets. It shows nothing for every row.
 - Legacy rows keep their absolute `source_path` until re-ingested.
+- Two writes to the same entry at the same moment can both pick the
+  same next `revision_number`. The unique index makes the second fail
+  with an `IntegrityError` and roll back (head included); the caller
+  retries. Nothing is lost or silently replaced.
+- Search hits do not carry `revision_id` yet; passage search with
+  stable citations is a separate task (#3761).
 
 Otherwise none outstanding. The kb-shaped vocabulary is stable; the substrate's
 metadata-filter surface is reserved for future v0.2.next work — a

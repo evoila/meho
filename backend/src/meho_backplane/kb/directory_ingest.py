@@ -33,13 +33,13 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Document
 from meho_backplane.kb.file_walker import KbFileRecord, walk_kb_directory
 from meho_backplane.kb.provenance import stamp_provenance
+from meho_backplane.kb.revisions import write_entry
 from meho_backplane.kb.schemas import (
-    KB_KIND_ENTRY,
     KB_SOURCE,
     KbIngestConflict,
     KbIngestionResult,
 )
-from meho_backplane.retrieval.indexer import compute_body_hash, index_document
+from meho_backplane.retrieval.indexer import compute_body_hash
 from meho_backplane.settings import get_settings
 
 __all__ = ["KbIngestRootError", "ingest_directory"]
@@ -201,7 +201,8 @@ async def _ingest_one(
     any existing row's. Stamps the provenance block (relative
     path, ``source_kind="directory"``, *ingested_at*) into the
     metadata before delegating to
-    :func:`~meho_backplane.retrieval.indexer.index_document`.
+    :func:`~meho_backplane.kb.revisions.write_entry`, which also
+    stores a retained revision when the body changed.
 
     The classification SELECT is one extra round-trip per file
     compared to calling ``index_document`` directly; the cost is
@@ -240,11 +241,9 @@ async def _ingest_one(
         ingested_at=ingested_at,
     )
 
-    await index_document(
+    await write_entry(
         tenant_id=tenant_id,
-        source=KB_SOURCE,
-        source_id=slug,
-        kind=KB_KIND_ENTRY,
+        slug=slug,
         body=record.body,
         metadata=enriched_metadata,
     )

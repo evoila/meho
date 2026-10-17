@@ -2082,7 +2082,7 @@ def _ck_source_scope(column: str) -> str:
     matches a hyphen); and ``ltrim`` with the lowercase hex alphabet
     (anything left over is a bad character). ``substr`` / ``replace`` /
     ``ltrim`` mean the same on PostgreSQL and SQLite. Mirrored verbatim
-    in migration ``0107``.
+    in migration ``0108``.
     """
     return (
         f"{column} IS NULL "
@@ -2187,16 +2187,16 @@ class GraphNode(Base):
       (the spec's soft-delete signal -- the row stays queryable for
       G9.3 history replay but is filtered out of default queries).
     * ``source_scope`` -- Text NULL with the portable
-      ``ck_graph_node_source_scope`` CHECK (migration ``0107``,
+      ``ck_graph_node_source_scope`` CHECK (migration ``0108``,
       #3739). Says where the node's name is unique: ``global``,
       ``target:<uuid>`` or ``legacy:<uuid>`` (see
       :data:`SOURCE_SCOPE_PATTERN`). ``NULL`` means not resolved yet:
       the row predates source-qualified identity, and ``target_id``
       only names the last target that saw it, so readers must not
       treat it as the scope. Nothing writes this column yet except the
-      ``0107`` backfill; the staged cut-over owns the writers.
+      ``0108`` backfill; the staged cut-over owns the writers.
     * ``source_scope_provenance`` -- Text NULL. What set
-      ``source_scope`` (``migration:0107`` for the backfill). Lets the
+      ``source_scope`` (``migration:0108`` for the backfill). Lets the
       later repair tell a mechanical value from a rediscovered one.
 
     Indexes on :class:`GraphNode`:
@@ -2210,7 +2210,7 @@ class GraphNode(Base):
       unique index, so adding ``source_scope`` as a fourth key column
       would let two unresolved rows share a name.
     * ``graph_node_tenant_scope_kind_name_idx`` -- non-unique b-tree on
-      ``(tenant_id, source_scope, kind, name)`` (migration ``0107``).
+      ``(tenant_id, source_scope, kind, name)`` (migration ``0108``).
       Serves per-scope lookups and the "unresolved rows" scan.
 
     The model deliberately ships with no helper methods -- write paths
@@ -8643,7 +8643,7 @@ class RequestUsageEvent(Base):
     * ``correlation_id`` -- opaque id that links a ``context_selected``
       event to later evaluation data; ``NULL`` on ``request_finished``.
 
-    Indexes are declared in migration ``0107``:
+    Indexes are declared in migration ``0108``:
     ``(tenant_id, occurred_at)`` for tenant-scoped window reads, and
     ``occurred_at`` for the retention delete.
     """

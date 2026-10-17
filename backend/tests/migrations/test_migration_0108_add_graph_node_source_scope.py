@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for Alembic migration ``0107_add_graph_node_source_scope``.
+"""Behavioural tests for Alembic migration ``0108_add_graph_node_source_scope``.
 
 #3739 is the expand-only step of source-qualified topology. The
 migration adds ``graph_node.source_scope`` / ``source_scope_provenance``,
@@ -12,7 +12,7 @@ index and the ``graph_node_scope_snapshot`` repair input, and backfills
 Coverage (SQLite driver; the PostgreSQL twin lives in
 ``tests/integration/test_topology_source_scope_migration.py``):
 
-* **Legacy fixture** -- rows written at ``0106`` stay readable and
+* **Legacy fixture** -- rows written at ``0107`` stay readable and
   unchanged; only ``kind='target'`` rows get ``global``; everything else
   stays NULL even when ``target_id`` is set (no scope guessing).
 * **Snapshot** -- one row per pre-existing node with the last target,
@@ -26,8 +26,8 @@ Coverage (SQLite driver; the PostgreSQL twin lives in
   present; round-trip. A ``target_id`` moved after the upgrade does not
   rewrite the snapshot.
 
-Every step targets this migration's own revision (``0107``) and its
-``down_revision`` (``0106``), never ``head``.
+Every step targets this migration's own revision (``0108``) and its
+``down_revision`` (``0107``), never ``head``.
 """
 
 from __future__ import annotations
@@ -49,8 +49,8 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0107"
-_DOWN_REVISION = "0106"
+_REVISION = "0108"
+_DOWN_REVISION = "0107"
 _UUID = "0f8fad5b-d9cb-469f-a165-70867728950e"
 
 
@@ -60,7 +60,7 @@ def alembic_cfg(
     tmp_path: Path,
 ) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0107.db"
+    db_path = tmp_path / "migration_0108.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
@@ -98,7 +98,7 @@ def _fetch(sync_url: str, sql: str, params: dict[str, Any] | None = None) -> lis
 
 
 def _seed_legacy_graph(sync_url: str) -> dict[str, str]:
-    """Write a pre-0107 graph: a tenant, a target and three node shapes.
+    """Write a pre-0108 graph: a tenant, a target and three node shapes.
 
     * ``target`` node ``cluster-a`` -- the registered target itself.
     * ``namespace`` node ``default`` -- last seen by ``cluster-a``
@@ -180,7 +180,7 @@ def _snapshot_view(sync_url: str) -> list[tuple[Any, ...]]:
 
 
 def _legacy_view(sync_url: str) -> list[tuple[Any, ...]]:
-    """The pre-0107 columns of every node, in a stable order."""
+    """The pre-0108 columns of every node, in a stable order."""
     rows = _fetch(
         sync_url,
         "SELECT id, tenant_id, kind, name, target_id, source, properties, discovered_by "
@@ -207,7 +207,7 @@ def test_upgrade_backfills_only_target_nodes_and_keeps_legacy_rows(
             sync_url, "SELECT id, source_scope, source_scope_provenance FROM graph_node"
         )
     }
-    assert scopes[ids["target_node"]] == ("global", "migration:0107")
+    assert scopes[ids["target_node"]] == ("global", "migration:0108")
     # target_id is set on the namespace row, but it only names the last
     # target that saw it -- the migration must not turn it into a scope.
     assert scopes[ids["namespace_node"]] == (None, None)
@@ -323,7 +323,7 @@ def test_check_rejects_malformed_scope_forms(
 
 
 def test_downgrade_keeps_rows_and_round_trips(alembic_cfg: tuple[Config, str]) -> None:
-    """``0107 -> 0106 -> 0107`` keeps every row and the snapshot; replays the backfill."""
+    """``0108 -> 0107 -> 0108`` keeps every row and the snapshot; replays the backfill."""
     cfg, sync_url = alembic_cfg
     command.upgrade(cfg, _DOWN_REVISION)
     ids = _seed_legacy_graph(sync_url)
@@ -350,7 +350,7 @@ def test_downgrade_keeps_rows_and_round_trips(alembic_cfg: tuple[Config, str]) -
     assert _legacy_view(sync_url) == before
     assert _snapshot_view(sync_url) == snapshot
 
-    # A node written while the schema is back at 0106 has no snapshot
+    # A node written while the schema is back at 0107 has no snapshot
     # row yet; the re-upgrade adds one without touching the others.
     _execute(
         sync_url,

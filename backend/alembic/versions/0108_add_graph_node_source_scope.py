@@ -3,8 +3,8 @@
 
 """Add ``graph_node.source_scope`` (expand step only) (#3739).
 
-Revision ID: 0107
-Revises: 0106
+Revision ID: 0108
+Revises: 0107
 Create Date: 2026-10-17
 
 Why
@@ -23,7 +23,7 @@ nothing else:
   row's own ``graph_node.id``, so legacy rows never collide). ``NULL``
   means "not resolved yet".
 * ``graph_node.source_scope_provenance`` -- nullable text. What set the
-  scope. The backfill below writes ``migration:0107``.
+  scope. The backfill below writes ``migration:0108``.
 * ``ck_graph_node_source_scope`` -- portable CHECK for the three forms
   (canonical lowercase UUIDs only). Mirrors ``_ck_source_scope`` in
   :mod:`meho_backplane.db.models`.
@@ -90,12 +90,12 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0107"
-down_revision: str | None = "0106"
+revision: str = "0108"
+down_revision: str | None = "0107"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-_PROVENANCE = "migration:0107"
+_PROVENANCE = "migration:0108"
 _SNAPSHOT_SCHEMA_VERSION = 1
 
 #: Inlined copy of ``_ck_source_scope("source_scope")`` in
@@ -187,7 +187,7 @@ def downgrade() -> None:
     ).scalar_one()
     if foreign:
         raise RuntimeError(
-            f"Refusing to downgrade 0107: {foreign} graph_node row(s) carry a "
+            f"Refusing to downgrade 0108: {foreign} graph_node row(s) carry a "
             "source_scope this migration did not write. The old schema cannot "
             "keep them. Roll forward instead of downgrading."
         )

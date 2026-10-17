@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""PostgreSQL tests for migration ``0107_add_graph_node_source_scope`` (#3739).
+"""PostgreSQL tests for migration ``0108_add_graph_node_source_scope`` (#3739).
 
-The SQLite twin is ``tests/migrations/test_migration_0107_add_graph_node_source_scope.py``.
+The SQLite twin is ``tests/migrations/test_migration_0108_add_graph_node_source_scope.py``.
 This module covers what only PostgreSQL can show:
 
 * **NULL uniqueness** -- a plain unique index treats NULLs as distinct,
@@ -47,8 +47,8 @@ from tests.integration.conftest import DOCKER_AVAILABLE, SKIP_REASON
 
 pytestmark = pytest.mark.skipif(not DOCKER_AVAILABLE, reason=SKIP_REASON)
 
-_REVISION = "0107"
-_DOWN_REVISION = "0106"
+_REVISION = "0108"
+_DOWN_REVISION = "0107"
 
 
 async def _run_sql(url: str, statements: list[tuple[str, dict[str, Any]]]) -> list[Any]:
@@ -91,7 +91,7 @@ def migration_cfg(integration_env: None, async_pg_url: str) -> Iterator[tuple[Co
 
 
 def _seed_tenant_and_target(url: str) -> tuple[str, str]:
-    """Insert a tenant and a target at ``head`` (0107 does not touch either table)."""
+    """Insert a tenant and a target at ``head`` (0108 does not touch either table)."""
     tenant_id = str(uuid.uuid4())
 
     async def _insert() -> None:
@@ -135,7 +135,7 @@ def _insert_target(url: str, tenant_id: str, name: str) -> str:
 
 
 def _seed_legacy_nodes(url: str, tenant_id: str, target_id: str) -> dict[str, str]:
-    """Write pre-0107 nodes: the target itself, a shared bare name, a curated VM."""
+    """Write pre-0108 nodes: the target itself, a shared bare name, a curated VM."""
     ids: dict[str, str] = {}
     statements: list[tuple[str, dict[str, Any]]] = []
     for key, kind, name, node_target, source in (
@@ -242,7 +242,7 @@ def test_upgrade_and_downgrade_before_cutover_keep_legacy_rows(
         for row in _sql(url, "SELECT id, source_scope, source_scope_provenance FROM graph_node")
     }
     assert scopes == {
-        ids["target_node"]: ("global", "migration:0107"),
+        ids["target_node"]: ("global", "migration:0108"),
         ids["namespace_node"]: (None, None),
         ids["vm_node"]: (None, None),
     }

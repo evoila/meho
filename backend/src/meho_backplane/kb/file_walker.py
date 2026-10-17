@@ -319,6 +319,11 @@ def _build_record(path: Path, rel: str) -> KbFileRecord:
             exc.end,
             f"could not decode {rel} as UTF-8: {exc.reason}",
         ) from exc
+    except OSError as exc:
+        # str(OSError) includes the absolute path; rebuild the message
+        # from the relative path. Same subclass, so callers can still
+        # catch PermissionError and friends.
+        raise type(exc)(f"could not read {rel}: {exc.strerror or type(exc).__name__}") from exc
 
     try:
         post = frontmatter.loads(raw)

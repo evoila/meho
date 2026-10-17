@@ -437,7 +437,9 @@ class AuditEventClass(StrEnum):
     * :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every
       row written before migration ``0106`` reads as this class; it is never
       guessed from ``method`` / ``path``. The REST and MCP request wrapper
-      rows also keep this class until they are retired.
+      rows also keep this class while ``AUDIT_WRAPPER_ROWS_RETIRED`` is off;
+      with it on they write a decision or execution class, or no row
+      (#3757, :mod:`meho_backplane.audit_cutover`).
     """
 
     OPERATION_EXECUTION = "operation_execution"
@@ -462,7 +464,8 @@ class AuditLog(Base):
     Every writer declares its :class:`AuditEventClass` on ``event_class``
     (see ``tests/test_audit_event_class.py`` for the writer inventory).
     The :class:`~meho_backplane.audit.AuditMiddleware` writes one row per
-    authenticated request (class ``legacy_request``); the dispatcher,
+    authenticated request (class ``legacy_request``) until
+    ``AUDIT_WRAPPER_ROWS_RETIRED`` is on (#3757); the dispatcher,
     the approval queue and the domain writers write classified rows.
     Read-only by every other consumer (no UPDATE / DELETE paths exist).
 
@@ -8669,9 +8672,10 @@ class RequestUsageEvent(Base):
     * ``correlation_id`` -- opaque id that links a ``context_selected``
       event to later evaluation data; ``NULL`` on ``request_finished``.
 
-    Indexes are declared in migration ``0108``:
-    ``(tenant_id, occurred_at)`` for tenant-scoped window reads, and
-    ``occurred_at`` for the retention delete.
+    Indexes are declared in migrations ``0107`` and ``0110``:
+    ``(tenant_id, occurred_at)`` for tenant-scoped window reads,
+    ``occurred_at`` for the retention delete, and ``session_id`` for the
+    reflex advisory's "did this session read the feed" check (#3757).
     """
 
     __tablename__ = "request_usage_event"

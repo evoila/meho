@@ -189,6 +189,10 @@ data:
   # `deploy/charts/meho/values.yaml` (`config.approvalAllowSelfApproval`)
   # and `docs/codebase/approvals.md`).
   APPROVAL_ALLOW_SELF_APPROVAL: {{ .Values.config.approvalAllowSelfApproval | quote }}
+  # Lab-class switch for delegated approval decisions (#3693). Rendered
+  # unconditionally, like the self-approval switch above; the default
+  # `"false"` refuses decisions made on someone else's instruction.
+  APPROVAL_ALLOW_DELEGATED_DECISION: {{ .Values.config.approvalAllowDelegatedDecision | quote }}
   # G0.8-T4 (#633) — the /mcp router is mounted unconditionally; an MCP
   # request's Bearer token must carry `aud == MCP_RESOURCE_URI`. The
   # documented default is `${BACKPLANE_URL}/mcp`, but on a deploy that

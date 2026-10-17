@@ -431,6 +431,11 @@
           "type": "string",
           "enum": ["true", "false"],
           "description": "Self-approval audited break-glass switch (#1401, #2669), rendered unconditionally into the `APPROVAL_ALLOW_SELF_APPROVAL` env var (`parse_bool_env` in `backend/src/meho_backplane/settings.py` reads it). Constrained to `\"true\"` / `\"false\"` so a typo fails at install rather than being silently coerced. Default `\"false\"` (fail-closed) enforces the four-eyes rule: the operator who requested a parked `requires_approval` write may not approve their own request (requester != approver). Set `\"true\"` ONLY for a genuine, audited emergency — it lifts the guard posture-wide and re-opens the single-account request+grant hole for every op, so it is NOT the single-operator answer (that is an agent-requester: park the write under a scheduled agent run whose distinct subject clears the gate with no flag). Deliberately absent from `config.required` — the safe default carries every install. Even under break-glass a self-approval is forensically visible: a decision audit row (requester == approver), a WARNING `approval_self_approval_break_glass` log, and `GET /ready` → `features.approval_queue.effective_posture: single_operator_break_glass`. See the operator guide (docs-site \"Do real work → Approvals and break-glass\") and `docs/codebase/approvals.md`."
+        },
+        "approvalAllowDelegatedDecision": {
+          "type": "string",
+          "enum": ["true", "false"],
+          "description": "Lab-class switch for delegated approval decisions (#3693), rendered unconditionally into the `APPROVAL_ALLOW_DELEGATED_DECISION` env var. A delegated decision is an approve or reject whose reason ends with an `Instructed-by:` block. Default `\"false\"` (fail-closed, production) refuses every delegated decision with 403 `delegated_decision_forbidden`. Set `\"true\"` only on a lab-class deployment. Deliberately absent from `config.required`."
         }
       }
     },

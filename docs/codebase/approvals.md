@@ -545,6 +545,52 @@ after a decision (`project_request_to_view(row, delegation)`).
 `work_ref` is unchanged: it stays the requester-side change ref. The
 `Refs:` values may match it, but they do not have to.
 
+### Delegated decisions are allowed only on lab-class deployments (#3693)
+
+On production, an approve or reject must be the approver's own call.
+A decision made on someone else's instruction is allowed only on a
+lab-class deployment. MEHO has no environment object, so the deployment
+says which class it is with one boot switch, like the self-approval
+switch:
+
+| Setting | Env var | Helm value | Default |
+|---|---|---|---|
+| `Settings.approval_allow_delegated_decision` | `APPROVAL_ALLOW_DELEGATED_DECISION` | `config.approvalAllowDelegatedDecision` | `false` (production) |
+
+The switch is read from the environment at boot. No request field,
+header, or parameter can change it.
+
+How the check runs (`_check_delegated_allowed` in
+`operations/approval_queue.py`):
+
+- Both `approve_request` and `reject_request` call it right after
+  `parse_delegation`, before any state change. So it covers REST, CLI,
+  and console at once. There is no MCP decision path.
+- An ordinary decision (no `Instructed-by:` line) always passes, on
+  every deployment.
+- An incomplete delegation block is still a 422 (`delegated_reason_invalid`),
+  checked first.
+- A valid delegation block with the switch off raises
+  `DelegatedDecisionForbiddenError`. The row stays `pending` and no
+  decision audit row is written. MEHO logs the WARNING event
+  `approval_delegated_decision_refused` (`approval_request_id`, `op_id`,
+  `decision`, `operator_sub`, `instructed_by`, `tenant_id`).
+- With the switch on, the decision goes through and is recorded as
+  described above.
+
+How a refusal reads:
+
+| Surface | Refusal |
+|---|---|
+| REST `/approve`, `/reject`, `/decide` | 403, `detail` starts with `delegated_decision_forbidden:` |
+| Console approve / deny | the modal re-renders with a 403 banner |
+| CLI `meho approvals approve` / `reject --reason` | posts to `/decide`; prints the 403 body |
+
+`GET /ready` shows the stance in
+`features.approval_queue.delegated_decision_posture`:
+`"production_own_hand_only"` (switch off) or
+`"lab_class_delegation_allowed"` (switch on).
+
 ## Single-operator tenants: use an agent-requester, not break-glass (#1738)
 
 The self-approval guard enforces requester != approver on the stable

@@ -129,6 +129,7 @@ __all__ = [
     "ApprovalRequestAlreadyDecidedError",
     "ApprovalRequestExpiredError",
     "ApprovalResultState",
+    "DelegatedDecisionForbiddenError",
     "DelegatedReasonInvalidError",
     "Delegation",
     "IdempotencyKeyConflictError",
@@ -408,6 +409,31 @@ class DelegatedReasonInvalidError(ApprovalError):
         )
 
 
+class DelegatedDecisionForbiddenError(ApprovalError):
+    """A delegated decision was made on a deployment that is not lab-class.
+
+    Raised by :func:`approve_request` and :func:`reject_request` when the
+    decision ``reason`` carries a valid delegation block (#3692) and the
+    deployment has not set ``Settings.approval_allow_delegated_decision``
+    (#3693). On production an approve or reject must be the approver's own
+    call, not one made on another person's instruction. The switch is read
+    from the environment at boot, so no request field can change the
+    outcome. The route layer maps this to 403.
+    """
+
+    def __init__(self, request_id: uuid.UUID, *, operator_sub: str, instructed_by: str) -> None:
+        self.request_id = request_id
+        self.operator_sub = operator_sub
+        self.instructed_by = instructed_by
+        super().__init__(
+            f"operator {operator_sub!r} may not decide approval_request "
+            f"{request_id} on the instruction of {instructed_by!r}: delegated "
+            "decisions are allowed only on lab-class deployments "
+            "(APPROVAL_ALLOW_DELEGATED_DECISION=true). Decide on your own "
+            "judgement, without the Instructed-by: block"
+        )
+
+
 #: Upper bound on a decision ``reason``, shared by the REST bodies and the
 #: console form. The audit row stores the reason verbatim; the bound keeps a
 #: paste accident from landing a huge free-text blob on the ledger.
@@ -542,6 +568,44 @@ def _record_delegation(
         reviewed_by=operator.sub,
         instructed_by=delegation.instructed_by,
         tenant_id=str(operator.tenant_id),
+    )
+
+
+def _check_delegated_allowed(
+    delegation: Delegation | None,
+    *,
+    request: ApprovalRequest,
+    operator: Operator,
+    decision: str,
+) -> None:
+    """Refuse a delegated decision unless the deployment is lab-class (#3693).
+
+    An ordinary decision (*delegation* is ``None``) always passes. A
+    delegated one passes only when ``Settings.approval_allow_delegated_decision``
+    is set. Settings are imported lazily, like :func:`_check_self_approval`.
+
+    Raises:
+        DelegatedDecisionForbiddenError: Delegated decision on a deployment
+            without the lab-class switch.
+    """
+    if delegation is None:
+        return
+
+    from meho_backplane.settings import get_settings
+
+    if get_settings().approval_allow_delegated_decision:
+        return
+    _log.warning(
+        "approval_delegated_decision_refused",
+        approval_request_id=str(request.id),
+        op_id=request.op_id,
+        decision=decision,
+        operator_sub=operator.sub,
+        instructed_by=delegation.instructed_by,
+        tenant_id=str(operator.tenant_id),
+    )
+    raise DelegatedDecisionForbiddenError(
+        request.id, operator_sub=operator.sub, instructed_by=delegation.instructed_by
     )
 
 
@@ -1266,13 +1330,16 @@ async def approve_request(
             carries no ``preview_hash`` binding (#3197).
         DelegatedReasonInvalidError: *reason* names an instructing human
             (``Instructed-by:``) but its trailer block is incomplete (#3692).
+        DelegatedDecisionForbiddenError: *reason* is a valid delegated
+            decision but the deployment is not lab-class (#3693).
     """
     request = await _load_pending_for_approval(
         session, request_id, operator=operator, params=params
     )
-    # Validate before any state change so a bad delegated reason leaves the
-    # row pending (#3692).
+    # Validate before any state change so a bad or forbidden delegated
+    # reason leaves the row pending (#3692, #3693).
     delegation = parse_delegation(reason)
+    _check_delegated_allowed(delegation, request=request, operator=operator, decision="approved")
 
     now = _now()
     request.status = ApprovalRequestStatus.APPROVED.value
@@ -1344,6 +1411,8 @@ async def reject_request(
         ApprovalRequestAlreadyDecidedError: Row is not ``pending``.
         DelegatedReasonInvalidError: *reason* names an instructing human
             (``Instructed-by:``) but its trailer block is incomplete (#3692).
+        DelegatedDecisionForbiddenError: *reason* is a valid delegated
+            decision but the deployment is not lab-class (#3693).
     """
     _check_reviewer_role(operator)
 
@@ -1355,6 +1424,7 @@ async def reject_request(
     if request.status != ApprovalRequestStatus.PENDING.value:
         raise ApprovalRequestAlreadyDecidedError(request_id, request.status)
     delegation = parse_delegation(reason)
+    _check_delegated_allowed(delegation, request=request, operator=operator, decision="rejected")
 
     now = _now()
     request.status = ApprovalRequestStatus.REJECTED.value

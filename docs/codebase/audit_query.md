@@ -9,9 +9,32 @@ and the three Pydantic value types around it: `AuditQueryFilters` (input),
 `AuditEntry` (one row), `AuditQueryResult` (page + forward-only cursor).
 
 The substrate is **read-only**. Audit-log rows are written by
-`meho_backplane.audit.AuditMiddleware` (HTTP chassis routes) and
-`meho_backplane.mcp.audit.write_mcp_audit_row` (MCP tool/resource handlers);
-this package never inserts, updates, or deletes.
+`meho_backplane.audit.AuditMiddleware` (HTTP chassis routes),
+`meho_backplane.mcp.audit.write_mcp_audit_row` (MCP tool/resource handlers),
+the dispatcher, the approval queue and the domain writers; this package never
+inserts, updates, or deletes.
+
+### Event class (#3733)
+
+Every row carries `event_class`, a closed set enforced by the database
+CHECK `ck_audit_log_event_class` (migration `0106`). Each writer sets the
+class it knows. Nothing is guessed from `method` / `path`.
+
+| Class | Written by |
+|---|---|
+| `operation_execution` | Dispatch rows that ran (`ok` or `error`), runbook abort, gateway command mint / result, satellite effect rows, topology / ingest / add-on writes, sweepers and reapers. |
+| `policy_decision` | Dispatch rows a gate refused (`denied`, rate limit, unqualified target version) and the `approval.request` park row. |
+| `approval_decision` | `approval.decision` rows (approve, reject, expire) and the standing-grant auto-approval row. |
+| `security_event` | Refresh-token replay, broken satellite effect chain, un-reported gateway mint alarm. |
+| `legacy_request` | Every row written before `0106` (server default; old rows are not reclassified), the REST and MCP request wrapper rows, and the `approval.result` read row. |
+
+The column default stays `legacy_request`, so a row from an older MEHO
+version during a rolling upgrade is also `legacy_request`. New code never
+relies on the default: `tests/test_audit_event_class.py` scans the source
+and fails on any `AuditLog(...)` call without `event_class=`. The shared
+helpers (`operations._audit.write_audit_row`,
+`memory.audit.write_internal_audit_row`, `approval_queue._write_audit_row`)
+take `event_class` as a required argument.
 
 ## Key types
 
@@ -29,6 +52,7 @@ this package never inserts, updates, or deletes.
 | `parent_audit_id` | `UUID \| None` | `audit_log.parent_audit_id = :value` — **exact match**, so it returns the direct children of one row, not the whole subtree. Uses the `audit_log_parent_audit_id_idx` index. Main use: find the decision row and the run row of one approval request, which are linked only by this column (#4030). The replay CTE walks the full subtree. |
 | `agent_session_id` | `UUID \| None` | `audit_log.agent_session_id = :value`. Un-gated by G8.2-T3 (#1011); the column landed with G8.2-T1 (#1009). |
 | `work_ref` | `str \| None` | `audit_log.work_ref = :value` — **exact match** (a change-ticket reference is an opaque identifier, not a search term, so deterministic equality per #1177, not `ILIKE`). Filterable + surfaced since work_ref I1-T3 (#1658); the column landed with work_ref I1-T1 (#1655, migration `0039`). NULL rows are excluded. |
+| `event_class` | `AuditEventClass \| None` | `audit_log.event_class = :value` — exact match on the closed set (#3733). `None` applies no class filter, so a query without it returns every class, the same rows as before. Old rows match `legacy_request`. |
 | `limit` | `int` (1-1000) | Default 100. |
 | `cursor` | `str \| None` | Opaque forward-only cursor produced by a prior page. |
 
@@ -58,6 +82,7 @@ Field-to-source mapping:
 | `agent_session_id` | `audit_log.agent_session_id` — MCP-session correlation column (G8.2-T1 #1009, migration `0014`). Surfaced + filterable since G8.2-T3 (#1011). |
 | `work_ref` | `audit_log.work_ref` — external change-ticket reference (work_ref I1-T1 #1655, migration `0039`). An opaque string (e.g. `"gh:evoila/meho#1"`) correlating a governed operation to the out-of-band change record that authorised it. Surfaced + exact-match-filterable since work_ref I1-T3 (#1658). Bind sources: the request/agent/dispatch boundary (work_ref I1-T2 #1657) and runbook runs (work_ref I3-T1 #1661 — a run's `runbook_runs.work_ref` is bound around each `operation_call` step's dispatch + on the abort row, so the step audit rows inherit the run's change ticket). NULL when no bind source is in scope; system-internal writers leave it NULL by design. |
 | `policy_decision` | `audit_log.policy_decision` — the synchronous policy-gate verdict stamped on the row (#130, migration `0051`). One of the closed `PermissionVerdict` set — `"auto-execute"` / `"needs-approval"` / `"deny"` — or `None` where no gate ran (pre-#130 rows, pre-gate usage errors like unknown-op / invalid-params / connector-resolution failures, and system-internal writers). Populated by both audit writers off the dispatch-scoped `policy_decision_var` contextvar: the parked "request" row carries `"needs-approval"`; the approval "decision" row carries `None` (an operator's approve/reject is not a gate verdict — it is recorded via `result_status`). A consumer reads the verdict directly (`WHERE policy_decision = '<verdict>'`) instead of reconstructing it from `method`+`path`+`payload`. **Verdict catalog:** the persisted set is exactly the three-value `PermissionVerdict` enum. `time_window_violation` / `quota_exceeded` are **not** implemented (no such policy classes exist in code); any external catalog listing them overstates the surface. |
+| `event_class` | `audit_log.event_class` — what kind of accountable event the row records (#3733, migration `0106`). See [Event class](#event-class-3733). |
 | `broadcast_event_id` | **None in v0.2** — FK direction is reversed: `BroadcastEvent.audit_id` points at the audit row. |
 
 The three computed fields use exactly the same rules
@@ -85,6 +110,7 @@ query_audit(filters, tenant_id, session)
   │       [+ parent_audit_id = :parent_audit_id]                ← exact match
   │       [+ agent_session_id = :agent_session_id]
   │       [+ work_ref = :work_ref]                              ← exact match
+  │       [+ event_class = :event_class]                        ← exact match
   │       [+ operator_sub ILIKE :principal]
   │       [+ occurred_at >= :since]
   │       [+ occurred_at <= :until]
@@ -113,6 +139,7 @@ query_audit(filters, tenant_id, session)
   │                 agent_session_id=row.agent_session_id,
   │                 work_ref=row.work_ref,
   │                 policy_decision=row.policy_decision,
+  │                 event_class=row.event_class,
   │                 principal_name=principal_name, broadcast_event_id=None)
   │
   └─ next_cursor = encode_cursor(CursorPosition(ts=last.ts, id=last.id))

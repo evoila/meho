@@ -710,6 +710,9 @@ async def test_approve_request_writes_decision_audit_row(session: AsyncSession) 
     assert len(decision_rows) == 1
     assert decision_rows[0].status_code == 200
     assert decision_rows[0].payload["decision"] == "approved"
+    # #3733: the park is a gate decision; the approve is an approval decision.
+    assert request_rows[0].event_class == "policy_decision"
+    assert decision_rows[0].event_class == "approval_decision"
 
 
 @pytest.mark.asyncio

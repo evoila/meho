@@ -94,6 +94,7 @@ from meho_backplane.broadcast.events import classify_op
 from meho_backplane.db.models import (
     ApprovalRequest,
     ApprovalRequestStatus,
+    AuditEventClass,
     AuditLog,
 )
 from meho_backplane.operations._audit import (
@@ -846,6 +847,7 @@ async def _write_audit_row(
     session: AsyncSession,
     *,
     audit_id: uuid.UUID,
+    event_class: AuditEventClass,
     operator: Operator,
     request: ApprovalRequest,
     path: str,
@@ -854,6 +856,12 @@ async def _write_audit_row(
     extra_payload: dict[str, Any] | None = None,
 ) -> None:
     """Insert one ``audit_log`` row for an approval queue event.
+
+    *event_class* (#3733) is declared by each caller:
+    ``policy_decision`` for the ``approval.request`` row (the gate decided
+    the call needs approval), ``approval_decision`` for an approve, reject
+    or expiry ``approval.decision`` row, and ``legacy_request`` for the
+    ``approval.result`` read row.
 
     Uses ``method='APPROVAL'`` and the provided *path* (``'approval.request'``
     or ``'approval.decision'``). The payload carries the
@@ -930,6 +938,7 @@ async def _write_audit_row(
         target_id=request.target_id,
         parent_audit_id=parent_audit_id,
         agent_session_id=request.agent_session_id,
+        event_class=event_class,
         method="APPROVAL",
         path=path,
         status_code=status_code,
@@ -1153,6 +1162,7 @@ async def create_pending_request(
     await _write_audit_row(
         session,
         audit_id=request_audit_id,
+        event_class=AuditEventClass.POLICY_DECISION,
         operator=operator,
         request=request,
         path="approval.request",
@@ -1283,6 +1293,7 @@ async def approve_request(
     await _write_audit_row(
         session,
         audit_id=approve_audit_id,
+        event_class=AuditEventClass.APPROVAL_DECISION,
         operator=operator,
         request=request,
         path="approval.decision",
@@ -1364,6 +1375,7 @@ async def reject_request(
     await _write_audit_row(
         session,
         audit_id=reject_audit_id,
+        event_class=AuditEventClass.APPROVAL_DECISION,
         operator=operator,
         request=request,
         path="approval.decision",
@@ -2119,6 +2131,7 @@ async def _expire_request(
     await _write_audit_row(
         session,
         audit_id=expire_audit_id,
+        event_class=AuditEventClass.APPROVAL_DECISION,
         operator=operator,
         request=request,
         path="approval.decision",
@@ -2452,6 +2465,7 @@ async def read_approval_result(
     await _write_audit_row(
         session,
         audit_id=uuid.uuid4(),
+        event_class=AuditEventClass.LEGACY_REQUEST,
         operator=operator,
         request=request,
         path="approval.result",

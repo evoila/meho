@@ -114,6 +114,7 @@ def _node(node_id: str, *, depth: int, children: list[ReplayNode] | None = None)
         agent_session_id=uuid.UUID(_SESSION_ID),
         work_ref=None,
         policy_decision=None,
+        event_class="legacy_request",
         broadcast_event_id=None,
         depth=depth,
         children=children or [],

@@ -373,6 +373,7 @@ def test_tools_call_handler_returns_result_model_dump(
         agent_session_id=None,
         work_ref=None,
         policy_decision=None,
+        event_class="legacy_request",
         broadcast_event_id=None,
     )
     mock_query = AsyncMock(

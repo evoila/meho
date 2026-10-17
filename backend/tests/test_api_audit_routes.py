@@ -212,6 +212,7 @@ def _make_entry(
         agent_session_id=None,
         work_ref=None,
         policy_decision=policy_decision,
+        event_class="legacy_request",
         broadcast_event_id=None,
     )
 
@@ -327,6 +328,64 @@ def test_post_query_body_tenant_id_is_rejected_with_extra_forbidden(
         for d in detail
     ), detail
     mock_query.assert_not_awaited()  # Substrate never reached.
+
+
+def test_post_query_event_class_reaches_the_substrate(client: TestClient) -> None:
+    """#3733: ``event_class`` in the body becomes the substrate class filter."""
+    key = make_rsa_keypair("kid-A")
+    token = _token(key)
+    mock_query = AsyncMock(return_value=_empty_result())
+    with (
+        respx.mock as r,
+        patch("meho_backplane.api.v1.audit.query_audit", new=mock_query),
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/audit/query",
+            json={"event_class": "approval_decision"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 200
+    filters = mock_query.await_args.args[0]
+    assert filters.event_class == "approval_decision"
+
+
+def test_post_query_without_event_class_applies_no_class_filter(client: TestClient) -> None:
+    """#3733: an old-style body (no class) keeps every class in the result."""
+    key = make_rsa_keypair("kid-A")
+    token = _token(key)
+    mock_query = AsyncMock(return_value=_empty_result())
+    with (
+        respx.mock as r,
+        patch("meho_backplane.api.v1.audit.query_audit", new=mock_query),
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/audit/query",
+            json={"principal": "op-1"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 200
+    assert mock_query.await_args.args[0].event_class is None
+
+
+def test_post_query_unknown_event_class_returns_422(client: TestClient) -> None:
+    """#3733: a class outside the closed list is refused before any query runs."""
+    key = make_rsa_keypair("kid-A")
+    token = _token(key)
+    mock_query = AsyncMock(return_value=_empty_result())
+    with (
+        respx.mock as r,
+        patch("meho_backplane.api.v1.audit.query_audit", new=mock_query),
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/audit/query",
+            json={"event_class": "http_request"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 422
+    mock_query.assert_not_awaited()
 
 
 def test_post_query_bad_duration_returns_400(client: TestClient) -> None:

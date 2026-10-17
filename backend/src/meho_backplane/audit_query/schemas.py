@@ -60,6 +60,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from meho_backplane.db.models import AuditEventClass
+
 __all__ = [
     "AuditEntry",
     "AuditQueryFilters",
@@ -101,6 +103,10 @@ class AuditQueryFilters(BaseModel):
     parent_audit_id: uuid.UUID | None = None
     agent_session_id: uuid.UUID | None = None
     work_ref: str | None = None
+    # Exact match on ``audit_log.event_class`` (#3733). ``None`` (the
+    # default) applies no class filter, so a query returns every class --
+    # the same rows it returned before the column existed.
+    event_class: AuditEventClass | None = None
     limit: int = Field(default=100, ge=1, le=1000)
     cursor: str | None = None
 
@@ -162,6 +168,10 @@ class AuditEntry(BaseModel):
     # the verdict directly instead of joining ``method``+``path`` + parsing
     # ``payload``.
     policy_decision: str | None
+    # What kind of accountable event the row records (#3733), from the real
+    # ``audit_log.event_class`` column. Rows written before the column
+    # existed read as ``legacy_request``.
+    event_class: str
     broadcast_event_id: uuid.UUID | None
 
 

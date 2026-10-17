@@ -51,7 +51,7 @@ from sqlalchemy import select, update
 
 from meho_backplane.db.advisory import advisory_lock
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import GatewayCommand
+from meho_backplane.db.models import AuditEventClass, GatewayCommand
 from meho_backplane.memory.audit import (
     INTERNAL_METHOD,
     write_internal_audit_row,
@@ -181,6 +181,7 @@ async def _audit_alarms(
     for tenant_id, command_id, runner_id, op_id, lapse_seconds in flipped:
         try:
             await write_internal_audit_row(
+                event_class=AuditEventClass.SECURITY_EVENT,
                 operator_sub=_SECURITY_OPERATOR_SUB,
                 tenant_id=tenant_id,
                 method=INTERNAL_METHOD,

@@ -23268,6 +23268,10 @@
             "nullable": true,
             "title": "Policy Decision"
           },
+          "event_class": {
+            "type": "string",
+            "title": "Event Class"
+          },
           "broadcast_event_id": {
             "type": "string",
             "format": "uuid",
@@ -23297,10 +23301,23 @@
           "agent_session_id",
           "work_ref",
           "policy_decision",
+          "event_class",
           "broadcast_event_id"
         ],
         "title": "AuditEntry",
         "description": "One row of the audit query result.\n\nField-to-column mapping (see module docstring for the substrate\nreconciliation):\n\n* ``id`` \u2190 ``audit_log.id``\n* ``ts`` \u2190 ``audit_log.occurred_at``\n* ``tenant_id`` \u2190 ``audit_log.tenant_id``\n* ``principal_sub`` \u2190 ``audit_log.operator_sub``\n* ``target_id`` \u2190 ``audit_log.target_id``\n* ``target_name`` \u2190 LEFT JOIN ``targets.name`` ON ``audit_log.target_id``\n* ``method`` / ``path`` / ``status_code`` / ``request_id`` / ``duration_ms``\n  / ``payload`` \u2190 columns of the same name\n* ``op_id`` / ``op_class`` / ``result_status`` \u2014 computed at query time\n* ``parent_audit_id`` \u2190 ``audit_log.parent_audit_id`` (lineage; #398)\n* ``agent_session_id`` \u2190 ``audit_log.agent_session_id`` (MCP session; #1009)\n* ``work_ref`` \u2190 ``audit_log.work_ref`` (external change-ticket reference;\n  work_ref I1-T1 #1655). NULL until a bind source lands (I1-T2); the flat\n  ``work_ref`` filter on :class:`AuditQueryFilters` is exact-match.\n* ``principal_name`` \u2190 ``payload['principal_name']`` when set. The MCP\n  audit-write helper (``write_mcp_audit_row``) populates it from\n  ``Operator.name`` since G0.15-T3 #1212; HTTP-chassis rows remain\n  None pending a separate fix to bind ``name`` to contextvars in\n  ``verify_jwt_and_bind``.\n* ``broadcast_event_id`` \u2014 v0.2 placeholder, always None (FK direction\n  is reversed: ``BroadcastEvent.audit_id`` points at the audit row)."
+      },
+      "AuditEventClass": {
+        "type": "string",
+        "enum": [
+          "operation_execution",
+          "policy_decision",
+          "approval_decision",
+          "security_event",
+          "legacy_request"
+        ],
+        "title": "AuditEventClass",
+        "description": "What kind of accountable event one ``audit_log`` row records (#3733).\n\nThe set is closed. The database CHECK ``ck_audit_log_event_class``\nrejects any other value, so a new class needs a code change and a\nmigration together.\n\n* :attr:`OPERATION_EXECUTION` -- an action ran: a dispatched operation\n  (success or failure), or a MEHO-internal action such as a topology\n  edit, a retention sweep or a reaper.\n* :attr:`POLICY_DECISION` -- a gate decided about a call before it ran:\n  a policy deny, a rate-limit refusal, or a park for approval.\n* :attr:`APPROVAL_DECISION` -- a person (or a standing grant) approved,\n  rejected, or let an approval request expire.\n* :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a\n  refresh-token replay or a broken satellite effect chain.\n* :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every\n  row written before migration ``0106`` reads as this class; it is never\n  guessed from ``method`` / ``path``. The REST and MCP request wrapper\n  rows also keep this class until they are retired."
       },
       "AuditQueryRequest": {
         "properties": {
@@ -23369,6 +23386,10 @@
             "maxLength": 256,
             "nullable": true,
             "title": "Work Ref"
+          },
+          "event_class": {
+            "$ref": "#/components/schemas/AuditEventClass",
+            "nullable": true
           },
           "limit": {
             "type": "integer",
@@ -31467,6 +31488,10 @@
             "nullable": true,
             "title": "Policy Decision"
           },
+          "event_class": {
+            "type": "string",
+            "title": "Event Class"
+          },
           "broadcast_event_id": {
             "type": "string",
             "format": "uuid",
@@ -31507,6 +31532,7 @@
           "agent_session_id",
           "work_ref",
           "policy_decision",
+          "event_class",
           "broadcast_event_id",
           "depth"
         ],

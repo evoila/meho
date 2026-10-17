@@ -267,4 +267,5 @@ async def test_tampered_report_is_refused_and_quarantined(
     # But the tamper is durably recorded as a security event.
     assert len(quarantine_rows) == 1
     assert quarantine_rows[0].payload["event_class"] == "security"
+    assert quarantine_rows[0].event_class == "security_event"
     assert quarantine_rows[0].payload["runner"] == _RUNNER_NAME

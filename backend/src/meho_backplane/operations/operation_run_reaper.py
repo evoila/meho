@@ -49,7 +49,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.advisory import advisory_lock
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, OperationRun, OperationRunStatus
+from meho_backplane.db.models import AuditEventClass, AuditLog, OperationRun, OperationRunStatus
 from meho_backplane.metrics import note_loop_tick
 from meho_backplane.operations.operation_run import (
     IllegalOperationRunTransitionError,
@@ -112,6 +112,7 @@ def _stage_audit_row(
     session.add(
         AuditLog(
             id=uuid.uuid4(),
+            event_class=AuditEventClass.OPERATION_EXECUTION,
             occurred_at=datetime.now(UTC),
             operator_sub=_SYSTEM_OPERATOR_SUB,
             tenant_id=tenant_id,

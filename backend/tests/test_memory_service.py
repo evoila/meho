@@ -41,6 +41,7 @@ from meho_backplane.db.models import Document
 from meho_backplane.memory.rbac import PermissionDeniedError
 from meho_backplane.memory.schemas import MemoryEntryCreate, MemoryScope
 from meho_backplane.memory.service import MemoryService
+from meho_backplane.memory.snippet import SNIPPET_MAX_CHARS
 from meho_backplane.retrieval.retriever import RetrievalHit
 from meho_backplane.settings import get_settings
 
@@ -646,9 +647,11 @@ async def test_search_memories_returns_substrate_hits_without_post_filter() -> N
     ):
         results = await MemoryService().search_memories(operator=operator, query="any")
 
-    assert [r.entry.slug for r in results] == ["user-match", "target-match"]
-    assert [r.entry.scope for r in results] == [MemoryScope.USER, MemoryScope.TARGET]
-    assert results[1].entry.target_name == "infra-1"
+    assert [r.slug for r in results] == ["user-match", "target-match"]
+    assert [r.rank for r in results] == [1, 2]
+    assert [r.scope for r in results] == [MemoryScope.USER, MemoryScope.TARGET]
+    assert results[1].target_name == "infra-1"
+    assert results[0].user_sub == "alice"
 
 
 @pytest.mark.asyncio
@@ -706,11 +709,38 @@ async def test_search_memories_passes_through_hit_timestamps() -> None:
         results = await MemoryService().search_memories(operator=operator, query="any")
 
     assert len(results) == 1
-    assert results[0].entry.created_at == created
-    assert results[0].entry.updated_at == updated
+    assert results[0].created_at == created
+    assert results[0].updated_at == updated
     epoch = datetime(1970, 1, 1, tzinfo=UTC)
-    assert results[0].entry.created_at != epoch
-    assert results[0].entry.updated_at != epoch
+    assert results[0].created_at != epoch
+    assert results[0].updated_at != epoch
+
+
+@pytest.mark.asyncio
+async def test_search_memories_returns_bounded_snippet_not_body() -> None:
+    """A hit holds a query-relevant snippet and the body length, never the body (#3751)."""
+    tenant = uuid.UUID("00000000-0000-0000-0000-00000000a0a0")
+    operator = _op(tenant_id=tenant)
+    hit = _build_hit(
+        kind="memory-tenant", tenant_id=tenant, user_sub=None, target_name=None, slug="long"
+    )
+    body = "x" * 2000 + " backup window is Sunday " + "y" * 2000
+    hit = hit.model_copy(update={"body": body, "doc_metadata": {"expires_at": None}})
+    with patch(
+        "meho_backplane.memory.service.retrieve",
+        new=AsyncMock(return_value=[hit]),
+    ):
+        (result,) = await MemoryService().search_memories(operator=operator, query="backup")
+
+    assert result.snippet_truncated is True
+    assert result.body_chars == len(body)
+    assert "backup window is Sunday" in result.snippet
+    assert len(result.snippet) <= SNIPPET_MAX_CHARS + 2
+    assert result.expiry_state == "never"
+    dumped = result.model_dump(mode="json")
+    assert "body" not in dumped
+    assert "fused_score" not in dumped
+    assert dumped["locator"] == f"meho://memory/id/{hit.document_id}"
 
 
 @pytest.mark.asyncio

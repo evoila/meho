@@ -76,6 +76,7 @@ EXPECTED_DECLARING_TOOLS: frozenset[str] = frozenset(
         "query_audit",
         "query_topology",
         "result_query",
+        "search_memory",
         "search_operations",
     }
 )

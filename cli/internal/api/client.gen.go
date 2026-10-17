@@ -724,6 +724,14 @@ const (
 	TopologyDiffEntrySourceNode TopologyDiffEntrySource = "node"
 )
 
+// Defines values for TopologyNodeScopeStatus.
+const (
+	TopologyNodeScopeStatusGlobal     TopologyNodeScopeStatus = "global"
+	TopologyNodeScopeStatusLegacy     TopologyNodeScopeStatus = "legacy"
+	TopologyNodeScopeStatusTarget     TopologyNodeScopeStatus = "target"
+	TopologyNodeScopeStatusUnresolved TopologyNodeScopeStatus = "unresolved"
+)
+
 // Defines values for UnderscoreKindFilter.
 const (
 	UnderscoreKindFilterAll                   UnderscoreKindFilter = "all"
@@ -9402,6 +9410,13 @@ type TopologyHistoryResult struct {
 // every “parent_node_id“ in a closure result is itself a row of
 // that result. Additive with “None“ defaults so pre-#2538
 // constructors and payloads stay valid.
+//
+// “source_scope“ (#3739) is the stored “graph_node.source_scope“:
+// “global“, “target:<uuid>“, “legacy:<uuid>“ or “None“.
+// “scope_status“ is derived from it. “unresolved“ means the row
+// has no scope yet and the reader does not know which source the
+// name belongs to; it never falls back to the last target that saw
+// the row.
 type TopologyNode struct {
 	Depth        int                     `json:"depth"`
 	Id           openapi_types.UUID      `json:"id"`
@@ -9409,10 +9424,17 @@ type TopologyNode struct {
 	Name         string                  `json:"name"`
 	ParentNodeId *openapi_types.UUID     `json:"parent_node_id"`
 	Properties   *map[string]interface{} `json:"properties,omitempty"`
-	Source       string                  `json:"source"`
-	ViaEdgeId    *openapi_types.UUID     `json:"via_edge_id"`
-	ViaEdgeKind  *string                 `json:"via_edge_kind"`
+
+	// ScopeStatus Where the name is unique, or ``unresolved`` when not recorded.
+	ScopeStatus *TopologyNodeScopeStatus `json:"scope_status,omitempty"`
+	Source      string                   `json:"source"`
+	SourceScope *string                  `json:"source_scope"`
+	ViaEdgeId   *openapi_types.UUID      `json:"via_edge_id"`
+	ViaEdgeKind *string                  `json:"via_edge_kind"`
 }
+
+// TopologyNodeScopeStatus Where the name is unique, or “unresolved“ when not recorded.
+type TopologyNodeScopeStatus string
 
 // TopologyPath An ordered shortest path between two nodes.
 //

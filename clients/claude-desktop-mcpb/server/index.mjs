@@ -51,6 +51,7 @@
 
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import tls from "node:tls";
 import { pathToFileURL } from "node:url";
@@ -79,7 +80,15 @@ if (url.protocol !== "https:") {
 // `${user_config.ca_cert}` placeholder, so an unsubstituted placeholder
 // means "no CA", the same as an empty or missing argument.
 const caArg = (process.argv[3] ?? "").trim();
-const caCertPath = /^\$\{[^}]*\}$/.test(caArg) ? "" : caArg;
+const caCertPath = /^\$\{[^}]*\}$/.test(caArg) ? "" : expandHome(caArg);
+
+// Desktop's file field also takes a typed path and stores it as typed.
+// Node does not expand `~`, so a typed `~/internal-ca.pem` would fail to
+// load. Expand a bare `~` or a leading `~/` (or `~\` on Windows) to the
+// home folder; leave every other path unchanged.
+function expandHome(path) {
+  return path === "~" || /^~[/\\]/.test(path) ? homedir() + path.slice(1) : path;
+}
 
 if (caCertPath && typeof tls.setDefaultCACertificates === "function") {
   // Append, never replace: the bundled roots and any OS-store roots already

@@ -76,10 +76,12 @@ backplane's and Keycloak's certificates. Either route is enough; a
 public-CA deploy needs neither.
 
 - **The bundle's CA field.** Pick the CA's PEM file in the install
-  dialog. The bundle's launcher adds its certificates to Node's trust
-  store in-process before the shim starts, keeping the trust it already
-  has. A path it cannot read, or a file without a PEM certificate, stops
-  the extension with an error naming the file.
+  dialog with the file picker. If you type the path instead, it must be
+  absolute or start with `~/`. The bundle's launcher adds its
+  certificates to Node's trust store in-process before the shim starts,
+  keeping the trust it already has. A path it cannot read, or a file
+  without a PEM certificate, stops the extension with an error naming
+  the file.
 - **Your OS trust store.** Leave the CA field empty and trust the root CA
   in the OS trust store. On macOS that is the login keychain:
 

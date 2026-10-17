@@ -3,8 +3,8 @@
 
 """Add the state and manifest tables for the topology scope cut-over (#3749).
 
-Revision ID: 0110
-Revises: 0109
+Revision ID: 0111
+Revises: 0110
 Create Date: 2026-10-17
 
 Why
@@ -55,8 +55,8 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = "0110"
-down_revision: str | None = "0109"
+revision: str = "0111"
+down_revision: str | None = "0110"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -111,7 +111,7 @@ def downgrade() -> None:
     )
     if mode == "scoped":
         raise RuntimeError(
-            "Refusing to downgrade 0110: the topology scope cut-over has run. "
+            "Refusing to downgrade 0111: the topology scope cut-over has run. "
             "graph_node now holds rows that differ only by source_scope, so the "
             "old (tenant_id, kind, name) key cannot come back. Roll forward instead."
         )

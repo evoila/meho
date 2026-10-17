@@ -8,7 +8,7 @@
   ``graph_edge`` row as the plan's :class:`~.plan.OldNode` /
   :class:`~.plan.OldEdge`.
 * :data:`MANIFEST` is the Core table for ``topology_scope_manifest``
-  (migration ``0110``); :func:`save_manifest`, :func:`load_manifest` and
+  (migration ``0111``); :func:`save_manifest`, :func:`load_manifest` and
   :func:`mark_manifest` read and write it.
 """
 

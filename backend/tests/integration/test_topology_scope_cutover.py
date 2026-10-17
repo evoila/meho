@@ -32,7 +32,7 @@ Coverage:
 * **Soft-delete** -- after the cut-over a refresh only soft-deletes rows
   in its own scope.
 * **Rollback guard** -- a second cut-over, a new staging run and the
-  ``0110`` downgrade all refuse once the graph is scoped.
+  ``0111`` downgrade all refuse once the graph is scoped.
 * **Curated quarantine** -- a curated edge to the merged row stays, with
   its history, but leaves every graph answer, the edge listing included.
 * **Old edge to another target** -- when a target stops reporting a
@@ -585,8 +585,8 @@ async def test_rollback_guards_refuse_once_scoped(scope_db: None, async_pg_url: 
 
     cfg = alembic_config()
     cfg.set_main_option("sqlalchemy.url", async_pg_url)
-    with pytest.raises(RuntimeError, match="Refusing to downgrade 0110"):
-        await asyncio.to_thread(command.downgrade, cfg, "0109")
+    with pytest.raises(RuntimeError, match="Refusing to downgrade 0111"):
+        await asyncio.to_thread(command.downgrade, cfg, "0110")
     assert await _mode() == "scoped"
 
 

@@ -359,7 +359,7 @@ each own a `default` namespace, and no answer joins them through that
 shared name. It needs fresh answers from every target, so it is an
 operator step, not a migration. Code: `topology/scope_repair/`.
 
-**Mode.** `topology_identity_state` (migration `0110`) holds one row:
+**Mode.** `topology_identity_state` (migration `0111`) holds one row:
 `mode` is `legacy` or `scoped`. Every install starts `legacy`; only the
 cut-over sets `scoped`. `topology/identity_mode.py` reads it. Writers
 read it with `FOR SHARE` inside their own transaction. Staging and the
@@ -467,7 +467,7 @@ graph is unchanged and readable. Refusals about the manifest
 rolls the whole transaction back; the same manifest can then roll
 forward if the graph has not changed. There is no way back to the old
 key: a second cut-over and a new staging run refuse once `scoped`, and
-the `0110` downgrade refuses too (as does `0108`'s, on `target:` /
+the `0111` downgrade refuses too (as does `0108`'s, on `target:` /
 `legacy:` values).
 
 **Schema after the cut-over** differs from the ORM declaration in
@@ -490,7 +490,7 @@ with `scopes` set instead of picking one; the traversal and path
 statements anchor on the resolved row id.
 
 **Tests.** `tests/test_topology_scope_plan.py` (plan rules, order,
-snapshot), `tests/migrations/test_migration_0110_add_topology_scope_cutover_state.py`
+snapshot), `tests/migrations/test_migration_0111_add_topology_scope_cutover_state.py`
 (SQLite: tables, CHECKs, downgrade guard) and
 `tests/integration/test_topology_scope_cutover.py` (PostgreSQL: staged
 manifest, a refresh that waits during staging, atomic cut-over,

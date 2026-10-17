@@ -99,8 +99,9 @@ default) reads the MCP envelope rows above. ``"request_usage"`` reads the
 meta-tool calls from ``ok`` ``request_finished`` usage events
 (:mod:`meho_backplane.request_usage`) instead, with the usage
 ``session_id`` as the session. Dispatch rows always come from
-``audit_log``: they are execution records, not wrapper rows. The routes
-keep the default until the wrapper rows are retired.
+``audit_log``: they are execution records, not wrapper rows. The REST
+route reads ``"request_usage"`` (#3747); ``"audit_log"`` stays only until
+the wrapper rows are retired.
 
 Tenant boundary
 ---------------

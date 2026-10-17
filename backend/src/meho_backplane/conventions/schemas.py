@@ -457,18 +457,22 @@ class ConventionHistoryEntry(BaseModel):
 
     Per the issue's acceptance criterion, history returns newest
     first ("pick newest first for v0.2; documented"); the route's
-    ORDER BY ``ts DESC`` enforces this. ``audit_id`` is the soft-FK
-    that G8's audit-query path joins on; it is nullable because
-    T5's seed migration inserts history rows with no audit_log row
-    (seeded rows pre-date any HTTP request).
+    ORDER BY ``ts DESC`` enforces this.
+
+    Provenance (#3747): the history row is the record of the edit.
+    ``change_kind`` says what it was (``created`` / ``updated`` /
+    ``deleted``) and ``request_id`` is the request correlation id of the
+    call, which links to the request usage event. Both are ``None`` on
+    rows written before #3747. ``audit_id`` is the legacy link to the
+    REST request wrapper row: old rows carry it, new rows and seeded
+    rows have ``None``.
 
     ``body_before`` is nullable -- the first history row (the
     CREATE event) has no prior state. DELETE history rows get
     ``body_after=<final body>`` (a legible last-known state for
     audit forensics) rather than an empty-string sentinel; the
-    lifecycle distinction (create / update / delete) lives in the
-    audit log row's ``method`` / ``path`` columns, not on the
-    history row itself.
+    lifecycle distinction (create / update / delete) is
+    ``change_kind`` on rows since #3747.
     """
 
     model_config = ConfigDict(frozen=True, from_attributes=True)
@@ -480,3 +484,5 @@ class ConventionHistoryEntry(BaseModel):
     actor_sub: str
     ts: datetime
     audit_id: uuid.UUID | None
+    change_kind: str | None = None
+    request_id: uuid.UUID | None = None

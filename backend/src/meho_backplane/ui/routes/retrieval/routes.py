@@ -738,6 +738,7 @@ async def _run_usage(
             until=now,
             surfaces=SUPPORTED_SURFACES,
             tenant_id=operator.tenant_id,
+            source="request_usage",
         )
     log.info(
         "ui_retrieval_usage_completed",
@@ -916,6 +917,7 @@ async def _run_retire(
             session=db_session,
             surfaces=list(SURFACE_VERDICT_ORDER),
             tenant_id=target_tenant,
+            source="request_usage",
         )
     log.info(
         "ui_retrieval_retire_checklist_completed",

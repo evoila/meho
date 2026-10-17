@@ -1683,6 +1683,39 @@ type AssignmentDocumentResponse struct {
 	Runner string              `json:"runner"`
 }
 
+// AuditClassCounts 200 body for “POST /api/v1/audit/class-counts“ (#3747).
+//
+// “counts“ has one key per event class (“operation_execution“,
+// “policy_decision“, “approval_decision“, “security_event“,
+// “legacy_request“), “0“ when a class has no rows. Old rows count
+// as “legacy_request“; they are never reclassified. “total“ is the
+// sum. “since“ is the start of the counted window: the request's
+// “since“, or 24 hours ago when the request set none.
+type AuditClassCounts struct {
+	Counts map[string]int `json:"counts"`
+	Since  time.Time      `json:"since"`
+	Total  int            `json:"total"`
+}
+
+// AuditClassCountsRequest POST body for “/api/v1/audit/class-counts“ (#3747).
+//
+// The same filters as :class:`AuditQueryRequest`, without
+// “event_class“, “limit“ and “cursor“: the answer counts every
+// class for the whole matching set, not one page.
+type AuditClassCountsRequest struct {
+	AgentSessionId *openapi_types.UUID `json:"agent_session_id"`
+	AuditId        *openapi_types.UUID `json:"audit_id"`
+	OpClass        *string             `json:"op_class"`
+	OpId           *string             `json:"op_id"`
+	ParentAuditId  *openapi_types.UUID `json:"parent_audit_id"`
+	Principal      *string             `json:"principal"`
+	ResultStatus   *string             `json:"result_status"`
+	Since          *string             `json:"since"`
+	Target         *string             `json:"target"`
+	Until          *string             `json:"until"`
+	WorkRef        *string             `json:"work_ref"`
+}
+
 // AuditEntry One row of the audit query result.
 //
 // Field-to-column mapping (see module docstring for the substrate
@@ -1763,11 +1796,6 @@ type AuditEventClass string
 // layer. All other fields pass through to the substrate filter
 // object unchanged. The empty body shape “{}“ is the no-filter
 // case — every field defaults to None or the substrate-side default.
-//
-// “extra="forbid"“ rejects unknown fields with 422
-// “extra_forbidden“ so a typo or a client passing “tenant_id“
-// in the body fails loud at the framework boundary — the route
-// always uses “operator.tenant_id“ from the JWT, never the body.
 type AuditQueryRequest struct {
 	AgentSessionId *openapi_types.UUID `json:"agent_session_id"`
 	AuditId        *openapi_types.UUID `json:"audit_id"`
@@ -1883,6 +1911,11 @@ type AuditReplayResult struct {
 //     normal state an operator must be able to observe, not an error. The
 //     console pane renders a "no trace captured" empty state for this case.
 //
+// Only an “operation_execution“ row resolves to the flight recorder
+// (#3747). A decision, security or legacy row is not an execution, so it
+// answers “trace_present=False“ and the route never reads a trace for
+// it. “event_class“ echoes the row's class so the reason is visible.
+//
 // “trace.redaction_uncertain“ surfaces the F5 degrade flag so an operator
 // (and a paired add-on reading over this route with its operator principal)
 // can see when a trace was withheld from the agent handle. The operator plane
@@ -1890,7 +1923,8 @@ type AuditReplayResult struct {
 //
 // Frozen like the models it carries.
 type AuditTraceResult struct {
-	AuditId openapi_types.UUID `json:"audit_id"`
+	AuditId    openapi_types.UUID `json:"audit_id"`
+	EventClass *string            `json:"event_class"`
 
 	// Trace A dispatch trace header plus its ordered spans, tenant-scoped.
 	//
@@ -3879,25 +3913,31 @@ type ConventionCreate struct {
 //
 // Per the issue's acceptance criterion, history returns newest
 // first ("pick newest first for v0.2; documented"); the route's
-// ORDER BY “ts DESC“ enforces this. “audit_id“ is the soft-FK
-// that G8's audit-query path joins on; it is nullable because
-// T5's seed migration inserts history rows with no audit_log row
-// (seeded rows pre-date any HTTP request).
+// ORDER BY “ts DESC“ enforces this.
+//
+// Provenance (#3747): the history row is the record of the edit.
+// “change_kind“ says what it was (“created“ / “updated“ /
+// “deleted“) and “request_id“ is the request correlation id of the
+// call, which links to the request usage event. Both are “None“ on
+// rows written before #3747. “audit_id“ is the legacy link to the
+// REST request wrapper row: old rows carry it, new rows and seeded
+// rows have “None“.
 //
 // “body_before“ is nullable -- the first history row (the
 // CREATE event) has no prior state. DELETE history rows get
 // “body_after=<final body>“ (a legible last-known state for
 // audit forensics) rather than an empty-string sentinel; the
-// lifecycle distinction (create / update / delete) lives in the
-// audit log row's “method“ / “path“ columns, not on the
-// history row itself.
+// lifecycle distinction (create / update / delete) is
+// “change_kind“ on rows since #3747.
 type ConventionHistoryEntry struct {
 	ActorSub     string              `json:"actor_sub"`
 	AuditId      *openapi_types.UUID `json:"audit_id"`
 	BodyAfter    string              `json:"body_after"`
 	BodyBefore   *string             `json:"body_before"`
+	ChangeKind   *string             `json:"change_kind"`
 	ConventionId openapi_types.UUID  `json:"convention_id"`
 	Id           openapi_types.UUID  `json:"id"`
+	RequestId    *openapi_types.UUID `json:"request_id"`
 	Ts           time.Time           `json:"ts"`
 }
 
@@ -5896,7 +5936,12 @@ type IngestionResultModel struct {
 // operator-facing identifier (“documents.source_id“ on the SQL
 // side); the underlying “Document.id“ UUID is also surfaced for
 // cross-correlation with audit-log rows and future MCP resource
-// URIs.
+// URIs. “id“ is the entry UUID.
+//
+// “revision_id“ is the retained revision that holds this body. Pass
+// it with “id“ to “meho://kb/id/{entry}/revision/{revision}“ to
+// read this exact body later, even after the entry changes. It is
+// “None“ only for a row that has no stored revision.
 type KbEntry struct {
 	Body      string                 `json:"body"`
 	CreatedAt time.Time              `json:"created_at"`
@@ -5911,10 +5956,11 @@ type KbEntry struct {
 	// entry was written before provenance was stored, or the stored value
 	// is not in the expected shape; every other field is ``None``. Legacy
 	// rows are not rewritten -- the next write records real provenance.
-	Provenance KbProvenance       `json:"provenance"`
-	Slug       string             `json:"slug"`
-	TenantId   openapi_types.UUID `json:"tenant_id"`
-	UpdatedAt  time.Time          `json:"updated_at"`
+	Provenance KbProvenance        `json:"provenance"`
+	RevisionId *openapi_types.UUID `json:"revision_id"`
+	Slug       string              `json:"slug"`
+	TenantId   openapi_types.UUID  `json:"tenant_id"`
+	UpdatedAt  time.Time           `json:"updated_at"`
 }
 
 // KbEntryCreate POST body for “/api/v1/kb“ -- create / re-index one entry.
@@ -10214,6 +10260,11 @@ type ByWorkRefApiV1AuditByWorkRefRefGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ClassCountsApiV1AuditClassCountsPostParams defines parameters for ClassCountsApiV1AuditClassCountsPost.
+type ClassCountsApiV1AuditClassCountsPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // MyRecentApiV1AuditMyRecentGetParams defines parameters for MyRecentApiV1AuditMyRecentGet.
 type MyRecentApiV1AuditMyRecentGetParams struct {
 	Since         *string `form:"since,omitempty" json:"since,omitempty"`
@@ -11158,6 +11209,7 @@ type UiAuditPageUiAuditGetParams struct {
 	WorkRef        *string             `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 	AuditId        *openapi_types.UUID `form:"audit_id,omitempty" json:"audit_id,omitempty"`
 	AgentSessionId *openapi_types.UUID `form:"agent_session_id,omitempty" json:"agent_session_id,omitempty"`
+	EventClass     *string             `form:"event_class,omitempty" json:"event_class,omitempty"`
 }
 
 // UiAuditResultsUiAuditResultsGetParams defines parameters for UiAuditResultsUiAuditResultsGet.
@@ -11172,6 +11224,7 @@ type UiAuditResultsUiAuditResultsGetParams struct {
 	WorkRef        *string             `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 	Cursor         *string             `form:"cursor,omitempty" json:"cursor,omitempty"`
 	AgentSessionId *openapi_types.UUID `form:"agent_session_id,omitempty" json:"agent_session_id,omitempty"`
+	EventClass     *string             `form:"event_class,omitempty" json:"event_class,omitempty"`
 	Partial        *string             `form:"partial,omitempty" json:"partial,omitempty"`
 }
 
@@ -11504,6 +11557,9 @@ type RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostJSONRequestBody = Rej
 
 // AskDocsEndpointApiV1AskDocsPostJSONRequestBody defines body for AskDocsEndpointApiV1AskDocsPost for application/json ContentType.
 type AskDocsEndpointApiV1AskDocsPostJSONRequestBody = AskDocsRequest
+
+// ClassCountsApiV1AuditClassCountsPostJSONRequestBody defines body for ClassCountsApiV1AuditClassCountsPost for application/json ContentType.
+type ClassCountsApiV1AuditClassCountsPostJSONRequestBody = AuditClassCountsRequest
 
 // QueryApiV1AuditQueryPostJSONRequestBody defines body for QueryApiV1AuditQueryPost for application/json ContentType.
 type QueryApiV1AuditQueryPostJSONRequestBody = AuditQueryRequest
@@ -13419,6 +13475,11 @@ type ClientInterface interface {
 
 	// ByWorkRefApiV1AuditByWorkRefRefGet request
 	ByWorkRefApiV1AuditByWorkRefRefGet(ctx context.Context, ref string, params *ByWorkRefApiV1AuditByWorkRefRefGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ClassCountsApiV1AuditClassCountsPostWithBody request with any body
+	ClassCountsApiV1AuditClassCountsPostWithBody(ctx context.Context, params *ClassCountsApiV1AuditClassCountsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ClassCountsApiV1AuditClassCountsPost(ctx context.Context, params *ClassCountsApiV1AuditClassCountsPostParams, body ClassCountsApiV1AuditClassCountsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// MyRecentApiV1AuditMyRecentGet request
 	MyRecentApiV1AuditMyRecentGet(ctx context.Context, params *MyRecentApiV1AuditMyRecentGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -15416,6 +15477,30 @@ func (c *Client) AskDocsEndpointApiV1AskDocsPost(ctx context.Context, params *As
 
 func (c *Client) ByWorkRefApiV1AuditByWorkRefRefGet(ctx context.Context, ref string, params *ByWorkRefApiV1AuditByWorkRefRefGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewByWorkRefApiV1AuditByWorkRefRefGetRequest(c.Server, ref, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ClassCountsApiV1AuditClassCountsPostWithBody(ctx context.Context, params *ClassCountsApiV1AuditClassCountsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewClassCountsApiV1AuditClassCountsPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ClassCountsApiV1AuditClassCountsPost(ctx context.Context, params *ClassCountsApiV1AuditClassCountsPostParams, body ClassCountsApiV1AuditClassCountsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewClassCountsApiV1AuditClassCountsPostRequest(c.Server, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -23969,6 +24054,61 @@ func NewByWorkRefApiV1AuditByWorkRefRefGetRequest(server string, ref string, par
 	if err != nil {
 		return nil, err
 	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewClassCountsApiV1AuditClassCountsPostRequest calls the generic ClassCountsApiV1AuditClassCountsPost builder with application/json body
+func NewClassCountsApiV1AuditClassCountsPostRequest(server string, params *ClassCountsApiV1AuditClassCountsPostParams, body ClassCountsApiV1AuditClassCountsPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewClassCountsApiV1AuditClassCountsPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewClassCountsApiV1AuditClassCountsPostRequestWithBody generates requests for ClassCountsApiV1AuditClassCountsPost with any type of body
+func NewClassCountsApiV1AuditClassCountsPostRequestWithBody(server string, params *ClassCountsApiV1AuditClassCountsPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/audit/class-counts")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	if params != nil {
 
@@ -35394,6 +35534,22 @@ func NewUiAuditPageUiAuditGetRequest(server string, params *UiAuditPageUiAuditGe
 
 		}
 
+		if params.EventClass != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "event_class", runtime.ParamLocationQuery, *params.EventClass); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -35601,6 +35757,22 @@ func NewUiAuditResultsUiAuditResultsGetRequest(server string, params *UiAuditRes
 		if params.AgentSessionId != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "agent_session_id", runtime.ParamLocationQuery, *params.AgentSessionId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.EventClass != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "event_class", runtime.ParamLocationQuery, *params.EventClass); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -44249,6 +44421,11 @@ type ClientWithResponsesInterface interface {
 	// ByWorkRefApiV1AuditByWorkRefRefGetWithResponse request
 	ByWorkRefApiV1AuditByWorkRefRefGetWithResponse(ctx context.Context, ref string, params *ByWorkRefApiV1AuditByWorkRefRefGetParams, reqEditors ...RequestEditorFn) (*ByWorkRefApiV1AuditByWorkRefRefGetResponse, error)
 
+	// ClassCountsApiV1AuditClassCountsPostWithBodyWithResponse request with any body
+	ClassCountsApiV1AuditClassCountsPostWithBodyWithResponse(ctx context.Context, params *ClassCountsApiV1AuditClassCountsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ClassCountsApiV1AuditClassCountsPostResponse, error)
+
+	ClassCountsApiV1AuditClassCountsPostWithResponse(ctx context.Context, params *ClassCountsApiV1AuditClassCountsPostParams, body ClassCountsApiV1AuditClassCountsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ClassCountsApiV1AuditClassCountsPostResponse, error)
+
 	// MyRecentApiV1AuditMyRecentGetWithResponse request
 	MyRecentApiV1AuditMyRecentGetWithResponse(ctx context.Context, params *MyRecentApiV1AuditMyRecentGetParams, reqEditors ...RequestEditorFn) (*MyRecentApiV1AuditMyRecentGetResponse, error)
 
@@ -46494,6 +46671,29 @@ func (r ByWorkRefApiV1AuditByWorkRefRefGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r ByWorkRefApiV1AuditByWorkRefRefGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ClassCountsApiV1AuditClassCountsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AuditClassCounts
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ClassCountsApiV1AuditClassCountsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ClassCountsApiV1AuditClassCountsPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -54862,6 +55062,23 @@ func (c *ClientWithResponses) ByWorkRefApiV1AuditByWorkRefRefGetWithResponse(ctx
 	return ParseByWorkRefApiV1AuditByWorkRefRefGetResponse(rsp)
 }
 
+// ClassCountsApiV1AuditClassCountsPostWithBodyWithResponse request with arbitrary body returning *ClassCountsApiV1AuditClassCountsPostResponse
+func (c *ClientWithResponses) ClassCountsApiV1AuditClassCountsPostWithBodyWithResponse(ctx context.Context, params *ClassCountsApiV1AuditClassCountsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ClassCountsApiV1AuditClassCountsPostResponse, error) {
+	rsp, err := c.ClassCountsApiV1AuditClassCountsPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseClassCountsApiV1AuditClassCountsPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) ClassCountsApiV1AuditClassCountsPostWithResponse(ctx context.Context, params *ClassCountsApiV1AuditClassCountsPostParams, body ClassCountsApiV1AuditClassCountsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ClassCountsApiV1AuditClassCountsPostResponse, error) {
+	rsp, err := c.ClassCountsApiV1AuditClassCountsPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseClassCountsApiV1AuditClassCountsPostResponse(rsp)
+}
+
 // MyRecentApiV1AuditMyRecentGetWithResponse request returning *MyRecentApiV1AuditMyRecentGetResponse
 func (c *ClientWithResponses) MyRecentApiV1AuditMyRecentGetWithResponse(ctx context.Context, params *MyRecentApiV1AuditMyRecentGetParams, reqEditors ...RequestEditorFn) (*MyRecentApiV1AuditMyRecentGetResponse, error) {
 	rsp, err := c.MyRecentApiV1AuditMyRecentGet(ctx, params, reqEditors...)
@@ -60591,6 +60808,39 @@ func ParseByWorkRefApiV1AuditByWorkRefRefGetResponse(rsp *http.Response) (*ByWor
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest AuditQueryResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseClassCountsApiV1AuditClassCountsPostResponse parses an HTTP response from a ClassCountsApiV1AuditClassCountsPostWithResponse call
+func ParseClassCountsApiV1AuditClassCountsPostResponse(rsp *http.Response) (*ClassCountsApiV1AuditClassCountsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ClassCountsApiV1AuditClassCountsPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AuditClassCounts
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

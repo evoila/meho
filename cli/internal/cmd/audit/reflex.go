@@ -18,8 +18,8 @@ import (
 
 // newReflexCmd returns the `meho audit reflex` command (#3134). The
 // verb wraps GET /api/v1/audit/reflex so operators can read the
-// reflex-adoption KPIs the backplane computes over `audit_log` +
-// the announce store: read-before-act, announce coverage, and
+// reflex-adoption KPIs the backplane computes over request usage
+// events + the announce store: read-before-act, announce coverage, and
 // write-back rate, each split by surface (agent vs CLI/REST).
 //
 // CLI shape:
@@ -45,15 +45,18 @@ func newReflexCmd() *cobra.Command {
 		Use:   "reflex",
 		Short: "Read reflex-adoption KPIs (read-before-act / announce coverage / write-back)",
 		Long: "reflex calls GET /api/v1/audit/reflex and renders the " +
-			"reflex-adoption KPIs the backplane aggregates from the " +
-			"audit log and the announce store, split by surface (agent " +
-			"vs CLI/REST):\n\n" +
+			"reflex-adoption KPIs the backplane aggregates from " +
+			"request usage events and the announce store, split by " +
+			"surface (agent vs CLI/REST):\n\n" +
 			"  - read-before-act: %% of agent sessions whose first " +
 			"call_operation is preceded by a broadcast_recent.\n" +
 			"  - announce coverage: %% of write-class operations executed " +
 			"with an earlier same-session announce claim.\n" +
 			"  - write-back rate: add_to_knowledge + add_to_memory calls " +
 			"per 100 call_operation calls.\n\n" +
+			"Usage events are recorded only when the backplane sets " +
+			"REQUEST_USAGE_RETENTION_DAYS; when it is not set, this report " +
+			"is empty, and it covers only the time since collection started.\n\n" +
 			"--since / --until accept the same relative shorthand (`7d` / " +
 			"`24h`) and absolute ISO-8601 date forms the audit surface " +
 			"supports; --until defaults to now. Ratios read `n/a` when " +

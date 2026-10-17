@@ -15,7 +15,10 @@ the following commit together or none of them do:
 3. ``LOCK TABLE graph_node, graph_edge IN EXCLUSIVE MODE`` (reads go on,
    writes wait), then fingerprint the graph again. A different
    ``snapshot_version`` means the graph changed after staging: refuse.
-4. Check that every target the plan relies on is still live.
+4. ``LOCK TABLE targets IN EXCLUSIVE MODE`` (reads go on, target
+   changes wait until the transaction ends), then compare the live target
+   set with the staged one. A staged target that was deleted, or a target
+   added after staging, means the plan is stale: refuse.
 5. Drop the old unique key ``graph_node_tenant_kind_name_idx``.
 6. Apply the node decisions, then the edge decisions, each with its
    history row and one audit row per tenant. A probe edge no target
@@ -93,11 +96,19 @@ _CREATE_SCOPED_KEY_SQL = sa.text(
     "CREATE UNIQUE INDEX graph_node_tenant_scope_kind_name_idx "
     "ON graph_node (tenant_id, source_scope, kind, name)"
 )
+# Reads go on; inserts, updates and deletes of targets wait until commit.
+_LOCK_TARGETS_SQL = sa.text("LOCK TABLE targets IN EXCLUSIVE MODE")
 
 #: Refusals that are about this manifest. They mark it ``refused``; the
 #: operator stages again. Other refusals leave the manifest as it is.
 _MANIFEST_REFUSALS = frozenset(
-    {"snapshot_changed", "target_unavailable", "malformed_scope", "unresolved_edge"}
+    {
+        "snapshot_changed",
+        "target_unavailable",
+        "target_added",
+        "malformed_scope",
+        "unresolved_edge",
+    }
 )
 
 
@@ -137,22 +148,28 @@ def _check_plan(plan: RepairPlan) -> None:
 
 
 async def _check_targets_live(session: AsyncSession, plan: RepairPlan) -> None:
-    """Refuse when a target the plan relies on was deleted after staging."""
-    wanted = {t.target_id for t in plan.targets}
-    if not wanted:
-        return
+    """Refuse when the live target set differs from the staged one.
+
+    Locks the ``targets`` table first, so the set cannot change again
+    before the cut-over commits. A staged target that is gone was
+    deleted after staging (``target_unavailable``). A live target the
+    plan does not know was added after staging and never asked; its
+    rows are not in the plan, and the graph fingerprint cannot see it
+    (``target_added``). Either way the operator stages again.
+    """
+    await session.execute(_LOCK_TARGETS_SQL)
+    staged = {t.target_id for t in plan.targets}
     live = set(
-        (
-            await session.execute(
-                sa.select(Target.id).where(Target.id.in_(wanted), Target.deleted_at.is_(None))
-            )
-        )
+        (await session.execute(sa.select(Target.id).where(Target.deleted_at.is_(None))))
         .scalars()
         .all()
     )
-    missing = sorted(wanted - live)
+    missing = sorted(staged - live)
     if missing:
         raise CutoverRefusedError("target_unavailable", str(missing[0]))
+    added = sorted(live - staged)
+    if added:
+        raise CutoverRefusedError("target_added", str(added[0]))
 
 
 async def _lock_and_load(session: AsyncSession, manifest_id: uuid.UUID) -> StoredManifest:

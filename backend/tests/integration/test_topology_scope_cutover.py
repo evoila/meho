@@ -23,8 +23,10 @@ Coverage:
 * **Order** -- discovering the targets in the opposite order gives the
   same scoped graph.
 * **Refusals** -- changed snapshot, unavailable target, deleted target,
-  malformed scope, unresolved edge: nothing changes and the old graph
-  stays readable.
+  target added after staging, malformed scope, unresolved edge: nothing
+  changes and the old graph stays readable.
+* **Target changes wait** -- a target added while the cut-over runs
+  lands only after the cut-over commits.
 * **Interrupted cut-over** -- a crash after the old key was dropped rolls
   everything back; the same manifest then rolls forward.
 * **Soft-delete** -- after the cut-over a refresh only soft-deletes rows
@@ -428,6 +430,61 @@ async def test_cutover_refuses_an_unavailable_or_deleted_target(scope_db: None) 
     assert excinfo.value.reason == "target_unavailable"
     assert await _mode() == "legacy"
     assert await _index_exists("graph_node_tenant_kind_name_idx")
+
+
+async def test_cutover_refuses_a_target_added_after_staging(scope_db: None) -> None:
+    # The new target has no rows yet, so the graph fingerprint cannot
+    # see it. The target set itself must be compared.
+    await _legacy_graph()
+    staged = await stage_scope_repair()
+    c = await _add_target("cluster-c")
+    with pytest.raises(CutoverRefusedError) as excinfo:
+        await cut_over(staged.id)
+    assert excinfo.value.reason == "target_added"
+    assert excinfo.value.detail == str(c.id)
+    assert await _mode() == "legacy"
+    assert await _index_exists("graph_node_tenant_kind_name_idx")
+    async with get_sessionmaker()() as session:
+        stored = await load_manifest(session, staged.id)
+    assert stored is not None and (stored.status, stored.refusal_reason) == (
+        "refused",
+        "target_added",
+    )
+
+    # Staging again asks the new target and the cut-over goes through.
+    _FakeCluster.answers[c.id] = _cluster("cluster-c", "default")
+    again = await stage_scope_repair()
+    assert {t.target_id for t in again.plan.targets} >= {c.id}
+    await cut_over(again.id)
+    assert await _mode() == "scoped"
+    nodes = {(n.source_scope, n.name) for n in await _nodes()}
+    assert (f"target:{c.id}", "default") in nodes
+
+
+async def test_target_added_during_cutover_waits_until_it_commits(
+    scope_db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _legacy_graph()
+    manifest = await stage_scope_repair()
+    finalise = cutover_module._finalise_schema
+    insert: list[asyncio.Task[Target]] = []
+    finished_during_cutover: list[bool] = []
+
+    async def _add_target_meanwhile(session: Any) -> None:
+        insert.append(asyncio.create_task(_add_target("cluster-c")))
+        await asyncio.sleep(1.0)
+        finished_during_cutover.append(insert[0].done())
+        await finalise(session)
+
+    monkeypatch.setattr(cutover_module, "_finalise_schema", _add_target_meanwhile)
+    await cut_over(manifest.id)
+
+    assert finished_during_cutover == [False], "target writes wait while the cut-over runs"
+    assert await _mode() == "scoped"
+    c = await asyncio.wait_for(insert[0], timeout=30)
+    assert await _scalar(f"SELECT deleted_at IS NULL FROM targets WHERE id = '{c.id}'") is True
+    # The late target is not in the scoped graph until its own refresh.
+    assert all(n.name != "cluster-c" for n in await _nodes())
 
 
 async def test_cutover_refuses_a_malformed_scope(scope_db: None) -> None:

@@ -29,6 +29,12 @@ The atomicity contract is the load-bearing piece:
    and would also break the "one operation, one audit row" invariant
    `audit_log` consumers rely on.
 
+   That row is the topology writer's own domain record of the change,
+   written in the same transaction (#3747). It is never the REST or
+   MCP request wrapper row, which is request activity and is being
+   retired. The hook does not create an execution row for a change
+   that did not run a connector operation.
+
 3. **Snapshot shape.** Each history row's :attr:`snapshot` JSONB is
    ``{"before": <row-json>|None, "after": <row-json>|None}``:
 
@@ -214,7 +220,9 @@ def record_node_change(
     ``audit_id`` is the **causing operation's** ``audit_log.id`` --
     the refresh / annotate service pre-allocates it at the top of the
     request and threads it down so every history row from this
-    operation links to the same audit row. Re-using one audit row
+    operation links to the same audit row. It must be the id of the
+    domain row that service writes itself in the same transaction,
+    never a request wrapper row (#3747). Re-using one audit row
     per operation (rather than per history row) keeps the audit log
     at one row per operation, which is the contract `audit_log`
     consumers rely on.

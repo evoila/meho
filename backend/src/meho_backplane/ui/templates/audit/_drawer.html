@@ -42,6 +42,9 @@
     references     -- AuditReferences: resolved named/linked substance
     trace          -- dict: projected flight-recorder trace pane (#3215);
                        always carries a ``present`` discriminator
+    is_execution   -- bool: the row is an ``operation_execution`` record; only
+                       then does the drawer read a trace (#3747)
+    event_class_label -- str: plain label of the row's record type
 -#}
 {% from "_references.html" import what_happened, principal_chip, operation_ref, target_ref, status_badge, timestamp, work_ref_ref, lineage %}
 <aside
@@ -92,6 +95,8 @@
           <span class="badge badge-outline badge-xs">{{ row.method }}</span>
           <span class="font-mono text-xs break-all">{{ row.path }}</span>
         </dd>
+        <dt class="opacity-60">Record type</dt>
+        <dd data-event-class="{{ row.event_class }}">{{ event_class_label }}</dd>
         <dt class="opacity-60">Status</dt>
         <dd>{{ status_badge(references.status) }}</dd>
         <dt class="opacity-60">Occurred</dt>
@@ -109,7 +114,11 @@
     {# ---------- Flight recorder trace (operator read surface, #3215) ---------- #}
     <section aria-label="Flight recorder trace">
       <h3 class="text-sm font-semibold uppercase opacity-60">Flight recorder</h3>
-      {% if not trace.present %}
+      {% if not is_execution %}
+        <p class="text-sm opacity-60" data-trace-not-applicable>
+          This record is not an operation run, so it has no trace.
+        </p>
+      {% elif not trace.present %}
         <p class="text-sm opacity-60">
           No trace captured for this dispatch (capture is per-tenant opt-in and best-effort).
         </p>

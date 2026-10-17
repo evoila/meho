@@ -3764,7 +3764,7 @@ meho retrieval retire-checklist [flags]
 
 ### `meho retrieval usage`
 
-Read audit-log-backed retrieval usage telemetry (daily buckets per surface)
+Read retrieval usage telemetry (daily buckets per surface)
 
 ```
 meho retrieval usage [flags]

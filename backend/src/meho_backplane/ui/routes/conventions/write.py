@@ -32,10 +32,9 @@ Service reuse
 
 Every write goes through the shared
 :class:`~meho_backplane.conventions.service.ConventionsService` so the
-budget gate, the ``tenant_convention_history`` row, and the
-pre-allocated-audit-id soft-FK pairing
-(:func:`~meho_backplane.audit.bind_preallocated_audit_id`, called inside
-the service) are exercised identically to the REST surface. This module
+budget gate and the ``tenant_convention_history`` row (with its
+``change_kind`` and request correlation id, #3747) are exercised
+identically to the REST surface. This module
 never re-derives the budget arithmetic -- the token-cost preview calls
 :func:`~meho_backplane.conventions.schemas.estimate_tokens` directly (the
 single source of truth) rather than re-deriving the chars-per-token
@@ -48,10 +47,7 @@ The chassis :class:`~meho_backplane.audit.AuditMiddleware` writes one row
 per request iff ``operator_sub`` is bound to the structlog contextvars
 when the hook fires. The BFF session middleware does not bind them, so
 each write handler binds the same ``audit_op_id`` / ``audit_op_class`` /
-``audit_slug`` triple the REST handler uses before the service call --
-and because the service mints + binds the pre-allocated audit id in the
-same transaction as the history row, the history row's ``audit_id``
-joins the audit row rather than landing NULL.
+``audit_slug`` triple the REST handler uses before the service call.
 
 RBAC + CSRF
 -----------
@@ -165,9 +161,7 @@ def _bind_write_audit(*, operator: Operator, op_id: str, slug: str) -> None:
     Same shape the REST conventions handlers use -- ``operator_sub`` +
     ``tenant_id`` so the chassis :class:`AuditMiddleware` commits a row
     at all, plus the canonical ``audit_op_id`` / ``audit_op_class`` /
-    ``audit_slug`` so the row carries the right op id. The service then
-    mints + binds the pre-allocated audit id in the same transaction as
-    the history row, so the history ``audit_id`` joins this audit row.
+    ``audit_slug`` so the row carries the right op id.
     """
     structlog.contextvars.bind_contextvars(
         operator_sub=operator.sub,

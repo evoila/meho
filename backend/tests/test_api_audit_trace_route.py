@@ -44,7 +44,7 @@ from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, Tenant
+from meho_backplane.db.models import AuditEventClass, AuditLog, Tenant
 from meho_backplane.flight_recorder import SpanInput, record_trace
 from meho_backplane.flight_recorder.config import reset_flight_recorder_config_cache_for_testing
 from meho_backplane.middleware import RequestContextMiddleware
@@ -136,6 +136,7 @@ async def _seed_audit_row(
                 status_code=200,
                 duration_ms=Decimal("1.0"),
                 payload={"op_id": "vsphere.vm.list", "op_class": "read"},
+                event_class=AuditEventClass.OPERATION_EXECUTION,
             )
         )
         await session.commit()

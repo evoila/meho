@@ -480,6 +480,11 @@ Metrics (aggregate only, no row content, keys, or vendor totals):
 - `result_cache_memory_bytes{kind}` — `used` and `max` memory of the
   dedicated store, sampled from `INFO memory` after each `v2` write.
 
+A read checks the record's byte length against
+`RESULT_HANDLE_MAX_RECORD_BYTES` before it decodes it, so an older record
+over the cap is a "handle not readable" miss. Capacity numbers for this
+store and the telemetry rules are in [`result-delivery.md`](result-delivery.md).
+
 ## Release verification
 
 Before a release that touches result reduction, the stored rows, or

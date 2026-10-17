@@ -23,9 +23,9 @@ Coverage matrix (Task #314 / G7.1-T2 acceptance criteria):
   the same 422.
 * ``priority`` round-trips through create + show.
 * Every PATCH and DELETE writes one history row + one audit row
-  per call. The history row's ``audit_id`` matches the audit
-  row's ``id`` -- the contextvar-binding contract this Task adds
-  to the AuditMiddleware.
+  per call. The history row carries ``change_kind`` and the
+  request correlation id, which matches the audit row's
+  ``request_id`` (#3747); it no longer points at the audit row.
 * History list returns newest first.
 
 The tests drive the production ``meho_backplane.main:app`` so the
@@ -928,15 +928,20 @@ async def test_post_unknown_field_returns_422(client: TestClient) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Audit + history correlation -- audit_id soft-FK
+# Audit + history correlation -- change_kind + request_id (#3747)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_create_history_audit_id_matches_audit_log_id(
+async def test_create_history_carries_change_kind_and_request_id(
     client: TestClient,
 ) -> None:
-    """Every CREATE writes one history row whose ``audit_id`` matches one ``AuditLog.id``."""
+    """A CREATE history row records the edit itself, not the wrapper row (#3747).
+
+    It carries ``change_kind=created`` and the request correlation id, which
+    matches the request wrapper row's ``request_id``. It no longer points at
+    the wrapper row's ``id``.
+    """
     await _seed_tenants()
     key = make_rsa_keypair("kid-audit-create")
     token = _token(key)
@@ -947,13 +952,15 @@ async def test_create_history_audit_id_matches_audit_log_id(
     rows = await _fetch_conventions(_TENANT_A)
     history = await _fetch_history(rows[0].id)
     assert len(history) == 1
-    audit_id = history[0].audit_id
-    assert audit_id is not None
+    assert history[0].change_kind == "created"
+    assert history[0].audit_id is None
+    assert history[0].request_id is not None
     audit_rows = await _fetch_audit_rows()
     # The middleware writes one row per request; find the POST row.
     post_rows = [r for r in audit_rows if r.method == "POST" and r.path == "/api/v1/conventions"]
     assert len(post_rows) == 1
-    assert post_rows[0].id == audit_id
+    assert post_rows[0].request_id == history[0].request_id
+    assert post_rows[0].id != history[0].id
 
 
 @pytest.mark.asyncio
@@ -978,7 +985,9 @@ async def test_patch_writes_one_history_one_audit(client: TestClient) -> None:
     audit_rows = await _fetch_audit_rows()
     patch_audit_rows = [r for r in audit_rows if r.method == "PATCH"]
     assert len(patch_audit_rows) == 1
-    assert patch_audit_rows[0].id == patch_history.audit_id
+    assert patch_history.change_kind == "updated"
+    assert patch_history.audit_id is None
+    assert patch_audit_rows[0].request_id == patch_history.request_id
 
 
 @pytest.mark.asyncio
@@ -1002,7 +1011,9 @@ async def test_delete_writes_one_history_one_audit(client: TestClient) -> None:
     audit_rows = await _fetch_audit_rows()
     delete_audit_rows = [r for r in audit_rows if r.method == "DELETE"]
     assert len(delete_audit_rows) == 1
-    assert delete_audit_rows[0].id == delete_history.audit_id
+    assert delete_history.change_kind == "deleted"
+    assert delete_history.audit_id is None
+    assert delete_audit_rows[0].request_id == delete_history.request_id
 
 
 @pytest.mark.asyncio

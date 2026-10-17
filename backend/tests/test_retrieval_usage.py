@@ -1072,18 +1072,20 @@ async def test_route_audit_row_count_matches_total_searches(
     inside the default window on every run.
     """
     base = datetime.now(UTC) - timedelta(hours=2)
+    # The route reads request usage events (#3747), not wrapper rows: the
+    # wrapper row below must not count.
     await _seed_audit_row(
         operator_sub="op-1",
         tenant_id=_FIXED_TENANT,
         path=f"{MCP_TOOL_PATH_PREFIX}search_knowledge",
         occurred_at=base,
     )
-    await _seed_audit_row(
-        operator_sub="op-1",
-        tenant_id=_FIXED_TENANT,
-        path=f"{MCP_TOOL_PATH_PREFIX}search_knowledge",
-        occurred_at=base + timedelta(minutes=15),
-    )
+    for minutes in (0, 15):
+        await seed_usage_event(
+            tenant_id=_FIXED_TENANT,
+            route="tool:search_knowledge",
+            occurred_at=base + timedelta(minutes=minutes),
+        )
 
     key = _make_rsa_keypair("kid-A")
     token = _mint_token(

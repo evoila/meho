@@ -177,11 +177,7 @@ func printHistoryDiffs(w io.Writer, slug string, entries []api.ConventionHistory
 		}
 		tsStr := e.Ts.UTC().Format("2006-01-02T15:04:05Z")
 		fmt.Fprintf(w, "=== %s  actor=%s  history_id=%s\n", tsStr, e.ActorSub, e.Id.String())
-		if e.AuditId != nil {
-			fmt.Fprintf(w, "    audit_id=%s\n", e.AuditId.String())
-		} else {
-			fmt.Fprintln(w, "    audit_id=<seed>")
-		}
+		printHistoryProvenance(w, e)
 
 		if e.BodyBefore == nil {
 			// CREATE row (or any other row with no prior state). Show
@@ -263,5 +259,24 @@ func writeUnifiedDiff(w io.Writer, before, after string) {
 		if !beforeSet[line] {
 			fmt.Fprintf(w, "+ %s\n", line)
 		}
+	}
+}
+
+// printHistoryProvenance prints where a history row came from. Rows
+// written since the backplane stopped linking history to the request
+// wrapper audit row carry change_kind and an optional request_id.
+// Older rows carry the legacy audit_id; seeded rows carry none.
+func printHistoryProvenance(w io.Writer, e api.ConventionHistoryEntry) {
+	switch {
+	case e.ChangeKind != nil:
+		requestID := "<none>"
+		if e.RequestId != nil {
+			requestID = e.RequestId.String()
+		}
+		fmt.Fprintf(w, "    change=%s  request_id=%s\n", *e.ChangeKind, requestID)
+	case e.AuditId != nil:
+		fmt.Fprintf(w, "    audit_id=%s\n", e.AuditId.String())
+	default:
+		fmt.Fprintln(w, "    audit_id=<seed>")
 	}
 }

@@ -17,8 +17,8 @@ without a translation table.
 :class:`~meho_backplane.memory.service.MemoryService.remember` accepts.
 Both are frozen (``ConfigDict(frozen=True)``) so a caller can stash a
 returned entry in a log record or audit row without fear of mutation;
-:class:`MemoryEntrySearchHit` carries the retrieval-rank metadata
-``search_memories`` surfaces.
+:class:`MemoryEntrySearchHit` is the bounded hit ``search_memories``
+returns: a short snippet, provenance, and the selected-read locator.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
@@ -224,23 +224,48 @@ class MemoryEntryCreate(BaseModel):
 
 
 class MemoryEntrySearchHit(BaseModel):
-    """One ranked hit from :meth:`MemoryService.search_memories`.
+    """One bounded hit from :meth:`MemoryService.search_memories` (#3751).
 
-    Wraps the retrieval-substrate :class:`RetrievalHit` shape, exposing
-    only the memory-relevant fields plus the fused / per-signal
-    ranking metadata so callers can build "why was this surfaced" UX
-    without re-running the query. Frozen for the same reason as
-    :class:`MemoryEntry`.
+    A hit is evidence for picking a result, not the entry itself. It holds
+    a short, query-relevant ``snippet`` of the body (at most
+    :data:`~meho_backplane.memory.snippet.SNIPPET_MAX_CHARS` characters of
+    body text), never the whole body and never the free-form ``metadata``.
+    The full entry is read through ``locator``.
+
+    ``rank`` is the 1-based position in the result list. It is an order,
+    not a confidence: the fused (RRF) ranking score is not calibrated, so
+    it is not exposed.
+
+    Provenance fields say where the evidence comes from and who can see
+    it: ``scope``, ``user_sub`` (the owner of a user-scoped entry, ``None``
+    for shared scopes), ``target_name``, and the ``created_at`` /
+    ``updated_at`` / ``expires_at`` timestamps. Frozen for the same reason
+    as :class:`MemoryEntry`.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    entry: MemoryEntry
-    fused_score: float
-    bm25_score: float | None
-    cosine_score: float | None
-    bm25_rank: int | None
-    cosine_rank: int | None
+    rank: int = Field(ge=1)
+    id: UUID
+    scope: MemoryScope
+    slug: str
+    user_sub: str | None
+    target_name: str | None
+    created_at: datetime
+    updated_at: datetime
+    expires_at: datetime | None
+    snippet: str
+    snippet_truncated: bool
+    body_chars: int = Field(ge=0)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def expiry_state(self) -> Literal["never", "scheduled"]:
+        """``never`` when the entry has no expiry, else ``scheduled``.
+
+        Search leaves out expired entries, so there is no expired state.
+        """
+        return "never" if self.expires_at is None else "scheduled"
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -250,4 +275,4 @@ class MemoryEntrySearchHit(BaseModel):
         Built from the row id only, so it never carries a target name
         or owner. Read it with ``resources/read`` to get the full entry.
         """
-        return memory_locator(self.entry.id)
+        return memory_locator(self.id)

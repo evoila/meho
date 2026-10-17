@@ -530,10 +530,15 @@ class MemorySearchBody(BaseModel):
 
 
 class MemorySearchResponse(BaseModel):
-    """Response for ``/api/v1/memory/search`` -- the MCP ``search_memory`` shape.
+    """Response for ``/api/v1/memory/search`` -- the same hits ``search_memory`` returns.
 
-    ``hits`` is the only field. There is deliberately no total or count:
-    "no match" and "only rows you may not see" both return ``{"hits": []}``.
+    ``hits`` is the only field. Each hit is bounded evidence (#3751): a
+    short snippet, provenance, and the selected-read ``locator``, never the
+    full body. The MCP tool also wraps each snippet in the untrusted-text
+    envelope and adds its ``delivery`` fields; this REST face serves the
+    plain snippet for the CLI table. There is deliberately no total or
+    count: "no match" and "only rows you may not see" both return
+    ``{"hits": []}``.
     """
 
     model_config = ConfigDict(frozen=True)

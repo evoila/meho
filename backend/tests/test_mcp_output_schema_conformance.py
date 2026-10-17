@@ -60,6 +60,7 @@ from meho_backplane.operations.addon_pairing import AddonPairingService
 from meho_backplane.operations.addon_pairing_contract import BACKPLANE_CONTRACT_VERSION
 from meho_backplane.operations.addon_pairing_schemas import PairAddonRequest
 from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
+from meho_backplane.retrieval.retriever import RetrievalHit
 from meho_backplane.settings import RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES, get_settings
 from meho_backplane.topology.schemas import TopologyEdge, TopologyEdgeEndpoint
 from tests._result_store_helpers import MemoryResultStore
@@ -104,6 +105,7 @@ _COVERED_TOOLS: frozenset[str] = frozenset(
         "query_audit",
         "query_topology",
         "result_query",
+        "search_memory",
         "search_operations",
     }
 )
@@ -770,6 +772,68 @@ def test_query_topology_edges_conforms(
         )
     assert payload["kind"] == "edges"
     assert payload["edges"][0]["kind"] == "depends-on"
+
+
+def _memory_retrieval_hit(
+    op: Operator, kind: str, slug: str, metadata: dict[str, Any], rank: int
+) -> RetrievalHit:
+    ts = datetime(2026, 9, 1, 8, 0, 0, tzinfo=UTC)
+    return RetrievalHit(
+        document_id=uuid.uuid4(),
+        tenant_id=op.tenant_id,
+        source="memory",
+        source_id=f"stub:{slug}",
+        kind=kind,
+        body="disk pressure on the backup node " * 40,
+        doc_metadata=metadata,
+        created_at=ts,
+        updated_at=ts,
+        fused_score=1.0 / (60 + rank),
+        bm25_score=0.2,
+        cosine_score=0.8,
+        bm25_rank=rank,
+        cosine_rank=rank,
+    )
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+@pytest.mark.parametrize("max_bytes", [None, 3 * RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES])
+def test_search_memory_conforms(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    max_bytes: int | None,
+) -> None:
+    """Bounded Memory hits conform, both complete and partial (#3751)."""
+    if max_bytes is not None:
+        monkeypatch.setenv("RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES", str(max_bytes))
+        get_settings.cache_clear()
+    client, op = client_with_operator
+    hits = [
+        _memory_retrieval_hit(
+            op, "memory-user", f"own-{i}", {"user_sub": op.sub, "expires_at": None}, i + 1
+        )
+        for i in range(8)
+    ]
+    hits.append(
+        _memory_retrieval_hit(
+            op,
+            "memory-target",
+            "shared",
+            {"target_name": "infra-1", "expires_at": "2099-01-01T00:00:00+00:00"},
+            9,
+        )
+    )
+    with patch("meho_backplane.memory.service.retrieve", new=AsyncMock(return_value=hits)):
+        payload = _assert_conforms(
+            "search_memory", _call(client, "search_memory", {"query": "disk"})
+        )
+    if max_bytes is None:
+        assert payload["delivery"] == "complete"
+        assert len(payload["hits"]) == len(hits)
+        assert payload["hits"][-1]["expiry_state"] == "scheduled"
+    else:
+        assert payload["delivery"] == "partial"
+        assert payload["omitted_hits"] == len(hits) - len(payload["hits"])
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)

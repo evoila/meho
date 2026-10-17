@@ -1140,6 +1140,24 @@ func TestRunRecallRequiresExactlyOneMode(t *testing.T) {
 	}
 }
 
+// fakeMemorySearchHit is one bounded search hit: a snippet and the
+// locator, no full body.
+func fakeMemorySearchHit() api.MemoryEntrySearchHit {
+	entry := fakeMemoryEntry(ScopeUserTenant, "wine", "I prefer dry red wines.")
+	locator := "meho://memory/id/" + entry.Id.String()
+	return api.MemoryEntrySearchHit{
+		Rank:      1,
+		Id:        entry.Id,
+		Scope:     entry.Scope,
+		Slug:      entry.Slug,
+		CreatedAt: entry.CreatedAt,
+		UpdatedAt: entry.UpdatedAt,
+		Snippet:   entry.Body,
+		BodyChars: len(entry.Body),
+		Locator:   &locator,
+	}
+}
+
 func fakeMemorySearchServer(t *testing.T, bodyJSON *map[string]any) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
@@ -1153,10 +1171,7 @@ func fakeMemorySearchServer(t *testing.T, bodyJSON *map[string]any) *httptest.Se
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(api.MemorySearchResponse{
-			Hits: []api.MemoryEntrySearchHit{{
-				Entry:      fakeMemoryEntry(ScopeUserTenant, "wine", "I prefer dry red wines."),
-				FusedScore: 0.9,
-			}},
+			Hits: []api.MemoryEntrySearchHit{fakeMemorySearchHit()},
 		})
 	})
 	mux.HandleFunc("/api/v1/retrieve", func(w http.ResponseWriter, _ *http.Request) {
@@ -1199,6 +1214,10 @@ func TestRunRecallByQueryHappyPath(t *testing.T) {
 	if !strings.Contains(out, "wine") || !strings.Contains(out, "user-tenant") {
 		t.Errorf("expected slug and scope in rendered table; got %q", out)
 	}
+	// The snippet is rendered; rank is an order, so no score column.
+	if !strings.Contains(out, "I prefer dry red wines.") || strings.Contains(out, "SCORE") {
+		t.Errorf("expected snippet and no score column; got %q", out)
+	}
 }
 
 func TestRunRecallByQueryDefaultsToAllScopes(t *testing.T) {
@@ -1224,7 +1243,7 @@ func TestRunRecallByQueryDefaultsToAllScopes(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("--json output is not a MemorySearchResponse: %v; out=%q", err, stdout.String())
 	}
-	if len(decoded.Hits) != 1 || decoded.Hits[0].Entry.Slug != "wine" {
+	if len(decoded.Hits) != 1 || decoded.Hits[0].Slug != "wine" {
 		t.Errorf("unexpected --json hits: %+v", decoded.Hits)
 	}
 }

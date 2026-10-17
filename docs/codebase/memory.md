@@ -59,18 +59,33 @@ service never substitutes a sentinel.
 
 ### `MemoryEntrySearchHit` (`memory/schemas.py`)
 
-Frozen wrap around `MemoryEntry` plus the per-signal retrieval
-scores (`fused_score`, `bm25_score`, `cosine_score`, `bm25_rank`,
-`cosine_rank`) that `MemoryService.search_memories` projects from
-the retrieval substrate's `RetrievalHit`. The fused-score is what
-the result list is sorted by; the per-signal numbers are observability
-glass for "why was this hit ranked here".
+One bounded search hit (#3751). It is evidence for picking a result,
+not the entry. Fields:
 
-It also has a computed `locator` field: the canonical selected-read
-URI `meho://memory/id/{document_uuid}` for the hit's row (built by
-`memory_locator(entry.id)`). It is part of `model_dump()`, so every
-surface that serialises a hit carries it. The locator holds only the
-row id: no target name, no owner.
+| Field | Meaning |
+|---|---|
+| `rank` | 1-based position in the result list. An order only. |
+| `id`, `scope`, `slug` | Which entry this is. |
+| `user_sub` | Owner of a user-scoped entry; `null` for tenant and target scopes. |
+| `target_name` | Target of a target-scoped entry, else `null`. |
+| `created_at`, `updated_at` | Real column values. |
+| `expires_at`, `expiry_state` | `expiry_state` is `never` (no expiry) or `scheduled`. Search leaves out expired rows, so there is no expired state. |
+| `snippet` | A query-relevant excerpt of the body, at most `SNIPPET_MAX_CHARS` (240) characters plus a `…` at each cut end. |
+| `snippet_truncated`, `body_chars` | Whether the body is longer than the snippet, and the body length in characters. |
+| `locator` | Computed: `meho://memory/id/{document_uuid}`, built by `memory_locator(id)`. Holds only the row id: no target name, no owner. |
+
+A hit never holds the full `body` or the free-form `metadata` (tags and
+any caller keys). Read the locator for those. The fused (RRF) score and
+the per-signal BM25 and cosine scores are not exposed: they are not
+calibrated, so showing them would look like a confidence they are not.
+
+### `query_snippet` (`memory/snippet.py`)
+
+`query_snippet(body, query)` returns `(snippet, truncated)`. A body of
+at most 240 characters comes back whole. A longer body is cut to a
+240-character window that starts a little before the first query word
+(two or more characters, case-insensitive) found in the body, or at the
+start when none is found. It cuts by characters, not words.
 
 ### `MemoryService` (`memory/service.py`)
 
@@ -206,15 +221,12 @@ are the real DB column values.
 
 ### Read path — selected read by id (`read_by_id`)
 
-Today a search hit still carries the full `MemoryEntry` (including
-`body`) under `entry`, plus the `locator`. Access is checked at search
-time by the RBAC predicate pushed into the retriever (see "Read path —
-search" below), so a hit already means the operator may read it. The
-locator adds a second, stable way to read the same entry later, and
-`read_by_id` checks access again on that read. Reducing search hits to
-a short, bounded snippet plus the locator is follow-up work in #3751;
-once it lands, the selected read becomes the only place the full body
-is served.
+A search hit carries a short snippet and the `locator`, never the full
+body (#3751). The selected read is the only MCP path that serves the
+full body. Access is checked at search time by the eligibility rules
+pushed into the retriever (see "Read path — search" below), so a hit
+already means the operator may read it. `read_by_id` checks access
+again on the selected read.
 
 Contract for `meho://memory/id/{document_uuid}`:
 
@@ -234,6 +246,15 @@ Contract for `meho://memory/id/{document_uuid}`:
 * The read response is the `MemoryEntry` shape plus `locator`, with
   `body` inside the untrusted-text envelope. The legacy
   `meho://memory/{scope}/{slug}` read returns the same shape.
+* The read is never cut. When the encoded `resources/read` text block
+  is over the shared read limit `RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES`
+  (default 2 MiB, measured with `measure_delivered_wire_bytes`), the
+  read fails with `-32602` and `error.data =
+  {"reason": "output_too_large", "delivery": "unavailable"}`, the same
+  data a too-large `result_query` read returns. The message names the
+  CLI `meho recall <scope>/<slug>` path. An MCP write caps the body at
+  64 KiB characters, so only very large REST writes or old rows reach
+  this.
 * The legacy scope/slug template still resolves `user`,
   `user-tenant`, and `tenant` entries. It does not resolve `target`
   or `user-target` entries (no target name in the URI); use the
@@ -242,9 +263,9 @@ Contract for `meho://memory/id/{document_uuid}`:
   canonical handler. `id` is not a scope value, so this cannot
   clash.
 
-Consumers: the MCP `search_memory` tool returns hits with `locator`.
-The CLI `meho recall --query` path still uses the generic retrieve
-route, which has no locator yet.
+Consumers: the MCP `search_memory` tool and the REST
+`POST /api/v1/memory/search` route (used by `meho recall --query`)
+return hits with `locator`.
 
 ### Read path — search (`search_memories`)
 
@@ -269,9 +290,11 @@ candidate slot from one they may see.
      `metadata->>'user_sub' = principal`; tenant and target kinds are
      shared across the tenant;
    * the expiry predicate (below).
-4. The service maps each hit to a `MemoryEntrySearchHit`. It does
-   **not** filter again in Python, so a page is never under-filled.
-   Only a hit with an unknown kind is dropped (defensive).
+4. The service maps each hit to a bounded `MemoryEntrySearchHit`
+   (`_hit_to_search_result`): it cuts the body to a query snippet with
+   `query_snippet` and numbers the hits with `rank`. It does **not**
+   filter again in Python, so a page is never under-filled. Only a hit
+   with an unknown kind is dropped (defensive).
 
 "No match" and "only rows you may not see" give the same answer: an
 empty `hits` list, with no count.
@@ -303,7 +326,8 @@ proves them on `pgvector/pgvector:pg16`.
 
 * MCP `search_memory` → `MemoryService.search_memories`.
 * REST `POST /api/v1/memory/search` (body `{query, scope?, limit?}`,
-  response `{hits: [MemoryEntrySearchHit]}` — the MCP shape) →
+  response `{hits: [MemoryEntrySearchHit]}` — the same hits as MCP,
+  see "Search output" below) →
   the same service call. Open to `read_only`, like other memory reads.
   Audit op id `memory.search`, class `read`; the query text is not
   stored.
@@ -324,6 +348,42 @@ it serializes the datetime verbatim, so every search response
 carried `"1970-01-01T00:00:00Z"` on persisted rows. The fix carries
 the real column values on `RetrievalHit` (substrate-level) and
 passes them through unchanged; the placeholder constant is gone.
+
+### Search output — bounded, untrusted evidence (#3751)
+
+What each front sends for the same search:
+
+* **Service and REST** (`POST /api/v1/memory/search`, `meho recall
+  --query`): `{"hits": [MemoryEntrySearchHit]}` with the plain snippet.
+  The CLI table shows `RANK`, `SCOPE`, `SLUG`, and the snippet cut to
+  80 characters; `--json` prints every field.
+* **MCP `search_memory`** (`mcp/tools/_memory_evidence.py`): the same
+  hits, each `snippet` wrapped in the `<<UNTRUSTED_AGENT_TEXT`
+  envelope, plus:
+  * `delivery`: `complete`, or `partial` when hits were left out to
+    stay inside the size limit;
+  * `omitted_hits`: how many were left out (only eligible hits, so it
+    is not an existence signal);
+  * `snippet_max_chars`: the snippet bound (240);
+  * `remediation`: present only when `partial`.
+
+  The tool declares an `outputSchema`, so the response goes on the wire
+  twice: as `content[0].text` and as `structuredContent`. Both are the
+  same object.
+
+The two fronts agree on every hit field once the envelope is removed;
+they are not byte-identical. `test_rest_and_mcp_return_the_same_eligible_hits`
+pins this.
+
+**Size limit.** The MCP response is measured with
+`measure_delivered_wire_bytes` (text block plus `structuredContent`)
+against the shared completed-call limit
+`RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES` (default 256 KiB, at least
+2048). While it is over, the lowest-ranked hit is dropped. Fifty hits
+with full snippets stay far below the default, so `partial` shows up
+only with a lowered limit or very long slugs or target names. There is
+no Memory-specific store, handle, or query grammar: the next step after
+a hit is always the selected read on its `locator`.
 
 ### Promote path
 
@@ -351,6 +411,11 @@ marker.
   before ranking. `search_memories` does not consult the resolver
   after retrieval; the SQL layer drops rows the caller may not see
   before the candidate budget is allocated.
+* `meho_backplane.operations.delivery_budget.measure_delivered_wire_bytes`
+  and the `result_*_wire_max_bytes` settings — the shared wire limits
+  for the `search_memory` response and the selected read.
+* `meho_backplane.untrusted_text.wrap_untrusted_text` — the envelope
+  around search snippets and the selected-read body.
 * `meho_backplane.memory.expiry` — background reaper for rows past
   `doc_metadata.expires_at`. Between expiry and reap, `recall` /
   `list_memories` hide expired rows in Python and search hides them
@@ -421,10 +486,13 @@ marker.
 
 * Task #3743 — canonical selected read `meho://memory/id/{document_uuid}`
   and `MemoryService.read_by_id` (parent Initiative #3729).
-* Task #3751 (follow-up, open) — bounded search snippets that carry
-  the locator instead of the full body.
+* Task #3751 — bounded, untrusted search evidence: query snippets,
+  provenance, `rank` instead of scores, the MCP `delivery` fields and
+  `outputSchema`, and the selected-read wire limit.
 
 See also: [`untrusted-text-envelope.md`](./untrusted-text-envelope.md)
-— both memory resources serve `body` inside the
-`<<UNTRUSTED_AGENT_TEXT` guard envelope (stored prompt-injection
-hardening at the LLM-facing read boundary).
+— both memory resources serve `body`, and `search_memory` serves each
+`snippet`, inside the `<<UNTRUSTED_AGENT_TEXT` guard envelope (stored
+prompt-injection hardening at the LLM-facing read boundary).
+[`result-delivery.md`](./result-delivery.md) — the shared wire limits
+and `delivery` states the search response and the selected read use.

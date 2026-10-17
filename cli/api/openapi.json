@@ -30187,32 +30187,71 @@
       },
       "MemoryEntrySearchHit": {
         "properties": {
-          "entry": {
-            "$ref": "#/components/schemas/MemoryEntry"
-          },
-          "fused_score": {
-            "type": "number",
-            "title": "Fused Score"
-          },
-          "bm25_score": {
-            "type": "number",
-            "nullable": true,
-            "title": "Bm25 Score"
-          },
-          "cosine_score": {
-            "type": "number",
-            "nullable": true,
-            "title": "Cosine Score"
-          },
-          "bm25_rank": {
+          "rank": {
             "type": "integer",
-            "nullable": true,
-            "title": "Bm25 Rank"
+            "minimum": 1.0,
+            "title": "Rank"
           },
-          "cosine_rank": {
-            "type": "integer",
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/MemoryScope"
+          },
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "user_sub": {
+            "type": "string",
             "nullable": true,
-            "title": "Cosine Rank"
+            "title": "User Sub"
+          },
+          "target_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Name"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Expires At"
+          },
+          "snippet": {
+            "type": "string",
+            "title": "Snippet"
+          },
+          "snippet_truncated": {
+            "type": "boolean",
+            "title": "Snippet Truncated"
+          },
+          "body_chars": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Body Chars"
+          },
+          "expiry_state": {
+            "type": "string",
+            "enum": [
+              "never",
+              "scheduled"
+            ],
+            "title": "Expiry State",
+            "description": "``never`` when the entry has no expiry, else ``scheduled``.\n\nSearch leaves out expired entries, so there is no expired state.",
+            "readOnly": true
           },
           "locator": {
             "type": "string",
@@ -30223,16 +30262,23 @@
         },
         "type": "object",
         "required": [
-          "entry",
-          "fused_score",
-          "bm25_score",
-          "cosine_score",
-          "bm25_rank",
-          "cosine_rank",
+          "rank",
+          "id",
+          "scope",
+          "slug",
+          "user_sub",
+          "target_name",
+          "created_at",
+          "updated_at",
+          "expires_at",
+          "snippet",
+          "snippet_truncated",
+          "body_chars",
+          "expiry_state",
           "locator"
         ],
         "title": "MemoryEntrySearchHit",
-        "description": "One ranked hit from :meth:`MemoryService.search_memories`.\n\nWraps the retrieval-substrate :class:`RetrievalHit` shape, exposing\nonly the memory-relevant fields plus the fused / per-signal\nranking metadata so callers can build \"why was this surfaced\" UX\nwithout re-running the query. Frozen for the same reason as\n:class:`MemoryEntry`."
+        "description": "One bounded hit from :meth:`MemoryService.search_memories` (#3751).\n\nA hit is evidence for picking a result, not the entry itself. It holds\na short, query-relevant ``snippet`` of the body (at most\n:data:`~meho_backplane.memory.snippet.SNIPPET_MAX_CHARS` characters of\nbody text), never the whole body and never the free-form ``metadata``.\nThe full entry is read through ``locator``.\n\n``rank`` is the 1-based position in the result list. It is an order,\nnot a confidence: the fused (RRF) ranking score is not calibrated, so\nit is not exposed.\n\nProvenance fields say where the evidence comes from and who can see\nit: ``scope``, ``user_sub`` (the owner of a user-scoped entry, ``None``\nfor shared scopes), ``target_name``, and the ``created_at`` /\n``updated_at`` / ``expires_at`` timestamps. Frozen for the same reason\nas :class:`MemoryEntry`."
       },
       "MemoryListResponse": {
         "properties": {
@@ -30306,7 +30352,7 @@
           "hits"
         ],
         "title": "MemorySearchResponse",
-        "description": "Response for ``/api/v1/memory/search`` -- the MCP ``search_memory`` shape.\n\n``hits`` is the only field. There is deliberately no total or count:\n\"no match\" and \"only rows you may not see\" both return ``{\"hits\": []}``."
+        "description": "Response for ``/api/v1/memory/search`` -- the same hits ``search_memory`` returns.\n\n``hits`` is the only field. Each hit is bounded evidence (#3751): a\nshort snippet, provenance, and the selected-read ``locator``, never the\nfull body. The MCP tool also wraps each snippet in the untrusted-text\nenvelope and adds its ``delivery`` fields; this REST face serves the\nplain snippet for the CLI table. There is deliberately no total or\ncount: \"no match\" and \"only rows you may not see\" both return\n``{\"hits\": []}``."
       },
       "MyRecentPage": {
         "properties": {

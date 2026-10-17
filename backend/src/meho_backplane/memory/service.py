@@ -70,6 +70,7 @@ from meho_backplane.memory.schemas import (
     scope_for_kind,
     validate_slug,
 )
+from meho_backplane.memory.snippet import query_snippet
 from meho_backplane.retrieval.indexer import index_document
 from meho_backplane.retrieval.retriever import RetrievalHit, retrieve
 
@@ -775,7 +776,9 @@ class MemoryService:
         )
         results: list[MemoryEntrySearchHit] = []
         for hit in hits:
-            converted = self._hit_to_search_result(operator, hit)
+            converted = self._hit_to_search_result(
+                operator, hit, query=query, rank=len(results) + 1
+            )
             if converted is not None:
                 results.append(converted)
         return results
@@ -904,9 +907,9 @@ class MemoryService:
         return not (tag is not None and not has_tag(entry.metadata, tag))
 
     def _hit_to_search_result(
-        self, operator: Operator, hit: RetrievalHit
+        self, operator: Operator, hit: RetrievalHit, *, query: str, rank: int
     ) -> MemoryEntrySearchHit | None:
-        """Convert one retrieval hit to a :class:`MemoryEntrySearchHit`.
+        """Project one retrieval hit to a bounded :class:`MemoryEntrySearchHit`.
 
         Returns ``None`` only when the hit's ``kind`` is not a known memory
         kind (a defensive drop with a warning log; the eligibility kinds
@@ -914,6 +917,8 @@ class MemoryService:
         checked here: the candidate SQL already enforced both before
         ranking (#3741), so this is field projection only.
 
+        The body is reduced to a query-relevant snippet (#3751); the full
+        body and the free-form metadata stay behind the selected read.
         ``created_at`` / ``updated_at`` are passed through from
         :class:`RetrievalHit`, which mirrors the persisted
         :class:`Document` columns (G0.9.1-T4 #776).
@@ -927,27 +932,18 @@ class MemoryService:
                 kind=hit.kind,
             )
             return None
-        user_sub = metadata_str(hit.doc_metadata, "user_sub")
-        target_name = metadata_str(hit.doc_metadata, "target_name")
-        expires_at = metadata_datetime(hit.doc_metadata, "expires_at")
-        entry = MemoryEntry(
+        snippet, truncated = query_snippet(hit.body, query)
+        return MemoryEntrySearchHit(
+            rank=rank,
             id=hit.document_id,
-            tenant_id=hit.tenant_id,
             scope=hit_scope,
             slug=slug_from_source_id(hit.source_id),
-            body=hit.body,
-            metadata=dict(hit.doc_metadata),
-            expires_at=expires_at,
-            user_sub=user_sub,
-            target_name=target_name,
+            user_sub=metadata_str(hit.doc_metadata, "user_sub"),
+            target_name=metadata_str(hit.doc_metadata, "target_name"),
             created_at=hit.created_at,
             updated_at=hit.updated_at,
-        )
-        return MemoryEntrySearchHit(
-            entry=entry,
-            fused_score=hit.fused_score,
-            bm25_score=hit.bm25_score,
-            cosine_score=hit.cosine_score,
-            bm25_rank=hit.bm25_rank,
-            cosine_rank=hit.cosine_rank,
+            expires_at=metadata_datetime(hit.doc_metadata, "expires_at"),
+            snippet=snippet,
+            snippet_truncated=truncated,
+            body_chars=len(hit.body),
         )

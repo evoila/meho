@@ -18,11 +18,11 @@ models that G9.1-T1 (#448, migration `0007`) created.
 
 **Read half — entry points (async, read-only):**
 
-- `find_dependents(operator, name_or_alias, *, kind=None, depth=16, kind_filter=None, include_stale=True)`
+- `find_dependents(operator, name_or_alias, *, kind=None, depth=16, kind_filter=None, relation_class=None, include_stale=True)`
   — reverse traversal, "what depends on me".
-- `find_dependencies(operator, name_or_alias, *, kind=None, depth=16, kind_filter=None, include_stale=True)`
+- `find_dependencies(operator, name_or_alias, *, kind=None, depth=16, kind_filter=None, relation_class=None, include_stale=True)`
   — forward traversal, "what I depend on".
-- `find_path(operator, from_name, to_name, *, from_kind=None, to_kind=None, max_hops=8)`
+- `find_path(operator, from_name, to_name, *, from_kind=None, to_kind=None, max_hops=8, include_stale=True, direction="undirected", relation_class=None, missing_endpoint_raises=False)`
   — shortest unweighted path, or `None` if unreachable.
 
 **Annotation — entry points (async, write half, G9.2-T3 #595):**
@@ -124,7 +124,8 @@ funnel through these primitives.
   ambiguity rule is single-sourced. It skips `legacy:` rows and, after
   the scope cut-over (#3749), also raises `AmbiguousNodeError` (with
   `scopes`) when one `(kind, name)` exists in several scopes.
-  `find_path` turns its `NodeNotFoundError` into `None`.
+  `find_path` turns its `NodeNotFoundError` into `None` unless the
+  caller passes `missing_endpoint_raises=True` (#3760).
 
 **Edge listing — entry point (async, read-only, G9.2-T4 #596):**
 
@@ -294,6 +295,10 @@ as a warning callout next to the counts (#2210).
 | `via_edge_id` | `UUID \| None` | #2538 chain provenance: the `graph_edge.id` that was walked to reach this node; `None` for the root. Additive (`None` default). |
 | `source_scope` | `str \| None` | #3739: the stored `graph_node.source_scope` — `global`, `target:<uuid>`, `legacy:<uuid>` or `None`. Additive (`None` default). See §Source scope (expand step). |
 | `scope_status` | `"global" \| "target" \| "legacy" \| "unresolved"` | #3739: derived from `source_scope` (read-only, computed). `unresolved` means the row has no scope yet; readers report it and never fall back to `target_id`. |
+| `last_seen` | `datetime \| None` | #3760: when MEHO last saw the node in a refresh. `None` when the latest refresh no longer reported it. Not the vendor's own time. |
+| `via_edge_source` | `str \| None` | #3760: `source` (`auto` / `curated`) of the edge walked to reach this node; `None` for the root. |
+| `via_edge_last_seen` | `datetime \| None` | #3760: `last_seen` of that edge; `None` for the root or a soft-deleted edge. |
+| `via_relation_class` | `"containment" \| "placement" \| "dependency" \| "unknown" \| None` | #3760: relation class of that edge (read-only, computed). See §Direction, relation class and freshness. |
 
 ### Source scope (expand step, #3739)
 
@@ -504,6 +509,7 @@ stopped reporting a shared row).
 |---|---|---|
 | `nodes` | `tuple[TopologyNode, ...]` | Ordered from the `from` node (`depth == 0`) to the `to` node (`depth == total_hops`). |
 | `total_hops` | `int` | Number of edges traversed; equals `len(nodes) - 1`. |
+| `direction` | `"undirected" \| "forward" \| "reverse"` | #3760: the edge direction the search applied. Default `undirected`. |
 
 ### `TopologyEdgeEndpoint` — frozen Pydantic v2 (edge listing, G9.2-T4)
 
@@ -512,6 +518,7 @@ stopped reporting a shared row).
 | `id` | `UUID` | `graph_node.id`. |
 | `kind` | `str` | `graph_node.kind`. |
 | `name` | `str` | `graph_node.name`. |
+| `source_scope` | `str \| None` | #3760: the node's stored `source_scope`, so an edge says which source each end came from. |
 
 Compact node identity carried as `from_endpoint` / `to_endpoint` on
 `TopologyEdge`. The full node `properties` bag is intentionally
@@ -530,6 +537,7 @@ separately via `resolve_node`.
 | `source` | `str` | `'auto'` (probe-derived) or `'curated'` (operator-asserted). |
 | `properties` | `dict` | `graph_edge.properties` JSONB; deep-frozen (same discipline as `TopologyNode.properties`). Carries the conflict markers `conflicts_with` (array, G9.2-T3 #595) and `superseded_by` (UUID, also #595). |
 | `last_seen` | `datetime \| None` | The refresh service's "I observed this edge at" timestamp. NULL after a soft-delete; soft-deleted edges are excluded from `list_edges` by default. Also the stable total-order key the helper paginates against. |
+| `relation_class` | `"containment" \| "placement" \| "dependency" \| "unknown"` | #3760: what the edge means (read-only, computed from `kind`). |
 
 ## Control flow — write half
 
@@ -758,9 +766,10 @@ returns the typed `{kind, status: "node_untracked", name,
 nodes: []}` envelope. The CLI's `formatNotFound` renders the
 operator-actionable "register / refresh the target or annotate
 the relationship" prompt. `find_path` keeps its G9.1 silent-on-miss
-contract — `None` is the recoverable "no route" answer for a
-single-anchor walk and is structurally distinct from "this anchor
-isn't in the graph."
+contract by default — `None` is the recoverable "no route" answer.
+The MCP front passes `missing_endpoint_raises=True` (#3760) so a
+missing endpoint raises `NodeNotFoundError` and the answer can say
+`node_untracked` instead of `no_route`.
 
 ### Path search
 
@@ -796,6 +805,53 @@ enumerates the whole ≤`max_hops` ball; its envelope is pinned by
 `tests/integration/test_topology_path_pruning.py` on a dense
 `MeshSpec` mesh (row-count pin + load-invariant timing ratio, see
 `docs/architecture/topology.md` §Performance expectations).
+
+### Direction, relation class and freshness (#3760)
+
+**Path direction.** `find_path(direction=...)` turns each `bi_edge` leg
+on or off with the `:walk_forward` / `:walk_reverse` binds.
+`undirected` (the default) keeps both legs, so reachability is the same
+as before. `forward` follows each edge from its `from` node to its `to`
+node only; `reverse` the other way only. `TopologyPath.direction`
+echoes the value. The closure verbs were always directed:
+`find_dependents` walks `reverse`, `find_dependencies` walks `forward`.
+
+**Relation class.** `topology/evidence.py` maps only reviewed edge
+kinds: `belongs-to` → `containment`, `runs-on` → `placement`,
+`authenticates-via` → `dependency`. Every other kind is `unknown`, even
+`depends-on`; MEHO never guesses that an unmapped kind is a dependency,
+and containment is never a service dependency. `relation_class=` on the
+closure verbs, `find_path` and `list_edges` becomes two SQL binds:
+`:class_kinds` (keep these kinds) for a mapped class, or
+`:class_excluded_kinds` (drop the mapped kinds) for `unknown`. The
+mapping lives once in Python, not in the SQL.
+
+**Source and freshness.** Closure and path rows carry the node's
+`source`, `source_scope` and `last_seen`, plus the walked edge's
+`via_edge_source` and `via_edge_last_seen`. Edge rows carry `source`,
+`last_seen` and each endpoint's `source_scope`. `last_seen` is MEHO's
+own observation time from a refresh. It is not the vendor's time, and
+rows from different targets come from different refreshes, so no answer
+is one consistent snapshot. `classify_freshness` turns a row into one
+of four values:
+
+| Value | Rule |
+|---|---|
+| `stale` | `last_seen` is NULL: the latest refresh no longer reported it. |
+| `asserted` | `source='curated'`: an operator stated it; refresh does not touch it. |
+| `old_observation` | Seen, but more than two `topology_refresh_interval_seconds` ago. |
+| `observed` | Seen within the last two refresh intervals. |
+
+**MCP answer shape.** `query_topology` adds `path_direction` and
+`relation_class` arguments. Closure answers carry `direction`,
+`relation_class`, per-row `freshness` / `via_edge_freshness` and an
+`evidence` block (`stale_rows`, `observation_note`, and
+`freshness_meaning` for each value that appears). `kind=path` always
+carries `status`: `found`, `node_untracked` (an endpoint is not in the
+graph) or `no_route` (both ends exist, no route), with a plain-language
+`detail` for the last two. `kind=edges` rows carry `relation_class` and
+`freshness`. The REST routes return the new model fields but keep their
+own shape; they do not take `direction` or `relation_class` yet.
 
 ### Cycle safety
 

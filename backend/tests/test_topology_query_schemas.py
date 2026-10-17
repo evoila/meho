@@ -18,18 +18,34 @@ Coverage matrix:
 * ``TopologyPath`` rejects structurally invalid instances (empty
   ``nodes``; ``total_hops`` disagreeing with ``len(nodes) - 1``) and
   accepts a well-formed one.
+* #3760: relation classes map only the reviewed edge kinds, and the
+  freshness rules keep stale, old, observed and curated rows apart.
 """
 
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
 
-from meho_backplane.topology.schemas import TopologyNode, TopologyPath
+from meho_backplane.topology.evidence import (
+    FRESHNESS_COPY,
+    MAPPED_RELATION_KINDS,
+    OBSERVATION_NOTE,
+    classify_freshness,
+    relation_class_for,
+    relation_class_kind_filter,
+)
+from meho_backplane.topology.schemas import (
+    TopologyEdge,
+    TopologyEdgeEndpoint,
+    TopologyNode,
+    TopologyPath,
+)
 
 
 def _node(name: str, *, depth: int = 0, properties: dict | None = None) -> TopologyNode:
@@ -222,3 +238,131 @@ def test_documented_scope_forms_are_accepted(scope: str, status: str) -> None:
 def test_malformed_scope_forms_are_rejected(scope: str) -> None:
     with pytest.raises(ValidationError):
         _scoped_node(scope)
+
+
+# ---------------------------------------------------------------------------
+# #3760 — relation class and freshness
+# ---------------------------------------------------------------------------
+
+
+def test_only_the_reviewed_kinds_are_mapped() -> None:
+    assert MAPPED_RELATION_KINDS == {
+        "belongs-to": "containment",
+        "runs-on": "placement",
+        "authenticates-via": "dependency",
+    }
+
+
+@pytest.mark.parametrize(
+    ("edge_kind", "relation_class"),
+    [
+        ("belongs-to", "containment"),
+        ("runs-on", "placement"),
+        ("authenticates-via", "dependency"),
+        # Unmapped kinds stay unknown, even ones whose name sounds like
+        # a dependency. MEHO never infers a dependency.
+        ("depends-on", "unknown"),
+        ("mounts", "unknown"),
+        ("routes-through", "unknown"),
+        ("some-new-kind", "unknown"),
+        (None, None),
+    ],
+)
+def test_relation_class_for_edge_kind(edge_kind: str | None, relation_class: str | None) -> None:
+    assert relation_class_for(edge_kind) == relation_class
+
+
+def test_relation_class_kind_filter_binds() -> None:
+    assert relation_class_kind_filter(None) == (None, None)
+    assert relation_class_kind_filter("containment") == (["belongs-to"], None)
+    assert relation_class_kind_filter("placement") == (["runs-on"], None)
+    assert relation_class_kind_filter("dependency") == (["authenticates-via"], None)
+    # ``unknown`` keeps every kind that is NOT mapped.
+    assert relation_class_kind_filter("unknown") == (
+        None,
+        ["authenticates-via", "belongs-to", "runs-on"],
+    )
+    with pytest.raises(ValueError, match="relation_class"):
+        relation_class_kind_filter("service")
+
+
+def test_node_and_edge_carry_relation_class() -> None:
+    root = _node("ns")
+    member = TopologyNode(
+        id=uuid4(),
+        kind="pod",
+        name="pod-1",
+        source="auto",
+        depth=1,
+        via_edge_kind="belongs-to",
+    )
+    other = TopologyNode(
+        id=uuid4(),
+        kind="svc",
+        name="svc-1",
+        source="curated",
+        depth=1,
+        via_edge_kind="depends-on",
+    )
+    assert root.via_relation_class is None
+    assert member.via_relation_class == "containment"
+    assert other.via_relation_class == "unknown"
+    assert json.loads(member.model_dump_json())["via_relation_class"] == "containment"
+
+    edge = TopologyEdge(
+        id=uuid4(),
+        from_endpoint=TopologyEdgeEndpoint(id=uuid4(), kind="vm", name="vm1"),
+        to_endpoint=TopologyEdgeEndpoint(
+            id=uuid4(),
+            kind="host",
+            name="h1",
+            source_scope="target:0f8fad5b-d9cb-469f-a165-70867728950e",
+        ),
+        kind="runs-on",
+        source="auto",
+        last_seen=None,
+    )
+    dumped = edge.model_dump(mode="json")
+    assert dumped["relation_class"] == "placement"
+    assert dumped["from_endpoint"]["source_scope"] is None
+    assert dumped["to_endpoint"]["source_scope"].startswith("target:")
+
+
+def test_path_echoes_direction_with_undirected_default() -> None:
+    assert TopologyPath(nodes=(_node("a"),), total_hops=0).direction == "undirected"
+    path = TopologyPath(nodes=(_node("a"),), total_hops=0, direction="forward")
+    assert path.model_dump()["direction"] == "forward"
+
+
+_NOW = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
+_HOUR = 3600
+
+
+@pytest.mark.parametrize(
+    ("source", "last_seen", "expected"),
+    [
+        # Soft-deleted by the latest refresh.
+        ("auto", None, "stale"),
+        ("curated", None, "stale"),
+        # Readable but seen more than two refresh cycles ago.
+        ("auto", _NOW - timedelta(hours=3), "old_observation"),
+        # Seen in a recent refresh.
+        ("auto", _NOW - timedelta(minutes=30), "observed"),
+        ("auto", _NOW - timedelta(hours=2), "observed"),
+        # Operator-stated rows are not refreshed, so their age is not a
+        # sign that anything changed.
+        ("curated", _NOW - timedelta(days=30), "asserted"),
+    ],
+)
+def test_classify_freshness(source: str, last_seen: datetime | None, expected: str) -> None:
+    assert (
+        classify_freshness(source, last_seen, now=_NOW, refresh_interval_seconds=_HOUR) == expected
+    )
+
+
+def test_freshness_copy_never_claims_vendor_time_or_one_snapshot() -> None:
+    assert set(FRESHNESS_COPY) == {"observed", "old_observation", "stale", "asserted"}
+    # Each category has its own text.
+    assert len(set(FRESHNESS_COPY.values())) == 4
+    assert "not the vendor's own timestamp" in OBSERVATION_NOTE
+    assert "not one consistent snapshot" in OBSERVATION_NOTE

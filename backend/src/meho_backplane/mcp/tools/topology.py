@@ -96,7 +96,7 @@ rejected at the schema layer before the handler runs.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Final
 
 from sqlalchemy import select
@@ -121,6 +121,14 @@ from meho_backplane.mcp.server import McpInternalError, McpInvalidParamsError
 from meho_backplane.operations._lookup import parse_connector_id
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
+from meho_backplane.settings import get_settings
+from meho_backplane.topology.evidence import (
+    FRESHNESS_COPY,
+    OBSERVATION_NOTE,
+    RELATION_CLASSES,
+    Freshness,
+    classify_freshness,
+)
 from meho_backplane.topology.query import (
     AmbiguousNodeError,
     find_dependencies,
@@ -132,6 +140,7 @@ from meho_backplane.topology.query import (
     query_timeline,
 )
 from meho_backplane.topology.resolvers import NodeNotFoundError
+from meho_backplane.topology.schemas import PathDirection, TopologyEdge, TopologyNode
 from meho_backplane.topology.timeline_cursor import InvalidTimelineCursorError
 
 __all__: list[str] = []
@@ -185,6 +194,9 @@ _HISTORY_LIMIT_MAX: Final[int] = 5000
 #: (T1 #2534): the write schemas constrain `kind` by slug pattern,
 #: not by membership, and this list is advisory.
 _EDGE_KIND_VALUES: Final[list[str]] = sorted(k.value for k in GraphEdgeKind)
+
+#: ``path_direction`` values (#3760); the first is the default.
+_PATH_DIRECTIONS: Final[tuple[PathDirection, ...]] = ("undirected", "forward", "reverse")
 
 
 _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
@@ -378,6 +390,35 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
                 "Ignored for the closure kinds."
             ),
         },
+        "path_direction": {
+            "type": "string",
+            "enum": list(_PATH_DIRECTIONS),
+            "default": "undirected",
+            "description": (
+                "How `kind=path` walks stored edges. Every edge is stored "
+                "as `from --kind--> to`. `undirected` (the default) walks "
+                "edges both ways: 'is there any route?'. `forward` follows "
+                "edges only from `from` to `to`, starting at `from_name`. "
+                "`reverse` follows them only from `to` to `from`. The "
+                "response echoes the direction it used. Ignored for the "
+                "other kinds."
+            ),
+        },
+        "relation_class": {
+            "type": ["string", "null"],
+            "enum": [None, *RELATION_CLASSES],
+            "description": (
+                "Keep only edges of one relation class. For `dependents` "
+                "/ `dependencies` / `path` / `edges`. `containment` = "
+                "`belongs-to` (a member of a group, for example a pod in "
+                "a namespace); `placement` = `runs-on` (where a workload "
+                "runs); `dependency` = `authenticates-via` (needs another "
+                "system to work); `unknown` = every other edge kind. Only "
+                "these three kinds are mapped; MEHO never guesses that "
+                "another kind is a dependency. Containment and placement "
+                "are not service dependencies."
+            ),
+        },
         "include_stale": {
             "type": "boolean",
             "default": True,
@@ -541,7 +582,26 @@ _QUERY_TOPOLOGY_DESCRIPTION: Final[str] = (
     "ambiguous in the tenant (same name as both, e.g., a target and a "
     "vm) pass `node_kind` to pin the anchor; an ambiguous bare name "
     "returns -32602 naming the candidate kinds.\n\n"
-    "Returns `{kind, nodes: [TopologyNode, ...]}` for the closure kinds "
+    "EDGE MEANING: closures follow stored edge direction (`dependents` "
+    "walks `reverse`, `dependencies` walks `forward`), and every edge "
+    "kind counts, so a closure can mix group membership, placement and "
+    "real dependencies. Each row says which: `via_relation_class` (and "
+    "`relation_class` on `edges` rows) is `containment` (`belongs-to`), "
+    "`placement` (`runs-on`), `dependency` (`authenticates-via`) or "
+    "`unknown` (every other kind). Only `dependency` is a service "
+    "dependency. Pass `relation_class` to keep one class.\n\n"
+    "FRESHNESS: rows carry `source` (`auto` = found by a refresh, "
+    "`curated` = stated by an operator), `source_scope` (which source "
+    "the node belongs to), `last_seen` and a `freshness` value "
+    "(`via_edge_freshness` for the edge walked): `observed`, "
+    "`old_observation` (last seen more than two refresh cycles ago), "
+    "`stale` (the latest refresh no longer reported it) or `asserted` "
+    "(curated). `last_seen` is when MEHO last saw the row, not the "
+    "vendor's own time, and rows from different systems are not one "
+    "consistent snapshot. The `evidence` block says whether stale rows "
+    "were included and explains each freshness value in the answer.\n\n"
+    "Returns `{kind, direction, relation_class, nodes: [TopologyNode, "
+    "...], evidence}` for the closure kinds "
     "(root at depth 0, so a one-element list means 'exists but nothing "
     "depends on it'). Each non-root node carries `parent_node_id` + "
     "`via_edge_id` — the node it hangs off and the exact edge walked — "
@@ -559,10 +619,17 @@ _QUERY_TOPOLOGY_DESCRIPTION: Final[str] = (
     "The recovery is `meho topology refresh <target>` for a k8s "
     "target or `meho_topology_annotate` for cross-system relationships "
     "the probes can't infer (G0.18-T4 #1357, RDC #789 N2). "
-    '`{kind: "path", path: TopologyPath|null}` for `path` '
-    "(null = unreachable within `max_hops`, a valid answer, not an "
-    'error); `{kind: "edges", edges: [TopologyEdge, ...]}` for `edges` '
-    "(flat list, ordered by `last_seen DESC NULLS LAST, id`).\n\n"
+    'For `path`: `{kind: "path", status, direction, relation_class, '
+    "path: TopologyPath|null}`. `status` is `found` (with `evidence`), "
+    "`node_untracked` (an endpoint is not in the graph; `name` says "
+    "which) or `no_route` (both ends exist but there is no route within "
+    "`max_hops` in that direction). `detail` explains the last two. "
+    "`path_direction` picks `undirected` (default, edges both ways), "
+    "`forward` or `reverse`. "
+    '`{kind: "edges", relation_class, edges: [TopologyEdge, ...], '
+    "evidence}` for `edges` "
+    "(flat list, ordered by `last_seen DESC NULLS LAST, id`; stale "
+    "edges are never listed).\n\n"
     "For `kind=timeline`: tenant-wide chronological feed of graph "
     "changes -- 'what changed in the graph since 9am?' → "
     "`query_topology {kind: timeline, since: 2026-05-22T09:00:00Z}`. "
@@ -627,7 +694,14 @@ async def _query_topology_handler(
             return await _closure_facet(operator, kind, arguments)
         if kind == "edges":
             edges = await _list_edges_facet(operator, arguments)
-            return {"kind": kind, "edges": [e.model_dump(mode="json") for e in edges]}
+            shaper = _RowShaper()
+            return {
+                "kind": kind,
+                "relation_class": arguments.get("relation_class"),
+                "edges": [shaper.edge(e) for e in edges],
+                # ``list_edges`` never returns soft-deleted edges.
+                "evidence": shaper.evidence(include_stale=False),
+            }
         if kind == "timeline":
             return await _timeline_facet(operator, arguments)
         if kind == "diff":
@@ -635,33 +709,121 @@ async def _query_topology_handler(
         if kind == "history":
             return await _history_facet(operator, arguments)
         # kind == "path" — the enum + schema guarantee no other value.
+        return await _path_facet(operator, arguments)
+    except AmbiguousNodeError as exc:
+        raise McpInvalidParamsError(str(exc)) from exc
+    except NodeNotFoundError as exc:
+        # Reached only when the substrate verb that surfaces a missing
+        # anchor as :class:`NodeNotFoundError` runs and is not the
+        # closure pair or path handled in their facets. Today that's
+        # ``kind=history`` (resolves the anchor and raises on miss).
+        raise McpInvalidParamsError(str(exc)) from exc
+
+
+class _RowShaper:
+    """Add freshness to topology rows and build the ``evidence`` block (#3760).
+
+    One instance per response, so every row is judged against the same
+    ``now`` and the ``evidence`` block explains only the freshness
+    values that actually appear.
+    """
+
+    def __init__(self) -> None:
+        self._now = datetime.now(UTC)
+        self._interval = get_settings().topology_refresh_interval_seconds
+        self._seen: set[Freshness] = set()
+
+    def _classify(self, source: str | None, last_seen: datetime | None) -> Freshness:
+        value = classify_freshness(
+            source, last_seen, now=self._now, refresh_interval_seconds=self._interval
+        )
+        self._seen.add(value)
+        return value
+
+    def node(self, node: TopologyNode) -> dict[str, Any]:
+        row = node.model_dump(mode="json")
+        row["freshness"] = self._classify(node.source, node.last_seen)
+        row["via_edge_freshness"] = (
+            None
+            if node.via_edge_id is None
+            else self._classify(node.via_edge_source, node.via_edge_last_seen)
+        )
+        return row
+
+    def edge(self, edge: TopologyEdge) -> dict[str, Any]:
+        row = edge.model_dump(mode="json")
+        row["freshness"] = self._classify(edge.source, edge.last_seen)
+        return row
+
+    def evidence(self, *, include_stale: bool) -> dict[str, Any]:
+        return {
+            "stale_rows": "included" if include_stale else "excluded",
+            "observation_note": OBSERVATION_NOTE,
+            "freshness_meaning": {value: FRESHNESS_COPY[value] for value in sorted(self._seen)},
+        }
+
+
+async def _path_facet(operator: Operator, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Run ``kind=path`` and say which of three outcomes happened (#3760).
+
+    ``status`` is ``found``, ``node_untracked`` (an endpoint is not in
+    the graph) or ``no_route`` (both ends exist, no route within
+    ``max_hops`` in the chosen direction and relation class). The three
+    used to share one ``path: null`` answer.
+    """
+    direction: PathDirection = arguments.get("path_direction", "undirected")
+    relation_class = arguments.get("relation_class")
+    include_stale = bool(arguments.get("include_stale", True))
+    max_hops = int(arguments.get("max_hops", _MAX_HOPS_DEFAULT))
+    envelope: dict[str, Any] = {
+        "kind": "path",
+        "direction": direction,
+        "relation_class": relation_class,
+    }
+    try:
         result = await find_path(
             operator,
             arguments["from_name"],
             arguments["to_name"],
             from_kind=arguments.get("node_kind"),
             to_kind=arguments.get("to_node_kind"),
-            max_hops=int(arguments.get("max_hops", _MAX_HOPS_DEFAULT)),
-            include_stale=bool(arguments.get("include_stale", True)),
+            max_hops=max_hops,
+            include_stale=include_stale,
+            direction=direction,
+            relation_class=relation_class,
+            missing_endpoint_raises=True,
         )
-    except AmbiguousNodeError as exc:
-        raise McpInvalidParamsError(str(exc)) from exc
     except NodeNotFoundError as exc:
-        # Reached only when the substrate verb that surfaces a missing
-        # anchor as :class:`NodeNotFoundError` runs and is not the
-        # closure pair handled above. Today that's ``kind=history``
-        # (resolves the anchor and raises on miss). ``find_path``
-        # keeps its G9.1 silent-on-miss contract — an unreachable /
-        # missing endpoint is the verb's ``None`` answer, not an
-        # exception. The closure verbs (G0.18-T4 #1357) intercept
-        # their own :class:`NodeNotFoundError` upstream and translate
-        # it to the typed ``node_untracked`` envelope rather than
-        # -32602, so a closure miss never lands here.
-        raise McpInvalidParamsError(str(exc)) from exc
-    return {
-        "kind": kind,
-        "path": None if result is None else result.model_dump(mode="json"),
-    }
+        envelope.update(
+            status="node_untracked",
+            name=exc.name,
+            path=None,
+            detail=(
+                f"{exc.name!r} is not in the topology graph for this tenant. "
+                "This does not say whether a route exists."
+            ),
+        )
+        if exc.kind is not None:
+            envelope["node_kind"] = exc.kind
+        return envelope
+    if result is None:
+        envelope.update(
+            status="no_route",
+            path=None,
+            detail=(
+                f"Both ends are in the graph, but MEHO found no {direction} route "
+                f"within {max_hops} hops. A route may still exist outside what "
+                "MEHO has discovered."
+            ),
+        )
+        return envelope
+    shaper = _RowShaper()
+    path = result.model_dump(mode="json")
+    path["nodes"] = [shaper.node(n) for n in result.nodes]
+    envelope.update(
+        status="found", path=path, evidence=shaper.evidence(include_stale=include_stale)
+    )
+    return envelope
 
 
 async def _closure_facet(
@@ -689,6 +851,7 @@ async def _closure_facet(
     node_kind = arguments.get("node_kind")
     depth = int(arguments.get("depth", _DEPTH_DEFAULT))
     kind_filter = arguments.get("kind_filter")
+    relation_class = arguments.get("relation_class")
     include_stale = bool(arguments.get("include_stale", True))
     verb = find_dependents if kind == "dependents" else find_dependencies
     try:
@@ -698,11 +861,20 @@ async def _closure_facet(
             kind=node_kind,
             depth=depth,
             kind_filter=kind_filter,
+            relation_class=relation_class,
             include_stale=include_stale,
         )
     except NodeNotFoundError as exc:
         return _node_untracked_envelope(kind, exc)
-    return {"kind": kind, "nodes": [n.model_dump(mode="json") for n in nodes]}
+    shaper = _RowShaper()
+    return {
+        "kind": kind,
+        # Closures always follow stored edges one way (#3760).
+        "direction": "reverse" if kind == "dependents" else "forward",
+        "relation_class": relation_class,
+        "nodes": [shaper.node(n) for n in nodes],
+        "evidence": shaper.evidence(include_stale=include_stale),
+    }
 
 
 def _node_untracked_envelope(
@@ -960,7 +1132,7 @@ async def _history_facet(
 async def _list_edges_facet(
     operator: Operator,
     arguments: dict[str, Any],
-) -> list[Any]:
+) -> list[TopologyEdge]:
     """Dispatch the ``kind="edges"`` facet to the G9.2-T4 substrate.
 
     Opens a session and forwards the optional filters
@@ -988,6 +1160,7 @@ async def _list_edges_facet(
             conflicts_only=bool(arguments.get("conflicts", False)),
             limit=int(arguments.get("limit", _EDGES_LIMIT_DEFAULT)),
             offset=int(arguments.get("offset", 0)),
+            relation_class=arguments.get("relation_class"),
         )
 
 
@@ -1027,24 +1200,65 @@ register_mcp_tool(
                 },
                 "status": {
                     "type": "string",
-                    "enum": ["node_untracked"],
+                    "enum": ["node_untracked", "found", "no_route"],
                     "description": (
-                        "Present for the closure kinds **only** when the "
-                        "anchor name does not resolve to a "
-                        "`graph_node` row in this tenant. Distinct from "
-                        "a tracked-but-no-dependents response (which "
-                        "omits `status` and carries the one-element "
-                        "`[root]` in `nodes`). Auto-discovery is "
-                        "k8s-only today; non-k8s targets surface here "
+                        "Closure kinds: present **only** as "
+                        "`node_untracked` when the anchor name does not "
+                        "resolve to a `graph_node` row in this tenant. "
+                        "Distinct from a tracked-but-no-dependents "
+                        "response (which omits `status` and carries the "
+                        "one-element `[root]` in `nodes`). Auto-discovery "
+                        "is k8s-only today; non-k8s targets surface here "
                         "until a populator or curated annotation lands. "
-                        "(G0.18-T4 #1357, RDC #789 N2.)"
+                        "(G0.18-T4 #1357, RDC #789 N2.) `kind=path`: "
+                        "always present — `found`, `node_untracked` (an "
+                        "endpoint is not in the graph) or `no_route` "
+                        "(both ends exist, no route) (#3760)."
+                    ),
+                },
+                "detail": {
+                    "type": "string",
+                    "description": (
+                        "Present for `kind=path` when `status` is "
+                        "`node_untracked` or `no_route`: a plain-language "
+                        "explanation of what the answer does and does "
+                        "not say."
+                    ),
+                },
+                "direction": {
+                    "type": "string",
+                    "enum": list(_PATH_DIRECTIONS),
+                    "description": (
+                        "The edge direction the answer used: the applied "
+                        "`path_direction` for `kind=path`; `reverse` for "
+                        "`dependents` and `forward` for `dependencies`."
+                    ),
+                },
+                "relation_class": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "Echo of the `relation_class` filter for the "
+                        "closure kinds, `path` and `edges`; null when no "
+                        "filter was applied."
+                    ),
+                },
+                "evidence": {
+                    "type": "object",
+                    "description": (
+                        "Present on closure, found-path and `edges` "
+                        "answers. `stale_rows` is `included` or "
+                        "`excluded`; `observation_note` says what "
+                        "`last_seen` means (MEHO's last refresh, not the "
+                        "vendor's time, not one consistent snapshot); "
+                        "`freshness_meaning` explains each `freshness` "
+                        "value that appears in the rows."
                     ),
                 },
                 "name": {
                     "type": "string",
                     "description": (
-                        "Present for the closure kinds when "
-                        "`status=node_untracked` — echoes the anchor "
+                        "Present for the closure kinds and `path` when "
+                        "`status=node_untracked` — echoes the missing "
                         "name the operator passed so a multi-call "
                         "consumer can pair the response with its "
                         "request without re-parsing the argument bag."
@@ -1053,7 +1267,7 @@ register_mcp_tool(
                 "node_kind": {
                     "type": "string",
                     "description": (
-                        "Present for the closure kinds when "
+                        "Present for the closure kinds and `path` when "
                         "`status=node_untracked` **and** the caller "
                         "supplied `node_kind=` on the request. Echoes "
                         "the kind pin so the diagnostic is "
@@ -1063,8 +1277,8 @@ register_mcp_tool(
                 "path": {
                     "type": ["object", "null"],
                     "description": (
-                        "Present for `kind=path`. A TopologyPath, or null "
-                        "when the target is unreachable within `max_hops`."
+                        "Present for `kind=path`. A TopologyPath when "
+                        "`status=found`, null otherwise (see `status`)."
                     ),
                 },
                 "edges": {

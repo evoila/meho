@@ -28,9 +28,11 @@ the host). The two directed verbs follow that convention:
   (``edge.from_node_id == current``) to ``edge.to_node_id``.
 
 :func:`find_path` is an unweighted shortest-path search: every edge
-costs one hop, direction-agnostic (it walks both ``from``→``to`` and
-``to``→``from``), and returns the first path found at the minimum hop
-count or ``None`` if the target is unreachable within ``max_hops``.
+costs one hop. By default it is direction-agnostic (it walks both
+``from``→``to`` and ``to``→``from``); ``direction="forward"`` or
+``"reverse"`` walks one way only (#3760). It returns the first path
+found at the minimum hop count or ``None`` if the target is unreachable
+within ``max_hops``.
 
 Cycle safety
 ------------
@@ -141,12 +143,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.topology.evidence import relation_class_kind_filter
 from meho_backplane.topology.resolvers import (
     AmbiguousNodeError,
     NodeNotFoundError,
     resolve_node,
 )
 from meho_backplane.topology.schemas import (
+    PathDirection,
     TopologyDiffEntry,
     TopologyDiffResult,
     TopologyEdge,
@@ -201,8 +205,9 @@ def _row_to_node(row: Row[Any]) -> TopologyNode:
     """Map a traversal result row to a :class:`TopologyNode`.
 
     The recursive CTE projects exactly ``id, kind, name, source,
-    source_scope, properties, depth, via_edge_kind, parent_node_id,
-    via_edge_id``; ``is_cycle`` / ``path`` are CYCLE-clause bookkeeping
+    source_scope, properties, last_seen, depth, via_edge_kind,
+    parent_node_id, via_edge_id, via_edge_source, via_edge_last_seen``;
+    ``is_cycle`` / ``path`` are CYCLE-clause bookkeeping
     filtered out in SQL and never selected into the row. ``properties`` arrives as
     a ``dict`` from JSONB on asyncpg (or a JSON string on the rare
     passthrough); the model's validator freezes it.
@@ -215,10 +220,13 @@ def _row_to_node(row: Row[Any]) -> TopologyNode:
         source=mapping["source"],
         source_scope=mapping["source_scope"],
         properties=mapping["properties"] or {},
+        last_seen=mapping["last_seen"],
         depth=mapping["depth"],
         via_edge_kind=mapping["via_edge_kind"],
         parent_node_id=mapping["parent_node_id"],
         via_edge_id=mapping["via_edge_id"],
+        via_edge_source=mapping["via_edge_source"],
+        via_edge_last_seen=mapping["via_edge_last_seen"],
     )
 
 
@@ -276,10 +284,13 @@ _TRAVERSAL_SQL_REVERSE = text(
             n.source        AS source,
             n.source_scope  AS source_scope,
             n.properties    AS properties,
+            n.last_seen     AS last_seen,
             0               AS depth,
             CAST(NULL AS text) AS via_edge_kind,
             CAST(NULL AS uuid) AS parent_node_id,
-            CAST(NULL AS uuid) AS via_edge_id
+            CAST(NULL AS uuid) AS via_edge_id,
+            CAST(NULL AS text) AS via_edge_source,
+            CAST(NULL AS timestamptz) AS via_edge_last_seen
         FROM graph_node n
         WHERE n.id = :anchor_id
           AND n.tenant_id = :tenant_id
@@ -291,10 +302,13 @@ _TRAVERSAL_SQL_REVERSE = text(
             n.source,
             n.source_scope,
             n.properties,
+            n.last_seen,
             w.depth + 1,
             e.kind,
             w.id,
-            e.id
+            e.id,
+            e.source,
+            e.last_seen
         FROM graph_edge e
         JOIN walk w ON e.to_node_id = w.id
         JOIN graph_node n ON n.id = e.from_node_id
@@ -303,18 +317,28 @@ _TRAVERSAL_SQL_REVERSE = text(
           AND w.depth < :depth
           AND (n.source_scope IS NULL OR n.source_scope NOT LIKE 'legacy:%')
           AND (CAST(:kind_filter AS text) IS NULL OR e.kind = :kind_filter)
+          AND (
+              CAST(:class_kinds AS text[]) IS NULL
+              OR e.kind = ANY(CAST(:class_kinds AS text[]))
+          )
+          AND (
+              CAST(:class_excluded_kinds AS text[]) IS NULL
+              OR e.kind <> ALL(CAST(:class_excluded_kinds AS text[]))
+          )
           AND e.properties->>'superseded_by' IS NULL
           AND (
               CAST(:include_stale AS boolean)
               OR (n.last_seen IS NOT NULL AND e.last_seen IS NOT NULL)
           )
     ) CYCLE id SET is_cycle USING path
-    SELECT id, kind, name, source, source_scope, properties, depth,
-           via_edge_kind, parent_node_id, via_edge_id
+    SELECT id, kind, name, source, source_scope, properties, last_seen, depth,
+           via_edge_kind, parent_node_id, via_edge_id, via_edge_source,
+           via_edge_last_seen
     FROM (
         SELECT DISTINCT ON (id)
-            id, kind, name, source, source_scope, properties, depth,
-            via_edge_kind, parent_node_id, via_edge_id
+            id, kind, name, source, source_scope, properties, last_seen, depth,
+            via_edge_kind, parent_node_id, via_edge_id, via_edge_source,
+            via_edge_last_seen
         FROM walk
         WHERE depth <= :depth
           AND NOT is_cycle
@@ -340,10 +364,13 @@ _TRAVERSAL_SQL_FORWARD = text(
             n.source        AS source,
             n.source_scope  AS source_scope,
             n.properties    AS properties,
+            n.last_seen     AS last_seen,
             0               AS depth,
             CAST(NULL AS text) AS via_edge_kind,
             CAST(NULL AS uuid) AS parent_node_id,
-            CAST(NULL AS uuid) AS via_edge_id
+            CAST(NULL AS uuid) AS via_edge_id,
+            CAST(NULL AS text) AS via_edge_source,
+            CAST(NULL AS timestamptz) AS via_edge_last_seen
         FROM graph_node n
         WHERE n.id = :anchor_id
           AND n.tenant_id = :tenant_id
@@ -355,10 +382,13 @@ _TRAVERSAL_SQL_FORWARD = text(
             n.source,
             n.source_scope,
             n.properties,
+            n.last_seen,
             w.depth + 1,
             e.kind,
             w.id,
-            e.id
+            e.id,
+            e.source,
+            e.last_seen
         FROM graph_edge e
         JOIN walk w ON e.from_node_id = w.id
         JOIN graph_node n ON n.id = e.to_node_id
@@ -367,18 +397,28 @@ _TRAVERSAL_SQL_FORWARD = text(
           AND w.depth < :depth
           AND (n.source_scope IS NULL OR n.source_scope NOT LIKE 'legacy:%')
           AND (CAST(:kind_filter AS text) IS NULL OR e.kind = :kind_filter)
+          AND (
+              CAST(:class_kinds AS text[]) IS NULL
+              OR e.kind = ANY(CAST(:class_kinds AS text[]))
+          )
+          AND (
+              CAST(:class_excluded_kinds AS text[]) IS NULL
+              OR e.kind <> ALL(CAST(:class_excluded_kinds AS text[]))
+          )
           AND e.properties->>'superseded_by' IS NULL
           AND (
               CAST(:include_stale AS boolean)
               OR (n.last_seen IS NOT NULL AND e.last_seen IS NOT NULL)
           )
     ) CYCLE id SET is_cycle USING path
-    SELECT id, kind, name, source, source_scope, properties, depth,
-           via_edge_kind, parent_node_id, via_edge_id
+    SELECT id, kind, name, source, source_scope, properties, last_seen, depth,
+           via_edge_kind, parent_node_id, via_edge_id, via_edge_source,
+           via_edge_last_seen
     FROM (
         SELECT DISTINCT ON (id)
-            id, kind, name, source, source_scope, properties, depth,
-            via_edge_kind, parent_node_id, via_edge_id
+            id, kind, name, source, source_scope, properties, last_seen, depth,
+            via_edge_kind, parent_node_id, via_edge_id, via_edge_source,
+            via_edge_last_seen
         FROM walk
         WHERE depth <= :depth
           AND NOT is_cycle
@@ -395,6 +435,7 @@ async def _resolve_endpoint_id(
     *,
     name: str,
     kind: str | None,
+    raise_on_missing: bool = False,
 ) -> UUID | None:
     """Resolve one :func:`find_path` endpoint to its row id, or ``None``.
 
@@ -403,11 +444,15 @@ async def _resolve_endpoint_id(
     ``(kind, name)`` owned by several source scopes, raises
     :class:`AmbiguousNodeError`; ``legacy:`` rows never match. A missing
     endpoint returns ``None`` -- the path verb keeps its G9.1
-    silent-on-miss contract (no route, not an exception).
+    silent-on-miss contract (no route, not an exception) -- unless
+    ``raise_on_missing`` is set, when :class:`NodeNotFoundError`
+    propagates (#3760).
     """
     try:
         node = await resolve_node(session, tenant_id, name, kind)
     except NodeNotFoundError:
+        if raise_on_missing:
+            raise
         return None
     return node.id
 
@@ -419,6 +464,7 @@ async def _traverse(
     depth: int,
     kind: str | None,
     kind_filter: str | None,
+    relation_class: str | None,
     include_stale: bool,
     reverse: bool,
 ) -> list[TopologyNode]:
@@ -444,6 +490,7 @@ async def _traverse(
     """
     sql = _TRAVERSAL_SQL_REVERSE if reverse else _TRAVERSAL_SQL_FORWARD
     tenant_id = str(operator.tenant_id)
+    class_kinds, class_excluded_kinds = relation_class_kind_filter(relation_class)
 
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -470,6 +517,8 @@ async def _traverse(
                 "tenant_id": tenant_id,
                 "depth": depth,
                 "kind_filter": kind_filter,
+                "class_kinds": class_kinds,
+                "class_excluded_kinds": class_excluded_kinds,
                 "include_stale": include_stale,
             },
         )
@@ -485,6 +534,7 @@ async def find_dependents(
     kind: str | None = None,
     depth: int = _DEFAULT_DEPTH,
     kind_filter: str | None = None,
+    relation_class: str | None = None,
     include_stale: bool = True,
 ) -> list[TopologyNode]:
     """Reverse traversal: every node that depends on *name_or_alias*.
@@ -516,7 +566,11 @@ async def find_dependents(
     in the tenant — if it is not, the call raises
     :class:`AmbiguousNodeError` instead of merging unrelated closures.
     ``kind_filter`` restricts the walk to edges of that
-    ``graph_edge.kind``. The tenant boundary is ``operator.tenant_id``
+    ``graph_edge.kind``. ``relation_class`` (#3760) restricts it to
+    edges of one relation class (``containment`` / ``placement`` /
+    ``dependency`` / ``unknown``, see
+    :mod:`meho_backplane.topology.evidence`); a value outside the four
+    raises :class:`ValueError`. The tenant boundary is ``operator.tenant_id``
     — a same-named node in another tenant is never returned. Cycles
     terminate at the CYCLE clause.
 
@@ -545,6 +599,7 @@ async def find_dependents(
         depth=depth,
         kind=kind,
         kind_filter=kind_filter,
+        relation_class=relation_class,
         include_stale=include_stale,
         reverse=True,
     )
@@ -557,6 +612,7 @@ async def find_dependencies(
     kind: str | None = None,
     depth: int = _DEFAULT_DEPTH,
     kind_filter: str | None = None,
+    relation_class: str | None = None,
     include_stale: bool = True,
 ) -> list[TopologyNode]:
     """Forward traversal: everything *name_or_alias* depends on.
@@ -578,6 +634,7 @@ async def find_dependencies(
         depth=depth,
         kind=kind,
         kind_filter=kind_filter,
+        relation_class=relation_class,
         include_stale=include_stale,
         reverse=False,
     )
@@ -640,6 +697,13 @@ async def find_dependencies(
 # cut-over), and the walk never steps onto a ``legacy:`` row. Without
 # that guard an old merged ``default`` namespace that both clusters'
 # edges still touch would join the two clusters into one path.
+#
+# Direction and relation class (#3760): ``:walk_forward`` switches the
+# stored-direction leg of ``bi_edge`` on, ``:walk_reverse`` the reversed
+# leg. ``undirected`` (the default) sets both, so reachability is the
+# same as before; ``forward`` / ``reverse`` set one. The relation-class
+# binds (``:class_kinds`` / ``:class_excluded_kinds``) apply to both
+# legs, like the superseded and staleness guards.
 _PATH_SQL = text(
     """
     WITH RECURSIVE
@@ -653,14 +717,32 @@ _PATH_SQL = text(
         SELECT from_node_id AS src, to_node_id AS dst, kind, id
         FROM graph_edge
         WHERE tenant_id = :tenant_id
+          AND CAST(:walk_forward AS boolean)
           AND properties->>'superseded_by' IS NULL
           AND (CAST(:include_stale AS boolean) OR last_seen IS NOT NULL)
+          AND (
+              CAST(:class_kinds AS text[]) IS NULL
+              OR kind = ANY(CAST(:class_kinds AS text[]))
+          )
+          AND (
+              CAST(:class_excluded_kinds AS text[]) IS NULL
+              OR kind <> ALL(CAST(:class_excluded_kinds AS text[]))
+          )
         UNION ALL
         SELECT to_node_id AS src, from_node_id AS dst, kind, id
         FROM graph_edge
         WHERE tenant_id = :tenant_id
+          AND CAST(:walk_reverse AS boolean)
           AND properties->>'superseded_by' IS NULL
           AND (CAST(:include_stale AS boolean) OR last_seen IS NOT NULL)
+          AND (
+              CAST(:class_kinds AS text[]) IS NULL
+              OR kind = ANY(CAST(:class_kinds AS text[]))
+          )
+          AND (
+              CAST(:class_excluded_kinds AS text[]) IS NULL
+              OR kind <> ALL(CAST(:class_excluded_kinds AS text[]))
+          )
     ),
     walk AS (
         SELECT
@@ -707,10 +789,21 @@ _PATH_SQL = text(
 # sequence.
 _PATH_NODES_SQL = text(
     """
-    SELECT id, kind, name, source, source_scope, properties
+    SELECT id, kind, name, source, source_scope, properties, last_seen
     FROM graph_node
     WHERE tenant_id = :tenant_id
       AND id = ANY(:node_ids)
+    """
+)
+
+# The source and observation time of each edge on the winning path
+# (#3760), fetched by id so the recursive walk carries no extra arrays.
+_PATH_EDGES_SQL = text(
+    """
+    SELECT id, source, last_seen
+    FROM graph_edge
+    WHERE tenant_id = :tenant_id
+      AND id = ANY(:edge_ids)
     """
 )
 
@@ -720,6 +813,7 @@ def _build_path_nodes(
     edge_kinds: list[str],
     edge_ids: list[UUID],
     by_id: dict[UUID, Any],
+    edges_by_id: dict[UUID, Any] | None = None,
 ) -> tuple[TopologyNode, ...]:
     """Assemble the ordered :class:`TopologyNode` tuple for a path.
 
@@ -730,10 +824,14 @@ def _build_path_nodes(
     unchanged, the edge id array is simply parallel to the kinds).
     ``parent_node_id`` is the previous node on the path — in a path
     the predecessor is by construction the prior position.
+    ``edges_by_id`` maps each hop's edge id to its ``source`` /
+    ``last_seen`` row (#3760); a missing entry leaves both ``None``.
     """
+    edges_by_id = edges_by_id or {}
     nodes: list[TopologyNode] = []
     for position, node_id in enumerate(node_ids):
         m = by_id[node_id]
+        edge = None if position == 0 else edges_by_id.get(edge_ids[position - 1])
         nodes.append(
             TopologyNode(
                 id=m["id"],
@@ -742,10 +840,13 @@ def _build_path_nodes(
                 source=m["source"],
                 source_scope=m["source_scope"],
                 properties=m["properties"] or {},
+                last_seen=m.get("last_seen"),
                 depth=position,
                 via_edge_kind=None if position == 0 else edge_kinds[position - 1],
                 parent_node_id=None if position == 0 else node_ids[position - 1],
                 via_edge_id=None if position == 0 else edge_ids[position - 1],
+                via_edge_source=None if edge is None else edge["source"],
+                via_edge_last_seen=None if edge is None else edge["last_seen"],
             )
         )
     return tuple(nodes)
@@ -760,17 +861,28 @@ async def find_path(
     to_kind: str | None = None,
     max_hops: int = _DEFAULT_MAX_HOPS,
     include_stale: bool = True,
+    direction: PathDirection = "undirected",
+    relation_class: str | None = None,
+    missing_endpoint_raises: bool = False,
 ) -> TopologyPath | None:
     """Shortest unweighted path from *from_name* to *to_name*.
 
-    Walks edges in both directions (``from``→``to`` and ``to``→``from``)
-    so the path follows the graph's connectivity rather than only its
-    edge orientation — "is there *any* route between these two
-    objects" is the operator question this answers. Every edge costs
-    one hop (v0.2 is unweighted). Returns the first path found at the
-    minimum hop count, or ``None`` if *to_name* is unreachable from
-    *from_name* within ``max_hops`` (or either endpoint does not exist
-    in this tenant).
+    ``direction`` (#3760) picks how stored edges are walked.
+    ``undirected`` (the default) walks both ways (``from``→``to`` and
+    ``to``→``from``), so the path follows the graph's connectivity
+    rather than only its edge orientation — "is there *any* route
+    between these two objects". ``forward`` follows each edge only from
+    its ``from`` node to its ``to`` node; ``reverse`` only the other
+    way. The returned :class:`TopologyPath` echoes the direction.
+    ``relation_class`` keeps only edges of that class (see
+    :func:`find_dependents`). Every edge costs one hop (v0.2 is
+    unweighted). Returns the first path found at the minimum hop count,
+    or ``None`` if *to_name* is unreachable from *from_name* within
+    ``max_hops`` (or either endpoint does not exist in this tenant).
+
+    ``missing_endpoint_raises`` (#3760) makes a missing endpoint raise
+    :class:`NodeNotFoundError` instead of returning ``None``, so a
+    caller can tell "endpoint not in the graph" from "no route".
 
     ``from_kind`` / ``to_kind`` pin each endpoint to its
     ``(tenant_id, kind, name)`` unique row. The same disambiguation
@@ -797,13 +909,24 @@ async def find_path(
     argument order.
     """
     tenant_id = str(operator.tenant_id)
+    class_kinds, class_excluded_kinds = relation_class_kind_filter(relation_class)
 
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         from_id = await _resolve_endpoint_id(
-            session, operator.tenant_id, name=from_name, kind=from_kind
+            session,
+            operator.tenant_id,
+            name=from_name,
+            kind=from_kind,
+            raise_on_missing=missing_endpoint_raises,
         )
-        to_id = await _resolve_endpoint_id(session, operator.tenant_id, name=to_name, kind=to_kind)
+        to_id = await _resolve_endpoint_id(
+            session,
+            operator.tenant_id,
+            name=to_name,
+            kind=to_kind,
+            raise_on_missing=missing_endpoint_raises,
+        )
         if from_id is None or to_id is None:
             return None
         path_result = await session.execute(
@@ -814,6 +937,10 @@ async def find_path(
                 "to_id": str(to_id),
                 "max_hops": max_hops,
                 "include_stale": include_stale,
+                "walk_forward": direction != "reverse",
+                "walk_reverse": direction != "forward",
+                "class_kinds": class_kinds,
+                "class_excluded_kinds": class_excluded_kinds,
             },
         )
         winner = path_result.first()
@@ -830,9 +957,14 @@ async def find_path(
             {"tenant_id": tenant_id, "node_ids": node_ids},
         )
         by_id = {r._mapping["id"]: r._mapping for r in node_result.fetchall()}
+        edge_result = await session.execute(
+            _PATH_EDGES_SQL,
+            {"tenant_id": tenant_id, "edge_ids": edge_ids},
+        )
+        edges_by_id = {r._mapping["id"]: r._mapping for r in edge_result.fetchall()}
 
-    nodes = _build_path_nodes(node_ids, edge_kinds, edge_ids, by_id)
-    return TopologyPath(nodes=nodes, total_hops=total_hops)
+    nodes = _build_path_nodes(node_ids, edge_kinds, edge_ids, by_id, edges_by_id)
+    return TopologyPath(nodes=nodes, total_hops=total_hops, direction=direction)
 
 
 # Default page size for :func:`list_edges`. Picked to fit the typical
@@ -898,9 +1030,11 @@ _LIST_EDGES_SQL = text(
         f.id                AS from_id,
         f.kind              AS from_kind,
         f.name              AS from_name,
+        f.source_scope      AS from_source_scope,
         t.id                AS to_id,
         t.kind              AS to_kind,
-        t.name              AS to_name
+        t.name              AS to_name,
+        t.source_scope      AS to_source_scope
     FROM graph_edge e
     JOIN graph_node f ON f.id = e.from_node_id
     JOIN graph_node t ON t.id = e.to_node_id
@@ -909,6 +1043,14 @@ _LIST_EDGES_SQL = text(
       AND (f.source_scope IS NULL OR f.source_scope NOT LIKE 'legacy:%')
       AND (t.source_scope IS NULL OR t.source_scope NOT LIKE 'legacy:%')
       AND (CAST(:kind AS text) IS NULL OR e.kind = :kind)
+      AND (
+          CAST(:class_kinds AS text[]) IS NULL
+          OR e.kind = ANY(CAST(:class_kinds AS text[]))
+      )
+      AND (
+          CAST(:class_excluded_kinds AS text[]) IS NULL
+          OR e.kind <> ALL(CAST(:class_excluded_kinds AS text[]))
+      )
       AND (CAST(:source AS text) IS NULL OR e.source = :source)
       AND (CAST(:from_node_id AS uuid) IS NULL OR e.from_node_id = :from_node_id)
       AND (CAST(:to_node_id AS uuid) IS NULL OR e.to_node_id = :to_node_id)
@@ -938,9 +1080,17 @@ def _row_to_edge(row: Row[Any]) -> TopologyEdge:
     return TopologyEdge(
         id=m["id"],
         from_endpoint=TopologyEdgeEndpoint(
-            id=m["from_id"], kind=m["from_kind"], name=m["from_name"]
+            id=m["from_id"],
+            kind=m["from_kind"],
+            name=m["from_name"],
+            source_scope=m["from_source_scope"],
         ),
-        to_endpoint=TopologyEdgeEndpoint(id=m["to_id"], kind=m["to_kind"], name=m["to_name"]),
+        to_endpoint=TopologyEdgeEndpoint(
+            id=m["to_id"],
+            kind=m["to_kind"],
+            name=m["to_name"],
+            source_scope=m["to_source_scope"],
+        ),
         kind=m["kind"],
         source=m["source"],
         properties=m["properties"] or {},
@@ -989,6 +1139,7 @@ async def list_edges(
     conflicts_only: bool = False,
     limit: int = _DEFAULT_EDGE_LIMIT,
     offset: int = 0,
+    relation_class: str | None = None,
 ) -> list[TopologyEdge]:
     """Tenant-scoped, filter-composable flat listing of ``graph_edge`` rows.
 
@@ -1047,6 +1198,9 @@ async def list_edges(
         limit: Maximum rows to return per call (1..``1000``). Defaults
             to ``200``. The route layer (T5) caps this further at the
             HTTP boundary.
+        relation_class: Optional relation-class filter (#3760):
+            ``containment`` / ``placement`` / ``dependency`` /
+            ``unknown``. See :mod:`meho_backplane.topology.evidence`.
         offset: Rows to skip before the first returned row, for
             pagination. Combined with the strict total order
             (``last_seen DESC NULLS LAST, id``), paging a result set is
@@ -1078,6 +1232,7 @@ async def list_edges(
         raise ValueError(f"limit must be in 1..{_MAX_EDGE_LIMIT}; got {limit}")
     if offset < 0:
         raise ValueError(f"offset must be >= 0; got {offset}")
+    class_kinds, class_excluded_kinds = relation_class_kind_filter(relation_class)
 
     from_node_id: UUID | None = None
     to_node_id: UUID | None = None
@@ -1103,6 +1258,8 @@ async def list_edges(
         {
             "tenant_id": str(tenant_id),
             "kind": kind,
+            "class_kinds": class_kinds,
+            "class_excluded_kinds": class_excluded_kinds,
             "source": source,
             "from_node_id": str(from_node_id) if from_node_id is not None else None,
             "to_node_id": str(to_node_id) if to_node_id is not None else None,

@@ -35672,6 +35672,18 @@
             "format": "date-time",
             "nullable": true,
             "title": "Last Seen"
+          },
+          "relation_class": {
+            "type": "string",
+            "enum": [
+              "containment",
+              "placement",
+              "dependency",
+              "unknown"
+            ],
+            "title": "Relation Class",
+            "description": "What this edge means (#3760); unmapped kinds are ``unknown``.",
+            "readOnly": true
           }
         },
         "type": "object",
@@ -35681,7 +35693,8 @@
           "to",
           "kind",
           "source",
-          "last_seen"
+          "last_seen",
+          "relation_class"
         ],
         "title": "TopologyEdge",
         "description": "One ``graph_edge`` row returned by :func:`list_edges`.\n\nFlat edge summary (no traversal context \u2014 there is no ``depth`` or\n``via_edge_kind``; those concepts only mean something during a\nwalk). The frozen Pydantic shape mirrors the immutability discipline\nof :class:`TopologyNode`: ``properties`` is deep-frozen so the\nconflict-marker arrays (``conflicts_with``) and the supersede UUID\n(``superseded_by``) \u2014 both written by G9.2-T3 (#595) and read by\nthis helper's ``conflicts_only=True`` filter \u2014 cannot be mutated by\na caller and leak back into shared result state.\n\n``last_seen`` is the refresh service's \"I observed this edge at\"\ntimestamp (NULL after a soft-delete; soft-deleted edges are\nexcluded from :func:`list_edges` by default). It doubles as the\nstable total-order key the helper paginates against:\n``ORDER BY last_seen DESC NULLS LAST, id`` is total because ``id``\nis a UUID primary key, and ``DESC`` puts the most-recently-observed\nedges first \u2014 the order an operator scanning a fresh inventory\nexpects."
@@ -35700,6 +35713,11 @@
           "name": {
             "type": "string",
             "title": "Name"
+          },
+          "source_scope": {
+            "type": "string",
+            "nullable": true,
+            "title": "Source Scope"
           }
         },
         "type": "object",
@@ -35709,7 +35727,7 @@
           "name"
         ],
         "title": "TopologyEdgeEndpoint",
-        "description": "One endpoint of a :class:`TopologyEdge` \u2014 the ``from`` or ``to`` node.\n\nCompact node identity for the flat edge-listing helper. Carries the\nthree fields a human-readable edge summary needs: the node ``id``\n(caller may follow it back to the full :class:`TopologyNode`), the\n``kind`` (the closed enum from migration ``0007``), and the\n``name`` (unique within ``(tenant_id, kind)``). The full node\n``properties`` bag is intentionally **not** included \u2014 an edge\nlisting is a survey of relationships, not a node dump; callers that\nneed the bag look the node up separately via\n:func:`meho_backplane.topology.resolvers.resolve_node`."
+        "description": "One endpoint of a :class:`TopologyEdge` \u2014 the ``from`` or ``to`` node.\n\nCompact node identity for the flat edge-listing helper. Carries the\nthree fields a human-readable edge summary needs: the node ``id``\n(caller may follow it back to the full :class:`TopologyNode`), the\n``kind`` (the closed enum from migration ``0007``), and the\n``name`` (unique within ``(tenant_id, kind)``). The full node\n``properties`` bag is intentionally **not** included \u2014 an edge\nlisting is a survey of relationships, not a node dump; callers that\nneed the bag look the node up separately via\n:func:`meho_backplane.topology.resolvers.resolve_node`.\n\n``source_scope`` (#3760) is the node's stored source scope, so an\nedge answer says which source each end came from."
       },
       "TopologyHistoryEntry": {
         "properties": {
@@ -35841,6 +35859,36 @@
             "nullable": true,
             "title": "Source Scope"
           },
+          "last_seen": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Last Seen"
+          },
+          "via_edge_source": {
+            "type": "string",
+            "nullable": true,
+            "title": "Via Edge Source"
+          },
+          "via_edge_last_seen": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Via Edge Last Seen"
+          },
+          "via_relation_class": {
+            "type": "string",
+            "enum": [
+              "containment",
+              "placement",
+              "dependency",
+              "unknown"
+            ],
+            "nullable": true,
+            "title": "Via Relation Class",
+            "description": "Relation class of the edge walked to reach this node.",
+            "readOnly": true
+          },
           "scope_status": {
             "type": "string",
             "enum": [
@@ -35862,10 +35910,11 @@
           "source",
           "depth",
           "via_edge_kind",
+          "via_relation_class",
           "scope_status"
         ],
         "title": "TopologyNode",
-        "description": "One ``graph_node`` row reached during a traversal.\n\n``depth`` is the distance from the query root: the root itself is\ndepth ``0``, its immediate dependents/dependencies are depth ``1``,\ntransitive ones depth ``2``, and so on. ``via_edge_kind`` is the\n``graph_edge.kind`` of the edge used to reach this node, or\n``None`` for the root (which is reached by no edge). ``source``\nis ``'auto'`` (probe-derived) or ``'curated'`` (operator-seeded /\npromoted; #2536) \u2014 mirrors :attr:`TopologyEdge.source`.\n\n``parent_node_id`` / ``via_edge_id`` (#2538) are the chain\nprovenance: the ``graph_node.id`` the walk stepped from and the\n``graph_edge.id`` it walked to reach this node, both ``None`` on\nthe root row. They let a caller reconstruct the exact dependency\nchain from the flat closure list without follow-up edge lookups \u2014\nevery ``parent_node_id`` in a closure result is itself a row of\nthat result. Additive with ``None`` defaults so pre-#2538\nconstructors and payloads stay valid.\n\n``source_scope`` (#3739) is the stored ``graph_node.source_scope``:\n``global``, ``target:<uuid>``, ``legacy:<uuid>`` or ``None``.\n``scope_status`` is derived from it. ``unresolved`` means the row\nhas no scope yet and the reader does not know which source the\nname belongs to; it never falls back to the last target that saw\nthe row."
+        "description": "One ``graph_node`` row reached during a traversal.\n\n``depth`` is the distance from the query root: the root itself is\ndepth ``0``, its immediate dependents/dependencies are depth ``1``,\ntransitive ones depth ``2``, and so on. ``via_edge_kind`` is the\n``graph_edge.kind`` of the edge used to reach this node, or\n``None`` for the root (which is reached by no edge). ``source``\nis ``'auto'`` (probe-derived) or ``'curated'`` (operator-seeded /\npromoted; #2536) \u2014 mirrors :attr:`TopologyEdge.source`.\n\n``parent_node_id`` / ``via_edge_id`` (#2538) are the chain\nprovenance: the ``graph_node.id`` the walk stepped from and the\n``graph_edge.id`` it walked to reach this node, both ``None`` on\nthe root row. They let a caller reconstruct the exact dependency\nchain from the flat closure list without follow-up edge lookups \u2014\nevery ``parent_node_id`` in a closure result is itself a row of\nthat result. Additive with ``None`` defaults so pre-#2538\nconstructors and payloads stay valid.\n\n``source_scope`` (#3739) is the stored ``graph_node.source_scope``:\n``global``, ``target:<uuid>``, ``legacy:<uuid>`` or ``None``.\n``scope_status`` is derived from it. ``unresolved`` means the row\nhas no scope yet and the reader does not know which source the\nname belongs to; it never falls back to the last target that saw\nthe row.\n\n``last_seen`` (#3760) is when MEHO last saw this node in a refresh\n(``None`` when the latest refresh no longer reported it). It is not\nthe vendor's own time. ``via_edge_source`` / ``via_edge_last_seen``\nare the same facts for the edge walked to reach the node, and\n``via_relation_class`` is that edge's relation class (see\n:mod:`meho_backplane.topology.evidence`). All are ``None`` on the\nroot row."
       },
       "TopologyPath": {
         "properties": {
@@ -35881,6 +35930,16 @@
             "type": "integer",
             "minimum": 0.0,
             "title": "Total Hops"
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "undirected",
+              "forward",
+              "reverse"
+            ],
+            "title": "Direction",
+            "default": "undirected"
           }
         },
         "type": "object",
@@ -35889,7 +35948,7 @@
           "total_hops"
         ],
         "title": "TopologyPath",
-        "description": "An ordered shortest path between two nodes.\n\n``nodes`` runs from the ``from`` node (``depth == 0``) to the\n``to`` node (``depth == total_hops``) inclusive. ``total_hops`` is\nthe number of edges traversed, i.e. ``len(nodes) - 1``. v0.2 is\nunweighted: every edge costs one hop."
+        "description": "An ordered shortest path between two nodes.\n\n``nodes`` runs from the ``from`` node (``depth == 0``) to the\n``to`` node (``depth == total_hops``) inclusive. ``total_hops`` is\nthe number of edges traversed, i.e. ``len(nodes) - 1``. v0.2 is\nunweighted: every edge costs one hop. ``direction`` (#3760) is the\nedge direction the search applied."
       },
       "TopologyTimelineEntry": {
         "properties": {

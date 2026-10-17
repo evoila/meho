@@ -730,12 +730,35 @@ const (
 	TopologyDiffEntrySourceNode TopologyDiffEntrySource = "node"
 )
 
+// Defines values for TopologyEdgeRelationClass.
+const (
+	TopologyEdgeRelationClassContainment TopologyEdgeRelationClass = "containment"
+	TopologyEdgeRelationClassDependency  TopologyEdgeRelationClass = "dependency"
+	TopologyEdgeRelationClassPlacement   TopologyEdgeRelationClass = "placement"
+	TopologyEdgeRelationClassUnknown     TopologyEdgeRelationClass = "unknown"
+)
+
 // Defines values for TopologyNodeScopeStatus.
 const (
 	TopologyNodeScopeStatusGlobal     TopologyNodeScopeStatus = "global"
 	TopologyNodeScopeStatusLegacy     TopologyNodeScopeStatus = "legacy"
 	TopologyNodeScopeStatusTarget     TopologyNodeScopeStatus = "target"
 	TopologyNodeScopeStatusUnresolved TopologyNodeScopeStatus = "unresolved"
+)
+
+// Defines values for TopologyNodeViaRelationClass.
+const (
+	TopologyNodeViaRelationClassContainment TopologyNodeViaRelationClass = "containment"
+	TopologyNodeViaRelationClassDependency  TopologyNodeViaRelationClass = "dependency"
+	TopologyNodeViaRelationClassPlacement   TopologyNodeViaRelationClass = "placement"
+	TopologyNodeViaRelationClassUnknown     TopologyNodeViaRelationClass = "unknown"
+)
+
+// Defines values for TopologyPathDirection.
+const (
+	TopologyPathDirectionForward    TopologyPathDirection = "forward"
+	TopologyPathDirectionReverse    TopologyPathDirection = "reverse"
+	TopologyPathDirectionUndirected TopologyPathDirection = "undirected"
 )
 
 // Defines values for UnderscoreKindFilter.
@@ -9492,12 +9515,18 @@ type TopologyEdge struct {
 	// listing is a survey of relationships, not a node dump; callers that
 	// need the bag look the node up separately via
 	// :func:`meho_backplane.topology.resolvers.resolve_node`.
+	//
+	// ``source_scope`` (#3760) is the node's stored source scope, so an
+	// edge answer says which source each end came from.
 	From       TopologyEdgeEndpoint    `json:"from"`
 	Id         openapi_types.UUID      `json:"id"`
 	Kind       string                  `json:"kind"`
 	LastSeen   *time.Time              `json:"last_seen"`
 	Properties *map[string]interface{} `json:"properties,omitempty"`
-	Source     string                  `json:"source"`
+
+	// RelationClass What this edge means (#3760); unmapped kinds are ``unknown``.
+	RelationClass *TopologyEdgeRelationClass `json:"relation_class,omitempty"`
+	Source        string                     `json:"source"`
 
 	// To One endpoint of a :class:`TopologyEdge` — the ``from`` or ``to`` node.
 	//
@@ -9510,8 +9539,14 @@ type TopologyEdge struct {
 	// listing is a survey of relationships, not a node dump; callers that
 	// need the bag look the node up separately via
 	// :func:`meho_backplane.topology.resolvers.resolve_node`.
+	//
+	// ``source_scope`` (#3760) is the node's stored source scope, so an
+	// edge answer says which source each end came from.
 	To TopologyEdgeEndpoint `json:"to"`
 }
+
+// TopologyEdgeRelationClass What this edge means (#3760); unmapped kinds are “unknown“.
+type TopologyEdgeRelationClass string
 
 // TopologyEdgeEndpoint One endpoint of a :class:`TopologyEdge` — the “from“ or “to“ node.
 //
@@ -9524,10 +9559,14 @@ type TopologyEdge struct {
 // listing is a survey of relationships, not a node dump; callers that
 // need the bag look the node up separately via
 // :func:`meho_backplane.topology.resolvers.resolve_node`.
+//
+// “source_scope“ (#3760) is the node's stored source scope, so an
+// edge answer says which source each end came from.
 type TopologyEdgeEndpoint struct {
-	Id   openapi_types.UUID `json:"id"`
-	Kind string             `json:"kind"`
-	Name string             `json:"name"`
+	Id          openapi_types.UUID `json:"id"`
+	Kind        string             `json:"kind"`
+	Name        string             `json:"name"`
+	SourceScope *string            `json:"source_scope"`
 }
 
 // TopologyHistoryEntry One row of the per-resource history walk (G9.3-T3).
@@ -9612,35 +9651,57 @@ type TopologyHistoryResult struct {
 // has no scope yet and the reader does not know which source the
 // name belongs to; it never falls back to the last target that saw
 // the row.
+//
+// “last_seen“ (#3760) is when MEHO last saw this node in a refresh
+// (“None“ when the latest refresh no longer reported it). It is not
+// the vendor's own time. “via_edge_source“ / “via_edge_last_seen“
+// are the same facts for the edge walked to reach the node, and
+// “via_relation_class“ is that edge's relation class (see
+// :mod:`meho_backplane.topology.evidence`). All are “None“ on the
+// root row.
 type TopologyNode struct {
 	Depth        int                     `json:"depth"`
 	Id           openapi_types.UUID      `json:"id"`
 	Kind         string                  `json:"kind"`
+	LastSeen     *time.Time              `json:"last_seen"`
 	Name         string                  `json:"name"`
 	ParentNodeId *openapi_types.UUID     `json:"parent_node_id"`
 	Properties   *map[string]interface{} `json:"properties,omitempty"`
 
 	// ScopeStatus Where the name is unique, or ``unresolved`` when not recorded.
-	ScopeStatus *TopologyNodeScopeStatus `json:"scope_status,omitempty"`
-	Source      string                   `json:"source"`
-	SourceScope *string                  `json:"source_scope"`
-	ViaEdgeId   *openapi_types.UUID      `json:"via_edge_id"`
-	ViaEdgeKind *string                  `json:"via_edge_kind"`
+	ScopeStatus     *TopologyNodeScopeStatus `json:"scope_status,omitempty"`
+	Source          string                   `json:"source"`
+	SourceScope     *string                  `json:"source_scope"`
+	ViaEdgeId       *openapi_types.UUID      `json:"via_edge_id"`
+	ViaEdgeKind     *string                  `json:"via_edge_kind"`
+	ViaEdgeLastSeen *time.Time               `json:"via_edge_last_seen"`
+	ViaEdgeSource   *string                  `json:"via_edge_source"`
+
+	// ViaRelationClass Relation class of the edge walked to reach this node.
+	ViaRelationClass *TopologyNodeViaRelationClass `json:"via_relation_class"`
 }
 
 // TopologyNodeScopeStatus Where the name is unique, or “unresolved“ when not recorded.
 type TopologyNodeScopeStatus string
+
+// TopologyNodeViaRelationClass Relation class of the edge walked to reach this node.
+type TopologyNodeViaRelationClass string
 
 // TopologyPath An ordered shortest path between two nodes.
 //
 // “nodes“ runs from the “from“ node (“depth == 0“) to the
 // “to“ node (“depth == total_hops“) inclusive. “total_hops“ is
 // the number of edges traversed, i.e. “len(nodes) - 1“. v0.2 is
-// unweighted: every edge costs one hop.
+// unweighted: every edge costs one hop. “direction“ (#3760) is the
+// edge direction the search applied.
 type TopologyPath struct {
-	Nodes     []TopologyNode `json:"nodes"`
-	TotalHops int            `json:"total_hops"`
+	Direction *TopologyPathDirection `json:"direction,omitempty"`
+	Nodes     []TopologyNode         `json:"nodes"`
+	TotalHops int                    `json:"total_hops"`
 }
+
+// TopologyPathDirection defines model for TopologyPath.Direction.
+type TopologyPathDirection string
 
 // TopologyTimelineEntry One row of the topology timeline (G9.3-T5).
 //

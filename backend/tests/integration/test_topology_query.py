@@ -47,6 +47,10 @@ Coverage matrix (mirrors the Task #451 acceptance criteria):
 * #2538 staleness: ``include_stale=True`` (default) keeps soft-deleted
   nodes/edges walkable on all three verbs; ``False`` excludes them —
   including the reversed ``bi_edge`` leg of ``find_path``.
+* #3760: ``find_path`` keeps undirected as the default and applies
+  ``forward`` / ``reverse``; ``relation_class`` keeps only reviewed
+  kinds; rows carry ``last_seen`` and the walked edge's source and
+  ``last_seen``; a missing endpoint can be told apart from no route.
 """
 
 from __future__ import annotations
@@ -55,7 +59,7 @@ import time
 import uuid
 from collections import Counter
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -63,11 +67,13 @@ import pytest
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import GraphEdge, GraphNode, Target
+from meho_backplane.topology.evidence import classify_freshness
 from meho_backplane.topology.query import (
     AmbiguousNodeError,
     find_dependencies,
     find_dependents,
     find_path,
+    list_edges,
 )
 from meho_backplane.topology.resolvers import NodeNotFoundError
 from tests.integration.conftest import DOCKER_AVAILABLE, SKIP_REASON
@@ -1117,6 +1123,186 @@ async def test_last_observed_target_is_not_read_as_scope(pg_engine: None) -> Non
     assert [(n.name, n.source_scope, n.scope_status) for n in nodes] == [
         ("default", None, "unresolved")
     ]
+
+
+# ---------------------------------------------------------------------------
+# #3760 — path direction, relation class, source and freshness
+# ---------------------------------------------------------------------------
+
+
+@_skip_no_docker
+async def test_undirected_path_is_the_default_and_keeps_legacy_reachability(
+    known_graph: dict[str, uuid.UUID],
+) -> None:
+    """With no direction, edges are walked both ways, as before."""
+    op = _operator(TENANT_A_ID)
+    path = await find_path(op, "ds1", "app")
+    assert path is not None
+    assert path.direction == "undirected"
+    assert [n.name for n in path.nodes] == ["ds1", "vm1", "app"]
+    # vm1 and vm2 only meet against edge direction (both run on host1).
+    sibling = await find_path(op, "vm1", "vm2")
+    assert sibling is not None and sibling.total_hops == 2
+    explicit = await find_path(op, "vm1", "vm2", direction="undirected")
+    assert explicit is not None and explicit.total_hops == 2
+
+
+@_skip_no_docker
+async def test_forward_and_reverse_paths_follow_edge_direction(
+    known_graph: dict[str, uuid.UUID],
+) -> None:
+    """``forward`` follows ``from -> to`` only; ``reverse`` the other way."""
+    op = _operator(TENANT_A_ID)
+
+    forward = await find_path(op, "app", "ds1", direction="forward")
+    assert forward is not None
+    assert forward.direction == "forward"
+    assert [n.name for n in forward.nodes] == ["app", "vm1", "ds1"]
+    # Every edge points away from ds1, so nothing leads forward from it.
+    assert await find_path(op, "ds1", "app", direction="forward") is None
+
+    reverse = await find_path(op, "ds1", "app", direction="reverse")
+    assert reverse is not None
+    assert reverse.direction == "reverse"
+    assert [n.name for n in reverse.nodes] == ["ds1", "vm1", "app"]
+    assert await find_path(op, "app", "ds1", direction="reverse") is None
+
+    # The siblings only meet when both directions are allowed.
+    assert await find_path(op, "vm1", "vm2", direction="forward") is None
+    assert await find_path(op, "vm1", "vm2", direction="reverse") is None
+
+
+@_skip_no_docker
+async def test_relation_class_filter_keeps_only_mapped_kinds(
+    known_graph: dict[str, uuid.UUID],
+) -> None:
+    """Containment is ``belongs-to`` only; ``mounts`` is ``unknown``."""
+    op = _operator(TENANT_A_ID)
+
+    contained = await find_dependencies(op, "app", relation_class="containment")
+    assert {n.name for n in contained} == {"app", "vm1", "vm2"}
+    assert {n.via_relation_class for n in contained if n.depth} == {"containment"}
+
+    placed = await find_dependents(op, "host1", relation_class="placement")
+    assert {n.name for n in placed} == {"host1", "vm1", "vm2"}
+    assert {n.via_relation_class for n in placed if n.depth} == {"placement"}
+
+    unknown = await find_dependencies(op, "vm1", relation_class="unknown")
+    assert {n.name for n in unknown} == {"vm1", "ds1"}
+    assert {n.via_relation_class for n in unknown if n.depth} == {"unknown"}
+
+    # No ``authenticates-via`` edge exists, so no dependency is claimed.
+    assert [n.name for n in await find_dependencies(op, "app", relation_class="dependency")] == [
+        "app"
+    ]
+
+    # The filter applies to path search too.
+    assert await find_path(op, "app", "ds1", relation_class="containment") is None
+    via_host = await find_path(op, "vm1", "vm2", relation_class="placement")
+    assert via_host is not None
+    assert [n.name for n in via_host.nodes] == ["vm1", "host1", "vm2"]
+
+
+@_skip_no_docker
+async def test_edge_listing_carries_relation_class_and_endpoint_scope(
+    pg_engine: None,
+) -> None:
+    """``list_edges`` filters by relation class and reports endpoint scopes."""
+    now = datetime.now(UTC)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        ids = {
+            name: await _seed_node(
+                session, tenant_id=TENANT_A_ID, kind=kind, name=name, last_seen=now
+            )
+            for name, kind in (
+                ("sa-1", "serviceaccount"),
+                ("role-1", "vault-role"),
+                ("pod-1", "pod"),
+                ("ns-1", "namespace"),
+            )
+        }
+        role = await session.get(GraphNode, ids["role-1"])
+        assert role is not None
+        role.source_scope = "global"
+        for frm, to, kind in (
+            ("sa-1", "role-1", "authenticates-via"),
+            ("pod-1", "ns-1", "belongs-to"),
+            ("pod-1", "sa-1", "depends-on"),
+        ):
+            await _seed_edge(
+                session,
+                tenant_id=TENANT_A_ID,
+                from_id=ids[frm],
+                to_id=ids[to],
+                kind=kind,
+                last_seen=now,
+            )
+
+    async with sessionmaker() as session:
+        dependency = await list_edges(session, TENANT_A_ID, relation_class="dependency")
+        unknown = await list_edges(session, TENANT_A_ID, relation_class="unknown")
+        everything = await list_edges(session, TENANT_A_ID)
+
+    assert [(e.kind, e.relation_class) for e in dependency] == [("authenticates-via", "dependency")]
+    assert dependency[0].from_endpoint.source_scope is None
+    assert dependency[0].to_endpoint.source_scope == "global"
+    # ``depends-on`` is not a reviewed kind, so it stays unknown.
+    assert [(e.kind, e.relation_class) for e in unknown] == [("depends-on", "unknown")]
+    assert {e.relation_class for e in everything} == {"dependency", "containment", "unknown"}
+
+
+@_skip_no_docker
+async def test_missing_endpoint_and_no_route_are_told_apart(
+    known_graph: dict[str, uuid.UUID],
+) -> None:
+    """``missing_endpoint_raises`` separates "not in the graph" from "no route"."""
+    op = _operator(TENANT_A_ID)
+    with pytest.raises(NodeNotFoundError) as excinfo:
+        await find_path(op, "app", "no-such-node", missing_endpoint_raises=True)
+    assert excinfo.value.name == "no-such-node"
+    # Both ends exist; the route is just too long for one hop.
+    assert await find_path(op, "app", "ds1", max_hops=1, missing_endpoint_raises=True) is None
+
+
+@_skip_no_docker
+async def test_stale_edge_and_old_observation_read_differently(
+    stale_chain: dict[str, uuid.UUID],
+) -> None:
+    """Rows carry ``last_seen`` and edge facts, so freshness can be told apart."""
+    op = _operator(TENANT_A_ID)
+    await _soft_delete_edge(stale_chain["e_mid_root"])
+    long_ago = datetime.now(UTC) - timedelta(days=3)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        leaf = await session.get(GraphNode, stale_chain["leaf"])
+        assert leaf is not None
+        leaf.last_seen = long_ago
+
+    rows = {n.name: n for n in await find_dependents(op, "root")}
+    path = await find_path(op, "root", "leaf")
+    assert path is not None
+    now = datetime.now(UTC)
+
+    def freshness(source: str | None, last_seen: datetime | None) -> str:
+        return classify_freshness(source, last_seen, now=now, refresh_interval_seconds=3600)
+
+    mid, leaf_row = rows["mid"], rows["leaf"]
+    # The edge into mid was dropped by the latest refresh: stale.
+    assert mid.via_edge_source == "auto"
+    assert mid.via_edge_last_seen is None
+    assert freshness(mid.via_edge_source, mid.via_edge_last_seen) == "stale"
+    assert freshness(mid.source, mid.last_seen) == "observed"
+    # leaf is still readable but was last seen days ago: old.
+    assert leaf_row.last_seen == long_ago
+    assert freshness(leaf_row.source, leaf_row.last_seen) == "old_observation"
+    assert freshness(leaf_row.via_edge_source, leaf_row.via_edge_last_seen) == "observed"
+    # Path rows carry the same facts per hop.
+    by_name = {n.name: n for n in path.nodes}
+    assert by_name["root"].via_edge_last_seen is None and by_name["root"].via_edge_source is None
+    assert by_name["mid"].via_edge_last_seen is None
+    assert by_name["mid"].via_edge_source == "auto"
+    assert by_name["leaf"].last_seen == long_ago
 
 
 def test_module_imports_cleanly() -> None:

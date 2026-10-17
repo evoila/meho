@@ -324,7 +324,9 @@ the place to record where a name is unique, and changes no writer.
   existed at upgrade time: its key, `last_target_id`, `scope_status`
   (`global` / `unresolved`) and `schema_version = 1`. It is keyed by the
   node id, so same-named rows never clash. It is the input for the later
-  repair step. No ORM model reads it yet.
+  repair step. No ORM model reads it yet. The upgrade creates the table
+  only when it is absent and adds rows only for nodes that have none, so
+  a row records the first time `0106` saw the node.
 - **Old key kept.** `graph_node_tenant_kind_name_idx` stays unique on
   `(tenant_id, kind, name)`. PostgreSQL treats NULLs as distinct in a
   unique index, so a fourth nullable key alone would let two unresolved
@@ -332,10 +334,14 @@ the place to record where a name is unique, and changes no writer.
   on `(tenant_id, source_scope, kind, name)` is added for scope lookups.
 - **Writers unchanged.** Refresh, seeding and bulk import still write
   `NULL`, so rows written before the cut-over also read as `unresolved`.
-- **Downgrade.** Keeps every row and drops only what `0106` added. It
-  refuses when `source_scope` holds a value `0106` did not write (any
-  `target:` / `legacy:` value, or a value from another writer): the old
-  schema cannot hold it, so recover by rolling forward.
+- **Downgrade.** Keeps every row, drops the two columns, the CHECK and
+  the scope index, and keeps `graph_node_scope_snapshot`. The snapshot
+  cannot be re-taken later, because a refresh moves `target_id` to the
+  last target that saw the row; keeping the table is how the repair
+  input is exported before the columns go. A re-upgrade keeps it as is.
+  Downgrade refuses when `source_scope` holds a value `0106` did not
+  write (any `target:` / `legacy:` value, or a value from another
+  writer): the old schema cannot hold it, so recover by rolling forward.
 - **Not in this step.** Writing scoped nodes, splitting or repairing
   rows, dropping the old key and changing path answers belong to the
   staged cut-over (#3749) and the path work (#3760).

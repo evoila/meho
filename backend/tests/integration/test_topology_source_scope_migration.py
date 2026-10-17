@@ -14,8 +14,11 @@ This module covers what only PostgreSQL can show:
   ``target:`` scopes are still rejected before the cut-over.
 * **Upgrade / downgrade before the cut-over** on a legacy fixture:
   legacy columns unchanged, ``global`` only for ``kind='target'``, the
-  snapshot written, the CHECK enforced, every row kept on downgrade,
-  and downgrade refused when it would lose scoped data.
+  snapshot written, the CHECK enforced, every row and the snapshot kept
+  on downgrade, and downgrade refused when it would lose scoped data.
+* **Moved target** -- a refresh that moves ``target_id`` after the
+  upgrade does not rewrite the snapshot across a downgrade and a
+  re-upgrade.
 
 Tests are sync because :func:`alembic.command.upgrade` runs its own
 :func:`asyncio.run`; database reads go through a short
@@ -68,23 +71,28 @@ def _sql(url: str, sql: str, **params: Any) -> list[Any]:
 
 @pytest.fixture
 def migration_cfg(integration_env: None, async_pg_url: str) -> Iterator[tuple[Config, str]]:
-    """Alembic config on the container; graph cleared; back at head afterwards."""
+    """Alembic config on the container; graph and snapshot cleared; head afterwards.
+
+    The snapshot table survives a downgrade, so it is cleared here as
+    well. Otherwise rows from one test would be kept by the next test's
+    upgrade.
+    """
     reset_engine_for_testing()
     cfg = alembic_config()
     cfg.set_main_option("sqlalchemy.url", async_pg_url)
-    _sql(async_pg_url, "TRUNCATE graph_node CASCADE")
+    _sql(async_pg_url, "TRUNCATE graph_node, graph_node_scope_snapshot CASCADE")
     try:
         yield cfg, async_pg_url
     finally:
         _sql(async_pg_url, "TRUNCATE graph_node CASCADE")
         command.upgrade(cfg, "head")
+        _sql(async_pg_url, "TRUNCATE graph_node_scope_snapshot")
         reset_engine_for_testing()
 
 
 def _seed_tenant_and_target(url: str) -> tuple[str, str]:
     """Insert a tenant and a target at ``head`` (0106 does not touch either table)."""
     tenant_id = str(uuid.uuid4())
-    target_id = str(uuid.uuid4())
 
     async def _insert() -> None:
         engine = create_async_engine(url)
@@ -95,11 +103,25 @@ def _seed_tenant_and_target(url: str) -> tuple[str, str]:
                         id=uuid.UUID(tenant_id), slug=f"scope-{tenant_id[:8]}", name="Scope"
                     )
                 )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_insert())
+    return tenant_id, _insert_target(url, tenant_id, "cluster-a")
+
+
+def _insert_target(url: str, tenant_id: str, name: str) -> str:
+    target_id = str(uuid.uuid4())
+
+    async def _insert() -> None:
+        engine = create_async_engine(url)
+        try:
+            async with engine.begin() as conn:
                 await conn.execute(
                     insert(Target).values(
                         id=uuid.UUID(target_id),
                         tenant_id=uuid.UUID(tenant_id),
-                        name="cluster-a",
+                        name=name,
                         aliases=[],
                         product="kubernetes",
                         host="k8s.example.test",
@@ -109,7 +131,7 @@ def _seed_tenant_and_target(url: str) -> tuple[str, str]:
             await engine.dispose()
 
     asyncio.run(_insert())
-    return tenant_id, target_id
+    return target_id
 
 
 def _seed_legacy_nodes(url: str, tenant_id: str, target_id: str) -> dict[str, str]:
@@ -258,7 +280,57 @@ def test_upgrade_and_downgrade_before_cutover_keep_legacy_rows(
     }
     assert "source_scope" not in columns
     assert "source_scope_provenance" not in columns
-    assert not _sql(url, "SELECT to_regclass('graph_node_scope_snapshot') AS snapshot")[0].snapshot
+    kept = {
+        str(row.node_id): (row.last_target_id and str(row.last_target_id), row.scope_status)
+        for row in _sql(
+            url, "SELECT node_id, last_target_id, scope_status FROM graph_node_scope_snapshot"
+        )
+    }
+    assert kept == {
+        ids["target_node"]: (target_id, "global"),
+        ids["namespace_node"]: (target_id, "unresolved"),
+        ids["vm_node"]: (None, "unresolved"),
+    }, "the repair input must survive the downgrade"
+
+
+def test_downgrade_keeps_the_snapshot_when_the_target_moved(
+    migration_cfg: tuple[Config, str],
+) -> None:
+    """A refresh that moves ``target_id`` after the upgrade must not rewrite the input."""
+    cfg, url = migration_cfg
+    tenant_id, target_id = _seed_tenant_and_target(url)
+    command.downgrade(cfg, _DOWN_REVISION)
+    ids = _seed_legacy_nodes(url, tenant_id, target_id)
+    command.upgrade(cfg, _REVISION)
+    other_target = _insert_target(url, tenant_id, "cluster-b")
+    _sql(
+        url,
+        "UPDATE graph_node SET target_id = :target_id WHERE id = :id",
+        target_id=uuid.UUID(other_target),
+        id=uuid.UUID(ids["namespace_node"]),
+    )
+
+    def _snapshot_row() -> tuple[str, str]:
+        row = _sql(
+            url,
+            "SELECT last_target_id, scope_status FROM graph_node_scope_snapshot "
+            "WHERE node_id = :id",
+            id=uuid.UUID(ids["namespace_node"]),
+        )[0]
+        return str(row.last_target_id), row.scope_status
+
+    assert _snapshot_row() == (target_id, "unresolved")
+
+    command.downgrade(cfg, _DOWN_REVISION)
+    assert _snapshot_row() == (target_id, "unresolved")
+
+    command.upgrade(cfg, _REVISION)
+    assert _snapshot_row() == (target_id, "unresolved")
+    live = _sql(
+        url, "SELECT target_id FROM graph_node WHERE id = :id", id=uuid.UUID(ids["namespace_node"])
+    )
+    assert str(live[0].target_id) == other_target
+    assert len(_sql(url, "SELECT node_id FROM graph_node_scope_snapshot")) == 3
 
 
 def test_downgrade_refuses_when_scoped_rows_exist(migration_cfg: tuple[Config, str]) -> None:

@@ -34,7 +34,10 @@ nothing else:
   and whether the scope is known (``global``) or ``unresolved``. Keyed
   by the node id, so two rows with the same name never clash. The
   ``schema_version`` column (``1``) tells the later repair step which
-  layout it is reading.
+  layout it is reading. The table is created only when it is absent,
+  and a node that already has a row keeps it. So the row records the
+  first time this migration saw the node, even across a downgrade and
+  a later re-upgrade (see *Reversibility*).
 
 What it does not do
 -------------------
@@ -61,14 +64,21 @@ named by its target name, and live target names are unique per tenant
 Reversibility
 -------------
 
-``downgrade()`` keeps every ``graph_node`` row and drops only what this
-migration added. It refuses (``RuntimeError``) when ``source_scope`` holds
-anything this migration did not write itself -- a ``target:`` /
-``legacy:`` value or a value from another writer. Such data cannot be
-kept in the old schema; recover by rolling forward instead. When the
-refusal does not fire, the dropped values are all ``global`` backfills
-that ``upgrade()`` re-derives, and the snapshot is re-taken from the
-kept rows, so nothing is lost.
+``downgrade()`` keeps every ``graph_node`` row and drops the two columns,
+the CHECK and the index. It refuses (``RuntimeError``) when
+``source_scope`` holds anything this migration did not write itself -- a
+``target:`` / ``legacy:`` value or a value from another writer. Such data
+cannot be kept in the old schema; recover by rolling forward instead.
+When the refusal does not fire, the dropped values are all ``global``
+backfills that ``upgrade()`` re-derives.
+
+``downgrade()`` keeps ``graph_node_scope_snapshot``. The snapshot is the
+repair input, and it cannot be re-derived: a normal refresh moves
+``graph_node.target_id`` to whichever target saw the row last, so a
+snapshot re-taken after a downgrade would record the wrong target.
+Keeping the table is how the repair metadata is exported before the
+columns go. A later ``upgrade()`` finds the table, keeps every row in
+it, and adds rows only for nodes that have none.
 
 The migration is self-contained: the CHECK body is inlined, never
 imported from :mod:`meho_backplane.db.models`.
@@ -101,7 +111,11 @@ _CK_SOURCE_SCOPE = (
 
 
 def upgrade() -> None:
-    """Add the scope columns, CHECK, index and snapshot; backfill ``global``."""
+    """Add the scope columns, CHECK, index and snapshot; backfill ``global``.
+
+    The snapshot is additive. A table left behind by an earlier
+    ``downgrade()`` is kept, and only nodes without a row get one.
+    """
     op.add_column("graph_node", sa.Column("source_scope", sa.Text(), nullable=True))
     op.add_column("graph_node", sa.Column("source_scope_provenance", sa.Text(), nullable=True))
     with op.batch_alter_table("graph_node") as batch_op:
@@ -122,38 +136,46 @@ def upgrade() -> None:
         ).bindparams(provenance=_PROVENANCE)
     )
 
-    op.create_table(
-        "graph_node_scope_snapshot",
-        sa.Column("node_id", sa.Uuid(), primary_key=True, nullable=False),
-        sa.Column("tenant_id", sa.Uuid(), nullable=False),
-        sa.Column("kind", sa.Text(), nullable=False),
-        sa.Column("name", sa.Text(), nullable=False),
-        sa.Column("last_target_id", sa.Uuid(), nullable=True),
-        sa.Column("source", sa.Text(), nullable=False),
-        sa.Column("discovered_by", sa.Text(), nullable=False),
-        sa.Column("scope_status", sa.Text(), nullable=False),
-        sa.Column("schema_version", sa.Integer(), nullable=False),
-        sa.Column("captured_at", sa.DateTime(timezone=True), nullable=False),
-        sa.CheckConstraint(
-            "scope_status IN ('global', 'unresolved')",
-            name="ck_graph_node_scope_snapshot_status",
-        ),
-    )
+    if not sa.inspect(op.get_bind()).has_table("graph_node_scope_snapshot"):
+        op.create_table(
+            "graph_node_scope_snapshot",
+            sa.Column("node_id", sa.Uuid(), primary_key=True, nullable=False),
+            sa.Column("tenant_id", sa.Uuid(), nullable=False),
+            sa.Column("kind", sa.Text(), nullable=False),
+            sa.Column("name", sa.Text(), nullable=False),
+            sa.Column("last_target_id", sa.Uuid(), nullable=True),
+            sa.Column("source", sa.Text(), nullable=False),
+            sa.Column("discovered_by", sa.Text(), nullable=False),
+            sa.Column("scope_status", sa.Text(), nullable=False),
+            sa.Column("schema_version", sa.Integer(), nullable=False),
+            sa.Column("captured_at", sa.DateTime(timezone=True), nullable=False),
+            sa.CheckConstraint(
+                "scope_status IN ('global', 'unresolved')",
+                name="ck_graph_node_scope_snapshot_status",
+            ),
+        )
     op.execute(
         sa.text(
             "INSERT INTO graph_node_scope_snapshot "
             "(node_id, tenant_id, kind, name, last_target_id, source, "
             "discovered_by, scope_status, schema_version, captured_at) "
-            "SELECT id, tenant_id, kind, name, target_id, source, discovered_by, "
-            "CASE WHEN source_scope = 'global' THEN 'global' ELSE 'unresolved' END, "
+            "SELECT n.id, n.tenant_id, n.kind, n.name, n.target_id, n.source, "
+            "n.discovered_by, "
+            "CASE WHEN n.source_scope = 'global' THEN 'global' ELSE 'unresolved' END, "
             ":schema_version, CURRENT_TIMESTAMP "
-            "FROM graph_node"
+            "FROM graph_node AS n "
+            "WHERE NOT EXISTS (SELECT 1 FROM graph_node_scope_snapshot AS s "
+            "WHERE s.node_id = n.id)"
         ).bindparams(schema_version=_SNAPSHOT_SCHEMA_VERSION)
     )
 
 
 def downgrade() -> None:
-    """Drop what ``upgrade()`` added; refuse if scoped data would be lost."""
+    """Drop the columns, CHECK and index; keep the snapshot; refuse on scoped data.
+
+    The snapshot stays because it is the repair input and cannot be
+    re-taken later: refreshes move ``target_id`` after the upgrade.
+    """
     bind = op.get_bind()
     foreign = bind.execute(
         sa.text(
@@ -170,7 +192,6 @@ def downgrade() -> None:
             "keep them. Roll forward instead of downgrading."
         )
 
-    op.drop_table("graph_node_scope_snapshot")
     op.drop_index("graph_node_tenant_scope_kind_name_idx", table_name="graph_node")
     with op.batch_alter_table("graph_node") as batch_op:
         batch_op.drop_constraint("ck_graph_node_source_scope", type_="check")

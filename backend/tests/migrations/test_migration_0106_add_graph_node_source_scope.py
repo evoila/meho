@@ -21,8 +21,10 @@ Coverage (SQLite driver; the PostgreSQL twin lives in
   duplicate name, whatever the scope.
 * **CHECK** -- the three scope forms are accepted; malformed
   ``target:`` / ``legacy:`` forms are rejected.
-* **Downgrade** -- keeps every row, drops the added schema, refuses when
-  a scope value this migration did not write is present; round-trip.
+* **Downgrade** -- keeps every row and the snapshot, drops the added
+  columns, refuses when a scope value this migration did not write is
+  present; round-trip. A ``target_id`` moved after the upgrade does not
+  rewrite the snapshot.
 
 Every step targets this migration's own revision (``0106``) and its
 ``down_revision`` (``0105``), never ``head``.
@@ -104,20 +106,13 @@ def _seed_legacy_graph(sync_url: str) -> dict[str, str]:
     * ``vm`` node ``vm-1`` -- curated, no ``target_id``.
     """
     tenant_id = str(uuid.uuid4())
-    target_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
     _execute(
         sync_url,
         "INSERT INTO tenant (id, slug, name, created_at) VALUES (:id, :slug, 'T', :now)",
         {"id": tenant_id, "slug": f"t-{tenant_id[:8]}", "now": now},
     )
-    _execute(
-        sync_url,
-        "INSERT INTO targets (id, tenant_id, name, aliases, product, host, created_at, "
-        "updated_at) VALUES (:id, :tenant_id, 'cluster-a', '[]', 'kubernetes', "
-        "'k8s.example.test', :now, :now)",
-        {"id": target_id, "tenant_id": tenant_id, "now": now},
-    )
+    target_id = _insert_target(sync_url, tenant_id, "cluster-a")
     ids = {"tenant": tenant_id, "target": target_id}
     for key, kind, name, node_target, source in (
         ("target_node", "target", "cluster-a", target_id, "auto"),
@@ -144,6 +139,19 @@ def _seed_legacy_graph(sync_url: str) -> dict[str, str]:
     return ids
 
 
+def _insert_target(sync_url: str, tenant_id: str, name: str) -> str:
+    target_id = str(uuid.uuid4())
+    now = datetime.now(UTC).isoformat()
+    _execute(
+        sync_url,
+        "INSERT INTO targets (id, tenant_id, name, aliases, product, host, created_at, "
+        "updated_at) VALUES (:id, :tenant_id, :name, '[]', 'kubernetes', "
+        "'k8s.example.test', :now, :now)",
+        {"id": target_id, "tenant_id": tenant_id, "name": name, "now": now},
+    )
+    return target_id
+
+
 def _insert_scoped_node(sync_url: str, tenant_id: str, name: str, scope: str | None) -> None:
     _execute(
         sync_url,
@@ -158,6 +166,17 @@ def _insert_scoped_node(sync_url: str, tenant_id: str, name: str, scope: str | N
             "scope": scope,
         },
     )
+
+
+def _snapshot_view(sync_url: str) -> list[tuple[Any, ...]]:
+    """The repair input, in a stable order."""
+    rows = _fetch(
+        sync_url,
+        "SELECT node_id, tenant_id, kind, name, last_target_id, source, discovered_by, "
+        "scope_status, schema_version, captured_at FROM graph_node_scope_snapshot "
+        "ORDER BY kind, name",
+    )
+    return [tuple(row) for row in rows]
 
 
 def _legacy_view(sync_url: str) -> list[tuple[Any, ...]]:
@@ -304,12 +323,13 @@ def test_check_rejects_malformed_scope_forms(
 
 
 def test_downgrade_keeps_rows_and_round_trips(alembic_cfg: tuple[Config, str]) -> None:
-    """``0106 -> 0105 -> 0106`` keeps every row and replays the backfill."""
+    """``0106 -> 0105 -> 0106`` keeps every row and the snapshot; replays the backfill."""
     cfg, sync_url = alembic_cfg
     command.upgrade(cfg, _DOWN_REVISION)
     ids = _seed_legacy_graph(sync_url)
     before = _legacy_view(sync_url)
     command.upgrade(cfg, _REVISION)
+    snapshot = _snapshot_view(sync_url)
 
     command.downgrade(cfg, _DOWN_REVISION)
 
@@ -324,16 +344,70 @@ def test_downgrade_keeps_rows_and_round_trips(alembic_cfg: tuple[Config, str]) -
         eng.dispose()
     assert "source_scope" not in columns
     assert "source_scope_provenance" not in columns
-    assert "graph_node_scope_snapshot" not in tables
+    assert "graph_node_scope_snapshot" in tables, "the repair input must survive"
     assert "graph_node_tenant_scope_kind_name_idx" not in index_names
     assert "graph_node_tenant_kind_name_idx" in index_names
     assert _legacy_view(sync_url) == before
+    assert _snapshot_view(sync_url) == snapshot
+
+    # A node written while the schema is back at 0105 has no snapshot
+    # row yet; the re-upgrade adds one without touching the others.
+    _execute(
+        sync_url,
+        "INSERT INTO graph_node (id, tenant_id, kind, name, properties, discovered_by, "
+        "first_seen) VALUES (:id, :tenant_id, 'vm', 'vm-2', '{}', 'test', :now)",
+        {"id": str(uuid.uuid4()), "tenant_id": ids["tenant"], "now": datetime.now(UTC).isoformat()},
+    )
 
     command.upgrade(cfg, _REVISION)
     rows = _fetch(
         sync_url, "SELECT id, source_scope FROM graph_node WHERE source_scope IS NOT NULL"
     )
     assert [(row.id, row.source_scope) for row in rows] == [(ids["target_node"], "global")]
+    after = _snapshot_view(sync_url)
+    assert len(after) == 4
+    assert [row for row in after if row[3] != "vm-2"] == snapshot
+
+
+def test_downgrade_keeps_the_snapshot_when_the_target_moved(
+    alembic_cfg: tuple[Config, str],
+) -> None:
+    """A refresh that moves ``target_id`` after the upgrade must not rewrite the input.
+
+    Without the kept table, a downgrade followed by a re-upgrade would
+    snapshot the *new* target and lose the one the row had at the cut.
+    """
+    cfg, sync_url = alembic_cfg
+    command.upgrade(cfg, _DOWN_REVISION)
+    ids = _seed_legacy_graph(sync_url)
+    command.upgrade(cfg, _REVISION)
+    other_target = _insert_target(sync_url, ids["tenant"], "cluster-b")
+    _execute(
+        sync_url,
+        "UPDATE graph_node SET target_id = :target_id WHERE id = :id",
+        {"target_id": other_target, "id": ids["namespace_node"]},
+    )
+
+    def _snapshot_row() -> tuple[Any, ...]:
+        rows = _fetch(
+            sync_url,
+            "SELECT last_target_id, scope_status FROM graph_node_scope_snapshot "
+            "WHERE node_id = :id",
+            {"id": ids["namespace_node"]},
+        )
+        return tuple(rows[0])
+
+    assert _snapshot_row() == (ids["target"], "unresolved")
+
+    command.downgrade(cfg, _DOWN_REVISION)
+    assert _snapshot_row() == (ids["target"], "unresolved")
+
+    command.upgrade(cfg, _REVISION)
+    assert _snapshot_row() == (ids["target"], "unresolved")
+    live = _fetch(
+        sync_url, "SELECT target_id FROM graph_node WHERE id = :id", {"id": ids["namespace_node"]}
+    )
+    assert live[0].target_id == other_target
     assert len(_fetch(sync_url, "SELECT node_id FROM graph_node_scope_snapshot")) == 3
 
 

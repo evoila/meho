@@ -71,8 +71,15 @@ body_before     TEXT    NULL        -- NULL for CREATE events
 body_after      TEXT    NOT NULL
 actor_sub       TEXT    NOT NULL
 ts              TIMESTAMPTZ NOT NULL DEFAULT now()
-audit_id        UUID    NULL        -- soft FK to audit_log.id; nullable for seeds
+audit_id        UUID    NULL        -- legacy link to the request wrapper row; NULL since #3747
+change_kind     TEXT    NULL        -- created / updated / deleted (#3747, migration 0109)
+request_id      UUID    NULL        -- request correlation id of the edit (#3747)
 ```
+
+`ck_tenant_convention_history_change_kind` allows only the three
+`change_kind` values (or `NULL`). Rows written before `0109` keep their
+`audit_id` and read `NULL` for `change_kind` and `request_id`; nothing is
+guessed for them.
 
 Indexed by `tenant_convention_history_convention_idx` -- composite
 btree on `(convention_id, ts)`.
@@ -91,23 +98,23 @@ Same module. Write-once, read-mostly. T3's `meho conventions history
 
 ## Service layer (G10.12-T0 #1894)
 
-The CRUD + budget + history + pre-allocated-audit-id logic that was
+The CRUD + budget + history logic that was
 originally inline in the route handlers now lives in
 [`ConventionsService`](../../backend/src/meho_backplane/conventions/service.py).
 The HTTP routes are a thin shell: they bind the audit contextvars,
 delegate to the service, and map the service's typed error vocabulary
 to status codes. The split exists so the in-process operator-console
-BFF (G10.12 T1/T2 #1838) can reuse the same budget gate, history-row
-pairing, and audit-id seam without copying the handlers or routing a
-Bearer-API call back through itself.
+BFF (G10.12 T1/T2 #1838) can reuse the same budget gate and history
+row without copying the handlers or routing a Bearer-API call back
+through itself.
 
 Two design points:
 
 - **Session is threaded in, not opened.** Every method takes an
   explicit `session: AsyncSession`. The REST handler passes its
-  request-scoped `get_session` dependency (so the audit middleware's
-  pre-allocated-id soft-FK and the post-write read-your-own-writes
-  preamble preview share one transaction); the BFF passes its own
+  request-scoped `get_session` dependency (so the history row and the
+  post-write read-your-own-writes preamble preview share one
+  transaction); the BFF passes its own
   in-process session. (Contrast `MemoryService`, which opens its own
   session via the sessionmaker.) `budget_status` accepts the param
   for signature parity but the assembler it calls opens its own
@@ -134,13 +141,9 @@ shipped the schema; T3-T5 layer CLI / preamble / seed on top.
 1. **POST /api/v1/conventions** (T2 #314) -- `tenant_admin` role
    required. Inserts one row into `tenant_conventions` and one row
    into `tenant_convention_history` (with `body_before=NULL`) inside
-   the same transaction. The audit middleware writes its own row
-   into `audit_log`; the service pre-allocates the audit row's
-   uuid via
-   [`bind_preallocated_audit_id`](../../backend/src/meho_backplane/audit.py)
-   so the middleware reuses it, and the history row's `audit_id`
-   soft-FK references that same uuid -- a single audit row joins
-   to the history row by exact-match uuid.
+   the same transaction. The history row has `change_kind=created`
+   and the request correlation id (`request_id`). See
+   [Domain provenance](#domain-provenance-3747).
 
 2. **PATCH /api/v1/conventions/{slug}** (T2) -- `tenant_admin` role
    required. Looks up the existing row by `(tenant_id, slug)`,
@@ -153,9 +156,8 @@ shipped the schema; T3-T5 layer CLI / preamble / seed on top.
 3. **DELETE /api/v1/conventions/{slug}** (T2) -- `tenant_admin` role
    required. Inserts a history row with `body_after=<final body>`
    (a legible last-known state for audit forensics) before deleting
-   the convention row from `tenant_conventions`. The lifecycle
-   distinction lives in the audit row's `method='DELETE'`, not in
-   `tenant_convention_history`.
+   the convention row from `tenant_conventions`. The history row has
+   `change_kind=deleted`.
 
 4. **GET /api/v1/conventions** (T2) -- list all conventions for the
    operator's tenant. Filters by `tenant_id` (resolved from the JWT
@@ -170,8 +172,9 @@ shipped the schema; T3-T5 layer CLI / preamble / seed on top.
 
 6. **GET /api/v1/conventions/{slug}/history** (T2) -- list of
    history rows for the convention ordered `ts DESC` (newest first
-   per the issue's "documented v0.2 ordering" decision), with
-   optional cross-reference to `audit_log` via `audit_id`.
+   per the issue's "documented v0.2 ordering" decision). Each entry
+   carries `change_kind` and `request_id` (rows since #3747) or the
+   legacy `audit_id` (older rows).
 
 7. **Session preamble** (T4 #316) -- on MCP `initialize`, MEHO loads
    all `kind='operational'` conventions for the tenant, packs them
@@ -468,34 +471,27 @@ because the title is part of the rendered cost.
 are exempt from the 422 -- a `workflow` convention of arbitrary
 size is accepted.
 
-## Audit row + history row in one transaction (T2)
+## Domain provenance (#3747)
 
-Every write route (POST / PATCH / DELETE) writes:
+Every write route (POST / PATCH / DELETE) writes, in one
+`session.begin()` block:
 
 1. The convention mutation (INSERT for POST, UPDATE for PATCH,
    INSERT-history-then-DELETE for DELETE).
-2. One `tenant_convention_history` row carrying the
-   `(body_before, body_after, actor_sub, ts, audit_id)` tuple.
-3. The chassis `audit_log` row (the
-   [`AuditMiddleware`](../../backend/src/meho_backplane/audit.py)
-   inserts this after the handler returns).
+2. One `tenant_convention_history` row carrying
+   `(body_before, body_after, actor_sub, ts, change_kind, request_id)`.
 
-All three commit or roll back together: the convention mutation +
-history row land in the same `session.begin()` block opened by
-`get_session`; the audit row commits in the same response cycle
-via the middleware. The history row's `audit_id` soft-FK
-references the audit row by exact-match uuid -- `ConventionsService`
-pre-allocates the uuid via `bind_preallocated_audit_id` and the
-middleware honors the contextvar instead of minting its own. G8's
-audit-query path joins `tenant_convention_history` on `audit_log`
-by `audit_id` to answer "who edited which rule when" with one
-SQL join.
+The history row is the record of the edit. It says what the edit was
+(`change_kind`), who made it and when, and keeps the request correlation
+id (`request_id`, from the `request_id` contextvar; `NULL` when the
+request id is not a UUID). The same id is on the request usage event
+(see [request-usage.md](request-usage.md)) and, while it is still
+written, on the REST request wrapper row in `audit_log`.
 
-The pre-allocation primitive is a small, additive chassis change
-(opt-in contextvar; when unset, the middleware falls back to the
-v0.1 fresh-uuid behaviour). The alternative -- having the route
-write its own audit row (the topology-nodes pattern) -- would
-double-audit because the middleware also fires per HTTP request.
+Before #3747 the service pre-allocated the wrapper row's id
+(`bind_preallocated_audit_id`) and stored it as `audit_id`. That wrapper
+row is request activity, not a record of the edit, and it is being
+retired. New rows leave `audit_id` `NULL`; old rows keep theirs.
 
 ## CLI surface (T3)
 

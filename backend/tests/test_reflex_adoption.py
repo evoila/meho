@@ -55,6 +55,7 @@ from meho_backplane.reflex.adoption import (
 )
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
+from ._oidc_jwt_helpers import DEFAULT_TENANT_ID as _DEFAULT_TENANT_ID
 from ._oidc_jwt_helpers import ISSUER as _ISSUER
 from ._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
 from ._oidc_jwt_helpers import mint_token as _mint_token
@@ -575,6 +576,46 @@ def test_route_malformed_since_returns_400(client: TestClient) -> None:
         )
     assert resp.status_code == 400
     assert "whenever" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_route_reads_request_usage_events_not_wrapper_rows(client: TestClient) -> None:
+    """The route counts meta-tool calls from usage events, not wrapper rows (#3747).
+
+    A read-first session exists only as audit envelope rows; another one
+    exists only as usage events. The route reports the usage-event session
+    and ignores the wrapper rows.
+    """
+    tenant = uuid.UUID(_DEFAULT_TENANT_ID)
+    await _seed_tenant(tenant)
+    base = datetime.now(UTC) - timedelta(hours=2)
+    wrapper_sid, usage_sid = uuid.uuid4(), uuid.uuid4()
+    await _seed_audit(
+        tenant_id=tenant, path=_RECENT_PATH, occurred_at=base, agent_session_id=wrapper_sid
+    )
+    await _seed_audit(
+        tenant_id=tenant,
+        path=_CALL_PATH,
+        occurred_at=base + timedelta(minutes=1),
+        agent_session_id=wrapper_sid,
+    )
+    await seed_usage_event(
+        tenant_id=tenant,
+        route=f"tool:{CALL_OPERATION_TOOL}",
+        occurred_at=base + timedelta(minutes=2),
+        session_id=usage_sid,
+    )
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(key, sub="op-1", tenant_role=TenantRole.OPERATOR.value)
+    with respx.mock as router:
+        _mock_discovery_and_jwks(router, _public_jwks(key))
+        resp = client.get("/api/v1/audit/reflex", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+    agent = resp.json()["surfaces"][0]
+    assert agent["surface"] == "agent"
+    assert agent["read_before_act_sessions"] == 1
+    assert agent["read_before_act_read_first"] == 0
+    assert agent["write_back_call_operations"] == 1
 
 
 def test_route_default_returns_200_zero_report(client: TestClient) -> None:

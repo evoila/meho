@@ -175,6 +175,7 @@ def _seed_audit_row(
     work_ref: str | None = None,
     agent_session_id: uuid.UUID | None = None,
     row_id: uuid.UUID | None = None,
+    event_class: str = "legacy_request",
 ) -> uuid.UUID:
     """Insert one ``audit_log`` row at ``_BASE + second``; return its id."""
     resolved_id = row_id or uuid.uuid4()
@@ -195,6 +196,7 @@ def _seed_audit_row(
                     payload={"op_id": op_id, "op_class": op_class},
                     work_ref=work_ref,
                     agent_session_id=agent_session_id,
+                    event_class=event_class,
                 )
             )
         return resolved_id
@@ -481,6 +483,80 @@ def test_audit_bad_since_renders_inline_error_not_500() -> None:
     assert response.status_code == 200, response.text
     body = response.text
     assert "Could not parse the time window" in body
+
+
+#: A ``since`` filter older than :data:`_BASE`, so the counters see every seeded row.
+_SINCE_BEFORE_BASE = "2000-01-01T00:00:00Z"
+
+
+def _seed_one_row_per_class() -> None:
+    """Seed one execution, one decision and two legacy rows in tenant A."""
+    _seed_audit_row(
+        tenant_id=_TENANT_A, second=0, op_id="vsphere.vm.poweron", event_class="operation_execution"
+    )
+    _seed_audit_row(
+        tenant_id=_TENANT_A, second=1, op_id="vault.kv.put", event_class="policy_decision"
+    )
+    _seed_audit_row(tenant_id=_TENANT_A, second=2, op_id="legacy.one")
+    _seed_audit_row(tenant_id=_TENANT_A, second=3, op_id="legacy.two")
+
+
+def _count_badge(body: str, event_class: str) -> str:
+    """Return the text of the counter badge for *event_class*."""
+    marker = f'data-event-class="{event_class}"'
+    start = body.index(marker)
+    return body[start : body.index("</li>", start)]
+
+
+def test_audit_event_class_filter_and_counters() -> None:
+    """The record type filter narrows rows; the counters show every class (#3747).
+
+    Old rows stay ``legacy_request`` ("Legacy row"); nothing is guessed from
+    their method or path.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_one_row_per_class()
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        page = client.get("/ui/audit")
+        counted = client.get(f"/ui/audit/results?since={_SINCE_BEFORE_BASE}")
+        filtered = client.get(
+            f"/ui/audit/results?event_class=policy_decision&since={_SINCE_BEFORE_BASE}"
+        )
+
+    assert page.status_code == 200, page.text
+    assert 'name="event_class"' in page.text
+    assert "Legacy row" in page.text
+    # With no since filter the counters cover only the last 24 hours, so
+    # the seeded rows (older than that) are not counted, and the page says so.
+    assert ">0<" in _count_badge(page.text, "legacy_request")
+    assert "last 24 hours" in page.text
+
+    assert counted.status_code == 200, counted.text
+    assert ">1<" in _count_badge(counted.text, "operation_execution")
+    assert ">1<" in _count_badge(counted.text, "policy_decision")
+    assert ">0<" in _count_badge(counted.text, "security_event")
+    assert ">2<" in _count_badge(counted.text, "legacy_request")
+    assert "last 24 hours" not in counted.text
+
+    assert filtered.status_code == 200, filtered.text
+    assert "vault.kv.put" in filtered.text
+    assert "vsphere.vm.poweron" not in filtered.text
+    assert "legacy.one" not in filtered.text
+    # The counters ignore the class filter, so the other classes stay visible.
+    assert ">2<" in _count_badge(filtered.text, "legacy_request")
+
+
+def test_audit_unknown_event_class_renders_inline_error_not_500() -> None:
+    """An unknown record type is an inline filter error, never a 500."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/audit/results?event_class=bogus")
+    assert response.status_code == 200, response.text
+    assert "Unknown event class" in response.text
 
 
 def test_audit_results_rejects_unknown_partial() -> None:

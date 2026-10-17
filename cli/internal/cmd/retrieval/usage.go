@@ -34,7 +34,7 @@ var usageSurfaces = map[string]struct{}{
 
 // newUsageCmd returns the `meho retrieval usage` subcommand. The
 // verb wraps GET /api/v1/retrieve/usage (G4.3-T5 #444) so operators
-// can read the audit-log-backed daily-use telemetry the
+// can read the daily-use telemetry (from request usage events) the
 // retire-checklist verb (T6 #445) consumes as one of its five
 // criteria.
 //
@@ -64,15 +64,18 @@ func newUsageCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "usage",
-		Short: "Read audit-log-backed retrieval usage telemetry (daily buckets per surface)",
+		Short: "Read retrieval usage telemetry (daily buckets per surface)",
 		Long: "usage calls GET /api/v1/retrieve/usage and renders daily " +
 			"counts grouped by `(date, surface)` for the operator's " +
-			"tenant. The audit-log-backed aggregation reports per-day " +
+			"tenant, read from request usage events. It reports per-day " +
 			"search counts, distinct operators, and a 0-100 " +
 			"search-to-action conversion percentage — the three signals " +
 			"the retire-checklist verb (T6 #445) consumes for criterion " +
 			"1 (≥1 month of daily use) and criterion 2 (≥3 operators / " +
 			"≥1 search-per-week for ≥4 consecutive weeks).\n\n" +
+			"Usage events are recorded only when the backplane sets " +
+			"REQUEST_USAGE_RETENTION_DAYS; when it is not set, this report " +
+			"is empty, and it covers only the time since collection started.\n\n" +
 			"--since accepts the same relative shorthand (`30d` / `7d` / " +
 			"`24h`) and absolute ISO-8601 date forms the backplane's " +
 			"parser supports. Malformed values surface the backplane's " +

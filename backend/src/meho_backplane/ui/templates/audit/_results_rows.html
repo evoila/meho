@@ -40,6 +40,13 @@
         <span class="badge badge-ghost badge-sm" aria-label="Result {{ row.result_status }}">
           {{ row.result_status }}
         </span>
+        {% if row.event_class_label %}
+          <span
+            class="badge badge-outline badge-sm"
+            data-event-class="{{ row.event_class }}"
+            aria-label="Record type {{ row.event_class_label }}"
+          >{{ row.event_class_label }}</span>
+        {% endif %}
       </div>
       <p class="truncate text-xs text-base-content/55">
         <span>{{ row.principal_name or row.principal_sub }}</span>

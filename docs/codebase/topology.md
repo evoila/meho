@@ -440,7 +440,12 @@ that share a name) and the plan does not use them.
    malformed scope, a problem or an unavailable target in the plan;
 3. `LOCK TABLE graph_node, graph_edge IN EXCLUSIVE MODE`, fingerprint
    the graph again, refuse a different `snapshot_version`;
-4. refuse when a planned target was deleted after staging;
+4. `LOCK TABLE targets IN EXCLUSIVE MODE` (reads go on, target changes
+   wait until the cut-over commits), then compare the live target set
+   with the staged one: refuse when a staged target was deleted
+   (`target_unavailable`) or a target was added after staging
+   (`target_added`; its rows are not in the plan and the graph
+   fingerprint cannot see a target with no rows yet);
 5. drop `graph_node_tenant_kind_name_idx`;
 6. apply node then edge decisions with history rows (node history
    snapshots now include `source_scope`) and one audit row per tenant
@@ -457,8 +462,8 @@ that share a name) and the plan does not use them.
 
 Refusals (`CutoverRefusedError.reason`) happen before step 5, so the old
 graph is unchanged and readable. Refusals about the manifest
-(`snapshot_changed`, `target_unavailable`, `malformed_scope`,
-`unresolved_edge`) mark it `refused`; stage again. A crash at any step
+(`snapshot_changed`, `target_unavailable`, `target_added`,
+`malformed_scope`, `unresolved_edge`) mark it `refused`; stage again. A crash at any step
 rolls the whole transaction back; the same manifest can then roll
 forward if the graph has not changed. There is no way back to the old
 key: a second cut-over and a new staging run refuse once `scoped`, and
@@ -476,7 +481,8 @@ and every reader skips them: `resolve_node` (and so annotate, bulk
 import, history and the closure verbs), the traversal CTEs (never step
 onto one), `find_path` (never a hop), the UI resolver and the UI BFS
 overlays. `list_edges` skips every edge with a `legacy:` end, on the
-REST, CLI and MCP edge listings alike. `list_nodes` and the timeline
+REST, CLI and MCP edge listings alike, and so do the console graph
+view and the node drawer's edge lists. `list_nodes` and the timeline
 still show legacy rows, with `scope_status = legacy`, for repair
 reports. When one `(kind, name)`
 exists in several scopes, `resolve_node` raises `AmbiguousNodeError`

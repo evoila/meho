@@ -208,8 +208,7 @@ func renderTransportError(
 //     names the required role.
 //   - 400 → unexpected with the parser / substrate error message —
 //     `DurationParseError`, `InvalidCursorError`, and
-//     `UnsupportedFilterError` (v0.2's `parent_audit_id` /
-//     `agent_session_id` gap) all surface as 400 from the backend.
+//     `UnsupportedFilterError` all surface as 400 from the backend.
 //   - 404 → unexpected with "audit row not found" (only the
 //     show endpoint emits this; cross-tenant probes also surface
 //     here per the substrate's tenant-scoping discipline).

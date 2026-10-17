@@ -18,8 +18,8 @@ Coverage matrix (G8.1-T1 acceptance criteria):
 * AC5 — Cursor pagination forward-only: 250 rows / ``limit=100`` produces 3
   pages, last page ``next_cursor=None``.
 * AC6 — ``op_id="vsphere.vm.*"`` glob matches MCP payload rows correctly.
-* AC8 — ``parent_audit_id`` filter raises :class:`UnsupportedFilterError`
-  (the flat filter stays gated; ``agent_session_id`` is un-gated by G8.2-T3).
+* #4030 — ``parent_audit_id`` exact-match filter returns the direct children
+  of one row (an approval request's decision and run rows), tenant-scoped.
 * G8.2-T3 — ``agent_session_id`` filter narrows rows; ``parent_audit_id`` /
   ``agent_session_id`` populate on the returned ``AuditEntry``.
 * work_ref I1-T3 #1658 — ``work_ref`` exact-match filter narrows to rows whose
@@ -44,7 +44,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.audit_query import (
     AuditQueryFilters,
     InvalidCursorError,
-    UnsupportedFilterError,
     decode_cursor,
     query_audit,
 )
@@ -476,21 +475,79 @@ async def test_op_class_filter_against_payload(session: AsyncSession) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Unsupported filters (AC8)
+# parent_audit_id filter (#4030)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_parent_audit_id_filter_raises_unsupported(
+async def test_parent_audit_id_filter_returns_approval_decision_and_run_rows(
     session: AsyncSession,
 ) -> None:
-    """``parent_audit_id`` filter raises until the column lands (G0.6-T7 #398)."""
-    with pytest.raises(UnsupportedFilterError):
-        await query_audit(
-            AuditQueryFilters(parent_audit_id=uuid.uuid4()),
-            tenant_id=uuid.uuid4(),
-            session=session,
-        )
+    """An approval request's decision and run rows are found by their parent.
+
+    The three rows carry no agent session, so ``parent_audit_id`` is the only
+    link between them. The filter returns the direct children only: not the
+    request row itself, not an unrelated row, not a grandchild, and not a
+    row in another tenant that points at the same parent id.
+    """
+    tenant_id = uuid.uuid4()
+    other_tenant_id = uuid.uuid4()
+    request_id = await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 1, tzinfo=UTC),
+        method="APPROVAL",
+        path="approval.request",
+        status_code=202,
+    )
+    decision_id = await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 2, tzinfo=UTC),
+        operator_sub="approver-1",
+        method="APPROVAL",
+        path="approval.decision",
+        parent_audit_id=request_id,
+    )
+    run_id = await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 3, tzinfo=UTC),
+        operator_sub="approver-1",
+        method="DISPATCH",
+        path="vsphere.vm.power_off",
+        parent_audit_id=request_id,
+    )
+    await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 4, tzinfo=UTC),
+        method="DISPATCH",
+        path="vsphere.vm.child_step",
+        parent_audit_id=run_id,
+    )
+    await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 5, tzinfo=UTC),
+    )
+    await _seed_audit_row(
+        session,
+        tenant_id=other_tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 6, tzinfo=UTC),
+        parent_audit_id=request_id,
+    )
+    await session.commit()
+
+    result = await query_audit(
+        AuditQueryFilters(parent_audit_id=request_id),
+        tenant_id=tenant_id,
+        session=session,
+    )
+
+    assert [row.id for row in result.rows] == [run_id, decision_id]
+    assert all(row.parent_audit_id == request_id for row in result.rows)
+    assert all(row.tenant_id == tenant_id for row in result.rows)
 
 
 @pytest.mark.asyncio

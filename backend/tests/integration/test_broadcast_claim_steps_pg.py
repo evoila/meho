@@ -11,15 +11,24 @@ completion commits, sees its row, and gets ``claim_completed``. Without
 the lock both could pass the open-claim check and the update could
 commit after the completion.
 
+The same lock orders a retry behind the first copy of its step: the retry
+key is looked up after the lock is held, so two identical completions
+give one row and one replay, not ``claim_completed``.
+
+Delivery to the stream is locked per stored row: a retry that overlaps
+the first try's stream write waits for it and then writes nothing, so
+feed watchers never see the same step twice.
+
 SQLite (the unit-suite driver) has no row locks and drops the clause, so
-this suite boots a real PostgreSQL and holds the completion's lock on
-purpose while the update tries to pass.
+this suite boots a real PostgreSQL and holds one request's lock on
+purpose while the other tries to pass.
 """
 
 from __future__ import annotations
 
 import asyncio
 import itertools
+import json
 import os
 import uuid
 from datetime import UTC, datetime
@@ -104,13 +113,43 @@ class _HoldAfterCheck:
         self.release = asyncio.Event()
         original = publisher._check_open_claim
 
-        async def gated(session: Any, event: AgentAnnouncementEvent) -> None:
-            await original(session, event)
+        async def gated(
+            session: Any, event: AgentAnnouncementEvent, idempotency_key: str | None
+        ) -> Any:
+            stored = await original(session, event, idempotency_key)
             if event.phase == phase:
                 self.checked.set()
                 await self.release.wait()
+            return stored
 
         monkeypatch.setattr(publisher, "_check_open_claim", gated)
+
+
+class _HoldStreamWrite:
+    """Hold one phase's first stream write open while its row lock is taken.
+
+    ``_deliver`` locks the archive row before the ``XADD``, so the held
+    write keeps that lock until it is released here.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, phase: str) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        counter = itertools.count(1)
+        held = False
+
+        async def xadd(_key: str, fields: dict[str, str], **_kwargs: Any) -> str:
+            nonlocal held
+            if not held and json.loads(fields["event"])["phase"] == phase:
+                held = True
+                self.started.set()
+                await self.release.wait()
+            return f"1700000000000-{next(counter)}"
+
+        self.xadd = AsyncMock(side_effect=xadd)
+        client = AsyncMock()
+        client.xadd = self.xadd
+        monkeypatch.setattr(publisher, "get_broadcast_client", lambda: client)
 
 
 async def _phases(claim_id: uuid.UUID) -> list[str]:
@@ -188,3 +227,79 @@ async def test_completion_waits_for_an_update_in_flight(
 
     assert await _phases(claim_id) == ["start", "update", "completion"]
     assert fake_stream.await_count == 3
+
+
+@_skip_no_docker
+async def test_identical_completion_retry_replays_after_waiting(
+    pg_engine: None,  # noqa: F811 -- fixture
+    fake_stream: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retry that waits behind the first copy of its step replays it."""
+    claim_id = uuid.uuid4()
+    await publish_agent_announcement(_event("start", claim_id))
+    hold = _HoldAfterCheck(monkeypatch, "completion")
+
+    first_task = asyncio.create_task(
+        publish_agent_announcement(_event("completion", claim_id), idempotency_key="c1")
+    )
+    await asyncio.wait_for(hold.checked.wait(), _WAIT_SECONDS)
+
+    # The first completion found no stored key and holds the start row
+    # lock. The retry with the same key must wait for it.
+    retry_task = asyncio.create_task(
+        publish_agent_announcement(_event("completion", claim_id), idempotency_key="c1")
+    )
+    done, _pending = await asyncio.wait({retry_task}, timeout=_HOLD_SECONDS)
+    assert not done, "the retry passed the open-claim check while the first copy held the lock"
+
+    hold.release.set()
+    first = await asyncio.wait_for(first_task, _WAIT_SECONDS)
+    retry = await asyncio.wait_for(retry_task, _WAIT_SECONDS)
+
+    assert first.replayed is False
+    assert retry.replayed is True
+    assert retry.event.event_id == first.event.event_id
+    # Exactly one of the two wrote the stream entry.
+    assert sum(result.cursor is not None for result in (first, retry)) == 1
+
+    assert await _phases(claim_id) == ["start", "completion"]
+    assert fake_stream.await_count == 2
+
+
+@_skip_no_docker
+async def test_overlapping_retries_deliver_a_stored_step_once(
+    pg_engine: None,  # noqa: F811 -- fixture
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retry that overlaps the first stream write waits and writes nothing."""
+    hold = _HoldStreamWrite(monkeypatch, "completion")
+    claim_id = uuid.uuid4()
+    await publish_agent_announcement(_event("start", claim_id))
+
+    first_task = asyncio.create_task(
+        publish_agent_announcement(_event("completion", claim_id), idempotency_key="c1")
+    )
+    await asyncio.wait_for(hold.started.wait(), _WAIT_SECONDS)
+
+    # The row is stored without a stream entry id, and the first stream
+    # write is in flight with the row lock held. The retry finds the row
+    # and must wait for the lock before it may deliver.
+    retry_task = asyncio.create_task(
+        publish_agent_announcement(_event("completion", claim_id), idempotency_key="c1")
+    )
+    done, _pending = await asyncio.wait({retry_task}, timeout=_HOLD_SECONDS)
+    assert not done, "the retry delivered while the first stream write held the row lock"
+
+    hold.release.set()
+    first = await asyncio.wait_for(first_task, _WAIT_SECONDS)
+    retry = await asyncio.wait_for(retry_task, _WAIT_SECONDS)
+
+    assert first.replayed is False
+    assert first.cursor == "1700000000000-2"
+    assert retry.replayed is True
+    assert retry.cursor is None
+    assert retry.event.event_id == first.event.event_id
+
+    assert await _phases(claim_id) == ["start", "completion"]
+    assert hold.xadd.await_count == 2

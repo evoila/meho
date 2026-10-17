@@ -248,10 +248,12 @@ MCP tools/call meho_broadcast_announce   (REST: POST /api/v1/broadcast/announce)
         'start'; missing ttl_minutes → 30
     → publish_agent_announcement(event, idempotency_key)  ← fail-loud
       → claim rules + INSERT agent_announcement in one transaction  ← durable, first
-        (update/completion lock the claim's start row until commit;
+        (update/completion lock the claim's start row until commit and
+         look the retry key up under that lock;
          known retry key → replay the stored step, no INSERT)
+      → SELECT agent_announcement ... FOR UPDATE  ← one delivery at a time per row
+        (stream_entry_id already set → nothing to deliver, cursor=null)
       → XADD meho:feed:{operator.tenant_id} {event: <json>} MAXLEN ~ 10000
-        (skipped when the stored step already has a stream_entry_id)
       → UPDATE agent_announcement SET stream_entry_id  ← delivery mark, fail-soft
       → returns AnnouncementPublishResult(event, cursor, replayed)
     → returns {event_id, cursor, claim_id, phase, owner_sub, admission,
@@ -500,6 +502,13 @@ principal may still declare its own `work_ref`.
   `cursor`. A plain replay of a delivered step returns `cursor=null`. A
   `start` sent without a key cannot be retried this way; its row stays
   as history and the agent's retry opens a new claim.
+- Overlapping requests never deliver a step twice. The stored row is
+  locked (`SELECT ... FOR UPDATE`) from the delivery check through the
+  stream write and the delivery mark, so a retry that overlaps the first
+  try waits, then sees the entry id and writes nothing. For `update` /
+  `completion` the retry key is looked up after the claim's start row is
+  locked, so a retry that waits behind the first copy of its step
+  replays it instead of getting `claim_completed`.
 - "Same step" means every field matches: `run_id`, `phase`, `activity`,
   `target`, `targets`, `scope`, `planned_op_class`, `ttl_minutes`,
   `work_ref`, and `claim_id` for `update` / `completion`. So a second
@@ -547,10 +556,12 @@ had no durable home until T2.
 `db/models.py::AgentAnnouncement`) keyed on the event's minted UUID
 (`event_id`), persisting the typed claim fields (T1 #2544) and lineage.
 The row is written **before** the `XADD` so a stream-side failure never
-costs the durable record; both legs are fail-loud. After a successful
-`XADD` one UPDATE sets `stream_entry_id` (the delivery mark, fail-soft:
-a failure there only logs a warning, because the announcement is already
-delivered). Columns: `id` (UUID
+costs the durable record; both legs are fail-loud. The `XADD` runs with
+the row locked (`SELECT ... FOR UPDATE`), so only one request delivers a
+stored step. After a successful `XADD` one UPDATE in the same transaction
+sets `stream_entry_id` (the delivery mark, fail-soft: a failure there
+only logs a warning, because the announcement is already delivered).
+Columns: `id` (UUID
 PK), `tenant_id` (FK), `principal_sub`, `activity`, `target`, `scope`,
 `targets` (JSONB), `phase`, `planned_op_class`, `ttl_minutes`,
 `work_ref`, `run_id`, `created_at` (the event's `ts`), plus the trusted

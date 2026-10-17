@@ -276,8 +276,11 @@ Pointer>"}`. The pointer rules follow RFC 6901: `""` is the whole
 document, each `/` starts one step, and in a step `~1` means `/` and `~0`
 means `~` (in that order, so `/a~1b~0c` reads the key `a/b~c`). An array
 index has no leading zero, and `-` never resolves. On a rows handle, the
-document is the set of top-level fields left out of the inline summary
-(see Overview). `path` cannot be combined with any relational field (a
+document is only the top-level scalar fields left out of the inline
+summary that the store kept with the rows (see Overview). Lists and
+objects beside the rows are not part of it, and when the store dropped
+the omitted scalars to make room for the rows, there is no document at
+all. `path` cannot be combined with any relational field (a
 `ValidationError` at spec construction). An array value pages with the
 call's `offset` / `limit` (items that are not objects come back as
 `{"value": item}`); any other value comes back whole in `value`, with

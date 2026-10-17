@@ -94,6 +94,9 @@ __all__ = [
 #: been set NULL by ``ON DELETE SET NULL``). ``tenant_id`` is omitted
 #: from the snapshot -- the history row's own ``tenant_id`` column
 #: carries it and duplicating it inside the JSONB just wastes bytes.
+#: ``source_scope`` (#3749) is included so the scope cut-over's moves
+#: (a row adopted into ``target:<id>`` or set aside as ``legacy:<id>``)
+#: show up in history and diff like any other change.
 _NODE_SNAPSHOT_COLUMNS: tuple[str, ...] = (
     "id",
     "kind",
@@ -104,6 +107,7 @@ _NODE_SNAPSHOT_COLUMNS: tuple[str, ...] = (
     "discovered_by",
     "first_seen",
     "last_seen",
+    "source_scope",
 )
 
 #: Columns projected into the snapshot for a :class:`GraphEdge`. Same

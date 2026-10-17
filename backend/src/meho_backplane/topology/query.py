@@ -84,6 +84,12 @@ than traversing the merged closure. ``find_path`` applies the same
 contract independently to each endpoint via ``from_kind`` /
 ``to_kind``.
 
+After the scope cut-over (#3749) one ``(kind, name)`` pair can exist
+in several source scopes (two clusters, each with a ``default``
+namespace). The resolver then raises :class:`AmbiguousNodeError` with
+the ``scopes`` instead of picking one, and every statement anchors on
+the resolved row id. ``legacy:`` rows are never anchors and never hops.
+
 Untracked-anchor handling (G0.18-T4 #1357)
 ------------------------------------------
 
@@ -138,7 +144,6 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.topology.resolvers import (
     AmbiguousNodeError,
     NodeNotFoundError,
-    _collect_distinct_kinds,
     resolve_node,
 )
 from meho_backplane.topology.schemas import (
@@ -237,6 +242,13 @@ def _row_to_node(row: Row[Any]) -> TopologyNode:
 # ``superseded_by`` key reads ``NULL`` from ``->>`` and passes the
 # filter, so the guard does not affect non-superseded edges.
 #
+# Source scope (#3749): the anchor is the exact row
+# :func:`resolve_node` picked (``n.id = :anchor_id``), because after the
+# scope cut-over a ``(kind, name)`` pair is no longer unique. The
+# recursive term never steps onto a ``legacy:`` row: the cut-over set
+# those aside because no target vouched for them, so they are not
+# evidence of a dependency.
+#
 # Chain provenance (#2538): each recursive row also projects the
 # predecessor node (``w.id AS parent_node_id``) and the edge that was
 # walked (``e.id AS via_edge_id``), so a closure result reconstructs
@@ -269,9 +281,8 @@ _TRAVERSAL_SQL_REVERSE = text(
             CAST(NULL AS uuid) AS parent_node_id,
             CAST(NULL AS uuid) AS via_edge_id
         FROM graph_node n
-        WHERE n.name = :name
+        WHERE n.id = :anchor_id
           AND n.tenant_id = :tenant_id
-          AND (CAST(:kind AS text) IS NULL OR n.kind = :kind)
         UNION ALL
         SELECT
             n.id,
@@ -290,6 +301,7 @@ _TRAVERSAL_SQL_REVERSE = text(
         WHERE e.tenant_id = :tenant_id
           AND n.tenant_id = :tenant_id
           AND w.depth < :depth
+          AND (n.source_scope IS NULL OR n.source_scope NOT LIKE 'legacy:%')
           AND (CAST(:kind_filter AS text) IS NULL OR e.kind = :kind_filter)
           AND e.properties->>'superseded_by' IS NULL
           AND (
@@ -333,9 +345,8 @@ _TRAVERSAL_SQL_FORWARD = text(
             CAST(NULL AS uuid) AS parent_node_id,
             CAST(NULL AS uuid) AS via_edge_id
         FROM graph_node n
-        WHERE n.name = :name
+        WHERE n.id = :anchor_id
           AND n.tenant_id = :tenant_id
-          AND (CAST(:kind AS text) IS NULL OR n.kind = :kind)
         UNION ALL
         SELECT
             n.id,
@@ -354,6 +365,7 @@ _TRAVERSAL_SQL_FORWARD = text(
         WHERE e.tenant_id = :tenant_id
           AND n.tenant_id = :tenant_id
           AND w.depth < :depth
+          AND (n.source_scope IS NULL OR n.source_scope NOT LIKE 'legacy:%')
           AND (CAST(:kind_filter AS text) IS NULL OR e.kind = :kind_filter)
           AND e.properties->>'superseded_by' IS NULL
           AND (
@@ -377,35 +389,27 @@ _TRAVERSAL_SQL_FORWARD = text(
 )
 
 
-async def _assert_anchor_unambiguous(
+async def _resolve_endpoint_id(
     session: Any,
+    tenant_id: UUID,
     *,
-    tenant_id: str,
     name: str,
     kind: str | None,
-) -> None:
-    """Raise :class:`AmbiguousNodeError` if *name* needs a ``kind``.
+) -> UUID | None:
+    """Resolve one :func:`find_path` endpoint to its row id, or ``None``.
 
-    No-op when ``kind`` is supplied (the ``(tenant_id, kind, name)``
-    unique index already makes the anchor unambiguous) or when the name
-    resolves to at most one kind in the tenant. Only when ``kind`` is
-    omitted *and* the name spans multiple kinds does the traversal
-    refuse — anchoring on all of them would merge unrelated closures.
-
-    Delegates the kind-collection query to
-    :func:`meho_backplane.topology.resolvers._collect_distinct_kinds`
-    so the ambiguity-probe SQL is single-sourced between the
-    traversal verbs and :func:`resolve_node`. The not-found
-    behavior intentionally stays unchanged here: a name that maps to
-    zero kinds is a silent no-op for traversal (G9.1 contract — an
-    empty result rather than an exception), only ``resolve_node``
-    surfaces :class:`NodeNotFoundError`.
+    Same rules as :func:`resolve_node` (shared with the closure verbs):
+    a name spanning several kinds without a ``kind`` pin, or one
+    ``(kind, name)`` owned by several source scopes, raises
+    :class:`AmbiguousNodeError`; ``legacy:`` rows never match. A missing
+    endpoint returns ``None`` -- the path verb keeps its G9.1
+    silent-on-miss contract (no route, not an exception).
     """
-    if kind is not None:
-        return
-    kinds = await _collect_distinct_kinds(session, tenant_id=tenant_id, name=name)
-    if len(kinds) > 1:
-        raise AmbiguousNodeError(name, kinds)
+    try:
+        node = await resolve_node(session, tenant_id, name, kind)
+    except NodeNotFoundError:
+        return None
+    return node.id
 
 
 async def _traverse(
@@ -453,20 +457,17 @@ async def _traverse(
         # :class:`AmbiguousNodeError` on multi-kind, so the previous
         # ``_assert_anchor_unambiguous`` probe is subsumed — one
         # session round-trip covers both checks. The kind pin
-        # (``kind=`` argument) flows through verbatim. ``resolve_node``
-        # also returns the canonical ``GraphNode.kind``; we pass it
-        # to the CTE so the traversal anchors on the exact row the
-        # resolver picked (avoiding a redundant ``CAST(:kind AS text)
-        # IS NULL OR n.kind = :kind`` re-evaluation that would in
-        # principle traverse a different row when, say, an
-        # alias-resolution layer lands on top of this code path).
+        # (``kind=`` argument) flows through verbatim. The CTE anchors
+        # on the resolved row's id, so the traversal walks from the
+        # exact row the resolver picked (#3749: after the scope
+        # cut-over a ``(kind, name)`` pair can exist in several
+        # scopes, and the resolver refuses rather than guessing).
         anchor = await resolve_node(session, operator.tenant_id, name_or_alias, kind)
         result = await session.execute(
             sql,
             {
-                "name": name_or_alias,
+                "anchor_id": str(anchor.id),
                 "tenant_id": tenant_id,
-                "kind": anchor.kind,
                 "depth": depth,
                 "kind_filter": kind_filter,
                 "include_stale": include_stale,
@@ -633,15 +634,20 @@ async def find_dependencies(
 # the non-recursive ``target`` CTE — without that arm the undirected
 # search would be asymmetric (a stale ``to`` endpoint unreachable
 # while the swapped argument order finds the path).
+#
+# Source scope (#3749): both endpoints arrive as the ids the resolver
+# picked (a ``(kind, name)`` pair is no longer unique after the scope
+# cut-over), and the walk never steps onto a ``legacy:`` row. Without
+# that guard an old merged ``default`` namespace that both clusters'
+# edges still touch would join the two clusters into one path.
 _PATH_SQL = text(
     """
     WITH RECURSIVE
     target AS (
         SELECT id
         FROM graph_node
-        WHERE name = :to_name
+        WHERE id = :to_id
           AND tenant_id = :tenant_id
-          AND (CAST(:to_kind AS text) IS NULL OR kind = :to_kind)
     ),
     bi_edge AS (
         SELECT from_node_id AS src, to_node_id AS dst, kind, id
@@ -664,9 +670,8 @@ _PATH_SQL = text(
             CAST(ARRAY[] AS text[])                AS edge_kinds,
             CAST(ARRAY[] AS uuid[])                AS edge_ids
         FROM graph_node n
-        WHERE n.name = :from_name
+        WHERE n.id = :from_id
           AND n.tenant_id = :tenant_id
-          AND (CAST(:from_kind AS text) IS NULL OR n.kind = :from_kind)
         UNION ALL
         SELECT
             be.dst,
@@ -679,6 +684,7 @@ _PATH_SQL = text(
         JOIN graph_node dn ON dn.id = be.dst
         WHERE w.hops < :max_hops
           AND dn.tenant_id = :tenant_id
+          AND (dn.source_scope IS NULL OR dn.source_scope NOT LIKE 'legacy:%')
           AND (
               CAST(:include_stale AS boolean)
               OR dn.last_seen IS NOT NULL
@@ -688,12 +694,8 @@ _PATH_SQL = text(
     ) CYCLE node_id SET is_cycle USING visited
     SELECT w.hops, w.node_ids, w.edge_kinds, w.edge_ids
     FROM walk w
-    JOIN graph_node tn
-      ON tn.id = w.node_id
-     AND tn.name = :to_name
-     AND tn.tenant_id = :tenant_id
-     AND (CAST(:to_kind AS text) IS NULL OR tn.kind = :to_kind)
-    WHERE NOT w.is_cycle
+    WHERE w.node_id = :to_id
+      AND NOT w.is_cycle
     ORDER BY w.hops
     LIMIT 1
     """
@@ -798,18 +800,18 @@ async def find_path(
 
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        await _assert_anchor_unambiguous(
-            session, tenant_id=tenant_id, name=from_name, kind=from_kind
+        from_id = await _resolve_endpoint_id(
+            session, operator.tenant_id, name=from_name, kind=from_kind
         )
-        await _assert_anchor_unambiguous(session, tenant_id=tenant_id, name=to_name, kind=to_kind)
+        to_id = await _resolve_endpoint_id(session, operator.tenant_id, name=to_name, kind=to_kind)
+        if from_id is None or to_id is None:
+            return None
         path_result = await session.execute(
             _PATH_SQL,
             {
                 "tenant_id": tenant_id,
-                "from_name": from_name,
-                "to_name": to_name,
-                "from_kind": from_kind,
-                "to_kind": to_kind,
+                "from_id": str(from_id),
+                "to_id": str(to_id),
                 "max_hops": max_hops,
                 "include_stale": include_stale,
             },

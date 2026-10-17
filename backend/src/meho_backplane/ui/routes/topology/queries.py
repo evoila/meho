@@ -86,6 +86,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from meho_backplane.db.models import GraphEdge, GraphNode
+from meho_backplane.topology.identity_mode import NOT_LEGACY_SCOPE, not_legacy_scope
 
 __all__ = [
     "DEFAULT_OVERLAY_DEPTH",
@@ -226,6 +227,10 @@ async def resolve_anchor(
       :class:`NodeNotFoundError`; 1 row returns it; >1 rows raises
       :class:`AmbiguousNodeError` with the candidate kinds.
 
+    ``legacy:`` rows (set aside by the #3749 scope cut-over) are never
+    candidates, and one ``(kind, name)`` in several source scopes raises
+    :class:`AmbiguousNodeError`, as in the substrate resolver.
+
     Soft-deleted nodes (``last_seen IS NULL``) are included -- the
     overlay mirrors the substrate traversal verbs, which do not filter
     ``last_seen`` (a soft-deleted node stays reachable, last-refresh-
@@ -238,6 +243,7 @@ async def resolve_anchor(
     stmt = select(GraphNode).where(
         GraphNode.tenant_id == tenant_id,
         GraphNode.name == name,
+        NOT_LEGACY_SCOPE,
     )
     if kind is not None:
         stmt = stmt.where(GraphNode.kind == kind)
@@ -292,6 +298,9 @@ async def _bfs_neighbours(
             GraphEdge.tenant_id == tenant_id,
             from_alias.tenant_id == tenant_id,
             to_alias.tenant_id == tenant_id,
+            # Mirror the substrate's legacy-row exclusion (#3749).
+            not_legacy_scope(from_alias.source_scope),
+            not_legacy_scope(to_alias.source_scope),
             # Mirror the substrate's superseded-edge exclusion -- the
             # PG raw-SQL ``e.properties->>'superseded_by' IS NULL``
             # idiom translated to dialect-portable ORM. PG returns SQL

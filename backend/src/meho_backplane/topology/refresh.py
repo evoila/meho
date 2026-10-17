@@ -26,10 +26,14 @@ is the single write path into the topology graph:
 
    Nodes are keyed by ``(kind, name)`` (the ``graph_node`` natural key
    within a tenant); edges by ``(from_kind, from_name, to_kind,
-   to_name, kind)``. Edge endpoints are mapped to ``graph_node.id`` via
-   the node key map built during the node pass, so an edge whose
-   endpoint the snapshot does not also carry as a node is skipped (a
-   well-formed connector always emits both).
+   to_name, kind)``. After the scope cut-over (#3749, ``scoped`` mode in
+   :mod:`meho_backplane.topology.identity_mode`) the reconcile only
+   loads rows in the scope each hint maps to, so ``(kind, name)`` stays
+   unique among the loaded rows; see :func:`_load_reconcile_candidate_nodes`.
+   Edge endpoints are mapped to ``graph_node.id`` via the node key map
+   built during the node pass, so an edge whose endpoint the snapshot
+   does not also carry as a node is skipped (a well-formed connector
+   always emits both).
 
 The entire reconcile runs in **one transaction**: any failure rolls the
 whole thing back, so a mid-reconcile crash never leaves the graph in a
@@ -52,7 +56,7 @@ from typing import Any
 
 import structlog
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import false, or_, select, tuple_
+from sqlalchemy import and_, false, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
@@ -63,6 +67,7 @@ from meho_backplane.connectors.resolver import resolve_connector
 from meho_backplane.connectors.schemas import EdgeHint, NodeHint, TopologyHints
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
+    SOURCE_SCOPE_GLOBAL,
     AuditEventClass,
     AuditLog,
     GraphEdge,
@@ -79,6 +84,7 @@ from meho_backplane.topology.history import (
     record_edge_change,
     record_node_change,
 )
+from meho_backplane.topology.identity_mode import read_identity_mode, scope_for_discovered_node
 
 __all__ = ["RefreshResult", "refresh_target_topology"]
 
@@ -249,12 +255,27 @@ def _merge_edge_properties(
     return merged
 
 
+def _owned_by_target(row: GraphNode, target_id: uuid.UUID, *, scoped: bool) -> bool:
+    """Whether this target's refresh decides the row's soft-delete.
+
+    Legacy mode: the row's ``target_id`` names this target. Scoped mode
+    (#3749): the row is in this target's scope, or it is this target's
+    own ``global`` node (``kind='target'``) that this target last saw.
+    """
+    if not scoped:
+        return row.target_id == target_id
+    return row.source_scope == f"target:{target_id}" or (
+        row.source_scope == SOURCE_SCOPE_GLOBAL and row.target_id == target_id
+    )
+
+
 async def _load_reconcile_candidate_nodes(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
     target_id: uuid.UUID,
     nodes: tuple[NodeHint, ...],
+    scoped: bool = False,
 ) -> list[GraphNode]:
     """Load every node a node-reconcile pass might touch, by natural key.
 
@@ -273,7 +294,18 @@ async def _load_reconcile_candidate_nodes(
     * rows already owned by *this* target — needed for the soft-delete
       pass, which must stay scoped to this target so a refresh never
       soft-deletes another target's node or a manual annotation.
+
+    In ``scoped`` mode (#3749) both sets are narrowed to scopes: a hint
+    only matches the row with the same ``(source_scope, kind, name)``
+    (scope from :func:`scope_for_discovered_node`), and "owned" means in
+    this target's scope. Rows of other targets, ``global`` operator
+    seeds and ``legacy:`` rows are never loaded, so they are never
+    adopted, changed or soft-deleted.
     """
+    if scoped:
+        return await _load_scoped_candidate_nodes(
+            session, tenant_id=tenant_id, target_id=target_id, nodes=nodes
+        )
     discovered_pairs = {(n.kind, n.name) for n in nodes}
     snapshot_predicate = (
         tuple_(GraphNode.kind, GraphNode.name).in_(sorted(discovered_pairs))
@@ -297,6 +329,44 @@ async def _load_reconcile_candidate_nodes(
     )
 
 
+async def _load_scoped_candidate_nodes(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    target_id: uuid.UUID,
+    nodes: tuple[NodeHint, ...],
+) -> list[GraphNode]:
+    """Scoped-mode half of :func:`_load_reconcile_candidate_nodes`."""
+    triples = sorted(
+        {(scope_for_discovered_node(target_id, n.kind), n.kind, n.name) for n in nodes}
+    )
+    snapshot_predicate = (
+        tuple_(GraphNode.source_scope, GraphNode.kind, GraphNode.name).in_(triples)
+        if triples
+        else false()
+    )
+    owned_predicate = or_(
+        GraphNode.source_scope == f"target:{target_id}",
+        and_(
+            GraphNode.source_scope == SOURCE_SCOPE_GLOBAL,
+            GraphNode.target_id == target_id,
+            GraphNode.kind == "target",
+        ),
+    )
+    return list(
+        (
+            await session.execute(
+                select(GraphNode).where(
+                    GraphNode.tenant_id == tenant_id,
+                    or_(snapshot_predicate, owned_predicate),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
 def _insert_discovered_node(
     session: AsyncSession,
     *,
@@ -306,11 +376,14 @@ def _insert_discovered_node(
     discovered_by: str,
     now: datetime,
     audit_id: uuid.UUID,
+    scoped: bool = False,
 ) -> uuid.UUID:
     """Insert one fresh :class:`GraphNode` + emit its ``created`` history row.
 
     Returns the new node's id so the orchestrator can populate both
-    the live and all key maps.
+    the live and all key maps. In ``scoped`` mode the row gets its
+    ``source_scope`` (provenance ``refresh``); in legacy mode it stays
+    ``NULL`` as before the cut-over.
     """
     new_id = uuid.uuid4()
     new_node = GraphNode(
@@ -324,6 +397,8 @@ def _insert_discovered_node(
         discovered_by=discovered_by,
         first_seen=now,
         last_seen=now,
+        source_scope=scope_for_discovered_node(target_id, hint.kind) if scoped else None,
+        source_scope_provenance="refresh" if scoped else None,
     )
     session.add(new_node)
     # Same-transaction history row: a ``created`` change with
@@ -477,6 +552,7 @@ def _soft_delete_missing_nodes(
     target_id: uuid.UUID,
     now: datetime,
     audit_id: uuid.UUID,
+    scoped: bool = False,
 ) -> int:
     """Soft-delete this target's auto nodes absent from the snapshot.
 
@@ -503,7 +579,7 @@ def _soft_delete_missing_nodes(
             continue
         if row.source == "curated":
             continue
-        if row.target_id != target_id:
+        if not _owned_by_target(row, target_id, scoped=scoped):
             continue
         if row.last_seen is None:
             continue
@@ -527,6 +603,7 @@ async def _reconcile_nodes(
     nodes: tuple[NodeHint, ...],
     now: datetime,
     audit_id: uuid.UUID,
+    scoped: bool = False,
 ) -> tuple[
     int,
     int,
@@ -548,14 +625,11 @@ async def _reconcile_nodes(
       soft-delete it when it is not).
     """
     existing_rows = await _load_reconcile_candidate_nodes(
-        session, tenant_id=tenant_id, target_id=target_id, nodes=nodes
+        session, tenant_id=tenant_id, target_id=target_id, nodes=nodes, scoped=scoped
     )
     existing_by_key = {_node_key(r.kind, r.name): r for r in existing_rows}
 
-    discovered_by_key: dict[tuple[str, str], NodeHint] = {
-        _node_key(n.kind, n.name): n for n in nodes
-    }
-
+    discovered_by_key = {_node_key(n.kind, n.name): n for n in nodes}
     added = updated = 0
     live_key_to_id: dict[tuple[str, str], uuid.UUID] = {}
     all_key_to_id: dict[tuple[str, str], uuid.UUID] = {
@@ -573,6 +647,7 @@ async def _reconcile_nodes(
                 discovered_by=discovered_by,
                 now=now,
                 audit_id=audit_id,
+                scoped=scoped,
             )
             live_key_to_id[key] = new_id
             all_key_to_id[key] = new_id
@@ -613,6 +688,7 @@ async def _reconcile_nodes(
         target_id=target_id,
         now=now,
         audit_id=audit_id,
+        scoped=scoped,
     )
 
     return added, updated, removed, live_key_to_id, all_key_to_id
@@ -1038,6 +1114,9 @@ async def _apply_reconcile(
     tenant_id = operator.tenant_id
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session, session.begin():
+        # Shared lock on the identity-mode row (#3749): the scope
+        # cut-over cannot switch modes while this reconcile runs.
+        scoped = await read_identity_mode(session, lock=True) == "scoped"
         now = datetime.now(UTC)
         (
             added_nodes,
@@ -1053,6 +1132,7 @@ async def _apply_reconcile(
             nodes=hints.nodes,
             now=now,
             audit_id=audit_id,
+            scoped=scoped,
         )
         added_edges, updated_edges, removed_edges = await _reconcile_edges(
             session,

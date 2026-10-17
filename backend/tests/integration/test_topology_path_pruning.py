@@ -37,9 +37,10 @@ from __future__ import annotations
 
 import time
 import uuid
+from typing import Any
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
@@ -167,19 +168,31 @@ def _walk_count_sql(*, pruned: bool) -> str:
     return head + "SELECT count(*) AS walk_rows FROM walk"
 
 
-def _params(
+async def _params(
+    session: Any,
     from_name: str,
     to_name: str,
     *,
     max_hops: int,
 ) -> dict[str, object]:
-    """Bind-parameter dict matching ``_PATH_SQL``'s named binds."""
+    """Bind-parameter dict matching ``_PATH_SQL``'s named binds.
+
+    ``_PATH_SQL`` anchors on row ids (#3749), so look the two names up
+    first, the way :func:`find_path` does through ``resolve_node``.
+    """
+    ids = {
+        row.name: row.id
+        for row in await session.execute(
+            select(GraphNode.name, GraphNode.id).where(
+                GraphNode.tenant_id == TENANT_A_ID,
+                GraphNode.name.in_([from_name, to_name]),
+            )
+        )
+    }
     return {
         "tenant_id": str(TENANT_A_ID),
-        "from_name": from_name,
-        "to_name": to_name,
-        "from_kind": None,
-        "to_kind": None,
+        "from_id": str(ids[from_name]),
+        "to_id": str(ids[to_name]),
         "max_hops": max_hops,
         # #2538 staleness opt-out — the harness always walks the
         # default last-refresh-wins view.
@@ -193,7 +206,7 @@ async def _walk_rows(from_name: str, to_name: str, *, max_hops: int, pruned: boo
     async with sm() as session:
         result = await session.execute(
             text(_walk_count_sql(pruned=pruned)),
-            _params(from_name, to_name, max_hops=max_hops),
+            await _params(session, from_name, to_name, max_hops=max_hops),
         )
         return int(result.scalar_one())
 
@@ -204,7 +217,7 @@ async def _unpruned_hops(from_name: str, to_name: str, *, max_hops: int) -> int 
     async with sm() as session:
         result = await session.execute(
             text(_path_sql(pruned=False)),
-            _params(from_name, to_name, max_hops=max_hops),
+            await _params(session, from_name, to_name, max_hops=max_hops),
         )
         row = result.first()
         return None if row is None else int(row._mapping["hops"])

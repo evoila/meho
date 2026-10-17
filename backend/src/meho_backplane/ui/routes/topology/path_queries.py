@@ -49,6 +49,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from meho_backplane.db.models import GraphEdge, GraphNode
+from meho_backplane.topology.identity_mode import not_legacy_scope
 from meho_backplane.ui.routes.topology.queries import (
     DEFAULT_PATH_MAX_HOPS,
     PathSubgraphResult,
@@ -92,6 +93,9 @@ async def _bidirectional_neighbours(
             GraphEdge.tenant_id == tenant_id,
             from_alias.tenant_id == tenant_id,
             to_alias.tenant_id == tenant_id,
+            # Substrate parity: never walk through a legacy row (#3749).
+            not_legacy_scope(from_alias.source_scope),
+            not_legacy_scope(to_alias.source_scope),
             # Substrate parity: drop edges curated as superseded so the
             # UI path overlay's reachability matches what the CLI/REST
             # find_path verb returns. The ``or_(.is_(None), ==

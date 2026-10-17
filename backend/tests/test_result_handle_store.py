@@ -905,7 +905,6 @@ async def test_full_result_cache_does_not_block_broadcast(
     """
     from datetime import UTC, datetime
     from types import SimpleNamespace
-    from unittest.mock import AsyncMock
 
     from meho_backplane.broadcast import AgentAnnouncementEvent
     from meho_backplane.broadcast import publisher as publisher_module
@@ -942,9 +941,6 @@ async def test_full_result_cache_does_not_block_broadcast(
         lambda: SimpleNamespace(broadcast_announce_rate_per_minute=10),
     )
     monkeypatch.setattr(publisher_module, "get_broadcast_client", lambda: shared)
-    monkeypatch.setattr(
-        publisher_module, "_persist_agent_announcement", AsyncMock(return_value=None)
-    )
 
     await enforce_announce_rate_limit(tenant, "op-a")
     result = await publish_agent_announcement(

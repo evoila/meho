@@ -48,12 +48,21 @@ batch atomic. When ``None``, the helper opens its own
 :func:`~meho_backplane.db.engine.get_sessionmaker` session, commits,
 and closes -- the convenient one-off-call shape.
 
+Prepared batches
+----------------
+
+:func:`prepare_index_batch` is the second write path, for a caller
+that writes several rows as one unit (the kb passage index, #3761).
+It computes every embedding first, with no transaction open, and
+returns a :class:`PreparedIndexBatch`. The caller then opens its short
+transaction, calls :meth:`PreparedIndexBatch.apply` with its own
+session, and commits. The slow model step never holds a row lock, and
+when it fails nothing has been written. A batch is used once: a second
+:meth:`~PreparedIndexBatch.apply` raises, so a retry prepares again.
+
 Out of scope (deferred per Initiative body)
 -------------------------------------------
 
-* Bulk ``index_documents([...])`` -- callers loop over
-  ``index_document`` in v0.2. The batch shape lands in v0.2.next if
-  G4's kb refresh shows meaningful overhead from the per-call session.
 * Background re-indexing on model change -- operators run a one-off
   re-index script when swapping models.
 * Token estimation via tiktoken -- v0.2 uses the rough heuristic
@@ -66,6 +75,8 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -75,9 +86,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Document
-from meho_backplane.retrieval.embedding import get_embedding_service
+from meho_backplane.retrieval.embedding import PassageTokenizer, get_embedding_service
 
-__all__ = ["compute_body_hash", "estimate_tokens", "index_document"]
+__all__ = [
+    "IndexItem",
+    "PreparedIndexBatch",
+    "compute_body_hash",
+    "estimate_tokens",
+    "get_passage_tokenizer",
+    "index_document",
+    "prepare_index_batch",
+]
 
 
 def compute_body_hash(body: str) -> str:
@@ -272,53 +291,182 @@ async def _index_in_session(
     # Either no existing row OR body changed -- both paths embed.
     embedding = await get_embedding_service().encode_one(body)
 
-    if existing is not None:
-        # Re-index path: row exists but body changed. Update every
-        # body-derived field plus the timestamp. ``created_at`` stays
-        # the original first-index time; ``id`` of course stays put.
-        existing.body = body
-        existing.body_hash = new_hash
-        existing.kind = kind
-        existing.embedding = embedding
-        existing.tokens = estimate_tokens(body)
-        existing.doc_metadata = metadata if metadata is not None else {}
-        existing.updated_at = now
-        await session.flush()
-        if commit:
-            await session.commit()
-        log.info(
-            "document_indexed",
-            action="reindex",
-            tenant_id=str(tenant_id),
+    # Re-index path: the row exists but the body changed; ``id`` and
+    # ``created_at`` stay the original first-index values. First-index
+    # path: a brand-new row. Both then get every body-derived field.
+    action = "reindex" if existing is not None else "insert"
+    doc = existing
+    if doc is None:
+        doc = Document(
+            id=uuid.uuid4(),
+            tenant_id=tenant_id,
             source=source,
             source_id=source_id,
+            created_at=now,
         )
-        return existing
-
-    # First-index path: brand-new row.
-    doc = Document(
-        id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        source=source,
-        source_id=source_id,
+        session.add(doc)
+    _assign(
+        doc,
         kind=kind,
         body=body,
-        body_hash=new_hash,
-        tokens=estimate_tokens(body),
         embedding=embedding,
-        doc_metadata=metadata if metadata is not None else {},
-        created_at=now,
-        updated_at=now,
+        tokens=estimate_tokens(body),
+        metadata=metadata if metadata is not None else {},
+        now=now,
     )
-    session.add(doc)
     await session.flush()
     if commit:
         await session.commit()
     log.info(
         "document_indexed",
-        action="insert",
+        action=action,
         tenant_id=str(tenant_id),
         source=source,
         source_id=source_id,
     )
     return doc
+
+
+def _assign(
+    doc: Document,
+    *,
+    kind: str,
+    body: str,
+    embedding: list[float],
+    tokens: int,
+    metadata: dict[str, Any],
+    now: datetime,
+) -> None:
+    """Write every body-derived field of *doc* (the re-index update)."""
+    doc.body = body
+    doc.body_hash = compute_body_hash(body)
+    doc.kind = kind
+    doc.embedding = embedding
+    doc.tokens = tokens
+    doc.doc_metadata = metadata
+    doc.updated_at = now
+
+
+@dataclass(frozen=True)
+class IndexItem:
+    """One row for :func:`prepare_index_batch`.
+
+    ``embed_text`` is the text the embedding is made from; ``None``
+    means ``body``. ``tokens`` is the stored token count; ``None``
+    means :func:`estimate_tokens` of ``body``. ``document_id`` is the
+    id a new row gets; ``None`` means a fresh UUID. An existing row
+    with the same ``(tenant_id, source, source_id)`` keeps its id.
+    """
+
+    source: str
+    source_id: str
+    kind: str
+    body: str
+    metadata: dict[str, Any]
+    embed_text: str | None = None
+    tokens: int | None = None
+    document_id: uuid.UUID | None = None
+
+
+class PreparedIndexBatch:
+    """Rows whose embeddings are already computed, ready to write once.
+
+    Build it with :func:`prepare_index_batch`. :meth:`apply` writes the
+    rows into a session the caller owns and does not commit.
+    """
+
+    def __init__(self, tenant_id: uuid.UUID, rows: list[tuple[IndexItem, list[float]]]) -> None:
+        self._tenant_id = tenant_id
+        self._rows = rows
+        self._applied = False
+
+    def __len__(self) -> int:
+        return len(self._rows)
+
+    async def apply(self, session: AsyncSession) -> list[Document]:
+        """Insert or update every row in *session*; return them in batch order.
+
+        Does not commit: the caller's transaction decides. Raises
+        :class:`RuntimeError` when the batch was already applied, even
+        if that first try failed -- prepare a new batch to retry.
+        """
+        if self._applied:
+            raise RuntimeError("prepared index batch was already applied; prepare a new one")
+        self._applied = True
+        now = datetime.now(UTC)
+        existing = await self._existing_rows(session)
+        docs: list[Document] = []
+        for item, embedding in self._rows:
+            tokens = item.tokens if item.tokens is not None else estimate_tokens(item.body)
+            doc = existing.get((item.source, item.source_id))
+            if doc is None:
+                doc = Document(
+                    id=item.document_id or uuid.uuid4(),
+                    tenant_id=self._tenant_id,
+                    source=item.source,
+                    source_id=item.source_id,
+                    created_at=now,
+                )
+                session.add(doc)
+            _assign(
+                doc,
+                kind=item.kind,
+                body=item.body,
+                embedding=embedding,
+                tokens=tokens,
+                metadata=item.metadata,
+                now=now,
+            )
+            docs.append(doc)
+        await session.flush()
+        structlog.get_logger().info(
+            "document_batch_indexed",
+            tenant_id=str(self._tenant_id),
+            rows=len(docs),
+        )
+        return docs
+
+    async def _existing_rows(self, session: AsyncSession) -> dict[tuple[str, str], Document]:
+        """Load the rows this batch overwrites, one query per source."""
+        ids_by_source: dict[str, list[str]] = {}
+        for item, _embedding in self._rows:
+            ids_by_source.setdefault(item.source, []).append(item.source_id)
+        found: dict[tuple[str, str], Document] = {}
+        for source, source_ids in ids_by_source.items():
+            result = await session.execute(
+                select(Document).where(
+                    Document.tenant_id == self._tenant_id,
+                    Document.source == source,
+                    Document.source_id.in_(source_ids),
+                )
+            )
+            for doc in result.scalars():
+                found[(doc.source, doc.source_id)] = doc
+        return found
+
+
+async def get_passage_tokenizer() -> PassageTokenizer:
+    """Return the token counter of the model :func:`prepare_index_batch` embeds with.
+
+    A caller that cuts text to fit the model window counts with this,
+    so the count and the embeddings always come from the same model.
+    """
+    return await get_embedding_service().passage_tokenizer()
+
+
+async def prepare_index_batch(
+    tenant_id: uuid.UUID,
+    items: Sequence[IndexItem],
+) -> PreparedIndexBatch:
+    """Compute the embeddings for *items* in one model call; write nothing.
+
+    Call it before opening the transaction that applies the batch. When
+    the model call fails, the error propagates and no row was touched.
+    """
+    texts = [item.body if item.embed_text is None else item.embed_text for item in items]
+    vectors = await get_embedding_service().encode(texts) if texts else []
+    if len(vectors) != len(items):
+        raise RuntimeError(
+            f"embedding model returned {len(vectors)} vectors for {len(items)} texts"
+        )
+    return PreparedIndexBatch(tenant_id, list(zip(items, vectors, strict=True)))

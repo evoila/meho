@@ -35,6 +35,7 @@ from meho_backplane.db.models import Document, KbRevision
 from meho_backplane.kb.revisions import CHUNKER_VERSION
 from meho_backplane.kb.service import KbService
 from meho_backplane.settings import get_settings
+from tests._kb_embedding_stub import fake_embedding_service
 
 
 @pytest.fixture(autouse=True)
@@ -50,8 +51,7 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> I
 
 @pytest.fixture(autouse=True)
 def _stub_embedding() -> Iterator[None]:
-    fake = AsyncMock()
-    fake.encode_one.return_value = [0.1] * 384
+    fake = fake_embedding_service()
     with patch("meho_backplane.retrieval.indexer.get_embedding_service", return_value=fake):
         yield
 

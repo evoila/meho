@@ -961,6 +961,14 @@ def _soa_serial_from_text(zonefile_text: str, zone_name: str) -> int:
 _VERIFY_POLL_ATTEMPTS: int = 10
 _VERIFY_POLL_INTERVAL_SECONDS: str = "0.3"
 
+#: ``dig`` flags for the polled checks. ``+short`` prints one rdata per
+#: line. ``+timeout=1 +tries=1`` bounds one call to about a second
+#: (dig's defaults are 5 s and 3 tries), so even a resolver that stops
+#: answering cannot push the whole poll past the 90 s budget the
+#: atomic-apply SSH call has -- the verify step must fail and roll back,
+#: not get cut off.
+_DIG_POLL_FLAGS: str = "+short +timeout=1 +tries=1"
+
 
 def _poll_verify(*, observe: str, success_test: str, diagnostic: str) -> str:
     """Render a bounded poll loop around a verify predicate.
@@ -1033,7 +1041,9 @@ def _dig_add_verify(fqdn: str, ip: str, record_type: str) -> str:
     quoted_fqdn = shlex.quote(fqdn)
     quoted_ip = shlex.quote(ip)
     return _poll_verify(
-        observe=f"ANSWER=$(dig @localhost {quoted_fqdn} {record_type} +short 2>&1) || true;",
+        observe=(
+            f"ANSWER=$(dig @localhost {quoted_fqdn} {record_type} {_DIG_POLL_FLAGS} 2>&1) || true;"
+        ),
         success_test=f'printf "%s\\n" "$ANSWER" | grep -qxF {quoted_ip}',
         diagnostic=(
             f'printf "expected {record_type} %s in the answer for %s after reload; '
@@ -1054,8 +1064,8 @@ def _dig_remove_verify(fqdn: str) -> str:
     quoted_fqdn = shlex.quote(fqdn)
     return _poll_verify(
         observe=(
-            f"A=$(dig @localhost {quoted_fqdn} A +short 2>&1) || true; "
-            f"AAAA=$(dig @localhost {quoted_fqdn} AAAA +short 2>&1) || true;"
+            f"A=$(dig @localhost {quoted_fqdn} A {_DIG_POLL_FLAGS} 2>&1) || true; "
+            f"AAAA=$(dig @localhost {quoted_fqdn} AAAA {_DIG_POLL_FLAGS} 2>&1) || true;"
         ),
         success_test='[ -z "$A" ] && [ -z "$AAAA" ]',
         diagnostic=(
@@ -1084,7 +1094,9 @@ def _dig_value_absent_verify(fqdn: str, record_type: str, rdata: str) -> str:
     quoted_fqdn = shlex.quote(fqdn)
     quoted_rdata = shlex.quote(rdata)
     return _poll_verify(
-        observe=f"ANSWER=$(dig @localhost {quoted_fqdn} {record_type} +short 2>&1) || true;",
+        observe=(
+            f"ANSWER=$(dig @localhost {quoted_fqdn} {record_type} {_DIG_POLL_FLAGS} 2>&1) || true;"
+        ),
         success_test=f'! printf "%s\\n" "$ANSWER" | grep -qxF {quoted_rdata}',
         diagnostic=(
             f'printf "{record_type} value %s still resolves for %s after delete; '

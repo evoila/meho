@@ -479,6 +479,20 @@ class TestViewAwareVerifyBuilders:
         assert "sleep 0.3; done; " in cmd
         assert cmd.endswith("exit 1")
 
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            _dig_add_verify("api.evba.lab", "10.5.50.99", "A"),
+            _dig_remove_verify("api.evba.lab"),
+            _dig_value_absent_verify("api.evba.lab", "A", "10.5.50.99"),
+        ],
+        ids=["add", "remove", "value-absent"],
+    )
+    def test_dig_polls_bound_each_call(self, cmd: str) -> None:
+        # One dig call must stay well under the 90 s atomic-apply budget
+        # even when named stops answering, so the poll ends in rollback.
+        assert cmd.count("dig @localhost") == cmd.count("+short +timeout=1 +tries=1")
+
 
 # A fake ``dig`` on PATH that replays canned answers one call at a time.
 # ``<empty>`` stands for an empty answer (what ``+short`` prints for a

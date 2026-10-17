@@ -409,7 +409,9 @@ commit-path `rndc reload` is asynchronous -- the ISC rndc manual says
 `named` can still serve the old zone when the first `dig` runs. A
 single check then rolled back a correct write with exit code 12. Every
 predicate now retries up to `_VERIFY_POLL_ATTEMPTS` (10) times,
-`_VERIFY_POLL_INTERVAL_SECONDS` (0.3 s) apart, about 3 s in total. A
+`_VERIFY_POLL_INTERVAL_SECONDS` (0.3 s) apart, about 3 s in total. Each
+`dig` call is bounded with `+timeout=1 +tries=1` so a resolver that stops
+answering cannot push the poll past the 90 s SSH budget of the apply. A
 record that never appears still fails, rolls back, and exits 12.
 
 All predicates **echo their last observed state on failure** so the

@@ -951,6 +951,41 @@ def _soa_serial_from_text(zonefile_text: str, zone_name: str) -> int:
     return int(zone.find_rdataset(zone_origin, dns.rdatatype.SOA)[0].serial)
 
 
+#: Bounded poll every verify predicate runs after ``rndc reload``. The
+#: commit path uses the whole-server ``rndc reload``, which the ISC rndc
+#: manual documents as asynchronous: it returns before named has finished
+#: loading the zone from disk. A single ``dig`` straight after the reload
+#: can therefore still see the old zone and fail a correct write (#4205).
+#: 10 x 0.3 s absorbs a slow reload without letting a record that never
+#: appears hang the apply for long.
+_VERIFY_POLL_ATTEMPTS: int = 10
+_VERIFY_POLL_INTERVAL_SECONDS: str = "0.3"
+
+
+def _poll_verify(*, observe: str, success_test: str, diagnostic: str) -> str:
+    """Render a bounded poll loop around a verify predicate.
+
+    ``observe`` captures the resolver's current answer into shell
+    variables (it must tolerate a failing command via ``|| true``);
+    ``success_test`` is the ``if`` condition that ends the loop with
+    ``exit 0``; ``diagnostic`` prints the last observation once the
+    attempts are used up, right before ``exit 1``. The ``if ... then
+    exit 0; fi`` shape keeps the predicate safe under the pipeline's
+    ``set -e``: a miss falls through to the next attempt and finally to
+    the diagnostic, never to an early abort.
+    """
+    attempts = " ".join(str(n) for n in range(1, _VERIFY_POLL_ATTEMPTS + 1))
+    return (
+        f"for _ in {attempts}; do "
+        f"{observe} "
+        f"if {success_test}; then exit 0; fi; "
+        f"sleep {_VERIFY_POLL_INTERVAL_SECONDS}; "
+        "done; "
+        f"{diagnostic} "
+        "exit 1"
+    )
+
+
 def _zonestatus_serial_verify(zone_name: str, view: str, serial: int) -> str:
     """View-precise verify predicate for a write into a named ``view``.
 
@@ -961,11 +996,11 @@ def _zonestatus_serial_verify(zone_name: str, view: str, serial: int) -> str:
     the view explicitly and reports the serial it currently serves, so
     asserting it equals the staged serial confirms named loaded our
     revision into *that* view (``named-checkzone`` in the validate step
-    already proved the record is in the file). A bounded poll absorbs
-    the small window between ``rndc reload`` returning and the zone
-    being live. On failure the last ``zonestatus`` output is echoed so
-    the surfaced ``AtomicApplyError`` detail is diagnosable -- the
-    silent ``grep -q`` predicate is why #2897 saw an empty detail.
+    already proved the record is in the file). The bounded poll absorbs
+    the window between ``rndc reload`` returning and the zone being
+    live. On failure the last ``zonestatus`` output is echoed so the
+    surfaced ``AtomicApplyError`` detail is diagnosable -- the silent
+    ``grep -q`` predicate is why #2897 saw an empty detail.
     """
     quoted_zone = shlex.quote(zone_name)
     quoted_view = shlex.quote(view)
@@ -973,21 +1008,14 @@ def _zonestatus_serial_verify(zone_name: str, view: str, serial: int) -> str:
     # Anchored, whitespace-tolerant so ``serial: <N>`` matches whatever
     # indentation the rndc build emits and never a ``signed serial:`` line.
     serial_re = f"^[[:space:]]*serial: {serial}[[:space:]]*$"
-    # ``if ... then exit 0; fi`` rather than ``... && exit 0`` so the
-    # predicate is unambiguously safe under the pipeline's ``set -e``:
-    # a grep miss must fall through to the next poll and, after the
-    # loop, to the diagnostic -- never abort the script early.
-    return (
-        "STATUS=''; "
-        "for _ in 1 2 3 4 5; do "
-        f"STATUS=$({zonestatus} 2>&1) || true; "
-        f'if printf "%s\\n" "$STATUS" | grep -qE "{serial_re}"; then exit 0; fi; '
-        "sleep 0.3; "
-        "done; "
-        'printf "zone %s view %s not at staged serial '
-        f'{serial} after reload; last rndc zonestatus:\\n%s\\n" '
-        f'{quoted_zone} {quoted_view} "$STATUS"; '
-        "exit 1"
+    return _poll_verify(
+        observe=f"STATUS=$({zonestatus} 2>&1) || true;",
+        success_test=f'printf "%s\\n" "$STATUS" | grep -qE "{serial_re}"',
+        diagnostic=(
+            'printf "zone %s view %s not at staged serial '
+            f'{serial} after reload; last rndc zonestatus:\\n%s\\n" '
+            f'{quoted_zone} {quoted_view} "$STATUS";'
+        ),
     )
 
 
@@ -996,21 +1024,21 @@ def _dig_add_verify(fqdn: str, ip: str, record_type: str) -> str:
 
     ``dig @localhost <fqdn> <type> +short`` emits one rdata per line;
     ``grep -qxF`` (literal, whole-line) asserts the new IP is present
-    without false-matching a substring. On mismatch the observed
-    ``dig`` output is echoed so the ``AtomicApplyError`` detail carries
-    the real reason (#2897 -- the prior silent predicate surfaced an
-    empty detail).
+    without false-matching a substring. The check is polled because the
+    whole-server reload is asynchronous (#4205). On mismatch the last
+    observed ``dig`` output is echoed so the ``AtomicApplyError`` detail
+    carries the real reason (#2897 -- the prior silent predicate
+    surfaced an empty detail).
     """
     quoted_fqdn = shlex.quote(fqdn)
     quoted_ip = shlex.quote(ip)
-    # ``if ... then exit 0; fi`` so a grep miss falls through to the
-    # diagnostic under the pipeline's ``set -e`` (not an early abort).
-    return (
-        f"ANSWER=$(dig @localhost {quoted_fqdn} {record_type} +short 2>&1) || true; "
-        f'if printf "%s\\n" "$ANSWER" | grep -qxF {quoted_ip}; then exit 0; fi; '
-        f'printf "expected {record_type} %s in the answer for %s; dig +short returned:'
-        f'\\n%s\\n" {quoted_ip} {quoted_fqdn} "$ANSWER"; '
-        "exit 1"
+    return _poll_verify(
+        observe=f"ANSWER=$(dig @localhost {quoted_fqdn} {record_type} +short 2>&1) || true;",
+        success_test=f'printf "%s\\n" "$ANSWER" | grep -qxF {quoted_ip}',
+        diagnostic=(
+            f'printf "expected {record_type} %s in the answer for %s after reload; '
+            f'last dig +short returned:\\n%s\\n" {quoted_ip} {quoted_fqdn} "$ANSWER";'
+        ),
     )
 
 
@@ -1018,18 +1046,22 @@ def _dig_remove_verify(fqdn: str) -> str:
     """Record-level verify predicate for a no-views / single-view remove.
 
     The FQDN must resolve to neither an A nor an AAAA answer. ``+short``
-    exits 0 on empty output, so emptiness is asserted explicitly. On
-    failure the residual answers are echoed for a diagnosable detail
-    (#2897).
+    exits 0 on empty output, so emptiness is asserted explicitly. The
+    check is polled because the whole-server reload is asynchronous
+    (#4205). On failure the residual answers are echoed for a
+    diagnosable detail (#2897).
     """
     quoted_fqdn = shlex.quote(fqdn)
-    return (
-        f"A=$(dig @localhost {quoted_fqdn} A +short 2>&1) || true; "
-        f"AAAA=$(dig @localhost {quoted_fqdn} AAAA +short 2>&1) || true; "
-        'if [ -z "$A" ] && [ -z "$AAAA" ]; then exit 0; fi; '
-        'printf "%s still resolves after remove (A: %s AAAA: %s)\\n" '
-        f'{quoted_fqdn} "$A" "$AAAA"; '
-        "exit 1"
+    return _poll_verify(
+        observe=(
+            f"A=$(dig @localhost {quoted_fqdn} A +short 2>&1) || true; "
+            f"AAAA=$(dig @localhost {quoted_fqdn} AAAA +short 2>&1) || true;"
+        ),
+        success_test='[ -z "$A" ] && [ -z "$AAAA" ]',
+        diagnostic=(
+            'printf "%s still resolves after remove (A: %s AAAA: %s)\\n" '
+            f'{quoted_fqdn} "$A" "$AAAA";'
+        ),
     )
 
 
@@ -1043,22 +1075,21 @@ def _dig_value_absent_verify(fqdn: str, record_type: str, rdata: str) -> str:
     "resolves to nothing" predicate is wrong here). ``grep -qxF`` is literal
     whole-line so a substring cannot false-match. ``record_type`` is one of
     the enum-validated A / AAAA tokens (never operator-free-text), so it is
-    safe to interpolate; ``fqdn`` / ``rdata`` are ``shlex.quote``-wrapped. On
-    a still-present value the observed ``dig`` output is echoed so the
-    ``AtomicApplyError`` detail is diagnosable (the #2897 discipline).
+    safe to interpolate; ``fqdn`` / ``rdata`` are ``shlex.quote``-wrapped.
+    The check is polled because the whole-server reload is asynchronous
+    (#4205). On a still-present value the last observed ``dig`` output is
+    echoed so the ``AtomicApplyError`` detail is diagnosable (the #2897
+    discipline).
     """
     quoted_fqdn = shlex.quote(fqdn)
     quoted_rdata = shlex.quote(rdata)
-    # ``if <present> then <diagnose>; exit 1; fi; exit 0`` — a grep miss (the
-    # value is gone, the success case) falls through to ``exit 0`` and never
-    # aborts early under the pipeline's ``set -e``.
-    return (
-        f"ANSWER=$(dig @localhost {quoted_fqdn} {record_type} +short 2>&1) || true; "
-        f'if printf "%s\\n" "$ANSWER" | grep -qxF {quoted_rdata}; then '
-        f'printf "{record_type} value %s still resolves for %s after delete; '
-        f'dig +short returned:\\n%s\\n" {quoted_rdata} {quoted_fqdn} "$ANSWER"; '
-        "exit 1; fi; "
-        "exit 0"
+    return _poll_verify(
+        observe=f"ANSWER=$(dig @localhost {quoted_fqdn} {record_type} +short 2>&1) || true;",
+        success_test=f'! printf "%s\\n" "$ANSWER" | grep -qxF {quoted_rdata}',
+        diagnostic=(
+            f'printf "{record_type} value %s still resolves for %s after delete; '
+            f'last dig +short returned:\\n%s\\n" {quoted_rdata} {quoted_fqdn} "$ANSWER";'
+        ),
     )
 
 

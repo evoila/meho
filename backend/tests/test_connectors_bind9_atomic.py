@@ -32,6 +32,9 @@ each test scenario needs. The handler-level tests additionally patch
 
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
@@ -40,6 +43,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import meho_backplane.connectors.bind9  # noqa: F401 -- registers connector at import
+import meho_backplane.connectors.bind9.ops_record as ops_record_module
 from meho_backplane.connectors.bind9 import BIND9_OPS, Bind9Connector
 from meho_backplane.connectors.bind9._atomic import (
     AtomicApplyError,
@@ -54,6 +58,7 @@ from meho_backplane.connectors.bind9.ops_record import (
     _add_record_to_zonefile,
     _dig_add_verify,
     _dig_remove_verify,
+    _dig_value_absent_verify,
     _remove_record_from_zonefile,
     _soa_serial_from_text,
     _zonestatus_serial_verify,
@@ -456,6 +461,118 @@ class TestViewAwareVerifyBuilders:
         assert "dig @localhost api.evba.lab AAAA +short" in cmd
         assert '[ -z "$A" ] && [ -z "$AAAA" ]' in cmd
         assert "still resolves after remove" in cmd  # failure diagnostic
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            _dig_add_verify("api.evba.lab", "10.5.50.99", "A"),
+            _dig_remove_verify("api.evba.lab"),
+            _dig_value_absent_verify("api.evba.lab", "A", "10.5.50.99"),
+            _zonestatus_serial_verify("evba.lab", "internal", 2026051802),
+        ],
+        ids=["add", "remove", "value-absent", "zonestatus"],
+    )
+    def test_verify_predicates_poll_before_failing(self, cmd: str) -> None:
+        # ``rndc reload`` is asynchronous, so every predicate retries for
+        # a bounded time instead of trusting the first answer (#4205).
+        assert cmd.startswith("for _ in 1 2 3 ")
+        assert "sleep 0.3; done; " in cmd
+        assert cmd.endswith("exit 1")
+
+
+# A fake ``dig`` on PATH that replays canned answers one call at a time.
+# ``<empty>`` stands for an empty answer (what ``+short`` prints for a
+# name with no records). The last answer repeats once the list runs out,
+# so a "never appears" scenario is one line long.
+_FAKE_DIG = """\
+#!/bin/sh
+n=$(cat "$FAKE_DIG_COUNTER" 2>/dev/null || echo 0)
+n=$((n + 1))
+echo "$n" > "$FAKE_DIG_COUNTER"
+line=$(sed -n "${n}p" "$FAKE_DIG_ANSWERS")
+[ -n "$line" ] || line=$(tail -n 1 "$FAKE_DIG_ANSWERS")
+[ "$line" = "<empty>" ] || printf '%s\n' "$line"
+"""
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash to run the predicate")
+class TestVerifyPredicatesUnderBash:
+    """Run the rendered predicates for real, against a fake ``dig``.
+
+    Mirrors the pipeline's ``set -e -u -o pipefail`` so the ``if ...
+    exit 0`` shape is proven safe, not just asserted on the string.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fast_poll(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(ops_record_module, "_VERIFY_POLL_ATTEMPTS", 3)
+        monkeypatch.setattr(ops_record_module, "_VERIFY_POLL_INTERVAL_SECONDS", "0.01")
+
+    @staticmethod
+    def _run(tmp_path: Any, cmd: str, answers: list[str]) -> tuple[int, str, int]:
+        """Return ``(exit_code, output, dig_calls)`` for *cmd* under bash."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        dig = bin_dir / "dig"
+        dig.write_text(_FAKE_DIG)
+        dig.chmod(0o755)
+        answers_file = tmp_path / "answers"
+        answers_file.write_text("\n".join(answers) + "\n")
+        counter = tmp_path / "counter"
+        env = {
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "FAKE_DIG_ANSWERS": str(answers_file),
+            "FAKE_DIG_COUNTER": str(counter),
+        }
+        proc = subprocess.run(
+            ["bash", "-e", "-u", "-o", "pipefail", "-c", cmd],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        calls = int(counter.read_text()) if counter.exists() else 0
+        return proc.returncode, proc.stdout + proc.stderr, calls
+
+    def test_add_passes_when_record_shows_up_late(self, tmp_path: Any) -> None:
+        cmd = _dig_add_verify("api.evba.lab", "10.5.50.99", "A")
+        code, _out, calls = self._run(tmp_path, cmd, ["<empty>", "<empty>", "10.5.50.99"])
+        assert code == 0
+        assert calls == 3
+
+    def test_add_fails_with_last_answer_when_record_never_shows_up(self, tmp_path: Any) -> None:
+        cmd = _dig_add_verify("api.evba.lab", "10.5.50.99", "A")
+        code, out, calls = self._run(tmp_path, cmd, ["10.5.50.2"])
+        assert code == 1
+        assert calls == 3  # every attempt used before giving up
+        assert "last dig +short returned:" in out
+        assert "10.5.50.2" in out
+
+    def test_remove_passes_once_both_families_are_gone(self, tmp_path: Any) -> None:
+        cmd = _dig_remove_verify("api.evba.lab")
+        # Each attempt asks A then AAAA: the first still sees the A record.
+        code, _out, calls = self._run(tmp_path, cmd, ["10.5.50.2", "<empty>", "<empty>"])
+        assert code == 0
+        assert calls == 4
+
+    def test_remove_fails_with_residual_answers(self, tmp_path: Any) -> None:
+        cmd = _dig_remove_verify("api.evba.lab")
+        code, out, _calls = self._run(tmp_path, cmd, ["10.5.50.2"])
+        assert code == 1
+        assert "still resolves after remove (A: 10.5.50.2 AAAA: 10.5.50.2)" in out
+
+    def test_value_absent_passes_once_value_is_gone_and_sibling_stays(self, tmp_path: Any) -> None:
+        cmd = _dig_value_absent_verify("api.evba.lab", "A", "10.5.50.99")
+        code, _out, calls = self._run(tmp_path, cmd, ["10.5.50.99", "10.5.50.2"])
+        assert code == 0
+        assert calls == 2
+
+    def test_value_absent_fails_when_value_stays(self, tmp_path: Any) -> None:
+        cmd = _dig_value_absent_verify("api.evba.lab", "A", "10.5.50.99")
+        code, out, _calls = self._run(tmp_path, cmd, ["10.5.50.99"])
+        assert code == 1
+        assert "still resolves for api.evba.lab after delete" in out
+        assert "10.5.50.99" in out
 
 
 # ---------------------------------------------------------------------------

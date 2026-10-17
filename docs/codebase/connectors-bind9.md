@@ -399,11 +399,20 @@ whether the caller passed `view`:
   so it confirms named loaded our revision into *that* view;
   `named-checkzone` (validate step) already proved the record is in the
   file.
-* **`view` omitted** (`_dig_add_verify` / `_dig_remove_verify`) -- the
-  record-level `dig @localhost` check, unchanged for no-views /
-  single-view targets.
+* **`view` omitted** (`_dig_add_verify` / `_dig_remove_verify` /
+  `_dig_value_absent_verify`) -- the record-level `dig @localhost`
+  check for no-views / single-view targets.
 
-Both predicates **echo their observed state on failure** so the
+All predicates **poll before they fail** (`_poll_verify`, #4205). The
+commit-path `rndc reload` is asynchronous -- the ISC rndc manual says
+"if no zone is specified, the reloading happens asynchronously" -- so
+`named` can still serve the old zone when the first `dig` runs. A
+single check then rolled back a correct write with exit code 12. Every
+predicate now retries up to `_VERIFY_POLL_ATTEMPTS` (10) times,
+`_VERIFY_POLL_INTERVAL_SECONDS` (0.3 s) apart, about 3 s in total. A
+record that never appears still fails, rolls back, and exits 12.
+
+All predicates **echo their last observed state on failure** so the
 `AtomicApplyError` detail is diagnosable -- the pre-#2897 silent
 `grep -q` / `[ -z … ]` predicates surfaced an empty `exception_message`.
 

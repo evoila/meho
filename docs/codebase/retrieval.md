@@ -223,7 +223,8 @@ The `kb_passage` locator holds `entry_id`, `revision_id`, `slug`,
 count Unicode code points.
 
 **How a body is split** (`kb/passages.py`, `chunk_markdown`). Every
-Markdown heading outside a code fence starts a section. A section that
+Markdown heading outside a code fence starts a section. A heading
+title longer than 200 characters is cut to 200. A section that
 fits the model window is one passage. A larger one is cut at
 paragraphs, then lines, then sentences, then words, then single
 characters, and neighbouring pieces are packed while they still fit.
@@ -278,8 +279,8 @@ readable by that exact read, but they are never searched.
 the shared `measure_delivered_wire_bytes` (#3641) against
 `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES`. When it is too large, the
 lowest-ranked hits are left out, `delivery` is `partial` and
-`omitted_hits` says how many. A passage is never cut. Snippets and
-passage texts are wrapped as untrusted text.
+`omitted_hits` says how many. A passage is never cut. Snippets,
+passage texts and heading titles are wrapped as untrusted text.
 
 ## Dependencies
 

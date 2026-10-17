@@ -69,6 +69,10 @@ CHUNKER_VERSION: Final[str] = "kb-md-heading-v1"
 #: Separator between heading titles in a passage header.
 _HEADER_JOIN: Final[str] = " > "
 
+#: Longest heading title kept in a heading path. A longer title is cut,
+#: so one long heading line cannot fill every search hit's locator.
+MAX_HEADING_TITLE_CHARS: Final[int] = 200
+
 _HEADING = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$")
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 _PARAGRAPH_BREAK = re.compile(r"\n[ \t]*\n")
@@ -158,7 +162,7 @@ def _sections(body: str) -> list[_Section]:
             level = len(heading.group(1))
             while stack and stack[-1][0] >= level:
                 stack.pop()
-            stack.append((level, heading.group(2).strip()))
+            stack.append((level, heading.group(2).strip()[:MAX_HEADING_TITLE_CHARS]))
             path = tuple(title for _level, title in stack)
             start = offset
         offset += len(line)

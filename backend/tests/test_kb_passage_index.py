@@ -39,6 +39,7 @@ from meho_backplane.db.models import Document, KbRevision
 from meho_backplane.kb import passages as passages_module
 from meho_backplane.kb.passages import (
     CHUNKER_VERSION,
+    MAX_HEADING_TITLE_CHARS,
     chunk_markdown,
     index_generation,
     passage_items,
@@ -52,7 +53,7 @@ from meho_backplane.retrieval.embedding import EmbeddingService, PassageTokenize
 from meho_backplane.retrieval.indexer import IndexItem, prepare_index_batch
 from meho_backplane.retrieval.retriever import RetrievalHit
 from meho_backplane.settings import get_settings
-from meho_backplane.untrusted_text import BLOCK_START
+from meho_backplane.untrusted_text import BLOCK_END, BLOCK_START
 from tests._kb_embedding_stub import StubPassageTokenizer, fake_embedding_service
 
 _WINDOW = 40
@@ -159,6 +160,12 @@ def test_chunker_drops_a_header_that_would_crowd_out_the_text() -> None:
     found = chunk_markdown(f"# {title}\n\nShort body.", _count, _WINDOW)
     assert all(p.embed_text == p.text for p in found)
     assert all(p.tokens <= _WINDOW for p in found)
+
+
+def test_chunker_cuts_long_heading_titles() -> None:
+    title = "t" * (MAX_HEADING_TITLE_CHARS + 50)
+    found = chunk_markdown(f"# {title}\n\nShort body.", _count, _WINDOW)
+    assert [p.heading_path for p in found] == [("t" * MAX_HEADING_TITLE_CHARS,)]
 
 
 def test_passage_items_carry_ids_locator_and_provenance() -> None:
@@ -552,3 +559,44 @@ async def test_search_knowledge_wraps_text_as_untrusted(fake_embed: AsyncMock) -
     assert hit["snippet"].startswith(BLOCK_START)
     assert all(p["text"].startswith(BLOCK_START) for p in hit["passages"])
     assert hit["passages"][0]["locator"]["uri"].startswith("meho://kb/id/")
+
+
+def _text_outside_envelopes(value: Any) -> list[str]:
+    """Return every string in *value* with the untrusted blocks taken out."""
+    if isinstance(value, dict):
+        return [text for item in value.values() for text in _text_outside_envelopes(item)]
+    if isinstance(value, list):
+        return [text for item in value for text in _text_outside_envelopes(item)]
+    if not isinstance(value, str):
+        return []
+    outside: list[str] = []
+    rest = value
+    while (start := rest.find(BLOCK_START)) != -1:
+        outside.append(rest[:start])
+        end = rest.rfind(BLOCK_END)
+        assert end > start, "an envelope was opened but not closed"
+        rest = rest[end + len(BLOCK_END) :]
+    outside.append(rest)
+    return outside
+
+
+async def test_search_knowledge_keeps_heading_text_inside_the_envelope(
+    fake_embed: AsyncMock,
+) -> None:
+    from meho_backplane.auth.operator import Operator, TenantRole
+    from meho_backplane.mcp.tools.knowledge import _search_knowledge_handler
+
+    tenant = uuid.uuid4()
+    marker = "headingmarkercode"
+    body = f"# Guide\n\nIntro.\n\n## Step {marker}\n\nRun the {marker} check.\n"
+    await KbService().create_entry(tenant, "guide", body)
+    operator = Operator(sub="op", raw_jwt="x", tenant_id=tenant, tenant_role=TenantRole.OPERATOR)
+    with patch("meho_backplane.kb.service.retrieve", side_effect=_fake_retrieve(tenant, {})):
+        payload = await _search_knowledge_handler(operator, {"query": marker})
+
+    hit = payload["hits"][0]
+    titles = hit["passages"][0]["locator"]["heading_path"]
+    assert len(titles) == 2
+    assert all(title.startswith(BLOCK_START) for title in titles)
+    assert marker in titles[1]
+    assert not any(marker in text for text in _text_outside_envelopes(payload))

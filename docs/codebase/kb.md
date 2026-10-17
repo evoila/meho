@@ -347,8 +347,8 @@ until the entry is deleted.
    per entry, best first, up to `limit` entries, each with up to 3
    passages and their locators.
 
-`search_knowledge` (MCP) wraps every snippet and passage text as
-untrusted text and keeps its response inside
+`search_knowledge` (MCP) wraps every snippet, passage text and
+heading title (`locator.heading_path`) as untrusted text and keeps its response inside
 `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES` using the shared wire
 measurement; when it has to leave lower-ranked hits out it says
 `delivery: "partial"` and `omitted_hits`.

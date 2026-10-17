@@ -190,3 +190,49 @@ def test_workflow_runs_on_every_pr_and_in_the_merge_queue() -> None:
         "pull-requests": "read",
         "actions": "write",
     }
+
+
+def test_two_new_migrations_where_the_first_clashes_with_main(
+    tmp_path: pathlib.Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """Main is at 0107. The branch adds 0107 and 0108 as a chain. Only
+    0108 is a new number, but both files are new, so the advice must
+    renumber the whole chain, not just fix the parent."""
+    main = _main_chain(tmp_path)
+    branch = tmp_path / "branch"
+    _write(branch, "0107_mine.py", "0107", "0106")
+    _write(branch, "0108_mine_too.py", "0108", "0107")
+    assert _module.main([str(branch), "--main", str(main)]) == 1
+    err = capfd.readouterr().err
+    assert "revision 0107 is used by 2 files: 0107_c.py, 0107_mine.py" in err
+    assert (
+        "What to do: main is at 0107. Your branch adds 2 migrations "
+        "(0107_mine.py, 0108_mine_too.py). Number them 0108, 0109 as one chain, "
+        "with the first one's down_revision set to '0107'." in err
+    )
+
+
+def test_two_new_migrations_with_right_numbers_but_stale_parent(
+    tmp_path: pathlib.Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    main = _main_chain(tmp_path)
+    branch = tmp_path / "branch"
+    _write(branch, "0108_mine.py", "0108", "0106")
+    _write(branch, "0109_mine_too.py", "0109", "0108")
+    assert _module.main([str(branch), "--main", str(main)]) == 1
+    err = capfd.readouterr().err
+    assert "Alembic finds 2 heads" in err
+    assert "What to do: main is at 0107. Set down_revision of 0108_mine.py to '0107'." in err
+
+
+def test_branch_file_that_replaces_a_main_file_is_not_counted_as_new(
+    tmp_path: pathlib.Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """A branch that edits 0107_c.py (same name as on main) and adds one
+    new file with a stale parent gets advice about the new file only."""
+    main = _main_chain(tmp_path)
+    branch = tmp_path / "branch"
+    _write(branch, "0107_c.py", "0107", "0106")
+    _write(branch, "0108_mine.py", "0108", "0106")
+    assert _module.main([str(branch), "--main", str(main)]) == 1
+    assert "What to do: main is at 0107. Set down_revision to '0107'." in capfd.readouterr().err

@@ -198,28 +198,46 @@ def _next_number(current: str, offset: int) -> str:
 
 
 def advice(main_migrations: list[Migration], migrations: list[Migration]) -> str:
-    """One line that says what to change, based on where ``main`` is."""
+    """One line that says what to change, based on where ``main`` is.
+
+    New migrations are the files that are not on ``main``, found by file
+    name. Their revision numbers are not used to find them, because a
+    number that clashes with ``main`` is exactly the case to report.
+    """
+    generic = (
+        "What to do: keep one chain. Every migration needs its own revision number, "
+        "and exactly one migration may be the newest."
+    )
     main_heads = heads(main_migrations)
     if len(main_heads) != 1 or not main_heads[0].isdigit():
-        return (
-            "What to do: keep one chain. Every migration needs its own revision number, "
-            "and exactly one migration may be the newest."
-        )
+        return generic
     main_head = main_heads[0]
-    on_main = {m.revision for m in main_migrations}
-    new = sorted({m.revision for m in migrations} - on_main)
-    wanted = _next_number(main_head, 1)
-    if new == [wanted]:
-        return f"What to do: main is at {main_head}. Set down_revision to {main_head!r}."
-    if len(new) <= 1:
+    on_main = {m.path.name for m in main_migrations}
+    new = sorted(
+        (m for m in migrations if m.path.name not in on_main),
+        key=lambda m: (m.revision, m.path.name),
+    )
+    if not new:
+        return generic
+    wanted = [_next_number(main_head, i + 1) for i in range(len(new))]
+    if [m.revision for m in new] == wanted:
+        if len(new) == 1:
+            return f"What to do: main is at {main_head}. Set down_revision to {main_head!r}."
+        return (
+            f"What to do: main is at {main_head}. Set down_revision of "
+            f"{new[0].path.name} to {main_head!r}."
+        )
+    if len(new) == 1:
         return (
             f"What to do: main is at {main_head}. Rename your migration to "
-            f"{wanted} and set down_revision to {main_head!r}."
+            f"{wanted[0]} and set down_revision to {main_head!r}."
         )
-    numbers = ", ".join(_next_number(main_head, i + 1) for i in range(len(new)))
+    files = ", ".join(m.path.name for m in new)
+    numbers = ", ".join(wanted)
     return (
-        f"What to do: main is at {main_head}. Number your new migrations {numbers} "
-        f"as one chain, with the first one's down_revision set to {main_head!r}."
+        f"What to do: main is at {main_head}. Your branch adds {len(new)} migrations "
+        f"({files}). Number them {numbers} as one chain, with the first one's "
+        f"down_revision set to {main_head!r}."
     )
 
 

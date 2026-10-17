@@ -472,6 +472,20 @@ function lockFiles() {
   }
 }
 
+// The second names copies give the lock while they take it over.
+function claimFiles() {
+  try {
+    return readdirSync(AUTH_DIR).filter((f) => f.includes(".lock.takeover."));
+  } catch {
+    return [];
+  }
+}
+
+// A second name as another copy (pid) would make it.
+function claimOf(pid) {
+  return `${LOCK}.takeover.${pid}.0badf00d`;
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 test("sign-in lock: held while mcp-remote connects, released at its first message", () => {
@@ -578,7 +592,8 @@ test("regression: a copy that lost the stale-lock race must not delete the winne
       "the other copy's lock must stay in place",
     );
     assert.match(said.join("\n"), /waiting for it to finish/);
-    assert.deepEqual(lockFiles(), [basename(LOCK)], "no second lock name may be left behind");
+    assert.deepEqual(lockFiles(), [basename(LOCK)], "no second lock may be left behind");
+    assert.deepEqual(claimFiles(), [], "no second name may be left behind");
     rmSync(LOCK); // the other copy finished
     const release = await pending;
     assert.match(said.join("\n"), /the other MEHO instance finished; starting/);
@@ -590,13 +605,13 @@ test("regression: a copy that lost the stale-lock race must not delete the winne
   }
 });
 
-// The takeover gives the stale lock a second name first. While that name
-// exists, another copy is in the middle of its takeover; a new copy waits
-// for it and then sees the live lock the other copy wrote.
+// The takeover gives the stale lock a second name first. While a name made
+// by a running copy exists, that copy is in the middle of its takeover; a
+// new copy waits for it and then sees the live lock the other copy wrote.
 test("sign-in lock: waits while another copy is taking over a stale lock", async () => {
   const stopped = spawnSync(process.execPath, ["-e", ""]).pid;
   writeLock(stopped);
-  const claim = `${LOCK}.takeover`;
+  const claim = claimOf(process.pid); // this test runner is alive
   linkSync(LOCK, claim);
   try {
     const run = startLauncher([URL_ARG]);
@@ -613,6 +628,7 @@ test("sign-in lock: waits while another copy is taking over a stale lock", async
     assert.equal(res.status, 0, res.stderr);
     assert.equal(JSON.parse(res.stdout).argv[2], URL_ARG);
     assert.deepEqual(lockFiles(), []);
+    assert.deepEqual(claimFiles(), []);
   } finally {
     rmSync(claim, { force: true });
     rmSync(LOCK, { force: true });
@@ -622,7 +638,7 @@ test("sign-in lock: waits while another copy is taking over a stale lock", async
 test("sign-in lock: a second name left by a stopped copy does not block the takeover", async () => {
   const stopped = spawnSync(process.execPath, ["-e", ""]).pid;
   writeLock(stopped);
-  const claim = `${LOCK}.takeover`;
+  const claim = claimOf(stopped);
   linkSync(LOCK, claim);
   try {
     const said = [];
@@ -631,15 +647,80 @@ test("sign-in lock: a second name left by a stopped copy does not block the take
       say: (t) => said.push(t),
       waitLimitMs: 10_000,
       pollMs: 50,
-      graceMs: 200,
     });
     assert.match(said.join("\n"), /found an old sign-in lock: its instance \(pid \d+\) stopped; taking it over/);
     assert.equal(JSON.parse(readFileSync(LOCK, "utf8")).pid, process.pid);
     assert.ok(!existsSync(claim), "the old second name must be gone");
     release();
     assert.deepEqual(lockFiles(), []);
+    assert.deepEqual(claimFiles(), []);
   } finally {
     rmSync(claim, { force: true });
+    rmSync(LOCK, { force: true });
+  }
+});
+
+// Two copies can find the same second name left by a stopped copy. In the
+// old code both read it, one removed it and made a new second name, and the
+// other then removed that new name with its earlier read. This forces that
+// sequence in one process: the copy under test finds the stale lock and the
+// abandoned name; at that moment "the other copy" (this test) has already
+// removed the abandoned name and made its own, and is in the middle of its
+// takeover. The copy under test must clean up only the abandoned name, must
+// not touch the other copy's name or the lock, and must wait.
+test("regression: a copy must not remove the second name another copy just made", async () => {
+  const stopped = spawnSync(process.execPath, ["-e", ""]).pid;
+  writeLock(stopped);
+  const stale = readFileSync(LOCK, "utf8");
+  const abandoned = claimOf(stopped);
+  linkSync(LOCK, abandoned);
+  // The other copy runs in its own process. (The copy under test runs in
+  // this process, and a copy cleans up names with its own process id.)
+  const otherCopy = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  const other = claimOf(otherCopy.pid);
+  try {
+    const said = [];
+    let raced = false;
+    const say = (t) => {
+      said.push(t);
+      if (!raced && /an old sign-in lock/.test(t)) {
+        raced = true;
+        linkSync(LOCK, other); // the other copy's fresh second name
+      }
+    };
+    let settled = false;
+    const pending = acquireSignInLock(new URL(URL_ARG).href, {
+      env: { MCP_REMOTE_CONFIG_DIR: AUTH_DIR },
+      say,
+      waitLimitMs: 10_000,
+      pollMs: 50,
+    }).then((release) => {
+      settled = true;
+      return release;
+    });
+    await sleep(500);
+    assert.ok(raced, "the test must have made the other copy's second name");
+    assert.equal(settled, false, "must wait while the other copy takes over");
+    assert.ok(!existsSync(abandoned), "the abandoned second name must be gone");
+    assert.ok(existsSync(other), "the other copy's second name must stay");
+    assert.equal(readFileSync(LOCK, "utf8"), stale, "the lock must be left to the other copy");
+    assert.deepEqual(claimFiles(), [basename(other)], "no further second name may be left behind");
+    assert.match(said.join("\n"), /taking over the old sign-in lock; waiting for it to finish/);
+    writeLock(process.pid); // the other copy finishes its takeover...
+    rmSync(other);
+    await sleep(300);
+    assert.equal(settled, false, "must keep waiting for the live lock");
+    rmSync(LOCK); // ...and later releases the lock
+    const release = await pending;
+    assert.match(said.join("\n"), /the other MEHO instance finished; starting/);
+    assert.equal(JSON.parse(readFileSync(LOCK, "utf8")).pid, process.pid);
+    release();
+    assert.deepEqual(lockFiles(), []);
+    assert.deepEqual(claimFiles(), []);
+  } finally {
+    otherCopy.kill();
+    rmSync(other, { force: true });
+    rmSync(abandoned, { force: true });
     rmSync(LOCK, { force: true });
   }
 });

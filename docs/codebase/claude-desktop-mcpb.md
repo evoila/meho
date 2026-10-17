@@ -56,12 +56,16 @@ records the launcher's contract and invariants.
    seconds; the next copy takes it over in place. It never deletes the stale
    file, because two copies can see the same stale lock, and the second
    delete would hit the lock the first copy had just made. Instead it gives
-   the file a second name with a hard link (`<lock>.takeover`; only one
-   process can create that name), checks that the file still holds the
-   stale content it read, and writes its own pid into it. Other copies then
-   read a live lock and wait. The second name is removed afterwards; one
-   left behind by a stopped copy is itself stale after five seconds and is
-   removed by the next copy. The launcher wraps
+   the file a second name of its own with a hard link
+   (`<lock>.takeover.<pid>.<random>`), checks that the file has exactly two
+   names (so no other copy is taking it over at the same time), checks that
+   the file still holds the stale content it read, writes its own pid into
+   it, and checks that the lock path shows that pid. Other copies then read
+   a live lock and wait. The second name is removed afterwards. A copy
+   removes a second name left behind by another copy only when the pid in
+   the name is not running; no other process can have made that exact name,
+   so the removal never hits a name a running copy is using. The launcher
+   wraps
    `process.stdout.write` once: the first write (`mcp-remote` answering the
    host, which only happens after it is connected) releases the lock. An
    `exit` listener also releases it. After waiting five minutes, or when the

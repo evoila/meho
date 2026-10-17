@@ -25,18 +25,20 @@
 //   the next copy takes it over. It never deletes the stale file, because
 //   two copies can see the same stale lock, and the second delete would hit
 //   the lock the first copy had just made. Instead the copy gives the lock
-//   file a second name (a hard link; only one process can create that
-//   name), checks that the file is still the stale lock it saw, and writes
-//   its own process id into it. Other copies then see a live lock.
+//   file a second name of its own (a hard link), checks that it holds the
+//   only second name, checks that the file is still the stale lock it saw,
+//   and writes its own process id into it. Other copies then see a live
+//   lock. See takeOverStaleLock for the details.
 // - The lock never blocks for good: after the wait limit, or when the lock
 //   file cannot be used at all, the launcher starts mcp-remote anyway.
 
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
   linkSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   statSync,
   unlinkSync,
@@ -44,7 +46,7 @@ import {
   writeSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
 // How long a copy waits for another copy's sign-in before it starts anyway.
@@ -53,8 +55,7 @@ export const WAIT_LIMIT_MS = 5 * 60 * 1000;
 const STALE_AGE_MS = 5 * 60 * 1000;
 const POLL_MS = 250;
 // A lock file without a readable pid is normal for a moment (created, not
-// yet written). After this long it is treated as stale. The same grace
-// applies to the second name a copy creates while it takes over a stale lock.
+// yet written). After this long it is treated as stale.
 const UNREADABLE_GRACE_MS = 5000;
 
 function sayDefault(text) {
@@ -84,8 +85,7 @@ function lockText() {
   return JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() });
 }
 
-// `age` counts from the last write. `changedAge` also counts from the last
-// change to the file's names (a hard link updates ctime, not mtime).
+// `age` counts from the last write.
 function readLock(path) {
   let text;
   let stat;
@@ -107,7 +107,6 @@ function readLock(path) {
     pid: Number.isInteger(pid) ? pid : undefined,
     text,
     age: now - stat.mtimeMs,
-    changedAge: now - Math.max(stat.mtimeMs, stat.ctimeMs),
   };
 }
 
@@ -145,6 +144,33 @@ function removeQuietly(path) {
   }
 }
 
+// The second name a copy gives the lock while it takes it over. The name
+// holds the copy's process id, so other copies can tell whether the copy
+// that made it still runs, and a random part, so a new process with the
+// same process id never reuses a name an old process left behind.
+function claimName(path) {
+  return `${path}.takeover.${process.pid}.${randomBytes(4).toString("hex")}`;
+}
+
+// Remove second names left behind by copies that stopped mid-takeover.
+//
+// A name is only removed when the process in its name is not running (or
+// is this process: an earlier process with the same id left it). Only that
+// process could have made that exact name, so the removal never hits a
+// name a running copy is using. A name with a running process id stays,
+// even when it is old; a copy that has it never waits for good, because the
+// wait limit still applies.
+function removeAbandonedClaims(path) {
+  const dir = dirname(path);
+  const prefix = `${basename(path)}.takeover.`;
+  for (const name of readdirSync(dir)) {
+    if (!name.startsWith(prefix)) continue;
+    const pid = Number(name.slice(prefix.length).split(".")[0]);
+    if (!Number.isInteger(pid)) continue;
+    if (pid === process.pid || !isRunning(pid)) removeQuietly(join(dir, name));
+  }
+}
+
 // Take over a stale lock without deleting it. Returns true when this process
 // owns the lock afterwards.
 //
@@ -153,33 +179,37 @@ function removeQuietly(path) {
 // copy's new lock, and both would sign in. So the lock file is taken over in
 // place:
 //
-// 1. Give the lock file a second name with a hard link. Only one process can
-//    create that name. While it exists, no other copy touches the lock.
-// 2. Check that the file is still the stale lock this copy saw. Another copy
-//    may have taken it over, or the owner may have released it and a new
-//    copy created a fresh lock, before step 1 ran. Then leave it alone.
-// 3. Write this process id into the file. The lock and the second name are
-//    the same file, so other copies now read a live lock and wait.
-// 4. Remove the second name.
-//
-// A second name left behind by a copy that stopped between steps 1 and 4 is
-// stale too (its pid stopped, or it is older than the grace period) and is
-// removed by the next copy.
-function takeOverStaleLock(path, stale, graceMs) {
-  const claim = `${path}.takeover`;
+// 1. Remove second names left behind by stopped copies (see above).
+// 2. Give the lock file a second name of this process's own, with a hard
+//    link. No other copy ever removes that name, so from here on the file
+//    cannot slip away under this copy.
+// 3. Count the file's names. Exactly two (the lock and this name) means no
+//    other copy is taking it over right now. More means another copy is;
+//    then give up this turn and try again on the next poll. While this
+//    name exists no other copy can count two, so at most one copy goes on.
+// 4. Check that the file is still the stale lock this copy saw. Another
+//    copy may have taken it over, or the owner may have released it and a
+//    new copy created a fresh lock, before step 2 ran. Then leave it alone.
+// 5. Write this process id into the file through the second name, and
+//    check that the lock path still shows it. If the owner released the
+//    lock between step 2 and now, the write went into a file that no
+//    longer is the lock, and this copy does not own the lock.
+// 6. Remove the second name.
+function takeOverStaleLock(path, stale) {
+  removeAbandonedClaims(path);
+  const claim = claimName(path);
   try {
     linkSync(path, claim);
   } catch (err) {
     if (err.code === "ENOENT") return false;
-    if (err.code !== "EEXIST") throw err;
-    const left = readLock(claim);
-    if (left && staleReason(left, graceMs) && left.changedAge > graceMs) removeQuietly(claim);
-    return false;
+    throw err;
   }
   try {
+    if (statSync(claim).nlink !== 2) return false;
     if (readLock(claim)?.text !== stale.text) return false;
-    writeFileSync(claim, lockText());
-    return true;
+    const mine = lockText();
+    writeFileSync(claim, mine);
+    return readLock(path)?.text === mine;
   } finally {
     removeQuietly(claim);
   }
@@ -215,7 +245,7 @@ export async function acquireSignInLock(
           foundStale = true;
           say(`found an old sign-in lock: ${reason}; taking it over`);
         }
-        if (takeOverStaleLock(path, lock, graceMs)) break;
+        if (takeOverStaleLock(path, lock)) break;
       }
       if (Date.now() >= deadline) {
         say(

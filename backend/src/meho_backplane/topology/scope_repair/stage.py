@@ -11,6 +11,13 @@ the graph, builds the plan with
 it as one ``topology_scope_manifest`` row with the graph's
 ``snapshot_version``. Nothing in the graph changes.
 
+The whole run is one transaction that holds the identity-mode row
+(``FOR UPDATE``) and an exclusive lock on the graph tables. Graph
+writes pause until the manifest is saved: a refresh that starts while
+a target is being asked cannot add a row the plan would then set aside
+as unreported. The snapshot the plan is built on is the graph the
+targets were asked against.
+
 A target that fails to answer is recorded with the exception class name
 only (never the message, which may carry connection details). Such a
 manifest is ``incomplete`` and the cut-over refuses it.
@@ -30,14 +37,19 @@ from meho_backplane.connectors.resolver import resolve_connector
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Target
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
-from meho_backplane.topology.identity_mode import read_identity_mode
+from meho_backplane.topology.identity_mode import lock_identity_mode
 from meho_backplane.topology.refresh import _invoke_discover_topology
 from meho_backplane.topology.scope_repair.plan import (
     TargetDiscovery,
     build_plan,
     snapshot_version,
 )
-from meho_backplane.topology.scope_repair.store import StoredManifest, load_graph, save_manifest
+from meho_backplane.topology.scope_repair.store import (
+    StoredManifest,
+    load_graph,
+    lock_graph_tables,
+    save_manifest,
+)
 
 __all__ = ["SCOPE_REPAIR_SUB", "AlreadyScopedError", "stage_scope_repair"]
 
@@ -95,13 +107,16 @@ async def _discover_one(target: Any) -> TargetDiscovery:
 async def stage_scope_repair(*, created_by: str = SCOPE_REPAIR_SUB) -> StoredManifest:
     """Discover every live target, plan the cut-over, save the manifest.
 
+    Graph writes wait while this runs (see the module docstring).
+
     Raises:
         AlreadyScopedError: the graph is already in ``scoped`` mode.
     """
     sessionmaker = get_sessionmaker()
-    async with sessionmaker() as session:
-        if await read_identity_mode(session) == "scoped":
+    async with sessionmaker() as session, session.begin():
+        if await lock_identity_mode(session) == "scoped":
             raise AlreadyScopedError("the topology scope cut-over has already run")
+        await lock_graph_tables(session)
         targets = list(
             (
                 await session.execute(
@@ -113,9 +128,7 @@ async def stage_scope_repair(*, created_by: str = SCOPE_REPAIR_SUB) -> StoredMan
             .scalars()
             .all()
         )
-    discoveries = [await _discover_one(t) for t in targets]
-
-    async with sessionmaker() as session, session.begin():
+        discoveries = [await _discover_one(t) for t in targets]
         nodes, edges = await load_graph(session)
         plan = build_plan(nodes, edges, discoveries)
         stored = await save_manifest(

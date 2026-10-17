@@ -34,8 +34,18 @@ Every claim without an existing row is ``publish``: a new row.
 Discovered edges link the final node ids. An edge whose end the same
 target did not report is a problem (``unresolved_edge``). An existing
 edge with the same ends and kind is adopted; otherwise the edge is
-published. Existing edges that touch a ``legacy`` row are listed as
-``quarantine``: they stay for history but leave every graph answer.
+published. Every other existing edge is accounted for too:
+
+* an edge that touches a ``legacy`` row is ``quarantine``
+  (``endpoint_set_aside``): it stays for history but leaves every graph
+  answer, because readers skip the legacy row;
+* a probe-made edge no target reported again is ``quarantine``
+  (``not_rediscovered``): the cut-over writes its history tombstone and
+  deletes the row. Such an edge was another target's claim on a row
+  that now belongs to one target, so keeping it would join two targets
+  that share nothing;
+* a curated edge between rows that stay readable is operator data and
+  is left as it is.
 
 The plan is *complete* only when every target answered and there is no
 problem. The cut-over refuses an incomplete plan.
@@ -423,27 +433,48 @@ def _plan_discovered_edges(
     return planned
 
 
-def _plan_quarantined_edges(
-    tenant_id: uuid.UUID, old_edges: list[OldEdge], legacy_ids: set[uuid.UUID]
+def _quarantine_reason(edge: OldEdge, scope_of: dict[uuid.UUID, str]) -> str | None:
+    """Why an existing edge no target reported again must leave the graph."""
+    ends = (scope_of.get(edge.from_node_id, ""), scope_of.get(edge.to_node_id, ""))
+    if any(scope.startswith("legacy:") for scope in ends):
+        return "endpoint_set_aside"
+    if edge.source != "curated":
+        return "not_rediscovered"
+    return None
+
+
+def _plan_leftover_edges(
+    tenant_id: uuid.UUID,
+    old_edges: list[OldEdge],
+    nodes: list[PlannedNode],
+    adopted: set[uuid.UUID],
 ) -> list[PlannedEdge]:
-    return [
-        PlannedEdge(
-            tenant_id=tenant_id,
-            kind=e.kind,
-            from_node_id=e.from_node_id,
-            to_node_id=e.to_node_id,
-            action="quarantine",
-            edge_id=e.id,
-            old_edge_id=e.id,
-            source=e.source,
-            target_id=None,
-            discovered_by=None,
-            observed_at=None,
-            reason="endpoint_set_aside",
+    """Quarantine every old edge no discovery adopted and the new graph cannot keep."""
+    scope_of = {n.node_id: n.scope for n in nodes if n.old_node_id is not None}
+    planned: list[PlannedEdge] = []
+    for e in sorted(old_edges, key=lambda r: r.id):
+        if e.id in adopted:
+            continue
+        reason = _quarantine_reason(e, scope_of)
+        if reason is None:
+            continue
+        planned.append(
+            PlannedEdge(
+                tenant_id=tenant_id,
+                kind=e.kind,
+                from_node_id=e.from_node_id,
+                to_node_id=e.to_node_id,
+                action="quarantine",
+                edge_id=e.id,
+                old_edge_id=e.id,
+                source=e.source,
+                target_id=None,
+                discovered_by=None,
+                observed_at=None,
+                reason=reason,
+            )
         )
-        for e in sorted(old_edges, key=lambda r: r.id)
-        if e.from_node_id in legacy_ids or e.to_node_id in legacy_ids
-    ]
+    return planned
 
 
 def build_plan(
@@ -476,9 +507,12 @@ def build_plan(
         old_by_ends = {
             (e.from_node_id, e.to_node_id, e.kind): e for e in edges_by_tenant[tenant_id]
         }
-        edges.extend(_plan_discovered_edges(tenant_id, stage, final_id, old_by_ends, new_id))
-        legacy_ids = {n.node_id for n in tenant_nodes if n.action == "legacy"}
-        edges.extend(_plan_quarantined_edges(tenant_id, edges_by_tenant[tenant_id], legacy_ids))
+        discovered = _plan_discovered_edges(tenant_id, stage, final_id, old_by_ends, new_id)
+        adopted = {e.old_edge_id for e in discovered if e.old_edge_id is not None}
+        edges.extend(discovered)
+        edges.extend(
+            _plan_leftover_edges(tenant_id, edges_by_tenant[tenant_id], tenant_nodes, adopted)
+        )
         nodes.extend(tenant_nodes)
         targets.extend(stage.targets)
         problems.extend(stage.problems)

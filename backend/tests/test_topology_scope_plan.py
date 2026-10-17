@@ -13,6 +13,9 @@ these tests need no database. They pin the staging rules:
   rows included, and its edges are quarantined;
 * one claim adopts the old row (same id); unclaimed curated rows stay
   ``global``; unclaimed probe rows become ``legacy``;
+* a probe edge no target reported again is quarantined, so an old edge
+  from another target cannot join two targets through an adopted row;
+  a curated edge between readable rows is left alone;
 * an unavailable target or an edge to an unreported node makes the plan
   incomplete;
 * the snapshot ignores refresh noise (``target_id``, properties) but not
@@ -187,6 +190,65 @@ def test_single_claim_adopts_and_unclaimed_rows_get_global_or_legacy() -> None:
     assert by_old[orphan.id].reason == "not_rediscovered"
     (edge,) = plan.edges
     assert (edge.action, edge.edge_id) == ("adopt", old_edge.id)
+
+
+def _connected(plan: RepairPlan, old_edges: list[OldEdge], a: uuid.UUID, b: uuid.UUID) -> bool:
+    """Walk what stays readable: planned live edges plus old edges the plan does not mention."""
+    decided = {e.old_edge_id for e in plan.edges if e.old_edge_id is not None}
+    live = [(e.from_node_id, e.to_node_id) for e in plan.edges if e.action != "quarantine"]
+    live += [(e.from_node_id, e.to_node_id) for e in old_edges if e.id not in decided]
+    seen, frontier = {a}, [a]
+    while frontier:
+        node = frontier.pop()
+        for x, y in live:
+            for nxt in (y if x == node else None, x if y == node else None):
+                if nxt is not None and nxt not in seen:
+                    seen.add(nxt)
+                    frontier.append(nxt)
+    return b in seen
+
+
+def test_old_edge_from_a_target_that_stopped_reporting_the_row_is_quarantined() -> None:
+    merged = _old("namespace", "default")
+    cluster_a = _old("target", "a", scope="global")
+    cluster_b = _old("target", "b", scope="global")
+    to_a = _old_edge(merged, cluster_a)
+    to_b = _old_edge(merged, cluster_b)
+
+    plan = build_plan(
+        [merged, cluster_a, cluster_b],
+        [to_a, to_b],
+        [_cluster(TARGET_A, "a", "default"), _cluster(TARGET_B, "b")],
+    )
+
+    assert plan.complete
+    by_old = {n.old_node_id: n for n in plan.nodes}
+    assert (by_old[merged.id].action, by_old[merged.id].scope) == ("adopt", f"target:{TARGET_A}")
+    decisions = {e.old_edge_id: (e.action, e.reason) for e in plan.edges}
+    assert decisions[to_a.id] == ("adopt", "rediscovered")
+    assert decisions[to_b.id] == ("quarantine", "not_rediscovered")
+    assert not _connected(plan, [to_a, to_b], cluster_a.id, cluster_b.id)
+
+
+def test_curated_edge_between_readable_rows_is_left_alone() -> None:
+    ns_a = _old("namespace", "only-a")
+    ns_b = _old("namespace", "only-b")
+    seed = _old("vm", "jump-host", source="curated")
+    operator_links = [
+        _old_edge(ns_a, seed, source="curated"),
+        _old_edge(ns_a, ns_b, source="curated"),
+    ]
+    stale_probe = _old_edge(ns_a, ns_b)
+
+    plan = build_plan(
+        [ns_a, ns_b, seed],
+        [*operator_links, stale_probe],
+        [_cluster(TARGET_A, "a", "only-a"), _cluster(TARGET_B, "b", "only-b")],
+    )
+
+    decisions = {e.old_edge_id: (e.action, e.reason) for e in plan.edges}
+    assert all(e.id not in decisions for e in operator_links)
+    assert decisions[stale_probe.id] == ("quarantine", "not_rediscovered")
 
 
 def test_unavailable_target_makes_the_plan_incomplete() -> None:

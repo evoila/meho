@@ -9,7 +9,8 @@ one row. The repair moves the graph to ``(tenant_id, source_scope, kind,
 name)`` in two operator steps:
 
 * :func:`~.stage.stage_scope_repair` asks every target again and saves
-  a manifest. It never writes to the graph.
+  a manifest. It never writes to the graph, and graph writes wait while
+  it runs.
 * :func:`~.cutover.cut_over` applies a staged manifest in one
   transaction, or refuses and changes nothing.
 

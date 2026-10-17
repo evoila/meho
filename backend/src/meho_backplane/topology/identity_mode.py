@@ -18,10 +18,11 @@ The graph runs in one of two modes, stored in the single row of
 
 Writers read the mode with :func:`read_identity_mode` and
 ``lock=True``. On PostgreSQL that is a shared row lock
-(``SELECT ... FOR SHARE``) held until the writer commits. The cut-over
-takes an update lock on the same row first, so a writer either finishes
-before the cut-over starts or starts after it commits. It never mixes
-the two modes.
+(``SELECT ... FOR SHARE``) held until the writer commits. Staging and
+the cut-over take an update lock on the same row first
+(:func:`lock_identity_mode`), so a writer either finishes before they
+start or starts after they commit. A writer never mixes the two modes,
+and no refresh lands while staging collects discovery.
 
 Readers do not need the mode. ``legacy:<uuid>`` rows only exist after
 the cut-over, and readers skip them in both modes (see
@@ -43,6 +44,7 @@ __all__ = [
     "IDENTITY_STATE",
     "NOT_LEGACY_SCOPE",
     "IdentityMode",
+    "lock_identity_mode",
     "not_legacy_scope",
     "read_identity_mode",
     "scope_for_discovered_node",
@@ -91,6 +93,18 @@ async def read_identity_mode(session: AsyncSession, *, lock: bool = False) -> Id
         stmt = stmt.with_for_update(read=True)
     mode = (await session.execute(stmt)).scalar_one_or_none()
     return "scoped" if mode == "scoped" else "legacy"
+
+
+async def lock_identity_mode(session: AsyncSession) -> str | None:
+    """Take the update lock on the state row; return its raw ``mode``.
+
+    ``None`` means the row is missing. The lock waits for every writer
+    that holds the shared lock, and every new writer waits until the
+    caller's transaction ends. Call it first in a transaction that must
+    not overlap with graph writers (staging, cut-over).
+    """
+    stmt = sa.select(IDENTITY_STATE.c.mode).where(IDENTITY_STATE.c.id == 1).with_for_update()
+    return (await session.execute(stmt)).scalar_one_or_none()
 
 
 def scope_for_discovered_node(target_id: uuid.UUID, kind: str) -> str:

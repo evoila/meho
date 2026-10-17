@@ -18,7 +18,8 @@ the following commit together or none of them do:
 4. Check that every target the plan relies on is still live.
 5. Drop the old unique key ``graph_node_tenant_kind_name_idx``.
 6. Apply the node decisions, then the edge decisions, each with its
-   history row and one audit row per tenant.
+   history row and one audit row per tenant. A probe edge no target
+   reported again is deleted after its history tombstone.
 7. Make ``source_scope`` required and make
    ``graph_node_tenant_scope_kind_name_idx`` unique on
    ``(tenant_id, source_scope, kind, name)``.
@@ -61,7 +62,7 @@ from meho_backplane.topology.history import (
     record_edge_change,
     record_node_change,
 )
-from meho_backplane.topology.identity_mode import IDENTITY_STATE
+from meho_backplane.topology.identity_mode import IDENTITY_STATE, lock_identity_mode
 from meho_backplane.topology.scope_repair.plan import (
     PlannedEdge,
     PlannedNode,
@@ -73,6 +74,7 @@ from meho_backplane.topology.scope_repair.store import (
     StoredManifest,
     load_graph,
     load_manifest,
+    lock_graph_tables,
     mark_manifest,
 )
 
@@ -84,7 +86,6 @@ _OP_ID = "topology.scope_cutover"
 _SCOPE_RE = re.compile(SOURCE_SCOPE_PATTERN)
 
 # Fully literal DDL. Run only inside the cut-over transaction.
-_LOCK_GRAPH_SQL = sa.text("LOCK TABLE graph_node, graph_edge IN EXCLUSIVE MODE")
 _DROP_OLD_KEY_SQL = sa.text("DROP INDEX graph_node_tenant_kind_name_idx")
 _SCOPE_NOT_NULL_SQL = sa.text("ALTER TABLE graph_node ALTER COLUMN source_scope SET NOT NULL")
 _DROP_SCOPE_INDEX_SQL = sa.text("DROP INDEX graph_node_tenant_scope_kind_name_idx")
@@ -159,11 +160,7 @@ async def _lock_and_load(session: AsyncSession, manifest_id: uuid.UUID) -> Store
     conn = await session.connection()
     if conn.dialect.name != "postgresql":
         raise CutoverRefusedError("postgresql_required")
-    mode = (
-        await session.execute(
-            sa.select(IDENTITY_STATE.c.mode).where(IDENTITY_STATE.c.id == 1).with_for_update()
-        )
-    ).scalar_one_or_none()
+    mode = await lock_identity_mode(session)
     if mode != "legacy":
         raise CutoverRefusedError("already_scoped" if mode == "scoped" else "state_missing")
     manifest = await load_manifest(session, manifest_id, lock=True)
@@ -172,7 +169,7 @@ async def _lock_and_load(session: AsyncSession, manifest_id: uuid.UUID) -> Store
     if manifest.status != "staged":
         raise CutoverRefusedError(f"manifest_{manifest.status}")
     _check_plan(manifest.plan)
-    await session.execute(_LOCK_GRAPH_SQL)
+    await lock_graph_tables(session)
     nodes, edges = await load_graph(session)
     if snapshot_version(nodes, edges) != manifest.snapshot_version:
         raise CutoverRefusedError("snapshot_changed")
@@ -309,17 +306,42 @@ def _apply_existing_edge(row: GraphEdge, planned: PlannedEdge) -> None:
         row.last_seen = None
 
 
+async def _delete_edge(
+    session: AsyncSession, row: GraphEdge, tenant_id: uuid.UUID, audit_id: uuid.UUID, now: datetime
+) -> None:
+    """Remove a probe edge no target reported again; its tombstone keeps the row's identity.
+
+    A soft-deleted edge would still be a hop: the closure and path
+    queries keep stale rows reachable by default. The history row
+    (``before.id`` in its snapshot) and the manifest keep the edge
+    addressable, the same way a deleted curated node is.
+    """
+    record_edge_change(
+        session,
+        edge_id=row.id,
+        tenant_id=tenant_id,
+        change_kind=GraphHistoryChangeKind.REMOVED,
+        before=edge_snapshot(row),
+        after=None,
+        audit_id=audit_id,
+        valid_from=now,
+    )
+    await session.delete(row)
+
+
 async def _apply_edges(
     session: AsyncSession,
     plan: RepairPlan,
     audit_ids: dict[uuid.UUID, uuid.UUID],
     now: datetime,
 ) -> None:
-    """Step 6, edge half: insert, re-mark or retire edges, write history.
+    """Step 6, edge half: insert, re-mark, retire or delete edges, write history.
 
-    A quarantined curated edge is left exactly as it is: it is operator
-    data. Readers already skip it because one of its ends is a legacy
-    row.
+    A quarantined edge with a legacy end is retired when probe-made and
+    left exactly as it is when curated (operator data); readers skip it
+    either way because of the legacy row. A quarantined probe edge that
+    no target reported again (``not_rediscovered``) is deleted after its
+    tombstone, see :func:`_delete_edge`.
     """
     existing_ids = [e.edge_id for e in plan.edges if e.action != "publish"]
     rows: dict[uuid.UUID, GraphEdge] = {}
@@ -343,6 +365,9 @@ async def _apply_edges(
             )
             continue
         row = rows[planned.edge_id]
+        if planned.action == "quarantine" and planned.reason == "not_rediscovered":
+            await _delete_edge(session, row, planned.tenant_id, audit_id, now)
+            continue
         was_live = row.last_seen is not None
         before = edge_snapshot(row)
         _apply_existing_edge(row, planned)

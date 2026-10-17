@@ -13,6 +13,9 @@ Coverage:
 
 * **Staged manifest** -- staging writes only a manifest; the two
   ``default`` namespaces stage as distinct ``target:<uuid>`` identities.
+* **Paused writes** -- a refresh that starts while staging asks a target
+  waits until the manifest is saved, so its new row is not in the plan;
+  the cut-over then refuses the changed snapshot.
 * **Atomic cut-over** -- one transaction publishes the scoped rows, sets
   the merged row aside as ``legacy:<id>``, swaps the unique key, makes
   ``source_scope`` required and switches the writers. No path joins the
@@ -29,14 +32,17 @@ Coverage:
 * **Rollback guard** -- a second cut-over, a new staging run and the
   ``0109`` downgrade all refuse once the graph is scoped.
 * **Curated quarantine** -- a curated edge to the merged row stays, with
-  its history, but leaves every graph answer.
+  its history, but leaves every graph answer, the edge listing included.
+* **Old edge to another target** -- when a target stops reporting a
+  shared row, its old edge to that row is deleted with a tombstone, so
+  no path joins the two targets.
 """
 
 from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from datetime import UTC, datetime
 from typing import Any, ClassVar
 from unittest.mock import AsyncMock, patch
@@ -51,7 +57,13 @@ from meho_backplane.connectors.registry import clear_registry, register_connecto
 from meho_backplane.connectors.schemas import EdgeHint, NodeHint, TopologyHints
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.migrations import alembic_config
-from meho_backplane.db.models import GraphEdge, GraphNode, GraphNodeHistory, Target
+from meho_backplane.db.models import (
+    GraphEdge,
+    GraphEdgeHistory,
+    GraphNode,
+    GraphNodeHistory,
+    Target,
+)
 from meho_backplane.operations._handler_resolve import reset_connector_instance_cache
 from meho_backplane.topology.nodes import create_or_get_node
 from meho_backplane.topology.query import (
@@ -59,6 +71,7 @@ from meho_backplane.topology.query import (
     find_dependencies,
     find_dependents,
     find_path,
+    list_edges,
 )
 from meho_backplane.topology.refresh import refresh_target_topology
 from meho_backplane.topology.scope_repair import (
@@ -93,10 +106,15 @@ _RESET_SQL = (
 
 
 class _FakeCluster(Connector):
-    """Kubernetes-shaped populator; answers per target id from :attr:`answers`."""
+    """Kubernetes-shaped populator; answers per target id from :attr:`answers`.
+
+    :attr:`during_discovery` runs a hook before a target answers, to
+    model something else happening while staging asks that target.
+    """
 
     product = "fakek8s"
     answers: ClassVar[dict[uuid.UUID, TopologyHints | Exception]] = {}
+    during_discovery: ClassVar[dict[uuid.UUID, Callable[[], Awaitable[None]]]] = {}
 
     async def fingerprint(self, target: Any) -> Any:  # pragma: no cover - unused
         raise NotImplementedError
@@ -110,6 +128,9 @@ class _FakeCluster(Connector):
         raise NotImplementedError
 
     async def discover_topology(self, target: Any) -> TopologyHints:
+        hook = type(self).during_discovery.get(target.id)
+        if hook is not None:
+            await hook()
         answer = type(self).answers[target.id]
         if isinstance(answer, Exception):
             raise answer
@@ -171,6 +192,7 @@ def _fake_registry() -> Iterator[None]:
     reset_connector_instance_cache()
     register_connector_v2(product="fakek8s", version="", impl_id="", cls=_FakeCluster)
     _FakeCluster.answers = {}
+    _FakeCluster.during_discovery = {}
     yield
     clear_registry()
     reset_connector_instance_cache()
@@ -259,6 +281,34 @@ async def test_stage_writes_only_a_manifest_with_distinct_scoped_identities(scop
     async with get_sessionmaker()() as session:
         stored = await load_manifest(session, manifest.id)
     assert stored is not None and stored.plan == manifest.plan
+
+
+async def test_refresh_during_staging_waits_and_stays_out_of_the_manifest(scope_db: None) -> None:
+    # Targets are asked in id order: a first, then b. While b is being
+    # asked, a refresh of a tries to add a namespace.
+    a, b = await _legacy_graph(a_id=uuid.UUID(int=1), b_id=uuid.UUID(int=2))
+    refresh: list[asyncio.Task[None]] = []
+    finished_during_staging: list[bool] = []
+
+    async def _refresh_a_meanwhile() -> None:
+        refresh.append(
+            asyncio.create_task(_refresh(a, _cluster("cluster-a", "default", "only-a", "fresh")))
+        )
+        await asyncio.sleep(1.0)
+        finished_during_staging.append(refresh[0].done())
+
+    _FakeCluster.during_discovery[b.id] = _refresh_a_meanwhile
+    manifest = await stage_scope_repair()
+
+    assert finished_during_staging == [False], "graph writes wait while staging runs"
+    assert manifest.status == "staged"
+    assert all(n.name != "fresh" for n in manifest.plan.nodes)
+    await asyncio.wait_for(refresh[0], timeout=30)
+    assert any(n.name == "fresh" for n in await _nodes()), "the refresh ran after staging"
+    with pytest.raises(CutoverRefusedError) as excinfo:
+        await cut_over(manifest.id)
+    assert excinfo.value.reason == "snapshot_changed"
+    assert await _mode() == "legacy"
 
 
 async def test_cutover_publishes_the_scoped_graph_in_one_step(scope_db: None) -> None:
@@ -504,6 +554,8 @@ async def test_curated_edge_to_a_merged_row_is_quarantined_with_history(scope_db
     manifest = await stage_scope_repair()
     quarantined = [e for e in manifest.plan.edges if e.action == "quarantine"]
     assert {e.source for e in quarantined} == {"auto", "curated"}
+    async with get_sessionmaker()() as session:
+        assert len(await list_edges(session, TENANT, source="curated")) == 1
 
     await cut_over(manifest.id)
 
@@ -527,3 +579,50 @@ async def test_curated_edge_to_a_merged_row_is_quarantined_with_history(scope_db
     assert len(history) >= 2, "the pre-cut-over history is kept"
     closure = await find_dependencies(_operator(), "ops", kind="vault-role")
     assert [n.name for n in closure] == ["ops"], "the legacy row is not a hop"
+    async with get_sessionmaker()() as session:
+        assert await list_edges(session, TENANT, source="curated") == []
+        assert await list_edges(session, TENANT, from_ref="ops") == []
+
+
+async def test_old_edge_to_a_target_that_stopped_reporting_the_row_is_removed(
+    scope_db: None,
+) -> None:
+    a, b = await _legacy_graph()
+    merged = next(n for n in await _nodes() if n.name == "default")
+    cluster_b = next(n for n in await _nodes() if n.name == "cluster-b")
+    async with get_sessionmaker()() as session:
+        old_edge = (
+            await session.execute(
+                sa.select(GraphEdge).where(
+                    GraphEdge.from_node_id == merged.id, GraphEdge.to_node_id == cluster_b.id
+                )
+            )
+        ).scalar_one()
+    _FakeCluster.answers[b.id] = _cluster("cluster-b", "only-b")
+
+    manifest = await stage_scope_repair()
+    decisions = {e.old_edge_id: (e.action, e.reason) for e in manifest.plan.edges}
+    assert decisions[old_edge.id] == ("quarantine", "not_rediscovered")
+    await cut_over(manifest.id)
+
+    nodes = {(n.source_scope, n.name): n for n in await _nodes()}
+    assert nodes[(f"target:{a.id}", "default")].id == merged.id, "one claimant adopts the row"
+    async with get_sessionmaker()() as session:
+        assert (await session.get(GraphEdge, old_edge.id)) is None
+        tombstones = (
+            (
+                await session.execute(
+                    sa.select(GraphEdgeHistory).where(
+                        GraphEdgeHistory.snapshot["before"]["id"].as_string() == str(old_edge.id),
+                        GraphEdgeHistory.change_kind == "removed",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(tombstones) == 1, "the deleted edge keeps a history tombstone"
+    for src, dst in (("cluster-a", "cluster-b"), ("cluster-b", "cluster-a")):
+        assert await find_path(_operator(), src, dst, from_kind="target", to_kind="target") is None
+    closure = await find_dependents(_operator(), "cluster-b", kind="target")
+    assert {n.name for n in closure} == {"cluster-b", "only-b"}

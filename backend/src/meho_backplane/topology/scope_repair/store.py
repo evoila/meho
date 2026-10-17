@@ -3,8 +3,10 @@
 
 """Database reads and writes for the scope repair (#3749).
 
-* :func:`load_graph` reads every ``graph_node`` / ``graph_edge`` row as
-  the plan's :class:`~.plan.OldNode` / :class:`~.plan.OldEdge`.
+* :func:`lock_graph_tables` blocks graph writes until the caller's
+  transaction ends; :func:`load_graph` then reads every ``graph_node`` /
+  ``graph_edge`` row as the plan's :class:`~.plan.OldNode` /
+  :class:`~.plan.OldEdge`.
 * :data:`MANIFEST` is the Core table for ``topology_scope_manifest``
   (migration ``0109``); :func:`save_manifest`, :func:`load_manifest` and
   :func:`mark_manifest` read and write it.
@@ -29,6 +31,7 @@ __all__ = [
     "StoredManifest",
     "load_graph",
     "load_manifest",
+    "lock_graph_tables",
     "mark_manifest",
     "save_manifest",
 ]
@@ -58,6 +61,22 @@ class StoredManifest:
     created_by: str
     created_at: datetime
     refusal_reason: str | None
+
+
+# Fully literal. Reads go on; inserts, updates and deletes wait.
+_LOCK_GRAPH_SQL = sa.text("LOCK TABLE graph_node, graph_edge IN EXCLUSIVE MODE")
+
+
+async def lock_graph_tables(session: AsyncSession) -> None:
+    """Pause graph writes until the caller's transaction ends (PostgreSQL).
+
+    Every writer waits, whether or not it reads the identity mode. Reads
+    keep working. SQLite has no such lock and no concurrent writers in
+    this code base, so the call is a no-op there.
+    """
+    conn = await session.connection()
+    if conn.dialect.name == "postgresql":
+        await session.execute(_LOCK_GRAPH_SQL)
 
 
 async def load_graph(session: AsyncSession) -> tuple[list[OldNode], list[OldEdge]]:

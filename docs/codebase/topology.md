@@ -362,8 +362,9 @@ operator step, not a migration. Code: `topology/scope_repair/`.
 **Mode.** `topology_identity_state` (migration `0109`) holds one row:
 `mode` is `legacy` or `scoped`. Every install starts `legacy`; only the
 cut-over sets `scoped`. `topology/identity_mode.py` reads it. Writers
-read it with `FOR SHARE` inside their own transaction, and the cut-over
-takes `FOR UPDATE` first, so a writer never mixes the two modes.
+read it with `FOR SHARE` inside their own transaction. Staging and the
+cut-over take `FOR UPDATE` first, so a writer never mixes the two modes
+and no write lands while staging runs.
 
 | Writer | `legacy` mode | `scoped` mode |
 |---|---|---|
@@ -390,6 +391,15 @@ the graph `snapshot_version` and the plan as JSON. A target that fails
 is recorded with its exception class name only. The plan stores keys,
 scopes, ids and reasons, never properties.
 
+The whole run is one transaction. It holds the mode row (`FOR UPDATE`)
+and `LOCK TABLE graph_node, graph_edge IN EXCLUSIVE MODE`, so graph
+writes wait until the manifest is saved. Reads go on. A refresh that
+starts while a target is being asked cannot add a row the plan would
+set aside as unreported: the plan is built against the graph the
+targets were asked against. Waiting writers run after staging, so run
+the cut-over soon after; a refresh that changes the graph in between
+makes the cut-over refuse (`snapshot_changed`), and you stage again.
+
 Plan rules per tenant. A *claim* is one target reporting a node, in the
 scope above.
 
@@ -403,8 +413,15 @@ scope above.
 A claim with no existing row is `publish` (a new row with empty
 properties; the next refresh fills them). Discovered edges link the
 final ids: `adopt` an existing edge with the same ends and kind, else
-`publish`. Existing edges touching a `legacy` row are `quarantine`. The
-plan is the same whatever order the targets answered in. It is
+`publish`. Every other existing edge is decided too:
+
+| Existing edge no discovery adopted | Decision |
+|---|---|
+| touches a `legacy` row | `quarantine` (`endpoint_set_aside`): stays for history; readers skip it through the legacy row |
+| probe-made, no target reported it again | `quarantine` (`not_rediscovered`): the cut-over writes its tombstone and deletes the row. It was another target's claim on a row that now belongs to one target, so it would join two targets that share nothing |
+| curated, both ends stay readable | left as it is (operator data) |
+
+The plan is the same whatever order the targets answered in. It is
 *complete* (manifest `staged`) only when every target answered and there
 is no problem; otherwise the manifest is `incomplete`. Problems:
 `target_unavailable`, `unresolved_edge` (an edge to a node the same
@@ -429,8 +446,11 @@ that share a name) and the plan does not use them.
    snapshots now include `source_scope`) and one audit row per tenant
    (`topology.scope_cutover`, `operation_execution`). `adopt` sets the
    scope, `target_id` (probe rows) and `last_seen`; `legacy` sets
-   `legacy:<id>` and soft-deletes probe rows; quarantined probe edges are
-   soft-deleted, quarantined curated edges are left as they are;
+   `legacy:<id>` and soft-deletes probe rows; a quarantined edge with a
+   legacy end is soft-deleted when probe-made and left as it is when
+   curated; a probe edge no target reported again is deleted after a
+   `removed` history row (a soft-deleted edge would still be a hop,
+   because traversal keeps stale rows by default);
 7. `source_scope` `SET NOT NULL`; recreate
    `graph_node_tenant_scope_kind_name_idx` as unique;
 8. set `mode = 'scoped'`; mark the manifest `cut_over`.
@@ -455,8 +475,10 @@ start `legacy`, so the ORM matches them. A later migration can require
 and every reader skips them: `resolve_node` (and so annotate, bulk
 import, history and the closure verbs), the traversal CTEs (never step
 onto one), `find_path` (never a hop), the UI resolver and the UI BFS
-overlays. `list_nodes` and the timeline still show them, with
-`scope_status = legacy`, for repair reports. When one `(kind, name)`
+overlays. `list_edges` skips every edge with a `legacy:` end, on the
+REST, CLI and MCP edge listings alike. `list_nodes` and the timeline
+still show legacy rows, with `scope_status = legacy`, for repair
+reports. When one `(kind, name)`
 exists in several scopes, `resolve_node` raises `AmbiguousNodeError`
 with `scopes` set instead of picking one; the traversal and path
 statements anchor on the resolved row id.
@@ -465,8 +487,10 @@ statements anchor on the resolved row id.
 snapshot), `tests/migrations/test_migration_0109_add_topology_scope_cutover_state.py`
 (SQLite: tables, CHECKs, downgrade guard) and
 `tests/integration/test_topology_scope_cutover.py` (PostgreSQL: staged
-manifest, atomic cut-over, refusals, interrupted cut-over, soft-delete,
-rollback guard, curated quarantine).
+manifest, a refresh that waits during staging, atomic cut-over,
+refusals, interrupted cut-over, soft-delete, rollback guard, curated
+quarantine with the edge listing, an old edge from a target that
+stopped reporting a shared row).
 
 ### `TopologyPath` — frozen Pydantic v2 (read half)
 

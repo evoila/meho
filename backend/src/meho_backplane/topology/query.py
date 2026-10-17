@@ -862,6 +862,10 @@ _MAX_EDGE_LIMIT = 1000
 # set deterministically and a two-page sweep reassembles to the unpaged
 # set with no gaps or duplicates.
 #
+# Edges with a ``legacy:`` end are excluded as well (#3749): the scope
+# cut-over sets such rows aside, and every reader skips them, so an
+# edge that touches one is never an answer either.
+#
 # Soft-deleted edges (``e.last_seen IS NULL``) are excluded from this
 # listing by the ``e.last_seen IS NOT NULL`` predicate below — surfacing
 # them would clutter an inventory view with stale relationships. This is
@@ -902,6 +906,8 @@ _LIST_EDGES_SQL = text(
     JOIN graph_node t ON t.id = e.to_node_id
     WHERE e.tenant_id = :tenant_id
       AND e.last_seen IS NOT NULL
+      AND (f.source_scope IS NULL OR f.source_scope NOT LIKE 'legacy:%')
+      AND (t.source_scope IS NULL OR t.source_scope NOT LIKE 'legacy:%')
       AND (CAST(:kind AS text) IS NULL OR e.kind = :kind)
       AND (CAST(:source AS text) IS NULL OR e.source = :source)
       AND (CAST(:from_node_id AS uuid) IS NULL OR e.from_node_id = :from_node_id)
@@ -1053,7 +1059,8 @@ async def list_edges(
         ``(last_seen DESC NULLS LAST, id)`` order, capped at
         ``limit``. Soft-deleted edges (``last_seen IS NULL``) are
         excluded — an inventory view should not surface stale
-        relationships. Empty list when no edge matches in the
+        relationships. Edges with a ``legacy:`` scoped end are
+        excluded too (#3749). Empty list when no edge matches in the
         tenant.
 
     Raises:

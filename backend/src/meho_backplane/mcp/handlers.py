@@ -119,6 +119,7 @@ from meho_backplane.mcp.registry import (
     surface_visible,
 )
 from meho_backplane.mcp.server import (
+    McpExecutionFailedError,
     McpInvalidParamsError,
     McpPermissionDeniedError,
     register_method,
@@ -506,10 +507,16 @@ async def handle_tools_call(
         # consistently with the wire outcome instead of mis-reporting a
         # crash. Explicit pre-dispatch branches already set 400/403/404,
         # so they flow through here unchanged; only the residual init 500
-        # is corrected.
+        # is corrected. A handler that reports a failed MEHO change
+        # (:class:`McpExecutionFailedError`, #3757) is projected to 502,
+        # the REST status for the same failure, so the row and the
+        # broadcast record a failed attempt, not a refusal.
         if status_code == 500:
-            status_code = 403
-            handler_rejected = not isinstance(exc, McpPermissionDeniedError)
+            if isinstance(exc, McpExecutionFailedError):
+                status_code = 502
+            else:
+                status_code = 403
+                handler_rejected = not isinstance(exc, McpPermissionDeniedError)
         raise
     finally:
         try:
@@ -518,6 +525,7 @@ async def handle_tools_call(
             row_class = wrapper_row_class(
                 status_code=_decision_status(status_code, handler_rejected=handler_rejected),
                 routine=mcp_tool_is_routine(audit_payload["op_class"]),
+                operator_sub=operator.sub,
             )
             if row_class is None:
                 note_request_status(status_code)
@@ -714,7 +722,10 @@ def _decision_status(status_code: int, *, handler_rejected: bool) -> int:
     row and the broadcast (#1481), but it is a validation failure, not a
     policy refusal, so the decision sees it as ``400``. Refusals are the
     explicit role / capability / surface / add-on gates and a handler that
-    raises :class:`McpPermissionDeniedError`; those keep their ``403``.
+    raises :class:`McpPermissionDeniedError`; those keep their ``403``. A
+    failed MEHO change (:class:`McpExecutionFailedError`) is already
+    ``502`` and keeps it, so the attempt gets an ``operation_execution``
+    row.
     """
     return 400 if handler_rejected else status_code
 
@@ -920,6 +931,7 @@ async def handle_resources_read(
         row_class = wrapper_row_class(
             status_code=_decision_status(status_code, handler_rejected=handler_rejected),
             routine=True,
+            operator_sub=operator.sub,
         )
         if row_class is None:
             note_request_status(status_code)

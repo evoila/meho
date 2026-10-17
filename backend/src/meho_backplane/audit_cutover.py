@@ -13,9 +13,11 @@ With ``AUDIT_WRAPPER_ROWS_RETIRED=true`` the two wrapper writers
 call :func:`~meho_backplane.mcp.audit.write_mcp_audit_row`) ask
 :func:`wrapper_row_class` what to write. The rules, in order:
 
-1. A classified writer already wrote a row for this request (the
-   dispatcher, an approval decision, a topology edit, ...): write nothing.
-   That row is the record; a wrapper row would count it twice.
+1. A classified writer already wrote a row for this request in the
+   caller's name (the dispatcher, an approval decision, a topology edit,
+   ...): write nothing. That row is the record; a wrapper row would count
+   it twice. A row under another identity (a system job's name) does not
+   count: the wrapper row stays, so the record still says who called.
 2. The request was refused (HTTP 401 / 403): write a ``policy_decision``
    row. A refusal is a decision, so it stays on the record.
 3. The request is routine (a read, a search, a list, a resource read, a
@@ -45,10 +47,11 @@ How rule 1 knows
 
 The wrapper opens a scope (:func:`open_classified_record_scope`) for one
 request or one MCP call. A SQLAlchemy ``init`` listener on
-:class:`~meho_backplane.db.models.AuditLog` marks the scope when any code
-in the request builds a row with a class other than ``legacy_request``.
-The scope object is shared by reference, so code that runs in a copied
-context (a thread pool, a task group) still marks the same scope.
+:class:`~meho_backplane.db.models.AuditLog` records, on the scope, the
+``operator_sub`` of every row built with a class other than
+``legacy_request``. The wrapper then asks whether one of them is the
+caller's. The scope object is shared by reference, so code that runs in a
+copied context (a thread pool, a task group) still marks the same scope.
 """
 
 from __future__ import annotations
@@ -129,12 +132,12 @@ _DENIED_STATUSES: Final[frozenset[int]] = frozenset({401, 403})
 
 
 class _ClassifiedRecords:
-    """Mutable marker for one request: did a classified writer build a row?"""
+    """Mutable marker for one request: whose classified rows were built?"""
 
-    __slots__ = ("seen",)
+    __slots__ = ("operator_subs",)
 
     def __init__(self) -> None:
-        self.seen = False
+        self.operator_subs: set[str] = set()
 
 
 _current_scope: ContextVar[_ClassifiedRecords | None] = ContextVar(
@@ -169,21 +172,26 @@ def close_classified_record_scope(token: Token[_ClassifiedRecords | None]) -> No
         _current_scope.set(None)
 
 
-def classified_record_seen() -> bool:
-    """Return whether code in the open scope built a classified row."""
+def classified_record_seen(operator_sub: str) -> bool:
+    """Return whether code in the open scope built a classified row for this caller."""
     scope = _current_scope.get()
-    return scope is not None and scope.seen
+    return scope is not None and operator_sub in scope.operator_subs
 
 
 @event.listens_for(AuditLog, "init")
 def _note_classified_record(_target: AuditLog, _args: Any, kwargs: dict[str, Any]) -> None:
-    """Mark the open scope when a row with a non-legacy class is built."""
+    """Record whose row it is when a row with a non-legacy class is built."""
     scope = _current_scope.get()
     if scope is None:
         return
     event_class = kwargs.get("event_class")
-    if event_class is not None and event_class != AuditEventClass.LEGACY_REQUEST:
-        scope.seen = True
+    operator_sub = kwargs.get("operator_sub")
+    if (
+        event_class is not None
+        and event_class != AuditEventClass.LEGACY_REQUEST
+        and isinstance(operator_sub, str)
+    ):
+        scope.operator_subs.add(operator_sub)
 
 
 def rest_request_is_routine(method: str, route_template: str | None) -> bool:
@@ -198,15 +206,21 @@ def mcp_tool_is_routine(op_class: str) -> bool:
     return op_class in MCP_ROUTINE_OP_CLASSES
 
 
-def wrapper_row_class(*, status_code: int, routine: bool) -> AuditEventClass | None:
+def wrapper_row_class(
+    *,
+    status_code: int,
+    routine: bool,
+    operator_sub: str,
+) -> AuditEventClass | None:
     """Return the class of the wrapper row to write, or ``None`` for no row.
 
-    See the module docstring for the rules. With the cutover off this is
-    always ``legacy_request``.
+    See the module docstring for the rules. ``operator_sub`` is the caller
+    the wrapper row would name; only a classified row in that name counts
+    as the record. With the cutover off this is always ``legacy_request``.
     """
     if not wrapper_rows_retired():
         return AuditEventClass.LEGACY_REQUEST
-    if classified_record_seen():
+    if classified_record_seen(operator_sub):
         return None
     if status_code in _DENIED_STATUSES:
         return AuditEventClass.POLICY_DECISION

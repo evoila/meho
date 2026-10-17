@@ -1002,6 +1002,7 @@ class AuditMiddleware:
                 method,
                 route_template if isinstance(route_template, str) else None,
             ),
+            operator_sub=operator_sub,
         )
         if event_class is None:
             await _forward_without_audit_row(send, buffered, result)

@@ -16,7 +16,9 @@ actions and decisions. This file proves it across the fronts:
   (success, connector error, or an audit that could not commit) has only
   the dispatcher's record; an approval decision has only its own record;
   a MEHO change with no record of its own writes one
-  ``operation_execution`` row.
+  ``operation_execution`` row; a change whose own record names another
+  identity keeps the caller's row; a write that failed in Keycloak keeps
+  one ``operation_execution`` row.
 """
 
 from __future__ import annotations
@@ -43,8 +45,12 @@ from meho_backplane.api.v1.approvals import router as approvals_router
 from meho_backplane.api.v1.memory import router as memory_router
 from meho_backplane.api.v1.operations import router as operations_router
 from meho_backplane.api.v1.retrieve_usage import router as retrieve_usage_router
+from meho_backplane.api.v1.runner_principals import router as runner_principals_router
 from meho_backplane.audit import AuditMiddleware, _write_audit_row
+from meho_backplane.auth.agent_principals import AgentPrincipalService
+from meho_backplane.auth.keycloak_admin import KeycloakAdminError
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.runner_principals import RunnerPrincipalService
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, OperationResult, ProbeResult
@@ -54,6 +60,7 @@ from meho_backplane.db.models import (
     ApprovalRequestStatus,
     AuditEventClass,
     AuditLog,
+    RunnerPrincipal,
 )
 from meho_backplane.docs_search.target_scope import TargetDeniedError
 from meho_backplane.main import app as production_app
@@ -61,6 +68,7 @@ from meho_backplane.mcp.audit import write_mcp_audit_row
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.tools import docs as docs_tools
+from meho_backplane.memory.audit import INTERNAL_METHOD, write_internal_audit_row
 from meho_backplane.memory.rbac import PermissionDeniedError
 from meho_backplane.memory.schemas import MemoryScope
 from meho_backplane.memory.service import MemoryService
@@ -148,37 +156,45 @@ def test_default_keeps_every_wrapper_row() -> None:
     for status in (200, 403, 422, 500):
         for routine in (True, False):
             assert (
-                audit_cutover.wrapper_row_class(status_code=status, routine=routine)
+                audit_cutover.wrapper_row_class(
+                    status_code=status, routine=routine, operator_sub="op"
+                )
                 == AuditEventClass.LEGACY_REQUEST
             )
 
 
 @pytest.mark.parametrize(
-    ("status", "routine", "seen", "expected"),
+    ("status", "routine", "recorded_by", "expected"),
     [
-        (200, True, False, None),
-        (500, True, False, None),
-        (400, False, False, None),
-        (404, False, False, None),
-        (422, False, False, None),
-        (403, True, False, AuditEventClass.POLICY_DECISION),
-        (401, False, False, AuditEventClass.POLICY_DECISION),
-        (200, False, False, AuditEventClass.OPERATION_EXECUTION),
-        (201, False, False, AuditEventClass.OPERATION_EXECUTION),
-        (500, False, False, AuditEventClass.OPERATION_EXECUTION),
-        (200, False, True, None),
-        (403, False, True, None),
+        (200, True, None, None),
+        (500, True, None, None),
+        (400, False, None, None),
+        (404, False, None, None),
+        (422, False, None, None),
+        (403, True, None, AuditEventClass.POLICY_DECISION),
+        (401, False, None, AuditEventClass.POLICY_DECISION),
+        (200, False, None, AuditEventClass.OPERATION_EXECUTION),
+        (201, False, None, AuditEventClass.OPERATION_EXECUTION),
+        (500, False, None, AuditEventClass.OPERATION_EXECUTION),
+        (200, False, "op", None),
+        (403, False, "op", None),
+        # A record under another identity does not say who called.
+        (200, False, "system:job", AuditEventClass.OPERATION_EXECUTION),
+        (403, False, "system:job", AuditEventClass.POLICY_DECISION),
     ],
 )
 @pytest.mark.usefixtures("cutover_on")
 def test_decision_table(
-    status: int, routine: bool, seen: bool, expected: AuditEventClass | None
+    status: int, routine: bool, recorded_by: str | None, expected: AuditEventClass | None
 ) -> None:
     token = audit_cutover.open_classified_record_scope()
     try:
-        if seen:
-            AuditLog(event_class=AuditEventClass.APPROVAL_DECISION)
-        assert audit_cutover.wrapper_row_class(status_code=status, routine=routine) == expected
+        if recorded_by is not None:
+            AuditLog(event_class=AuditEventClass.APPROVAL_DECISION, operator_sub=recorded_by)
+        assert (
+            audit_cutover.wrapper_row_class(status_code=status, routine=routine, operator_sub="op")
+            == expected
+        )
     finally:
         audit_cutover.close_classified_record_scope(token)
 
@@ -186,14 +202,16 @@ def test_decision_table(
 def test_legacy_rows_do_not_count_as_classified() -> None:
     token = audit_cutover.open_classified_record_scope()
     try:
-        AuditLog(event_class=AuditEventClass.LEGACY_REQUEST)
-        AuditLog()
-        assert audit_cutover.classified_record_seen() is False
-        AuditLog(event_class="operation_execution")
-        assert audit_cutover.classified_record_seen() is True
+        AuditLog(event_class=AuditEventClass.LEGACY_REQUEST, operator_sub="op")
+        AuditLog(operator_sub="op")
+        AuditLog(event_class=AuditEventClass.OPERATION_EXECUTION)
+        AuditLog(event_class=AuditEventClass.OPERATION_EXECUTION, operator_sub="system:job")
+        assert audit_cutover.classified_record_seen("op") is False
+        AuditLog(event_class="operation_execution", operator_sub="op")
+        assert audit_cutover.classified_record_seen("op") is True
     finally:
         audit_cutover.close_classified_record_scope(token)
-    assert audit_cutover.classified_record_seen() is False
+    assert audit_cutover.classified_record_seen("op") is False
 
 
 @pytest.mark.parametrize("writer", [_write_audit_row, write_mcp_audit_row])
@@ -361,6 +379,22 @@ async def _refused(operator: Operator = Depends(verify_jwt_and_bind)) -> dict[st
     raise HTTPException(status_code=403, detail="insufficient_role")
 
 
+@_probe.post("/system-recorded", status_code=201)
+async def _system_recorded(operator: Operator = Depends(verify_jwt_and_bind)) -> dict[str, str]:
+    """A MEHO change whose own record names a system identity, not the caller."""
+    await write_internal_audit_row(
+        event_class=AuditEventClass.OPERATION_EXECUTION,
+        operator_sub="system:probe",
+        tenant_id=operator.tenant_id,
+        method=INTERNAL_METHOD,
+        path="probe.system_recorded",
+        status_code=200,
+        duration_ms=1.0,
+        payload={},
+    )
+    return {"recorded": "by-system"}
+
+
 class _Caller:
     """The REST caller; tests switch its role."""
 
@@ -390,6 +424,7 @@ def _rest_client() -> tuple[TestClient, _Caller]:
     rest_app.include_router(search_docs_api.router)
     rest_app.include_router(memory_router)
     rest_app.include_router(retrieve_usage_router)
+    rest_app.include_router(runner_principals_router)
     rest_app.include_router(_probe)
     caller = _Caller()
     rest_app.dependency_overrides[verify_jwt_and_bind] = caller
@@ -491,6 +526,58 @@ async def test_rest_meho_change_without_own_record_is_an_execution(
         ("operation_execution", "POST", "/api/v1/cutover-probe/broken"),
     ]
     assert [row.status_code for row in rows] == [201, 500]
+
+
+async def test_rest_record_under_another_identity_keeps_the_callers_row(
+    rest: tuple[TestClient, _Caller],
+) -> None:
+    """A record in a system job's name does not say who called; the wrapper row stays."""
+    client, caller = rest
+    response = client.post("/api/v1/cutover-probe/system-recorded")
+    assert response.status_code == 201
+
+    rows = await _audit_rows()
+    assert sorted(_shape(rows)) == [
+        ("operation_execution", "INTERNAL", "probe.system_recorded"),
+        ("operation_execution", "POST", "/api/v1/cutover-probe/system-recorded"),
+    ]
+    assert {row.operator_sub for row in rows} == {"system:probe", caller.sub}
+
+
+async def test_rest_runner_revocation_keeps_its_own_record_in_the_callers_name(
+    rest: tuple[TestClient, _Caller],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Revoking a runner leaves one row, and that row says who revoked it."""
+    client, caller = rest
+    caller.role = TenantRole.TENANT_ADMIN
+    async with get_sessionmaker()() as session:
+        session.add(
+            RunnerPrincipal(
+                id=uuid.uuid4(),
+                tenant_id=_TENANT,
+                name="edge-runner",
+                keycloak_client_id="runner:edge-runner",
+                keycloak_internal_id="kc-edge-runner",
+                owner_sub=caller.sub,
+                created_by_sub=caller.sub,
+                revoked=False,
+            )
+        )
+        await session.commit()
+
+    async def _keycloak_disabled(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(RunnerPrincipalService, "_disable_keycloak_client", _keycloak_disabled)
+
+    response = client.delete("/api/v1/runner-principals/edge-runner/revoke")
+    assert response.status_code == 200, response.text
+
+    rows = await _audit_rows()
+    assert _shape(rows) == [("operation_execution", "INTERNAL", "runner.principal.revoked")]
+    assert rows[0].operator_sub == caller.sub
+    assert rows[0].request_id is not None
 
 
 async def _seed_pending_request() -> uuid.UUID:
@@ -891,3 +978,42 @@ async def test_mcp_scope_refusals_write_one_decision_row(retired: bool) -> None:
         ],
     )
     assert {row.status_code for row in rows} == {403}
+
+
+# ===========================================================================
+# A write that failed (MCP)
+# ===========================================================================
+
+
+async def test_mcp_failed_write_keeps_one_execution_row(
+    retired: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write that fails in Keycloak is a failed attempt, not a bad argument.
+
+    REST answers 502 and writes an ``operation_execution`` row. The MCP
+    handler raises ``McpExecutionFailedError`` for the same failure, so the
+    attempt keeps one ``operation_execution`` row with the switch on.
+    """
+    op = build_operator(TenantRole.TENANT_ADMIN)
+
+    async def _keycloak_down(*_args: Any, **_kwargs: Any) -> Any:
+        raise KeycloakAdminError("keycloak unreachable")
+
+    monkeypatch.setattr(AgentPrincipalService, "revoke", _keycloak_down)
+
+    async def _fake_verify() -> Operator:
+        structlog.contextvars.bind_contextvars(operator_sub=op.sub, tenant_id=str(op.tenant_id))
+        return op
+
+    production_app.dependency_overrides[verify_mcp_jwt_and_bind] = _fake_verify
+    try:
+        with TestClient(production_app) as client:
+            result = _tool_call(client, "meho_agent_principals_revoke", {"name": "agent-x"})
+            assert result["error"]["message"] == "Keycloak admin error: KeycloakAdminError"
+    finally:
+        production_app.dependency_overrides.pop(verify_mcp_jwt_and_bind, None)
+
+    rows = await _audit_rows()
+    row_class = "operation_execution" if retired else "legacy_request"
+    assert _shape(rows) == [(row_class, "MCP", "/mcp/tools/call/meho_agent_principals_revoke")]
+    assert rows[0].status_code == 502

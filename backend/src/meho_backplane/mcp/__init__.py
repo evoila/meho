@@ -96,6 +96,7 @@ from meho_backplane.mcp.registry import (
     register_mcp_tool,
 )
 from meho_backplane.mcp.server import (
+    McpExecutionFailedError,
     McpInvalidParamsError,
     McpPermissionDeniedError,
     register_method,
@@ -103,6 +104,7 @@ from meho_backplane.mcp.server import (
 )
 
 __all__ = [
+    "McpExecutionFailedError",
     "McpInvalidParamsError",
     "McpPermissionDeniedError",
     "ResourceHandler",

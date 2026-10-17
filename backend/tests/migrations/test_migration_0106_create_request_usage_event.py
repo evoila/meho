@@ -24,7 +24,7 @@ from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
 _REVISION = "0106"
-_DOWN_REVISION = "0104"
+_DOWN_REVISION = "0105"
 _TABLE = "request_usage_event"
 _INDEXES = {
     "request_usage_event_tenant_occurred_idx",

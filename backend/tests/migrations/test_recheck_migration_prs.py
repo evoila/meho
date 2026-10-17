@@ -72,9 +72,27 @@ class FakePullRequest:
         _write(self.root / VERSIONS_DIR, name, revision, down_revision)
         self.files.append(f"{VERSIONS_DIR}/{name}")
 
+    def add_link(self, name: str, target: pathlib.Path) -> None:
+        """A symbolic link in the migration directory, kept as a link in the archive."""
+        directory = self.root / VERSIONS_DIR
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / name).symlink_to(target)
+        self.files.append(f"{VERSIONS_DIR}/{name}")
 
-#: Pull requests per page of the fake listing, the same as GitHub's maximum.
+
+#: Pull requests (and changed files of one pull request) per page of the
+#: fake listing, the same as GitHub's maximum.
 PAGE_SIZE = 100
+
+
+def _files_page(files: list[str], start: int) -> dict[str, Any]:
+    return {
+        "pageInfo": {
+            "hasNextPage": start + PAGE_SIZE < len(files),
+            "endCursor": str(start + PAGE_SIZE),
+        },
+        "nodes": [{"path": path} for path in files[start : start + PAGE_SIZE]],
+    }
 
 
 @dataclass
@@ -92,34 +110,38 @@ class FakeGitHub:
     check_runs: list[dict[str, Any]] = field(default_factory=list)
     _fetched: FakePullRequest | None = None
 
-    def _list_page(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+    def _graphql(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        flags = args[3::2]
         variables = dict(arg.split("=", 1) for arg in args[4::2])
-        assert args[3::2] == ["-f"] * len(variables)
         assert variables["owner"] == "evoila" and variables["name"] == "meho"
-        assert "pullRequests(states: OPEN, first: 100, after: $after)" in variables["query"]
-        start = int(variables.get("after", "0"))
-        page = self.prs[start : start + PAGE_SIZE]
-        body = {
-            "data": {
-                "repository": {
-                    "pullRequests": {
-                        "pageInfo": {
-                            "hasNextPage": start + PAGE_SIZE < len(self.prs),
-                            "endCursor": str(start + PAGE_SIZE),
-                        },
-                        "nodes": [
-                            {
-                                "number": pr.number,
-                                "headRefOid": pr.head_sha,
-                                "isCrossRepository": pr.is_fork,
-                                "files": {"nodes": [{"path": path} for path in pr.files]},
-                            }
-                            for pr in page
-                        ],
-                    }
+        if "pullRequests(states: OPEN, first: 100, after: $after)" in variables["query"]:
+            assert flags == ["-f"] * len(variables)
+            start = int(variables.get("after", "0"))
+            repository: dict[str, Any] = {
+                "pullRequests": {
+                    "pageInfo": {
+                        "hasNextPage": start + PAGE_SIZE < len(self.prs),
+                        "endCursor": str(start + PAGE_SIZE),
+                    },
+                    "nodes": [
+                        {
+                            "number": pr.number,
+                            "headRefOid": pr.head_sha,
+                            "isCrossRepository": pr.is_fork,
+                            "files": _files_page(pr.files, 0),
+                        }
+                        for pr in self.prs[start : start + PAGE_SIZE]
+                    ],
                 }
             }
-        }
+        else:
+            assert "pullRequest(number: $number)" in variables["query"]
+            assert "files(first: 100, after: $after)" in variables["query"]
+            assert flags == ["-f", "-f", "-f", "-F", "-f"]
+            assert list(variables) == ["query", "owner", "name", "number", "after"]
+            pr = next(pr for pr in self.prs if pr.number == int(variables["number"]))
+            repository = {"pullRequest": {"files": _files_page(pr.files, int(variables["after"]))}}
+        body = {"data": {"repository": repository}}
         return subprocess.CompletedProcess(args, 0, json.dumps(body), "")
 
     def __call__(
@@ -127,7 +149,7 @@ class FakeGitHub:
     ) -> subprocess.CompletedProcess[str]:
         self.calls.append(args)
         if args[:3] == ["gh", "api", "graphql"]:
-            return self._list_page(args)
+            return self._graphql(args)
         if args[:2] == ["git", "fetch"]:
             number = int(args[-1].removeprefix("pull/").removesuffix("/head"))
             self._fetched = next(pr for pr in self.prs if pr.number == number)
@@ -310,6 +332,55 @@ def test_a_migration_pr_beyond_the_first_200_listed_is_still_rechecked(
     cursors = [[arg for arg in call if arg.startswith("after=")] for call in listings]
     assert cursors == [[], ["after=100"], ["after=200"]]
     assert not any(call[:3] == ["gh", "pr", "list"] for call in github.calls)
+
+
+def test_a_migration_after_the_first_100_changed_files_is_still_found(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The listing carries only the first 100 changed paths of a pull
+    request. A big pull request whose migration comes later must not
+    keep its old green check."""
+    big = _pr(tmp_path, 49, is_fork=False)
+    big.files = [f"backend/src/module_{n:03d}.py" for n in range(150)]
+    big.add_migration("0107_mine.py", "0107", "0106")
+    small = _pr(tmp_path, 50, is_fork=False)
+    small.add_migration("0108_mine.py", "0108", "0107")
+    github = FakeGitHub([big, small])
+    assert _run(tmp_path, github) == 0
+    assert [(run["head_sha"], run["conclusion"]) for run in github.check_runs] == [
+        (big.head_sha, "failure"),
+        (small.head_sha, "success"),
+    ]
+    file_pages = [
+        [arg for arg in call if arg.startswith(("number=", "after="))]
+        for call in github.calls
+        if call[:3] == ["gh", "api", "graphql"] and any("number=" in arg for arg in call)
+    ]
+    assert file_pages == [["number=49", "after=100"]]
+
+
+def test_an_archive_that_cannot_be_unpacked_skips_only_that_pr(
+    tmp_path: pathlib.Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """A link that points outside the work directory is rejected by the
+    extraction filter. That must stop only this pull request; the next
+    one still gets its result."""
+    outside = tmp_path / "outside.py"
+    outside.write_text("")
+    bad = _pr(tmp_path, 51, is_fork=True)
+    bad.add_link("0107_link.py", outside)
+    fine = _pr(tmp_path, 52, is_fork=False)
+    fine.add_migration("0107_mine.py", "0107", "0106")
+    github = FakeGitHub([bad, fine])
+    assert _run(tmp_path, github) == 1
+    assert [(run["head_sha"], run["conclusion"]) for run in github.check_runs] == [
+        (fine.head_sha, "failure")
+    ]
+    assert not (tmp_path / "work" / "pr-51" / VERSIONS_DIR / "0107_link.py").exists()
+    out = capfd.readouterr().out
+    assert "::warning::Could not re-check #51 (fork): could not unpack the migration files" in out
+    assert "#52 (same repo, head" in out
+    assert "Re-checked 2 pull request(s); 1 could not be checked." in out
 
 
 def test_workflow_recheck_job_needs_nothing_from_the_pr_branch() -> None:

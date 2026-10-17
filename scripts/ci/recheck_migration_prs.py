@@ -12,7 +12,8 @@ gives every such pull request a fresh result:
 
 1. list every open pull request that touches ``backend/alembic/versions/``
    (from a branch in this repo or from a fork, it makes no difference;
-   every page of the list is read, so no pull request is too old),
+   every page of the list and every page of a pull request's changed
+   files is read, so no pull request is too old or too big),
 2. fetch its head commit and copy its migration directory out of git
    with ``git archive``,
 3. run ``check_migration_heads.py`` on that copy with ``main``'s
@@ -33,8 +34,9 @@ Exit codes
 
 * 0 — every pull request got a result (or had nothing to re-check)
 * 1 — at least one pull request could not be checked (printed as a
-  warning; a slow fetch or a failed command stops only that pull
-  request, the merge-queue run still catches a clash there)
+  warning; a slow fetch, a failed command or an archive that cannot be
+  unpacked stops only that pull request, the merge-queue run still
+  catches a clash there)
 * 2 — bad environment or arguments
 """
 
@@ -65,10 +67,12 @@ Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 #: Seconds one ``gh`` or ``git`` call may take before it is given up on.
 COMMAND_TIMEOUT = 300
 
-#: One page of open pull requests, with the paths each one changes.
-#: ``gh pr list`` stops at its ``--limit``; this query is paged by hand
-#: with ``after`` until ``hasNextPage`` is false. 100 is GitHub's largest
-#: page, for pull requests and for the files of one pull request alike.
+#: One page of open pull requests, with the first page of paths each
+#: one changes. ``gh pr list`` stops at its ``--limit``; this query is
+#: paged by hand with ``after`` until ``hasNextPage`` is false. 100 is
+#: GitHub's largest page, for pull requests and for the files of one pull
+#: request alike. A pull request with more files than that is paged
+#: further with :data:`FILES_QUERY` before it is skipped.
 LIST_QUERY = """
 query($owner: String!, $name: String!, $after: String) {
   repository(owner: $owner, name: $name) {
@@ -78,7 +82,24 @@ query($owner: String!, $name: String!, $after: String) {
         number
         headRefOid
         isCrossRepository
-        files(first: 100) { nodes { path } }
+        files(first: 100) {
+          pageInfo { hasNextPage endCursor }
+          nodes { path }
+        }
+      }
+    }
+  }
+}
+"""
+
+#: The next page of changed paths of one pull request.
+FILES_QUERY = """
+query($owner: String!, $name: String!, $number: Int!, $after: String!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      files(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes { path }
       }
     }
   }
@@ -132,22 +153,47 @@ def _reason(exc: RecheckError | subprocess.TimeoutExpired) -> str:
     return str(exc)
 
 
-def _list_page(run: Runner, repo: str, after: str | None) -> dict[str, Any]:
+def _graphql(run: Runner, repo: str, query: str, **variables: str | int) -> dict[str, Any]:
+    """Run one GraphQL query and return its ``data.repository`` object."""
     owner, _, name = repo.partition("/")
-    args = ["gh", "api", "graphql", "-f", f"query={LIST_QUERY}", "-f", f"owner={owner}"]
+    args = ["gh", "api", "graphql", "-f", f"query={query}", "-f", f"owner={owner}"]
     args += ["-f", f"name={name}"]
-    if after is not None:
-        args += ["-f", f"after={after}"]
+    for key, value in variables.items():
+        args += ["-F" if isinstance(value, int) else "-f", f"{key}={value}"]
     result = run(args)
     if result.returncode != 0:
-        raise RecheckError(f"listing open pull requests failed: {result.stderr.strip()}")
-    page: dict[str, Any] = json.loads(result.stdout)["data"]["repository"]["pullRequests"]
+        raise RecheckError(f"GitHub query failed: {result.stderr.strip()}")
+    repository: dict[str, Any] = json.loads(result.stdout)["data"]["repository"]
+    return repository
+
+
+def _list_page(run: Runner, repo: str, after: str | None) -> dict[str, Any]:
+    variables: dict[str, str | int] = {} if after is None else {"after": after}
+    page: dict[str, Any] = _graphql(run, repo, LIST_QUERY, **variables)["pullRequests"]
     return page
 
 
-def _touches_migrations(item: dict[str, Any]) -> bool:
-    paths = [str(f["path"]) for f in item["files"]["nodes"]]
+def _has_migration(files: dict[str, Any]) -> bool:
+    paths = [str(f["path"]) for f in files["nodes"]]
     return any(path.startswith(f"{VERSIONS_DIR}/") for path in paths)
+
+
+def _touches_migrations(run: Runner, repo: str, item: dict[str, Any]) -> bool:
+    """Whether the pull request changes a file under the migrations directory.
+
+    The listing carries only the first 100 changed paths. A pull request
+    with more files is paged further until a migration shows up or the
+    paths run out, so a migration after the first page is not missed.
+    """
+    files: dict[str, Any] = item["files"]
+    while True:
+        if _has_migration(files):
+            return True
+        if not files["pageInfo"]["hasNextPage"]:
+            return False
+        after = str(files["pageInfo"]["endCursor"])
+        number = int(item["number"])
+        files = _graphql(run, repo, FILES_QUERY, number=number, after=after)["pullRequest"]["files"]
 
 
 def list_open_migration_prs(run: Runner, repo: str) -> list[PullRequest]:
@@ -161,7 +207,7 @@ def list_open_migration_prs(run: Runner, repo: str) -> list[PullRequest]:
     while True:
         page = _list_page(run, repo, after)
         for item in page["nodes"]:
-            if _touches_migrations(item):
+            if _touches_migrations(run, repo, item):
                 prs.append(
                     PullRequest(
                         number=int(item["number"]),
@@ -180,7 +226,10 @@ def export_versions(run: Runner, pr: PullRequest, dest: pathlib.Path) -> pathlib
 
     Fetches ``refs/pull/N/head``, which exists in this repo for fork pull
     requests too. When the head moved since the listing, the newer head
-    has its own ``pull_request`` run, so this one is skipped.
+    has its own ``pull_request`` run, so this one is skipped. The archive
+    is unpacked with the ``data`` filter, which rejects links and paths
+    that leave *dest*; such a pull request is skipped with a reason
+    instead of stopping the re-check.
     """
     fetched = run(["git", "fetch", "--no-tags", "--depth=1", "origin", f"pull/{pr.number}/head"])
     if fetched.returncode != 0:
@@ -197,8 +246,11 @@ def export_versions(run: Runner, pr: PullRequest, dest: pathlib.Path) -> pathlib
     if archived.returncode != 0:
         raise RecheckError(f"git archive failed: {archived.stderr.strip()}")
     dest.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(tar_path) as tar:
-        tar.extractall(dest, filter="data")
+    try:
+        with tarfile.open(tar_path) as tar:
+            tar.extractall(dest, filter="data")
+    except (tarfile.TarError, OSError) as exc:
+        raise RecheckError(f"could not unpack the migration files: {exc}") from exc
     return dest / VERSIONS_DIR
 
 
@@ -248,8 +300,8 @@ def recheck(run: Runner, target: Target, work_dir: pathlib.Path) -> int:
     """Give every open migration pull request a fresh result.
 
     A pull request that cannot be checked (a slow or failed ``gh`` or
-    ``git`` call, a head that moved) is reported and skipped. The others
-    still get their result.
+    ``git`` call, a head that moved, an archive that cannot be unpacked)
+    is reported and skipped. The others still get their result.
     """
     prs = list_open_migration_prs(run, target.repo)
     if not prs:

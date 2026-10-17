@@ -278,11 +278,13 @@ from a fork, with or without the workflow file on the branch. It runs
 from a checkout of `main` on a GitHub-hosted runner. It fetches the pull
 request's head commit, copies only `backend/alembic/versions/` out of it,
 and reads those files. No code from the pull request runs. It reads the
-whole list of open pull requests, page by page, so no pull request is
-too old to be re-checked. A pull request whose head moved since the
-listing is skipped; its new head has its own pull request run. A pull
-request whose fetch fails or takes too long is reported and skipped; the
-other pull requests still get their result.
+whole list of open pull requests, page by page, and every page of a pull
+request's changed files, so no pull request is too old or too big to be
+re-checked. A pull request whose head moved since the listing is
+skipped; its new head has its own pull request run. A pull request whose
+fetch fails, takes too long, or whose migration files cannot be unpacked
+(for example a link that points outside the work directory) is reported
+and skipped; the other pull requests still get their result.
 
 ### What to do when the check fails
 
@@ -327,8 +329,10 @@ adds several migrations, and compares the script's heads with Alembic's
 own `ScriptDirectory.get_heads()` on the real tree.
 `backend/tests/migrations/test_recheck_migration_prs.py` covers the
 re-check: a fork pull request and a branch without the workflow file both
-get a check run on their head commit, and a pull request whose head moved
-or cannot be fetched is reported and skipped.
+get a check run on their head commit, a migration after the first 100
+changed files is still found, and a pull request whose head moved, cannot
+be fetched, or cannot be unpacked is reported and skipped while the next
+one still gets its result.
 
 ## Additive-only constraint
 

@@ -1450,6 +1450,19 @@ meho docs search <query> [flags]
 - `--product` — optional vendor-product refinement within a single collection
 - `--version` — optional product-version refinement within a single collection
 
+## `meho doctor`
+
+Check this machine's MEHO client setup and say which layer is broken
+
+```
+meho doctor [flags]
+```
+
+- `--backplane` — backplane URL to check (defaults to the URL saved by the last `meho login`)
+- `--json` — emit one JSON document on stdout instead of the human report
+- `--no-network` — run only the offline layer; make no network call
+- `--plugin-root` — path to the installed Claude Code plugin (defaults to $CLAUDE_PLUGIN_ROOT, then a search under ~/.claude/plugins)
+
 ## `meho event-source`
 
 Operate the MEHO event_source registry (add / list / describe / update / delete)

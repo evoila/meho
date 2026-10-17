@@ -183,6 +183,10 @@ cli/
     │   ├── login_test.go      # override-resolution + help-flag + --resolve help/hint (#2107) + post-login nudge tests.
     │   ├── status.go          # `meho status` subcommand + --json + URL resolver.
     │   ├── status_test.go     # happy/JSON/no-creds/unreachable/401/redaction tests.
+    │   ├── doctor.go          # `meho doctor` (#3666) — command, report model, redaction, exit codes.
+    │   ├── doctor_offline.go  # offline layer: binary, config, credential store, plugin shim/lock/cache, plugin settings, CA bundle.
+    │   ├── doctor_online.go   # authenticated layer: DNS, token + refresh, MCP handshake, working-surface compare.
+    │   ├── doctor_test.go     # offline, credential-store, redaction, and httptest MCP-stub tests.
     │   ├── audit/            # G8.1-T3 #467 — `meho audit …` verb tree.
     │   │   ├── audit.go          # NewRootCmd + shared typed-client helpers (G0.12-T5 #1263).
     │   │   ├── query.go          # `meho audit query` (POST /api/v1/audit/query).
@@ -316,6 +320,9 @@ cli/
     ├── discovery/
     │   ├── discovery.go       # /api/v1/commands manifest fetch + cobra graft + maturity help labels (#2676).
     │   └── discovery_test.go  # 200/404/transport/decode + collision + maturity-label tests.
+    ├── netdiag/
+    │   ├── netdiag.go         # shared DNS / TLS / unreachable classifier for client diagnostics (#3666).
+    │   └── netdiag_test.go    # table tests + a real TLS failure.
     ├── output/
     │   ├── format.go          # human + JSON formatters + structured exit codes.
     │   └── format_test.go     # human/JSON/exit-code pinning.
@@ -802,6 +809,89 @@ defences enforce that:
 The same `eyJ` prefix matches access tokens, refresh tokens, and
 id tokens alike, so the single redaction rule covers every
 credential the CLI persists.
+
+## Doctor flow (`meho doctor`, #3666)
+
+`meho doctor` checks the client setup on this machine and says which
+layer fails. It only reports: it never logs in again, re-installs, or
+edits a file.
+
+### Offline layer (no network)
+
+`runOfflineChecks` in `doctor_offline.go`. One check per line:
+
+- **binary** — `os.Executable()` and the build version.
+- **config** — parses the saved backplane URL (`config.json`) or
+  `--backplane` with `normalizeBackplaneURL`. No call.
+- **credential store** — mirrors `auth.NewTokenStore`. Four states:
+  `keyring`, `file-forced` (`MEHO_KEYRING_DISABLE`), `file-fallback`
+  (the keyring answers but the login sits in the 0600 file, usually
+  because it was too big), and `keyring-unavailable` (any keyring error
+  other than go-keyring's `ErrNotFound`). `ErrNotFound` means "the
+  keyring works, nothing is stored", never "backend unavailable". The
+  keyring value is read and dropped at once.
+- **plugin shim** — finds the Claude Code plugin: `--plugin-root`, then
+  `CLAUDE_PLUGIN_ROOT`, then a bounded search under `~/.claude/plugins`
+  for `bin/meho-mcp-remote` next to a `package-lock.json`.
+- **plugin settings** — where the shim reads its settings. It reads
+  `plugin.env` (`MEHO_PLUGIN_CONFIG` or `$XDG_CONFIG_HOME/meho/plugin.env`)
+  the same way the shim does: a value in the file wins over the
+  environment. Reports the MCP URL, the scopes the shim will request
+  (the default is read from the shim file itself, so it cannot drift),
+  and warns when the plugin and the CLI point at different hosts.
+- **vendored lock** — mirrors the shim's `cmp -s` test: the cached
+  `package-lock.json` must match the plugin's committed one byte for
+  byte, and the installed `mcp-remote` must match the version pinned in
+  the lock.
+- **cache** — `node_modules/mcp-remote` present in the cache dir.
+- **CA bundle** — `MEHO_CA_CERT`, `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`
+  must be readable PEM files with at least one certificate.
+
+### Authenticated layer
+
+`runAuthenticatedChecks` in `doctor_online.go`. It stops at the first
+failed step:
+
+1. **dns** — resolves the backplane host (skipped for an IP).
+2. **token** — `GET /api/v1/health/live` (no role gate, no Vault). On a
+   401 it refreshes the token the normal way and tries once more.
+3. **MCP handshake** — `initialize` → `notifications/initialized` →
+   `resources/list` → `tools/list` → `tools/call meho_status` on
+   `<backplane>/mcp`, with the same bearer. Answers may be JSON or SSE.
+   The `Mcp-Session-Id` from `initialize` is echoed and shown as a
+   correlation id.
+4. **working surface** — compares `surface_summary.listed_working_tools`
+   from `meho_status` with the names the handshake listed. A tool the
+   server lists for this session but the client did not see is a
+   `surface_gap`.
+
+Failure classes: `dns`, `tls`, `unreachable` (from `internal/netdiag`),
+`not_logged_in`, `refresh_rejected`, `no_refresh_token`, `unauthorized`,
+`surface_gap`, `unexpected`. Exit codes follow the `meho status`
+taxonomy: 2 login problem, 3 network problem, 4 unexpected answer or
+surface gap, 1 an offline check failed, 0 no failure.
+
+The scopes shown are the CLI login's scopes. A Claude client logs in on
+its own through `mcp-remote` and can hold other scopes (for example
+`mcp:admin`); `meho_status` called from that client shows those.
+
+### Shared network classifier (`internal/netdiag`)
+
+`netdiag.Classify(err)` walks the error chain and returns `dns`
+(`*net.DNSError`), `tls` (x509 / `crypto/tls` errors), `unreachable`
+(`*net.OpError`, timeouts), or `other`. `netdiag.Hint` gives a plain
+next step. The first-start checks of `meho status` (#4042) are meant to
+reuse this package so both commands name failures the same way.
+
+### Redaction
+
+`renderDoctor` passes every free-text field through `redactSensitive`
+before printing, in human and JSON mode alike. It extends
+`redactJWTLike`: it also removes `Authorization` / `Cookie` /
+`Set-Cookie` header values, bearer values, OAuth parameters (`code=`,
+`state=`, `redirect_uri=`, token parameters), `Location` values, and
+the query part of any URL. `TestDoctor_RedactsSecrets` plants each
+marker and checks that none reaches the output.
 
 ## Watch flow (`meho status --watch`, G6.1-T5)
 

@@ -117,6 +117,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newVersionCmd())
 	root.AddCommand(newLoginCmd())
 	root.AddCommand(newStatusCmd())
+	root.AddCommand(newDoctorCmd())
 
 	// G4.3-T2 (#441) -- retrieval-quality + migration-decision tooling.
 	// `meho retrieval eval` ships first; sibling verbs (usage T5b #464,

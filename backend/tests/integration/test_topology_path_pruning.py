@@ -356,6 +356,13 @@ async def worst_mesh(pg_engine: None) -> dict[str, uuid.UUID]:
         )
         session.add(island)
         ids["worst-island"] = island.id
+    # Collect planner statistics, as autovacuum does in a real deployment.
+    # Without them, the plan for this small, never-analyzed table depends
+    # on the estimated row width, so adding a graph_node column (#3739)
+    # flipped it to a slower join order. This gate checks the walk, not
+    # plans on a table with no statistics.
+    async with sm() as session, session.begin():
+        await session.execute(text("ANALYZE graph_node, graph_edge"))
     return ids
 
 

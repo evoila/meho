@@ -258,7 +258,7 @@ def test_upgrade_and_downgrade_before_cutover_keep_legacy_rows(
     }
     assert "source_scope" not in columns
     assert "source_scope_provenance" not in columns
-    assert not _sql(url, "SELECT to_regclass('graph_node_scope_snapshot') AS t")[0].t
+    assert not _sql(url, "SELECT to_regclass('graph_node_scope_snapshot') AS snapshot")[0].snapshot
 
 
 def test_downgrade_refuses_when_scoped_rows_exist(migration_cfg: tuple[Config, str]) -> None:

@@ -31,6 +31,7 @@ import (
 
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/output"
+	"github.com/evoila/meho/cli/internal/version"
 )
 
 // CallResult mirrors the backend OperationResult Pydantic model.
@@ -161,6 +162,23 @@ func WriteParkedHint(w io.Writer, extras json.RawMessage) {
 	if id := ParkedApprovalID(extras); id != "" {
 		fmt.Fprintf(w, "  approval id: %s — inspect with: meho approvals show %s\n", id, id)
 	}
+}
+
+// UnknownStatusError is the error for an OperationResult.status this
+// CLI does not know. The usual cause is a backplane that is newer than
+// the CLI and has added a status (a CLI from before the approval flow
+// read "awaiting_approval" as invalid, although the operation had
+// parked fine). So the message names the version gap as the likely
+// cause and warns that the operation may have run or be waiting for
+// approval, instead of calling the response invalid. The exit code
+// stays unexpected_response (4): the CLI cannot say whether it worked.
+func UnknownStatusError(status string) *output.StructuredError {
+	return output.Unexpected(fmt.Sprintf(
+		"backplane returned OperationResult.status %q, which this CLI (%s) does not know. "+
+			"The backplane is probably newer than this CLI. "+
+			"This is not necessarily a failure: the operation may have run or may be waiting for approval, so check before you retry. "+
+			"Run `meho status` to compare versions, then upgrade the CLI.",
+		status, version.Get().Version))
 }
 
 // APIResponseError wraps a non-2xx response from the backplane so
@@ -566,14 +584,7 @@ func (c Connector) Render(
 	case "ok", "error", "denied":
 		// fall through.
 	default:
-		return output.RenderError(
-			cmd.ErrOrStderr(),
-			output.Unexpected(fmt.Sprintf(
-				"backplane returned invalid OperationResult.status %q (expected one of: ok / error / denied / awaiting_approval)",
-				r.Status,
-			)),
-			jsonOut,
-		)
+		return output.RenderError(cmd.ErrOrStderr(), UnknownStatusError(r.Status), jsonOut)
 	}
 	if jsonOut {
 		if err := output.PrintJSON(cmd.OutOrStdout(), r); err != nil {

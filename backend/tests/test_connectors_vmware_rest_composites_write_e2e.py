@@ -1711,17 +1711,16 @@ async def test_deploy_from_library_queue_approve_resume_with_2681_envelope(
 
 
 # ===========================================================================
-# vm.deploy_from_library — a park after the VM exists resumes on that VM (#3697)
+# vm.deploy_from_library — an approval after the VM exists never deploys twice
 # ===========================================================================
 #
 # The rename, the power-on and the cleanup removals run after the deploy's
-# main effect exists. Their parks keep the parent composite on the row (the
-# resume must go through the composite's built-in code: with nothing
-# ingested, a generic re-dispatch of the sub-op's key would be ``unknown_op``
-# and the VM would stay behind) plus the state that makes the re-entry
-# continue at that step instead of deploying a second VM. The deploy itself
-# saves its unique deploy name, so a resumed deploy keeps the params hash the
-# human approved.
+# main effect exists. Their parks record the parent composite on the row, and
+# approving one re-runs that composite from the top (#3351) — which would
+# deploy a second VM. Until an approval can continue at the approved step
+# (#4217) the composite refuses such a re-run before any read or write. The
+# deploy's own park is refused the same way: a re-run would draw a fresh
+# deploy name, so the approved sub-op could not clear.
 
 _DEPLOY_OP_ID = "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy"
 _RENAME_VM_OP_ID = "POST:/VirtualMachine/{moId}/Rename_Task"
@@ -1815,7 +1814,8 @@ async def _service_deploys_until_a_follow_on_parks(
         params=_DEPLOY_NAMED_PARAMS,
     )
     assert result.status == "ok", result.error
-    request_id = UUID(result.result["issues"][-1]["message"].rsplit(" ", 1)[-1])
+    message = result.result["issues"][-1]["message"]
+    request_id = UUID(message.split("waits for approval request ", 1)[1].split(";", 1)[0])
     async with get_sessionmaker()() as s:
         pending = await s.get(ApprovalRequest, request_id)
     assert pending is not None
@@ -1825,18 +1825,25 @@ async def _service_deploys_until_a_follow_on_parks(
     return reviewer, request_id, pending
 
 
+def _assert_resume_refused(resume: Any, *, approved_op_id: str) -> None:
+    """The resumed dispatch refused to re-run the composite; nothing else happened."""
+    assert resume.status == "error", resume
+    assert resume.extras["error_code"] == "composite_resume_unsupported"
+    assert resume.extras["approved_op_id"] == approved_op_id
+    assert "no VM was deployed" in (resume.error or "")
+
+
 @pytest.mark.asyncio
-async def test_deploy_rename_park_approve_resume_renames_the_deployed_vm_without_ingest(
+async def test_deploy_rename_park_approve_resume_refuses_and_deploys_nothing(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """A parked rename, approved, renames the VM through the composite; no second deploy.
+    """Approving a parked rename does not re-run the deploy: the resume is refused (#4217).
 
-    Nothing is ingested, so the vim rename op has no descriptor. The park
-    records the parent composite with the deployed VM as its state, and the
-    resume re-enters the composite at the rename: one ``Rename_Task`` on the
-    existing VM, no ``unknown_op``, and the OVF deploy fired exactly once.
+    The park records the parent composite, so the approval re-runs it. The
+    composite refuses before any call: the OVF deploy fired exactly once,
+    no rename reached the wire, and the VM keeps its deploy name.
     """
     recorder = _deploy_recorder(succeeded=True)
     await _bootstrap(recorder, stub_embedding_service)
@@ -1851,17 +1858,6 @@ async def test_deploy_rename_park_approve_resume_renames_the_deployed_vm_without
     assert pending.resume_parent == {
         "op_id": "vmware.composite.vm.deploy_from_library",
         "params": _DEPLOY_NAMED_PARAMS,
-        "state": {
-            "deploy_name": deploy_name,
-            "deployed": {
-                "vm_id": "vm-ovf-9",
-                "resource_type": "VirtualMachine",
-                "library_item_id": "li-1",
-                "name": "web-01",
-                "step": "rename",
-                "issues": [],
-            },
-        },
     }
 
     async with get_sessionmaker()() as s:
@@ -1869,33 +1865,25 @@ async def test_deploy_rename_park_approve_resume_renames_the_deployed_vm_without
     assert row is not None
     resume = await resume_dispatch_after_approval(operator=reviewer, request=row, params=None)
 
-    assert resume.status == "ok", resume.error
-    assert resume.result["status"] == "deployed"
-    assert resume.result["vm_id"] == "vm-ovf-9"
-    assert resume.result["issues"] == []
-    # The resume issued the rename only: the deploy did not run a second time.
+    _assert_resume_refused(resume, approved_op_id=_RENAME_VM_OP_ID)
     assert recorder.calls == [("POST", "/vcenter/ovf/library-item/li-1?action=deploy")]
-    assert recorder.vmomi_calls[0] == (
-        "/VirtualMachine/vm-ovf-9/Rename_Task",
-        {"newName": "web-01"},
-    )
+    assert recorder.vmomi_calls == []
     assert await _approval_row_count() == 1
 
 
 @pytest.mark.asyncio
-async def test_deploy_cleanup_park_approve_resume_deletes_the_partial_vm_without_ingest(
+async def test_deploy_cleanup_park_approve_resume_refuses_and_deploys_nothing(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """A parked cleanup DELETE, approved, removes the partial VM through the composite.
+    """Approving a parked cleanup DELETE does not re-run the deploy: the resume is refused.
 
     The deploy reports ``succeeded=false`` and names the VM it left. The
-    service principal has no grant on the delete, so the cleanup parks with
-    the failed deploy as its state. The resume re-enters the composite,
-    which re-runs the cleanup: the DELETE fires on the existing VM, the
-    deploy does not run again, and the envelope is the failure with the
-    cleanup reported.
+    service principal has no grant on the delete, so the cleanup parks. The
+    approval's re-run is refused before any call: one deploy, one listing,
+    no second deploy and no DELETE (the operator deletes the VM by hand,
+    as the warning says, until #4217).
     """
     recorder = _deploy_recorder(succeeded=False)
     await _bootstrap(recorder, stub_embedding_service)
@@ -1906,20 +1894,10 @@ async def test_deploy_cleanup_park_approve_resume_deletes_the_partial_vm_without
         ("POST", "/vcenter/ovf/library-item/li-1?action=deploy"),
         ("GET", "/vcenter/vm"),
     ]
-    deploy_name = recorder.deploy_bodies[0]["deployment_spec"]["name"]
     assert pending.params == {"vm": "vm-ovf-9"}
     assert pending.resume_parent == {
         "op_id": "vmware.composite.vm.deploy_from_library",
         "params": _DEPLOY_NAMED_PARAMS,
-        "state": {
-            "deploy_name": deploy_name,
-            "failed": {
-                "status": "deploy_failed",
-                "library_item_id": "li-1",
-                "reported": ["vm-ovf-9", "VirtualMachine"],
-                "issues": [],
-            },
-        },
     }
 
     async with get_sessionmaker()() as s:
@@ -1927,45 +1905,31 @@ async def test_deploy_cleanup_park_approve_resume_deletes_the_partial_vm_without
     assert row is not None
     resume = await resume_dispatch_after_approval(operator=reviewer, request=row, params=None)
 
-    assert resume.status == "ok", resume.error
-    assert resume.result["status"] == "deploy_failed"
-    assert resume.result["issues"] == [
-        {
-            "category": "cleanup",
-            "severity": "info",
-            "message": "removed VM vm-ovf-9 left by the failed deploy",
-        }
-    ]
-    # The resume looked the deploy name up again and deleted the VM; no second deploy.
+    _assert_resume_refused(resume, approved_op_id="DELETE:/vcenter/vm/{vm}")
     assert recorder.calls == [
         ("POST", "/vcenter/ovf/library-item/li-1?action=deploy"),
         ("GET", "/vcenter/vm"),
-        ("GET", "/vcenter/vm"),
-        ("DELETE", "/vcenter/vm/vm-ovf-9"),
     ]
     assert await _approval_row_count() == 1
 
 
 @pytest.mark.asyncio
-async def test_agent_waiter_resumes_a_parked_deploy_under_the_same_deploy_name(
+async def test_agent_waiter_resume_of_a_parked_deploy_is_refused_before_any_call(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """The agent path resumes an approved deploy with the deploy name its park saved.
+    """An approved deploy sub-op does not resume yet: refused, nothing deployed (#4217).
 
     With the real token generator the first run draws a random deploy name
-    into the deploy body. The approved sub-op clears its gate by params
-    hash, so the resume must deploy under that same name — a fresh token
-    would leave the deploy parked again (or refused) and nothing deployed.
-    The agent's rename then parks on its own row during the resume (a write
-    after the main effect is allowed to), with the deployed VM as its state.
+    into the deploy body. A re-run would draw another, so the approved
+    sub-op's params hash could not clear. The composite refuses the re-run
+    up front: no deploy fired, no second approval row.
     """
     recorder = _deploy_recorder(succeeded=True)
     await _bootstrap(recorder, stub_embedding_service)
     target_id = await _persist_vmware_target()
     await _seed_agent_needs_approval_grant("POST:/vcenter/ovf/*")
-    await _seed_agent_needs_approval_grant("POST:/VirtualMachine/*")
     agent = _make_operator(sub=_AGENT_SUB, principal_kind=PrincipalKind.AGENT)
 
     request_id, envelope = await _agent_parks_subop(
@@ -1979,12 +1943,10 @@ async def test_agent_waiter_resumes_a_parked_deploy_under_the_same_deploy_name(
         pending = await s.get(ApprovalRequest, request_id)
     assert pending is not None
     assert pending.op_id == _DEPLOY_OP_ID
-    approved_name = pending.params["deployment_spec"]["name"]
-    assert approved_name.startswith("web-01-meho-")
+    assert pending.params["deployment_spec"]["name"].startswith("web-01-meho-")
     assert pending.resume_parent == {
         "op_id": "vmware.composite.vm.deploy_from_library",
         "params": _DEPLOY_NAMED_PARAMS,
-        "state": {"deploy_name": approved_name},
     }
 
     await _approve_as_reviewer(request_id)
@@ -1997,42 +1959,11 @@ async def test_agent_waiter_resumes_a_parked_deploy_under_the_same_deploy_name(
         approval_request_id=request_id,
     )
 
-    assert resumed["status"] == "ok", resumed
-    assert resumed["result"]["status"] == "deployed"
-    assert resumed["result"]["vm_id"] == "vm-ovf-9"
-    # One deploy, under the approved name — not a second park, not a refusal.
-    assert recorder.calls == [("POST", "/vcenter/ovf/library-item/li-1?action=deploy")]
-    assert [body["deployment_spec"]["name"] for body in recorder.deploy_bodies] == [approved_name]
-    # The rename parked on its own row, naming it; its resume continues at
-    # the rename of this VM.
+    assert resumed["status"] == "error", resumed
+    assert "composite_resume_unsupported" in json.dumps(resumed)
+    assert recorder.calls == []
     assert recorder.vmomi_calls == []
-    (rename_issue,) = resumed["result"]["issues"]
-    assert rename_issue["category"] == "rename"
-    assert (
-        f"deployed as {approved_name!r}; rename to 'web-01' waits for approval request "
-        in (rename_issue["message"])
-    )
-    assert await _approval_row_count() == 2
-    rename_request_id = UUID(rename_issue["message"].rsplit(" ", 1)[-1])
-    async with get_sessionmaker()() as s:
-        rename_row = await s.get(ApprovalRequest, rename_request_id)
-    assert rename_row is not None
-    assert rename_row.op_id == _RENAME_VM_OP_ID
-    assert rename_row.resume_parent == {
-        "op_id": "vmware.composite.vm.deploy_from_library",
-        "params": _DEPLOY_NAMED_PARAMS,
-        "state": {
-            "deploy_name": approved_name,
-            "deployed": {
-                "vm_id": "vm-ovf-9",
-                "resource_type": "VirtualMachine",
-                "library_item_id": "li-1",
-                "name": "web-01",
-                "step": "rename",
-                "issues": [],
-            },
-        },
-    }
+    assert await _approval_row_count() == 1
 
 
 # ===========================================================================

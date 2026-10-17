@@ -117,8 +117,6 @@ __all__ = [
     "composite_depth_var",
     "composite_dispatch_var",
     "composite_resume_scope_var",
-    "composite_resume_state",
-    "composite_resume_state_var",
     "composite_resume_var",
     "enforce_subop_policy",
     "get_dispatch_child",
@@ -261,37 +259,6 @@ composite_resume_scope_var: ContextVar[tuple[str, str] | None] = ContextVar(
     "composite_resume_scope",
     default=None,
 )
-
-
-#: ContextVar carrying the ``(parent op_id, state)`` a parked sub-op saved for
-#: its resume (#3697): the ``resume_state`` the composite passed to
-#: :func:`enforce_subop_policy`, stored on ``ApprovalRequest.resume_parent``
-#: under ``state`` and bound alongside :data:`composite_resume_var` for the
-#: whole re-entry of the parent composite. The composite reads it through
-#: :func:`composite_resume_state`, so a re-entered composite can pick up the
-#: values its first run chose (the unique deploy name of a VM) or continue at
-#: the step whose write parked instead of repeating its main effect (rename,
-#: power-on or clean up the VM that already exists). ``None`` for every
-#: ordinary dispatch and for a park that saved no state.
-composite_resume_state_var: ContextVar[tuple[str, dict[str, Any]] | None] = ContextVar(
-    "composite_resume_state",
-    default=None,
-)
-
-
-def composite_resume_state(op_id: str) -> dict[str, Any] | None:
-    """The state a parked sub-op of composite *op_id* saved, during its resume (#3697).
-
-    Returns the ``resume_state`` the composite handed to
-    :func:`enforce_subop_policy` when the sub-op parked, and ``None`` on an
-    ordinary dispatch, when the park saved no state, or when the resumed
-    parent is a different composite (a nested composite must not read the
-    state its parent saved).
-    """
-    bound = composite_resume_state_var.get()
-    if bound is None or bound[0] != op_id:
-        return None
-    return bound[1]
 
 
 class DispatchChild(Protocol):
@@ -502,9 +469,7 @@ def _subop_resume_cleared(*, op_id: str, params_hash: str) -> bool:
     return False
 
 
-def _resume_parent_for_current_composite(
-    resume_state: dict[str, Any] | None,
-) -> dict[str, Any] | None:
+def _resume_parent_for_current_composite() -> dict[str, Any] | None:
     """Build the ``ApprovalRequest.resume_parent`` payload from the composite ctx.
 
     Reads :data:`composite_dispatch_var` (the parent composite's ``(op_id,
@@ -513,19 +478,14 @@ def _resume_parent_for_current_composite(
     parked sub-op records the composite to re-enter on resume (#3351). The
     stored ``params`` are the composite's own dispatch params — the resume
     re-dispatches this parent composite verbatim, ``_approved=True``, with the
-    approved sub-op pre-cleared. *resume_state*, when given, rides along under
-    ``state`` and comes back through :func:`composite_resume_state` during
-    the re-entry (#3697). ``None`` when no composite is on the stack, so the
-    park keeps the unchanged generic re-dispatch of its ``op_id``.
+    approved sub-op pre-cleared. ``None`` when no composite is on the stack, so
+    the park keeps the unchanged generic re-dispatch of its ``op_id``.
     """
     ctx = composite_dispatch_var.get()
     if ctx is None:
         return None
     parent_op_id, parent_params = ctx
-    resume_parent: dict[str, Any] = {"op_id": parent_op_id, "params": parent_params}
-    if resume_state is not None:
-        resume_parent["state"] = resume_state
-    return resume_parent
+    return {"op_id": parent_op_id, "params": parent_params}
 
 
 # code-quality-allow: pre-existing 118-line function (predates #3151); this
@@ -541,8 +501,6 @@ async def enforce_subop_policy(
     requires_approval: bool,
     target: Any,
     params: dict[str, Any],
-    resume_state: dict[str, Any] | None = None,
-    after_main_effect: bool = False,
 ) -> OperationResult | None:
     """Re-apply the dispatcher policy/approval gate around a direct-session sub-op.
 
@@ -577,29 +535,6 @@ async def enforce_subop_policy(
     "top-level-sufficiency" alternative, and the call-site example are
     documented in ``docs/architecture/operations-substrate.md`` under
     "Preserving write-composite policy on the direct path".
-
-    ``resume_state`` and ``after_main_effect`` shape what an approval
-    **resumes** (#3697). A parked sub-op records its parent composite, and
-    approving it re-runs that composite from the top with this one sub-op
-    pre-cleared — always through the composite's own built-in code, never
-    through an ingested descriptor, so the resume works on a fresh boot
-    with nothing ingested. Two things make that re-run reproduce the
-    approved step exactly:
-
-    * ``resume_state`` is JSON the composite saved at park time. It is
-      stored on the approval row (``resume_parent["state"]``) and handed
-      back through :func:`composite_resume_state` during the re-entry, so
-      the re-run can reuse what the first run chose (the unique name a VM
-      was deployed under — a fresh one would change the sub-op's params
-      hash and the approved sub-op would no longer clear) or know where to
-      continue.
-    * ``after_main_effect=True`` says the composite's main effect already
-      exists when this sub-op runs — the rename, power-on or cleanup of a
-      VM that was deployed — and the saved state tells the re-run to
-      continue at this step instead of repeating that main effect (a
-      second VM). Such a park is also allowed while a parent resume is in
-      flight, because its own resume repeats no earlier leg; the
-      multi-gate guard below applies only to parks whose resume would.
     """
     # Lazy imports: this module is imported by the dispatcher, so a
     # top-level import of the policy/approval machinery (which imports
@@ -674,7 +609,7 @@ async def enforce_subop_policy(
         # ``dangerous`` + ``requires_approval=False``, which the USER reviewer
         # auto-executes in the single resume pass. Refuse instead of parking.
         resume_scope = composite_resume_scope_var.get()
-        if resume_scope is not None and not after_main_effect:
+        if resume_scope is not None:
             approved_op_id, _approved_hash = resume_scope
             composite_ctx = composite_dispatch_var.get()
             composite_op_id = composite_ctx[0] if composite_ctx is not None else "<unknown>"
@@ -770,9 +705,8 @@ async def enforce_subop_policy(
                 proposed_effect=proposed_effect,
                 # #3351: record the parent composite so the approval-resume
                 # re-enters it (this sub-op's key + gate params are not a
-                # dispatchable descriptor call), with the state the re-entry
-                # needs (#3697). ``None`` outside a composite.
-                resume_parent=_resume_parent_for_current_composite(resume_state),
+                # dispatchable descriptor call). ``None`` outside a composite.
+                resume_parent=_resume_parent_for_current_composite(),
             )
             await session.commit()
         # Publish AFTER commit so a broadcast can never outlive a failed

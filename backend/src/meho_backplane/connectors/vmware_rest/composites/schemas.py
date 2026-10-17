@@ -4157,11 +4157,11 @@ VM_DEPLOY_FROM_LIBRARY_RESPONSE_SCHEMA: dict[str, Any] = {
                 "failed deploy adds one ``category='cleanup'`` entry per partial VM "
                 "or vApp it found: severity ``info`` when it was removed, "
                 "``warning`` when it could not be removed, its removal waits for "
-                "an approval request (named in the message), or the check itself "
+                "an approval request (named in the message; approving it does "
+                "not run the removal yet, so do it by hand), or the check itself "
                 "faulted (#3697). A ``category='rename'`` warning means the deploy "
                 "succeeded but the VM still carries its deploy name; the message "
-                "names both names and, for a parked rename, the approval request "
-                "that renames this VM when approved."
+                "names both names and, for a parked rename, the approval request."
             ),
         },
         "candidates": {

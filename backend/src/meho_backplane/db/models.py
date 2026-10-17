@@ -6288,10 +6288,7 @@ class ApprovalRequest(Base):
       to re-enter when this row is a parked composite **sub-op** (#3351):
       ``{"op_id": <composite op_id>, "params": <composite params>}``, captured
       at park time from
-      :data:`~meho_backplane.operations.composite.composite_dispatch_var`,
-      plus an optional ``"state"`` the sub-op saved for the re-entry (#3697;
-      read back through
-      :func:`~meho_backplane.operations.composite.composite_resume_state`).
+      :data:`~meho_backplane.operations.composite.composite_dispatch_var`.
       A composite's governed sub-op parks under its sub-op governance key +
       identity-only gate params, which is not a dispatchable descriptor call,
       so the shared resume path re-dispatches this parent composite

@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Iterator
-from typing import Any
 
 import pytest
 from sqlalchemy import func, select
@@ -45,12 +44,10 @@ from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import (
     SelfApprovalForbiddenError,
     approve_request,
-    composite_resume_binding,
 )
 from meho_backplane.operations.composite import (
     composite_dispatch_var,
     composite_resume_scope_var,
-    composite_resume_state,
     composite_resume_var,
     enforce_subop_policy,
 )
@@ -435,116 +432,6 @@ async def test_subop_resume_scope_guard_fails_closed_on_second_gate(
     assert after == before
 
 
-@pytest.mark.asyncio
-async def test_subop_park_saves_resume_state_on_the_parent_and_binds_it_on_resume(
-    session: AsyncSession,
-) -> None:
-    """A park's ``resume_state`` rides on ``resume_parent`` and comes back on resume (#3697).
-
-    A follow-on write that runs after the composite's main effect exists
-    (the rename of a deployed VM, the delete that cleans up a failed deploy)
-    still records its parent composite — the resume must go through the
-    composite's built-in code, never through an ingested descriptor of the
-    sub-op, so it works with nothing ingested. What keeps the re-entry from
-    repeating the main effect is the state the park saved: the resume
-    binding hands it back through ``composite_resume_state``, keyed by the
-    parent, and only for the block.
-    """
-    parent_op_id = "vmware.composite.vm.deploy_from_library"
-    parent_params = {"library_item": "li-1", "resource_pool": "resgroup-8"}
-    rename_op_id = "POST:/VirtualMachine/{moId}/Rename_Task"
-    rename_params = {"moId": "vm-ovf-9", "body": {"newName": "router-01"}}
-    state = {"deploy_name": "router-01-meho-0123456789", "deployed": {"vm_id": "vm-ovf-9"}}
-    token = composite_dispatch_var.set((parent_op_id, parent_params))
-    try:
-        result = await enforce_subop_policy(
-            operator=_operator(),
-            connector_id=_CONNECTOR_ID,
-            op_id=rename_op_id,
-            safety_level="dangerous",
-            requires_approval=True,
-            target=None,
-            params=rename_params,
-            resume_state=state,
-            after_main_effect=True,
-        )
-    finally:
-        composite_dispatch_var.reset(token)
-
-    assert result is not None
-    assert result.status == "awaiting_approval"
-    request_id = uuid.UUID(result.extras["approval_request_id"])
-    row = await session.get(ApprovalRequest, request_id)
-    assert row is not None
-    assert row.op_id == rename_op_id
-    assert row.params == rename_params
-    # The parent composite is recorded, with the saved state alongside.
-    assert row.resume_parent == {"op_id": parent_op_id, "params": parent_params, "state": state}
-
-    with composite_resume_binding(
-        subop_op_id=row.op_id,
-        subop_params_hash=row.params_hash,
-        resume_parent=row.resume_parent,
-    ) as parent_call:
-        # The resume dispatches the parent composite, not the sub-op's key.
-        assert parent_call == (parent_op_id, parent_params)
-        assert composite_resume_state(parent_op_id) == state
-        # A nested composite does not see the state its parent saved.
-        assert composite_resume_state("vmware.composite.vm.power") is None
-    assert composite_resume_state(parent_op_id) is None
-
-
-@pytest.mark.asyncio
-async def test_after_main_effect_park_is_allowed_during_a_parent_resume(
-    session: AsyncSession,
-) -> None:
-    """A park after the main effect during a parent resume parks instead of failing closed (#3697).
-
-    The multi-gate guard refuses a second park whose resume would re-run the
-    earlier legs. A park whose saved state continues the composite at this
-    step repeats nothing, so it is safe to write while the resume scope is
-    set — the deploy that was approved runs once, and its rename waits on
-    its own row, parent and state included.
-    """
-    approved = ("POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy", "approvedhash")
-    parent_params = {"library_item": "li-1"}
-    state = {"deploy_name": "router-01-meho-0123456789", "deployed": {"step": "rename"}}
-    before = await session.scalar(select(func.count()).select_from(ApprovalRequest))
-    dispatch_token = composite_dispatch_var.set(
-        ("vmware.composite.vm.deploy_from_library", parent_params)
-    )
-    scope_token = composite_resume_scope_var.set(approved)
-    resume_token = composite_resume_var.set(None)
-    try:
-        result = await enforce_subop_policy(
-            operator=_operator(),
-            connector_id=_CONNECTOR_ID,
-            op_id="POST:/VirtualMachine/{moId}/Rename_Task",
-            safety_level="dangerous",
-            requires_approval=True,
-            target=None,
-            params={"moId": "vm-ovf-9", "body": {"newName": "router-01"}},
-            resume_state=state,
-            after_main_effect=True,
-        )
-    finally:
-        composite_resume_var.reset(resume_token)
-        composite_resume_scope_var.reset(scope_token)
-        composite_dispatch_var.reset(dispatch_token)
-
-    assert result is not None
-    assert result.status == "awaiting_approval"
-    after = await session.scalar(select(func.count()).select_from(ApprovalRequest))
-    assert after == before + 1
-    row = await session.get(ApprovalRequest, uuid.UUID(result.extras["approval_request_id"]))
-    assert row is not None
-    assert row.resume_parent == {
-        "op_id": "vmware.composite.vm.deploy_from_library",
-        "params": parent_params,
-        "state": state,
-    }
-
-
 # ===========================================================================
 # #294 (security review S06) -- proposed_effect stamping restores the
 # tier-keyed self-approval carve-out + the destructive-binding refusal on
@@ -642,6 +529,7 @@ async def test_subop_park_refused_when_preflight_says_write_will_be_denied(
     still recorded: one ``denied`` audit row on the sub-op's path, through
     the same writer the dispatcher park uses.
     """
+    from typing import Any
 
     from meho_backplane.db.models import AuditLog
     from meho_backplane.operations._preview import (

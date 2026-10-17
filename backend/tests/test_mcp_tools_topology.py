@@ -512,6 +512,53 @@ def test_query_topology_dependencies_untracked_echoes_node_kind_when_supplied(
     assert payload["nodes"] == []
 
 
+@pytest.mark.parametrize(
+    ("kind", "patch_target", "direction"),
+    [
+        ("dependents", _DEPENDENTS_PATCH, "reverse"),
+        ("dependencies", _DEPENDENCIES_PATCH, "forward"),
+    ],
+)
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+def test_query_topology_closure_untracked_carries_direction_filters_and_evidence(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    kind: str,
+    patch_target: str,
+    direction: str,
+) -> None:
+    """#3760: an untracked closure root still reports the direction, the
+    relation filter and the stale view the lookup used, like every other
+    closure answer."""
+    client, _op = client_with_operator
+    mock_verb = AsyncMock(side_effect=NodeNotFoundError("ghost"))
+    with patch(patch_target, new=mock_verb):
+        payload = _payload(
+            _call_query_topology(
+                client,
+                {
+                    "kind": kind,
+                    "target": "ghost",
+                    "include_stale": False,
+                    "relation_class": "placement",
+                },
+            )
+        )
+    assert mock_verb.await_args.kwargs["include_stale"] is False
+    assert mock_verb.await_args.kwargs["relation_class"] == "placement"
+    assert payload["kind"] == kind
+    assert payload["status"] == "node_untracked"
+    assert payload["name"] == "ghost"
+    assert payload["nodes"] == []
+    assert payload["direction"] == direction
+    assert payload["relation_class"] == "placement"
+    evidence = payload["evidence"]
+    assert evidence["stale_rows"] == "excluded"
+    assert "include_stale is false" in evidence["stale_rows_note"]
+    assert "the root you named" in evidence["stale_rows_note"]
+    assert "not the vendor's own timestamp" in evidence["observation_note"]
+    assert evidence["freshness_meaning"] == {}
+
+
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
 def test_query_topology_dependents_tracked_no_deps_omits_status(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811

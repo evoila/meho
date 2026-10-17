@@ -901,21 +901,30 @@ async def _closure_facet(
             include_stale=include_stale,
         )
     except NodeNotFoundError as exc:
-        return _node_untracked_envelope(kind, exc)
+        return _node_untracked_envelope(
+            kind, exc, relation_class=relation_class, include_stale=include_stale
+        )
     shaper = _RowShaper()
     return {
         "kind": kind,
-        # Closures always follow stored edges one way (#3760).
-        "direction": "reverse" if kind == "dependents" else "forward",
+        "direction": _closure_direction(kind),
         "relation_class": relation_class,
         "nodes": [shaper.node(n) for n in nodes],
         "evidence": shaper.evidence(include_stale=include_stale, named_rows=_CLOSURE_NAMED_ROWS),
     }
 
 
+def _closure_direction(kind: str) -> str:
+    """Closures always follow stored edges one way (#3760)."""
+    return "reverse" if kind == "dependents" else "forward"
+
+
 def _node_untracked_envelope(
     kind: str,
     exc: NodeNotFoundError,
+    *,
+    relation_class: str | None,
+    include_stale: bool,
 ) -> dict[str, Any]:
     """Build the closure-kind ``node_untracked`` typed envelope.
 
@@ -940,12 +949,22 @@ def _node_untracked_envelope(
     recovery path. Includes the substrate's resolved ``name`` and,
     when supplied, the ``kind`` pin so the front can render a
     diagnostic without a second round-trip.
+
+    Like every other closure answer it also carries ``direction``,
+    ``relation_class`` and ``evidence`` (#3760), so the caller can see
+    which stale view and filters the lookup used even though no rows
+    came back.
     """
     envelope: dict[str, Any] = {
         "kind": kind,
         "status": "node_untracked",
         "name": exc.name,
+        "direction": _closure_direction(kind),
+        "relation_class": relation_class,
         "nodes": [],
+        "evidence": _RowShaper().evidence(
+            include_stale=include_stale, named_rows=_CLOSURE_NAMED_ROWS
+        ),
     }
     if exc.kind is not None:
         envelope["node_kind"] = exc.kind

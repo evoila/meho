@@ -46,7 +46,8 @@ across every cut:
   `cosign verify` that digest against the keyless workflow identity before
   `helm upgrade` — ideally enforced at admission (a Sigstore
   policy-controller / Kyverno rule). CLI tarballs carry `SHA256SUMS` plus
-  cosign signatures for the same reason. Full recipes:
+  cosign signatures for the same reason; the Desktop `.mcpb` bundle carries
+  its own signed `SHA256SUMS-mcpb`. Full recipes:
   [`docs/codebase/devops.md` § Image reference / Verifying provenance](codebase/devops.md)
   and the [repository README](https://github.com/evoila/meho#verify-image--chart--cli-signatures).
 
@@ -261,6 +262,10 @@ The push fans out to `cli-release.yml`, `image.yml`, `chart.yml`.
 - [ ] CLI tarballs attached to the Release; `meho version` prints `vX.Y.Z`.
 - [ ] Claude Desktop bundle `meho-claude-desktop-X.Y.Z.mcpb` attached to
   the Release (fifth asset, uploaded by `cli-release.yml` after GoReleaser).
+- [ ] The bundle's checksum file `SHA256SUMS-mcpb` and its
+  `SHA256SUMS-mcpb.cosign.bundle` are attached too. Download the bundle and
+  the checksum file into one folder; `shasum -a 256 -c SHA256SUMS-mcpb`
+  prints `OK`.
 
 #### Maintainer one-time setup — GHCR package visibility
 

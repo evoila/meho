@@ -6,7 +6,9 @@ The "MEHO for Claude Desktop" bundle packages the proven Desktop onramp —
 a local `mcp-remote` stdio→Streamable-HTTP shim running on the operator's
 VPN-connected machine — as a one-click MCPB extension. It is built by
 `build.sh` (manifest validation + pack via the pinned `@anthropic-ai/mcpb`
-CLI) and attached to each GitHub Release by `cli-release.yml`; PRs touching
+CLI) and attached to each GitHub Release by `cli-release.yml`, together
+with its own checksum file `SHA256SUMS-mcpb` (two-space `sha256sum` format,
+cosign-signed like the CLI `SHA256SUMS`); PRs touching
 the directory get a dry-run pack and the launcher test suite from
 `mcpb-bundle.yml`. Operator-facing behaviour (install dialog, OAuth first
 connect, elevated scopes, trust routes) is documented in the bundle's

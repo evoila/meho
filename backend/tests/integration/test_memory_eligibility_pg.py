@@ -35,9 +35,11 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from sqlalchemy import text
 from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.memory.rbac import MemoryRbacResolver
 from meho_backplane.memory.schemas import MemoryScope
 from meho_backplane.memory.service import MemoryService
@@ -207,9 +209,17 @@ async def test_expiry_cases_through_memory_search(pg_engine: None, stub_embeddin
 async def test_expiry_applies_to_all_source_retrieve_without_eligibility(
     pg_engine: None, stub_embedding: None
 ) -> None:
-    """Even a caller with no eligibility value cannot rank an expired memory."""
+    """Even a caller with no eligibility value cannot rank an expired memory.
+
+    The session runs in a non-UTC time zone (UTC+05:30). If the SQL cast
+    read offset-less values in the session zone instead of UTC,
+    ``naivefuture`` (now + 2h) would land 3.5h in the past and drop out.
+    """
     expected = await _stage_expiry_cases()
-    hits = await retrieve(TENANT, QUERY, limit=50)
+    async with get_sessionmaker()() as session:
+        await session.execute(text("SET TIME ZONE 'Asia/Kolkata'"))
+        assert (await session.execute(text("SHOW TimeZone"))).scalar_one() == "Asia/Kolkata"
+        hits = await retrieve(TENANT, QUERY, limit=50, session=session)
     assert _slugs(hits) == expected
 
 

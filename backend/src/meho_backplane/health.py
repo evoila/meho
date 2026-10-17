@@ -28,10 +28,13 @@ timeout takes the pod out of rotation.
 (``agent_runtime``, ``ui_surface``, ``audit_replay``,
 ``approval_queue``) with their configured / missing-env state so an
 operator's single GET answers "which features will work out of the
-box on my deploy?". The block is **always present** — emitted on both
-the 200 and 503 branches — and is independent of the probe-registry
-verdict: a probe failure surfaces under ``checks``, a feature gate
-surfaces under ``features``, and the two never mask each other.
+box on my deploy?". The block is emitted on both the 200 and 503
+branches and is independent of the probe-registry verdict: a probe
+failure surfaces under ``checks``, a feature gate surfaces under
+``features``, and the two never mask each other. When
+``METRICS_AUTH_TOKEN`` is set, the block is left out unless the caller
+presents the matching bearer token (#3594); the verdict itself is
+always served, so a kubelet readiness probe needs no header.
 
 Usage::
 
@@ -51,11 +54,11 @@ from dataclasses import asdict, dataclass
 from typing import cast
 
 import structlog
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from meho_backplane.features import build_features_block
-from meho_backplane.metrics_access import verify_metrics_access
+from meho_backplane.metrics_access import has_metrics_access
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -526,18 +529,18 @@ async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@router.get("/ready", dependencies=[Depends(verify_metrics_access)])
-async def ready() -> JSONResponse:
+@router.get("/ready")
+async def ready(request: Request) -> JSONResponse:
     """Readiness probe with deploy-time feature-gate visibility.
 
-    Guarded by :func:`~meho_backplane.metrics_access.verify_metrics_access`
-    (#3499): open by default, but when ``METRICS_AUTH_TOKEN`` is set the
-    caller must present a matching bearer token or the request is refused
-    401 — so the ``features`` block's four-eyes / feature-gate posture is
-    not readable unauthenticated on a shared ingress. ``/healthz`` (pure
-    liveness) is deliberately left unguarded, so a bearer-less liveness path
-    always exists; a deployment that turns the guard on carries the token on
-    the readiness probe via ``httpHeaders``.
+    The body depends on the opt-in ``METRICS_AUTH_TOKEN`` guard (#3499,
+    #3594). When the token is unset, every caller gets the full body. When
+    it is set, only a caller with the matching bearer token gets the
+    ``features`` block; every other caller (for example a kubelet
+    readiness probe, which cannot send a header from a Secret) gets just
+    ``status`` + ``checks`` with the same 200 / 503 status code. ``/ready``
+    never answers 401. See
+    :func:`~meho_backplane.metrics_access.has_metrics_access`.
 
     Returns 200 with
     ``{"status": "ready", "checks": [...], "features": {...}}`` when
@@ -560,9 +563,10 @@ async def ready() -> JSONResponse:
     """
     results = await run_probes_async()
     ready_ok = bool(results) and all(r.ok for r in results)
-    payload = {
+    payload: dict[str, object] = {
         "status": "ready" if ready_ok else "not_ready",
         "checks": [asdict(r) for r in results],
-        "features": build_features_block(get_settings()),
     }
+    if has_metrics_access(request):
+        payload["features"] = build_features_block(get_settings())
     return JSONResponse(content=payload, status_code=200 if ready_ok else 503)

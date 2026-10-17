@@ -48,6 +48,12 @@ off-switch.
     same message) but **returns** the validated IP-literal address set to
     dial (or `None` for a passthrough — empty host / allowlisted hostname
     literal / unresolvable name).
+  - `is_allowlisted(host)` — true when the host is an exact entry on the
+    allowlist: a hostname listed verbatim, or an IP literal listed as a
+    single address (bare IP, `/32`, or `/128`). An IP that only falls
+    inside a wider listed range does not count. No DNS lookup. The corpus client uses it to allow
+    plain `http` for a trusted in-cluster corpus host (#3573); it grants
+    nothing on the target dial path.
   - `_screen(host)` — the shared screening core both entry points call,
     so the assert-only and address-returning arms can never diverge.
   - `_dialed_host(candidate)` — normalizes a non-IP-literal value to

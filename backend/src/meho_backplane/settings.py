@@ -1881,13 +1881,14 @@ class Settings(BaseModel):
     # shared ingress and, unauthenticated, leak operational metrics and the
     # effective four-eyes / feature-gate posture to anyone who can reach it.
     # Empty ("", the default) leaves both endpoints **open** — behaviour is
-    # unchanged, so the in-cluster scraper and the kubelet readiness probe
-    # keep working with no config change. Set it to a shared secret to
-    # require ``Authorization: Bearer <token>`` on both endpoints
-    # (constant-time compared in :mod:`meho_backplane.metrics_access`); a
-    # deployment that turns it on must then hand the same token to the
-    # scraper (Prometheus ``bearer_token`` / ServiceMonitor
-    # ``bearerTokenSecret``) and to the readiness probe (``httpHeaders``).
+    # unchanged. Set it to a shared secret to require
+    # ``Authorization: Bearer <token>`` on ``/metrics`` (constant-time
+    # compared in :mod:`meho_backplane.metrics_access`); a deployment that
+    # turns it on must then hand the same token to the scraper (Prometheus
+    # ``bearer_token`` / ServiceMonitor ``bearerTokenSecret``). ``/ready``
+    # never answers 401 (#3594): without the bearer it still returns the
+    # readiness verdict but leaves out the ``features`` block, so the
+    # kubelet readiness probe needs no header.
     # ``/healthz`` (pure liveness, no posture) is deliberately never guarded,
     # so a bearer-less liveness path always exists. A **source-CIDR** allow
     # was considered and rejected: behind the shared ingress the app sees the

@@ -6229,6 +6229,13 @@ class ApprovalRequest(Base):
         nullable=True,
         default=None,
     )
+    # Client-chosen retry key (#3486). Sent as ``idempotency_key`` on
+    # ``call_operation``. While this row is ``pending`` or ``approved``, the
+    # same principal sending the same key gets this row back instead of a
+    # new one. The partial unique index below enforces it, so two racing
+    # requests cannot both insert. NULL when no key was sent and on pre-0105
+    # rows. Added by migration ``0105``.
+    idempotency_key: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     # Parent composite to re-enter on resume when this row parks a composite
     # sub-op (#3351). ``{"op_id": ..., "params": ...}`` captured at park time;
     # NULL for direct-op parks (generic re-dispatch of ``op_id``) and pre-0099
@@ -6260,6 +6267,22 @@ class ApprovalRequest(Base):
             "approval_request_work_ref_idx",
             "work_ref",
             postgresql_using="btree",
+        ),
+        # Matches migration 0105 (#3486): at most one live (pending or
+        # approved) row per (tenant, principal, idempotency_key).
+        Index(
+            "approval_request_idempotency_key_idx",
+            "tenant_id",
+            "principal_sub",
+            "idempotency_key",
+            unique=True,
+            postgresql_using="btree",
+            postgresql_where=sa.text(
+                "idempotency_key IS NOT NULL AND status IN ('pending', 'approved')"
+            ),
+            sqlite_where=sa.text(
+                "idempotency_key IS NOT NULL AND status IN ('pending', 'approved')"
+            ),
         ),
         sa.CheckConstraint(
             _ck_in("status", _APPROVAL_REQUEST_STATUSES),

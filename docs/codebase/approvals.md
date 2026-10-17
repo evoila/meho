@@ -742,7 +742,7 @@ the existing exactly-one-resumer substrate rather than duplicating it:
    (#3079) — persists the re-dispatch's reduced result envelope onto
    `approval_request.resume_result` (nullable JSON, migration `0096`) right
    after the dispatch returns. Only the resumer that **won**
-   `claim_resume` (#2293) reaches the capture (`_persist_resume_result`), so
+   `claim_resume` (#2293) reaches the capture (`persist_resume_result`), so
    it runs at most once per approved request; a loser that no-ops
    `already_resumed` leaves the winner's result untouched. The stored value
    is `OperationResult.model_dump(mode="json")` — the **same** reduced /
@@ -823,6 +823,141 @@ for the paired add-on that requested the approval
 (`AddonStepEventService.record_if_owned_committed`). That answers "was it
 approved?"; the `/result` surface answers "what did the approved re-dispatch
 produce?" — complementary, not a duplicate.
+
+## Retry-safe approval requests, binding identity, and run phase (#3486)
+
+A durable client, such as an add-on that drives a two-person governed
+delete, retries after a crash or restart. Three things make that safe.
+
+### 1. Send an `idempotency_key` so a retry gets the same request
+
+`call_operation` (REST `POST /api/v1/operations/call`, MCP `call_operation`)
+takes an optional `idempotency_key` (1 to 200 characters,
+`CallOperationBody.idempotency_key`). It only matters when the call waits
+for approval.
+
+- **First call.** The new `approval_request` row stores the key
+  (`idempotency_key` column, migration `0105`).
+- **Retry of the identical call.** If the same principal in the same tenant
+  has a `pending` or `approved` request with this key,
+  `create_pending_request` returns that request. The reply is the normal
+  `awaiting_approval` envelope (HTTP 200) with the **same**
+  `extras.approval_request_id` and `extras.approval_request_reused: true`.
+  No new row, no new `approval.request` audit row, no second
+  `approval.pending` event. The first row's audit record stands.
+- **Same key, different call.** "Identical" means the same `op_id`,
+  `connector_id`, target, `params_hash`, `preview_hash`, and `work_ref`. If
+  any of them differs, the call is refused with `status="denied"` and
+  `extras.error_code="idempotency_key_conflict"`, and
+  `extras.approval_request_id` names the request that holds the key. Nothing
+  is parked. The refusal writes a `denied` audit row.
+- **When the key is free again.** A `rejected` or `expired` request no
+  longer holds its key, so the same key parks a new request. An `approved`
+  request keeps its key even after it ran: a retry then returns the request
+  that already ran, so the op is never run twice.
+- **A late retry.** A request can pass its deadline (`expires_at`) while
+  it is still `pending`, because the expiry sweeper runs only every few
+  minutes, or not at all when it is off. Such a request can no longer be
+  approved, so a retry does not get it back. Instead, `create_pending_request`
+  locks it and expires it in the same transaction (`_lock_and_expire_pending`,
+  the same steps and the same `approval.decision` audit row as
+  `expire_stale_requests`). Like the sweeper, it records the expiry under
+  the system identity `system:approval-expiry` (`expiry_operator` in
+  `approval_queue.py`), not under the requester. Then it parks a new
+  request with the same key.
+  The reply carries the new `approval_request_id` and no
+  `approval_request_reused`. After commit the dispatcher publishes
+  `approval.expired` for the old request and `approval.pending` for the
+  new one.
+- **Who can match.** The key is scoped to `(tenant_id, principal_sub)`. Two
+  requesters, or two runs with different `work_ref` values, never share one
+  request. Without a key, nothing changes: every call that waits for
+  approval makes a new request.
+
+**Races.** A partial unique index,
+`approval_request_idempotency_key_idx` on `(tenant_id, principal_sub,
+idempotency_key) WHERE idempotency_key IS NOT NULL AND status IN
+('pending', 'approved')`, makes sure two racing calls cannot both insert.
+The losing insert runs in a savepoint (`_insert_idempotent_request`). When
+the index refuses it, the savepoint rolls back and the winner's row is
+returned the same way as a normal retry.
+
+Two late retries can also race to expire the same overdue request. Only one
+gets the row lock. When the other's locked re-read finds no `pending` row,
+the row changed under it: another retry expired it and parked a replacement,
+or a sweep, reject or approve got there first. `_resolve_idempotent_request`
+then looks the key up again and returns what holds it now, for example the
+replacement as a reused request. It never returns the expired row it read
+first. That second lookup refreshes the row the session already holds
+(`populate_existing`). This matters when an approve commits while the late
+retry waits for the lock: the row is now `approved`, and the retry returns
+it. With the cached `pending` state it would try to expire the row again,
+miss again, and never return.
+`tests/integration/test_approval_idempotent_retry_pg.py` runs both races
+(two late retries; a late retry against an approve) on a real Postgres.
+
+**What does not change.** The lookup runs inside `create_pending_request`,
+after every park gate in `_handle_needs_approval`. So a retry still goes
+through the policy gate, the destructive-tier `preview_hash` check (#3197),
+and the permission preflight. A retry with a stale `preview_hash` is refused
+with `preview_hash_mismatch`, as before. The key is not used for the
+sub-op requests a composite (multi-step) op makes, and not on the resume
+path. Tenant isolation and the one-resumer latch (`resumed_at`) are
+unchanged.
+
+### 2. `preview_hash` on list and show
+
+`ApprovalRequestView` (`GET /api/v1/approvals` and `GET
+/api/v1/approvals/{id}`) now carries `preview_hash`, the destructive-tier
+binding stored at park time. With `op_id`, `target_id`, and `params_hash`, a
+client can match a request to the row it previewed. It is `null` for a
+non-destructive request. The field is additive.
+
+### 3. `result_state`: has the approved op run yet?
+
+`status` keeps its four values (`pending` / `approved` / `rejected` /
+`expired`), so the migration `0023` `CHECK` constraint and every existing
+client are unchanged. Next to it, the list and show views carry
+`result_state`, worked out from the row by `approval_result_state` (it is
+not stored):
+
+| `result_state` | Meaning |
+|---|---|
+| `null` | `status` is not `approved`. |
+| `not_started` | Approved. No resumer has claimed the run yet (`resumed_at IS NULL`). |
+| `started` | A resumer claimed the run (`resumed_at` is set), but no result is stored yet. The op may still be running. |
+| `executed` | The stored result (`resume_result`) has `status == "ok"`. |
+| `failed` | A result is stored and its `status` is not `ok`. |
+
+So a client that lists or shows requests can tell "approved, not run yet"
+from "approved and run" without polling the owner-only `/result` read. The
+result body itself stays on `/result` only; the views show the phase, not
+the payload.
+
+Both resume paths store the result (`persist_resume_result`): the operator
+surface (`resume_dispatch_after_approval`) and the in-process agent waiter
+(`_resume_approved_or_already_resumed` in `agent/approval_wait.py`). So a
+request the agent resumed also reaches `executed` or `failed`. Limits of
+`started`: the result write is best-effort, and a re-dispatch that raised
+instead of returning an envelope stores nothing. In those cases the row
+stays `started`.
+
+### The add-on governed-destroy round trip (#3478)
+
+For the add-on that proposes a destructive op: send an `idempotency_key`
+with the `call_operation` that carries the `preview_hash`. Derive the key
+from something stable on your side, for example your run id plus the row
+you want to delete. If you crash before you store the
+`approval_request_id`, send the identical call again with the same key. You
+get the same request back. Then watch `result_state` on `GET
+/api/v1/approvals/{id}`, and read the result body from `/result` once it is
+`executed` or `failed`.
+
+**Pinned by tests:** `tests/test_approval_idempotent_park.py` (retry,
+scoping, conflict, race, `result_state` on the REST list and show after both
+resume paths), `tests/integration/test_approval_idempotent_retry_pg.py` (two
+late retries, and a late retry against an approve, on a real Postgres) and
+`tests/migrations/test_migration_0105_add_approval_request_idempotency_key.py`.
 
 ## `proposed_effect` builder hook (#1437)
 
@@ -1460,7 +1595,7 @@ a phantom event cannot outlive a failed transaction:
 | Create | `approval.pending` | `create_pending_request` (dispatcher parks a `needs-approval` verdict). | `operations/dispatcher.py::_handle_needs_approval` |
 | Approve | `approval.approved` | `approve_request` succeeds. | `api/v1/approvals.py` (REST), `mcp/tools/approvals.py` (MCP) |
 | Reject | `approval.rejected` | `reject_request` succeeds. | `api/v1/approvals.py` (REST), `mcp/tools/approvals.py` (MCP) |
-| Expire | `approval.expired` | `expire_stale_requests` (periodic sweeper) per expired row. | `operations/approval_expiry.py::_sweep_one_tenant` (commits then publishes per returned row's `_audit_id`) |
+| Expire | `approval.expired` | `expire_stale_requests` (periodic sweeper) per expired row, or a late retry with the same idempotency key that finds its request still `pending` past the deadline. Both use the `system:approval-expiry` identity. | `operations/approval_expiry.py::_sweep_one_tenant` (commits then publishes per returned row's `_audit_id`); `operations/dispatcher.py::_handle_needs_approval` (publishes the `_expired_request` before the new `approval.pending`) |
 
 Payload: `approval_request_id`, `decision`, `connector_id`,
 `approval_op_id`. The event's `audit_id` field is the decision row's

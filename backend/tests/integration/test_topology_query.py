@@ -70,6 +70,8 @@ from meho_backplane.db.models import GraphEdge, GraphNode, Target
 from meho_backplane.topology.evidence import classify_freshness
 from meho_backplane.topology.query import (
     AmbiguousNodeError,
+    ClosureBudget,
+    bounded_closure,
     find_dependencies,
     find_dependents,
     find_path,
@@ -1341,3 +1343,192 @@ def test_module_imports_cleanly() -> None:
     assert issubclass(query.AmbiguousNodeError, ValueError)
     assert schemas.TopologyNode.model_config["frozen"] is True
     assert schemas.TopologyPath.model_config["frozen"] is True
+
+
+# ---------------------------------------------------------------------------
+# #3764 — bounded closure answers. New fixtures: the star (one hub, many
+# dependents) and the dense mesh (layers fully linked to the next layer).
+# ---------------------------------------------------------------------------
+
+
+async def _seed_new_star_fixture(*, leaves: int, pad_bytes: int = 0) -> None:
+    """New #3764 fixture: ``star-hub`` with *leaves* dependents ``star-leaf-NNNN``.
+
+    Each leaf ``runs-on`` the hub, so a dependents walk from the hub has
+    one level with *leaves* nodes. *pad_bytes* adds a string of that size
+    to every leaf's properties, for the byte-limit test.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        hub = await _seed_node(session, tenant_id=TENANT_A_ID, kind="host", name="star-hub")
+        leaf_nodes = [
+            GraphNode(
+                id=uuid.uuid4(),
+                tenant_id=TENANT_A_ID,
+                kind="vm",
+                name=f"star-leaf-{i:04d}",
+                source="auto",
+                properties={"pad": "x" * pad_bytes},
+                discovered_by="test",
+            )
+            for i in range(leaves)
+        ]
+        session.add_all(leaf_nodes)
+        await session.flush()
+        session.add_all(
+            GraphEdge(
+                id=uuid.uuid4(),
+                tenant_id=TENANT_A_ID,
+                from_node_id=leaf.id,
+                to_node_id=hub,
+                kind="runs-on",
+                source="auto",
+                discovered_by="test",
+            )
+            for leaf in leaf_nodes
+        )
+
+
+async def _seed_new_dense_mesh_fixture(*, layers: int, width: int) -> None:
+    """New #3764 fixture: ``mesh-root`` plus *layers* layers of *width* nodes.
+
+    Every node of a layer depends on every node of the layer above it, so
+    the number of distinct walks grows as ``width ** layers``. The
+    recursive CTE follows each walk, which is the dense fan-out a depth
+    limit alone does not bound.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        root = await _seed_node(session, tenant_id=TENANT_A_ID, kind="host", name="mesh-root")
+        above = [root]
+        for layer in range(layers):
+            current = [
+                await _seed_node(
+                    session, tenant_id=TENANT_A_ID, kind="vm", name=f"mesh-{layer}-{i}"
+                )
+                for i in range(width)
+            ]
+            for lower in current:
+                for upper in above:
+                    await _seed_edge(
+                        session,
+                        tenant_id=TENANT_A_ID,
+                        from_id=lower,
+                        to_id=upper,
+                        kind="runs-on",
+                    )
+            above = current
+
+
+@_skip_no_docker
+async def test_bounded_closure_new_star_fixture_stops_at_node_limit(pg_engine: None) -> None:
+    """A dense star stops at the node limit and returns the first part in order."""
+    await _seed_new_star_fixture(leaves=300)
+    operator = _operator(TENANT_A_ID)
+
+    answer = await bounded_closure(
+        operator, "star-hub", reverse=True, budget=ClosureBudget(max_nodes=40)
+    )
+
+    assert answer.limit_hit == "node_limit"
+    assert len(answer.nodes) == 40
+    full = await find_dependents(operator, "star-hub")
+    assert len(full) == 301
+    # The cut answer is the first part of the full closure, in its order.
+    assert [n.id for n in answer.nodes] == [n.id for n in full[:40]]
+    assert answer.root.name == "star-hub"
+
+
+@_skip_no_docker
+async def test_bounded_closure_new_star_fixture_stops_at_byte_limit(pg_engine: None) -> None:
+    """Large node properties stop the walk at the byte limit, not the node limit."""
+    await _seed_new_star_fixture(leaves=50, pad_bytes=1000)
+
+    answer = await bounded_closure(
+        _operator(TENANT_A_ID),
+        "star-hub",
+        reverse=True,
+        budget=ClosureBudget(max_bytes=10_000),
+    )
+
+    assert answer.limit_hit == "byte_limit"
+    assert 1 < len(answer.nodes) < 12
+    # Every kept node arrives whole; the row past the budget is not kept.
+    assert all(len(n.properties["pad"]) == 1000 for n in answer.nodes[1:])
+
+
+@_skip_no_docker
+async def test_bounded_closure_new_dense_mesh_fixture_stops_at_time_budget(
+    pg_engine: None,
+) -> None:
+    """The dense mesh stops at the time budget with no nodes and a known root."""
+    await _seed_new_dense_mesh_fixture(layers=8, width=6)
+    operator = _operator(TENANT_A_ID)
+
+    answer = await bounded_closure(
+        operator, "mesh-root", reverse=True, budget=ClosureBudget(time_budget_ms=1)
+    )
+
+    assert answer.limit_hit == "time_budget"
+    assert answer.nodes == ()
+    assert answer.root.name == "mesh-root"
+    # The cancelled statement leaves the pool usable for the next query.
+    shallow = await bounded_closure(operator, "mesh-root", reverse=True, depth=1)
+    assert shallow.limit_hit == "hop_limit"
+    assert len(shallow.nodes) == 7
+
+
+@_skip_no_docker
+async def test_bounded_closure_reports_hop_limit_only_when_more_nodes_exist(
+    known_graph: dict[str, uuid.UUID],
+) -> None:
+    """``hop_limit`` means nodes exist past the depth; a full answer has no limit."""
+    operator = _operator(TENANT_A_ID)
+
+    cut = await bounded_closure(operator, "ds1", reverse=True, depth=1)
+    assert cut.limit_hit == "hop_limit"
+    assert [n.name for n in cut.nodes] == ["ds1", "host1", "vm1"]
+
+    full = await bounded_closure(operator, "ds1", reverse=True, depth=2)
+    assert full.limit_hit is None
+    assert [n.name for n in full.nodes] == ["ds1", "host1", "vm1", "app", "vm2"]
+
+
+@_skip_no_docker
+async def test_bounded_closure_complete_answer_continues_through_shared_handle(
+    pg_engine: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A complete large closure is kept behind a handle only its owner can read."""
+    import meho_backplane.operations.jsonflux_reducer as reducer_module
+    import meho_backplane.operations.result_query as result_query_core
+    from meho_backplane.mcp.tools.topology import _query_topology_handler
+    from tests._result_store_helpers import MemoryResultStore
+
+    store = MemoryResultStore()
+    monkeypatch.setattr(reducer_module, "get_result_handle_store", lambda: store)
+    monkeypatch.setattr(result_query_core, "get_result_handle_store", lambda: store)
+    await _seed_new_star_fixture(leaves=120)
+    operator = _operator(TENANT_A_ID)
+
+    answer = await _query_topology_handler(operator, {"kind": "dependents", "target": "star-hub"})
+
+    assert answer["completeness"]["state"] == "complete"
+    assert answer["completeness"]["limits_hit"] == []
+    assert answer["completeness"]["found"] == answer["completeness"]["retained"] == 121
+    assert answer["delivery"] == "complete"
+    assert "nodes" not in answer
+    assert answer["node_count"] == 121
+    assert answer["edge_count"] == 120
+    handle_id = uuid.UUID(answer["handle"]["handle_id"])
+
+    window = await result_query_core.read_result_window(operator, handle_id, 0, 500)
+    full = await find_dependents(operator, "star-hub")
+    assert [row["id"] for row in window["rows"]] == [str(n.id) for n in full]
+    assert window["rows"][1]["parent_node_id"] == answer["root"]["id"]
+    assert all(row["via_relation_class"] == "placement" for row in window["rows"][1:])
+
+    other_caller = operator.model_copy(update={"sub": "someone-else"})
+    other_tenant = _operator(TENANT_B_ID)
+    for intruder in (other_caller, other_tenant):
+        with pytest.raises(result_query_core.ResultHandleNotFoundError):
+            await result_query_core.read_result_window(intruder, handle_id, 0, 50)

@@ -20,6 +20,9 @@ Coverage matrix:
   accepts a well-formed one.
 * #3760: relation classes map only the reviewed edge kinds, and the
   freshness rules keep stale, old, observed and curated rows apart.
+* #3764: the bounded closure keeps only rows inside the depth, node and
+  byte limits, names the limit that stopped it, and rejects a budget
+  that is not positive.
 """
 
 from __future__ import annotations
@@ -42,6 +45,7 @@ from meho_backplane.topology.evidence import (
     relation_class_kind_filter,
     stale_rows_evidence,
 )
+from meho_backplane.topology.query import ClosureBudget, _cut_closure_rows, bounded_closure
 from meho_backplane.topology.schemas import (
     TopologyEdge,
     TopologyEdgeEndpoint,
@@ -419,3 +423,82 @@ def test_stale_rows_evidence_reports_the_named_row_exception() -> None:
     assert edges["stale_rows_note"] == (
         "Rows the latest refresh no longer reported are never listed."
     )
+
+
+# ---------------------------------------------------------------------------
+# #3764 — cutting traversal rows at the closure limits (no database)
+# ---------------------------------------------------------------------------
+
+
+class _FakeRow:
+    """Stand-in for a traversal result row: only ``_mapping`` is read."""
+
+    def __init__(self, name: str, depth: int, cumulative_bytes: int) -> None:
+        self._mapping = {
+            "id": uuid4(),
+            "kind": "vm",
+            "name": name,
+            "source": "auto",
+            "source_scope": None,
+            "properties": {},
+            "last_seen": None,
+            "depth": depth,
+            "via_edge_kind": None if depth == 0 else "runs-on",
+            "parent_node_id": None,
+            "via_edge_id": None,
+            "via_edge_source": None,
+            "via_edge_last_seen": None,
+            "cumulative_bytes": cumulative_bytes,
+        }
+
+
+def _new_star_rows(leaves: int, *, row_bytes: int = 10, depth: int = 1) -> list[_FakeRow]:
+    """New #3764 fixture: a root and *leaves* rows at *depth*, in answer order."""
+    rows = [_FakeRow("root", 0, row_bytes)]
+    rows += [_FakeRow(f"leaf-{i:04d}", depth, row_bytes * (i + 2)) for i in range(leaves)]
+    return rows
+
+
+def test_cut_closure_rows_keeps_everything_when_no_limit_applies() -> None:
+    nodes, limit = _cut_closure_rows(_new_star_rows(3), depth=1, budget=ClosureBudget())
+    assert limit is None
+    assert [n.name for n in nodes] == ["root", "leaf-0000", "leaf-0001", "leaf-0002"]
+
+
+def test_cut_closure_rows_stops_the_new_star_at_the_node_limit() -> None:
+    rows = _new_star_rows(10)[:5]  # the SQL sends at most max_nodes + 1 rows
+    nodes, limit = _cut_closure_rows(rows, depth=1, budget=ClosureBudget(max_nodes=4))
+    assert limit == "node_limit"
+    assert [n.name for n in nodes] == ["root", "leaf-0000", "leaf-0001", "leaf-0002"]
+
+
+def test_cut_closure_rows_stops_the_new_star_at_the_byte_limit() -> None:
+    nodes, limit = _cut_closure_rows(
+        _new_star_rows(10), depth=1, budget=ClosureBudget(max_bytes=35)
+    )
+    assert limit == "byte_limit"
+    assert [n.name for n in nodes] == ["root", "leaf-0000", "leaf-0001"]
+
+
+def test_cut_closure_rows_keeps_an_oversized_root_and_reports_bytes() -> None:
+    nodes, limit = _cut_closure_rows(
+        [_FakeRow("root", 0, 100)], depth=1, budget=ClosureBudget(max_bytes=10)
+    )
+    assert limit == "byte_limit"
+    assert [n.name for n in nodes] == ["root"]
+
+
+def test_cut_closure_rows_reports_hop_limit_for_a_row_past_the_depth() -> None:
+    rows = [*_new_star_rows(2), _FakeRow("deeper", 2, 1000)]
+    nodes, limit = _cut_closure_rows(rows, depth=1, budget=ClosureBudget(max_bytes=40))
+    assert limit == "hop_limit"
+    assert [n.name for n in nodes] == ["root", "leaf-0000", "leaf-0001"]
+
+
+@pytest.mark.parametrize(
+    "budget",
+    [ClosureBudget(max_nodes=0), ClosureBudget(max_bytes=0), ClosureBudget(time_budget_ms=0)],
+)
+async def test_bounded_closure_rejects_a_non_positive_budget(budget: ClosureBudget) -> None:
+    with pytest.raises(ValueError, match="must be positive"):
+        await bounded_closure(None, "x", reverse=True, budget=budget)  # type: ignore[arg-type]

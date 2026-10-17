@@ -1,0 +1,158 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# Single-head migration guard (#4204).
+#
+# Migrations are numbered by hand. Two pull requests made at the same
+# time often take the same next number and the same parent. Git sees no
+# conflict (the file names differ), but Alembic then finds two heads and
+# the app refuses to start, so every database-backed job in the merge
+# queue fails with hundreds of `Multiple head revisions` errors.
+#
+# `scripts/ci/check_migration_heads.py` finds the clash in well under a
+# minute with no database and no Alembic install. It fails when two
+# files use the same revision number, when a down_revision points at a
+# revision that does not exist, or when the chain has more than one
+# head. The message says which number main is at and what to rename.
+#
+# Four triggers, one job each does a different part of the promise:
+#
+#   pull_request    — the check runs on the merge result of the PR and
+#                     main at that moment. Every PR, no path filter: a
+#                     required check skipped by `on.paths` stays Pending
+#                     and blocks the merge (#2140 trap).
+#   merge_group     — the check runs on the real merge-queue commit, so
+#                     a clash that slipped past the PR check fails here
+#                     fast, before the slow database jobs.
+#   push to main    — only when a migration file changed. The `check`
+#                     job confirms main itself is healthy, then
+#                     `recheck-open-prs` dispatches this workflow on every
+#                     open same-repo PR that adds a migration.
+#   workflow_dispatch — that re-check. It runs on the PR branch, adds
+#                     main's current migration files to the check, and
+#                     posts a fresh result under the same check name on
+#                     the PR's head commit. A PR that now clashes turns
+#                     red before anyone adds it to the merge queue.
+#
+# The `check` job always adds main's migration files (`--main`) before
+# checking. On pull_request / merge_group / push that is a no-op, because
+# the checkout already contains main. On workflow_dispatch it is what
+# makes a branch that is behind main see the clash.
+#
+# Required status check in branch protection: "Migration chain (single
+# head)". Registering it is a manual ops step, like the other required
+# contexts (see docs/codebase/devops.md, "Merge queue").
+
+name: migration-heads
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/alembic/versions/**'
+      - 'scripts/ci/check_migration_heads.py'
+      - '.github/workflows/migration-heads.yml'
+  pull_request:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: Why this run was started (shown in the log only)
+        required: false
+        type: string
+        default: manual
+
+permissions:
+  contents: read
+
+concurrency:
+  group: migration-heads-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
+
+jobs:
+  check:
+    name: Migration chain (single head)
+    # Untrusted-PR runner isolation (F06, meho-internal#268): the job runs
+    # PR-controlled code (the check script), needs no internal route or
+    # credential, so a fork PR goes to a disposable GitHub-hosted runner.
+    # Same shape as migration-compat.yml.
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'meho-runners-ci' }}
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.14'
+
+      - name: Fetch the migration files that are on main
+        env:
+          REASON: ${{ inputs.reason }}
+        run: |
+          set -euo pipefail
+          if [ -n "${REASON}" ]; then
+            echo "Re-check reason: ${REASON}"
+          fi
+          git fetch --no-tags --depth=1 origin main
+          mkdir -p "${RUNNER_TEMP}/main"
+          git archive FETCH_HEAD backend/alembic/versions | tar -x -C "${RUNNER_TEMP}/main"
+
+      - name: Check the migration chain against main
+        run: |
+          python scripts/ci/check_migration_heads.py backend/alembic/versions \
+            --main "${RUNNER_TEMP}/main/backend/alembic/versions"
+
+  recheck-open-prs:
+    name: Re-check open pull requests that add a migration
+    # A migration just landed on main. Every open same-repo PR that adds a
+    # migration was tested against the old main, so its green check may be
+    # stale. Dispatch this workflow on each such branch; the new run
+    # replaces the stale result under the same check name on the PR head.
+    #
+    # Push-only, so a pull_request can never reach this job. Fork PRs are
+    # skipped: a dispatch can only target a branch in this repo. A branch
+    # that does not carry this workflow file yet cannot be dispatched
+    # (GitHub answers 422); that is logged and the merge-queue run still
+    # catches the clash.
+    needs: check
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: write
+    steps:
+      - name: Dispatch the check on every open PR that adds a migration
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          MAIN_SHA: ${{ github.sha }}
+          WORKFLOW_FILE: migration-heads.yml
+        run: |
+          set -euo pipefail
+          branches="$(
+            gh pr list --state open --limit 200 \
+              --json number,headRefName,isCrossRepository,files \
+              --jq '.[]
+                    | select(.isCrossRepository | not)
+                    | select(any(.files[]; .path | startswith("backend/alembic/versions/")))
+                    | "\(.number) \(.headRefName)"'
+          )"
+          if [ -z "${branches}" ]; then
+            echo "No open same-repo pull request adds a migration. Nothing to re-check."
+            exit 0
+          fi
+          failed=0
+          while read -r number branch; do
+            echo "Re-checking #${number} (${branch}) against main ${MAIN_SHA}"
+            if ! gh workflow run "${WORKFLOW_FILE}" --ref "${branch}" \
+                 -f "reason=main moved to ${MAIN_SHA}; re-check for pull request #${number}"; then
+              echo "::warning::Could not dispatch the check on #${number} (${branch}). The branch probably predates this workflow; the merge-queue run still catches a clash."
+              failed=$((failed + 1))
+            fi
+          done <<< "${branches}"
+          echo "Dispatched re-checks; ${failed} branch(es) could not be dispatched."

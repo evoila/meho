@@ -48,6 +48,9 @@
 #   * Alembic backward-compat guard -> .github/workflows/migration-compat.yml
 #     (path-scoped to backend/alembic/versions/**, runs only when
 #     migrations change).
+#   * Alembic single-head guard     -> .github/workflows/migration-heads.yml
+#     (every PR + merge_group, seconds, no database; re-checks open
+#     migration PRs when a migration lands on main — #4204).
 #   * Chart publish / sign          -> .github/workflows/chart.yml
 #     (publish runs only on main + tag pushes; chart.yml's `validate`
 #     job runs on PRs too as a path-scoped gate. This workflow's
@@ -203,7 +206,7 @@ jobs:
             # alembic tree, the relocated migration test suite, the db
             # migrate/migrations modules under test, the compat script, and
             # the workflows that define this gate.
-            if printf '%s\n' "${changed}" | grep -qE '^(backend/alembic/|backend/tests/migrations/|backend/src/meho_backplane/db/(migrations|migrate)\.py$|scripts/ci/check_migration_compat\.py$|\.github/workflows/(ci|migration-compat)\.yml$)'; then
+            if printf '%s\n' "${changed}" | grep -qE '^(backend/alembic/|backend/tests/migrations/|backend/src/meho_backplane/db/(migrations|migrate)\.py$|scripts/ci/check_migration_(compat|heads)\.py$|\.github/workflows/(ci|migration-compat|migration-heads)\.yml$)'; then
               migrations=true
               echo "migration-related change detected -> migrations=true"
             else

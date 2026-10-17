@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for Alembic migration ``0109_add_topology_scope_cutover_state``.
+"""Behavioural tests for Alembic migration ``0110_add_topology_scope_cutover_state``.
 
 #3749 adds the two tables the staged scope cut-over needs and nothing
 else. Coverage (SQLite driver; the cut-over itself is PostgreSQL-only
@@ -15,8 +15,8 @@ and lives in ``tests/integration/test_topology_scope_cutover.py``):
 * **Downgrade** -- drops both tables while the graph is ``legacy``;
   refuses once the mode is ``scoped`` (the rollback guard).
 
-Every step targets this migration's own revision (``0109``) and its
-``down_revision`` (``0108``), never ``head``.
+Every step targets this migration's own revision (``0110``) and its
+``down_revision`` (``0109``), never ``head``.
 """
 
 from __future__ import annotations
@@ -36,8 +36,8 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0109"
-_DOWN_REVISION = "0108"
+_REVISION = "0110"
+_DOWN_REVISION = "0109"
 
 
 @pytest.fixture
@@ -46,7 +46,7 @@ def alembic_cfg(
     tmp_path: Path,
 ) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0109.db"
+    db_path = tmp_path / "migration_0110.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
@@ -138,6 +138,6 @@ def test_downgrade_refuses_once_scoped(alembic_cfg: tuple[Config, str]) -> None:
     command.upgrade(cfg, _REVISION)
     _execute(sync_url, "UPDATE topology_identity_state SET mode = 'scoped'")
 
-    with pytest.raises(RuntimeError, match="Refusing to downgrade 0109"):
+    with pytest.raises(RuntimeError, match="Refusing to downgrade 0110"):
         command.downgrade(cfg, _DOWN_REVISION)
     assert {"topology_identity_state", "topology_scope_manifest"} <= _tables(sync_url)

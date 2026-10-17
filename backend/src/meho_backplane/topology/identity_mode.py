@@ -4,7 +4,7 @@
 """Which node identity rules the topology writers follow (#3749).
 
 The graph runs in one of two modes, stored in the single row of
-``topology_identity_state`` (migration ``0109``):
+``topology_identity_state`` (migration ``0110``):
 
 * ``legacy`` -- the old unique key ``(tenant_id, kind, name)`` is in
   place. Writers leave ``graph_node.source_scope`` empty and a refresh

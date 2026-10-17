@@ -767,6 +767,58 @@ def test_diagnostics_forwards_operator_tenant_and_filters() -> None:
     assert kwargs["limit"] == 20
     # Own-tenant only -- the per-principal predicate is bound from the operator.
     assert kwargs["principal_sub"] == "op-principal"
+    # A non-Memory source has no Memory candidates, so no eligibility.
+    assert kwargs["memory_eligibility"] is None
+
+
+def _post_diagnostics_with_mock(
+    *, source: str, operator: Operator, retrieve_mock: AsyncMock
+) -> None:
+    """POST the diagnostics form once with *source* against a mocked retrieve."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RETRIEVE, retrieve_mock),
+        ):
+            response = client.post(
+                "/ui/retrieval/diagnostics",
+                data={"query": "vcenter maximums", "source": source, "kind": "", "limit": 20},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+    assert response.status_code == 200, response.text
+    retrieve_mock.assert_awaited_once()
+
+
+@pytest.mark.parametrize("source", ["", "memory"])
+def test_diagnostics_passes_memory_eligibility_when_memory_rows_can_rank(
+    source: str,
+) -> None:
+    """No source and ``source=memory`` both pass the Memory eligibility (#3741).
+
+    The UI front must follow the same Memory contract as ``POST
+    /api/v1/retrieve`` and the MCP retrieve resource: the frozen eligibility
+    carries the operator's tenant, their ``sub``, and every visible Memory
+    kind, so the candidate SQL drops rows the operator may not see before
+    ranking.
+    """
+    operator = _operator(tenant_id=_TENANT_A, sub="op-principal")
+    retrieve_mock = AsyncMock(return_value=[_hit()])
+
+    _post_diagnostics_with_mock(source=source, operator=operator, retrieve_mock=retrieve_mock)
+
+    kwargs = retrieve_mock.await_args.kwargs
+    assert kwargs["source"] == (source or None)
+    assert kwargs["principal_sub"] == "op-principal"
+    eligibility = kwargs["memory_eligibility"]
+    assert eligibility is not None
+    assert eligibility.tenant_id == _TENANT_A
+    assert eligibility.principal_sub == "op-principal"
+    assert len(eligibility.kinds) == 5
 
 
 # ---------------------------------------------------------------------------

@@ -124,7 +124,9 @@ backplane's and Keycloak's TLS certificates. There are two routes; either
 one is enough, and a public-CA deploy needs neither.
 
 1. **The "Internal CA bundle" field.** Pick the CA's PEM file in the
-   install dialog. Claude Desktop passes the path to the launcher as an
+   install dialog with the file picker. A typed path must be absolute or
+   start with `~/`; the launcher expands a leading `~` to the home folder.
+   Claude Desktop passes the path to the launcher as an
    argument; the launcher reads the file and appends its certificates to
    Node's default CA list with
    [`tls.setDefaultCACertificates()`](https://nodejs.org/api/tls.html#tlssetdefaultcacertificatescerts)

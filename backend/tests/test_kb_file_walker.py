@@ -24,6 +24,7 @@ Coverage matrix:
 
 from __future__ import annotations
 
+import errno
 from pathlib import Path
 
 import pytest
@@ -219,6 +220,34 @@ def test_best_effort_mode_handles_binary_file(tmp_path: Path) -> None:
     assert slugs == ["text"]
     assert len(errors) == 1
     assert "binary.md" in errors[0]
+
+
+def test_unreadable_file_error_uses_relative_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file that cannot be read is reported by its relative path only."""
+    _write(tmp_path / "sub" / "locked.md", "Body.")
+    _write(tmp_path / "text.md", "Text.")
+    locked = (tmp_path / "sub" / "locked.md").resolve()
+    real_read_text = Path.read_text
+
+    def fake_read_text(self: Path, *args: object, **kwargs: object) -> str:
+        if self == locked:
+            raise PermissionError(errno.EACCES, "Permission denied", str(self))
+        return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", fake_read_text)
+
+    errors: list[str] = []
+    slugs = _slugs(tmp_path, errors=errors)
+
+    assert slugs == ["text"]
+    assert errors == ["sub/locked.md: could not read sub/locked.md: Permission denied"]
+    assert str(tmp_path.resolve()) not in errors[0]
+
+    with pytest.raises(PermissionError) as exc_info:
+        list(walk_kb_directory(tmp_path))
+    assert str(tmp_path.resolve()) not in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------

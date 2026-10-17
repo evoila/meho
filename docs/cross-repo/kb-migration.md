@@ -47,7 +47,7 @@ Expected on a never-ingested corpus: `inserted_count == <file count>`, `updated_
 meho kb ingest ./kb --json
 ```
 
-Expected: a `KbIngestionResult` with `inserted_count == <file count>` on the first real run. Any per-file failure (binary file masquerading as `.md`, malformed front-matter, invalid slug) is counted in `error_count` and described in `errors[]` — the run continues; one bad file does not abort the corpus.
+Expected: a `KbIngestionResult` with `inserted_count == <file count>` on the first real run. Any per-file failure (binary file masquerading as `.md`, malformed front-matter, invalid slug) is counted in `error_count` and described in `errors[]` — the run continues; one bad file does not abort the corpus. If two or more files share a slug, none of them is written, the existing entry stays unchanged, and they are listed in `conflicts[]` (counted in `conflict_count`). Rename a file or fix its `slug:` front-matter, then run the ingest again.
 
 The `tenant` row was already seeded by the **first authenticated request** of this session — including the `--dry-run` in step 2. The seed runs in the `verify_jwt_and_bind` middleware that every authenticated route flows through (G0.8-T1, #628), so any authenticated call (a read, a `--dry-run`, or this real ingest) provisions the row idempotently before the route runs. Before #628 this step failed with an asyncpg `documents_tenant_id_fkey` violation on a fresh deploy because the `tenant` table was empty; that failure mode is gone.
 

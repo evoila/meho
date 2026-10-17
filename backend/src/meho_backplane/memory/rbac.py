@@ -56,7 +56,9 @@ from meho_backplane.memory.schemas import (
     TARGET_SCOPED,
     USER_SCOPED,
     MemoryScope,
+    kind_for_scope,
 )
+from meho_backplane.retrieval.retriever import MemoryEligibility
 
 __all__ = [
     "InvalidPromotionStepError",
@@ -191,6 +193,30 @@ class MemoryRbacResolver:
         # can pin the result list without a sort step.
         del operator
         return [f"memory-{scope.value}" for scope in MemoryScope]
+
+    def eligibility(
+        self, operator: Operator, scope: MemoryScope | None = None
+    ) -> MemoryEligibility:
+        """Build the frozen Memory eligibility for one read (#3741).
+
+        This is the one place that turns the read rules above into the
+        value the retrieval SQL enforces before ranking: the operator's
+        tenant and ``sub``, plus the kinds they may see. ``scope=None``
+        keeps every visible kind (the documented all-scopes default); a
+        scope narrows it to that scope's kind. User-scoped kinds are
+        matched on ``user_sub`` in SQL, tenant and target kinds are shared
+        across the tenant, and expiry is checked against database time --
+        the same rules :meth:`can_read` and ``is_expired`` apply per row.
+        """
+        visible = self.visible_kinds(operator)
+        if scope is not None:
+            wanted = kind_for_scope(scope)
+            visible = [kind for kind in visible if kind == wanted]
+        return MemoryEligibility(
+            tenant_id=operator.tenant_id,
+            principal_sub=operator.sub,
+            kinds=tuple(visible),
+        )
 
 
 # ---------------------------------------------------------------------------

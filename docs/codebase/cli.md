@@ -70,8 +70,9 @@ names.
   parent — per consumer-needs.md §G5's ergonomic shape:
   `meho remember "note"` rather than `meho memory remember "note"`).
   Wraps the four `/api/v1/memory*` routes shipped by G5.1-T2 (#422)
-  plus the `/api/v1/retrieve` route (G0.4-T5 #262, `source="memory"`
-  scoped) for `meho recall --query`. Five scopes: `user` /
+  plus `POST /api/v1/memory/search` (#3741, the same
+  `MemoryService.search_memories` call MCP `search_memory` makes) for
+  `meho recall --query`. Five scopes: `user` /
   `user-tenant` / `user-target` / `tenant` / `target`. The two
   target-scoped values require `--target NAME`; the CLI rejects a
   missing `--target` client-side before the round-trip.
@@ -207,7 +208,7 @@ cli/
     │   │   ├── add.go            # `meho kb add <slug> --body @file|@-|text` (POST /api/v1/kb).
     │   │   ├── delete.go         # `meho kb delete <slug> [--confirm]` (DELETE /api/v1/kb/{slug}).
     │   │   ├── kb_test.go        # helpers + register-all-verbs + body/metadata/confirm contract tests.
-    │   │   ├── ingest_test.go    # POST body + four-bucket render + 400 directory_not_found tests.
+    │   │   ├── ingest_test.go    # POST body + counter/conflict render + 400 directory_not_found tests.
     │   │   ├── search_test.go    # POST body (source pinned) + table render + nil-score safety tests.
     │   │   ├── list_test.go      # query-param emit + table render + limit-range gate tests.
     │   │   ├── show_test.go      # path-escape + Markdown body to stdout + 404 slug_not_found tests.
@@ -226,7 +227,7 @@ cli/
     │   ├── memory/           # G5.1-T4 #424 — top-level `meho remember/recall/forget/list/promote` (no parent).
     │   │   ├── memory.go         # Scope alias for api.MemoryScope + newAuthedClient/retryOn401/renderHTTPStatus typed-client helpers (G0.12-T10 #1268) + parseScope/parseTTL/parseTags/parseScopeSlugArg/loadBody/confirmPrompt.
     │   │   ├── remember.go       # `meho remember <body> [--scope --slug --target --tag --ttl --persist --json]` (POST /api/v1/memory). `--persist` (G5.2-T2 #624) sends explicit `expires_at: null` to opt out of the backend's default-7-day TTL on `memory-user` writes.
-    │   │   ├── recall.go         # `meho recall <scope>/<slug>` or `meho recall --query` (GET /api/v1/memory/{scope}/{slug} or POST /api/v1/retrieve, source="memory").
+    │   │   ├── recall.go         # `meho recall <scope>/<slug>` or `meho recall --query` (GET /api/v1/memory/{scope}/{slug} or POST /api/v1/memory/search).
     │   │   ├── forget.go         # `meho forget <scope>/<slug> [--confirm --target --json]` (DELETE /api/v1/memory/{scope}/{slug}).
     │   │   ├── list.go           # `meho list [--scope --tag --slug-pattern --include-expired --limit --json]` (GET /api/v1/memory).
     │   │   └── memory_test.go    # parseScope/parseTTL/parseScopeSlugArg + verb-happy-path + 403/404/422 + decline + JSON envelope tests.

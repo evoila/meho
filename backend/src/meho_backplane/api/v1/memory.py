@@ -120,6 +120,7 @@ from meho_backplane.auth.rbac import require_role
 from meho_backplane.memory import (
     InvalidPromotionStepError,
     MemoryEntry,
+    MemoryEntrySearchHit,
     MemoryScope,
     MemoryService,
     PermissionDeniedError,
@@ -127,7 +128,14 @@ from meho_backplane.memory import (
 from meho_backplane.memory.schemas import SLUG_PATTERN
 from meho_backplane.memory.ttl import resolve_default_expires_at
 
-__all__ = ["MemoryListResponse", "PromoteBody", "RememberBody", "router"]
+__all__ = [
+    "MemoryListResponse",
+    "MemorySearchBody",
+    "MemorySearchResponse",
+    "PromoteBody",
+    "RememberBody",
+    "router",
+]
 
 router = APIRouter(prefix="/api/v1/memory", tags=["memory"])
 
@@ -158,6 +166,7 @@ _require_operator = Depends(require_role(TenantRole.OPERATOR))
 _MEMORY_OP_IDS: Final[dict[str, str]] = {
     "remember": "memory.remember",
     "list": "memory.list",
+    "search": "memory.search",
     "recall": "memory.recall",
     "forget": "memory.forget",
     "promote": "memory.promote",
@@ -503,6 +512,61 @@ async def list_memories(
         limit=limit,
     )
     return MemoryListResponse(entries=entries)
+
+
+class MemorySearchBody(BaseModel):
+    """POST body for ``/api/v1/memory/search``.
+
+    Same limits as the MCP ``search_memory`` tool so the CLI and an agent
+    can send the same input: ``query`` 1..256 chars, ``limit`` 1..50
+    (default 10). Omit ``scope`` to search all five scopes.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    query: str = Field(min_length=1, max_length=256)
+    scope: MemoryScope | None = None
+    limit: int = Field(default=10, ge=1, le=50)
+
+
+class MemorySearchResponse(BaseModel):
+    """Response for ``/api/v1/memory/search`` -- the MCP ``search_memory`` shape.
+
+    ``hits`` is the only field. There is deliberately no total or count:
+    "no match" and "only rows you may not see" both return ``{"hits": []}``.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    hits: list[MemoryEntrySearchHit]
+
+
+@router.post("/search", response_model=MemorySearchResponse)
+async def search_memories(
+    body: MemorySearchBody,
+    operator: Operator = _require_read,
+) -> MemorySearchResponse:
+    """Rank the operator's eligible memories for a query (#3741).
+
+    A thin adapter over :meth:`MemoryService.search_memories`, the same
+    call the MCP ``search_memory`` tool makes, so ``meho recall --query``
+    and an agent get the same eligible result set. The service applies
+    tenant, principal, scope, and expiry rules before ranking. Open to
+    ``read_only`` like the other memory reads. The query text is never
+    bound to the audit row; only the op id, class, and scope are.
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_MEMORY_OP_IDS["search"],
+        audit_op_class="read",
+        audit_scope=body.scope.value if body.scope is not None else None,
+    )
+    hits = await MemoryService().search_memories(
+        operator,
+        body.query,
+        scope=body.scope,
+        limit=body.limit,
+    )
+    return MemorySearchResponse(hits=hits)
 
 
 @router.get("/{scope}/{slug}", response_model=MemoryEntry)

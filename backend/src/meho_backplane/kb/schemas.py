@@ -44,7 +44,7 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import datetime
-from typing import Final
+from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -53,11 +53,14 @@ __all__ = [
     "KB_SOURCE",
     "META_CREATED_BY_SUB",
     "META_LAST_UPDATED_BY_SUB",
+    "META_PROVENANCE",
     "SLUG_PATTERN",
     "InvalidKbSlugError",
     "KbEntry",
     "KbEntrySearchHit",
+    "KbIngestConflict",
     "KbIngestionResult",
+    "KbProvenance",
     "validate_slug",
 ]
 
@@ -84,6 +87,17 @@ KB_SOURCE: Final[str] = "kb"
 #: wrote it and who last mutated it without an audit-log correlation.
 META_CREATED_BY_SUB: Final[str] = "created_by_sub"
 META_LAST_UPDATED_BY_SUB: Final[str] = "last_updated_by_sub"
+
+#: Metadata key that holds where an entry came from. The service owns
+#: this key: it writes it on every directory ingest and every direct
+#: create, and it replaces any value a caller or a front-matter block
+#: supplies. The stored value is a small dict with ``source_kind``
+#: (``"directory"`` or ``"direct"``), ``relative_path`` (the file path
+#: relative to the ingest directory, never an absolute host path; ``None``
+#: for direct writes) and ``ingested_at`` (UTC ISO-8601 time of the
+#: write). Rows written before this key existed have no value here; the
+#: read side reports them as ``state="legacy"`` instead of guessing.
+META_PROVENANCE: Final[str] = "provenance"
 
 #: The ``documents.kind`` value every kb entry carries. Distinct from
 #: future kb-adjacent rows (kb-index, kb-collection) that would each
@@ -127,6 +141,25 @@ def validate_slug(slug: str) -> str:
     return slug
 
 
+class KbProvenance(BaseModel):
+    """Where a kb entry came from, as read back from its metadata.
+
+    ``state="recorded"`` means the service stored provenance when it
+    wrote the entry; the other fields are then set (``relative_path``
+    stays ``None`` for direct writes). ``state="legacy"`` means the
+    entry was written before provenance was stored, or the stored value
+    is not in the expected shape; every other field is ``None``. Legacy
+    rows are not rewritten -- the next write records real provenance.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    state: Literal["recorded", "legacy"]
+    source_kind: Literal["directory", "direct"] | None = None
+    relative_path: str | None = None
+    ingested_at: datetime | None = None
+
+
 class KbEntry(BaseModel):
     """One kb entry -- mirrors a row in the ``documents`` table.
 
@@ -145,6 +178,7 @@ class KbEntry(BaseModel):
     slug: str
     body: str
     metadata: dict[str, object]
+    provenance: KbProvenance
     created_at: datetime
     updated_at: datetime
 
@@ -179,11 +213,27 @@ class KbEntrySearchHit(BaseModel):
     cosine_rank: int | None
 
 
+class KbIngestConflict(BaseModel):
+    """Two or more files in one directory ingest claim the same slug.
+
+    ``relative_paths`` lists every file that claims ``slug``, sorted,
+    relative to the ingest directory. None of these files is written,
+    and an existing entry with this slug stays unchanged. The operator
+    fixes the conflict (rename a file or change its ``slug:``
+    front-matter) and runs the ingest again.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    slug: str
+    relative_paths: list[str]
+
+
 class KbIngestionResult(BaseModel):
     """Summary of one :meth:`KbService.ingest_directory` run.
 
-    The four counters partition every discovered ``.md`` file into
-    exactly one of four buckets:
+    The five counters partition every discovered ``.md`` file into
+    exactly one of five buckets:
 
     * ``inserted_count`` -- file's slug had no prior row in the tenant;
       a new document row was created and embedded.
@@ -199,9 +249,17 @@ class KbIngestionResult(BaseModel):
       front-matter). The matching error message is appended to
       :attr:`errors`; the ingestion run continues with the remaining
       files.
+    * ``conflict_count`` -- the file shares its slug with at least one
+      other file in the same run. No file in that group is written;
+      :attr:`conflicts` lists each group once.
 
     Sum invariant: ``inserted_count + updated_count + skipped_count
-    + error_count == <total discovered .md files>``.
+    + error_count + conflict_count == <total discovered .md files>``.
+
+    The run walks files in sorted relative-path order, so the same
+    directory gives the same counters, ``errors`` order and
+    ``conflicts`` order on every run, whatever order the filesystem
+    lists the files in.
 
     The ``errors`` list is bounded in practice by the corpus size --
     no per-file error string exceeds ~200 chars (the file path plus a
@@ -216,4 +274,6 @@ class KbIngestionResult(BaseModel):
     updated_count: int
     skipped_count: int
     error_count: int
+    conflict_count: int
     errors: list[str]
+    conflicts: list[KbIngestConflict]

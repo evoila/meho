@@ -230,7 +230,8 @@ func newRootCmd() *cobra.Command {
 	// consumer-needs.md §G5 ergonomic shape (`meho remember "..."`
 	// rather than `meho memory remember "..."`). Wraps the four
 	// /api/v1/memory* routes shipped by G5.1-T2 (#422) plus the
-	// /api/v1/retrieve route for the `recall --query` retrieval form.
+	// POST /api/v1/memory/search route for the `recall --query` search
+	// form.
 	// Registered before registerDynamicSubcommands so the backplane
 	// manifest cannot shadow the built-in verbs.
 	//

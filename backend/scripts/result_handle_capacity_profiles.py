@@ -96,6 +96,41 @@ def _metric_row(i: int) -> dict[str, Any]:
     return row
 
 
+_JA_SENTENCE = (
+    "仮想マシン「app-{n:05d}」のホスト「esx-{h:02d}」への移行が完了しました。"
+    "データストアの空き容量を確認してください。"
+)
+_RU_SENTENCE = (
+    "Миграция виртуальной машины «app-{n:05d}» на хост «esx-{h:02d}» завершена. "
+    "Проверьте свободное место в хранилище данных."
+)
+
+
+def _event_row(i: int, sentence: str, repeats: int) -> dict[str, Any]:
+    """An event whose message is one non-ASCII sentence repeated *repeats* times.
+
+    The message is long enough that the rows byte budget, not the row
+    count, ends a page. Spaces, digits and punctuation stay ASCII, as in a
+    real vendor message.
+    """
+    message = " ".join(sentence.format(n=i + k, h=(i + k) % 48) for k in range(repeats))
+    return {
+        "key": 500_000 + i,
+        "created_time": f"2026-10-01T{i // 3600 % 24:02d}:{i // 60 % 60:02d}:{i % 60:02d}Z",
+        "user_name": f"operator-{i % 20}",
+        "vm": f"vm-{1000 + i}",
+        "full_formatted_message": message,
+    }
+
+
+def _cjk_event_row(i: int) -> dict[str, Any]:
+    return _event_row(i, _JA_SENTENCE, 12)
+
+
+def _cyrillic_event_row(i: int) -> dict[str, Any]:
+    return _event_row(i, _RU_SENTENCE, 8)
+
+
 def _log_row(i: int) -> dict[str, Any]:
     return {
         "timestamp": f"2026-10-01T12:{i // 60 % 60:02d}:{i % 60:02d}.{i % 1000:03d}Z",
@@ -127,6 +162,18 @@ PROFILES: tuple[PayloadProfile, ...] = (
         "metric-stats", "Operations-style resource with 120 stats", _metric_row, "values"
     ),
     PayloadProfile("log-lines", "Log lines with non-ASCII text and quotes", _log_row, "logs"),
+    PayloadProfile(
+        "cjk-events",
+        "vCenter events with Japanese messages (3-byte UTF-8 characters)",
+        _cjk_event_row,
+        "value",
+    ),
+    PayloadProfile(
+        "cyrillic-events",
+        "vCenter events with Russian messages (2-byte UTF-8 characters)",
+        _cyrillic_event_row,
+        "value",
+    ),
 )
 
 

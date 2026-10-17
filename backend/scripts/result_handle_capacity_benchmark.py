@@ -186,6 +186,10 @@ class ProfileMeasurement:
 
     ``nodes`` / ``decoded_bytes`` / ``depth`` are the guard's work for the
     rows the store kept (``stored_rows``), not for every captured row.
+    ``page_bytes`` is what the rows budget charges the largest page (its
+    rows encoded once, no escaping); ``page_wire_bytes`` is what the same
+    page costs on the MCP wire. Non-ASCII text widens the gap, because the
+    text block escapes every such character and is then escaped again.
     """
 
     profile: str
@@ -197,6 +201,7 @@ class ProfileMeasurement:
     decoded_bytes: int
     depth: int
     page_rows: int
+    page_bytes: int
     page_wire_bytes: int
     complete_wire_bytes: int
     decode_heap_bytes: int
@@ -322,14 +327,16 @@ def render_markdown(
     lines += [
         "",
         "| Profile | Rows stored | Record bytes | Cache bytes | Nodes | Decoded bytes "
-        "| Depth | Page rows | Page wire | Completed wire | Decode heap | Decode ms |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Depth | Page rows | Page bytes | Page wire | Completed wire | Decode heap "
+        "| Decode ms |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for m in measurements:
         lines.append(
             f"| {m.profile} | {m.stored_rows:,} / {m.captured_rows:,} | {m.record_bytes:,} "
             f"| {m.cache_bytes:,} | {m.nodes:,} | {m.decoded_bytes:,} | {m.depth} "
-            f"| {m.page_rows} | {m.page_wire_bytes:,} | {m.complete_wire_bytes:,} "
+            f"| {m.page_rows} | {m.page_bytes:,} | {m.page_wire_bytes:,} "
+            f"| {m.complete_wire_bytes:,} "
             f"| {m.decode_heap_bytes:,} | {m.decode_ms:.0f} |"
         )
     lines += [
@@ -465,6 +472,7 @@ def measure_profile(
         decoded_bytes=work.decoded_bytes,
         depth=work.depth,
         page_rows=len(page),
+        page_bytes=len(msgspec.json.encode(page)),
         page_wire_bytes=measure_delivered_wire_bytes(page_payload),
         complete_wire_bytes=measure_delivered_wire_bytes(completed.model_dump(mode="json")),
         decode_heap_bytes=heap,

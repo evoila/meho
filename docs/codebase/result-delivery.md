@@ -175,15 +175,22 @@ How each value is derived (the rules are pinned by
   multiplied by `--headroom` (default 1.25).
 - **Wire ceilings:** the largest measured response times `--headroom`.
   For a read, that is the largest page the rows budget still allows
-  (500 rows or 256 KiB of rows). For a completed call, that is the
-  reduced response with its handle.
+  (500 rows or 256 KiB of rows). The rows budget counts the rows encoded
+  once, with no escaping. The wire carries the text block, where every
+  non-ASCII character becomes a `\uXXXX` escape and is then escaped
+  again, plus `structuredContent`. So a page that fills the rows budget
+  costs about 2 wire bytes per rows byte for ASCII text, about 3.1 for
+  3-byte characters (Japanese, Chinese), and about 4 for 2-byte
+  characters (Cyrillic, Greek, accented Latin). Two profiles with
+  non-ASCII messages (`cjk-events`, `cyrillic-events`) measure this. For
+  a completed call, that is the reduced response with its handle.
 
 ### Results
 
-Measured on 2026-10-17, 10000 rows per profile, Python 3.14, x86_64.
-"Action" is `raise` when the default is below the recommendation, `lower`
-when it is more than twice the recommendation, else `keep`. Decode time
-and heap depend on the machine.
+Measured on 2026-10-17, seven profiles, 10000 rows per profile, Python
+3.14, x86_64. "Action" is `raise` when the default is below the
+recommendation, `lower` when it is more than twice the recommendation,
+else `keep`. Decode time and heap depend on the machine.
 
 | Setting | Current default | Needed | Recommended | Action | Basis |
 |---|---:|---:|---:|---|---|
@@ -191,23 +198,25 @@ and heap depend on the machine.
 | `RESULT_REDUCTION_MAX_DECODED_BYTES` | 67,108,864 | 27,700,166 | 50,331,648 | keep | payload that fills the 16777216-byte record cap x 1.25 |
 | `RESULT_REDUCTION_MAX_NODES` | 2,000,000 | 2,126,026 | 2,750,000 | raise | payload that fills the 16777216-byte record cap x 1.25 |
 | `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES` | 262,144 | 22,687 | 65,536 | lower | largest completed response x 1.25 |
-| `RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES` | 2,097,152 | 597,768 | 786,432 | lower | largest full read page x 1.25 |
+| `RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES` | 2,097,152 | 1,038,460 | 1,310,720 | keep | largest full read page x 1.25 |
 
-| Profile | Rows stored | Record bytes | Cache bytes | Nodes | Decoded bytes | Depth | Page rows | Page wire | Completed wire | Decode heap | Decode ms |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| vm-inventory | 10,000 / 10,000 | 3,082,468 | 3,145,728 | 230,003 | 2,464,877 | 3 | 500 | 338,688 | 8,267 | 10,055,990 | 55 |
-| k8s-pods | 10,000 / 10,000 | 7,654,637 | 8,388,608 | 970,003 | 5,474,372 | 8 | 342 | 597,768 | 12,577 | 53,088,970 | 355 |
-| nsx-segments | 10,000 / 10,000 | 4,248,159 | 5,242,880 | 370,003 | 3,399,430 | 5 | 500 | 466,524 | 9,398 | 16,282,871 | 77 |
-| metric-stats | 7,050 / 10,000 | 16,776,789 | 16,777,216 | 1,741,353 | 27,699,460 | 3 | 111 | 576,920 | 22,687 | 53,066,548 | 434 |
-| log-lines | 10,000 / 10,000 | 1,798,258 | 1,835,008 | 90,003 | 1,527,991 | 3 | 500 | 216,428 | 6,152 | 5,466,861 | 24 |
+| Profile | Rows stored | Record bytes | Cache bytes | Nodes | Decoded bytes | Depth | Page rows | Page bytes | Page wire | Completed wire | Decode heap | Decode ms |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| vm-inventory | 10,000 / 10,000 | 3,082,468 | 3,145,728 | 230,003 | 2,464,877 | 3 | 500 | 153,667 | 338,688 | 8,267 | 10,055,990 | 55 |
+| k8s-pods | 10,000 / 10,000 | 7,654,637 | 8,388,608 | 970,003 | 5,474,372 | 8 | 342 | 261,429 | 597,768 | 12,577 | 53,088,970 | 354 |
+| nsx-segments | 10,000 / 10,000 | 4,248,159 | 5,242,880 | 370,003 | 3,399,430 | 5 | 500 | 211,835 | 466,524 | 9,398 | 16,282,871 | 77 |
+| metric-stats | 7,050 / 10,000 | 16,776,789 | 16,777,216 | 1,741,353 | 27,699,460 | 3 | 111 | 260,646 | 576,920 | 22,687 | 53,066,548 | 427 |
+| log-lines | 10,000 / 10,000 | 1,798,258 | 1,835,008 | 90,003 | 1,527,991 | 3 | 500 | 88,787 | 216,428 | 6,152 | 5,466,861 | 24 |
+| cjk-events | 8,522 / 10,000 | 16,775,830 | 16,777,216 | 93,745 | 16,536,949 | 3 | 133 | 261,808 | 821,354 | 16,721 | 16,425,009 | 37 |
+| cyrillic-events | 9,888 / 10,000 | 16,776,155 | 16,777,216 | 108,771 | 16,499,021 | 3 | 154 | 261,259 | 1,038,460 | 17,867 | 22,380,964 | 43 |
 
-Peak heap for 4 parallel decodes of the largest record: 212,287,256 bytes.
+Peak heap for 4 parallel decodes of the largest record: 212,287,304 bytes.
 
 ### What the numbers mean
 
 - **Cache `maxmemory`: keep `768mb`.** It holds 37 records at the cap at
-  the same time, and far more typical ones (the other profiles store 1.8
-  to 7.7 MB at 10000 rows).
+  the same time, and far more typical ones. Three profiles fill the cap
+  at 10000 rows; the other four store 1.8 to 7.7 MB.
 - **Reducer decoded-bytes guard: keep 64 MiB.** The widest profile needs
   about 28 MB of guard work to fill one 16 MiB record.
 - **Reducer node guard: raise to 2,750,000.** Nested rows (the pod list)
@@ -220,10 +229,13 @@ Peak heap for 4 parallel decodes of the largest record: 212,287,256 bytes.
   field list longer, and an over-ceiling response still keeps its
   handle (`delivery="partial"`), so lowering it is low risk. Keep the
   current default until a wider real payload is measured.
-- **Read wire ceiling: 768 KiB is enough.** A full page under the 256 KiB
-  rows budget is at most about 584 KiB on the wire (the text block and
-  `structuredContent` together). The 2 MiB default leaves room but is
-  not needed.
+- **Read wire ceiling: keep 2 MiB.** The wire size of a full page
+  depends on its text. The ASCII profiles stay under 600 KB on the wire
+  for a 256 KiB page. The Japanese messages take 821 KB and the Russian
+  messages 1,038 KB for the same rows budget, because the text block
+  escapes every non-ASCII character twice. A ceiling below about 1.25
+  MiB would refuse reads that work today. This holds for the seven
+  profiles measured. A page of other text needs its own measurement.
 - **Worker memory.** Decoding one 16 MiB record takes about 53 MB of
   Python heap; four parallel decodes peak at about 212 MB. Size the
   backplane pod memory for `RESULT_QUERY_EXECUTOR_WORKERS` times that.

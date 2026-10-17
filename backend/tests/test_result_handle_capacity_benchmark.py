@@ -48,6 +48,7 @@ def _measurement(**overrides: Any) -> ProfileMeasurement:
         "decoded_bytes": 2 * MIB,
         "depth": 3,
         "page_rows": 500,
+        "page_bytes": 150_000,
         "page_wire_bytes": 300_000,
         "complete_wire_bytes": 10_000,
         "decode_heap_bytes": 4 * MIB,
@@ -224,6 +225,28 @@ def test_measure_profile_runs_the_real_store_path(profile: Any) -> None:
     assert measurement.page_wire_bytes > 0
     assert 2048 < measurement.complete_wire_bytes < 256 * KIB
     assert measurement.decode_heap_bytes > 0
+
+
+@pytest.mark.parametrize(
+    ("name", "min_wire_per_rows_byte"), [("cjk-events", 3.0), ("cyrillic-events", 3.5)]
+)
+def test_non_ascii_page_costs_more_on_the_wire_than_its_rows_budget(
+    name: str, min_wire_per_rows_byte: float
+) -> None:
+    """A page that fills the rows budget can be several times larger on the wire.
+
+    The text block escapes every non-ASCII character (``\\uXXXX``) and is
+    then escaped again, so a 3-byte character costs 10 wire bytes and a
+    2-byte character 9. ASCII costs 2 per byte.
+    """
+    profile = next(p for p in PROFILES if p.name == name)
+    rows_budget = 256 * KIB
+    measurement, _ = measure_profile(profile, 500, max_record_bytes=_CAP)
+
+    assert measurement.page_rows < 500  # the byte budget, not the row cap, ends the page
+    assert measurement.page_bytes <= rows_budget
+    assert measurement.page_wire_bytes > min_wire_per_rows_byte * measurement.page_bytes
+    assert measurement.page_wire_bytes > 2 * rows_budget
 
 
 def test_measure_profile_honours_the_record_cap() -> None:

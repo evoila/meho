@@ -755,6 +755,40 @@ test("sign-in lock: release only removes this process's own lock", async () => {
   release(); // safe to call twice
 });
 
+// Once a lock is older than five minutes, another copy may take it over
+// while its owner releases it. The old release read its own pid and then
+// deleted the file; a takeover that finished in between lost its lock. This
+// forces that sequence: when the owner releases, "the other copy" (a running
+// helper process) has already given the lock its second name and is about
+// to write its pid. The owner must leave the lock alone, the other copy's
+// takeover must land, and a later release must still leave it alone.
+test("regression: release must not delete a lock another copy is taking over", async () => {
+  const env = { MCP_REMOTE_CONFIG_DIR: AUTH_DIR };
+  const release = await acquireSignInLock(new URL(URL_ARG).href, { env, say: () => {} });
+  const old = new Date(Date.now() - 6 * 60 * 1000);
+  utimesSync(LOCK, old, old); // the sign-in took longer than five minutes
+  const otherCopy = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  const other = claimOf(otherCopy.pid);
+  linkSync(LOCK, other); // the other copy's takeover is in progress
+  try {
+    release();
+    assert.deepEqual(lockFiles(), [basename(LOCK)], "the lock must stay during the takeover");
+    assert.equal(JSON.parse(readFileSync(LOCK, "utf8")).pid, process.pid);
+    assert.deepEqual(claimFiles(), [basename(other)], "only the other copy's second name may remain");
+    const taken = JSON.stringify({ pid: otherCopy.pid, startedAt: new Date().toISOString() });
+    writeFileSync(other, taken); // the other copy finishes its takeover
+    rmSync(other);
+    assert.equal(readFileSync(LOCK, "utf8"), taken, "the other copy's lock must be in place");
+    release(); // the exit listener's turn: not ours any more
+    assert.equal(readFileSync(LOCK, "utf8"), taken);
+    assert.deepEqual(claimFiles(), []);
+  } finally {
+    otherCopy.kill();
+    rmSync(other, { force: true });
+    rmSync(LOCK, { force: true });
+  }
+});
+
 test("sign-in lock: an unusable lock folder does not stop the launcher", () => {
   const notADir = join(BUNDLE, "not-a-dir");
   writeFileSync(notADir, "");

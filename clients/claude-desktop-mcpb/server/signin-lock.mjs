@@ -29,6 +29,10 @@
 //   only second name, checks that the file is still the stale lock it saw,
 //   and writes its own process id into it. Other copies then see a live
 //   lock. See takeOverStaleLock for the details.
+// - The owner releases the lock through the same second-name step, so a
+//   takeover and a release never overlap: the release deletes the file
+//   only while no other copy can be writing its process id into it. See
+//   releaseLock for the details.
 // - The lock never blocks for good: after the wait limit, or when the lock
 //   file cannot be used at all, the launcher starts mcp-remote anyway.
 
@@ -191,9 +195,9 @@ function removeAbandonedClaims(path) {
 //    copy may have taken it over, or the owner may have released it and a
 //    new copy created a fresh lock, before step 2 ran. Then leave it alone.
 // 5. Write this process id into the file through the second name, and
-//    check that the lock path still shows it. If the owner released the
-//    lock between step 2 and now, the write went into a file that no
-//    longer is the lock, and this copy does not own the lock.
+//    check that the lock path still shows it. The owner's release also
+//    counts the names (see releaseLock), so it cannot delete the lock
+//    while this name exists; the check is a safety net.
 // 6. Remove the second name.
 function takeOverStaleLock(path, stale) {
   removeAbandonedClaims(path);
@@ -210,6 +214,49 @@ function takeOverStaleLock(path, stale) {
     const mine = lockText();
     writeFileSync(claim, mine);
     return readLock(path)?.text === mine;
+  } finally {
+    removeQuietly(claim);
+  }
+}
+
+// Release the lock without deleting another copy's lock. Returns true when
+// the release is done (the lock is gone, or it belongs to another copy) and
+// false when another copy is in the middle of a takeover, so the caller
+// should try again later.
+//
+// Once the lock is older than five minutes, another copy may take it over
+// while the owner releases it. If the owner read its own process id and
+// then deleted the file, the other copy could finish its takeover in
+// between, and the delete would remove the new owner's lock. So the release
+// uses the same second-name step as the takeover:
+//
+// 1. Remove second names left behind by stopped copies.
+// 2. Give the lock file a second name of this process's own. From here on
+//    no takeover can go on, because a takeover counts the names and needs
+//    exactly two.
+// 3. Count the names. More than two means another copy is in the middle of
+//    a takeover and may still write its process id; leave the lock alone
+//    and report that the release is not done.
+// 4. Check that the file still holds this process's id (another copy may
+//    have taken it over before step 2), then remove the lock path.
+// 5. Remove the second name.
+//
+// A file system without hard links makes step 2 fail. There no takeover can
+// succeed either, so the plain check and delete is safe.
+function releaseLock(path) {
+  removeAbandonedClaims(path);
+  const claim = claimName(path);
+  try {
+    linkSync(path, claim);
+  } catch (err) {
+    if (err.code === "ENOENT") return true;
+    if (readLock(path)?.pid === process.pid) removeQuietly(path);
+    return true;
+  }
+  try {
+    if (statSync(claim).nlink !== 2) return false;
+    if (readLock(claim)?.pid === process.pid) removeQuietly(path);
+    return true;
   } finally {
     removeQuietly(claim);
   }
@@ -274,13 +321,15 @@ export async function acquireSignInLock(
   let released = false;
   const release = () => {
     if (released) return;
-    released = true;
-    process.removeListener("exit", release);
     try {
-      if (readLock(path)?.pid === process.pid) removeQuietly(path);
+      // Another copy is taking the lock over: leave it, and try again on
+      // the next call (the exit listener at the latest).
+      if (!releaseLock(path)) return;
     } catch {
       // Best effort: a lock left behind is stale once this process stops.
     }
+    released = true;
+    process.removeListener("exit", release);
   };
   process.on("exit", release);
   return release;

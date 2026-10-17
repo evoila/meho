@@ -68,8 +68,14 @@ records the launcher's contract and invariants.
    wraps
    `process.stdout.write` once: the first write (`mcp-remote` answering the
    host, which only happens after it is connected) releases the lock. An
-   `exit` listener also releases it. After waiting five minutes, or when the
-   lock file cannot be used, the launcher starts without the lock.
+   `exit` listener also releases it. The release uses the same second-name
+   step as the takeover: it gives the file a second name, goes on only when
+   the file has exactly two names, and deletes the lock path only when the
+   file still holds its own pid. While another copy's second name exists,
+   that copy may be about to write its pid; the release then leaves the
+   lock and tries again on the next call. So a release never deletes a lock
+   another copy has just taken over. After waiting five minutes, or when
+   the lock file cannot be used, the launcher starts without the lock.
 6. **Hand-off.** `process.argv` becomes
    `[node, entry, url, --static-oauth-client-info, {"client_id"}, --static-oauth-client-metadata, {"scope"}]`
    and the entry is dynamically imported; `mcp-remote` parses argv at

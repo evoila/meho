@@ -122,11 +122,10 @@ async def _stage(
 
 
 def _slugs(hits: list[Any]) -> set[str]:
-    """Slug of each hit (the last body word, as staged by :func:`_stage`)."""
+    """Slug of each hit: a Memory search hit's ``slug``, else the last body word."""
     out: set[str] = set()
     for hit in hits:
-        body = hit.entry.body if hasattr(hit, "entry") else hit.body
-        out.add(body.rsplit(" ", 1)[-1])
+        out.add(hit.slug if hasattr(hit, "slug") else hit.body.rsplit(" ", 1)[-1])
     return out
 
 

@@ -425,6 +425,12 @@ const (
 	KindFilterValueOneOff KindFilterValue = "one_off"
 )
 
+// Defines values for MemoryEntrySearchHitExpiryState.
+const (
+	MemoryEntrySearchHitExpiryStateNever     MemoryEntrySearchHitExpiryState = "never"
+	MemoryEntrySearchHitExpiryStateScheduled MemoryEntrySearchHitExpiryState = "scheduled"
+)
+
 // Defines values for MemoryScope.
 const (
 	MemoryScopeTarget     MemoryScope = "target"
@@ -6231,38 +6237,67 @@ type MemoryEntry struct {
 	UserSub    *string            `json:"user_sub"`
 }
 
-// MemoryEntrySearchHit One ranked hit from :meth:`MemoryService.search_memories`.
+// MemoryEntrySearchHit One bounded hit from :meth:`MemoryService.search_memories` (#3751).
 //
-// Wraps the retrieval-substrate :class:`RetrievalHit` shape, exposing
-// only the memory-relevant fields plus the fused / per-signal
-// ranking metadata so callers can build "why was this surfaced" UX
-// without re-running the query. Frozen for the same reason as
-// :class:`MemoryEntry`.
+// A hit is evidence for picking a result, not the entry itself. It holds
+// a short, query-relevant “snippet“ of the body (at most
+// :data:`~meho_backplane.memory.snippet.SNIPPET_MAX_CHARS` characters of
+// body text), never the whole body and never the free-form “metadata“.
+// The full entry is read through “locator“.
+//
+// “rank“ is the 1-based position in the result list. It is an order,
+// not a confidence: the fused (RRF) ranking score is not calibrated, so
+// it is not exposed.
+//
+// Provenance fields say where the evidence comes from and who can see
+// it: “scope“, “user_sub“ (the owner of a user-scoped entry, “None“
+// for shared scopes), “target_name“, and the “created_at“ /
+// “updated_at“ / “expires_at“ timestamps. Frozen for the same reason
+// as :class:`MemoryEntry`.
 type MemoryEntrySearchHit struct {
-	Bm25Rank    *int     `json:"bm25_rank"`
-	Bm25Score   *float32 `json:"bm25_score"`
-	CosineRank  *int     `json:"cosine_rank"`
-	CosineScore *float32 `json:"cosine_score"`
+	BodyChars int        `json:"body_chars"`
+	CreatedAt time.Time  `json:"created_at"`
+	ExpiresAt *time.Time `json:"expires_at"`
 
-	// Entry Read shape -- one memory row as the service returns it.
+	// ExpiryState ``never`` when the entry has no expiry, else ``scheduled``.
 	//
-	// Frozen so callers can stash the entry in audit / log records
-	// without mutation surprises. ``expires_at`` is lifted out of
-	// ``doc_metadata`` for filter convenience -- the read-side filter in
-	// :meth:`~meho_backplane.memory.service.MemoryService.list_memories`
-	// and :meth:`~meho_backplane.memory.service.MemoryService.recall`
-	// compares it without re-parsing the dict. The raw ``metadata`` is
-	// still carried so callers (audit middleware, MCP resource handlers)
-	// see the original payload.
-	Entry      MemoryEntry `json:"entry"`
-	FusedScore float32     `json:"fused_score"`
+	// Search leaves out expired entries, so there is no expired state.
+	ExpiryState *MemoryEntrySearchHitExpiryState `json:"expiry_state,omitempty"`
+	Id          openapi_types.UUID               `json:"id"`
 
 	// Locator Canonical selected-read URI (``meho://memory/id/{document_uuid}``).
 	//
 	// Built from the row id only, so it never carries a target name
 	// or owner. Read it with ``resources/read`` to get the full entry.
 	Locator *string `json:"locator,omitempty"`
+	Rank    int     `json:"rank"`
+
+	// Scope One of the five memory scopes from consumer-needs.md §G5 L137-141.
+	//
+	// The string value is the wire-level identifier (route path segment,
+	// CLI flag value, MCP tool arg). Each value maps to a single
+	// ``documents.kind`` row prefixed with ``memory-`` --
+	// :func:`kind_for_scope` is the canonical translation. The mapping is
+	// one-to-one and bijective with :func:`scope_for_kind`, so callers
+	// never round-trip through ad-hoc string-prefixing.
+	//
+	// ``StrEnum`` (PEP 663, stdlib in 3.11+) gives the members ``str``
+	// semantics for free: ``f"scope={MemoryScope.USER}"`` renders as
+	// ``"scope=user"`` rather than ``"scope=MemoryScope.USER"``, matching
+	// the :class:`~meho_backplane.auth.operator.TenantRole` convention.
+	Scope            MemoryScope `json:"scope"`
+	Slug             string      `json:"slug"`
+	Snippet          string      `json:"snippet"`
+	SnippetTruncated bool        `json:"snippet_truncated"`
+	TargetName       *string     `json:"target_name"`
+	UpdatedAt        time.Time   `json:"updated_at"`
+	UserSub          *string     `json:"user_sub"`
 }
+
+// MemoryEntrySearchHitExpiryState “never“ when the entry has no expiry, else “scheduled“.
+//
+// Search leaves out expired entries, so there is no expired state.
+type MemoryEntrySearchHitExpiryState string
 
 // MemoryListResponse Response envelope for “GET /api/v1/memory“.
 //
@@ -6318,10 +6353,15 @@ type MemorySearchBody struct {
 	Scope *MemoryScope `json:"scope,omitempty"`
 }
 
-// MemorySearchResponse Response for “/api/v1/memory/search“ -- the MCP “search_memory“ shape.
+// MemorySearchResponse Response for “/api/v1/memory/search“ -- the same hits “search_memory“ returns.
 //
-// “hits“ is the only field. There is deliberately no total or count:
-// "no match" and "only rows you may not see" both return “{"hits": []}“.
+// “hits“ is the only field. Each hit is bounded evidence (#3751): a
+// short snippet, provenance, and the selected-read “locator“, never the
+// full body. The MCP tool also wraps each snippet in the untrusted-text
+// envelope and adds its “delivery“ fields; this REST face serves the
+// plain snippet for the CLI table. There is deliberately no total or
+// count: "no match" and "only rows you may not see" both return
+// “{"hits": []}“.
 type MemorySearchResponse struct {
 	Hits []MemoryEntrySearchHit `json:"hits"`
 }

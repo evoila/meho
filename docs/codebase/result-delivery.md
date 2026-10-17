@@ -102,8 +102,8 @@ and cut the work down. Wire ceilings run last, on the encoded response.
 |---|---|---|---|
 | Inline sample budget | `JSONFLUX_SAMPLE_BYTE_BUDGET` (4096) | Sample rows on a reduced response | Fewer sample rows |
 | Rows budget | `RESULT_QUERY_MAX_OUTPUT_ROWS` (500), `RESULT_QUERY_MAX_OUTPUT_BYTES` (256 KiB) | `rows` of a read | `output_too_large` error |
-| Completed-call wire ceiling | `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES` (256 KiB, at least 2048) | A finished `call_operation` | `delivery="partial"` or `"unavailable"` |
-| Read wire ceiling | `RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES` (2 MiB) | A `result_query` response | `output_too_large` with `delivery=unavailable` |
+| Completed-call wire ceiling | `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES` (256 KiB, at least 2048) | A finished `call_operation`; a `search_memory` response | `delivery="partial"` or `"unavailable"` |
+| Read wire ceiling | `RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES` (2 MiB) | A `result_query` response; a Memory selected read (`meho://memory/id/{document_uuid}`) | `output_too_large` with `delivery=unavailable` |
 
 **Measured on the real encoder.** Both wire ceilings use
 `measure_delivered_wire_bytes` (`operations/delivery_budget.py`). An MCP
@@ -123,6 +123,10 @@ its status stays `ok`:
 - `unavailable`: the response was too large and there is no readable
   handle. Only the receipt and the remediation text are left. The caller
   must not run the operation again.
+
+On `search_memory`, `delivery="partial"` means lower-ranked hits were
+left out, and `omitted_hits` says how many. There is no handle, so the
+caller lowers `limit` or narrows the query.
 
 A `result_query` response over its ceiling is refused with the
 recoverable `output_too_large` error, `delivery=unavailable`. Nothing is

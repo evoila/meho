@@ -44,6 +44,7 @@ from meho_backplane.mcp.tools.memory import _search_memory_handler
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.retrieval.retriever import RetrievalHit
 from meho_backplane.settings import get_settings
+from meho_backplane.untrusted_text import BLOCK_END, BLOCK_START, GUARD_PREFIX
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
 from ._oidc_jwt_helpers import ISSUER as _ISSUER
@@ -143,8 +144,13 @@ def test_search_defaults_to_all_visible_scopes(client: TestClient) -> None:
 
     assert response.status_code == 200
     body = response.json()
-    assert [h["entry"]["slug"] for h in body["hits"]] == ["own-note", "shared-target"]
-    assert body["hits"][1]["entry"]["target_name"] == "infra-1"
+    assert [h["slug"] for h in body["hits"]] == ["own-note", "shared-target"]
+    assert [h["rank"] for h in body["hits"]] == [1, 2]
+    assert body["hits"][1]["target_name"] == "infra-1"
+    # REST serves the plain bounded snippet, never the body or a score.
+    assert body["hits"][0]["snippet"] == "body of own-note"
+    assert "entry" not in body["hits"][0]
+    assert "fused_score" not in body["hits"][0]
     kwargs = fake.await_args.kwargs
     assert kwargs["source"] == "memory"
     assert kwargs["limit"] == 10
@@ -235,7 +241,12 @@ async def test_search_audit_row_is_read_without_query(client: TestClient) -> Non
 async def test_rest_and_mcp_return_the_same_eligible_hits(
     client: TestClient, scope: str | None
 ) -> None:
-    """CLI recall (REST) and MCP ``search_memory`` give the same result for the same input."""
+    """CLI recall (REST) and MCP ``search_memory`` agree on the hits for the same input.
+
+    They are not byte-identical: MCP wraps each snippet in the
+    untrusted-text envelope and adds its ``delivery`` fields. With the
+    envelope removed, every hit field matches.
+    """
     rest_fake = AsyncMock(return_value=_HITS)
     payload: dict[str, Any] = {"query": "rotation runbook", "limit": 5}
     if scope is not None:
@@ -256,7 +267,15 @@ async def test_rest_and_mcp_return_the_same_eligible_hits(
     with patch("meho_backplane.memory.service.retrieve", new=mcp_fake):
         mcp = await _search_memory_handler(operator, payload)
 
-    assert rest.json() == json.loads(json.dumps(mcp))
+    mcp_wire = json.loads(json.dumps(mcp))
+    assert mcp_wire["delivery"] == "complete"
+    envelope_head = f"{BLOCK_START}\n{GUARD_PREFIX}\n\n"
+    envelope_tail = f"\n{BLOCK_END}"
+    for hit in mcp_wire["hits"]:
+        assert hit["snippet"].startswith(envelope_head)
+        assert hit["snippet"].endswith(envelope_tail)
+        hit["snippet"] = hit["snippet"][len(envelope_head) : -len(envelope_tail)]
+    assert rest.json() == {"hits": mcp_wire["hits"]}
     rest_kwargs = rest_fake.await_args.kwargs
     mcp_kwargs = mcp_fake.await_args.kwargs
     assert rest_kwargs["memory_eligibility"] == mcp_kwargs["memory_eligibility"]

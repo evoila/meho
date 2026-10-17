@@ -2157,8 +2157,12 @@ def _post_console_decision(rid: uuid.UUID, action: str, reason: str) -> tuple[st
     return response.text, response.status_code
 
 
-def test_delegated_reject_renders_delegation_on_outcome_and_detail() -> None:
+def test_delegated_reject_renders_delegation_on_outcome_and_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A delegated deny shows the delegation on the outcome card and the decided modal."""
+    monkeypatch.setenv("APPROVAL_ALLOW_DELEGATED_DECISION", "true")
+    get_settings.cache_clear()
     _seed_tenant(_TENANT_A, "tenant-a")
     rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
 
@@ -2211,6 +2215,22 @@ def test_delegated_reason_missing_instruction_is_refused_in_modal(action: str) -
     assert status_code == 200, body
     assert "422" in body
     assert "Instruction" in body
+    assert "Request approved" not in body
+    assert "Request denied" not in body
+    assert _request_status(rid) == ApprovalRequestStatus.PENDING.value
+
+
+@pytest.mark.parametrize("action", ["approve", "reject"])
+def test_delegated_decision_on_production_is_refused_in_modal(action: str) -> None:
+    """#3693: setting off, a valid delegated decision is a 403 banner; row stays pending."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+
+    body, status_code = _post_console_decision(rid, action, _DELEGATED_REASON)
+
+    assert status_code == 200, body
+    assert "403" in body
+    assert "someone else&#39;s instruction" in body
     assert "Request approved" not in body
     assert "Request denied" not in body
     assert _request_status(rid) == ApprovalRequestStatus.PENDING.value

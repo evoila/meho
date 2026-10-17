@@ -306,6 +306,37 @@ test("CA: a missing CA file fails fast before importing mcp-remote", { skip: NO_
   assert.ok(res.stderr.includes(missing), res.stderr);
 });
 
+test("CA: a typed path with a leading ~ resolves to the home folder; other paths are unchanged", { skip: NO_INJECT_API }, () => {
+  // Desktop's file field stores a typed path as typed, and Node does not
+  // expand `~`. HOME (USERPROFILE on Windows) decides os.homedir().
+  const home = join(BUNDLE, "home");
+  mkdirSync(home, { recursive: true });
+  writeFileSync(join(home, "internal-ca.pem"), TEST_CA_PEM);
+  const homeEnv = { HOME: home, USERPROFILE: home };
+
+  const tilde = runLauncher([URL_ARG, "~/internal-ca.pem"], homeEnv);
+  assert.equal(tilde.status, 0, tilde.stderr);
+  assert.equal(tilde.stderr, "");
+  assert.ok(JSON.parse(tilde.stdout).caDefault.includes(CA_FINGERPRINT));
+
+  // A missing file under ~ names the expanded path, so the error shows
+  // where the launcher looked.
+  const missing = runLauncher([URL_ARG, "~/no-such-ca.pem"], homeEnv);
+  assert.equal(missing.status, 1);
+  assert.equal(missing.stdout, "");
+  assert.ok(missing.stderr.includes(`${home}/no-such-ca.pem`), missing.stderr);
+
+  // An absolute path is used as given.
+  const absolute = runLauncher([URL_ARG, CA_FIXTURE], homeEnv);
+  assert.equal(absolute.status, 0, absolute.stderr);
+  assert.ok(JSON.parse(absolute.stdout).caDefault.includes(CA_FINGERPRINT));
+
+  // `~name/…` (another user's home) is not expanded.
+  const otherUser = runLauncher([URL_ARG, "~other/internal-ca.pem"], homeEnv);
+  assert.equal(otherUser.status, 1);
+  assert.ok(otherUser.stderr.includes("bundle ~other/internal-ca.pem:"), otherUser.stderr);
+});
+
 test("CA: a file without a valid PEM certificate fails fast", { skip: NO_INJECT_API }, () => {
   const noPem = join(BUNDLE, "not-a-cert.pem");
   writeFileSync(noPem, "this is not a certificate\n");

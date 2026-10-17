@@ -70,8 +70,9 @@ names.
   parent — per consumer-needs.md §G5's ergonomic shape:
   `meho remember "note"` rather than `meho memory remember "note"`).
   Wraps the four `/api/v1/memory*` routes shipped by G5.1-T2 (#422)
-  plus the `/api/v1/retrieve` route (G0.4-T5 #262, `source="memory"`
-  scoped) for `meho recall --query`. Five scopes: `user` /
+  plus `POST /api/v1/memory/search` (#3741, the same
+  `MemoryService.search_memories` call MCP `search_memory` makes) for
+  `meho recall --query`. Five scopes: `user` /
   `user-tenant` / `user-target` / `tenant` / `target`. The two
   target-scoped values require `--target NAME`; the CLI rejects a
   missing `--target` client-side before the round-trip.
@@ -181,7 +182,7 @@ cli/
     │   ├── version_test.go    # output-contract test.
     │   ├── login.go           # `meho login` subcommand + auth-config discovery + --resolve split-DNS pin (#2107) + config persistence + post-login memory-migration nudge (T5 #612).
     │   ├── login_test.go      # override-resolution + help-flag + --resolve help/hint (#2107) + post-login nudge tests.
-    │   ├── status.go          # `meho status` subcommand + --json + URL resolver.
+    │   ├── status.go          # `meho status` subcommand + --json + URL resolver + printVersionSkew (shared with login, #3871).
     │   ├── status_test.go     # happy/JSON/no-creds/unreachable/401/redaction tests.
     │   ├── doctor.go          # `meho doctor` (#3666) — command, report model, redaction, exit codes.
     │   ├── doctor_offline.go  # offline layer: binary, config, credential store, plugin shim/lock/cache, plugin settings, CA bundle.
@@ -211,7 +212,7 @@ cli/
     │   │   ├── add.go            # `meho kb add <slug> --body @file|@-|text` (POST /api/v1/kb).
     │   │   ├── delete.go         # `meho kb delete <slug> [--confirm]` (DELETE /api/v1/kb/{slug}).
     │   │   ├── kb_test.go        # helpers + register-all-verbs + body/metadata/confirm contract tests.
-    │   │   ├── ingest_test.go    # POST body + four-bucket render + 400 directory_not_found tests.
+    │   │   ├── ingest_test.go    # POST body + counter/conflict render + 400 directory_not_found tests.
     │   │   ├── search_test.go    # POST body (source pinned) + table render + nil-score safety tests.
     │   │   ├── list_test.go      # query-param emit + table render + limit-range gate tests.
     │   │   ├── show_test.go      # path-escape + Markdown body to stdout + 404 slug_not_found tests.
@@ -230,7 +231,7 @@ cli/
     │   ├── memory/           # G5.1-T4 #424 — top-level `meho remember/recall/forget/list/promote` (no parent).
     │   │   ├── memory.go         # Scope alias for api.MemoryScope + newAuthedClient/retryOn401/renderHTTPStatus typed-client helpers (G0.12-T10 #1268) + parseScope/parseTTL/parseTags/parseScopeSlugArg/loadBody/confirmPrompt.
     │   │   ├── remember.go       # `meho remember <body> [--scope --slug --target --tag --ttl --persist --json]` (POST /api/v1/memory). `--persist` (G5.2-T2 #624) sends explicit `expires_at: null` to opt out of the backend's default-7-day TTL on `memory-user` writes.
-    │   │   ├── recall.go         # `meho recall <scope>/<slug>` or `meho recall --query` (GET /api/v1/memory/{scope}/{slug} or POST /api/v1/retrieve, source="memory").
+    │   │   ├── recall.go         # `meho recall <scope>/<slug>` or `meho recall --query` (GET /api/v1/memory/{scope}/{slug} or POST /api/v1/memory/search).
     │   │   ├── forget.go         # `meho forget <scope>/<slug> [--confirm --target --json]` (DELETE /api/v1/memory/{scope}/{slug}).
     │   │   ├── list.go           # `meho list [--scope --tag --slug-pattern --include-expired --limit --json]` (GET /api/v1/memory).
     │   │   └── memory_test.go    # parseScope/parseTTL/parseScopeSlugArg + verb-happy-path + 403/404/422 + decline + JSON envelope tests.
@@ -327,7 +328,8 @@ cli/
     │   ├── format.go          # human + JSON formatters + structured exit codes.
     │   └── format_test.go     # human/JSON/exit-code pinning.
     └── version/
-        └── version.go         # build-time identity (Version/Commit/Date).
+        ├── version.go         # build-time identity (Version/Commit/Date).
+        └── skew.go            # GET /version fetch + CLI/backplane version-gap warning (#3871).
 ```
 
 `internal/` enforces the Go-visibility seal: only packages under
@@ -733,7 +735,12 @@ renders that response in one of two formats.
      at login time. If refresh succeeds, retries the request once.
    * If refresh fails (no refresh_token, IdP rejected), surfaces
      `auth_expired`.
-4. **Render output.** Default human format on stdout; `--json`
+4. **Check the version gap.** `printVersionSkew` reads the
+   backplane's `GET /version` (3-second cap) and compares its
+   `chart_version` with the CLI's build version
+   (`internal/version/skew.go`). See
+   [Version check](#version-check-login-and-status) below.
+5. **Render output.** Default human format on stdout; `--json`
    emits the typed body as a single JSON document. Both formats
    write success output to stdout and errors to stderr.
 
@@ -809,6 +816,39 @@ defences enforce that:
 The same `eyJ` prefix matches access tokens, refresh tokens, and
 id tokens alike, so the single redaction rule covers every
 credential the CLI persists.
+
+### Version check (`login` and `status`)
+
+An old CLI against a newer backplane can misread new responses. For
+example, a CLI from before the approval flow called a write that was
+waiting for approval an "invalid" response. So `meho login` (after the
+token is stored) and `meho status` (after the health call) compare
+versions:
+
+- The CLI reads `GET /version` on the backplane. The route needs no
+  login. Only `chart_version` is used; `git_sha` cannot be compared
+  with a CLI release.
+- Supported: the same major version, and the CLI minor version is the
+  same as the backplane's or one lower (N-1).
+- Outside that range the CLI prints one line on **stderr**, for
+  example `warning: CLI v0.12.0 vs backplane 0.35.12 — this CLI is too
+  old for this backplane. Upgrade: <release page for v0.35.12>`.
+  The CLI and the backplane share release tags, so the backplane's
+  version names the CLI release to install.
+- No warning when the comparison makes no sense: a `dev` CLI build, a
+  backplane without `chart_version`, or a main-branch backplane build
+  (date-based `0.1.<YYYYMMDD>-<sha>` chart version).
+- The check is best effort. A missing route, a timeout, or a bad body
+  prints nothing and never changes the exit code. stdout is not
+  touched, so `meho status --json` stays one JSON document.
+
+A status the CLI does not know in an `OperationResult` gets the same
+treatment: `dispatch.UnknownStatusError` (used by `dispatch.Render`,
+`meho operation call`, and `meho secret read`) says the backplane is
+probably newer than the CLI, that the operation may have run or be
+waiting for approval, and points at `meho status`. The exit code stays
+`4` (`unexpected_response`) because the CLI cannot tell whether the
+operation worked.
 
 ## Doctor flow (`meho doctor`, #3666)
 
@@ -1253,7 +1293,10 @@ scenarios.
   `errOpError` sentinel.
 - `2` — `auth_expired` (no stored credentials, or refresh failed).
 - `3` — `unreachable` (network / transport failure).
-- `4` — `unexpected_response` (parse error, malformed JSON, etc.).
+- `4` — `unexpected_response` (parse error, malformed JSON, or an
+  `OperationResult.status` this CLI does not know — the message names
+  a likely CLI/backplane version gap, see
+  [Version check](#version-check-login-and-status)).
 
 ### MCP parity
 

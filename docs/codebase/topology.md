@@ -292,6 +292,63 @@ as a warning callout next to the counts (#2210).
 | `via_edge_kind` | `str \| None` | The `graph_edge.kind` of the edge used to reach this node; `None` for the root. |
 | `parent_node_id` | `UUID \| None` | #2538 chain provenance: the `graph_node.id` the walk stepped from; `None` for the root. In a closure result the parent is always itself a row of that result, so the flat list reconstructs the exact dependency chain without follow-up edge lookups. Additive (`None` default). |
 | `via_edge_id` | `UUID \| None` | #2538 chain provenance: the `graph_edge.id` that was walked to reach this node; `None` for the root. Additive (`None` default). |
+| `source_scope` | `str \| None` | #3739: the stored `graph_node.source_scope` — `global`, `target:<uuid>`, `legacy:<uuid>` or `None`. Additive (`None` default). See §Source scope (expand step). |
+| `scope_status` | `"global" \| "target" \| "legacy" \| "unresolved"` | #3739: derived from `source_scope` (read-only, computed). `unresolved` means the row has no scope yet; readers report it and never fall back to `target_id`. |
+
+### Source scope (expand step, #3739)
+
+A node is keyed by `(tenant_id, kind, name)`, so two targets that report
+the same name (two clusters with a `default` namespace) collapse into one
+row. Migration `0108` is the first, expand-only step of the fix. It adds
+the place to record where a name is unique, and changes no writer.
+
+- **Columns.** `graph_node.source_scope` (nullable text) and
+  `graph_node.source_scope_provenance` (nullable text: what set the
+  scope; the backfill writes `migration:0108`).
+- **Vocabulary** (`SOURCE_SCOPE_PATTERN` in `db/models.py`):
+  - `global` — the name means the same thing for the whole tenant.
+  - `target:<uuid>` — the name is unique only inside one target
+    (`targets.id`).
+  - `legacy:<uuid>` — a pre-migration row kept apart from scoped rows;
+    the UUID is the row's own `graph_node.id`, so legacy rows never
+    collide.
+  - `NULL` — not resolved yet. Readers show it as `unresolved`.
+- **CHECK.** `ck_graph_node_source_scope` is portable (PostgreSQL and
+  SQLite) and accepts only the three forms with canonical lowercase
+  UUIDs. `TopologyNode.source_scope` checks the same pattern.
+- **Backfill.** Only `kind = 'target'` rows get `global` (the row is the
+  registered target itself; live target names are unique per tenant).
+  Every other row stays `NULL`. `target_id` is never read as a scope: it
+  only names the last target that saw the row.
+- **Snapshot.** `graph_node_scope_snapshot` holds one row per node that
+  existed at upgrade time: its key, `last_target_id`, `scope_status`
+  (`global` / `unresolved`) and `schema_version = 1`. It is keyed by the
+  node id, so same-named rows never clash. It is the input for the later
+  repair step. No ORM model reads it yet. The upgrade creates the table
+  only when it is absent and adds rows only for nodes that have none, so
+  a row records the first time `0108` saw the node.
+- **Old key kept.** `graph_node_tenant_kind_name_idx` stays unique on
+  `(tenant_id, kind, name)`. PostgreSQL treats NULLs as distinct in a
+  unique index, so a fourth nullable key alone would let two unresolved
+  rows share a name. A non-unique `graph_node_tenant_scope_kind_name_idx`
+  on `(tenant_id, source_scope, kind, name)` is added for scope lookups.
+- **Writers unchanged.** Refresh, seeding and bulk import still write
+  `NULL`, so rows written before the cut-over also read as `unresolved`.
+- **Downgrade.** Keeps every row, drops the two columns, the CHECK and
+  the scope index, and keeps `graph_node_scope_snapshot`. The snapshot
+  cannot be re-taken later, because a refresh moves `target_id` to the
+  last target that saw the row; keeping the table is how the repair
+  input is exported before the columns go. A re-upgrade keeps it as is.
+  Downgrade refuses when `source_scope` holds a value `0108` did not
+  write (any `target:` / `legacy:` value, or a value from another
+  writer): the old schema cannot hold it, so recover by rolling forward.
+- **Not in this step.** Writing scoped nodes, splitting or repairing
+  rows, dropping the old key and changing path answers belong to the
+  staged cut-over (#3749) and the path work (#3760).
+- **Tests.** `tests/migrations/test_migration_0108_add_graph_node_source_scope.py`
+  (SQLite), `tests/integration/test_topology_source_scope_migration.py`
+  (PostgreSQL: NULL uniqueness, upgrade/downgrade, refusal) and the
+  legacy-read tests in `tests/integration/test_topology_query.py`.
 
 ### `TopologyPath` — frozen Pydantic v2 (read half)
 

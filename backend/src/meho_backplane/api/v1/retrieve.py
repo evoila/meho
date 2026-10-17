@@ -88,7 +88,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
-from meho_backplane.retrieval.retriever import RetrievalHit, retrieve
+from meho_backplane.memory.rbac import MemoryRbacResolver
+from meho_backplane.retrieval.retriever import MemoryEligibility, RetrievalHit, retrieve
 
 __all__ = ["router"]
 
@@ -230,6 +231,17 @@ def _compute_query_hash(query: str) -> str:
     return hashlib.sha256(query.encode("utf-8")).hexdigest()
 
 
+def _memory_eligibility(operator: Operator, source: str | None) -> MemoryEligibility | None:
+    """Return the Memory eligibility when Memory rows can be candidates.
+
+    ``None`` for any other source, because Memory rows are not candidates
+    there. The route still passes ``principal_sub`` either way.
+    """
+    if source not in (None, "memory"):
+        return None
+    return MemoryRbacResolver().eligibility(operator)
+
+
 @router.post("/retrieve", response_model=RetrieveResponse)
 async def retrieve_endpoint(
     body: RetrieveRequest,
@@ -269,8 +281,10 @@ async def retrieve_endpoint(
         audit_metadata_filters_keys=metadata_filters_keys,
     )
 
-    # `principal_sub=operator.sub` enforces the mandatory, non-overridable
-    # per-principal isolation predicate at the retrieval boundary (#1797):
+    # Memory rows go through the Memory service's typed eligibility (#3741)
+    # whenever they can be candidates (`source="memory"` or no source), so
+    # an all-source query cannot bypass the Memory contract. Its principal
+    # also drives the per-principal isolation predicate (#1797):
     # a `source="memory"` user-scoped row (`memory-user` /
     # `memory-user-tenant` / `memory-user-target`) is only returned when
     # its stored `user_sub` equals the caller's `sub`. This closes the
@@ -286,6 +300,7 @@ async def retrieve_endpoint(
         limit=body.limit,
         metadata_filters=body.metadata_filters,
         principal_sub=operator.sub,
+        memory_eligibility=_memory_eligibility(operator, body.source),
     )
 
     structlog.contextvars.bind_contextvars(audit_hit_count=len(hits))

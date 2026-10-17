@@ -36,17 +36,23 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
+from contextlib import ExitStack
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from meho_backplane.memory._internal import MEMORY_SOURCE
 from meho_backplane.memory.schemas import USER_SCOPED, kind_for_scope
 from meho_backplane.retrieval.retriever import (
+    _BM25_CANDIDATES_SQL,
+    _COSINE_CANDIDATES_SQL,
+    _MEMORY_ELIGIBILITY_PREDICATE_SQL,
     _MEMORY_SOURCE,
     _PRINCIPAL_PREDICATE_SQL,
     _USER_SCOPED_MEMORY_KINDS,
+    MemoryEligibility,
     retrieve,
 )
 from meho_backplane.settings import get_settings
@@ -249,3 +255,128 @@ def test_principal_predicate_sql_has_fail_open_for_non_memory_and_broadcast() ->
     # leave a real kind ungated).
     for kind in _USER_SCOPED_MEMORY_KINDS:
         assert kind in sql
+
+
+# ---------------------------------------------------------------------------
+# Memory eligibility (#3741)
+# ---------------------------------------------------------------------------
+
+
+def _patched_substrate(captured: list[tuple[Any, ...]]) -> Any:
+    """Patch embedding + both candidate helpers; record positional args."""
+
+    async def fake_candidates(*args: Any, **kwargs: Any) -> list[Any]:
+        captured.append(args)
+        return []
+
+    fake_embedding_service = MagicMock()
+    fake_embedding_service.encode_one = AsyncMock(return_value=[0.0] * 384)
+    stack = ExitStack()
+    stack.enter_context(
+        patch(
+            "meho_backplane.retrieval.retriever.get_embedding_service",
+            return_value=fake_embedding_service,
+        )
+    )
+    stack.enter_context(
+        patch("meho_backplane.retrieval.retriever._bm25_candidates", side_effect=fake_candidates)
+    )
+    stack.enter_context(
+        patch("meho_backplane.retrieval.retriever._cosine_candidates", side_effect=fake_candidates)
+    )
+    stack.enter_context(
+        patch(
+            "meho_backplane.retrieval.retriever._log_unreadable_memory_expiry",
+            new=AsyncMock(),
+        )
+    )
+    return stack
+
+
+@pytest.mark.asyncio
+async def test_memory_eligibility_threads_kinds_and_principal_to_both_signals() -> None:
+    """Both signals get the eligibility's principal and kinds before ranking."""
+    tenant = uuid.uuid4()
+    eligibility = MemoryEligibility(
+        tenant_id=tenant, principal_sub="principal-A", kinds=("memory-user", "memory-tenant")
+    )
+    captured: list[tuple[Any, ...]] = []
+    with _patched_substrate(captured):
+        await retrieve(
+            tenant_id=tenant,
+            query="anything",
+            source="memory",
+            memory_eligibility=eligibility,
+            session=MagicMock(),
+        )
+    assert len(captured) == 2
+    for args in captured:
+        assert args[6] == "principal-A"
+        assert args[7] == ["memory-user", "memory-tenant"]
+
+
+@pytest.mark.asyncio
+async def test_no_memory_eligibility_binds_no_kind_limit() -> None:
+    """Without eligibility the kinds bind is ``None`` (expiry still applies in SQL)."""
+    captured: list[tuple[Any, ...]] = []
+    with _patched_substrate(captured):
+        await retrieve(tenant_id=uuid.uuid4(), query="anything", session=MagicMock())
+    assert [args[7] for args in captured] == [None, None]
+
+
+@pytest.mark.asyncio
+async def test_memory_eligibility_tenant_mismatch_fails_loudly() -> None:
+    """An eligibility built for another tenant is a programming error."""
+    eligibility = MemoryEligibility(
+        tenant_id=uuid.uuid4(), principal_sub="principal-A", kinds=("memory-user",)
+    )
+    with pytest.raises(ValueError, match="tenant_id"):
+        await retrieve(
+            tenant_id=uuid.uuid4(),
+            query="anything",
+            memory_eligibility=eligibility,
+            session=MagicMock(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_memory_eligibility_principal_mismatch_fails_loudly() -> None:
+    """``principal_sub`` cannot disagree with the eligibility's principal."""
+    tenant = uuid.uuid4()
+    eligibility = MemoryEligibility(
+        tenant_id=tenant, principal_sub="principal-A", kinds=("memory-user",)
+    )
+    with pytest.raises(ValueError, match="principal_sub"):
+        await retrieve(
+            tenant_id=tenant,
+            query="anything",
+            principal_sub="principal-B",
+            memory_eligibility=eligibility,
+            session=MagicMock(),
+        )
+
+
+def test_memory_eligibility_is_frozen_and_never_empty() -> None:
+    """The projection cannot be widened after it is built, nor built empty."""
+    eligibility = MemoryEligibility(
+        tenant_id=uuid.uuid4(), principal_sub="principal-A", kinds=("memory-user",)
+    )
+    with pytest.raises(ValidationError):
+        eligibility.kinds = ("memory-user", "memory-tenant")  # type: ignore[misc]
+    with pytest.raises(ValidationError):
+        MemoryEligibility(tenant_id=uuid.uuid4(), principal_sub="principal-A", kinds=())
+
+
+def test_eligibility_predicate_guards_expiry_before_any_cast() -> None:
+    """The expiry arm checks shape and validity before it casts, in both statements."""
+    sql = _MEMORY_ELIGIBILITY_PREDICATE_SQL
+    assert sql.index("pg_input_is_valid") < sql.index("CAST(metadata ->> 'expires_at'")
+    assert "WHEN metadata ->> 'expires_at' IS NULL THEN true" in sql
+    assert "> now()" in sql
+    assert "timezone('UTC', now())" in sql
+    needle = " ".join(sql.split())
+    for statement in (_BM25_CANDIDATES_SQL, _COSINE_CANDIDATES_SQL):
+        haystack = " ".join(str(statement.text).split())
+        assert needle in haystack
+        # The predicate sits in WHERE, before ORDER BY / LIMIT.
+        assert haystack.index(needle) < haystack.index("ORDER BY")

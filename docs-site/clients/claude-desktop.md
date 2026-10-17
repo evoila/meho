@@ -39,6 +39,32 @@ design sketch.
 
 MEHO ships a Claude Desktop bundle in the MCPB format, distributed as an
 asset on each [GitHub Release](https://github.com/evoila/meho/releases).
+
+!!! tip "Check the download before you install it"
+
+    Each Release also has a checksum file for the bundle,
+    `SHA256SUMS-mcpb`. Download it into the same folder as the `.mcpb`
+    file and run (macOS or Linux):
+
+    ```bash
+    shasum -a 256 -c SHA256SUMS-mcpb
+    ```
+
+    It must print `meho-claude-desktop-<version>.mcpb: OK`. On Linux,
+    `sha256sum -c SHA256SUMS-mcpb` works too.
+
+    The checksum file is signed with cosign, like the CLI checksums. To
+    check the signature as well, also download
+    `SHA256SUMS-mcpb.cosign.bundle` and run:
+
+    ```bash
+    cosign verify-blob \
+      --certificate-identity-regexp '^https://github\.com/evoila/meho/\.github/workflows/cli-release\.yml@refs/tags/v.+$' \
+      --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+      --bundle SHA256SUMS-mcpb.cosign.bundle \
+      SHA256SUMS-mcpb
+    ```
+
 Install it by **opening the `.mcpb` file** in Claude Desktop: it wires
 the same `mcp-remote` shim and asks, in a dialog, for the two things
 that differ per deployment —
@@ -76,10 +102,12 @@ backplane's and Keycloak's certificates. Either route is enough; a
 public-CA deploy needs neither.
 
 - **The bundle's CA field.** Pick the CA's PEM file in the install
-  dialog. The bundle's launcher adds its certificates to Node's trust
-  store in-process before the shim starts, keeping the trust it already
-  has. A path it cannot read, or a file without a PEM certificate, stops
-  the extension with an error naming the file.
+  dialog with the file picker. If you type the path instead, it must be
+  absolute or start with `~/`. The bundle's launcher adds its
+  certificates to Node's trust store in-process before the shim starts,
+  keeping the trust it already has. A path it cannot read, or a file
+  without a PEM certificate, stops the extension with an error naming
+  the file.
 - **Your OS trust store.** Leave the CA field empty and trust the root CA
   in the OS trust store. On macOS that is the login keychain:
 

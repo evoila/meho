@@ -62,7 +62,7 @@ import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import GraphEdge, GraphNode
+from meho_backplane.db.models import GraphEdge, GraphNode, Target
 from meho_backplane.topology.query import (
     AmbiguousNodeError,
     find_dependencies,
@@ -1032,6 +1032,91 @@ async def test_guard_does_not_drop_non_superseded_edges(
     path = await find_path(_operator(TENANT_A_ID), "app", "ds1")
     assert path is not None
     assert path.total_hops == 2
+
+
+def _closure_shape(nodes: Any) -> list[tuple[Any, ...]]:
+    """The pre-#3739 fields of a closure, in result order."""
+    return [
+        (n.id, n.kind, n.name, n.source, n.depth, n.via_edge_kind, n.parent_node_id, n.via_edge_id)
+        for n in nodes
+    ]
+
+
+@_skip_no_docker
+async def test_legacy_rows_read_back_unresolved_and_results_unchanged(
+    known_graph: dict[str, uuid.UUID],
+) -> None:
+    """#3739 expand step: readers label legacy rows and never pick a scope.
+
+    Every seeded row has ``source_scope`` NULL, the legacy shape. Readers
+    must return it as ``unresolved``. Setting scopes afterwards must not
+    change which rows come back, their order or their chain provenance --
+    the scope is reported, not used to choose a source.
+    """
+    op = _operator(TENANT_A_ID)
+    legacy_closure = await find_dependencies(op, "app")
+    legacy_path = await find_path(op, "app", "ds1")
+    assert legacy_path is not None
+    assert all(n.source_scope is None for n in legacy_closure)
+    assert {n.scope_status for n in legacy_closure} == {"unresolved"}
+    assert {n.scope_status for n in legacy_path.nodes} == {"unresolved"}
+
+    target_scope = f"target:{uuid.uuid4()}"
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        app = await session.get(GraphNode, known_graph["app"])
+        vm1 = await session.get(GraphNode, known_graph["vm1"])
+        assert app is not None
+        assert vm1 is not None
+        app.source_scope = "global"
+        vm1.source_scope = target_scope
+
+    scoped_closure = await find_dependencies(op, "app")
+    scoped_path = await find_path(op, "app", "ds1")
+    assert scoped_path is not None
+    assert _closure_shape(scoped_closure) == _closure_shape(legacy_closure)
+    assert _closure_shape(scoped_path.nodes) == _closure_shape(legacy_path.nodes)
+    status = {n.name: (n.source_scope, n.scope_status) for n in scoped_closure}
+    assert status["app"] == ("global", "global")
+    assert status["vm1"] == (target_scope, "target")
+    assert status["host1"] == (None, "unresolved")
+    path_status = {n.name: n.scope_status for n in scoped_path.nodes}
+    assert path_status["app"] == "global"
+
+
+@_skip_no_docker
+async def test_last_observed_target_is_not_read_as_scope(pg_engine: None) -> None:
+    """A legacy row with ``target_id`` set still reads as ``unresolved``."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        target = Target(
+            id=uuid.uuid4(),
+            tenant_id=TENANT_A_ID,
+            name=f"cluster-{uuid.uuid4().hex[:8]}",
+            aliases=[],
+            product="kubernetes",
+            host="k8s.example.test",
+        )
+        session.add(target)
+        await session.flush()
+        session.add(
+            GraphNode(
+                id=uuid.uuid4(),
+                tenant_id=TENANT_A_ID,
+                kind="namespace",
+                name="default",
+                target_id=target.id,
+                source="auto",
+                properties={},
+                discovered_by="kubernetes",
+            )
+        )
+
+    nodes = await find_dependents(_operator(TENANT_A_ID), "default", kind="namespace")
+
+    assert [(n.name, n.source_scope, n.scope_status) for n in nodes] == [
+        ("default", None, "unresolved")
+    ]
 
 
 def test_module_imports_cleanly() -> None:

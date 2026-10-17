@@ -157,3 +157,68 @@ def test_single_node_path_is_valid() -> None:
     path = TopologyPath(nodes=(_node("solo"),), total_hops=0)
     assert path.total_hops == 0
     assert len(path.nodes) == 1
+
+
+# ---------------------------------------------------------------------------
+# Source scope (#3739 expand step)
+# ---------------------------------------------------------------------------
+
+_SCOPE_UUID = "0f8fad5b-d9cb-469f-a165-70867728950e"
+
+
+def _scoped_node(source_scope: str | None) -> TopologyNode:
+    return TopologyNode(
+        id=uuid4(),
+        kind="namespace",
+        name="default",
+        source="auto",
+        depth=0,
+        via_edge_kind=None,
+        source_scope=source_scope,
+    )
+
+
+def test_legacy_node_without_scope_reads_unresolved() -> None:
+    node = TopologyNode(
+        id=uuid4(), kind="vm", name="vm1", source="auto", depth=0, via_edge_kind=None
+    )
+
+    assert node.source_scope is None
+    assert node.scope_status == "unresolved"
+    dumped = json.loads(node.model_dump_json())
+    assert dumped["source_scope"] is None
+    assert dumped["scope_status"] == "unresolved"
+
+
+@pytest.mark.parametrize(
+    ("scope", "status"),
+    [
+        ("global", "global"),
+        (f"target:{_SCOPE_UUID}", "target"),
+        (f"legacy:{_SCOPE_UUID}", "legacy"),
+    ],
+)
+def test_documented_scope_forms_are_accepted(scope: str, status: str) -> None:
+    node = _scoped_node(scope)
+
+    assert node.source_scope == scope
+    assert node.scope_status == status
+    assert node.model_dump()["scope_status"] == status
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [
+        "",
+        "Global",
+        f"target:{_SCOPE_UUID.upper()}",
+        f"cluster:{_SCOPE_UUID}",
+        f"target:{_SCOPE_UUID[:-1]}",
+        f"target:{_SCOPE_UUID.replace('-', '')}",
+        f"legacy:{_SCOPE_UUID[:-1]}g",
+        "legacy:",
+    ],
+)
+def test_malformed_scope_forms_are_rejected(scope: str) -> None:
+    with pytest.raises(ValidationError):
+        _scoped_node(scope)

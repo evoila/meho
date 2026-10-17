@@ -25,10 +25,11 @@ import (
 //     avoid leaking tenant boundaries via status-code differential;
 //     the CLI surfaces the detail string (`memory_not_found`) verbatim.
 //   - `meho recall --query "search terms" [--scope SCOPE] [--limit N]`
-//     — hybrid retrieval via POST /api/v1/retrieve with
-//     source="memory" and optional kind=memory-<scope>. The substrate
-//     post-filters user-scoped hits against operator.sub so a search
-//     never surfaces another operator's user-scoped row.
+//     — hybrid retrieval via POST /api/v1/memory/search, the same
+//     MemoryService.search_memories call the MCP search_memory tool
+//     makes. The server drops memories you may not see and expired
+//     memories before ranking, so the CLI and an agent get the same
+//     hits for the same input.
 //
 // The two modes are mutually exclusive — supplying both a positional
 // arg and `--query` fails fast client-side. Supplying neither also
@@ -59,7 +60,7 @@ func NewRecallCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "recall <scope>/<slug>",
-		Short: "Fetch a memory by natural key or via retrieval (GET /api/v1/memory or /api/v1/retrieve)",
+		Short: "Fetch a memory by natural key or search memories (GET /api/v1/memory or POST /api/v1/memory/search)",
 		Long: "recall has two modes. The positional form fetches one " +
 			"memory by its <scope>/<slug> natural key via " +
 			"GET /api/v1/memory/{scope}/{slug}; the body is written to " +
@@ -67,10 +68,9 @@ func NewRecallCmd() *cobra.Command {
 			"`glow` or `bat -l md` if you want them rendered). The " +
 			"query form (--query \"search terms\") runs hybrid " +
 			"BM25 + cosine retrieval over the operator's visible " +
-			"memories via POST /api/v1/retrieve, pinning " +
-			"source=\"memory\" so only memory rows are ranked.\n\n" +
-			"--scope narrows the query-mode search to one scope " +
-			"(translated to kind=memory-<scope> server-side); without " +
+			"memories via POST /api/v1/memory/search. Expired memories " +
+			"and memories you may not see are left out before ranking.\n\n" +
+			"--scope narrows the query-mode search to one scope; without " +
 			"it, every scope visible to the operator is considered. " +
 			"--limit caps the result count (1..50, server default 10 " +
 			"when omitted). --target is only consulted in positional " +
@@ -114,7 +114,7 @@ func NewRecallCmd() *cobra.Command {
 	cmd.Flags().StringVar(&targetFlag, "target", "",
 		"target name for user-target / target scopes (positional mode only)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
-		"emit raw MemoryEntry / RetrieveResponse JSON instead of human output")
+		"emit raw MemoryEntry / MemorySearchResponse JSON instead of human output")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to query (defaults to the URL recorded by `meho login`)")
 	return cmd
@@ -215,21 +215,16 @@ func runRecallByQuery(cmd *cobra.Command, backplaneURL string, opts recallOption
 			opts.JSONOut,
 		)
 	}
-	var kindFilter string
+	var scopeFilter *Scope
 	if opts.ScopeFilterArg != "" {
 		scope, err := parseScope(opts.ScopeFilterArg)
 		if err != nil {
 			return output.RenderError(cmd.ErrOrStderr(),
 				output.Unexpected(err.Error()), opts.JSONOut)
 		}
-		// kind_for_scope translation matches
-		// `backend/src/meho_backplane/memory/schemas.py::kind_for_scope`:
-		// `f"memory-{scope.value}"`. Inlined here (no shared package)
-		// because the CLI is a thin caller and a function would be
-		// noise.
-		kindFilter = "memory-" + string(scope)
+		scopeFilter = &scope
 	}
-	resp, err := postRecallQuery(cmd.Context(), backplaneURL, opts, kindFilter)
+	resp, err := postRecallQuery(cmd.Context(), backplaneURL, opts, scopeFilter)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
@@ -244,7 +239,7 @@ func runRecallByQuery(cmd *cobra.Command, backplaneURL string, opts recallOption
 		return output.RenderError(
 			cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf(
-				"call %s: HTTP 200 without a retrieve response payload",
+				"call %s: HTTP 200 without a memory search payload",
 				backplaneURL,
 			)),
 			opts.JSONOut,
@@ -291,23 +286,14 @@ func getRecall(
 }
 
 // buildRecallQueryBody assembles the typed POST body for
-// /api/v1/retrieve. `Source` is pinned to "memory" so the substrate
-// scopes hits to memory-entry rows. `Kind` is set only when the
-// operator narrowed via --scope (translated to `memory-<scope>`).
-// `Limit` flows onto the wire only when the operator passed a
-// positive value; the generated field tag is `omitempty`, so a nil
-// pointer keeps the JSON key absent and the backend's
-// `Field(ge=1, le=50, default=10)` applies.
-func buildRecallQueryBody(opts recallOptions, kindFilter string) api.RetrieveRequest {
-	src := "memory"
-	body := api.RetrieveRequest{
-		Query:  opts.QueryArg,
-		Source: &src,
-	}
-	if kindFilter != "" {
-		k := kindFilter
-		body.Kind = &k
-	}
+// /api/v1/memory/search. `Scope` is set only when the operator
+// narrowed via --scope; without it the server searches every scope
+// the operator can see. `Limit` flows onto the wire only when the
+// operator passed a positive value; the generated field tag is
+// `omitempty`, so a nil pointer keeps the JSON key absent and the
+// backend's `Field(ge=1, le=50, default=10)` applies.
+func buildRecallQueryBody(opts recallOptions, scope *Scope) api.MemorySearchBody {
+	body := api.MemorySearchBody{Query: opts.QueryArg, Scope: scope}
 	if opts.LimitArg > 0 {
 		limit := opts.LimitArg
 		body.Limit = &limit
@@ -319,32 +305,30 @@ func postRecallQuery(
 	ctx context.Context,
 	backplaneURL string,
 	opts recallOptions,
-	kindFilter string,
-) (*api.RetrieveEndpointApiV1RetrievePostResponse, error) {
+	scope *Scope,
+) (*api.SearchMemoriesApiV1MemorySearchPostResponse, error) {
 	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
 	}
-	reqBody := buildRecallQueryBody(opts, kindFilter)
+	reqBody := buildRecallQueryBody(opts, scope)
 	return retryOn401(ctx, authed,
-		func(ctx context.Context) (*api.RetrieveEndpointApiV1RetrievePostResponse, error) {
-			return authed.RetrieveEndpointApiV1RetrievePostWithResponse(
+		func(ctx context.Context) (*api.SearchMemoriesApiV1MemorySearchPostResponse, error) {
+			return authed.SearchMemoriesApiV1MemorySearchPostWithResponse(
 				ctx,
-				&api.RetrieveEndpointApiV1RetrievePostParams{},
+				&api.SearchMemoriesApiV1MemorySearchPostParams{},
 				reqBody,
 			)
 		},
-		func(r *api.RetrieveEndpointApiV1RetrievePostResponse) int { return r.StatusCode() },
+		func(r *api.SearchMemoriesApiV1MemorySearchPostResponse) int { return r.StatusCode() },
 	)
 }
 
 // printRecallTable renders the ranked hits from --query mode as a
-// compact table. Columns: RANK (1-based), SCORE (fused), SCOPE
-// (lifted from the hit's `kind` by stripping the `memory-` prefix),
-// SLUG (the substrate's `source_id`), SNIPPET (200-char excerpt).
-// The fused / per-signal scores are visible in --json output for
-// retrieval-tuning sessions.
-func printRecallTable(w io.Writer, r *api.RetrieveResponse) {
+// compact table. Columns: RANK (1-based), SCORE (fused), SCOPE, SLUG,
+// SNIPPET (80-char excerpt). The per-signal scores and the full
+// entry are visible in --json output.
+func printRecallTable(w io.Writer, r *api.MemorySearchResponse) {
 	if r == nil || len(r.Hits) == 0 {
 		fmt.Fprintln(w, "no memory hits for this query")
 		return
@@ -355,47 +339,11 @@ func printRecallTable(w io.Writer, r *api.RetrieveResponse) {
 		fmt.Fprintf(w, "%-5d %-8.4f %-14s %-40s %s\n",
 			i+1,
 			hit.FusedScore,
-			scopeFromKind(hit.Kind),
-			truncate(slugFromSourceID(hit.SourceId), 40),
-			truncate(snippetOf(hit.Body), 80),
+			string(hit.Entry.Scope),
+			truncate(hit.Entry.Slug, 40),
+			truncate(snippetOf(hit.Entry.Body), 80),
 		)
 	}
-	if r.QueryDurationMs > 0 {
-		fmt.Fprintf(w, "queried in %.2f ms\n", r.QueryDurationMs)
-	}
-}
-
-// scopeFromKind reverses the `memory-<scope>` prefix the backend
-// stores. Mirrors
-// `backend/src/meho_backplane/memory/schemas.py::scope_for_kind` —
-// inlined for the table renderer because the CLI doesn't need a
-// typed Scope here (it's only printed). Returns the raw `kind` on
-// shapes that don't match so an unexpected backend value doesn't
-// crash the renderer.
-func scopeFromKind(kind string) string {
-	const prefix = "memory-"
-	if len(kind) > len(prefix) && kind[:len(prefix)] == prefix {
-		return kind[len(prefix):]
-	}
-	return kind
-}
-
-// slugFromSourceID extracts the human-friendly slug from the
-// substrate's source_id encoding. The backend's
-// `meho_backplane/memory/_internal.py::encode_source_id` joins
-// natural-key segments with `:`; the slug is always the LAST
-// segment. The CLI doesn't need to decode the user_sub / target_name
-// segments — those are visible separately in --json output.
-func slugFromSourceID(sourceID string) string {
-	// rsplit(':', 1) — same shape the backend's slug_from_source_id
-	// helper uses. Without the `:` delimiter the source_id IS the
-	// slug.
-	for i := len(sourceID) - 1; i >= 0; i-- {
-		if sourceID[i] == ':' {
-			return sourceID[i+1:]
-		}
-	}
-	return sourceID
 }
 
 // snippetOf returns the first ~200 chars of body so the table render

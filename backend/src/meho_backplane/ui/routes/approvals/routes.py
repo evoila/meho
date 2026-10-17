@@ -134,6 +134,7 @@ from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
     ApprovalRequestExpiredError,
+    DelegatedDecisionForbiddenError,
     DelegatedReasonInvalidError,
     Delegation,
     PreviewBindingMissingError,
@@ -838,5 +839,15 @@ async def _commit_decision(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(exc),
+        ) from exc
+    except DelegatedDecisionForbiddenError as exc:
+        # #3693: delegated decisions are allowed only on lab-class deploys.
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "This deployment does not allow decisions made on someone "
+                "else's instruction. Decide on your own judgement, without "
+                "the Instructed-by: lines."
+            ),
         ) from exc
     return request

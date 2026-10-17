@@ -191,13 +191,12 @@ func renderNonOKToStderr(cmd *cobra.Command, r *dispatch.CallResult) error {
 	}
 	vaultConn.PrintGeneric(cmd.ErrOrStderr(), opKVRead, r)
 	// error / denied → exit 1 via the shared sentinel; any other status is
-	// a backend contract violation → exit 4.
+	// one this CLI does not know (likely a newer backplane) → exit 4.
 	switch r.Status {
 	case "error", "denied":
 		return dispatch.ErrOpError
 	default:
-		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(fmt.Sprintf(
-			"backplane returned invalid OperationResult.status %q", r.Status)), false)
+		return output.RenderError(cmd.ErrOrStderr(), dispatch.UnknownStatusError(r.Status), false)
 	}
 }
 

@@ -284,6 +284,8 @@ __all__ = [
     "KIND_SLUG_MIN_LENGTH",
     "KIND_SLUG_PATTERN",
     "KIND_SLUG_RE",
+    "SOURCE_SCOPE_GLOBAL",
+    "SOURCE_SCOPE_PATTERN",
     "WELL_KNOWN_NODE_KINDS",
     "AgentRun",
     "AgentRunStatus",
@@ -2050,6 +2052,48 @@ def _ck_in(column: str, values: tuple[str, ...]) -> str:
     return f"{column} IN ({', '.join(f"'{v}'" for v in values)})"
 
 
+#: :attr:`GraphNode.source_scope` value for a node whose name means the
+#: same thing for the whole tenant, whichever source reported it (#3739).
+SOURCE_SCOPE_GLOBAL: Final[str] = "global"
+
+#: The full :attr:`GraphNode.source_scope` grammar (#3739). Three forms:
+#:
+#: * ``global`` -- the name is tenant-wide (see :data:`SOURCE_SCOPE_GLOBAL`).
+#: * ``target:<uuid>`` -- the name is only unique inside one target; the
+#:   UUID is that target's ``targets.id``.
+#: * ``legacy:<uuid>`` -- a pre-migration row kept apart from scoped rows;
+#:   the UUID is the row's own ``graph_node.id``, so two legacy rows never
+#:   collide.
+#:
+#: UUIDs are canonical lowercase text. ``NULL`` means "not resolved yet".
+SOURCE_SCOPE_PATTERN: Final[str] = (
+    r"^(?:global|(?:target|legacy):"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
+)
+
+
+def _ck_source_scope(column: str) -> str:
+    """Render the portable CHECK body for :data:`SOURCE_SCOPE_PATTERN`.
+
+    Regex CHECKs are not portable, so the UUID form is checked in four
+    portable steps: the 7-character prefix (``=`` is case-sensitive on
+    both dialects, unlike SQLite ``LIKE``); the ``LIKE`` layout (length
+    and hyphen positions); exactly four hyphens (``_`` in ``LIKE`` also
+    matches a hyphen); and ``ltrim`` with the lowercase hex alphabet
+    (anything left over is a bad character). ``substr`` / ``replace`` /
+    ``ltrim`` mean the same on PostgreSQL and SQLite. Mirrored verbatim
+    in migration ``0108``.
+    """
+    return (
+        f"{column} IS NULL "
+        f"OR {column} = 'global' "
+        f"OR (substr({column}, 1, 7) IN ('target:', 'legacy:') "
+        f"AND {column} LIKE '_______________-____-____-____-____________' "
+        f"AND length(replace({column}, '-', '')) = 39 "
+        f"AND ltrim(substr({column}, 8), '0123456789abcdef-') = '')"
+    )
+
+
 def _ck_kind_shape(column: str) -> str:
     """Render the portable minimal shape CHECK for an open kind column.
 
@@ -2142,6 +2186,18 @@ class GraphNode(Base):
       out once a node has been absent past the configured threshold
       (the spec's soft-delete signal -- the row stays queryable for
       G9.3 history replay but is filtered out of default queries).
+    * ``source_scope`` -- Text NULL with the portable
+      ``ck_graph_node_source_scope`` CHECK (migration ``0108``,
+      #3739). Says where the node's name is unique: ``global``,
+      ``target:<uuid>`` or ``legacy:<uuid>`` (see
+      :data:`SOURCE_SCOPE_PATTERN`). ``NULL`` means not resolved yet:
+      the row predates source-qualified identity, and ``target_id``
+      only names the last target that saw it, so readers must not
+      treat it as the scope. Nothing writes this column yet except the
+      ``0108`` backfill; the staged cut-over owns the writers.
+    * ``source_scope_provenance`` -- Text NULL. What set
+      ``source_scope`` (``migration:0108`` for the backfill). Lets the
+      later repair tell a mechanical value from a rediscovered one.
 
     Indexes on :class:`GraphNode`:
 
@@ -2149,7 +2205,13 @@ class GraphNode(Base):
       ``(tenant_id, kind, name)``. Enforces the "one (kind, name) per
       tenant" invariant at the DB layer. Named index only; no
       ``unique=True`` on the column triple to avoid PG auto-generating
-      a duplicate anonymous index alongside it.
+      a duplicate anonymous index alongside it. It stays in place until
+      the staged cut-over: PostgreSQL treats NULLs as distinct in a
+      unique index, so adding ``source_scope`` as a fourth key column
+      would let two unresolved rows share a name.
+    * ``graph_node_tenant_scope_kind_name_idx`` -- non-unique b-tree on
+      ``(tenant_id, source_scope, kind, name)`` (migration ``0108``).
+      Serves per-scope lookups and the "unresolved rows" scan.
 
     The model deliberately ships with no helper methods -- write paths
     land in T3's refresh service, read paths in T4's recursive-CTE
@@ -2193,6 +2255,12 @@ class GraphNode(Base):
         nullable=True,
         default=None,
     )
+    source_scope: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    source_scope_provenance: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
         Index(
@@ -2203,6 +2271,14 @@ class GraphNode(Base):
             unique=True,
             postgresql_using="btree",
         ),
+        Index(
+            "graph_node_tenant_scope_kind_name_idx",
+            "tenant_id",
+            "source_scope",
+            "kind",
+            "name",
+            postgresql_using="btree",
+        ),
         sa.CheckConstraint(
             _ck_kind_shape("kind"),
             name="ck_graph_node_kind",
@@ -2210,6 +2286,10 @@ class GraphNode(Base):
         sa.CheckConstraint(
             _ck_in("source", _GRAPH_SOURCES),
             name="ck_graph_node_source",
+        ),
+        sa.CheckConstraint(
+            _ck_source_scope("source_scope"),
+            name="ck_graph_node_source_scope",
         ),
     )
 
@@ -8563,7 +8643,7 @@ class RequestUsageEvent(Base):
     * ``correlation_id`` -- opaque id that links a ``context_selected``
       event to later evaluation data; ``NULL`` on ``request_finished``.
 
-    Indexes are declared in migration ``0107``:
+    Indexes are declared in migration ``0108``:
     ``(tenant_id, occurred_at)`` for tenant-scoped window reads, and
     ``occurred_at`` for the retention delete.
     """

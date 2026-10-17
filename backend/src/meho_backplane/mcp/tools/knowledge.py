@@ -186,7 +186,7 @@ def _hit_payload(hit: KbEntrySearchHit) -> dict[str, Any]:
 
 _PARTIAL_SEARCH_REMEDIATION: Final[str] = (
     "{omitted} lower-ranked hits were left out to keep this response under "
-    "{limit} bytes. Lower `limit` or narrow the query to see them."
+    "{limit} bytes. Narrow the query or add filters to find them."
 )
 
 

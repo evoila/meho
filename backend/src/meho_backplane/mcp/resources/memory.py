@@ -138,8 +138,8 @@ def _render_entry(entry: MemoryEntry) -> dict[str, Any]:
 
     Adds the canonical ``locator`` so a legacy read also teaches the
     caller the stable URI. The body is wrapped in the untrusted-content
-    envelope (stored-prompt-injection guard, evoila-bosnia/meho-internal#154):
-    it is agent-authored Markdown re-served into an LLM context.
+    envelope because it is agent-authored Markdown re-served into an
+    LLM context, so it must be treated as data, not as instructions.
     """
     data = entry.model_dump(mode="json")
     data["body"] = wrap_untrusted_text(data["body"])

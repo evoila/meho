@@ -399,11 +399,30 @@ whether the caller passed `view`:
   so it confirms named loaded our revision into *that* view;
   `named-checkzone` (validate step) already proved the record is in the
   file.
-* **`view` omitted** (`_dig_add_verify` / `_dig_remove_verify`) -- the
-  record-level `dig @localhost` check, unchanged for no-views /
-  single-view targets.
+* **`view` omitted** (`_dig_add_verify` / `_dig_remove_verify` /
+  `_dig_value_absent_verify`) -- the record-level `dig @localhost`
+  check for no-views / single-view targets.
 
-Both predicates **echo their observed state on failure** so the
+All predicates **poll before they fail** (`_poll_verify`, #4205). The
+commit-path `rndc reload` is asynchronous -- the ISC rndc manual says
+"if no zone is specified, the reloading happens asynchronously" -- so
+`named` can still serve the old zone when the first `dig` runs. A
+single check then rolled back a correct write with exit code 12. Every
+predicate now retries up to `_VERIFY_POLL_ATTEMPTS` (10) times,
+`_VERIFY_POLL_INTERVAL_SECONDS` (0.3 s) apart, about 3 s in total. Each
+`dig` call is bounded with `+timeout=1 +tries=1` so a resolver that stops
+answering cannot push the poll past the 90 s SSH budget of the apply. A
+record that never appears still fails, rolls back, and exits 12.
+
+The two absence checks (`_dig_remove_verify`, `_dig_value_absent_verify`)
+only accept "the record is gone" when `dig` exited 0 (`_dig_observe`
+stores the exit status next to the answer). `dig` exits 0 for every real
+DNS answer, including NXDOMAIN, and non-zero when no server replied. A
+lookup that got no reply prints error text without the value, which must
+not pass as absence: the poll retries it and, if the server never
+answers, fails and rolls back.
+
+All predicates **echo their last observed state on failure** so the
 `AtomicApplyError` detail is diagnosable -- the pre-#2897 silent
 `grep -q` / `[ -z … ]` predicates surfaced an empty `exception_message`.
 

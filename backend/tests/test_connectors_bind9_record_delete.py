@@ -411,6 +411,7 @@ def test_dig_value_absent_verify_is_scoped_and_quoted() -> None:
     cmd = _dig_value_absent_verify("web.example.test", "A", "192.0.2.20")
     assert "dig @localhost web.example.test A +short" in cmd
     assert "grep -qxF 192.0.2.20" in cmd  # literal whole-line, single value
+    assert "sleep 0.3; done; " in cmd  # polled: the reload is asynchronous (#4205)
     # A metacharacter-laden value is quoted, not interpolated raw.
     danger = _dig_value_absent_verify("x.example.test", "A", "1.2.3.4; rm -rf /")
     assert "'1.2.3.4; rm -rf /'" in danger

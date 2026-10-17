@@ -27,7 +27,7 @@
 // guard and reads `process.argv.slice(2)` at module top level, so importing
 // it runs its `main` against the argv set below.
 //
-// It adds two things over invoking mcp-remote directly:
+// It adds three things over invoking mcp-remote directly:
 //
 //  1. Internal-CA trust. The optional `ca_cert` user_config (a PEM file
 //     path) arrives as argv[3], and the launcher appends its certificates to
@@ -48,12 +48,17 @@
 //     public `meho-mcp` client via --static-oauth-client-info, overridable
 //     through the optional `client_id` user_config (delivered as
 //     MEHO_MCP_CLIENT_ID) without editing the installed bundle.
+//  3. One sign-in at a time (#3857). Claude Desktop can start the extension
+//     twice at once; signin-lock.mjs makes the second copy wait until the
+//     first one is connected, so only one browser tab opens.
 
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import tls from "node:tls";
 import { pathToFileURL } from "node:url";
+
+import { acquireSignInLock } from "./signin-lock.mjs";
 
 const rawUrl = process.argv[2];
 
@@ -163,6 +168,20 @@ process.argv = [
   "--static-oauth-client-metadata",
   JSON.stringify({ scope: scopes }),
 ];
+
+// One sign-in at a time (#3857): Claude Desktop can start this extension
+// twice at once, and both copies would open a browser sign-in. Wait until no
+// other copy is signing in, and release the lock once mcp-remote is
+// connected. mcp-remote writes nothing to stdout before its connection to
+// MEHO works, so its first stdout message is the "connected" signal. Details
+// in signin-lock.mjs.
+const releaseSignInLock = await acquireSignInLock(url.href);
+const stdoutWrite = process.stdout.write;
+process.stdout.write = function writeAndRelease(...args) {
+  process.stdout.write = stdoutWrite;
+  releaseSignInLock();
+  return stdoutWrite.apply(this, args);
+};
 
 // Import (not spawn) the vendored entry. pathToFileURL keeps the dynamic
 // import valid on Windows, where a bare path is not a valid import

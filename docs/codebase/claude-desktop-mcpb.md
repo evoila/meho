@@ -18,7 +18,8 @@ records the launcher's contract and invariants.
 | File | Role |
 |---|---|
 | `manifest.json` | MCPB 0.3 manifest. `mcp_config` runs `node server/index.mjs <backplane_url> <ca_cert>`; env carries `MEHO_MCP_CLIENT_ID`, `MEHO_MCP_SCOPES`, and `NODE_EXTRA_CA_CERTS` (older-Node CA fallback). |
-| `server/index.mjs` | The launcher. Validates argv, injects the internal CA, rewrites `process.argv`, imports the vendored `mcp-remote` entry in-process. |
+| `server/index.mjs` | The launcher. Validates argv, injects the internal CA, takes the sign-in lock, rewrites `process.argv`, imports the vendored `mcp-remote` entry in-process. |
+| `server/signin-lock.mjs` | One sign-in at a time (#3857). A per-endpoint lock file, so two copies started together do not both run the browser login. |
 | `package.json` / `package-lock.json` | Pin `mcp-remote@0.1.38` and its tree; `build.sh` vendors it with `npm ci --omit=dev`. |
 | `test/index.test.mjs` | `node --test` suite: runs the launcher against a stub `mcp-remote` that reports the argv, env, pid/ppid, and default-CA fingerprints it sees at import time. |
 
@@ -46,7 +47,18 @@ records the launcher's contract and invariants.
    realm's SSO idle limit (30 minutes by default).
 4. **mcp-remote entry.** Resolved from the bundle's `node_modules` via the
    package's `bin` mapping.
-5. **Hand-off.** `process.argv` becomes
+5. **Sign-in lock (#3857).** `acquireSignInLock(url.href)` waits until it
+   can create `<config dir>/meho-claude-desktop-<sha256(url)[:16]>.lock`
+   with the exclusive `wx` flag. The config dir is `MCP_REMOTE_CONFIG_DIR`
+   or `~/.mcp-auth`, the same base folder `mcp-remote` uses. The file holds
+   the owner's pid. A lock is stale when its pid is not running, when it is
+   older than five minutes, or when it has no readable pid after five
+   seconds; the next copy removes it. The launcher wraps
+   `process.stdout.write` once: the first write (`mcp-remote` answering the
+   host, which only happens after it is connected) releases the lock. An
+   `exit` listener also releases it. After waiting five minutes, or when the
+   lock file cannot be used, the launcher starts without the lock.
+6. **Hand-off.** `process.argv` becomes
    `[node, entry, url, --static-oauth-client-info, {"client_id"}, --static-oauth-client-metadata, {"scope"}]`
    and the entry is dynamically imported; `mcp-remote` parses argv at
    module top level and owns stdio from then on.
@@ -66,6 +78,14 @@ records the launcher's contract and invariants.
   1.3109.0 strips `NODE_EXTRA_CA_CERTS` from the extension environment, and
   Node reads that variable only at startup. The manifest env entry remains
   solely as the older-Node fallback.
+- **One copy signs in at a time (#3857).** `mcp-remote` 0.1.38 has its own
+  lockfile, but it checks for it and creates it in two steps, so copies
+  that start together both miss it; on Windows it skips the check. The
+  launcher lock closes that gap. It relies on `mcp-remote` writing nothing
+  to stdout before it is connected (its `log` goes to stderr, and the stdio
+  transport starts only after the remote connection). Newer upstream
+  `mcp-remote` (0.15.x checked) coordinates concurrent starts itself; if
+  the pin moves there, re-check whether this lock is still needed.
 - **argv[3] is load-bearing.** The manifest's third `args` item must stay
   `${user_config.ca_cert}`; the suite pins the manifest `args` array.
 
@@ -85,8 +105,10 @@ records the launcher's contract and invariants.
 
 ## Known issues
 
-- Desktop's version probe starts the launcher twice, and both instances run
-  OAuth (#3857).
+- If Desktop stops the copy that holds the sign-in lock before the login
+  finishes, the waiting copy takes over and opens a second browser tab.
+- Three copies and a stale lock at the same moment can, in rare timing,
+  both remove the stale lock and both start a login.
 - The field tests so far (#3143) ran on macOS; how Desktop on Windows
   handles either CA route is unverified.
 

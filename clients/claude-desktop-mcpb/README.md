@@ -82,7 +82,9 @@ requested OAuth scopes delivered as `MEHO_MCP_SCOPES`. The launcher:
    `mcp:read mcp:execute offline_access mcp:admin`) is the deliberate opt-in to
    [operator mode](#elevated-operator-mode-opt-in). The seam variable is
    scrubbed from the environment `mcp-remote` inherits.
-5. Sets `process.argv` to the `mcp-remote` invocation — the backplane URL,
+5. Waits until no other copy of the extension is signing in, then takes a
+   small lock file — see [One sign-in at a time](#one-sign-in-at-a-time).
+6. Sets `process.argv` to the `mcp-remote` invocation — the backplane URL,
    plus `--static-oauth-client-info '{"client_id": "…"}'` and
    `--static-oauth-client-metadata '{"scope": "<resolved scopes>"}'` — and
    **imports** the vendored `mcp-remote@0.1.38` CLI entry into this
@@ -188,6 +190,44 @@ lapsed*:
 `mcp-remote` caches the tokens under `~/.mcp-auth`, so once the first login
 succeeds **every later launch connects instantly** — the race only bites the
 very first connect on a fresh machine (or again after you clear `~/.mcp-auth`).
+
+## One sign-in at a time
+
+Claude Desktop can start the extension **twice** at almost the same moment
+(it checks which MCP protocol version the server speaks). Before this fix,
+both copies ran the browser login: two browser tabs opened, and one copy
+failed with `InvalidGrantError: Code not valid` (#3857).
+
+Now only one copy signs in:
+
+- The first copy creates a lock file next to the saved logins:
+  `~/.mcp-auth/meho-claude-desktop-<id>.lock`. It removes the file as soon
+  as it is connected to MEHO, and when it stops.
+- The second copy waits while that file exists. Then it starts and uses the
+  saved login. It opens no browser tab.
+- A lock file whose copy has stopped, or that is older than five minutes, is
+  removed by the next copy.
+- A copy never waits more than five minutes. After that, or when it cannot
+  use the lock file, it starts anyway.
+
+**Expected log lines.** In the extension's log, the waiting copy writes
+these lines. They are normal, not an error:
+
+```
+meho-claude-desktop: another MEHO instance (pid 12345) is signing in; waiting for it to finish
+meho-claude-desktop: the other MEHO instance finished; starting
+```
+
+This line is also normal. It means an earlier copy stopped without cleaning
+up, and this copy took over:
+
+```
+meho-claude-desktop: removing an old sign-in lock: its instance (pid 12345) stopped
+```
+
+If Claude Desktop stops the first copy before you finish the login, the
+waiting copy takes over and opens a new browser tab. Finish the login in the
+new tab.
 
 ## How long the login lasts
 

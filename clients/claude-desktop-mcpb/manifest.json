@@ -36,7 +36,7 @@
     "ca_cert": {
       "type": "file",
       "title": "Internal CA bundle (optional)",
-      "description": "PEM bundle for the internal CA that signs the backplane's TLS certificate; the extension adds it to its trust store. Alternatively leave this empty and trust the root CA in your OS trust store (on macOS, the login keychain): current Claude Desktop runs extensions with the OS trust store enabled. Leave empty for public-CA deploys.",
+      "description": "PEM bundle for the internal CA that signs the backplane's TLS certificate; the extension adds it to its trust store. Alternatively leave this empty and trust the root CA in your OS trust store (on macOS, the login keychain): current Claude Desktop runs extensions with the OS trust store enabled. Leave empty for public-CA deploys. No CA file yet? See \"Before you start: trust your deployment's CA\" on the MEHO docs page for Claude Desktop.",
       "required": false
     },
     "client_id": {

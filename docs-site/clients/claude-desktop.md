@@ -35,6 +35,87 @@ deploy over VPN (issue
 [#2666](https://github.com/evoila/meho/issues/2666)) — not a
 design sketch.
 
+## Before you start: trust your deployment's CA
+
+Do this step first. It takes a few minutes.
+
+A CA (certificate authority) is the certificate that signs the server
+certificates of your MEHO deployment. Many deployments use their own
+internal CA. Your machine does not trust an internal CA yet, so every
+login fails until you add it.
+
+### 1. Check if you need this step
+
+Run this on your machine. Use your backplane host in place of
+`meho.example.com`. On Windows, type `curl.exe` in place of `curl`.
+
+```bash
+curl -sS -o /dev/null https://meho.example.com/healthz && echo trusted
+```
+
+- It prints `trusted`: your machine already trusts the deployment. Skip
+  to the [next section](#the-one-command-path-the-mcpb-bundle).
+- It fails with `SSL certificate problem` (for example `unable to get
+  local issuer certificate`): the deployment uses an internal CA. Go on.
+
+### 2. Get the root CA file
+
+The MEHO servers send only their own certificate, not the root CA. So
+you cannot copy the root CA from the server. The person or team that
+deployed MEHO (your deployer) publishes it in a place you can open
+before you trust it, for example:
+
+- an internal docs page,
+- an item in your team's password manager,
+- a plain-HTTP link, such as `http://ca.example.internal/root.pem`.
+
+Ask your deployer where it is. You do not need access to the secrets
+store or to the cluster. Save the file as `internal-ca.pem`. For a
+plain-HTTP link:
+
+```bash
+curl -fsS -o internal-ca.pem http://ca.example.internal/root.pem
+```
+
+Then check that it is the right file. Print its SHA-256 fingerprint and
+compare it with the fingerprint your deployer published (on Windows, run
+this in Git Bash, which includes `openssl`):
+
+```bash
+openssl x509 -in internal-ca.pem -noout -subject -fingerprint -sha256
+```
+
+If the fingerprints do not match, stop and ask your deployer. Always do
+this check when the file came over plain HTTP.
+
+### 3. Trust the root CA
+
+Run the one command for your system, then open a new terminal.
+
+- **macOS** (asks for your password):
+
+    ```bash
+    sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain internal-ca.pem
+    ```
+
+- **Windows** (in a terminal you started as administrator):
+
+    ```
+    certutil -addstore -f Root internal-ca.pem
+    ```
+
+The `meho` CLI reads this trust store, and so does current Claude
+Desktop (details in [Trusting an internal CA](#trusting-an-internal-ca)).
+No admin rights on macOS? The login keychain command there is enough
+for Claude Desktop.
+
+Run the check from step 1 again. It now prints `trusted`. Keep
+`internal-ca.pem`: you can also pick it in the bundle's CA field.
+
+Deployers: the
+[deployer guide](https://github.com/evoila/meho/blob/main/deploy/values-examples/README.md#publish-the-root-ca-for-operators)
+says how to publish the root CA so that operators can do this step.
+
 ## The one-command path: the `.mcpb` bundle
 
 MEHO ships a Claude Desktop bundle in the MCPB format, distributed as an
@@ -110,7 +191,8 @@ public-CA deploy needs neither.
   machine ([The meho CLI](cli.md)) — it proves TLS trust and the realm
   before you add the shim's moving parts.
 - On an internal-CA deploy, the deployment's CA in your OS trust store
-  (the `meho` CLI reads it), plus a way for the shim's Node to trust it —
+  (the `meho` CLI reads it; see
+  [Before you start](#before-you-start-trust-your-deployments-ca)), plus a way for the shim's Node to trust it —
   Node ignores the OS store unless told otherwise: a PEM file for
   `NODE_EXTRA_CA_CERTS`, or `NODE_USE_SYSTEM_CA=1` (below).
 - The realm's public **`meho-mcp`** OAuth client, with the shim's

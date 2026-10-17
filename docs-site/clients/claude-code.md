@@ -12,6 +12,77 @@ Either way, Claude Code must run on a machine **on the internal network
 / VPN** — MEHO is internal-only — and nothing is exposed to the
 internet.
 
+## Before you start: trust your deployment's CA
+
+Do this step first. It takes a few minutes.
+
+A CA (certificate authority) is the certificate that signs the server
+certificates of your MEHO deployment. Many deployments use their own
+internal CA. Your machine does not trust an internal CA yet, so every
+login fails until you add it.
+
+### 1. Check if you need this step
+
+Run this on your machine. Use your backplane host in place of
+`meho.example.com`. On Windows, type `curl.exe` in place of `curl`.
+
+```bash
+curl -sS -o /dev/null https://meho.example.com/healthz && echo trusted
+```
+
+- It prints `trusted`: your machine already trusts the deployment. Skip
+  to the [next section](#the-one-command-path-the-meho-plugin).
+- It fails with `SSL certificate problem` (for example `unable to get
+  local issuer certificate`): the deployment uses an internal CA. Go on.
+
+### 2. Get the root CA file
+
+The MEHO servers send only their own certificate, not the root CA. So
+you cannot copy the root CA from the server. The person or team that
+deployed MEHO (your deployer) publishes it in a place you can open
+before you trust it, for example an internal docs page, an item in your
+team's password manager, or a plain-HTTP link such as
+`http://ca.example.internal/root.pem`. Ask your deployer where it is.
+You do not need access to the secrets store or to the cluster.
+
+Save the file as `internal-ca.pem`, then check that it is the right
+file. Compare its SHA-256 fingerprint with the one your deployer
+published:
+
+```bash
+curl -fsS -o internal-ca.pem http://ca.example.internal/root.pem
+openssl x509 -in internal-ca.pem -noout -subject -fingerprint -sha256
+```
+
+If the fingerprints do not match, stop and ask your deployer. Always do
+this check when the file came over plain HTTP.
+
+### 3. Trust the root CA
+
+Two parts need it:
+
+- **Your OS trust store**, for the `meho` CLI. Run the one command for
+  your system, then open a new terminal:
+    - macOS: `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain internal-ca.pem`
+    - Linux (Debian, Ubuntu): `sudo cp internal-ca.pem /usr/local/share/ca-certificates/internal-ca.crt && sudo update-ca-certificates`
+    - Windows (terminal started as administrator): `certutil -addstore -f Root internal-ca.pem`
+- **The plugin's MCP shim.** It runs on Node, which does not read the
+  OS trust store. Give it the file in `~/.config/meho/plugin.env` (next
+  section):
+
+    ```bash
+    MEHO_CA_CERT="$HOME/internal-ca.pem"   # where you saved the file
+    ```
+
+    On the manual `.mcp.json` path, use `NODE_EXTRA_CA_CERTS` instead —
+    see [Internal-CA trust](#internal-ca-trust).
+
+Run the check from step 1 again. It now prints `trusted`.
+
+Deployers: the
+[deployer guide](https://github.com/evoila/meho/blob/main/deploy/values-examples/README.md#publish-the-root-ca-for-operators)
+says how to publish the root CA so that operators can do this step.
+
 ## The one-command path: the MEHO plugin
 
 MEHO ships an in-repo Claude Code plugin marketplace. Add it and install
@@ -35,7 +106,8 @@ MEHO_MCP_URL="https://meho.example.com/mcp"
 ```
 
 `MEHO_CA_CERT` is only needed on an internal-CA deploy (the plugin's
-shim runs on Node, which does not read the OS trust store). To opt a
+shim runs on Node, which does not read the OS trust store). Get the file
+first — see [Before you start](#before-you-start-trust-your-deployments-ca). To opt a
 session into the operator planes, set `MEHO_MCP_SCOPES` to add
 `mcp:admin` — see
 [MCP surface and scopes](mcp-surface-and-scopes.md#how-a-client-requests-elevation).

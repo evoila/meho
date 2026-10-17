@@ -79,8 +79,10 @@ Filter parameters narrow the candidate set in both signals symmetrically:
   candidates are limited to its kinds and its principal drives the
   per-principal predicate, inside both candidate queries, before
   `LIMIT`. A tenant or principal that does not match the call raises
-  `ValueError`. Generic `POST /api/v1/retrieve` and the MCP retrieve
-  resource pass it whenever Memory rows can be candidates.
+  `ValueError`. Generic `POST /api/v1/retrieve`, the MCP retrieve
+  resource, and the UI diagnostics page (`POST /ui/retrieval/diagnostics`)
+  pass it whenever Memory rows can be candidates (`source="memory"` or
+  no source). Other sources pass `None`.
 - **Memory expiry is always enforced in SQL.** Every `source='memory'`
   row must have no `expires_at`, or a valid ISO 8601 timestamp later
   than the database `now()`. Malformed values, `now`, `epoch`, and

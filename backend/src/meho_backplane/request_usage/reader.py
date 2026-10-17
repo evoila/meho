@@ -44,7 +44,7 @@ __all__ = [
 ]
 
 #: Where a report reads its activity rows from. ``audit_log`` is the
-#: wrapper rows (the default until the reader cutover); ``request_usage``
+#: wrapper rows (kept until the wrapper rows are retired); ``request_usage``
 #: is the usage events this package collects.
 UsageSource = Literal["audit_log", "request_usage"]
 

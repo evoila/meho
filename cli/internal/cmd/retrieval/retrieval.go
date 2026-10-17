@@ -7,7 +7,7 @@
 //
 //   - `meho retrieval eval` — corpus-driven precision@5 / MRR /
 //     coverage report against /api/v1/retrieve/eval (T2 #441).
-//   - `meho retrieval usage` — audit-log-backed daily-use telemetry
+//   - `meho retrieval usage` — daily-use telemetry from request usage events
 //     (T5b #464) against /api/v1/retrieve/usage (T5 #444).
 //   - `meho retrieval retire-checklist` — combined retire-decision
 //     verb (T6 #445).

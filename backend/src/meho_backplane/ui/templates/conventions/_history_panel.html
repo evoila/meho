@@ -12,9 +12,10 @@
   CREATE row (``is_create`` / ``body_before is None``) shows no "before"
   pane (there was no prior state). Bodies render as escaped plain text in
   ``<pre>`` blocks, so a body containing raw HTML never executes in the
-  diff view. Each row also surfaces the actor + timestamp + the
-  ``audit_id`` soft-FK (when present) so the row joins back to the G8
-  audit log.
+  diff view. Each row also surfaces the actor + timestamp, the
+  ``change_kind`` (rows since #3747), the request correlation id
+  (``request_id``, when present), and the legacy ``audit_id`` link that
+  rows written before #3747 carry.
 -#}
 <section
   id="conventions-history-panel"
@@ -40,12 +41,18 @@
               <span data-history-ts="{{ row.ts.isoformat() }}">
                 {{ row.ts.isoformat() }}
               </span>
-              {% if row.audit_id %}
+              {% if row.request_id %}
+                <span class="font-mono" data-history-request-id="{{ row.request_id }}">
+                  request {{ row.request_id[:8] }}
+                </span>
+              {% elif row.audit_id %}
                 <span class="font-mono" data-history-audit-id="{{ row.audit_id }}">
                   audit {{ row.audit_id[:8] }}
                 </span>
               {% endif %}
-              {% if row.is_create %}
+              {% if row.change_kind %}
+                <span class="badge badge-xs" data-history-change-kind="{{ row.change_kind }}">{{ row.change_kind }}</span>
+              {% elif row.is_create %}
                 <span class="badge badge-success badge-xs">created</span>
               {% endif %}
             </div>

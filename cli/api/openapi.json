@@ -249,7 +249,7 @@
           "retrieval"
         ],
         "summary": "Usage Endpoint",
-        "description": "Return audit-backed retrieval usage aggregates for *operator*.\n\nTenant scoping: callers are scoped to ``operator.tenant_id``; a\n``tenant_filter`` naming a different tenant returns 403\n``cross_tenant_requires_platform_admin`` unless the caller holds the\n``platform_admin`` cross-tenant capability (#1638). *since*\naccepts ``<N>d`` / ``<N>h`` (relative) or an ISO-8601 date;\nmalformed \u2192 400. ``surface=all`` (default) covers all three;\n``surface=<one>`` narrows. Empty result is a structured zero\nreport, not 404. Audit overrides + enrichment contextvars are\nbound before :func:`compute_usage` runs so a handler exception\nstill produces an audit row with partial payload.",
+        "description": "Return retrieval usage aggregates for *operator*.\n\nReads request usage events (``request_usage``), not ``audit_log``. MEHO\ncollects them only when ``REQUEST_USAGE_RETENTION_DAYS`` is set, so the\nreport is empty when that setting is off and covers only the time\nsince collection started.\n\nTenant scoping: callers are scoped to ``operator.tenant_id``; a\n``tenant_filter`` naming a different tenant returns 403\n``cross_tenant_requires_platform_admin`` unless the caller holds the\n``platform_admin`` cross-tenant capability (#1638). *since*\naccepts ``<N>d`` / ``<N>h`` (relative) or an ISO-8601 date;\nmalformed \u2192 400. ``surface=all`` (default) covers all three;\n``surface=<one>`` narrows. Empty result is a structured zero\nreport, not 404. Audit overrides + enrichment contextvars are\nbound before :func:`compute_usage` runs so a handler exception\nstill produces an audit row with partial payload.",
         "operationId": "usage_endpoint_api_v1_retrieve_usage_get",
         "parameters": [
           {
@@ -388,7 +388,7 @@
           "retrieval"
         ],
         "summary": "Retire Checklist Endpoint",
-        "description": "Return the five-criterion retire-decision checklist per surface.\n\nTenant scoping mirrors the sibling usage route:\nCallers are scoped to ``operator.tenant_id``; a ``tenant_filter``\nquery parameter naming a different tenant returns 403\n``cross_tenant_requires_platform_admin`` unless the caller holds the\n``platform_admin`` cross-tenant capability (#1638).\nThe request body's ``surface=all`` (default) walks every supported\nsurface in the order :data:`SURFACE_VERDICT_ORDER` pins.\n\nAudit overrides + enrichment contextvars are bound **before** the\ntenant-filter 403 path so the denied request still produces an\naudit row with the canonical ``op_id`` /\n``op_class`` / ``tenant_scope`` payload (the \"audit row per call\"\ncontract from the issue body holds on every status code). The\nsame overrides also protect the happy-path handler-exception case:\na partial payload is itself a useful incident-postmortem signal.\n``audit_row_count`` is bound after the service returns so the\nbroadcast event's ``row_count`` field reflects the number of\nsurfaces evaluated, not the underlying audit_log scan size.",
+        "description": "Return the five-criterion retire-decision checklist per surface.\n\nThe usage criteria read request usage events (``request_usage``),\nnot ``audit_log``. MEHO collects them only when\n``REQUEST_USAGE_RETENTION_DAYS`` is set, so they stay unmet when that\nsetting is off, and they cover only the time since collection started.\n\nTenant scoping mirrors the sibling usage route:\nCallers are scoped to ``operator.tenant_id``; a ``tenant_filter``\nquery parameter naming a different tenant returns 403\n``cross_tenant_requires_platform_admin`` unless the caller holds the\n``platform_admin`` cross-tenant capability (#1638).\nThe request body's ``surface=all`` (default) walks every supported\nsurface in the order :data:`SURFACE_VERDICT_ORDER` pins.\n\nAudit overrides + enrichment contextvars are bound **before** the\ntenant-filter 403 path so the denied request still produces an\naudit row with the canonical ``op_id`` /\n``op_class`` / ``tenant_scope`` payload (the \"audit row per call\"\ncontract from the issue body holds on every status code). The\nsame overrides also protect the happy-path handler-exception case:\na partial payload is itself a useful incident-postmortem signal.\n``audit_row_count`` is bound after the service returns so the\nbroadcast event's ``row_count`` field reflects the number of\nsurfaces evaluated, not the underlying audit_log scan size.",
         "operationId": "retire_checklist_endpoint_api_v1_retrieve_retire_checklist_post",
         "parameters": [
           {
@@ -6935,7 +6935,7 @@
           "audit"
         ],
         "summary": "Trace",
-        "description": "Fetch the flight-recorder trace for one dispatch, scoped to the tenant.\n\nThe **operator read surface** of the dispatch flight recorder\n(``docs/decisions/dispatch-flight-recorder.md``): the ordered, already\nredacted+capped spans a governed dispatch produced. Read-only \u2014 it renders\nwhat the capture/redaction seams (#3213/#3214) stored and never\nre-processes, un-redacts, or writes.\n\nOperator plane keeps **full** access, independent of the agent gate: unlike\nthe agent read (a sibling task) this serves redaction-uncertain traces too,\nsurfacing ``trace.redaction_uncertain`` so an operator sees when a trace was\nwithheld from agents. Paired add-ons consume this same route with their\noperator principal \u2014 no separate add-on surface.\n\nAbsence has two levels. A missing / cross-tenant **audit row** is a 404\n(never 403), matching :func:`show`: the existence check runs through the\ntenant-scoped substrate, so a foreign ``audit_id`` yields zero rows and\nexistence never leaks. An audit row that exists but carries **no trace** is\na 200 with ``trace_present=False`` \u2014 capture is a best-effort opt-in\n(F1/F7), so \"no trace\" is a normal observable state, not an error.\n\nTenant isolation is enforced twice: the existence check is tenant-scoped,\nand :func:`~meho_backplane.flight_recorder.load_trace` additionally filters\nthe trace header on ``tenant_id`` as defence in depth.",
+        "description": "Fetch the flight-recorder trace for one dispatch, scoped to the tenant.\n\nThe **operator read surface** of the dispatch flight recorder\n(``docs/decisions/dispatch-flight-recorder.md``): the ordered, already\nredacted+capped spans a governed dispatch produced. Read-only \u2014 it renders\nwhat the capture/redaction seams (#3213/#3214) stored and never\nre-processes, un-redacts, or writes.\n\nOperator plane keeps **full** access, independent of the agent gate: unlike\nthe agent read (a sibling task) this serves redaction-uncertain traces too,\nsurfacing ``trace.redaction_uncertain`` so an operator sees when a trace was\nwithheld from agents. Paired add-ons consume this same route with their\noperator principal \u2014 no separate add-on surface.\n\nAbsence has two levels. A missing / cross-tenant **audit row** is a 404\n(never 403), matching :func:`show`: the existence check runs through the\ntenant-scoped substrate, so a foreign ``audit_id`` yields zero rows and\nexistence never leaks. An audit row that exists but carries **no trace** is\na 200 with ``trace_present=False`` \u2014 capture is a best-effort opt-in\n(F1/F7), so \"no trace\" is a normal observable state, not an error.\n\nTenant isolation is enforced twice: the existence check is tenant-scoped,\nand :func:`~meho_backplane.flight_recorder.load_trace` additionally filters\nthe trace header on ``tenant_id`` as defence in depth.\n\nOnly an ``operation_execution`` row resolves to the flight recorder\n(#3747); any other class answers ``trace_present=False``.",
         "operationId": "trace_api_v1_audit__audit_id__trace_get",
         "parameters": [
           {
@@ -7037,13 +7037,67 @@
         }
       }
     },
+    "/api/v1/audit/class-counts": {
+      "post": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Class Counts",
+        "description": "Count the matching rows per event class, tenant-scoped (#3747).",
+        "operationId": "class_counts_api_v1_audit_class_counts_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuditClassCountsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditClassCounts"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/audit/reflex": {
       "get": {
         "tags": [
           "audit"
         ],
         "summary": "Reflex Endpoint",
-        "description": "Return reflex-adoption KPIs for *operator* over the requested window.\n\nTenant scoping: callers are scoped to ``operator.tenant_id``; a\n``tenant_filter`` naming a different tenant returns 403\n``cross_tenant_requires_platform_admin`` unless the caller holds the\n``platform_admin`` capability (#1638). *since* / *until* accept\n``<N>d`` / ``<N>h`` (relative) or an ISO-8601 date; malformed \u2192 400.\n*until* defaults to now. An empty window is a structured zero report\n(both surfaces present, ``None`` ratios), not 404.",
+        "description": "Return reflex-adoption KPIs for *operator* over the requested window.\n\nReads request usage events (``request_usage``), not ``audit_log``. MEHO\ncollects them only when ``REQUEST_USAGE_RETENTION_DAYS`` is set, so the\nreport is empty when that setting is off and covers only the time\nsince collection started.\n\nTenant scoping: callers are scoped to ``operator.tenant_id``; a\n``tenant_filter`` naming a different tenant returns 403\n``cross_tenant_requires_platform_admin`` unless the caller holds the\n``platform_admin`` capability (#1638). *since* / *until* accept\n``<N>d`` / ``<N>h`` (relative) or an ISO-8601 date; malformed \u2192 400.\n*until* defaults to now. An empty window is a structured zero report\n(both surfaces present, ``None`` ratios), not 404.",
         "operationId": "reflex_endpoint_api_v1_audit_reflex_get",
         "parameters": [
           {
@@ -11094,7 +11148,7 @@
           "conventions"
         ],
         "summary": "Create Convention",
-        "description": "Create one convention; writes one history row in the same transaction.\n\nSequence: budget 422 -> pre-allocate audit_id -> insert\nconvention + history rows -> 409 on duplicate ``(tenant_id,\nslug)``. The CREATE history row has ``body_before=NULL``;\n``body_after=body.body``.",
+        "description": "Create one convention; writes one history row in the same transaction.\n\nSequence: budget 422 -> insert convention + history rows -> 409\non duplicate ``(tenant_id, slug)``. The CREATE history row has ``body_before=NULL``;\n``body_after=body.body``.",
         "operationId": "create_convention_api_v1_conventions_post",
         "parameters": [
           {
@@ -21041,6 +21095,17 @@
             }
           },
           {
+            "name": "event_class",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 32,
+              "default": "",
+              "title": "Event Class"
+            }
+          },
+          {
             "name": "partial",
             "in": "query",
             "required": false,
@@ -21314,6 +21379,17 @@
               "format": "uuid",
               "nullable": true,
               "title": "Agent Session Id"
+            }
+          },
+          {
+            "name": "event_class",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 32,
+              "default": "",
+              "title": "Event Class"
             }
           }
         ],
@@ -23221,6 +23297,108 @@
         "title": "AssignmentDocumentResponse",
         "description": "Echo returned by ``PUT``: the stored authored document + runner name."
       },
+      "AuditClassCounts": {
+        "properties": {
+          "counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Counts"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "since": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Since"
+          }
+        },
+        "type": "object",
+        "required": [
+          "counts",
+          "total",
+          "since"
+        ],
+        "title": "AuditClassCounts",
+        "description": "200 body for ``POST /api/v1/audit/class-counts`` (#3747).\n\n``counts`` has one key per event class (``operation_execution``,\n``policy_decision``, ``approval_decision``, ``security_event``,\n``legacy_request``), ``0`` when a class has no rows. Old rows count\nas ``legacy_request``; they are never reclassified. ``total`` is the\nsum. ``since`` is the start of the counted window: the request's\n``since``, or 24 hours ago when the request set none."
+      },
+      "AuditClassCountsRequest": {
+        "properties": {
+          "target": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Target"
+          },
+          "principal": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Principal"
+          },
+          "op_id": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Op Id"
+          },
+          "op_class": {
+            "type": "string",
+            "maxLength": 64,
+            "nullable": true,
+            "title": "Op Class"
+          },
+          "result_status": {
+            "type": "string",
+            "maxLength": 16,
+            "nullable": true,
+            "title": "Result Status"
+          },
+          "since": {
+            "type": "string",
+            "maxLength": 32,
+            "nullable": true,
+            "title": "Since"
+          },
+          "until": {
+            "type": "string",
+            "maxLength": 32,
+            "nullable": true,
+            "title": "Until"
+          },
+          "audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Audit Id"
+          },
+          "parent_audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Parent Audit Id"
+          },
+          "agent_session_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Agent Session Id"
+          },
+          "work_ref": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Work Ref"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "AuditClassCountsRequest",
+        "description": "POST body for ``/api/v1/audit/class-counts`` (#3747).\n\nThe same filters as :class:`AuditQueryRequest`, without\n``event_class``, ``limit`` and ``cursor``: the answer counts every\nclass for the whole matching set, not one page."
+      },
       "AuditEntry": {
         "properties": {
           "id": {
@@ -23462,7 +23640,7 @@
         "additionalProperties": false,
         "type": "object",
         "title": "AuditQueryRequest",
-        "description": "POST body for ``/api/v1/audit/query``.\n\nMirrors :class:`~meho_backplane.audit_query.AuditQueryFilters`\nexcept ``since`` / ``until`` are strings parsed by\n:func:`~meho_backplane.audit_query.parse_duration` at the router\nlayer. All other fields pass through to the substrate filter\nobject unchanged. The empty body shape ``{}`` is the no-filter\ncase \u2014 every field defaults to None or the substrate-side default.\n\n``extra=\"forbid\"`` rejects unknown fields with 422\n``extra_forbidden`` so a typo or a client passing ``tenant_id``\nin the body fails loud at the framework boundary \u2014 the route\nalways uses ``operator.tenant_id`` from the JWT, never the body."
+        "description": "POST body for ``/api/v1/audit/query``.\n\nMirrors :class:`~meho_backplane.audit_query.AuditQueryFilters`\nexcept ``since`` / ``until`` are strings parsed by\n:func:`~meho_backplane.audit_query.parse_duration` at the router\nlayer. All other fields pass through to the substrate filter\nobject unchanged. The empty body shape ``{}`` is the no-filter\ncase \u2014 every field defaults to None or the substrate-side default."
       },
       "AuditQueryResult": {
         "properties": {
@@ -23540,6 +23718,11 @@
           "trace": {
             "$ref": "#/components/schemas/TraceView",
             "nullable": true
+          },
+          "event_class": {
+            "type": "string",
+            "nullable": true,
+            "title": "Event Class"
           }
         },
         "type": "object",
@@ -23548,7 +23731,7 @@
           "trace_present"
         ],
         "title": "AuditTraceResult",
-        "description": "200 body for ``GET /api/v1/audit/{audit_id}/trace`` (#3215).\n\nThe operator read surface of the dispatch flight recorder\n(``docs/decisions/dispatch-flight-recorder.md``). Wraps the tenant-scoped\n:class:`~meho_backplane.flight_recorder.TraceView` with the echoed\n``audit_id`` and a ``trace_present`` discriminator, the same REST-envelope\nlayering :class:`AuditReplayResult` follows over the substrate's\n:class:`ReplayNode`.\n\nTwo-level absence semantics -- distinct on purpose:\n\n* The **audit row** being missing or in another tenant is a 404 from the\n  route, matching ``GET /show/{audit_id}``: existence never leaks across\n  the tenant boundary.\n* The audit row existing but carrying **no captured trace** is *not* a 404 --\n  it is a 200 with ``trace_present=False`` and ``trace=None``. Capture is a\n  per-tenant/per-target opt-in and best-effort (F1/F7), so \"no trace\" is a\n  normal state an operator must be able to observe, not an error. The\n  console pane renders a \"no trace captured\" empty state for this case.\n\n``trace.redaction_uncertain`` surfaces the F5 degrade flag so an operator\n(and a paired add-on reading over this route with its operator principal)\ncan see when a trace was withheld from the agent handle. The operator plane\nkeeps **full** access regardless of that flag.\n\nFrozen like the models it carries."
+        "description": "200 body for ``GET /api/v1/audit/{audit_id}/trace`` (#3215).\n\nThe operator read surface of the dispatch flight recorder\n(``docs/decisions/dispatch-flight-recorder.md``). Wraps the tenant-scoped\n:class:`~meho_backplane.flight_recorder.TraceView` with the echoed\n``audit_id`` and a ``trace_present`` discriminator, the same REST-envelope\nlayering :class:`AuditReplayResult` follows over the substrate's\n:class:`ReplayNode`.\n\nTwo-level absence semantics -- distinct on purpose:\n\n* The **audit row** being missing or in another tenant is a 404 from the\n  route, matching ``GET /show/{audit_id}``: existence never leaks across\n  the tenant boundary.\n* The audit row existing but carrying **no captured trace** is *not* a 404 --\n  it is a 200 with ``trace_present=False`` and ``trace=None``. Capture is a\n  per-tenant/per-target opt-in and best-effort (F1/F7), so \"no trace\" is a\n  normal state an operator must be able to observe, not an error. The\n  console pane renders a \"no trace captured\" empty state for this case.\n\nOnly an ``operation_execution`` row resolves to the flight recorder\n(#3747). A decision, security or legacy row is not an execution, so it\nanswers ``trace_present=False`` and the route never reads a trace for\nit. ``event_class`` echoes the row's class so the reason is visible.\n\n``trace.redaction_uncertain`` surfaces the F5 degrade flag so an operator\n(and a paired add-on reading over this route with its operator principal)\ncan see when a trace was withheld from the agent handle. The operator plane\nkeeps **full** access regardless of that flag.\n\nFrozen like the models it carries."
       },
       "AuthConfigResponse": {
         "properties": {
@@ -26820,6 +27003,17 @@
             "format": "uuid",
             "nullable": true,
             "title": "Audit Id"
+          },
+          "change_kind": {
+            "type": "string",
+            "nullable": true,
+            "title": "Change Kind"
+          },
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Request Id"
           }
         },
         "type": "object",
@@ -26833,7 +27027,7 @@
           "audit_id"
         ],
         "title": "ConventionHistoryEntry",
-        "description": "One row from ``GET /api/v1/conventions/{slug}/history``.\n\nPer the issue's acceptance criterion, history returns newest\nfirst (\"pick newest first for v0.2; documented\"); the route's\nORDER BY ``ts DESC`` enforces this. ``audit_id`` is the soft-FK\nthat G8's audit-query path joins on; it is nullable because\nT5's seed migration inserts history rows with no audit_log row\n(seeded rows pre-date any HTTP request).\n\n``body_before`` is nullable -- the first history row (the\nCREATE event) has no prior state. DELETE history rows get\n``body_after=<final body>`` (a legible last-known state for\naudit forensics) rather than an empty-string sentinel; the\nlifecycle distinction (create / update / delete) lives in the\naudit log row's ``method`` / ``path`` columns, not on the\nhistory row itself."
+        "description": "One row from ``GET /api/v1/conventions/{slug}/history``.\n\nPer the issue's acceptance criterion, history returns newest\nfirst (\"pick newest first for v0.2; documented\"); the route's\nORDER BY ``ts DESC`` enforces this.\n\nProvenance (#3747): the history row is the record of the edit.\n``change_kind`` says what it was (``created`` / ``updated`` /\n``deleted``) and ``request_id`` is the request correlation id of the\ncall, which links to the request usage event. Both are ``None`` on\nrows written before #3747. ``audit_id`` is the legacy link to the\nREST request wrapper row: old rows carry it, new rows and seeded\nrows have ``None``.\n\n``body_before`` is nullable -- the first history row (the\nCREATE event) has no prior state. DELETE history rows get\n``body_after=<final body>`` (a legible last-known state for\naudit forensics) rather than an empty-string sentinel; the\nlifecycle distinction (create / update / delete) is\n``change_kind`` on rows since #3747."
       },
       "ConventionKind": {
         "type": "string",

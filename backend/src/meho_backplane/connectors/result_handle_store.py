@@ -81,7 +81,9 @@ would blow the per-key value size. :meth:`spill` caps the persisted record by
 row count and encoded bytes, using the configured limits.
 It records both the cap-applied ``stored_rows`` and the true
 ``total_rows`` so a reader can tell when the tail was truncated. Combined
-with the TTL, the store's footprint is bounded on both axes.
+with the TTL, the store's footprint is bounded on both axes. A read checks
+the record's byte length against the same cap before it decodes, so a
+larger record written before the cap existed is a miss, never a decode.
 
 Fail-open
 =========
@@ -106,7 +108,7 @@ import structlog
 from prometheus_client import Counter, Gauge
 
 from meho_backplane.jsonflux.query.contract import QueryContractError
-from meho_backplane.settings import get_settings
+from meho_backplane.settings import Settings, get_settings
 
 __all__ = [
     "ResultHandleStore",
@@ -371,7 +373,8 @@ class ResultHandleStore:
     A thin wrapper over two async Valkey clients: ``client`` is the shared
     broadcast client (legacy keys) and ``dedicated_client`` the result-cache
     client (``v2`` keys; defaults to ``client``). ``writer_enabled`` picks
-    where :meth:`spill` and :meth:`spill_document` write. One instance is
+    where :meth:`spill` and :meth:`spill_document` write. ``read_max_record_bytes``
+    is the byte cap :meth:`fetch_record` checks before decode. One instance is
     shared process-wide via :func:`get_result_handle_store`; the reducer
     spills into it at materialize time and the ``result_query`` MCP tool
     reads windows back out of it.
@@ -383,10 +386,18 @@ class ResultHandleStore:
         *,
         dedicated_client: redis.Redis | None = None,
         writer_enabled: bool = False,
+        read_max_record_bytes: int | None = None,
     ) -> None:
         self._client = client
         self._dedicated = dedicated_client if dedicated_client is not None else client
         self._writer_enabled = writer_enabled
+        # The read-side record cap. ``None`` uses the setting's default, so a
+        # store built directly (tests, scripts) needs no loaded settings.
+        self._read_max_record_bytes = (
+            read_max_record_bytes
+            if read_max_record_bytes is not None
+            else Settings.model_fields["result_handle_max_record_bytes"].default
+        )
 
     def _write_target(self, tenant_id: UUID, handle_id: UUID) -> tuple[str, redis.Redis, str]:
         """Return ``(namespace, client, key)`` for a write, per the writer gate."""
@@ -631,11 +642,28 @@ class ResultHandleStore:
         record and an undecodable value into the same ``None`` so the store
         leaks no existence signal across the operator boundary (the #304
         isolation contract).
+
+        A record over the read cap (``result_handle_max_record_bytes``) is
+        also a miss. The
+        byte length is checked here, before any decode, so an oversized
+        record (written before the per-record cap existed) never reaches the
+        decoder or the worker pool.
         """
         raw = await self._get_record(tenant_id, handle_id)
         if raw is None:
             return None
-        return _to_bytes(raw)
+        data = _to_bytes(raw)
+        max_record_bytes = self._read_max_record_bytes
+        if len(data) > max_record_bytes:
+            _log.warning(
+                "result_handle_record_over_cap",
+                handle_id=str(handle_id),
+                tenant_id=str(tenant_id),
+                record_bytes=len(data),
+                max_record_bytes=max_record_bytes,
+            )
+            return None
+        return data
 
     @staticmethod
     def _decode(raw: bytes, *, operator_sub: str, handle_id: UUID) -> _StoredPayload | None:
@@ -822,6 +850,7 @@ def get_result_handle_store() -> ResultHandleStore:
             shared,
             dedicated_client=dedicated,
             writer_enabled=settings.result_cache_writer_enabled,
+            read_max_record_bytes=settings.result_handle_max_record_bytes,
         )
     return _STORE
 

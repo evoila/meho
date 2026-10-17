@@ -295,6 +295,7 @@ __all__ = [
     "Base",
     "BroadcastOverride",
     "BudgetWindowKind",
+    "ConventionHistoryChangeKind",
     "DispatchTrace",
     "DispatchTraceSpan",
     "Document",
@@ -3253,6 +3254,19 @@ class TenantConvention(Base):
     )
 
 
+class ConventionHistoryChangeKind(StrEnum):
+    """What one :class:`TenantConventionHistory` row records (#3747).
+
+    Mirrored by the CHECK ``ck_tenant_convention_history_change_kind``
+    (migration ``0109``). Rows written before ``0109`` have ``NULL``; the
+    kind is never guessed for them.
+    """
+
+    CREATED = "created"
+    UPDATED = "updated"
+    DELETED = "deleted"
+
+
 class TenantConventionHistory(Base):
     """One row per edit to a :class:`TenantConvention`.
 
@@ -3327,17 +3341,29 @@ class TenantConventionHistory(Base):
         nullable=False,
         default=lambda: datetime.now(UTC),
     )
-    # Nullable -- migration-seeded rows have no audit_log row to point
-    # at. T2's CRUD writes populate ``audit_id`` from the audit
-    # middleware's contextvar so G8's audit-query path can join
-    # history back to the originating request.
+    # Nullable. Legacy link to the REST request wrapper row: rows written
+    # before #3747 carry it; new rows leave it ``NULL`` because the
+    # history row itself is the record of the edit (see ``change_kind``
+    # and ``request_id``). Migration-seeded rows never had one.
     audit_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(),
         nullable=True,
         default=None,
     )
+    # Nullable (#3747, migration ``0109``). ``created`` / ``updated`` /
+    # ``deleted`` -- what this edit was. ``NULL`` on rows written before
+    # ``0109``; never guessed.
+    change_kind: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # Nullable (#3747). The request correlation id of the call that made
+    # the edit; links the row to the request usage event. ``NULL`` when
+    # the call had no usable request id, and on rows before ``0109``.
+    request_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True, default=None)
 
     __table_args__ = (
+        sa.CheckConstraint(
+            "change_kind IN ('created', 'updated', 'deleted')",
+            name="ck_tenant_convention_history_change_kind",
+        ),
         Index(
             "tenant_convention_history_convention_idx",
             "convention_id",

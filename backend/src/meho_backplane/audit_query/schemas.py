@@ -66,6 +66,7 @@ __all__ = [
     "AuditEntry",
     "AuditQueryFilters",
     "AuditQueryResult",
+    "EventClassCounts",
     "MyRecentPage",
     "ReplayNode",
 ]
@@ -216,6 +217,15 @@ class AuditQueryResult(BaseModel):
 
     rows: list[AuditEntry]
     next_cursor: str | None
+
+
+class EventClassCounts(BaseModel):
+    """Rows per event class, and the start of the counted window (#3747)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    counts: dict[str, int]
+    since: datetime
 
 
 class MyRecentPage(BaseModel):

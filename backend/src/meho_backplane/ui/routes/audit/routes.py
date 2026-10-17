@@ -103,13 +103,14 @@ from meho_backplane.audit_query import (
     InvalidCursorError,
     ReplayNode,
     UnsupportedFilterError,
+    count_event_classes,
     parse_duration,
     query_audit,
     replay_session,
 )
 from meho_backplane.broadcast import classify_op
 from meho_backplane.db.engine import get_raw_session, get_sessionmaker
-from meho_backplane.db.models import AuditLog
+from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.flight_recorder import load_trace
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
@@ -145,6 +146,16 @@ _PAGE_SIZE: Final[int] = 50
 #: the "Any" sentinel that omits the filter. Surfaced in the
 #: ok / pending / error / denied order an operator reads severity in.
 _RESULT_STATUS_OPTIONS: Final[tuple[str, ...]] = ("ok", "pending", "error", "denied")
+
+#: Plain labels for the event class (#3733) filter, counters and badges, in
+#: the closed enum order. The empty form value is the "Any" sentinel.
+_EVENT_CLASS_LABELS: Final[dict[str, str]] = {
+    AuditEventClass.OPERATION_EXECUTION.value: "Operation run",
+    AuditEventClass.POLICY_DECISION.value: "Policy decision",
+    AuditEventClass.APPROVAL_DECISION.value: "Approval decision",
+    AuditEventClass.SECURITY_EVENT.value: "Security event",
+    AuditEventClass.LEGACY_REQUEST.value: "Legacy row",
+}
 
 #: Max length accepted on the free-text filter inputs. Generous enough for
 #: any real target name / principal sub / op_id glob / work_ref while keeping
@@ -194,6 +205,7 @@ def _filter_form_context(
     until: str,
     work_ref: str,
     agent_session_id: uuid.UUID | None,
+    event_class: str = "",
 ) -> dict[str, object]:
     """Echo the operator's filter selection back into the form context.
 
@@ -219,6 +231,8 @@ def _filter_form_context(
         "until_filter": until,
         "work_ref_filter": work_ref,
         "agent_session_id_filter": str(agent_session_id) if agent_session_id is not None else "",
+        "event_class_labels": _EVENT_CLASS_LABELS,
+        "event_class_filter": event_class,
     }
 
 
@@ -234,6 +248,7 @@ def _build_filters(
     work_ref: str,
     cursor: str | None,
     agent_session_id: uuid.UUID | None = None,
+    event_class: str = "",
 ) -> AuditQueryFilters:
     """Construct the substrate filter object from the echoed form values.
 
@@ -264,6 +279,7 @@ def _build_filters(
         until=until_dt,
         work_ref=work_ref or None,
         agent_session_id=agent_session_id,
+        event_class=AuditEventClass(event_class) if event_class else None,
         limit=_PAGE_SIZE,
         cursor=cursor,
     )
@@ -312,6 +328,8 @@ def _project_rows(result: AuditQueryResult, *, is_admin: bool) -> list[dict[str,
             "op_class": row.op_class,
             "badge_class": _badge_class(row.op_class),
             "result_status": row.result_status,
+            "event_class": row.event_class,
+            "event_class_label": _EVENT_CLASS_LABELS.get(row.event_class, row.event_class),
             "work_ref": row.work_ref,
             "agent_session_id": (
                 str(row.agent_session_id) if row.agent_session_id is not None else None
@@ -351,6 +369,8 @@ def _project_replay_node(node: ReplayNode, *, is_admin: bool) -> dict[str, objec
         "op_class": node.op_class,
         "badge_class": _badge_class(node.op_class),
         "result_status": node.result_status,
+        "event_class": node.event_class,
+        "event_class_label": _EVENT_CLASS_LABELS.get(node.event_class, node.event_class),
         "work_ref": node.work_ref,
         "agent_session_id": (
             str(node.agent_session_id) if node.agent_session_id is not None else None
@@ -405,9 +425,14 @@ async def _build_drawer_context(
     # concrete ``tenant_id``, and ``NULL = :id`` never matches), so the guard's
     # else branch is unreachable for a resolved row -- it only satisfies the
     # nullable column type and shows the empty state for the impossible case.
+    #
+    # Only an ``operation_execution`` row resolves to the flight recorder
+    # (#3747): a decision, security or legacy row is not an execution, so
+    # the drawer never offers a trace for it.
+    is_execution = row.event_class == AuditEventClass.OPERATION_EXECUTION
     trace_view = (
         await load_trace(db_session, audit_id=row.id, tenant_id=row.tenant_id)
-        if row.tenant_id is not None
+        if is_execution and row.tenant_id is not None
         else None
     )
     return {
@@ -418,6 +443,8 @@ async def _build_drawer_context(
         "aggregate_only": aggregate_only,
         "request_payload": request_payload,
         "trace": project_trace(trace_view),
+        "is_execution": is_execution,
+        "event_class_label": _EVENT_CLASS_LABELS.get(row.event_class, row.event_class),
         # The single-source gated op-class set (from the shared
         # broadcast aggregate_gate) names the withheld classes in the 🔒
         # placeholder copy, so the drawer text stays honest about which
@@ -557,6 +584,8 @@ async def _build_results_context(
     work_ref: str,
     cursor: str | None,
     agent_session_id: uuid.UUID | None = None,
+    event_class: str = "",
+    include_counts: bool = True,
 ) -> dict[str, object]:
     """Assemble the context shared by the full page + the results fragment.
 
@@ -569,6 +598,11 @@ async def _build_results_context(
     threaded into every :func:`_build_filters` call (including the
     cursor-reset re-run) and echoed via :func:`_filter_form_context` so the
     session pre-filter survives the cursor-reset and "Load more" paths.
+
+    ``event_class`` filters on one class (#3733); an unknown value is an
+    inline filter error, never a 500. ``include_counts`` adds the per-class
+    counters (#3747) for the same filters; the "Load more" append skips
+    them because it renders rows only.
     """
     is_admin = await is_ui_tenant_admin(session)
     context: dict[str, object] = {
@@ -582,6 +616,7 @@ async def _build_results_context(
             until=until,
             work_ref=work_ref,
             agent_session_id=agent_session_id,
+            event_class=event_class,
         ),
         "rows": [],
         "next_cursor": None,
@@ -589,7 +624,12 @@ async def _build_results_context(
         "duration_error": None,
         "filter_error": None,
         "page_size": _PAGE_SIZE,
+        "class_counts": [],
+        "class_counts_since": None,
     }
+    if event_class and event_class not in _EVENT_CLASS_LABELS:
+        context["filter_error"] = f"Unknown event class '{event_class}'."
+        return context
 
     try:
         filters = _build_filters(
@@ -603,6 +643,7 @@ async def _build_results_context(
             work_ref=work_ref,
             cursor=cursor,
             agent_session_id=agent_session_id,
+            event_class=event_class,
         )
     except DurationParseError as exc:
         # Inline field error on since/until -- never a 500 on operator input.
@@ -626,6 +667,7 @@ async def _build_results_context(
             work_ref=work_ref,
             cursor=None,
             agent_session_id=agent_session_id,
+            event_class=event_class,
         )
         result = await _run_query(filters, tenant_id=session.tenant_id)
     except UnsupportedFilterError as exc:
@@ -637,7 +679,23 @@ async def _build_results_context(
     context["rows"] = _project_rows(result, is_admin=is_admin)
     context["next_cursor"] = result.next_cursor
     context["has_more"] = result.next_cursor is not None
+    if include_counts:
+        context.update(await _class_counts(filters, tenant_id=session.tenant_id))
     return context
+
+
+async def _class_counts(filters: AuditQueryFilters, *, tenant_id: uuid.UUID) -> dict[str, object]:
+    """Return the per-class counters for *filters* and the counted window start."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as db_session:
+        result = await count_event_classes(filters, tenant_id=tenant_id, session=db_session)
+    return {
+        "class_counts": [
+            {"value": value, "label": _EVENT_CLASS_LABELS[value], "count": count}
+            for value, count in result.counts.items()
+        ],
+        "class_counts_since": result.since.strftime("%Y-%m-%d %H:%M UTC"),
+    }
 
 
 async def _results_handler(
@@ -652,6 +710,7 @@ async def _results_handler(
     work_ref: str = Query(default="", max_length=_MAX_FILTER_LENGTH),
     cursor: str | None = Query(default=None),
     agent_session_id: uuid.UUID | None = Query(default=None),
+    event_class: str = Query(default="", max_length=32),
     partial: str = Query(default=""),
     session: UISessionContext = _require_session,
 ) -> HTMLResponse:
@@ -684,6 +743,8 @@ async def _results_handler(
         work_ref=work_ref,
         cursor=cursor,
         agent_session_id=agent_session_id,
+        event_class=event_class,
+        include_counts=partial != _RESULTS_PARTIAL_ROWS,
     )
     template = (
         "audit/_results_rows_oob.html"
@@ -705,6 +766,7 @@ async def _page_handler(
     work_ref: str = Query(default="", max_length=_MAX_FILTER_LENGTH),
     audit_id: uuid.UUID | None = Query(default=None),
     agent_session_id: uuid.UUID | None = Query(default=None),
+    event_class: str = Query(default="", max_length=32),
     session: UISessionContext = _require_session,
     db_session: AsyncSession = _get_raw_session_dep,
 ) -> HTMLResponse:
@@ -740,6 +802,7 @@ async def _page_handler(
         work_ref=work_ref,
         cursor=None,
         agent_session_id=agent_session_id,
+        event_class=event_class,
     )
     csrf_token = mint_csrf_token(str(session.session_id))
     context["page_title"] = "Audit"

@@ -935,6 +935,11 @@ consumers rely on — and lets `meho topology diff` / `history` /
 `timeline` (T3-T5) join history back to the principal / session /
 target via `audit_log.id`.
 
+That audit row is the topology writer's own domain record of the
+change, written in the same transaction (#3747). It is never the REST or
+MCP request wrapper row, which is request activity and is being retired.
+`tests/test_audit_domain_provenance.py` checks this for annotate.
+
 ### Refresh path
 
 `_reconcile_nodes` and `_reconcile_edges` (in `topology/refresh.py`)

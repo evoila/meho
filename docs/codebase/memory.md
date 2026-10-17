@@ -206,8 +206,15 @@ are the real DB column values.
 
 ### Read path — selected read by id (`read_by_id`)
 
-A search hit is only a locator. The full entry comes from the
-selected read, and that read is the authorization boundary.
+Today a search hit still carries the full `MemoryEntry` (including
+`body`) under `entry`, plus the `locator`. Access is checked at search
+time by the RBAC predicate pushed into the retriever (see "Read path —
+search" below), so a hit already means the operator may read it. The
+locator adds a second, stable way to read the same entry later, and
+`read_by_id` checks access again on that read. Reducing search hits to
+a short, bounded snippet plus the locator is follow-up work in #3751;
+once it lands, the selected read becomes the only place the full body
+is served.
 
 Contract for `meho://memory/id/{document_uuid}`:
 
@@ -401,6 +408,8 @@ marker.
 
 * Task #3743 — canonical selected read `meho://memory/id/{document_uuid}`
   and `MemoryService.read_by_id` (parent Initiative #3729).
+* Task #3751 (follow-up, open) — bounded search snippets that carry
+  the locator instead of the full body.
 
 See also: [`untrusted-text-envelope.md`](./untrusted-text-envelope.md)
 — both memory resources serve `body` inside the

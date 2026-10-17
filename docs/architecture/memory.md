@@ -151,7 +151,7 @@ The verbs are **top-level** (not nested under `meho memory ...`) per the consume
 Per CLAUDE.md postulate 5, the agent never sees vendor-specific tools. The memory flow is:
 
 1. When the agent starts a session in a tenant, `search_memory(scope=user)` and `search_memory(scope=user-tenant)` for relevant context (the operator's preferences, the lab's conventions). The agent surface is two read tools; the implicit recipe is "search first, ask the operator second".
-2. The agent picks a hit, then `resources/read` on its `locator` (`meho://memory/id/{document_uuid}`) for the full body if the snippet isn't enough.
+2. The agent picks a hit. The hit already carries the entry; its `locator` (`meho://memory/id/{document_uuid}`) is the stable way to read that entry again with `resources/read`.
 3. When the agent (or the operator working with it) learns something durable — a preference, a tenant convention, a target gotcha — it `search_memory` first to avoid duplicates, then `add_to_memory` at the narrowest appropriate scope. Same-slug re-add merges in place via the body-hash short-circuit.
 4. Promotion to a broader scope (e.g. "this user-tenant memory is actually useful tenant-wide") is **operator-initiated only** — the agent does not have a `promote_memory` tool. G5.2's `meho promote` CLI verb is the human-authorised path; AI-suggested promotion is explicitly disallowed per consumer-needs.md §G5 "Out of scope".
 

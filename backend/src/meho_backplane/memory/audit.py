@@ -68,7 +68,7 @@ from typing import Any
 import structlog
 
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog
+from meho_backplane.db.models import AuditEventClass, AuditLog
 
 __all__ = ["write_internal_audit_row"]
 
@@ -88,8 +88,11 @@ INTERNAL_METHOD: str = "INTERNAL"
 MEMORY_EXPIRE_PATH: str = "memory.expire"
 
 
+# code-quality-allow: was 113 lines on main before #3733 (mostly docstring);
+# the required event_class argument adds a few lines. Splitting is out of scope.
 async def write_internal_audit_row(
     *,
+    event_class: AuditEventClass,
     operator_sub: str,
     tenant_id: uuid.UUID,
     method: str,
@@ -112,6 +115,10 @@ async def write_internal_audit_row(
 
     Parameters
     ----------
+    event_class:
+        What kind of accountable event the row records (#3733). The caller
+        knows it: ``operation_execution`` for a sweep, expiry or reaper
+        action, ``security_event`` for a security alarm.
     operator_sub:
         Synthetic identity for the background job. Use
         :data:`SYSTEM_OPERATOR_SUB` (``"system"``) for the memory
@@ -176,6 +183,7 @@ async def write_internal_audit_row(
             occurred_at=datetime.now(UTC),
             operator_sub=operator_sub,
             tenant_id=tenant_id,
+            event_class=event_class,
             method=method,
             path=path,
             status_code=status_code,

@@ -118,7 +118,7 @@ from meho_backplane.broadcast import (
     redact_payload,
 )
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog
+from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.operations._audit import resolve_broadcast_lineage, work_ref_var
 from meho_backplane.request_usage.collector import open_request_usage
 
@@ -398,6 +398,8 @@ async def _write_audit_row(
     async with sessionmaker() as session:
         row = AuditLog(
             id=audit_id,
+            # A request wrapper row: it keeps the old request meaning (#3733).
+            event_class=AuditEventClass.LEGACY_REQUEST,
             occurred_at=datetime.now(UTC),
             operator_sub=operator_sub,
             actor_sub=resolve_actor_sub(),

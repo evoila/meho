@@ -39,6 +39,7 @@ Each `AuditEntry` carries the forensic fields you filter and pivot on:
 | `policy_decision` | the gate verdict: `auto-execute`, `needs-approval`, or `deny` |
 | `agent_session_id` | the originating agent's MCP session id — the key for session tracing |
 | `work_ref` | an external change-ticket reference, when one was stamped |
+| `event_class` | what kind of record it is: `operation_execution`, `policy_decision`, `approval_decision`, `security_event`, or `legacy_request` (every row from before this field existed) |
 | `method` / `path` / `status_code` / `duration_ms` / `payload` | the request particulars |
 
 ## The filter surface
@@ -61,6 +62,9 @@ shortcuts over the same substrate.
 `audit_id`, `agent_session_id`, `work_ref`, `limit` (default 100, max
 1000), and `cursor`. Calling it with **no** filters returns the most
 recent 100 rows of your tenant — bounded, never the whole ledger.
+
+The REST route `POST /api/v1/audit/query` also accepts `event_class`. It
+returns only rows of that class. Without it you get every class, as before.
 
 ```bash
 # "Did anyone read a Vault secret before the outage?"

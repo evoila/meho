@@ -61,6 +61,15 @@ const (
 	ApprovalResultStateStarted    ApprovalResultState = "started"
 )
 
+// Defines values for AuditEventClass.
+const (
+	AuditEventClassApprovalDecision   AuditEventClass = "approval_decision"
+	AuditEventClassLegacyRequest      AuditEventClass = "legacy_request"
+	AuditEventClassOperationExecution AuditEventClass = "operation_execution"
+	AuditEventClassPolicyDecision     AuditEventClass = "policy_decision"
+	AuditEventClassSecurityEvent      AuditEventClass = "security_event"
+)
+
 // Defines values for AuthModel.
 const (
 	AuthModelImpersonation        AuthModel = "impersonation"
@@ -1678,6 +1687,7 @@ type AuditEntry struct {
 	AgentSessionId   *openapi_types.UUID    `json:"agent_session_id"`
 	BroadcastEventId *openapi_types.UUID    `json:"broadcast_event_id"`
 	DurationMs       *string                `json:"duration_ms"`
+	EventClass       string                 `json:"event_class"`
 	Id               openapi_types.UUID     `json:"id"`
 	Method           string                 `json:"method"`
 	OpClass          string                 `json:"op_class"`
@@ -1698,6 +1708,27 @@ type AuditEntry struct {
 	WorkRef          *string                `json:"work_ref"`
 }
 
+// AuditEventClass What kind of accountable event one “audit_log“ row records (#3733).
+//
+// The set is closed. The database CHECK “ck_audit_log_event_class“
+// rejects any other value, so a new class needs a code change and a
+// migration together.
+//
+//   - :attr:`OPERATION_EXECUTION` -- an action ran: a dispatched operation
+//     (success or failure), or a MEHO-internal action such as a topology
+//     edit, a retention sweep or a reaper.
+//   - :attr:`POLICY_DECISION` -- a gate decided about a call before it ran:
+//     a policy deny, a rate-limit refusal, or a park for approval.
+//   - :attr:`APPROVAL_DECISION` -- a person (or a standing grant) approved,
+//     rejected, or let an approval request expire.
+//   - :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a
+//     refresh-token replay or a broken satellite effect chain.
+//   - :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every
+//     row written before migration “0106“ reads as this class; it is never
+//     guessed from “method“ / “path“. The REST and MCP request wrapper
+//     rows also keep this class until they are retired.
+type AuditEventClass string
+
 // AuditQueryRequest POST body for “/api/v1/audit/query“.
 //
 // Mirrors :class:`~meho_backplane.audit_query.AuditQueryFilters`
@@ -1715,16 +1746,37 @@ type AuditQueryRequest struct {
 	AgentSessionId *openapi_types.UUID `json:"agent_session_id"`
 	AuditId        *openapi_types.UUID `json:"audit_id"`
 	Cursor         *string             `json:"cursor"`
-	Limit          *int                `json:"limit,omitempty"`
-	OpClass        *string             `json:"op_class"`
-	OpId           *string             `json:"op_id"`
-	ParentAuditId  *openapi_types.UUID `json:"parent_audit_id"`
-	Principal      *string             `json:"principal"`
-	ResultStatus   *string             `json:"result_status"`
-	Since          *string             `json:"since"`
-	Target         *string             `json:"target"`
-	Until          *string             `json:"until"`
-	WorkRef        *string             `json:"work_ref"`
+
+	// EventClass What kind of accountable event one ``audit_log`` row records (#3733).
+	//
+	// The set is closed. The database CHECK ``ck_audit_log_event_class``
+	// rejects any other value, so a new class needs a code change and a
+	// migration together.
+	//
+	// * :attr:`OPERATION_EXECUTION` -- an action ran: a dispatched operation
+	//   (success or failure), or a MEHO-internal action such as a topology
+	//   edit, a retention sweep or a reaper.
+	// * :attr:`POLICY_DECISION` -- a gate decided about a call before it ran:
+	//   a policy deny, a rate-limit refusal, or a park for approval.
+	// * :attr:`APPROVAL_DECISION` -- a person (or a standing grant) approved,
+	//   rejected, or let an approval request expire.
+	// * :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a
+	//   refresh-token replay or a broken satellite effect chain.
+	// * :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every
+	//   row written before migration ``0106`` reads as this class; it is never
+	//   guessed from ``method`` / ``path``. The REST and MCP request wrapper
+	//   rows also keep this class until they are retired.
+	EventClass    *AuditEventClass    `json:"event_class,omitempty"`
+	Limit         *int                `json:"limit,omitempty"`
+	OpClass       *string             `json:"op_class"`
+	OpId          *string             `json:"op_id"`
+	ParentAuditId *openapi_types.UUID `json:"parent_audit_id"`
+	Principal     *string             `json:"principal"`
+	ResultStatus  *string             `json:"result_status"`
+	Since         *string             `json:"since"`
+	Target        *string             `json:"target"`
+	Until         *string             `json:"until"`
+	WorkRef       *string             `json:"work_ref"`
 }
 
 // AuditQueryResult Page of audit rows plus the forward-only continuation cursor.
@@ -6889,6 +6941,7 @@ type ReplayNode struct {
 	Children         *[]ReplayNode          `json:"children,omitempty"`
 	Depth            int                    `json:"depth"`
 	DurationMs       *string                `json:"duration_ms"`
+	EventClass       string                 `json:"event_class"`
 	Id               openapi_types.UUID     `json:"id"`
 	Method           string                 `json:"method"`
 	OpClass          string                 `json:"op_class"`

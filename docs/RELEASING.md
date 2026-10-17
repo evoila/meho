@@ -667,15 +667,15 @@ git push origin v1.0.0-rc.N
 ```
 
 The push fans out to the same four workflows as a final tag (all four
-match `tags: ['v*']`: `cli-release.yml` L54, `image.yml` L96,
+match `tags: ['v*']`: `cli-release.yml` L56, `image.yml` L96,
 `chart.yml` L70, `docs-site.yml` L66). What each one does with a
 pre-release identifier, read from the YAML:
 
 | Artefact | What `v1.0.0-rc.N` produces | Where |
 |---|---|---|
-| GitHub Release | Created **auto-published and marked pre-release**: `prerelease: auto` flips the flag on the hyphen in the tag. Body = the `## [1.0.0-rc.N]` CHANGELOG section if one exists, else the `[Unreleased]` block — the documented pre-release fallback, and with R3's no-roll rule the intended path. `[Unreleased]` must therefore be audited and non-empty; an empty body here is the step-2 failure mode, not a quirk of rcs. | [`cli/.goreleaser.yaml`](../cli/.goreleaser.yaml) L264–269; [`cli-release.yml`](../.github/workflows/cli-release.yml) L164–172, L204–208 |
-| CLI tarballs | `meho_1.0.0-rc.N_<os>_<arch>.tar.gz` (`{{ .Version }}` strips the `v`); `meho version` prints `v1.0.0-rc.N` (`{{.Tag}}` keeps it). The cosign identity regex `refs/tags/v.+` covers rc tags, so the step-5 verify recipe is unchanged. | `.goreleaser.yaml` L104, L117, L157; `cli-release.yml` L366 |
-| `.mcpb` bundle | `meho-claude-desktop-1.0.0-rc.N.mcpb`, attached as the fifth asset. `mcpb pack` accepts a pre-release semver — the PR dry-run already packs `0.0.0-pr<N>` on every bundle PR. | `cli-release.yml` L285–292; [`mcpb-bundle.yml`](../.github/workflows/mcpb-bundle.yml) L74–78 |
+| GitHub Release | Created **auto-published and marked pre-release**: `prerelease: auto` flips the flag on the hyphen in the tag. Body = the `## [1.0.0-rc.N]` CHANGELOG section if one exists, else the `[Unreleased]` block — the documented pre-release fallback, and with R3's no-roll rule the intended path. `[Unreleased]` must therefore be audited and non-empty; an empty body here is the step-2 failure mode, not a quirk of rcs. | [`cli/.goreleaser.yaml`](../cli/.goreleaser.yaml) L264–269; [`cli-release.yml`](../.github/workflows/cli-release.yml) L167–175, L207–211 |
+| CLI tarballs | `meho_1.0.0-rc.N_<os>_<arch>.tar.gz` (`{{ .Version }}` strips the `v`); `meho version` prints `v1.0.0-rc.N` (`{{.Tag}}` keeps it). The cosign identity regex `refs/tags/v.+` covers rc tags, so the step-5 verify recipe is unchanged. | `.goreleaser.yaml` L104, L117, L157; `cli-release.yml` L396 |
+| `.mcpb` bundle | `meho-claude-desktop-1.0.0-rc.N.mcpb`, attached as the fifth asset. `mcpb pack` accepts a pre-release semver — the PR dry-run already packs `0.0.0-pr<N>` on every bundle PR. | `cli-release.yml` L283–295; [`mcpb-bundle.yml`](../.github/workflows/mcpb-bundle.yml) L74–78 |
 | Backplane image | Alias `ghcr.io/evoila/meho:v1.0.0-rc.N` — `type=semver,pattern={{raw}}` is the only tag-push pattern; `:main` is not emitted on a tag (`enable={{is_default_branch}}`). Quarantine build → trivy gate → promote → cosign sign → SBOM attest run unchanged, so the rc's promoted **digest** is what the lab deploy pins (R5). | [`image.yml`](../.github/workflows/image.yml) L160–163, L235–269, L305–335 |
 | Helm chart | Version `1.0.0-rc.N` (`VERSION="${REF#refs/tags/v}"`), `appVersion` = the git SHA; pushed to `oci://ghcr.io/evoila/meho-chart:1.0.0-rc.N` and anonymously pulled back by exact version. Hyphenated chart versions are already the norm for `main` pushes (`0.1.<date>-<sha>`), so the push path is proven. Always pass the exact `--version 1.0.0-rc.N` when installing. | [`chart.yml`](../.github/workflows/chart.yml) L1247–1265, L1309, L1440 |
 | Docs site | Publishes under **`1.0`** and **moves `latest` + the site default to it**: the `v[0-9]*.[0-9]*` case matches, `sed` truncates to MAJOR.MINOR, then `mike deploy --push --update-aliases 1.0 latest` and `mike set-default --push latest`. Deploying under the minor is intended ("the rc docs are that minor's docs in progress"); moving `latest` before GA is **Known gap 1**. | [`docs-site.yml`](../.github/workflows/docs-site.yml) L60–66, L156–173 |
@@ -837,9 +837,9 @@ follow-up task.
    pre-releases from the `semver` type, add `type=raw,value={{ref}}`
    (or equivalent) for tag pushes.
 5. **The rc Release body is the raw `[Unreleased]` block.**
-   `.github/workflows/cli-release.yml` L204–208 — by design, but
+   `.github/workflows/cli-release.yml` L207–211 — by design, but
    nothing labels it as cumulative rc notes, and the GoReleaser git-log
-   fallback (L216) kicks in silently if `[Unreleased]` is empty.
+   fallback (L219) kicks in silently if `[Unreleased]` is empty.
    Suggested fix: prepend a one-line "Release candidate `rc.N` for
    1.0.0 — cumulative notes since `PREV`" header when the tag contains
    a hyphen, and fail the step (not warn) when both sections are empty.

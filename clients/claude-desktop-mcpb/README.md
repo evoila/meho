@@ -206,7 +206,9 @@ Now only one copy signs in:
 - The second copy waits while that file exists. Then it starts and uses the
   saved login. It opens no browser tab.
 - A lock file whose copy has stopped, or that is older than five minutes, is
-  removed by the next copy.
+  taken over by the next copy. The copy does not delete the old file. It
+  writes its own process id into it, after a check that only one copy can
+  pass. So two copies that find the same old lock never both sign in.
 - A copy never waits more than five minutes. After that, or when it cannot
   use the lock file, it starts anyway.
 
@@ -222,7 +224,7 @@ This line is also normal. It means an earlier copy stopped without cleaning
 up, and this copy took over:
 
 ```
-meho-claude-desktop: removing an old sign-in lock: its instance (pid 12345) stopped
+meho-claude-desktop: found an old sign-in lock: its instance (pid 12345) stopped; taking it over
 ```
 
 If Claude Desktop stops the first copy before you finish the login, the

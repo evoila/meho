@@ -53,7 +53,15 @@ records the launcher's contract and invariants.
    or `~/.mcp-auth`, the same base folder `mcp-remote` uses. The file holds
    the owner's pid. A lock is stale when its pid is not running, when it is
    older than five minutes, or when it has no readable pid after five
-   seconds; the next copy removes it. The launcher wraps
+   seconds; the next copy takes it over in place. It never deletes the stale
+   file, because two copies can see the same stale lock, and the second
+   delete would hit the lock the first copy had just made. Instead it gives
+   the file a second name with a hard link (`<lock>.takeover`; only one
+   process can create that name), checks that the file still holds the
+   stale content it read, and writes its own pid into it. Other copies then
+   read a live lock and wait. The second name is removed afterwards; one
+   left behind by a stopped copy is itself stale after five seconds and is
+   removed by the next copy. The launcher wraps
    `process.stdout.write` once: the first write (`mcp-remote` answering the
    host, which only happens after it is connected) releases the lock. An
    `exit` listener also releases it. After waiting five minutes, or when the
@@ -107,8 +115,8 @@ records the launcher's contract and invariants.
 
 - If Desktop stops the copy that holds the sign-in lock before the login
   finishes, the waiting copy takes over and opens a second browser tab.
-- Three copies and a stale lock at the same moment can, in rare timing,
-  both remove the stale lock and both start a login.
+- The takeover of a stale lock needs hard links. On a file system without
+  them the launcher logs that it cannot use the lock and starts without it.
 - The field tests so far (#3143) ran on macOS; how Desktop on Windows
   handles either CA route is unverified.
 

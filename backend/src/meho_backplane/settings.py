@@ -1071,6 +1071,18 @@ class Settings(BaseModel):
         ``docs/codebase/approvals.md``. Reject is always allowed
         regardless of this flag — an operator withdrawing their own
         pending request is never a privilege escalation.
+    approval_allow_delegated_decision:
+        Lab-class switch for **delegated** approval decisions (#3693).
+        A delegated decision is an approve or reject whose ``reason``
+        ends with an ``Instructed-by:`` block (#3692): the approver acts
+        on another person's written instruction. Default ``False``
+        (fail-closed, production): every delegated decision is refused
+        with
+        :class:`~meho_backplane.operations.approval_queue.DelegatedDecisionForbiddenError`,
+        so on production an approve or reject is always the approver's
+        own call. Set ``APPROVAL_ALLOW_DELEGATED_DECISION=true`` only on
+        a lab-class deployment. Ordinary decisions are never affected.
+        Read at boot only; no request field can change it.
     openai_api_key:
         Bearer token the OpenAI-compatible backend builder
         (G11.5-T3 #1077) authenticates with. Empty (the default) is
@@ -1527,6 +1539,10 @@ class Settings(BaseModel):
     # docs/codebase/approvals.md "Single-operator tenants: use an
     # agent-requester, not break-glass".
     approval_allow_self_approval: bool = False
+    # #3693 -- delegated approval decisions (an ``Instructed-by:`` block in
+    # the reason, #3692) are allowed only on lab-class deployments. Default
+    # False is fail-closed: production refuses them.
+    approval_allow_delegated_decision: bool = False
     # #2322 (G0.31 #2364) -- approval-TTL lifecycle. Every parked approval
     # is stamped ``expires_at = created_at + APPROVAL_DEFAULT_TTL_SECONDS``
     # (default 14 days); an explicit caller override is honoured but capped
@@ -2633,6 +2649,11 @@ def get_settings() -> Settings:
         # unless this break-glass switch is explicitly enabled.
         approval_allow_self_approval=parse_bool_env(
             os.environ.get("APPROVAL_ALLOW_SELF_APPROVAL", "false"),
+        ),
+        # #3693 — fail-closed default: delegated decisions refused unless
+        # this lab-class switch is explicitly enabled.
+        approval_allow_delegated_decision=parse_bool_env(
+            os.environ.get("APPROVAL_ALLOW_DELEGATED_DECISION", "false"),
         ),
         # #2322 — approval-TTL default + sweeper knobs.
         approval_default_ttl_seconds=int(

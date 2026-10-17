@@ -96,6 +96,7 @@ from meho_backplane.operations.approval_queue import (
     ApprovalRequestAlreadyDecidedError,
     ApprovalRequestExpiredError,
     ApprovalResultState,
+    DelegatedDecisionForbiddenError,
     DelegatedReasonInvalidError,
     Delegation,
     ParamsMismatchError,
@@ -429,6 +430,14 @@ def _delegated_reason_http_error(exc: DelegatedReasonInvalidError) -> HTTPExcept
     )
 
 
+def _delegated_forbidden_http_error(exc: DelegatedDecisionForbiddenError) -> HTTPException:
+    """Map a delegated decision on a non-lab deployment to 403 (#3693)."""
+    return HTTPException(
+        status_code=http_status.HTTP_403_FORBIDDEN,
+        detail=f"delegated_decision_forbidden: {exc}",
+    )
+
+
 async def _resume_dispatch_after_approval(
     *,
     operator: Operator,
@@ -526,6 +535,8 @@ async def _capture_operator_decision(
         ) from exc
     except DelegatedReasonInvalidError as exc:
         raise _delegated_reason_http_error(exc) from exc
+    except DelegatedDecisionForbiddenError as exc:
+        raise _delegated_forbidden_http_error(exc) from exc
     return request
 
 
@@ -765,6 +776,8 @@ async def _record_approval_decision(
         ) from exc
     except DelegatedReasonInvalidError as exc:
         raise _delegated_reason_http_error(exc) from exc
+    except DelegatedDecisionForbiddenError as exc:
+        raise _delegated_forbidden_http_error(exc) from exc
     return request
 
 
@@ -917,6 +930,8 @@ async def reject_approval_request(
         ) from exc
     except DelegatedReasonInvalidError as exc:
         raise _delegated_reason_http_error(exc) from exc
+    except DelegatedDecisionForbiddenError as exc:
+        raise _delegated_forbidden_http_error(exc) from exc
 
     return RejectResponseBody(
         approval_request_id=request_id,

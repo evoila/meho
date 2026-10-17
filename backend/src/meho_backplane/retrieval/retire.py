@@ -87,6 +87,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.models import AuditLog
+from meho_backplane.request_usage.reader import (
+    UsageSource,
+    mcp_tool_route,
+    select_finished_events,
+)
 from meho_backplane.retrieval.eval.runner import (
     DEFAULT_K,
     RetrieveCallable,
@@ -581,8 +586,13 @@ def _evaluate_open_blockers(
 # ---------------------------------------------------------------------------
 
 
-def _surface_search_paths() -> dict[str, ChecklistSurface]:
+def _surface_search_paths(
+    source: UsageSource = "audit_log",
+) -> dict[str, ChecklistSurface]:
     """Return the audit_log ``path`` → surface mapping for every surface.
+
+    With ``source="request_usage"`` the keys are the usage route labels
+    (``tool:<name>``) instead of audit paths (#3734).
 
     Mirrors :func:`meho_backplane.retrieval.usage._search_paths_for`
     but keyed on every surface unconditionally; the retire-checklist
@@ -595,7 +605,9 @@ def _surface_search_paths() -> dict[str, ChecklistSurface]:
     # ``ChecklistSurface`` literal at this single boundary so downstream
     # consumers stay surface-typed without re-validating on every call.
     return {
-        f"{MCP_TOOL_PATH_PREFIX}{op_id}": cast("ChecklistSurface", surface)
+        (
+            f"{MCP_TOOL_PATH_PREFIX}{op_id}" if source == "audit_log" else mcp_tool_route(op_id)
+        ): cast("ChecklistSurface", surface)
         for op_id, surface in SEARCH_OPS.items()
     }
 
@@ -606,6 +618,7 @@ async def _fetch_surface_audit_scan(
     since: datetime,
     until: datetime,
     tenant_id: uuid.UUID | None,
+    source: UsageSource = "audit_log",
 ) -> tuple[
     dict[ChecklistSurface, datetime],
     dict[ChecklistSurface, dict[str, set[tuple[int, int]]]],
@@ -623,33 +636,46 @@ async def _fetch_surface_audit_scan(
     treats absence as "no signal" and the criteria evaluators report
     that as red (criterion 1) + red (criterion 2 — zero qualified
     operators).
+
+    With ``source="request_usage"`` the rows are ``ok``
+    ``request_finished`` usage events instead of audit rows (#3734).
     """
-    path_to_surface = _surface_search_paths()
+    path_to_surface = _surface_search_paths(source)
     paths = list(path_to_surface.keys())
     if not paths:
         # Defensive: SEARCH_OPS is non-empty, but a misconfiguration
         # there would otherwise produce ``IN ()`` which PG rejects.
         return {}, {}
 
-    stmt = (
-        select(
-            AuditLog.occurred_at,
-            AuditLog.operator_sub,
-            AuditLog.path,
+    if source == "request_usage":
+        stmt = select_finished_events(
+            since=since,
+            until=until,
+            tenant_id=tenant_id,
+            routes=paths,
+            ok_only=True,
         )
-        .where(AuditLog.occurred_at >= since)
-        .where(AuditLog.occurred_at <= until)
-        .where(AuditLog.path.in_(paths))
-        .where(AuditLog.status_code == 200)
-    )
-    if tenant_id is not None:
-        stmt = stmt.where(AuditLog.tenant_id == tenant_id)
+    else:
+        stmt = (
+            select(
+                AuditLog.occurred_at,
+                AuditLog.operator_sub,
+                AuditLog.path,
+            )
+            .where(AuditLog.occurred_at >= since)
+            .where(AuditLog.occurred_at <= until)
+            .where(AuditLog.path.in_(paths))
+            .where(AuditLog.status_code == 200)
+        )
+        if tenant_id is not None:
+            stmt = stmt.where(AuditLog.tenant_id == tenant_id)
 
     first_use: dict[ChecklistSurface, datetime] = {}
     operator_weeks: dict[ChecklistSurface, dict[str, set[tuple[int, int]]]] = {}
 
     result = await session.execute(stmt)
-    for occurred_at, operator_sub, path in result.all():
+    for row in result.all():
+        occurred_at, operator_sub, path = row.occurred_at, row.operator_sub, row.path
         # SQLite returns ``occurred_at`` as a naive datetime; PG returns
         # it timezone-aware. Normalise to UTC at the read boundary so
         # downstream arithmetic against the tz-aware ``now`` clock
@@ -764,6 +790,8 @@ def _resolve_eval_lookup(
     return lookup
 
 
+# code-quality-allow: pre-existing size (143 lines before #3734); #3734 only
+# threads the ``source`` argument through to the activity scan.
 async def compute_retire_checklist(
     *,
     session: AsyncSession,
@@ -774,6 +802,7 @@ async def compute_retire_checklist(
     baseline_overrides: Mapping[ChecklistSurface, BaselineMetricsOverride] | None = None,
     now: datetime | None = None,
     k: int = DEFAULT_K,
+    source: UsageSource = "audit_log",
 ) -> RetireChecklistReport:
     """Build the five-criterion retire-decision checklist per surface.
 
@@ -801,7 +830,9 @@ async def compute_retire_checklist(
     to compute the baseline against (see
     :class:`BaselineMetricsOverride`). *now* defaults to
     ``datetime.now(UTC)`` and is exposed so tests can pin a frozen
-    clock for the first-use-date math.
+    clock for the first-use-date math. *source* picks the activity rows
+    for criteria 1 and 2: ``audit_log`` wrapper rows (default) or
+    ``request_usage`` events (#3734).
     """
     moment = now or datetime.now(UTC)
     since = moment - RETIRE_LOOKBACK
@@ -812,6 +843,7 @@ async def compute_retire_checklist(
         since=since,
         until=moment,
         tenant_id=tenant_id,
+        source=source,
     )
 
     # ``eval_all`` is tenant-scoped per its own contract; pass through

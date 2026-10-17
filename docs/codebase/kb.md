@@ -37,7 +37,9 @@ session notes and per-target settings).
 
 Frozen Pydantic value object that mirrors one `documents` row in
 kb-shaped vocabulary: `id`, `tenant_id`, `slug` (renamed from
-`source_id`), `body`, `metadata`, `created_at`, `updated_at`. The
+`source_id`), `body`, `metadata`, `provenance`, `created_at`,
+`updated_at`. `provenance` is a typed `KbProvenance` read from
+`metadata["provenance"]` (see "Provenance" below). The
 substrate columns the kb does not expose (`source`, `kind`,
 `body_hash`, `tokens`, `embedding`) stay invisible to callers. Write
 attribution rides `metadata` as `created_by_sub` /
@@ -58,10 +60,24 @@ through `KbService.get_entry(slug)`.
 
 ### `KbIngestionResult` (`kb/schemas.py`)
 
-Summary of one `ingest_directory` run. Four counters that partition
+Summary of one `ingest_directory` run. Five counters that partition
 every discovered `.md` file into exactly one bucket: `inserted_count`,
-`updated_count`, `skipped_count`, `error_count`, plus `errors` (the
-list of per-file failure messages).
+`updated_count`, `skipped_count`, `error_count`, `conflict_count`.
+`errors` holds the per-file failure messages (each starts with the
+file path relative to the ingest directory). `conflicts` holds one
+`KbIngestConflict(slug, relative_paths)` per slug that two or more
+files claim. Both lists are in sorted order, so the same directory
+gives the same result on every run.
+
+### `KbProvenance` (`kb/schemas.py`, written by `kb/provenance.py`)
+
+Where an entry came from. `state` is `"recorded"` or `"legacy"`.
+For recorded rows, `source_kind` is `"directory"` (directory ingest)
+or `"direct"` (REST / MCP / console create), `relative_path` is the
+file path relative to the ingest directory (`None` for direct
+writes), and `ingested_at` is the UTC write time. Rows written before
+provenance existed, or rows whose `provenance` key has another shape,
+read as `state="legacy"` with every other field `None`.
 
 ### `InvalidKbSlugError` (`kb/schemas.py`)
 
@@ -80,18 +96,21 @@ before returning. Six verbs:
 
 | Verb | What it does | Throws |
 |---|---|---|
-| `create_entry(tenant_id, slug, body, metadata=None, *, actor_sub=None)` | Insert or re-index one entry; returns `(entry, created)`. Validates slug, stamps attribution, delegates to `index_document`. | `InvalidKbSlugError` on bad slug |
+| `create_entry(tenant_id, slug, body, metadata=None, *, actor_sub=None)` | Insert or replace one entry (explicit last-write-wins); returns `(entry, created)`. Validates slug, stamps attribution and `direct` provenance, delegates to `index_document`. | `InvalidKbSlugError` on bad slug |
 | `get_entry(tenant_id, slug)` | Natural-key SELECT; returns `KbEntry` or `None`. | – |
 | `list_entries(tenant_id, filter_pattern=None, limit=100, offset=0)` | List entries; slug-sorted; SQL `LIKE` pattern forwarded verbatim. | `ValueError` on negative `limit`/`offset` |
 | `delete_entry(tenant_id, slug)` | Delete by natural key; returns whether a row existed. | – |
 | `search_entries(tenant_id, query, filters=None, limit=10)` | Hybrid BM25 + cosine retrieval with `source=KB_SOURCE` pinned. | – |
-| `ingest_directory(directory, tenant_id, dry_run=False)` | Walk a directory of `.md` files and ingest each one; idempotent. Per-file failures counted, run continues. | – |
+| `ingest_directory(directory, tenant_id, dry_run=False)` | Read every `.md` file in sorted order, report slug conflicts without writing them, ingest the rest; idempotent. Per-file failures counted, run continues. | `KbIngestRootError` outside `KB_INGEST_ROOT` |
 
 ### `walk_kb_directory` (`kb/file_walker.py`)
 
 The directory-walking helper `ingest_directory` calls. Reads
 Markdown front-matter via `python-frontmatter` and yields a
-`KbFileRecord(path, slug, body, metadata)` for each valid file.
+`KbFileRecord(path, relative_path, slug, body, metadata)` for each
+valid file, sorted by POSIX relative path (`Path.rglob` order depends
+on the filesystem, so the walker sorts). `path` is only used to read
+the file; `relative_path` is what gets stored and reported.
 Per-file errors (binary file, unreadable bytes, invalid slug,
 malformed front-matter) are caught inside the walker and appended
 to the caller's `errors` list rather than raising.
@@ -106,14 +125,23 @@ to the caller's `errors` list rather than raising.
    overwrite** signal (no prior row ⇒ `created=True`) and the prior
    `created_by_sub` to preserve.
 3. `merge_attribution(...)` (in `kb/attribution.py`) folds the
-   attribution keys into the metadata to persist.
-4. `index_document(tenant_id, source='kb', source_id=slug,
+   attribution keys into the metadata to persist. When the caller sent
+   no metadata and no actor, the existing metadata is kept.
+4. `stamp_provenance(..., source_kind="direct")` replaces any
+   caller-sent `provenance` key with the service's own block.
+5. `index_document(tenant_id, source='kb', source_id=slug,
    kind='kb-entry', body, metadata=merged)` — substrate's upsert path.
    The `documents.body_hash` short-circuit means an unchanged body
    pays zero embedding cost (just an `updated_at` bump).
-5. Return `(_doc_to_entry(doc), created)`. The REST route maps
+6. Return `(_doc_to_entry(doc), created)`. The REST route maps
    `created` to **HTTP 201** (fresh slug) vs **200** (in-place
-   overwrite); the MCP / UI callers discard it.
+   overwrite) and records `audit_created`; the MCP / UI callers
+   discard it.
+
+This is an **explicit replace**: the newest write wins, with no
+expected-revision check. A compare-and-set API waits until a real
+multi-writer workflow needs it. Directory ingest uses a different
+rule (below): it never lets file order pick a winner.
 
 ### Cross-principal write & delete semantics (#1845)
 
@@ -152,18 +180,48 @@ hit's `doc_metadata` is the same JSONB column).
 
 ### Write path — `ingest_directory`
 
-1. `walk_kb_directory(directory, errors=errors)` — yields one record
-   per valid `.md` file; per-file walk failures land in `errors`.
-2. For each yielded record, `_ingest_one` does:
+`KbService.ingest_directory` delegates to
+`kb/directory_ingest.py::ingest_directory`.
+
+1. Confine the directory to `KB_INGEST_ROOT` (#101).
+2. Pre-walk: `list(walk_kb_directory(directory, errors=errors))` reads
+   every valid `.md` file, in sorted relative-path order, before any
+   write. Per-file walk failures land in `errors`.
+3. `_find_slug_conflicts(records)` groups records by slug. Every slug
+   with two or more files becomes a `KbIngestConflict`. None of those
+   files is written, so an existing entry with that slug stays exactly
+   as it was. This also applies in `dry_run`.
+4. For each remaining record, `_ingest_one` does:
    - SELECT existing row by natural key.
    - Compute `compute_body_hash(body)` and compare.
    - Classify as `inserted` / `updated` / `skipped`.
-   - On `dry_run=False`, call `index_document` with the source path
-     enriched into metadata.
-3. Per-file commits — a failing file in the middle of the corpus
+   - On `dry_run=False`, call `index_document` with the front-matter
+     metadata plus a `directory` provenance block (relative path and
+     one `ingested_at` timestamp for the whole run).
+5. Per-file commits — a failing file in the middle of the corpus
    does **not** roll back the successful files preceding it. That
    trade-off (per-file commit overhead vs. all-or-nothing) is the
-   load-bearing reason the service is stateless.
+   load-bearing reason the service is stateless. Conflicts are found
+   before step 4, so no conflict group is ever half-written.
+
+The REST route binds `audit_conflict_count` with the other counters.
+The CLI prints a `conflicted:` counter and a `conflicts` list.
+
+### Provenance
+
+`metadata["provenance"]` is owned by the service. Each write replaces
+any value a caller or front-matter block put there:
+
+```json
+{"source_kind": "directory", "relative_path": "runbooks/vm-restart.md",
+ "ingested_at": "2026-03-04T05:06:07Z"}
+```
+
+No absolute host path is stored; `stamp_provenance` rejects absolute
+or `..` paths. Older directory-ingested rows may still carry a
+`source_path` key with an absolute path. They are not rewritten: they
+read as `provenance.state="legacy"`, and the next ingest of the same
+file replaces their metadata (dropping `source_path`).
 
 ### Read path — `get_entry` / `list_entries`
 
@@ -209,7 +267,11 @@ Transports that call into this service:
 
 ## Known issues
 
-None outstanding. The kb-shaped vocabulary is stable; the substrate's
+- The console detail page reads `metadata["path"]` for its "source
+  path" field, a key no writer sets. It shows nothing for every row.
+- Legacy rows keep their absolute `source_path` until re-ingested.
+
+Otherwise none outstanding. The kb-shaped vocabulary is stable; the substrate's
 metadata-filter surface is reserved for future v0.2.next work — a
 caller passing extra keys to `filters` today silently has them
 ignored (substrate cap, not a kb-package decision).

@@ -121,9 +121,12 @@ Search knowledge the same way:
 meho kb search "vcenter session authentication"
 ```
 
-Both search tools return a **snippet** and the natural key, not the full
-body — fetch the full body with a resource read (`meho://memory/{scope}/{slug}`
-or `meho://kb/{slug}`), or `meho recall <scope>/<slug>` / `meho kb show <slug>`.
+Knowledge search returns a **snippet**, not the full body. Memory search
+hits carry the full entry today, plus a `locator`
+(`meho://memory/id/{document_uuid}`): read it with a resource read to get
+the entry again later. It works for every scope, and MEHO checks your
+access again on that read. For knowledge, read `meho://kb/{slug}`. From the
+CLI, use `meho recall <scope>/<slug>` / `meho kb show <slug>`.
 Omitting `scope` on `search_memory` searches every scope you can read;
 `search_knowledge` takes an optional `filters` object (e.g.
 `{"kind": "kb-entry"}`) that narrows by metadata containment.

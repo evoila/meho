@@ -33,7 +33,7 @@ import (
 //	  [--limit N]                  # 1..1000, default 100 (server-side)
 //	  [--cursor C]                 # opaque forward-pagination cursor
 //	  [--audit-id ID]              # exact-id lookup
-//	  [--parent-audit-id ID]       # v0.2 substrate rejects (400)
+//	  [--parent-audit-id ID]       # rows whose parent is this audit-id
 //	  [--session-id ID]            # narrow to one agent session (UUID)
 //	  [--work-ref REF]             # exact change-ticket ref: gh:evoila/meho#1
 //	  [--json]                     # raw AuditQueryResult JSON
@@ -119,8 +119,8 @@ func newQueryCmd() *cobra.Command {
 	cmd.Flags().StringVar(&auditID, "audit-id", "",
 		"exact audit-id lookup (UUID)")
 	cmd.Flags().StringVar(&parentAuditID, "parent-audit-id", "",
-		"narrow to the composite-op subtree under this audit-id "+
-			"(v0.2 substrate rejects with 400; column lands with G0.6-T7 #398)")
+		"narrow to the rows whose parent is this audit-id (UUID); "+
+			"e.g. the decision and run rows of one approval request")
 	cmd.Flags().StringVar(&sessionID, "session-id", "",
 		"narrow to one agent session (UUID); the flat companion to `meho audit replay`")
 	cmd.Flags().StringVar(&workRef, "work-ref", "",

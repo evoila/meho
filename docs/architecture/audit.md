@@ -141,7 +141,7 @@ The convention is closed-set on the *channel* axis (HTTP / MCP / INTERNAL is the
 
 ## Sibling Initiative
 
-[G8.2 (#377)](https://github.com/evoila/meho/issues/377) — audit replay (`meho audit replay <session-id>`) — builds a recursive-CTE traversal on top of the `parent_audit_id` filter shipped in [T1 (#465)](https://github.com/evoila/meho/issues/465). G8.1 ships the filter (which raises `UnsupportedFilterError` in v0.2 because the column hasn't landed yet); G8.2 ships the schema column, the recursive traversal, and the operator-facing `replay` verb. The split keeps each Initiative shippable on its own clock.
+[G8.2 (#377)](https://github.com/evoila/meho/issues/377) — audit replay (`meho audit replay <session-id>`) — builds a recursive-CTE traversal on top of the `parent_audit_id` filter shipped in [T1 (#465)](https://github.com/evoila/meho/issues/465). G8.1 ships the filter; G8.2 ships the schema column, the recursive traversal, and the operator-facing `replay` verb. The split keeps each Initiative shippable on its own clock. In v0.2 the flat filter was refused because the column had not landed yet. Since #4030 it works: it is an exact match that returns the direct children of one row.
 
 ## References
 

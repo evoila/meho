@@ -187,8 +187,9 @@ def test_tool_descriptions_satisfy_ai_engineering_anchor(
     assert "recall" in search_desc.lower() or "established" in search_desc.lower()
     # When NOT to use: durable team knowledge → kb.
     assert "knowledge base" in search_desc.lower() or "search_knowledge" in search_desc
-    # Cross-reference to the companion resource for the full body.
-    assert "meho://memory/" in search_desc
+    # Cross-reference to the canonical selected read for the full body.
+    assert "meho://memory/id/{document_uuid}" in search_desc
+    assert "locator" in search_desc
     # Scope enumeration discipline (names every scope so an agent
     # without a tool listing can still pick correctly).
     for scope_value in (s.value for s in MemoryScope):
@@ -309,6 +310,8 @@ async def test_tools_call_search_memory_returns_ranked_hits(
     assert hit["entry"]["slug"] == "wine-preference"
     assert hit["entry"]["body"] == "Prefers a 2019 Brunello with steak."
     assert hit["fused_score"] == pytest.approx(0.7)
+    # Every hit carries the canonical selected-read locator.
+    assert hit["locator"] == f"meho://memory/id/{fake_hit.document_id}"
 
 
 @pytest.mark.parametrize(

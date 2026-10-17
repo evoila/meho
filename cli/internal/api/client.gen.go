@@ -406,6 +406,18 @@ const (
 	IngestRequestAuthSchemeStaticHeader      IngestRequestAuthScheme = "static_header"
 )
 
+// Defines values for KbProvenanceSourceKind.
+const (
+	KbProvenanceSourceKindDirect    KbProvenanceSourceKind = "direct"
+	KbProvenanceSourceKindDirectory KbProvenanceSourceKind = "directory"
+)
+
+// Defines values for KbProvenanceState.
+const (
+	KbProvenanceStateLegacy   KbProvenanceState = "legacy"
+	KbProvenanceStateRecorded KbProvenanceState = "recorded"
+)
+
 // Defines values for KindFilterValue.
 const (
 	KindFilterValueCron   KindFilterValue = "cron"
@@ -5861,9 +5873,19 @@ type KbEntry struct {
 	CreatedAt time.Time              `json:"created_at"`
 	Id        openapi_types.UUID     `json:"id"`
 	Metadata  map[string]interface{} `json:"metadata"`
-	Slug      string                 `json:"slug"`
-	TenantId  openapi_types.UUID     `json:"tenant_id"`
-	UpdatedAt time.Time              `json:"updated_at"`
+
+	// Provenance Where a kb entry came from, as read back from its metadata.
+	//
+	// ``state="recorded"`` means the service stored provenance when it
+	// wrote the entry; the other fields are then set (``relative_path``
+	// stays ``None`` for direct writes). ``state="legacy"`` means the
+	// entry was written before provenance was stored, or the stored value
+	// is not in the expected shape; every other field is ``None``. Legacy
+	// rows are not rewritten -- the next write records real provenance.
+	Provenance KbProvenance       `json:"provenance"`
+	Slug       string             `json:"slug"`
+	TenantId   openapi_types.UUID `json:"tenant_id"`
+	UpdatedAt  time.Time          `json:"updated_at"`
 }
 
 // KbEntryCreate POST body for “/api/v1/kb“ -- create / re-index one entry.
@@ -5901,10 +5923,22 @@ type KbEntryPreview struct {
 	UpdatedAt string                 `json:"updated_at"`
 }
 
+// KbIngestConflict Two or more files in one directory ingest claim the same slug.
+//
+// “relative_paths“ lists every file that claims “slug“, sorted,
+// relative to the ingest directory. None of these files is written,
+// and an existing entry with this slug stays unchanged. The operator
+// fixes the conflict (rename a file or change its “slug:“
+// front-matter) and runs the ingest again.
+type KbIngestConflict struct {
+	RelativePaths []string `json:"relative_paths"`
+	Slug          string   `json:"slug"`
+}
+
 // KbIngestionResult Summary of one :meth:`KbService.ingest_directory` run.
 //
-// The four counters partition every discovered “.md“ file into
-// exactly one of four buckets:
+// The five counters partition every discovered “.md“ file into
+// exactly one of five buckets:
 //
 //   - “inserted_count“ -- file's slug had no prior row in the tenant;
 //     a new document row was created and embedded.
@@ -5920,9 +5954,17 @@ type KbEntryPreview struct {
 //     front-matter). The matching error message is appended to
 //     :attr:`errors`; the ingestion run continues with the remaining
 //     files.
+//   - “conflict_count“ -- the file shares its slug with at least one
+//     other file in the same run. No file in that group is written;
+//     :attr:`conflicts` lists each group once.
 //
 // Sum invariant: “inserted_count + updated_count + skipped_count
-// + error_count == <total discovered .md files>“.
+// + error_count + conflict_count == <total discovered .md files>“.
+//
+// The run walks files in sorted relative-path order, so the same
+// directory gives the same counters, “errors“ order and
+// “conflicts“ order on every run, whatever order the filesystem
+// lists the files in.
 //
 // The “errors“ list is bounded in practice by the corpus size --
 // no per-file error string exceeds ~200 chars (the file path plus a
@@ -5930,11 +5972,13 @@ type KbEntryPreview struct {
 // corpus stays under ~200 KB of allocated memory. Truncation /
 // sampling can land in v0.2.next if real corpora drive that.
 type KbIngestionResult struct {
-	ErrorCount    int      `json:"error_count"`
-	Errors        []string `json:"errors"`
-	InsertedCount int      `json:"inserted_count"`
-	SkippedCount  int      `json:"skipped_count"`
-	UpdatedCount  int      `json:"updated_count"`
+	ConflictCount int                `json:"conflict_count"`
+	Conflicts     []KbIngestConflict `json:"conflicts"`
+	ErrorCount    int                `json:"error_count"`
+	Errors        []string           `json:"errors"`
+	InsertedCount int                `json:"inserted_count"`
+	SkippedCount  int                `json:"skipped_count"`
+	UpdatedCount  int                `json:"updated_count"`
 }
 
 // KbListResponse Response envelope for “GET /api/v1/kb“.
@@ -5948,6 +5992,27 @@ type KbIngestionResult struct {
 type KbListResponse struct {
 	Entries []KbEntryPreview `json:"entries"`
 }
+
+// KbProvenance Where a kb entry came from, as read back from its metadata.
+//
+// “state="recorded"“ means the service stored provenance when it
+// wrote the entry; the other fields are then set (“relative_path“
+// stays “None“ for direct writes). “state="legacy"“ means the
+// entry was written before provenance was stored, or the stored value
+// is not in the expected shape; every other field is “None“. Legacy
+// rows are not rewritten -- the next write records real provenance.
+type KbProvenance struct {
+	IngestedAt   *time.Time              `json:"ingested_at"`
+	RelativePath *string                 `json:"relative_path"`
+	SourceKind   *KbProvenanceSourceKind `json:"source_kind"`
+	State        KbProvenanceState       `json:"state"`
+}
+
+// KbProvenanceSourceKind defines model for KbProvenance.SourceKind.
+type KbProvenanceSourceKind string
+
+// KbProvenanceState defines model for KbProvenance.State.
+type KbProvenanceState string
 
 // KindFilterValue Closed enum of the trigger “kind“ values exposed in the filter URL.
 //

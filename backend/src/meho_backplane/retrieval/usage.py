@@ -66,6 +66,17 @@ definition is the right v0.2 baseline because the retire-checklist
 searching, vs grep-and-fall-through"), not a perfect per-hit
 attribution.
 
+Request usage events (#3734)
+----------------------------
+
+:func:`compute_usage` takes a ``source``. ``"audit_log"`` (the default)
+reads the MCP wrapper rows described above. ``"request_usage"`` reads the
+privacy-bounded ``request_usage_event`` rows instead
+(:mod:`meho_backplane.request_usage`): a search is a ``request_finished``
+event on route ``tool:<search tool>`` with outcome ``ok``, and the
+conversion universe is every ``request_finished`` event of the same
+principal. The routes keep the default until the wrapper rows are retired.
+
 Cross-DB portability
 --------------------
 
@@ -120,6 +131,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.models import AuditLog
+from meho_backplane.request_usage.reader import (
+    UsageSource,
+    mcp_tool_route,
+    select_finished_events,
+)
 
 __all__ = [
     "ADD_OPS",
@@ -347,20 +363,26 @@ class UsageReport(BaseModel):
     rest_excluded: bool = Field(default=REST_RETRIEVE_EXCLUDED)
 
 
-def _search_paths_for(surfaces: Iterable[str]) -> tuple[list[str], dict[str, str]]:
+def _search_paths_for(
+    surfaces: Iterable[str],
+    source: UsageSource = "audit_log",
+) -> tuple[list[str], dict[str, str]]:
     """Return ``(paths, path_to_surface)`` for the given surface set.
 
     Splitting the lookup table out makes the query builder testable
     in isolation: pass any surface set and assert the
     ``AuditLog.path IN (...)`` list matches the expected MCP tool
-    routing.
+    routing. With ``source="request_usage"`` the keys are the usage
+    route labels (``tool:<name>``) instead of audit paths.
     """
     surface_set = set(surfaces)
     paths: list[str] = []
     mapping: dict[str, str] = {}
     for op_id, surface in SEARCH_OPS.items():
         if surface in surface_set:
-            path = f"{MCP_TOOL_PATH_PREFIX}{op_id}"
+            path = (
+                f"{MCP_TOOL_PATH_PREFIX}{op_id}" if source == "audit_log" else mcp_tool_route(op_id)
+            )
             paths.append(path)
             mapping[path] = surface
     return paths, mapping
@@ -373,14 +395,26 @@ async def _fetch_search_rows(
     until: datetime,
     paths: list[str],
     tenant_id: UUID | None,
+    source: UsageSource = "audit_log",
 ) -> list[Any]:
     """Pull successful search rows from ``audit_log`` in the time window.
 
     Successful rows only (``status_code = 200``) — a 4xx/5xx search
     attempt isn't "daily use". Ordering by ``(operator_sub,
     occurred_at)`` lets the downstream conversion loop walk the per-
-    operator action timeline without re-sorting.
+    operator action timeline without re-sorting. With
+    ``source="request_usage"`` the same rows come from ``ok``
+    ``request_finished`` usage events.
     """
+    if source == "request_usage":
+        usage_stmt = select_finished_events(
+            since=since,
+            until=until,
+            tenant_id=tenant_id,
+            routes=paths,
+            ok_only=True,
+        )
+        return list((await session.execute(usage_stmt)).all())
     stmt = (
         select(
             AuditLog.id,
@@ -406,13 +440,23 @@ async def _fetch_action_universe(
     since: datetime,
     until: datetime,
     tenant_id: UUID | None,
+    source: UsageSource = "audit_log",
 ) -> list[Any]:
     """Pull every audit_log row in the extended window (conversion universe).
 
     Over-fetches by :data:`CONVERSION_WINDOW` on the upper bound so a
     search at exactly ``until`` still sees a same-tenant follow-up
-    action that lands just inside the window.
+    action that lands just inside the window. With
+    ``source="request_usage"`` the universe is every
+    ``request_finished`` usage event instead.
     """
+    if source == "request_usage":
+        usage_stmt = select_finished_events(
+            since=since,
+            until=until + CONVERSION_WINDOW,
+            tenant_id=tenant_id,
+        )
+        return list((await session.execute(usage_stmt)).all())
     stmt = (
         select(
             AuditLog.id,
@@ -522,6 +566,7 @@ async def compute_usage(
     until: datetime,
     surfaces: Iterable[str],
     tenant_id: UUID | None,
+    source: UsageSource = "audit_log",
 ) -> UsageReport:
     """Aggregate ``audit_log`` rows into a per-day per-surface report.
 
@@ -543,9 +588,12 @@ async def compute_usage(
     session from :func:`~meho_backplane.db.engine.get_sessionmaker`.
     The helper does not commit (it's read-only) and does not close
     the session (lifetime is the caller's concern).
+
+    *source* picks the row source: ``audit_log`` wrapper rows (default)
+    or ``request_usage`` events (see the module docstring).
     """
     surfaces_list = list(surfaces)
-    paths, path_to_surface = _search_paths_for(surfaces_list)
+    paths, path_to_surface = _search_paths_for(surfaces_list, source)
     if not paths:
         # No surfaces in scope → empty report. Avoids issuing an
         # ``IN ()`` clause which PG rejects outright and SQLite
@@ -565,12 +613,14 @@ async def compute_usage(
         until=until,
         paths=paths,
         tenant_id=tenant_id,
+        source=source,
     )
     action_rows = await _fetch_action_universe(
         session,
         since=since,
         until=until,
         tenant_id=tenant_id,
+        source=source,
     )
     timelines = _index_actions_by_principal(action_rows)
     buckets, total = _build_buckets(

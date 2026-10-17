@@ -276,6 +276,12 @@ async def _search_memory_handler(
     / tenant / target). Passing one narrows the retrieval to that
     single kind, useful when the agent knows it's looking for a
     tenant convention vs an operator preference.
+
+    Each hit carries ``locator`` (``meho://memory/id/{document_uuid}``,
+    a computed field on
+    :class:`~meho_backplane.memory.schemas.MemoryEntrySearchHit`). It is the
+    canonical selected read served by
+    :mod:`meho_backplane.mcp.resources.memory`.
     """
     query: str = arguments["query"]
     scope_raw = arguments.get("scope")
@@ -439,9 +445,10 @@ register_mcp_tool(
         description=(
             "Search the operator's accessible memories (own user-scoped "
             "entries + tenant-shared + target-shared entries visible to "
-            "this operator). Returns ranked hits with a body snippet and "
-            "the (scope, slug) pair you'll need to fetch the full body "
-            "via `resources/read meho://memory/{scope}/{slug}`. "
+            "this operator). Returns ranked hits. Each hit carries a "
+            "`locator` (meho://memory/id/{document_uuid}); pass it to "
+            "`resources/read` to get the full entry. The locator works "
+            "for every scope and access is checked again on that read. "
             "Call when you need to recall established team conventions, "
             "operator preferences for this tenant, or notes about a "
             "specific target. As a first reflex, search here before "

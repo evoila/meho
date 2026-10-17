@@ -466,7 +466,10 @@ _CHANGE_BY_TYPE: dict[str, str] = {
 }
 #: Columns with a CHECK constraint get a value the constraint accepts, so
 #: only the guard can reject the change.
-_CHANGE_BY_COLUMN: dict[str, str] = {"policy_decision": "'deny'"}
+_CHANGE_BY_COLUMN: dict[str, str] = {
+    "policy_decision": "'deny'",
+    "event_class": "'policy_decision'",
+}
 
 
 def test_nulling_raw_payload_and_changing_any_other_column_is_rejected(pg: _Pg) -> None:

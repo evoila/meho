@@ -42,6 +42,7 @@ import uuid
 from pydantic import BaseModel, ConfigDict, Field
 
 from meho_backplane.audit_query import AuditEntry, AuditQueryResult, ReplayNode
+from meho_backplane.db.models import AuditEventClass
 from meho_backplane.flight_recorder import TraceSpanView, TraceView
 
 __all__ = [
@@ -85,6 +86,8 @@ class AuditQueryRequest(BaseModel):
     parent_audit_id: uuid.UUID | None = None
     agent_session_id: uuid.UUID | None = None
     work_ref: str | None = Field(default=None, max_length=256)
+    # Optional class filter (#3733). An unknown value fails with 422.
+    event_class: AuditEventClass | None = None
     limit: int = Field(default=100, ge=1, le=1000)
     cursor: str | None = Field(default=None, max_length=512)
 

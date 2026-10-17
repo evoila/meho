@@ -587,6 +587,14 @@ class Settings(BaseModel):
         (no writes, nothing to prune) while a running loop still heartbeats;
         ``enabled=False`` skips starting the loop entirely. Read once at
         lifespan startup; toggling post-start requires a pod restart.
+    request_usage_retention_days:
+        How many days request usage events are kept (#3734). These are the
+        privacy-bounded ``request_usage_event`` rows written at the REST and
+        MCP boundary. **Unset (the default) turns collection off**: no
+        events are written and requests are never slowed or blocked by it.
+        When set, one event is written per request and a daily job deletes
+        events older than this many days. Range ``[1, 3650]``. Env var
+        ``REQUEST_USAGE_RETENTION_DAYS``; an empty value counts as unset.
     result_handle_max_spill_rows:
         Upper bound on how many rows the reducer spills into the
         :class:`~meho_backplane.connectors.result_handle_store.ResultHandleStore`
@@ -665,12 +673,29 @@ class Settings(BaseModel):
         purpose; a load benchmark may tune it. Default 2097152 (2 MiB). Env
         ``RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES``.
     result_query_timeout_seconds:
-        Wall-time budget for a single ``result_query`` compiled ``SELECT``.
-        DuckDB exposes no native Python query timeout, so the core runs
-        ``conn.execute()`` on a worker thread and calls ``conn.interrupt()``
-        on expiry (raising ``InterruptException``), surfaced to the caller as
-        a recoverable "narrow and retry" error. Default 5 seconds. Env
+        Wall-time budget for a whole ``result_query`` read (#3640): the
+        store fetch plus the catalog, compile, ``SELECT``, and encode steps
+        on the worker thread. DuckDB exposes no native Python query timeout,
+        so the core calls ``conn.interrupt()`` on expiry and returns a
+        recoverable "narrow and retry" error at once; a worker that is still
+        busy keeps its slot until it finishes. Default 10 seconds. Env
         ``RESULT_QUERY_TIMEOUT_SECONDS``.
+    result_query_executor_workers:
+        Size of the dedicated worker pool that runs ``result_query`` work,
+        and of the process-wide gate both result reads (paging and query)
+        must pass before the store is read (#3640). The gate does not queue:
+        when every slot is busy a read is refused with a recoverable
+        "capacity" error. Default 4. Env ``RESULT_QUERY_EXECUTOR_WORKERS``.
+    result_query_tenant_concurrency:
+        Most result reads one tenant may run at the same time in this
+        process (#3640). Only binds when it is lower than
+        ``result_query_executor_workers``. Default 4. Env
+        ``RESULT_QUERY_TENANT_CONCURRENCY``.
+    result_query_rate_per_minute:
+        Per-``(tenant, principal)`` fixed-window cap on result reads, shared
+        by paging and query and checked before the store is read (#3640).
+        ``0`` (the default) turns the check off, with no Valkey round-trip.
+        Env ``RESULT_QUERY_RATE_PER_MINUTE``.
     jsonflux_sample_byte_budget:
         Upper bound, in serialized JSON bytes, on the inline sample the
         JSONFlux reducer carries on a reduced ``ResultHandle`` (#134).
@@ -1445,6 +1470,9 @@ class Settings(BaseModel):
     checks_evidence_retention_days: int = Field(default=7, ge=0, le=3650)
     checks_evidence_prune_interval_seconds: int = Field(default=604800, ge=60, le=604800)
     checks_evidence_prune_enabled: bool = True
+    # Request usage events (#3734). ``None`` = collection off. There is no
+    # default window on purpose: the operator chooses how long to keep them.
+    request_usage_retention_days: int | None = Field(default=None, ge=1, le=3650)
     result_handle_max_spill_rows: int = Field(default=10000, gt=0)
     result_cache_redis_url: str = Field(default="redis://localhost:6379", min_length=1)
     result_cache_redis_password: str | None = Field(default=None)
@@ -1462,12 +1490,16 @@ class Settings(BaseModel):
     result_query_max_output_rows: int = Field(default=500, gt=0)
     # Query-domain shaping budget (rows only, checked before encoding).
     result_query_max_output_bytes: int = Field(default=262144, gt=0)
+    result_query_timeout_seconds: int = Field(default=10, gt=0)
+    # #3640 -- admission for the two result-read paths.
+    result_query_executor_workers: int = Field(default=4, gt=0)
+    result_query_tenant_concurrency: int = Field(default=4, gt=0)
+    result_query_rate_per_minute: int = Field(default=0, ge=0)
     # #3641 -- terminal wire ceilings, measured after encoding on the MCP
     # wire (text block + structuredContent). Generous defaults; a benchmark
     # may tune them.
     result_complete_response_wire_max_bytes: int = Field(default=262144, gt=0)
     result_query_response_wire_max_bytes: int = Field(default=2097152, gt=0)
-    result_query_timeout_seconds: int = Field(default=5, gt=0)
     jsonflux_sample_byte_budget: int = Field(default=4096, gt=0)
     composite_max_depth: int = Field(default=8, gt=0)
     agent_invoke_max_depth: int = Field(default=4, gt=0)
@@ -2325,6 +2357,12 @@ def get_settings() -> Settings:
         result_cache_redis_password = broadcast_redis_password
     else:
         result_cache_redis_password = os.environ.get("RESULT_CACHE_REDIS_PASSWORD") or None
+    # An unset or blank REQUEST_USAGE_RETENTION_DAYS keeps request usage
+    # collection off (#3734).
+    request_usage_retention_raw = os.environ.get("REQUEST_USAGE_RETENTION_DAYS", "").strip()
+    request_usage_retention_days = (
+        int(request_usage_retention_raw) if request_usage_retention_raw else None
+    )
     return Settings(
         keycloak_issuer_url=os.environ["KEYCLOAK_ISSUER_URL"],  # type: ignore[arg-type]
         keycloak_audience=os.environ["KEYCLOAK_AUDIENCE"],
@@ -2519,6 +2557,7 @@ def get_settings() -> Settings:
         checks_evidence_prune_enabled=parse_bool_env(
             os.environ.get("CHECKS_EVIDENCE_PRUNE_ENABLED", "true"),
         ),
+        request_usage_retention_days=request_usage_retention_days,
         result_handle_max_spill_rows=int(
             os.environ.get("RESULT_HANDLE_MAX_SPILL_ROWS", "10000"),
         ),
@@ -2552,7 +2591,16 @@ def get_settings() -> Settings:
             os.environ.get("RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES", "2097152"),
         ),
         result_query_timeout_seconds=int(
-            os.environ.get("RESULT_QUERY_TIMEOUT_SECONDS", "5"),
+            os.environ.get("RESULT_QUERY_TIMEOUT_SECONDS", "10"),
+        ),
+        result_query_executor_workers=int(
+            os.environ.get("RESULT_QUERY_EXECUTOR_WORKERS", "4"),
+        ),
+        result_query_tenant_concurrency=int(
+            os.environ.get("RESULT_QUERY_TENANT_CONCURRENCY", "4"),
+        ),
+        result_query_rate_per_minute=int(
+            os.environ.get("RESULT_QUERY_RATE_PER_MINUTE", "0"),
         ),
         jsonflux_sample_byte_budget=int(
             os.environ.get("JSONFLUX_SAMPLE_BYTE_BUDGET", "4096"),

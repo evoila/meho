@@ -62,6 +62,7 @@ from sqlalchemy import or_, select
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.broadcast import BroadcastEvent, publish_event
 from meho_backplane.db.models import (
+    AuditEventClass,
     AuditLog,
     GraphEdge,
     GraphHistoryChangeKind,
@@ -238,6 +239,7 @@ def _build_audit_row(
     """
     return AuditLog(
         id=audit_id,
+        event_class=AuditEventClass.OPERATION_EXECUTION,
         occurred_at=datetime.now(UTC),
         operator_sub=operator.sub,
         actor_sub=resolve_actor_sub(),

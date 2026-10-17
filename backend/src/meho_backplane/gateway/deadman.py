@@ -80,7 +80,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.advisory import advisory_lock
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import RunnerAssignmentRow, RunnerPrincipal
+from meho_backplane.db.models import AuditEventClass, RunnerAssignmentRow, RunnerPrincipal
 from meho_backplane.gateway.queue import GATEWAY_LONGPOLL_MAX_WAIT_SECONDS
 from meho_backplane.memory.audit import (
     INTERNAL_METHOD,
@@ -251,6 +251,7 @@ async def _audit_flips(
     for tenant_id, runner_name, lapse_seconds in flipped:
         try:
             await write_internal_audit_row(
+                event_class=AuditEventClass.OPERATION_EXECUTION,
                 operator_sub=SYSTEM_OPERATOR_SUB,
                 tenant_id=tenant_id,
                 method=INTERNAL_METHOD,

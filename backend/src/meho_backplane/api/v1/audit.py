@@ -104,10 +104,9 @@ Error mapping
   (``since`` / ``until`` shorthand) → 400 with the parser's message.
 * :class:`~meho_backplane.audit_query.InvalidCursorError` (tampered
   cursor) → 400 with the substrate's message.
-* :class:`~meho_backplane.audit_query.UnsupportedFilterError`
-  (``parent_audit_id`` in v0.2 — ``agent_session_id`` is a *supported*
-  flat filter as of G8.2 #1009) → 400 with the column-name message from
-  the substrate.
+* :class:`~meho_backplane.audit_query.UnsupportedFilterError` → 400 with
+  the column-name message from the substrate. No filter raises it today;
+  ``parent_audit_id`` and ``agent_session_id`` are both normal filters.
 
 Other exceptions propagate; the chassis middleware turns them into 500.
 """
@@ -280,6 +279,7 @@ async def query(
         parent_audit_id=body.parent_audit_id,
         agent_session_id=body.agent_session_id,
         work_ref=body.work_ref,
+        event_class=body.event_class,
         limit=body.limit,
         cursor=body.cursor,
     )

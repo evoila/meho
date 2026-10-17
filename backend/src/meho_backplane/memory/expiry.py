@@ -82,7 +82,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import Document
+from meho_backplane.db.models import AuditEventClass, Document
 from meho_backplane.memory._internal import MEMORY_SOURCE
 from meho_backplane.memory.audit import (
     INTERNAL_METHOD,
@@ -192,6 +192,7 @@ async def _run_one_tick() -> None:
         unique_scopes = sorted(set(kinds))
         try:
             await write_internal_audit_row(
+                event_class=AuditEventClass.OPERATION_EXECUTION,
                 operator_sub=SYSTEM_OPERATOR_SUB,
                 tenant_id=tenant_id,
                 method=INTERNAL_METHOD,

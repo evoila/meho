@@ -640,7 +640,7 @@ meho audit query [flags]
 - `--limit` — max rows per page (1..1000, server default 100 when omitted)
 - `--op-class` — narrow to one op-class (read|write|credential_read|audit_query|other)
 - `--op-id` — narrow to one op-id (glob with * wildcards)
-- `--parent-audit-id` — narrow to the composite-op subtree under this audit-id
+- `--parent-audit-id` — narrow to the rows whose parent is this audit-id (UUID); e.g. the decision and run rows of one approval request
 - `--principal` — narrow to one operator (JWT subject; partial-match supported)
 - `--result-status` — narrow to one result-status (ok|error|denied)
 - `--session-id` — narrow to one agent session (UUID); the flat companion to `meho audit replay`

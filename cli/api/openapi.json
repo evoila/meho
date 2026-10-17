@@ -4096,7 +4096,7 @@
           "operations"
         ],
         "summary": "Post Result Query",
-        "description": "Read a ``[offset : offset+limit]`` window of a JSONFlux result handle.\n\nDelegates to :func:`read_result_window` \u2014 the same transport-neutral\ncore the MCP ``result_query`` tool wraps \u2014 so REST and MCP share the\ntenant/principal scoping and not-found semantics exactly. The tenant +\nprincipal come from the JWT-validated :class:`Operator`; the body carries\nno tenant, by design.\n\nCloses the REST dead-end #3179 named: ``POST /api/v1/operations/call``\ncan *mint* a reduced ``handle`` for any set-shaped result over the\n50-row / 4 KB thresholds, but before this route a REST consumer had no\nway to read it back and had to fail closed or hand the drill-in to a\nhuman over MCP.\n\nA handle that is unknown, expired (TTL elapsed), or belongs to a\ndifferent operator is a ``404`` with a structured ``detail`` carrying\n``reason=\"handle_not_found\"`` \u2014 the recoverable-miss twin of the MCP\ntool's ``-32602`` / ``data.reason=handle_not_found`` (the caller re-runs\nthe operation for a fresh handle). Cross-operator access is deliberately\nindistinguishable from \"not found\" so the store leaks no existence\nsignal across the operator boundary. A malformed ``handle_id`` (not a\nUUID) or an out-of-range ``offset`` / ``limit`` is a ``422`` at the\nPydantic layer before the handler runs.",
+        "description": "Read a ``[offset : offset+limit]`` window of a JSONFlux result handle.\n\nDelegates to :func:`read_result_window` \u2014 the same transport-neutral\ncore the MCP ``result_query`` tool wraps \u2014 so REST and MCP share the\ntenant/principal scoping and not-found semantics exactly. The tenant +\nprincipal come from the JWT-validated :class:`Operator`; the body carries\nno tenant, by design.\n\nCloses the REST dead-end #3179 named: ``POST /api/v1/operations/call``\ncan *mint* a reduced ``handle`` for any set-shaped result over the\n50-row / 4 KB thresholds, but before this route a REST consumer had no\nway to read it back and had to fail closed or hand the drill-in to a\nhuman over MCP.\n\nA handle that is unknown, expired (TTL elapsed), or belongs to a\ndifferent operator is a ``404`` with a structured ``detail`` carrying\n``reason=\"handle_not_found\"`` \u2014 the recoverable-miss twin of the MCP\ntool's ``-32602`` / ``data.reason=handle_not_found`` (the caller re-runs\nthe operation for a fresh handle). Cross-operator access is deliberately\nindistinguishable from \"not found\" so the store leaks no existence\nsignal across the operator boundary. A malformed ``handle_id`` (not a\nUUID) or an out-of-range ``offset`` / ``limit`` is a ``422`` at the\nPydantic layer before the handler runs. A read refused by the result-read\nrate or capacity check (#3640) is a ``429`` with ``Retry-After``; a page\nthat runs past the time budget is a ``422`` with\n``reason=\"query_timeout\"``, the same as a query.",
         "operationId": "post_result_query_api_v1_operations_result_query_post",
         "parameters": [
           {
@@ -11337,7 +11337,7 @@
           "mcp"
         ],
         "summary": "Mcp Dispatch",
-        "description": "Dispatch a single JSON-RPC 2.0 request or notification.\n\nThe Streamable HTTP body contract (\u00a7\"Sending Messages to the Server\"):\n\n* Input is a JSON object \u2014 batch arrays are unsupported in T1.\n* On a *request* (id present): return 200 + single JSON envelope.\n* On a *notification* (id absent, or method prefix\n  ``notifications/``): return 202 with no body, regardless of\n  whether the handler errored \u2014 JSON-RPC \u00a74.1.2 forbids replying.\n\nAuthentication (G0.5-T2, #247): every request to this route MUST\ncarry a Bearer token whose ``aud`` claim equals the canonical MCP\nresource URI per RFC 8707 \u00a72. Validation runs as a FastAPI\ndependency before the body is parsed, so a missing or invalid\ntoken short-circuits to 401 + ``WWW-Authenticate: Bearer\nresource_metadata=...`` per RFC 9728 \u00a75.1 \u2014 the dispatch pipeline\nnever sees an unauthenticated request. The :class:`Operator` is\ninjected into this handler for downstream use even though T2\nitself doesn't consume the identity beyond the contextvar binding\nside effect; T3 / T4 / T5 will pull tenant / role data off it.\n\nThe function is the orchestrator only; each phase of the dispatch\npipeline lives in its own helper so the per-phase contract is grep-\nable and the cognitive complexity stays under the project's\nSonarCloud threshold:\n\n* :func:`_read_body_capped` \u2014 bounded body read; over-cap payloads\n  are refused with HTTP 413 before any parsing.\n* :func:`_parse_request_body` \u2014 body \u2192 ``dict`` or transport error.\n* :func:`JsonRpcRequest.model_validate` + :func:`_coerce_request_id`\n  \u2014 envelope shape validation.\n* :func:`_validate_protocol_version_header` \u2014 spec \u00a7\"Protocol\n  Version Header\" enforcement.\n* :func:`_dispatch_to_handler` \u2014 handler lookup + execution + error\n  mapping.\n\nGET requests on this path automatically return HTTP 405 (FastAPI's\ndefault for an unmatched method) which satisfies the spec's\nfallback when the server does not implement the GET-opens-SSE\nbranch of the Streamable HTTP transport.",
+        "description": "Dispatch a single JSON-RPC 2.0 request or notification.\n\nThe Streamable HTTP body contract (\u00a7\"Sending Messages to the Server\"):\n\n* Input is a JSON object \u2014 batch arrays are unsupported in T1.\n* On a *request* (id present): return 200 + single JSON envelope.\n* On a *notification* (id absent, or method prefix\n  ``notifications/``): return 202 with no body, regardless of\n  whether the handler errored \u2014 JSON-RPC \u00a74.1.2 forbids replying.\n\nAuthentication (G0.5-T2, #247): every request to this route MUST\ncarry a Bearer token whose ``aud`` claim equals the canonical MCP\nresource URI per RFC 8707 \u00a72. Validation runs as a FastAPI\ndependency before the body is parsed, so a missing or invalid\ntoken short-circuits to 401 + ``WWW-Authenticate: Bearer\nresource_metadata=...`` per RFC 9728 \u00a75.1 \u2014 the dispatch pipeline\nnever sees an unauthenticated request. The :class:`Operator` is\ninjected into this handler for downstream use even though T2\nitself doesn't consume the identity beyond the contextvar binding\nside effect; T3 / T4 / T5 will pull tenant / role data off it.\n\nThe function is the orchestrator only; each phase of the dispatch\npipeline lives in its own helper so the per-phase contract is grep-\nable and the cognitive complexity stays under the project's\nSonarCloud threshold:\n\n* :func:`_read_body_capped` \u2014 bounded body read; over-cap payloads\n  are refused with HTTP 413 before any parsing.\n* :func:`_parse_request_body` \u2014 body \u2192 ``dict`` or transport error.\n* :func:`JsonRpcRequest.model_validate` + :func:`_coerce_request_id`\n  \u2014 envelope shape validation.\n* :func:`_validate_protocol_version_header` \u2014 spec \u00a7\"Protocol\n  Version Header\" enforcement.\n* :func:`_dispatch_to_handler` \u2014 handler lookup + execution + error\n  mapping.\n* :func:`_note_request_usage_outcome` \u2014 records the outcome of a\n  JSON-RPC error envelope for request usage (#3734), after every\n  arm above has produced its response.\n\nGET requests on this path automatically return HTTP 405 (FastAPI's\ndefault for an unmatched method) which satisfies the spec's\nfallback when the server does not implement the GET-opens-SSE\nbranch of the Streamable HTTP transport.",
         "operationId": "mcp_dispatch_mcp_post",
         "parameters": [
           {
@@ -23268,6 +23268,10 @@
             "nullable": true,
             "title": "Policy Decision"
           },
+          "event_class": {
+            "type": "string",
+            "title": "Event Class"
+          },
           "broadcast_event_id": {
             "type": "string",
             "format": "uuid",
@@ -23297,10 +23301,23 @@
           "agent_session_id",
           "work_ref",
           "policy_decision",
+          "event_class",
           "broadcast_event_id"
         ],
         "title": "AuditEntry",
         "description": "One row of the audit query result.\n\nField-to-column mapping (see module docstring for the substrate\nreconciliation):\n\n* ``id`` \u2190 ``audit_log.id``\n* ``ts`` \u2190 ``audit_log.occurred_at``\n* ``tenant_id`` \u2190 ``audit_log.tenant_id``\n* ``principal_sub`` \u2190 ``audit_log.operator_sub``\n* ``target_id`` \u2190 ``audit_log.target_id``\n* ``target_name`` \u2190 LEFT JOIN ``targets.name`` ON ``audit_log.target_id``\n* ``method`` / ``path`` / ``status_code`` / ``request_id`` / ``duration_ms``\n  / ``payload`` \u2190 columns of the same name\n* ``op_id`` / ``op_class`` / ``result_status`` \u2014 computed at query time\n* ``parent_audit_id`` \u2190 ``audit_log.parent_audit_id`` (lineage; #398)\n* ``agent_session_id`` \u2190 ``audit_log.agent_session_id`` (MCP session; #1009)\n* ``work_ref`` \u2190 ``audit_log.work_ref`` (external change-ticket reference;\n  work_ref I1-T1 #1655). NULL until a bind source lands (I1-T2); the flat\n  ``work_ref`` filter on :class:`AuditQueryFilters` is exact-match.\n* ``principal_name`` \u2190 ``payload['principal_name']`` when set. The MCP\n  audit-write helper (``write_mcp_audit_row``) populates it from\n  ``Operator.name`` since G0.15-T3 #1212; HTTP-chassis rows remain\n  None pending a separate fix to bind ``name`` to contextvars in\n  ``verify_jwt_and_bind``.\n* ``broadcast_event_id`` \u2014 v0.2 placeholder, always None (FK direction\n  is reversed: ``BroadcastEvent.audit_id`` points at the audit row)."
+      },
+      "AuditEventClass": {
+        "type": "string",
+        "enum": [
+          "operation_execution",
+          "policy_decision",
+          "approval_decision",
+          "security_event",
+          "legacy_request"
+        ],
+        "title": "AuditEventClass",
+        "description": "What kind of accountable event one ``audit_log`` row records (#3733).\n\nThe set is closed. The database CHECK ``ck_audit_log_event_class``\nrejects any other value, so a new class needs a code change and a\nmigration together.\n\n* :attr:`OPERATION_EXECUTION` -- an action ran: a dispatched operation\n  (success or failure), or a MEHO-internal action such as a topology\n  edit, a retention sweep or a reaper.\n* :attr:`POLICY_DECISION` -- a gate decided about a call before it ran:\n  a policy deny, a rate-limit refusal, or a park for approval.\n* :attr:`APPROVAL_DECISION` -- a person (or a standing grant) approved,\n  rejected, or let an approval request expire.\n* :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a\n  refresh-token replay or a broken satellite effect chain.\n* :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every\n  row written before migration ``0106`` reads as this class; it is never\n  guessed from ``method`` / ``path``. The REST and MCP request wrapper\n  rows also keep this class until they are retired."
       },
       "AuditQueryRequest": {
         "properties": {
@@ -23369,6 +23386,10 @@
             "maxLength": 256,
             "nullable": true,
             "title": "Work Ref"
+          },
+          "event_class": {
+            "$ref": "#/components/schemas/AuditEventClass",
+            "nullable": true
           },
           "limit": {
             "type": "integer",
@@ -31512,6 +31533,10 @@
             "nullable": true,
             "title": "Policy Decision"
           },
+          "event_class": {
+            "type": "string",
+            "title": "Event Class"
+          },
           "broadcast_event_id": {
             "type": "string",
             "format": "uuid",
@@ -31552,6 +31577,7 @@
           "agent_session_id",
           "work_ref",
           "policy_decision",
+          "event_class",
           "broadcast_event_id",
           "depth"
         ],

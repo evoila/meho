@@ -2893,6 +2893,8 @@ async def test_dispatch_returns_connector_error_when_handler_raises(
         )
     assert len(rows) == 1
     assert rows[0].payload["result_status"] == "error"
+    # #3733: a failed run is still an execution record.
+    assert rows[0].event_class == "operation_execution"
 
     assert len(captured_events) == 1
     assert captured_events[0].result_status == "error"
@@ -3263,6 +3265,12 @@ async def test_audit_row_stamps_policy_decision_per_verdict(
     # path wrote no row (it never executed).
     assert by_path["approval.request"].policy_decision == "needs-approval"
     assert "vault.kv.needsapproval" not in by_path
+
+    # #3733: each writer declares its event class. The executed op is an
+    # execution record; the deny and the park are gate decisions.
+    assert by_path["vault.kv.autoexec"].event_class == "operation_execution"
+    assert by_path["vault.kv.deny"].event_class == "policy_decision"
+    assert by_path["approval.request"].event_class == "policy_decision"
 
 
 @pytest.mark.asyncio

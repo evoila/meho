@@ -970,6 +970,23 @@ _VERIFY_POLL_INTERVAL_SECONDS: str = "0.3"
 _DIG_POLL_FLAGS: str = "+short +timeout=1 +tries=1"
 
 
+def _dig_observe(var: str, quoted_fqdn: str, record_type: str) -> str:
+    """Render one ``dig`` call that stores its answer and its exit status.
+
+    The answer lands in ``<var>``, the exit status in ``<var>_RC``. The
+    absence predicates need the status: ``dig`` exits 0 for every real
+    DNS answer (including NXDOMAIN) and non-zero when no server replied.
+    The error text of a failed lookup says nothing about the zone, so it
+    must never count as "the record is gone" -- the poll retries instead
+    and, if the server never answers, fails and rolls back.
+    """
+    return (
+        f"{var}_RC=0; "
+        f"{var}=$(dig @localhost {quoted_fqdn} {record_type} {_DIG_POLL_FLAGS} 2>&1) "
+        f"|| {var}_RC=$?;"
+    )
+
+
 def _poll_verify(*, observe: str, success_test: str, diagnostic: str) -> str:
     """Render a bounded poll loop around a verify predicate.
 
@@ -1056,21 +1073,23 @@ def _dig_remove_verify(fqdn: str) -> str:
     """Record-level verify predicate for a no-views / single-view remove.
 
     The FQDN must resolve to neither an A nor an AAAA answer. ``+short``
-    exits 0 on empty output, so emptiness is asserted explicitly. The
-    check is polled because the whole-server reload is asynchronous
-    (#4205). On failure the residual answers are echoed for a
-    diagnosable detail (#2897).
+    exits 0 on empty output, so emptiness is asserted explicitly, and
+    only after both lookups succeeded: a lookup that got no reply is not
+    proof of absence, so it is retried. The check is polled because the
+    whole-server reload is asynchronous (#4205). On failure the last
+    answers and dig exit codes are echoed for a diagnosable detail
+    (#2897).
     """
     quoted_fqdn = shlex.quote(fqdn)
     return _poll_verify(
         observe=(
-            f"A=$(dig @localhost {quoted_fqdn} A {_DIG_POLL_FLAGS} 2>&1) || true; "
-            f"AAAA=$(dig @localhost {quoted_fqdn} AAAA {_DIG_POLL_FLAGS} 2>&1) || true;"
+            f"{_dig_observe('A', quoted_fqdn, 'A')} {_dig_observe('AAAA', quoted_fqdn, 'AAAA')}"
         ),
-        success_test='[ -z "$A" ] && [ -z "$AAAA" ]',
+        success_test=('[ "$A_RC" -eq 0 ] && [ "$AAAA_RC" -eq 0 ] && [ -z "$A" ] && [ -z "$AAAA" ]'),
         diagnostic=(
-            'printf "%s still resolves after remove (A: %s AAAA: %s)\\n" '
-            f'{quoted_fqdn} "$A" "$AAAA";'
+            'printf "%s still resolves after remove, or dig got no answer '
+            '(A exit %s: %s AAAA exit %s: %s)\\n" '
+            f'{quoted_fqdn} "$A_RC" "$A" "$AAAA_RC" "$AAAA";'
         ),
     )
 
@@ -1087,20 +1106,23 @@ def _dig_value_absent_verify(fqdn: str, record_type: str, rdata: str) -> str:
     the enum-validated A / AAAA tokens (never operator-free-text), so it is
     safe to interpolate; ``fqdn`` / ``rdata`` are ``shlex.quote``-wrapped.
     The check is polled because the whole-server reload is asynchronous
-    (#4205). On a still-present value the last observed ``dig`` output is
-    echoed so the ``AtomicApplyError`` detail is diagnosable (the #2897
-    discipline).
+    (#4205). Absence only counts when ``dig`` exited 0: a lookup that got
+    no reply prints error text without the value, which must not pass as
+    "the value is gone", so it is retried. On failure the last observed
+    ``dig`` output and exit code are echoed so the ``AtomicApplyError``
+    detail is diagnosable (the #2897 discipline).
     """
     quoted_fqdn = shlex.quote(fqdn)
     quoted_rdata = shlex.quote(rdata)
     return _poll_verify(
-        observe=(
-            f"ANSWER=$(dig @localhost {quoted_fqdn} {record_type} {_DIG_POLL_FLAGS} 2>&1) || true;"
+        observe=_dig_observe("ANSWER", quoted_fqdn, record_type),
+        success_test=(
+            f'[ "$ANSWER_RC" -eq 0 ] && ! printf "%s\\n" "$ANSWER" | grep -qxF {quoted_rdata}'
         ),
-        success_test=f'! printf "%s\\n" "$ANSWER" | grep -qxF {quoted_rdata}',
         diagnostic=(
-            f'printf "{record_type} value %s still resolves for %s after delete; '
-            f'last dig +short returned:\\n%s\\n" {quoted_rdata} {quoted_fqdn} "$ANSWER";'
+            f'printf "{record_type} value %s still resolves for %s after delete, '
+            'or dig got no answer; last dig +short (exit %s) returned:\\n%s\\n" '
+            f'{quoted_rdata} {quoted_fqdn} "$ANSWER_RC" "$ANSWER";'
         ),
     )
 

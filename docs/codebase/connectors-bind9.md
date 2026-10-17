@@ -414,6 +414,14 @@ predicate now retries up to `_VERIFY_POLL_ATTEMPTS` (10) times,
 answering cannot push the poll past the 90 s SSH budget of the apply. A
 record that never appears still fails, rolls back, and exits 12.
 
+The two absence checks (`_dig_remove_verify`, `_dig_value_absent_verify`)
+only accept "the record is gone" when `dig` exited 0 (`_dig_observe`
+stores the exit status next to the answer). `dig` exits 0 for every real
+DNS answer, including NXDOMAIN, and non-zero when no server replied. A
+lookup that got no reply prints error text without the value, which must
+not pass as absence: the poll retries it and, if the server never
+answers, fails and rolls back.
+
 All predicates **echo their last observed state on failure** so the
 `AtomicApplyError` detail is diagnosable -- the pre-#2897 silent
 `grep -q` / `[ -z … ]` predicates surfaced an empty `exception_message`.

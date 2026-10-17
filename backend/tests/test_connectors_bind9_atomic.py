@@ -465,10 +465,10 @@ class TestViewAwareVerifyBuilders:
     @pytest.mark.parametrize(
         "cmd",
         [
-            _dig_add_verify("api.evba.lab", "10.5.50.99", "A"),
-            _dig_remove_verify("api.evba.lab"),
-            _dig_value_absent_verify("api.evba.lab", "A", "10.5.50.99"),
-            _zonestatus_serial_verify("evba.lab", "internal", 2026051802),
+            _dig_add_verify("api.example.test", "192.0.2.99", "A"),
+            _dig_remove_verify("api.example.test"),
+            _dig_value_absent_verify("api.example.test", "A", "192.0.2.99"),
+            _zonestatus_serial_verify("example.test", "internal", 2026051802),
         ],
         ids=["add", "remove", "value-absent", "zonestatus"],
     )
@@ -482,9 +482,9 @@ class TestViewAwareVerifyBuilders:
     @pytest.mark.parametrize(
         "cmd",
         [
-            _dig_add_verify("api.evba.lab", "10.5.50.99", "A"),
-            _dig_remove_verify("api.evba.lab"),
-            _dig_value_absent_verify("api.evba.lab", "A", "10.5.50.99"),
+            _dig_add_verify("api.example.test", "192.0.2.99", "A"),
+            _dig_remove_verify("api.example.test"),
+            _dig_value_absent_verify("api.example.test", "A", "192.0.2.99"),
         ],
         ids=["add", "remove", "value-absent"],
     )
@@ -493,11 +493,34 @@ class TestViewAwareVerifyBuilders:
         # even when named stops answering, so the poll ends in rollback.
         assert cmd.count("dig @localhost") == cmd.count("+short +timeout=1 +tries=1")
 
+    @pytest.mark.parametrize(
+        ("cmd", "status_checks"),
+        [
+            (_dig_remove_verify("api.example.test"), ['[ "$A_RC" -eq 0 ]', '[ "$AAAA_RC" -eq 0 ]']),
+            (
+                _dig_value_absent_verify("api.example.test", "A", "192.0.2.99"),
+                ['[ "$ANSWER_RC" -eq 0 ]'],
+            ),
+        ],
+        ids=["remove", "value-absent"],
+    )
+    def test_absence_predicates_require_a_successful_lookup(
+        self, cmd: str, status_checks: list[str]
+    ) -> None:
+        # A dig that got no reply prints error text without the value. That
+        # must not pass as "the record is gone"; only a dig that exited 0
+        # may prove absence.
+        for check in status_checks:
+            assert check in cmd
+        assert "|| true" not in cmd
+
 
 # A fake ``dig`` on PATH that replays canned answers one call at a time.
 # ``<empty>`` stands for an empty answer (what ``+short`` prints for a
-# name with no records). The last answer repeats once the list runs out,
-# so a "never appears" scenario is one line long.
+# name with no records). ``<no-reply>`` stands for a server that does not
+# answer: real dig then prints its error text and exits 9. The last
+# answer repeats once the list runs out, so a "never appears" scenario
+# is one line long.
 _FAKE_DIG = """\
 #!/bin/sh
 n=$(cat "$FAKE_DIG_COUNTER" 2>/dev/null || echo 0)
@@ -505,6 +528,10 @@ n=$((n + 1))
 echo "$n" > "$FAKE_DIG_COUNTER"
 line=$(sed -n "${n}p" "$FAKE_DIG_ANSWERS")
 [ -n "$line" ] || line=$(tail -n 1 "$FAKE_DIG_ANSWERS")
+if [ "$line" = "<no-reply>" ]; then
+  printf ';; communications error to 127.0.0.1#53: timed out\n;; no servers could be reached\n'
+  exit 9
+fi
 [ "$line" = "<empty>" ] || printf '%s\n' "$line"
 """
 
@@ -549,44 +576,80 @@ class TestVerifyPredicatesUnderBash:
         return proc.returncode, proc.stdout + proc.stderr, calls
 
     def test_add_passes_when_record_shows_up_late(self, tmp_path: Any) -> None:
-        cmd = _dig_add_verify("api.evba.lab", "10.5.50.99", "A")
-        code, _out, calls = self._run(tmp_path, cmd, ["<empty>", "<empty>", "10.5.50.99"])
+        cmd = _dig_add_verify("api.example.test", "192.0.2.99", "A")
+        code, _out, calls = self._run(tmp_path, cmd, ["<empty>", "<empty>", "192.0.2.99"])
         assert code == 0
         assert calls == 3
 
     def test_add_fails_with_last_answer_when_record_never_shows_up(self, tmp_path: Any) -> None:
-        cmd = _dig_add_verify("api.evba.lab", "10.5.50.99", "A")
-        code, out, calls = self._run(tmp_path, cmd, ["10.5.50.2"])
+        cmd = _dig_add_verify("api.example.test", "192.0.2.99", "A")
+        code, out, calls = self._run(tmp_path, cmd, ["192.0.2.2"])
         assert code == 1
         assert calls == 3  # every attempt used before giving up
         assert "last dig +short returned:" in out
-        assert "10.5.50.2" in out
+        assert "192.0.2.2" in out
 
     def test_remove_passes_once_both_families_are_gone(self, tmp_path: Any) -> None:
-        cmd = _dig_remove_verify("api.evba.lab")
+        cmd = _dig_remove_verify("api.example.test")
         # Each attempt asks A then AAAA: the first still sees the A record.
-        code, _out, calls = self._run(tmp_path, cmd, ["10.5.50.2", "<empty>", "<empty>"])
+        code, _out, calls = self._run(tmp_path, cmd, ["192.0.2.2", "<empty>", "<empty>"])
         assert code == 0
         assert calls == 4
 
     def test_remove_fails_with_residual_answers(self, tmp_path: Any) -> None:
-        cmd = _dig_remove_verify("api.evba.lab")
-        code, out, _calls = self._run(tmp_path, cmd, ["10.5.50.2"])
+        cmd = _dig_remove_verify("api.example.test")
+        code, out, _calls = self._run(tmp_path, cmd, ["192.0.2.2"])
         assert code == 1
-        assert "still resolves after remove (A: 10.5.50.2 AAAA: 10.5.50.2)" in out
+        assert "(A exit 0: 192.0.2.2 AAAA exit 0: 192.0.2.2)" in out
+
+    def test_remove_does_not_accept_a_lookup_without_reply(self, tmp_path: Any) -> None:
+        # Both lookups fail every time: the empty-looking result must not
+        # count as "gone". All attempts are used, then the check fails.
+        cmd = _dig_remove_verify("api.example.test")
+        code, out, calls = self._run(tmp_path, cmd, ["<no-reply>"])
+        assert code == 1
+        assert calls == 6  # 3 attempts x (A + AAAA)
+        assert "or dig got no answer (A exit 9:" in out
+        assert "no servers could be reached" in out
+
+    def test_remove_passes_once_the_server_answers_again(self, tmp_path: Any) -> None:
+        cmd = _dig_remove_verify("api.example.test")
+        code, _out, calls = self._run(
+            tmp_path, cmd, ["<no-reply>", "<no-reply>", "<empty>", "<empty>"]
+        )
+        assert code == 0
+        assert calls == 4
 
     def test_value_absent_passes_once_value_is_gone_and_sibling_stays(self, tmp_path: Any) -> None:
-        cmd = _dig_value_absent_verify("api.evba.lab", "A", "10.5.50.99")
-        code, _out, calls = self._run(tmp_path, cmd, ["10.5.50.99", "10.5.50.2"])
+        cmd = _dig_value_absent_verify("api.example.test", "A", "192.0.2.99")
+        code, _out, calls = self._run(tmp_path, cmd, ["192.0.2.99", "192.0.2.2"])
         assert code == 0
         assert calls == 2
 
     def test_value_absent_fails_when_value_stays(self, tmp_path: Any) -> None:
-        cmd = _dig_value_absent_verify("api.evba.lab", "A", "10.5.50.99")
-        code, out, _calls = self._run(tmp_path, cmd, ["10.5.50.99"])
+        cmd = _dig_value_absent_verify("api.example.test", "A", "192.0.2.99")
+        code, out, _calls = self._run(tmp_path, cmd, ["192.0.2.99"])
         assert code == 1
-        assert "still resolves for api.evba.lab after delete" in out
-        assert "10.5.50.99" in out
+        assert "still resolves for api.example.test after delete" in out
+        assert "last dig +short (exit 0) returned:" in out
+        assert "192.0.2.99" in out
+
+    def test_value_absent_does_not_accept_a_lookup_without_reply(self, tmp_path: Any) -> None:
+        # The error text of a timed-out dig never contains the value. Before
+        # the exit-status check this passed on the first attempt and skipped
+        # the rollback; now every attempt is used and the check fails.
+        cmd = _dig_value_absent_verify("api.example.test", "A", "192.0.2.99")
+        code, out, calls = self._run(tmp_path, cmd, ["<no-reply>"])
+        assert code == 1
+        assert calls == 3
+        assert "or dig got no answer; last dig +short (exit 9) returned:" in out
+        assert "no servers could be reached" in out
+
+    def test_value_absent_passes_once_the_server_answers_again(self, tmp_path: Any) -> None:
+        cmd = _dig_value_absent_verify("api.example.test", "A", "192.0.2.99")
+        code, _out, calls = self._run(tmp_path, cmd, ["<no-reply>", "192.0.2.2"])
+        assert code == 0
+        assert calls == 2
 
 
 # ---------------------------------------------------------------------------

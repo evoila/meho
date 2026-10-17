@@ -57,6 +57,7 @@ __all__ = [
     "SLUG_PATTERN",
     "InvalidKbSlugError",
     "KbEntry",
+    "KbEntryRevision",
     "KbEntrySearchHit",
     "KbIngestConflict",
     "KbIngestionResult",
@@ -168,7 +169,12 @@ class KbEntry(BaseModel):
     operator-facing identifier (``documents.source_id`` on the SQL
     side); the underlying ``Document.id`` UUID is also surfaced for
     cross-correlation with audit-log rows and future MCP resource
-    URIs.
+    URIs. ``id`` is the entry UUID.
+
+    ``revision_id`` is the retained revision that holds this body. Pass
+    it with ``id`` to ``meho://kb/id/{entry}/revision/{revision}`` to
+    read this exact body later, even after the entry changes. It is
+    ``None`` only for a row that has no stored revision.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -181,6 +187,38 @@ class KbEntry(BaseModel):
     provenance: KbProvenance
     created_at: datetime
     updated_at: datetime
+    revision_id: uuid.UUID | None = None
+
+
+class KbEntryRevision(BaseModel):
+    """One retained, immutable body of a kb entry.
+
+    Returned by :meth:`KbService.get_revision`. ``entry_id`` is the
+    entry UUID (``KbEntry.id``) and ``revision_id`` the revision UUID.
+    ``revision_number`` counts up from 1 per entry. ``body`` and
+    ``body_hash`` never change after the revision is stored.
+
+    ``origin="backfill-current"`` means the revision was copied from
+    the entry's body when retained revisions were first added. It is
+    the body the entry had at that time, not a historical version, and
+    ``embedding_model`` / ``chunker_version`` are ``None`` because they
+    were not recorded. ``origin="write"`` revisions record both.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    entry_id: uuid.UUID
+    revision_id: uuid.UUID
+    tenant_id: uuid.UUID
+    slug: str
+    revision_number: int
+    body: str
+    body_hash: str
+    provenance: KbProvenance
+    origin: Literal["write", "backfill-current"]
+    embedding_model: str | None
+    chunker_version: str | None
+    created_at: datetime
 
 
 class KbEntrySearchHit(BaseModel):

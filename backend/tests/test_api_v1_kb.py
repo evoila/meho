@@ -887,6 +887,27 @@ def test_show_returns_provenance_block(client: TestClient) -> None:
     }
 
 
+def test_show_returns_entry_and_revision_ids(client: TestClient) -> None:
+    """``GET /api/v1/kb/{slug}`` names the current revision for an exact read later."""
+    tenant_a = uuid.uuid4()
+    key, token = _operator_token(tenant_id=tenant_a)
+    revision_id = UUID("33333333-3333-3333-3333-333333333333")
+    entry = _make_entry().model_copy(update={"revision_id": revision_id})
+    with (
+        respx.mock as mock_router,
+        patch(
+            "meho_backplane.api.v1.kb.KbService.get_entry",
+            AsyncMock(return_value=entry),
+        ),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get("/api/v1/kb/k8s-ingress", headers=_authed(token))
+
+    assert response.status_code == 200
+    assert response.json()["id"] == "11111111-1111-1111-1111-111111111111"
+    assert response.json()["revision_id"] == str(revision_id)
+
+
 def test_ingest_both_directory_and_tarball_returns_422(client: TestClient) -> None:
     """Both ``directory`` AND ``tarball_url`` set → 422 (validator)."""
     tenant_a = uuid.uuid4()

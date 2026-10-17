@@ -154,6 +154,8 @@ def _seed_node(
     name: str,
     target_id: uuid.UUID | None = None,
     discovered_by: str = "test",
+    source: str = "auto",
+    source_scope: str | None = None,
 ) -> uuid.UUID:
     """Insert one ``graph_node`` row and return its id."""
     node_id = uuid.uuid4()
@@ -168,10 +170,12 @@ def _seed_node(
                     kind=kind,
                     name=name,
                     target_id=target_id,
+                    source=source,
                     properties={},
                     discovered_by=discovered_by,
                     first_seen=datetime.now(UTC),
                     last_seen=datetime.now(UTC),
+                    source_scope=source_scope,
                 ),
             )
 
@@ -607,6 +611,47 @@ def test_graph_excludes_cross_tenant_edges() -> None:
     # Tenant B's edge id never surfaces.
     edge_ids = {e["data"]["id"] for e in edges}
     assert str(b_edge) not in edge_ids
+
+
+def test_graph_hides_edges_with_a_legacy_scoped_end() -> None:
+    """A curated edge to a row the scope cut-over set aside is not drawn.
+
+    The cut-over (#3749) keeps such an edge for history and keeps the
+    ``legacy:`` row in the node list for repair, but the edge is not
+    a live relationship: neither the normal graph nor the drawer shows
+    it. The edge between two live rows stays.
+    """
+    _seed_tenant_row(_TENANT_A, "tenant-a")
+    host_id = _seed_node(tenant_id=_TENANT_A, kind="host", name="host-1")
+    vm_id = _seed_node(tenant_id=_TENANT_A, kind="vm", name="vm-1")
+    set_aside_id = _seed_node(
+        tenant_id=_TENANT_A,
+        kind="vault-role",
+        name="legacy-vault-role",
+        source="curated",
+        source_scope=f"legacy:{uuid.uuid4()}",
+    )
+    live_edge = _seed_edge(tenant_id=_TENANT_A, from_node_id=vm_id, to_node_id=host_id)
+    quarantined = _seed_edge(
+        tenant_id=_TENANT_A,
+        from_node_id=set_aside_id,
+        to_node_id=host_id,
+        kind="authenticates-via",
+        source="curated",
+    )
+
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/topology?view=graph")
+    assert response.status_code == 200, response.text
+    elements = _extract_data_island(response.text, "topology-graph-data")
+    assert isinstance(elements, list)
+    nodes = {e["data"]["id"] for e in elements if e.get("group") == "nodes"}
+    assert nodes == {str(host_id), str(vm_id), str(set_aside_id)}, "the row stays listed"
+    edges = {e["data"]["id"] for e in elements if e.get("group") == "edges"}
+    assert edges == {str(live_edge)}
+    assert str(quarantined) not in response.text
 
 
 # ---------------------------------------------------------------------------

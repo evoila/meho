@@ -119,12 +119,12 @@ funnel through these primitives.
   `AmbiguousNodeError` (bare name maps to multiple kinds in the
   tenant) / `NodeNotFoundError` (no match — including names that
   exist only in another tenant). Works for non-target nodes
-  (`target_id IS NULL`) as well as registered targets. The
-  ambiguity-probe SQL is shared with the traversal verbs'
-  `_assert_anchor_unambiguous`, so the "name → multiple kinds"
-  surface is single-sourced; traversal's not-found behavior is
-  unchanged (empty result, not a raise) — only `resolve_node`
-  surfaces `NodeNotFoundError`.
+  (`target_id IS NULL`) as well as registered targets. The closure
+  and path verbs resolve their anchors through it too, so the
+  ambiguity rule is single-sourced. It skips `legacy:` rows and, after
+  the scope cut-over (#3749), also raises `AmbiguousNodeError` (with
+  `scopes`) when one `(kind, name)` exists in several scopes.
+  `find_path` turns its `NodeNotFoundError` into `None`.
 
 **Edge listing — entry point (async, read-only, G9.2-T4 #596):**
 
@@ -332,8 +332,9 @@ the place to record where a name is unique, and changes no writer.
   unique index, so a fourth nullable key alone would let two unresolved
   rows share a name. A non-unique `graph_node_tenant_scope_kind_name_idx`
   on `(tenant_id, source_scope, kind, name)` is added for scope lookups.
-- **Writers unchanged.** Refresh, seeding and bulk import still write
-  `NULL`, so rows written before the cut-over also read as `unresolved`.
+- **Writers unchanged until the cut-over.** In `legacy` mode refresh and
+  seeding still write `NULL`, so rows written before the cut-over also
+  read as `unresolved`. The cut-over below switches them.
 - **Downgrade.** Keeps every row, drops the two columns, the CHECK and
   the scope index, and keeps `graph_node_scope_snapshot`. The snapshot
   cannot be re-taken later, because a refresh moves `target_id` to the
@@ -343,12 +344,159 @@ the place to record where a name is unique, and changes no writer.
   write (any `target:` / `legacy:` value, or a value from another
   writer): the old schema cannot hold it, so recover by rolling forward.
 - **Not in this step.** Writing scoped nodes, splitting or repairing
-  rows, dropping the old key and changing path answers belong to the
-  staged cut-over (#3749) and the path work (#3760).
+  rows and dropping the old key belong to the staged cut-over (#3749,
+  next section). Path answer changes belong to #3760.
 - **Tests.** `tests/migrations/test_migration_0108_add_graph_node_source_scope.py`
   (SQLite), `tests/integration/test_topology_source_scope_migration.py`
   (PostgreSQL: NULL uniqueness, upgrade/downgrade, refusal) and the
   legacy-read tests in `tests/integration/test_topology_query.py`.
+
+### Source scope cut-over (#3749)
+
+The cut-over moves the graph from the old key `(tenant_id, kind, name)`
+to `(tenant_id, source_scope, kind, name)`. After it, two clusters can
+each own a `default` namespace, and no answer joins them through that
+shared name. It needs fresh answers from every target, so it is an
+operator step, not a migration. Code: `topology/scope_repair/`.
+
+**Mode.** `topology_identity_state` (migration `0111`) holds one row:
+`mode` is `legacy` or `scoped`. Every install starts `legacy`; only the
+cut-over sets `scoped`. `topology/identity_mode.py` reads it. Writers
+read it with `FOR SHARE` inside their own transaction. Staging and the
+cut-over take `FOR UPDATE` first, so a writer never mixes the two modes
+and no write lands while staging runs.
+
+| Writer | `legacy` mode | `scoped` mode |
+|---|---|---|
+| refresh | keys on `(kind, name)` tenant-wide, adopts rows across targets, writes `NULL` scope | loads only rows in the scope each hint maps to: `target:<target id>`, or `global` for the target's own `kind='target'` node; never touches another target's rows, `global` seeds or `legacy:` rows; soft-deletes only rows in its own scope (plus its own `global` target node) |
+| `create_or_get_node` | writes `NULL` scope | writes `global` (provenance `curated`) |
+
+Both modes skip `legacy:` rows when a seed looks for a row to merge
+into, and a seed of a `(kind, name)` that exists in several scopes
+raises `AmbiguousNodeError`.
+
+**Commands** (run inside the backplane image; they use its settings):
+
+```
+python -m meho_backplane.topology.scope_repair stage
+python -m meho_backplane.topology.scope_repair show <manifest-id>
+python -m meho_backplane.topology.scope_repair cutover <manifest-id>
+```
+
+**Stage** (`stage.py`). Calls `discover_topology` on every live target
+of every tenant (same call as a refresh, as `system:topology-scope-repair`)
+and never writes to the graph. It reads the graph, builds the plan
+(`plan.py`, pure) and saves one `topology_scope_manifest` row: status,
+the graph `snapshot_version` and the plan as JSON. A target that fails
+is recorded with its exception class name only. The plan stores keys,
+scopes, ids and reasons, never properties.
+
+The whole run is one transaction. It holds the mode row (`FOR UPDATE`)
+and `LOCK TABLE graph_node, graph_edge IN EXCLUSIVE MODE`, so graph
+writes wait until the manifest is saved. Reads go on. A refresh that
+starts while a target is being asked cannot add a row the plan would
+set aside as unreported: the plan is built against the graph the
+targets were asked against. Waiting writers run after staging, so run
+the cut-over soon after; a refresh that changes the graph in between
+makes the cut-over refuse (`snapshot_changed`), and you stage again.
+
+Plan rules per tenant. A *claim* is one target reporting a node, in the
+scope above.
+
+| Existing row | Decision |
+|---|---|
+| claimed in exactly one scope | `adopt`: keeps its id, history and edges; gets the scope |
+| claimed in two or more scopes | `legacy`: set aside as `legacy:<its id>` (curated rows too); each claimant gets a new row |
+| not claimed, `kind='target'` or curated | `keep` as `global` |
+| not claimed, probe-made | `legacy` (`not_rediscovered`) |
+
+A claim with no existing row is `publish` (a new row with empty
+properties; the next refresh fills them). Discovered edges link the
+final ids: `adopt` an existing edge with the same ends and kind, else
+`publish`. Every other existing edge is decided too:
+
+| Existing edge no discovery adopted | Decision |
+|---|---|
+| touches a `legacy` row | `quarantine` (`endpoint_set_aside`): stays for history; readers skip it through the legacy row |
+| probe-made, no target reported it again | `quarantine` (`not_rediscovered`): the cut-over writes its tombstone and deletes the row. It was another target's claim on a row that now belongs to one target, so it would join two targets that share nothing |
+| curated, both ends stay readable | left as it is (operator data) |
+
+The plan is the same whatever order the targets answered in. It is
+*complete* (manifest `staged`) only when every target answered and there
+is no problem; otherwise the manifest is `incomplete`. Problems:
+`target_unavailable`, `unresolved_edge` (an edge to a node the same
+target did not report), `global_name_claimed_twice`.
+
+`snapshot_version` is a SHA-256 over node ids, keys, `source`,
+`source_scope` and liveness, and edge ids, ends, kind, `source` and
+liveness. It leaves out properties, timestamps and `target_id`: a
+refresh rewrites those on every run (`target_id` flips between targets
+that share a name) and the plan does not use them.
+
+**Cut over** (`cutover.py`), one PostgreSQL transaction:
+
+1. lock the mode row (`FOR UPDATE`); refuse unless `legacy`;
+2. load the manifest (`FOR UPDATE`); refuse unless `staged`; refuse a
+   malformed scope, a problem or an unavailable target in the plan;
+3. `LOCK TABLE graph_node, graph_edge IN EXCLUSIVE MODE`, fingerprint
+   the graph again, refuse a different `snapshot_version`;
+4. `LOCK TABLE targets IN EXCLUSIVE MODE` (reads go on, target changes
+   wait until the cut-over commits), then compare the live target set
+   with the staged one: refuse when a staged target was deleted
+   (`target_unavailable`) or a target was added after staging
+   (`target_added`; its rows are not in the plan and the graph
+   fingerprint cannot see a target with no rows yet);
+5. drop `graph_node_tenant_kind_name_idx`;
+6. apply node then edge decisions with history rows (node history
+   snapshots now include `source_scope`) and one audit row per tenant
+   (`topology.scope_cutover`, `operation_execution`). `adopt` sets the
+   scope, `target_id` (probe rows) and `last_seen`; `legacy` sets
+   `legacy:<id>` and soft-deletes probe rows; a quarantined edge with a
+   legacy end is soft-deleted when probe-made and left as it is when
+   curated; a probe edge no target reported again is deleted after a
+   `removed` history row (a soft-deleted edge would still be a hop,
+   because traversal keeps stale rows by default);
+7. `source_scope` `SET NOT NULL`; recreate
+   `graph_node_tenant_scope_kind_name_idx` as unique;
+8. set `mode = 'scoped'`; mark the manifest `cut_over`.
+
+Refusals (`CutoverRefusedError.reason`) happen before step 5, so the old
+graph is unchanged and readable. Refusals about the manifest
+(`snapshot_changed`, `target_unavailable`, `target_added`,
+`malformed_scope`, `unresolved_edge`) mark it `refused`; stage again. A crash at any step
+rolls the whole transaction back; the same manifest can then roll
+forward if the graph has not changed. There is no way back to the old
+key: a second cut-over and a new staging run refuse once `scoped`, and
+the `0111` downgrade refuses too (as does `0108`'s, on `target:` /
+`legacy:` values).
+
+**Schema after the cut-over** differs from the ORM declaration in
+`db/models.py`, which still declares the pre-cut-over shape (old unique
+key, nullable `source_scope`). Fresh installs and the test database
+start `legacy`, so the ORM matches them. A later migration can require
+`scoped` and update the model.
+
+**Readers** need no mode. `legacy:` rows only exist after the cut-over,
+and every reader skips them: `resolve_node` (and so annotate, bulk
+import, history and the closure verbs), the traversal CTEs (never step
+onto one), `find_path` (never a hop), the UI resolver and the UI BFS
+overlays. `list_edges` skips every edge with a `legacy:` end, on the
+REST, CLI and MCP edge listings alike, and so do the console graph
+view and the node drawer's edge lists. `list_nodes` and the timeline
+still show legacy rows, with `scope_status = legacy`, for repair
+reports. When one `(kind, name)`
+exists in several scopes, `resolve_node` raises `AmbiguousNodeError`
+with `scopes` set instead of picking one; the traversal and path
+statements anchor on the resolved row id.
+
+**Tests.** `tests/test_topology_scope_plan.py` (plan rules, order,
+snapshot), `tests/migrations/test_migration_0111_add_topology_scope_cutover_state.py`
+(SQLite: tables, CHECKs, downgrade guard) and
+`tests/integration/test_topology_scope_cutover.py` (PostgreSQL: staged
+manifest, a refresh that waits during staging, atomic cut-over,
+refusals, interrupted cut-over, soft-delete, rollback guard, curated
+quarantine with the edge listing, an old edge from a target that
+stopped reporting a shared row).
 
 ### `TopologyPath` — frozen Pydantic v2 (read half)
 
@@ -569,26 +717,25 @@ MCP `query_topology.include_stale`.
 
 ### Anchor disambiguation
 
-`graph_node` uniqueness is `(tenant_id, kind, name)`. Resolving an
-anchor by `name` alone would match every kind with that name and
-silently merge unrelated closures. `_assert_anchor_unambiguous` probes
-the distinct kinds for `(tenant_id, name)` before traversing: a no-op
-when `kind` is supplied or the name maps to one kind, but a raise of
-`AmbiguousNodeError` (a `ValueError` subclass carrying `name` + the
-matched `kinds`) when `kind` is omitted and the name spans multiple
-kinds. `find_path` applies the same probe independently to each
-endpoint. Alias → name resolution remains the T5/T6 router's job; this
+`graph_node` uniqueness is `(tenant_id, kind, name)` before the scope
+cut-over and `(tenant_id, source_scope, kind, name)` after it. Resolving
+an anchor by `name` alone would match every kind with that name and
+silently merge unrelated closures. Every verb resolves its anchor with
+`resolve_node` first: it raises `AmbiguousNodeError` (a `ValueError`
+subclass carrying `name`, the matched `kinds` and, for a scope
+ambiguity, `scopes`) when `kind` is omitted and the name spans multiple
+kinds, or when one `(kind, name)` exists in several scopes. `legacy:`
+rows are never candidates. The CTEs then anchor on the resolved row id.
+`find_path` resolves each endpoint the same way (`_resolve_endpoint_id`;
+a missing endpoint returns `None`). Alias → name resolution remains the T5/T6 router's job; this
 substrate matches `graph_node.name` directly.
 
 As of G9.2-T2 (#594), `AmbiguousNodeError` is defined in
 `meho_backplane.topology.resolvers` (alongside `resolve_node` and the
 new `NodeNotFoundError`) and re-exported by
 `meho_backplane.topology.query` for back-compat with pre-G9.2
-importers. The kind-collection SQL is single-sourced in the resolver
-module; the traversal's `_assert_anchor_unambiguous` and
-`resolve_node` call into the same helper, so the "name → multiple
-kinds in this tenant" surface stays consistent across the two
-call paths. The not-found behavior intentionally differs between the
+importers. The ambiguity rule lives only in `resolve_node`, so the
+traversal verbs and the write paths share one answer. The not-found behavior intentionally differs between the
 two surfaces: `resolve_node` raises `NodeNotFoundError`; the
 traversal verbs keep G9.1's silent-on-miss contract (empty result,
 not an exception) — opting traversal into the stricter raise-on-miss
@@ -1035,11 +1182,10 @@ response. A caller that overflows the cap narrows `since` /
 column stores 32-char hex without dashes, and the dashed-string
 filter silently matched zero rows — `resolve_node` then raised a
 spurious `NodeNotFoundError`. Production PG accepts both forms,
-masking the bug. #859 pins `_ANCHOR_KINDS_SQL` to a SAUuid bind
-type so both dialects round-trip cleanly. The closure / path verbs
-were unaffected because they call `_assert_anchor_unambiguous`,
-which only raises when 2+ kinds match (a zero-row result is
-intentionally silent there — G9.1 contract).
+masking the bug. #859 pinned the old `_ANCHOR_KINDS_SQL` to a SAUuid
+bind type so both dialects round-trip cleanly. Since #3749,
+`resolve_node` uses one ORM select (the `Uuid` column type handles the
+bind), and that raw SQL is gone.
 
 ### Audit class
 

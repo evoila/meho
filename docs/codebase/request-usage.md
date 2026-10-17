@@ -123,7 +123,7 @@ not deleted or reclassified.
 The reflex advisory ("did this agent session read the broadcast feed?")
 reads both the `meho_broadcast_recent` wrapper row and the session's
 `tool:meho_broadcast_recent` usage event, so it works before and after the
-cutover. Migration `0110` adds the `session_id` index it uses.
+cutover. Migration `0111` adds the `session_id` index it uses.
 
 ## Context selection
 
@@ -161,7 +161,7 @@ the loop goes on.
 - `backend/src/meho_backplane/db/models.py` — `RequestUsageEvent`.
 - `backend/alembic/versions/0107_create_request_usage_event.py` — table,
   CHECK constraints, indexes.
-- `backend/alembic/versions/0110_add_request_usage_session_index.py` — the
+- `backend/alembic/versions/0111_add_request_usage_session_index.py` — the
   `session_id` index for the reflex advisory.
 - `backend/src/meho_backplane/audit_cutover.py` — which wrapper rows are
   still written (#3757).

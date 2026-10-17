@@ -266,11 +266,20 @@ Alembic install, well under a minute. It fails when:
 
 - on every pull request (no path filter, so the check can be required),
 - in every merge-queue run (`merge_group`),
-- on a push to `main` that changes a migration. That run then dispatches
-  the same workflow on every open same-repo pull request that adds a
-  migration. The new run adds `main`'s current migration files to the
-  check (`--main`), so a branch that is behind `main` sees the clash, and
-  its check turns red before it can enter the merge queue.
+- on a push to `main` that changes a migration. That run first checks
+  `main` itself. Then `scripts/ci/recheck_migration_prs.py` runs the
+  check again for every open pull request that adds a migration, against
+  the new `main`, and posts the result as a fresh check run on the pull
+  request's head commit under the same check name. A branch that is
+  behind `main` turns red before it can enter the merge queue.
+
+The re-check works for every pull request: from a branch in this repo or
+from a fork, with or without the workflow file on the branch. It runs
+from a checkout of `main` on a GitHub-hosted runner. It fetches the pull
+request's head commit, copies only `backend/alembic/versions/` out of it,
+and reads those files. No code from the pull request runs. A pull
+request whose head moved since the listing is skipped; its new head has
+its own pull request run.
 
 ### What to do when the check fails
 
@@ -310,9 +319,13 @@ python3 scripts/ci/check_migration_heads.py --main /tmp/main-versions/backend/al
 ```
 
 Tests: `backend/tests/migrations/test_migration_heads.py` covers one head,
-two heads, two files with the same number, a stale parent, and compares
-the script's heads with Alembic's own `ScriptDirectory.get_heads()` on the
-real tree.
+two heads, two files with the same number, a stale parent, a branch that
+adds several migrations, and compares the script's heads with Alembic's
+own `ScriptDirectory.get_heads()` on the real tree.
+`backend/tests/migrations/test_recheck_migration_prs.py` covers the
+re-check: a fork pull request and a branch without the workflow file both
+get a check run on their head commit, and a pull request whose head moved
+or cannot be fetched is reported and skipped.
 
 ## Additive-only constraint
 
@@ -434,3 +447,4 @@ avoid "event loop already running" errors.
 - `backend/tests/migrations/test_alembic_seed_rdc_conventions.py`: 0018 behavioural tests.
 - `backend/tests/migrations/test_migration_compat.py`: additive-only CI guard tests.
 - `backend/tests/migrations/test_migration_heads.py`: single-head CI guard tests (#4204).
+- `backend/tests/migrations/test_recheck_migration_prs.py`: re-check of open migration pull requests after `main` moved (#4204).

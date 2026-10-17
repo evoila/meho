@@ -1007,7 +1007,7 @@ hangs the queue forever:
 | `Python License Check` | `dependency-license-check.yml` | yes — `changes` + job-level `if:` |
 | `NPM License Check` | `dependency-license-check.yml` | yes — same shape |
 | `helm install + helm test (pgvector preflight)` | `chart.yml` | **yes (#3253)** — the `helm-test-gate` aggregator (`if: always()`) is the required context and fails closed |
-| `Migration chain (single head)` | `migration-heads.yml` | yes (#4204) — no path filter; also re-runs itself on open migration PRs when a migration lands on `main` (`workflow_dispatch`). **Operator registers the context after #4204 lands.** |
+| `Migration chain (single head)` | `migration-heads.yml` | yes (#4204) — no path filter; when a migration lands on `main`, the push run also posts a fresh check run under this name on every open PR that adds a migration (`scripts/ci/recheck_migration_prs.py`). **Operator registers the context after #4204 lands.** |
 | `DCO` | **external GitHub App** (`app_id 1861`), not a workflow | **operator must verify** — see caveat below |
 
 Two shapes are load-bearing for queue compatibility and appear across
@@ -1497,7 +1497,7 @@ their isolation posture:
 | `chart.yml` | yes (helm template) | fork guard on the internal-pool PR job; publish/verify jobs are `push`-only |
 | `pr-smoke.yml` | yes (`pull_request_target`) | fork guard + `environment: rke2-ci` + PR-head-SHA checkout + isolated `pr-smoke` cache scope |
 | `migration-compat.yml` | yes (runs `check_migration_compat.py`) | **route**: fork PR → disposable GitHub-hosted runner |
-| `migration-heads.yml` | yes (runs `check_migration_heads.py`) | **route**: fork PR → disposable GitHub-hosted runner; the `recheck-open-prs` job is `push`-only and runs on `ubuntu-latest` |
+| `migration-heads.yml` | yes (runs `check_migration_heads.py`) | **route**: fork PR → disposable GitHub-hosted runner; the `recheck-open-prs` job is `push`-only, runs on `ubuntu-latest` from a checkout of `main`, and only reads PR migration files (never runs PR code) |
 | `dependency-license-check.yml` | yes (`pip install -e ./backend` runs the build backend) | **route**: fork PR → disposable GitHub-hosted runner (all 3 jobs) |
 | `readme-version-check.yml` | yes (inline shell over PR content) | **route**: fork PR → disposable GitHub-hosted runner |
 | `secret-scan.yml` | yes (`docker run` TruffleHog over PR content) | **route**: fork PR → disposable GitHub-hosted runner |

@@ -175,21 +175,17 @@ def test_cli_against_real_versions_dir_passes() -> None:
 
 def test_workflow_runs_on_every_pr_and_in_the_merge_queue() -> None:
     """The check is a required status check, so it must trigger with no
-    path filter on pull requests and on merge_group, and the re-check
-    after a main push needs workflow_dispatch."""
+    path filter on pull requests and on merge_group. The re-check after
+    a main push is a job of the push run, not a separate trigger."""
     with _WORKFLOW_PATH.open() as fh:
         workflow = cast("dict[Any, Any]", yaml.safe_load(fh))
     triggers = cast("dict[str, Any]", workflow.get("on", workflow.get(True)))
-    assert set(triggers) == {"push", "pull_request", "merge_group", "workflow_dispatch"}
+    assert set(triggers) == {"push", "pull_request", "merge_group"}
     assert "paths" not in (triggers["pull_request"] or {})
     assert workflow["jobs"]["check"]["name"] == "Migration chain (single head)"
     recheck = workflow["jobs"]["recheck-open-prs"]
+    assert recheck["needs"] == "check"
     assert recheck["if"] == "github.event_name == 'push'"
-    assert recheck["permissions"] == {
-        "contents": "read",
-        "pull-requests": "read",
-        "actions": "write",
-    }
 
 
 def test_two_new_migrations_where_the_first_clashes_with_main(

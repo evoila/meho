@@ -241,6 +241,99 @@ Rules for this kind of migration:
    `SET search_path = pg_catalog, pg_temp` and write operators and types with the
    `pg_catalog` schema, so a caller cannot swap in its own functions or operators.
 
+## One chain, one head (the single-head check, #4204)
+
+The app expects exactly one newest migration (one "head").
+`backend/src/meho_backplane/db/migrations.py` calls `get_current_head()`,
+and that raises when two migrations share the same parent. Two pull
+requests made at the same time often take the same next number and the
+same `down_revision`. Git sees no conflict, because the file names
+differ. Without a guard the clash shows up only in the merge queue, where
+every database-backed job fails with hundreds of `Multiple head
+revisions` errors.
+
+`scripts/ci/check_migration_heads.py` finds the clash first. It reads
+`revision` and `down_revision` from every file in
+`backend/alembic/versions/` with the `ast` module. No database, no
+Alembic install, well under a minute. It fails when:
+
+- two files use the same `revision`,
+- a `down_revision` names a revision that does not exist,
+- more than one revision is a head.
+
+`.github/workflows/migration-heads.yml` runs it as the check
+**Migration chain (single head)**:
+
+- on every pull request (no path filter, so the check can be required),
+- in every merge-queue run (`merge_group`),
+- on a push to `main` that changes a migration. That run first checks
+  `main` itself. Then `scripts/ci/recheck_migration_prs.py` runs the
+  check again for every open pull request that adds a migration, against
+  the new `main`, and posts the result as a fresh check run on the pull
+  request's head commit under the same check name. A branch that is
+  behind `main` turns red before it can enter the merge queue.
+
+The re-check works for every pull request: from a branch in this repo or
+from a fork, with or without the workflow file on the branch. It runs
+from a checkout of `main` on a GitHub-hosted runner. It fetches the pull
+request's head commit, copies only `backend/alembic/versions/` out of it,
+and reads those files. No code from the pull request runs. It reads the
+whole list of open pull requests, page by page, and every page of a pull
+request's changed files, so no pull request is too old or too big to be
+re-checked. A pull request whose head moved since the listing is
+skipped; its new head has its own pull request run. A pull request whose
+fetch fails, takes too long, or whose migration files cannot be unpacked
+(for example a link that points outside the work directory) is reported
+and skipped; the other pull requests still get their result.
+
+### What to do when the check fails
+
+The last line of the check output says what to change. Example:
+
+```
+Migration chain check FAILED:
+  - revision 0108 is used by 2 files: 0108_add_claims.py, 0108_add_scope.py
+What to do: main is at 0108. Rename your migration to 0109 and set down_revision to '0108'.
+```
+
+1. Rename your migration file to the number the message gives
+   (`0109_<slug>.py`) and set `revision` to that number.
+2. Set `down_revision` to the number `main` is at.
+3. Update the `Revision ID:` and `Revises:` lines in the docstring.
+4. Push. The check runs again on the pull request.
+
+If the message says only "Set down_revision ... to ...", your numbers are
+already right and only the named parent links are stale. If a migration on `main`
+merges after you fixed it, the check runs again on your branch by itself
+and tells you if you need to move once more.
+
+Run it locally before you push (from the repo root):
+
+```bash
+python3 scripts/ci/check_migration_heads.py
+```
+
+To see the result as the check will see it after a merge with `main`,
+pass `main`'s copy of the directory:
+
+```bash
+git fetch origin main
+rm -rf /tmp/main-versions && mkdir -p /tmp/main-versions
+git archive origin/main backend/alembic/versions | tar -x -C /tmp/main-versions
+python3 scripts/ci/check_migration_heads.py --main /tmp/main-versions/backend/alembic/versions
+```
+
+Tests: `backend/tests/migrations/test_migration_heads.py` covers one head,
+two heads, two files with the same number, a stale parent, a branch that
+adds several migrations, and compares the script's heads with Alembic's
+own `ScriptDirectory.get_heads()` on the real tree.
+`backend/tests/migrations/test_recheck_migration_prs.py` covers the
+re-check: a fork pull request and a branch without the workflow file both
+get a check run on their head commit, a migration after the first 100
+changed files is still found, and a pull request whose head moved, cannot
+be fetched, or cannot be unpacked is reported and skipped while the next
+one still gets its result.
+
 ## Additive-only constraint
 
 Migrations in `upgrade()` must be additive: `create_table`, `add_column`,
@@ -360,3 +453,5 @@ avoid "event loop already running" errors.
 - `backend/tests/migrations/test_alembic_uuid_param_consistency.py`: drift-guard test.
 - `backend/tests/migrations/test_alembic_seed_rdc_conventions.py`: 0018 behavioural tests.
 - `backend/tests/migrations/test_migration_compat.py`: additive-only CI guard tests.
+- `backend/tests/migrations/test_migration_heads.py`: single-head CI guard tests (#4204).
+- `backend/tests/migrations/test_recheck_migration_prs.py`: re-check of open migration pull requests after `main` moved (#4204).

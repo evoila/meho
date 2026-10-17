@@ -963,7 +963,8 @@ see [Sharded unit lane (#3251)](#sharded-unit-lane-3251) below.
 Every workflow that owns a required status check triggers on
 `merge_group` in addition to `pull_request` and `push`: `ci.yml`,
 `security-scan.yml`, `secret-scan.yml`, `dependency-license-check.yml`
-(all landed with #769) and `chart.yml` (the last gap, closed by #3253).
+(all landed with #769), `chart.yml` (closed by #3253) and
+`migration-heads.yml` (#4204, see `docs/codebase/migrations.md`).
 The `merge_group` event fires when a PR is admitted to the GitHub merge
 queue and runs the full check matrix against the **synthesised merge
 commit** — PR head + current `main` tip + any PRs ahead in the queue. A
@@ -1006,6 +1007,7 @@ hangs the queue forever:
 | `Python License Check` | `dependency-license-check.yml` | yes — `changes` + job-level `if:` |
 | `NPM License Check` | `dependency-license-check.yml` | yes — same shape |
 | `helm install + helm test (pgvector preflight)` | `chart.yml` | **yes (#3253)** — the `helm-test-gate` aggregator (`if: always()`) is the required context and fails closed |
+| `Migration chain (single head)` | `migration-heads.yml` | yes (#4204) — no path filter; when a migration lands on `main`, the push run also posts a fresh check run under this name on every open PR that adds a migration (`scripts/ci/recheck_migration_prs.py`). **Operator registers the context after #4204 lands.** |
 | `DCO` | **external GitHub App** (`app_id 1861`), not a workflow | **operator must verify** — see caveat below |
 
 Two shapes are load-bearing for queue compatibility and appear across
@@ -1495,6 +1497,7 @@ their isolation posture:
 | `chart.yml` | yes (helm template) | fork guard on the internal-pool PR job; publish/verify jobs are `push`-only |
 | `pr-smoke.yml` | yes (`pull_request_target`) | fork guard + `environment: rke2-ci` + PR-head-SHA checkout + isolated `pr-smoke` cache scope |
 | `migration-compat.yml` | yes (runs `check_migration_compat.py`) | **route**: fork PR → disposable GitHub-hosted runner |
+| `migration-heads.yml` | yes (runs `check_migration_heads.py`) | **route**: fork PR → disposable GitHub-hosted runner; the `recheck-open-prs` job is `push`-only, runs on `ubuntu-latest` from a checkout of `main`, and only reads PR migration files (never runs PR code) |
 | `dependency-license-check.yml` | yes (`pip install -e ./backend` runs the build backend) | **route**: fork PR → disposable GitHub-hosted runner (all 3 jobs) |
 | `readme-version-check.yml` | yes (inline shell over PR content) | **route**: fork PR → disposable GitHub-hosted runner |
 | `secret-scan.yml` | yes (`docker run` TruffleHog over PR content) | **route**: fork PR → disposable GitHub-hosted runner |

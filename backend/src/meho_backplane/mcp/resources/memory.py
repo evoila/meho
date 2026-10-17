@@ -118,6 +118,8 @@ from meho_backplane.memory.schemas import (
     validate_slug,
 )
 from meho_backplane.memory.service import MemoryService
+from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
+from meho_backplane.settings import get_settings
 from meho_backplane.untrusted_text import wrap_untrusted_text
 
 #: The ``{scope}`` value that marks a canonical id URI caught by the
@@ -144,7 +146,29 @@ def _render_entry(entry: MemoryEntry) -> dict[str, Any]:
     data = entry.model_dump(mode="json")
     data["body"] = wrap_untrusted_text(data["body"])
     data["locator"] = memory_locator(entry.id)
+    _check_read_wire_limit(data)
     return data
+
+
+def _check_read_wire_limit(data: dict[str, Any]) -> None:
+    """Refuse a selected read that is too large to deliver (#3641, #3751).
+
+    Uses the shared read limit, ``result_query_response_wire_max_bytes``,
+    measured on the ``resources/read`` text block the way the transport
+    encodes it. An over-limit entry is never cut: the read fails with the
+    same recoverable ``output_too_large`` / ``delivery=unavailable`` data
+    a too-large ``result_query`` read returns.
+    """
+    max_bytes = get_settings().result_query_response_wire_max_bytes
+    size = measure_delivered_wire_bytes(data, structured=False)
+    if size > max_bytes:
+        raise McpInvalidParamsError(
+            f"memory entry {data['locator']} is {size} bytes on the wire, over the "
+            f"{max_bytes}-byte delivery limit, so it was not delivered (delivery "
+            "unavailable). Read it with the CLI instead: `meho recall <scope>/<slug>`, "
+            "plus `--target` for a target scope.",
+            data={"reason": "output_too_large", "delivery": "unavailable"},
+        )
 
 
 async def _memory_by_id_handler(

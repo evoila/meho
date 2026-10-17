@@ -325,29 +325,30 @@ func postRecallQuery(
 }
 
 // printRecallTable renders the ranked hits from --query mode as a
-// compact table. Columns: RANK (1-based), SCORE (fused), SCOPE, SLUG,
-// SNIPPET (80-char excerpt). The per-signal scores and the full
-// entry are visible in --json output.
+// compact table. Columns: RANK (1-based order, not a confidence
+// score), SCOPE, SLUG, SNIPPET. The server sends a short excerpt per
+// hit, not the full body; the table cuts it to 80 chars. Read the full
+// entry with the positional `<scope>/<slug>` form. Provenance fields,
+// expiry state, and the locator are in --json output.
 func printRecallTable(w io.Writer, r *api.MemorySearchResponse) {
 	if r == nil || len(r.Hits) == 0 {
 		fmt.Fprintln(w, "no memory hits for this query")
 		return
 	}
-	fmt.Fprintf(w, "%-5s %-8s %-14s %-40s %s\n",
-		"RANK", "SCORE", "SCOPE", "SLUG", "SNIPPET")
-	for i, hit := range r.Hits {
-		fmt.Fprintf(w, "%-5d %-8.4f %-14s %-40s %s\n",
-			i+1,
-			hit.FusedScore,
-			string(hit.Entry.Scope),
-			truncate(hit.Entry.Slug, 40),
-			truncate(snippetOf(hit.Entry.Body), 80),
+	fmt.Fprintf(w, "%-5s %-14s %-40s %s\n",
+		"RANK", "SCOPE", "SLUG", "SNIPPET")
+	for _, hit := range r.Hits {
+		fmt.Fprintf(w, "%-5d %-14s %-40s %s\n",
+			hit.Rank,
+			string(hit.Scope),
+			truncate(hit.Slug, 40),
+			truncate(hit.Snippet, 80),
 		)
 	}
 }
 
-// snippetOf returns the first ~200 chars of body so the table render
-// fits a default terminal width. Same shape as `meho kb search`'s
+// snippetOf returns the first ~200 chars of body so the `meho memory
+// list` table render fits a default terminal width. Same shape as `meho kb search`'s
 // helper of the same name; kept inline here to avoid a cross-package
 // import that would close a cycle through cmd/root.go.
 func snippetOf(body string) string {

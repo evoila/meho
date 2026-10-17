@@ -203,6 +203,11 @@ def advice(main_migrations: list[Migration], migrations: list[Migration]) -> str
     New migrations are the files that are not on ``main``, found by file
     name. Their revision numbers are not used to find them, because a
     number that clashes with ``main`` is exactly the case to report.
+
+    When the numbers already continue ``main``'s chain, every parent link
+    is checked: the first new migration must point at ``main``'s head and
+    each later one at the migration before it. The advice names every
+    link that is wrong, so fixing one does not leave a second head behind.
     """
     generic = (
         "What to do: keep one chain. Every migration needs its own revision number, "
@@ -221,12 +226,18 @@ def advice(main_migrations: list[Migration], migrations: list[Migration]) -> str
         return generic
     wanted = [_next_number(main_head, i + 1) for i in range(len(new))]
     if [m.revision for m in new] == wanted:
+        parents = [main_head, *wanted[:-1]]
+        broken = [
+            (m, parent)
+            for m, parent in zip(new, parents, strict=True)
+            if m.down_revisions != (parent,)
+        ]
+        if not broken:
+            return generic
         if len(new) == 1:
             return f"What to do: main is at {main_head}. Set down_revision to {main_head!r}."
-        return (
-            f"What to do: main is at {main_head}. Set down_revision of "
-            f"{new[0].path.name} to {main_head!r}."
-        )
+        links = ", ".join(f"{m.path.name} to {parent!r}" for m, parent in broken)
+        return f"What to do: main is at {main_head}. Set down_revision of {links}."
     if len(new) == 1:
         return (
             f"What to do: main is at {main_head}. Rename your migration to "

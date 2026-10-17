@@ -221,6 +221,36 @@ def test_two_new_migrations_with_right_numbers_but_stale_parent(
     assert "What to do: main is at 0107. Set down_revision of 0108_mine.py to '0107'." in err
 
 
+def test_two_new_migrations_with_right_numbers_but_the_second_parent_wrong(
+    tmp_path: pathlib.Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """Main is at 0107. The branch adds 0108 and 0109, both pointing at
+    0107. The first link is right, so the advice must name the second
+    one; saying "set 0108's parent to 0107" would change nothing."""
+    main = _main_chain(tmp_path)
+    branch = tmp_path / "branch"
+    _write(branch, "0108_mine.py", "0108", "0107")
+    _write(branch, "0109_mine_too.py", "0109", "0107")
+    assert _module.main([str(branch), "--main", str(main)]) == 1
+    err = capfd.readouterr().err
+    assert "Alembic finds 2 heads" in err
+    assert "What to do: main is at 0107. Set down_revision of 0109_mine_too.py to '0108'." in err
+
+
+def test_two_new_migrations_with_right_numbers_and_both_parents_wrong(
+    tmp_path: pathlib.Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    main = _main_chain(tmp_path)
+    branch = tmp_path / "branch"
+    _write(branch, "0108_mine.py", "0108", "0106")
+    _write(branch, "0109_mine_too.py", "0109", "0106")
+    assert _module.main([str(branch), "--main", str(main)]) == 1
+    assert (
+        "What to do: main is at 0107. Set down_revision of 0108_mine.py to '0107', "
+        "0109_mine_too.py to '0108'." in capfd.readouterr().err
+    )
+
+
 def test_branch_file_that_replaces_a_main_file_is_not_counted_as_new(
     tmp_path: pathlib.Path, capfd: pytest.CaptureFixture[str]
 ) -> None:

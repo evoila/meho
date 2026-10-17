@@ -849,7 +849,7 @@ app.include_router(api_v1_health_router)
 # privacy-preserving query_hash payload (the raw query is never
 # persisted -- per v0.2 sensitivity defaults).
 app.include_router(api_v1_retrieve_router)
-# G4.3-T5 (#444) -- audit-backed retrieval usage telemetry
+# G4.3-T5 (#444) -- retrieval usage telemetry (request usage events, #3747)
 # (`GET /api/v1/retrieve/usage`). Operator role minimum; the route uses
 # `require_role(TenantRole.OPERATOR)` and gates the `tenant_filter`
 # cross-tenant parameter behind tenant_admin. Broadcast publishes

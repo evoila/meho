@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``GET /api/v1/retrieve/usage`` -- audit-backed retrieval usage telemetry.
+"""``GET /api/v1/retrieve/usage`` -- retrieval usage telemetry.
 
 G4.3-T5 (#444) of Initiative #373. Exposes per-day, per-surface,
-per-tenant aggregates of the retrieval-class MCP meta-tool invocations
-that ``audit_log`` already records, computed by
-:func:`meho_backplane.retrieval.usage.compute_usage`. Operator workflow:
+per-tenant aggregates of the retrieval-class MCP meta-tool invocations,
+computed by :func:`meho_backplane.retrieval.usage.compute_usage`. Since
+#3747 it reads request usage events (``request_usage``), not
+``audit_log``. MEHO collects them only when
+``REQUEST_USAGE_RETENTION_DAYS`` is set, so the report is empty when
+that setting is off. Operator workflow:
 
 * ``GET /api/v1/retrieve/usage`` — operator's own tenant; defaults to
   the last 30 days, all three surfaces.
@@ -127,7 +130,12 @@ async def usage_endpoint(
     tenant_filter: UUID | None = Query(default=None),
     operator: Operator = _require_operator,
 ) -> UsageReport:
-    """Return audit-backed retrieval usage aggregates for *operator*.
+    """Return retrieval usage aggregates for *operator*.
+
+    Reads request usage events (``request_usage``), not ``audit_log``. MEHO
+    collects them only when ``REQUEST_USAGE_RETENTION_DAYS`` is set, so the
+    report is empty when that setting is off and covers only the time
+    since collection started.
 
     Tenant scoping: callers are scoped to ``operator.tenant_id``; a
     ``tenant_filter`` naming a different tenant returns 403

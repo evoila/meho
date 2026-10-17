@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``GET /api/v1/audit/reflex`` -- reflex-adoption KPIs over ``audit_log``.
+"""``GET /api/v1/audit/reflex`` -- reflex-adoption KPIs over request usage events.
 
 Task #3134 (Initiative #3128). Exposes the four reflex-adoption metrics
 computed by :func:`meho_backplane.reflex.compute_reflex_report` over a
@@ -18,7 +18,10 @@ workflow:
 * ``GET /api/v1/audit/reflex?tenant_filter=<uuid>`` — cross-tenant view,
   gated behind the ``platform_admin`` capability (#1638).
 
-The route backs ``meho audit reflex``.
+The route backs ``meho audit reflex``. Since #3747 it reads request
+usage events (``request_usage``), not ``audit_log``. MEHO collects them
+only when ``REQUEST_USAGE_RETENTION_DAYS`` is set, so the report is
+empty when that setting is off.
 
 Audit + broadcast contract
 --------------------------
@@ -103,6 +106,11 @@ async def reflex_endpoint(
     operator: Operator = _require_operator,
 ) -> ReflexReport:
     """Return reflex-adoption KPIs for *operator* over the requested window.
+
+    Reads request usage events (``request_usage``), not ``audit_log``. MEHO
+    collects them only when ``REQUEST_USAGE_RETENTION_DAYS`` is set, so the
+    report is empty when that setting is off and covers only the time
+    since collection started.
 
     Tenant scoping: callers are scoped to ``operator.tenant_id``; a
     ``tenant_filter`` naming a different tenant returns 403

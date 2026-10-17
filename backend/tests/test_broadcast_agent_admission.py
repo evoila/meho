@@ -22,8 +22,8 @@ applied). Only the Valkey ``XADD`` and the rate limiter are faked.
 
 from __future__ import annotations
 
-import itertools
-from collections.abc import Iterator
+import json
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
@@ -32,7 +32,10 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 from redis.exceptions import RedisError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.agent.invoke import current_agent_run_id_var
 from meho_backplane.auth.agent_admission import (
@@ -48,7 +51,11 @@ from meho_backplane.db.models import AgentAnnouncement
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.mcp.tools.broadcast import _handler_announce
-from tests.broadcast_admission_helpers import seed_agent_principal, seed_agent_run
+from tests.broadcast_admission_helpers import (
+    FakeStreamClient,
+    seed_agent_principal,
+    seed_agent_run,
+)
 from tests.mcp_test_fixtures import (
     client_with_operator,  # noqa: F401 -- pytest-discovered fixture
     isolated_registry,  # noqa: F401 -- pytest-discovered autouse fixture
@@ -60,21 +67,25 @@ _AGENT_CLIENT = "agent:triage"
 
 
 @pytest.fixture(autouse=True)
-def _fake_stream(
+def _fake_valkey(
     monkeypatch: pytest.MonkeyPatch,
     isolated_registry: None,  # noqa: F811 -- reload the tool module first
-) -> Iterator[AsyncMock]:
-    """Fake the Valkey XADD and switch the rate limiter off."""
-    counter = itertools.count(1)
-    client = AsyncMock()
-    client.xadd = AsyncMock(side_effect=lambda *_a, **_k: f"1700000000000-{next(counter)}")
+) -> FakeStreamClient:
+    """Fake the Valkey client the publisher writes to and switch the rate limiter off."""
+    client = FakeStreamClient()
     monkeypatch.setattr("meho_backplane.broadcast.publisher.get_broadcast_client", lambda: client)
     for target in (
         "meho_backplane.broadcast.enforce_announce_rate_limit",
         "meho_backplane.mcp.tools.broadcast.enforce_announce_rate_limit",
     ):
         monkeypatch.setattr(target, AsyncMock(return_value=None))
-    yield client.xadd
+    return client
+
+
+@pytest.fixture
+def _fake_stream(_fake_valkey: FakeStreamClient) -> AsyncMock:
+    """The fake ``XADD``, for tests that assert on stream writes."""
+    return _fake_valkey.xadd
 
 
 def _operator(
@@ -479,6 +490,100 @@ async def test_retry_finishes_a_delivery_whose_stream_write_failed(
         },
     )
     assert data["code"] == "claim_completed"
+
+
+async def _completion_step(agent: Operator, key: str) -> tuple[dict[str, Any], UUID]:
+    """Open a claim and return a completion step for it plus the start's claim id."""
+    start = await _handler_announce(agent, {"activity": "start"})
+    step = {
+        "activity": "done",
+        "phase": "completion",
+        "claim_id": start["claim_id"],
+        "idempotency_key": key,
+    }
+    return step, UUID(start["claim_id"])
+
+
+async def _completion_row(claim_id: UUID) -> AgentAnnouncement:
+    async with get_sessionmaker()() as session:
+        return (
+            await session.execute(
+                select(AgentAnnouncement).where(
+                    AgentAnnouncement.claim_id == claim_id,
+                    AgentAnnouncement.phase == "completion",
+                )
+            )
+        ).scalar_one()
+
+
+async def test_retry_after_a_failed_delivery_mark_writes_no_second_entry(
+    _fake_valkey: FakeStreamClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stream write lands, the delivery mark does not commit, the retry writes nothing."""
+    tenant_id = uuid4()
+    agent = await _registered_agent(tenant_id)
+    step, claim_id = await _completion_step(agent, "c1")
+
+    original_commit: Callable[[AsyncSession], Awaitable[None]] = AsyncSession.commit
+    fail_next_commit = False
+
+    async def _xadd_then_fail_mark(*args: Any, **kwargs: Any) -> str:
+        nonlocal fail_next_commit
+        fail_next_commit = True
+        return "1700000000000-77"
+
+    async def _commit(session: AsyncSession) -> None:
+        nonlocal fail_next_commit
+        if fail_next_commit:
+            fail_next_commit = False
+            raise OperationalError("UPDATE agent_announcement", {}, Exception("connection lost"))
+        await original_commit(session)
+
+    _fake_valkey.xadd.side_effect = _xadd_then_fail_mark
+    monkeypatch.setattr(AsyncSession, "commit", _commit)
+
+    first = await _handler_announce(agent, step)
+    assert first["replayed"] is False
+    assert first["cursor"] == "1700000000000-77"
+    assert (await _completion_row(claim_id)).stream_entry_id is None
+
+    retry = await _handler_announce(agent, step)
+    assert retry["replayed"] is True
+    assert retry["cursor"] is None
+    assert retry["event_id"] == first["event_id"]
+    assert _fake_valkey.xadd.await_count == 2, "start + one completion write, no duplicate"
+    assert (await _completion_row(claim_id)).stream_entry_id == "1700000000000-77"
+    assert await _row_count(tenant_id) == 2
+
+
+async def test_retry_after_a_lost_stream_reply_writes_no_second_entry(
+    _fake_valkey: FakeStreamClient,
+) -> None:
+    """The stream write lands on the server, its reply is lost, the retry writes nothing."""
+    tenant_id = uuid4()
+    agent = await _registered_agent(tenant_id)
+    step, claim_id = await _completion_step(agent, "c1")
+
+    _fake_valkey.lose_next_response = True
+    with pytest.raises(RedisTimeoutError):
+        await _handler_announce(agent, step)
+    assert (await _completion_row(claim_id)).stream_entry_id is None
+    assert _fake_valkey.xadd.await_count == 2
+    _stream_key, fields = _fake_valkey.xadd.await_args.args
+    written_event_id = json.loads(fields["event"])["event_id"]
+
+    retry = await _handler_announce(agent, step)
+    assert retry["replayed"] is True
+    assert retry["cursor"] is None
+    assert retry["event_id"] == written_event_id
+    assert _fake_valkey.xadd.await_count == 2, "the retry found the entry and wrote nothing"
+    assert (await _completion_row(claim_id)).stream_entry_id == "1700000000000-2"
+    assert await _row_count(tenant_id) == 2
+
+    again = await _handler_announce(agent, step)
+    assert again["replayed"] is True
+    assert again["cursor"] is None
+    assert _fake_valkey.xadd.await_count == 2
 
 
 async def test_same_key_from_another_run_is_refused() -> None:

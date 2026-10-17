@@ -12,12 +12,16 @@ registered agent principal. Admission itself is tested for real in
 
 from __future__ import annotations
 
+import itertools
+from collections.abc import Awaitable, Callable, Iterator, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
 import pytest
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from meho_backplane.auth.agent_admission import AgentAdmission
 from meho_backplane.auth.operator import Operator
@@ -26,7 +30,9 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentPrincipal, AgentRun
 
 __all__ = [
+    "FakeStreamClient",
     "fake_admission",
+    "fake_stream_write",
     "patch_agent_admission",
     "seed_agent_principal",
     "seed_agent_run",
@@ -136,3 +142,57 @@ async def seed_agent_principal(tenant_id: UUID, client_id: str, *, revoked: bool
             )
         )
         await session.commit()
+
+
+class FakeStreamClient:
+    """In-memory stand-in for the Valkey client the publisher writes to.
+
+    ``xadd`` is an ``AsyncMock`` that hands out increasing entry ids, so
+    tests keep asserting on stream writes. ``register_script`` returns the
+    publisher's deliver-once script as a coroutine: it keeps the per-event
+    delivery markers in ``markers`` and makes the write through ``xadd``,
+    like the real script does with ``XADD``. Set ``lose_next_response`` to
+    make one script call finish on the "server" side and still raise, like
+    a reply that never reaches the client.
+    """
+
+    def __init__(self, xadd: Callable[..., Awaitable[Any]] | None = None) -> None:
+        counter = itertools.count(1)
+        self.xadd = xadd or AsyncMock(
+            side_effect=lambda *_a, **_k: f"1700000000000-{next(counter)}"
+        )
+        self.markers: dict[str, str] = {}
+        self.lose_next_response = False
+
+    def register_script(self, _script: str) -> Callable[..., Awaitable[list[Any]]]:
+        return self._deliver_once
+
+    async def _deliver_once(self, keys: Sequence[str], args: Sequence[Any]) -> list[Any]:
+        stream_key, marker_key = keys
+        payload, maxlen, _ttl_seconds = args
+        known = self.markers.get(marker_key)
+        if known is not None:
+            return [0, known]
+        entry_id = str(
+            await self.xadd(stream_key, {"event": payload}, maxlen=int(maxlen), approximate=True)
+        )
+        self.markers[marker_key] = entry_id
+        if self.lose_next_response:
+            self.lose_next_response = False
+            raise RedisTimeoutError("reply lost after the stream write")
+        return [1, entry_id]
+
+
+@contextmanager
+def fake_stream_write(client: Any, xadd: AsyncMock) -> Iterator[AsyncMock]:
+    """Patch ``xadd`` and the deliver-once script on a real client object.
+
+    For tests that build the real (never connected) broadcast client and
+    only want to fake the stream write.
+    """
+    fake = FakeStreamClient(xadd=xadd)
+    with (
+        patch.object(client, "xadd", new=xadd),
+        patch.object(client, "register_script", new=fake.register_script),
+    ):
+        yield xadd

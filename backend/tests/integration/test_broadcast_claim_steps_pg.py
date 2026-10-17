@@ -17,7 +17,9 @@ give one row and one replay, not ``claim_completed``.
 
 Delivery to the stream is locked per stored row: a retry that overlaps
 the first try's stream write waits for it and then writes nothing, so
-feed watchers never see the same step twice.
+feed watchers never see the same step twice. A retry after a write whose
+row mark or reply was lost is covered by the per-event marker on the
+Valkey side; the unit suite checks that path.
 
 SQLite (the unit-suite driver) has no row locks and drops the clause, so
 this suite boots a real PostgreSQL and holds one request's lock on
@@ -48,6 +50,7 @@ from meho_backplane.broadcast.announcement_claims import (
 from meho_backplane.broadcast.publisher import publish_agent_announcement
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentAnnouncement
+from tests.broadcast_admission_helpers import FakeStreamClient
 
 # ``pg_engine`` (imported for its side effect of being a discoverable
 # fixture) points the process sessionmaker at the testcontainer and seeds
@@ -93,12 +96,9 @@ def _event(phase: str, claim_id: uuid.UUID) -> AgentAnnouncementEvent:
 @pytest.fixture
 def fake_stream(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     """Fake the Valkey ``XADD``; the database is the real one."""
-    counter = itertools.count(1)
-    xadd = AsyncMock(side_effect=lambda *_a, **_k: f"1700000000000-{next(counter)}")
-    client = AsyncMock()
-    client.xadd = xadd
+    client = FakeStreamClient()
     monkeypatch.setattr(publisher, "get_broadcast_client", lambda: client)
-    return xadd
+    return client.xadd
 
 
 class _HoldAfterCheck:
@@ -147,8 +147,7 @@ class _HoldStreamWrite:
             return f"1700000000000-{next(counter)}"
 
         self.xadd = AsyncMock(side_effect=xadd)
-        client = AsyncMock()
-        client.xadd = self.xadd
+        client = FakeStreamClient(xadd=self.xadd)
         monkeypatch.setattr(publisher, "get_broadcast_client", lambda: client)
 
 

@@ -37,7 +37,7 @@ from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
@@ -59,7 +59,11 @@ from meho_backplane.mcp.tools.broadcast import (
 )
 from meho_backplane.settings import get_settings
 from meho_backplane.untrusted_text import wrap_untrusted_text
-from tests.broadcast_admission_helpers import patch_agent_admission, trusted_event
+from tests.broadcast_admission_helpers import (
+    fake_stream_write,
+    patch_agent_admission,
+    trusted_event,
+)
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     build_operator,
@@ -254,7 +258,7 @@ def test_activity_at_exactly_cap_is_accepted(
     """``activity`` of exactly 500 chars publishes cleanly."""
     client, _op = client_with_operator
     bc = get_broadcast_client()
-    with patch.object(bc, "xadd", new=AsyncMock(return_value="1747800000000-0")):
+    with fake_stream_write(bc, AsyncMock(return_value="1747800000000-0")):
         resp = post_mcp(
             client,
             _tools_call(
@@ -381,7 +385,7 @@ def test_stream_key_derived_from_operator_tenant_id(
     """
     client, op = client_with_operator
     bc = get_broadcast_client()
-    with patch.object(bc, "xadd", new=AsyncMock(return_value="1747800000000-0")) as xa:
+    with fake_stream_write(bc, AsyncMock(return_value="1747800000000-0")) as xa:
         post_mcp(
             client,
             _tools_call("meho_broadcast_announce", {"activity": "investigating"}),
@@ -427,7 +431,7 @@ async def test_handler_with_distinct_operator_writes_distinct_stream() -> None:
     )
 
     bc = get_broadcast_client()
-    with patch.object(bc, "xadd", new=AsyncMock(return_value="1747800000000-0")) as xa:
+    with fake_stream_write(bc, AsyncMock(return_value="1747800000000-0")) as xa:
         await _handler_announce(op_a, {"activity": "alpha"})
         await _handler_announce(op_b, {"activity": "beta"})
 
@@ -460,10 +464,9 @@ def test_valkey_unreachable_surfaces_as_internal_error(
 
     client, _op = client_with_operator
     bc = get_broadcast_client()
-    with patch.object(
+    with fake_stream_write(
         bc,
-        "xadd",
-        new=AsyncMock(side_effect=redis_exceptions.ConnectionError("refused")),
+        AsyncMock(side_effect=redis_exceptions.ConnectionError("refused")),
     ):
         resp = post_mcp(
             client,
@@ -493,10 +496,9 @@ async def test_publish_agent_announcement_propagates_exception() -> None:
     event = trusted_event(tenant_id=OPERATOR_TENANT_ID, ts=datetime.now(UTC))
     bc = get_broadcast_client()
     with (
-        patch.object(
+        fake_stream_write(
             bc,
-            "xadd",
-            new=AsyncMock(side_effect=redis_exceptions.ConnectionError("refused")),
+            AsyncMock(side_effect=redis_exceptions.ConnectionError("refused")),
         ),
         pytest.raises(redis_exceptions.ConnectionError),
     ):
@@ -526,7 +528,7 @@ def test_successful_publish_returns_event_id(
     """
     client, _op = client_with_operator
     bc = get_broadcast_client()
-    with patch.object(bc, "xadd", new=AsyncMock(return_value="1747800000000-7")):
+    with fake_stream_write(bc, AsyncMock(return_value="1747800000000-7")):
         resp = post_mcp(
             client,
             _tools_call("meho_broadcast_announce", {"activity": "investigating"}),
@@ -559,7 +561,7 @@ def test_metric_increments_per_phase(
     """
     client, _op = client_with_operator
     bc = get_broadcast_client()
-    with patch.object(bc, "xadd", new=AsyncMock(return_value="1747800000000-0")):
+    with fake_stream_write(bc, AsyncMock(return_value="1747800000000-0")):
         arguments: dict[str, Any] = {"activity": "x", "phase": phase_label}
         if phase_label != "start":
             # update / completion continue a claim: open one first.
@@ -585,7 +587,7 @@ def test_phase_defaults_to_start(
     client, _op = client_with_operator
     bc = get_broadcast_client()
     baseline = _counter_value(BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL, phase="start")
-    with patch.object(bc, "xadd", new=AsyncMock(return_value="1747800000000-0")):
+    with fake_stream_write(bc, AsyncMock(return_value="1747800000000-0")):
         post_mcp(
             client,
             _tools_call("meho_broadcast_announce", {"activity": "investigating"}),
@@ -607,10 +609,9 @@ def test_failed_publish_does_not_increment_metric(
     client, _op = client_with_operator
     bc = get_broadcast_client()
     baseline = _counter_value(BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL, phase="start")
-    with patch.object(
+    with fake_stream_write(
         bc,
-        "xadd",
-        new=AsyncMock(side_effect=redis_exceptions.ConnectionError("refused")),
+        AsyncMock(side_effect=redis_exceptions.ConnectionError("refused")),
     ):
         post_mcp(
             client,
@@ -645,7 +646,7 @@ def test_published_event_carries_agent_announcement_kind(
     """
     client, op = client_with_operator
     bc = get_broadcast_client()
-    with patch.object(bc, "xadd", new=AsyncMock(return_value="1747800000000-0")) as xa:
+    with fake_stream_write(bc, AsyncMock(return_value="1747800000000-0")) as xa:
         post_mcp(
             client,
             _tools_call(
@@ -702,7 +703,7 @@ def test_target_and_scope_default_to_none(
     """Omitting ``target`` / ``scope`` lands ``None`` on the published event."""
     client, _op = client_with_operator
     bc = get_broadcast_client()
-    with patch.object(bc, "xadd", new=AsyncMock(return_value="1747800000000-0")) as xa:
+    with fake_stream_write(bc, AsyncMock(return_value="1747800000000-0")) as xa:
         post_mcp(
             client,
             _tools_call("meho_broadcast_announce", {"activity": "investigating"}),

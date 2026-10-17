@@ -70,6 +70,7 @@ from meho_backplane.broadcast.events import BroadcastEvent
 from meho_backplane.broadcast.history import row_to_announcement
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentAnnouncement
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL",
@@ -158,7 +159,8 @@ class AnnouncementPublishResult:
       first stored copy, so the caller echoes the original ids.
     * ``cursor`` -- the Valkey stream entry id this call wrote, or
       ``None`` when the entry was already on the stream (a plain replay,
-      or an overlapping request for the same step delivered it first).
+      an overlapping request for the same step delivered it first, or an
+      earlier try wrote the entry but could not record it on the row).
     * ``replayed`` -- ``True`` when the ``idempotency_key`` matched an
       earlier, identical step, so no new row was written. A replay still
       writes the stream entry when the first try stored the row but never
@@ -366,48 +368,100 @@ async def _persist_agent_announcement(
     return None
 
 
-async def _write_stream_entry(event: AgentAnnouncementEvent) -> str:
-    """``XADD`` one announcement to its tenant stream and return the entry id.
+#: Valkey-side "write this announcement once" step, run as one Lua script
+#: so the check, the ``XADD`` and the marker write cannot interleave with
+#: another request or be split by a lost reply. ``KEYS[1]`` is the tenant
+#: stream, ``KEYS[2]`` the per-event delivery marker
+#: (:func:`_delivery_marker_key`). ``ARGV`` is the event JSON, the
+#: ``MAXLEN ~`` ceiling and the marker TTL in seconds. Returns
+#: ``[1, entry_id]`` when this call wrote the entry and ``[0, entry_id]``
+#: when the marker already held the id of an earlier write.
+_DELIVER_ONCE_LUA: Final[str] = """
+local known = redis.call('GET', KEYS[2])
+if known then
+  return {0, known}
+end
+local entry_id = redis.call('XADD', KEYS[1], 'MAXLEN', '~', ARGV[2], '*', 'event', ARGV[1])
+redis.call('SET', KEYS[2], entry_id, 'EX', ARGV[3])
+return {1, entry_id}
+"""
 
-    Fail-loud: any redis-py / Valkey error propagates to the caller.
+
+def _delivery_marker_key(event: AgentAnnouncementEvent) -> str:
+    """Key that remembers the stream entry id written for one announcement.
+
+    Own namespace, separate from the ``meho:feed:{tenant}`` stream and the
+    ``meho:ratelimit:announce:...`` counters.
+    """
+    return f"meho:announce:delivered:{event.tenant_id}:{event.event_id}"
+
+
+async def _write_stream_entry_once(event: AgentAnnouncementEvent) -> tuple[bool, str]:
+    """``XADD`` one announcement to its tenant stream unless it is already there.
+
+    Runs :data:`_DELIVER_ONCE_LUA`. The per-event marker is what makes a
+    retry safe when the row could not be marked after a successful write:
+    the delivery-mark UPDATE failed, or the ``XADD`` ran on the server but
+    its reply never reached this process. In both cases the archive row
+    still says "not delivered", and without the marker the retry would
+    write the same step to the stream a second time.
+
+    The marker lives as long as the stream read window
+    (``broadcast_retention_hours``); a retry after that is outside the
+    window readers use anyway.
+
+    Returns ``(written, entry_id)``: ``written`` is ``False`` when the
+    marker already held the id of an earlier write. Fail-loud: any
+    redis-py / Valkey error propagates to the caller.
     """
     client = get_broadcast_client()
-    entry_id = await client.xadd(
-        _stream_key(event.tenant_id),
-        {"event": event.model_dump_json()},
-        maxlen=BROADCAST_MAXLEN,
-        approximate=True,
+    deliver_once = client.register_script(_DELIVER_ONCE_LUA)
+    written, entry_id = await deliver_once(
+        keys=[_stream_key(event.tenant_id), _delivery_marker_key(event)],
+        args=[
+            event.model_dump_json(),
+            BROADCAST_MAXLEN,
+            get_settings().broadcast_retention_hours * 3600,
+        ],
     )
     # ``decode_responses=True`` on the broadcast client (see
-    # :mod:`~meho_backplane.broadcast.client`) makes xadd's return value
-    # ``str``; the cast is documentary rather than runtime-meaningful but
-    # keeps mypy honest about the public contract this module advertises.
-    return str(entry_id)
+    # :mod:`~meho_backplane.broadcast.client`) makes the entry id ``str``;
+    # the casts are documentary rather than runtime-meaningful but keep
+    # mypy honest about the public contract this module advertises.
+    return bool(written), str(entry_id)
 
 
 async def _deliver(event: AgentAnnouncementEvent) -> str | None:
     """Write the stored step to the stream once and record the entry id on its row.
 
-    The archive row is locked (``SELECT ... FOR UPDATE``) for the whole
-    delivery: the delivery check, the ``XADD``, and the UPDATE that sets
-    ``stream_entry_id`` (the one UPDATE the application runs against
-    ``agent_announcement``). Two requests for the same stored step, for
-    example a retry that overlaps the first try, therefore deliver one
-    after the other: the second waits, re-reads the row, finds the entry
-    id, and writes nothing. Without the lock both could read "not yet
-    delivered" and both ``XADD``. The lock is held across one Valkey
-    round trip, bounded by the broadcast client's 5 s socket timeout.
+    Two guards keep one stored step at one stream entry:
+
+    * The archive row is locked (``SELECT ... FOR UPDATE``) for the whole
+      delivery: the delivery check, the stream write, and the UPDATE that
+      sets ``stream_entry_id`` (the one UPDATE the application runs
+      against ``agent_announcement``). Two requests for the same stored
+      step, for example a retry that overlaps the first try, therefore
+      deliver one after the other: the second waits, re-reads the row,
+      finds the entry id, and writes nothing. The lock is held across one
+      Valkey round trip, bounded by the broadcast client's 5 s socket
+      timeout.
+    * The stream write itself is :func:`_write_stream_entry_once`. When
+      the first try wrote the entry but the row was never marked (the
+      UPDATE failed, or the reply to the write was lost), the row lock
+      cannot help: the next request reads "not delivered" again. The
+      per-event marker on the Valkey side then returns the earlier entry
+      id instead of writing a second entry, and this call records it on
+      the row.
 
     Returns the entry id this call wrote, or ``None`` when the step was
-    already on the stream. The ``XADD`` is fail-loud: its error
+    already on the stream. The stream write is fail-loud: its error
     propagates, the transaction rolls back, and the row keeps
     ``stream_entry_id = NULL`` so a retry can finish the delivery. The
-    UPDATE after a successful ``XADD`` is fail-soft on purpose: the
+    UPDATE after a successful write is fail-soft on purpose: the
     announcement is already on the stream and in the archive, so a
     failure there must not turn a delivered announcement into an error
-    for the caller. The cost is one warning line and, only if the caller
-    retries the same key anyway, one duplicate stream entry with the same
-    ``event_id``.
+    for the caller. The cost is one warning line; a later retry marks the
+    row without writing again.
     """
     async with get_sessionmaker()() as session:
         row = (
@@ -419,7 +473,7 @@ async def _deliver(event: AgentAnnouncementEvent) -> str | None:
         ).scalar_one()
         if row.stream_entry_id is not None:
             return None
-        entry_id = await _write_stream_entry(event)
+        written, entry_id = await _write_stream_entry_once(event)
         row.stream_entry_id = entry_id
         try:
             await session.commit()
@@ -430,7 +484,7 @@ async def _deliver(event: AgentAnnouncementEvent) -> str | None:
                 error_class=type(exc).__name__,
                 event_id=str(event.event_id),
             )
-        return entry_id
+        return entry_id if written else None
 
 
 async def publish_event(event: BroadcastEvent) -> None:
@@ -545,10 +599,11 @@ async def publish_agent_announcement(
         The caller's retry key for this step (#3736). Required by the
         callers for ``update`` / ``completion``; optional for ``start``.
         A retry with the same key that finds the stored row without a
-        stream entry id (the first try's ``XADD`` failed) writes the
-        stream entry now, with the stored copy's ids. A ``start`` sent
-        without a key cannot be retried this way: its row stays in the
-        archive and the agent's retry opens a new claim.
+        stream entry id finishes the delivery with the stored copy's ids
+        (see :func:`_deliver`): it writes the entry if the first try never
+        reached the stream, or only marks the row if it did. A ``start``
+        sent without a key cannot be retried this way: its row stays in
+        the archive and the agent's retry opens a new claim.
 
     Returns
     -------
@@ -585,10 +640,9 @@ async def publish_agent_announcement(
     stored = await _persist_agent_announcement(event, idempotency_key)
     if stored is not None and stored.delivered:
         return AnnouncementPublishResult(event=stored.event, cursor=None, replayed=True)
-    # A replay whose first try stored the row but never reached the
-    # stream finishes the delivery here, with the stored copy's ids. The
-    # row lock inside _deliver makes sure only one of several overlapping
-    # requests for the same step writes the stream entry.
+    # A replay whose row was stored but never marked as delivered finishes
+    # the delivery here, with the stored copy's ids. _deliver makes sure
+    # the step reaches the stream once (row lock + per-event marker).
     to_publish = event if stored is None else stored.event
     cursor = await _deliver(to_publish)
     if cursor is not None:

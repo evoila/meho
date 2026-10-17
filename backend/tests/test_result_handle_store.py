@@ -893,6 +893,11 @@ class _SharedValkey(_FakeRedis):
         entries.append(fields)
         return f"1700000000000-{len(entries) - 1}"
 
+    def register_script(self, script: str) -> Any:
+        from tests.broadcast_admission_helpers import FakeStreamClient
+
+        return FakeStreamClient(xadd=self.xadd).register_script(script)
+
 
 async def test_full_result_cache_does_not_block_broadcast(
     monkeypatch: pytest.MonkeyPatch,

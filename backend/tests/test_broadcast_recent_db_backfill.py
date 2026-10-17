@@ -43,6 +43,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentAnnouncement, Tenant
 from meho_backplane.settings import get_settings
 from meho_backplane.untrusted_text import wrap_untrusted_text
+from tests.broadcast_admission_helpers import fake_stream_write
 
 pytestmark = pytest.mark.asyncio
 
@@ -139,7 +140,7 @@ async def test_publish_persists_durable_row_keyed_on_event_uuid() -> None:
         admission="hosted_run",
     )
     bc = get_broadcast_client()
-    with patch.object(bc, "xadd", new=AsyncMock(return_value="1747800000000-0")):
+    with fake_stream_write(bc, AsyncMock(return_value="1747800000000-0")):
         result = await publish_agent_announcement(event, idempotency_key="key-1")
 
     # The result carries the stream cursor; the durable id is the UUID.

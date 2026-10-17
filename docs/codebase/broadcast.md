@@ -253,7 +253,10 @@ MCP tools/call meho_broadcast_announce   (REST: POST /api/v1/broadcast/announce)
          known retry key → replay the stored step, no INSERT)
       → SELECT agent_announcement ... FOR UPDATE  ← one delivery at a time per row
         (stream_entry_id already set → nothing to deliver, cursor=null)
-      → XADD meho:feed:{operator.tenant_id} {event: <json>} MAXLEN ~ 10000
+      → one Lua script (deliver once):
+          GET meho:announce:delivered:{tenant}:{event_id}  ← known → return it, no write
+          XADD meho:feed:{operator.tenant_id} {event: <json>} MAXLEN ~ 10000
+          SET meho:announce:delivered:{tenant}:{event_id} <entry id> EX <stream window>
       → UPDATE agent_announcement SET stream_entry_id  ← delivery mark, fail-soft
       → returns AnnouncementPublishResult(event, cursor, replayed)
     → returns {event_id, cursor, claim_id, phase, owner_sub, admission,
@@ -509,6 +512,16 @@ principal may still declare its own `work_ref`.
   `completion` the retry key is looked up after the claim's start row is
   locked, so a retry that waits behind the first copy of its step
   replays it instead of getting `claim_completed`.
+- A retry after a lost delivery mark never writes a second entry either.
+  The stream write is one Lua script: it checks a per-event marker key
+  (`meho:announce:delivered:{tenant}:{event_id}`), runs the `XADD`, and
+  stores the new entry id in the marker, all in one step. If the first
+  try wrote the entry but the row mark failed, or the reply to the write
+  never came back, the row still says "not delivered"; the retry's script
+  then finds the marker, returns the known entry id without writing, and
+  the row is marked with it. The retry gets `replayed=true` and
+  `cursor=null`. The marker lives as long as the stream read window
+  (`broadcast_retention_hours`).
 - "Same step" means every field matches: `run_id`, `phase`, `activity`,
   `target`, `targets`, `scope`, `planned_op_class`, `ttl_minutes`,
   `work_ref`, and `claim_id` for `update` / `completion`. So a second
@@ -558,9 +571,12 @@ had no durable home until T2.
 The row is written **before** the `XADD` so a stream-side failure never
 costs the durable record; both legs are fail-loud. The `XADD` runs with
 the row locked (`SELECT ... FOR UPDATE`), so only one request delivers a
-stored step. After a successful `XADD` one UPDATE in the same transaction
-sets `stream_entry_id` (the delivery mark, fail-soft: a failure there
-only logs a warning, because the announcement is already delivered).
+stored step, and inside one Lua script with a per-event marker key, so a
+retry after a lost delivery mark or a lost reply finds the entry instead
+of writing it again. After a successful `XADD` one UPDATE in the same
+transaction sets `stream_entry_id` (the delivery mark, fail-soft: a
+failure there only logs a warning, because the announcement is already
+delivered; the next retry marks the row).
 Columns: `id` (UUID
 PK), `tenant_id` (FK), `principal_sub`, `activity`, `target`, `scope`,
 `targets` (JSONB), `phase`, `planned_op_class`, `ttl_minutes`,

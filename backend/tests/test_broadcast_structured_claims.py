@@ -46,7 +46,7 @@ from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.mcp.tools.broadcast import _handler_recent
 from meho_backplane.settings import get_settings
 from meho_backplane.untrusted_text import wrap_untrusted_text
-from tests.broadcast_admission_helpers import patch_agent_admission
+from tests.broadcast_admission_helpers import fake_stream_write, patch_agent_admission
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     build_operator,
@@ -402,7 +402,7 @@ def test_announce_echoes_declared_claims_and_publishes_them(
     """The ack echoes declared claims; the XADD'd JSON carries them typed."""
     client, op = client_with_operator
     bc = get_broadcast_client()
-    with patch.object(bc, "xadd", new=AsyncMock(return_value="1747800000000-0")) as xa:
+    with fake_stream_write(bc, AsyncMock(return_value="1747800000000-0")) as xa:
         resp = post_mcp(
             client,
             _tools_call(
@@ -456,7 +456,7 @@ def test_bare_announce_returns_stamped_claim_ack(
     """No declared claims → the ack carries only the server-stamped claim keys (#3736)."""
     client, _op = client_with_operator
     bc = get_broadcast_client()
-    with patch.object(bc, "xadd", new=AsyncMock(return_value="1747800000000-7")):
+    with fake_stream_write(bc, AsyncMock(return_value="1747800000000-7")):
         resp = post_mcp(
             client,
             _tools_call("meho_broadcast_announce", {"activity": "investigating"}),

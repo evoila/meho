@@ -181,7 +181,7 @@ async def _docs_chunk_handler(
         except CollectionForbiddenError as exc:
             raise McpPermissionDeniedError(f"docs chunk: {exc}") from exc
         except CollectionDisabledError as exc:
-            raise McpInvalidParamsError(
+            raise McpPermissionDeniedError(
                 f"docs chunk: {exc}",
                 data={"reason": "collection_disabled"},
             ) from exc

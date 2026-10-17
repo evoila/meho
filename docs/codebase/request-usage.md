@@ -90,7 +90,7 @@ for each REST request and each MCP tool call or resource read:
 | The request | What goes into `audit_log` |
 |---|---|
 | A classified writer already wrote a row (the dispatcher, an approval decision, a topology edit, ...) | Nothing more. That row is the record. |
-| Refused: HTTP 401 / 403, an MCP role / capability / surface / add-on gate, or an MCP handler that raises `McpPermissionDeniedError` (the caller may not use this target, memory scope, collection or tenant) | One `policy_decision` row. |
+| Refused: HTTP 401 / 403, an MCP role / capability / surface / add-on gate, or an MCP handler that raises `McpPermissionDeniedError` (the caller may not use this target, memory scope, docs collection, tenant, built-in connector or doc collection, runbook template or run, or another session's audit trail). REST answers 403 for the same checks. | One `policy_decision` row. |
 | Routine: a `GET`, a read-only `POST` (search, query, preview, heartbeat, runner results), an MCP `read` or `audit_query` tool, a resource read | Nothing. |
 | An operation call (`POST /api/v1/operations/call`, MCP `call_operation`) | Nothing more. The dispatcher writes the execution or policy row, also for a connector error. An async run writes it when the run finishes. |
 | Any other 4xx (validation failure, not found, conflict), or an MCP handler that rejects its arguments | Nothing. |

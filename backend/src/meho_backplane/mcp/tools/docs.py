@@ -345,7 +345,7 @@ async def _resolve_collection_or_error(
             # ``str(exc)`` already names the missing capability + the identity
             # it checked; also surface the capability key on ``error.data`` so
             # an agent can self-correct without parsing the message (T2 #1802).
-            raise McpInvalidParamsError(
+            raise McpPermissionDeniedError(
                 f"{tool}: {exc}",
                 data={
                     "reason": "not_entitled",
@@ -353,7 +353,7 @@ async def _resolve_collection_or_error(
                 },
             ) from exc
         except CollectionDisabledError as exc:
-            raise McpInvalidParamsError(
+            raise McpPermissionDeniedError(
                 f"{tool}: {exc}",
                 data={"reason": "collection_disabled"},
             ) from exc
@@ -396,7 +396,7 @@ async def _resolve_fanout_or_error(
                 session, operator, requested_keys=requested_keys
             )
         except NoEntitledReadyCollectionError as exc:
-            raise McpInvalidParamsError(f"{tool}: {exc}") from exc
+            raise McpPermissionDeniedError(f"{tool}: {exc}") from exc
 
 
 def _search_chunk_payload(chunk: DocsChunk) -> dict[str, Any]:

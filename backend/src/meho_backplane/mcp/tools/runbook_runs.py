@@ -90,7 +90,7 @@ from meho_backplane.mcp.registry import (
     ToolSurface,
     register_mcp_tool,
 )
-from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
 from meho_backplane.runbooks.engine import (
     PreviousStepNotVerifiedError,
     VerifyResponseMismatchError,
@@ -161,8 +161,13 @@ def _to_invalid_params(tool: str, exc: Exception) -> McpInvalidParamsError:
 
     Centralised so every handler maps the typed-exception set in
     :data:`_INVALID_PARAMS_ERRORS` to the spec-correct ``-32602`` with a
-    consistent ``"<tool>: <detail>"`` message shape.
+    consistent ``"<tool>: <detail>"`` message shape. A
+    :class:`NotRunAssigneeError` is a permission refusal (REST 403), so it
+    becomes :class:`McpPermissionDeniedError` and keeps its decision row
+    (#3757).
     """
+    if isinstance(exc, NotRunAssigneeError):
+        return McpPermissionDeniedError(f"{tool}: {exc}")
     return McpInvalidParamsError(f"{tool}: {exc}")
 
 

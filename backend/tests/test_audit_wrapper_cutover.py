@@ -77,6 +77,7 @@ from tests.mcp_test_fixtures import (
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
     post_mcp,
     required_settings_env,  # noqa: F401 — pytest-discovered autouse fixture
+    seed_doc_collection,
 )
 
 from ._request_usage_helpers import read_usage_events
@@ -835,6 +836,58 @@ async def test_mcp_handler_refusals_write_one_decision_row(retired: bool) -> Non
                 ("MCP", f"/mcp/resources/read/meho://tenant/{_FOREIGN_TENANT}/{resource}")
                 for resource in _TENANT_RESOURCES
             ],
+        ],
+    )
+    assert {row.status_code for row in rows} == {403}
+
+
+async def test_mcp_scope_refusals_write_one_decision_row(retired: bool) -> None:
+    """A docs collection the caller may not use, and an ingest into another tenant.
+
+    REST answers 403 for both. On MCP each one writes one
+    ``policy_decision`` row with the switch on, and one ``legacy_request``
+    row with it off.
+    """
+    await seed_doc_collection()
+    # Base docs capability only: the tool is visible, the vmware
+    # collection is not.
+    op = build_operator(TenantRole.TENANT_ADMIN).model_copy(
+        update={"capabilities": frozenset({"meho-docs"})},
+    )
+
+    async def _fake_verify() -> Operator:
+        structlog.contextvars.bind_contextvars(operator_sub=op.sub, tenant_id=str(op.tenant_id))
+        return op
+
+    production_app.dependency_overrides[verify_mcp_jwt_and_bind] = _fake_verify
+    try:
+        with TestClient(production_app) as client:
+            docs = _tool_call(
+                client, "search_docs", {"query": "upgrade", "collection": "vmware"}, 1
+            )
+            assert docs["error"]["data"]["reason"] == "not_entitled"
+            ingest = _tool_call(
+                client,
+                "meho_connector_ingest",
+                {
+                    "product": "scopedenied",
+                    "version": "1.0",
+                    "impl_id": "scopedenied-rest",
+                    "specs": [{"uri": "docs:never-fetched/spec.yaml"}],
+                    "tenant_id": str(_FOREIGN_TENANT),
+                },
+                2,
+            )
+            assert "cannot ingest into" in ingest["error"]["message"]
+    finally:
+        production_app.dependency_overrides.pop(verify_mcp_jwt_and_bind, None)
+
+    rows = await _audit_rows()
+    assert _shape(rows) == _expected_rows(
+        retired,
+        [
+            ("MCP", "/mcp/tools/call/search_docs"),
+            ("MCP", "/mcp/tools/call/meho_connector_ingest"),
         ],
     )
     assert {row.status_code for row in rows} == {403}

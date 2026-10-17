@@ -489,6 +489,41 @@ If `/ready` still reports `unreachable: SSLError` after the mount lands, check t
 common drift cause: a typo'd ConfigMap name (the mount succeeds but
 the file is empty / wrong).
 
+### Publish the root CA for operators
+
+Every operator machine must trust the same root CA before the `meho`
+CLI or a Claude client can log in. The backplane, Keycloak and the
+other services send only their own (leaf) certificate, not the root. So
+operators cannot copy the root from a server. You, the deployer, must
+hand it to them.
+
+Publish the root CA where an operator can get it **without trusting
+the CA first**, and without access to the cluster or the secrets
+store. Good places:
+
+- an internal docs page on a site the operator already trusts,
+- an item in the team's password manager,
+- a plain-HTTP link, for example `http://ca.example.internal/root.pem`.
+
+Publish only the root certificate (public by design), never a private
+key.
+
+Also publish its SHA-256 fingerprint, and do it through a channel the
+operator already trusts: the team's password manager, or a docs page
+behind a login. Do not publish the fingerprint only next to a plain-HTTP
+download. Someone who can replace that file can also replace a
+fingerprint shown beside it. Operators must compare the file against
+this fingerprint before they import it:
+
+```bash
+openssl x509 -in root.pem -noout -subject -fingerprint -sha256
+```
+
+Then tell new operators where to find it. The operator steps are on the
+Claude Desktop and Claude Code pages of the docs site, under "Before
+you start: trust your deployment's CA"
+([`docs-site/clients/claude-desktop.md`](../../docs-site/clients/claude-desktop.md#before-you-start-trust-your-deployments-ca)).
+
 ## Connector dispatch against self-signed / internal-CA targets
 
 The trust-bundle section above covers the backplane's **own**

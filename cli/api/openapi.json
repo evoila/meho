@@ -25729,7 +25729,7 @@
           "replayed"
         ],
         "title": "BroadcastAnnounceResponse",
-        "description": "Acknowledgement with distinct durable event id and stream cursor.\n\n``cursor`` is ``None`` on an idempotent replay (``replayed=true``),\nbecause nothing new was written to the stream."
+        "description": "Acknowledgement with distinct durable event id and stream cursor.\n\n``replayed=true`` means the step was already stored and no new row was\nwritten. ``cursor`` is ``None`` when the stream entry already existed;\nit is set when this call wrote the stream entry, including a retry\nthat finished a delivery whose first stream write failed."
       },
       "BroadcastOverrideCreate": {
         "properties": {

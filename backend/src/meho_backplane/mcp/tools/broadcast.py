@@ -564,9 +564,10 @@ async def _publish_agent_announcement_impl(
         raise McpInvalidParamsError(str(exc), data={"code": exc.code}) from exc
     stored = result.event
     # ``event_id`` is the per-announcement UUID (the durable row's PK);
-    # ``cursor`` is the Valkey stream entry id (``None`` on an idempotent
-    # replay, which writes nothing new). The stamped identity and claim
-    # fields are trusted structured values, echoed unwrapped.
+    # ``cursor`` is the Valkey stream entry id this call wrote (``None``
+    # on a replay whose entry was already on the stream). The stamped
+    # identity and claim fields are trusted structured values, echoed
+    # unwrapped.
     ack: dict[str, Any] = {
         "event_id": str(stored.event_id),
         "cursor": result.cursor,
@@ -891,7 +892,9 @@ register_mcp_tool(
                         "Your retry key for this step. Required for "
                         "'update' and 'completion', optional for 'start'. "
                         "Sending the same key again returns the first "
-                        "result (replayed=true) and writes nothing new."
+                        "result (replayed=true) and stores nothing new. If "
+                        "the first try was stored but never reached the "
+                        "feed, the retry delivers it and returns a cursor."
                     ),
                 },
                 "phase": {

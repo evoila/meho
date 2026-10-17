@@ -16,6 +16,8 @@ applied). Only the Valkey ``XADD`` and the rate limiter are faked.
   default TTL, and per-tenant, per-owner idempotency.
 * A legacy archive row (written before trusted admission) can never be
   continued as a claim.
+* A step whose stream write failed is delivered by the retry with the
+  same key, once, without a second row.
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from redis.exceptions import RedisError
 from sqlalchemy import func, select
 
 from meho_backplane.agent.invoke import current_agent_run_id_var
@@ -411,6 +414,71 @@ async def test_same_key_replays_without_a_second_write(_fake_stream: AsyncMock) 
 
     data = await _announce_error(agent, {**step, "activity": "something else"})
     assert data["code"] == "idempotency_key_reused"
+
+
+async def test_retry_finishes_a_delivery_whose_stream_write_failed(
+    _fake_stream: AsyncMock,
+) -> None:
+    """The row is stored, the stream write fails, the retry delivers it once."""
+    tenant_id = uuid4()
+    agent = await _registered_agent(tenant_id)
+    start = await _handler_announce(agent, {"activity": "start"})
+    step = {
+        "activity": "done",
+        "phase": "completion",
+        "claim_id": start["claim_id"],
+        "idempotency_key": "c1",
+    }
+    outcomes: list[Any] = [RedisError("valkey down"), "1700000000000-77"]
+
+    def _next_outcome(*_args: Any, **_kwargs: Any) -> str:
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return str(outcome)
+
+    _fake_stream.side_effect = _next_outcome
+
+    with pytest.raises(RedisError):
+        await _handler_announce(agent, step)
+    assert await _row_count(tenant_id) == 2
+    async with get_sessionmaker()() as session:
+        pending = (
+            await session.execute(
+                select(AgentAnnouncement).where(AgentAnnouncement.phase == "completion")
+            )
+        ).scalar_one()
+        assert pending.stream_entry_id is None
+        pending_id = pending.id
+
+    delivered = await _handler_announce(agent, step)
+    assert delivered["replayed"] is True
+    assert delivered["cursor"] == "1700000000000-77"
+    assert delivered["event_id"] == str(pending_id)
+    assert await _row_count(tenant_id) == 2
+    assert _fake_stream.await_count == 3
+    _stream_key, fields = _fake_stream.await_args.args
+    assert str(pending_id) in fields["event"]
+    async with get_sessionmaker()() as session:
+        marked = await session.get(AgentAnnouncement, pending_id)
+        assert marked is not None
+        assert marked.stream_entry_id == "1700000000000-77"
+
+    again = await _handler_announce(agent, step)
+    assert again["replayed"] is True
+    assert again["cursor"] is None
+    assert _fake_stream.await_count == 3
+
+    data = await _announce_error(
+        agent,
+        {
+            "activity": "late",
+            "phase": "update",
+            "claim_id": start["claim_id"],
+            "idempotency_key": "u9",
+        },
+    )
+    assert data["code"] == "claim_completed"
 
 
 async def test_same_key_from_another_run_is_refused() -> None:

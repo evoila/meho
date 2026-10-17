@@ -3035,8 +3035,10 @@ type BroadcastAnnounceRequestPlannedOpClass string
 
 // BroadcastAnnounceResponse Acknowledgement with distinct durable event id and stream cursor.
 //
-// “cursor“ is “None“ on an idempotent replay (“replayed=true“),
-// because nothing new was written to the stream.
+// “replayed=true“ means the step was already stored and no new row was
+// written. “cursor“ is “None“ when the stream entry already existed;
+// it is set when this call wrote the stream entry, including a retry
+// that finished a delivery whose first stream write failed.
 type BroadcastAnnounceResponse struct {
 	ActorSub       *string             `json:"actor_sub"`
 	Admission      string              `json:"admission"`

@@ -3,7 +3,7 @@
 
 """Tests for Alembic migration ``0106_add_agent_announcement_claims``.
 
-#3736 adds five nullable trusted-claim columns to ``agent_announcement``
+#3736 adds six nullable trusted-claim columns to ``agent_announcement``
 and three partial unique indexes. The tests check that ``upgrade`` adds
 them, that the indexes refuse a second ``completion`` for one claim and a
 reused retry key for one owner, that a legacy row (all new columns NULL)
@@ -30,7 +30,14 @@ from meho_backplane.settings import get_settings
 _REVISION = "0106"
 _DOWN_REVISION = "0105"
 _TABLE = "agent_announcement"
-_COLUMNS = {"claim_id", "owner_sub", "actor_sub", "admission", "idempotency_key"}
+_COLUMNS = {
+    "claim_id",
+    "owner_sub",
+    "actor_sub",
+    "admission",
+    "idempotency_key",
+    "stream_entry_id",
+}
 _INDEXES = {
     "agent_announcement_idempotency_uq",
     "agent_announcement_claim_start_uq",

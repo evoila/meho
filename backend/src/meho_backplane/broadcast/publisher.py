@@ -53,7 +53,7 @@ from uuid import UUID
 
 import structlog
 from prometheus_client import Counter
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -156,15 +156,25 @@ class AnnouncementPublishResult:
 
     * ``event`` -- the stored announcement. On a replay this is the
       first stored copy, so the caller echoes the original ids.
-    * ``cursor`` -- the Valkey stream entry id, or ``None`` on a replay
-      (nothing new was written to the stream).
+    * ``cursor`` -- the Valkey stream entry id this call wrote, or
+      ``None`` when the entry was already on the stream (a plain replay).
     * ``replayed`` -- ``True`` when the ``idempotency_key`` matched an
-      earlier, identical step; no new row and no new stream entry.
+      earlier, identical step, so no new row was written. A replay still
+      writes the stream entry when the first try stored the row but never
+      reached the stream; ``cursor`` is then set.
     """
 
     event: AgentAnnouncementEvent
     cursor: str | None
     replayed: bool
+
+
+@dataclass(frozen=True)
+class _StoredStep:
+    """A step found by its retry key, and whether it reached the stream."""
+
+    event: AgentAnnouncementEvent
+    delivered: bool
 
 
 _STEP_FIELDS = (
@@ -196,7 +206,7 @@ async def _find_by_idempotency_key(
     session: AsyncSession,
     event: AgentAnnouncementEvent,
     idempotency_key: str,
-) -> AgentAnnouncementEvent | None:
+) -> _StoredStep | None:
     row = (
         await session.execute(
             select(AgentAnnouncement).where(
@@ -214,7 +224,7 @@ async def _find_by_idempotency_key(
             IDEMPOTENCY_KEY_REUSED,
             "this idempotency_key was already used for a different step",
         )
-    return stored
+    return _StoredStep(event=stored, delivered=row.stream_entry_id is not None)
 
 
 async def _check_open_claim(session: AsyncSession, event: AgentAnnouncementEvent) -> None:
@@ -222,14 +232,25 @@ async def _check_open_claim(session: AsyncSession, event: AgentAnnouncementEvent
 
     Legacy rows (no ``claim_id``) never match, so an old archive entry
     can never be continued as a claim.
+
+    The claim's ``start`` row is locked (``SELECT ... FOR UPDATE``) until
+    the caller's transaction ends. Two steps on one claim therefore run
+    one after the other: an ``update`` that waits behind a ``completion``
+    re-reads after the completion commits, sees its row, and gets
+    ``claim_completed``. Without the lock both could pass this check and
+    the update could commit after the completion. SQLite (dev/test only)
+    has no row locks and drops the clause; the partial unique indexes
+    still stop a second ``completion`` there.
     """
     start = (
         await session.execute(
-            select(AgentAnnouncement.owner_sub, AgentAnnouncement.run_id).where(
+            select(AgentAnnouncement.owner_sub, AgentAnnouncement.run_id)
+            .where(
                 AgentAnnouncement.tenant_id == event.tenant_id,
                 AgentAnnouncement.claim_id == event.claim_id,
                 AgentAnnouncement.phase == "start",
             )
+            .with_for_update()
         )
     ).one_or_none()
     if start is None:
@@ -279,7 +300,7 @@ def _announcement_row(
 async def _persist_agent_announcement(
     event: AgentAnnouncementEvent,
     idempotency_key: str | None,
-) -> AgentAnnouncementEvent | None:
+) -> _StoredStep | None:
     """Check the claim rules and write one durable :class:`AgentAnnouncement` row.
 
     Broadcast v2 T2 (#2547) made this row the durable archive, written
@@ -290,13 +311,16 @@ async def _persist_agent_announcement(
       step (a safe retry) instead of writing again; the same key for a
       different step is refused;
     * an ``update`` / ``completion`` must continue an open claim that the
-      same owner (and the same hosted run) started.
+      same owner (and the same hosted run) started. The claim's start row
+      is locked for the rest of the transaction (:func:`_check_open_claim`),
+      so steps on one claim never interleave.
 
-    The partial unique indexes catch the race where two requests pass the
-    checks at the same time: the loser re-reads and replays, or gets
-    ``claim_completed``.
+    The partial unique indexes catch the race where two requests with the
+    same key pass the checks at the same time: the loser re-reads and
+    replays. Two identical requests in flight at the same moment may then
+    both write the stream entry; readers correlate by ``event_id``.
 
-    Returns the stored event on a replay, else ``None`` (a new row was
+    Returns the stored step on a replay, else ``None`` (a new row was
     written). Any other DB error propagates (fail-loud).
     """
     sessionmaker = get_sessionmaker()
@@ -322,6 +346,55 @@ async def _persist_agent_announcement(
                 ) from None
             raise
     return None
+
+
+async def _write_stream_entry(event: AgentAnnouncementEvent) -> str:
+    """``XADD`` one announcement to its tenant stream and return the entry id.
+
+    Fail-loud: any redis-py / Valkey error propagates to the caller.
+    """
+    client = get_broadcast_client()
+    entry_id = await client.xadd(
+        _stream_key(event.tenant_id),
+        {"event": event.model_dump_json()},
+        maxlen=BROADCAST_MAXLEN,
+        approximate=True,
+    )
+    # ``decode_responses=True`` on the broadcast client (see
+    # :mod:`~meho_backplane.broadcast.client`) makes xadd's return value
+    # ``str``; the cast is documentary rather than runtime-meaningful but
+    # keeps mypy honest about the public contract this module advertises.
+    return str(entry_id)
+
+
+async def _mark_delivered(event_id: UUID, entry_id: str) -> None:
+    """Record the stream entry id on the archive row after a successful ``XADD``.
+
+    This is the one UPDATE the application runs against
+    ``agent_announcement``. It lets a retry tell "stored but never
+    reached the feed" from "delivered", so the retry can finish the
+    delivery without a second row and without a duplicate stream entry.
+
+    Fail-soft on purpose: when this runs the announcement is already on
+    the stream and in the archive, so a failure here must not turn a
+    delivered announcement into an error for the caller. The cost is one
+    warning line and, only if the caller retries the same key anyway, one
+    duplicate stream entry with the same ``event_id``.
+    """
+    try:
+        async with get_sessionmaker()() as session:
+            await session.execute(
+                update(AgentAnnouncement)
+                .where(AgentAnnouncement.id == event_id)
+                .values(stream_entry_id=entry_id)
+            )
+            await session.commit()
+    except Exception as exc:
+        _log.warning(
+            "broadcast_announcement_delivery_mark_failed",
+            error_class=type(exc).__name__,
+            event_id=str(event_id),
+        )
 
 
 async def publish_event(event: BroadcastEvent) -> None:
@@ -435,13 +508,18 @@ async def publish_agent_announcement(
     idempotency_key:
         The caller's retry key for this step (#3736). Required by the
         callers for ``update`` / ``completion``; optional for ``start``.
+        A retry with the same key that finds the stored row without a
+        stream entry id (the first try's ``XADD`` failed) writes the
+        stream entry now, with the stored copy's ids. A ``start`` sent
+        without a key cannot be retried this way: its row stays in the
+        archive and the agent's retry opens a new claim.
 
     Returns
     -------
     AnnouncementPublishResult
         The stored event, the Valkey stream entry id (``"<ms>-<seq>"``)
-        the ``XADD`` wrote (``None`` on a replay), and whether the call
-        was an idempotent replay.
+        this call wrote (``None`` on a plain replay), and whether the
+        call was an idempotent replay.
 
     Raises
     ------
@@ -469,18 +547,12 @@ async def publish_agent_announcement(
     # stream-side failure never costs the durable record. Fail-loud --
     # any DB exception propagates to the -32603 path.
     stored = await _persist_agent_announcement(event, idempotency_key)
-    if stored is not None:
-        return AnnouncementPublishResult(event=stored, cursor=None, replayed=True)
-    client = get_broadcast_client()
-    entry_id = await client.xadd(
-        _stream_key(event.tenant_id),
-        {"event": event.model_dump_json()},
-        maxlen=BROADCAST_MAXLEN,
-        approximate=True,
-    )
-    BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL.labels(phase=event.phase).inc()
-    # ``decode_responses=True`` on the broadcast client (see
-    # :mod:`~meho_backplane.broadcast.client`) makes xadd's return value
-    # ``str``; the cast is documentary rather than runtime-meaningful but
-    # keeps mypy honest about the public contract this function advertises.
-    return AnnouncementPublishResult(event=event, cursor=str(entry_id), replayed=False)
+    if stored is not None and stored.delivered:
+        return AnnouncementPublishResult(event=stored.event, cursor=None, replayed=True)
+    # A replay whose first try stored the row but never reached the
+    # stream finishes the delivery here, with the stored copy's ids.
+    to_publish = event if stored is None else stored.event
+    cursor = await _write_stream_entry(to_publish)
+    await _mark_delivered(to_publish.event_id, cursor)
+    BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL.labels(phase=to_publish.phase).inc()
+    return AnnouncementPublishResult(event=to_publish, cursor=cursor, replayed=stored is not None)

@@ -248,8 +248,11 @@ MCP tools/call meho_broadcast_announce   (REST: POST /api/v1/broadcast/announce)
         'start'; missing ttl_minutes → 30
     → publish_agent_announcement(event, idempotency_key)  ← fail-loud
       → claim rules + INSERT agent_announcement in one transaction  ← durable, first
-        (known retry key → replay the stored step, no INSERT, no XADD)
+        (update/completion lock the claim's start row until commit;
+         known retry key → replay the stored step, no INSERT)
       → XADD meho:feed:{operator.tenant_id} {event: <json>} MAXLEN ~ 10000
+        (skipped when the stored step already has a stream_entry_id)
+      → UPDATE agent_announcement SET stream_entry_id  ← delivery mark, fail-soft
       → returns AnnouncementPublishResult(event, cursor, replayed)
     → returns {event_id, cursor, claim_id, phase, owner_sub, admission,
        ttl_minutes, replayed, …} to the agent
@@ -486,9 +489,17 @@ principal may still declare its own `work_ref`.
   claim also stays with that run: another run of the same agent gets
   `claim_not_owned`.
 - The `idempotency_key` is scoped to (tenant, owner). Sending the same
-  step again returns the first result with `replayed=true` and
-  `cursor=null`; nothing new is stored or streamed. The same key for a
-  different step gets `idempotency_key_reused`.
+  step again returns the first result with `replayed=true`; nothing new
+  is stored. The same key for a different step gets
+  `idempotency_key_reused`.
+- A retry also finishes a delivery that failed half-way. The row is
+  written first, then the stream. If the stream write fails, the caller
+  gets an error and the row keeps `stream_entry_id = NULL`. The retry
+  with the same key finds that row, writes the stream entry with the
+  stored ids, marks the row, and returns `replayed=true` with the new
+  `cursor`. A plain replay of a delivered step returns `cursor=null`. A
+  `start` sent without a key cannot be retried this way; its row stays
+  as history and the agent's retry opens a new claim.
 - "Same step" means every field matches: `run_id`, `phase`, `activity`,
   `target`, `targets`, `scope`, `planned_op_class`, `ttl_minutes`,
   `work_ref`, and `claim_id` for `update` / `completion`. So a second
@@ -498,9 +509,16 @@ principal may still declare its own `work_ref`.
   `claim_id_not_allowed`, `claim_id_required`, `idempotency_key_required`,
   `server_stamped_field`, `claim_not_found`, `claim_not_owned`,
   `claim_completed`, `idempotency_key_reused`.
-- The checks and the INSERT share one transaction. Three partial unique
-  indexes (migration `0106`) catch two requests that race: one retry key
-  per owner, one `start` per claim, one `completion` per claim.
+- The checks and the INSERT share one transaction. For `update` and
+  `completion` the claim's `start` row is locked (`SELECT ... FOR
+  UPDATE`) until commit, so two steps on one claim run one after the
+  other: an `update` that waits behind a `completion` sees the completion
+  row and gets `claim_completed`. Three partial unique indexes
+  (migration `0106`) back this up and also catch two requests that race
+  on the same retry key: one retry key per owner, one `start` per claim,
+  one `completion` per claim. The lock is a PostgreSQL feature; SQLite
+  (dev/test) drops it and relies on the indexes. The PostgreSQL test is
+  `tests/integration/test_broadcast_claim_steps_pg.py`.
 
 A claim is **advisory**. It tells others what an agent intends. It is
 never a lock, never blocks another claim, and never blocks a write.
@@ -529,12 +547,15 @@ had no durable home until T2.
 `db/models.py::AgentAnnouncement`) keyed on the event's minted UUID
 (`event_id`), persisting the typed claim fields (T1 #2544) and lineage.
 The row is written **before** the `XADD` so a stream-side failure never
-costs the durable record; both legs are fail-loud. Columns: `id` (UUID
+costs the durable record; both legs are fail-loud. After a successful
+`XADD` one UPDATE sets `stream_entry_id` (the delivery mark, fail-soft:
+a failure there only logs a warning, because the announcement is already
+delivered). Columns: `id` (UUID
 PK), `tenant_id` (FK), `principal_sub`, `activity`, `target`, `scope`,
 `targets` (JSONB), `phase`, `planned_op_class`, `ttl_minutes`,
 `work_ref`, `run_id`, `created_at` (the event's `ts`), plus the trusted
 claim columns from migration `0106` (#3736): `claim_id`, `owner_sub`,
-`actor_sub`, `admission`, `idempotency_key`. Indexes:
+`actor_sub`, `admission`, `idempotency_key`, `stream_entry_id`. Indexes:
 `(tenant_id, created_at DESC)` (recent backfill + prune) and
 `(tenant_id, work_ref)` (filter). This is the split Kubernetes draws
 between its bounded Events TTL and the durable records it expects

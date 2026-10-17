@@ -5,7 +5,14 @@
 
 from __future__ import annotations
 
-from meho_backplane.memory.snippet import SNIPPET_MAX_CHARS, query_snippet
+import time
+
+from meho_backplane.memory.snippet import (
+    SNIPPET_MAX_CHARS,
+    SNIPPET_MAX_TERMS,
+    SNIPPET_SCAN_MAX_CHARS,
+    query_snippet,
+)
 
 
 def test_body_that_fits_is_returned_whole() -> None:
@@ -41,3 +48,40 @@ def test_one_letter_and_regex_characters_in_the_query_are_safe() -> None:
     body = "f" * 500 + " a.b(c) " + "g" * 500
     snippet, _ = query_snippet(body, "a ( ) .*")
     assert snippet == "f" * SNIPPET_MAX_CHARS + "…"
+
+
+def test_only_the_longest_query_words_are_used() -> None:
+    # Nine words of two letters each, plus one longer word. Only the
+    # longest SNIPPET_MAX_TERMS words count, so the shortest is dropped.
+    short_words = [f"{chr(97 + i)}{chr(97 + i)}" for i in range(SNIPPET_MAX_TERMS)]
+    query = " ".join([*short_words, "longword"])
+    dropped = sorted(short_words)[-1]
+    body = "x" * 1000 + f" {dropped} " + "y" * 1000
+    snippet, truncated = query_snippet(body, query)
+    assert truncated is True
+    assert snippet == "x" * SNIPPET_MAX_CHARS + "…"
+
+
+def test_a_match_past_the_scan_limit_is_ignored() -> None:
+    body = "z" * SNIPPET_SCAN_MAX_CHARS + " needle " + "w" * 1000
+    snippet, truncated = query_snippet(body, "needle")
+    assert truncated is True
+    assert snippet == "z" * SNIPPET_MAX_CHARS + "…"
+
+
+def test_a_match_just_inside_the_scan_limit_is_found() -> None:
+    body = "z" * (SNIPPET_SCAN_MAX_CHARS - 10) + "needle" + "w" * 1000
+    snippet, _ = query_snippet(body, "needle")
+    assert "needle" in snippet
+
+
+def test_many_words_and_a_long_body_still_return_a_window() -> None:
+    query = " ".join(f"word{i:03d}" for i in range(85))
+    body = "q" * (1024 * 1024)
+    started = time.perf_counter()
+    for _ in range(50):
+        snippet, truncated = query_snippet(body, query)
+    elapsed = time.perf_counter() - started
+    assert truncated is True
+    assert snippet == "q" * SNIPPET_MAX_CHARS + "…"
+    assert elapsed < 1.0

@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from typing import Final
 
-__all__ = ["SNIPPET_MAX_CHARS", "query_snippet"]
+__all__ = ["SNIPPET_MAX_CHARS", "SNIPPET_MAX_TERMS", "SNIPPET_SCAN_MAX_CHARS", "query_snippet"]
 
 #: Most characters of body text one snippet holds. Cut ends get one
 #: ``…`` each, so a snippet is at most this length plus two.
@@ -21,16 +21,30 @@ SNIPPET_MAX_CHARS: Final[int] = 240
 #: Query words shorter than this are too common to pick a window.
 _MIN_TERM_CHARS: Final[int] = 2
 
+#: Most query words used to pick a window. The longest words win, since
+#: they are the most specific.
+SNIPPET_MAX_TERMS: Final[int] = 8
+
+#: Only this many leading characters of a body are searched for a query
+#: word. When no word appears there, the window starts at the body start.
+SNIPPET_SCAN_MAX_CHARS: Final[int] = 32_768
+
 _WORD_RE: Final[re.Pattern[str]] = re.compile(r"\w+")
 
 
 def _first_match(body: str, query: str) -> int:
-    """Return where the first query word appears in *body*, or ``0``."""
-    terms = {word for word in _WORD_RE.findall(query) if len(word) >= _MIN_TERM_CHARS}
-    if not terms:
+    """Return where the first query word appears in *body*, or ``0``.
+
+    The work per call is bounded: at most :data:`SNIPPET_MAX_TERMS` query
+    words (longest first) and only the first :data:`SNIPPET_SCAN_MAX_CHARS`
+    characters of *body*.
+    """
+    words = {word for word in _WORD_RE.findall(query) if len(word) >= _MIN_TERM_CHARS}
+    if not words:
         return 0
-    pattern = "|".join(re.escape(term) for term in sorted(terms, key=len, reverse=True))
-    match = re.search(pattern, body, flags=re.IGNORECASE)
+    terms = sorted(words, key=lambda word: (-len(word), word))[:SNIPPET_MAX_TERMS]
+    pattern = "|".join(re.escape(term) for term in terms)
+    match = re.search(pattern, body[:SNIPPET_SCAN_MAX_CHARS], flags=re.IGNORECASE)
     return match.start() if match else 0
 
 

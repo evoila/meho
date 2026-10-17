@@ -85,7 +85,11 @@ calibrated, so showing them would look like a confidence they are not.
 at most 240 characters comes back whole. A longer body is cut to a
 240-character window that starts a little before the first query word
 (two or more characters, case-insensitive) found in the body, or at the
-start when none is found. It cuts by characters, not words.
+start when none is found. It cuts by characters, not words. The work per
+hit is bounded: it uses at most 8 query words (`SNIPPET_MAX_TERMS`,
+longest first) and looks only at the first 32,768 characters of the body
+(`SNIPPET_SCAN_MAX_CHARS`). A word that first appears after that point
+does not move the window.
 
 ### `MemoryService` (`memory/service.py`)
 

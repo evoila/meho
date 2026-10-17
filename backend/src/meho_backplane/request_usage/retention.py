@@ -32,7 +32,7 @@ import structlog
 from sqlalchemy import delete
 
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import RequestUsageEvent
+from meho_backplane.db.models import AuditEventClass, RequestUsageEvent
 from meho_backplane.memory.audit import INTERNAL_METHOD, write_internal_audit_row
 from meho_backplane.metrics import note_loop_tick
 from meho_backplane.settings import get_settings
@@ -94,6 +94,7 @@ async def prune_request_usage_once(*, now: datetime | None = None) -> int | None
     )
     try:
         await write_internal_audit_row(
+            event_class=AuditEventClass.OPERATION_EXECUTION,
             operator_sub=SYSTEM_OPERATOR_SUB,
             tenant_id=REQUEST_USAGE_RETENTION_SYSTEM_TENANT_ID,
             method=INTERNAL_METHOD,

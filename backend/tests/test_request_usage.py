@@ -235,9 +235,9 @@ def test_migration_value_sets_match_schema() -> None:
         Path(__file__).resolve().parents[1]
         / "alembic"
         / "versions"
-        / "0106_create_request_usage_event.py"
+        / "0107_create_request_usage_event.py"
     )
-    spec = importlib.util.spec_from_file_location("_migration_0106", path)
+    spec = importlib.util.spec_from_file_location("_migration_0107", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

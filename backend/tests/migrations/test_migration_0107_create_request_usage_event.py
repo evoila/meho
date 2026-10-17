@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for Alembic migration ``0106_create_request_usage_event`` (#3734).
+"""Tests for Alembic migration ``0107_create_request_usage_event`` (#3734).
 
 The migration adds one new table with two indexes. The tests check that
 ``upgrade`` creates the table and indexes, that ``downgrade`` removes
@@ -23,8 +23,8 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0106"
-_DOWN_REVISION = "0105"
+_REVISION = "0107"
+_DOWN_REVISION = "0106"
 _TABLE = "request_usage_event"
 _INDEXES = {
     "request_usage_event_tenant_occurred_idx",
@@ -38,7 +38,7 @@ def alembic_cfg(
     tmp_path: Path,
 ) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0106.db"
+    db_path = tmp_path / "migration_0107.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)

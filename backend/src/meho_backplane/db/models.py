@@ -8563,7 +8563,7 @@ class RequestUsageEvent(Base):
     * ``correlation_id`` -- opaque id that links a ``context_selected``
       event to later evaluation data; ``NULL`` on ``request_finished``.
 
-    Indexes are declared in migration ``0106``:
+    Indexes are declared in migration ``0107``:
     ``(tenant_id, occurred_at)`` for tenant-scoped window reads, and
     ``occurred_at`` for the retention delete.
     """

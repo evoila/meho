@@ -3,8 +3,8 @@
 
 """Create the ``request_usage_event`` table (#3734).
 
-Revision ID: 0106
-Revises: 0105
+Revision ID: 0107
+Revises: 0106
 Create Date: 2026-10-16
 
 Routine REST and MCP activity (lists, searches, resource reads) is usage,
@@ -31,8 +31,8 @@ What this migration adds
 Revision number
 ---------------
 
-This is ``0106`` and it follows ``0105`` (the approval request idempotency
-key), which merged first. The chain keeps a single head.
+This is ``0107`` and it follows ``0106`` (the ``audit_log`` event class),
+which merged first. The chain keeps a single head.
 
 Reversibility
 -------------
@@ -47,8 +47,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0106"
-down_revision: str | None = "0105"
+revision: str = "0107"
+down_revision: str | None = "0106"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

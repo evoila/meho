@@ -112,7 +112,7 @@ the loop goes on.
 - `backend/src/meho_backplane/request_usage/` — schema, collector, reader,
   retention.
 - `backend/src/meho_backplane/db/models.py` — `RequestUsageEvent`.
-- `backend/alembic/versions/0106_create_request_usage_event.py` — table,
+- `backend/alembic/versions/0107_create_request_usage_event.py` — table,
   CHECK constraints, indexes.
 - `backend/src/meho_backplane/settings.py` — `request_usage_retention_days`.
 - Tests: `backend/tests/test_request_usage.py`, plus the

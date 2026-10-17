@@ -89,9 +89,9 @@ for each REST request and each MCP tool call or resource read:
 
 | The request | What goes into `audit_log` |
 |---|---|
-| A classified writer already wrote a row in the caller's name (the dispatcher, an approval decision, a topology edit, a runner revocation, ...) | Nothing more. That row is the record. A row under another identity (a system job's name) does not count, so the wrapper row stays and the record still says who called. |
+| A classified writer already wrote a row in the caller's name (the dispatcher, an approval decision, a topology edit, a runner revocation, ...) and that row committed | Nothing more. That row is the record. A row under another identity (a system job's name) does not count, so the wrapper row stays and the record still says who called. A row that rolled back with a failed change does not count either; the failed attempt gets its `operation_execution` row below. |
 | Refused: HTTP 401 / 403, an MCP role / capability / surface / add-on gate, or an MCP handler that raises `McpPermissionDeniedError` (the caller may not use this target, memory scope, docs collection, tenant, built-in connector or doc collection, runbook template or run, or another session's audit trail). REST answers 403 for the same checks. | One `policy_decision` row. |
-| Routine: a `GET`, a read-only `POST` (search, query, preview, heartbeat, runner results), an MCP `read` or `audit_query` tool, a resource read | Nothing. |
+| Routine: a `GET`, a read-only `POST` (search, query, preview, heartbeat, runner results), an MCP `read` or `audit_query` tool, a resource read, or the dry run of a write route or `write` tool (a topology bulk import, a connector ingest, a kb ingest with `dry_run`) | Nothing. |
 | An operation call (`POST /api/v1/operations/call`, MCP `call_operation`) | Nothing more. The dispatcher writes the execution or policy row, also for a connector error. An async run writes it when the run finishes. |
 | Any other 4xx (validation failure, not found, conflict), or an MCP handler that rejects its arguments with a plain `McpInvalidParamsError` | Nothing. |
 | Anything else: a MEHO change with no record of its own (create a target, enable a connector, an MCP `write` tool), or one that failed with 5xx, or an MCP handler that raises `McpExecutionFailedError` (the change failed in Keycloak or Vault; REST answers 502 or 503 for the same failure) | One `operation_execution` row. |
@@ -113,7 +113,10 @@ changed.
 The routine `POST` routes and the operation routes are two lists in
 `audit_cutover.py` (`ROUTINE_POST_ROUTES`, `DISPATCH_ROUTES`). A new
 read-only `POST` route must be added to the first list; otherwise, after
-the cutover, each call writes an `operation_execution` row.
+the cutover, each call writes an `operation_execution` row. A write route
+or `write` tool with a dry-run branch calls `note_preview()` on that
+branch instead, so the dry run is routine and the real run still gets its
+record.
 
 The cutover is fail closed:
 

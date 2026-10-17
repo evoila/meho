@@ -20,7 +20,10 @@ actions and decisions. This file proves it across the fronts:
   identity keeps the caller's row; a write that failed in Keycloak keeps
   one ``operation_execution`` row; a connector edit's own record carries
   the agent session, the delegated actor and the request id the wrapper
-  row used to carry.
+  row used to carry; a change whose own record was rolled back with it
+  keeps one ``operation_execution`` row for the failed attempt; a bulk
+  import's dry run is routine, while its apply keeps only the records it
+  wrote itself.
 """
 
 from __future__ import annotations
@@ -28,9 +31,11 @@ from __future__ import annotations
 import ast
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
+from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import structlog
@@ -48,6 +53,7 @@ from meho_backplane.api.v1.memory import router as memory_router
 from meho_backplane.api.v1.operations import router as operations_router
 from meho_backplane.api.v1.retrieve_usage import router as retrieve_usage_router
 from meho_backplane.api.v1.runner_principals import router as runner_principals_router
+from meho_backplane.api.v1.topology import router as topology_router
 from meho_backplane.audit import AuditMiddleware, _write_audit_row
 from meho_backplane.auth.agent_principals import AgentPrincipalService
 from meho_backplane.auth.delegation import ACTOR_SUB_KEY
@@ -63,14 +69,17 @@ from meho_backplane.db.models import (
     ApprovalRequestStatus,
     AuditEventClass,
     AuditLog,
+    GraphNode,
     OperationGroup,
     RunnerPrincipal,
+    Tenant,
 )
 from meho_backplane.docs_search.target_scope import TargetDeniedError
 from meho_backplane.main import app as production_app
 from meho_backplane.mcp.audit import write_mcp_audit_row
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
+from meho_backplane.mcp.server import McpExecutionFailedError
 from meho_backplane.mcp.tools import docs as docs_tools
 from meho_backplane.memory.audit import INTERNAL_METHOD, write_internal_audit_row
 from meho_backplane.memory.rbac import PermissionDeniedError
@@ -188,13 +197,16 @@ def test_default_keeps_every_wrapper_row() -> None:
     ],
 )
 @pytest.mark.usefixtures("cutover_on")
-def test_decision_table(
+async def test_decision_table(
     status: int, routine: bool, recorded_by: str | None, expected: AuditEventClass | None
 ) -> None:
     token = audit_cutover.open_classified_record_scope()
     try:
         if recorded_by is not None:
-            AuditLog(event_class=AuditEventClass.APPROVAL_DECISION, operator_sub=recorded_by)
+            await _store(
+                _classified_row(AuditEventClass.APPROVAL_DECISION, operator_sub=recorded_by),
+                commit=True,
+            )
         assert (
             audit_cutover.wrapper_row_class(status_code=status, routine=routine, operator_sub="op")
             == expected
@@ -203,41 +215,85 @@ def test_decision_table(
         audit_cutover.close_classified_record_scope(token)
 
 
-def test_legacy_rows_do_not_count_as_classified() -> None:
-    token = audit_cutover.open_classified_record_scope()
-    try:
-        AuditLog(event_class=AuditEventClass.LEGACY_REQUEST, operator_sub="op")
-        AuditLog(operator_sub="op")
-        AuditLog(event_class=AuditEventClass.OPERATION_EXECUTION)
-        AuditLog(event_class=AuditEventClass.OPERATION_EXECUTION, operator_sub="system:job")
-        assert audit_cutover.classified_record_seen("op") is False
-        AuditLog(event_class="operation_execution", operator_sub="op")
-        assert audit_cutover.classified_record_seen("op") is True
-    finally:
-        audit_cutover.close_classified_record_scope(token)
-    assert audit_cutover.classified_record_seen("op") is False
-
-
 def _classified_row(
-    event_class: AuditEventClass = AuditEventClass.OPERATION_EXECUTION, **lineage: Any
+    event_class: AuditEventClass = AuditEventClass.OPERATION_EXECUTION,
+    *,
+    operator_sub: str = "op-rest",
+    path: str = "probe.edit",
+    **lineage: Any,
 ) -> AuditLog:
     """Build (not store) a row the way a domain writer does."""
-    from datetime import UTC, datetime
-    from decimal import Decimal
-
     return AuditLog(
         id=uuid.uuid4(),
         event_class=event_class,
         occurred_at=datetime.now(UTC),
-        operator_sub="op-rest",
+        operator_sub=operator_sub,
         tenant_id=_TENANT,
         method="SERVICE",
-        path="probe.edit",
+        path=path,
         status_code=200,
         duration_ms=Decimal("0"),
         payload={},
         **lineage,
     )
+
+
+async def _store(row: AuditLog, *, commit: bool) -> None:
+    """Add *row* in its own session, then commit it or roll it back."""
+    async with get_sessionmaker()() as session:
+        session.add(row)
+        await session.flush()
+        if commit:
+            await session.commit()
+        else:
+            await session.rollback()
+
+
+async def test_only_committed_classified_rows_count() -> None:
+    """A row counts once its transaction commits; a rolled-back row never does.
+
+    A ``legacy_request`` row and a row under another identity do not
+    count even when committed.
+    """
+    token = audit_cutover.open_classified_record_scope()
+    try:
+        built = _classified_row()
+        assert audit_cutover.classified_record_seen("op-rest") is False
+        await _store(_classified_row(), commit=False)
+        assert audit_cutover.classified_record_seen("op-rest") is False
+        await _store(_classified_row(AuditEventClass.LEGACY_REQUEST), commit=True)
+        await _store(_classified_row(operator_sub="system:job"), commit=True)
+        assert audit_cutover.classified_record_seen("op-rest") is False
+        await _store(built, commit=True)
+        assert audit_cutover.classified_record_seen("op-rest") is True
+    finally:
+        audit_cutover.close_classified_record_scope(token)
+    assert audit_cutover.classified_record_seen("op-rest") is False
+
+
+@pytest.mark.usefixtures("cutover_on")
+def test_a_preview_is_routine_unless_refused() -> None:
+    """A dry-run branch marks the request as a preview; a refusal still counts."""
+    token = audit_cutover.open_classified_record_scope()
+    try:
+        assert audit_cutover.request_is_preview() is False
+        audit_cutover.note_preview()
+        assert audit_cutover.request_is_preview() is True
+        for status in (200, 500):
+            assert (
+                audit_cutover.wrapper_row_class(
+                    status_code=status, routine=False, operator_sub="op"
+                )
+                is None
+            )
+        assert (
+            audit_cutover.wrapper_row_class(status_code=403, routine=False, operator_sub="op")
+            == AuditEventClass.POLICY_DECISION
+        )
+    finally:
+        audit_cutover.close_classified_record_scope(token)
+    audit_cutover.note_preview()
+    assert audit_cutover.request_is_preview() is False
 
 
 def _lineage(row: AuditLog) -> tuple[Any, ...]:
@@ -457,6 +513,15 @@ async def _refused(operator: Operator = Depends(verify_jwt_and_bind)) -> dict[st
     raise HTTPException(status_code=403, detail="insufficient_role")
 
 
+@_probe.post("/rolled-back", status_code=201)
+async def _rolled_back(operator: Operator = Depends(verify_jwt_and_bind)) -> dict[str, str]:
+    """A MEHO change whose own record was written, then rolled back with the change."""
+    async with get_sessionmaker()() as session, session.begin():
+        session.add(_classified_row(operator_sub=operator.sub, path="probe.rolled_back"))
+        await session.flush()
+        raise RuntimeError("the change failed after its record was written")
+
+
 @_probe.post("/system-recorded", status_code=201)
 async def _system_recorded(operator: Operator = Depends(verify_jwt_and_bind)) -> dict[str, str]:
     """A MEHO change whose own record names a system identity, not the caller."""
@@ -503,6 +568,7 @@ def _rest_client() -> tuple[TestClient, _Caller]:
     rest_app.include_router(memory_router)
     rest_app.include_router(retrieve_usage_router)
     rest_app.include_router(runner_principals_router)
+    rest_app.include_router(topology_router)
     rest_app.include_router(_probe)
     caller = _Caller()
     rest_app.dependency_overrides[verify_jwt_and_bind] = caller
@@ -604,6 +670,71 @@ async def test_rest_meho_change_without_own_record_is_an_execution(
         ("operation_execution", "POST", "/api/v1/cutover-probe/broken"),
     ]
     assert [row.status_code for row in rows] == [201, 500]
+
+
+async def test_rest_rolled_back_record_keeps_the_failed_attempt(
+    rest: tuple[TestClient, _Caller],
+) -> None:
+    """A record that rolled back with its change is no record; the failure row stays."""
+    client, caller = rest
+    assert client.post("/api/v1/cutover-probe/rolled-back").status_code == 500
+
+    rows = await _audit_rows()
+    assert _shape(rows) == [("operation_execution", "POST", "/api/v1/cutover-probe/rolled-back")]
+    assert rows[0].status_code == 500
+    assert rows[0].operator_sub == caller.sub
+
+
+async def _seed_topology_nodes() -> None:
+    """Insert the tenant and two graph nodes a bulk import can join."""
+    async with get_sessionmaker()() as session:
+        session.add(Tenant(id=_TENANT, slug="op-tenant", name="Op Tenant"))
+        for kind, name in (("service", "svc-a"), ("database", "db-b")):
+            session.add(
+                GraphNode(
+                    id=uuid.uuid4(),
+                    tenant_id=_TENANT,
+                    kind=kind,
+                    name=name,
+                    target_id=None,
+                    properties={},
+                    discovered_by="test",
+                    first_seen=datetime.now(UTC),
+                )
+            )
+        await session.commit()
+
+
+_BULK_ROUTE = "/api/v1/topology/edges/bulk"
+_BULK_EDGE = {"from": {"name": "svc-a"}, "kind": "depends-on", "to": {"name": "db-b"}}
+_ANNOTATE_ROW = ("operation_execution", "ANNOTATE", "topology.annotate")
+_PUBLISH_PATCH = "meho_backplane.topology.annotate.publish_event"
+
+
+async def test_rest_bulk_import_dry_run_is_routine_and_apply_keeps_its_own_record(
+    rest: tuple[TestClient, _Caller],
+) -> None:
+    """The same write route is a preview with ``dry_run`` and a change without it."""
+    client, caller = rest
+    caller.role = TenantRole.TENANT_ADMIN
+    await _seed_topology_nodes()
+
+    preview = client.post(_BULK_ROUTE, json={"edges": [_BULK_EDGE], "dry_run": True})
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["dry_run"] is True
+    assert await _audit_rows() == []
+
+    with patch(_PUBLISH_PATCH, new=AsyncMock()):
+        applied = client.post(_BULK_ROUTE, json={"edges": [_BULK_EDGE], "dry_run": False})
+    assert applied.status_code == 200, applied.text
+    rows = await _audit_rows()
+    assert _shape(rows) == [_ANNOTATE_ROW]
+    assert rows[0].operator_sub == caller.sub
+
+    caller.role = TenantRole.OPERATOR
+    refused = client.post(_BULK_ROUTE, json={"edges": [_BULK_EDGE], "dry_run": True})
+    assert refused.status_code == 403
+    assert _shape(await _audit_rows()) == [_ANNOTATE_ROW, ("policy_decision", "POST", _BULK_ROUTE)]
 
 
 async def test_rest_record_under_another_identity_keeps_the_callers_row(
@@ -752,9 +883,6 @@ async def _write_tool_handler(_operator: Operator, _arguments: dict[str, Any]) -
 async def _self_recording_tool_handler(
     operator: Operator, _arguments: dict[str, Any]
 ) -> dict[str, Any]:
-    from datetime import UTC, datetime
-    from decimal import Decimal
-
     async with get_sessionmaker()() as session:
         session.add(
             AuditLog(
@@ -772,6 +900,19 @@ async def _self_recording_tool_handler(
         )
         await session.commit()
     return {"done": True}
+
+
+async def _rolled_back_tool_handler(
+    operator: Operator, _arguments: dict[str, Any]
+) -> dict[str, Any]:
+    """A write whose own record rolled back with it; the failure is a failed change."""
+    try:
+        async with get_sessionmaker()() as session, session.begin():
+            session.add(_classified_row(operator_sub=operator.sub, path="test.rolled_back"))
+            await session.flush()
+            raise RuntimeError("the change failed after its record was written")
+    except RuntimeError as exc:
+        raise McpExecutionFailedError(str(exc)) from exc
 
 
 def _register_tool(name: str, handler: Any, *, op_class: str = "write") -> None:
@@ -862,6 +1003,54 @@ async def test_mcp_write_tool_rows(
         ("operation_execution", "MCP", "/mcp/tools/call/test.cutover_write"),
         ("operation_execution", "INTERNAL", "test.self_recording"),
     ]
+
+
+async def test_mcp_rolled_back_record_keeps_the_failed_attempt(
+    mcp: tuple[TestClient, dict[str, Operator]],
+) -> None:
+    client, holder = mcp
+    _register_tool("test.cutover_rolled_back", _rolled_back_tool_handler)
+    result = _tool_call(client, "test.cutover_rolled_back", {})
+    assert "error" in result, result
+
+    rows = await _audit_rows()
+    assert _shape(rows) == [
+        ("operation_execution", "MCP", "/mcp/tools/call/test.cutover_rolled_back")
+    ]
+    assert rows[0].status_code == 502
+    assert rows[0].operator_sub == holder["op"].sub
+
+
+async def test_mcp_bulk_import_dry_run_is_routine_and_apply_keeps_its_own_records(
+    mcp: tuple[TestClient, dict[str, Operator]],
+) -> None:
+    """The ``write`` tool is a preview by default and a change with ``dry_run: false``."""
+    client, holder = mcp
+    holder["op"] = build_operator(TenantRole.TENANT_ADMIN)
+    await _seed_topology_nodes()
+    rows_arg = [{"from_name": "svc-a", "kind": "depends-on", "to_name": "db-b"}]
+    tool_path = "/mcp/tools/call/meho_topology_bulk_import"
+
+    preview = _tool_call(client, "meho_topology_bulk_import", {"rows": rows_arg}, 1)
+    assert "error" not in preview, preview
+    assert await _audit_rows() == []
+
+    with patch(_PUBLISH_PATCH, new=AsyncMock()):
+        applied = _tool_call(
+            client, "meho_topology_bulk_import", {"rows": rows_arg, "dry_run": False}, 2
+        )
+    assert "error" not in applied, applied
+    rows = await _audit_rows()
+    assert sorted(_shape(rows)) == [
+        _ANNOTATE_ROW,
+        ("operation_execution", "DISPATCH", "topology.bulk_import"),
+    ]
+    assert {row.operator_sub for row in rows} == {holder["op"].sub}
+
+    holder["op"] = build_operator(TenantRole.OPERATOR)
+    refused = _tool_call(client, "meho_topology_bulk_import", {"rows": rows_arg}, 3)
+    assert "error" in refused, refused
+    assert _shape(await _audit_rows())[-1] == ("policy_decision", "MCP", tool_path)
 
 
 @pytest.mark.usefixtures("cutover_on")

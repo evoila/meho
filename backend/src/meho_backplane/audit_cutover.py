@@ -21,8 +21,8 @@ call :func:`~meho_backplane.mcp.audit.write_mcp_audit_row`) ask
 2. The request was refused (HTTP 401 / 403): write a ``policy_decision``
    row. A refusal is a decision, so it stays on the record.
 3. The request is routine (a read, a search, a list, a resource read, a
-   preview, a heartbeat) or ran an operation through the dispatcher:
-   write nothing. The request usage event (#3734) records it.
+   preview or dry run, a heartbeat) or ran an operation through the
+   dispatcher: write nothing. The request usage event (#3734) records it.
 4. Any other 4xx (validation failure, not found, conflict): write
    nothing. Nothing changed.
 5. Anything else is a MEHO change with no record of its own (create a
@@ -47,11 +47,25 @@ How rule 1 knows
 
 The wrapper opens a scope (:func:`open_classified_record_scope`) for one
 request or one MCP call. A SQLAlchemy ``init`` listener on
-:class:`~meho_backplane.db.models.AuditLog` records, on the scope, the
-``operator_sub`` of every row built with a class other than
-``legacy_request``. The wrapper then asks whether one of them is the
-caller's. The scope object is shared by reference, so code that runs in a
-copied context (a thread pool, a task group) still marks the same scope.
+:class:`~meho_backplane.db.models.AuditLog` notes, on the scope, every
+row built with a class other than ``legacy_request`` and the
+``operator_sub`` it names. A built row does not count yet. It counts
+once its session commits: a ``Session`` ``after_commit`` listener moves
+the rows that session holds from "built" to "committed". A row whose
+transaction rolls back never commits, so it never counts, and the wrapper
+still writes the row for the failed attempt. The wrapper then asks
+whether a committed row is the caller's. The scope object is shared by
+reference, so code that runs in a copied context (a thread pool, a task
+group, the greenlet SQLAlchemy runs the sync session in) still marks the
+same scope.
+
+How rule 3 knows about a dry run
+--------------------------------
+
+Some write routes and ``write`` tools have a dry-run branch (a topology
+bulk import, a connector ingest, a kb ingest). The route or tool is not
+routine, but a dry run changes nothing, so the branch calls
+:func:`note_preview`. The call is then routine unless it was refused.
 
 What a kept record carries
 --------------------------
@@ -72,6 +86,7 @@ from contextvars import ContextVar, Token
 from typing import Any, Final
 
 from sqlalchemy import event
+from sqlalchemy.orm import Session
 
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.db.models import AuditEventClass, AuditLog
@@ -90,7 +105,9 @@ __all__ = [
     "classified_record_seen",
     "close_classified_record_scope",
     "mcp_tool_is_routine",
+    "note_preview",
     "open_classified_record_scope",
+    "request_is_preview",
     "rest_request_is_routine",
     "wrapper_row_class",
     "wrapper_rows_retired",
@@ -151,12 +168,17 @@ _DENIED_STATUSES: Final[frozenset[int]] = frozenset({401, 403})
 
 
 class _ClassifiedRecords:
-    """Mutable marker for one request: whose classified rows were built?"""
+    """Mutable marker for one request: which classified rows were built and committed?"""
 
-    __slots__ = ("operator_subs",)
+    __slots__ = ("built", "committed_subs", "preview")
 
     def __init__(self) -> None:
-        self.operator_subs: set[str] = set()
+        #: Rows built in this scope that have not committed yet, with the caller each names.
+        self.built: dict[AuditLog, str] = {}
+        #: Callers named by a committed classified row.
+        self.committed_subs: set[str] = set()
+        #: The request ran a dry-run branch and changed nothing.
+        self.preview = False
 
 
 _current_scope: ContextVar[_ClassifiedRecords | None] = ContextVar(
@@ -192,9 +214,27 @@ def close_classified_record_scope(token: Token[_ClassifiedRecords | None]) -> No
 
 
 def classified_record_seen(operator_sub: str) -> bool:
-    """Return whether code in the open scope built a classified row for this caller."""
+    """Return whether code in the open scope committed a classified row for this caller."""
     scope = _current_scope.get()
-    return scope is not None and operator_sub in scope.operator_subs
+    return scope is not None and operator_sub in scope.committed_subs
+
+
+def note_preview() -> None:
+    """Mark the open request or MCP call as a preview: it changed nothing.
+
+    A write route or ``write`` tool calls this on its dry-run branch. The
+    call is then routine (rule 3); a refusal still writes its decision
+    row. Outside a scope this does nothing.
+    """
+    scope = _current_scope.get()
+    if scope is not None:
+        scope.preview = True
+
+
+def request_is_preview() -> bool:
+    """Return whether code in the open scope marked the request as a preview."""
+    scope = _current_scope.get()
+    return scope is not None and scope.preview
 
 
 def _request_lineage() -> dict[str, Any]:
@@ -234,9 +274,26 @@ def _note_classified_record(_target: AuditLog, _args: Any, kwargs: dict[str, Any
         or not isinstance(operator_sub, str)
     ):
         return
-    scope.operator_subs.add(operator_sub)
+    scope.built[_target] = operator_sub
     if wrapper_rows_retired():
         _fill_request_lineage(kwargs)
+
+
+@event.listens_for(Session, "after_commit")
+def _note_committed_records(session: Session) -> None:
+    """Count the classified rows this session just committed as records.
+
+    The listener runs on the sync ``Session`` under every
+    :class:`~sqlalchemy.ext.asyncio.AsyncSession`, in the caller's
+    context, so it sees the request's scope. A row that never commits
+    (its transaction rolled back, or its session closed) stays in
+    ``built`` and never counts.
+    """
+    scope = _current_scope.get()
+    if scope is None or not scope.built:
+        return
+    for row in [row for row in scope.built if row in session]:
+        scope.committed_subs.add(scope.built.pop(row))
 
 
 def rest_request_is_routine(method: str, route_template: str | None) -> bool:
@@ -260,8 +317,10 @@ def wrapper_row_class(
     """Return the class of the wrapper row to write, or ``None`` for no row.
 
     See the module docstring for the rules. ``operator_sub`` is the caller
-    the wrapper row would name; only a classified row in that name counts
-    as the record. With the cutover off this is always ``legacy_request``.
+    the wrapper row would name; only a committed classified row in that
+    name counts as the record. A request that ran a dry-run branch
+    (:func:`note_preview`) counts as routine. With the cutover off this
+    is always ``legacy_request``.
     """
     if not wrapper_rows_retired():
         return AuditEventClass.LEGACY_REQUEST
@@ -269,6 +328,6 @@ def wrapper_row_class(
         return None
     if status_code in _DENIED_STATUSES:
         return AuditEventClass.POLICY_DECISION
-    if routine or 400 <= status_code < 500:
+    if routine or request_is_preview() or 400 <= status_code < 500:
         return None
     return AuditEventClass.OPERATION_EXECUTION

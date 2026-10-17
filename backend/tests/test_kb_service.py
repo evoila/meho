@@ -51,6 +51,7 @@ from meho_backplane.kb.service import KbIngestRootError, KbService
 from meho_backplane.retrieval.indexer import index_document
 from meho_backplane.retrieval.retriever import RetrievalHit
 from meho_backplane.settings import get_settings
+from tests._kb_embedding_stub import fake_embedding_service
 
 
 @pytest.fixture(autouse=True)
@@ -83,15 +84,13 @@ def stub_embedding() -> Iterator[AsyncMock]:
     the import site inside the indexer module so the embed singleton
     factory is bypassed entirely.
     """
-    fake_service = AsyncMock()
-    fake_service.encode_one.return_value = [0.1] * 384
-    fake_service.encode.return_value = [[0.1] * 384]
-    fake_service.dimension = 384
+    fake_service = fake_embedding_service()
     with patch(
         "meho_backplane.retrieval.indexer.get_embedding_service",
         return_value=fake_service,
     ):
-        yield fake_service.encode_one
+        # A kb write embeds its head and passages in one ``encode`` call.
+        yield fake_service.encode
 
 
 @pytest.fixture
@@ -254,7 +253,13 @@ async def _kb_rows(tenant_id: uuid.UUID) -> dict[str, Document]:
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as s:
         rows = (
-            (await s.execute(select(Document).where(Document.tenant_id == tenant_id)))
+            (
+                await s.execute(
+                    select(Document).where(
+                        Document.tenant_id == tenant_id, Document.source == KB_SOURCE
+                    )
+                )
+            )
             .scalars()
             .all()
         )

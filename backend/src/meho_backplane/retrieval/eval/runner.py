@@ -134,13 +134,19 @@ RetrieveCallable = Callable[..., Awaitable[list[RetrievalHit]]]
 def _kb_hits_to_slugs(hits: list[RetrievalHit]) -> list[str]:
     """Map kb retrieval hits to slug strings (the corpus's expected_hits shape).
 
-    The kb corpus's ``expected_hits`` is a list of ``source_id``
-    values (slug = filename without ``.md``); :class:`RetrievalHit`
-    carries ``source_id`` directly. The mapping is a one-liner kept
-    here as a named function so the per-surface symmetry with the
-    memory + operations dispatchers is obvious.
+    The kb corpus's ``expected_hits`` is a list of slugs (filename
+    without ``.md``). ``retrieve(source="kb")`` ranks passage rows
+    (#3761), whose slug is in their ``kb_passage`` metadata; a legacy
+    head row carries the slug as ``source_id``. Several passages of one
+    entry count once, at the rank of the best one.
     """
-    return [hit.source_id for hit in hits]
+    slugs: list[str] = []
+    for hit in hits:
+        locator = hit.doc_metadata.get("kb_passage")
+        slug = str(locator["slug"]) if isinstance(locator, dict) else hit.source_id
+        if slug not in slugs:
+            slugs.append(slug)
+    return slugs
 
 
 def _memory_hits_to_pairs(hits: list[RetrievalHit]) -> list[str]:

@@ -90,6 +90,8 @@ from kb_writeback.workflow import (  # noqa: E402
     run_closed_loop,
 )
 
+from tests._kb_embedding_stub import StubPassageTokenizer  # noqa: E402
+
 # Pinned tenant UUIDs the ``pg_engine`` fixture seeds. Mirror
 # :mod:`tests.integration.test_kb_service_pg` so the two suites can
 # share interpretation of the seed rows.
@@ -150,6 +152,7 @@ def _make_stub_embedding_service() -> AsyncMock:
     fake = AsyncMock()
     fake.encode_one.side_effect = lambda t: _make_stub_embedding_vector(t)
     fake.encode.side_effect = lambda ts: [_make_stub_embedding_vector(t) for t in ts]
+    fake.passage_tokenizer.return_value = StubPassageTokenizer()
     fake.dimension = 384
     return fake
 

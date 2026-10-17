@@ -127,6 +127,7 @@ from meho_backplane.db.models import AuditLog
 from meho_backplane.kb.service import KbService
 from meho_backplane.retrieval.eval import eval_surface
 from meho_backplane.retrieval.eval.corpus import load_corpus
+from tests._kb_embedding_stub import StubPassageTokenizer
 from tests.acceptance._consumer_kb import (
     CONSUMER_KB_REASON,
     resolve_consumer_kb_dir,
@@ -181,6 +182,7 @@ def _make_stub_embedding_service() -> AsyncMock:
     fake = AsyncMock()
     fake.encode_one.side_effect = lambda t: _make_stub_embedding_vector(t)
     fake.encode.side_effect = lambda ts: [_make_stub_embedding_vector(t) for t in ts]
+    fake.passage_tokenizer.return_value = StubPassageTokenizer()
     fake.dimension = 384
     return fake
 

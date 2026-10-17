@@ -2279,8 +2279,10 @@ class GraphNode(Base):
       :data:`SOURCE_SCOPE_PATTERN`). ``NULL`` means not resolved yet:
       the row predates source-qualified identity, and ``target_id``
       only names the last target that saw it, so readers must not
-      treat it as the scope. Nothing writes this column yet except the
-      ``0108`` backfill; the staged cut-over owns the writers.
+      treat it as the scope. Writers fill it only after the staged
+      scope cut-over (#3749, :mod:`meho_backplane.topology.scope_repair`),
+      which also makes it ``NOT NULL`` at the database level. This
+      declaration keeps the pre-cut-over shape that fresh installs have.
     * ``source_scope_provenance`` -- Text NULL. What set
       ``source_scope`` (``migration:0108`` for the backfill). Lets the
       later repair tell a mechanical value from a rediscovered one.
@@ -2294,7 +2296,9 @@ class GraphNode(Base):
       a duplicate anonymous index alongside it. It stays in place until
       the staged cut-over: PostgreSQL treats NULLs as distinct in a
       unique index, so adding ``source_scope`` as a fourth key column
-      would let two unresolved rows share a name.
+      would let two unresolved rows share a name. The cut-over (#3749)
+      drops it and makes ``graph_node_tenant_scope_kind_name_idx``
+      unique instead.
     * ``graph_node_tenant_scope_kind_name_idx`` -- non-unique b-tree on
       ``(tenant_id, source_scope, kind, name)`` (migration ``0108``).
       Serves per-scope lookups and the "unresolved rows" scan.

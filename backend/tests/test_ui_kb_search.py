@@ -80,6 +80,7 @@ from meho_backplane.ui.csrf import (
 from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.ui.templating import reset_templating_for_testing
+from tests._kb_embedding_stub import fake_embedding_service
 from tests.conftest import DEFAULT_AUDIENCE, DEFAULT_ISSUER
 
 # ---------------------------------------------------------------------------
@@ -178,9 +179,7 @@ def _seed_kb_entry(
     """
     from meho_backplane.kb.service import KbService
 
-    fake_service = AsyncMock()
-    fake_service.encode_one.return_value = [0.1] * 384
-    fake_service.encode.return_value = [[0.1] * 384]
+    fake_service = fake_embedding_service()
     fake_service.dimension = 384
 
     created_entry: KbEntry | None = None

@@ -77,12 +77,13 @@ Search adaptation
 
 :meth:`search_entries` wraps
 :func:`~meho_backplane.retrieval.retriever.retrieve` with
-``source=KB_SOURCE`` pinned. The :class:`RetrievalHit` shape is
-adapted to :class:`KbEntrySearchHit` (source_id renamed to slug,
-body truncated to a snippet). The full body is recoverable through
-:meth:`get_entry` keyed on the returned slug; the snippet exists so
-agent flows can ``search → decide → fetch`` without round-tripping
-every full body on every search.
+``source=KB_SOURCE`` pinned, which ranks the passage rows of each
+entry's current revision (#3761). The ranked passages are grouped by
+entry: one :class:`KbEntrySearchHit` per entry, best entry first, with
+up to :data:`_MAX_PASSAGES_PER_HIT` matching passages and their exact
+locators. A long entry therefore returns the part that matched, not
+the whole body. An entry indexed before passages existed still comes
+back as one whole-body hit with no passages.
 """
 
 from __future__ import annotations
@@ -99,6 +100,7 @@ from meho_backplane.db.models import Document
 from meho_backplane.kb.attribution import merge_attribution
 from meho_backplane.kb.directory_ingest import KbIngestRootError
 from meho_backplane.kb.directory_ingest import ingest_directory as _ingest_directory
+from meho_backplane.kb.passages import revision_uri
 from meho_backplane.kb.provenance import read_provenance, stamp_provenance
 from meho_backplane.kb.revisions import (
     current_revision_id,
@@ -107,14 +109,18 @@ from meho_backplane.kb.revisions import (
     write_entry,
 )
 from meho_backplane.kb.schemas import (
+    KB_PASSAGE_SOURCE,
     KB_SOURCE,
+    META_KB_PASSAGE,
     KbEntry,
     KbEntryRevision,
     KbEntrySearchHit,
     KbIngestionResult,
+    KbPassageEvidence,
+    KbPassageLocator,
     validate_slug,
 )
-from meho_backplane.retrieval.retriever import retrieve
+from meho_backplane.retrieval.retriever import CANDIDATE_LIMIT, RetrievalHit, retrieve
 
 __all__ = ["KbIngestRootError", "KbService"]
 
@@ -132,6 +138,10 @@ _SNIPPET_CHARS: int = 200
 #: in place so a corpus that grows past ~1k rows doesn't accidentally
 #: stream the whole table back to a casual ``meho kb list``.
 DEFAULT_LIST_LIMIT: int = 100
+
+#: Most passages one search hit carries. The rest of the entry stays
+#: readable through a locator's ``uri``.
+_MAX_PASSAGES_PER_HIT: int = 3
 
 
 class KbService:
@@ -391,11 +401,11 @@ class KbService:
         """Hybrid BM25 + cosine retrieval scoped to *tenant_id*'s kb corpus.
 
         Wraps :func:`~meho_backplane.retrieval.retriever.retrieve`
-        with ``source=KB_SOURCE`` pinned. The
-        :class:`~meho_backplane.retrieval.retriever.RetrievalHit`
-        shape is adapted to :class:`KbEntrySearchHit` (slug instead
-        of source_id, snippet instead of full body, kb-shaped
-        vocabulary).
+        with ``source=KB_SOURCE`` pinned. The ranked passage rows are
+        grouped into one :class:`KbEntrySearchHit` per entry (see
+        :func:`_group_by_entry`): slug, snippet, metadata, the best
+        passage's scores, and the matching passages with their exact
+        revision locators.
 
         Parameters
         ----------
@@ -418,9 +428,15 @@ class KbService:
             slice. Values must be JSON scalars -- the substrate's
             ``@>`` containment is shape-flat-only by contract.
         limit
-            Maximum hits to return. Default 10; capped at 50 by the
-            substrate (and the API surface).
+            Maximum entries to return. Default 10; capped at 50 by the
+            API surface. Up to
+            :data:`~meho_backplane.retrieval.retriever.CANDIDATE_LIMIT`
+            passages are ranked to fill them.
         """
+        if limit < 0:
+            raise ValueError(f"limit must be >= 0; got {limit}")
+        if limit == 0:
+            return []
         kind_filter: str | None = None
         metadata_filters: dict[str, Any] | None = None
         if filters is not None:
@@ -436,27 +452,88 @@ class KbService:
             residual = {k: v for k, v in filters.items() if k != "kind"}
             metadata_filters = residual or None
 
-        hits = await retrieve(
+        ranked = await retrieve(
             tenant_id=tenant_id,
             query=query,
             source=KB_SOURCE,
             kind=kind_filter,
-            limit=limit,
+            limit=CANDIDATE_LIMIT,
             metadata_filters=metadata_filters,
         )
-        return [
-            KbEntrySearchHit(
-                slug=hit.source_id,
-                snippet=_make_snippet(hit.body),
-                metadata=hit.doc_metadata,
-                fused_score=hit.fused_score,
-                bm25_score=hit.bm25_score,
-                cosine_score=hit.cosine_score,
-                bm25_rank=hit.bm25_rank,
-                cosine_rank=hit.cosine_rank,
+        return _group_by_entry(ranked, limit)
+
+
+def _group_by_entry(ranked: list[RetrievalHit], limit: int) -> list[KbEntrySearchHit]:
+    """Fold ranked passage rows into one hit per entry, best entry first.
+
+    A hit takes its scores from its best passage and keeps up to
+    :data:`_MAX_PASSAGES_PER_HIT` passages in rank order. A legacy
+    whole-body head row becomes a hit with no passages.
+    """
+    groups: dict[str, tuple[RetrievalHit, list[KbPassageEvidence]]] = {}
+    for hit in ranked:
+        locator = _locator(hit)
+        slug = hit.source_id if locator is None else str(hit.doc_metadata[META_KB_PASSAGE]["slug"])
+        if slug not in groups:
+            if len(groups) == limit:
+                continue
+            groups[slug] = (hit, [])
+        evidence = groups[slug][1]
+        if locator is not None and len(evidence) < _MAX_PASSAGES_PER_HIT:
+            evidence.append(
+                KbPassageEvidence(
+                    text=hit.body,
+                    locator=locator,
+                    fused_score=hit.fused_score,
+                    bm25_rank=hit.bm25_rank,
+                    cosine_rank=hit.cosine_rank,
+                )
             )
-            for hit in hits
-        ]
+    return [_entry_hit(slug, best, evidence) for slug, (best, evidence) in groups.items()]
+
+
+def _locator(hit: RetrievalHit) -> KbPassageLocator | None:
+    """Return the passage locator of *hit*, or ``None`` for a legacy head row."""
+    if hit.source != KB_PASSAGE_SOURCE:
+        return None
+    raw = hit.doc_metadata[META_KB_PASSAGE]
+    if not isinstance(raw, dict):
+        return None
+    entry_id = uuid.UUID(str(raw["entry_id"]))
+    revision_id = uuid.UUID(str(raw["revision_id"]))
+    return KbPassageLocator(
+        entry_id=entry_id,
+        revision_id=revision_id,
+        passage_id=hit.source_id,
+        ordinal=int(raw["ordinal"]),
+        passage_count=int(raw["passage_count"]),
+        heading_path=[str(title) for title in raw["heading_path"]],
+        start=int(raw["start"]),
+        end=int(raw["end"]),
+        chunker_version=str(raw["chunker_version"]),
+        embedding_model=str(raw["embedding_model"]),
+        uri=revision_uri(entry_id, revision_id),
+    )
+
+
+def _entry_hit(
+    slug: str, best: RetrievalHit, evidence: list[KbPassageEvidence]
+) -> KbEntrySearchHit:
+    """Build the hit for one entry from its best row and its passages."""
+    metadata = {k: v for k, v in best.doc_metadata.items() if k != META_KB_PASSAGE}
+    complete = bool(evidence) and len(evidence) == evidence[0].locator.passage_count
+    return KbEntrySearchHit(
+        slug=slug,
+        snippet=_make_snippet(evidence[0].text if evidence else best.body),
+        metadata=metadata,
+        fused_score=best.fused_score,
+        bm25_score=best.bm25_score,
+        cosine_score=best.cosine_score,
+        bm25_rank=best.bm25_rank,
+        cosine_rank=best.cosine_rank,
+        passages=evidence,
+        coverage="complete" if complete else "partial",
+    )
 
 
 def _doc_to_entry(doc: Document, revision_id: uuid.UUID | None) -> KbEntry:

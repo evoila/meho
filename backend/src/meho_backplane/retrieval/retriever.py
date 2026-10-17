@@ -62,7 +62,8 @@ Optional filters
 
 ``source`` (e.g. ``"kb"`` vs ``"memory"``) and ``kind``
 (e.g. ``"kb-entry"`` vs ``"memory-user"``) narrow within a tenant.
-G4's ``meho kb search`` calls ``retrieve(source="kb")``; G5's
+G4's ``meho kb search`` calls ``retrieve(source="kb")``, which ranks the
+kb passage rows (see :data:`_KB_PASSAGE_MAPPING_SQL`); G5's
 Memory search calls ``retrieve(source="memory", memory_eligibility=...)``
 so Memory eligibility and expiry run inside the candidate SQL (#3741).
 
@@ -259,10 +260,12 @@ async def retrieve(
         :func:`~meho_backplane.retrieval.embedding.EmbeddingService.encode_one`.
     source
         Optional source namespace filter (``"kb"``, ``"memory"``, …).
-        ``None`` retrieves across every source.
+        ``None`` retrieves across every source. ``"kb"`` ranks kb
+        passage rows (see :data:`_KB_PASSAGE_MAPPING_SQL`).
     kind
         Optional kind filter (``"kb-entry"``, ``"memory-user"``, …).
-        Independently applicable from ``source``.
+        Independently applicable from ``source``. ``"kb-entry"`` also
+        admits ``kb-passage`` rows.
     limit
         Maximum number of hits to return. Default 10; the API
         surface (T5) caps at 50.
@@ -603,6 +606,45 @@ _MEMORY_EXPIRY_SHAPE_SQL: str = (
     r"'^\d{4}-\d\d-\d\d[T ]\d\d:\d\d(:\d\d([.]\d{1,6})?)?(Z|[+-]\d\d(:?\d\d)?)?$'"
 )
 
+#: KB compatibility mapping (#3761), inlined verbatim into both candidate
+#: queries. A kb entry is searched through the passage rows of its current
+#: revision (``source='kb-passage'``, ``kind='kb-passage'``):
+#:
+#: * a filter on ``source='kb'`` also admits ``kb-passage`` rows, and a
+#:   filter on ``kind='kb-entry'`` also admits ``kb-passage`` rows, so
+#:   ``meho kb search``, ``search_knowledge`` and ``POST /api/v1/retrieve``
+#:   with ``source="kb"`` all rank passages;
+#: * a kb head row (``source='kb'``) stops being a candidate as soon as
+#:   its entry has passage rows, so an entry never shows up twice (once
+#:   as its whole-body head and once as its passages). An entry written
+#:   before passages existed keeps its head searchable until its next
+#:   write builds the passages.
+#:
+#: Memory and every other source are not touched by any of these terms.
+#: Pinned to both statements by :func:`_assert_predicate_inlined`.
+_KB_PASSAGE_MAPPING_SQL: str = """
+      AND (
+        CAST(:source AS text) IS NULL
+        OR source = :source
+        OR (CAST(:source AS text) = 'kb' AND source = 'kb-passage')
+      )
+      AND (
+        CAST(:kind AS text) IS NULL
+        OR kind = :kind
+        OR (CAST(:kind AS text) = 'kb-entry' AND kind = 'kb-passage')
+      )
+      AND NOT (
+        source = 'kb'
+        AND EXISTS (
+          SELECT 1 FROM documents AS passage
+          WHERE passage.tenant_id = documents.tenant_id
+            AND passage.source = 'kb-passage'
+            AND passage.metadata @> jsonb_build_object(
+              'kb_passage', jsonb_build_object('entry_id', CAST(documents.id AS text))
+            )
+        )
+      )"""
+
 # BM25 candidate query. Fully-literal ``text("...")`` (no f-string) so the
 # ``avoid-sqlalchemy-text`` SAST rule stays clean; the per-principal
 # predicate is inlined verbatim from :data:`_PRINCIPAL_PREDICATE_SQL` and
@@ -615,8 +657,27 @@ _BM25_CANDIDATES_SQL = text(
     ) AS score
     FROM documents
     WHERE tenant_id = :tenant_id
-      AND (CAST(:source AS text) IS NULL OR source = :source)
-      AND (CAST(:kind AS text) IS NULL OR kind = :kind)
+      AND (
+        CAST(:source AS text) IS NULL
+        OR source = :source
+        OR (CAST(:source AS text) = 'kb' AND source = 'kb-passage')
+      )
+      AND (
+        CAST(:kind AS text) IS NULL
+        OR kind = :kind
+        OR (CAST(:kind AS text) = 'kb-entry' AND kind = 'kb-passage')
+      )
+      AND NOT (
+        source = 'kb'
+        AND EXISTS (
+          SELECT 1 FROM documents AS passage
+          WHERE passage.tenant_id = documents.tenant_id
+            AND passage.source = 'kb-passage'
+            AND passage.metadata @> jsonb_build_object(
+              'kb_passage', jsonb_build_object('entry_id', CAST(documents.id AS text))
+            )
+        )
+      )
       AND (CAST(:metadata_filters AS text) IS NULL
            OR metadata @> CAST(:metadata_filters AS jsonb))
       AND (
@@ -655,8 +716,27 @@ _COSINE_CANDIDATES_SQL = text(
     SELECT id, 1 - (embedding <=> CAST(:emb AS vector)) AS score
     FROM documents
     WHERE tenant_id = :tenant_id
-      AND (CAST(:source AS text) IS NULL OR source = :source)
-      AND (CAST(:kind AS text) IS NULL OR kind = :kind)
+      AND (
+        CAST(:source AS text) IS NULL
+        OR source = :source
+        OR (CAST(:source AS text) = 'kb' AND source = 'kb-passage')
+      )
+      AND (
+        CAST(:kind AS text) IS NULL
+        OR kind = :kind
+        OR (CAST(:kind AS text) = 'kb-entry' AND kind = 'kb-passage')
+      )
+      AND NOT (
+        source = 'kb'
+        AND EXISTS (
+          SELECT 1 FROM documents AS passage
+          WHERE passage.tenant_id = documents.tenant_id
+            AND passage.source = 'kb-passage'
+            AND passage.metadata @> jsonb_build_object(
+              'kb_passage', jsonb_build_object('entry_id', CAST(documents.id AS text))
+            )
+        )
+      )
       AND (CAST(:metadata_filters AS text) IS NULL
            OR metadata @> CAST(:metadata_filters AS jsonb))
       AND (
@@ -736,17 +816,19 @@ def _assert_predicate_inlined() -> None:
     """
     principal = " ".join(_PRINCIPAL_PREDICATE_SQL.split())
     eligibility = " ".join(_MEMORY_ELIGIBILITY_PREDICATE_SQL.split())
+    kb_mapping = " ".join(_KB_PASSAGE_MAPPING_SQL.split())
     for name, statement in (
         ("_BM25_CANDIDATES_SQL", _BM25_CANDIDATES_SQL),
         ("_COSINE_CANDIDATES_SQL", _COSINE_CANDIDATES_SQL),
     ):
         haystack = " ".join(str(statement.text).split())
-        if principal not in haystack or eligibility not in haystack:
+        if principal not in haystack or eligibility not in haystack or kb_mapping not in haystack:
             raise AssertionError(
-                f"{name} no longer contains the per-principal and Memory "
-                "eligibility predicates verbatim; they must stay "
-                "byte-equivalent to _PRINCIPAL_PREDICATE_SQL and "
-                "_MEMORY_ELIGIBILITY_PREDICATE_SQL (see retriever.py)."
+                f"{name} no longer contains the per-principal, Memory "
+                "eligibility and KB passage predicates verbatim; they must "
+                "stay byte-equivalent to _PRINCIPAL_PREDICATE_SQL, "
+                "_MEMORY_ELIGIBILITY_PREDICATE_SQL and _KB_PASSAGE_MAPPING_SQL "
+                "(see retriever.py)."
             )
     for name, sql in (
         ("_MEMORY_ELIGIBILITY_PREDICATE_SQL", _MEMORY_ELIGIBILITY_PREDICATE_SQL),

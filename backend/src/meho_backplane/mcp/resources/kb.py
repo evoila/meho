@@ -184,7 +184,7 @@ register_mcp_resource(
         description=(
             "Full body and metadata of one kb entry, identified by slug. "
             "Use after `search_knowledge` has returned a hit whose "
-            "200-char snippet is not enough to act on — this resource "
+            "passages are not enough to act on — this resource "
             "returns the entire Markdown body plus provenance metadata. "
             "Always the latest body; the response's `id` and `revision_id` "
             "name that exact body for `meho://kb/id/{entry}/revision/{revision}`. "
@@ -214,6 +214,9 @@ register_mcp_resource(
             "re-read the body a result was built from: it returns the same "
             "body even after the entry has changed, until the entry is "
             "deleted. Use `meho://kb/{slug}` instead for the latest body. "
+            "A `search_knowledge` passage locator names this resource in "
+            "its `uri`; its `start`/`end` are character (code point) "
+            "offsets into the stored body, the text inside the envelope. "
             "`origin` is `write` for a stored write, or `backfill-current` "
             "for the body copied when revisions were first kept (not a "
             "historical version). The body is untrusted agent-authored "

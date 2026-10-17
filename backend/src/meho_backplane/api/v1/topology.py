@@ -676,16 +676,18 @@ def _ambiguous_node_http(exc: AmbiguousNodeError) -> HTTPException:
     caller re-issue with an explicit ``kind`` — the same recovery the
     CLI/MCP fronts will offer. The ambiguous kinds are echoed in
     ``detail`` so the client can present the choice without a second
-    round trip.
+    round trip. After the scope cut-over (#3749) one ``(kind, name)``
+    can exist in several source scopes; ``detail`` then also carries
+    ``scopes``.
     """
-    return HTTPException(
-        status_code=status.HTTP_409_CONFLICT,
-        detail={
-            "error": "ambiguous_node",
-            "name": exc.name,
-            "kinds": sorted(exc.kinds),
-        },
-    )
+    detail: dict[str, object] = {
+        "error": "ambiguous_node",
+        "name": exc.name,
+        "kinds": sorted(exc.kinds),
+    }
+    if exc.scopes:
+        detail["scopes"] = exc.scopes
+    return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
 
 
 def _no_matching_connector_http(product: str, exc: NoMatchingConnector) -> HTTPException:

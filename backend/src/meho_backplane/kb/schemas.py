@@ -50,8 +50,11 @@ from pydantic import BaseModel, ConfigDict
 
 __all__ = [
     "KB_KIND_ENTRY",
+    "KB_KIND_PASSAGE",
+    "KB_PASSAGE_SOURCE",
     "KB_SOURCE",
     "META_CREATED_BY_SUB",
+    "META_KB_PASSAGE",
     "META_LAST_UPDATED_BY_SUB",
     "META_PROVENANCE",
     "SLUG_PATTERN",
@@ -61,6 +64,8 @@ __all__ = [
     "KbEntrySearchHit",
     "KbIngestConflict",
     "KbIngestionResult",
+    "KbPassageEvidence",
+    "KbPassageLocator",
     "KbProvenance",
     "validate_slug",
 ]
@@ -104,6 +109,21 @@ META_PROVENANCE: Final[str] = "provenance"
 #: future kb-adjacent rows (kb-index, kb-collection) that would each
 #: pick their own ``kind`` value within the ``source='kb'`` namespace.
 KB_KIND_ENTRY: Final[str] = "kb-entry"
+
+#: ``documents.source`` and ``documents.kind`` of a kb passage row
+#: (#3761). Each passage is one heading-aware piece of the **current**
+#: revision of an entry. Search ranks these rows: the retriever maps a
+#: query for ``source="kb"`` (or ``kind="kb-entry"``) to them, and an
+#: entry's head row stops being a search candidate once the entry has
+#: passages. The same literals live in the retriever's SQL.
+KB_PASSAGE_SOURCE: Final[str] = "kb-passage"
+KB_KIND_PASSAGE: Final[str] = "kb-passage"
+
+#: Metadata key that holds a passage's locator on its ``documents``
+#: row: entry, revision, slug, ordinal, heading path, offsets and the
+#: chunker / model that made it. The service owns it; a caller value
+#: under this key is replaced on the passage rows.
+META_KB_PASSAGE: Final[str] = "kb_passage"
 
 #: Slug regex. Anchored start + end. Lowercase letter as the leading
 #: character; lowercase letter or digit as the trailing character;
@@ -221,6 +241,49 @@ class KbEntryRevision(BaseModel):
     created_at: datetime
 
 
+class KbPassageLocator(BaseModel):
+    """Where one passage sits in one retained revision.
+
+    ``start`` / ``end`` are Unicode code-point offsets into the
+    revision body: ``body[start:end]`` is exactly the passage text.
+    ``uri`` reads that revision (``meho://kb/id/{entry}/revision/{revision}``).
+    ``passage_id`` is an opaque id of this passage in this indexing
+    generation; do not parse it. A locator a client sends back is
+    untrusted input and the server checks it again.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    entry_id: uuid.UUID
+    revision_id: uuid.UUID
+    passage_id: str
+    ordinal: int
+    passage_count: int
+    heading_path: list[str]
+    start: int
+    end: int
+    chunker_version: str
+    embedding_model: str
+    uri: str
+
+
+class KbPassageEvidence(BaseModel):
+    """One passage that matched a search, with its exact locator.
+
+    ``text`` is the whole passage (never cut), so it is always the
+    complete ``body[start:end]`` of the revision. Scores are the
+    passage's own retrieval scores.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    text: str
+    locator: KbPassageLocator
+    fused_score: float
+    bm25_rank: int | None
+    cosine_rank: int | None
+
+
 class KbEntrySearchHit(BaseModel):
     """One ranked search hit returned by :meth:`KbService.search_entries`.
 
@@ -232,11 +295,17 @@ class KbEntrySearchHit(BaseModel):
     ``cosine_score=None``) means the hit only appeared in the other
     signal's top-:data:`~meho_backplane.retrieval.retriever.CANDIDATE_LIMIT`.
 
-    ``snippet`` is the first ~200 characters of the body -- enough to
-    let an operator (or the agent's downstream reasoning) decide
-    whether a full ``get_entry`` is warranted. The full body is
-    available through :meth:`KbService.get_entry` keyed on the
-    returned ``slug``.
+    ``passages`` (#3761) are the matching passages of the entry's
+    current revision, best first, each with its exact locator. The
+    scores on the hit are those of its best passage. ``coverage`` is
+    ``"complete"`` when ``passages`` hold every passage of the revision
+    (the whole body is in the hit) and ``"partial"`` otherwise; read
+    the rest through a locator's ``uri``. An entry indexed before
+    passages existed has no passages yet; its hit has an empty list,
+    ``coverage="partial"`` and the old whole-body scores.
+
+    ``snippet`` is the first ~200 characters of the best passage (or of
+    the body, for an entry without passages).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -249,6 +318,8 @@ class KbEntrySearchHit(BaseModel):
     cosine_score: float | None
     bm25_rank: int | None
     cosine_rank: int | None
+    passages: list[KbPassageEvidence] = []
+    coverage: Literal["complete", "partial"] = "partial"
 
 
 class KbIngestConflict(BaseModel):

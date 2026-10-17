@@ -61,6 +61,15 @@ const (
 	ApprovalResultStateStarted    ApprovalResultState = "started"
 )
 
+// Defines values for AuditEventClass.
+const (
+	AuditEventClassApprovalDecision   AuditEventClass = "approval_decision"
+	AuditEventClassLegacyRequest      AuditEventClass = "legacy_request"
+	AuditEventClassOperationExecution AuditEventClass = "operation_execution"
+	AuditEventClassPolicyDecision     AuditEventClass = "policy_decision"
+	AuditEventClassSecurityEvent      AuditEventClass = "security_event"
+)
+
 // Defines values for AuthModel.
 const (
 	AuthModelImpersonation        AuthModel = "impersonation"
@@ -395,6 +404,18 @@ const (
 	IngestRequestAuthSchemeSessionLoginBasic IngestRequestAuthScheme = "session_login_basic"
 	IngestRequestAuthSchemeSessionLoginToken IngestRequestAuthScheme = "session_login_token"
 	IngestRequestAuthSchemeStaticHeader      IngestRequestAuthScheme = "static_header"
+)
+
+// Defines values for KbProvenanceSourceKind.
+const (
+	KbProvenanceSourceKindDirect    KbProvenanceSourceKind = "direct"
+	KbProvenanceSourceKindDirectory KbProvenanceSourceKind = "directory"
+)
+
+// Defines values for KbProvenanceState.
+const (
+	KbProvenanceStateLegacy   KbProvenanceState = "legacy"
+	KbProvenanceStateRecorded KbProvenanceState = "recorded"
 )
 
 // Defines values for KindFilterValue.
@@ -1678,6 +1699,7 @@ type AuditEntry struct {
 	AgentSessionId   *openapi_types.UUID    `json:"agent_session_id"`
 	BroadcastEventId *openapi_types.UUID    `json:"broadcast_event_id"`
 	DurationMs       *string                `json:"duration_ms"`
+	EventClass       string                 `json:"event_class"`
 	Id               openapi_types.UUID     `json:"id"`
 	Method           string                 `json:"method"`
 	OpClass          string                 `json:"op_class"`
@@ -1698,6 +1720,27 @@ type AuditEntry struct {
 	WorkRef          *string                `json:"work_ref"`
 }
 
+// AuditEventClass What kind of accountable event one “audit_log“ row records (#3733).
+//
+// The set is closed. The database CHECK “ck_audit_log_event_class“
+// rejects any other value, so a new class needs a code change and a
+// migration together.
+//
+//   - :attr:`OPERATION_EXECUTION` -- an action ran: a dispatched operation
+//     (success or failure), or a MEHO-internal action such as a topology
+//     edit, a retention sweep or a reaper.
+//   - :attr:`POLICY_DECISION` -- a gate decided about a call before it ran:
+//     a policy deny, a rate-limit refusal, or a park for approval.
+//   - :attr:`APPROVAL_DECISION` -- a person (or a standing grant) approved,
+//     rejected, or let an approval request expire.
+//   - :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a
+//     refresh-token replay or a broken satellite effect chain.
+//   - :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every
+//     row written before migration “0106“ reads as this class; it is never
+//     guessed from “method“ / “path“. The REST and MCP request wrapper
+//     rows also keep this class until they are retired.
+type AuditEventClass string
+
 // AuditQueryRequest POST body for “/api/v1/audit/query“.
 //
 // Mirrors :class:`~meho_backplane.audit_query.AuditQueryFilters`
@@ -1715,16 +1758,37 @@ type AuditQueryRequest struct {
 	AgentSessionId *openapi_types.UUID `json:"agent_session_id"`
 	AuditId        *openapi_types.UUID `json:"audit_id"`
 	Cursor         *string             `json:"cursor"`
-	Limit          *int                `json:"limit,omitempty"`
-	OpClass        *string             `json:"op_class"`
-	OpId           *string             `json:"op_id"`
-	ParentAuditId  *openapi_types.UUID `json:"parent_audit_id"`
-	Principal      *string             `json:"principal"`
-	ResultStatus   *string             `json:"result_status"`
-	Since          *string             `json:"since"`
-	Target         *string             `json:"target"`
-	Until          *string             `json:"until"`
-	WorkRef        *string             `json:"work_ref"`
+
+	// EventClass What kind of accountable event one ``audit_log`` row records (#3733).
+	//
+	// The set is closed. The database CHECK ``ck_audit_log_event_class``
+	// rejects any other value, so a new class needs a code change and a
+	// migration together.
+	//
+	// * :attr:`OPERATION_EXECUTION` -- an action ran: a dispatched operation
+	//   (success or failure), or a MEHO-internal action such as a topology
+	//   edit, a retention sweep or a reaper.
+	// * :attr:`POLICY_DECISION` -- a gate decided about a call before it ran:
+	//   a policy deny, a rate-limit refusal, or a park for approval.
+	// * :attr:`APPROVAL_DECISION` -- a person (or a standing grant) approved,
+	//   rejected, or let an approval request expire.
+	// * :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a
+	//   refresh-token replay or a broken satellite effect chain.
+	// * :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every
+	//   row written before migration ``0106`` reads as this class; it is never
+	//   guessed from ``method`` / ``path``. The REST and MCP request wrapper
+	//   rows also keep this class until they are retired.
+	EventClass    *AuditEventClass    `json:"event_class,omitempty"`
+	Limit         *int                `json:"limit,omitempty"`
+	OpClass       *string             `json:"op_class"`
+	OpId          *string             `json:"op_id"`
+	ParentAuditId *openapi_types.UUID `json:"parent_audit_id"`
+	Principal     *string             `json:"principal"`
+	ResultStatus  *string             `json:"result_status"`
+	Since         *string             `json:"since"`
+	Target        *string             `json:"target"`
+	Until         *string             `json:"until"`
+	WorkRef       *string             `json:"work_ref"`
 }
 
 // AuditQueryResult Page of audit rows plus the forward-only continuation cursor.
@@ -5801,9 +5865,19 @@ type KbEntry struct {
 	CreatedAt time.Time              `json:"created_at"`
 	Id        openapi_types.UUID     `json:"id"`
 	Metadata  map[string]interface{} `json:"metadata"`
-	Slug      string                 `json:"slug"`
-	TenantId  openapi_types.UUID     `json:"tenant_id"`
-	UpdatedAt time.Time              `json:"updated_at"`
+
+	// Provenance Where a kb entry came from, as read back from its metadata.
+	//
+	// ``state="recorded"`` means the service stored provenance when it
+	// wrote the entry; the other fields are then set (``relative_path``
+	// stays ``None`` for direct writes). ``state="legacy"`` means the
+	// entry was written before provenance was stored, or the stored value
+	// is not in the expected shape; every other field is ``None``. Legacy
+	// rows are not rewritten -- the next write records real provenance.
+	Provenance KbProvenance       `json:"provenance"`
+	Slug       string             `json:"slug"`
+	TenantId   openapi_types.UUID `json:"tenant_id"`
+	UpdatedAt  time.Time          `json:"updated_at"`
 }
 
 // KbEntryCreate POST body for “/api/v1/kb“ -- create / re-index one entry.
@@ -5841,10 +5915,22 @@ type KbEntryPreview struct {
 	UpdatedAt string                 `json:"updated_at"`
 }
 
+// KbIngestConflict Two or more files in one directory ingest claim the same slug.
+//
+// “relative_paths“ lists every file that claims “slug“, sorted,
+// relative to the ingest directory. None of these files is written,
+// and an existing entry with this slug stays unchanged. The operator
+// fixes the conflict (rename a file or change its “slug:“
+// front-matter) and runs the ingest again.
+type KbIngestConflict struct {
+	RelativePaths []string `json:"relative_paths"`
+	Slug          string   `json:"slug"`
+}
+
 // KbIngestionResult Summary of one :meth:`KbService.ingest_directory` run.
 //
-// The four counters partition every discovered “.md“ file into
-// exactly one of four buckets:
+// The five counters partition every discovered “.md“ file into
+// exactly one of five buckets:
 //
 //   - “inserted_count“ -- file's slug had no prior row in the tenant;
 //     a new document row was created and embedded.
@@ -5860,9 +5946,17 @@ type KbEntryPreview struct {
 //     front-matter). The matching error message is appended to
 //     :attr:`errors`; the ingestion run continues with the remaining
 //     files.
+//   - “conflict_count“ -- the file shares its slug with at least one
+//     other file in the same run. No file in that group is written;
+//     :attr:`conflicts` lists each group once.
 //
 // Sum invariant: “inserted_count + updated_count + skipped_count
-// + error_count == <total discovered .md files>“.
+// + error_count + conflict_count == <total discovered .md files>“.
+//
+// The run walks files in sorted relative-path order, so the same
+// directory gives the same counters, “errors“ order and
+// “conflicts“ order on every run, whatever order the filesystem
+// lists the files in.
 //
 // The “errors“ list is bounded in practice by the corpus size --
 // no per-file error string exceeds ~200 chars (the file path plus a
@@ -5870,11 +5964,13 @@ type KbEntryPreview struct {
 // corpus stays under ~200 KB of allocated memory. Truncation /
 // sampling can land in v0.2.next if real corpora drive that.
 type KbIngestionResult struct {
-	ErrorCount    int      `json:"error_count"`
-	Errors        []string `json:"errors"`
-	InsertedCount int      `json:"inserted_count"`
-	SkippedCount  int      `json:"skipped_count"`
-	UpdatedCount  int      `json:"updated_count"`
+	ConflictCount int                `json:"conflict_count"`
+	Conflicts     []KbIngestConflict `json:"conflicts"`
+	ErrorCount    int                `json:"error_count"`
+	Errors        []string           `json:"errors"`
+	InsertedCount int                `json:"inserted_count"`
+	SkippedCount  int                `json:"skipped_count"`
+	UpdatedCount  int                `json:"updated_count"`
 }
 
 // KbListResponse Response envelope for “GET /api/v1/kb“.
@@ -5888,6 +5984,27 @@ type KbIngestionResult struct {
 type KbListResponse struct {
 	Entries []KbEntryPreview `json:"entries"`
 }
+
+// KbProvenance Where a kb entry came from, as read back from its metadata.
+//
+// “state="recorded"“ means the service stored provenance when it
+// wrote the entry; the other fields are then set (“relative_path“
+// stays “None“ for direct writes). “state="legacy"“ means the
+// entry was written before provenance was stored, or the stored value
+// is not in the expected shape; every other field is “None“. Legacy
+// rows are not rewritten -- the next write records real provenance.
+type KbProvenance struct {
+	IngestedAt   *time.Time              `json:"ingested_at"`
+	RelativePath *string                 `json:"relative_path"`
+	SourceKind   *KbProvenanceSourceKind `json:"source_kind"`
+	State        KbProvenanceState       `json:"state"`
+}
+
+// KbProvenanceSourceKind defines model for KbProvenance.SourceKind.
+type KbProvenanceSourceKind string
+
+// KbProvenanceState defines model for KbProvenance.State.
+type KbProvenanceState string
 
 // KindFilterValue Closed enum of the trigger “kind“ values exposed in the filter URL.
 //
@@ -6058,6 +6175,12 @@ type MemoryEntrySearchHit struct {
 	// see the original payload.
 	Entry      MemoryEntry `json:"entry"`
 	FusedScore float32     `json:"fused_score"`
+
+	// Locator Canonical selected-read URI (``meho://memory/id/{document_uuid}``).
+	//
+	// Built from the row id only, so it never carries a target name
+	// or owner. Read it with ``resources/read`` to get the full entry.
+	Locator *string `json:"locator,omitempty"`
 }
 
 // MemoryListResponse Response envelope for “GET /api/v1/memory“.
@@ -6949,6 +7072,7 @@ type ReplayNode struct {
 	Children         *[]ReplayNode          `json:"children,omitempty"`
 	Depth            int                    `json:"depth"`
 	DurationMs       *string                `json:"duration_ms"`
+	EventClass       string                 `json:"event_class"`
 	Id               openapi_types.UUID     `json:"id"`
 	Method           string                 `json:"method"`
 	OpClass          string                 `json:"op_class"`

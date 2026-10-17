@@ -278,6 +278,7 @@ from sqlalchemy.types import TypeDecorator, TypeEngine
 from meho_backplane.checks.assertions import CheckState
 
 __all__ = [
+    "AUDIT_EVENT_CLASSES",
     "EVENT_OUTBOX_NOTIFY_CHANNEL",
     "KIND_SLUG_MAX_LENGTH",
     "KIND_SLUG_MIN_LENGTH",
@@ -287,6 +288,7 @@ __all__ = [
     "AgentRun",
     "AgentRunStatus",
     "AgentRunTrigger",
+    "AuditEventClass",
     "AuditLog",
     "Base",
     "BroadcastOverride",
@@ -304,6 +306,7 @@ __all__ = [
     "GraphNodeHistory",
     "IdentityBudget",
     "OperationGroup",
+    "RequestUsageEvent",
     "RunbookRun",
     "RunbookRunStepState",
     "RunbookTemplate",
@@ -412,14 +415,53 @@ class Base(DeclarativeBase):
     """
 
 
-class AuditLog(Base):
-    """One row per authenticated request, written synchronously before response.
+class AuditEventClass(StrEnum):
+    """What kind of accountable event one ``audit_log`` row records (#3733).
 
-    The :class:`~meho_backplane.audit.AuditMiddleware` constructs an
-    instance, populates every field from the request / response /
-    contextvars, and commits before yielding the response back to
-    the ASGI send chain. Read-only by every other consumer in v0.1
-    (no UPDATE / DELETE paths exist).
+    The set is closed. The database CHECK ``ck_audit_log_event_class``
+    rejects any other value, so a new class needs a code change and a
+    migration together.
+
+    * :attr:`OPERATION_EXECUTION` -- an action ran: a dispatched operation
+      (success or failure), or a MEHO-internal action such as a topology
+      edit, a retention sweep or a reaper.
+    * :attr:`POLICY_DECISION` -- a gate decided about a call before it ran:
+      a policy deny, a rate-limit refusal, or a park for approval.
+    * :attr:`APPROVAL_DECISION` -- a person (or a standing grant) approved,
+      rejected, or let an approval request expire.
+    * :attr:`SECURITY_EVENT` -- a security-relevant signal, such as a
+      refresh-token replay or a broken satellite effect chain.
+    * :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every
+      row written before migration ``0106`` reads as this class; it is never
+      guessed from ``method`` / ``path``. The REST and MCP request wrapper
+      rows also keep this class until they are retired.
+    """
+
+    OPERATION_EXECUTION = "operation_execution"
+    POLICY_DECISION = "policy_decision"
+    APPROVAL_DECISION = "approval_decision"
+    SECURITY_EVENT = "security_event"
+    LEGACY_REQUEST = "legacy_request"
+
+
+#: Closed tuple mirrored in migration ``0106``'s CHECK constraint.
+AUDIT_EVENT_CLASSES: tuple[str, ...] = tuple(c.value for c in AuditEventClass)
+
+
+def _ck_event_class_in(values: tuple[str, ...]) -> str:
+    """Render the ``event_class IN (...)`` CHECK body for ``audit_log``."""
+    return f"event_class IN ({', '.join(f"'{v}'" for v in values)})"
+
+
+class AuditLog(Base):
+    """One durable accountability record, written synchronously.
+
+    Every writer declares its :class:`AuditEventClass` on ``event_class``
+    (see ``tests/test_audit_event_class.py`` for the writer inventory).
+    The :class:`~meho_backplane.audit.AuditMiddleware` writes one row per
+    authenticated request (class ``legacy_request``); the dispatcher,
+    the approval queue and the domain writers write classified rows.
+    Read-only by every other consumer (no UPDATE / DELETE paths exist).
 
     Field semantics are documented on the module docstring; this
     class deliberately ships with no helper methods — the audit row
@@ -593,8 +635,25 @@ class AuditLog(Base):
         nullable=True,
         default=None,
     )
+    # What kind of accountable event this row records (#3733). Closed
+    # vocabulary :class:`AuditEventClass`, DB-enforced by the CHECK below.
+    # NOT NULL. The server default ``legacy_request`` is what every row
+    # written before migration ``0106`` reads as, and what a row from an
+    # older MEHO version writes during a rolling upgrade. There is no
+    # Python-side default on purpose: every writer in this codebase passes
+    # the class it knows, and the writer-inventory test fails on any
+    # ``AuditLog(...)`` call that does not.
+    event_class: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=sa.text("'legacy_request'"),
+    )
 
     __table_args__ = (
+        sa.CheckConstraint(
+            _ck_event_class_in(AUDIT_EVENT_CLASSES),
+            name="ck_audit_log_event_class",
+        ),
         # Verdict vocabulary is the closed ``PermissionVerdict`` set. The
         # literal mirrors ``_PERMISSION_VERDICTS`` (defined later in this
         # module, after the enum) rather than referencing it — this
@@ -8477,3 +8536,54 @@ class DispatchTraceSpan(Base):
             postgresql_using="btree",
         ),
     )
+
+
+class RequestUsageEvent(Base):
+    """One privacy-bounded usage event at the REST or MCP boundary (#3734).
+
+    Routine activity (a list, a search, a resource read) is usage, not an
+    accountable action. This table keeps it apart from ``audit_log``. It is
+    written by :mod:`meho_backplane.request_usage.collector` and only when
+    ``REQUEST_USAGE_RETENTION_DAYS`` is set; the retention job deletes rows
+    older than that window. During the dual-write phase the wrapper
+    ``audit_log`` rows are still written too.
+
+    The row holds only opaque ids and bounded labels. It never holds a
+    request body, a query string, tool arguments, a prompt, a token, or a
+    target name. ``route`` is a route template or a registered MCP tool /
+    resource template / method name, never a concrete path.
+
+    * ``kind`` -- ``request_finished`` (one per boundary) or
+      ``context_selected`` (optional; says context was picked, never that
+      it was followed).
+    * ``tenant_id`` -- soft reference, same as ``audit_log.tenant_id``.
+    * ``outcome`` -- bounded code (``ok`` / ``client_error`` / ``denied``
+      / ``not_found`` / ``rate_limited`` / ``server_error``); ``NULL`` on
+      ``context_selected``.
+    * ``correlation_id`` -- opaque id that links a ``context_selected``
+      event to later evaluation data; ``NULL`` on ``request_finished``.
+
+    Indexes are declared in migration ``0107``:
+    ``(tenant_id, occurred_at)`` for tenant-scoped window reads, and
+    ``occurred_at`` for the retention delete.
+    """
+
+    __tablename__ = "request_usage_event"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    session_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    run_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    request_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    correlation_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    transport: Mapped[str] = mapped_column(Text, nullable=False)
+    route: Mapped[str] = mapped_column(Text, nullable=False)
+    outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
+    duration_ms: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)

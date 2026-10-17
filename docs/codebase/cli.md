@@ -208,7 +208,7 @@ cli/
     │   │   ├── add.go            # `meho kb add <slug> --body @file|@-|text` (POST /api/v1/kb).
     │   │   ├── delete.go         # `meho kb delete <slug> [--confirm]` (DELETE /api/v1/kb/{slug}).
     │   │   ├── kb_test.go        # helpers + register-all-verbs + body/metadata/confirm contract tests.
-    │   │   ├── ingest_test.go    # POST body + four-bucket render + 400 directory_not_found tests.
+    │   │   ├── ingest_test.go    # POST body + counter/conflict render + 400 directory_not_found tests.
     │   │   ├── search_test.go    # POST body (source pinned) + table render + nil-score safety tests.
     │   │   ├── list_test.go      # query-param emit + table render + limit-range gate tests.
     │   │   ├── show_test.go      # path-escape + Markdown body to stdout + 404 slug_not_found tests.

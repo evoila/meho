@@ -118,6 +118,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     AgentRun,
     AgentRunStatus,
+    AuditEventClass,
     AuditLog,
     ScheduledTriggerInFlightPolicy,
 )
@@ -214,6 +215,7 @@ def _stage_audit_row(
     session.add(
         AuditLog(
             id=uuid.uuid4(),
+            event_class=AuditEventClass.OPERATION_EXECUTION,
             occurred_at=datetime.now(UTC),
             operator_sub=operator_sub,
             tenant_id=tenant_id,

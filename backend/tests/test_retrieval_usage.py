@@ -76,6 +76,7 @@ from ._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
 from ._oidc_jwt_helpers import mint_token as _mint_token
 from ._oidc_jwt_helpers import mock_discovery_and_jwks as _mock_discovery_and_jwks
 from ._oidc_jwt_helpers import public_jwks as _public_jwks
+from ._request_usage_helpers import seed_usage_event
 
 # ---------------------------------------------------------------------------
 # Settings + JWKS cache fixtures (mirrors test_api_v1_retrieve.py)
@@ -1104,3 +1105,64 @@ async def test_route_audit_row_count_matches_total_searches(
     rows = await _read_audit_rows_for_path("/api/v1/retrieve/usage")
     assert len(rows) == 1
     assert rows[0].payload["row_count"] == 2
+
+
+# ---------------------------------------------------------------------------
+# #3734: the same report from request usage events
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_compute_usage_aggregates_from_request_usage_events() -> None:
+    """``source="request_usage"`` counts ok search events and their conversion.
+
+    Audit rows are ignored for this source; a failed search event is not
+    daily use; a follow-up event of the same principal inside the window
+    converts the search; another tenant's events never count.
+    """
+    base = _NOW - timedelta(hours=2)
+    await seed_usage_event(
+        tenant_id=_FIXED_TENANT,
+        route="tool:search_knowledge",
+        occurred_at=base,
+    )
+    await seed_usage_event(
+        tenant_id=_FIXED_TENANT,
+        route="/api/v1/targets/{target_id}",
+        transport="rest",
+        occurred_at=base + timedelta(minutes=2),
+    )
+    await seed_usage_event(
+        tenant_id=_FIXED_TENANT,
+        route="tool:search_memory",
+        occurred_at=base,
+        outcome="server_error",
+    )
+    await seed_usage_event(
+        tenant_id=_OTHER_TENANT,
+        route="tool:search_knowledge",
+        occurred_at=base,
+    )
+    await _seed_audit_row(
+        operator_sub="op-1",
+        tenant_id=_FIXED_TENANT,
+        path=f"{MCP_TOOL_PATH_PREFIX}search_operations",
+        occurred_at=base,
+    )
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        report = await compute_usage(
+            session=session,
+            since=_NOW - timedelta(days=1),
+            until=_NOW,
+            surfaces=SUPPORTED_SURFACES,
+            tenant_id=_FIXED_TENANT,
+            source="request_usage",
+        )
+
+    assert report.total_searches == 1
+    [bucket] = report.buckets
+    assert bucket.surface == "kb"
+    assert bucket.search_count == 1
+    assert bucket.action_conversion_pct == 100.0

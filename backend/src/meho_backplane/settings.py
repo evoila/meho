@@ -587,6 +587,14 @@ class Settings(BaseModel):
         (no writes, nothing to prune) while a running loop still heartbeats;
         ``enabled=False`` skips starting the loop entirely. Read once at
         lifespan startup; toggling post-start requires a pod restart.
+    request_usage_retention_days:
+        How many days request usage events are kept (#3734). These are the
+        privacy-bounded ``request_usage_event`` rows written at the REST and
+        MCP boundary. **Unset (the default) turns collection off**: no
+        events are written and requests are never slowed or blocked by it.
+        When set, one event is written per request and a daily job deletes
+        events older than this many days. Range ``[1, 3650]``. Env var
+        ``REQUEST_USAGE_RETENTION_DAYS``; an empty value counts as unset.
     result_handle_max_spill_rows:
         Upper bound on how many rows the reducer spills into the
         :class:`~meho_backplane.connectors.result_handle_store.ResultHandleStore`
@@ -1462,6 +1470,9 @@ class Settings(BaseModel):
     checks_evidence_retention_days: int = Field(default=7, ge=0, le=3650)
     checks_evidence_prune_interval_seconds: int = Field(default=604800, ge=60, le=604800)
     checks_evidence_prune_enabled: bool = True
+    # Request usage events (#3734). ``None`` = collection off. There is no
+    # default window on purpose: the operator chooses how long to keep them.
+    request_usage_retention_days: int | None = Field(default=None, ge=1, le=3650)
     result_handle_max_spill_rows: int = Field(default=10000, gt=0)
     result_cache_redis_url: str = Field(default="redis://localhost:6379", min_length=1)
     result_cache_redis_password: str | None = Field(default=None)
@@ -2346,6 +2357,12 @@ def get_settings() -> Settings:
         result_cache_redis_password = broadcast_redis_password
     else:
         result_cache_redis_password = os.environ.get("RESULT_CACHE_REDIS_PASSWORD") or None
+    # An unset or blank REQUEST_USAGE_RETENTION_DAYS keeps request usage
+    # collection off (#3734).
+    request_usage_retention_raw = os.environ.get("REQUEST_USAGE_RETENTION_DAYS", "").strip()
+    request_usage_retention_days = (
+        int(request_usage_retention_raw) if request_usage_retention_raw else None
+    )
     return Settings(
         keycloak_issuer_url=os.environ["KEYCLOAK_ISSUER_URL"],  # type: ignore[arg-type]
         keycloak_audience=os.environ["KEYCLOAK_AUDIENCE"],
@@ -2540,6 +2557,7 @@ def get_settings() -> Settings:
         checks_evidence_prune_enabled=parse_bool_env(
             os.environ.get("CHECKS_EVIDENCE_PRUNE_ENABLED", "true"),
         ),
+        request_usage_retention_days=request_usage_retention_days,
         result_handle_max_spill_rows=int(
             os.environ.get("RESULT_HANDLE_MAX_SPILL_ROWS", "10000"),
         ),

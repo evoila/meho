@@ -60,6 +60,7 @@ from ._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
 from ._oidc_jwt_helpers import mint_token as _mint_token
 from ._oidc_jwt_helpers import mock_discovery_and_jwks as _mock_discovery_and_jwks
 from ._oidc_jwt_helpers import public_jwks as _public_jwks
+from ._request_usage_helpers import seed_usage_event
 
 # ---------------------------------------------------------------------------
 # Settings + JWKS cache fixtures (mirrors test_retrieval_usage.py)
@@ -271,6 +272,57 @@ async def test_read_before_act_scores_first_call_vs_broadcast_recent() -> None:
     assert agent.read_before_act_sessions == 4
     assert agent.read_before_act_read_first == 2
     assert agent.read_before_act_pct == 50.0
+
+
+@pytest.mark.asyncio
+async def test_meta_tool_metrics_aggregate_from_request_usage_events() -> None:
+    """#3734: ``source="request_usage"`` reads the meta-tool calls from usage events.
+
+    * ``u1`` broadcast_recent then call_operation → read-first.
+    * ``u2`` call_operation only, plus one add_to_memory.
+    * A failed call event and audit envelope rows are ignored.
+    * Dispatch rows still come from ``audit_log`` (execution records).
+    """
+    await _seed_tenant(_TENANT_A)
+    u1, u2 = uuid.uuid4(), uuid.uuid4()
+    recent = f"tool:{BROADCAST_RECENT_TOOL}"
+    call = f"tool:{CALL_OPERATION_TOOL}"
+    for route, at, session in (
+        (recent, 10, u1),
+        (call, 20, u1),
+        (call, 30, u2),
+        (f"tool:{ADD_TOOLS[1]}", 40, u2),
+    ):
+        await seed_usage_event(
+            tenant_id=_TENANT_A, route=route, occurred_at=_at(at), session_id=session
+        )
+    await seed_usage_event(
+        tenant_id=_TENANT_A, route=call, occurred_at=_at(5), session_id=u1, outcome="denied"
+    )
+    await _seed_audit(
+        tenant_id=_TENANT_A, path=_CALL_PATH, occurred_at=_at(50), agent_session_id=u1
+    )
+    await _seed_dispatch(
+        tenant_id=_TENANT_A, op_id=_WRITE_OP, occurred_at=_at(60), agent_session_id=u1
+    )
+    await _seed_announce(tenant_id=_TENANT_A, run_id=u1, created_at=_at(1))
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        report = await compute_reflex_report(
+            session=session,
+            since=_SINCE,
+            until=_UNTIL,
+            tenant_id=_TENANT_A,
+            source="request_usage",
+        )
+    agent = _surface(report, "agent")
+    assert agent.read_before_act_sessions == 2
+    assert agent.read_before_act_read_first == 1
+    assert agent.write_back_call_operations == 2
+    assert agent.write_back_add_calls == 1
+    assert agent.announce_coverage_write_ops == 1
+    assert agent.announce_coverage_announced == 1
 
 
 # ---------------------------------------------------------------------------

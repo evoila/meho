@@ -187,6 +187,29 @@ func TestPrintIngestSummaryWithErrors(t *testing.T) {
 	}
 }
 
+// TestPrintIngestSummaryWithConflicts — slug conflicts are listed
+// with every file path and counted in the total.
+func TestPrintIngestSummaryWithConflicts(t *testing.T) {
+	var buf bytes.Buffer
+	printIngestSummary(&buf, &api.KbIngestionResult{
+		InsertedCount: 1, ConflictCount: 2,
+		Errors: []string{},
+		Conflicts: []api.KbIngestConflict{
+			{Slug: "dup", RelativePaths: []string{"a/dup.md", "b/dup.md"}},
+		},
+	}, false)
+	out := buf.String()
+	for _, want := range []string{
+		"conflicted:    2", "total:         3",
+		"conflicts (not written; existing entry unchanged):",
+		"dup: a/dup.md, b/dup.md",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in %q", want, out)
+		}
+	}
+}
+
 // TestPrintIngestSummaryDryRunBanner — --dry-run emits a banner.
 func TestPrintIngestSummaryDryRunBanner(t *testing.T) {
 	var buf bytes.Buffer

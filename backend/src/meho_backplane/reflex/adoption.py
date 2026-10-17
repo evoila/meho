@@ -91,6 +91,17 @@ Let a *session* be a distinct non-null ``agent_session_id``.
 4. **surface split** — every metric above, reported once per surface
    (``agent`` / ``cli_rest``).
 
+Request usage events (#3734)
+----------------------------
+
+:func:`compute_reflex_report` takes a ``source``. ``"audit_log"`` (the
+default) reads the MCP envelope rows above. ``"request_usage"`` reads the
+meta-tool calls from ``ok`` ``request_finished`` usage events
+(:mod:`meho_backplane.request_usage`) instead, with the usage
+``session_id`` as the session. Dispatch rows always come from
+``audit_log``: they are execution records, not wrapper rows. The routes
+keep the default until the wrapper rows are retired.
+
 Tenant boundary
 ---------------
 
@@ -115,7 +126,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from datetime import datetime
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, NamedTuple
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
@@ -124,6 +135,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.db.models import AgentAnnouncement, AuditLog
+from meho_backplane.request_usage.reader import (
+    MCP_TOOL_ROUTE_PREFIX,
+    UsageSource,
+    mcp_tool_route,
+    select_finished_events,
+)
 
 # Re-exported from the #444 seam so the reflex ``--since`` grammar is
 # identical to ``meho retrieval usage`` by construction, not by a
@@ -233,6 +250,14 @@ class ReflexReport(BaseModel):
     surfaces: list[SurfaceMetrics]
 
 
+class _MetaToolRow(NamedTuple):
+    """A meta-tool call read from usage events, in the audit row shape."""
+
+    occurred_at: datetime
+    agent_session_id: UUID | None
+    path: str
+
+
 def _tool_path(tool_name: str) -> str:
     """Return the audited MCP envelope path for *tool_name*."""
     return f"{MCP_TOOL_PATH_PREFIX}{tool_name}"
@@ -249,19 +274,35 @@ async def _fetch_meta_tool_rows(
     since: datetime,
     until: datetime,
     tenant_id: UUID | None,
+    source: UsageSource = "audit_log",
 ) -> list[Any]:
     """Pull successful reflex meta-tool envelope rows in the window.
 
     Returns ``(occurred_at, agent_session_id, path)`` for the four
     reflex meta-tools, ordered by ``(agent_session_id, occurred_at)`` so
     the per-session read-before-act walk sees each session's timeline in
-    order.
+    order. With ``source="request_usage"`` the rows come from ``ok``
+    usage events, with the route label turned back into the audit path
+    so the metric helpers stay source-agnostic.
     """
-    paths = [
-        _tool_path(CALL_OPERATION_TOOL),
-        _tool_path(BROADCAST_RECENT_TOOL),
-        *(_tool_path(tool) for tool in ADD_TOOLS),
-    ]
+    tools = [CALL_OPERATION_TOOL, BROADCAST_RECENT_TOOL, *ADD_TOOLS]
+    if source == "request_usage":
+        usage_stmt = select_finished_events(
+            since=since,
+            until=until,
+            tenant_id=tenant_id,
+            routes=[mcp_tool_route(tool) for tool in tools],
+            ok_only=True,
+        )
+        return [
+            _MetaToolRow(
+                occurred_at=row.occurred_at,
+                agent_session_id=row.agent_session_id,
+                path=_tool_path(row.path.removeprefix(MCP_TOOL_ROUTE_PREFIX)),
+            )
+            for row in (await session.execute(usage_stmt)).all()
+        ]
+    paths = [_tool_path(tool) for tool in tools]
     stmt = (
         select(
             AuditLog.occurred_at,
@@ -465,6 +506,7 @@ async def compute_reflex_report(
     since: datetime,
     until: datetime,
     tenant_id: UUID | None,
+    source: UsageSource = "audit_log",
 ) -> ReflexReport:
     """Aggregate ``audit_log`` + announce rows into a reflex-adoption report.
 
@@ -472,13 +514,15 @@ async def compute_reflex_report(
     rows, per-session earliest announce), then per-surface Python
     correlation. Read-only: the helper neither commits nor closes the
     caller-owned *session*. An empty window yields both surfaces present
-    with zero counts and ``None`` ratios.
+    with zero counts and ``None`` ratios. *source* picks where the
+    meta-tool calls come from (see the module docstring).
     """
     meta_rows = await _fetch_meta_tool_rows(
         session,
         since=since,
         until=until,
         tenant_id=tenant_id,
+        source=source,
     )
     dispatch_rows = await _fetch_dispatch_rows(
         session,

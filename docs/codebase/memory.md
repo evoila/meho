@@ -8,7 +8,8 @@
 The memory service is the persistent, RBAC-gated key-value layer that
 backs both the REST surface (`/api/v1/memory/...`) and the MCP meta-
 tools (`add_to_memory`, `search_memory`, `meho_memory_promote`, plus
-the resource template `meho://memory/{scope}/{slug}`). All memory
+the resource templates `meho://memory/id/{document_uuid}` and
+`meho://memory/{scope}/{slug}`). All memory
 rows are stored in the shared `documents` table under
 `source = 'memory'` — the same table that backs `kb` and any future
 indexed corpus — which lets hybrid BM25 + cosine retrieval span the
@@ -65,13 +66,19 @@ the retrieval substrate's `RetrievalHit`. The fused-score is what
 the result list is sorted by; the per-signal numbers are observability
 glass for "why was this hit ranked here".
 
+It also has a computed `locator` field: the canonical selected-read
+URI `meho://memory/id/{document_uuid}` for the hit's row (built by
+`memory_locator(entry.id)`). It is part of `model_dump()`, so every
+surface that serialises a hit carries it. The locator holds only the
+row id: no target name, no owner.
+
 ### `MemoryService` (`memory/service.py`)
 
 Singleton-style service: holds a `MemoryRbacResolver` and a
 `structlog` logger; opens a fresh `AsyncSession` per method. No
 shared cursor / connection state across calls. Public methods:
-`remember`, `recall`, `forget`, `list_memories`, `search_memories`,
-`promote`.
+`remember`, `recall`, `read_by_id`, `forget`, `list_memories`,
+`search_memories`, `promote`.
 
 ### `resolve_default_expires_at` (`memory/ttl.py`)
 
@@ -197,6 +204,48 @@ DESC`, then post-filters through the RBAC matrix on `user_sub`. Both
 paths project via `document_to_entry`, so the returned timestamps
 are the real DB column values.
 
+### Read path — selected read by id (`read_by_id`)
+
+Today a search hit still carries the full `MemoryEntry` (including
+`body`) under `entry`, plus the `locator`. Access is checked at search
+time by the RBAC predicate pushed into the retriever (see "Read path —
+search" below), so a hit already means the operator may read it. The
+locator adds a second, stable way to read the same entry later, and
+`read_by_id` checks access again on that read. Reducing search hits to
+a short, bounded snippet plus the locator is follow-up work in #3751;
+once it lands, the selected read becomes the only place the full body
+is served.
+
+Contract for `meho://memory/id/{document_uuid}`:
+
+* The `{document_uuid}` is `documents.id`. No migration; the id
+  already exists on every row.
+* The id is not authority. `MemoryService.read_by_id` loads the row
+  by `(id, tenant_id, source='memory')`, then checks, in order: the
+  `kind` maps to a scope; a target-scoped row has a `target_name`;
+  `MemoryRbacResolver.can_read` allows it; the row's `source_id`
+  equals the natural key this operator would build for it (so for
+  user scopes the owner is checked through the key, not only through
+  metadata); the row has not expired.
+* Every miss returns `None`: unknown id, deleted row, other tenant,
+  other owner, non-memory row, broken row, expired row. The MCP
+  handler also maps a malformed id to the same answer. The wire error
+  is always `-32602` "memory entry not found: id=<input>".
+* The read response is the `MemoryEntry` shape plus `locator`, with
+  `body` inside the untrusted-text envelope. The legacy
+  `meho://memory/{scope}/{slug}` read returns the same shape.
+* The legacy scope/slug template still resolves `user`,
+  `user-tenant`, and `tenant` entries. It does not resolve `target`
+  or `user-target` entries (no target name in the URI); use the
+  locator. A `meho://memory/id/<x>` URI also matches the legacy
+  template's shape, so its handler forwards `scope == "id"` to the
+  canonical handler. `id` is not a scope value, so this cannot
+  clash.
+
+Consumers: the MCP `search_memory` tool returns hits with `locator`.
+The CLI `meho recall --query` path still uses the generic retrieve
+route, which has no locator yet.
+
 ### Read path — search (`search_memories`)
 
 Rule: **eligibility first, ranking second** (#3741). A memory the
@@ -296,9 +345,12 @@ marker.
   ORM row's fields, including the timestamps. Owns the
   `MemoryEligibility` type and the SQL that enforces it.
 * `meho_backplane.memory.rbac.MemoryRbacResolver` — the scope ×
-  role matrix. Applied at write boundaries, at the `list_memories`
-  in-process filter, and — through `eligibility()` — as the input
-  the search SQL enforces before ranking.
+  role matrix. Applied at write boundaries, on `recall` and
+  `read_by_id`, at the `list_memories` in-process filter, and —
+  through `eligibility()` — as the input the search SQL enforces
+  before ranking. `search_memories` does not consult the resolver
+  after retrieval; the SQL layer drops rows the caller may not see
+  before the candidate budget is allocated.
 * `meho_backplane.memory.expiry` — background reaper for rows past
   `doc_metadata.expires_at`. Between expiry and reap, `recall` /
   `list_memories` hide expired rows in Python and search hides them
@@ -367,7 +419,12 @@ marker.
   validation logic across entry points — one canonical resolver;
   pydantic set-vs-unset is the idiomatic discriminator).
 
+* Task #3743 — canonical selected read `meho://memory/id/{document_uuid}`
+  and `MemoryService.read_by_id` (parent Initiative #3729).
+* Task #3751 (follow-up, open) — bounded search snippets that carry
+  the locator instead of the full body.
+
 See also: [`untrusted-text-envelope.md`](./untrusted-text-envelope.md)
-— the `meho://memory/{scope}/{slug}` resource serves `body` inside the
+— both memory resources serve `body` inside the
 `<<UNTRUSTED_AGENT_TEXT` guard envelope (stored prompt-injection
 hardening at the LLM-facing read boundary).

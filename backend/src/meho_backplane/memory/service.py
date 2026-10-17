@@ -622,6 +622,64 @@ class MemoryService:
             return None
         return entry
 
+    async def read_by_id(self, operator: Operator, document_id: uuid.UUID) -> MemoryEntry | None:
+        """Fetch one memory by its row id. ``None`` on every kind of miss.
+
+        This is the service side of the canonical selected read
+        ``meho://memory/id/{document_uuid}``. The id names a row; it is
+        not authority. The method runs the same checks :meth:`recall`
+        runs on a natural-key read, so a caller gets the row only when
+        ``recall`` on the row's own ``(scope, slug, target_name)`` would
+        return it:
+
+        * the row is a memory row in the operator's tenant,
+        * its ``kind`` maps to a known scope,
+        * a target-scoped row carries a ``target_name``,
+        * the RBAC matrix lets the operator read it,
+        * its ``source_id`` equals the natural key this operator would
+          build for it (for user scopes this pins the owner a second
+          time, through the key and not only through metadata),
+        * it has not expired.
+
+        A missing, deleted, foreign-tenant, other-owner, broken, or
+        expired row all return ``None``, so the caller cannot tell them
+        apart (same no-oracle rule as :meth:`recall`).
+        """
+        doc = await self._fetch_by_id(operator, document_id)
+        if doc is None:
+            return None
+        try:
+            scope = scope_for_kind(doc.kind)
+        except ValueError:
+            return None
+        metadata = doc.doc_metadata or {}
+        stored_user_sub = metadata_str(metadata, "user_sub")
+        stored_target = metadata_str(metadata, "target_name")
+        # ``and`` short-circuits: the target-name check runs first, so
+        # ``encode_source_id`` never sees a target scope without a name.
+        readable = (
+            (scope not in TARGET_SCOPED or stored_target is not None)
+            and self._rbac.can_read(
+                operator,
+                scope,
+                user_sub=stored_user_sub,
+                target_name=stored_target,
+            )
+            and doc.source_id
+            == encode_source_id(
+                scope=scope,
+                user_sub=operator.sub,
+                target_name=stored_target,
+                slug=slug_from_source_id(doc.source_id),
+            )
+        )
+        if not readable:
+            return None
+        entry = document_to_entry(doc)
+        if entry.expires_at is not None and is_expired(entry.expires_at):
+            return None
+        return entry
+
     async def list_memories(
         self,
         operator: Operator,
@@ -747,6 +805,19 @@ class MemoryService:
                     Document.tenant_id == operator.tenant_id,
                     Document.source == MEMORY_SOURCE,
                     Document.source_id == source_id,
+                )
+            )
+            return result.scalar_one_or_none()
+
+    async def _fetch_by_id(self, operator: Operator, document_id: uuid.UUID) -> Document | None:
+        """Single-row fetch by ``documents.id``, bounded to the tenant's memory rows."""
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            result = await session.execute(
+                select(Document).where(
+                    Document.id == document_id,
+                    Document.tenant_id == operator.tenant_id,
+                    Document.source == MEMORY_SOURCE,
                 )
             )
             return result.scalar_one_or_none()

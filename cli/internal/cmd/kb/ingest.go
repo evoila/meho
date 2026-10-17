@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -36,7 +37,12 @@ import (
 //
 // `--dry-run` short-circuits the substrate's write path; the
 // counters in the returned `KbIngestionResult` reflect what _would_
-// have been inserted / updated / skipped / errored.
+// have been inserted / updated / skipped / errored / conflicted.
+//
+// Files that share a slug in one run are listed under `conflicts:`
+// and are not written; the existing entry keeps its content. The
+// operator renames a file (or fixes its `slug:` front-matter) and
+// runs the ingest again.
 //
 // Exit codes:
 //   - 0   ingest returned cleanly; counters rendered
@@ -66,6 +72,9 @@ func newIngestCmd() *cobra.Command {
 			"counters in the returned KbIngestionResult reflect what " +
 			"would have been inserted / updated / skipped / errored " +
 			"without actually writing.\n\n" +
+			"Files are read in sorted order. When two or more files " +
+			"share a slug, none of them is written and the existing " +
+			"entry stays unchanged; they are listed under conflicts.\n\n" +
 			"The substrate's body-hash short-circuit means re-ingesting " +
 			"an unchanged corpus only pays an updated_at bump per file; " +
 			"the skipped_count counter rises rather than updated_count.",
@@ -177,10 +186,11 @@ func postIngest(
 	)
 }
 
-// printIngestSummary renders the four-bucket counter result as a
-// stable key-value summary. Errors (if any) are appended one per
-// line so an operator triaging a partial-failure run sees every
-// file path that failed without needing --json.
+// printIngestSummary renders the five-bucket counter result as a
+// stable key-value summary. Errors and slug conflicts (if any) are
+// appended one per line so an operator triaging a partial-failure
+// run sees every file path that was not written without needing
+// --json.
 func printIngestSummary(w io.Writer, r *api.KbIngestionResult, dryRun bool) {
 	if r == nil {
 		return
@@ -192,12 +202,19 @@ func printIngestSummary(w io.Writer, r *api.KbIngestionResult, dryRun bool) {
 	fmt.Fprintf(w, "%-14s %d\n", "updated:", r.UpdatedCount)
 	fmt.Fprintf(w, "%-14s %d\n", "skipped:", r.SkippedCount)
 	fmt.Fprintf(w, "%-14s %d\n", "errored:", r.ErrorCount)
-	total := r.InsertedCount + r.UpdatedCount + r.SkippedCount + r.ErrorCount
+	fmt.Fprintf(w, "%-14s %d\n", "conflicted:", r.ConflictCount)
+	total := r.InsertedCount + r.UpdatedCount + r.SkippedCount + r.ErrorCount + r.ConflictCount
 	fmt.Fprintf(w, "%-14s %d\n", "total:", total)
 	if len(r.Errors) > 0 {
 		fmt.Fprintln(w, "errors:")
 		for _, e := range r.Errors {
 			fmt.Fprintf(w, "  - %s\n", e)
+		}
+	}
+	if len(r.Conflicts) > 0 {
+		fmt.Fprintln(w, "conflicts (not written; existing entry unchanged):")
+		for _, c := range r.Conflicts {
+			fmt.Fprintf(w, "  - %s: %s\n", c.Slug, strings.Join(c.RelativePaths, ", "))
 		}
 	}
 }

@@ -118,8 +118,9 @@ from meho_backplane.broadcast import (
     redact_payload,
 )
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog
+from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.operations._audit import resolve_broadcast_lineage, work_ref_var
+from meho_backplane.request_usage.collector import open_request_usage
 
 __all__ = ["AuditMiddleware", "bind_preallocated_audit_id"]
 
@@ -397,6 +398,8 @@ async def _write_audit_row(
     async with sessionmaker() as session:
         row = AuditLog(
             id=audit_id,
+            # A request wrapper row: it keeps the old request meaning (#3733).
+            event_class=AuditEventClass.LEGACY_REQUEST,
             occurred_at=datetime.now(UTC),
             operator_sub=operator_sub,
             actor_sub=resolve_actor_sub(),
@@ -780,6 +783,26 @@ class AuditMiddleware:
             await self.app(scope, receive, send)
             return
 
+        # #3734: request usage boundary. This middleware is the outermost
+        # place that sees every HTTP request (``/mcp`` included), so it owns
+        # the one ``request_finished`` event. ``None`` when collection is off
+        # or a boundary is already open (nested layer). The usage write runs
+        # after the response is sent and never raises, so it cannot change
+        # the audit write or the response.
+        usage = open_request_usage()
+        if usage is None:
+            await self._handle_http(scope, receive, send)
+            return
+        try:
+            await self._handle_http(scope, receive, usage.wrap_send(send))
+        finally:
+            await usage.close(scope)
+
+    # code-quality-allow: the pre-#3734 ``__call__`` body moved here unchanged
+    # so ``__call__`` can wrap it in the request usage boundary; splitting the
+    # shielded-cancellation drain is out of scope for #3734.
+    async def _handle_http(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Write the audit row for one HTTP request (the pre-#3734 ``__call__`` body)."""
         # G0.5-T5 (#250): MCP requests are audited at per-operation
         # granularity by the MCP handlers themselves, not at the
         # JSON-RPC-envelope layer. Skip the chassis audit path entirely

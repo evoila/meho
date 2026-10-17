@@ -88,6 +88,7 @@ from ._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
 from ._oidc_jwt_helpers import mint_token as _mint_token
 from ._oidc_jwt_helpers import mock_discovery_and_jwks as _mock_discovery_and_jwks
 from ._oidc_jwt_helpers import public_jwks as _public_jwks
+from ._request_usage_helpers import seed_usage_event
 
 # ---------------------------------------------------------------------------
 # Fixtures (mirrors test_retrieval_usage.py)
@@ -587,6 +588,61 @@ async def test_compute_retire_ready_to_retire_happy_path() -> None:
         assert criterion.verdict == "green", (
             f"criterion {criterion.name} is {criterion.verdict}: {criterion.observed_value}"
         )
+
+
+@pytest.mark.asyncio
+async def test_compute_retire_reads_request_usage_events() -> None:
+    """#3734: ``source="request_usage"`` drives criteria 1 + 2 from usage events.
+
+    The same seeded activity as the happy path, stored as ok
+    ``request_finished`` events, turns both criteria green. A failed
+    search event does not count as use.
+    """
+    base = _NOW - timedelta(days=40)
+    for op in ("op-A", "op-B", "op-C"):
+        for week_offset in range(MIN_OPERATOR_STREAK_WEEKS + 1):
+            await seed_usage_event(
+                principal_sub=op,
+                tenant_id=_FIXED_TENANT,
+                route="tool:search_knowledge",
+                occurred_at=base + timedelta(days=7 * week_offset),
+            )
+    await seed_usage_event(
+        principal_sub="op-D",
+        tenant_id=_FIXED_TENANT,
+        route="tool:search_knowledge",
+        occurred_at=base - timedelta(days=30),
+        outcome="server_error",
+    )
+
+    fake_eval = AsyncMock(return_value=_stub_eval_result(kb_precision=0.90))
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        with patch("meho_backplane.retrieval.retire.eval_all", new=fake_eval):
+            report = await compute_retire_checklist(
+                session=session,
+                surfaces=["kb"],
+                tenant_id=_FIXED_TENANT,
+                blocker_counts={"kb": 0},
+                now=_NOW,
+                source="request_usage",
+            )
+    criteria = {c.name: c for c in report.surfaces[0].criteria}
+    assert criteria["daily_use_duration"].verdict == "green"
+    assert criteria["operator_breadth"].verdict == "green"
+    assert report.overall_verdict == "READY TO RETIRE"
+
+    # The default source still reads audit_log only, which is empty here.
+    async with sessionmaker() as session:
+        with patch("meho_backplane.retrieval.retire.eval_all", new=fake_eval):
+            default_report = await compute_retire_checklist(
+                session=session,
+                surfaces=["kb"],
+                tenant_id=_FIXED_TENANT,
+                blocker_counts={"kb": 0},
+                now=_NOW,
+            )
+    assert default_report.overall_verdict == "NOT YET"
 
 
 @pytest.mark.asyncio

@@ -68,7 +68,7 @@ from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.broadcast.events import BroadcastEvent
 from meho_backplane.broadcast.publisher import publish_event
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, EventOutbox
+from meho_backplane.db.models import AuditEventClass, AuditLog, EventOutbox
 from meho_backplane.event_source.schemas import EventSourceAuthStrategy
 from meho_backplane.event_source.secrets import read_event_source_secret
 from meho_backplane.events.ingest.auth import IngestAuthError, verify_ingest_auth
@@ -259,6 +259,7 @@ def _build_audit_row(
     """
     return AuditLog(
         id=audit_id,
+        event_class=AuditEventClass.OPERATION_EXECUTION,
         occurred_at=now,
         operator_sub=INGEST_OPERATOR_SUB,
         tenant_id=source.tenant_id,

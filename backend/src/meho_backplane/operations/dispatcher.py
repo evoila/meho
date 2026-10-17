@@ -268,7 +268,7 @@ from meho_backplane.connectors import (
 )
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import Connector, ConnectorResourceNotFoundError, shim_kind
-from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
+from meho_backplane.db.models import AuditEventClass, EndpointDescriptor, PermissionVerdict
 from meho_backplane.flight_recorder import attach_agent_trace_handle
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.operations._audit import (
@@ -1012,6 +1012,7 @@ async def _reduce_and_audit_success(
     try:
         receipt = await audit_and_broadcast_safe(
             audit_id=audit_id,
+            event_class=AuditEventClass.OPERATION_EXECUTION,
             operator=operator,
             descriptor=descriptor,
             target=target,
@@ -1522,6 +1523,7 @@ async def _audit_error_and_return(
     """
     await audit_and_broadcast_safe(
         audit_id=audit_id,
+        event_class=AuditEventClass.OPERATION_EXECUTION,
         operator=operator,
         descriptor=descriptor,
         target=target,
@@ -2031,6 +2033,7 @@ async def _unavailable_delivery_result(
     try:
         receipt = await audit_and_broadcast_safe(
             audit_id=audit_id,
+            event_class=AuditEventClass.OPERATION_EXECUTION,
             operator=operator,
             descriptor=descriptor,
             target=target,
@@ -2478,6 +2481,7 @@ async def _audit_denied_and_return(
     """
     await audit_and_broadcast_safe(
         audit_id=uuid.uuid4(),
+        event_class=AuditEventClass.POLICY_DECISION,
         operator=operator,
         descriptor=descriptor,
         target=target,
@@ -2930,6 +2934,7 @@ async def dispatch(
                 duration_ms = _elapsed_ms(started)
                 await audit_and_broadcast_safe(
                     audit_id=uuid.uuid4(),
+                    event_class=AuditEventClass.POLICY_DECISION,
                     operator=operator,
                     descriptor=descriptor,
                     target=target,
@@ -2966,6 +2971,7 @@ async def dispatch(
                 duration_ms = _elapsed_ms(started)
                 await audit_and_broadcast_safe(
                     audit_id=uuid.uuid4(),
+                    event_class=AuditEventClass.POLICY_DECISION,
                     operator=operator,
                     descriptor=descriptor,
                     target=target,
@@ -2999,6 +3005,7 @@ async def dispatch(
                 duration_ms = _elapsed_ms(started)
                 await audit_and_broadcast_safe(
                     audit_id=uuid.uuid4(),
+                    event_class=AuditEventClass.POLICY_DECISION,
                     operator=operator,
                     descriptor=descriptor,
                     target=target,

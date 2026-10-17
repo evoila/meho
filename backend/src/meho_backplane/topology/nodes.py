@@ -70,6 +70,7 @@ from meho_backplane.db.models import (
     KIND_SLUG_MIN_LENGTH,
     KIND_SLUG_PATTERN,
     WELL_KNOWN_NODE_KINDS,
+    AuditEventClass,
     AuditLog,
     GraphHistoryChangeKind,
     GraphNode,
@@ -222,6 +223,7 @@ def _build_audit_row(
     """
     return AuditLog(
         id=audit_id,
+        event_class=AuditEventClass.OPERATION_EXECUTION,
         occurred_at=datetime.now(UTC),
         operator_sub=operator.sub,
         actor_sub=resolve_actor_sub(),

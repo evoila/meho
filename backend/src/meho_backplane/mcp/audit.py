@@ -63,7 +63,7 @@ from meho_backplane.audit import _resolve_audit_payload
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog
+from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.operations._audit import work_ref_var
 
 __all__ = ["compute_params_hash", "write_mcp_audit_row"]
@@ -285,6 +285,8 @@ async def write_mcp_audit_row(
     async with sessionmaker() as session:
         row = AuditLog(
             id=audit_id,
+            # A request wrapper row: it keeps the old request meaning (#3733).
+            event_class=AuditEventClass.LEGACY_REQUEST,
             occurred_at=datetime.now(UTC),
             operator_sub=operator.sub,
             actor_sub=resolve_actor_sub(),

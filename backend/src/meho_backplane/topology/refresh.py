@@ -62,7 +62,13 @@ from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.connectors.resolver import resolve_connector
 from meho_backplane.connectors.schemas import EdgeHint, NodeHint, TopologyHints
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, GraphEdge, GraphHistoryChangeKind, GraphNode
+from meho_backplane.db.models import (
+    AuditEventClass,
+    AuditLog,
+    GraphEdge,
+    GraphHistoryChangeKind,
+    GraphNode,
+)
 from meho_backplane.operations._audit import resolve_broadcast_lineage
 from meho_backplane.operations._handler_resolve import (
     get_or_create_connector_instance,
@@ -941,6 +947,7 @@ async def _write_audit_and_broadcast(
     session.add(
         AuditLog(
             id=audit_id,
+            event_class=AuditEventClass.OPERATION_EXECUTION,
             occurred_at=datetime.now(UTC),
             operator_sub=operator.sub,
             tenant_id=operator.tenant_id,

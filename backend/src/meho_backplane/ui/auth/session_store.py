@@ -115,7 +115,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, WebSession
+from meho_backplane.db.models import AuditEventClass, AuditLog, WebSession
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -1035,6 +1035,7 @@ def _build_replay_audit_row(
     """
     return AuditLog(
         id=uuid.uuid4(),
+        event_class=AuditEventClass.SECURITY_EVENT,
         occurred_at=now,
         operator_sub=operator_sub,
         tenant_id=tenant_id,

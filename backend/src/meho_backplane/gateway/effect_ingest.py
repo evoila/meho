@@ -48,7 +48,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.db.models import AuditLog, GatewayCommand, RunnerEffectChain
+from meho_backplane.db.models import AuditEventClass, AuditLog, GatewayCommand, RunnerEffectChain
 from meho_backplane.memory.audit import (
     INTERNAL_METHOD,
     write_internal_audit_row,
@@ -240,6 +240,7 @@ async def _write_effect_audit_row(
     session.add(
         AuditLog(
             id=audit_id,
+            event_class=AuditEventClass.OPERATION_EXECUTION,
             occurred_at=datetime.now(UTC),
             operator_sub=operator.sub,
             tenant_id=operator.tenant_id,
@@ -342,6 +343,7 @@ async def quarantine_effect_chain(
     effect row at audit-query time.
     """
     return await write_internal_audit_row(
+        event_class=AuditEventClass.SECURITY_EVENT,
         operator_sub=_SECURITY_OPERATOR_SUB,
         tenant_id=tenant_id,
         method=INTERNAL_METHOD,

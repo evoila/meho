@@ -63,7 +63,7 @@ from sqlalchemy.exc import IntegrityError
 
 from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AddonOrchestrationRun, AuditLog
+from meho_backplane.db.models import AddonOrchestrationRun, AuditEventClass, AuditLog
 from meho_backplane.operations._audit import (
     agent_session_id_var,
     parent_audit_id_var,
@@ -166,6 +166,7 @@ async def _open_run(
         session.add(
             AuditLog(
                 id=anchor_audit_id,
+                event_class=AuditEventClass.OPERATION_EXECUTION,
                 occurred_at=now,
                 operator_sub=operator.sub,
                 tenant_id=operator.tenant_id,

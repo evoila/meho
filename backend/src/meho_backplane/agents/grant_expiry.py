@@ -54,7 +54,7 @@ import structlog
 from sqlalchemy import delete, select
 
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AgentPermission
+from meho_backplane.db.models import AgentPermission, AuditEventClass
 from meho_backplane.memory.audit import (
     INTERNAL_METHOD,
     SYSTEM_OPERATOR_SUB,
@@ -125,6 +125,7 @@ async def _run_one_tick() -> None:
     for tenant_id, expired_count in per_tenant.items():
         try:
             await write_internal_audit_row(
+                event_class=AuditEventClass.OPERATION_EXECUTION,
                 operator_sub=SYSTEM_OPERATOR_SUB,
                 tenant_id=tenant_id,
                 method=INTERNAL_METHOD,

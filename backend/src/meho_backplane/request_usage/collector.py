@@ -26,6 +26,10 @@ the request only *annotates* the open boundary:
   the tool, or the resource template the request used.
 * :func:`note_request_status` -- the MCP audit writer records the
   projected status (MCP answers HTTP 200 even when a call fails).
+* :func:`note_request_fallback_status` -- the MCP dispatcher records the
+  status a JSON-RPC error envelope stands for, but only when no handler
+  recorded a more specific one (a parse error, an unknown method, or a
+  rate-limited ``initialize`` never reaches the audit writer).
 * :func:`note_context_selected` -- optional; records that context was
   picked, on an opaque correlation id.
 
@@ -75,6 +79,7 @@ __all__ = [
     "build_route_catalog",
     "collection_enabled",
     "note_context_selected",
+    "note_request_fallback_status",
     "note_request_route",
     "note_request_status",
     "open_request_usage",
@@ -143,6 +148,18 @@ def note_request_status(status_code: int) -> None:
     """Record the projected status of an MCP call on the open boundary."""
     state = _current_boundary.get()
     if state is not None:
+        state.projected_status = status_code
+
+
+def note_request_fallback_status(status_code: int) -> None:
+    """Record *status_code* unless a handler already recorded a projected status.
+
+    A tool handler knows more than the dispatcher (an unknown tool is
+    ``404``, a refused one ``403``), so its status wins. This fills the
+    gap for MCP errors that no handler saw.
+    """
+    state = _current_boundary.get()
+    if state is not None and state.projected_status is None:
         state.projected_status = status_code
 
 

@@ -19,6 +19,10 @@ Coverage, by acceptance criterion:
   prune job deletes only expired events; aggregate reads enforce the
   tenant boundary.
 * **Dual write** -- the wrapper ``audit_log`` row is still written.
+* **MCP errors are not ``ok``** -- malformed JSON, an unknown method and a
+  rate-limited ``initialize`` answer HTTP 200 without reaching a handler's
+  audit writer; the dispatcher records their outcome, and a status a
+  handler did record wins.
 """
 
 from __future__ import annotations
@@ -42,13 +46,17 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
 from meho_backplane.main import app as production_app
+from meho_backplane.mcp import server as mcp_server
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
+from meho_backplane.mcp.schemas import PROTOCOL_VERSION, RATE_LIMITED
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.operations.ingest.boot_stamp import BOOT_STAMP_OPERATOR_SUB
 from meho_backplane.request_usage import collector as collector_module
 from meho_backplane.request_usage.collector import (
     MAX_CONTEXT_SELECTIONS,
     note_context_selected,
+    note_request_fallback_status,
+    note_request_status,
     open_request_usage,
 )
 from meho_backplane.request_usage.reader import summarize_request_usage
@@ -58,6 +66,7 @@ from meho_backplane.request_usage.schema import (
     EVENT_KINDS,
     OUTCOMES,
     TRANSPORTS,
+    UNMATCHED_ROUTE,
     RequestUsageEventData,
     RouteCatalog,
     outcome_for_status,
@@ -269,6 +278,18 @@ async def test_context_selections_are_capped() -> None:
     await boundary.close({"type": "http", "path": "/x"})
 
 
+@pytest.mark.usefixtures("usage_on")
+async def test_fallback_status_never_overrides_a_handler_status() -> None:
+    boundary = open_request_usage()
+    assert boundary is not None
+    note_request_fallback_status(400)
+    assert boundary._state.projected_status == 400
+    note_request_status(404)
+    note_request_fallback_status(400)
+    assert boundary._state.projected_status == 404
+    await boundary.close({"type": "http", "path": "/x"})
+
+
 # ---------------------------------------------------------------------------
 # REST boundary (AuditMiddleware)
 # ---------------------------------------------------------------------------
@@ -477,7 +498,78 @@ async def test_mcp_unknown_tool_keeps_only_the_method_label(
     )
     [event] = [e for e in await read_usage_events() if e.transport == "mcp"]
     assert event.route == "method:tools/call"
+    # The handler's 404 wins over the dispatcher's INVALID_PARAMS fallback.
     assert event.outcome == "not_found"
+
+
+async def _single_mcp_event() -> Any:
+    [event] = [e for e in await read_usage_events() if e.transport == "mcp"]
+    return event
+
+
+async def test_mcp_malformed_json_is_a_client_error(
+    mcp_client: tuple[TestClient, Operator],
+) -> None:
+    client, _op = mcp_client
+    response = client.post(
+        "/mcp",
+        content=b'{"jsonrpc": "2.0", "id": 1, "method": ',
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 200
+    assert "error" in response.json()
+
+    event = await _single_mcp_event()
+    assert event.route == UNMATCHED_ROUTE
+    assert event.outcome == "client_error"
+
+
+async def test_mcp_unknown_method_is_not_found(
+    mcp_client: tuple[TestClient, Operator],
+) -> None:
+    client, _op = mcp_client
+    response = post_mcp(
+        client,
+        {"jsonrpc": "2.0", "id": 3, "method": "prod-db/dump", "params": {}},
+    )
+    assert response.status_code == 200
+    assert "error" in response.json()
+
+    event = await _single_mcp_event()
+    assert event.route == UNMATCHED_ROUTE
+    assert event.outcome == "not_found"
+
+
+async def test_mcp_rate_limited_initialize_is_rate_limited(
+    mcp_client: tuple[TestClient, Operator],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _op = mcp_client
+
+    async def _over_cap(tenant_id: uuid.UUID, cap: int) -> int | None:
+        return 10
+
+    monkeypatch.setattr(mcp_server, "resolve_mcp_session_cap", lambda settings, tenant_id: 1)
+    monkeypatch.setattr(mcp_server, "check_mcp_session_cap", _over_cap)
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "usage-test", "version": "1"},
+            },
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["error"]["code"] == RATE_LIMITED
+
+    event = await _single_mcp_event()
+    assert event.route == "method:initialize"
+    assert event.outcome == "rate_limited"
 
 
 # ---------------------------------------------------------------------------

@@ -108,7 +108,10 @@ from meho_backplane.mcp.session_limit import (
     check_mcp_session_cap,
     resolve_mcp_session_cap,
 )
-from meho_backplane.request_usage.collector import note_request_route
+from meho_backplane.request_usage.collector import (
+    note_request_fallback_status,
+    note_request_route,
+)
 from meho_backplane.settings import Settings, get_settings
 from meho_backplane.version import deployed_version_label
 
@@ -1132,6 +1135,55 @@ async def _dispatch_to_handler(
     return _build_success_response(jrpc.id, result)
 
 
+#: Audit projection of each JSON-RPC error code onto an HTTP status. Used
+#: for the request usage outcome (#3734) when the error never reached a
+#: handler's audit writer; see :func:`_note_request_usage_outcome`.
+_JSONRPC_ERROR_STATUS: Final[dict[int, int]] = {
+    PARSE_ERROR: 400,
+    INVALID_REQUEST: 400,
+    METHOD_NOT_FOUND: 404,
+    INVALID_PARAMS: 400,
+    RATE_LIMITED: 429,
+    INTERNAL_ERROR: 500,
+}
+
+
+def _jsonrpc_error_code(response: Response) -> int | None:
+    """Return the ``error.code`` of a JSON-RPC error envelope, else ``None``.
+
+    Reads the rendered body like :func:`_response_is_jsonrpc_error`. A bare
+    :class:`Response` (the HTTP 202 notification arm) has no envelope.
+    """
+    body = getattr(response, "body", None)
+    if not body:
+        return None
+    try:
+        envelope = json.loads(body)
+    except (ValueError, TypeError):
+        return None
+    error = envelope.get("error") if isinstance(envelope, dict) else None
+    code = error.get("code") if isinstance(error, dict) else None
+    return code if isinstance(code, int) else None
+
+
+def _note_request_usage_outcome(response: Response) -> None:
+    """Give the request usage boundary the status a JSON-RPC error stands for.
+
+    MCP answers HTTP 200 for a parse error, an unknown method, invalid
+    params, a rate-limited ``initialize`` and an internal error. Only
+    ``tools/call`` and ``resources/read`` record a projected status through
+    the audit writer, so without this step every other failure would be
+    counted as ``ok`` (#3734). A status a handler already recorded wins;
+    an HTTP error status is recorded by the middleware's ``send`` wrapper.
+    """
+    if not (200 <= response.status_code < 300):
+        return
+    code = _jsonrpc_error_code(response)
+    if code is None:
+        return
+    note_request_fallback_status(_JSONRPC_ERROR_STATUS.get(code, 500))
+
+
 @router.post("")
 async def mcp_dispatch(
     request: Request,
@@ -1172,12 +1224,22 @@ async def mcp_dispatch(
       Version Header" enforcement.
     * :func:`_dispatch_to_handler` — handler lookup + execution + error
       mapping.
+    * :func:`_note_request_usage_outcome` — records the outcome of a
+      JSON-RPC error envelope for request usage (#3734), after every
+      arm above has produced its response.
 
     GET requests on this path automatically return HTTP 405 (FastAPI's
     default for an unmatched method) which satisfies the spec's
     fallback when the server does not implement the GET-opens-SSE
     branch of the Streamable HTTP transport.
     """
+    response = await _dispatch_mcp_request(request, operator)
+    _note_request_usage_outcome(response)
+    return response
+
+
+async def _dispatch_mcp_request(request: Request, operator: Operator) -> Response:
+    """Run the dispatch pipeline described on :func:`mcp_dispatch`."""
     # ``operator`` flows through to handlers — T3 registry handlers
     # use it for RBAC filtering on tools/list / resources/templates/list
     # and for the call-time role re-check on tools/call / resources/read.

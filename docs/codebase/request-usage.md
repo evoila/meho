@@ -62,6 +62,13 @@ is never stored. A request with no known route is stored as `<unmatched>`.
    - `mcp/audit.py::write_mcp_audit_row` records the projected MCP status
      (MCP answers HTTP 200 even when a call fails), and 500 if the audit
      commit fails;
+   - `mcp/server.py::_note_request_usage_outcome` runs after the dispatch.
+     When the response is a JSON-RPC error envelope and no handler
+     recorded a status, it records the status the error code stands for
+     (parse error, invalid request and invalid params are 400, method not
+     found is 404, rate limited is 429, internal error is 500). So a
+     malformed body, an unknown method or a rate-limited `initialize` is
+     never counted as `ok`. A status a tool handler recorded wins;
    - `note_context_selected()` (optional) records that context was picked.
 4. The middleware wraps `send`, so the boundary sees the status the client
    really got (including the audit-failure 500).

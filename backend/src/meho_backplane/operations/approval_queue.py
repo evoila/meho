@@ -879,7 +879,8 @@ async def _write_audit_row(
     }
     # Hoist the acting operator's display name so the name-aware audit views
     # resolve the approval row's ``operator_sub`` to a human name (#3300) --
-    # the same ``payload['principal_name']`` shape dispatch rows carry (#1212).
+    # the same ``payload['principal_name']`` shape the MCP wrapper rows (#1212)
+    # and the DISPATCH run rows (#4029) carry.
     # ``operator`` is the requester on a "request" row / the reviewer on a
     # "decision" row, so the name always pairs with ``operator_sub``. Omitted
     # when the token had no name (resolver fails open to the raw sub); display

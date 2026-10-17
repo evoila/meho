@@ -384,7 +384,11 @@ shape what the caller sees and how it reads more:
   rows and checks each field the query names. A field with mixed kinds,
   objects, lists, only nulls, or integers past 64 bits cannot be used in
   `filter`, `order_by`, `group_by`, or `aggregate`, but `select` still
-  returns it. A flat query returns the stored rows exactly as captured.
+  returns it. Two cases still count as one kind: nulls next to one
+  scalar kind (the field is nullable, not mixed), and whole numbers next
+  to decimals, which query as one decimal column as long as every whole
+  number is within ±2^53. A flat query returns the stored rows exactly
+  as captured.
 - **`path` reads (#3633).** A large payload with no single list is kept
   whole as a document record. `result_query` reads part of it with
   `query={"path": "<RFC 6901 JSON Pointer>"}` (`""` is the whole

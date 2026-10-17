@@ -11,7 +11,8 @@ migration lands on ``main``, that green check may be stale. This script
 gives every such pull request a fresh result:
 
 1. list every open pull request that touches ``backend/alembic/versions/``
-   (from a branch in this repo or from a fork, it makes no difference),
+   (from a branch in this repo or from a fork, it makes no difference;
+   every page of the list is read, so no pull request is too old),
 2. fetch its head commit and copy its migration directory out of git
    with ``git archive``,
 3. run ``check_migration_heads.py`` on that copy with ``main``'s
@@ -32,7 +33,8 @@ Exit codes
 
 * 0 — every pull request got a result (or had nothing to re-check)
 * 1 — at least one pull request could not be checked (printed as a
-  warning; the merge-queue run still catches a clash there)
+  warning; a slow fetch or a failed command stops only that pull
+  request, the merge-queue run still catches a clash there)
 * 2 — bad environment or arguments
 """
 
@@ -48,6 +50,7 @@ import tarfile
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 #: The check name the ``check`` job of the workflow reports under. The
 #: re-check posts under the same name so the newest result replaces the
@@ -59,11 +62,38 @@ CHECK_SCRIPT: pathlib.Path = pathlib.Path(__file__).with_name("check_migration_h
 
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 
+#: Seconds one ``gh`` or ``git`` call may take before it is given up on.
+COMMAND_TIMEOUT = 300
+
+#: One page of open pull requests, with the paths each one changes.
+#: ``gh pr list`` stops at its ``--limit``; this query is paged by hand
+#: with ``after`` until ``hasNextPage`` is false. 100 is GitHub's largest
+#: page, for pull requests and for the files of one pull request alike.
+LIST_QUERY = """
+query($owner: String!, $name: String!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(states: OPEN, first: 100, after: $after) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number
+        headRefOid
+        isCrossRepository
+        files(first: 100) { nodes { path } }
+      }
+    }
+  }
+}
+"""
+
 
 def run_command(args: list[str], *, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
-    """Run one command and capture its output. Never raises on exit code."""
+    """Run one command and capture its output.
+
+    Never raises on exit code. Raises :class:`subprocess.TimeoutExpired`
+    when the command takes longer than :data:`COMMAND_TIMEOUT`.
+    """
     return subprocess.run(
-        args, input=stdin, capture_output=True, text=True, check=False, timeout=300
+        args, input=stdin, capture_output=True, text=True, check=False, timeout=COMMAND_TIMEOUT
     )
 
 
@@ -94,32 +124,54 @@ class RecheckError(Exception):
     """The pull request could not be checked. The message says why."""
 
 
-def list_open_migration_prs(run: Runner) -> list[PullRequest]:
-    """Every open pull request that changes a file under the migrations directory."""
-    result = run(
-        [
-            "gh",
-            "pr",
-            "list",
-            "--state",
-            "open",
-            "--limit",
-            "200",
-            "--json",
-            "number,headRefOid,isCrossRepository,files",
-        ]
-    )
+def _reason(exc: RecheckError | subprocess.TimeoutExpired) -> str:
+    """One readable line for a failure of one ``gh`` or ``git`` call."""
+    if isinstance(exc, subprocess.TimeoutExpired):
+        cmd = exc.cmd if isinstance(exc.cmd, str) else " ".join(str(part) for part in exc.cmd[:2])
+        return f"{cmd} timed out after {exc.timeout:.0f} s"
+    return str(exc)
+
+
+def _list_page(run: Runner, repo: str, after: str | None) -> dict[str, Any]:
+    owner, _, name = repo.partition("/")
+    args = ["gh", "api", "graphql", "-f", f"query={LIST_QUERY}", "-f", f"owner={owner}"]
+    args += ["-f", f"name={name}"]
+    if after is not None:
+        args += ["-f", f"after={after}"]
+    result = run(args)
     if result.returncode != 0:
-        raise RecheckError(f"gh pr list failed: {result.stderr.strip()}")
-    prs = [
-        PullRequest(
-            number=int(item["number"]),
-            head_sha=str(item["headRefOid"]),
-            is_fork=bool(item["isCrossRepository"]),
-        )
-        for item in json.loads(result.stdout)
-        if any(str(f["path"]).startswith(f"{VERSIONS_DIR}/") for f in item["files"])
-    ]
+        raise RecheckError(f"listing open pull requests failed: {result.stderr.strip()}")
+    page: dict[str, Any] = json.loads(result.stdout)["data"]["repository"]["pullRequests"]
+    return page
+
+
+def _touches_migrations(item: dict[str, Any]) -> bool:
+    paths = [str(f["path"]) for f in item["files"]["nodes"]]
+    return any(path.startswith(f"{VERSIONS_DIR}/") for path in paths)
+
+
+def list_open_migration_prs(run: Runner, repo: str) -> list[PullRequest]:
+    """Every open pull request that changes a file under the migrations directory.
+
+    Reads the whole list, page by page. A repository with many open pull
+    requests must not hide its oldest migration pull requests.
+    """
+    prs: list[PullRequest] = []
+    after: str | None = None
+    while True:
+        page = _list_page(run, repo, after)
+        for item in page["nodes"]:
+            if _touches_migrations(item):
+                prs.append(
+                    PullRequest(
+                        number=int(item["number"]),
+                        head_sha=str(item["headRefOid"]),
+                        is_fork=bool(item["isCrossRepository"]),
+                    )
+                )
+        if not page["pageInfo"]["hasNextPage"]:
+            break
+        after = str(page["pageInfo"]["endCursor"])
     return sorted(prs, key=lambda pr: pr.number)
 
 
@@ -193,7 +245,13 @@ def create_check_run(run: Runner, pr: PullRequest, target: Target, verdict: Verd
 
 
 def recheck(run: Runner, target: Target, work_dir: pathlib.Path) -> int:
-    prs = list_open_migration_prs(run)
+    """Give every open migration pull request a fresh result.
+
+    A pull request that cannot be checked (a slow or failed ``gh`` or
+    ``git`` call, a head that moved) is reported and skipped. The others
+    still get their result.
+    """
+    prs = list_open_migration_prs(run, target.repo)
     if not prs:
         print("No open pull request adds a migration. Nothing to re-check.")
         return 0
@@ -203,9 +261,9 @@ def recheck(run: Runner, target: Target, work_dir: pathlib.Path) -> int:
         try:
             verdict = check_pull_request(run, pr, target, work_dir)
             create_check_run(run, pr, target, verdict)
-        except RecheckError as exc:
+        except (RecheckError, subprocess.TimeoutExpired) as exc:
             failed += 1
-            print(f"::warning::Could not re-check #{pr.number} ({origin}): {exc}")
+            print(f"::warning::Could not re-check #{pr.number} ({origin}): {_reason(exc)}")
             continue
         print(f"#{pr.number} ({origin}, head {pr.head_sha}): {verdict.conclusion}")
     print(f"Re-checked {len(prs)} pull request(s); {failed} could not be checked.")
@@ -257,8 +315,8 @@ def main(argv: list[str] | None = None) -> int:
         try:
             target = Target(args.repo, args.main_dir.resolve(), args.main_sha, args.details_url)
             return recheck(run_command, target, pathlib.Path(tmp))
-        except RecheckError as exc:
-            print(f"recheck_migration_prs: {exc}", file=sys.stderr)
+        except (RecheckError, subprocess.TimeoutExpired) as exc:
+            print(f"recheck_migration_prs: {_reason(exc)}", file=sys.stderr)
             return 2
 
 

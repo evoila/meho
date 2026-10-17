@@ -277,9 +277,12 @@ The re-check works for every pull request: from a branch in this repo or
 from a fork, with or without the workflow file on the branch. It runs
 from a checkout of `main` on a GitHub-hosted runner. It fetches the pull
 request's head commit, copies only `backend/alembic/versions/` out of it,
-and reads those files. No code from the pull request runs. A pull
-request whose head moved since the listing is skipped; its new head has
-its own pull request run.
+and reads those files. No code from the pull request runs. It reads the
+whole list of open pull requests, page by page, so no pull request is
+too old to be re-checked. A pull request whose head moved since the
+listing is skipped; its new head has its own pull request run. A pull
+request whose fetch fails or takes too long is reported and skipped; the
+other pull requests still get their result.
 
 ### What to do when the check fails
 
@@ -297,8 +300,8 @@ What to do: main is at 0108. Rename your migration to 0109 and set down_revision
 3. Update the `Revision ID:` and `Revises:` lines in the docstring.
 4. Push. The check runs again on the pull request.
 
-If the message says only "Set down_revision to ...", your number is
-already right and only the parent is stale. If a migration on `main`
+If the message says only "Set down_revision ... to ...", your numbers are
+already right and only the named parent links are stale. If a migration on `main`
 merges after you fixed it, the check runs again on your branch by itself
 and tells you if you need to move once more.
 

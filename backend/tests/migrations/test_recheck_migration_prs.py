@@ -65,17 +65,26 @@ class FakePullRequest:
     #: When set, ``git rev-parse FETCH_HEAD`` answers this instead of ``head_sha``.
     moved_to: str | None = None
     fetch_fails: bool = False
+    #: ``git fetch`` raises ``subprocess.TimeoutExpired`` instead of answering.
+    fetch_times_out: bool = False
 
     def add_migration(self, name: str, revision: str, down_revision: str | None) -> None:
         _write(self.root / VERSIONS_DIR, name, revision, down_revision)
         self.files.append(f"{VERSIONS_DIR}/{name}")
 
 
+#: Pull requests per page of the fake listing, the same as GitHub's maximum.
+PAGE_SIZE = 100
+
+
 @dataclass
 class FakeGitHub:
     """Answers the ``gh`` and ``git`` calls the script makes.
 
-    Anything else (the check script) runs for real.
+    The listing is served in pages of :data:`PAGE_SIZE`, with the index
+    of the next pull request as the cursor, so a test can check that the
+    script reads every page. Anything else (the check script) runs for
+    real.
     """
 
     prs: list[FakePullRequest]
@@ -83,24 +92,47 @@ class FakeGitHub:
     check_runs: list[dict[str, Any]] = field(default_factory=list)
     _fetched: FakePullRequest | None = None
 
+    def _list_page(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        variables = dict(arg.split("=", 1) for arg in args[4::2])
+        assert args[3::2] == ["-f"] * len(variables)
+        assert variables["owner"] == "evoila" and variables["name"] == "meho"
+        assert "pullRequests(states: OPEN, first: 100, after: $after)" in variables["query"]
+        start = int(variables.get("after", "0"))
+        page = self.prs[start : start + PAGE_SIZE]
+        body = {
+            "data": {
+                "repository": {
+                    "pullRequests": {
+                        "pageInfo": {
+                            "hasNextPage": start + PAGE_SIZE < len(self.prs),
+                            "endCursor": str(start + PAGE_SIZE),
+                        },
+                        "nodes": [
+                            {
+                                "number": pr.number,
+                                "headRefOid": pr.head_sha,
+                                "isCrossRepository": pr.is_fork,
+                                "files": {"nodes": [{"path": path} for path in pr.files]},
+                            }
+                            for pr in page
+                        ],
+                    }
+                }
+            }
+        }
+        return subprocess.CompletedProcess(args, 0, json.dumps(body), "")
+
     def __call__(
         self, args: list[str], *, stdin: str | None = None
     ) -> subprocess.CompletedProcess[str]:
         self.calls.append(args)
-        if args[:2] == ["gh", "pr"]:
-            listing = [
-                {
-                    "number": pr.number,
-                    "headRefOid": pr.head_sha,
-                    "isCrossRepository": pr.is_fork,
-                    "files": [{"path": path} for path in pr.files],
-                }
-                for pr in self.prs
-            ]
-            return subprocess.CompletedProcess(args, 0, json.dumps(listing), "")
+        if args[:3] == ["gh", "api", "graphql"]:
+            return self._list_page(args)
         if args[:2] == ["git", "fetch"]:
             number = int(args[-1].removeprefix("pull/").removesuffix("/head"))
             self._fetched = next(pr for pr in self.prs if pr.number == number)
+            if self._fetched.fetch_times_out:
+                raise subprocess.TimeoutExpired(args, 300)
             if self._fetched.fetch_fails:
                 return subprocess.CompletedProcess(args, 128, "", "fatal: couldn't find remote ref")
             return subprocess.CompletedProcess(args, 0, "", "")
@@ -234,6 +266,50 @@ def test_fetch_failure_is_a_warning_and_the_other_prs_still_run(
     out = capfd.readouterr().out
     assert "::warning::Could not re-check #45 (fork): git fetch failed" in out
     assert "Re-checked 2 pull request(s); 1 could not be checked." in out
+
+
+def test_fetch_timeout_is_a_warning_and_the_next_pr_still_gets_a_result(
+    tmp_path: pathlib.Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """One slow fetch must not stop the re-check of the pull requests
+    after it; they would keep a stale green result."""
+    slow = _pr(tmp_path, 47, is_fork=True)
+    slow.add_migration("0107_mine.py", "0107", "0106")
+    slow.fetch_times_out = True
+    fine = _pr(tmp_path, 48, is_fork=False)
+    fine.add_migration("0107_mine.py", "0107", "0106")
+    github = FakeGitHub([slow, fine])
+    assert _run(tmp_path, github) == 1
+    assert [(run["head_sha"], run["conclusion"]) for run in github.check_runs] == [
+        (fine.head_sha, "failure")
+    ]
+    out = capfd.readouterr().out
+    assert "::warning::Could not re-check #47 (fork): git fetch timed out after 300 s" in out
+    assert "#48 (same repo, head" in out
+    assert "Re-checked 2 pull request(s); 1 could not be checked." in out
+
+
+def test_a_migration_pr_beyond_the_first_200_listed_is_still_rechecked(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The listing is read page by page until the last one. A repository
+    with 200 other open pull requests must not hide the one that adds a
+    migration."""
+    others = [
+        FakePullRequest(n, f"{n:040x}", False, tmp_path / f"pr-{n}", files=["backend/src/app.py"])
+        for n in range(1, 201)
+    ]
+    late = _pr(tmp_path, 201, is_fork=False)
+    late.add_migration("0107_mine.py", "0107", "0106")
+    github = FakeGitHub([*others, late])
+    assert _run(tmp_path, github) == 0
+    assert [(run["head_sha"], run["conclusion"]) for run in github.check_runs] == [
+        (late.head_sha, "failure")
+    ]
+    listings = [call for call in github.calls if call[:3] == ["gh", "api", "graphql"]]
+    cursors = [[arg for arg in call if arg.startswith("after=")] for call in listings]
+    assert cursors == [[], ["after=100"], ["after=200"]]
+    assert not any(call[:3] == ["gh", "pr", "list"] for call in github.calls)
 
 
 def test_workflow_recheck_job_needs_nothing_from_the_pr_branch() -> None:

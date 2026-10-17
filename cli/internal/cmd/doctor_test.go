@@ -191,34 +191,60 @@ func TestDoctor_OfflineLayer_BadConfigAndCA(t *testing.T) {
 
 func TestDoctor_CredentialStore(t *testing.T) {
 	const bp = "https://backplane.example"
+	const keyringSecret = "secret-value-never-shown"
+	const refreshMarker = "REFRESH-TOKEN-NEVER-SHOWN"
+	// keyringEntry is what go-keyring would hand back: the JSON form of
+	// a saved login, as auth's keyring store writes it.
+	keyringEntry := func(refresh string, savedAt time.Time) string {
+		raw, err := json.Marshal(auth.StoredToken{BackplaneURL: bp, AccessToken: keyringSecret, RefreshToken: refresh, SavedAt: savedAt})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+	now := time.Now().UTC()
 	cases := []struct {
 		name       string
 		disable    string
 		keyringErr error
-		fileCred   bool
+		keyringVal string
+		fileCred   *auth.StoredToken
 		wantState  string
 		wantStatus string
 		wantText   string
 	}{
-		{"keyring selected", "", nil, false, "store=keyring:", doctorOK, "a login is stored"},
-		{"forced file fallback", "1", nil, true, "store=file-forced:", doctorOK, "MEHO_KEYRING_DISABLE is set"},
-		{"oversize file fallback", "", keyring.ErrNotFound, true, "store=file-fallback:", doctorOK, "too big"},
-		{"keyring backend unavailable", "", errors.New("dbus: no session bus"), true, "store=keyring-unavailable:", doctorOK, "no OS keyring backend"},
-		{"keyring has no credential", "", keyring.ErrNotFound, false, "store=keyring:", doctorWarn, "no stored credential"},
+		{"keyring selected", "", nil, keyringEntry(refreshMarker, now), nil, "store=keyring:", doctorOK, "a login is stored"},
+		{"forced file fallback", "1", nil, "", &auth.StoredToken{}, "store=file-forced:", doctorOK, "MEHO_KEYRING_DISABLE is set"},
+		{"oversize file fallback", "", keyring.ErrNotFound, "", &auth.StoredToken{}, "store=file-fallback:", doctorOK, "too big"},
+		{"keyring backend unavailable", "", errors.New("dbus: no session bus"), "", &auth.StoredToken{}, "store=keyring-unavailable:", doctorOK, "no OS keyring backend"},
+		{"keyring has no credential", "", keyring.ErrNotFound, "", nil, "store=keyring:", doctorWarn, "no stored credential"},
+		{"keyring entry malformed", "", nil, keyringSecret, nil, "store=keyring:", doctorFail, "not valid JSON"},
+		// Both stores hold a login: the doctor must name the one the
+		// CLI's store reads (auth.SecondaryWins), not always the keyring.
+		{"both; only the file has a refresh token", "", nil, keyringEntry("", now.Add(time.Hour)),
+			&auth.StoredToken{RefreshToken: refreshMarker}, "store=file-fallback:", doctorOK, "both stores hold a login"},
+		{"both; only the keyring has a refresh token", "", nil, keyringEntry(refreshMarker, now.Add(-time.Hour)),
+			&auth.StoredToken{}, "store=keyring:", doctorOK, "the file also holds a login"},
+		{"both renewable; file newer", "", nil, keyringEntry(refreshMarker, now.Add(-time.Hour)),
+			&auth.StoredToken{RefreshToken: refreshMarker}, "store=file-fallback:", doctorOK, "both stores hold a login"},
+		{"both renewable; keyring newer", "", nil, keyringEntry(refreshMarker, now.Add(time.Hour)),
+			&auth.StoredToken{RefreshToken: refreshMarker}, "store=keyring:", doctorOK, "the file also holds a login"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			xdg := withTempXDG(t)
 			t.Setenv("MEHO_KEYRING_DISABLE", tc.disable)
-			if tc.fileCred {
-				seedCreds(t, xdg, bp, auth.StoredToken{BackplaneURL: bp, AccessToken: jwtMarker})
+			if tc.fileCred != nil {
+				tok := *tc.fileCred
+				tok.BackplaneURL, tok.AccessToken = bp, jwtMarker
+				seedCreds(t, xdg, bp, tok)
 			}
 			deps := offlineDeps(t, t.TempDir())
 			deps.keyringGet = func(string, string) (string, error) {
 				if tc.keyringErr != nil {
 					return "", tc.keyringErr
 				}
-				return "secret-value-never-shown", nil
+				return tc.keyringVal, nil
 			}
 			c := checkCredentialStore(deps, bp)
 			if !strings.HasPrefix(c.Detail, tc.wantState) {
@@ -227,8 +253,10 @@ func TestDoctor_CredentialStore(t *testing.T) {
 			if c.Status != tc.wantStatus || !strings.Contains(c.Detail, tc.wantText) {
 				t.Errorf("status=%s detail=%q; want %s containing %q", c.Status, c.Detail, tc.wantStatus, tc.wantText)
 			}
-			if strings.Contains(c.Detail, "secret-value-never-shown") || strings.Contains(c.Detail, jwtMarker) {
-				t.Errorf("credential leaked: %q", c.Detail)
+			for _, secret := range []string{keyringSecret, refreshMarker, jwtMarker} {
+				if strings.Contains(c.Detail+c.Hint, secret) {
+					t.Errorf("credential leaked: %q", c.Detail)
+				}
 			}
 			if errors.Is(tc.keyringErr, keyring.ErrNotFound) && strings.Contains(c.Detail, "unavailable") {
 				t.Errorf("ErrNotFound must not read as unavailable: %q", c.Detail)
@@ -245,8 +273,14 @@ func TestDoctor_RedactsSecrets(t *testing.T) {
 		"PLANTED-AUTH-HEADER",
 		"PLANTED-REDIRECT",
 		"PLANTED-STATE",
+		"PLANTED-JSON-ACCESS",
+		"PLANTED-JSON-REFRESH",
+		"PLANTED-JSON-ID",
 	}
 	r := &doctorReport{MCPSessionID: "0b6c1f7e-1111-2222-3333-444455556666"}
+	r.add(doctorCheck{Layer: layerAuthed, Name: "token refresh", Status: doctorFail, Class: classUnexpected,
+		Detail: "refresh exchange: oauth2: cannot fetch token: 500 Internal Server Error\nResponse: " +
+			`{"access_token":"PLANTED-JSON-ACCESS","refresh_token": "PLANTED-JSON-REFRESH","id_token" : "PLANTED-JSON-ID","expires_in":300}`})
 	r.add(doctorCheck{Layer: layerAuthed, Name: "token", Status: doctorFail, Class: classUnexpected,
 		Detail: "refresh failed: token eyJhbGciOiJSUzI1NiJ9.PLANTED.SIG rejected; callback http://127.0.0.1:3334/cb?code=PLANTED-OAUTH-CODE&state=PLANTED-STATE",
 		Hint:   "Set-Cookie: KEYCLOAK_SESSION=PLANTED-COOKIE; Path=/"})
@@ -266,6 +300,9 @@ func TestDoctor_RedactsSecrets(t *testing.T) {
 		}
 		if !strings.Contains(out, "0b6c1f7e-1111-2222-3333-444455556666") {
 			t.Errorf("json=%t: the MCP session id (a safe correlation id) should be shown", jsonOut)
+		}
+		if !strings.Contains(out, "expires_in") {
+			t.Errorf("json=%t: harmless JSON members must survive redaction:\n%s", jsonOut, out)
 		}
 	}
 }
@@ -459,6 +496,138 @@ func TestDoctor_AuthenticatedLayer(t *testing.T) {
 		if classes[k] != v {
 			t.Errorf("%s classified as %q, want %q", k, classes[k], v)
 		}
+	}
+}
+
+// TestDoctor_RefreshErrorBodyRedacted drives the real refresh path: a
+// token endpoint that fails with a JSON body. The oauth2 error carries
+// that body verbatim into the report, so the output must not.
+func TestDoctor_RefreshErrorBodyRedacted(t *testing.T) {
+	xdg := withTempXDG(t)
+	mux := http.NewServeMux()
+	mux.Handle("/", (&mcpStub{liveStatus: http.StatusUnauthorized}).handler(t))
+	mux.HandleFunc("/token", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"access_token":"PLANTED-OPAQUE-ACCESS","refresh_token":"PLANTED-OPAQUE-REFRESH","token_type":"Bearer"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedCreds(t, xdg, srv.URL, auth.StoredToken{
+		BackplaneURL: srv.URL, AccessToken: jwtMarker, RefreshToken: jwtMarker + ".REFRESH",
+		Issuer: srv.URL, ClientID: "meho-cli", Expiry: time.Now().Add(-time.Minute),
+	})
+	deps := onlineDeps(t)
+	deps.authedOpts.RefreshDiscoverer = func(context.Context, *http.Client, string) (*auth.DiscoveryDocument, error) {
+		return &auth.DiscoveryDocument{TokenEndpoint: srv.URL + "/token"}, nil
+	}
+	r := runAuthed(t, srv.URL, deps)
+	c := findCheck(t, r, "token refresh")
+	if c.Status != doctorFail || c.Class != classUnexpected {
+		t.Fatalf("refresh failure not reported as unexpected: %+v", c)
+	}
+	if !strings.Contains(c.Detail, "PLANTED-OPAQUE-ACCESS") {
+		t.Fatalf("the raw report should carry the response body for this test to mean anything: %q", c.Detail)
+	}
+	for _, jsonOut := range []bool{false, true} {
+		var buf bytes.Buffer
+		_ = renderDoctor(&buf, r, jsonOut)
+		for _, m := range []string{"PLANTED-OPAQUE-ACCESS", "PLANTED-OPAQUE-REFRESH", jwtMarker} {
+			if strings.Contains(buf.String(), m) {
+				t.Errorf("json=%t: output leaked %q:\n%s", jsonOut, m, buf.String())
+			}
+		}
+	}
+}
+
+// TestDoctor_StalledServer: a server that accepts the connection and
+// never answers must end as an "unreachable" failure in the report,
+// both through the per-request timeout and through the layer deadline.
+func TestDoctor_StalledServer(t *testing.T) {
+	cases := []struct {
+		name         string
+		request      time.Duration
+		layerTimeout time.Duration
+	}{
+		{"request timeout", 200 * time.Millisecond, 10 * time.Second},
+		{"layer deadline", 10 * time.Second, 300 * time.Millisecond},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			xdg := withTempXDG(t)
+			release := make(chan struct{})
+			srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				select {
+				case <-r.Context().Done():
+				case <-release:
+				}
+			}))
+			t.Cleanup(srv.Close)
+			t.Cleanup(func() { close(release) })
+			seedCreds(t, xdg, srv.URL, auth.StoredToken{BackplaneURL: srv.URL, AccessToken: jwtMarker, Expiry: time.Now().Add(time.Hour)})
+			deps := onlineDeps(t)
+			deps.httpClient = &http.Client{Timeout: tc.request}
+			deps.layerTimeout = tc.layerTimeout
+
+			start := time.Now()
+			r := &doctorReport{}
+			runAuthenticatedChecks(context.Background(), r, srv.URL, deps)
+			if took := time.Since(start); took > 5*time.Second {
+				t.Fatalf("the doctor hung for %s", took)
+			}
+			c := findCheck(t, r, "backplane")
+			if c.Status != doctorFail || c.Class != "unreachable" || c.Hint == "" {
+				t.Errorf("stalled server: %+v", c)
+			}
+			if doctorExitCode(r) != output.ExitUnreachable {
+				t.Errorf("exit code = %d", doctorExitCode(r))
+			}
+		})
+	}
+}
+
+// countingTransport counts requests and refuses them all.
+type countingTransport struct{ calls int }
+
+func (c *countingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	c.calls++
+	return nil, errors.New("no network allowed")
+}
+
+// TestDoctor_NoNetworkSkipsDiscovery runs the real root command with a
+// saved backplane URL: `doctor --no-network` must not trigger the
+// dynamic command discovery fetch, while another verb still does.
+func TestDoctor_NoNetworkSkipsDiscovery(t *testing.T) {
+	xdg := withTempXDG(t)
+	t.Setenv("CLAUDE_PLUGIN_ROOT", "")
+	seedCreds(t, xdg, "https://backplane.example", auth.StoredToken{BackplaneURL: "https://backplane.example", AccessToken: jwtMarker})
+	t.Cleanup(setDynamicRegistrar(nil))
+	counter := &countingTransport{}
+	prev := http.DefaultTransport
+	http.DefaultTransport = counter
+	t.Cleanup(func() { http.DefaultTransport = prev })
+
+	args := []string{"--verbose", "doctor", "--no-network", "--json"}
+	root := newRootCmdFor(args)
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetArgs(args)
+	_ = root.Execute()
+	if counter.calls != 0 {
+		t.Errorf("doctor --no-network made %d network request(s)", counter.calls)
+	}
+	var report doctorReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("not JSON: %v\n%s\n%s", err, stdout.String(), stderr.String())
+	}
+	if c := findCheck(t, &report, "authenticated layer"); c.Status != doctorSkip {
+		t.Errorf("authenticated layer should be skipped: %+v", c)
+	}
+
+	newRootCmdFor([]string{"version"})
+	if counter.calls != 1 {
+		t.Errorf("another verb should still run discovery; got %d request(s)", counter.calls)
 	}
 }
 

@@ -30,6 +30,15 @@ const doctorProtocolVersion = "2025-06-18"
 // mcpResponseLimit caps how much of one MCP answer the doctor reads.
 const mcpResponseLimit = 4 << 20
 
+// doctorRequestTimeout bounds one HTTP request of the authenticated
+// layer and doctorLayerTimeout bounds the whole layer. A server that
+// accepts the connection and then stays silent ends as an "unreachable"
+// failure in the report instead of a command that never returns.
+const (
+	doctorRequestTimeout = 15 * time.Second
+	doctorLayerTimeout   = 60 * time.Second
+)
+
 func authed(name, status, class, detail, hint string) doctorCheck {
 	return doctorCheck{Layer: layerAuthed, Name: name, Status: status, Class: class, Detail: detail, Hint: hint}
 }
@@ -49,6 +58,11 @@ func failNet(r *doctorReport, name string, err error, host string) {
 // runs the MCP handshake. It stops at the first failed step, because
 // every later step depends on it.
 func runAuthenticatedChecks(ctx context.Context, r *doctorReport, backplaneURL string, deps doctorDeps) {
+	if deps.layerTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, deps.layerTimeout)
+		defer cancel()
+	}
 	u, err := url.Parse(backplaneURL)
 	if err != nil {
 		r.add(authed("dns", doctorFail, classUnexpected, err.Error(), ""))

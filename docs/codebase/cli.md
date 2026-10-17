@@ -828,8 +828,12 @@ edits a file.
   (the keyring answers but the login sits in the 0600 file, usually
   because it was too big), and `keyring-unavailable` (any keyring error
   other than go-keyring's `ErrNotFound`). `ErrNotFound` means "the
-  keyring works, nothing is stored", never "backend unavailable". The
-  keyring value is read and dropped at once.
+  keyring works, nothing is stored", never "backend unavailable". When
+  both stores hold a login, the doctor applies `auth.SecondaryWins`,
+  the same rule the CLI's store applies on read (the entry with a
+  refresh token wins, then the newer one), so it names the store the
+  CLI really uses. The keyring value is parsed only for that rule and
+  never reported; an entry that is not valid JSON is a failure.
 - **plugin shim** — finds the Claude Code plugin: `--plugin-root`, then
   `CLAUDE_PLUGIN_ROOT`, then a bounded search under `~/.claude/plugins`
   for `bin/meho-mcp-remote` next to a `package-lock.json`.
@@ -850,7 +854,12 @@ edits a file.
 ### Authenticated layer
 
 `runAuthenticatedChecks` in `doctor_online.go`. It stops at the first
-failed step:
+failed step. Every request has a 15 second timeout and the whole layer
+a 60 second deadline, so a server that accepts the connection and then
+stays silent ends as an `unreachable` failure in the report instead of
+a hang. The root command also skips the dynamic command discovery
+fetch for `meho doctor` (`invokesDoctor` in `root.go`): the doctor
+makes exactly the calls it reports, and none with `--no-network`.
 
 1. **dns** — resolves the backplane host (skipped for an IP).
 2. **token** — `GET /api/v1/health/live` (no role gate, no Vault). On a
@@ -889,9 +898,12 @@ reuse this package so both commands name failures the same way.
 before printing, in human and JSON mode alike. It extends
 `redactJWTLike`: it also removes `Authorization` / `Cookie` /
 `Set-Cookie` header values, bearer values, OAuth parameters (`code=`,
-`state=`, `redirect_uri=`, token parameters), `Location` values, and
-the query part of any URL. `TestDoctor_RedactsSecrets` plants each
-marker and checks that none reaches the output.
+`state=`, `redirect_uri=`, token parameters, and the same names as
+JSON members such as `"access_token":"..."`, because a failed token
+exchange echoes the response body), `Location` values, and the query
+part of any URL. `TestDoctor_RedactsSecrets` plants each marker and
+checks that none reaches the output; `TestDoctor_RefreshErrorBodyRedacted`
+does the same through the real refresh path.
 
 ## Watch flow (`meho status --watch`, G6.1-T5)
 

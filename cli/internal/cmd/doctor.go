@@ -258,18 +258,22 @@ func (r *doctorReport) redacted() *doctorReport {
 }
 
 // Patterns for secrets that can show up in error text: HTTP headers that
-// carry credentials, OAuth parameters, and redirect targets.
+// carry credentials, OAuth parameters (as query parameters and as JSON
+// members, because a failed token exchange echoes the response body),
+// and redirect targets.
 var (
 	redactHeaderRe = regexp.MustCompile(`(?i)\b(proxy-authorization|authorization|set-cookie|cookie)\s*[:=]\s*[^\r\n]*`)
 	redactLocRe    = regexp.MustCompile(`(?i)\blocation\s*:\s*\S+`)
 	redactBearerRe = regexp.MustCompile(`(?i)\bbearer\s+\S+`)
 	redactParamRe  = regexp.MustCompile(`(?i)\b(code|device_code|user_code|access_token|refresh_token|id_token|token|state|redirect_uri|client_secret|session_state)=[^&\s"']+`)
+	redactJSONRe   = regexp.MustCompile(`(?i)"(code|device_code|user_code|access_token|refresh_token|id_token|token|state|redirect_uri|client_secret|session_state|password|cookie|authorization)"\s*:\s*"(?:[^"\\]|\\.)*"`)
 	redactQueryRe  = regexp.MustCompile(`(https?://[^\s?#"']+)[?#][^\s"']*`)
 )
 
 // redactSensitive extends redactJWTLike (status.go): besides JWT-shaped
 // strings it removes credential headers, bearer values, OAuth parameters
-// (code=, state=, redirect_uri=, ...), redirect Location values, and the
+// (code=, state=, redirect_uri=, ... and the same names as JSON members,
+// for example {"access_token":"..."}), redirect Location values, and the
 // query part of any URL.
 func redactSensitive(s string) string {
 	if s == "" {
@@ -279,6 +283,7 @@ func redactSensitive(s string) string {
 	s = redactLocRe.ReplaceAllString(s, "Location: [redacted-url]")
 	s = redactBearerRe.ReplaceAllString(s, "Bearer [redacted]")
 	s = redactParamRe.ReplaceAllString(s, "$1=[redacted]")
+	s = redactJSONRe.ReplaceAllString(s, `"$1":"[redacted]"`)
 	s = redactQueryRe.ReplaceAllString(s, "$1?[redacted]")
 	return redactJWTLike(s)
 }

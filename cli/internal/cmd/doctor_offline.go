@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/zalando/go-keyring"
 
@@ -34,11 +35,15 @@ type doctorDeps struct {
 	getenv     func(string) string
 	executable func() (string, error)
 	homeDir    func() (string, error)
-	// keyringGet is go-keyring's Get. The value it returns is dropped
-	// at once; only the error matters.
+	// keyringGet is go-keyring's Get. The value it returns is parsed
+	// only to apply the CLI's keyring-versus-file choice (see
+	// keyringHit); no field of it is kept or reported.
 	keyringGet func(service, user string) (string, error)
-	httpClient *http.Client
-	lookupHost func(ctx context.Context, host string) ([]string, error)
+	// httpClient carries the per-request timeout of the authenticated
+	// layer; layerTimeout bounds that layer as a whole.
+	httpClient   *http.Client
+	layerTimeout time.Duration
+	lookupHost   func(ctx context.Context, host string) ([]string, error)
 	// authedOpts is passed to api.NewAuthedClient (tests inject a store
 	// and a refresh discoverer).
 	authedOpts api.AuthedClientOptions
@@ -46,12 +51,13 @@ type doctorDeps struct {
 
 func defaultDoctorDeps() doctorDeps {
 	return doctorDeps{
-		getenv:     os.Getenv,
-		executable: os.Executable,
-		homeDir:    os.UserHomeDir,
-		keyringGet: keyring.Get,
-		httpClient: http.DefaultClient,
-		lookupHost: net.DefaultResolver.LookupHost,
+		getenv:       os.Getenv,
+		executable:   os.Executable,
+		homeDir:      os.UserHomeDir,
+		keyringGet:   keyring.Get,
+		httpClient:   &http.Client{Timeout: doctorRequestTimeout},
+		layerTimeout: doctorLayerTimeout,
+		lookupHost:   net.DefaultResolver.LookupHost,
 	}
 }
 
@@ -125,6 +131,8 @@ const (
 // auth.NewTokenStore's choice: MEHO_KEYRING_DISABLE forces the file; a
 // keyring that answers go-keyring's ErrNotFound is available (the entry
 // just is not there); any other keyring error means no keyring backend.
+// When both stores hold a login, keyringHit applies the same rule the
+// CLI's store applies on read.
 func checkCredentialStore(deps doctorDeps, backplaneURL string) doctorCheck {
 	file, err := auth.NewFileStore()
 	if err != nil {
@@ -134,31 +142,57 @@ func checkCredentialStore(deps doctorDeps, backplaneURL string) doctorCheck {
 	if backplaneURL != "" {
 		service, user = auth.KeyForBackplane(backplaneURL)
 	}
+	var fileTok auth.StoredToken
 	fileHas := false
 	if backplaneURL != "" {
-		_, ferr := file.Load(service, user)
+		var ferr error
+		fileTok, ferr = file.Load(service, user)
 		fileHas = ferr == nil
 	}
 
-	var state, where string
-	var has bool
 	if deps.getenv("MEHO_KEYRING_DISABLE") != "" {
-		state, where, has = storeFileForced, file.Describe()+" (MEHO_KEYRING_DISABLE is set)", fileHas
-	} else {
-		_, kerr := deps.keyringGet(service, user)
-		switch {
-		case kerr == nil:
-			state, where, has = storeKeyring, "OS keyring", true
-		case errors.Is(kerr, keyring.ErrNotFound) && fileHas:
-			state, where, has = storeFileFallback,
-				file.Describe()+" (the keyring works, but the login was too big for it or was saved to the file)", true
-		case errors.Is(kerr, keyring.ErrNotFound):
-			state, where, has = storeKeyring, "OS keyring", false
-		default:
-			state, where, has = storeKeyringUnavailable,
-				fmt.Sprintf("%s (no OS keyring backend: %v)", file.Describe(), kerr), fileHas
-		}
+		return storeResult(storeFileForced, file.Describe()+" (MEHO_KEYRING_DISABLE is set)", fileHas, backplaneURL)
 	}
+	raw, kerr := deps.keyringGet(service, user)
+	switch {
+	case kerr == nil:
+		return keyringHit(raw, file, fileTok, fileHas, backplaneURL)
+	case errors.Is(kerr, keyring.ErrNotFound) && fileHas:
+		return storeResult(storeFileFallback,
+			file.Describe()+" (the keyring works, but the login was too big for it or was saved to the file)", true, backplaneURL)
+	case errors.Is(kerr, keyring.ErrNotFound):
+		return storeResult(storeKeyring, "OS keyring", false, backplaneURL)
+	default:
+		return storeResult(storeKeyringUnavailable,
+			fmt.Sprintf("%s (no OS keyring backend: %v)", file.Describe(), kerr), fileHas, backplaneURL)
+	}
+}
+
+// keyringHit describes the store when the keyring holds an entry for
+// the login key. The entry is parsed only to apply auth.SecondaryWins,
+// the rule the CLI's own store uses when the keyring and the file both
+// hold a login; no field of it is kept or reported.
+func keyringHit(raw string, file auth.TokenStore, fileTok auth.StoredToken, fileHas bool, backplaneURL string) doctorCheck {
+	if backplaneURL == "" {
+		return storeResult(storeKeyring, "OS keyring", true, "")
+	}
+	var keyringTok auth.StoredToken
+	if json.Unmarshal([]byte(raw), &keyringTok) != nil {
+		return offline("credential store", doctorFail, "store="+storeKeyring+": OS keyring; the saved login is not valid JSON",
+			"run `meho login "+backplaneURL+"` to save it again")
+	}
+	switch {
+	case fileHas && auth.SecondaryWins(keyringTok, fileTok):
+		return storeResult(storeFileFallback,
+			file.Describe()+" (both stores hold a login; the CLI uses the file entry because it is newer or still has a refresh token)",
+			true, backplaneURL)
+	case fileHas:
+		return storeResult(storeKeyring, "OS keyring (the file also holds a login that the CLI does not use)", true, backplaneURL)
+	}
+	return storeResult(storeKeyring, "OS keyring", true, backplaneURL)
+}
+
+func storeResult(state, where string, has bool, backplaneURL string) doctorCheck {
 	detail := "store=" + state + ": " + where
 	switch {
 	case backplaneURL == "":

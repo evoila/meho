@@ -514,6 +514,11 @@ async def test_forget_denied_for_operator_role_on_tenant_scope(
 # ---------------------------------------------------------------------------
 # search_memories (retrieval substrate mocked)
 # ---------------------------------------------------------------------------
+#
+# The eligibility SQL itself (expiry, user_sub, kinds) is PostgreSQL-only and
+# is proven in tests/integration/test_memory_eligibility_pg.py. These tests
+# pin the service side of the contract: one typed eligibility value, one
+# retrieve call, no Python post-filter.
 
 
 def _build_hit(
@@ -523,25 +528,16 @@ def _build_hit(
     user_sub: str | None,
     target_name: str | None,
     slug: str,
-    body: str = "stub body",
-    expires_at: datetime | None = None,
+    fused_score: float = 0.5,
     created_at: datetime | None = None,
     updated_at: datetime | None = None,
 ) -> RetrievalHit:
-    """Build a :class:`RetrievalHit` shaped like one the substrate would emit.
-
-    Helper for the search tests: lets each test pin the metadata
-    fields ``MemoryService.search_memories`` post-filters on without
-    going through the SQL path. ``created_at`` / ``updated_at``
-    default to a deterministic non-epoch instant so a passthrough
-    regression (the G0.9.1-T4 #776 fix) surfaces in any test that
-    asserts on the result-side timestamps.
-    """
+    """Build a :class:`RetrievalHit` shaped like one the substrate would emit."""
     metadata: dict[str, Any] = {
         "scope": kind.removeprefix("memory-"),
         "user_sub": user_sub,
         "target_name": target_name,
-        "expires_at": expires_at.isoformat() if expires_at is not None else None,
+        "expires_at": None,
     }
     default_ts = datetime(2026, 5, 21, 10, 16, 12, tzinfo=UTC)
     return RetrievalHit(
@@ -550,11 +546,11 @@ def _build_hit(
         source="memory",
         source_id=f"stub:{slug}",
         kind=kind,
-        body=body,
+        body="stub body",
         doc_metadata=metadata,
         created_at=created_at if created_at is not None else default_ts,
         updated_at=updated_at if updated_at is not None else default_ts,
-        fused_score=0.5,
+        fused_score=fused_score,
         bm25_score=0.4,
         cosine_score=0.6,
         bm25_rank=1,
@@ -562,346 +558,133 @@ def _build_hit(
     )
 
 
+_ALL_MEMORY_KINDS: tuple[str, ...] = (
+    "memory-user",
+    "memory-user-tenant",
+    "memory-user-target",
+    "memory-tenant",
+    "memory-target",
+)
+
+
 @pytest.mark.asyncio
-async def test_search_memories_pushes_user_sub_to_substrate_for_user_scopes() -> None:
-    """G4.4-T2 (#1179): user-scoped recalls push ``user_sub`` to the substrate.
+async def test_search_memories_cross_scope_is_one_eligible_retrieve() -> None:
+    """``scope=None`` makes one retrieve call with all five visible kinds.
 
-    Pre-migration the service post-filtered the retriever's hits in
-    Python on ``user_sub`` (an operator's search could rank against
-    another operator's user-scoped row and drop it after the fact,
-    burning the substrate's candidate budget on RBAC-invisible rows).
-    Post-migration the predicate rides into the substrate's
-    ``metadata_filters`` so the SQL layer eliminates those rows
-    upstream.
-
-    Cross-scope (``scope=None``) search fans out per visible kind:
-    one ``retrieve`` call per :class:`MemoryScope` member, each with
-    its kind-appropriate ``metadata_filters`` dict (``{"user_sub":
-    op.sub}`` for user-flavoured kinds, ``None`` for tenant /
-    target-flavoured kinds).
+    One call means the query is embedded once and every scope ranks in one
+    pool. The eligibility carries the operator's tenant and ``sub``; there
+    is no per-kind fan-out and no ``metadata_filters`` work-around.
     """
     tenant = uuid.UUID("00000000-0000-0000-0000-00000000a0a0")
     bob = _op(sub="bob", tenant_id=tenant)
-    # Substrate is push-down-correct: simulate it returning only
-    # bob-owned rows (alice's user-scoped rows were filtered out at
-    # the SQL boundary by ``doc_metadata @> {"user_sub": "bob"}``).
-    bob_hit = _build_hit(
-        kind="memory-user",
-        tenant_id=tenant,
-        user_sub="bob",
-        target_name=None,
-        slug="bob-note",
-    )
-
-    with patch(
-        "meho_backplane.memory.service.retrieve",
-        new=AsyncMock(return_value=[bob_hit]),
-    ) as retrieve_mock:
-        service = MemoryService()
-        results = await service.search_memories(operator=bob, query="any")
-
-    # Returned hits carry only operator-visible rows; the substrate
-    # is the one enforcing that, not the service post-filter.
-    assert len(results) >= 1
-    assert all(r.entry.user_sub in (None, "bob") for r in results)
-
-    # Cross-scope (scope=None) fans out one retrieve per visible
-    # kind. Inspect the per-kind metadata_filters: user-flavoured
-    # kinds push user_sub, tenant/target kinds push None.
-    expected_kinds_with_filters = {
-        "memory-user": {"user_sub": "bob"},
-        "memory-user-tenant": {"user_sub": "bob"},
-        "memory-user-target": {"user_sub": "bob"},
-        "memory-tenant": None,
-        "memory-target": None,
-    }
-    observed = {}
-    for call in retrieve_mock.await_args_list:
-        kwargs = call.kwargs
-        assert kwargs["source"] == "memory"
-        observed[kwargs["kind"]] = kwargs.get("metadata_filters")
-    assert observed == expected_kinds_with_filters
-
-
-@pytest.mark.asyncio
-async def test_search_memories_scope_given_user_pushes_single_filter() -> None:
-    """``scope=USER`` issues exactly one retrieve with ``{"user_sub": op.sub}``.
-
-    Scope-given recalls take the single-retrieve fast path -- the
-    cross-scope fan-out only fires when ``scope=None``. This test
-    pins both ends: one call, with the right ``kind`` and
-    ``metadata_filters``.
-    """
-    tenant = uuid.UUID("00000000-0000-0000-0000-00000000a0a0")
-    operator = _op(sub="alice", tenant_id=tenant)
     with patch(
         "meho_backplane.memory.service.retrieve",
         new=AsyncMock(return_value=[]),
     ) as retrieve_mock:
-        service = MemoryService()
-        await service.search_memories(
-            operator=operator,
-            query="any",
-            scope=MemoryScope.USER,
-        )
+        await MemoryService().search_memories(operator=bob, query="any", limit=7)
+
     retrieve_mock.assert_awaited_once()
     kwargs = retrieve_mock.await_args.kwargs
     assert kwargs["source"] == "memory"
-    assert kwargs["kind"] == "memory-user"
-    assert kwargs["metadata_filters"] == {"user_sub": "alice"}
+    assert kwargs["limit"] == 7
+    assert "kind" not in kwargs
+    assert "metadata_filters" not in kwargs
+    eligibility = kwargs["memory_eligibility"]
+    assert eligibility.tenant_id == tenant
+    assert eligibility.principal_sub == "bob"
+    assert eligibility.kinds == _ALL_MEMORY_KINDS
 
 
+@pytest.mark.parametrize("scope", list(MemoryScope))
 @pytest.mark.asyncio
-async def test_search_memories_scope_given_tenant_pushes_no_metadata_filter() -> None:
-    """``scope=TENANT`` issues one retrieve with ``metadata_filters=None``.
-
-    Within-tenant RBAC for ``TENANT`` / ``TARGET`` scopes is "any
-    operator" -- there's no per-row predicate to push down. The
-    substrate's ``tenant_id`` filter already enforces the tenant
-    boundary upstream, so ``metadata_filters`` is ``None`` here.
-    """
+async def test_search_memories_scope_narrows_eligible_kinds(scope: MemoryScope) -> None:
+    """A given scope narrows the eligibility to exactly that scope's kind."""
     tenant = uuid.UUID("00000000-0000-0000-0000-00000000a0a0")
-    operator = _op(tenant_id=tenant, role=TenantRole.TENANT_ADMIN)
+    operator = _op(sub="alice", tenant_id=tenant, role=TenantRole.READ_ONLY)
     with patch(
         "meho_backplane.memory.service.retrieve",
         new=AsyncMock(return_value=[]),
     ) as retrieve_mock:
-        service = MemoryService()
-        await service.search_memories(
-            operator=operator,
-            query="any",
-            scope=MemoryScope.TENANT,
-        )
-    retrieve_mock.assert_awaited_once()
-    kwargs = retrieve_mock.await_args.kwargs
-    assert kwargs["kind"] == "memory-tenant"
-    assert kwargs["metadata_filters"] is None
+        await MemoryService().search_memories(operator=operator, query="any", scope=scope)
+
+    eligibility = retrieve_mock.await_args.kwargs["memory_eligibility"]
+    assert eligibility.kinds == (f"memory-{scope.value}",)
+    assert eligibility.principal_sub == "alice"
 
 
 @pytest.mark.asyncio
-async def test_search_memories_rbac_invisible_rows_no_longer_burn_budget() -> None:
-    """G4.4-T2 (#1179) regression: many invisible rows + 1 visible -> 1 hit.
+async def test_search_memories_returns_substrate_hits_without_post_filter() -> None:
+    """Hits come back in substrate order, all of them, mapped to scopes.
 
-    Pre-migration scenario: tenant has N>50 user-scoped memories
-    owned by *alice*, plus 1 user-scoped memory owned by *bob* that
-    matches *bob*'s query. The substrate's 50-candidate-per-signal
-    budget gets burned on alice's rows (they rank highly on lexical
-    match) and bob's matching row falls off the end -- the in-process
-    post-filter drops alice's rows and returns ``[]`` to bob.
-
-    Post-migration: the substrate's ``metadata_filters={"user_sub":
-    "bob"}`` predicate eliminates alice's rows before candidate
-    selection. Bob's row is the only candidate, ranks 1, returns.
-
-    This test mocks the substrate to *behave* as the push-down
-    promises -- when called with ``metadata_filters={"user_sub":
-    "bob"}`` it returns only bob's row, regardless of what alice's
-    rows look like in the simulated corpus. The teeth of the test is
-    that the service no longer drops anything in post-retrieval
-    Python: every returned hit shows up because the substrate
-    pre-filtered, not because the service did.
-    """
-    tenant = uuid.UUID("00000000-0000-0000-0000-00000000a0a0")
-    bob = _op(sub="bob", tenant_id=tenant)
-
-    async def push_down_aware_retrieve(**kwargs: Any) -> list[RetrievalHit]:
-        # Simulate substrate: only return rows matching the
-        # metadata_filters dict the caller passed. The kind dispatch
-        # is per-scope; bob's match lives in ``memory-user``.
-        if kwargs["kind"] != "memory-user":
-            return []
-        filters = kwargs.get("metadata_filters")
-        if filters != {"user_sub": "bob"}:
-            # Pre-migration shape (no filter) would have returned 50
-            # alice-owned rows + 1 bob row; if the service ever stops
-            # passing the filter this branch surfaces it.
-            return [
-                _build_hit(
-                    kind="memory-user",
-                    tenant_id=tenant,
-                    user_sub="alice",
-                    target_name=None,
-                    slug=f"alice-note-{i}",
-                )
-                for i in range(50)
-            ] + [
-                _build_hit(
-                    kind="memory-user",
-                    tenant_id=tenant,
-                    user_sub="bob",
-                    target_name=None,
-                    slug="bob-match",
-                )
-            ]
-        return [
-            _build_hit(
-                kind="memory-user",
-                tenant_id=tenant,
-                user_sub="bob",
-                target_name=None,
-                slug="bob-match",
-            )
-        ]
-
-    with patch(
-        "meho_backplane.memory.service.retrieve",
-        new=AsyncMock(side_effect=push_down_aware_retrieve),
-    ):
-        service = MemoryService()
-        results = await service.search_memories(operator=bob, query="any")
-
-    # Bob sees his row. The push-down is the only reason -- if the
-    # service still post-filtered on user_sub the test would still
-    # pass, so the real teeth is the metadata_filters assertion above
-    # in ``test_search_memories_pushes_user_sub_to_substrate_for_user_scopes``.
-    assert len(results) == 1
-    assert results[0].entry.slug == "bob-match"
-    assert results[0].entry.user_sub == "bob"
-
-
-@pytest.mark.asyncio
-async def test_search_memories_multi_scope_intersection_via_per_kind_fanout() -> None:
-    """Cross-scope recall returns hits from multiple kinds, ranked by fused_score.
-
-    Verifies the per-kind fan-out merge: when scope=None and matches
-    exist in both a user-flavoured kind (with user_sub push-down) and
-    a tenant-flavoured kind (no push-down), both surface, ordered
-    by ``fused_score`` desc. The merge is rank-based and
-    scale-invariant (RRF), so cross-kind comparison is total-order
-    on a comparable scalar.
+    The substrate already applied eligibility before ranking, so the
+    service must not drop or reorder rows (a Python post-filter is what
+    used to under-fill pages).
     """
     tenant = uuid.UUID("00000000-0000-0000-0000-00000000a0a0")
     operator = _op(sub="alice", tenant_id=tenant)
-
-    user_hit = _build_hit(
-        kind="memory-user",
-        tenant_id=tenant,
-        user_sub="alice",
-        target_name=None,
-        slug="user-match",
-    )
-    # Mutate fused_score so we can pin the merge ordering.
-    user_hit = user_hit.model_copy(update={"fused_score": 0.7})
-
-    tenant_hit = _build_hit(
-        kind="memory-tenant",
-        tenant_id=tenant,
-        user_sub=None,
-        target_name=None,
-        slug="tenant-match",
-    )
-    tenant_hit = tenant_hit.model_copy(update={"fused_score": 0.5})
-
-    async def fanout_retrieve(**kwargs: Any) -> list[RetrievalHit]:
-        if kwargs["kind"] == "memory-user":
-            assert kwargs["metadata_filters"] == {"user_sub": "alice"}
-            return [user_hit]
-        if kwargs["kind"] == "memory-tenant":
-            assert kwargs.get("metadata_filters") is None
-            return [tenant_hit]
-        return []
-
+    hits = [
+        _build_hit(
+            kind="memory-user",
+            tenant_id=tenant,
+            user_sub="alice",
+            target_name=None,
+            slug="user-match",
+            fused_score=0.7,
+        ),
+        _build_hit(
+            kind="memory-target",
+            tenant_id=tenant,
+            user_sub=None,
+            target_name="infra-1",
+            slug="target-match",
+            fused_score=0.5,
+        ),
+    ]
     with patch(
         "meho_backplane.memory.service.retrieve",
-        new=AsyncMock(side_effect=fanout_retrieve),
+        new=AsyncMock(return_value=hits),
     ):
-        service = MemoryService()
-        results = await service.search_memories(operator=operator, query="any")
+        results = await MemoryService().search_memories(operator=operator, query="any")
 
-    # Both kinds surface, ordered by fused_score desc.
-    assert len(results) == 2
-    assert results[0].entry.slug == "user-match"
-    assert results[0].entry.scope == MemoryScope.USER
-    assert results[1].entry.slug == "tenant-match"
-    assert results[1].entry.scope == MemoryScope.TENANT
+    assert [r.entry.slug for r in results] == ["user-match", "target-match"]
+    assert [r.entry.scope for r in results] == [MemoryScope.USER, MemoryScope.TARGET]
+    assert results[1].entry.target_name == "infra-1"
 
 
 @pytest.mark.asyncio
-async def test_search_memories_filters_expired_hits() -> None:
-    """Expired hits are dropped from the search result, same as ``list_memories``.
-
-    G4.4-T2 (#1179) note: ``expires_at`` is a *range* predicate
-    (``> now()``) which the T1 substrate's containment-only
-    ``metadata_filters`` cannot express, so expired rows stay as a
-    post-retrieval Python filter in
-    :meth:`MemoryService._hit_to_search_result`. RBAC ``user_sub``
-    push-down covers the much-larger budget-burn surface (every
-    operator's archived memories across the tenant); the expired-row
-    pool stays small in practice via the daily reaper.
-    """
+async def test_search_memories_drops_unknown_kind() -> None:
+    """A hit with a non-memory kind is dropped defensively."""
     tenant = uuid.UUID("00000000-0000-0000-0000-00000000a0a0")
     operator = _op(tenant_id=tenant)
-    past = datetime.now(UTC) - timedelta(hours=1)
-    live_hit = _build_hit(
-        kind="memory-user",
-        tenant_id=tenant,
-        user_sub=operator.sub,
-        target_name=None,
-        slug="live",
+    stray = _build_hit(
+        kind="kb-entry", tenant_id=tenant, user_sub=None, target_name=None, slug="stray"
     )
-    expired_hit = _build_hit(
-        kind="memory-user",
-        tenant_id=tenant,
-        user_sub=operator.sub,
-        target_name=None,
-        slug="expired",
-        expires_at=past,
-    )
-
-    async def per_kind_retrieve(**kwargs: Any) -> list[RetrievalHit]:
-        # Cross-scope fan-out asks for each kind in turn; the
-        # expired/live pair lives under memory-user. The substrate
-        # would receive ``metadata_filters={"user_sub": op.sub}`` for
-        # user-flavoured kinds, but the mock doesn't need to inspect
-        # that here -- the push-down assertions live in the dedicated
-        # ``_pushes_user_sub_to_substrate`` test above.
-        if kwargs["kind"] == "memory-user":
-            return [expired_hit, live_hit]
-        return []
-
     with patch(
         "meho_backplane.memory.service.retrieve",
-        new=AsyncMock(side_effect=per_kind_retrieve),
+        new=AsyncMock(return_value=[stray]),
     ):
-        service = MemoryService()
-        results = await service.search_memories(operator=operator, query="any")
-    assert len(results) == 1
-    assert results[0].entry.slug == "live"
+        results = await MemoryService().search_memories(operator=operator, query="any")
+    assert results == []
 
 
 @pytest.mark.asyncio
-async def test_search_memories_with_scope_narrows_kind_filter() -> None:
-    """``scope`` arg pins ``kind`` on the underlying retrieve call."""
-    tenant = uuid.UUID("00000000-0000-0000-0000-00000000a0a0")
-    operator = _op(tenant_id=tenant, role=TenantRole.TENANT_ADMIN)
+async def test_search_memories_limit_below_one_skips_retrieve() -> None:
+    """``limit < 1`` returns ``[]`` without touching the substrate."""
     with patch(
         "meho_backplane.memory.service.retrieve",
         new=AsyncMock(return_value=[]),
     ) as retrieve_mock:
-        service = MemoryService()
-        await service.search_memories(
-            operator=operator,
-            query="anything",
-            scope=MemoryScope.TENANT,
-        )
-    call_kwargs = retrieve_mock.await_args.kwargs
-    assert call_kwargs["kind"] == "memory-tenant"
+        results = await MemoryService().search_memories(operator=_op(), query="any", limit=0)
+    assert results == []
+    retrieve_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_search_memories_passes_through_hit_timestamps() -> None:
     """``created_at`` / ``updated_at`` on the search result match the substrate hit.
 
-    G0.9.1-T4 (#776) regression gate. Before the fix the service
-    substituted ``EPOCH`` for both fields because :class:`RetrievalHit`
-    didn't carry them; the consumer dogfood (Signal #11) observed
-    ``1970-01-01T00:00:00Z`` strings on every search response. This
-    test pins the passthrough: a hit with distinct, non-epoch
-    ``created_at`` / ``updated_at`` surfaces unchanged on
-    ``result.entry``. The default ``_build_hit`` instant already
-    differs from ``EPOCH``; this test makes the two timestamps
-    distinct so an accidental ``updated_at = created_at`` swap
-    surfaces too.
+    G0.9.1-T4 (#776) regression gate: the service once substituted
+    ``EPOCH`` for both fields.
     """
     tenant = uuid.UUID("00000000-0000-0000-0000-00000000a0a0")
     operator = _op(tenant_id=tenant)
@@ -916,32 +699,55 @@ async def test_search_memories_passes_through_hit_timestamps() -> None:
         created_at=created,
         updated_at=updated,
     )
-
-    async def per_kind_retrieve(**kwargs: Any) -> list[RetrievalHit]:
-        # Cross-scope fan-out (``scope=None``) issues one retrieve per
-        # visible kind. Return the timestamp-bearing hit only for the
-        # ``memory-user`` kind so the test exercises a single result
-        # row through ``_hit_to_search_result``.
-        if kwargs["kind"] == "memory-user":
-            return [hit]
-        return []
-
     with patch(
         "meho_backplane.memory.service.retrieve",
-        new=AsyncMock(side_effect=per_kind_retrieve),
+        new=AsyncMock(return_value=[hit]),
     ):
-        service = MemoryService()
-        results = await service.search_memories(operator=operator, query="any")
+        results = await MemoryService().search_memories(operator=operator, query="any")
 
     assert len(results) == 1
     assert results[0].entry.created_at == created
     assert results[0].entry.updated_at == updated
-    # Defence in depth: explicitly disallow the old EPOCH placeholder
-    # so a regression to "swap in a sentinel that looks real" is
-    # caught here, not just by the equality assertions above.
     epoch = datetime(1970, 1, 1, tzinfo=UTC)
     assert results[0].entry.created_at != epoch
     assert results[0].entry.updated_at != epoch
+
+
+@pytest.mark.asyncio
+async def test_same_body_remember_refreshes_ttl_without_re_embedding() -> None:
+    """Writing the same body again updates metadata and TTL but does not re-embed.
+
+    Regression for the verified same-body refresh (#3741): the indexer's
+    body-hash short-circuit must keep working through the Memory write path.
+    """
+    fake = AsyncMock()
+    fake.encode_one.return_value = _FAKE_EMBEDDING
+    fake.dimension = 384
+    operator = _op()
+    first_expiry = datetime.now(UTC) + timedelta(days=1)
+    second_expiry = datetime.now(UTC) + timedelta(days=30)
+    service = MemoryService()
+    with patch("meho_backplane.retrieval.indexer.get_embedding_service", return_value=fake):
+        await service.remember(
+            operator,
+            MemoryScope.USER,
+            "same body",
+            slug="refresh",
+            metadata={"tags": ["a"]},
+            expires_at=first_expiry,
+        )
+        refreshed = await service.remember(
+            operator,
+            MemoryScope.USER,
+            "same body",
+            slug="refresh",
+            metadata={"tags": ["b"]},
+            expires_at=second_expiry,
+        )
+
+    assert fake.encode_one.await_count == 1
+    assert refreshed.expires_at == second_expiry
+    assert refreshed.metadata["tags"] == ["b"]
 
 
 # ---------------------------------------------------------------------------

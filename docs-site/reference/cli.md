@@ -3681,14 +3681,14 @@ meho promote <scope>/<slug> [flags]
 
 ## `meho recall`
 
-Fetch a memory by natural key or via retrieval (GET /api/v1/memory or /api/v1/retrieve)
+Fetch a memory by natural key or search memories (GET /api/v1/memory or POST /api/v1/memory/search)
 
 ```
 meho recall <scope>/<slug> [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by `meho login`)
-- `--json` — emit raw MemoryEntry / RetrieveResponse JSON instead of human output
+- `--json` — emit raw MemoryEntry / MemorySearchResponse JSON instead of human output
 - `--limit` — max hits to return in --query mode (1..50, server default 10 when omitted)
 - `--query` — run hybrid retrieval against memories with this query; mutually exclusive with the <scope>/<slug> positional
 - `--scope` — narrow --query mode to one scope: user|user-tenant|user-target|tenant|target

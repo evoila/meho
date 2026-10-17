@@ -6342,6 +6342,60 @@
         }
       }
     },
+    "/api/v1/memory/search": {
+      "post": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "Search Memories",
+        "description": "Rank the operator's eligible memories for a query (#3741).\n\nA thin adapter over :meth:`MemoryService.search_memories`, the same\ncall the MCP ``search_memory`` tool makes, so ``meho recall --query``\nand an agent get the same eligible result set. The service applies\ntenant, principal, scope, and expiry rules before ranking. Open to\n``read_only`` like the other memory reads. The query text is never\nbound to the audit row; only the op id, class, and scope are.",
+        "operationId": "search_memories_api_v1_memory_search_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemorySearchBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemorySearchResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/memory/{scope}/{slug}": {
       "get": {
         "tags": [
@@ -30114,6 +30168,55 @@
         "title": "MemoryEntry",
         "description": "Read shape -- one memory row as the service returns it.\n\nFrozen so callers can stash the entry in audit / log records\nwithout mutation surprises. ``expires_at`` is lifted out of\n``doc_metadata`` for filter convenience -- the read-side filter in\n:meth:`~meho_backplane.memory.service.MemoryService.list_memories`\nand :meth:`~meho_backplane.memory.service.MemoryService.recall`\ncompares it without re-parsing the dict. The raw ``metadata`` is\nstill carried so callers (audit middleware, MCP resource handlers)\nsee the original payload."
       },
+      "MemoryEntrySearchHit": {
+        "properties": {
+          "entry": {
+            "$ref": "#/components/schemas/MemoryEntry"
+          },
+          "fused_score": {
+            "type": "number",
+            "title": "Fused Score"
+          },
+          "bm25_score": {
+            "type": "number",
+            "nullable": true,
+            "title": "Bm25 Score"
+          },
+          "cosine_score": {
+            "type": "number",
+            "nullable": true,
+            "title": "Cosine Score"
+          },
+          "bm25_rank": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Bm25 Rank"
+          },
+          "cosine_rank": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Cosine Rank"
+          },
+          "locator": {
+            "type": "string",
+            "title": "Locator",
+            "description": "Canonical selected-read URI (``meho://memory/id/{document_uuid}``).\n\nBuilt from the row id only, so it never carries a target name\nor owner. Read it with ``resources/read`` to get the full entry.",
+            "readOnly": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "entry",
+          "fused_score",
+          "bm25_score",
+          "cosine_score",
+          "bm25_rank",
+          "cosine_rank",
+          "locator"
+        ],
+        "title": "MemoryEntrySearchHit",
+        "description": "One ranked hit from :meth:`MemoryService.search_memories`.\n\nWraps the retrieval-substrate :class:`RetrievalHit` shape, exposing\nonly the memory-relevant fields plus the fused / per-signal\nranking metadata so callers can build \"why was this surfaced\" UX\nwithout re-running the query. Frozen for the same reason as\n:class:`MemoryEntry`."
+      },
       "MemoryListResponse": {
         "properties": {
           "entries": {
@@ -30142,6 +30245,51 @@
         ],
         "title": "MemoryScope",
         "description": "One of the five memory scopes from consumer-needs.md \u00a7G5 L137-141.\n\nThe string value is the wire-level identifier (route path segment,\nCLI flag value, MCP tool arg). Each value maps to a single\n``documents.kind`` row prefixed with ``memory-`` --\n:func:`kind_for_scope` is the canonical translation. The mapping is\none-to-one and bijective with :func:`scope_for_kind`, so callers\nnever round-trip through ad-hoc string-prefixing.\n\n``StrEnum`` (PEP 663, stdlib in 3.11+) gives the members ``str``\nsemantics for free: ``f\"scope={MemoryScope.USER}\"`` renders as\n``\"scope=user\"`` rather than ``\"scope=MemoryScope.USER\"``, matching\nthe :class:`~meho_backplane.auth.operator.TenantRole` convention."
+      },
+      "MemorySearchBody": {
+        "properties": {
+          "query": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Query"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/MemoryScope",
+            "nullable": true
+          },
+          "limit": {
+            "type": "integer",
+            "maximum": 50.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "default": 10
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "title": "MemorySearchBody",
+        "description": "POST body for ``/api/v1/memory/search``.\n\nSame limits as the MCP ``search_memory`` tool so the CLI and an agent\ncan send the same input: ``query`` 1..256 chars, ``limit`` 1..50\n(default 10). Omit ``scope`` to search all five scopes."
+      },
+      "MemorySearchResponse": {
+        "properties": {
+          "hits": {
+            "items": {
+              "$ref": "#/components/schemas/MemoryEntrySearchHit"
+            },
+            "type": "array",
+            "title": "Hits"
+          }
+        },
+        "type": "object",
+        "required": [
+          "hits"
+        ],
+        "title": "MemorySearchResponse",
+        "description": "Response for ``/api/v1/memory/search`` -- the MCP ``search_memory`` shape.\n\n``hits`` is the only field. There is deliberately no total or count:\n\"no match\" and \"only rows you may not see\" both return ``{\"hits\": []}``."
       },
       "MyRecentPage": {
         "properties": {

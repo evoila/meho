@@ -6158,6 +6158,39 @@ type MemoryEntry struct {
 	UserSub    *string            `json:"user_sub"`
 }
 
+// MemoryEntrySearchHit One ranked hit from :meth:`MemoryService.search_memories`.
+//
+// Wraps the retrieval-substrate :class:`RetrievalHit` shape, exposing
+// only the memory-relevant fields plus the fused / per-signal
+// ranking metadata so callers can build "why was this surfaced" UX
+// without re-running the query. Frozen for the same reason as
+// :class:`MemoryEntry`.
+type MemoryEntrySearchHit struct {
+	Bm25Rank    *int     `json:"bm25_rank"`
+	Bm25Score   *float32 `json:"bm25_score"`
+	CosineRank  *int     `json:"cosine_rank"`
+	CosineScore *float32 `json:"cosine_score"`
+
+	// Entry Read shape -- one memory row as the service returns it.
+	//
+	// Frozen so callers can stash the entry in audit / log records
+	// without mutation surprises. ``expires_at`` is lifted out of
+	// ``doc_metadata`` for filter convenience -- the read-side filter in
+	// :meth:`~meho_backplane.memory.service.MemoryService.list_memories`
+	// and :meth:`~meho_backplane.memory.service.MemoryService.recall`
+	// compares it without re-parsing the dict. The raw ``metadata`` is
+	// still carried so callers (audit middleware, MCP resource handlers)
+	// see the original payload.
+	Entry      MemoryEntry `json:"entry"`
+	FusedScore float32     `json:"fused_score"`
+
+	// Locator Canonical selected-read URI (``meho://memory/id/{document_uuid}``).
+	//
+	// Built from the row id only, so it never carries a target name
+	// or owner. Read it with ``resources/read`` to get the full entry.
+	Locator *string `json:"locator,omitempty"`
+}
+
 // MemoryListResponse Response envelope for “GET /api/v1/memory“.
 //
 // Wrapped in “{"entries": [...]}“ so a future cursor field can
@@ -6186,6 +6219,39 @@ type MemoryListResponse struct {
 // “"scope=user"“ rather than “"scope=MemoryScope.USER"“, matching
 // the :class:`~meho_backplane.auth.operator.TenantRole` convention.
 type MemoryScope string
+
+// MemorySearchBody POST body for “/api/v1/memory/search“.
+//
+// Same limits as the MCP “search_memory“ tool so the CLI and an agent
+// can send the same input: “query“ 1..256 chars, “limit“ 1..50
+// (default 10). Omit “scope“ to search all five scopes.
+type MemorySearchBody struct {
+	Limit *int   `json:"limit,omitempty"`
+	Query string `json:"query"`
+
+	// Scope One of the five memory scopes from consumer-needs.md §G5 L137-141.
+	//
+	// The string value is the wire-level identifier (route path segment,
+	// CLI flag value, MCP tool arg). Each value maps to a single
+	// ``documents.kind`` row prefixed with ``memory-`` --
+	// :func:`kind_for_scope` is the canonical translation. The mapping is
+	// one-to-one and bijective with :func:`scope_for_kind`, so callers
+	// never round-trip through ad-hoc string-prefixing.
+	//
+	// ``StrEnum`` (PEP 663, stdlib in 3.11+) gives the members ``str``
+	// semantics for free: ``f"scope={MemoryScope.USER}"`` renders as
+	// ``"scope=user"`` rather than ``"scope=MemoryScope.USER"``, matching
+	// the :class:`~meho_backplane.auth.operator.TenantRole` convention.
+	Scope *MemoryScope `json:"scope,omitempty"`
+}
+
+// MemorySearchResponse Response for “/api/v1/memory/search“ -- the MCP “search_memory“ shape.
+//
+// “hits“ is the only field. There is deliberately no total or count:
+// "no match" and "only rows you may not see" both return “{"hits": []}“.
+type MemorySearchResponse struct {
+	Hits []MemoryEntrySearchHit `json:"hits"`
+}
 
 // MyRecentPage Unified list envelope for “GET /api/v1/audit/my-recent“.
 //
@@ -10446,6 +10512,11 @@ type RememberApiV1MemoryPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// SearchMemoriesApiV1MemorySearchPostParams defines parameters for SearchMemoriesApiV1MemorySearchPost.
+type SearchMemoriesApiV1MemorySearchPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // ForgetApiV1MemoryScopeSlugDeleteParams defines parameters for ForgetApiV1MemoryScopeSlugDelete.
 type ForgetApiV1MemoryScopeSlugDeleteParams struct {
 	TargetName    *string `form:"target_name,omitempty" json:"target_name,omitempty"`
@@ -11407,6 +11478,9 @@ type IngestKbApiV1KbIngestPostJSONRequestBody = IngestKbRequest
 
 // RememberApiV1MemoryPostJSONRequestBody defines body for RememberApiV1MemoryPost for application/json ContentType.
 type RememberApiV1MemoryPostJSONRequestBody = RememberBody
+
+// SearchMemoriesApiV1MemorySearchPostJSONRequestBody defines body for SearchMemoriesApiV1MemorySearchPost for application/json ContentType.
+type SearchMemoriesApiV1MemorySearchPostJSONRequestBody = MemorySearchBody
 
 // PromoteApiV1MemoryScopeSlugPromotePostJSONRequestBody defines body for PromoteApiV1MemoryScopeSlugPromotePost for application/json ContentType.
 type PromoteApiV1MemoryScopeSlugPromotePostJSONRequestBody = PromoteBody
@@ -13489,6 +13563,11 @@ type ClientInterface interface {
 	RememberApiV1MemoryPostWithBody(ctx context.Context, params *RememberApiV1MemoryPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	RememberApiV1MemoryPost(ctx context.Context, params *RememberApiV1MemoryPostParams, body RememberApiV1MemoryPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SearchMemoriesApiV1MemorySearchPostWithBody request with any body
+	SearchMemoriesApiV1MemorySearchPostWithBody(ctx context.Context, params *SearchMemoriesApiV1MemorySearchPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	SearchMemoriesApiV1MemorySearchPost(ctx context.Context, params *SearchMemoriesApiV1MemorySearchPostParams, body SearchMemoriesApiV1MemorySearchPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ForgetApiV1MemoryScopeSlugDelete request
 	ForgetApiV1MemoryScopeSlugDelete(ctx context.Context, scope MemoryScope, slug string, params *ForgetApiV1MemoryScopeSlugDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -16238,6 +16317,30 @@ func (c *Client) RememberApiV1MemoryPostWithBody(ctx context.Context, params *Re
 
 func (c *Client) RememberApiV1MemoryPost(ctx context.Context, params *RememberApiV1MemoryPostParams, body RememberApiV1MemoryPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewRememberApiV1MemoryPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SearchMemoriesApiV1MemorySearchPostWithBody(ctx context.Context, params *SearchMemoriesApiV1MemorySearchPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSearchMemoriesApiV1MemorySearchPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SearchMemoriesApiV1MemorySearchPost(ctx context.Context, params *SearchMemoriesApiV1MemorySearchPostParams, body SearchMemoriesApiV1MemorySearchPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSearchMemoriesApiV1MemorySearchPostRequest(c.Server, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -27754,6 +27857,61 @@ func NewRememberApiV1MemoryPostRequestWithBody(server string, params *RememberAp
 	}
 
 	operationPath := fmt.Sprintf("/api/v1/memory")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewSearchMemoriesApiV1MemorySearchPostRequest calls the generic SearchMemoriesApiV1MemorySearchPost builder with application/json body
+func NewSearchMemoriesApiV1MemorySearchPostRequest(server string, params *SearchMemoriesApiV1MemorySearchPostParams, body SearchMemoriesApiV1MemorySearchPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewSearchMemoriesApiV1MemorySearchPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewSearchMemoriesApiV1MemorySearchPostRequestWithBody generates requests for SearchMemoriesApiV1MemorySearchPost with any type of body
+func NewSearchMemoriesApiV1MemorySearchPostRequestWithBody(server string, params *SearchMemoriesApiV1MemorySearchPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/memory/search")
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -44235,6 +44393,11 @@ type ClientWithResponsesInterface interface {
 
 	RememberApiV1MemoryPostWithResponse(ctx context.Context, params *RememberApiV1MemoryPostParams, body RememberApiV1MemoryPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RememberApiV1MemoryPostResponse, error)
 
+	// SearchMemoriesApiV1MemorySearchPostWithBodyWithResponse request with any body
+	SearchMemoriesApiV1MemorySearchPostWithBodyWithResponse(ctx context.Context, params *SearchMemoriesApiV1MemorySearchPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SearchMemoriesApiV1MemorySearchPostResponse, error)
+
+	SearchMemoriesApiV1MemorySearchPostWithResponse(ctx context.Context, params *SearchMemoriesApiV1MemorySearchPostParams, body SearchMemoriesApiV1MemorySearchPostJSONRequestBody, reqEditors ...RequestEditorFn) (*SearchMemoriesApiV1MemorySearchPostResponse, error)
+
 	// ForgetApiV1MemoryScopeSlugDeleteWithResponse request
 	ForgetApiV1MemoryScopeSlugDeleteWithResponse(ctx context.Context, scope MemoryScope, slug string, params *ForgetApiV1MemoryScopeSlugDeleteParams, reqEditors ...RequestEditorFn) (*ForgetApiV1MemoryScopeSlugDeleteResponse, error)
 
@@ -47687,6 +47850,29 @@ func (r RememberApiV1MemoryPostResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r RememberApiV1MemoryPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type SearchMemoriesApiV1MemorySearchPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *MemorySearchResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r SearchMemoriesApiV1MemorySearchPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SearchMemoriesApiV1MemorySearchPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -55312,6 +55498,23 @@ func (c *ClientWithResponses) RememberApiV1MemoryPostWithResponse(ctx context.Co
 	return ParseRememberApiV1MemoryPostResponse(rsp)
 }
 
+// SearchMemoriesApiV1MemorySearchPostWithBodyWithResponse request with arbitrary body returning *SearchMemoriesApiV1MemorySearchPostResponse
+func (c *ClientWithResponses) SearchMemoriesApiV1MemorySearchPostWithBodyWithResponse(ctx context.Context, params *SearchMemoriesApiV1MemorySearchPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SearchMemoriesApiV1MemorySearchPostResponse, error) {
+	rsp, err := c.SearchMemoriesApiV1MemorySearchPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSearchMemoriesApiV1MemorySearchPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) SearchMemoriesApiV1MemorySearchPostWithResponse(ctx context.Context, params *SearchMemoriesApiV1MemorySearchPostParams, body SearchMemoriesApiV1MemorySearchPostJSONRequestBody, reqEditors ...RequestEditorFn) (*SearchMemoriesApiV1MemorySearchPostResponse, error) {
+	rsp, err := c.SearchMemoriesApiV1MemorySearchPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSearchMemoriesApiV1MemorySearchPostResponse(rsp)
+}
+
 // ForgetApiV1MemoryScopeSlugDeleteWithResponse request returning *ForgetApiV1MemoryScopeSlugDeleteResponse
 func (c *ClientWithResponses) ForgetApiV1MemoryScopeSlugDeleteWithResponse(ctx context.Context, scope MemoryScope, slug string, params *ForgetApiV1MemoryScopeSlugDeleteParams, reqEditors ...RequestEditorFn) (*ForgetApiV1MemoryScopeSlugDeleteResponse, error) {
 	rsp, err := c.ForgetApiV1MemoryScopeSlugDelete(ctx, scope, slug, params, reqEditors...)
@@ -62306,6 +62509,39 @@ func ParseRememberApiV1MemoryPostResponse(rsp *http.Response) (*RememberApiV1Mem
 			return nil, err
 		}
 		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSearchMemoriesApiV1MemorySearchPostResponse parses an HTTP response from a SearchMemoriesApiV1MemorySearchPostWithResponse call
+func ParseSearchMemoriesApiV1MemorySearchPostResponse(rsp *http.Response) (*SearchMemoriesApiV1MemorySearchPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SearchMemoriesApiV1MemorySearchPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest MemorySearchResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError

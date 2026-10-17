@@ -106,7 +106,7 @@ meho recall --query "kubectl" --scope user                       # hybrid retrie
 meho recall user/kubectl-preference                              # exact natural-key fetch (writes body to stdout)
 ```
 
-`meho recall --query` rides the G0.4 retrieval substrate (`POST /api/v1/retrieve` with `source="memory"` pinned). The substrate post-filters user-scoped hits against your `sub`, so a query never surfaces another operator's user-scoped row even when retrieval ranked it highly. `--scope user` narrows to `kind=memory-user` server-side; omitting it considers every scope visible to you.
+`meho recall --query` calls `POST /api/v1/memory/search` (`MemoryService.search_memories`, the same call the MCP `search_memory` tool makes). The server drops memories you may not see and memories that have expired *before* it ranks the results, so a query never surfaces another operator's user-scoped row, and expired rows never take a result slot. `--scope user` narrows to `kind=memory-user` server-side; omitting it considers every scope visible to you.
 
 A `meho recall user/missing-slug` returns 404 (CLI exit code 4) by design — the route deliberately conflates "not found" and "no access" so an operator can't probe for slugs they shouldn't see.
 

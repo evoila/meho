@@ -1779,7 +1779,9 @@ type AuditEntry struct {
 //   - :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every
 //     row written before migration “0106“ reads as this class; it is never
 //     guessed from “method“ / “path“. The REST and MCP request wrapper
-//     rows also keep this class until they are retired.
+//     rows also keep this class while “AUDIT_WRAPPER_ROWS_RETIRED“ is off;
+//     with it on they write a decision or execution class, or no row
+//     (#3757, :mod:`meho_backplane.audit_cutover`).
 type AuditEventClass string
 
 // AuditQueryRequest POST body for “/api/v1/audit/query“.
@@ -1813,7 +1815,9 @@ type AuditQueryRequest struct {
 	// * :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every
 	//   row written before migration ``0106`` reads as this class; it is never
 	//   guessed from ``method`` / ``path``. The REST and MCP request wrapper
-	//   rows also keep this class until they are retired.
+	//   rows also keep this class while ``AUDIT_WRAPPER_ROWS_RETIRED`` is off;
+	//   with it on they write a decision or execution class, or no row
+	//   (#3757, :mod:`meho_backplane.audit_cutover`).
 	EventClass    *AuditEventClass    `json:"event_class,omitempty"`
 	Limit         *int                `json:"limit,omitempty"`
 	OpClass       *string             `json:"op_class"`

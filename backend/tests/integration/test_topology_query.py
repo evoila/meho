@@ -596,6 +596,26 @@ async def test_include_stale_false_exempts_both_path_endpoints(
 
 
 @_skip_no_docker
+async def test_include_stale_false_still_returns_a_stale_closure_root(
+    stale_chain: dict[str, uuid.UUID],
+) -> None:
+    """The closure root is never filtered by ``include_stale`` (#2538): a
+    soft-deleted root still comes back at depth 0 with ``last_seen``
+    NULL, so the MCP ``evidence`` block has to name that exception
+    (#3760). Reached as a non-root row, the same stale node is dropped.
+    """
+    op = _operator(TENANT_A_ID)
+    await _soft_delete_node(stale_chain["root"])
+
+    dependents = await find_dependents(op, "root", include_stale=False)
+    assert [n.name for n in dependents] == ["root", "mid", "leaf"]
+    assert dependents[0].depth == 0 and dependents[0].last_seen is None
+
+    dependencies = await find_dependencies(op, "leaf", include_stale=False)
+    assert {n.name for n in dependencies} == {"leaf", "mid"}
+
+
+@_skip_no_docker
 async def test_find_dependents_untracked_vs_tracked_no_deps(
     known_graph: dict[str, uuid.UUID],
 ) -> None:

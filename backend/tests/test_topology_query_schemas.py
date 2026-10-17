@@ -36,9 +36,11 @@ from meho_backplane.topology.evidence import (
     FRESHNESS_COPY,
     MAPPED_RELATION_KINDS,
     OBSERVATION_NOTE,
+    STALE_SHOWN_COPY,
     classify_freshness,
     relation_class_for,
     relation_class_kind_filter,
+    stale_rows_evidence,
 )
 from meho_backplane.topology.schemas import (
     TopologyEdge,
@@ -349,8 +351,8 @@ _HOUR = 3600
         # Seen in a recent refresh.
         ("auto", _NOW - timedelta(minutes=30), "observed"),
         ("auto", _NOW - timedelta(hours=2), "observed"),
-        # Operator-stated rows are not refreshed, so their age is not a
-        # sign that anything changed.
+        # A refresh never changes or removes an operator-stated row, so
+        # its age is not a sign that anything changed.
         ("curated", _NOW - timedelta(days=30), "asserted"),
     ],
 )
@@ -366,3 +368,54 @@ def test_freshness_copy_never_claims_vendor_time_or_one_snapshot() -> None:
     assert len(set(FRESHNESS_COPY.values())) == 4
     assert "not the vendor's own timestamp" in OBSERVATION_NOTE
     assert "not one consistent snapshot" in OBSERVATION_NOTE
+
+
+def test_observation_note_explains_both_last_seen_sources() -> None:
+    """``last_seen`` has two sources: a refresh for auto rows, an operator
+    entry for curated rows (a refresh may bump it later). The note must
+    not call every value a refresh time."""
+    assert "source auto" in OBSERVATION_NOTE
+    assert "last refresh that reported the row" in OBSERVATION_NOTE
+    assert "source curated" in OBSERVATION_NOTE
+    assert "entered or re-stated the row" in OBSERVATION_NOTE
+    assert "later refresh that also observed it" in OBSERVATION_NOTE
+
+
+def test_asserted_copy_keeps_operator_assertion_distinct_from_observation() -> None:
+    """A refresh can move a curated row's ``last_seen`` but never changes
+    or removes the row; the copy must not say MEHO never refreshes it."""
+    asserted = FRESHNESS_COPY["asserted"]
+    assert asserted.startswith("An operator stated this.")
+    assert "never changes or removes it" in asserted
+    assert "later refresh that also observed it" in asserted
+    assert "does not refresh" not in asserted
+
+
+def test_stale_copy_does_not_assume_include_stale_is_true() -> None:
+    """The base ``stale`` text is neutral; the reason the row is shown
+    depends on the selected stale view."""
+    assert "include_stale" not in FRESHNESS_COPY["stale"]
+    assert "include_stale is true" in STALE_SHOWN_COPY[True]
+    assert "named it" in STALE_SHOWN_COPY[False]
+    assert "other stale rows are excluded" in STALE_SHOWN_COPY[False]
+
+
+def test_stale_rows_evidence_reports_the_named_row_exception() -> None:
+    included = stale_rows_evidence(include_stale=True, named_rows="the root you named")
+    assert included["stale_rows"] == "included"
+    assert "include_stale is true" in included["stale_rows_note"]
+
+    closure = stale_rows_evidence(include_stale=False, named_rows="the root you named")
+    assert closure["stale_rows"] == "excluded"
+    note = closure["stale_rows_note"]
+    assert "include_stale is false" in note
+    assert "the root you named, which MEHO always shows, even when stale" in note
+
+    path = stale_rows_evidence(include_stale=False, named_rows="the two endpoints you named")
+    assert "the two endpoints you named" in path["stale_rows_note"]
+
+    edges = stale_rows_evidence(include_stale=False, named_rows=None)
+    assert edges["stale_rows"] == "excluded"
+    assert edges["stale_rows_note"] == (
+        "Rows the latest refresh no longer reported are never listed."
+    )

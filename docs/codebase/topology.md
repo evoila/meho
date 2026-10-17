@@ -830,26 +830,38 @@ mapping lives once in Python, not in the SQL.
 `source`, `source_scope` and `last_seen`, plus the walked edge's
 `via_edge_source` and `via_edge_last_seen`. Edge rows carry `source`,
 `last_seen` and each endpoint's `source_scope`. `last_seen` is MEHO's
-own observation time from a refresh. It is not the vendor's time, and
-rows from different targets come from different refreshes, so no answer
-is one consistent snapshot. `classify_freshness` turns a row into one
-of four values:
+own time, never the vendor's. For an `auto` row it is the last refresh
+that reported the row. For a `curated` row it is when the operator
+entered or re-stated the row (`annotate_edge`, `create_or_get_node`);
+a refresh that also observes a curated row bumps `last_seen`
+(`_refresh_curated_node` / `_refresh_curated_edge`) but never changes
+or removes the row. Rows from different targets come from different
+refreshes, so no answer is one consistent snapshot. `classify_freshness`
+turns a row into one of four values:
 
 | Value | Rule |
 |---|---|
 | `stale` | `last_seen` is NULL: the latest refresh no longer reported it. |
-| `asserted` | `source='curated'`: an operator stated it; refresh does not touch it. |
+| `asserted` | `source='curated'`: an operator stated it. A refresh never changes or removes it; a refresh that also observes it only moves `last_seen` forward. |
 | `old_observation` | Seen, but more than two `topology_refresh_interval_seconds` ago. |
 | `observed` | Seen within the last two refresh intervals. |
 
 **MCP answer shape.** `query_topology` adds `path_direction` and
 `relation_class` arguments. Closure answers carry `direction`,
 `relation_class`, per-row `freshness` / `via_edge_freshness` and an
-`evidence` block (`stale_rows`, `observation_note`, and
-`freshness_meaning` for each value that appears). `kind=path` always
+`evidence` block (`stale_rows`, `stale_rows_note`, `observation_note`,
+and `freshness_meaning` for each value that appears). The stale view is
+reported as the queries apply it: with `include_stale=false` the walk
+skips stale rows, but the closure root and the two path endpoints are
+returned even when stale (#2538), and `stale_rows_note` plus the `stale`
+entry of `freshness_meaning` say so (`stale_rows_evidence` and
+`STALE_SHOWN_COPY` in `topology/evidence.py`). `kind=path` always
 carries `status`: `found`, `node_untracked` (an endpoint is not in the
-graph) or `no_route` (both ends exist, no route), with a plain-language
-`detail` for the last two. `kind=edges` rows carry `relation_class` and
+graph) or `no_route` (both ends exist, no route under the selected
+direction, relation class and stale view), with a plain-language
+`detail` for the last two. All three path outcomes carry `evidence`, so
+a `no_route` caused by an excluded stale edge still says that stale
+rows were excluded. `kind=edges` rows carry `relation_class` and
 `freshness`. The REST routes return the new model fields but keep their
 own shape; they do not take `direction` or `relation_class` yet.
 

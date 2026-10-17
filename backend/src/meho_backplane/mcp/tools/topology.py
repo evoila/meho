@@ -126,8 +126,10 @@ from meho_backplane.topology.evidence import (
     FRESHNESS_COPY,
     OBSERVATION_NOTE,
     RELATION_CLASSES,
+    STALE_SHOWN_COPY,
     Freshness,
     classify_freshness,
+    stale_rows_evidence,
 )
 from meho_backplane.topology.query import (
     AmbiguousNodeError,
@@ -596,10 +598,13 @@ _QUERY_TOPOLOGY_DESCRIPTION: Final[str] = (
     "(`via_edge_freshness` for the edge walked): `observed`, "
     "`old_observation` (last seen more than two refresh cycles ago), "
     "`stale` (the latest refresh no longer reported it) or `asserted` "
-    "(curated). `last_seen` is when MEHO last saw the row, not the "
-    "vendor's own time, and rows from different systems are not one "
-    "consistent snapshot. The `evidence` block says whether stale rows "
-    "were included and explains each freshness value in the answer.\n\n"
+    "(curated). `last_seen` is MEHO's own time, not the vendor's: the "
+    "last refresh that reported an `auto` row, or when an operator "
+    "entered a `curated` row (a later refresh that also observes it "
+    "moves it forward). Rows from different systems are not one "
+    "consistent snapshot. The `evidence` block says which stale view "
+    "the answer used (`stale_rows`, `stale_rows_note`) and explains each "
+    "freshness value in the answer.\n\n"
     "Returns `{kind, direction, relation_class, nodes: [TopologyNode, "
     "...], evidence}` for the closure kinds "
     "(root at depth 0, so a one-element list means 'exists but nothing "
@@ -607,7 +612,9 @@ _QUERY_TOPOLOGY_DESCRIPTION: Final[str] = (
     "`via_edge_id` — the node it hangs off and the exact edge walked — "
     "so the dependency chain reconstructs from the flat list without "
     "extra calls. Soft-deleted rows stay reachable by default; pass "
-    "`include_stale: false` to walk live rows only. When the anchor is "
+    "`include_stale: false` to walk live rows only (the anchor you "
+    "named is always returned, even when stale; the `evidence` block "
+    "says so). When the anchor is "
     "not tracked in the topology "
     'graph for this tenant, returns `{kind, status: "node_untracked", '
     "name, nodes: []}` (and `node_kind` when `node_kind=` was supplied) "
@@ -620,10 +627,12 @@ _QUERY_TOPOLOGY_DESCRIPTION: Final[str] = (
     "target or `meho_topology_annotate` for cross-system relationships "
     "the probes can't infer (G0.18-T4 #1357, RDC #789 N2). "
     'For `path`: `{kind: "path", status, direction, relation_class, '
-    "path: TopologyPath|null}`. `status` is `found` (with `evidence`), "
+    "path: TopologyPath|null, evidence}`. `status` is `found`, "
     "`node_untracked` (an endpoint is not in the graph; `name` says "
     "which) or `no_route` (both ends exist but there is no route within "
-    "`max_hops` in that direction). `detail` explains the last two. "
+    "`max_hops` under the selected direction, relation class and stale "
+    "view). `detail` explains the last two. Every outcome carries "
+    "`evidence`, so the stale view the search used is never implicit. "
     "`path_direction` picks `undirected` (default, edges both ways), "
     "`forward` or `reverse`. "
     '`{kind: "edges", relation_class, edges: [TopologyEdge, ...], '
@@ -700,7 +709,7 @@ async def _query_topology_handler(
                 "relation_class": arguments.get("relation_class"),
                 "edges": [shaper.edge(e) for e in edges],
                 # ``list_edges`` never returns soft-deleted edges.
-                "evidence": shaper.evidence(include_stale=False),
+                "evidence": shaper.evidence(include_stale=False, named_rows=None),
             }
         if kind == "timeline":
             return await _timeline_facet(operator, arguments)
@@ -755,12 +764,27 @@ class _RowShaper:
         row["freshness"] = self._classify(edge.source, edge.last_seen)
         return row
 
-    def evidence(self, *, include_stale: bool) -> dict[str, Any]:
+    def evidence(self, *, include_stale: bool, named_rows: str | None) -> dict[str, Any]:
+        """Build the ``evidence`` block for one answer.
+
+        *named_rows* names the rows the caller asked for by name, which
+        the query returns even when stale (see
+        :func:`~meho_backplane.topology.evidence.stale_rows_evidence`).
+        """
+        meaning = {value: FRESHNESS_COPY[value] for value in sorted(self._seen)}
+        if "stale" in meaning:
+            meaning["stale"] = f"{meaning['stale']} {STALE_SHOWN_COPY[include_stale]}"
         return {
-            "stale_rows": "included" if include_stale else "excluded",
+            **stale_rows_evidence(include_stale=include_stale, named_rows=named_rows),
             "observation_note": OBSERVATION_NOTE,
-            "freshness_meaning": {value: FRESHNESS_COPY[value] for value in sorted(self._seen)},
+            "freshness_meaning": meaning,
         }
+
+
+#: The rows a closure / path query returns even when stale (#2538), named
+#: in the ``evidence`` block so the answer does not contradict its rows.
+_CLOSURE_NAMED_ROWS = "the root you named"
+_PATH_NAMED_ROWS = "the two endpoints you named"
 
 
 async def _path_facet(operator: Operator, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -768,13 +792,17 @@ async def _path_facet(operator: Operator, arguments: dict[str, Any]) -> dict[str
 
     ``status`` is ``found``, ``node_untracked`` (an endpoint is not in
     the graph) or ``no_route`` (both ends exist, no route within
-    ``max_hops`` in the chosen direction and relation class). The three
-    used to share one ``path: null`` answer.
+    ``max_hops`` in the chosen direction, relation class and stale
+    view). The three used to share one ``path: null`` answer. Every
+    outcome carries ``evidence`` with the stale view the search used,
+    so a ``no_route`` caused by an excluded stale edge is not read as
+    "no route at all".
     """
     direction: PathDirection = arguments.get("path_direction", "undirected")
     relation_class = arguments.get("relation_class")
     include_stale = bool(arguments.get("include_stale", True))
     max_hops = int(arguments.get("max_hops", _MAX_HOPS_DEFAULT))
+    shaper = _RowShaper()
     envelope: dict[str, Any] = {
         "kind": "path",
         "direction": direction,
@@ -805,23 +833,31 @@ async def _path_facet(operator: Operator, arguments: dict[str, Any]) -> dict[str
         )
         if exc.kind is not None:
             envelope["node_kind"] = exc.kind
+        envelope["evidence"] = shaper.evidence(
+            include_stale=include_stale, named_rows=_PATH_NAMED_ROWS
+        )
         return envelope
     if result is None:
+        stale_view = "included" if include_stale else "excluded"
+        class_view = "any" if relation_class is None else relation_class
         envelope.update(
             status="no_route",
             path=None,
             detail=(
                 f"Both ends are in the graph, but MEHO found no {direction} route "
-                f"within {max_hops} hops. A route may still exist outside what "
-                "MEHO has discovered."
+                f"within {max_hops} hops under the selected filters (stale rows "
+                f"{stale_view}, relation class {class_view}). A route may still "
+                "exist under other filters, or outside what MEHO has discovered."
             ),
+            evidence=shaper.evidence(include_stale=include_stale, named_rows=_PATH_NAMED_ROWS),
         )
         return envelope
-    shaper = _RowShaper()
     path = result.model_dump(mode="json")
     path["nodes"] = [shaper.node(n) for n in result.nodes]
     envelope.update(
-        status="found", path=path, evidence=shaper.evidence(include_stale=include_stale)
+        status="found",
+        path=path,
+        evidence=shaper.evidence(include_stale=include_stale, named_rows=_PATH_NAMED_ROWS),
     )
     return envelope
 
@@ -873,7 +909,7 @@ async def _closure_facet(
         "direction": "reverse" if kind == "dependents" else "forward",
         "relation_class": relation_class,
         "nodes": [shaper.node(n) for n in nodes],
-        "evidence": shaper.evidence(include_stale=include_stale),
+        "evidence": shaper.evidence(include_stale=include_stale, named_rows=_CLOSURE_NAMED_ROWS),
     }
 
 
@@ -1245,13 +1281,16 @@ register_mcp_tool(
                 "evidence": {
                     "type": "object",
                     "description": (
-                        "Present on closure, found-path and `edges` "
-                        "answers. `stale_rows` is `included` or "
-                        "`excluded`; `observation_note` says what "
-                        "`last_seen` means (MEHO's last refresh, not the "
-                        "vendor's time, not one consistent snapshot); "
-                        "`freshness_meaning` explains each `freshness` "
-                        "value that appears in the rows."
+                        "Present on closure, `edges` and every `path` "
+                        "answer (all three statuses). `stale_rows` is "
+                        "`included` or `excluded`; `stale_rows_note` "
+                        "says what that means, including that a named "
+                        "root or endpoint is always shown even when "
+                        "stale; `observation_note` says what `last_seen` "
+                        "means (MEHO's own time, not the vendor's, not "
+                        "one consistent snapshot); `freshness_meaning` "
+                        "explains each `freshness` value that appears in "
+                        "the rows."
                     ),
                 },
                 "name": {

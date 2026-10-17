@@ -37,6 +37,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.kb.service import KbService
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.untrusted_text import BLOCK_END, BLOCK_START, GUARD_PREFIX
+from tests._kb_embedding_stub import fake_embedding_service
 from tests.mcp_test_fixtures import (
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
@@ -48,10 +49,7 @@ from tests.mcp_test_fixtures import (
 @pytest.fixture
 def stub_embedding() -> Iterator[AsyncMock]:
     """Patch the embedding service so SQLite-backed tests run without fastembed."""
-    fake = AsyncMock()
-    fake.encode_one.return_value = [0.1] * 384
-    fake.encode.return_value = [[0.1] * 384]
-    fake.dimension = 384
+    fake = fake_embedding_service()
     with patch(
         "meho_backplane.retrieval.indexer.get_embedding_service",
         return_value=fake,

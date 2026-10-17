@@ -39,6 +39,9 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from meho_backplane.kb.service import KbService
+from meho_backplane.retrieval.indexer import index_document
+from meho_backplane.retrieval.retriever import retrieve
+from tests._kb_embedding_stub import StubPassageTokenizer
 
 from .conftest import DOCKER_AVAILABLE, SKIP_REASON
 
@@ -78,6 +81,7 @@ def _make_stub_embedding_service() -> AsyncMock:
     fake = AsyncMock()
     fake.encode_one.side_effect = lambda t: _make_stub_embedding_vector(t)
     fake.encode.side_effect = lambda ts: [_make_stub_embedding_vector(t) for t in ts]
+    fake.passage_tokenizer.return_value = StubPassageTokenizer()
     fake.dimension = 384
     return fake
 
@@ -242,6 +246,89 @@ async def test_tenant_boundary_holds_for_list_and_search(
     assert len(a_entries) == 10
     assert b_entries == []
     assert b_search == []
+
+
+# ---------------------------------------------------------------------------
+# Test 4 -- passages replace whole-body heads in search (#3761)
+# ---------------------------------------------------------------------------
+
+
+@_skip_no_docker
+@pytest.mark.asyncio
+async def test_kb_search_ranks_current_passages_without_duplicates(pg_engine: None) -> None:
+    """``source="kb"`` ranks current passages; heads and old passages are not candidates.
+
+    * An entry written through the service is found only through its
+      passages: its head row is never a hit, so no entry shows twice.
+    * After a body change, a term that only the old body had finds
+      nothing; the new body's passages are found.
+    * A legacy head without passages (written before this change) is
+      still found, as itself.
+    * ``source="memory"`` and ``source=None`` keep working; memory rows
+      are untouched by the mapping.
+    """
+    tenant_id = uuid.UUID(TENANT_A_ID)
+    service = KbService()
+    fake = _make_stub_embedding_service()
+    long_body = (
+        "# Runbook\n\n"
+        + "\n\n".join(f"Intro paragraph {i} about generic cluster upkeep." for i in range(40))
+        + "\n\n## Restart\n\nThe zebracode restart needs the green wrench.\n"
+    )
+
+    with (
+        patch("meho_backplane.retrieval.indexer.get_embedding_service", return_value=fake),
+        patch("meho_backplane.retrieval.retriever.get_embedding_service", return_value=fake),
+    ):
+        entry, _ = await service.create_entry(tenant_id, "long-runbook", long_body)
+        await service.create_entry(tenant_id, "swap-entry", "Old body mentions oldtermxyz.")
+        await service.create_entry(tenant_id, "swap-entry", "New body mentions newtermxyz.")
+        await index_document(
+            tenant_id=tenant_id,
+            source="kb",
+            source_id="legacy-entry",
+            kind="kb-entry",
+            body="Legacy body mentions zebracode too.",
+        )
+        await index_document(
+            tenant_id=tenant_id,
+            source="memory",
+            source_id="tenant:zebra-note",
+            kind="memory-tenant",
+            body="Memory note about zebracode.",
+        )
+
+        kb_hits = await retrieve(tenant_id, "zebracode", source="kb", limit=50)
+        all_hits = await retrieve(tenant_id, "zebracode", limit=50)
+        memory_hits = await retrieve(tenant_id, "zebracode", source="memory", limit=50)
+        old_term = await retrieve(tenant_id, "oldtermxyz", source="kb", limit=50)
+        kind_hits = await retrieve(tenant_id, "newtermxyz", kind="kb-entry", limit=50)
+        search = await service.search_entries(tenant_id, "zebracode restart", limit=5)
+
+    head_ids = {h.source_id for h in kb_hits if h.source == "kb"}
+    assert head_ids == {"legacy-entry"}
+    assert "long-runbook" not in {h.source_id for h in all_hits}
+    passage_slugs = {
+        h.doc_metadata["kb_passage"]["slug"] for h in kb_hits if h.kind == "kb-passage"
+    }
+    assert "long-runbook" in passage_slugs
+    assert {h.source for h in all_hits} == {"kb", "kb-passage", "memory"}
+    assert [h.source_id for h in memory_hits] == ["tenant:zebra-note"]
+    assert not any("oldtermxyz" in h.body for h in old_term)
+    assert [h.doc_metadata["kb_passage"]["slug"] for h in kind_hits if "newtermxyz" in h.body] == [
+        "swap-entry"
+    ]
+
+    by_slug = {hit.slug: hit for hit in search}
+    runbook = by_slug["long-runbook"]
+    assert runbook.passages, "the long entry must come back as passages"
+    best = runbook.passages[0]
+    assert "zebracode" in best.text
+    assert len(best.text) < len(long_body) // 4
+    assert best.locator.heading_path == ["Runbook", "Restart"]
+    assert long_body[best.locator.start : best.locator.end] == best.text
+    assert best.locator.revision_id == entry.revision_id
+    assert by_slug["legacy-entry"].passages == []
 
 
 # ---------------------------------------------------------------------------

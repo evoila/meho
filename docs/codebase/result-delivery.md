@@ -103,6 +103,7 @@ and cut the work down. Wire ceilings run last, on the encoded response.
 | Inline sample budget | `JSONFLUX_SAMPLE_BYTE_BUDGET` (4096) | Sample rows on a reduced response | Fewer sample rows |
 | Rows budget | `RESULT_QUERY_MAX_OUTPUT_ROWS` (500), `RESULT_QUERY_MAX_OUTPUT_BYTES` (256 KiB) | `rows` of a read | `output_too_large` error |
 | Completed-call wire ceiling | `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES` (256 KiB, at least 2048) | A finished `call_operation` | `delivery="partial"` or `"unavailable"` |
+| Knowledge search wire ceiling | `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES` (same value) | A `search_knowledge` response | lowest-ranked hits left out, `delivery="partial"`, `omitted_hits` |
 | Read wire ceiling | `RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES` (2 MiB) | A `result_query` response | `output_too_large` with `delivery=unavailable` |
 
 **Measured on the real encoder.** Both wire ceilings use

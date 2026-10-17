@@ -12,7 +12,8 @@ SQL filters by `tenant_id` in both candidate statements.
 
 This is the shared read path for:
 
-- **G4 `meho kb search`** — `retrieve(source="kb")`, surfaced via
+- **G4 `meho kb search`** — `retrieve(source="kb")`, which ranks kb
+  passage rows (see "What search indexes for kb" below), surfaced via
   `KbService.search_entries` and the `search_knowledge` MCP tool.
 - **G5 `meho recall --query`** — `retrieve(source="memory",
   memory_eligibility=...)` through `MemoryService.search_memories`
@@ -161,8 +162,8 @@ retrieve()
 ```
 
 The two candidate SQL statements share the same WHERE shape — every
-filter parameter (`source` / `kind` / `metadata_filters`) plus the
-mandatory per-principal predicate (`principal_sub`, see the parameter
+filter parameter (`source` / `kind` / `metadata_filters`), the kb
+passage mapping, plus the mandatory per-principal predicate (`principal_sub`, see the parameter
 notes above) is applied symmetrically so the fused list is the
 intersection of two equally-scoped sets and neither signal can surface
 a user-scoped memory row the caller does not own.
@@ -201,18 +202,84 @@ So a caller sending
 reaches the substrate as `kind="kb-entry"` plus
 `metadata_filters={"source_kind": "evoila-distilled"}`.
 
-### What search indexes for kb, and what an exact read returns
+### What search indexes for kb: current passages (#3761)
 
-Retrieval only reads the `documents` table. For kb, that is the
-**latest head** of each entry; older bodies are never searched. Older
-bodies live in `kb_revision` (see [`kb.md`](./kb.md)). They are only
-reachable by an exact read, `meho://kb/id/{entry}/revision/{revision}`,
-which checks tenant, entry and revision together. A search hit's
-`source_id` is the slug; `meho://kb/{slug}` then returns the latest
-body plus its `id` (entry UUID) and `revision_id`, which together name
-that exact body for a later citation. Deleting a kb entry removes the
-head (so search stops finding it) and its revisions in one
-transaction.
+A kb entry is searched through **passages**, not through its whole
+body. A passage is one heading-aware piece of the entry's **current**
+revision, stored as its own `documents` row:
+
+| Column | Value |
+|---|---|
+| `source` / `kind` | `kb-passage` / `kb-passage` |
+| `source_id` | opaque: revision id, indexing generation tag, ordinal |
+| `body` | exactly `revision_body[start:end]` |
+| `embedding` | made from `heading path + body` |
+| `tokens` | the real token count of that text |
+| `metadata` | the entry's metadata, plus a `kb_passage` locator |
+
+The `kb_passage` locator holds `entry_id`, `revision_id`, `slug`,
+`ordinal`, `passage_count`, `heading_path`, `start`, `end`,
+`chunker_version`, `embedding_model` and `index_generation`. Offsets
+count Unicode code points.
+
+**How a body is split** (`kb/passages.py`, `chunk_markdown`). Every
+Markdown heading outside a code fence starts a section. A section that
+fits the model window is one passage. A larger one is cut at
+paragraphs, then lines, then sentences, then words, then single
+characters, and neighbouring pieces are packed while they still fit.
+The same body always gives the same passages.
+
+**How tokens are counted** (`retrieval/embedding.py`,
+`PassageTokenizer`). The embedding model cuts every text at 512 tokens,
+so its own tokenizer cannot tell whether a text is too long. The
+service loads a **second** tokenizer from the same installed model
+files with fastembed's own loader, reads the window from it, and turns
+off cutting and padding on that copy only. Special tokens (`[CLS]`,
+`[SEP]`) stay on. Header, text and special tokens together must be at
+most the window. The model's own tokenizer is never changed.
+
+**How a write publishes** (`kb/revisions.py`, `write_entry`):
+
+1. Read the entry: head, latest revision, passage generation.
+2. Prepare, with no transaction open: split the body, then embed the
+   head (if the body changed) and every new passage in one model call
+   (`retrieval/indexer.py`, `prepare_index_batch`). Nothing is written.
+3. Publish in one short transaction: lock the head (PostgreSQL), check
+   the entry did not move, update the head, add the revision, delete
+   the old passages, insert the new ones (`PreparedIndexBatch.apply`,
+   one use only), check again, commit.
+
+A failure in step 2 or 3 keeps the old head, revision and passages.
+When the body is unchanged and the passages already belong to the
+current revision and generation, nothing is embedded. The passages are
+rebuilt for the same revision when the chunker version or the model
+changes (a new **indexing generation**, so new passage ids).
+
+**One mapping for every kb search.** The retriever's
+`_KB_PASSAGE_MAPPING_SQL` sits in both candidate statements:
+
+- `source="kb"` also admits `kb-passage` rows; `kind="kb-entry"` also
+  admits `kb-passage` rows. `meho kb search`, `search_knowledge` and
+  `POST /api/v1/retrieve` with `source="kb"` therefore rank passages.
+- A kb head row (`source="kb"`) is not a candidate once its entry has
+  passage rows. An entry never appears twice.
+- Memory and every other source are not affected.
+
+**What search returns.** `KbService.search_entries` ranks up to 50
+passages and folds them into one `KbEntrySearchHit` per entry, best
+first. A hit carries up to 3 matching passages (`KbPassageEvidence`):
+the whole passage text and its `KbPassageLocator`. The locator `uri`
+is `meho://kb/id/{entry}/revision/{revision}`, the exact read of that
+revision; `body[start:end]` there is the passage. `coverage` is
+`complete` when the passages hold the whole entry. Old revisions stay
+readable by that exact read, but they are never searched.
+
+**Bounded delivery.** `search_knowledge` measures its response with
+the shared `measure_delivered_wire_bytes` (#3641) against
+`RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES`. When it is too large, the
+lowest-ranked hits are left out, `delivery` is `partial` and
+`omitted_hits` says how many. A passage is never cut. Snippets and
+passage texts are wrapped as untrusted text.
 
 ## Dependencies
 
@@ -243,6 +310,13 @@ transaction.
 - **IVFFlat empty-table caveat.** Building IVFFlat against an empty
   table produces zero centroids. The expected remediation is `REINDEX
   INDEX documents_embedding_idx` after the first backfill batch.
+- **Entries written before passages existed.** Their head stays the
+  search candidate (one whole-body hit, no passages) until the entry is
+  written again. `meho kb ingest` rewrites every file, also unchanged
+  ones, so running it once builds the passages.
+- **Retrieval eval counts passages.** `retrieval/eval/runner.py` asks
+  for `k` rows and folds passages of one entry into one slug, so fewer
+  than `k` slugs can come back.
 - **Per-query re-embed.** Every retrieval calls `encode_one(query)`;
   there is no embedding cache in v0.2. v0.2.next may add an LRU once
   cache-hit ratios are measured.
@@ -260,3 +334,7 @@ transaction.
 - Memory recall push-down Task: [#1179 G4.4-T2](https://github.com/evoila/meho/issues/1179) (follow-up).
 - PG JSONB containment + GIN indexing: <https://www.postgresql.org/docs/16/datatype-json.html#JSON-CONTAINMENT> and <https://www.postgresql.org/docs/16/datatype-json.html#JSON-INDEXING>.
 - pgvector: <https://github.com/pgvector/pgvector>.
+- KB passage index: #3761 (Initiative #3730).
+- fastembed tokenizer loading (0.9.0, `fastembed/common/preprocessor_utils.py`, `load_tokenizer`): <https://github.com/qdrant/fastembed>.
+- Hugging Face `tokenizers` (`no_truncation`, `no_padding`, post-processor): <https://huggingface.co/docs/tokenizers/api/tokenizer>.
+- BGE small model card (512-token window): <https://huggingface.co/BAAI/bge-small-en-v1.5>.

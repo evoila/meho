@@ -188,10 +188,12 @@ func runCall(cmd *cobra.Command, opts callOptions) error {
 	}
 	// Classify status BEFORE rendering. The backend
 	// `Connector.execute` contract (see
-	// `backend/src/meho_backplane/connectors/schemas.py`) defines three
-	// valid values: "ok" / "error" / "denied". Anything else is a
-	// malformed response — surface as unexpected_response (exit 4)
-	// without printing the result envelope first. Pre-fix-3 we
+	// `backend/src/meho_backplane/connectors/schemas.py`) defines
+	// "ok" / "error" / "denied" (awaiting_approval is handled above).
+	// Anything else is a status this CLI does not know — most likely
+	// the backplane is newer — so surface it as unexpected_response
+	// (exit 4) with a message that names the version gap, without
+	// printing the result envelope first. Pre-fix-3 we
 	// rendered then classified, which (a) misled the operator into
 	// thinking they had a real result before the trailing error fired
 	// and (b) produced two JSON objects on stdout in --json mode,
@@ -200,14 +202,7 @@ func runCall(cmd *cobra.Command, opts callOptions) error {
 	case "ok", "error", "denied":
 		// fall through to rendering + exit-code branching below.
 	default:
-		return output.RenderError(
-			cmd.ErrOrStderr(),
-			output.Unexpected(fmt.Sprintf(
-				"backplane returned invalid OperationResult.status %q (expected one of: ok / error / denied / awaiting_approval)",
-				result.Status,
-			)),
-			opts.JSONOut,
-		)
+		return output.RenderError(cmd.ErrOrStderr(), dispatch.UnknownStatusError(result.Status), opts.JSONOut)
 	}
 	if opts.JSONOut {
 		if err := output.PrintJSON(cmd.OutOrStdout(), result); err != nil {

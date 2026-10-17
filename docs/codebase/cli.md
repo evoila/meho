@@ -182,7 +182,7 @@ cli/
     │   ├── version_test.go    # output-contract test.
     │   ├── login.go           # `meho login` subcommand + auth-config discovery + --resolve split-DNS pin (#2107) + config persistence + post-login memory-migration nudge (T5 #612).
     │   ├── login_test.go      # override-resolution + help-flag + --resolve help/hint (#2107) + post-login nudge tests.
-    │   ├── status.go          # `meho status` subcommand + --json + URL resolver.
+    │   ├── status.go          # `meho status` subcommand + --json + URL resolver + printVersionSkew (shared with login, #3871).
     │   ├── status_test.go     # happy/JSON/no-creds/unreachable/401/redaction tests.
     │   ├── audit/            # G8.1-T3 #467 — `meho audit …` verb tree.
     │   │   ├── audit.go          # NewRootCmd + shared typed-client helpers (G0.12-T5 #1263).
@@ -321,7 +321,8 @@ cli/
     │   ├── format.go          # human + JSON formatters + structured exit codes.
     │   └── format_test.go     # human/JSON/exit-code pinning.
     └── version/
-        └── version.go         # build-time identity (Version/Commit/Date).
+        ├── version.go         # build-time identity (Version/Commit/Date).
+        └── skew.go            # GET /version fetch + CLI/backplane version-gap warning (#3871).
 ```
 
 `internal/` enforces the Go-visibility seal: only packages under
@@ -727,7 +728,12 @@ renders that response in one of two formats.
      at login time. If refresh succeeds, retries the request once.
    * If refresh fails (no refresh_token, IdP rejected), surfaces
      `auth_expired`.
-4. **Render output.** Default human format on stdout; `--json`
+4. **Check the version gap.** `printVersionSkew` reads the
+   backplane's `GET /version` (3-second cap) and compares its
+   `chart_version` with the CLI's build version
+   (`internal/version/skew.go`). See
+   [Version check](#version-check-login-and-status) below.
+5. **Render output.** Default human format on stdout; `--json`
    emits the typed body as a single JSON document. Both formats
    write success output to stdout and errors to stderr.
 
@@ -803,6 +809,39 @@ defences enforce that:
 The same `eyJ` prefix matches access tokens, refresh tokens, and
 id tokens alike, so the single redaction rule covers every
 credential the CLI persists.
+
+### Version check (`login` and `status`)
+
+An old CLI against a newer backplane can misread new responses. For
+example, a CLI from before the approval flow called a write that was
+waiting for approval an "invalid" response. So `meho login` (after the
+token is stored) and `meho status` (after the health call) compare
+versions:
+
+- The CLI reads `GET /version` on the backplane. The route needs no
+  login. Only `chart_version` is used; `git_sha` cannot be compared
+  with a CLI release.
+- Supported: the same major version, and the CLI minor version is the
+  same as the backplane's or one lower (N-1).
+- Outside that range the CLI prints one line on **stderr**, for
+  example `warning: CLI v0.12.0 vs backplane 0.35.12 — this CLI is too
+  old for this backplane. Upgrade: <release page for v0.35.12>`.
+  The CLI and the backplane share release tags, so the backplane's
+  version names the CLI release to install.
+- No warning when the comparison makes no sense: a `dev` CLI build, a
+  backplane without `chart_version`, or a main-branch backplane build
+  (date-based `0.1.<YYYYMMDD>-<sha>` chart version).
+- The check is best effort. A missing route, a timeout, or a bad body
+  prints nothing and never changes the exit code. stdout is not
+  touched, so `meho status --json` stays one JSON document.
+
+A status the CLI does not know in an `OperationResult` gets the same
+treatment: `dispatch.UnknownStatusError` (used by `dispatch.Render`,
+`meho operation call`, and `meho secret read`) says the backplane is
+probably newer than the CLI, that the operation may have run or be
+waiting for approval, and points at `meho status`. The exit code stays
+`4` (`unexpected_response`) because the CLI cannot tell whether the
+operation worked.
 
 ## Watch flow (`meho status --watch`, G6.1-T5)
 
@@ -1152,7 +1191,10 @@ scenarios.
   `errOpError` sentinel.
 - `2` — `auth_expired` (no stored credentials, or refresh failed).
 - `3` — `unreachable` (network / transport failure).
-- `4` — `unexpected_response` (parse error, malformed JSON, etc.).
+- `4` — `unexpected_response` (parse error, malformed JSON, or an
+  `OperationResult.status` this CLI does not know — the message names
+  a likely CLI/backplane version gap, see
+  [Version check](#version-check-login-and-status)).
 
 ### MCP parity
 

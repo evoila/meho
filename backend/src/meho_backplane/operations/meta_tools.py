@@ -442,6 +442,22 @@ class CallOperationBody(BaseModel):
             "keeps a bare call_operation byte-identical to pre-#3197."
         ),
     )
+    idempotency_key: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        description=(
+            "Optional retry key for a call that waits for approval (#3486). "
+            "If you send the same key again with the identical call, MEHO "
+            "returns the approval request it already made (same "
+            "approval_request_id, extras.approval_request_reused=true) "
+            "instead of a second one. The key belongs to you: another "
+            "principal's key never matches. It is free again once that "
+            "request is rejected or expires. The same key with a different "
+            "call is refused with idempotency_key_conflict. Ignored when the "
+            "call does not wait for approval."
+        ),
+    )
     async_: bool = Field(
         default=False,
         alias="async",
@@ -1143,6 +1159,9 @@ async def _call_operation_impl(
                 # ``params``, so it stays out of ``params_hash`` and the op's
                 # parameter_schema. ``None`` for a non-destructive call.
                 preview_hash=arguments.get("preview_hash"),
+                # #3486: retry key for a parked call, a MEHO dispatch control
+                # like ``preview_hash`` -- never part of ``params``.
+                idempotency_key=arguments.get("idempotency_key"),
             )
     finally:
         if work_ref_token is not None:

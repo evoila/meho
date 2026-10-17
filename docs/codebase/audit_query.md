@@ -53,7 +53,7 @@ Field-to-source mapping:
 | `op_id` | `payload['op_id']` if a string, else `f"http.{method.lower()}:{path}"`. |
 | `op_class` | `payload['op_class']` if a string, else `classify_op(op_id)` from `broadcast.events`. For the MCP `call_operation` outer-wrapper row this is `"tool_call"` (G0.15-T3 #1212) — the inner DISPATCH row carries the domain `read` / `write` class. |
 | `result_status` | Derived from `status_code` — 401/403 → `"denied"`, 4xx/5xx else → `"error"`, otherwise `"ok"`. |
-| `principal_name` | `payload['principal_name']` when present (MCP rows since G0.15-T3 #1212; `write_mcp_audit_row` merges `Operator.name` from the validated JWT). HTTP-chassis rows remain `None` — the `verify_jwt_and_bind` middleware does not bind `name` to contextvars, so the audit middleware sees no source for it. |
+| `principal_name` | `payload['principal_name']` when present. Three writers set it from `Operator.name` (the token's `name` claim): MCP rows (#1212, `write_mcp_audit_row`), approval request and decision rows (#3300), and `DISPATCH` operation run rows (#4029, `operations/_audit.py:write_audit_row`). The name always belongs to the row's `operator_sub`. On an approved run that is the approver when a person approves through the console, CLI or REST (`resume_dispatch_after_approval`), and the agent when MEHO's own agent waits for the approval and resumes the run itself (`agent/approval_wait.py:_resume_approved_or_already_resumed`). It is `None` when the token has no name. HTTP-chassis rows remain `None` — the `verify_jwt_and_bind` middleware does not bind `name` to contextvars, so the audit middleware sees no source for it. |
 | `parent_audit_id` | `audit_log.parent_audit_id` — composite-operation lineage column (G0.6-T7 #398, migration `0006`). Surfaced on the row since G8.2-T3 (#1011); exact-match filterable since #4030. |
 | `agent_session_id` | `audit_log.agent_session_id` — MCP-session correlation column (G8.2-T1 #1009, migration `0014`). Surfaced + filterable since G8.2-T3 (#1011). |
 | `work_ref` | `audit_log.work_ref` — external change-ticket reference (work_ref I1-T1 #1655, migration `0039`). An opaque string (e.g. `"gh:evoila/meho#1"`) correlating a governed operation to the out-of-band change record that authorised it. Surfaced + exact-match-filterable since work_ref I1-T3 (#1658). Bind sources: the request/agent/dispatch boundary (work_ref I1-T2 #1657) and runbook runs (work_ref I3-T1 #1661 — a run's `runbook_runs.work_ref` is bound around each `operation_call` step's dispatch + on the abort row, so the step audit rows inherit the run's change ticket). NULL when no bind source is in scope; system-internal writers leave it NULL by design. |
@@ -105,7 +105,7 @@ query_audit(filters, tenant_id, session)
   │   ├─ op_class = payload['op_class'] if str else classify_op(op_id)
   │   ├─ result_status = _derive_result_status(status_code)
   │   ├─ principal_name = payload['principal_name'] if str
-  │   │                  else None   # MCP rows since G0.15-T3 #1212
+  │   │                  else None   # MCP, approval and DISPATCH rows
   │   │                              # carry it in payload; HTTP-chassis
   │   │                              # rows still have no source
   │   └─ AuditEntry(... real cols ..., op_id, op_class, result_status,
@@ -515,12 +515,18 @@ parity with the ``/api/v1/*`` chassis path and the MCP transport path.
 
 ## Known issues / v0.2 gaps
 
-* **`principal_name` populates for MCP rows; HTTP-chassis rows still
-  return `None`.** Since G0.15-T3 (#1212) the MCP audit writer
-  (`mcp/audit.py:write_mcp_audit_row`) merges `Operator.name` into
-  `payload['principal_name']` whenever the JWT carries it, and the
-  audit-query handler reads that key off the JSON column into the
-  returned `AuditEntry`. The HTTP audit middleware
+* **`principal_name` populates for MCP, approval and `DISPATCH` rows;
+  HTTP-chassis rows still return `None`.** The MCP audit writer
+  (`mcp/audit.py:write_mcp_audit_row`, #1212), the approval row writer
+  (`operations/approval_queue.py:_write_audit_row`, #3300) and the
+  operation run writer (`operations/_audit.py:write_audit_row`, #4029)
+  put `Operator.name` into `payload['principal_name']` whenever the JWT
+  carries it, and the audit-query handler reads that key off the JSON
+  column into the returned `AuditEntry`. A run row is the only row of an
+  approved run, so it must carry the name itself. The name always
+  belongs to the row's `operator_sub`: the approver when a person
+  approves through the console, CLI or REST, and the agent when
+  MEHO's own agent waits for the approval and resumes the run itself. The HTTP audit middleware
   (`meho_backplane.audit._write_audit_row`) reads `operator_sub` from
   contextvars but never the JWT `name` claim, so HTTP rows remain
   `principal_name=None`. Closing the HTTP gap is a small write-path

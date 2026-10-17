@@ -256,6 +256,10 @@ curl -s https://<your-backplane>/ready | jq .features.approval_queue.effective_p
 # "single_operator_break_glass"   → APPROVAL_ALLOW_SELF_APPROVAL=true is set
 ```
 
+If the deploy sets `METRICS_AUTH_TOKEN`, `/ready` only returns the
+`features` block when you send that token. Add
+`-H "Authorization: Bearer <metrics-token>"` to the `curl` call.
+
 **Did a specific write self-approve?** Two signals:
 
 - A structured **`approval_self_approval_break_glass`** log event

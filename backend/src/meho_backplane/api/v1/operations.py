@@ -73,6 +73,7 @@ from meho_backplane.operations.result_query import (
     ResultQueryOutputTooLargeError,
     ResultQuerySpec,
     ResultQueryTimeoutError,
+    ResultReadRejectedError,
     read_result_window,
     run_result_query,
 )
@@ -409,7 +410,10 @@ async def post_result_query(
     indistinguishable from "not found" so the store leaks no existence
     signal across the operator boundary. A malformed ``handle_id`` (not a
     UUID) or an out-of-range ``offset`` / ``limit`` is a ``422`` at the
-    Pydantic layer before the handler runs.
+    Pydantic layer before the handler runs. A read refused by the result-read
+    rate or capacity check (#3640) is a ``429`` with ``Retry-After``; a page
+    that runs past the time budget is a ``422`` with
+    ``reason="query_timeout"``, the same as a query.
     """
     if body.query is not None:
         return await _run_result_query_body(operator, body)
@@ -429,6 +433,11 @@ async def post_result_query(
             status_code=422,
             detail={"message": str(exc), "reason": "invalid_query"},
         ) from exc
+    except ResultQueryTimeoutError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": str(exc), "reason": "query_timeout"},
+        ) from exc
     except ResultQueryOutputTooLargeError as exc:
         raise HTTPException(
             status_code=422,
@@ -438,6 +447,21 @@ async def post_result_query(
                 "delivery": "unavailable",
             },
         ) from exc
+    except ResultReadRejectedError as exc:
+        raise _read_rejected(exc) from exc
+
+
+def _read_rejected(exc: ResultReadRejectedError) -> HTTPException:
+    """Map a refused read (rate or capacity, #3640) to a ``429``."""
+    return HTTPException(
+        status_code=429,
+        detail={
+            "message": str(exc),
+            "reason": exc.reason,
+            "retry_after_seconds": exc.retry_after_seconds,
+        },
+        headers={"Retry-After": str(exc.retry_after_seconds)},
+    )
 
 
 async def _run_result_query_body(
@@ -488,6 +512,8 @@ async def _run_result_query_body(
                 "delivery": "unavailable",
             },
         ) from exc
+    except ResultReadRejectedError as exc:
+        raise _read_rejected(exc) from exc
 
 
 @router.post("/preview")

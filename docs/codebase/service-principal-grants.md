@@ -204,6 +204,47 @@ layer (`ServicePrincipalGrantService.create`, NULL-safe on the nullable
 selector columns) rather than by a partial index, sidestepping the awkward
 NULL-vs-NULL portability across Postgres / SQLite.
 
+### Orphaned grants — the target was deleted or registered again (#3430)
+
+A grant with a concrete `target_id` matches only that exact target id. When
+the target is deleted (`DELETE /api/v1/targets/{name}` stamps `deleted_at`)
+or torn down and registered again (the new registration gets a **new** id),
+the old grant can never match again. The run then waits for approval on
+every op the grant was meant to cover. Deleting a target does not touch its
+grants, so before #3430 nothing showed this.
+
+Now every grant read (list, show, and the create response) marks such a grant
+as **orphaned**:
+
+- `orphaned: true` — the grant is not revoked, it has a concrete `target_id`,
+  and no live (`deleted_at IS NULL`) target with that id exists in the tenant.
+  A target id with no row at all counts too.
+- `orphan_remediation` — a plain-language fix: create a new grant with a
+  target selector (`target_name_pattern` set to the old target name when MEHO
+  still knows it, or `target_product`), which matches by name or product and
+  so survives a new registration; then revoke the orphaned grant. The
+  suggested pattern escapes `*`, `?` and `[` in the old name (`glob.escape`),
+  so it matches that name literally and not a look-alike target.
+
+Rules:
+
+- **Read-time check only.** `orphaned` is not a stored column. It is worked
+  out on each read by `service_grants.classify_orphaned_grants` (one query for
+  live targets, plus one for old names only when something is orphaned).
+- **Never auto-revoked.** MEHO does not revoke or change an orphaned grant.
+  Cleanup stays an operator decision.
+- **Selector and targetless grants are never orphaned** — they do not point
+  at one target id. Revoked grants are not flagged either (they are already
+  cleaned up).
+- **Surfaces.** REST returns the two fields on `ServiceGrantRead`. The CLI
+  `grants list` adds an `ORPHANED` column and a count line; `grants show`
+  prints `orphaned: yes` and the remediation. The console `/ui/grants` shows
+  an `orphaned` status badge with the remediation under it.
+
+A named grant profile attached at target registration (so a grant set is
+applied again by name on a new registration) is **not built**. The selector
+grant already survives a new registration, so it covers the same need.
+
 ### Delete-shaped guardrail
 
 A grant is the **floor** of what runs unattended, never a bypass of a
@@ -334,6 +375,7 @@ route on this router has no matching CLI verb in that reference.
   (#3349) — selector columns + narrowed targetless partial unique index.
 - `operations/service_grants.py` — CRUD service + `find_live_grant`
   (selector matching) + `null_target_only_park_hint` (#3349) +
+  `classify_orphaned_grants` (#3430, read-time orphan flag) +
   `consult_and_record_grant` + delete-shaped classification
   (`delete_shaped_refusal_reason` public alias).
 - `operations/service_grant_schemas.py` — REST request / response shapes

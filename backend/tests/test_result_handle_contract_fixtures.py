@@ -28,7 +28,7 @@ from meho_backplane.jsonflux.query.contract import (
 )
 from meho_backplane.jsonflux.query.result_catalog import AdmissionGuard, build_catalog
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
-from meho_backplane.operations.result_query import _run_compiled_query
+from meho_backplane.operations.result_query import _query_pipeline_sync, _WorkerGuard
 from meho_backplane.settings import get_settings
 
 
@@ -125,12 +125,11 @@ async def test_string_literals_are_rejected_for_non_string_columns(
     """DuckDB binding must not silently coerce text into bools or integers."""
     field = next(iter(rows[0]))
     with pytest.raises(QueryContractError):
-        await _run_compiled_query(
+        _query_pipeline_sync(
+            _WorkerGuard(),
             rows,
             ResultQuerySpec(filter=[{"field": field, "op": "=", "value": value}]),
-            uuid4(),
-            max_output_rows=10,
-            timeout_seconds=5,
+            10,
         )
 
 
@@ -138,12 +137,11 @@ async def test_kind_switches_are_not_replaced_during_projection() -> None:
     """A value that changes JSON kind survives the projection unchanged."""
     values = [{"nested": "object"}, ["list"], "scalar"]
     _, row_set = await _stored_result([{"value": value} for value in values] * 17)
-    projected, _, _ = await _run_compiled_query(
+    projected, *_ = _query_pipeline_sync(
+        _WorkerGuard(),
         row_set.rows,
         ResultQuerySpec(select=["value"]),
-        uuid4(),
-        max_output_rows=100,
-        timeout_seconds=5,
+        100,
     )
     assert [row["value"] for row in projected] == values * 17
 
@@ -151,12 +149,11 @@ async def test_kind_switches_are_not_replaced_during_projection() -> None:
 async def test_empty_object_remains_distinguishable() -> None:
     """An empty object must remain an object through query projection."""
     _, row_set = await _stored_result([{"value": {}}] * 51)
-    projected, _, _ = await _run_compiled_query(
+    projected, *_ = _query_pipeline_sync(
+        _WorkerGuard(),
         row_set.rows,
         ResultQuerySpec(select=["value"]),
-        uuid4(),
-        max_output_rows=100,
-        timeout_seconds=5,
+        100,
     )
     assert projected[0]["value"] == {}
 
@@ -164,12 +161,11 @@ async def test_empty_object_remains_distinguishable() -> None:
 async def test_empty_list_remains_distinguishable() -> None:
     """An empty list is already retained through the reducer, store, and query path."""
     _, row_set = await _stored_result([{"value": []}] * 51)
-    projected, _, _ = await _run_compiled_query(
+    projected, *_ = _query_pipeline_sync(
+        _WorkerGuard(),
         row_set.rows,
         ResultQuerySpec(select=["value"]),
-        uuid4(),
-        max_output_rows=100,
-        timeout_seconds=5,
+        100,
     )
     assert projected[0]["value"] == []
 
@@ -178,12 +174,11 @@ async def test_int64_max_round_trips_through_reducer_store_and_query() -> None:
     """The supported signed-int64 maximum is already preserved and queryable."""
     number = 2**63 - 1
     _, row_set = await _stored_result([{"number": number}] * 51)
-    projected, _, _ = await _run_compiled_query(
+    projected, *_ = _query_pipeline_sync(
+        _WorkerGuard(),
         row_set.rows,
         ResultQuerySpec(filter=[{"field": "number", "op": "=", "value": number}]),
-        uuid4(),
-        max_output_rows=100,
-        timeout_seconds=5,
+        100,
     )
     assert projected[0]["number"] == number
 
@@ -193,21 +188,19 @@ async def test_integer_overflow_is_preserved_and_explicitly_raw_only(number: int
     """Overflow values stay in the spill, come back raw, and cannot be filtered."""
     row_set = await _stored_rows([{"number": number}] * 51)
     assert row_set.rows[0]["number"] == number
-    projected, _, _ = await _run_compiled_query(
+    projected, *_ = _query_pipeline_sync(
+        _WorkerGuard(),
         row_set.rows,
         ResultQuerySpec(select=["number"]),
-        uuid4(),
-        max_output_rows=100,
-        timeout_seconds=5,
+        100,
     )
     assert projected[0]["number"] == number
     with pytest.raises(QueryContractError, match="integer_out_of_int64_range"):
-        await _run_compiled_query(
+        _query_pipeline_sync(
+            _WorkerGuard(),
             row_set.rows,
             ResultQuerySpec(filter=[{"field": "number", "op": "=", "value": number}]),
-            uuid4(),
-            max_output_rows=100,
-            timeout_seconds=5,
+            100,
         )
 
 
@@ -219,32 +212,29 @@ async def test_large_integer_mixed_with_float_keeps_its_exact_value() -> None:
     """
     large = 2**53 + 1
     rows = [{"number": large}, {"number": 1.5}]
-    result, _, _ = await _run_compiled_query(
+    result, *_ = _query_pipeline_sync(
+        _WorkerGuard(),
         rows,
         ResultQuerySpec(),
-        uuid4(),
-        max_output_rows=10,
-        timeout_seconds=5,
+        10,
     )
     assert large in [row["number"] for row in result]
     with pytest.raises(QueryContractError, match="mixed_non_null_kinds"):
-        await _run_compiled_query(
+        _query_pipeline_sync(
+            _WorkerGuard(),
             rows,
             ResultQuerySpec(order_by=[{"field": "number"}]),
-            uuid4(),
-            max_output_rows=10,
-            timeout_seconds=5,
+            10,
         )
 
 
 async def test_case_distinct_keys_remain_independently_queryable() -> None:
     """A DuckDB registration must not rename one of two case-distinct JSON keys."""
-    result, _, _ = await _run_compiled_query(
+    result, *_ = _query_pipeline_sync(
+        _WorkerGuard(),
         [{"Foo": "upper", "foo": "lower"}],
         ResultQuerySpec(),
-        uuid4(),
-        max_output_rows=10,
-        timeout_seconds=5,
+        10,
     )
     assert set(result[0]) == {"Foo", "foo"}
 

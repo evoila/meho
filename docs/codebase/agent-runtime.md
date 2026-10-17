@@ -36,7 +36,9 @@ All public types are re-exported from `meho_backplane.agent`
   `agent/toolset.py`) — the toolset resolver + handler-to-agent-tool adapter.
   `resolve_agent_tools(toolset, operator)` returns the `pydantic_ai.Tool`
   list to register: (spec allow-list) ∩ (meta-tools the operator's role
-  admits). See "Tools" below.
+  admits). `resolve_agent_toolset` returns the same tools inside a
+  `ToolsetResolution` that also lists `missing` and `disabled` names. See
+  "Tools" below.
 - **`AgentRun`** — the runtime-checkable Protocol every consumer depends
   on: `start(definition, operator, inputs) -> AgentRunHandle`,
   `poll(handle) -> AgentRunStatus`, `result(handle) -> AgentRunResult`,
@@ -139,7 +141,8 @@ JSON-shaped (so it can grow without a migration):
   meta-tools is `META_TOOL_NAMES`; an unknown name in the list is ignored
   with a warning (forward-compat).
 - `connectors` — optional allow-list of `connector_id` values the agent may
-  reach through `call_operation`. Omitted / `null` means "no connector-level
+  reach through `call_operation` (and inspect through `preview_operation`).
+  Omitted / `null` means "no connector-level
   restriction beyond what dispatch already enforces" (the tenant boundary +
   per-op RBAC still apply); `[]` forbids every connector. A `call_operation`
   to a connector outside the list is rejected with a `ModelRetry` — a
@@ -167,8 +170,8 @@ participant:
 - `broadcast_watch` — a single bounded long-poll (≤30s) for new events; no
   background subscription.
 
-These do **not** re-implement the feed. `_build_broadcast_meta_tools` in
-`toolset.py` resolves the `(inputSchema, handler)` pairs the MCP surface
+These do **not** re-implement the feed. `build_broadcast_meta_tools` in
+`toolset_broadcast.py` resolves the `(inputSchema, handler)` pairs the MCP surface
 already registered for `meho_broadcast_{announce,recent,watch}` (via the
 registry's `get_tool`) and reuses the handlers verbatim, so the agent's wire
 shape — the #2544 structured claims, the #2545 actor/work_ref lineage, the
@@ -202,6 +205,60 @@ definition with `toolset is None` uses the legacy `_register_default_meta_tools`
 fallback (the original two tools) and does not gain the broadcast surface; a
 definition wanting coordination lists them (or omits `meta_tools` to take the
 whole catalog).
+
+### Governed discovery and result-handle tools (#3737)
+
+Configured definitions also get four tools from the MCP working surface, under
+the same names:
+
+- `meho_connector_list` — the connectors the tenant can use.
+- `list_targets` — the tenant's managed targets. A page over the JSONFlux
+  threshold comes back as a result handle, as on MCP.
+- `preview_operation` — the request `call_operation` would send, without
+  sending it.
+- `result_query` — read rows back from a JSONFlux result handle.
+
+`agent/toolset_discovery.py` builds them the same way the broadcast bridge
+does: it looks up the MCP `(definition, handler)` with `get_tool`, reuses the
+handler, publishes the MCP wire schema (`to_wire()`), and keeps the MCP
+`required_role` as the floor. So tenant scoping, target authorization (the
+cross-tenant `platform_admin` check in `list_targets`), the preview rate
+limit, and the result-handle owner check are the same code on both surfaces.
+
+The MCP `tools/call` handler runs some gates before the tool handler. The
+agent loop does not, so `_governed_handler` repeats them on every call:
+
+- role and capability, read from the operator of that call;
+- the registered `inputSchema`, with the same Draft 2020-12 validator and
+  format checker. This matters: `list_targets` and `result_query` rely on the
+  schema for their `limit` bounds, and `Tool.from_schema` does not validate
+  arguments.
+
+A failed gate, an `McpInvalidParamsError`, or an `McpRateLimitedError` reaches
+the model as `ModelRetry`. On top of that, `_make_meta_tool` re-checks every
+catalog tool's role floor against `ctx.deps` at call time, and checks the
+`connectors` allow-list for both `call_operation` and `preview_operation`.
+
+The empty spec `{}` resolves, in order: `list_operation_groups`,
+`search_operations`, `call_operation`, `meho_connector_list`, `list_targets`,
+`preview_operation`, `result_query`, `broadcast_announce`, `broadcast_recent`,
+`broadcast_watch`. A definition with `toolset is None` keeps the legacy two
+tools until it is migrated to a spec. Runbook, approval, and admin tools stay
+out of the catalog on purpose; this is not full 25-tool parity with MCP.
+
+Hosted calls to these four tools do not write the per-call MCP audit row
+(`mcp/audit.py`); that row belongs to the MCP transport. `call_operation`
+still writes its dispatch audit row as before.
+
+**Missing versus disabled.** `resolve_agent_toolset` reports two different
+outcomes, and `agent_toolset_resolved` logs both:
+
+- `missing` — the spec names a tool this runtime does not ship.
+- `disabled` — a catalog tool that was not registered, with a reason:
+  `not_in_allow_list` (the spec's `meta_tools` leaves it out) or
+  `role_below_floor` (the run's role is too low).
+
+Neither kind is registered, so the model never sees it.
 
 ## Invocation surface (T4 #811)
 
@@ -1005,7 +1062,10 @@ the architecture grounding it links back to.
   adapter directly (no model run): the spec ∩ identity-perms intersection
   (including the read_only-floor exclusion), operator threading, tool input
   schemas reflecting the meta-tool schemas, the connector allow-list yielding
-  a `ModelRetry`, and spec validation.
+  a `ModelRetry`, and spec validation. The #3737 tests pin the `{}` surface
+  and the legacy `None` two-tool surface, and cover missing versus disabled
+  outcomes, the call-time role re-check, MCP schema enforcement, MCP handler
+  reuse, and JSONFlux handles passing through unchanged.
 - `backend/tests/integration/test_agent_run_anthropic.py` — opt-in
   real-Anthropic loop (skipped unless `ANTHROPIC_API_KEY` is set; marked
   `slow`). Proves the seam drives a live model that calls a real operation

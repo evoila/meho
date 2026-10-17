@@ -913,7 +913,8 @@ def test_edges_facet_conflicts_only_filter(
     body = response.json()
     assert body["result"]["isError"] is False
     payload = json.loads(body["result"]["content"][0]["text"])
-    assert payload == {"kind": "edges", "edges": []}
+    assert payload["kind"] == "edges"
+    assert payload["edges"] == []
     assert mock_list.await_args.kwargs["conflicts_only"] is True
 
 

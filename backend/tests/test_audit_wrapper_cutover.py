@@ -18,7 +18,9 @@ actions and decisions. This file proves it across the fronts:
   a MEHO change with no record of its own writes one
   ``operation_execution`` row; a change whose own record names another
   identity keeps the caller's row; a write that failed in Keycloak keeps
-  one ``operation_execution`` row.
+  one ``operation_execution`` row; a connector edit's own record carries
+  the agent session, the delegated actor and the request id the wrapper
+  row used to carry.
 """
 
 from __future__ import annotations
@@ -48,6 +50,7 @@ from meho_backplane.api.v1.retrieve_usage import router as retrieve_usage_router
 from meho_backplane.api.v1.runner_principals import router as runner_principals_router
 from meho_backplane.audit import AuditMiddleware, _write_audit_row
 from meho_backplane.auth.agent_principals import AgentPrincipalService
+from meho_backplane.auth.delegation import ACTOR_SUB_KEY
 from meho_backplane.auth.keycloak_admin import KeycloakAdminError
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.runner_principals import RunnerPrincipalService
@@ -60,6 +63,7 @@ from meho_backplane.db.models import (
     ApprovalRequestStatus,
     AuditEventClass,
     AuditLog,
+    OperationGroup,
     RunnerPrincipal,
 )
 from meho_backplane.docs_search.target_scope import TargetDeniedError
@@ -212,6 +216,80 @@ def test_legacy_rows_do_not_count_as_classified() -> None:
     finally:
         audit_cutover.close_classified_record_scope(token)
     assert audit_cutover.classified_record_seen("op") is False
+
+
+def _classified_row(
+    event_class: AuditEventClass = AuditEventClass.OPERATION_EXECUTION, **lineage: Any
+) -> AuditLog:
+    """Build (not store) a row the way a domain writer does."""
+    from datetime import UTC, datetime
+    from decimal import Decimal
+
+    return AuditLog(
+        id=uuid.uuid4(),
+        event_class=event_class,
+        occurred_at=datetime.now(UTC),
+        operator_sub="op-rest",
+        tenant_id=_TENANT,
+        method="SERVICE",
+        path="probe.edit",
+        status_code=200,
+        duration_ms=Decimal("0"),
+        payload={},
+        **lineage,
+    )
+
+
+def _lineage(row: AuditLog) -> tuple[Any, ...]:
+    return (row.agent_session_id, row.actor_sub, row.parent_audit_id, row.request_id, row.work_ref)
+
+
+@pytest.mark.usefixtures("cutover_on")
+def test_classified_rows_inherit_the_request_lineage() -> None:
+    """A record built inside a request gets the lineage its writer left empty.
+
+    A value the writer set is kept. A ``legacy_request`` row (a wrapper
+    row) and a row built outside a scope are left alone.
+    """
+    session_id, parent_id, request_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    bound = structlog.contextvars.bound_contextvars(
+        mcp_session_id=str(session_id),
+        request_id=str(request_id),
+        **{ACTOR_SUB_KEY: "agent:planner"},
+    )
+    parent_token = dispatch_audit.parent_audit_id_var.set(parent_id)
+    work_ref_token = dispatch_audit.work_ref_var.set("ticket-1")
+    try:
+        with bound:
+            scope = audit_cutover.open_classified_record_scope()
+            try:
+                filled = _classified_row()
+                explicit = _classified_row(actor_sub="agent:other", request_id=None)
+                legacy = _classified_row(event_class=AuditEventClass.LEGACY_REQUEST)
+            finally:
+                audit_cutover.close_classified_record_scope(scope)
+            outside = _classified_row()
+    finally:
+        dispatch_audit.work_ref_var.reset(work_ref_token)
+        dispatch_audit.parent_audit_id_var.reset(parent_token)
+
+    assert _lineage(filled) == (session_id, "agent:planner", parent_id, request_id, "ticket-1")
+    assert _lineage(explicit) == (session_id, "agent:other", parent_id, request_id, "ticket-1")
+    assert _lineage(legacy) == (None, None, None, None, None)
+    assert _lineage(outside) == (None, None, None, None, None)
+
+
+def test_classified_rows_keep_their_lineage_with_the_cutover_off() -> None:
+    """Off by default: a domain record is built exactly as its writer wrote it."""
+    scope = audit_cutover.open_classified_record_scope()
+    try:
+        with structlog.contextvars.bound_contextvars(
+            mcp_session_id=str(uuid.uuid4()), **{ACTOR_SUB_KEY: "agent:planner"}
+        ):
+            row = _classified_row()
+    finally:
+        audit_cutover.close_classified_record_scope(scope)
+    assert _lineage(row) == (None, None, None, None, None)
 
 
 @pytest.mark.parametrize("writer", [_write_audit_row, write_mcp_audit_row])
@@ -645,7 +723,14 @@ def mcp(cutover_on: None) -> Iterator[tuple[TestClient, dict[str, Operator]]]:
         production_app.dependency_overrides.pop(verify_mcp_jwt_and_bind, None)
 
 
-def _tool_call(client: TestClient, name: str, arguments: Any, call_id: int = 1) -> Any:
+def _tool_call(
+    client: TestClient,
+    name: str,
+    arguments: Any,
+    call_id: int = 1,
+    *,
+    headers: dict[str, str] | None = None,
+) -> Any:
     response = post_mcp(
         client,
         {
@@ -654,6 +739,7 @@ def _tool_call(client: TestClient, name: str, arguments: Any, call_id: int = 1) 
             "method": "tools/call",
             "params": {"name": name, "arguments": arguments},
         },
+        headers=headers,
     )
     assert response.status_code == 200
     return response.json()
@@ -775,6 +861,69 @@ async def test_mcp_write_tool_rows(
     assert _shape(await _audit_rows()) == [
         ("operation_execution", "MCP", "/mcp/tools/call/test.cutover_write"),
         ("operation_execution", "INTERNAL", "test.self_recording"),
+    ]
+
+
+@pytest.mark.usefixtures("cutover_on")
+async def test_mcp_connector_edit_keeps_the_session_and_actor_on_its_own_record() -> None:
+    """A connector edit over MCP stays in its session's replay after the cutover.
+
+    The edit's own record used to leave the agent session, the delegated
+    actor and the request id empty; the wrapper row carried them. After
+    the cutover the record is the only row, so it must carry them itself,
+    and the request's usage event must point at the same request.
+    """
+    op = build_operator(TenantRole.TENANT_ADMIN)
+    session_id = uuid.uuid4()
+    async with get_sessionmaker()() as session:
+        session.add(
+            OperationGroup(
+                id=uuid.uuid4(),
+                tenant_id=_TENANT,
+                product="vmware",
+                version="9.0",
+                impl_id="vmware-rest",
+                group_key="inventory",
+                name="Inventory",
+                when_to_use="Use for inventory reads.",
+                review_status="staged",
+            )
+        )
+        await session.commit()
+
+    async def _delegated_verify() -> Operator:
+        structlog.contextvars.bind_contextvars(
+            operator_sub=op.sub, tenant_id=str(op.tenant_id), **{ACTOR_SUB_KEY: "agent:planner"}
+        )
+        return op
+
+    production_app.dependency_overrides[verify_mcp_jwt_and_bind] = _delegated_verify
+    try:
+        with TestClient(production_app) as client:
+            result = _tool_call(
+                client,
+                "meho_connector_edit_group",
+                {
+                    "connector_id": "vmware-rest-9.0",
+                    "group_key": "inventory",
+                    "when_to_use": "Use for inventory reads and searches.",
+                    "tenant_id": str(_TENANT),
+                },
+                headers={"Mcp-Session-Id": str(session_id)},
+            )
+            assert "error" not in result, result
+    finally:
+        production_app.dependency_overrides.pop(verify_mcp_jwt_and_bind, None)
+
+    rows = await _audit_rows()
+    assert _shape(rows) == [("operation_execution", "SERVICE", "meho_connector_edit_group")]
+    assert rows[0].operator_sub == op.sub
+    assert rows[0].actor_sub == "agent:planner"
+    assert rows[0].agent_session_id == session_id
+    assert rows[0].request_id is not None
+    events = await read_usage_events()
+    assert [(event.session_id, event.request_id) for event in events] == [
+        (session_id, rows[0].request_id)
     ]
 
 

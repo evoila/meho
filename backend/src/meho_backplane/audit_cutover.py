@@ -52,6 +52,18 @@ request or one MCP call. A SQLAlchemy ``init`` listener on
 ``legacy_request``. The wrapper then asks whether one of them is the
 caller's. The scope object is shared by reference, so code that runs in a
 copied context (a thread pool, a task group) still marks the same scope.
+
+What a kept record carries
+--------------------------
+
+The wrapper row carried the request's lineage: the agent session, the
+delegated actor (RFC 8693 ``act.sub``), the parent record, the request id
+and the work reference. Many domain writers (a connector edit, a topology
+edit, ...) leave those columns empty. After the cutover their row is the
+only one, so the same listener fills each empty lineage column from the
+request context. A value the writer set is kept. Outside a scope (a
+system job, an async run that finishes after the response) nothing is
+filled; with the setting off nothing is filled either.
 """
 
 from __future__ import annotations
@@ -61,7 +73,14 @@ from typing import Any, Final
 
 from sqlalchemy import event
 
+from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.db.models import AuditEventClass, AuditLog
+from meho_backplane.operations._audit import (
+    parent_audit_id_var,
+    resolve_agent_session_id,
+    work_ref_var,
+)
+from meho_backplane.request_usage.collector import current_request_id
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -178,20 +197,46 @@ def classified_record_seen(operator_sub: str) -> bool:
     return scope is not None and operator_sub in scope.operator_subs
 
 
+def _request_lineage() -> dict[str, Any]:
+    """Return the lineage columns the wrapper row would carry for this request."""
+    return {
+        "agent_session_id": resolve_agent_session_id(),
+        "actor_sub": resolve_actor_sub(),
+        "parent_audit_id": parent_audit_id_var.get(),
+        "request_id": current_request_id(),
+        "work_ref": work_ref_var.get(),
+    }
+
+
+def _fill_request_lineage(kwargs: dict[str, Any]) -> None:
+    """Fill each lineage column the writer left empty from the request context."""
+    for column, value in _request_lineage().items():
+        if value is not None and kwargs.get(column) is None:
+            kwargs[column] = value
+
+
 @event.listens_for(AuditLog, "init")
 def _note_classified_record(_target: AuditLog, _args: Any, kwargs: dict[str, Any]) -> None:
-    """Record whose row it is when a row with a non-legacy class is built."""
+    """Record whose row it is when a row with a non-legacy class is built.
+
+    After the cutover the row also inherits the request's lineage (see the
+    module docstring). SQLAlchemy passes ``kwargs`` so that the listener
+    may change it in place before ``__init__`` runs.
+    """
     scope = _current_scope.get()
     if scope is None:
         return
     event_class = kwargs.get("event_class")
     operator_sub = kwargs.get("operator_sub")
     if (
-        event_class is not None
-        and event_class != AuditEventClass.LEGACY_REQUEST
-        and isinstance(operator_sub, str)
+        event_class is None
+        or event_class == AuditEventClass.LEGACY_REQUEST
+        or not isinstance(operator_sub, str)
     ):
-        scope.operator_subs.add(operator_sub)
+        return
+    scope.operator_subs.add(operator_sub)
+    if wrapper_rows_retired():
+        _fill_request_lineage(kwargs)
 
 
 def rest_request_is_routine(method: str, route_template: str | None) -> bool:

@@ -99,6 +99,17 @@ for each REST request and each MCP tool call or resource read:
 A request with no row also publishes no broadcast event. Every request
 still writes its usage event.
 
+The wrapper row carried the request's lineage: the agent session, the
+delegated actor, the parent record, the request id and the work
+reference. Many domain writers (a connector edit, a topology edit, ...)
+leave those columns empty. After the cutover, a record written during a
+request gets each of them filled from the request context when its writer
+left it empty; a value the writer set is kept. So a connector edit made
+over MCP still shows up in its session's replay, and its request id
+matches the request's usage event. Records written outside a request (a
+system job, an async run that finishes after the response) are not
+changed.
+
 The routine `POST` routes and the operation routes are two lists in
 `audit_cutover.py` (`ROUTINE_POST_ROUTES`, `DISPATCH_ROUTES`). A new
 read-only `POST` route must be added to the first list; otherwise, after

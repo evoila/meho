@@ -61,7 +61,7 @@ keys surface on every read surface that already returns `metadata`.
 
 ### `KbRevision` (`db/models.py`) and `KbEntryRevision` (`kb/schemas.py`)
 
-`KbRevision` is the ORM row in `kb_revision` (migration `0109`):
+`KbRevision` is the ORM row in `kb_revision` (migration `0110`):
 `id` (revision UUID), `tenant_id`, `entry_id` (the `documents.id`,
 `ON DELETE CASCADE`), `revision_number` (1, 2, 3, ... per entry; unique
 per entry; the highest is current), `body`, `body_hash`, `provenance`
@@ -69,7 +69,7 @@ per entry; the highest is current), `body`, `body_hash`, `provenance`
 `chunker_version` (`whole-body-v1` today) and `created_at`.
 
 `origin` is `write` for a row stored by a kb write, or
-`backfill-current` for the one row migration `0109` copied from each
+`backfill-current` for the one row migration `0110` copied from each
 entry that existed then. A backfill row is the body the entry had at
 migration time, not a historical version, and its `embedding_model` /
 `chunker_version` are `NULL` because they were never recorded. The

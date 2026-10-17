@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for Alembic migration ``0109_create_kb_revision`` (#3753).
+"""Tests for Alembic migration ``0110_create_kb_revision`` (#3753).
 
 The migration adds the ``kb_revision`` table and copies one current
 revision per existing kb entry. The tests check that ``upgrade``
@@ -28,8 +28,8 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0109"
-_DOWN_REVISION = "0108"
+_REVISION = "0110"
+_DOWN_REVISION = "0109"
 _TABLE = "kb_revision"
 
 
@@ -39,7 +39,7 @@ def alembic_cfg(
     tmp_path: Path,
 ) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0109.db"
+    db_path = tmp_path / "migration_0110.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)

@@ -1053,7 +1053,7 @@ class Document(Base):
 
 #: Closed set for :attr:`KbRevision.origin`. ``write`` rows were stored
 #: by a kb write. ``backfill-current`` rows were copied from the current
-#: kb entry by migration ``0109``; they are not historical versions.
+#: kb entry by migration ``0110``; they are not historical versions.
 KB_REVISION_ORIGINS: tuple[str, ...] = ("write", "backfill-current")
 
 
@@ -1103,7 +1103,7 @@ class KbRevision(Base):
     revision_number: Mapped[int] = mapped_column(Integer, nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
     body_hash: Mapped[str] = mapped_column(Text, nullable=False)
-    # ``none_as_null`` stores ``None`` as SQL ``NULL``, matching migration 0109.
+    # ``none_as_null`` stores ``None`` as SQL ``NULL``, matching migration 0110.
     provenance: Mapped[dict[str, object] | None] = mapped_column(
         JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql"),
         nullable=True,

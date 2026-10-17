@@ -218,7 +218,7 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     "documents",
     # ``kb_revision.tenant_id`` is a real ``REFERENCES tenant(id)`` FK and
     # ``kb_revision.entry_id`` references ``documents(id)`` (migration
-    # ``0109``, #3753), so it must be truncated in the same statement.
+    # ``0110``, #3753), so it must be truncated in the same statement.
     "kb_revision",
     "endpoint_descriptor",
     # ``event_outbox.tenant_id`` is a real ``REFERENCES tenant(id)`` FK from

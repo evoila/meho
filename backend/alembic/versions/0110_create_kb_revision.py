@@ -3,8 +3,8 @@
 
 """Create the ``kb_revision`` table and copy in each current kb body (#3753).
 
-Revision ID: 0109
-Revises: 0108
+Revision ID: 0110
+Revises: 0109
 Create Date: 2026-10-17
 
 A kb entry is one ``documents`` row (``source='kb'``). A new body
@@ -54,8 +54,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0109"
-down_revision: str | None = "0108"
+revision: str = "0110"
+down_revision: str | None = "0109"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

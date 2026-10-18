@@ -75,13 +75,19 @@ def project_outcome(outcome: ResumeOutcome | None) -> dict[str, Any] | None:
     }
 
 
-def project_run_result(result: Any) -> dict[str, Any]:
+def project_run_result(result: Any) -> dict[str, Any] | None:
     """Project the result of the run that an approve just started (#3543).
 
     Used by the decision-outcome fragment, which renders right after the
     run returns. The request row in hand was read before the run, so the
     outcome is read off the returned result, not off the row.
+
+    Returns ``None`` when another resumer (usually the waiting requester)
+    already ran the operation (``already_resumed``). That is not a failure,
+    so the fragment shows the normal "Request approved" card.
     """
+    if getattr(result, "status", None) == "already_resumed":
+        return None
     outcome = resume_outcome_from_envelope(
         {
             "status": getattr(result, "status", None),

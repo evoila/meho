@@ -1025,7 +1025,9 @@ Where it shows:
   the history list (`ran OK`, `run failed`, ...). The detail modal of a
   failed run shows a red banner with the error code and a link to the audit
   row (`/ui/audit?audit_id=<id>`). The card after an approve says "Approved,
-  but the run failed" when the run returned an error.
+  but the run failed" when the run returned an error. When another resumer
+  (usually the waiting requester) already ran the operation
+  (`already_resumed`), it shows the normal "Request approved" card.
 
 **Decision: reads of an approval request stay as they are here.** A client
 that polls `GET /api/v1/approvals/{id}` until the run ends makes one

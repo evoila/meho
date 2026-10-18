@@ -66,6 +66,7 @@ from meho_backplane.db.models import (
     Target,
     Tenant,
 )
+from meho_backplane.operations._errors import result_already_resumed
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import (
     SESSION_COOKIE_NAME,
@@ -2372,3 +2373,32 @@ def test_approve_whose_run_fails_shows_a_failed_card() -> None:
     assert "Request approved" not in body
     assert "connector_vault_forbidden" in body
     assert f'href="/ui/audit?audit_id={_RUN_AUDIT_ID}"' in body
+
+
+def test_approve_already_resumed_elsewhere_shows_the_approved_card() -> None:
+    """Another resumer won the run claim: that is not a failed run."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+    already = result_already_resumed("vsphere.vm.create", rid, 1.0)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RESUME_DISPATCH, AsyncMock(return_value=already)),
+        ):
+            response = client.post(
+                f"/ui/approvals/{rid}/approve",
+                data={"reason": "looks safe"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "Request approved" in body
+    assert "the run failed" not in body
+    assert 'data-testid="approval-outcome"' not in body

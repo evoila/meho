@@ -239,7 +239,7 @@ def _xread_items(raw_response: Any) -> list[tuple[str, dict[str, str]]]:
     Returns an empty list for the three "nothing for us" shapes ``XREAD``
     produces (``None`` on BLOCK timeout, empty outer list, inner list
     empty) so the caller has one ``if not items`` branch. Mirrors the
-    same idiom :func:`meho_backplane.mcp.tools.broadcast._xread_items_or_none`
+    idiom the SSE feed generator (:mod:`meho_backplane.api.v1.feed`)
     uses; duplicated for the same reason :func:`_stream_key` is.
     """
     if not raw_response:

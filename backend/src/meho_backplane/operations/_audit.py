@@ -37,11 +37,10 @@ from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast import (
     BroadcastEvent,
-    classify_op,
     publish_event,
     redact_payload,
 )
-from meho_backplane.broadcast.events import scrub_broadcast_params
+from meho_backplane.broadcast.events import resolve_op_class, scrub_broadcast_params
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog, EndpointDescriptor
 from meho_backplane.operations._errors import status_code_for_result
@@ -469,6 +468,8 @@ def _build_audit_payload(
     # default keys are documented + load-bearing for audit consumers,
     # so this layering is the explicit knob, not an accidental coupling.
     payload.update(_resolve_audit_extras_from_contextvars())
+    # The op that ran, not a route's own label (e.g. agent.run) still bound.
+    payload.update(op_id=descriptor.op_id, op_class=resolve_op_class(descriptor.op_id))
     # #2680: the structured error envelope is authoritative for an error
     # row, so it lands last -- after the handler-extras merge -- under a
     # dedicated ``error`` key that cannot collide with the structural /
@@ -561,12 +562,13 @@ class AuditCommitError(RuntimeError):
     """The DISPATCH audit row could not be committed.
 
     Raised by :func:`audit_and_broadcast_safe` when ``require_audit`` is
-    set (the write-class / post-approval success path) and
+    set (every completed-handler success path) and
     :func:`write_audit_row` fails. Per CLAUDE.md postulate 7 / v0.1-spec
     §6 the durable audit row is a hard precondition of a successful
-    return, so the dispatcher converts this into a ``connector_error``
-    result rather than reporting ``status='ok'`` for a mutation that
-    left no governance-grade record.
+    return, so the dispatcher converts this into an ``audit_commit_failed``
+    result (``execution_outcome='uncertain'``, ``retry=False``) rather than
+    reporting ``status='ok'`` for a call that left no governance-grade
+    record.
     """
 
 
@@ -706,7 +708,7 @@ async def publish_broadcast(
     full-detail default is preserved for params in which no secret
     material is detected.
     """
-    op_class = classify_op(descriptor.op_id)
+    op_class = resolve_op_class(descriptor.op_id)
     scrubbed_params, secret_detected = scrub_broadcast_params(params)
     if secret_detected and op_class not in {
         "credential_read",
@@ -776,16 +778,16 @@ async def audit_and_broadcast_safe(
     Audit-row failures are gated by *require_audit* (S07, #295):
 
     * ``require_audit=False`` (the default; the deny / error / announce
-      callers and read-class success) -- an audit-insert failure is
+      callers) -- an audit-insert failure is
       recorded via ``dispatch_audit_failed`` and swallowed. The caller
       keeps the outcome it already decided; the broadcast is skipped.
-    * ``require_audit=True`` (the write-class / post-approval success
-      path) -- the durable DISPATCH row is a hard precondition of a
-      successful return (CLAUDE.md postulate 7 / v0.1-spec §6). An
-      audit-insert failure is still logged, the broadcast is still
-      skipped, and then :exc:`AuditCommitError` is raised so the caller
-      fails the operation instead of reporting ``status='ok'`` for a
-      mutation with no governance-grade record.
+    * ``require_audit=True`` (the success path of every completed
+      handler, read or write) -- the durable DISPATCH row is a hard
+      precondition of a successful return (CLAUDE.md postulate 7 /
+      v0.1-spec §6). An audit-insert failure is still logged, the
+      broadcast is still skipped, and then :exc:`AuditCommitError` is
+      raised so the caller fails the operation instead of reporting
+      ``status='ok'`` for a call with no governance-grade record.
 
     *raw_payload* / *redaction_manifest* / *redaction_policy_id* are
     the connector-boundary redaction artefacts (G11.4-T2 #1071);
@@ -836,10 +838,10 @@ async def audit_and_broadcast_safe(
         # holds whether we swallow or re-raise below, so no phantom event
         # is emitted on either branch.
         if require_audit:
-            # Write-class / post-approval success path: the DISPATCH row
-            # is a hard precondition of a successful return. Fail the
-            # operation so the caller never sees status=ok for a mutation
-            # that left no durable audit record.
+            # Completed-handler success path: the DISPATCH row is a hard
+            # precondition of a successful return. Fail the operation so
+            # the caller never sees status=ok for a call that left no
+            # durable audit record.
             raise AuditCommitError(
                 f"DISPATCH audit row could not be committed for {descriptor.op_id}"
             ) from audit_exc

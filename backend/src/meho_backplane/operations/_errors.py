@@ -54,6 +54,7 @@ __all__ = [
     "result_already_resumed",
     "result_ambiguous_connector",
     "result_ambiguous_target",
+    "result_audit_commit_failed",
     "result_awaiting_approval",
     "result_composite_resume_multi_gate_unsupported",
     "result_composite_resume_repeats_write",
@@ -599,6 +600,42 @@ def result_receipt_too_large(
     )
 
 
+def result_audit_commit_failed(op_id: str, duration_ms: float) -> OperationResult:
+    """The handler finished, but its audit record could not be saved.
+
+    An operation does not return success unless its audit row commits
+    (CLAUDE.md postulate 7 / v0.1-spec §6). This applies to every completed
+    handler: safe reads, writes, and approved runs. When the commit fails
+    after the handler returned, MEHO cannot prove what happened, so:
+
+    * ``status`` is ``error``, but the error is not a connector error -- the
+      connector call itself worked.
+    * ``extras.execution_outcome`` is ``uncertain``: the vendor may already
+      hold the change.
+    * ``extras.retry`` is ``False``: running it again could repeat a change.
+    * ``audit_id`` stays ``None``: there is no committed record to point at.
+    """
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=(
+            "audit_commit_failed: the operation ran, but MEHO could not save its "
+            "audit record. Do not run it again."
+        ),
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "audit_commit_failed",
+            "execution_outcome": "uncertain",
+            "retry": False,
+            "remediation": (
+                "The operation may have changed the target. Do not run it again. "
+                "Check the target's current state, and ask an operator to check "
+                "the audit database."
+            ),
+        },
+    )
+
+
 def result_composite_resume_multi_gate_unsupported(
     *,
     composite_op_id: str,
@@ -925,9 +962,11 @@ def result_composite_terminal_error(
     op_id: str,
     *,
     error_code: str,
-    envelope: dict[str, Any],
+    envelope: dict[str, Any] | None,
     error_summary: str,
     duration_ms: float,
+    handle: ResultHandle | None = None,
+    delivery: Literal["complete", "partial", "unavailable"] | None = None,
 ) -> OperationResult:
     """A composite handler's terminal-error envelope mapped to a dispatch error (#3809).
 
@@ -948,6 +987,14 @@ def result_composite_terminal_error(
     error-severity issue; it is Tier-1-redacted + length-capped here as a second
     line of defence even though the dispatcher's connector-boundary middleware
     already redacted the envelope's string leaves.
+
+    *envelope* is the envelope **after** the dispatcher ran it through the
+    result reducer (#4223): an oversized refusal (an ``ambiguous_parent``
+    naming hundreds of candidate folder ids) arrives as the reducer's bounded
+    summary with the full envelope behind *handle*, the same contract a
+    success payload gets. ``None`` + ``delivery="unavailable"`` when the
+    reducer failed — the operation stays an error and the unbounded envelope
+    is not shipped inline.
     """
     return OperationResult(
         status="error",
@@ -955,6 +1002,8 @@ def result_composite_terminal_error(
         result=envelope,
         error=_sanitize_free_text(error_summary),
         duration_ms=duration_ms,
+        handle=handle,
+        delivery=delivery,
         extras={"error_code": error_code},
     )
 

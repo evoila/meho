@@ -346,7 +346,8 @@ inline `result` and the extras and keeps the status `ok`:
 - `delivery="unavailable"` otherwise. Only the `audit_id` receipt and the
   remediation text remain; an unreadable handle is dropped too.
 
-`extras.remediation` says the operation already ran and must not be re-invoked;
+`extras.remediation` says the operation already ran and must not be re-invoked,
+and `extras.retry` is `false` so a program can see the same rule;
 `extras.delivered_bytes` and `extras.delivery_max_bytes` give the numbers. A
 completed write is never reported as an error because its response was too
 large. Non-`ok` envelopes are not rewritten. The REST `/call` twin shares the
@@ -525,7 +526,7 @@ add-on-family gate.
 | `list_operation_groups` | operator | — | List a connector's enabled operation groups. |
 | `list_targets` | operator | — | List the tenant's accessible infrastructure targets. |
 | `meho_broadcast_announce` | operator | — | CLI: `meho broadcast announce <activity>` publishes through the shared durable publisher. |
-| `meho_broadcast_recent` | operator | — | CLI: `meho broadcast recent` reads through the shared strict history reader. |
+| `meho_broadcast_recent` | operator | — | CLI: `meho broadcast recent` reads stored agent announcements through the shared archive reader (operation, approval and check events are on the SSE feed and in `query_audit`). |
 | `meho_broadcast_watch` | operator | — | CLI: `meho broadcast watch` tails the authenticated `/api/v1/feed` SSE route. |
 | `meho_connector_list` | operator | — | List connectors visible to the tenant (plus built-in / global). |
 | `meho_runbook_abort` | operator | — | Abort an in-progress runbook run. |

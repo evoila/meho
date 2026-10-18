@@ -90,6 +90,7 @@ from meho_backplane.operations.approval_context import (
     ReviewerContext,
     resolve_reviewer_context,
 )
+from meho_backplane.operations.approval_outcome import resume_outcome
 from meho_backplane.operations.approval_queue import (
     MAX_REASON_LENGTH,
     ApprovalNotFoundError,
@@ -198,6 +199,26 @@ class DelegationView(BaseModel):
     refs: list[str]
 
 
+class ApprovalResumeOutcomeView(BaseModel):
+    """What happened when an approved request ran (#3543).
+
+    A summary read off the stored result envelope. The result body and the
+    free-text error stay on the owner-only ``/result`` read.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    #: When MEHO started the run of the approved operation.
+    resumed_at: str | None
+    #: ``status`` of the run's result: ``ok``, ``error``, ``denied``, ...
+    #: ``None`` while the run has no stored result.
+    result_status: str | None
+    #: Error code of a failed run (for example ``connector_error``).
+    error_code: str | None
+    #: Id of the audit row the run wrote. Open it with ``meho audit show``.
+    audit_id: uuid.UUID | None
+
+
 class ApprovalRequestView(BaseModel):
     """Read-only view of an :class:`~meho_backplane.db.models.ApprovalRequest`."""
 
@@ -228,6 +249,10 @@ class ApprovalRequestView(BaseModel):
     #: ``approved``. Read off the row; ``status`` keeps its four values.
     #: Additive; a client that ignores it is unaffected.
     result_state: ApprovalResultState | None = None
+    #: Run summary of an approved request (#3543): start time, result
+    #: status, error code and the run's audit id. ``None`` until the run
+    #: starts, and for a request that is not ``approved``. Additive.
+    resume_outcome: ApprovalResumeOutcomeView | None = None
     reviewed_by: str | None
     #: Reviewer display name, resolved alongside ``reviewed_by`` (#3300).
     #: ``None`` before a decision or when the deciding token carried no
@@ -375,6 +400,19 @@ def _reviewer_context_view(ctx: ReviewerContext) -> ReviewerContextView:
     )
 
 
+def _resume_outcome_view(row: ApprovalRequest) -> ApprovalResumeOutcomeView | None:
+    """Project the run summary of *row* (#3543), or ``None`` before a run."""
+    outcome = resume_outcome(row)
+    if outcome is None:
+        return None
+    return ApprovalResumeOutcomeView(
+        resumed_at=outcome.resumed_at,
+        result_status=outcome.result_status,
+        error_code=outcome.error_code,
+        audit_id=outcome.audit_id,
+    )
+
+
 def _view(
     row: ApprovalRequest,
     reviewer_context: ReviewerContextView | None = None,
@@ -403,6 +441,7 @@ def _view(
         proposed_effect=row.proposed_effect,
         status=ApprovalRequestStatus(row.status),
         result_state=approval_result_state(row),
+        resume_outcome=_resume_outcome_view(row),
         reviewed_by=row.reviewed_by,
         reviewed_by_name=row.reviewed_by_name,
         decided_at=row.decided_at.isoformat() if row.decided_at else None,

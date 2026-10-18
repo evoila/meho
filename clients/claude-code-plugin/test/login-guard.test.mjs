@@ -7,6 +7,10 @@
 //      stops, so an unfinished browser login frees the callback port.
 //   2. When the login expires during a session, the failed call gets a clear
 //      message, and the process stops.
+//   3. Once connected, the process frees the OAuth callback port and removes
+//      its own lockfile, so another session can run its own login (#4000).
+//      It also drops mcp-remote's exit hooks that would later delete
+//      another session's lockfile.
 //
 // Two layers:
 //   - Stub tests: tiny fake mcp-remote entries. No network, always run.
@@ -118,6 +122,15 @@ function portIsFree(port) {
     s.once("error", () => resolve(false));
     s.listen(port, "127.0.0.1", () => s.close(() => resolve(true)));
   });
+}
+
+async function waitForFreePort(port, ms = 5000) {
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    if (await portIsFree(port)) return true;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return false;
 }
 
 function stubEntry(source) {
@@ -245,6 +258,37 @@ test("a missing entry argument is rejected", async () => {
   assert.match(stderr, /needs the mcp-remote entry/);
 });
 
+test("a connected session frees its port and removes only its own lockfile", async () => {
+  // Like mcp-remote after a login: it holds the callback port and a
+  // lockfile with its pid, then connects (writes to stdout) and keeps
+  // running. Another session's lockfile sits next to it.
+  const configDir = tempDir("meho-guard-auth-");
+  const dir = join(configDir, "mcp-remote-0.0.0");
+  mkdirSync(dir, { recursive: true });
+  const otherLock = join(dir, "other_lock.json");
+  writeFileSync(otherLock, JSON.stringify({ pid: 1, port: 1, timestamp: Date.now() }));
+  const entry = stubEntry(`
+    import { createServer } from "node:http";
+    import { writeFileSync } from "node:fs";
+    const s = createServer().listen(0, "127.0.0.1", () => {
+      writeFileSync(${JSON.stringify(join(dir, "own_lock.json"))},
+        JSON.stringify({ pid: process.pid, port: s.address().port, timestamp: Date.now() }));
+      process.stderr.write("PORT " + s.address().port + "\\n");
+      process.stdout.write('{"jsonrpc":"2.0","id":1,"result":{}}\\n');
+    });
+    setInterval(() => {}, 1000);
+  `);
+  const run = startGuard(entry, [], { MCP_REMOTE_CONFIG_DIR: configDir });
+  const port = Number(await waitFor(() => run.stderr.match(/PORT (\d+)/)?.[1], "stub port"));
+  await waitFor(() => run.lines.length === 1, "the first message");
+  assert.equal(await waitForFreePort(port), true, "the port must be free");
+  assert.equal(existsSync(join(dir, "own_lock.json")), false, "own lockfile must be gone");
+  assert.equal(existsSync(otherLock), true, "another session's lockfile must stay");
+  assert.equal(run.child.exitCode, null, "the connected session must keep running");
+  run.child.kill("SIGTERM");
+  await run.exited;
+});
+
 // --- End-to-end tests with the real pinned mcp-remote ----------------------
 
 function realEntry() {
@@ -282,8 +326,14 @@ function mcpRemoteConfigVersion() {
 //   "expire": the token "good" works for initialize and tools/list; tools/call
 //     answers 401, and every refresh answers invalid_grant. That is a login
 //     that expired during the session.
+//   "browser": every finished browser login (an authorization code sent to
+//     the token endpoint) gets a new token, and only the newest token works.
+//     expireLogin() makes the current token stop working, as when a login
+//     expires; a refresh then answers invalid_grant.
 async function startFakeMeho(mode) {
   let base;
+  let issued = 0;
+  let validToken = mode === "browser" ? null : "good";
   const server = createHttpServer((req, res) => {
     let body = "";
     req.on("data", (c) => (body += c));
@@ -310,6 +360,11 @@ async function startFakeMeho(mode) {
         });
       }
       if (path === "/realms/test/token") {
+        if (mode === "browser" && new URLSearchParams(body).get("grant_type") === "authorization_code") {
+          issued += 1;
+          validToken = `token-${issued}`;
+          return json(200, { access_token: validToken, token_type: "Bearer", expires_in: 3600 });
+        }
         return json(400, { error: "invalid_grant", error_description: "Token is not active" });
       }
       if (path !== "/mcp") {
@@ -319,7 +374,7 @@ async function startFakeMeho(mode) {
       const challenge = {
         "www-authenticate": `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource"`,
       };
-      if (mode === "login" || req.headers.authorization !== "Bearer good") {
+      if (mode === "login" || !validToken || req.headers.authorization !== `Bearer ${validToken}`) {
         return json(401, { detail: "unauthorized" }, challenge);
       }
       if (req.method !== "POST") {
@@ -327,7 +382,9 @@ async function startFakeMeho(mode) {
         return res.end();
       }
       const msg = JSON.parse(body || "{}");
-      if (msg.method === "tools/call") return json(401, { detail: "token_expired" }, challenge);
+      if (mode === "expire" && msg.method === "tools/call") {
+        return json(401, { detail: "token_expired" }, challenge);
+      }
       if (msg.id === undefined) {
         res.writeHead(202);
         return res.end();
@@ -345,7 +402,13 @@ async function startFakeMeho(mode) {
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   base = `http://127.0.0.1:${server.address().port}`;
-  return { url: `${base}/mcp`, close: () => server.close() };
+  return {
+    url: `${base}/mcp`,
+    close: () => server.close(),
+    expireLogin: () => {
+      validToken = null;
+    },
+  };
 }
 
 function mcpRemoteArgs(url) {
@@ -454,6 +517,101 @@ e2e("e2e: a second session does not crash while another one waits for a login", 
     assert.doesNotMatch(second.stderr, /EADDRINUSE/);
     first.child.kill("SIGTERM");
     await first.exited;
+  } finally {
+    fake.close();
+  }
+});
+
+// Play the browser: wait until mcp-remote prints the login URL, then send the
+// authorization code to the redirect_uri in it, as Keycloak would.
+async function finishBrowserLogin(run, code) {
+  const loginUrl = await waitFor(
+    () => run.stderr.match(/Please authorize this client by visiting:\n(\S+)/)?.[1],
+    "the browser login URL",
+  );
+  const callback = new URL(new URL(loginUrl).searchParams.get("redirect_uri"));
+  callback.searchParams.set("code", code);
+  const res = await fetch(callback);
+  assert.equal(res.status, 200, `the callback must accept the code; stderr:\n${run.stderr}`);
+  return Number(callback.port);
+}
+
+function waitForAnswer(run, id, what) {
+  return waitFor(() => run.lines.map((l) => JSON.parse(l)).find((m) => m.id === id), what, 20000);
+}
+
+e2e("e2e: a second session can log in while a logged-in session stays open", { timeout: 60000 }, async () => {
+  const fake = await startFakeMeho("browser");
+  try {
+    const configDir = tempDir("meho-guard-auth-");
+    const env = { MCP_REMOTE_CONFIG_DIR: configDir, MEHO_MCP_LOGIN_TIMEOUT: "30" };
+    const lockfiles = () =>
+      readdirSync(join(configDir, `mcp-remote-${mcpRemoteConfigVersion()}`)).filter((n) =>
+        n.endsWith("_lock.json"),
+      );
+
+    // Session A logs in in the browser and connects.
+    const first = startGuard(REAL_ENTRY, mcpRemoteArgs(fake.url), env);
+    first.send(INITIALIZE);
+    const port = await finishBrowserLogin(first, "code-a");
+    const answerA = await waitForAnswer(first, 1, "session A to connect");
+    assert.ok(answerA.result, `session A must connect; stderr:\n${first.stderr}`);
+    assert.equal(await waitForFreePort(port), true, "session A must free the callback port");
+    assert.deepEqual(lockfiles(), [], "session A must remove its lockfile");
+
+    // Session A's login expires. Session B starts and needs a new browser
+    // login on the same callback port while A stays open.
+    fake.expireLogin();
+    const second = startGuard(REAL_ENTRY, mcpRemoteArgs(fake.url), env);
+    second.send(INITIALIZE);
+    const portB = await finishBrowserLogin(second, "code-b");
+    assert.equal(portB, port, "both sessions use the same callback port");
+    const answerB = await waitForAnswer(second, 1, "session B to connect");
+    assert.ok(answerB.result, `session B must connect; stderr:\n${second.stderr}`);
+    assert.doesNotMatch(second.stderr, /EADDRINUSE|already in use/);
+    assert.equal(first.child.exitCode, null, "session A must still be running");
+    assert.equal(await waitForFreePort(port), true, "session B must free the callback port too");
+
+    first.child.kill("SIGTERM");
+    second.child.kill("SIGTERM");
+    await Promise.all([first.exited, second.exited]);
+  } finally {
+    fake.close();
+  }
+});
+
+e2e("e2e: a connected session that stops leaves another session's lockfile alone", { timeout: 60000 }, async () => {
+  const fake = await startFakeMeho("browser");
+  try {
+    const configDir = tempDir("meho-guard-auth-");
+    const env = { MCP_REMOTE_CONFIG_DIR: configDir, MEHO_MCP_LOGIN_TIMEOUT: "30" };
+    const hash = createHash("md5").update(fake.url).digest("hex");
+    const lock = join(configDir, `mcp-remote-${mcpRemoteConfigVersion()}`, `${hash}_lock.json`);
+
+    // Session A logs in in the browser and connects.
+    const first = startGuard(REAL_ENTRY, mcpRemoteArgs(fake.url), env);
+    first.send(INITIALIZE);
+    await finishBrowserLogin(first, "code-a");
+    const answerA = await waitForAnswer(first, 1, "session A to connect");
+    assert.ok(answerA.result, `session A must connect; stderr:\n${first.stderr}`);
+
+    // Session B starts a browser login and writes its lockfile.
+    fake.expireLogin();
+    const second = startGuard(REAL_ENTRY, mcpRemoteArgs(fake.url), env);
+    second.send(INITIALIZE);
+    await waitFor(() => /Creating lockfile/.test(second.stderr), "session B's lockfile");
+    await waitFor(() => existsSync(lock), "session B's lockfile on disk");
+
+    // Claude Code closes session A. B's lockfile must stay, so a third
+    // session waits for B's login instead of failing on the busy port.
+    first.child.stdin.end();
+    const { code } = await first.exited;
+    assert.equal(code, 0, first.stderr);
+    assert.equal(existsSync(lock), true, "session B's lockfile must stay");
+    assert.equal(JSON.parse(readFileSync(lock, "utf8")).pid, second.child.pid);
+
+    second.child.kill("SIGTERM");
+    await second.exited;
   } finally {
     fake.close();
   }

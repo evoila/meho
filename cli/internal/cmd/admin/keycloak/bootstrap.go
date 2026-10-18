@@ -90,6 +90,14 @@ type BootstrapOptions struct {
 	// CLI use.
 	CLIOfflineSessionIdleSeconds int
 
+	// MCPOfflineSessionIdleSeconds sets the per-client
+	// `client.offline.session.idle.timeout` attribute on the MCP
+	// browser-flow client: how long an unused MCP login (an offline
+	// refresh token) stays valid. Zero means the default, 48 hours.
+	// Without this attribute the realm's Offline Session Idle applies,
+	// which is 30 days on a default Keycloak realm.
+	MCPOfflineSessionIdleSeconds int
+
 	// DryRun true → print every API call that would be made and exit
 	// 0 without mutating anything. Mirrors the reference shell
 	// script's `--dry-run`.
@@ -100,6 +108,11 @@ type BootstrapOptions struct {
 	Out io.Writer
 	Err io.Writer
 }
+
+// defaultMCPOfflineSessionIdleSeconds is the offline-session idle
+// timeout (48h) set on the MCP browser-flow client unless the operator
+// picks another value with --mcp-offline-session-idle.
+const defaultMCPOfflineSessionIdleSeconds = 172800
 
 // withDefaults applies the recipe defaults so the cobra command can
 // pass a sparsely-populated BootstrapOptions and still get the right
@@ -122,6 +135,9 @@ func (o BootstrapOptions) withDefaults() BootstrapOptions {
 	}
 	if o.AdminGroupName == "" {
 		o.AdminGroupName = "meho-admins"
+	}
+	if o.MCPOfflineSessionIdleSeconds == 0 {
+		o.MCPOfflineSessionIdleSeconds = defaultMCPOfflineSessionIdleSeconds
 	}
 	if len(o.MCPRedirectURIs) == 0 {
 		o.MCPRedirectURIs = []string{
@@ -199,6 +215,11 @@ func (o BootstrapOptions) validate() error {
 			"--cli-offline-access seconds must be a positive number of " +
 				"seconds (omit the flag to leave the CLI client " +
 				"offline-token-free)")
+	}
+	if o.MCPOfflineSessionIdleSeconds < 0 {
+		return errors.New(
+			"--mcp-offline-session-idle must be a positive number of " +
+				"seconds (omit the flag to use the 48h default)")
 	}
 	return nil
 }
@@ -387,6 +408,9 @@ func (o BootstrapOptions) desiredMCPClient() *clientRep {
 			"oauth2.device.authorization.grant.enabled":   "false",
 			"use.refresh.tokens":                          "true",
 			"client.use.lightweight.access.token.enabled": "false",
+			// Bounds how long an unused MCP login lasts. Without it the
+			// realm's Offline Session Idle (30 days by default) applies.
+			"client.offline.session.idle.timeout": strconv.Itoa(o.MCPOfflineSessionIdleSeconds),
 		},
 		RedirectURIs:         append([]string{}, o.MCPRedirectURIs...),
 		WebOrigins:           append([]string{}, o.MCPWebOrigins...),
@@ -423,6 +447,8 @@ type Result struct {
 //     device-code client gets the same optional scope only when a
 //     deployment opts in via --cli-offline-access (off by default,
 //     #2902); see RDC Wall W7 in deploy/values-examples/README.md.
+//     The MCP client also gets `client.offline.session.idle.timeout`
+//     (48h unless --mcp-offline-session-idle says otherwise).
 //  6. `meho-admins` group (top-level, no attributes)
 //  7. Admin user, set password, join meho-admins
 //
@@ -596,6 +622,9 @@ func dryRunSummary(
 	for _, s := range requiredMCPOptionalScopes() {
 		fmt.Fprintf(out, "    - %s\n", s)
 	}
+	fmt.Fprintf(out, "==> MCP browser-flow client: offline session idle "+
+		"(client.offline.session.idle.timeout) = %ds\n",
+		opts.MCPOfflineSessionIdleSeconds)
 	if cliOptional := opts.requiredCLIOptionalScopes(); len(cliOptional) > 0 {
 		fmt.Fprintf(out, "==> optional client scopes on the CLI device-code "+
 			"client (--cli-offline-access opt-in; offline idle bound %ds):\n",

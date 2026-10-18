@@ -25841,7 +25841,7 @@
               "completion"
             ],
             "title": "Phase",
-            "default": "update"
+            "default": "start"
           },
           "targets": {
             "items": {
@@ -25885,6 +25885,19 @@
             "format": "uuid",
             "nullable": true,
             "title": "Run Id"
+          },
+          "claim_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Claim Id"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Idempotency Key"
           }
         },
         "additionalProperties": false,
@@ -25904,7 +25917,34 @@
           },
           "cursor": {
             "type": "string",
+            "nullable": true,
             "title": "Cursor"
+          },
+          "claim_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Claim Id"
+          },
+          "phase": {
+            "type": "string",
+            "title": "Phase"
+          },
+          "owner_sub": {
+            "type": "string",
+            "title": "Owner Sub"
+          },
+          "admission": {
+            "type": "string",
+            "title": "Admission"
+          },
+          "replayed": {
+            "type": "boolean",
+            "title": "Replayed"
+          },
+          "actor_sub": {
+            "type": "string",
+            "nullable": true,
+            "title": "Actor Sub"
           },
           "targets": {
             "items": {
@@ -25939,10 +25979,15 @@
         "type": "object",
         "required": [
           "event_id",
-          "cursor"
+          "cursor",
+          "claim_id",
+          "phase",
+          "owner_sub",
+          "admission",
+          "replayed"
         ],
         "title": "BroadcastAnnounceResponse",
-        "description": "Acknowledgement with distinct durable event id and stream cursor."
+        "description": "Acknowledgement with distinct durable event id and stream cursor.\n\n``replayed=true`` means the step was already stored and no new row was\nwritten. ``cursor`` is ``None`` when the stream entry already existed;\nit is set when this call wrote the stream entry, including a retry\nthat finished a delivery whose first stream write failed."
       },
       "BroadcastOverrideCreate": {
         "properties": {

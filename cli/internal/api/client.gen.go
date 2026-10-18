@@ -3150,6 +3150,8 @@ type BoolCompare struct {
 // BroadcastAnnounceRequest The REST representation of a governed agent announcement.
 type BroadcastAnnounceRequest struct {
 	Activity       string                                  `json:"activity"`
+	ClaimId        *openapi_types.UUID                     `json:"claim_id"`
+	IdempotencyKey *string                                 `json:"idempotency_key"`
 	Phase          *BroadcastAnnounceRequestPhase          `json:"phase,omitempty"`
 	PlannedOpClass *BroadcastAnnounceRequestPlannedOpClass `json:"planned_op_class"`
 	RunId          *openapi_types.UUID                     `json:"run_id"`
@@ -3167,10 +3169,21 @@ type BroadcastAnnounceRequestPhase string
 type BroadcastAnnounceRequestPlannedOpClass string
 
 // BroadcastAnnounceResponse Acknowledgement with distinct durable event id and stream cursor.
+//
+// “replayed=true“ means the step was already stored and no new row was
+// written. “cursor“ is “None“ when the stream entry already existed;
+// it is set when this call wrote the stream entry, including a retry
+// that finished a delivery whose first stream write failed.
 type BroadcastAnnounceResponse struct {
-	Cursor         string              `json:"cursor"`
+	ActorSub       *string             `json:"actor_sub"`
+	Admission      string              `json:"admission"`
+	ClaimId        openapi_types.UUID  `json:"claim_id"`
+	Cursor         *string             `json:"cursor"`
 	EventId        openapi_types.UUID  `json:"event_id"`
+	OwnerSub       string              `json:"owner_sub"`
+	Phase          string              `json:"phase"`
 	PlannedOpClass *string             `json:"planned_op_class"`
+	Replayed       bool                `json:"replayed"`
 	RunId          *openapi_types.UUID `json:"run_id"`
 	Targets        *[]string           `json:"targets"`
 	TtlMinutes     *int                `json:"ttl_minutes"`

@@ -179,10 +179,12 @@ shape — the #2544 structured claims, the #2545 actor/work_ref lineage, the
 (`dump_event_wire`) on reads — is identical to every other surface's. The
 read tools publish the MCP tool's **wire** schema (`ToolDefinition.to_wire()`,
 not the registered `inputSchema`) unchanged; `broadcast_announce` publishes
-it minus `run_id` / `work_ref`, which the wrapper stamps from the ambient run
-context (`current_agent_run_id_var` + `work_ref_var`, the same ContextVars the
-audit writers and `approval_wait` read) so announcements auto-group under the
-run without the model self-reporting a spoofable id. Publishing the wire copy
+it minus `run_id` / `work_ref`. The announce handler itself stamps those from
+the checked hosted run (#3736): it reads the run id from
+`current_agent_run_id_var`, loads the live `agent_run` row, and takes the work
+reference from that row, so the model never self-reports a spoofable id. This
+ambient run is also what lets a hosted run publish at all: only a trusted agent
+may announce (see `broadcast.md` § Who can publish). Publishing the wire copy
 rather than the registered schema is load-bearing (#2644): `to_wire()` strips
 the top-level `oneOf` / `allOf` / `anyOf` the Anthropic Messages API rejects
 on a tool's `input_schema`, and because that API validates the whole `tools`

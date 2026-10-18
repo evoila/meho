@@ -11,14 +11,20 @@ foundation.
 
 from meho_backplane.broadcast.agent_events import (
     ACTIVITY_MAX_CHARS,
+    IDEMPOTENCY_KEY_MAX_CHARS,
     MAX_TARGETS,
     PLANNED_OP_CLASS_VALUES,
     TARGET_MAX_CHARS,
+    TTL_DEFAULT_MINUTES,
     TTL_MAX_MINUTES,
     TTL_MIN_MINUTES,
     WORK_REF_MAX_CHARS,
     AgentAnnouncementEvent,
     PlannedOpClass,
+)
+from meho_backplane.broadcast.announcement_claims import (
+    AnnouncementClaimError,
+    build_trusted_announcement,
 )
 from meho_backplane.broadcast.client import (
     BROADCAST_BLOCKING_SOCKET_TIMEOUT_SECONDS,
@@ -53,6 +59,7 @@ from meho_backplane.broadcast.publisher import (
     BROADCAST_EVENTS_PUBLISHED_TOTAL,
     BROADCAST_MAXLEN,
     BROADCAST_PUBLISH_ERRORS_TOTAL,
+    AnnouncementPublishResult,
     publish_agent_announcement,
     publish_event,
 )
@@ -73,19 +80,24 @@ __all__ = [
     "BROADCAST_MAXLEN",
     "BROADCAST_PUBLISH_ERRORS_TOTAL",
     "DEFAULT_WINDOW_MINUTES",
+    "IDEMPOTENCY_KEY_MAX_CHARS",
     "MAX_TARGETS",
     "OP_CLASS_ENUM",
     "PLANNED_OP_CLASS_VALUES",
     "TARGET_MAX_CHARS",
+    "TTL_DEFAULT_MINUTES",
     "TTL_MAX_MINUTES",
     "TTL_MIN_MINUTES",
     "WORK_REF_MAX_CHARS",
     "AgentAnnouncementEvent",
     "AnnounceRateLimitError",
+    "AnnouncementClaimError",
+    "AnnouncementPublishResult",
     "BroadcastEvent",
     "InvalidSinceError",
     "PlannedOpClass",
     "broadcast_readiness_probe",
+    "build_trusted_announcement",
     "classify_op",
     "compute_effective_broadcast_detail",
     "dispose_broadcast_blocking_client",

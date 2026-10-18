@@ -162,6 +162,8 @@ func printDecision(w io.Writer, idArg string, detail *api.ApprovalRequestView) {
 		fmt.Fprintf(w, "instruction:   %q\n", dl.Instruction)
 		fmt.Fprintf(w, "refs:          %s\n", strings.Join(dl.Refs, ", "))
 	}
+	// An approve runs the operation; say how the run ended (#3543).
+	printRunOutcome(w, detail)
 }
 
 // postDecision calls POST /api/v1/approvals/{id}/decide via the

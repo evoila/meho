@@ -199,6 +199,8 @@ def _seed_request(
     decided_at: datetime | None = None,
     work_ref: str | None = None,
     expires_at: datetime | None = None,
+    resumed_at: datetime | None = None,
+    resume_result: dict[str, object] | None = None,
 ) -> uuid.UUID:
     """Insert one ``approval_request`` row; return its id."""
     rid = request_id or uuid.uuid4()
@@ -233,6 +235,8 @@ def _seed_request(
                     work_ref=work_ref,
                     created_at=datetime(2026, 6, 15, 12, 0, tzinfo=UTC),
                     expires_at=stored_expires_at,
+                    resumed_at=resumed_at,
+                    resume_result=resume_result,
                 ),
             )
         return rid
@@ -2262,3 +2266,109 @@ def test_pending_modal_reason_field_is_multiline() -> None:
     assert 'maxlength="2000"' in reason_field
     assert all('name="reason"' not in tag.split(">")[0] for tag in body.split("<input")[1:])
     assert body.count('hx-include="#meho-approval-reason"') == 2
+
+
+# ---------------------------------------------------------------------------
+# Approved, but the run failed (#3543)
+# ---------------------------------------------------------------------------
+
+_RUN_AUDIT_ID = "44444444-4444-4444-4444-444444444444"
+
+#: The stored envelope of a run that a connector error ended.
+_FAILED_ENVELOPE: dict[str, object] = {
+    "status": "error",
+    "op_id": "vsphere.vm.create",
+    "error": "connector_error: RuntimeError",
+    "duration_ms": 7.0,
+    "audit_id": _RUN_AUDIT_ID,
+    "extras": {"error_code": "connector_error", "exception_message": "secret detail"},
+}
+
+
+def _seed_ran_request(*, op_id: str, resume_result: dict[str, object]) -> uuid.UUID:
+    return _seed_request(
+        tenant_id=_TENANT_A,
+        op_id=op_id,
+        status_value=ApprovalRequestStatus.APPROVED.value,
+        reviewed_by=_REVIEWER_SUB,
+        decided_at=datetime(2026, 6, 16, 9, 0, tzinfo=UTC),
+        resumed_at=datetime(2026, 6, 16, 9, 0, 1, tzinfo=UTC),
+        resume_result=resume_result,
+    )
+
+
+def test_history_tells_a_failed_run_from_a_run_that_landed() -> None:
+    """The Approved tab shows a run badge next to the ``approved`` pill."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_ran_request(op_id="failed.op", resume_result=_FAILED_ENVELOPE)
+    _seed_ran_request(op_id="landed.op", resume_result={"status": "ok", "op_id": "landed.op"})
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/approvals/list?tab=approved", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'data-result-state="failed"' in body
+    assert "run failed" in body
+    assert 'data-result-state="executed"' in body
+    assert "ran OK" in body
+
+
+def test_detail_modal_renders_the_failed_run() -> None:
+    """The decided modal names the failed run, its error code and audit row."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_ran_request(op_id="failed.op", resume_result=_FAILED_ENVELOPE)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}", headers=_HX_HEADERS)
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'data-testid="approval-outcome"' in body
+    assert "alert-error" in body
+    assert "did not succeed" in body
+    assert "connector_error" in body
+    assert f'href="/ui/audit?audit_id={_RUN_AUDIT_ID}"' in body
+    # The free-text error detail stays on the owner-only /result read.
+    assert "secret detail" not in body
+
+
+def test_approve_whose_run_fails_shows_a_failed_card() -> None:
+    """An approve whose run errors does not render the plain success card."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+    failed = SimpleNamespace(
+        status="error",
+        op_id="vsphere.vm.create",
+        audit_id=uuid.UUID(_RUN_AUDIT_ID),
+        extras={"error_code": "connector_vault_forbidden"},
+    )
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RESUME_DISPATCH, AsyncMock(return_value=failed)),
+        ):
+            response = client.post(
+                f"/ui/approvals/{rid}/approve",
+                data={"reason": "looks safe"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "Approved, but the run failed" in body
+    assert "Request approved" not in body
+    assert "connector_vault_forbidden" in body
+    assert f'href="/ui/audit?audit_id={_RUN_AUDIT_ID}"' in body

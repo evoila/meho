@@ -189,18 +189,21 @@ func fetchList(
 }
 
 // printListTable renders the list as a compact table.
-// Columns: ID (truncated), STATUS, CONNECTOR, OP, PRINCIPAL, CREATED.
+// Columns: ID, STATUS, RUN, CONNECTOR, OP, PRINCIPAL, CREATED. RUN (#3543)
+// says whether an approved request ran and how it ended, so a run that
+// failed after the approval does not look like a plain "approved".
 func printListTable(w io.Writer, items []api.ApprovalRequestView) {
 	if len(items) == 0 {
 		fmt.Fprintln(w, "no approval requests in this tenant")
 		return
 	}
-	fmt.Fprintf(w, "%-36s %-9s %-24s %-32s %-20s %s\n",
-		"ID", "STATUS", "CONNECTOR", "OP", "PRINCIPAL", "CREATED")
+	fmt.Fprintf(w, "%-36s %-9s %-11s %-24s %-32s %-20s %s\n",
+		"ID", "STATUS", "RUN", "CONNECTOR", "OP", "PRINCIPAL", "CREATED")
 	for _, e := range items {
-		fmt.Fprintf(w, "%-36s %-9s %-24s %-32s %-20s %s\n",
+		fmt.Fprintf(w, "%-36s %-9s %-11s %-24s %-32s %-20s %s\n",
 			e.Id.String(),
 			string(e.Status),
+			runStateLabel(e.ResultState),
 			truncate(e.ConnectorId, 24),
 			truncate(e.OpId, 32),
 			truncate(principalScanLabel(e.PrincipalSub, e.PrincipalName), 20),

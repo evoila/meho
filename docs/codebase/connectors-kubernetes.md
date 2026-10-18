@@ -501,7 +501,10 @@ on the real apply and on the dry-run. The result is `error` with
 `extras.http_status` and the API server's `message` in
 `extras.upstream_message`. The approval preview shows the rejection
 (`preview_unavailable` with the message in `preview_error`) instead of a
-clean-looking summary with no `resourceVersion` and no `uid`.
+clean-looking summary with no `resourceVersion` and no `uid`. The preview
+message is redacted before it is stored, like `extras.upstream_message`,
+so a denial that quotes a credential does not put it into the approval
+row.
 `ApplyNotPersistedError` is now only raised for a 2xx real apply with no
 `resourceVersion`. `k8s.apply` is the only op that uses `DynamicClient`.
 The other ops use the generated API classes, which raise `ApiException`

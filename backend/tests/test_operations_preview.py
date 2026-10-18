@@ -146,11 +146,41 @@ async def test_k8s_apply_preview_forces_server_dry_run(
 _WEBHOOK_DENIAL = 'admission webhook "machine.example.test" denied the request: not allowed'
 
 
+# Credential fixtures assembled from fragments so gitleaks' built-in
+# rules do not false-positive on the test source (the
+# ``test_operations_connector_error_redaction.py`` posture).
+_PASSWORD_SECRET = "P@ssw0rd" + "!withMore"
+_PASSWORD_DENIAL = (
+    'admission webhook "machine.example.test" denied the request: login failed for admin: '
+    + "password"
+    + "="
+    + _PASSWORD_SECRET
+)
+_BEARER_SECRET = "eyJtoken" + "$value!123" + "abcdef"
+_BEARER_DENIAL = (
+    'admission webhook "machine.example.test" denied the request: header was '
+    + "Bearer "
+    + _BEARER_SECRET
+)
+
+#: The fixed part of the reason ``k8s_apply`` renders for a 403 on
+#: ``_SINGLE_MANIFEST``. The straddle test places a credential across
+#: the 500-char cap relative to it, and asserts the prefix still matches
+#: so the placement math cannot go stale silently.
+_K8S_REASON_PREFIX = (
+    "ApplyRejectedError: the API server rejected the server-side apply of "
+    "apps/v1/Deployment argocd/web (HTTP 403 Forbidden): "
+)
+
+
 class _StatusFailureResponse:
     """A raw API response carrying a Kubernetes ``Status`` failure body."""
 
     status = 403
     reason = "Forbidden"
+
+    def __init__(self, message: str = _WEBHOOK_DENIAL) -> None:
+        self._message = message
 
     async def text(self) -> str:
         return json.dumps(
@@ -160,9 +190,39 @@ class _StatusFailureResponse:
                 "status": "Failure",
                 "reason": "Forbidden",
                 "code": 403,
-                "message": _WEBHOOK_DENIAL,
+                "message": self._message,
             }
         )
+
+
+async def _k8s_apply_preview_denied_with(
+    monkeypatch: pytest.MonkeyPatch, message: str
+) -> dict[str, Any]:
+    """Run the real ``k8s_apply`` preview against a stub that answers 403 with *message*."""
+    dyn = MagicMock()
+    dyn.resources.get = AsyncMock(return_value=MagicMock())
+    dyn.server_side_apply = AsyncMock(return_value=_StatusFailureResponse(message))
+
+    async def _dynamic_client(_api_client: Any) -> Any:
+        return dyn
+
+    monkeypatch.setattr(
+        "meho_backplane.connectors.kubernetes.ops_write_dangerous.DynamicClient",
+        _dynamic_client,
+    )
+    connector = KubernetesConnector(kubeconfig_loader=None)  # type: ignore[arg-type]
+    monkeypatch.setattr(connector, "_get_api_client", AsyncMock(return_value=MagicMock()))
+    ctx = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="k8s.apply"),  # type: ignore[arg-type]
+        connector_instance=connector,
+        operator=_operator(),
+        target=_FakeTarget(),
+        params={"manifest": _SINGLE_MANIFEST, "dry_run": "none"},
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    assert effect["preview_unavailable"] is True
+    return effect
 
 
 @pytest.mark.asyncio
@@ -205,6 +265,89 @@ async def test_k8s_apply_preview_shows_api_server_denial(
     assert "HTTP 403 Forbidden" in effect["preview_error"]
     assert _WEBHOOK_DENIAL in effect["preview_error"]
     assert dyn.server_side_apply.call_args.kwargs["dry_run"] == "All"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "secret", "marker"),
+    [
+        (_PASSWORD_DENIAL, _PASSWORD_SECRET, "[REDACTED:api_key]"),
+        (_BEARER_DENIAL, _BEARER_SECRET, "[REDACTED:bearer_token]"),
+    ],
+)
+async def test_k8s_apply_preview_redacts_credential_in_denial(
+    monkeypatch: pytest.MonkeyPatch, message: str, secret: str, marker: str
+) -> None:
+    """A denial that quotes a credential does not put it into the approval row (#3876).
+
+    ``preview_error`` is durable and reviewer-facing. The server message
+    is kept, but the credential inside it is replaced by the Tier-1
+    marker, the same way ``extras.upstream_message`` is treated.
+    """
+    effect = await _k8s_apply_preview_denied_with(monkeypatch, message)
+
+    reason = effect["preview_error"]
+    assert reason.startswith(_K8S_REASON_PREFIX)
+    assert "denied the request" in reason
+    assert marker in reason
+    assert secret not in reason
+
+
+@pytest.mark.asyncio
+async def test_k8s_apply_preview_redacts_credential_across_length_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A credential that straddles the 500-char cap leaves no cleartext fragment (#3876).
+
+    Redaction must run before truncation: cutting first would leave the
+    head of the password in the row as a fragment the patterns no longer
+    match.
+    """
+    label = "password" + "="
+    pad_len = 500 - len(_K8S_REASON_PREFIX) - len(label) - 3
+    message = "x" * (pad_len - 1) + " " + label + _PASSWORD_SECRET
+    raw_len = len(_K8S_REASON_PREFIX) + len(message)
+    # The un-redacted reason would be cut three characters into the secret.
+    assert raw_len - len(_PASSWORD_SECRET) < 500 < raw_len
+
+    effect = await _k8s_apply_preview_denied_with(monkeypatch, message)
+
+    reason = effect["preview_error"]
+    assert reason.startswith(_K8S_REASON_PREFIX)
+    assert reason.endswith(" [truncated]")
+    assert len(reason) == 500 + len(" [truncated]")
+    assert "[REDACTED:" in reason
+    assert label not in reason
+    assert _PASSWORD_SECRET[:3] not in reason
+
+
+@pytest.mark.asyncio
+async def test_builder_failure_reason_withholds_message_when_redaction_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the redactor itself fails, the message is withheld rather than stored raw."""
+
+    def _broken_redact(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("redactor down")
+
+    monkeypatch.setattr("meho_backplane.operations._preview.redact", _broken_redact)
+
+    async def _boom(_ctx: PreviewContext) -> dict[str, Any] | None:
+        raise RuntimeError(_PASSWORD_DENIAL)
+
+    register_preview_builder("test.preview.boomredact", _boom)
+    ctx = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="test.preview.boomredact"),  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=_operator(),
+        target=_FakeTarget(),
+        params={},
+    )
+    effect = await build_proposed_effect(ctx)
+    assert effect is not None
+    assert effect["preview_unavailable"] is True
+    assert effect["preview_error"] == "RuntimeError: <message withheld: redaction unavailable>"
+    assert _PASSWORD_SECRET not in effect["preview_error"]
 
 
 @pytest.mark.asyncio

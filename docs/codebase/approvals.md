@@ -1074,8 +1074,13 @@ Three invariants make the hook safe to wire on the park path:
    dispatcher merges that marker onto the identifier fields, so the
    parked row reads "blast-radius unknown: <reason>" instead of a bare
    identifier default a reviewer can't tell from a small action. The
-   reason string is the exception's type + message, truncated at 500
-   chars. A builder that *declines* (returns `None` — op not
+   reason string is the exception's type + message. The message is
+   redacted with the packaged default credential policy (the same one
+   the `connector_error` envelope uses) and then truncated at 500 chars,
+   because a builder fault can echo an upstream error body — for example
+   a Kubernetes admission webhook denial that quotes a password (#3876).
+   Redaction runs before the cut so a secret cannot survive as a
+   fragment. A builder that *declines* (returns `None` — op not
    previewable from these params) still collapses to the identifier-only
    default with no marker, as do connector-resolution faults outside
    the hook.

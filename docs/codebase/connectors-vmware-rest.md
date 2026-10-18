@@ -1220,7 +1220,7 @@ enum) are:
 | --- | --- |
 | `vm.create` | `created`, `rolled_back` (the optional `nested_hv` VHV leg (#3093) is a vim `ReconfigVM_Task` through the governed vmomi seam, task-polled, applied after NIC attach and before any power-on; a leg failure — transport fault, task fault, or poll timeout — rolls back like the other post-create steps. The `created` envelope echoes the applied `nested_hv` state only when the param was supplied, so a param-absent call keeps the pre-#3093 envelope byte-identical. Optional placement pins — `resource_pool` / `datastore` / `host` moids, #3096 — thread into the CreateSpec `placement` alongside the resolved folder moid; absent pins keep the create body byte-identical and never echo into the envelope. **Data disks (#3117):** the optional `disks` param (`[{capacity_gb}]`) lands data disks in the one create — REST arm threads each into the CreateSpec `disks` as a SCSI `new_vmdk` (vCenter fabricates the controller), pre-9.0 vim arm ALWAYS folds a `VirtualLsiLogicSASController` (so a fresh VM is disk-add-ready even with no `disks`, closing the `500 UNABLE_TO_ALLOCATE_RESOURCE` on the documented governed disk-add) plus one `VirtualDisk` (`fileOperation: create`) per entry bound to it; `disk_attach` rides `steps_succeeded` when disks were requested, an invalid `capacity_gb` fails closed with `disk_spec`, and empty `disks` keeps the REST create byte-identical. **Folder resolution (#3115, both arms):** an explicit `folder` moid pin skips the display-name lookup entirely (`folder_lookup` omitted from the ledger; one of `folder`/`folder_name` required via `anyOf`); a `folder_name` matching more than one folder — every datacenter ships a default VM folder named `vm`, so multi-DC collisions are the norm — reverse-maps a placement pin to its datacenter (datacenter listing + one identity∩`datacenters` intersection probe per DC, host → resource-pool → datastore priority) and re-issues the lookup scoped via `filter.datacenters`; residual ambiguity refuses with a `rolled_back` carrying `candidate_folders` instead of silently taking the first row (which created VMs in the wrong datacenter, proven live). Unique-name lookups stay byte-identical (zero extra reads). **Version-conditional create transport (#3099):** on a live pre-9.0 `about.version` major the whole create rides vim `Folder.CreateVM_Task` through the governed vmomi seam, task-polled — bare REST `POST /api/vcenter/vm` is vendor-defective on vCenter 8.0.x (opaque `500 UNABLE_TO_ALLOCATE_RESOURCE` for every spec shape/placement, proven live) — with the always-folded SCSI controller + disks (#3117), NICs (vmxnet3; DVPG backing resolved via portgroup-key + switch-uuid vmomi reads, standard-portgroup backing via the network display name) and `nested_hv` folded into the one ConfigSpec; `resource_pool`/`datastore` are required there (`placement_params` fail-closed), the `guest_os` enum maps through a curated spec-grounded guestId table (`guest_id_mapping` fail-closed), and 9.0+/unresolved keep the REST path byte-identical) |
 | `vm.clone` | `completed` (the pinned deploy operation is synchronous — its 200 body is the new VM id, #2970; deploy failures raise `connector_error`) |
-| `vm.deploy_from_library` | `deployed`, `deploy_failed`, `deploy_error`, `invalid_reference`, `library_not_found`, `ambiguous_library`, `item_not_found`, `ambiguous_item`, `resolve_error` (OVF/OVA deploy, #2909; the synchronous deploy's 200 body is a `DeploymentResult` — `succeeded=false` → `deploy_failed` with the report's per-issue messages, an HTTP 400/404 for an invalid/missing placement resource → `deploy_error`, and a faulted content-library `find` during name resolution → `resolve_error` (#3071), both with a structured message carrying the vCenter status — so a placement/mapping/resolution error is a structured status, never a raw vendor fault) |
+| `vm.deploy_from_library` | `deployed`, `deploy_failed`, `deploy_error`, `invalid_reference`, `library_not_found`, `ambiguous_library`, `item_not_found`, `ambiguous_item`, `resolve_error` (OVF/OVA deploy, #2909; the synchronous deploy's 200 body is a `DeploymentResult` — `succeeded=false` → `deploy_failed` with the report's per-issue messages, an HTTP 400/404 for an invalid/missing placement resource → `deploy_error`, and a faulted content-library `find` during name resolution → `resolve_error` (#3071), both with a structured message carrying the vCenter status — so a placement/mapping/resolution error is a structured status, never a raw vendor fault; the VM is deployed under a unique deploy name and renamed on success, and a failed deploy deletes the partial VM it left and adds a `cleanup` issue, #3697) |
 | `vm.import_from_library` | `deployed`, `deploy_failed`, `deploy_error`, plus the same resolution statuses as `vm.deploy_from_library` (typed HttpNfcLease OVF import, #3229; the deploy-envelope family is reused — `CreateImportSpec` descriptor rejection → `deploy_failed`, a vim control-plane / lease / disk-upload fault → `deploy_error` — plus a per-disk `transfer` manifest; see the dedicated section) |
 | `vm.snapshot.revert` | `reverted`, `ambiguous`, `not_found`, `timeout` (vim `RevertToSnapshot_Task` polled; a task fault raises `connector_error`, #2970) |
 | `vm.migrate` | `migrated`, `no_recommendation` |
@@ -2002,10 +2002,15 @@ the pinned `vi-json.yaml`.
 ### OVF/OVA content-library deploy (`vm.deploy_from_library`, #2909)
 
 Retires `govc library.deploy` for OVF/OVA appliances (the HoloRouter OVA
-and friends). Pure vSphere Automation REST — no `pyvmomi`. All four
-sub-ops are `vcenter.yaml`-served paths, so the composite reconciles
-through the generic `_SUB_OPS_VM_DEPLOY_FROM_LIBRARY` sweep (not a
-`_VIM_SUB_OPS_*` lane).
+and friends). vSphere Automation REST — no `pyvmomi`. The seven REST
+sub-ops (two finds, the OVF summary, the deploy, power-on, and the cleanup
+listing + delete) are `vcenter.yaml`-served paths, so they reconcile
+through the generic `_SUB_OPS_VM_DEPLOY_FROM_LIBRARY` sweep. The vim legs
+— the `Rename_Task` that gives the finished VM its requested name (#3697,
+no REST rename exists), the vApp `Destroy_Task` that cleans up a failed
+vApp deploy, and the property read that polls them and finds such a vApp
+— ride the governed VI-JSON seam and live in the
+`_VIM_SUB_OPS_VM_DEPLOY_FROM_LIBRARY` lane.
 
 **Item resolution.** `library_item` (an id) is a passthrough. Otherwise
 `library_item_name` is resolved to an id via
@@ -2062,6 +2067,88 @@ a best-effort `POST:/vcenter/vm/{vm}/power?action=start` follows a
 successful deploy; a power-on fault leaves `status='deployed'` with
 `powered_on=false` and a `power_on` warning issue (a deployed appliance
 is never rolled back over a power-on hiccup).
+
+**No partial VM after a failed deploy (#3697).** vCenter's own rollback of
+an interrupted deploy depends on timing: the copy can also finish, or stop
+half-way, after the caller is gone. So the composite cleans up itself, the
+same guarantee `vm.import_from_library` gets from aborting its lease. The
+REST VM listing cannot show which deploy created a VM, so the composite
+gives its VM a name nobody else uses:
+
+1. The final name is `name`, or — when `name` is not set — the OVF
+   descriptor's default name, read before the deploy from the un-gated OVF
+   summary (`POST:/vcenter/ovf/library-item/{id}?action=filter`,
+   `OvfSummary.name`). A faulted summary read is `resolve_error`; a
+   descriptor without a name is `invalid_reference` ("set `name`"). Both
+   refuse before any VM exists.
+2. The deploy runs under the unique deploy name `<name>-meho-<token>`
+   (`_deploy_vm_name`, ten random hex characters, cut to vCenter's
+   80-character VM-name limit). While the copy runs, vCenter shows this
+   name, and an adopt-by-name consumer does not see a half-copied VM under
+   the requested name.
+3. When the deploy call faults (`deploy_error`), answers with a body that
+   is not JSON (also `deploy_error`: the result is unknown, so the VM may
+   exist), reports `succeeded=false` (`deploy_failed`), or is cancelled, the
+   composite looks the deploy name up twice, both un-gated reads: the VM
+   listing (`GET:/vcenter/vm`), and the target resource pool's child
+   resource pools (`RetrievePropertiesEx` on `ResourcePool.resourcePool`,
+   then the `name` of every `VirtualApp` child). The second lookup matters
+   for an OVF with several VMs: vCenter deploys it as a **vApp** that
+   carries the deploy name, while its VMs carry the OVF's own names, so the
+   VM listing alone would miss them. Every VM found, plus the entity the
+   `DeploymentResult` names (a `VirtualMachine` or a `VirtualApp`), is
+   removed: a VM with the best-effort `DELETE:/vcenter/vm/{vm}`
+   (`_delete_leftover_vm`), a vApp with its own governed vim
+   `POST:/VirtualApp/{moId}/Destroy_Task` (`_destroy_leftover_vapp`,
+   task-polled), which destroys the vApp and every VM in it. An older VM
+   with the requested name, or a same-name VM another caller created
+   meanwhile, never carries the deploy name, so it is never touched.
+4. Each VM or vApp gets a `cleanup` issue: `info` when it was removed,
+   `warning` when the removal faulted, was denied, or waits for approval
+   (the message then names the approval request). A faulted lookup (a
+   transport fault, an unavailable VI-JSON API, or a response that is not
+   JSON) is a `warning` that names the deploy name (and the pool, for the
+   vApp lookup), so the operator can look for it by hand. The other lookup
+   and the removals still run, so a VM the listing already found is still
+   deleted. A removal whose response is not JSON is a `warning` for that
+   entity, and the other removals still run.
+5. On every failure path the cleanup runs as a shielded task (the audit
+   middleware's drain pattern, `_drain_deploy_cleanup`): a caller cancel
+   during the lookups or the removal does not stop it. A cancel seen during
+   the cleanup is re-raised once the cleanup is done, and the cleanup
+   outcome is logged because no envelope reaches the caller. A cleanup
+   that raises anything the steps above do not catch becomes a `cleanup`
+   warning; it never replaces the deploy failure and never hides a cancel.
+6. A success renames the VM (or vApp) to the final name through the
+   governed vim `Rename_Task` (`POST:/VirtualMachine/{moId}/Rename_Task` or
+   `POST:/VirtualApp/{moId}/Rename_Task`, task-polled, 600 s bound). The
+   rename is best-effort like the power-on: a parked/denied gate, a transport
+   fault, an unavailable VI-JSON API, a response that is not JSON from the
+   rename or from its task poll, a task fault (for example the requested
+   name now exists) or a poll timeout leaves `status='deployed'` with a
+   `rename` warning that names both names. A success issues no listing and
+   no delete.
+7. **An approval never deploys twice.** A governed write that waits for
+   approval records this composite on its approval row, and approving it
+   runs the composite again from the start (#3351). For this composite that
+   re-run would do harm: the rename, the power-on and the cleanup removals
+   run after the VM exists, so the re-run would deploy a second VM; and a
+   deploy that waited would run again under a fresh deploy name, so the
+   approved step would not match. Until an approval can continue at the
+   approved step (Task #4217), the composite refuses such a re-run before
+   any read or write (`_refuse_deploy_resume`): the result is an error
+   (`composite_resume_unsupported`), nothing is deployed, and the issue
+   message of the waiting step says to do it by hand.
+
+Operator note: the rename and the cleanup removals are governed writes
+with their own ops (`POST:/VirtualMachine/{moId}/Rename_Task`, the
+`VirtualApp` form, `DELETE:/vcenter/vm/{vm}` and
+`POST:/VirtualApp/{moId}/Destroy_Task`), listed on the governed-subops
+discovery surface. For a service principal without a standing grant on
+such an op, the step waits for approval: the VM keeps its deploy name, or
+stays behind, and the envelope names the approval request. Approving that
+request does not run the step today (see point 7). Rename or delete the
+VM by hand, or give the principal a grant for the op before the deploy.
 
 **Synchronous-deploy long timeout (#3076).** Both library-item deploys —
 the OVF `POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy`

@@ -62,6 +62,7 @@ from meho_backplane.operations.addon_pairing_schemas import PairAddonRequest
 from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
 from meho_backplane.retrieval.retriever import RetrievalHit
 from meho_backplane.settings import RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES, get_settings
+from meho_backplane.topology.resolvers import NodeNotFoundError
 from meho_backplane.topology.schemas import TopologyEdge, TopologyEdgeEndpoint
 from tests._result_store_helpers import MemoryResultStore
 from tests.mcp_test_fixtures import (
@@ -730,12 +731,21 @@ def test_preview_operation_unavailable_envelope_conforms(
 def test_query_topology_untracked_closure_conforms(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """Closure kind on an untracked anchor: the ``node_untracked`` envelope."""
+    """Closure kind on an untracked anchor: the ``node_untracked`` envelope.
+
+    The bounded closure substrate is PG-only from its first statement
+    (one-snapshot transaction, statement timeout), so like the edges
+    facet below it is stubbed at the tool's import site; the envelope the
+    handler builds from ``NodeNotFoundError`` is what this scenario pins.
+    ``tests/integration/test_topology_query.py`` covers the real lookup.
+    """
     client, _op = client_with_operator
-    payload = _assert_conforms(
-        "query_topology",
-        _call(client, "query_topology", {"kind": "dependents", "target": "ghost"}),
-    )
+    untracked = AsyncMock(side_effect=NodeNotFoundError("ghost"))
+    with patch("meho_backplane.mcp.tools.topology.bounded_closure", new=untracked):
+        payload = _assert_conforms(
+            "query_topology",
+            _call(client, "query_topology", {"kind": "dependents", "target": "ghost"}),
+        )
     assert payload["status"] == "node_untracked"
     assert payload["nodes"] == []
 

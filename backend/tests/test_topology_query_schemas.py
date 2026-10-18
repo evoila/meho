@@ -50,6 +50,7 @@ from meho_backplane.topology.evidence import (
     stale_rows_evidence,
 )
 from meho_backplane.topology.query import ClosureBudget, _cut_closure_rows, bounded_closure
+from meho_backplane.topology.resolvers import NodeNotFoundError
 from meho_backplane.topology.schemas import (
     TopologyEdge,
     TopologyEdgeEndpoint,
@@ -541,12 +542,14 @@ class _FakeSession:
         *,
         cancel_hop: int | None = None,
         cancel_lookup: bool = False,
+        root_found: bool = True,
         anchor_bytes: int = 10,
         delay_s: float = 0.0,
     ) -> None:
         self.hops = hops
         self.cancel_hop = cancel_hop
         self.cancel_lookup = cancel_lookup
+        self.root_found = root_found
         self.delay_s = delay_s
         self.root = SimpleNamespace(
             id=uuid4(), kind="host", name="root", source="auto", source_scope=None, last_seen=None
@@ -574,7 +577,7 @@ class _FakeSession:
         if "frontier" not in params:  # the identity-only root lookup
             if self.cancel_lookup:
                 raise DBAPIError("lookup", {}, _CancelledError())
-            return _FakeResult([self.root])
+            return _FakeResult([self.root] if self.root_found else [])
         # Copy the bind lists: the walk grows ``visited`` in place after the hop.
         self.asked.append({k: list(v) if isinstance(v, list) else v for k, v in params.items()})
         if params["depth"] == self.cancel_hop:
@@ -612,6 +615,17 @@ async def test_walk_starts_on_one_snapshot_and_looks_the_root_up_under_the_deadl
     assert answer.root is not None
     assert answer.root.id == session.root.id
     assert answer.root.properties == {}
+
+
+async def test_walk_raises_for_an_untracked_root_before_any_hop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _FakeSession({1: _hop_rows(1, 2)}, root_found=False)
+
+    with pytest.raises(NodeNotFoundError):
+        await _walk(session, monkeypatch, depth=1)
+
+    assert session.asked == []
 
 
 async def test_walk_reports_time_budget_without_a_root_when_the_lookup_runs_out_of_time(

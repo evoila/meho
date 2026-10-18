@@ -1764,7 +1764,7 @@ async def test_bounded_closure_new_dense_mesh_fixture_expands_each_node_once(
 async def test_bounded_closure_new_dense_mesh_fixture_stops_at_time_budget(
     pg_engine: None,
 ) -> None:
-    """A walk that runs out of time has no nodes and a known root."""
+    """A walk that runs out of time has no nodes; the answer says so."""
     await _seed_new_dense_mesh_fixture(layers=8, width=6)
     operator = _operator(TENANT_A_ID)
 
@@ -1774,12 +1774,44 @@ async def test_bounded_closure_new_dense_mesh_fixture_stops_at_time_budget(
 
     assert answer.limit_hit == "time_budget"
     assert answer.nodes == ()
-    assert answer.root is not None
-    assert answer.root.name == "mesh-root"
+    # With one millisecond the root lookup itself may be the statement that
+    # runs out; the two tests below pin each case on its own.
+    assert answer.root is None or answer.root.name == "mesh-root"
     # A cancelled statement leaves the pool usable for the next query.
     shallow = await bounded_closure(operator, "mesh-root", reverse=True, depth=1)
     assert shallow.limit_hit == "hop_limit"
     assert len(shallow.nodes) == 7
+
+
+@_skip_no_docker
+async def test_bounded_closure_names_the_root_when_a_hop_runs_out_of_time(
+    pg_engine: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the lookup finished but a hop did not, the root is still named."""
+    await _seed_new_dense_mesh_fixture(layers=2, width=2)
+    monkeypatch.setattr(query_module, "_CLOSURE_STEP_SQL_REVERSE", text("SELECT pg_sleep(5)"))
+
+    started = time.monotonic()
+    answer = await bounded_closure(
+        _operator(TENANT_A_ID), "mesh-root", reverse=True, budget=ClosureBudget(time_budget_ms=300)
+    )
+
+    assert time.monotonic() - started < 3
+    assert answer.limit_hit == "time_budget"
+    assert answer.nodes == ()
+    assert answer.root is not None
+    assert answer.root.name == "mesh-root"
+
+
+@_skip_no_docker
+async def test_bounded_closure_keeps_the_anchor_contract(known_graph: dict[str, uuid.UUID]) -> None:
+    """An untracked anchor raises, like the unbounded verbs; nothing is walked."""
+    with _HopStatements() as statements, pytest.raises(NodeNotFoundError):
+        await bounded_closure(_operator(TENANT_A_ID), "ghost", reverse=True)
+    assert statements.hops == 0
+    # Another tenant's node is untracked here too.
+    with pytest.raises(NodeNotFoundError):
+        await bounded_closure(_operator(TENANT_B_ID), "host1", reverse=True)
 
 
 @_skip_no_docker

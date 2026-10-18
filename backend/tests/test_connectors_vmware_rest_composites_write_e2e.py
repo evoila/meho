@@ -1949,6 +1949,56 @@ async def test_deploy_cleanup_park_approve_resume_deletes_and_deploys_nothing(
 
 
 @pytest.mark.asyncio
+async def test_deploy_vapp_destroy_park_approve_resume_destroys_once_and_deploys_nothing(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """Approving a waiting vApp destroy destroys the vApp once and deploys nothing (#4217).
+
+    The failed deploy names the vApp it left. The service principal has no
+    grant on ``Destroy_Task``, so the cleanup waits. The row saves the
+    deploy name and the failed deploy, marked ``after_main_effect``. The
+    approval re-runs only the cleanup: ``Destroy_Task`` runs once on that
+    vApp, and there is no second OVF deploy.
+    """
+    recorder = _deploy_recorder(succeeded=False)
+    recorder.responses["/vcenter/ovf/library-item/li-1?action=deploy"] = {
+        "succeeded": False,
+        "resource_id": {"type": "VirtualApp", "id": "vapp-7"},
+    }
+    recorder.responses["/vcenter/vm"] = {"value": []}
+    recorder.vmomi_responses["/VirtualApp/vapp-7/Destroy_Task"] = _vmomi_task_moref("t-destroy-7")
+    await _bootstrap(recorder, stub_embedding_service)
+    reviewer, request_id, pending = await _service_deploys_until_a_follow_on_parks(
+        recorder, parked_op_id="POST:/VirtualApp/{moId}/Destroy_Task"
+    )
+    destroy_path = "/VirtualApp/vapp-7/Destroy_Task"
+    assert [path for path, _ in recorder.vmomi_calls if path == destroy_path] == []
+    assert pending.params == {"moId": "vapp-7", "body": {}}
+    assert pending.resume_parent is not None
+    assert pending.resume_parent["after_main_effect"] is True
+    saved = pending.resume_parent["state"]
+    assert saved["deploy_name"] == recorder.deploy_bodies[0]["deployment_spec"]["name"]
+    assert saved["failed"]["status"] == "deploy_failed"
+    assert saved["failed"]["reported"] == ["vapp-7", "VirtualApp"]
+
+    resume = await _resume(request_id, reviewer)
+
+    assert resume.status == "ok", resume.error
+    assert resume.result["status"] == "deploy_failed"
+    assert resume.result["issues"][-1] == {
+        "category": "cleanup",
+        "severity": "info",
+        "message": "removed vApp vapp-7 and its VMs left by the failed deploy",
+    }
+    assert [path for path, _ in recorder.vmomi_calls if path == destroy_path] == [destroy_path]
+    assert recorder.calls.count(_DEPLOY_CALL) == 1, "no second deploy"
+    assert len(recorder.deploy_bodies) == 1
+    assert await _approval_row_count() == 1
+
+
+@pytest.mark.asyncio
 async def test_deploy_each_approval_continues_and_no_write_runs_twice(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,

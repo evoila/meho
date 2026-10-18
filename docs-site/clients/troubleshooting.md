@@ -161,11 +161,9 @@ failed with `listen EADDRINUSE`.
 for it there. If several MEHO login tabs are open, close them all and
 reconnect once.
 
-**Known limit.** A session that finished its login keeps the callback
-port while it runs, so a new login in another session may not finish. Then
-reconnect `meho` (or close Claude Code) in your other sessions first, and
-try again. This is tracked in
-[evoila/meho#4000](https://github.com/evoila/meho/issues/4000).
+A session that is connected does not hold the callback port. It frees
+the port and removes its lockfile as soon as it connects, so a new login
+in another session can finish while it stays open.
 
 ## Token issues but every call 401s
 

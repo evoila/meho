@@ -2084,19 +2084,25 @@ helper, #3076).
 
 **Async dispatch is the supported mode for multi-GB deploys (#3176 / #3079).**
 Widening the read ceiling is a *bounded* mitigation: a still-larger item or a
-slower fabric can outrun any fixed window, and on the synchronous path a caller
-that disconnects mid-transfer aborts the deploy session — vCenter rolls the
-half-created VM back (the second live failure mode on the 4.7 GB installer
-OVA). Both are cured by dispatching the deploy in **async governed mode**
+slower fabric can outrun any fixed window. On the synchronous path the caller
+must also hold the connection open for the whole copy. If the caller gives up
+and disconnects, MEHO does **not** stop the deploy: the server does not cancel
+the request, and MEHO lets the vCenter POST finish so no half-applied change
+is left behind. The caller just never sees the answer. MEHO notices the
+disconnect and writes the time into `payload.caller_gone_at` on the audit
+rows written after it, so the finished deploy's audit row shows that nobody
+was waiting (#3696; see `operations/caller_gone.py`). Both problems are
+cured by dispatching the deploy in **async governed mode**
 (`POST /api/v1/operations/call` with `async: true`, or the `call_operation`
 meta-tool's async flag; #3079 / PR #3201): the dispatch runs on a durable
 background task that owns the vCenter POST, the route returns `202` + a run
 handle (`GET /api/v1/operations/runs/{handle}` polls it, and the completed
 `DeploymentResult` envelope is persisted on the run row), and because that task
 is spawned via `asyncio.create_task` — independent of the request handler
-task — a dropped caller no longer propagates cancellation into the in-flight
-copy. The synchronous path stays the default for small items but is bounded by
-the ceiling above; an item large enough to outrun even 3 h uses the durable
+task — a dropped caller loses nothing: the outcome waits on the run row.
+**Async dispatch (or the typed `vm.import_from_library` below) is the supported
+route for any deploy that can take more than a few minutes.** The synchronous
+path stays the default for small items but is bounded by the ceiling above; an item large enough to outrun even 3 h uses the durable
 typed `HttpNfcLease` import `vm.import_from_library` (#3229; shipped, see the
 next section) — MEHO drives the disk transfer itself, so completion is bounded
 only by the transfer's own duration and there is no single blocking read to

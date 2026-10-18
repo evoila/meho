@@ -45,6 +45,7 @@ from meho_backplane.broadcast.events import scrub_broadcast_params
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog, EndpointDescriptor
 from meho_backplane.operations._errors import status_code_for_result
+from meho_backplane.operations.caller_gone import caller_gone_at
 
 __all__ = [
     "AgentRunAuditMeta",
@@ -494,7 +495,11 @@ def _apply_contextvar_lineage_mirrors(payload: dict[str, Any]) -> None:
     * credential_read reveal choice (#2467) -- ``reveal_secret`` (bool),
       bound only for a credential_read dispatch (``True`` = the caller
       opted into the raw value, ``False`` = the default key-name-scrubbed
-      response), so the key stays absent for every other op.
+      response), so the key stays absent for every other op;
+    * caller gone (#3696) -- ``caller_gone_at`` (ISO-8601), present only when
+      the caller of a synchronous request disconnected before this row was
+      written (:mod:`meho_backplane.operations.caller_gone`). The operation
+      still ran to the end.
     """
     agent_session_id = agent_session_id_var.get()
     if agent_session_id is not None:
@@ -521,6 +526,9 @@ def _apply_contextvar_lineage_mirrors(payload: dict[str, Any]) -> None:
     reveal_secret = reveal_secret_var.get()
     if reveal_secret is not None:
         payload["reveal_secret"] = reveal_secret
+    gone_at = caller_gone_at()
+    if gone_at is not None:
+        payload["caller_gone_at"] = gone_at.isoformat()
 
 
 def _resolve_target_id(target: Any) -> uuid.UUID | None:

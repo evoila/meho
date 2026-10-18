@@ -133,6 +133,21 @@ the `main.py` lifespan alongside the other background sweeps.
 - `db/advisory.advisory_lock`, `db/engine.get_sessionmaker`,
   `settings` (`operation_run_*` knobs), `main.py` lifespan wiring.
 
+## Synchronous path: caller gone (#3696)
+
+Without `async: true`, the REST `/call` route and the MCP `POST /mcp` route
+run the operation inside the request. If the client disconnects, the ASGI
+server does not cancel the request, so the operation runs to the end. That is
+on purpose: stopping a vendor call half way could leave a half-applied change.
+
+Both routes wrap the work in `watch_caller(request.receive)`
+(`operations/caller_gone.py`). It waits for the ASGI `http.disconnect`
+message and stores the time. The dispatcher audit writer
+(`_apply_contextvar_lineage_mirrors` in `operations/_audit.py`) copies it into
+`payload["caller_gone_at"]` (ISO-8601, UTC) on every audit row written after
+the disconnect. The key is absent when the caller stayed. The async path
+does not need this: its outcome is stored on the run row.
+
 ## Known issues / notes
 
 - **No CLI verbs yet.** The generated Go client (`cli/api/openapi.json` /

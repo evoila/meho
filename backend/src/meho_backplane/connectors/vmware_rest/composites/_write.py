@@ -230,10 +230,11 @@ _OP_DEPLOY_OVF_LIBRARY_ITEM = "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}
 # 30-min window live, faulting mid-transfer while vCenter kept copying.
 # Widening the read cap is a *bounded mitigation*, not the durable fix — a
 # still-larger item or a slower fabric can outrun any fixed ceiling, and on
-# this synchronous path a caller that disconnects mid-wait still aborts + rolls
-# the deploy back. The durable fixes are orthogonal and live elsewhere: async
-# governed dispatch (#3079) decouples completion from the request connection so
-# a dropped caller no longer cancels the in-flight deploy (the supported mode
+# this synchronous path a caller that disconnects mid-wait never gets the
+# answer (the deploy still runs to the end; the audit row records
+# ``caller_gone_at``, #3696). The durable fixes are orthogonal and live
+# elsewhere: async governed dispatch (#3079) decouples completion from the
+# request connection so a dropped caller loses nothing (the supported mode
 # for multi-GB items — see ``vm_deploy_from_library_composite``'s docstring),
 # and a typed pyvmomi ``HttpNfcLease`` import (#2890) would uncouple completion
 # from a single blocking read entirely.

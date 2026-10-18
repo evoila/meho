@@ -662,7 +662,13 @@ the migration, oldest first. `seq` is nullable only so an older pod
 can still write during a rolling upgrade. Before every scan, the reader
 gives such rows the next numbers, oldest first, under the same counter
 lock (`number_unnumbered_rows`), so they show up as new announcements
-instead of staying invisible. The PostgreSQL lock tests are in
+instead of staying invisible. The lock order is the same everywhere:
+announcement rows first, the counter second. A claim step locks the
+claim's start row and then takes the counter; the numbering reader
+locks the rows it will number (`SELECT ... FOR UPDATE`, oldest first)
+and then takes the counter. Nobody holds the counter while waiting for
+a row, so a reader and a claim step on the same start row take turns
+instead of waiting for each other. The PostgreSQL lock tests are in
 `tests/integration/test_broadcast_archive_cursor_pg.py`.
 
 **Two cursor kinds.** `broadcast/archive_cursor.py`. Both are opaque,

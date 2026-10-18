@@ -18,7 +18,10 @@ open on purpose, right after it took its number, and checks:
 * a writer in another tenant does not wait at all;
 * readers that number rows an older pod wrote without ``seq`` (a rolling
   upgrade) take the same lock, so three readers and a publisher at once
-  hand out each number exactly once.
+  hand out each number exactly once;
+* a reader that numbers an unnumbered ``start`` row waits for an
+  ``update`` / ``completion`` that holds that row, instead of the two
+  waiting for each other (rows first, counter second, on both sides).
 
 SQLite (the unit-suite driver) has one writer at a time and no row
 locks, so these checks need a real PostgreSQL.
@@ -75,16 +78,22 @@ _skip_no_docker = pytest.mark.skipif(
 )
 
 
-def _event(activity: str, tenant_id: uuid.UUID = _TENANT) -> AgentAnnouncementEvent:
+def _event(
+    activity: str,
+    tenant_id: uuid.UUID = _TENANT,
+    *,
+    phase: str = "start",
+    claim_id: uuid.UUID | None = None,
+) -> AgentAnnouncementEvent:
     return AgentAnnouncementEvent.model_validate(
         {
             "tenant_id": tenant_id,
             "principal_sub": "svc-agent:triage",
             "activity": activity,
-            "phase": "start",
+            "phase": phase,
             "ttl_minutes": 30,
             "ts": datetime.now(UTC),
-            "claim_id": uuid.uuid4(),
+            "claim_id": claim_id or uuid.uuid4(),
             "owner_sub": "svc-agent:triage",
             "admission": "agent_principal",
         }
@@ -128,18 +137,50 @@ class _HoldAfterNumber:
         monkeypatch.setattr(publisher, "next_announcement_seq", gated)
 
 
-async def _seed_unnumbered(tenant_id: uuid.UUID, activities: list[str]) -> None:
+class _HoldAfterClaimCheck:
+    """Hold a claim step open right after its open-claim check passed.
+
+    The check locks the claim's ``start`` row. The held step has that row
+    but has not taken the counter yet, which is the window where a reader
+    that wants to number the same row must wait, not deadlock.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.checked = asyncio.Event()
+        self.release = asyncio.Event()
+        original = publisher._check_open_claim
+
+        async def gated(
+            session: AsyncSession, event: AgentAnnouncementEvent, idempotency_key: str | None
+        ) -> Any:
+            stored = await original(session, event, idempotency_key)
+            self.checked.set()
+            await self.release.wait()
+            return stored
+
+        monkeypatch.setattr(publisher, "_check_open_claim", gated)
+
+
+async def _store_unnumbered(events: list[AgentAnnouncementEvent]) -> None:
     """Store rows the way a pod on the previous release does: without ``seq``."""
-    now = datetime.now(UTC)
     async with get_sessionmaker()() as session:
-        for offset, activity in enumerate(activities):
-            event = _event(activity, tenant_id).model_copy(
-                update={"ts": now - timedelta(minutes=len(activities) - offset)}
-            )
+        for event in events:
             row = publisher._announcement_row(event, None, 0)
             row.seq = None
             session.add(row)
         await session.commit()
+
+
+async def _seed_unnumbered(tenant_id: uuid.UUID, activities: list[str]) -> None:
+    now = datetime.now(UTC)
+    await _store_unnumbered(
+        [
+            _event(activity, tenant_id).model_copy(
+                update={"ts": now - timedelta(minutes=len(activities) - offset)}
+            )
+            for offset, activity in enumerate(activities)
+        ]
+    )
 
 
 async def _rows(tenant_id: uuid.UUID) -> list[tuple[int, str]]:
@@ -259,3 +300,36 @@ async def test_concurrent_readers_number_older_writes_exactly_once(
     after = await _recent(_TENANT)
     assert len(after["events"]) == 4
     assert after["watch_checkpoint"] == encode_watch_checkpoint(_TENANT, 4)
+
+
+@_skip_no_docker
+@pytest.mark.parametrize("phase", ["update", "completion"])
+async def test_numbering_a_start_row_waits_for_the_claim_step_that_holds_it(
+    pg_engine: None,  # noqa: F811 -- fixture
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    start = _event("legacy start")
+    await _store_unnumbered([start])
+    hold = _HoldAfterClaimCheck(monkeypatch)
+
+    step_task = asyncio.create_task(
+        publish_agent_announcement(_event(f"{phase} step", phase=phase, claim_id=start.claim_id))
+    )
+    await asyncio.wait_for(hold.checked.wait(), _WAIT_SECONDS)
+
+    # The step holds the start row. The reader must wait for it, instead
+    # of taking the counter first and leaving both stuck on each other.
+    reader_task = asyncio.create_task(_recent(_TENANT))
+    done, _pending = await asyncio.wait({reader_task}, timeout=_HOLD_SECONDS)
+    assert not done, "the reader numbered a start row that a claim step holds"
+
+    hold.release.set()
+    step = await asyncio.wait_for(step_task, _WAIT_SECONDS)
+    read = await asyncio.wait_for(reader_task, _WAIT_SECONDS)
+
+    assert step.seq == 1
+    assert await _rows(_TENANT) == [(1, f"{phase} step"), (2, "legacy start")]
+    assert len(read["events"]) == 2
+    assert read["gap"] is None
+    assert read["watch_checkpoint"] == encode_watch_checkpoint(_TENANT, 2)

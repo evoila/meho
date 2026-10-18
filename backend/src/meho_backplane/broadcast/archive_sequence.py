@@ -26,6 +26,13 @@ rows the next numbers, oldest first, under the same counter lock. Readers
 call it before every scan, so an older pod's announcement shows up like a
 new one instead of staying invisible.
 
+Lock order, for everyone who touches the counter: **announcement rows
+first, the counter second.** A claim step locks the claim's start row
+and then takes the counter. The numbering reader locks the rows it will
+number and then takes the counter. Nobody holds the counter while
+waiting for a row, so one of them always finishes and the other one
+waits for it; they never wait for each other at the same time.
+
 SQLite (dev/test only) has one writer at a time anyway, so it keeps the
 same order without row locks.
 
@@ -111,12 +118,19 @@ async def _lock_counter(session: AsyncSession, tenant_id: UUID) -> None:
         await session.execute(stmt)
 
 
-async def _unnumbered_ids(session: AsyncSession, tenant_id: UUID) -> list[UUID]:
-    """Ids of the tenant's rows without a number, oldest first."""
+async def _lock_unnumbered_rows(session: AsyncSession, tenant_id: UUID) -> list[UUID]:
+    """Lock the tenant's rows without a number, oldest first, and return their ids.
+
+    ``SELECT ... FOR UPDATE`` on PostgreSQL waits for a claim step that
+    holds one of the rows, and leaves out a row another reader numbered
+    meanwhile (the row is checked again after the wait). An empty result
+    locks nothing. SQLite drops the clause.
+    """
     stmt = (
         select(AgentAnnouncement.id)
         .where(AgentAnnouncement.tenant_id == tenant_id, AgentAnnouncement.seq.is_(None))
         .order_by(AgentAnnouncement.created_at, AgentAnnouncement.id)
+        .with_for_update()
     )
     return list((await session.execute(stmt)).scalars().all())
 
@@ -127,18 +141,23 @@ async def number_unnumbered_rows(session: AsyncSession, tenant_id: UUID) -> int:
     A pod on the previous release writes ``seq = NULL`` during a rolling
     upgrade. This numbers such rows oldest first (``created_at``, then
     ``id``) so they take their place at the end of the order, like
-    announcements that commit now. The counter row is locked first, so a
-    reader numbering rows, a second reader, and a publisher take turns and
-    no number is handed out twice. The row list is read again under the
-    lock, because another reader may have numbered the rows meanwhile.
+    announcements that commit now.
+
+    The rows are locked first and the counter second. That is the order
+    a claim step uses too (the claim's start row, then the counter), so
+    a reader numbering a start row and an ``update`` or ``completion``
+    on that claim take turns instead of waiting for each other. Two
+    readers lock the rows in the same order and the second one gets only
+    the rows the first one left unnumbered, so no number is handed out
+    twice. A row inserted after the lock is numbered by the next scan.
 
     The caller commits. Returns how many rows got a number; the common
     case after the upgrade is ``0`` after one cheap indexed read.
     """
-    if not await _unnumbered_ids(session, tenant_id):
+    ids = await _lock_unnumbered_rows(session, tenant_id)
+    if not ids:
         return 0
     await _lock_counter(session, tenant_id)
-    ids = await _unnumbered_ids(session, tenant_id)
     for row_id in ids:
         seq = await _bump(session, tenant_id)
         await session.execute(

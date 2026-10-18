@@ -206,7 +206,7 @@ test("an expired login answer gets the Claude Desktop message; mcp-remote never 
     id: 2,
     error: { code: -32603, message: LOGIN_EXPIRED },
   });
-  assert.match(run.stderr, new RegExp(`meho-claude-desktop: ${LOGIN_EXPIRED.replace(/[().]/g, "\\$&")}`));
+  assert.ok(run.stderr.includes(`meho-claude-desktop: ${LOGIN_EXPIRED}`), run.stderr);
 });
 
 // --- End-to-end tests with the real pinned mcp-remote ----------------------

@@ -466,8 +466,13 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   - **`vmware.vm.info`** (`typed_ops_vm_info.py`, handler `vm_info`) —
     single-VM incident triage. Addressed by `vm` moid or `name`
     (`oneOf` in the schema; a `name` is resolved via
-    `GET /vcenter/vm?filter.names=`, and an unknown / ambiguous name
-    raises). One PropertyCollector read of the `VirtualMachine`'s
+    `GET /vcenter/vm?filter.names=`). An unknown name — the listing
+    answers `200 []` — raises `ConnectorResourceNotFoundError` with the
+    name as the resource id, so the dispatcher returns
+    `status="not_found"` (HTTP 404, `extras.error_code="not_found"`)
+    and callers can use the op to check whether a VM exists (#3653). An
+    ambiguous name still raises a plain error. One PropertyCollector
+    read of the `VirtualMachine`'s
     `runtime.powerState`, `guest.ipAddress` / `guest.hostName` /
     `guest.toolsStatus` / `guest.toolsRunningStatus`,
     `guestHeartbeatStatus`, and `storage.perDatastoreUsage`. Unlike

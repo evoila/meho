@@ -15,12 +15,15 @@ history answer goes out in one of two ways:
 
 Every answer carries a ``completeness`` block. It names each limit that
 applied, so the answer never claims a complete result after a limit cut
-it. The finished answer is then checked against the shared completed-call
-wire ceiling from :mod:`meho_backplane.operations.delivery_budget`.
+it. The finished answer is measured against the shared completed-call
+wire ceiling from :mod:`meho_backplane.operations.delivery_budget` and
+made smaller, step by step, until it fits; each smaller answer says what
+it left out.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any, Final, Literal
 
 import structlog
@@ -90,7 +93,7 @@ _GUIDANCE: Final[dict[AnswerLimit, str]] = {
         "`result_query`. Try again later or narrow the query."
     ),
     "delivery_cap": (
-        "The answer was too large to send inline. Read the rows with "
+        "The answer was too large to send whole. Read the rows with "
         "`result_query` and the handle when `delivery` is `partial`; when it is "
         "`unavailable`, narrow the query."
     ),
@@ -129,11 +132,20 @@ _OP_ID: Final[str] = "query_topology"
 
 
 def _completeness(
-    limits_hit: list[AnswerLimit], *, found: int, retained: int, limits: dict[str, int]
+    limits_hit: list[AnswerLimit],
+    *,
+    found: int,
+    retained: int,
+    limits: dict[str, int],
+    readable: bool = True,
 ) -> dict[str, Any]:
-    """Build the ``completeness`` block from the limits that applied."""
+    """Build the ``completeness`` block from the limits that applied.
+
+    *readable* is false when the delivery step dropped the rows and there
+    is no handle to read them through; the state is then ``unavailable``.
+    """
     hit = set(limits_hit)
-    if hit & _UNAVAILABLE:
+    if hit & _UNAVAILABLE or not readable:
         state = "unavailable"
     elif hit & _INCOMPLETE:
         state = "incomplete"
@@ -186,39 +198,89 @@ async def _retain(
         limits_hit.append("store_unavailable")
     elif retained < len(rows):
         limits_hit.append("store_cap")
-    body = {**summary, "handle": _handle_payload(handle, preview_omits)}
+    # Rows the reducer could not profile come back as ``status:
+    # unprofiled`` with a ``reason``. ``status`` means something else on
+    # this tool, so the answer keeps only ``reason`` and says the rest
+    # through ``completeness`` (the store kept no rows).
+    body = {key: value for key, value in summary.items() if key != "status"}
+    body["handle"] = _handle_payload(handle, preview_omits)
     if preview_omits:
         body["preview_omits"] = list(preview_omits)
     return body, retained, handle
 
 
-def _fit_delivery(
+def _finished(
+    body: dict[str, Any],
+    delivery: Literal["complete", "partial", "unavailable"],
+    limits_hit: list[AnswerLimit],
+    *,
+    found: int,
+    retained: int,
+    limits: dict[str, int],
+    over_size: tuple[int, int] | None = None,
+) -> dict[str, Any]:
+    """Return *body* as a finished answer with ``completeness`` and ``delivery``.
+
+    *over_size* is ``(delivered_bytes, delivery_max_bytes)`` of the whole
+    answer that did not fit, so a smaller answer can say why it is smaller.
+    """
+    answer = dict(body)
+    answer["completeness"] = _completeness(
+        limits_hit,
+        found=found,
+        retained=retained,
+        limits=limits,
+        readable=delivery != "unavailable",
+    )
+    answer["delivery"] = delivery
+    if over_size is not None:
+        answer["delivered_bytes"], answer["delivery_max_bytes"] = over_size
+    return answer
+
+
+def _smaller_answers(
     body: dict[str, Any],
     rows_key: str,
     handle: ResultHandle | None,
     limits_hit: list[AnswerLimit],
-) -> str:
-    """Trim *body* in place to the completed-call wire ceiling; return the delivery state.
+    *,
+    found: int,
+    retained: int,
+    limits: dict[str, int],
+    over_size: tuple[int, int],
+) -> Iterator[dict[str, Any]]:
+    """Yield ever smaller finished answers for a body over the wire ceiling.
 
-    ``partial``: the inline preview was dropped and the rows stay readable
-    through the handle. ``unavailable``: the inline rows were dropped and
-    there is no readable handle. Nothing is cut without saying so.
+    ``partial`` (only with a readable handle): the inline preview is
+    dropped and the rows stay readable through the handle. ``unavailable``:
+    the inline rows and the handle are dropped. The last resort keeps only
+    ``kind``, ``completeness`` and ``delivery``. Nothing is cut without
+    saying so.
     """
-    max_bytes = get_settings().result_complete_response_wire_max_bytes
-    size = measure_delivered_wire_bytes(body)
-    if size <= max_bytes:
-        return "complete"
-    limits_hit.append("delivery_cap")
     if handle_is_readable(handle):
-        body["handle"] = {**body["handle"], "sample_rows": None}
-        delivery = "partial"
-    else:
-        body.pop(rows_key, None)
-        body.pop("handle", None)
-        delivery = "unavailable"
-    body["delivered_bytes"] = size
-    body["delivery_max_bytes"] = max_bytes
-    return delivery
+        partial = {key: value for key, value in body.items() if key != rows_key}
+        partial["handle"] = {**body["handle"], "sample_rows": None}
+        yield _finished(
+            partial,
+            "partial",
+            limits_hit,
+            found=found,
+            retained=retained,
+            limits=limits,
+            over_size=over_size,
+        )
+    without_rows = {key: value for key, value in body.items() if key not in (rows_key, "handle")}
+    receipt = {"kind": body["kind"]}
+    for smaller in (without_rows, receipt):
+        yield _finished(
+            smaller,
+            "unavailable",
+            limits_hit,
+            found=found,
+            retained=0,
+            limits=limits,
+            over_size=over_size,
+        )
 
 
 async def bounded_answer(
@@ -238,23 +300,36 @@ async def bounded_answer(
     or ``None``. *limits* is echoed in ``completeness.limits``.
     *preview_omits* names row keys left out of the handle's inline preview
     (history leaves out ``snapshot``; the full rows stay behind the handle).
+
+    The finished answer, ``completeness`` and ``delivery`` included, is
+    measured on the wire. Over the ceiling, each smaller answer from
+    :func:`_smaller_answers` is measured in turn and the first one that
+    fits is returned. The last resort fits by construction for any ceiling
+    the settings accept; it is still measured, and a warning is logged if
+    it is ever over, because returning it beats returning nothing.
     """
     limits_hit: list[AnswerLimit] = [query_limit] if query_limit else []
     part, retained, handle = await _retain(operator, rows_key, rows, limits_hit, preview_omits)
     body = {**envelope, **part}
-    body["completeness"] = _completeness(
-        limits_hit, found=len(rows), retained=retained, limits=limits
-    )
-    delivery = _fit_delivery(body, rows_key, handle, limits_hit)
-    body["delivery"] = delivery
-    if delivery != "complete":
-        retained = retained if delivery == "partial" else 0
-        body["completeness"] = _completeness(
-            limits_hit, found=len(rows), retained=retained, limits=limits
-        )
-        if delivery == "unavailable":
-            body["completeness"]["state"] = "unavailable"
-        size = measure_delivered_wire_bytes(body)
-        if size > body["delivery_max_bytes"]:
-            _log.warning("topology_answer_over_ceiling", delivered_bytes=size)
-    return body
+    found = len(rows)
+    answer = _finished(body, "complete", limits_hit, found=found, retained=retained, limits=limits)
+    max_bytes = get_settings().result_complete_response_wire_max_bytes
+    size = measure_delivered_wire_bytes(answer)
+    if size <= max_bytes:
+        return answer
+    limits_hit = [*limits_hit, "delivery_cap"]
+    for answer in _smaller_answers(
+        body,
+        rows_key,
+        handle,
+        limits_hit,
+        found=found,
+        retained=retained,
+        limits=limits,
+        over_size=(size, max_bytes),
+    ):
+        size = measure_delivered_wire_bytes(answer)
+        if size <= max_bytes:
+            return answer
+    _log.warning("topology_answer_over_ceiling", delivered_bytes=size, delivery_max_bytes=max_bytes)
+    return answer

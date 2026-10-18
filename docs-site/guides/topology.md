@@ -126,9 +126,9 @@ block:
 - `state: unavailable` — no nodes can be read, for example because the
   walk ran out of time.
 
-Do not read an `incomplete` or `unavailable` answer as the whole blast
-radius. `guidance` says how to narrow the query. A large answer has no
-inline `nodes`: it has a `handle`, and you read the rows with
+Do not read an `incomplete` or `unavailable` answer as everything that
+is affected. `guidance` says how to narrow the query. A large answer
+has no inline `nodes`: it has a `handle`, and you read the rows with
 `result_query`. `history` answers work the same way.
 
 `dependencies` is the mirror image — same shape, same flags, forward

@@ -14,10 +14,12 @@ distinct answer:
 * store limits (``store_cap``: ``incomplete``; ``store_unavailable``:
   ``unavailable``);
 * the wire ceiling (``delivery_cap``): ``delivery`` is ``partial`` when the
-  handle is readable and ``unavailable`` when it is not.
+  handle is readable and ``unavailable`` when it is not. The finished
+  answer, whatever its form, is measured and fits the ceiling.
 
 History answers get the same envelope, and their inline preview leaves
-out the ``snapshot`` payloads.
+out the ``snapshot`` payloads. Every answer is checked against the tool's
+declared ``outputSchema``.
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
+import jsonschema
 import pytest
 from fastapi.testclient import TestClient
 
@@ -37,6 +40,9 @@ import meho_backplane.operations.jsonflux_reducer as reducer_module
 import meho_backplane.operations.result_query as result_query_core
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.result_handle_store import SpillResult
+from meho_backplane.jsonflux.query.result_catalog import AdmissionGuard
+from meho_backplane.mcp import registry as mcp_registry
+from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.topology.query import BoundedClosure, ClosureBudget, ClosureLimit
 from meho_backplane.topology.schemas import (
@@ -110,7 +116,17 @@ def _call(client: TestClient, arguments: dict[str, Any]) -> dict[str, Any]:
     )
     body = response.json()
     assert body["result"]["isError"] is False, body
-    return json.loads(body["result"]["content"][0]["text"])
+    payload = json.loads(body["result"]["content"][0]["text"])
+    assert payload == body["result"]["structuredContent"]
+    entry = mcp_registry.get_tool("query_topology")
+    assert entry is not None
+    jsonschema.validate(
+        instance=payload,
+        schema=entry[0].outputSchema,
+        cls=jsonschema.Draft202012Validator,
+        format_checker=jsonschema.Draft202012Validator.FORMAT_CHECKER,
+    )
+    return payload
 
 
 def _dependents(client: TestClient, mock: AsyncMock) -> dict[str, Any]:
@@ -243,6 +259,27 @@ def test_store_refusal_is_unavailable(
     assert payload["handle"]["fetch_more"]["drill_in"]["available"] is False
 
 
+def test_unprofiled_rows_keep_the_schema_and_read_as_unavailable(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    store: MemoryResultStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rows over the reducer's work limit give `reason`, never `status: unprofiled`."""
+    client, _op = client_with_operator
+    guard = AdmissionGuard(max_nodes=20)
+    monkeypatch.setattr(
+        answer_module, "_REDUCER", JsonFluxReducer(store=store, admission_guard=guard)
+    )
+    payload = _dependents(client, _closure(80))  # validated against the outputSchema
+
+    assert "status" not in payload
+    assert payload["reason"] == "admission_limit_exceeded"
+    assert payload["completeness"]["state"] == "unavailable"
+    assert payload["completeness"]["limits_hit"] == ["store_unavailable"]
+    assert payload["completeness"]["retained"] == 0
+    assert payload["handle"]["fetch_more"]["drill_in"]["available"] is False
+
+
 def _ceiling(monkeypatch: pytest.MonkeyPatch, max_bytes: int) -> None:
     settings = types.SimpleNamespace(result_complete_response_wire_max_bytes=max_bytes)
     monkeypatch.setattr(answer_module, "get_settings", lambda: settings)
@@ -263,6 +300,7 @@ def test_delivery_cap_with_a_readable_handle_is_partial(
     assert payload["completeness"]["limits_hit"] == ["delivery_cap"]
     assert payload["completeness"]["retained"] == 80
     assert payload["delivery_max_bytes"] == 9000
+    assert measure_delivered_wire_bytes(payload) <= 9000
 
 
 def test_delivery_cap_without_a_handle_is_unavailable(
@@ -279,6 +317,73 @@ def test_delivery_cap_without_a_handle_is_unavailable(
     assert payload["completeness"]["state"] == "unavailable"
     assert payload["completeness"]["limits_hit"] == ["delivery_cap"]
     assert payload["completeness"]["retained"] == 0
+    assert measure_delivered_wire_bytes(payload) <= 2048
+
+
+def test_finished_answer_is_measured_with_its_completeness_and_delivery(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    store: MemoryResultStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The size check covers the whole answer, so a ceiling of exactly its size passes."""
+    client, _op = client_with_operator
+    _ceiling(monkeypatch, 1 << 20)
+    whole = _dependents(client, _closure(3))
+    size = measure_delivered_wire_bytes(whole)
+
+    _ceiling(monkeypatch, size)
+    assert _dependents(client, _closure(3))["delivery"] == "complete"
+
+    _ceiling(monkeypatch, size - 1)
+    smaller = _dependents(client, _closure(3))
+    assert smaller["delivery"] == "unavailable"
+    assert smaller["delivered_bytes"] == size
+    assert measure_delivered_wire_bytes(smaller) <= size - 1
+
+
+def test_every_smaller_answer_fits_the_ceiling_it_was_cut_for(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    store: MemoryResultStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """partial, then unavailable, then the bare receipt: each fits its ceiling.
+
+    Each next ceiling sits a few bytes under the previous answer, not one
+    byte, because the two byte counts in the answer can lose a digit
+    between calls.
+    """
+    client, _op = client_with_operator
+    _ceiling(monkeypatch, 1 << 20)
+    whole_size = measure_delivered_wire_bytes(_dependents(client, _closure(80)))
+
+    _ceiling(monkeypatch, whole_size - 1)
+    partial = _dependents(client, _closure(80))
+    assert partial["delivery"] == "partial"
+    partial_size = measure_delivered_wire_bytes(partial)
+    assert partial_size <= whole_size - 1
+
+    _ceiling(monkeypatch, partial_size - 16)
+    unavailable = _dependents(client, _closure(80))
+    assert unavailable["delivery"] == "unavailable"
+    assert "handle" not in unavailable
+    assert unavailable["root"]["name"] == "hub"
+    unavailable_size = measure_delivered_wire_bytes(unavailable)
+    assert unavailable_size <= partial_size - 16
+
+    _ceiling(monkeypatch, unavailable_size - 16)
+    receipt = _dependents(client, _closure(80))
+    assert set(receipt) == {
+        "kind",
+        "completeness",
+        "delivery",
+        "delivered_bytes",
+        "delivery_max_bytes",
+    }
+    assert receipt["completeness"]["state"] == "unavailable"
+    assert receipt["completeness"]["limits_hit"] == ["delivery_cap"]
+    assert measure_delivered_wire_bytes(receipt) <= unavailable_size - 16
+    for answer in (partial, unavailable, receipt):
+        assert answer["delivered_bytes"] == whole_size
 
 
 def _history(count: int, snapshot_bytes: int) -> TopologyHistoryResult:

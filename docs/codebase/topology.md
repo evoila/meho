@@ -909,37 +909,54 @@ so the guard runs only where the column is JSONB.
 
 `query_topology` with `kind=dependents` / `dependencies` does not call
 `find_dependents` / `find_dependencies`. It calls `bounded_closure`,
-which runs the same statements with limits, so a dense graph cannot
-make the answer unbounded. The REST, CLI and console closure routes
-still call the unbounded verbs (see Known issues).
+which walks the graph hop by hop under limits, so a dense graph cannot
+make the database do unbounded work. The REST, CLI and console closure
+routes still call the unbounded recursive-CTE verbs (see Known issues).
 
-What `bounded_closure` does:
+What `bounded_closure` does (`_bounded_walk`):
 
-- **Time.** Before the traversal it runs
-  `SELECT set_config('statement_timeout', :timeout_ms, true)`. The
-  `true` makes the setting end with the transaction, like `SET LOCAL`.
-  When PostgreSQL stops the statement (SQLSTATE `57014`), the answer
-  has no nodes and `limit_hit="time_budget"`. The root is still known,
-  because the resolver ran first. This is the only bound on the work
-  PostgreSQL does: the recursive CTE follows every walk before it sorts,
-  so on a dense mesh the number of walks grows much faster than the
-  number of nodes.
-- **Nodes and bytes.** The statements compute `row_bytes` (the stored
-  bytes of the node's kind, name, scope and properties) and a running
-  total in answer order `(depth, name, id)`. `:byte_budget` keeps the
-  rows whose running total before them is within the budget, so one row
-  past the budget comes back, with its properties left out, and shows
-  that the byte limit applied. `LIMIT :row_limit` (`max_nodes + 1`)
-  caps the rows. The unbounded verbs pass `NULL` for both.
-- **Depth.** The walk goes one hop past the requested `depth`. A row
-  past it means more nodes exist (`limit_hit="hop_limit"`); it is not
-  returned.
+- **One statement per hop, not one recursive CTE.** The anchor
+  statement (`_CLOSURE_ANCHOR_SQL`) returns the root. Each hop statement
+  (`_CLOSURE_STEP_SQL_REVERSE` / `_FORWARD`) expands only the nodes kept
+  at the previous hop (`:frontier`), skips every node already in the
+  answer (`:visited`), and returns at most `:row_limit` rows in
+  `(name, id)` order. The work per hop is the kept frontier times its
+  fan-out. On a dense mesh each node is expanded once, so the cost
+  grows with the number of nodes, not with the number of paths (the
+  recursive CTE follows every path). A node reached through several
+  parents in one hop keeps the parent and edge with the smallest ids,
+  the same choice the recursive CTE makes.
+- **Nodes.** `:row_limit` is `max_nodes + 1` minus the rows already in
+  hand, so the walk never fetches more than `max_nodes + 1` rows in
+  total, and it stops asking as soon as that row is in hand.
+- **Bytes.** Each hop computes `row_bytes` (the stored bytes of the
+  node's kind, name, scope and properties) and a running total that
+  continues from the previous hop (`:bytes_before`). Rows whose running
+  total before them is within `:byte_budget` come back, so one row past
+  the budget comes back, with its properties left out, and shows that
+  the byte limit applied. The walk stops asking after that row.
+- **Time.** The budget covers the whole walk. Before every statement
+  the time left is set as `SELECT set_config('statement_timeout',
+  :timeout_ms, true)` (the `true` makes it end with the transaction,
+  like `SET LOCAL`). When the time is up, or PostgreSQL stops a
+  statement (SQLSTATE `57014`), the answer has no nodes and
+  `limit_hit="time_budget"`. The root is still known, because the
+  resolver ran first.
+- **Depth.** After the last hop within `depth` the walk probes one hop
+  further with `LIMIT 1`. A row there means more nodes exist
+  (`limit_hit="hop_limit"`); it is not returned.
 
 `_cut_closure_rows` keeps the rows within all limits and names the first
 limit that stopped them. The kept rows are always the first part of
 the full closure in `(depth, name, id)` order, never a sample from the
 middle. The root is always kept. Defaults: `CLOSURE_MAX_NODES` 2000,
 `CLOSURE_MAX_BYTES` 4 MiB, `CLOSURE_TIME_BUDGET_MS` 5000.
+
+The walk is tested without a database with a fake session that records
+each hop (`tests/test_topology_query_schemas.py`), and against
+PostgreSQL by counting the hop statements the walk sends
+(`tests/integration/test_topology_query.py`: a star cut at the first hop
+sends one; the dense mesh sends one per layer plus the probe).
 
 The MCP facet then hands the rows to `bounded_answer` in
 `mcp/tools/_topology_answer.py`. It reuses the shared result
@@ -951,11 +968,23 @@ contracts and adds nothing of its own:
    with the usual ownership check. The answer then carries the reducer
    summary and `handle` instead of `nodes`. The handle's
    `fetch_more.drill_in.stored_rows` says how many rows the store kept.
-2. The finished answer is measured with `measure_delivered_wire_bytes`
-   against `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES`. Over the ceiling,
-   the inline preview is dropped when the handle is readable
-   (`delivery="partial"`), or the inline rows are dropped when it is not
-   (`delivery="unavailable"`).
+   Rows the reducer could not profile (its admission work limit) come
+   back from it as `status: unprofiled`; `status` means something else
+   on this tool and its `outputSchema` only allows those values, so the
+   answer drops `status`, keeps the reducer's `reason`
+   (`admission_limit_exceeded`) and reports `store_unavailable`.
+2. The finished answer, `completeness` and `delivery` included, is
+   measured with `measure_delivered_wire_bytes` against
+   `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES`. Over the ceiling, smaller
+   answers are built and measured in turn until one fits: the inline
+   preview is dropped when the handle is readable
+   (`delivery="partial"`); then the inline rows and the handle are
+   dropped (`delivery="unavailable"`); the last resort keeps only `kind`,
+   `completeness` and `delivery`. Each smaller answer carries
+   `delivered_bytes` (the size of the whole answer) and
+   `delivery_max_bytes`. The last resort fits by construction for any
+   ceiling the settings accept; it is still measured, and a warning is
+   logged if it is ever over.
 3. A `completeness` block names every limit that applied:
 
 | Limit | `state` | What it means |

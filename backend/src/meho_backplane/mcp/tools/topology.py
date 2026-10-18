@@ -618,8 +618,8 @@ _QUERY_TOPOLOGY_DESCRIPTION: Final[str] = (
     "`time_budget` the traversal ran out of time). `completeness."
     "limits_hit` names each limit (`hop_limit` = more nodes exist past "
     "`depth`) and `guidance` says how to narrow the query. Never read an "
-    "`incomplete` or `unavailable` answer as the whole blast radius. A "
-    "large answer has no inline `nodes`: it has `handle` and a short "
+    "`incomplete` or `unavailable` answer as everything that is affected. "
+    "A large answer has no inline `nodes`: it has `handle` and a short "
     "preview in `handle.sample_rows`; read every row with `result_query` "
     "and `handle_id`. `kind=history` answers work the same way, with "
     "`rows` instead of `nodes`, and the handle preview leaves out "
@@ -1482,7 +1482,20 @@ register_mcp_tool(
                         "so the inline preview was left out; read the rows "
                         "with `result_query` and `handle`. `unavailable`: it "
                         "was too large and there is no readable handle; "
-                        "narrow the query."
+                        "narrow the query. The finished answer is measured "
+                        "on the wire and made smaller until it fits; the "
+                        "smallest form keeps only `kind`, `completeness` and "
+                        "`delivery`."
+                    ),
+                },
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "Closure and `history` answers with a `handle` whose "
+                        "rows the result store did not keep: why. "
+                        "`admission_limit_exceeded` means the rows were too "
+                        "large or too deeply nested to profile; narrow the "
+                        "query."
                     ),
                 },
                 "handle": {

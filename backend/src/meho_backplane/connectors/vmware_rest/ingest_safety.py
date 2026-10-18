@@ -5,8 +5,12 @@
 
 from __future__ import annotations
 
+import re
+
 from meho_backplane.operations.ingest.safety_floors import register_ingest_safety_floor
 from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
+
+__all__ = ["is_vmware_tagging_removal", "vmware_rest_safety_floor"]
 
 _WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
@@ -18,12 +22,22 @@ _WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 _FLOORED_VERSIONS = frozenset({"8.0", "9.0"})
 
 
-# Tag detach is a POST with an ``?action=detach...`` query in the path key
-# (``detach``, ``detach-multiple-tags-from-object``,
-# ``detach-tag-from-multiple-objects``). It removes tags from inventory
-# objects, so it waits for approval like the tag and category DELETEs (#3827).
+# The tagging removals are ``destructive`` (#3827): a category delete also
+# removes every tag in it and detaches those tags from every object; a tag
+# delete detaches it everywhere; a detach drops the association that
+# governance (for example storage policy tags) relies on. ``destructive``
+# means every seat waits for a second person, a standing grant can never
+# satisfy the op, and the park needs a preview with the affected objects.
+# The preview builders live in ``tagging_delete_preview.py``.
 _TAG_ASSOCIATION_PATH = "/cis/tagging/tag-association"
 _TAG_DETACH_ACTION_PREFIX = "action=detach"
+_TAGGING_OBJECT_PATH_RE = re.compile(r"/cis/tagging/(category|tag)/\{[^/{}]+\}")
+
+
+def _canonical(path: str) -> tuple[str, str]:
+    """Split *path* into ``(path without the /api mount, query)``."""
+    raw_path, _, query = path.partition("?")
+    return raw_path.removeprefix("/api"), query
 
 
 def _is_tag_detach(method: str, canonical_path: str, query: str) -> bool:
@@ -35,14 +49,25 @@ def _is_tag_detach(method: str, canonical_path: str, query: str) -> bool:
     )
 
 
+def is_vmware_tagging_removal(method: str, path: str) -> bool:
+    """Return whether ``(method, path)`` deletes a tag or category, or detaches a tag.
+
+    Matches ``DELETE /cis/tagging/category/{id}``, ``DELETE /cis/tagging/tag/{id}``
+    and the three ``POST /cis/tagging/tag-association[/{id}]?action=detach*``
+    actions, with or without the ``/api`` mount in the path.
+    """
+    method = method.upper()
+    canonical_path, query = _canonical(path)
+    if method == "DELETE":
+        return _TAGGING_OBJECT_PATH_RE.fullmatch(canonical_path) is not None
+    return _is_tag_detach(method, canonical_path, query)
+
+
 def _requires_vmware_safety_floor(method: str, path: str) -> bool:
-    """Identify VMware write families that require approval."""
+    """Identify VMware VM write families that require approval."""
     if method not in _WRITE_METHODS:
         return False
-    raw_path, _, query = path.partition("?")
-    canonical_path = raw_path.removeprefix("/api")
-    if _is_tag_detach(method, canonical_path, query):
-        return True
+    canonical_path, _query = _canonical(path)
     if canonical_path == "/vcenter/vm/{vm}/hardware":
         return True
     if canonical_path.startswith("/vcenter/vm/{vm}/hardware/"):
@@ -59,10 +84,13 @@ def _requires_vmware_safety_floor(method: str, path: str) -> bool:
 def vmware_rest_safety_floor(
     version: str, proto: EndpointDescriptorProto
 ) -> EndpointDescriptorProto:
-    """Promote VM hardware, lifecycle, power, and tag-detach writes for the VMware catalogs."""
-    if version not in _FLOORED_VERSIONS or not _requires_vmware_safety_floor(
-        proto.method.upper(), proto.path
-    ):
+    """Promote VM hardware, lifecycle, power, and tagging-removal writes for the VMware catalogs."""
+    if version not in _FLOORED_VERSIONS:
+        return proto
+    method = proto.method.upper()
+    if is_vmware_tagging_removal(method, proto.path):
+        return proto.model_copy(update={"safety_level": "destructive", "requires_approval": True})
+    if not _requires_vmware_safety_floor(method, proto.path):
         return proto
     safety_level = proto.safety_level if proto.safety_level == "destructive" else "dangerous"
     return proto.model_copy(update={"safety_level": safety_level, "requires_approval": True})

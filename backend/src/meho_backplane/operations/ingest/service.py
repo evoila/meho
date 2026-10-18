@@ -106,6 +106,8 @@ from meho_backplane.operations.ingest._internals import (
     load_ops_outside_groups,
     operator_disabled_op_ids,
     scope_has_groups,
+    scope_has_rows,
+    select_groups,
     validate_edit_op_args,
     write_audit_row,
 )
@@ -321,14 +323,14 @@ class ReviewService:
                 impl_id=scope.impl_id,
                 tenant_id=None,
             )
-            if await scope_has_groups(session, builtin_scope):
+            if await scope_has_rows(session, builtin_scope):
                 return builtin_scope
             raise ConnectorNotFoundError(
                 connector_id=connector_id,
                 tenant_id=None,
             )
         # prefer == "tenant"
-        if tenant_id is not None and await scope_has_groups(session, scope):
+        if tenant_id is not None and await scope_has_rows(session, scope):
             return scope
         raise ConnectorNotFoundError(
             connector_id=connector_id,
@@ -391,7 +393,7 @@ class ReviewService:
         if tenant_id is None:
             # Explicit built-in probe (admin path) — single-pass, no
             # fallback, no ambiguity.
-            if await scope_has_groups(session, scope):
+            if await scope_has_rows(session, scope):
                 return scope
             raise ConnectorNotFoundError(
                 connector_id=connector_id,
@@ -403,8 +405,8 @@ class ReviewService:
             impl_id=scope.impl_id,
             tenant_id=None,
         )
-        tenant_exists = await scope_has_groups(session, scope)
-        builtin_exists = await scope_has_groups(session, builtin_scope)
+        tenant_exists = await scope_has_rows(session, scope)
+        builtin_exists = await scope_has_rows(session, builtin_scope)
         if tenant_exists and builtin_exists:
             raise AmbiguousConnectorScopeError(
                 connector_id=connector_id,
@@ -528,9 +530,11 @@ class ReviewService:
         ``group_key`` and ops by ``op_id`` so consecutive calls
         produce identical payloads.
 
-        Empty group set → :class:`ConnectorNotFoundError`. A group
-        with zero ops is legal and renders as ``op_count=0,
-        ops=[]``.
+        No group row **and** no descriptor row →
+        :class:`ConnectorNotFoundError`. A group with zero ops is legal
+        and renders as ``op_count=0, ops=[]``; a connector with ops but
+        no groups renders ``groups=[]`` and lists every op in
+        ``ungrouped_ops`` (#3870).
 
         No audit row is written; the surrounding HTTP / MCP request
         already audits the read at the chassis layer.
@@ -576,14 +580,15 @@ class ReviewService:
     ) -> ConnectorReviewPayload:
         """Load groups + ops for *scope* and pack them into the payload.
 
-        Raises :class:`ConnectorNotFoundError` when no group rows
-        exist under *scope* (a defensive guard — the caller resolves
-        the scope via :meth:`_resolve_existing_scope` first, so on the
-        normal path rows are present). The caller owns the open
-        *session* / transaction so scope resolution and payload
-        rendering observe one consistent snapshot.
+        A scope with descriptor rows but no group rows (the grouping
+        pass produced no buckets) renders ``groups=[]`` with every op
+        in ``ungrouped_ops`` (#3870); the caller has already checked
+        via :meth:`_resolve_existing_scope` that the scope holds rows.
+        The caller owns the open *session* / transaction so scope
+        resolution and payload rendering observe one consistent
+        snapshot.
         """
-        groups = await load_groups(session, scope, connector_id)
+        groups = await select_groups(session, scope)
         ops = await load_ops_in_groups(
             session,
             scope,

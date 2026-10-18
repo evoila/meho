@@ -478,6 +478,100 @@ async def test_review_payload_lists_ungrouped_ops_with_state() -> None:
 
 
 @pytest.mark.asyncio
+async def test_review_payload_for_tenant_connector_without_groups() -> None:
+    """#3870: a tenant connector with ops but no group rows still has a review.
+
+    The grouping pass can fail and leave descriptor rows with no group.
+    Dispatch still serves the enabled ones, so the review must resolve
+    the connector from its op rows, return ``groups=[]``, and list every
+    op in ``ungrouped_ops``.
+    """
+    tenant_id = uuid.uuid4()
+    await _add_ungrouped_op(
+        tenant_id=tenant_id,
+        op_id="GET:/api/v1/ungrouped/list",
+        method="GET",
+        is_enabled=True,
+    )
+    await _add_ungrouped_op(
+        tenant_id=tenant_id,
+        op_id="POST:/api/v1/ungrouped/create",
+        method="POST",
+        is_enabled=False,
+    )
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+
+    payload = await service.get_review_payload("vmware-rest-9.0", tenant_id)
+
+    assert payload.tenant_id == tenant_id
+    assert payload.groups == []
+    assert payload.total_op_count == 0
+    assert payload.ungrouped_op_count == 2
+    assert [(op.op_id, op.is_enabled) for op in payload.ungrouped_ops] == [
+        ("GET:/api/v1/ungrouped/list", True),
+        ("POST:/api/v1/ungrouped/create", False),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_review_payload_for_builtin_connector_without_groups() -> None:
+    """#3870: a built-in connector with ops but no group rows has a review too.
+
+    Both built-in read paths must find it: the operator's own-tenant
+    probe falls back to the built-in row, and the admin path's explicit
+    ``tenant_id=None`` probe resolves it directly.
+    """
+    operator_tenant = uuid.uuid4()
+    await _add_ungrouped_op(
+        tenant_id=None,
+        op_id="GET:/api/v1/ungrouped/list",
+        method="GET",
+        is_enabled=True,
+    )
+
+    fallback = ReviewService(_make_operator(tenant_id=operator_tenant, role=TenantRole.OPERATOR))
+    payload = await fallback.get_review_payload("vmware-rest-9.0", operator_tenant)
+    assert payload.tenant_id is None
+    assert payload.groups == []
+    assert [op.op_id for op in payload.ungrouped_ops] == ["GET:/api/v1/ungrouped/list"]
+    assert payload.ungrouped_op_count == 1
+
+    admin = ReviewService(_make_operator(tenant_id=operator_tenant, platform_admin=True))
+    payload = await admin.get_review_payload("vmware-rest-9.0", None)
+    assert payload.tenant_id is None
+    assert payload.groups == []
+    assert [op.op_id for op in payload.ungrouped_ops] == ["GET:/api/v1/ungrouped/list"]
+
+
+@pytest.mark.asyncio
+async def test_review_payload_tenant_ops_without_groups_shadow_builtin_groups() -> None:
+    """#3870: a tenant row made only of op rows still counts as the tenant's row.
+
+    Dispatch treats the tenant's descriptor rows as authoritative, so the
+    review resolver must see them too. With a built-in row present as
+    well, the un-preferred probe reports the ambiguity instead of
+    silently reviewing the built-in row.
+    """
+    tenant_id = uuid.uuid4()
+    await _seed_connector(tenant_id=None, group_count=1, ops_per_group=1)
+    await _add_ungrouped_op(
+        tenant_id=tenant_id,
+        op_id="GET:/api/v1/tenant-only",
+        method="GET",
+        is_enabled=True,
+    )
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+
+    with pytest.raises(AmbiguousConnectorScopeError):
+        await service.get_review_payload("vmware-rest-9.0", tenant_id)
+
+    payload = await service.get_review_payload("vmware-rest-9.0", tenant_id, prefer="tenant")
+    assert payload.tenant_id == tenant_id
+    assert payload.groups == []
+    assert [op.op_id for op in payload.ungrouped_ops] == ["GET:/api/v1/tenant-only"]
+
+
+@pytest.mark.asyncio
 async def test_review_counts_do_not_bleed_across_duplicate_scope_registrations() -> None:
     """A duplicate ``connector_id`` under two scopes keeps counts isolated (#2977).
 
@@ -1962,6 +2056,32 @@ async def test_enable_reads_does_not_move_group_review_status() -> None:
 
     statuses = await _group_statuses(tenant_id=tenant_id)
     assert set(statuses.values()) == {"staged"}, "group must stay staged"
+
+
+@pytest.mark.asyncio
+async def test_enable_reads_on_connector_without_groups_flips_read_ops() -> None:
+    """#3870: enable-reads shares the review resolver, so it finds a group-less connector too."""
+    tenant_id = uuid.uuid4()
+    await _add_ungrouped_op(
+        tenant_id=tenant_id,
+        op_id="GET:/api/v1/ungrouped/list",
+        method="GET",
+        is_enabled=False,
+    )
+    await _add_ungrouped_op(
+        tenant_id=tenant_id,
+        op_id="POST:/api/v1/ungrouped/create",
+        method="POST",
+        is_enabled=False,
+    )
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+
+    enabled = await service.enable_reads("vmware-rest-9.0", tenant_id=tenant_id)
+
+    assert enabled == 1
+    state = await _ops_enabled_state(tenant_id=tenant_id)
+    assert state["GET:/api/v1/ungrouped/list"] is True
+    assert state["POST:/api/v1/ungrouped/create"] is False
 
 
 @pytest.mark.asyncio

@@ -1730,7 +1730,10 @@ so they can never diverge on *which row* they act on. The resolver:
   path) does a single-pass existence check — no fallback, no
   ambiguity;
 - for the operator's own tenant, probes **both** the tenant scope and
-  the built-in scope with `scope_has_groups` and then:
+  the built-in scope with `scope_has_rows` (a group row **or** a
+  descriptor row counts, so a connector whose grouping pass produced no
+  groups is still found and reviewed with `groups=[]` and every op in
+  `ungrouped_ops`, #3870) and then:
   - both exist → raises `AmbiguousConnectorScopeError` (the route maps
     it to a 409 `connector_scope_ambiguous` enumerating the candidate
     rows — neither a silent pick nor a bare 404);

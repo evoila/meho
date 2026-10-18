@@ -2219,8 +2219,7 @@ composite, plus a per-disk `transfer` manifest (`{path, device_id,
 size_bytes}`). `datastore` is **required** (the vim `CreateImportSpec` request
 takes an explicit placement datastore, unlike the REST deploy which derives
 it). As with the deploy composite, multi-GB imports should ride **async
-governed dispatch** (#3079) so a dropped caller cannot cancel the in-flight
-transfer.
+governed dispatch** (#3079) so a dropped caller does not lose the outcome.
 
 **Live-appliance verification is deferred** (no lab access at implementation
 time): the deliverable is the implementation + full conformance/unit coverage,

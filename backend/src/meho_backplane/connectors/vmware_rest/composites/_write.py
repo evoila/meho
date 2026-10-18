@@ -2990,10 +2990,10 @@ async def vm_deploy_from_library_composite(
     on the default sync path, but a **multi-GB installer OVA should be
     dispatched in async mode** (``call_operation`` with ``async=true`` → HTTP
     202 + a durable run handle, #3079): the deploy then runs on a background
-    task that owns the vCenter POST, so a caller that disconnects mid-transfer
-    no longer cancels the in-flight deploy — on the sync path a dropped caller
-    propagates cancellation into the POST and vCenter rolls the half-created VM
-    back. The sync ceiling stays a bounded mitigation; an item large enough to
+    task that owns the vCenter POST, so the caller does not have to keep the
+    connection open. On the sync path a caller that disconnects never gets the
+    answer; the deploy still runs to the end, and the audit row records
+    ``caller_gone_at`` (#3696). The sync ceiling stays a bounded mitigation; an item large enough to
     outrun 3 h still needs the typed ``HttpNfcLease`` import (#2890).
     """
     try:

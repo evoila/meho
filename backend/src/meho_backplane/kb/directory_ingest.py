@@ -29,6 +29,7 @@ from typing import Literal
 import structlog
 from sqlalchemy import select
 
+from meho_backplane.audit_cutover import note_preview
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Document
 from meho_backplane.kb.file_walker import KbFileRecord, walk_kb_directory
@@ -128,6 +129,9 @@ async def ingest_directory(
         ``meho kb ingest --dry-run`` before a real run.
     """
     log = structlog.get_logger()
+    if dry_run:
+        # A dry run changes nothing, so the request needs no audit row (#3757).
+        note_preview()
     # Confine to KB_INGEST_ROOT before any read; dry-run too (#101).
     resolved = _resolve_within_ingest_root(directory)
     counts: Counter[_IngestAction] = Counter()

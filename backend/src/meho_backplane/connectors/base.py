@@ -22,7 +22,13 @@ from meho_backplane.connectors.schemas import (
     TopologyHints,
 )
 
-__all__ = ["Connector", "ConnectorResourceNotFoundError", "ShimKind", "shim_kind"]
+__all__ = [
+    "Connector",
+    "ConnectorResourceNotFoundError",
+    "ConnectorUpstreamError",
+    "ShimKind",
+    "shim_kind",
+]
 
 # Forward declaration — replaced with `from meho_backplane.targets import Target`
 # in G0.2-T5 once G0.3 lands the Target model.
@@ -41,6 +47,24 @@ class ConnectorResourceNotFoundError(Exception):
     def __init__(self, resource_ids: list[str], message: str) -> None:
         super().__init__(message)
         self.resource_ids = resource_ids
+
+
+class ConnectorUpstreamError(Exception):
+    """The upstream API answered a call with a non-success HTTP status.
+
+    For connectors whose client library does not raise
+    :exc:`httpx.HTTPStatusError`. The connector reads the status and the
+    upstream's own error message at its boundary and raises this (or a
+    subclass). The dispatcher's ``connector_error`` envelope then carries
+    ``extras.http_status`` and ``extras.upstream_message``, the same keys
+    the ``httpx`` path sets, so the caller sees the status code and the
+    upstream's message instead of a bare exception class.
+    """
+
+    def __init__(self, message: str, *, http_status: int, upstream_message: str | None) -> None:
+        super().__init__(message)
+        self.http_status = http_status
+        self.upstream_message = upstream_message
 
 
 #: G0.28-T1 (#1967) — tri-state dispatchability classification of a

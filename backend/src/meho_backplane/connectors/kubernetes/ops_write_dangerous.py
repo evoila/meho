@@ -39,8 +39,17 @@ References
 * Parent task: G3.14-T1 (#1403); Initiative G3.14 (#1398).
 * Server-side apply:
   https://kubernetes.io/docs/reference/using-api/server-side-apply/
-* ``kubernetes_asyncio.dynamic.DynamicClient`` (35.0.1):
+* ``kubernetes_asyncio.dynamic.DynamicClient`` (36.1.0):
   https://github.com/tomplus/kubernetes_asyncio/blob/master/kubernetes_asyncio/dynamic/client.py
+  ``DynamicClient.request`` calls the API with ``_preload_content=False``,
+  and ``RESTClientObject.request`` only turns a non-2xx answer into an
+  ``ApiException`` when ``_preload_content`` is true. So a rejected
+  request comes back as a normal response. :func:`_apply_one` therefore
+  asks for the raw response (``serialize=False``) and checks the HTTP
+  status itself (#3876).
+* Kubernetes error responses are a ``Status`` object with ``code``,
+  ``reason`` and ``message``:
+  https://kubernetes.io/docs/reference/kubernetes-api/common-definitions/status/
 * Redaction op-class (reused, not reinvented):
   :data:`meho_backplane.broadcast.events._CREDENTIAL_WRITE_OPS`
   (shipped by #1401).
@@ -48,6 +57,7 @@ References
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -60,6 +70,7 @@ from meho_backplane.connectors._shared.vault_creds import (
     load_vault_secret_data,
     strip_credential_value,
 )
+from meho_backplane.connectors.base import ConnectorUpstreamError
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -71,6 +82,7 @@ __all__ = [
     "FIELD_MANAGER",
     "ApplyManifestError",
     "ApplyNotPersistedError",
+    "ApplyRejectedError",
     "KubernetesSecretRefError",
     "UndeletableKindError",
     "k8s_apply",
@@ -115,6 +127,9 @@ class ApplyManifestError(ValueError):
 class ApplyNotPersistedError(ValueError):
     """A real (non-dry-run) server-side apply returned an unpersisted object.
 
+    Only for a 2xx answer. A non-2xx answer raises
+    :class:`ApplyRejectedError` before this check runs.
+
     The Kubernetes API server always stamps a ``metadata.resourceVersion``
     on an object it actually stores, so a **real** apply (``dry_run`` not
     ``"server"``) that comes back with no ``resourceVersion`` did not
@@ -128,6 +143,18 @@ class ApplyNotPersistedError(ValueError):
     Subclasses :class:`ValueError` so the dispatcher's ``connector_error``
     envelope tags ``extras.exception_class="ApplyNotPersistedError"``,
     like the sibling manifest / kind / secret-ref errors above.
+    """
+
+
+class ApplyRejectedError(ConnectorUpstreamError):
+    """The API server answered a server-side apply with a non-2xx status.
+
+    For example an admission webhook that denies the request (403), an
+    invalid object (422) or a field-ownership conflict (409). Raised for
+    the real apply and for the dry-run, so the dispatcher returns
+    ``error`` with ``extras.http_status`` and the API server's message in
+    ``extras.upstream_message``, and the approval preview shows the
+    rejection instead of a clean-looking dry-run (#3876).
     """
 
 
@@ -184,6 +211,25 @@ def _parse_manifest(manifest: str) -> list[dict[str, Any]]:
     return parsed
 
 
+def _status_message(body: str) -> str | None:
+    """Return the ``message`` of a Kubernetes ``Status`` body, else the raw text.
+
+    Returns ``None`` for an empty body.
+    """
+    text = body.strip()
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return text
+    if isinstance(parsed, dict):
+        message = parsed.get("message")
+        if isinstance(message, str) and message.strip():
+            return message
+    return text
+
+
 async def _apply_one(
     dyn: DynamicClient,
     doc: dict[str, Any],
@@ -213,16 +259,33 @@ async def _apply_one(
         # caller). force_conflicts is left unset -- a dry-run that hits
         # a field-ownership conflict is signal the reviewer wants.
         kwargs["dry_run"] = "All"
-    applied = await dyn.server_side_apply(
+    # ``serialize=False`` returns the raw aiohttp response. The default
+    # path would parse a rejection (a ``Status`` body) as if it were the
+    # applied object, because the library skips its non-2xx check here.
+    response = await dyn.server_side_apply(
         resource,
         body=doc,
         name=name,
         namespace=namespace,
+        serialize=False,
         **kwargs,
     )
-    applied_meta = getattr(applied, "metadata", None)
-    resource_version = getattr(applied_meta, "resourceVersion", None)
-    uid = getattr(applied_meta, "uid", None)
+    body = await response.text()
+    subject = f"{api_version}/{kind} {namespace + '/' if namespace else ''}{name}"
+    if not 200 <= response.status <= 299:
+        message = _status_message(body)
+        status_line = " ".join(str(part) for part in (response.status, response.reason) if part)
+        detail = f": {message}" if message else ""
+        raise ApplyRejectedError(
+            f"the API server rejected the server-side apply of {subject} "
+            f"(HTTP {status_line}){detail}",
+            http_status=response.status,
+            upstream_message=message,
+        )
+    applied = json.loads(body) if body.strip() else {}
+    applied_meta = (applied.get("metadata") if isinstance(applied, dict) else None) or {}
+    resource_version = applied_meta.get("resourceVersion")
+    uid = applied_meta.get("uid")
     # Persistence check (the false-positive-apply guard). A real apply must
     # come back with a ``resourceVersion`` -- the API server stamps one on
     # every object it stores. When the request was accepted (HTTP 200) but
@@ -234,8 +297,7 @@ async def _apply_one(
     # guard is scoped to the real path.
     if not dry_run and not resource_version:
         raise ApplyNotPersistedError(
-            f"server-side apply of {api_version}/{kind} "
-            f"{namespace + '/' if namespace else ''}{name} was accepted but "
+            f"server-side apply of {subject} was accepted but "
             f"returned no resourceVersion -- the object was not persisted (the "
             f"response is indistinguishable from a dry-run preview). Refusing to "
             f"report success for an apply that created nothing."

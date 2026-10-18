@@ -439,7 +439,9 @@ class AuditEventClass(StrEnum):
     * :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every
       row written before migration ``0106`` reads as this class; it is never
       guessed from ``method`` / ``path``. The REST and MCP request wrapper
-      rows also keep this class until they are retired.
+      rows also keep this class while ``AUDIT_WRAPPER_ROWS_RETIRED`` is off;
+      with it on they write a decision or execution class, or no row
+      (#3757, :mod:`meho_backplane.audit_cutover`).
     """
 
     OPERATION_EXECUTION = "operation_execution"
@@ -464,7 +466,8 @@ class AuditLog(Base):
     Every writer declares its :class:`AuditEventClass` on ``event_class``
     (see ``tests/test_audit_event_class.py`` for the writer inventory).
     The :class:`~meho_backplane.audit.AuditMiddleware` writes one row per
-    authenticated request (class ``legacy_request``); the dispatcher,
+    authenticated request (class ``legacy_request``) until
+    ``AUDIT_WRAPPER_ROWS_RETIRED`` is on (#3757); the dispatcher,
     the approval queue and the domain writers write classified rows.
     Read-only by every other consumer (no UPDATE / DELETE paths exist).
 
@@ -6350,7 +6353,14 @@ class ApprovalRequest(Base):
       to re-enter when this row is a parked composite **sub-op** (#3351):
       ``{"op_id": <composite op_id>, "params": <composite params>}``, captured
       at park time from
-      :data:`~meho_backplane.operations.composite.composite_dispatch_var`.
+      :data:`~meho_backplane.operations.composite.composite_dispatch_var`,
+      plus two optional keys (#4217): ``"state"``, the JSON the composite
+      saved for the re-entry (read back with
+      :func:`~meho_backplane.operations.composite.composite_resume_state`),
+      and ``"after_main_effect": true`` when the parked step runs after the
+      composite's main change exists. Such a re-entry continues at the
+      parked step instead of running the composite from the start, and may
+      wait for approval again.
       A composite's governed sub-op parks under its sub-op governance key +
       identity-only gate params, which is not a dispatchable descriptor call,
       so the shared resume path re-dispatches this parent composite
@@ -6363,7 +6373,8 @@ class ApprovalRequest(Base):
       in that single pass; a composite that would open a *second* governed gate
       is unsupported and fails closed
       (``composite_resume_multi_gate_unsupported``) rather than re-park (#3351
-      review B1). NULL for every non-composite (direct-op) park — those keep
+      review B1), unless that gate is an ``after_main_effect`` step with saved
+      state (#4217). NULL for every non-composite (direct-op) park — those keep
       the unchanged generic re-dispatch of ``op_id`` — and on pre-0099 rows.
       Internal resume input only; like ``params`` it is never projected onto a
       read view or a broadcast frame. Added by migration ``0099``.
@@ -8817,9 +8828,10 @@ class RequestUsageEvent(Base):
     * ``correlation_id`` -- opaque id that links a ``context_selected``
       event to later evaluation data; ``NULL`` on ``request_finished``.
 
-    Indexes are declared in migration ``0108``:
-    ``(tenant_id, occurred_at)`` for tenant-scoped window reads, and
-    ``occurred_at`` for the retention delete.
+    Indexes are declared in migrations ``0107`` and ``0113``:
+    ``(tenant_id, occurred_at)`` for tenant-scoped window reads,
+    ``occurred_at`` for the retention delete, and ``session_id`` for the
+    reflex advisory's "did this session read the feed" check (#3757).
     """
 
     __tablename__ = "request_usage_event"

@@ -813,3 +813,152 @@ async def test_handler_returns_resolution_error(monkeypatch: pytest.MonkeyPatch)
         params={"resource_pool": "rp-1", "datastore": "ds-1", "library_item_name": "app"},
     )
     assert envelope["status"] == "ambiguous_item"
+
+
+# ---------------------------------------------------------------------------
+# #4217 -- an approved power-on of an imported VM only powers it on
+# ---------------------------------------------------------------------------
+
+
+class _PowerConnector:
+    """Records the direct write sub-calls of the power-on step."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    async def mount_op_path(self, target: Any, path: str, operator: Any) -> str:
+        return f"/api{path}"
+
+    async def _post_json(
+        self, target: Any, path: str, *, operator: Any, verb: str, **_kw: Any
+    ) -> Any:
+        self.calls.append((verb, path))
+        return {}
+
+
+def _record_gate(
+    monkeypatch: pytest.MonkeyPatch, verdict: OperationResult | None
+) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+
+    async def _gate(**kwargs: Any) -> OperationResult | None:
+        calls.append(kwargs)
+        return verdict
+
+    monkeypatch.setattr(_write, "enforce_subop_policy", _gate)
+    return calls
+
+
+async def test_import_power_on_park_saves_the_import_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A waiting power-on saves the imported VM's envelope as its resume state (#4217)."""
+    parked = OperationResult(
+        status="awaiting_approval",
+        op_id="POST:/vcenter/vm/{vm}/power?action=start",
+        duration_ms=0.0,
+        extras={"approval_request_id": "req-1"},
+    )
+    gate_calls = _record_gate(monkeypatch, parked)
+    engine_result = LeaseImportResult(
+        status="imported", vm_id="vm-9", resource_type="VirtualMachine"
+    )
+    envelope = await _call_handler(
+        monkeypatch,
+        resolved=("item-1", None),
+        engine_result=engine_result,
+        params={"resource_pool": "rp-1", "datastore": "ds-1", "power_on": True},
+    )
+    assert envelope["powered_on"] is False
+    assert "waits for approval request req-1" in envelope["issues"][-1]["message"]
+    (power_gate,) = gate_calls
+    assert power_gate["after_main_effect"] is True
+    saved = power_gate["resume_state"]["imported"]
+    assert saved["vm_id"] == "vm-9"
+    assert saved["library_item_id"] == "item-1"
+    assert saved["powered_on"] is False
+
+
+async def test_import_resume_of_a_power_on_only_powers_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An approved power-on starts the imported VM; no lookup and no import run (#4217)."""
+    from meho_backplane.operations.composite import (
+        CompositeResumeState,
+        composite_resume_state_var,
+    )
+
+    async def _must_not_run(**_kw: Any) -> Any:
+        raise AssertionError("the resume must not resolve or import again")
+
+    monkeypatch.setattr(_write, "_resolve_deploy_library_item", _must_not_run)
+    monkeypatch.setattr(_write, "import_ovf_from_source", _must_not_run)
+    gate_calls = _record_gate(monkeypatch, None)
+    imported = {
+        "status": "deployed",
+        "vm_id": "vm-9",
+        "resource_type": "VirtualMachine",
+        "library_item_id": "item-1",
+        "powered_on": False,
+        "issues": [],
+        "transfer": [],
+        "candidates": None,
+    }
+    connector = _PowerConnector()
+    token = composite_resume_state_var.set(
+        CompositeResumeState(
+            op_id="vmware.composite.vm.import_from_library",
+            state={"imported": imported},
+            after_main_effect=True,
+        )
+    )
+    try:
+        envelope = await _write.vm_import_from_library_composite(
+            operator=_Operator(),  # type: ignore[arg-type]
+            target=_Target(),
+            params={"resource_pool": "rp-1", "datastore": "ds-1", "power_on": True},
+            connector=connector,  # type: ignore[arg-type]
+        )
+    finally:
+        composite_resume_state_var.reset(token)
+    assert envelope == {**imported, "powered_on": True}
+    assert connector.calls == [("POST", "/api/vcenter/vm/vm-9/power?action=start")]
+    assert [call["op_id"] for call in gate_calls] == ["POST:/vcenter/vm/{vm}/power?action=start"]
+
+
+async def test_import_refuses_to_re_run_for_an_approved_power_on_without_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An approved power-on with no saved envelope stops before any call (#4217).
+
+    Such an approval request was saved before #4217. Running the import
+    from the start would import a second VM, so the re-run refuses at once.
+    """
+    from meho_backplane.operations.composite import composite_resume_scope_var
+
+    async def _must_not_run(**_kw: Any) -> Any:
+        raise AssertionError("the refused resume must not resolve or import")
+
+    monkeypatch.setattr(_write, "_resolve_deploy_library_item", _must_not_run)
+    monkeypatch.setattr(_write, "import_ovf_from_source", _must_not_run)
+    gate_calls = _record_gate(monkeypatch, None)
+    connector = _PowerConnector()
+    power_op = "POST:/vcenter/vm/{vm}/power?action=start"
+    token = composite_resume_scope_var.set((power_op, "deadbeef"))
+    try:
+        out = await _write.vm_import_from_library_composite(
+            operator=_Operator(),  # type: ignore[arg-type]
+            target=_Target(),
+            params={"resource_pool": "rp-1", "datastore": "ds-1", "power_on": True},
+            connector=connector,  # type: ignore[arg-type]
+        )
+    finally:
+        composite_resume_scope_var.reset(token)
+    assert isinstance(out, OperationResult)
+    assert out.status == "error"
+    assert out.op_id == "vmware.composite.vm.import_from_library"
+    assert out.extras["error_code"] == "composite_resume_unsupported"
+    assert out.extras["approved_op_id"] == power_op
+    assert "nothing was imported" in (out.error or "")
+    assert connector.calls == []
+    assert gate_calls == []

@@ -116,7 +116,7 @@ from meho_backplane.mcp.registry import (
     ResourceTemplateDefinition,
     register_mcp_resource,
 )
-from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
 from meho_backplane.untrusted_text import wrap_untrusted_text
 
 #: Slug shape T2's :class:`~meho_backplane.conventions.schemas.ConventionCreate`
@@ -174,7 +174,7 @@ async def _conventions_resource_handler(
         # AC's "403" -- mapped to -32602 per the JSON-RPC transport.
         # Pre-DB-query rejection so the response cannot oracle which
         # foreign tenants happen to host conventions.
-        raise McpInvalidParamsError(
+        raise McpPermissionDeniedError(
             "tenant_conventions: cross-tenant access denied -- "
             f"bound tenant_id {raw_tenant_id!r} does not match the "
             "operator's tenant",

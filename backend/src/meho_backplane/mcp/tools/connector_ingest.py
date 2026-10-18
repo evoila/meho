@@ -110,7 +110,7 @@ from meho_backplane.api.v1.connectors_ingest import get_llm_client_factory
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.profile import NAMED_AUTH_SCHEMES
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
-from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
 from meho_backplane.mcp.tools._connector_shared import (
     _OP_CLASS_READ,
     _OP_CLASS_WRITE,
@@ -269,8 +269,9 @@ def _authorize_write_scope_or_invalid_params(
     request the same way on both paths — synchronously, before the
     async path creates its job row or detaches the pipeline task.
 
-    The denial maps onto :class:`McpInvalidParamsError` (JSON-RPC
-    ``-32602``) carrying the shared :class:`PermissionError` message
+    The denial maps onto :class:`McpPermissionDeniedError` (JSON-RPC
+    ``-32602``, so it still writes a decision row once the wrapper rows
+    are retired, #3757) carrying the shared :class:`PermissionError` message
     verbatim — the same string the REST 403's plain ``detail`` carries,
     so the cross-surface diagnostic can't drift. MCP tools return
     errors in-envelope (there is no HTTP-403 on this transport); the
@@ -287,7 +288,7 @@ def _authorize_write_scope_or_invalid_params(
     try:
         service.authorize_scope(tenant_id)
     except PermissionError as exc:
-        raise McpInvalidParamsError(str(exc)) from exc
+        raise McpPermissionDeniedError(str(exc)) from exc
 
 
 async def _run_inline_ingest(

@@ -62,7 +62,7 @@ from meho_backplane.auth.keycloak_admin import (
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
-from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.server import McpExecutionFailedError, McpInvalidParamsError
 from meho_backplane.scheduler.vault_credentials import (
     SCHEDULER_VAULT_TOKEN_INVALID_DETAIL,
     SCHEDULER_VAULT_WRITE_DENIED_DETAIL,
@@ -166,13 +166,13 @@ async def _register_handler(
             f"agent principal {name!r} already exists for this tenant"
         ) from exc
     except KeycloakAdminNotConfiguredError as exc:
-        raise McpInvalidParamsError(
+        raise McpExecutionFailedError(
             "Keycloak admin is not configured; "
             "set KEYCLOAK_ADMIN_URL, KEYCLOAK_ADMIN_CLIENT_ID, and "
             "KEYCLOAK_ADMIN_CLIENT_SECRET"
         ) from exc
     except KeycloakAdminError as exc:
-        raise McpInvalidParamsError(f"Keycloak admin error: {type(exc).__name__}") from exc
+        raise McpExecutionFailedError(f"Keycloak admin error: {type(exc).__name__}") from exc
     except SchedulerVaultBrokerError as exc:
         # ``VAULT_SCHEDULER_TOKEN`` is set but the Vault write failed
         # (unreachable / denied). The just-created Keycloak client is
@@ -181,7 +181,7 @@ async def _register_handler(
         # opaque ``-32603`` a bubbled exception would produce. The broker
         # already ran ``lookup-self`` and told us *which* remediation
         # applies (#2652); neither message leaks the secret.
-        raise McpInvalidParamsError(
+        raise McpExecutionFailedError(
             SCHEDULER_VAULT_TOKEN_INVALID_DETAIL
             if exc.token_invalid
             else SCHEDULER_VAULT_WRITE_DENIED_DETAIL
@@ -267,13 +267,13 @@ async def _revoke_handler(
             f"agent principal {name!r} not found or already revoked"
         ) from exc
     except KeycloakAdminNotConfiguredError as exc:
-        raise McpInvalidParamsError(
+        raise McpExecutionFailedError(
             "Keycloak admin is not configured; "
             "set KEYCLOAK_ADMIN_URL, KEYCLOAK_ADMIN_CLIENT_ID, and "
             "KEYCLOAK_ADMIN_CLIENT_SECRET"
         ) from exc
     except KeycloakAdminError as exc:
-        raise McpInvalidParamsError(f"Keycloak admin error: {type(exc).__name__}") from exc
+        raise McpExecutionFailedError(f"Keycloak admin error: {type(exc).__name__}") from exc
     return _row_to_dict(entry)
 
 

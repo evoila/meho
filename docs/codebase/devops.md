@@ -1500,6 +1500,7 @@ their isolation posture:
 | `migration-heads.yml` | yes (runs `check_migration_heads.py`) | **route**: fork PR → disposable GitHub-hosted runner; the `recheck-open-prs` job is `push`-only, runs on `ubuntu-latest` from a checkout of `main`, and only reads PR migration files (never runs PR code) |
 | `dependency-license-check.yml` | yes (`pip install -e ./backend` runs the build backend) | **route**: fork PR → disposable GitHub-hosted runner (all 3 jobs) |
 | `readme-version-check.yml` | yes (inline shell over PR content) | **route**: fork PR → disposable GitHub-hosted runner |
+| `plugin-version-check.yml` | yes (runs `check_plugin_version.py`) | **route**: fork PR → disposable GitHub-hosted runner |
 | `secret-scan.yml` | yes (`docker run` TruffleHog over PR content) | **route**: fork PR → disposable GitHub-hosted runner |
 | `security-scan.yml` | yes (Semgrep over PR content) | **fork guard** (skip on fork PR — the job runs inside the internal Harbor-proxied container, which a GitHub-hosted runner cannot reach; the required context still runs on `merge_group` + `push`) |
 | `docs-site.yml`, `quality-gate.yml` | n/a | already on GitHub-hosted `ubuntu-latest` / `workflow_run` (trusted) |

@@ -86,6 +86,33 @@ Choose the bump from what's in `[Unreleased]`:
   publish, marked pre-release. See
   [Release candidates — the rc series](#release-candidates--the-rc-series).
 
+### Claude Code plugin version
+
+The Claude Code plugin (`clients/claude-code-plugin/`) is **not** a release
+artefact, and its version does **not** come from the git tag:
+
+- Users install the plugin straight from `main`
+  (`claude plugin marketplace add evoila/meho`). A release does not change
+  what they get.
+- Claude Code installs a new copy of the plugin only when its `version`
+  goes up. So the version is raised **in the pull request that changes the
+  plugin**, not at release time. That way each fix reaches users as soon
+  as it is merged.
+- The version is written in three places that must agree:
+  `clients/claude-code-plugin/.claude-plugin/plugin.json` and the two
+  `version` fields in `.claude-plugin/marketplace.json`.
+- The `Plugin Version Check` workflow
+  ([`plugin-version-check.yml`](../.github/workflows/plugin-version-check.yml),
+  script [`scripts/ci/check_plugin_version.py`](../scripts/ci/check_plugin_version.py))
+  fails a pull request when those places disagree, or when it changes a
+  file under `clients/claude-code-plugin/` (except `test/`) and does not
+  raise the version. It also runs in the merge queue.
+- So a release needs **no plugin step**. Do not set the plugin version to
+  the MEHO version.
+
+How users get the new version is in the
+[plugin README](../clients/claude-code-plugin/README.md#get-updates).
+
 ## The runbook
 
 ### 1. Pre-flight

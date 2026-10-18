@@ -4570,7 +4570,7 @@ meho targets update <name|alias> [flags]
 - `--alias` — alias the target resolves by (repeatable; replaces the whole alias list)
 - `--auth-model` — per-target identity model
 - `--backplane` — backplane URL the target lives in (defaults to the URL recorded by `meho login`)
-- `--clear` — field to remove by sending null (repeatable): fqdn, note, port, preferred-impl, secret-ref, tls-ca-pin, tls-server-name, version
+- `--clear` — field to remove (repeatable; sends null, or an empty list for alias and an empty map for extra): alias, extra, fqdn, note, port, preferred-impl, secret-ref, tls-ca-pin, tls-server-name, version
 - `--extra` — key=value for the target's extras map, e.g. scheme=http (repeatable; replaces the whole map)
 - `--fqdn` — fully-qualified domain name, when distinct from --host
 - `--host` — new host or IP the connector dials

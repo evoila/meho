@@ -188,7 +188,8 @@ meho targets update lab-prom --clear secret-ref --extra scheme=http
 ```
 
 `--extra` on `update` replaces the whole `extras` map, so pass every key
-you want to keep. In YAML, write `secret_ref: null`.
+you want to keep. `--clear extra` removes every extra, and `--clear alias`
+removes every alias. In YAML, write `secret_ref: null`.
 
 ## Import and verify
 

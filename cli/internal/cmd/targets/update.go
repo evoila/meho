@@ -32,6 +32,19 @@ var clearableFields = map[string]string{
 	"note":            "notes",
 }
 
+// emptyableFields maps the `--clear` values for the two collection
+// fields to the TargetUpdate key and the empty value that removes all
+// entries. `aliases` and `extras` are NOT NULL columns, so they are
+// cleared with `[]` / `{}` instead of null. The values are typed
+// (not nil) so they marshal as `[]` and `{}`.
+var emptyableFields = map[string]struct {
+	field string
+	empty any
+}{
+	"alias": {"aliases", []string{}},
+	"extra": {"extras", map[string]any{}},
+}
+
 // updateFlags holds the values of the `meho targets update` flags.
 type updateFlags struct {
 	aliases       []string
@@ -86,10 +99,12 @@ func newUpdateCmd() *cobra.Command {
 			"`--alias` replaces the whole alias list, and `--extra " +
 			"key=value` replaces the whole `extras` map (pass every key " +
 			"you want to keep). `--clear <field>` (repeatable) removes a " +
-			"value by sending null. Fields you can clear: " +
+			"value: it sends null for a single field, an empty list for " +
+			"`alias`, and an empty map for `extra`. Fields you can clear: " +
 			strings.Join(clearableFieldNames(), ", ") + ". For example, " +
 			"`--clear secret-ref --extra scheme=http` turns a target into " +
-			"a plain-HTTP target with no credential.\n\n" +
+			"a plain-HTTP target with no credential, and `--clear alias` " +
+			"removes every alias.\n\n" +
 			"All validation is server-side; a 422 body is printed as is. " +
 			"On success the updated target is shown in the same shape as " +
 			"`meho targets describe` (use `--json` for the raw Target).",
@@ -135,12 +150,15 @@ func registerUpdateFlags(cmd *cobra.Command, f *updateFlags) {
 	fs.StringArrayVar(&f.extras, "extra", nil,
 		"key=value for the target's extras map, e.g. scheme=http (repeatable; replaces the whole map)")
 	fs.StringArrayVar(&f.clear, "clear", nil,
-		"field to remove by sending null (repeatable): "+strings.Join(clearableFieldNames(), ", "))
+		"field to remove (repeatable; sends null, or an empty list for alias and an empty map for extra): "+
+			strings.Join(clearableFieldNames(), ", "))
 }
 
 // buildUpdateBody turns the flags the operator set into a sparse
 // TargetUpdate body. It fails when no field was given, when `--clear`
 // names an unknown field, or when one field is both set and cleared.
+// `--clear alias` and `--clear extra` send `[]` and `{}`; every other
+// `--clear` sends null.
 func buildUpdateBody(cmd *cobra.Command, f *updateFlags) (map[string]any, *output.StructuredError) {
 	fs := cmd.Flags()
 	body := map[string]any{}
@@ -172,7 +190,7 @@ func buildUpdateBody(cmd *cobra.Command, f *updateFlags) (map[string]any, *outpu
 		body["extras"] = parsed
 	}
 	for _, name := range f.clear {
-		field, ok := clearableFields[name]
+		field, value, ok := clearValue(name)
 		if !ok {
 			return nil, output.Unexpected(fmt.Sprintf(
 				"invalid --clear %q: expected one of %s",
@@ -182,13 +200,26 @@ func buildUpdateBody(cmd *cobra.Command, f *updateFlags) (map[string]any, *outpu
 			return nil, output.Unexpected(fmt.Sprintf(
 				"--%s and --clear %s cannot be used together", name, name))
 		}
-		body[field] = nil
+		body[field] = value
 	}
 	if len(body) == 0 {
 		return nil, output.Unexpected(
 			"nothing to update: pass at least one field flag or --clear")
 	}
 	return body, nil
+}
+
+// clearValue returns the TargetUpdate key and the value `--clear name`
+// sends: nil for a nullable field, `[]` for alias, `{}` for extra.
+// ok is false when name is not clearable.
+func clearValue(name string) (field string, value any, ok bool) {
+	if field, ok := clearableFields[name]; ok {
+		return field, nil, true
+	}
+	if e, ok := emptyableFields[name]; ok {
+		return e.field, e.empty, true
+	}
+	return "", nil, false
 }
 
 // updateFieldName maps a flag name to its snake_case TargetUpdate key.
@@ -205,8 +236,11 @@ func updateFieldName(flag string) string {
 // clearableFieldNames returns the `--clear` values in a stable order
 // for help text and error messages.
 func clearableFieldNames() []string {
-	names := make([]string, 0, len(clearableFields))
+	names := make([]string, 0, len(clearableFields)+len(emptyableFields))
 	for name := range clearableFields {
+		names = append(names, name)
+	}
+	for name := range emptyableFields {
 		names = append(names, name)
 	}
 	sort.Strings(names)

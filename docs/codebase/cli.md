@@ -1393,10 +1393,13 @@ though the API supports `DELETE /api/v1/targets/{name}`
   replaces the whole `extras` map, matching the server's PATCH
   semantics. `--clear <field>` (repeatable) sends an explicit JSON null
   for a nullable column: `secret-ref`, `version`, `port`, `fqdn`,
-  `tls-ca-pin`, `tls-server-name`, `preferred-impl`, `note`. Three
-  checks run before any request: at least one field must be given,
-  `--clear` must name a field from that list, and one field cannot be
-  both set and cleared (all exit 4). Server errors use the shared
+  `tls-ca-pin`, `tls-server-name`, `preferred-impl`, `note`. The two
+  collection columns are NOT NULL, so `--clear alias` sends
+  `"aliases": []` and `--clear extra` sends `"extras": {}` instead of
+  null; that is how an operator removes every alias or every extra.
+  Three checks run before any request: at least one field must be
+  given, `--clear` must name a field from that list, and one field
+  cannot be both set and cleared (all exit 4). Server errors use the shared
   `renderHTTPStatus` ladder (404 near-misses, 409 ambiguous alias, 422
   body verbatim). Same `doAuthedRequest` plumbing as `add`.
 - `meho targets list [--product P] [--limit N] [--cursor C]` — calls

@@ -409,7 +409,10 @@ func parseOrderBy(raw string) (api.OrderBy, error) {
 // postCall), and unmarshals the 200 body into ResultQueryResult. When *spec*
 // is non-nil the request carries the structured query (query mode) and the
 // backend ignores offset/limit. Non-2xx outcomes — including the 404
-// handle-not-found miss — wrap as *apiResponseError for renderRequestError.
+// handle-not-found miss and the 422 refusals with an object `detail` — wrap
+// as *apiResponseError for renderRequestError. The body is read here, not by
+// the generated parser, so a 422 whose `detail` is not a validation list
+// still reaches the operator with its reason and message.
 func postResultQuery(
 	ctx context.Context,
 	client operationsAPI,
@@ -425,24 +428,31 @@ func postResultQuery(
 		Query:    spec,
 	}
 	apiParams := &api.PostResultQueryApiV1OperationsResultQueryPostParams{}
-	resp, err := client.PostResultQueryApiV1OperationsResultQueryPostWithResponse(ctx, apiParams, body)
+	resp, err := client.PostResultQueryApiV1OperationsResultQueryPost(ctx, apiParams, body)
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode() == http.StatusUnauthorized {
+	if resp.StatusCode == http.StatusUnauthorized {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
 		if rerr := client.Refresh(ctx); rerr != nil {
 			return nil, rerr
 		}
-		resp, err = client.PostResultQueryApiV1OperationsResultQueryPostWithResponse(ctx, apiParams, body)
+		resp, err = client.PostResultQueryApiV1OperationsResultQueryPost(ctx, apiParams, body)
 		if err != nil {
 			return nil, err
 		}
 	}
-	if resp.StatusCode() != http.StatusOK {
-		return nil, classifyNon2xx(resp.HTTPResponse, resp.Body)
+	raw, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		return nil, fmt.Errorf("read result-query response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, classifyNon2xx(resp, raw)
 	}
 	var out ResultQueryResult
-	if err := json.Unmarshal(resp.Body, &out); err != nil {
+	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, fmt.Errorf("decode result-query response: %w", err)
 	}
 	return &out, nil

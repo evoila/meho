@@ -195,7 +195,7 @@ async def read_result_window(
                 handle_id,
                 output_bytes,
                 max_bytes,
-                remediation=ResultQueryOutputTooLargeError.PAGING_REMEDIATION,
+                remediation=_paging_remediation(window.rows, offset, max_bytes),
             )
         payload = {
             "handle_id": str(handle_id),
@@ -217,6 +217,72 @@ async def read_result_window(
         work,
         timeout_remediation=ResultQueryTimeoutError.PAGING_REMEDIATION,
     )
+
+
+#: How many top-level field names a paging refusal lists as ``select`` hints.
+_SELECT_HINT_FIELDS = 5
+#: Largest JSON-encoded size of one listed field name. Field names come from
+#: the stored rows (vendor data), so a refusal must not copy a huge name into
+#: its own message; names over this budget are left out of the list.
+_SELECT_HINT_NAME_BYTES = 64
+
+
+def _select_hint_names(row: dict[str, Any]) -> list[str]:
+    """The first few top-level field names of *row* that fit the name budget."""
+    names: list[str] = []
+    for name in row:
+        if len(msgspec.json.encode(name)) > _SELECT_HINT_NAME_BYTES:
+            continue
+        names.append(name)
+        if len(names) == _SELECT_HINT_FIELDS:
+            break
+    return names
+
+
+def _paging_remediation(rows: list[Any], offset: int, max_bytes: int) -> str:
+    """Say how to read an over-budget paging window (#3704).
+
+    Rows that are large nested objects (for example one full Kubernetes or
+    ArgoCD object per row) can push even the default page past the byte
+    budget. A bare "lower `limit`" leaves the caller guessing, so this names
+    the row size, the largest ``limit`` that fits from *offset*, and the
+    top-level fields a ``select`` query can return instead of whole rows.
+    Only runs on the refusal path, so encoding each row again is cheap
+    enough.
+    """
+    sizes = [len(msgspec.json.encode(row)) for row in rows]
+    fit = 0
+    used = 2  # the enclosing "[" and "]"
+    for size in sizes:
+        used += size + (1 if fit else 0)  # a "," between rows
+        if used > max_bytes:
+            break
+        fit += 1
+    first = rows[0] if rows else None
+    nested = isinstance(first, dict) and any(
+        isinstance(value, dict | list) for value in first.values()
+    )
+    shape = "large nested objects" if nested else "large"
+    if fit:
+        hint = (
+            f"The rows in this window are {shape} (about {sum(sizes) // len(sizes)} bytes "
+            f"each). The first {fit} rows fit: set `limit` to {fit}, then continue "
+            f"with `offset` {offset + fit}."
+        )
+    else:
+        hint = (
+            f"The rows in this window are {shape}: the row at `offset` {offset} alone "
+            f"is {sizes[0] if sizes else 0} bytes, so no `limit` fits."
+        )
+    if isinstance(first, dict):
+        hint += (
+            " To get fewer fields per row, run a query with `select` set to some top-level fields"
+        )
+        names = _select_hint_names(first)
+        if names:
+            hint += f" (this handle has: {', '.join(names)})"
+        hint += "."
+    return hint
 
 
 class ResultQueryTimeoutError(Exception):

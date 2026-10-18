@@ -27,6 +27,7 @@ same shape ``test_api_v1_targets`` does. The chassis settings
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -997,6 +998,107 @@ def test_post_result_query_paging_over_budget_returns_422(
     assert detail["reason"] == "output_too_large"
     # Paging remediation names a smaller `limit`, not `select` / `filter`.
     assert "limit" in detail["message"].lower()
+
+
+def _nested_app_row(i: int, pad: int = 0) -> dict[str, Any]:
+    """One row shaped like a full nested object (metadata / spec / status)."""
+    return {
+        "metadata": {"name": f"app-{i}", "namespace": "apps", "labels": {"team": "a"}},
+        "spec": {
+            "source": {"repoURL": "https://example.invalid/repo.git", "path": f"apps/{i}"},
+            "destination": {"namespace": f"ns-{i}"},
+        },
+        "status": {
+            "sync": {"status": "Synced"},
+            "health": {"status": "Healthy"},
+            "resources": [{"kind": "Deployment", "name": f"d-{i}", "note": "x" * pad}],
+        },
+    }
+
+
+def test_post_result_query_default_page_returns_nested_object_rows(
+    client: TestClient,
+    fake_result_store: MemoryResultStore,
+) -> None:
+    """A collection of deeply nested objects pages back on the default page (#3704).
+
+    No offset, no limit, no query: the 43 nested rows come back verbatim.
+    """
+    handle = uuid.uuid4()
+    rows = [_nested_app_row(i) for i in range(43)]
+    fake_result_store.seed(
+        tenant_id=uuid.UUID(DEFAULT_TENANT_ID),
+        operator_sub="op-1",
+        handle_id=handle,
+        rows=rows,
+    )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/result-query",
+            json={"handle_id": str(handle)},
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["returned_rows"] == 43
+    assert body["total_rows"] == 43
+    assert body["rows"] == rows
+
+
+def test_post_result_query_default_page_too_large_nested_rows_says_how_to_read(
+    client: TestClient,
+    fake_result_store: MemoryResultStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Over-budget nested rows on the default page get a readable 422 (#3704).
+
+    ``detail`` is an object with ``reason`` and ``message``. The message names
+    the shape (large nested objects), the largest ``limit`` that fits, and the
+    top-level fields a ``select`` query can return.
+    """
+    monkeypatch.setenv("RESULT_QUERY_MAX_OUTPUT_BYTES", "20000")
+    get_settings.cache_clear()
+    handle = uuid.uuid4()
+    rows = [_nested_app_row(i, pad=1500) for i in range(43)]
+    fake_result_store.seed(
+        tenant_id=uuid.UUID(DEFAULT_TENANT_ID),
+        operator_sub="op-1",
+        handle_id=handle,
+        rows=rows,
+    )
+    fit = max(
+        n
+        for n in range(1, 44)
+        if len(json.dumps(rows[:n], separators=(",", ":")).encode()) <= 20000
+    )
+    assert 1 < fit < 43
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/result-query",
+            json={"handle_id": str(handle)},
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert detail["reason"] == "output_too_large"
+        message = detail["message"]
+        assert "large nested objects" in message
+        assert f"set `limit` to {fit}" in message
+        assert f"`offset` {fit}" in message
+        assert "metadata, spec, status" in message
+
+        # Following the advice works.
+        retry = client.post(
+            "/api/v1/operations/result-query",
+            json={"handle_id": str(handle), "limit": fit},
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert retry.status_code == 200
+    assert retry.json()["rows"] == rows[:fit]
 
 
 def test_post_result_query_over_wire_ceiling_returns_422(

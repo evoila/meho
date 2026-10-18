@@ -93,12 +93,17 @@ type operationsAPI interface {
 		params *api.GetSearchApiV1OperationsSearchGetParams,
 		reqEditors ...api.RequestEditorFn,
 	) (*api.GetSearchApiV1OperationsSearchGetResponse, error)
-	PostResultQueryApiV1OperationsResultQueryPostWithResponse(
+	// result-query binds to the raw method, not the *WithResponse one:
+	// the generated parser decodes every 422 as HTTPValidationError (a
+	// list `detail`) and fails on the backplane's object `detail`
+	// refusals (output_too_large, invalid_query, query_timeout), which
+	// would hide the reason from the operator.
+	PostResultQueryApiV1OperationsResultQueryPost(
 		ctx context.Context,
 		params *api.PostResultQueryApiV1OperationsResultQueryPostParams,
 		body api.PostResultQueryApiV1OperationsResultQueryPostJSONRequestBody,
 		reqEditors ...api.RequestEditorFn,
-	) (*api.PostResultQueryApiV1OperationsResultQueryPostResponse, error)
+	) (*http.Response, error)
 	Refresh(ctx context.Context) error
 }
 

@@ -122,6 +122,7 @@ from meho_backplane.mcp.server import (
     McpInvalidParamsError,
     McpPermissionDeniedError,
 )
+from meho_backplane.mcp.tools._topology_answer import COMPLETENESS_SCHEMA, bounded_answer
 from meho_backplane.operations._lookup import parse_connector_id
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
@@ -137,8 +138,7 @@ from meho_backplane.topology.evidence import (
 )
 from meho_backplane.topology.query import (
     AmbiguousNodeError,
-    find_dependencies,
-    find_dependents,
+    bounded_closure,
     find_path,
     list_edges,
     query_diff,
@@ -609,10 +609,26 @@ _QUERY_TOPOLOGY_DESCRIPTION: Final[str] = (
     "consistent snapshot. The `evidence` block says which stale view "
     "the answer used (`stale_rows`, `stale_rows_note`) and explains each "
     "freshness value in the answer.\n\n"
-    "Returns `{kind, direction, relation_class, nodes: [TopologyNode, "
-    "...], evidence}` for the closure kinds "
-    "(root at depth 0, so a one-element list means 'exists but nothing "
-    "depends on it'). Each non-root node carries `parent_node_id` + "
+    "Returns `{kind, direction, relation_class, query, root, node_count, "
+    "edge_count, nodes: [TopologyNode, ...], completeness, delivery, "
+    "evidence}` for the closure kinds "
+    "(root at depth 0, so a one-element list with `completeness.state: "
+    "complete` means 'exists but nothing depends on it'). Rows are ordered "
+    "(depth, name, id).\n\n"
+    "LIMITS: a closure stops at a node limit, a byte limit and a time "
+    "limit, as well as at `depth`. `completeness.state` says `complete`, "
+    "`incomplete` (a limit cut the answer; you have the first part in "
+    "row order) or `unavailable` (no rows can be read; for "
+    "`time_budget` the traversal ran out of time). `completeness."
+    "limits_hit` names each limit (`hop_limit` = more nodes exist past "
+    "`depth`) and `guidance` says how to narrow the query. Never read an "
+    "`incomplete` or `unavailable` answer as everything that is affected. "
+    "A large answer has no inline `nodes`: it has `handle` and a short "
+    "preview in `handle.sample_rows`; read every row with `result_query` "
+    "and `handle_id`. `kind=history` answers work the same way, with "
+    "`rows` instead of `nodes`, and the handle preview leaves out "
+    "`snapshot`.\n\n"
+    "Each non-root node carries `parent_node_id` + "
     "`via_edge_id` — the node it hangs off and the exact edge walked — "
     "so the dependency chain reconstructs from the flat list without "
     "extra calls. Soft-deleted rows stay reachable by default; pass "
@@ -679,7 +695,8 @@ _QUERY_TOPOLOGY_DESCRIPTION: Final[str] = (
     "this change?' questions. Unknown / cross-tenant target returns "
     '-32602 `node_not_found`. Returns `{kind: "history", rows: '
     "[TopologyHistoryEntry, ...], anchor_node_id: <uuid>, "
-    "include_edges: <bool>}`."
+    "include_edges: <bool>, completeness, delivery}` (`handle` "
+    "instead of `rows` when the answer is large; see LIMITS)."
 )
 
 
@@ -742,13 +759,13 @@ class _RowShaper:
     """
 
     def __init__(self) -> None:
-        self._now = datetime.now(UTC)
+        self.now = datetime.now(UTC)
         self._interval = get_settings().topology_refresh_interval_seconds
         self._seen: set[Freshness] = set()
 
     def _classify(self, source: str | None, last_seen: datetime | None) -> Freshness:
         value = classify_freshness(
-            source, last_seen, now=self._now, refresh_interval_seconds=self._interval
+            source, last_seen, now=self.now, refresh_interval_seconds=self._interval
         )
         self._seen.add(value)
         return value
@@ -887,35 +904,67 @@ async def _closure_facet(
     untracked path is handled here because the typed envelope it
     returns is a successful tool call, not an exception.
     """
-    target = arguments["target"]
-    node_kind = arguments.get("node_kind")
-    depth = int(arguments.get("depth", _DEPTH_DEFAULT))
-    kind_filter = arguments.get("kind_filter")
-    relation_class = arguments.get("relation_class")
-    include_stale = bool(arguments.get("include_stale", True))
-    verb = find_dependents if kind == "dependents" else find_dependencies
+    query = {
+        "target": arguments["target"],
+        "node_kind": arguments.get("node_kind"),
+        "depth": int(arguments.get("depth", _DEPTH_DEFAULT)),
+        "kind_filter": arguments.get("kind_filter"),
+        "relation_class": arguments.get("relation_class"),
+        "include_stale": bool(arguments.get("include_stale", True)),
+    }
     try:
-        nodes = await verb(
+        answer = await bounded_closure(
             operator,
-            target,
-            kind=node_kind,
-            depth=depth,
-            kind_filter=kind_filter,
-            relation_class=relation_class,
-            include_stale=include_stale,
+            query["target"],
+            reverse=kind == "dependents",
+            kind=query["node_kind"],
+            depth=query["depth"],
+            kind_filter=query["kind_filter"],
+            relation_class=query["relation_class"],
+            include_stale=query["include_stale"],
         )
     except NodeNotFoundError as exc:
         return _node_untracked_envelope(
-            kind, exc, relation_class=relation_class, include_stale=include_stale
+            kind, exc, relation_class=query["relation_class"], include_stale=query["include_stale"]
         )
     shaper = _RowShaper()
-    return {
+    rows = [shaper.node(n) for n in answer.nodes]
+    envelope: dict[str, Any] = {
         "kind": kind,
         "direction": _closure_direction(kind),
-        "relation_class": relation_class,
-        "nodes": [shaper.node(n) for n in nodes],
-        "evidence": shaper.evidence(include_stale=include_stale, named_rows=_CLOSURE_NAMED_ROWS),
+        "relation_class": query["relation_class"],
+        "query": query,
+        "snapshot_at": shaper.now.isoformat(),
     }
+    # The root is unknown only when the lookup itself ran out of time.
+    if answer.root is not None:
+        envelope["root"] = {
+            "id": str(answer.root.id),
+            "kind": answer.root.kind,
+            "name": answer.root.name,
+            "source_scope": answer.root.source_scope,
+        }
+    envelope |= {
+        "ordering": "depth, name, id",
+        "node_count": len(rows),
+        "edge_count": max(len(rows) - 1, 0),
+        "evidence": shaper.evidence(
+            include_stale=query["include_stale"], named_rows=_CLOSURE_NAMED_ROWS
+        ),
+    }
+    return await bounded_answer(
+        operator,
+        envelope,
+        "nodes",
+        rows,
+        query_limit=answer.limit_hit,
+        limits={
+            "max_depth": answer.depth,
+            "max_nodes": answer.budget.max_nodes,
+            "max_bytes": answer.budget.max_bytes,
+            "time_budget_ms": answer.budget.time_budget_ms,
+        },
+    )
 
 
 def _closure_direction(kind: str) -> str:
@@ -1171,6 +1220,7 @@ async def _history_facet(
                 f"query_topology(kind=history): 'until' is not ISO-8601: {until_str!r}",
             ) from exc
 
+    limit = int(arguments.get("limit", _HISTORY_LIMIT_MAX))
     result = await query_history(
         operator,
         target_name,
@@ -1178,14 +1228,26 @@ async def _history_facet(
         since=since_dt,
         until=until_dt,
         include_edges=bool(arguments.get("include_edges", False)),
-        limit=int(arguments.get("limit", _HISTORY_LIMIT_MAX)),
+        limit=limit,
     )
-    return {
+    rows = [r.model_dump(mode="json") for r in result.rows]
+    envelope = {
         "kind": "history",
         "anchor_node_id": str(result.anchor_node_id),
         "include_edges": result.include_edges,
-        "rows": [r.model_dump(mode="json") for r in result.rows],
+        "snapshot_at": datetime.now(UTC).isoformat(),
+        "ordering": "valid_from DESC, history_id DESC",
     }
+    # A full page may hide older rows, so it is never reported complete.
+    return await bounded_answer(
+        operator,
+        envelope,
+        "rows",
+        rows,
+        query_limit="row_limit" if len(rows) >= limit else None,
+        limits={"limit": limit},
+        preview_omits=("snapshot",),
+    )
 
 
 async def _list_edges_facet(
@@ -1249,9 +1311,11 @@ register_mcp_tool(
                     "type": "array",
                     "items": {"type": "object"},
                     "description": (
-                        "Present for the closure kinds. TopologyNode rows "
-                        "ordered (depth, name); root at depth 0. See "
+                        "Present for the closure kinds when the answer is "
+                        "small. TopologyNode rows ordered (depth, name, id); "
+                        "root at depth 0. See "
                         "`meho_backplane.topology.schemas.TopologyNode`. "
+                        "A larger answer has `handle` instead. "
                         "When the anchor is untracked the array is empty "
                         "and `status` carries `node_untracked` (G0.18-T4 "
                         "#1357)."
@@ -1357,9 +1421,10 @@ register_mcp_tool(
                     "items": {"type": "object"},
                     "description": (
                         "Present for `kind=timeline` (TopologyTimelineEntry "
-                        "rows, summary only) and `kind=history` "
-                        "(TopologyHistoryEntry rows, full snapshot.before/"
-                        "after payload). Both ordered (valid_from DESC, "
+                        "rows, summary only) and for a small `kind=history` "
+                        "answer (TopologyHistoryEntry rows, full snapshot."
+                        "before/after payload; a larger one has `handle` "
+                        "instead). Both ordered (valid_from DESC, "
                         "history_id DESC). See "
                         "`meho_backplane.topology.schemas`."
                     ),
@@ -1414,6 +1479,99 @@ register_mcp_tool(
                         "edge rows are expected to appear in `rows`."
                     ),
                 },
+                "completeness": COMPLETENESS_SCHEMA,
+                "delivery": {
+                    "type": "string",
+                    "enum": ["complete", "partial", "unavailable"],
+                    "description": (
+                        "Closure and `history` answers. `complete`: the "
+                        "answer was sent whole. `partial`: it was too large, "
+                        "so the inline preview was left out; read the rows "
+                        "with `result_query` and `handle`. `unavailable`: it "
+                        "was too large and there is no readable handle; "
+                        "narrow the query. The finished answer is measured "
+                        "on the wire and made smaller until it fits; the "
+                        "smallest form keeps only `kind`, `completeness` and "
+                        "`delivery`."
+                    ),
+                },
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "Closure and `history` answers with a `handle` whose "
+                        "rows the result store did not keep: why. "
+                        "`admission_limit_exceeded` means the rows were too "
+                        "large or too deeply nested to profile; narrow the "
+                        "query."
+                    ),
+                },
+                "handle": {
+                    "type": "object",
+                    "description": (
+                        "Closure and `history` answers over the JSONFlux "
+                        "threshold: the rows are kept behind this result "
+                        "handle instead of inline. Read them with "
+                        "`result_query` and `handle_id`, in the order named "
+                        "by `ordering`. Only you can read it, until it "
+                        "expires."
+                    ),
+                },
+                "row_count": {"type": "integer"},
+                "total": {"type": "integer"},
+                "sample_rows_returned": {"type": "integer"},
+                "sample_bytes": {"type": "integer"},
+                "source_key": {"type": "string"},
+                "preview_omits": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "`history` with a handle: row fields left out of "
+                        "`handle.sample_rows` (`snapshot`). They are kept "
+                        "behind the handle."
+                    ),
+                },
+                "root": {
+                    "type": "object",
+                    "description": (
+                        "Closure kinds: the anchor the traversal started "
+                        "from (`id`, `kind`, `name`, `source_scope`), shown "
+                        "even when no nodes came back. Missing only when "
+                        "the time budget ran out before the anchor was found."
+                    ),
+                },
+                "query": {
+                    "type": "object",
+                    "description": (
+                        "Closure kinds: the target and filters the answer "
+                        "used (`target`, `node_kind`, `depth`, "
+                        "`kind_filter`, `relation_class`, `include_stale`)."
+                    ),
+                },
+                "snapshot_at": {
+                    "type": "string",
+                    "description": (
+                        "Closure and `history` answers: when MEHO ran the "
+                        "query. Rows behind `handle` are this answer, not a "
+                        "later re-run."
+                    ),
+                },
+                "ordering": {
+                    "type": "string",
+                    "description": "Closure and `history` answers: the row order.",
+                },
+                "node_count": {
+                    "type": "integer",
+                    "description": "Closure kinds: nodes found, root included.",
+                },
+                "edge_count": {
+                    "type": "integer",
+                    "description": (
+                        "Closure kinds: edges walked to reach the nodes "
+                        "(one per node after the root)."
+                    ),
+                },
+                "delivered_bytes": {"type": "integer"},
+                "delivery_max_bytes": {"type": "integer"},
             },
             "required": ["kind"],
         },

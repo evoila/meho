@@ -56,9 +56,10 @@ can grow without a migration — the T2 design constraint):
     }
 
 * ``meta_tools`` — the allow-list of meta-tool names to register. Omitted /
-  ``null`` means "all meta-tools the identity's role admits" (the safe
-  default for a definition that just wants the standard discovery +
-  execution surface). An empty list registers no tools.
+  ``null`` means "all meta-tools the identity's role admits", except the
+  opt-in context tools (see below) — the safe default for a definition that
+  just wants the standard discovery + execution surface. An empty list
+  registers no tools.
 * ``connectors`` — an optional allow-list of ``connector_id`` values the
   agent may reach through ``call_operation`` (and inspect through
   ``preview_operation``). Omitted / ``null`` means "no
@@ -95,6 +96,19 @@ author can tell them from the ``agent_toolset_resolved`` log line:
   run's role is below the tool's floor (``role_below_floor``).
 
 A disabled tool is still not registered, so the model never sees it.
+
+Opt-in context tools (#3759)
+============================
+
+Four tools return stored tenant text: ``query_topology``, ``search_memory``,
+``search_knowledge`` (bridged from MCP by
+:func:`~meho_backplane.agent.toolset_discovery.build_retrieval_meta_tools`)
+and the hosted-only ``read_context_resource``
+(:mod:`meho_backplane.agent.hosted_context`). They are listed in
+:data:`OPT_IN_META_TOOL_NAMES` and register only when the spec's
+``meta_tools`` list names them. An omitted ``meta_tools`` does not add them,
+so existing definitions keep their surface; such a tool is reported
+``not_in_allow_list``.
 """
 
 from __future__ import annotations
@@ -106,9 +120,17 @@ import structlog
 from pydantic_ai import ModelRetry, RunContext, Tool
 
 from meho_backplane.agent.approval_wait import resume_or_surface_awaiting_approval
+from meho_backplane.agent.hosted_context import (
+    READ_CONTEXT_RESOURCE,
+    build_read_context_resource_tool,
+)
 from meho_backplane.agent.meta_tool import MetaToolSpec
 from meho_backplane.agent.toolset_broadcast import build_broadcast_meta_tools
-from meho_backplane.agent.toolset_discovery import build_discovery_meta_tools
+from meho_backplane.agent.toolset_discovery import (
+    RETRIEVAL_META_TOOL_NAMES,
+    build_discovery_meta_tools,
+    build_retrieval_meta_tools,
+)
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import role_at_least
 from meho_backplane.operations.meta_tools import (
@@ -120,6 +142,7 @@ from meho_backplane.settings import get_settings
 
 __all__ = [
     "META_TOOL_NAMES",
+    "OPT_IN_META_TOOL_NAMES",
     "RUNBOOK_EXECUTION_META_TOOL_NAMES",
     "DisabledReason",
     "MetaToolSpec",
@@ -245,13 +268,22 @@ _OPERATIONS_META_TOOLS: tuple[MetaToolSpec, ...] = (
 
 #: The full agent meta-tool catalog: the connector-execution tools, the
 #: governed discovery and result-handle tools (#3737,
-#: :mod:`meho_backplane.agent.toolset_discovery`), and the broadcast
-#: coordination tools (#2548, :mod:`meho_backplane.agent.toolset_broadcast`).
+#: :mod:`meho_backplane.agent.toolset_discovery`), the broadcast
+#: coordination tools (#2548, :mod:`meho_backplane.agent.toolset_broadcast`),
+#: and the opt-in context tools (#3759).
 #: Catalog order is the order tools are advertised to the model.
 _META_TOOL_CATALOG: tuple[MetaToolSpec, ...] = (
     *_OPERATIONS_META_TOOLS,
     *build_discovery_meta_tools(),
     *build_broadcast_meta_tools(),
+    *build_retrieval_meta_tools(),
+    build_read_context_resource_tool(),
+)
+
+#: Catalog tools a spec must name in ``meta_tools`` to get (#3759). They
+#: return stored tenant text, so an omitted allow-list does not add them.
+OPT_IN_META_TOOL_NAMES: frozenset[str] = frozenset(
+    {*RETRIEVAL_META_TOOL_NAMES, READ_CONTEXT_RESOURCE},
 )
 
 #: The set of meta-tool names the agent surface knows about. Public so a
@@ -453,7 +485,8 @@ def resolve_agent_toolset(
 
     The registered set is the intersection of:
 
-    * the spec's ``meta_tools`` allow-list (or all meta-tools when omitted),
+    * the spec's ``meta_tools`` allow-list (or, when omitted, every
+      meta-tool except the opt-in ones in :data:`OPT_IN_META_TOOL_NAMES`),
       and
     * the meta-tools the *operator*'s role admits (via
       :func:`~meho_backplane.mcp.registry.role_at_least`).
@@ -504,7 +537,12 @@ def resolve_agent_toolset(
     for meta in _META_TOOL_CATALOG:
         # Side 1 — toolset spec: omitted allow-list means "all"; a present
         # list must contain the name.
-        if requested_names is not None and meta.name not in requested_names:
+        # Opt-in tools additionally need an explicit allow-list entry.
+        if requested_names is None:
+            if meta.name in OPT_IN_META_TOOL_NAMES:
+                disabled[meta.name] = "not_in_allow_list"
+                continue
+        elif meta.name not in requested_names:
             disabled[meta.name] = "not_in_allow_list"
             continue
         # Side 2 — identity permissions: the role must meet the tool's floor.

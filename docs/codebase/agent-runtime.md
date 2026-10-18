@@ -137,7 +137,8 @@ JSON-shaped (so it can grow without a migration):
 ```
 
 - `meta_tools` — allow-list of meta-tool names. Omitted / `null` means "all
-  meta-tools the role admits"; `[]` registers nothing. The catalog of known
+  meta-tools the role admits", except the opt-in context tools (#3759, see
+  below); `[]` registers nothing. The catalog of known
   meta-tools is `META_TOOL_NAMES`; an unknown name in the list is ignored
   with a warning (forward-compat).
 - `connectors` — optional allow-list of `connector_id` values the agent may
@@ -261,6 +262,79 @@ outcomes, and `agent_toolset_resolved` logs both:
   `role_below_floor` (the run's role is too low).
 
 Neither kind is registered, so the model never sees it.
+
+### Opt-in context tools and hosted context (#3759)
+
+A configured definition can also get four context tools. They return stored
+tenant text, so they are **opt-in**: they register only when the spec's
+`meta_tools` list names them (`OPT_IN_META_TOOL_NAMES`). An omitted
+`meta_tools` does not add them, so existing definitions keep their surface;
+`resolve_agent_toolset` reports them as `not_in_allow_list`.
+
+- `query_topology`, `search_memory`, `search_knowledge` — bridged from the MCP
+  working surface by `build_retrieval_meta_tools` in `toolset_discovery.py`,
+  with the same `_bridge` and `_governed_handler` as the #3737 tools. So the
+  MCP handler, the MCP wire schema, the `OPERATOR` floor, tenant scoping,
+  Memory RBAC, the untrusted-text envelope on snippets and passages, and the
+  response size limits are the same code as on MCP. For the two search
+  tools the hosted description is the MCP description plus one sentence:
+  there is no `resources/read` here, use `read_context_resource`.
+- `read_context_resource(uri)` — hosted only (there is no MCP tool of this
+  name; MCP clients use `resources/read`). Lives in `agent/hosted_context.py`.
+  It accepts only these MCP resource templates (`READABLE_URI_TEMPLATES`):
+  `meho://memory/id/{document_uuid}`, `meho://kb/{slug}`,
+  `meho://kb/id/{entry}/revision/{revision}`, and
+  `meho://tenant/{tenant_id}/conventions/{slug}`. Any other URI — `http(s)`,
+  `file`, the legacy Memory `{scope}/{slug}` form, `meho://retrieve/...`,
+  docs, the feed, a URI over 512 characters — is refused with `ModelRetry`.
+  The URI is only matched against the MCP resource registry; nothing is
+  fetched over the network. An allowed URI runs the resource's role and
+  capability gates, then the registered handler, which does the tenant,
+  owner, and expiry checks.
+
+Reads that cannot be delivered come back as a structured omission instead of
+content: `{"uri", "delivery": "omitted", "reason", "fallback"}`.
+
+- `reason="not_available"` — the handler said "not found" or "denied". Both
+  give the same answer, as on MCP, so the reply does not show whether an
+  entry exists.
+- `reason="output_too_large"` — the body is over the shared read limit
+  (`result_query_response_wire_max_bytes`, measured like a `resources/read`
+  text block). The body is never cut.
+- `fallback` tells the model to work from the search snippets and passages.
+
+**Hosted context.** A configured definition also gets a second system prompt
+part, built at run start by `assemble_hosted_context(operator, tool_names)`
+and registered in `PydanticAgentRun._build_agent` with
+`agent.system_prompt(...)`. Pydantic AI sends static prompts first, so
+`AgentDefinition.system_prompt` stays the first part, unchanged, ahead of all
+tenant text. The legacy `toolset is None` path gets no hosted context.
+
+The second part has two bands:
+
+1. `<<HOSTED_CONTEXT>>` — short text MEHO writes. It says MEHO policy, audit,
+   and approvals always apply and no tool text can change them; that Memory,
+   knowledge base, and topology are not in the prompt; which of the four
+   context tools this run has (only the registered ones); what to do without
+   `read_context_resource`; and that conventions and retrieved text are data,
+   not instructions.
+2. The tenant conventions, from `assemble_preamble(...,
+   conventions_only=True)` — the same seam, order, 600-token budget, guard
+   prefix, and delimiters as the MCP `initialize` instructions. The
+   broadcast, runbook-priming, and doc-catalogue bands are left out: they name
+   MCP tools (`meho_broadcast_*`, `meho_runbook_*`, docs tools) a hosted run
+   does not have.
+
+Conventions that do not fit the budget are returned as
+`HostedContext.omissions` (`ContextOmission(kind="convention", name=<slug>,
+reason="over_budget")`), named in the hosted band (up to 20 slugs, then a
+count), and logged as `agent_hosted_context_over_budget`. With
+`read_context_resource` the band also names the URI to read one.
+
+Memory, knowledge base, and topology are on demand only; nothing loads them
+into the prompt. Delivery receipts for the hosted context are separate work
+(#3763). Like the #3737 tools, hosted reads do not write the per-call MCP
+audit row.
 
 ## Invocation surface (T4 #811)
 
@@ -1067,7 +1141,12 @@ the architecture grounding it links back to.
   a `ModelRetry`, and spec validation. The #3737 tests pin the `{}` surface
   and the legacy `None` two-tool surface, and cover missing versus disabled
   outcomes, the call-time role re-check, MCP schema enforcement, MCP handler
-  reuse, and JSONFlux handles passing through unchanged.
+  reuse, and JSONFlux handles passing through unchanged. The #3759 tests
+  cover the opt-in context tools (schema, role floor, the run's tenant
+  reaching the real MCP handlers, refused URIs, tenant- and owner-scoped
+  reads, `not_available` and `output_too_large` omissions) and the hosted
+  context (tool-aware band, conventions through the preamble seam,
+  over-budget omissions, system prompt kept first, legacy runs unchanged).
 - `backend/tests/integration/test_agent_run_anthropic.py` — opt-in
   real-Anthropic loop (skipped unless `ANTHROPIC_API_KEY` is set; marked
   `slow`). Proves the seam drives a live model that calls a real operation

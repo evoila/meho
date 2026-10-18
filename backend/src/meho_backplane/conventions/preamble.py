@@ -289,6 +289,7 @@ async def assemble_preamble(
     *,
     capabilities: frozenset[str] | None = None,
     max_tokens: int = DEFAULT_MAX_PREAMBLE_TOKENS,
+    conventions_only: bool = False,
 ) -> PreambleResult:
     """Assemble the session preamble for *tenant_id* + *operator_sub* up to *max_tokens*.
 
@@ -328,6 +329,15 @@ async def assemble_preamble(
     band; a tenant entitled to no collections also omits it, so the
     preamble stays byte-identical to its pre-T4 shape for non-docs tenants.
 
+    #3759 added the optional ``conventions_only`` keyword for hosted agent
+    runs. When ``True`` the result holds only the conventions band: no
+    broadcast, runbook-priming, or doc-catalogue band. Those bands name
+    MCP tools a hosted run does not have, so the hosted context assembler
+    (:mod:`meho_backplane.agent.hosted_context`) asks for the conventions
+    alone. The conventions are packed with the same order, budget, and
+    guard as the MCP preamble. The default ``False`` keeps every existing
+    caller byte-identical.
+
     Delegates to :func:`assemble_preamble_detailed` and discards the
     verbose fields -- the MCP read path only needs ``text`` and
     ``dropped_slugs``. The G0.14-T8 (#1149) post-write inclusion
@@ -340,6 +350,7 @@ async def assemble_preamble(
         operator_sub,
         capabilities=capabilities,
         max_tokens=max_tokens,
+        conventions_only=conventions_only,
     )
     return PreambleResult(detailed.text, detailed.dropped_slugs)
 
@@ -351,6 +362,7 @@ async def assemble_preamble_detailed(
     capabilities: frozenset[str] | None = None,
     max_tokens: int = DEFAULT_MAX_PREAMBLE_TOKENS,
     session: AsyncSession | None = None,
+    conventions_only: bool = False,
 ) -> PreambleAssembly:
     """Assemble the preamble (verbose pack record + runbook priming band).
 
@@ -386,8 +398,28 @@ async def assemble_preamble_detailed(
     conventions surface, and a tenant with 50 conventions does not
     shrink the priming surface. Treating them as a single shared
     budget would force a tradeoff that neither caller wants.
+
+    ``conventions_only`` (#3759) skips the broadcast, priming, and
+    catalogue bands; see :func:`assemble_preamble`.
     """
     conventions = await _load_conventions(session, tenant_id)
+    # An empty list renders as ``text=""`` with empty receipt fields, so a
+    # tenant without operational conventions still gets the priming and
+    # catalogue bands on their own -- the bands are independent (#1316,
+    # #1553).
+    rendered = render_conventions(
+        [ConventionEntry(conv.slug, conv.title, conv.body) for conv in conventions],
+        max_tokens,
+    )
+    if conventions_only:
+        return PreambleAssembly(
+            text=rendered.text,
+            dropped_slugs=rendered.dropped_slugs,
+            kept_slugs=rendered.kept_slugs,
+            token_counts=rendered.token_counts,
+            conventions_tokens=rendered.estimated_tokens,
+            oversize_slugs=rendered.oversize_slugs,
+        )
     # The priming helper opens its own DB session through
     # :class:`RunbookRunService` -- threading the caller's *session*
     # through is not required because priming reads ``runbook_runs``
@@ -405,27 +437,6 @@ async def assemble_preamble_detailed(
         catalogue = await assemble_doc_catalogue(capabilities, tenant_id)
         catalogue_text = catalogue.text
 
-    if not conventions:
-        # No conventions text: emit the priming + catalogue bands on their
-        # own if present, else the empty-string sentinel. An operator with
-        # in-progress runs or entitled collections in a tenant without
-        # operational conventions still receives those bands -- the three
-        # bands are independent (#1316, #1553).
-        return PreambleAssembly(
-            text=_combine_bands("", priming.text, catalogue_text),
-            dropped_slugs=[],
-            kept_slugs=[],
-            token_counts={},
-            conventions_tokens=0,
-            oversize_slugs=[],
-            runbook_block_count=priming.block_count,
-            runbook_summarized=priming.summarized,
-        )
-
-    rendered = render_conventions(
-        [ConventionEntry(conv.slug, conv.title, conv.body) for conv in conventions],
-        max_tokens,
-    )
     return PreambleAssembly(
         text=_combine_bands(rendered.text, priming.text, catalogue_text),
         dropped_slugs=rendered.dropped_slugs,

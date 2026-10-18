@@ -1,64 +1,47 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for ``meho_broadcast_watch`` (G6.4-T3, #1093).
+"""Behavioural tests for ``meho_broadcast_watch`` (G6.4-T3 #1093, #3748).
 
-Acceptance-criteria coverage:
+Since #3748 the tool watches the ``agent_announcement`` archive: it
+scans after the caller's watch checkpoint, waits on the Valkey stream
+only as a wake-up, and scans again after every wake-up or timeout.
 
-* ``meho_broadcast_watch`` is registered and visible on ``tools/list``
-  for an ``operator`` JWT; hidden from ``read_only``.
-* ``since_cursor`` is required at the schema layer -- missing surfaces as
-  JSON-RPC ``-32602`` Invalid Params.
-* ``timeout_ms`` is enforced at the input-schema AND handler layers:
-  values outside ``[100, 30000]`` reject with ``-32602``. The 30s cap is
-  the hard backpressure boundary; ``block=0`` (infinite) is not allowed.
-* No events within the block window returns
-  ``{events: [], next_cursor: <since_cursor>}`` (unchanged cursor signals
-  "I waited; nothing landed").
-* New events matching the filter arrive mid-block -> returned immediately
-  with ``next_cursor`` advanced to the **last fetched** entry id
-  (mirrors the SSE generator's M2 fix: a filter-heavy page still moves
-  the cursor forward).
-* Tenant boundary is structural -- the stream key passed to ``xread``
-  is always ``meho:feed:{operator.tenant_id}``, regardless of arguments.
-* ``filter.op_class`` / ``filter.principal`` / ``filter.target`` narrow
-  the result (one test per sub-key).
-* Cancellation: when Starlette cancels the request mid-block, the handler
-  raises :class:`asyncio.CancelledError` (chassis worker released).
-* Credential_read + audit_query events surface aggregate-only -- the
-  publisher already redacts at write time, so the tool surfaces what's
-  on the stream verbatim (no re-redaction, no leakage).
-
-The mocked-client tests cover the wire surface (registration, schema,
-validation, handler glue). The Docker-gated
-``TestBroadcastWatchIntegration`` suite spins up ``valkey/valkey:8`` via
-testcontainers and drives the full publisher -> XREAD -> handler seam,
-including the cursor round-trip and the watch-then-arrives cadence.
+* Registration, role visibility, argument and ``timeout_ms`` validation.
+* Stored announcements after the checkpoint return at once, with the
+  checkpoint moved past them; nothing new returns an empty list after
+  the wait, with the checkpoint unchanged.
+* A wake-up leads to a fresh archive scan.
+* When the wake-up fails, the watch polls the archive every
+  ``WATCH_POLL_SECONDS`` and still delivers each event once.
+* Cancellation during the wait re-raises.
+* Checkpoints are tenant-bound; old stream cursors and garbage are
+  ``-32602``.
+* Real Valkey (Docker-gated): a publish during the wait wakes the
+  watcher well before the timeout.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 from collections.abc import AsyncIterator, Iterator
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from redis.exceptions import ConnectionError as RedisConnectionError
 
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast import (
-    BroadcastEvent,
+    archive_reader,
     dispose_broadcast_blocking_client,
     dispose_broadcast_client,
-    get_broadcast_blocking_client,
-    get_broadcast_client,
-    publish_event,
+    encode_watch_checkpoint,
+    publish_agent_announcement,
     reset_broadcast_blocking_client_for_testing,
     reset_broadcast_client_for_testing,
 )
@@ -72,8 +55,8 @@ from meho_backplane.mcp.tools.broadcast import (
     _validate_timeout_ms,
 )
 from meho_backplane.settings import get_settings
+from tests.broadcast_admission_helpers import seed_announcement, trusted_event
 from tests.mcp_test_fixtures import (
-    OPERATOR_TENANT_ID,
     build_operator,
     client_with_operator,  # noqa: F401 -- pytest-discovered fixture
     isolated_registry,  # noqa: F401 -- pytest-discovered autouse fixture
@@ -81,28 +64,13 @@ from tests.mcp_test_fixtures import (
     required_settings_env,  # noqa: F401 -- pytest-discovered autouse fixture
 )
 
-_AUDIT_ID: UUID = UUID("55555555-5555-5555-5555-555555555555")
-
-#: A canonical Valkey stream cursor used as ``since_cursor`` in tests
-#: that don't exercise cursor-shape semantics directly. The bare-ms +
-#: sequence shape matches what :func:`_handler_recent`'s ``next_cursor``
-#: would hand the caller in production.
-_SINCE_FIXTURE: str = "1747800000000-0"
-
-
-# ---------------------------------------------------------------------------
-# Per-test broadcast-client isolation (mirrors test_mcp_tool_broadcast_recent)
-# ---------------------------------------------------------------------------
+#: A cursor value for tests that are rejected before any read.
+_SINCE_FIXTURE: str = "w1.not-read"
 
 
 @pytest.fixture(autouse=True)
 def _isolated_broadcast_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Clear the cached client + pin a stub URL around every test.
-
-    Pinning ``BROADCAST_REDIS_URL`` keeps the construction path free of
-    "URL not set" failures; per-test patches replace ``xread`` so no
-    socket ever opens.
-    """
+    """Pin a stub broadcast URL and reset the cached clients around every test."""
     monkeypatch.setenv("BROADCAST_REDIS_URL", "redis://broadcast.test:6379")
     get_settings.cache_clear()
     reset_broadcast_client_for_testing()
@@ -113,56 +81,34 @@ def _isolated_broadcast_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[None
     get_settings.cache_clear()
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+class _FakeWake:
+    """Fake Valkey clients for the watch wake-up.
 
-
-def _make_event(
-    *,
-    tenant_id: UUID = OPERATOR_TENANT_ID,
-    op_id: str = "vsphere.vm.list",
-    op_class: str = "read",
-    principal_sub: str = "op-test",
-    target_name: str | None = None,
-    result_status: str = "ok",
-    payload: dict[str, Any] | None = None,
-) -> BroadcastEvent:
-    """Build a :class:`BroadcastEvent` shaped like one the publisher emits."""
-    return BroadcastEvent(
-        event_id=uuid4(),
-        ts=datetime(2026, 5, 25, 10, 0, tzinfo=UTC),
-        tenant_id=tenant_id,
-        principal_sub=principal_sub,
-        target_name=target_name,
-        op_id=op_id,
-        op_class=op_class,
-        result_status=result_status,
-        audit_id=_AUDIT_ID,
-        payload=payload or {"op_class": op_class, "params": {}, "result_status": result_status},
-    )
-
-
-def _xread_envelope(
-    stream_key: str,
-    items: list[tuple[BroadcastEvent, str]],
-) -> list[tuple[str, list[tuple[str, dict[str, str]]]]]:
-    """Build the redis-py ``XREAD`` return shape from event+id tuples.
-
-    redis-py returns ``[[stream_key, [(entry_id, fields), ...]]]``; the
-    handler unwraps it via ``entries[0][1]``. *items* pairs each event
-    with the stream entry id the publisher would have minted for it.
+    ``xrevrange`` reports the stream's newest id; ``xread`` is an
+    ``AsyncMock`` the test scripts (return ``None`` for a timeout, raise
+    for a failed wake-up, or run a side effect that stores a row first).
     """
-    fields_list = [(entry_id, {"event": event.model_dump_json()}) for event, entry_id in items]
-    return [(stream_key, fields_list)]
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.xrevrange = AsyncMock(return_value=[("1700000000000-1", {})])
+        self.xread = AsyncMock(return_value=None)
+        monkeypatch.setattr(archive_reader, "get_broadcast_client", lambda: self)
+        monkeypatch.setattr(archive_reader, "get_broadcast_blocking_client", lambda: self)
 
 
-def _result_dict(response: Any) -> dict[str, Any]:
-    """Extract the JSON-decoded tool result from a JSON-RPC response."""
-    body = response.json()
-    assert "error" not in body, body
-    content = body["result"]["content"]
-    return json.loads(content[0]["text"])
+@pytest.fixture
+def wake(monkeypatch: pytest.MonkeyPatch) -> _FakeWake:
+    return _FakeWake(monkeypatch)
+
+
+def _operator(tenant_id: UUID) -> Operator:
+    return Operator(
+        sub="reader-1",
+        raw_jwt="x",
+        tenant_id=tenant_id,
+        tenant_role=TenantRole.OPERATOR,
+        principal_kind=PrincipalKind.USER,
+    )
 
 
 def _tools_call(name: str, arguments: dict[str, Any], call_id: int = 1) -> dict[str, Any]:
@@ -175,8 +121,12 @@ def _tools_call(name: str, arguments: dict[str, Any], call_id: int = 1) -> dict[
     }
 
 
+def _ids(result: dict[str, Any]) -> list[str]:
+    return [event["event_id"] for event in result["events"]]
+
+
 # ---------------------------------------------------------------------------
-# Registration shape + role visibility
+# Registration shape + role visibility + argument validation
 # ---------------------------------------------------------------------------
 
 
@@ -442,516 +392,140 @@ def test_handler_timeout_validator_accepts_in_range(good_timeout: int) -> None:
 # ---------------------------------------------------------------------------
 # No events within timeout -> {events: [], next_cursor: unchanged}
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "client_with_operator",
-    [TenantRole.OPERATOR],
-    indirect=True,
-)
-def test_xread_timeout_none_returns_empty_with_unchanged_cursor(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-) -> None:
-    """``XREAD`` returning ``None`` (timeout) -> empty + unchanged cursor.
-
-    redis-py's documented "no new messages within block window" shape is
-    a ``None`` return value. The handler MUST surface
-    ``{events: [], next_cursor: <since_cursor>}`` so the caller knows to
-    re-poll with the same cursor.
-    """
-    client, _op = client_with_operator
-    bc = get_broadcast_blocking_client()
-    with patch.object(bc, "xread", new=AsyncMock(return_value=None)) as xr:
-        resp = post_mcp(
-            client,
-            _tools_call(
-                "meho_broadcast_watch",
-                {"since_cursor": _SINCE_FIXTURE, "timeout_ms": 200},
-            ),
-        )
-    result = _result_dict(resp)
-    assert result == {"events": [], "next_cursor": _SINCE_FIXTURE}
-    # And xread was invoked with the right block window.
-    assert xr.await_args.kwargs["block"] == 200
-
-
-@pytest.mark.parametrize(
-    "client_with_operator",
-    [TenantRole.OPERATOR],
-    indirect=True,
-)
-def test_xread_empty_list_returns_empty_with_unchanged_cursor(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-) -> None:
-    """An empty outer list from XREAD is also a "nothing for us" shape.
-
-    Defensive against a future redis-py shape change -- the truthiness
-    check collapses ``None`` and ``[]`` into the same branch.
-    """
-    client, _op = client_with_operator
-    bc = get_broadcast_blocking_client()
-    with patch.object(bc, "xread", new=AsyncMock(return_value=[])):
-        resp = post_mcp(
-            client,
-            _tools_call(
-                "meho_broadcast_watch",
-                {"since_cursor": _SINCE_FIXTURE},
-            ),
-        )
-    result = _result_dict(resp)
-    assert result == {"events": [], "next_cursor": _SINCE_FIXTURE}
-
-
-# ---------------------------------------------------------------------------
-# New events arrive -> returned immediately, cursor advanced
+# Archive scans and the wake-up
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "client_with_operator",
-    [TenantRole.OPERATOR],
-    indirect=True,
-)
-def test_new_events_returned_with_advanced_cursor(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-) -> None:
-    """Entries arriving within the block window surface immediately.
+async def test_stored_events_after_the_checkpoint_return_at_once(wake: _FakeWake) -> None:
+    tenant_id = uuid4()
+    _, seen_seq = await seed_announcement(tenant_id)
+    newer, newer_seq = await seed_announcement(tenant_id)
+    checkpoint = encode_watch_checkpoint(tenant_id, seen_seq)
 
-    The handler advances ``next_cursor`` to the LAST FETCHED entry id
-    (the M2 invariant: filter-heavy pages still move the cursor forward).
-    """
-    client, op = client_with_operator
-    stream_key = f"meho:feed:{op.tenant_id}"
-    e1 = _make_event(op_id="vsphere.vm.list")
-    e2 = _make_event(op_id="vsphere.vm.create", op_class="write")
-    e3 = _make_event(op_id="vsphere.vm.delete", op_class="write")
-    envelope = _xread_envelope(
-        stream_key,
-        [(e1, "1747800000100-0"), (e2, "1747800000200-0"), (e3, "1747800000300-0")],
+    result = await _handler_watch(_operator(tenant_id), {"cursor": checkpoint})
+
+    assert _ids(result) == [str(newer.event_id)]
+    assert result["next_cursor"] == encode_watch_checkpoint(tenant_id, newer_seq)
+    assert result["gap"] is None
+    wake.xread.assert_not_awaited()
+
+
+async def test_nothing_new_waits_then_returns_the_same_checkpoint(wake: _FakeWake) -> None:
+    tenant_id = uuid4()
+    _, seq = await seed_announcement(tenant_id)
+    checkpoint = encode_watch_checkpoint(tenant_id, seq)
+
+    result = await _handler_watch(
+        _operator(tenant_id), {"cursor": checkpoint, "timeout_ms": _WATCH_MIN_TIMEOUT_MS}
     )
-    bc = get_broadcast_blocking_client()
-    with patch.object(bc, "xread", new=AsyncMock(return_value=envelope)):
-        resp = post_mcp(
-            client,
-            _tools_call(
-                "meho_broadcast_watch",
-                {"since_cursor": _SINCE_FIXTURE},
-            ),
-        )
-    result = _result_dict(resp)
-    op_ids = [e["op_id"] for e in result["events"]]
-    assert op_ids == ["vsphere.vm.list", "vsphere.vm.create", "vsphere.vm.delete"]
-    assert result["next_cursor"] == "1747800000300-0"
-    # Each row self-labels its stream entry id as ``cursor`` (#2479);
-    # ``id`` stays as the legacy alias of the same value.
-    assert [e["cursor"] for e in result["events"]] == [
-        "1747800000100-0",
-        "1747800000200-0",
-        "1747800000300-0",
-    ]
-    assert all(e["cursor"] == e["id"] for e in result["events"])
+
+    assert result == {"events": [], "next_cursor": checkpoint, "gap": None}
+    wake.xread.assert_awaited()
+    streams = wake.xread.await_args.args[0]
+    assert streams == {f"meho:feed:{tenant_id}": "1700000000000-1"}
+    assert 1 <= wake.xread.await_args.kwargs["block"] <= _WATCH_MIN_TIMEOUT_MS
 
 
-@pytest.mark.parametrize(
-    "client_with_operator",
-    [TenantRole.OPERATOR],
-    indirect=True,
-)
-def test_cursor_advances_past_filtered_out_entries(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-) -> None:
-    """A page where every entry is filtered out still moves the cursor.
+async def test_a_wake_up_rescans_the_archive(wake: _FakeWake) -> None:
+    tenant_id = uuid4()
+    checkpoint = encode_watch_checkpoint(tenant_id, 0)
+    stored: list[str] = []
 
-    Without this, a busy-but-filtered tenant would loop forever re-reading
-    the same XREAD batch on every poll -- the M2 fix the SSE generator
-    documents explicitly. ``events`` is empty (filter dropped both), but
-    ``next_cursor`` reflects the last *fetched* entry id.
-    """
-    client, op = client_with_operator
-    stream_key = f"meho:feed:{op.tenant_id}"
-    read_event = _make_event(op_id="vsphere.vm.list", op_class="read")
-    write_event = _make_event(op_id="vsphere.vm.create", op_class="write")
-    envelope = _xread_envelope(
-        stream_key,
-        [(read_event, "1747800000100-0"), (write_event, "1747800000200-0")],
-    )
-    bc = get_broadcast_blocking_client()
-    with patch.object(bc, "xread", new=AsyncMock(return_value=envelope)):
-        resp = post_mcp(
-            client,
-            _tools_call(
-                "meho_broadcast_watch",
-                {
-                    "since_cursor": _SINCE_FIXTURE,
-                    "filter": {"op_class": "credential_read"},  # matches nothing
-                },
-            ),
-        )
-    result = _result_dict(resp)
+    async def _publish_then_wake(*_args: Any, **_kwargs: Any) -> Any:
+        event, _ = await seed_announcement(tenant_id, activity="late")
+        stored.append(str(event.event_id))
+        return [["key", [("1700000000000-2", {})]]]
+
+    wake.xread.side_effect = _publish_then_wake
+    result = await _handler_watch(_operator(tenant_id), {"cursor": checkpoint, "timeout_ms": 5000})
+    assert _ids(result) == stored
+
+
+async def test_filtered_out_rows_still_move_the_checkpoint(wake: _FakeWake) -> None:
+    tenant_id = uuid4()
+    await seed_announcement(tenant_id, principal_sub="op-bob")
+    _, last_seq = await seed_announcement(tenant_id, principal_sub="op-bob")
+    op = _operator(tenant_id)
+    args = {"filter": {"principal": "op-alice"}, "timeout_ms": _WATCH_MIN_TIMEOUT_MS}
+
+    result = await _handler_watch(op, {"cursor": encode_watch_checkpoint(tenant_id, 0), **args})
+
     assert result["events"] == []
-    assert result["next_cursor"] == "1747800000200-0"  # advanced past both
+    assert result["next_cursor"] == encode_watch_checkpoint(tenant_id, last_seq)
+
+
+async def test_failed_wake_up_polls_and_delivers_each_event_once(
+    wake: _FakeWake, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Valkey failure falls back to a bounded poll; reconnecting never repeats events."""
+    tenant_id = uuid4()
+    wake.xread.side_effect = RedisConnectionError("valkey down")
+    naps: list[float] = []
+    stored: list[str] = []
+
+    async def _nap(seconds: float) -> None:
+        naps.append(seconds)
+        event, _ = await seed_announcement(tenant_id, activity="while polling")
+        stored.append(str(event.event_id))
+
+    monkeypatch.setattr(archive_reader.asyncio, "sleep", _nap)
+    op = _operator(tenant_id)
+
+    first = await _handler_watch(
+        op, {"cursor": encode_watch_checkpoint(tenant_id, 0), "timeout_ms": 30_000}
+    )
+    assert _ids(first) == stored
+    assert naps == [archive_reader.WATCH_POLL_SECONDS]
+
+    wake.xrevrange.side_effect = RedisConnectionError("valkey down")
+    second = await _handler_watch(op, {"cursor": first["next_cursor"], "timeout_ms": 30_000})
+    assert _ids(second) == stored[1:]
+    assert not set(_ids(first)) & set(_ids(second))
+    assert naps[1:] == [archive_reader.WATCH_POLL_SECONDS]
+
+
+async def test_cancellation_during_the_wait_re_raises(wake: _FakeWake) -> None:
+    tenant_id = uuid4()
+    wake.xread.side_effect = asyncio.CancelledError()
+    with pytest.raises(asyncio.CancelledError):
+        await _handler_watch(
+            _operator(tenant_id),
+            {"cursor": encode_watch_checkpoint(tenant_id, 0), "timeout_ms": 5000},
+        )
 
 
 # ---------------------------------------------------------------------------
-# Filter narrowing
+# Checkpoint checks
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    "client_with_operator",
-    [TenantRole.OPERATOR],
-    indirect=True,
+    ("cursor", "message"),
+    [
+        ("1747800000000-0", "not a watch checkpoint"),
+        ("w1.@@@", "malformed"),
+        ("h1.AAAA", "not a watch checkpoint"),
+    ],
 )
-def test_filter_op_class_narrows_result(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-) -> None:
-    """``filter.op_class`` keeps only matching events."""
-    client, op = client_with_operator
-    stream_key = f"meho:feed:{op.tenant_id}"
-    read_event = _make_event(op_id="vsphere.vm.list", op_class="read")
-    write_event = _make_event(op_id="vsphere.vm.create", op_class="write")
-    envelope = _xread_envelope(
-        stream_key,
-        [(read_event, "1747800000100-0"), (write_event, "1747800000200-0")],
+async def test_bad_checkpoints_are_refused(cursor: str, message: str) -> None:
+    with pytest.raises(McpInvalidParamsError, match=message):
+        await _handler_watch(_operator(uuid4()), {"cursor": cursor})
+
+
+async def test_checkpoint_from_another_tenant_is_refused() -> None:
+    checkpoint = encode_watch_checkpoint(uuid4(), 0)
+    with pytest.raises(McpInvalidParamsError, match="another tenant"):
+        await _handler_watch(_operator(uuid4()), {"cursor": checkpoint})
+
+
+async def test_checkpoint_ahead_of_the_archive_resets(wake: _FakeWake) -> None:
+    tenant_id = uuid4()
+    _, seq = await seed_announcement(tenant_id)
+    result = await _handler_watch(
+        _operator(tenant_id), {"cursor": encode_watch_checkpoint(tenant_id, seq + 50)}
     )
-    bc = get_broadcast_blocking_client()
-    with patch.object(bc, "xread", new=AsyncMock(return_value=envelope)):
-        resp = post_mcp(
-            client,
-            _tools_call(
-                "meho_broadcast_watch",
-                {"since_cursor": _SINCE_FIXTURE, "filter": {"op_class": "write"}},
-            ),
-        )
-    result = _result_dict(resp)
-    op_ids = [e["op_id"] for e in result["events"]]
-    assert op_ids == ["vsphere.vm.create"]
-
-
-@pytest.mark.parametrize(
-    "client_with_operator",
-    [TenantRole.OPERATOR],
-    indirect=True,
-)
-def test_filter_principal_narrows_result(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-) -> None:
-    """``filter.principal`` keeps only events from the named JWT 'sub'."""
-    client, op = client_with_operator
-    stream_key = f"meho:feed:{op.tenant_id}"
-    alice = _make_event(op_id="vsphere.vm.list", principal_sub="op-alice")
-    bob = _make_event(op_id="vsphere.vm.list", principal_sub="op-bob")
-    envelope = _xread_envelope(
-        stream_key,
-        [(alice, "1747800000100-0"), (bob, "1747800000200-0")],
-    )
-    bc = get_broadcast_blocking_client()
-    with patch.object(bc, "xread", new=AsyncMock(return_value=envelope)):
-        resp = post_mcp(
-            client,
-            _tools_call(
-                "meho_broadcast_watch",
-                {"since_cursor": _SINCE_FIXTURE, "filter": {"principal": "op-alice"}},
-            ),
-        )
-    result = _result_dict(resp)
-    principals = [e["principal_sub"] for e in result["events"]]
-    assert principals == ["op-alice"]
-
-
-@pytest.mark.parametrize(
-    "client_with_operator",
-    [TenantRole.OPERATOR],
-    indirect=True,
-)
-def test_filter_target_narrows_result(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-) -> None:
-    """``filter.target`` keeps only events with matching ``target_name``.
-
-    Asserts both:
-
-    1. The matching event survives.
-    2. Events with ``target_name=None`` are dropped (the caller asked
-       for a specific target; an untagged event doesn't qualify).
-    """
-    client, op = client_with_operator
-    stream_key = f"meho:feed:{op.tenant_id}"
-    prod = _make_event(target_name="prod-vc-1")
-    staging = _make_event(target_name="staging-vc-1")
-    untagged = _make_event(target_name=None)
-    envelope = _xread_envelope(
-        stream_key,
-        [
-            (prod, "1747800000100-0"),
-            (staging, "1747800000200-0"),
-            (untagged, "1747800000300-0"),
-        ],
-    )
-    bc = get_broadcast_blocking_client()
-    with patch.object(bc, "xread", new=AsyncMock(return_value=envelope)):
-        resp = post_mcp(
-            client,
-            _tools_call(
-                "meho_broadcast_watch",
-                {"since_cursor": _SINCE_FIXTURE, "filter": {"target": "prod-vc-1"}},
-            ),
-        )
-    result = _result_dict(resp)
-    targets = [e["target_name"] for e in result["events"]]
-    assert targets == ["prod-vc-1"]
-
-
-# ---------------------------------------------------------------------------
-# Tenant boundary (structural -- no input that could ask for another tenant)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "client_with_operator",
-    [TenantRole.OPERATOR],
-    indirect=True,
-)
-def test_stream_key_derived_from_operator_tenant_id(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-) -> None:
-    """The handler ALWAYS reads ``meho:feed:{operator.tenant_id}``.
-
-    Tenant isolation here is structural: the input schema has no
-    ``tenant_id`` field, so a malicious caller has no way to ask for
-    another tenant's stream. Asserting the read key is the right shape
-    proves the structural property holds.
-    """
-    client, op = client_with_operator
-    bc = get_broadcast_blocking_client()
-    with patch.object(bc, "xread", new=AsyncMock(return_value=None)) as xr:
-        post_mcp(
-            client,
-            _tools_call("meho_broadcast_watch", {"since_cursor": _SINCE_FIXTURE}),
-        )
-    streams_arg = xr.await_args.args[0]
-    expected_key = f"meho:feed:{op.tenant_id}"
-    assert expected_key in streams_arg
-    # And the cursor we passed forward is the one the caller sent.
-    assert streams_arg[expected_key] == _SINCE_FIXTURE
-
-
-async def test_handler_with_distinct_operator_reads_distinct_stream() -> None:
-    """Two operators on different tenants read their own streams only.
-
-    Directly exercises the handler (bypassing the FastAPI dispatcher)
-    with two operators bound to two different tenant ids; asserts each
-    call resolves to its own stream key. The mocked client always
-    returns ``None`` -- the assertion is on the key passed to xread,
-    not on what came back.
-    """
-    tenant_a = UUID("aaaa0000-0000-0000-0000-000000000001")
-    tenant_b = UUID("bbbb0000-0000-0000-0000-000000000002")
-    op_a = Operator(
-        sub="op-a",
-        raw_jwt="x",
-        tenant_id=tenant_a,
-        tenant_role=TenantRole.OPERATOR,
-    )
-    op_b = Operator(
-        sub="op-b",
-        raw_jwt="x",
-        tenant_id=tenant_b,
-        tenant_role=TenantRole.OPERATOR,
-    )
-
-    bc = get_broadcast_blocking_client()
-    with patch.object(bc, "xread", new=AsyncMock(return_value=None)) as xr:
-        await _handler_watch(op_a, {"since_cursor": _SINCE_FIXTURE})
-        await _handler_watch(op_b, {"since_cursor": _SINCE_FIXTURE})
-
-    keys_read = [next(iter(call.args[0].keys())) for call in xr.await_args_list]
-    assert keys_read == [f"meho:feed:{tenant_a}", f"meho:feed:{tenant_b}"]
-
-
-# ---------------------------------------------------------------------------
-# Cancellation: client disconnects mid-block -> CancelledError re-raised
-# ---------------------------------------------------------------------------
-
-
-async def test_handler_re_raises_cancelled_error_from_xread() -> None:
-    """When ``xread`` raises ``asyncio.CancelledError``, the handler re-raises.
-
-    Swallowing ``CancelledError`` breaks the task tree's unwind invariants
-    per the asyncio cancellation contract (Sonar S7497; Python 3.13+
-    re-issues cancellation if it goes unpropagated). The handler logs the
-    structured disconnect and re-raises so the chassis worker is released
-    the moment Starlette cancels the request.
-    """
-    op = build_operator(TenantRole.OPERATOR)
-
-    async def _cancelled_xread(*_args: object, **_kwargs: object) -> Any:
-        raise asyncio.CancelledError
-
-    bc = get_broadcast_blocking_client()
-    with (
-        patch.object(bc, "xread", new=_cancelled_xread),
-        pytest.raises(asyncio.CancelledError),
-    ):
-        await _handler_watch(op, {"since_cursor": _SINCE_FIXTURE})
-
-
-async def test_handler_cancellation_during_real_block_releases_worker() -> None:
-    """An asyncio-driven cancellation during a real block window propagates cleanly.
-
-    Models the full Starlette cancellation path: a long-poll call is in
-    progress, the client transport closes, ``asyncio.Task.cancel()`` lands
-    on the awaiting task, and the handler must release the chassis worker
-    without swallowing the signal. Drives this with ``asyncio.wait_for``
-    against a never-completing fake xread.
-
-    A "release the worker" guarantee that swallowed cancellation would
-    fail this test by leaking past the ``asyncio.TimeoutError`` raise --
-    that mechanism is exactly the one asyncio uses to escalate a
-    cancellation that the awaitee swallows.
-    """
-    op = build_operator(TenantRole.OPERATOR)
-
-    async def _never_returns(*_args: object, **_kwargs: object) -> Any:
-        await asyncio.sleep(3600)  # never completes within the test window
-        return None
-
-    bc = get_broadcast_blocking_client()
-    with (
-        patch.object(bc, "xread", new=_never_returns),
-        pytest.raises((asyncio.TimeoutError, asyncio.CancelledError)),
-    ):
-        await asyncio.wait_for(
-            _handler_watch(op, {"since_cursor": _SINCE_FIXTURE}),
-            timeout=0.1,
-        )
-
-
-# ---------------------------------------------------------------------------
-# PII inheritance: aggregate-only payloads pass through verbatim
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "client_with_operator",
-    [TenantRole.OPERATOR],
-    indirect=True,
-)
-def test_credential_read_payload_surfaces_aggregate_only(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-) -> None:
-    """``credential_read`` events return whatever the publisher redacted to.
-
-    The tool MUST NOT re-derive or mutate ``payload``; it surfaces the
-    on-stream view verbatim. Feeding an aggregate-shaped payload
-    asserts the tool doesn't accidentally expand it back to full.
-    """
-    client, op = client_with_operator
-    stream_key = f"meho:feed:{op.tenant_id}"
-    aggregate_payload = {"op_class": "credential_read", "result_status": "ok"}
-    event = _make_event(
-        op_id="vault.kv.read",
-        op_class="credential_read",
-        payload=aggregate_payload,
-    )
-    envelope = _xread_envelope(stream_key, [(event, "1747800000100-0")])
-    bc = get_broadcast_blocking_client()
-    with patch.object(bc, "xread", new=AsyncMock(return_value=envelope)):
-        resp = post_mcp(
-            client,
-            _tools_call("meho_broadcast_watch", {"since_cursor": _SINCE_FIXTURE}),
-        )
-    result = _result_dict(resp)
-    assert result["events"][0]["payload"] == aggregate_payload
-    # And no path / key / value leak from any earlier-rendered shape.
-    assert "params" not in result["events"][0]["payload"]
-    assert "path" not in result["events"][0]["payload"]
-
-
-@pytest.mark.parametrize(
-    "client_with_operator",
-    [TenantRole.OPERATOR],
-    indirect=True,
-)
-def test_audit_query_payload_surfaces_aggregate_with_row_count(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-) -> None:
-    """``audit_query`` events surface the ``row_count`` aggregate verbatim."""
-    client, op = client_with_operator
-    stream_key = f"meho:feed:{op.tenant_id}"
-    aggregate_payload = {
-        "op_class": "audit_query",
-        "result_status": "ok",
-        "row_count": 17,
-    }
-    event = _make_event(
-        op_id="meho_audit_replay",
-        op_class="audit_query",
-        payload=aggregate_payload,
-    )
-    envelope = _xread_envelope(stream_key, [(event, "1747800000100-0")])
-    bc = get_broadcast_blocking_client()
-    with patch.object(bc, "xread", new=AsyncMock(return_value=envelope)):
-        resp = post_mcp(
-            client,
-            _tools_call("meho_broadcast_watch", {"since_cursor": _SINCE_FIXTURE}),
-        )
-    result = _result_dict(resp)
-    assert result["events"][0]["payload"] == aggregate_payload
-
-
-# ---------------------------------------------------------------------------
-# Deserialisation safety net (skip malformed entries, don't raise)
-# ---------------------------------------------------------------------------
-
-
-async def test_handler_skips_unknown_field_shape() -> None:
-    """An entry without an ``event`` field is logged + skipped, not raised."""
-    op = build_operator(TenantRole.OPERATOR)
-    stream_key = f"meho:feed:{op.tenant_id}"
-    good = _make_event()
-    envelope = [
-        (
-            stream_key,
-            [
-                ("1747800000100-0", {"unexpected_key": "nothing-useful"}),
-                ("1747800000200-0", {"event": good.model_dump_json()}),
-            ],
-        ),
-    ]
-    bc = get_broadcast_blocking_client()
-    with patch.object(bc, "xread", new=AsyncMock(return_value=envelope)):
-        result = await _handler_watch(op, {"since_cursor": _SINCE_FIXTURE})
-    assert len(result["events"]) == 1
-    assert result["events"][0]["event_id"] == str(good.event_id)
-    # Cursor still advances past the malformed entry.
-    assert result["next_cursor"] == "1747800000200-0"
-
-
-async def test_handler_skips_malformed_event_json() -> None:
-    """An entry whose ``event`` field doesn't parse as BroadcastEvent is skipped."""
-    op = build_operator(TenantRole.OPERATOR)
-    stream_key = f"meho:feed:{op.tenant_id}"
-    good = _make_event()
-    envelope = [
-        (
-            stream_key,
-            [
-                ("1747800000100-0", {"event": '{"not": "a BroadcastEvent"}'}),
-                ("1747800000200-0", {"event": good.model_dump_json()}),
-            ],
-        ),
-    ]
-    bc = get_broadcast_blocking_client()
-    with patch.object(bc, "xread", new=AsyncMock(return_value=envelope)):
-        result = await _handler_watch(op, {"since_cursor": _SINCE_FIXTURE})
-    assert len(result["events"]) == 1
-    assert result["events"][0]["event_id"] == str(good.event_id)
-
-
-# ---------------------------------------------------------------------------
-# Filter input-shape validation
-# ---------------------------------------------------------------------------
+    assert result["gap"]["reason"] == "checkpoint_ahead"
+    assert result["next_cursor"] == encode_watch_checkpoint(tenant_id, seq)
 
 
 @pytest.mark.parametrize(
@@ -1034,21 +608,14 @@ def _docker_socket_present() -> bool:
     return Path("/var/run/docker.sock").exists() or os.environ.get("DOCKER_HOST") is not None
 
 
-_DOCKER_AVAILABLE = _docker_socket_present()
 _SKIP_REASON = (
     "Docker socket unavailable in this sandbox; runs in CI where containers are provisioned."
 )
 
 
-@pytest.mark.skipif(not _DOCKER_AVAILABLE, reason=_SKIP_REASON)
+@pytest.mark.skipif(not _docker_socket_present(), reason=_SKIP_REASON)
 class TestBroadcastWatchIntegration:
-    """End-to-end suite against a real Valkey container.
-
-    Drives the same publisher (``publish_event``) the production
-    publish-on-write hook uses so the integration covers the full
-    XADD -> XREAD -> handler seam, including the cursor round-trip
-    and the watch-then-arrives cadence.
-    """
+    """The stream wake-up against a real Valkey container."""
 
     @pytest.fixture
     async def valkey_url(self, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[str]:
@@ -1070,122 +637,23 @@ class TestBroadcastWatchIntegration:
                 await dispose_broadcast_blocking_client()
                 get_settings.cache_clear()
 
-    async def test_watch_returns_immediately_when_event_already_present(
-        self,
-        valkey_url: str,
-    ) -> None:
-        """Pre-existing entries past the cursor surface on the first call.
-
-        Sets up: publish entry A, get its id; publish entry B; call watch
-        with since_cursor=A.id. Expect entry B in the response without
-        blocking.
-        """
-        op = build_operator(TenantRole.OPERATOR)
-        event_a = _make_event(op_id="vsphere.vm.list")
-        event_b = _make_event(op_id="vsphere.vm.create")
-        await publish_event(event_a)
-        # Wait so the two events get distinct ids -- Valkey's monotonic
-        # ms+seq guarantees ordering, but the cursor round-trip is the
-        # contract under test.
-        await asyncio.sleep(0.01)
-        await publish_event(event_b)
-
-        client = get_broadcast_client()
-        stream_key = f"meho:feed:{op.tenant_id}"
-        # Get the first event's id by XRANGE on the stream.
-        first = await client.xrange(stream_key, count=1)
-        assert first, "publisher seeded entry A but XRANGE returned empty"
-        a_id = first[0][0]
-
-        result = await _handler_watch(
-            op,
-            {"since_cursor": a_id, "timeout_ms": 1000},
-        )
-        op_ids = [e["op_id"] for e in result["events"]]
-        assert op_ids == ["vsphere.vm.create"]
-        assert result["next_cursor"] != a_id
-
-    async def test_watch_returns_empty_after_timeout_no_events(
-        self,
-        valkey_url: str,
-    ) -> None:
-        """No events arrive within the window -> empty + unchanged cursor.
-
-        Uses the smallest allowed timeout to keep the test fast (~100ms).
-        """
-        op = build_operator(TenantRole.OPERATOR)
-        # No publishes -- the stream may not exist yet. XREAD against a
-        # missing stream returns the same "no entries" shape.
-        result = await _handler_watch(
-            op,
-            {"since_cursor": "0-0", "timeout_ms": _WATCH_MIN_TIMEOUT_MS},
-        )
-        assert result == {"events": [], "next_cursor": "0-0"}
-
-    async def test_two_tenants_see_only_their_own_events(
-        self,
-        valkey_url: str,
-    ) -> None:
-        """Two operators on two tenants each read only their own stream.
-
-        The structural tenant guarantee verified end-to-end: tenant-A's
-        operator never sees tenant-B's events even when both streams sit
-        on the same Valkey instance.
-        """
-        tenant_a = UUID("aaaa0000-0000-0000-0000-000000000001")
-        tenant_b = UUID("bbbb0000-0000-0000-0000-000000000002")
-        op_a = Operator(
-            sub="op-a",
-            raw_jwt="x",
-            tenant_id=tenant_a,
-            tenant_role=TenantRole.OPERATOR,
-        )
-        op_b = Operator(
-            sub="op-b",
-            raw_jwt="x",
-            tenant_id=tenant_b,
-            tenant_role=TenantRole.OPERATOR,
-        )
-
-        await publish_event(_make_event(tenant_id=tenant_a, op_id="tenant-a.op"))
-        await publish_event(_make_event(tenant_id=tenant_b, op_id="tenant-b.op"))
-
-        # Watch with since_cursor=0-0 to fetch the first batch on each
-        # stream regardless of pre-existing data.
-        result_a = await _handler_watch(
-            op_a,
-            {"since_cursor": "0-0", "timeout_ms": _WATCH_MIN_TIMEOUT_MS},
-        )
-        result_b = await _handler_watch(
-            op_b,
-            {"since_cursor": "0-0", "timeout_ms": _WATCH_MIN_TIMEOUT_MS},
-        )
-
-        a_op_ids = [e["op_id"] for e in result_a["events"]]
-        b_op_ids = [e["op_id"] for e in result_b["events"]]
-        assert a_op_ids == ["tenant-a.op"]
-        assert b_op_ids == ["tenant-b.op"]
-
-    async def test_watch_then_publish_during_block(self, valkey_url: str) -> None:
-        """A publish landing mid-block surfaces to the waiting watcher.
-
-        Schedules a publish for ~50ms after the watch starts; the watch
-        with a 5s timeout should return well before the timeout fires.
-        """
-        op = build_operator(TenantRole.OPERATOR)
+    async def test_publish_during_the_wait_wakes_the_watcher(self, valkey_url: str) -> None:
+        tenant_id = uuid4()
+        op = _operator(tenant_id)
+        late = trusted_event(tenant_id=tenant_id, activity="late")
 
         async def _delayed_publish() -> None:
-            await asyncio.sleep(0.05)
-            await publish_event(_make_event(op_id="vsphere.vm.late"))
+            await asyncio.sleep(0.2)
+            await publish_agent_announcement(late)
 
         publish_task = asyncio.create_task(_delayed_publish())
+        loop = asyncio.get_running_loop()
+        started = loop.time()
         try:
             result = await _handler_watch(
-                op,
-                {"since_cursor": "0-0", "timeout_ms": 5000},
+                op, {"cursor": encode_watch_checkpoint(tenant_id, 0), "timeout_ms": 20_000}
             )
         finally:
             await publish_task
-
-        op_ids = [e["op_id"] for e in result["events"]]
-        assert "vsphere.vm.late" in op_ids
+        assert _ids(result) == [str(late.event_id)]
+        assert loop.time() - started < archive_reader.WATCH_POLL_SECONDS

@@ -19,14 +19,15 @@
 #   3. The SessionStart reflex hook (bin/session-start.sh) shells out to
 #      the `meho` CLI and injects a digest whose recent-activity window
 #      must exclude `__sensor__` heartbeat rows.
-#   4. The login guard (lib/login-guard.mjs, #3961): an unfinished login
-#      stops after a time limit, and a login that expires during a session
-#      fails the call fast with a clear message. Its end-to-end tests run
-#      the real mcp-remote from the committed lock against a fake MEHO +
-#      Keycloak on 127.0.0.1, so the workflow vendors that tree first
-#      (`npm ci` from the lock — the same install the shim does on an
-#      operator's machine). MEHO_PLUGIN_E2E=1 makes a missing tree a
-#      failure instead of a skip.
+#   4. The login guard (lib/login-guard.mjs, #3961, #4000): an unfinished
+#      login stops after a time limit, a login that expires during a session
+#      fails the call fast with a clear message, and a connected session
+#      frees the login callback port so another session can log in. Its
+#      end-to-end tests run the real mcp-remote from the committed lock
+#      against a fake MEHO + Keycloak on 127.0.0.1, so the workflow vendors
+#      that tree first (`npm ci` from the lock — the same install the shim
+#      does on an operator's machine). MEHO_PLUGIN_E2E=1 makes a missing
+#      tree a failure instead of a skip.
 # This workflow runs every `test/*.test.mjs` suite whenever a PR touches
 # the plugin sources.
 #

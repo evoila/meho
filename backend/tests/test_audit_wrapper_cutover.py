@@ -634,7 +634,13 @@ async def test_rest_audit_uncertain_result_is_explicit_and_adds_no_wrapper_row(
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "error"
-    assert body["error"] == "connector_error: AuditCommitError"
+    # The handler finished but its audit row did not commit: the result says
+    # the outcome is uncertain and must not be retried, with no audit_id.
+    assert body["error"].startswith("audit_commit_failed:")
+    assert body["extras"]["error_code"] == "audit_commit_failed"
+    assert body["extras"]["execution_outcome"] == "uncertain"
+    assert body["extras"]["retry"] is False
+    assert body.get("audit_id") is None
     # No success row, and no wrapper row standing in for the missing one.
     assert await _audit_rows() == []
 
@@ -986,7 +992,8 @@ async def test_mcp_dispatch_keeps_only_the_execution_record(
     uncertain = _tool_call(
         client, "call_operation", {"connector_id": _CONNECTOR, "op_id": _WRITE_OP}, 3
     )
-    assert "AuditCommitError" in str(uncertain)
+    assert "audit_commit_failed" in str(uncertain)
+    assert "uncertain" in str(uncertain)
     assert len(await _audit_rows()) == 2
 
 

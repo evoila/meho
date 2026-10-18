@@ -50,8 +50,11 @@ __all__ = [
     "result_already_resumed",
     "result_ambiguous_connector",
     "result_ambiguous_target",
+    "result_audit_commit_failed",
     "result_awaiting_approval",
     "result_composite_resume_multi_gate_unsupported",
+    "result_composite_resume_repeats_write",
+    "result_composite_resume_state_missing",
     "result_composite_terminal_error",
     "result_connector_auth_failed",
     "result_connector_error",
@@ -592,6 +595,42 @@ def result_receipt_too_large(
     )
 
 
+def result_audit_commit_failed(op_id: str, duration_ms: float) -> OperationResult:
+    """The handler finished, but its audit record could not be saved.
+
+    An operation does not return success unless its audit row commits
+    (CLAUDE.md postulate 7 / v0.1-spec §6). This applies to every completed
+    handler: safe reads, writes, and approved runs. When the commit fails
+    after the handler returned, MEHO cannot prove what happened, so:
+
+    * ``status`` is ``error``, but the error is not a connector error -- the
+      connector call itself worked.
+    * ``extras.execution_outcome`` is ``uncertain``: the vendor may already
+      hold the change.
+    * ``extras.retry`` is ``False``: running it again could repeat a change.
+    * ``audit_id`` stays ``None``: there is no committed record to point at.
+    """
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=(
+            "audit_commit_failed: the operation ran, but MEHO could not save its "
+            "audit record. Do not run it again."
+        ),
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "audit_commit_failed",
+            "execution_outcome": "uncertain",
+            "retry": False,
+            "remediation": (
+                "The operation may have changed the target. Do not run it again. "
+                "Check the target's current state, and ask an operator to check "
+                "the audit database."
+            ),
+        },
+    )
+
+
 def result_composite_resume_multi_gate_unsupported(
     *,
     composite_op_id: str,
@@ -646,6 +685,63 @@ def result_composite_resume_multi_gate_unsupported(
                 "requires_approval=False, or add a completed-leg guard before "
                 "introducing a second gate"
             ),
+        },
+    )
+
+
+def result_composite_resume_state_missing(*, op_id: str, duration_ms: float) -> OperationResult:
+    """Refusal of a sub-op marked ``after_main_effect`` that saved no resume state (#4217).
+
+    Returned by
+    :func:`~meho_backplane.operations.composite.enforce_subop_policy`. Such a
+    step tells the seam that its resume continues at this step, but without
+    saved state the composite can only start again from the beginning and
+    repeat its earlier writes. This is a bug in the composite, so the write
+    does not run and does not wait for approval.
+    """
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=(
+            f"composite_resume_state_missing: sub-op {op_id!r} is marked "
+            "after_main_effect but saved no resume state; it did not run and does "
+            "not wait for approval, because an approval could repeat earlier writes"
+        ),
+        duration_ms=duration_ms,
+        extras={"error_code": "composite_resume_state_missing", "blocked_op_id": op_id},
+    )
+
+
+def result_composite_resume_repeats_write(
+    *,
+    composite_op_id: str,
+    approved_op_id: str,
+    blocked_op_id: str,
+    duration_ms: float,
+) -> OperationResult:
+    """Refusal of an earlier write during a resume that must skip it (#4217).
+
+    Returned by
+    :func:`~meho_backplane.operations.composite.enforce_subop_policy` while a
+    composite resumes an approved step marked ``after_main_effect``: the
+    resume must go straight to that step, so a governed write before it
+    that is not itself ``after_main_effect`` is a write the first run already
+    did. It is refused before it runs, whatever the policy verdict.
+    """
+    return OperationResult(
+        status="error",
+        op_id=composite_op_id,
+        error=(
+            f"composite_resume_repeats_write: resuming composite {composite_op_id!r} "
+            f"for the approved step {approved_op_id!r} reached the earlier write "
+            f"{blocked_op_id!r}; it did not run, because the first run already did it"
+        ),
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "composite_resume_repeats_write",
+            "composite_op_id": composite_op_id,
+            "approved_op_id": approved_op_id,
+            "blocked_op_id": blocked_op_id,
         },
     )
 

@@ -16,7 +16,12 @@ from meho_backplane.api.v1.broadcast import router
 from meho_backplane.auth.agent_admission import AgentIdentityRequiredError
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import verify_jwt_and_bind
-from meho_backplane.broadcast import AgentAnnouncementEvent, AnnouncementPublishResult
+from meho_backplane.broadcast import (
+    AgentAnnouncementEvent,
+    AnnouncementFilter,
+    AnnouncementPublishResult,
+    encode_watch_checkpoint,
+)
 from tests.broadcast_admission_helpers import fake_admission
 
 _TENANT_ID = UUID("11111111-1111-1111-1111-111111111111")
@@ -40,10 +45,15 @@ def _client() -> TestClient:
     return TestClient(app)
 
 
-def test_recent_uses_shared_strict_history_reader() -> None:
-    expected = {"events": [{"cursor": "1-0", "kind": "announcement"}], "next_cursor": "1-0"}
+def test_recent_uses_the_shared_archive_reader() -> None:
+    expected = {
+        "events": [{"event_id": "e-1", "kind": "agent_announcement"}],
+        "next_cursor": None,
+        "watch_checkpoint": "w1.x",
+        "gap": None,
+    }
     with patch(
-        "meho_backplane.api.v1.broadcast.list_recent_events_strict",
+        "meho_backplane.api.v1.broadcast.read_announcement_history",
         new=AsyncMock(return_value=expected),
     ) as recent:
         response = _client().get(
@@ -54,20 +64,17 @@ def test_recent_uses_shared_strict_history_reader() -> None:
     assert response.status_code == 200
     assert response.json() == expected
     assert recent.await_args.kwargs == {
-        "since": "2026-09-13T12:00:00Z",
-        "op_class": None,
-        "principal": None,
-        "target": "cluster-a",
-        "actor_sub": None,
-        "work_ref": None,
-        "active_only": False,
+        "cursor": "2026-09-13T12:00:00Z",
+        "flt": AnnouncementFilter(target="cluster-a"),
         "limit": 5,
     }
     assert recent.await_args.args[0].tenant_id == _TENANT_ID
 
 
 async def _published(event: AgentAnnouncementEvent, **_kwargs: Any) -> AnnouncementPublishResult:
-    return AnnouncementPublishResult(event=event, cursor="1726228800000-0", replayed=False)
+    return AnnouncementPublishResult(
+        event=event, seq=7, stream_entry_id="1726228800000-0", replayed=False
+    )
 
 
 def test_announce_uses_rate_limit_and_shared_durable_publisher() -> None:
@@ -97,7 +104,8 @@ def test_announce_uses_rate_limit_and_shared_durable_publisher() -> None:
         )
 
     assert response.status_code == 201
-    assert response.json()["cursor"] == "1726228800000-0"
+    assert response.json()["watch_checkpoint"] == encode_watch_checkpoint(_TENANT_ID, 7)
+    assert response.json()["delivery_pending"] is False
     rate_limit.assert_awaited_once_with(_TENANT_ID, "operator-a")
     event = publish.await_args.args[0]
     assert event.tenant_id == _TENANT_ID
@@ -131,7 +139,7 @@ def test_announce_from_a_person_returns_agent_identity_required() -> None:
 
 def test_recent_rejects_unknown_op_class_before_reading_history() -> None:
     with patch(
-        "meho_backplane.api.v1.broadcast.list_recent_events_strict",
+        "meho_backplane.api.v1.broadcast.read_announcement_history",
         new=AsyncMock(),
     ) as recent:
         response = _client().get("/api/v1/broadcast/recent", params={"op_class": "unknown"})
@@ -139,3 +147,9 @@ def test_recent_rejects_unknown_op_class_before_reading_history() -> None:
     assert response.status_code == 422
     assert response.json()["detail"] == "invalid_op_class"
     recent.assert_not_awaited()
+
+
+def test_recent_maps_a_bad_cursor_to_422() -> None:
+    response = _client().get("/api/v1/broadcast/recent", params={"cursor": "1747800000000-0"})
+    assert response.status_code == 422
+    assert "no longer accepted" in response.json()["detail"]

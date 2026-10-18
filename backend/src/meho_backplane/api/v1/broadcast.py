@@ -3,10 +3,10 @@
 
 """Operator REST parity for the broadcast working-surface tools (#3470).
 
-The routes are deliberately thin adapters.  They use the same strict history
-reader and announcement publisher as the MCP tools, so REST and CLI callers
-keep the broadcast subsystem's tenant isolation, durable-before-stream
-announcement order, rate limit, and fail-loud semantics.
+The routes are deliberately thin adapters.  They use the same archive reader
+and announcement publisher as the MCP tools (#3748), so REST and CLI callers
+keep the broadcast subsystem's tenant isolation, archive-first announcement
+order, rate limit, and error semantics.
 """
 
 from __future__ import annotations
@@ -36,12 +36,14 @@ from meho_backplane.broadcast import (
     TTL_MIN_MINUTES,
     WORK_REF_MAX_CHARS,
     AnnouncementClaimError,
+    AnnouncementFilter,
     AnnounceRateLimitError,
-    InvalidSinceError,
+    InvalidArchiveCursorError,
     build_trusted_announcement,
+    encode_watch_checkpoint,
     enforce_announce_rate_limit,
-    list_recent_events_strict,
     publish_agent_announcement,
+    read_announcement_history,
 )
 
 __all__ = ["router"]
@@ -86,16 +88,18 @@ class BroadcastAnnounceRequest(BaseModel):
 
 
 class BroadcastAnnounceResponse(BaseModel):
-    """Acknowledgement with distinct durable event id and stream cursor.
+    """Acknowledgement of a stored announcement.
 
     ``replayed=true`` means the step was already stored and no new row was
-    written. ``cursor`` is ``None`` when the stream entry already existed;
-    it is set when this call wrote the stream entry, including a retry
-    that finished a delivery whose first stream write failed.
+    written. ``watch_checkpoint`` is a watch cursor just after this
+    announcement in the archive order. ``delivery_pending=true`` means
+    the announcement is stored and readable, but the live wake-up for
+    watchers failed; a retry with the same ``idempotency_key`` finishes it.
     """
 
     event_id: UUID
-    cursor: str | None
+    watch_checkpoint: str | None
+    delivery_pending: bool
     claim_id: UUID
     phase: str
     owner_sub: str
@@ -126,26 +130,24 @@ async def recent_broadcast_events(
     active_only: bool = False,
     limit: Annotated[int, Query(ge=1, le=1000)] = 100,
 ) -> dict[str, Any]:
-    """Read one tenant-scoped, LLM-safe broadcast history page."""
+    """Read one tenant-scoped, LLM-safe page of archived announcements."""
     if op_class is not None and op_class not in OP_CLASS_ENUM:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="invalid_op_class",
         )
     _bind_audit(op_id="meho_broadcast_recent", op_class="read")
+    flt = AnnouncementFilter(
+        op_class=op_class,
+        principal=principal,
+        target=target,
+        actor_sub=actor_sub,
+        work_ref=work_ref,
+        active_only=active_only,
+    )
     try:
-        return await list_recent_events_strict(
-            operator,
-            since=cursor,
-            op_class=op_class,
-            principal=principal,
-            target=target,
-            actor_sub=actor_sub,
-            work_ref=work_ref,
-            active_only=active_only,
-            limit=limit,
-        )
-    except InvalidSinceError as exc:
+        return await read_announcement_history(operator, cursor=cursor, flt=flt, limit=limit)
+    except InvalidArchiveCursorError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(exc),
@@ -226,7 +228,10 @@ async def announce_broadcast(
     stored = result.event
     return BroadcastAnnounceResponse(
         event_id=stored.event_id,
-        cursor=result.cursor,
+        watch_checkpoint=(
+            None if result.seq is None else encode_watch_checkpoint(operator.tenant_id, result.seq)
+        ),
+        delivery_pending=result.delivery_pending,
         claim_id=cast("UUID", stored.claim_id),
         phase=stored.phase,
         owner_sub=cast("str", stored.owner_sub),

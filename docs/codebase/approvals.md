@@ -26,8 +26,11 @@ truth:
   the broadcast notifications: each `create_pending_request` /
   `approve_request` / `reject_request` publishes an
   `approval.{pending,approved,rejected}` event via
-  `broadcast.publisher.publish_event` so a `broadcast_watch` operator
-  session learns of pending requests without polling.
+  `broadcast.publisher.publish_event`. These events go to the live SSE
+  feed (`/api/v1/feed`, `/ui/broadcast/stream`) until #3758 moves them,
+  and the audit log (`query_audit`) records them. Since #3748 the MCP and
+  REST `recent` / `watch` reads return agent announcements only, so an
+  operator session does not see approval events there.
 
 The durable state is one `approval_request` row (table created by
 `backend/alembic/versions/0023_create_approval_request.py`, T4 #817).
@@ -826,9 +829,11 @@ captured envelope, or `null` while unready). A consumer polls until
 returned task id. When the approved run failed on an upstream vim fault,
 `result.extras.upstream_fault` carries the fault type and full faultstring
 (#3567), so the owner can see why without the approver-owned
-flight-recorder handle. `resume_result` is **internal to this surface** — like
-`params` it is never projected onto the default read view (`_view`) or a
-broadcast frame.
+flight-recorder handle. The `resume_result` **payload** is internal to this
+surface — like `params` it is never projected onto the default read view
+(`_view`) or a broadcast frame. Only a short summary of it (status, error
+code, audit id) appears on the list and show views; see "Approved, but the
+run failed" below (#3543).
 
 ### Who owns a result handle from an approved run (#3548)
 
@@ -987,6 +992,60 @@ request the agent resumed also reaches `executed` or `failed`. Limits of
 `started`: the result write is best-effort, and a re-dispatch that raised
 instead of returning an envelope stores nothing. In those cases the row
 stays `started`.
+
+### 4. Approved, but the run failed: `resume_outcome` (#3543)
+
+`status` stays `approved` even when the run after the approval failed (for
+example a Vault write that Vault refused). `result_state` already tells
+`executed` from `failed`. Next to it, the list and show views carry
+`resume_outcome`, a short summary read off the stored result by
+`operations/approval_outcome.py` (`resume_outcome`):
+
+| Field | Meaning |
+|---|---|
+| `resumed_at` | When MEHO started the run (the `resumed_at` claim). |
+| `result_status` | `status` of the stored result: `ok`, `error`, `denied`, ... `null` while no result is stored. |
+| `error_code` | `extras.error_code` of a failed run, for example `connector_error`. |
+| `audit_id` | The audit row the dispatcher wrote for the run. |
+
+`resume_outcome` is `null` for a request that is not approved, and before
+the run starts. The result body and the free-text `error` stay on the
+owner-only `/result` read: an odd or missing field reads as `null`, never
+raises.
+
+Where it shows:
+
+- **REST** `GET /api/v1/approvals` and `GET /api/v1/approvals/{id}`: the
+  `resume_outcome` field.
+- **MCP** `meho_approvals_list` / `meho_approvals_get`: `result_state` and
+  `resume_outcome`, same shape.
+- **CLI** `meho approvals list`: a `RUN` column (`not-run`, `started`,
+  `ok`, `FAILED`, or `-` when the request is not approved). `meho approvals
+  show` and `approve`: `Run:`, `Run started:`, `Run result:`, `Error code:`
+  and `Run audit:` lines, with the `meho audit show <id>` command for the
+  audit row.
+- **Console** `/ui/approvals`: a run badge next to the `approved` pill in
+  the history list (`ran OK`, `run failed`, ...). The detail modal of a
+  failed run shows a red banner with the error code and a link to the audit
+  row (`/ui/audit?audit_id=<id>`). The card after an approve says "Approved,
+  but the run failed" when the run returned an error. When another resumer
+  (usually the waiting requester) already ran the operation
+  (`already_resumed`), it shows the normal "Request approved" card.
+
+**Decision: reads of an approval request stay as they are here.** A client
+that polls `GET /api/v1/approvals/{id}` until the run ends makes one
+routine REST read per poll. Routine reads moving off the audit log and into
+request usage records is the job of #3757 (it retires the per-request
+wrapper rows), not of this change. The owner-only `/result` read keeps its
+`approval.result` audit row on purpose: it hands out the result payload,
+which is a data release worth a record. With `result_state` and
+`resume_outcome` on the list and show views, a client no longer needs to
+poll `/result` to learn whether the run ended.
+
+**Pinned by tests:** `tests/test_approval_resume_outcome.py` (summary
+shape, odd envelopes, a resume that errors shows on REST show, list and
+MCP), `tests/test_ui_approvals.py` (run badge, failed-run modal, failed
+approve card) and `cli/internal/cmd/approvals/approvals_test.go`.
 
 ### The add-on governed-destroy round trip (#3478)
 
@@ -1558,7 +1617,9 @@ dispatcher re-checks `required_role` at `tools/call`.
 ### CLI (`cli/internal/cmd/approvals/`)
 
 `meho approvals list / show <id> / approve <id> / reject <id> [--reason]`
-verbs that hit the REST surface via the generated typed client.
+verbs that hit the REST surface via the generated typed client. `list`
+has a `RUN` column and `show` / `approve` print how the run of an approved
+request ended (#3543, see "Approved, but the run failed" above).
 
 ### Operator console (`backend/src/meho_backplane/ui/routes/approvals/`)
 
@@ -1599,7 +1660,7 @@ no new gate, service call, route, or migration.
 | `GET` | `/ui/approvals/badge` | Live **pending** count for the app-shell bell. Always `status='pending'` — it counts actionable work, not history. |
 | `GET` | `/ui/approvals` | Content-negotiated. A normal navigation (no `HX-Request`) → the **full-page console**: status tabs (Pending / Approved / Rejected / Expired / All), a `work_ref` filter, and the decision-history list. The bell's `hx-get` (`HX-Request: true`) → the existing pending **panel** modal fragment (unchanged). (G10.8-T #1827) |
 | `GET` | `/ui/approvals/list` | Decision-history partial — the HTMX swap target for the status tabs / `work_ref` filter / "Load more" offset pager. Reuses `list_pending(status=…, work_ref=…, offset=…)`; `tab=all` passes `status=None`. Pages with a real offset, not the badge's 50-row glance cap. (G10.8-T #1827) |
-| `GET` | `/ui/approvals/{id}` | Request-detail modal. A pending row offers Approve/Deny; a **decided** row renders read-only with a decision banner ("Approved/Rejected by X at T"). The `proposed_effect` envelope renders **structurally** (#2447), not as raw JSON (below). |
+| `GET` | `/ui/approvals/{id}` | Request-detail modal. A pending row offers Approve/Deny; a **decided** row renders read-only with a decision banner ("Approved/Rejected by X at T"). An approved row also shows how its run ended; a failed run turns the banner red (#3543). The `proposed_effect` envelope renders **structurally** (#2447), not as raw JSON (below). |
 | `POST` | `/ui/approvals/{id}/approve` | Approve in-process + re-dispatch the parked op + fail-open broadcast. |
 | `POST` | `/ui/approvals/{id}/reject` | Reject in-process + broadcast; the op never runs. |
 
@@ -1847,6 +1908,69 @@ composite's own dispatch audit row. This is enforced in
 `enforce_subop_policy` (the `NEEDS_APPROVAL` branch, keyed off the unconsumed
 `composite_resume_scope_var`) and is unreachable for shipped composites.
 
+#### Continuing where it stopped (#4217)
+
+Some steps run after the composite's main change already exists: the
+rename or power-on of a VM that was just deployed, the delete that cleans
+up a failed deploy, or `vm.create`'s rollback delete. Running the whole
+composite again for such a step repeats the main change (it deploys a
+second VM). So these steps tell the seam two things:
+
+- `resume_state`: JSON the composite saves on the approval row, under
+  `resume_parent["state"]`. During the re-run, `composite_resume_binding`
+  binds it on `composite_resume_state_var`, and the composite reads it with
+  `composite_resume_state(op_id)` (only the parent composite gets it). The
+  composite uses it to continue at the step that waited, with the same
+  parameters, so the approved sub-op still matches its stored parameter
+  hash. The state must pin what the step acts on: the object id, or the
+  resolved parameters. It must not hold a name the re-run would look up
+  again, because by then the name may point at something else, and the
+  step would no longer be the one the person approved.
+- `after_main_effect=True`: this step runs after the main change. The row
+  stores `resume_parent["after_main_effect"] = true`.
+
+**The safety-check change (the relaxed guard).** The multi-gate guard above
+does not apply to an `after_main_effect` step. Such a step may wait for
+approval even during a re-run, because its own re-run continues at that
+step and repeats no earlier write. `enforce_subop_policy` checks
+`if resume_scope is not None and not after_main_effect`. Steps without the
+mark still fail closed (`test_vm_create_multi_gate_resume_fails_closed_no_double_execute`).
+
+**Who the new request belongs to.** A step that waits again during a
+re-run gets a new approval request. That request names the requester of
+the request being re-run (`principal_sub`, `principal_act`,
+`principal_name`), not the reviewer who runs the re-run. Both resume paths
+pass that requester to `composite_resume_binding`, which binds
+`resume_requester_var`; `enforce_subop_policy` hands it to
+`create_pending_request(requester=...)`. So the reviewer path and the agent
+path save the same requester.
+
+**The risk, and the two checks that limit it.** With the guard relaxed, safety
+depends on the composite: its re-run must really skip every earlier write.
+Two checks in `enforce_subop_policy` stop a composite that gets this wrong:
+
+- `after_main_effect=True` without `resume_state` is refused
+  (`composite_resume_state_missing`), in every run, before the policy
+  check. Without state the re-run could only start from the beginning.
+- During the re-run of an `after_main_effect` park, until the approved
+  sub-op has cleared, any other governed write that is not itself
+  `after_main_effect` is refused before it runs, whatever the policy
+  verdict (`composite_resume_repeats_write`). That is a write the first run
+  already did.
+
+What is left: a composite can still repeat an earlier step that is itself
+marked `after_main_effect` (for example a second removal in the same
+cleanup), so only mark steps that are safe to run again. Ungoverned reads
+are not checked.
+
+Steps that use the switch today: in `vm.deploy_from_library` the rename,
+the power-on, the cleanup VM delete and the vApp destroy; in `vm.create`
+the rollback delete; in `vm.import_from_library` the power-on. Tests:
+`test_operations_subop_policy_gate.py` (the seam checks, on their own) and
+the `#4217` tests in `test_connectors_vmware_rest_composites_write_e2e.py`
+(through the real dispatcher, including three approvals in a row where
+each write runs once).
+
 A direct (non-composite) park is unchanged — `resume_parent` is NULL, so
 the resume keeps the generic re-dispatch of the stored `op_id`.
 
@@ -1901,8 +2025,9 @@ One difference stays on purpose: the agent waiter re-enters the composite
 as the **agent**, not as the reviewer. So every other governed sub-op is
 checked against the agent's own grants. If one would need its own approval,
 the multi-gate guard above fails closed
-(`composite_resume_multi_gate_unsupported`) on the agent path too. If the
-agent has no grant for it, that sub-op is denied.
+(`composite_resume_multi_gate_unsupported`) on the agent path too, unless
+that step is marked `after_main_effect` (#4217): then it waits for its own
+approval. If the agent has no grant for it, that sub-op is denied.
 
 Note: every shipped governed composite is `requires_approval=True` at the
 top level, so an agent's first call makes the composite itself wait for

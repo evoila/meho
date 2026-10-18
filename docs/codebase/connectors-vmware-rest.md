@@ -1252,7 +1252,13 @@ enum) are:
 | `content_library.delete` / `content_library.item.delete` | `deleted`, `unchanged`, `invalid_request`, `precondition_failed`, `still_present` (#3339 / #3331; REST `DELETE` -- a REST fault raises) |
 
 `vm.create` is the only composite that issues a compensating
-mutation (`DELETE:/vcenter/vm/{vm}`) on partial failure. The other
+mutation (`DELETE:/vcenter/vm/{vm}`) on partial failure. When that
+rollback DELETE waits for approval, it saves the rollback on the approval
+row (#4217); approving it re-runs `vm.create`, which then only deletes the
+VM the first run created (`_resumed_vm_create_rollback`) and returns the
+same `rolled_back` envelope. An approved rollback DELETE with no saved
+rollback (a request saved before #4217) is refused before anything runs
+(`composite_resume_unsupported`). The other
 write composites prefer "stop and report" semantics over silent
 rollback -- the operator decides whether to manually finish or
 revert. `vm.resize`'s `partial` follows the same rule: a CPU PATCH
@@ -2128,27 +2134,47 @@ gives its VM a name nobody else uses:
    name now exists) or a poll timeout leaves `status='deployed'` with a
    `rename` warning that names both names. A success issues no listing and
    no delete.
-7. **An approval never deploys twice.** A governed write that waits for
-   approval records this composite on its approval row, and approving it
-   runs the composite again from the start (#3351). For this composite that
-   re-run would do harm: the rename, the power-on and the cleanup removals
-   run after the VM exists, so the re-run would deploy a second VM; and a
-   deploy that waited would run again under a fresh deploy name, so the
-   approved step would not match. Until an approval can continue at the
-   approved step (Task #4217), the composite refuses such a re-run before
-   any read or write (`_refuse_deploy_resume`): the result is an error
-   (`composite_resume_unsupported`), nothing is deployed, and the issue
-   message of the waiting step says to do it by hand.
+7. **An approval never deploys twice (#4217).** A governed write that
+   waits for approval records this composite on its approval row, and
+   approving it runs the composite again (#3351). Each write saves on the
+   row where that re-run continues (`resume_state`, read back with
+   `composite_resume_state`):
+   - The deploy saves its resolved deploy parameters (the library item id
+     and the deploy body under its unique deploy name) and the final VM
+     name (`"deploy"`). The re-run sends exactly those and resolves
+     nothing again, so the approved deploy matches its stored parameter
+     hash even when `library_item_name` would now find another item.
+   - The rename and the power-on save the deployed VM and the step
+     (`"deployed"`). The re-run goes straight to `_finish_deploy` at that
+     step, on the VM that exists. A rename that waits ends the first run
+     before the power-on; the power-on then runs after the rename is
+     approved, and a `power_on` warning says so.
+   - A cleanup removal saves the failed deploy (`"failed"`) and the one
+     object it removes (`removal`: id and type). The re-run goes straight
+     to `_resume_failed_deploy_removal`: it removes exactly that object and
+     does not look the deploy name up again. So a leftover that was renamed
+     meanwhile is still removed, and an object that took the deploy name
+     since is never touched. When both a VM and a vApp wait, each approval
+     removes its own object.
+   These steps are marked `after_main_effect`, so the seam refuses any
+   earlier write a wrong re-run would repeat, and they may wait for
+   approval again during a re-run (see "Continuing where it stopped" in
+   `docs/codebase/approvals.md`). An approval row with no saved state (one
+   written before #4217), or with a state the composite cannot continue
+   from (a deploy without its parameters, a removal without its object),
+   is refused before any read or write (`_refuse_deploy_resume`,
+   `composite_resume_unsupported`).
 
 Operator note: the rename and the cleanup removals are governed writes
 with their own ops (`POST:/VirtualMachine/{moId}/Rename_Task`, the
 `VirtualApp` form, `DELETE:/vcenter/vm/{vm}` and
 `POST:/VirtualApp/{moId}/Destroy_Task`), listed on the governed-subops
-discovery surface. For a service principal without a standing grant on
-such an op, the step waits for approval: the VM keeps its deploy name, or
-stays behind, and the envelope names the approval request. Approving that
-request does not run the step today (see point 7). Rename or delete the
-VM by hand, or give the principal a grant for the op before the deploy.
+discovery surface. A service principal that runs the deploy unattended
+needs a grant for the rename op (and the power-on op when it asks for
+`power_on`). Without one, the step waits for approval: the VM keeps its
+deploy name, or stays behind, and the envelope names the approval
+request. Approving that request runs only that step on the existing VM
+(see point 7). The op's description says this too.
 
 **Synchronous-deploy long timeout (#3076).** Both library-item deploys —
 the OVF `POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy`
@@ -2275,6 +2301,15 @@ content-library byte source in `library_download.py`):
 6. `HttpNfcLeaseComplete` on success; `HttpNfcLeaseAbort` on any failure after
    the lease exists — vCenter then removes the half-created inventory objects,
    so a failed import never leaves a partial VM behind.
+
+**Power-on after the import (#4217).** With `power_on`, a best-effort
+`POST:/vcenter/vm/{vm}/power?action=start` follows a successful import.
+When it waits for approval, it saves the import's envelope on the approval
+row and is marked `after_main_effect`. Approving it re-runs the composite,
+which then only powers on the imported VM (`_power_on_imported_vm`): no
+library lookup, no second import. An approved power-on with no saved
+envelope (a request saved before #4217) is refused before anything runs
+(`composite_resume_unsupported`).
 
 **Version-agnostic (AC5).** Every schema + method is core vim25 (`OvfManager`
 / `HttpNfcLease` predate 9.0), and the engine reads only the pre-9.0

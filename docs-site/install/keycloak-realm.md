@@ -141,7 +141,7 @@ differences:
 | PKCE challenge method | `S256` | Spec-required for public clients. |
 | `offline_access` client scope | Assign as **Optional** | The MEHO Claude Code plugin, the Claude Desktop bundle, and Claude Code's own HTTP client ask for it, so the login lasts past the realm's SSO idle limit. Keycloak refuses a login that asks for a scope the client does not offer: it answers `invalid_scope` and issues no token. `meho-cli` does not get this scope by default. |
 | `mcp:read`, `mcp:execute`, `mcp:admin` client scopes | Create each, then assign as **Optional** | The Claude Code plugin and the Claude Desktop bundle ask for `mcp:read mcp:execute` at every login, and for `mcp:admin` when you turn on the operator tools. Keycloak does not ship these scopes. Create each one under **Client scopes → Create client scope**: protocol **OpenID Connect**, **Include in token scope** On. Then add all three to `meho-mcp` as **Optional**. If one is missing, Keycloak refuses the login with `invalid_scope`. `meho-cli` does not get them. |
-| Client Offline Session Idle (attribute `client.offline.session.idle.timeout`) | **`172800`** seconds (48 hours) — recommended | Sets how long the MCP login lasts with no use. Without it, the realm's Offline Session Idle applies (30 days by default). Set it on the **Advanced** tab of the client, or with `kcadm.sh update clients/<client-uuid> -r <realm> -s 'attributes."client.offline.session.idle.timeout"=172800'`. |
+| Client Offline Session Idle (attribute `client.offline.session.idle.timeout`) | **`172800`** seconds (48 hours) | Sets how long the MCP login lasts with no use. Without it, the realm's Offline Session Idle applies (30 days by default). If you set up the client by hand, set it on the **Advanced** tab of the client, or with `kcadm.sh update clients/<client-uuid> -r <realm> -s 'attributes."client.offline.session.idle.timeout"=172800'`. |
 
 The five mappers and four default scopes apply identically. Which MCP
 client uses which flow — and everything else client-side — is the
@@ -165,9 +165,12 @@ Two more things must be true:
   user through the realm's default roles (`default-roles-<realm>`). Without
   it, the token request fails with "Offline tokens not allowed for the user
   or client".
-- `meho admin keycloak bootstrap-clients` assigns `offline_access` (and
-  the three `mcp:*` scopes) as optional scopes on `meho-mcp`. It does **not** set the 48-hour offline
-  idle limit yet, so set that by hand as shown in the table.
+- `meho admin keycloak bootstrap-clients` assigns `offline_access` and the
+  three `mcp:*` scopes as optional scopes on `meho-mcp`. It also sets the 48-hour offline idle
+  limit, on new and existing clients. To use a different limit, pass
+  `--mcp-offline-session-idle=<seconds>`. Each run sets the value again,
+  so a value changed by hand goes back to 48 hours unless you pass the
+  flag.
 
 ## Approve-only principal
 

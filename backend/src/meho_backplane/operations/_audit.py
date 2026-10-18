@@ -37,11 +37,10 @@ from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast import (
     BroadcastEvent,
-    classify_op,
     publish_event,
     redact_payload,
 )
-from meho_backplane.broadcast.events import scrub_broadcast_params
+from meho_backplane.broadcast.events import resolve_op_class, scrub_broadcast_params
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog, EndpointDescriptor
 from meho_backplane.operations._errors import status_code_for_result
@@ -469,6 +468,8 @@ def _build_audit_payload(
     # default keys are documented + load-bearing for audit consumers,
     # so this layering is the explicit knob, not an accidental coupling.
     payload.update(_resolve_audit_extras_from_contextvars())
+    # The op that ran, not a route's own label (e.g. agent.run) still bound.
+    payload.update(op_id=descriptor.op_id, op_class=resolve_op_class(descriptor.op_id))
     # #2680: the structured error envelope is authoritative for an error
     # row, so it lands last -- after the handler-extras merge -- under a
     # dedicated ``error`` key that cannot collide with the structural /
@@ -707,7 +708,7 @@ async def publish_broadcast(
     full-detail default is preserved for params in which no secret
     material is detected.
     """
-    op_class = classify_op(descriptor.op_id)
+    op_class = resolve_op_class(descriptor.op_id)
     scrubbed_params, secret_detected = scrub_broadcast_params(params)
     if secret_detected and op_class not in {
         "credential_read",

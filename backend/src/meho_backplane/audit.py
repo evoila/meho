@@ -1050,6 +1050,12 @@ class AuditMiddleware:
                 op_class_override=broadcast_op_class_override,
             )
             broadcast_payload = dict(payload)
+            # A route-declared class goes through the same mapping as the
+            # broadcast (resolve_op_class), so store what the event carries.
+            # A row with no declared class keeps none: audit query derives
+            # it from the op id with the same mapping.
+            if "op_class" in payload:
+                payload["op_class"] = broadcast_decision[0]
             payload["broadcast_detail_origin"] = broadcast_decision[2]
             # G6.3-T3 (#380): record the resolver's effective detail
             # alongside the origin so ``meho audit query`` can answer

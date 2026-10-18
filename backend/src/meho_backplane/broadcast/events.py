@@ -79,6 +79,7 @@ __all__ = [
     "classify_op",
     "is_secret_param_name",
     "redact_payload",
+    "resolve_op_class",
     "scrub_broadcast_params",
     "scrub_secret_named_values",
 ]
@@ -497,6 +498,16 @@ _WRITE_OPS: Final[frozenset[str]] = frozenset(
         # sessions) whose ``.logout`` suffix is not a write suffix. Its params
         # are a user id or username only, so plain ``write``.
         "keycloak.user.logout",
+        # MEHO's own registry writes, run through the dispatcher on synthetic
+        # connectors. None of their verbs is a write suffix, so without a pin
+        # they showed as ``other``. Their params carry no secret material
+        # (``targets.register`` takes a ``secret_ref`` path, never a secret).
+        "targets.register",
+        "topology.annotate",
+        "topology.unannotate",
+        "topology.bulk_import",
+        "topology.create_node",
+        "topology.delete_node",
     }
 )
 
@@ -826,6 +837,8 @@ def classify_op(op_id: str) -> str:
     'write'
     >>> classify_op("topology.refresh")  # a read: .refresh is deliberately not global
     'other'
+    >>> classify_op("targets.register")  # registry write, exact-match pin
+    'write'
     >>> classify_op("some.unknown.op")
     'other'
     >>> classify_op("meho_audit_replay")
@@ -887,6 +900,42 @@ def classify_op(op_id: str) -> str:
     if op_id.endswith(_READ_SUFFIXES):
         return "read"
     return "other"
+
+
+#: Classes :func:`resolve_op_class` never lets a declared class replace:
+#: they decide that the broadcast shows only an aggregate (decision #3).
+_SECRET_SHAPE_CLASSES: Final[frozenset[str]] = frozenset(
+    {"credential_read", "credential_mint", "credential_write", "audit_query"}
+)
+
+
+def resolve_op_class(op_id: str, declared: str | None = None) -> str:
+    """Return the one op class an audit row and its broadcast event both carry.
+
+    Every audit writer (HTTP middleware, MCP handler, dispatcher) and every
+    broadcast publisher calls this, so the two records of one call can never
+    disagree on the class.
+
+    * *declared* is the class the caller states for the op: the MCP tool's
+      ``op_class``, or a route's ``audit_op_class``. It wins over the class
+      :func:`classify_op` derives from the op id, because a tool name like
+      ``list_targets`` carries no verb suffix the classifier knows.
+    * The one exception: when :func:`classify_op` says the op touches
+      credentials or the audit log, that class wins. A declared class can
+      never turn an aggregate-only broadcast into a full one.
+    * With no *declared* class, the derived class is the answer.
+
+    >>> resolve_op_class("list_targets", "read")
+    'read'
+    >>> resolve_op_class("list_targets")
+    'other'
+    >>> resolve_op_class("vault.kv.read", "read")
+    'credential_read'
+    """
+    derived = classify_op(op_id)
+    if declared and derived not in _SECRET_SHAPE_CLASSES:
+        return declared
+    return derived
 
 
 def _maybe_row_count(raw_params: dict[str, Any]) -> int | None:

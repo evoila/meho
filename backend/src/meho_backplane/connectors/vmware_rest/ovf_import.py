@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from meho_backplane.connectors.vmware_rest import composite_issues
 from meho_backplane.connectors.vmware_rest import ovf_import_control as control
 from meho_backplane.connectors.vmware_rest import ovf_transfer as transfer
 
@@ -190,7 +191,7 @@ async def import_ovf_from_source(
             status="import_error",
             issues=[
                 *spec.warnings,
-                control.issue("lease", "error", "ImportVApp returned no lease"),
+                composite_issues.issue("lease", "error", "ImportVApp returned no lease"),
             ],
         )
 
@@ -235,12 +236,16 @@ async def _finalize_non_ready(
     if outcome == control.LEASE_STATE_ERROR:
         message = control.fault_text(info.get("error"))
         return LeaseImportResult(
-            status="lease_error", issues=[*warnings, control.issue("lease", "error", message)]
+            status="lease_error",
+            issues=[*warnings, composite_issues.issue("lease", "error", message)],
         )
     await control.abort_lease(connector, target, operator, lease_moid=lease_moid)
     return LeaseImportResult(
         status="lease_timeout",
-        issues=[*warnings, control.issue("lease", "error", "lease never reached the ready state")],
+        issues=[
+            *warnings,
+            composite_issues.issue("lease", "error", "lease never reached the ready state"),
+        ],
     )
 
 
@@ -289,7 +294,9 @@ async def _run_transfer(
             operator,
             lease_moid=lease_moid,
             warnings=warnings,
-            issue=control.issue("security", "error", f"device thumbprint pin failed: {exc}"),
+            issue=composite_issues.issue(
+                "security", "error", f"device thumbprint pin failed: {exc}"
+            ),
         )
     except httpx.HTTPError as exc:
         return await _abort_import_error(
@@ -298,7 +305,7 @@ async def _run_transfer(
             operator,
             lease_moid=lease_moid,
             warnings=warnings,
-            issue=control.issue("transfer", "error", f"disk upload faulted: {exc}"),
+            issue=composite_issues.issue("transfer", "error", f"disk upload faulted: {exc}"),
         )
     vm_id, resource_type = control.entity_from_info(info)
     return LeaseImportResult(

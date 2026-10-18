@@ -2218,6 +2218,12 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
      per-client `client.offline.session.idle.timeout` attribute
      (default 48h = 172800s) so an idle offline token expires fast.
      Operators then request it per-login with `meho login --offline`.
+     The MCP client always gets `client.offline.session.idle.timeout`
+     (default 48h = 172800s, change it with
+     `--mcp-offline-session-idle=<seconds>`, #4001). Without it an MCP
+     login would last up to the realm's Offline Session Idle (30 days
+     by default). The attribute is part of the desired client shape,
+     so a re-run sets it on an existing `meho-mcp` client too.
 
 ### Idempotency
 

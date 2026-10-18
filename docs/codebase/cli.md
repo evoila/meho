@@ -890,6 +890,11 @@ that header from one place, so every verb gets it without its own flag.
   test_audit_work_ref_control_plane.py` proves this round trip for
   `targets add`, `agent grant create`, `connector ingest` (sync and
   background job) and `connector edit-op`.
+- The header works the same way on MCP (`POST /mcp`, #4256). The audit
+  middleware writes no row of its own for `/mcp`, but it still reads the
+  header first. So the MCP row and the dispatch row of each tool call
+  carry it. A `work_ref` argument on `call_operation` still wins over the
+  header. `backend/tests/test_mcp_work_ref_header.py` proves this.
 - Some commands have their own local `--work-ref` (`operation call`,
   `scheduler create`, `runbook start`, `agent run`, and the filters on
   `audit query`, `approvals list`, `broadcast recent`, ...). Cobra lets a local

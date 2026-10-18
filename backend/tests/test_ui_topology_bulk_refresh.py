@@ -42,7 +42,6 @@ import warnings
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar
-from unittest.mock import AsyncMock, patch
 
 import pytest
 import respx
@@ -106,10 +105,6 @@ _TENANT_A = uuid.UUID("11111111-1111-1111-1111-111111111111")
 
 _OP_OPERATOR = "op-operator"
 _OP_ADMIN = "op-admin"
-
-#: Patch target for the refresh service's fail-open broadcast publish, so the
-#: refresh path runs without a live broadcaster.
-_PUBLISH = "meho_backplane.topology.refresh.publish_event"
 
 
 @pytest.fixture(autouse=True)
@@ -759,11 +754,10 @@ def test_topology_ui_refresh_renders_all_six_counts_for_operator() -> None:
         role=TenantRole.OPERATOR,
     )
     try:
-        with patch(_PUBLISH, new=AsyncMock()):
-            response = client.post(
-                "/ui/topology/refresh/vcenter-a",
-                headers=_csrf_headers(csrf),
-            )
+        response = client.post(
+            "/ui/topology/refresh/vcenter-a",
+            headers=_csrf_headers(csrf),
+        )
     finally:
         mock.stop()
 
@@ -813,11 +807,10 @@ def test_topology_ui_refresh_no_populator_renders_coverage_gap_callout() -> None
         role=TenantRole.OPERATOR,
     )
     try:
-        with patch(_PUBLISH, new=AsyncMock()):
-            response = client.post(
-                "/ui/topology/refresh/argocd-style-target",
-                headers=_csrf_headers(csrf),
-            )
+        response = client.post(
+            "/ui/topology/refresh/argocd-style-target",
+            headers=_csrf_headers(csrf),
+        )
     finally:
         mock.stop()
 

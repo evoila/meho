@@ -453,7 +453,7 @@ async def test_mid_reconcile_failure_rolls_back() -> None:
     with (
         patch(_PUBLISH, new=AsyncMock()),
         patch(
-            "meho_backplane.topology.refresh._write_audit_and_broadcast",
+            "meho_backplane.topology.refresh._write_audit",
             new=AsyncMock(side_effect=RuntimeError("boom")),
         ),
         pytest.raises(RuntimeError, match="boom"),

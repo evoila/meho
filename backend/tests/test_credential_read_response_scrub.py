@@ -36,9 +36,7 @@ from uuid import UUID
 import pytest
 from sqlalchemy import select
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.broadcast.events import scrub_secret_named_values
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.base import Connector
@@ -85,17 +83,6 @@ def stub_embedding_service() -> AsyncMock:
     service.encode.return_value = [[0.1] * 384]
     service.dimension = 384
     return service
-
-
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
 
 
 def _make_operator(*, principal_kind: PrincipalKind = PrincipalKind.USER) -> Operator:
@@ -183,7 +170,6 @@ async def _audit_row(op_id: str) -> AuditLog:
 
 async def test_credential_read_response_scrubbed_by_default(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """No ``reveal_secret`` -> the secret value is replaced; siblings survive."""
     await _register_vault_read(stub_embedding_service)
@@ -214,7 +200,6 @@ async def test_credential_read_response_scrubbed_by_default(
 
 async def test_credential_read_scrub_is_principal_independent(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """The scrub keys on the op class, not the caller kind (product decision).
 
@@ -242,7 +227,6 @@ async def test_credential_read_scrub_is_principal_independent(
 
 async def test_reveal_secret_true_returns_raw_and_stamps_audit(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``reveal_secret=true`` -> raw value returned AND stamped on the audit row."""
     await _register_vault_read(stub_embedding_service)
@@ -269,7 +253,6 @@ async def test_reveal_secret_true_returns_raw_and_stamps_audit(
 
 async def test_reveal_secret_does_not_reach_op_schema_or_hash(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``reveal_secret`` is a dispatch control: stripped before schema + hash.
 
@@ -328,7 +311,6 @@ async def _module_metadata_handler(
 
 async def test_non_credential_read_op_is_not_scrubbed_or_stamped(
     stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """A ``read``-class op keeps its payload and carries no reveal stamp.
 

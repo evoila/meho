@@ -12,8 +12,7 @@ registers a stand-in ``requires_approval=True`` write op (the same
 pattern ``test_examples_r2_approval_gate.py`` uses for the R2 recipe),
 drives the full *human* queued → approve → resume cycle that #1401 just
 shipped, captures the **real** ``approval.request`` / ``approval.decision``
-audit rows and the **real** broadcast events the dispatcher emits, and
-feeds them into the harness's stage-4 verifier
+audit rows, and feeds them into the harness's stage-4 verifier
 (:func:`assert_approval_completeness`).
 
 It proves the harness asserts the #817 governance invariant against the
@@ -102,13 +101,12 @@ async def test_reference_soak_run_human_cycle(monkeypatch: pytest.MonkeyPatch) -
       **stage 4** (the governance invariant) which is the part that
       must hold against the live substrate and is connector-agnostic.
     * The captured ``approval.request`` + ``approval.decision`` audit
-      rows and the single write-effect broadcast event are fed into
-      :func:`assert_approval_completeness`.
+      rows are fed into :func:`assert_approval_completeness`. Broadcast
+      no longer carries automatic events, so the event list is empty.
     * :func:`scorecard_cell` then derives the supported cell: stages
       clean + no live soak yet → 🟡 SHADOW (the op is ready to enter
       stage 5, not yet ✅).
     """
-    import meho_backplane.operations._audit as audit_module
     from meho_backplane.connectors.base import Connector
     from meho_backplane.connectors.registry import clear_registry, register_connector_v2
     from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
@@ -119,12 +117,6 @@ async def test_reference_soak_run_human_cycle(monkeypatch: pytest.MonkeyPatch) -
     )
     from meho_backplane.operations.approval_queue import approve_request
 
-    captured_events: list[Any] = []
-
-    async def _capture(event: Any) -> None:
-        captured_events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
     reset_dispatcher_caches()
     clear_registry()
 
@@ -235,16 +227,11 @@ async def test_reference_soak_run_human_cycle(monkeypatch: pytest.MonkeyPatch) -
         )
     audit_rows = [{"path": r.path, "operator_sub": r.operator_sub} for r in rows]
 
-    # ---- Capture the real broadcast events (BroadcastEvent → dict) ----
-    broadcast_events = [
-        {"op_id": e.op_id, "op_class": e.op_class, "payload": e.payload} for e in captured_events
-    ]
-
     # ---- Feed the LIVE evidence into the harness stage-4 verifier ----
     stage4 = assert_approval_completeness(
         _OP_ID,
         audit_rows=audit_rows,
-        broadcast_events=broadcast_events,
+        broadcast_events=[],
         # The resume only returned after approve_request committed the
         # decision row (we awaited the commit above before re-dispatching).
         returned_after_decision=True,

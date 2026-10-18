@@ -22,10 +22,10 @@ What this harness proves (issue #622 DoD)
   dispatches against the live Harbor and returns a minted ``secret``
   in ``result``. A synchronous ``audit_log`` row commits
   (CLAUDE.md postulate 7).
-* The broadcast event for ``harbor.robot.create`` is classified
-  ``credential_mint`` — the secret never appears in the broadcast
-  payload (aggregate-only collapse enforced by
-  :func:`~meho_backplane.broadcast.events.classify_op`).
+* The audit row for ``harbor.robot.create`` is classified
+  ``credential_mint`` (by
+  :func:`~meho_backplane.broadcast.events.classify_op`) and never
+  carries the minted secret.
 * ``harbor.robot.delete`` (typed op, ``safety_level="caution"``) removes
   the robot created in the step above; classified ``write``; audited.
 * ``harbor.about`` (typed read op) returns the Harbor
@@ -71,6 +71,7 @@ Skip conditions
 
 from __future__ import annotations
 
+import json
 import os
 import time
 import uuid
@@ -83,8 +84,6 @@ import httpx
 import pytest
 from sqlalchemy import select
 
-import meho_backplane.operations._audit as _audit_module
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors.harbor import (
     HARBOR_CONNECTOR_ID,
     HARBOR_IMPL_ID,
@@ -337,18 +336,6 @@ class _HarborTarget:
             version = "v2.11.0"
 
         self.fingerprint = _FP()
-
-
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    """Capture every broadcast event the dispatcher emits (no Valkey needed)."""
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(_audit_module, "publish_event", _capture)
-    return events
 
 
 @pytest.fixture
@@ -609,9 +596,8 @@ async def _assert_audited(
     operator_sub: str,
     expected_op_class: str,
     expected_source_kind: str,
-    events: list[BroadcastEvent],
-) -> None:
-    """Assert one ``audit_log`` row + one broadcast event for *op_id*."""
+) -> AuditLog:
+    """Assert one ``audit_log`` row for *op_id* and return it."""
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as fresh:
         rows = (
@@ -635,15 +621,10 @@ async def _assert_audited(
     assert row.payload["op_id"] == op_id
     assert row.payload["source_kind"] == expected_source_kind
     assert row.payload["result_status"] == "ok"
-
-    matching = [e for e in events if e.op_id == op_id]
-    assert len(matching) == 1, f"expected one broadcast for {op_id!r}, got {len(matching)}"
-    event = matching[0]
-    assert event.op_class == expected_op_class, (
-        f"{op_id}: expected op_class={expected_op_class!r}, got {event.op_class!r}"
+    assert row.payload["op_class"] == expected_op_class, (
+        f"{op_id}: expected op_class={expected_op_class!r}, got {row.payload['op_class']!r}"
     )
-    assert event.result_status == "ok"
-    assert event.audit_id == row.id
+    return row
 
 
 # ---------------------------------------------------------------------------
@@ -654,7 +635,6 @@ async def _assert_audited(
 @pytest.mark.asyncio
 async def test_systeminfo_returns_harbor_version(
     harbor_e2e: tuple[_HarborTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``harbor.about`` returns harbor_version from the live container."""
     target, _ = harbor_e2e
@@ -678,14 +658,12 @@ async def test_systeminfo_returns_harbor_version(
         operator_sub="e2e-systeminfo",
         expected_op_class="read",
         expected_source_kind="typed",
-        events=captured_events,
     )
 
 
 @pytest.mark.asyncio
 async def test_robot_list_never_returns_secret(
     harbor_e2e: tuple[_HarborTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
     """``harbor.robot.list`` list response contains no ``secret`` field."""
     target, _ = harbor_e2e
@@ -713,24 +691,21 @@ async def test_robot_list_never_returns_secret(
         operator_sub="e2e-robot-list",
         expected_op_class="read",
         expected_source_kind="typed",
-        events=captured_events,
     )
 
 
 @pytest.mark.asyncio
 async def test_robot_create_credential_mint_classification(
     harbor_e2e: tuple[_HarborTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
-    """``harbor.robot.create`` mints a secret; broadcast is credential_mint (#147).
+    """``harbor.robot.create`` mints a secret; op_class is credential_mint (#147).
 
     ``harbor.robot.create`` now parks (``requires_approval=True``, #147), so a
-    lone dispatch never executes. The minted-secret + aggregate-only broadcast
-    contract is therefore proven through the real four-eyes approve→resume
-    flow: a lone operator parks the mint, a **second** operator approves, and
-    the committed approval drives the re-dispatch that mints against the live
-    Harbor container. The executed op's result carries the secret while its
-    broadcast collapses to aggregate-only.
+    lone dispatch never executes. The minted-secret contract is therefore
+    proven through the real approve→resume flow: a lone operator parks the
+    mint, a **second** operator approves, and the committed approval drives
+    the re-dispatch that mints against the live Harbor container. The
+    executed op's result carries the secret; its audit row does not.
     """
     target, _ = harbor_e2e
     result = await _create_robot_via_approve_resume(
@@ -758,31 +733,25 @@ async def test_robot_create_credential_mint_classification(
     # ``approval.request`` row (not keyed on the op-id), so filtering on
     # ``path == "harbor.robot.create"`` + the requester sub selects exactly
     # the one executed dispatch row.
-    await _assert_audited(
+    row = await _assert_audited(
         "harbor.robot.create",
         operator_sub="e2e-robot-create",
         expected_op_class="credential_mint",
         expected_source_kind="typed",
-        events=captured_events,
     )
 
-    # The broadcast event must NOT carry the secret — credential_mint
-    # classification collapses the event to aggregate-only, so the
-    # result payload in the broadcast is null/omitted (no secret egress).
-    event = next(e for e in captured_events if e.op_id == "harbor.robot.create")
-    # The event.payload (always the redacted view) must not contain the secret key.
-    if event.payload is not None:
-        assert "secret" not in event.payload, (
-            "broadcast event for credential_mint must not expose robot secret"
-        )
+    # The stored audit row must NOT carry the minted secret.
+    assert "secret" not in row.payload, "audit row for credential_mint must not expose robot secret"
+    assert result.result["secret"] not in json.dumps(row.payload, default=str), (
+        "minted robot secret leaked into the audit row"
+    )
 
 
 @pytest.mark.asyncio
 async def test_robot_delete_classified_write(
     harbor_e2e: tuple[_HarborTarget, str],
-    captured_events: list[BroadcastEvent],
 ) -> None:
-    """``harbor.robot.delete`` removes the robot; broadcast is classified write.
+    """``harbor.robot.delete`` removes the robot; classified write.
 
     Since #3288 the op is ``safety_level=destructive`` + ``requires_approval``,
     so the delete runs through the governed flow (preview-hash-bound park →
@@ -825,5 +794,4 @@ async def test_robot_delete_classified_write(
         operator_sub="e2e-robot-delete",
         expected_op_class="write",
         expected_source_kind="typed",
-        events=captured_events,
     )

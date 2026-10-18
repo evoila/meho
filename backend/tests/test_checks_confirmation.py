@@ -25,9 +25,9 @@ to the issue's acceptance criteria:
   and one notification; a flapping all-clear sends no recovery mail.
 
 ``dispatch`` is stubbed on the runner module and the transition
-detector's notification / broadcast / investigation seams are replaced
-with recorders (patched at the usage location), so no connector, mail
-transport, or Valkey is hit.
+detector's notification / investigation seams are replaced
+with recorders (patched at the usage location), so no connector or mail
+transport is hit.
 """
 
 from __future__ import annotations
@@ -490,21 +490,16 @@ class _DetectorRecorders:
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.notifications: list[Any] = []
-        self.published: list[dict[str, Any]] = []
         self.investigations: list[Any] = []
 
         def _notify(notice: Any) -> None:
             self.notifications.append(notice)
-
-        async def _publish(**kwargs: Any) -> None:
-            self.published.append(kwargs)
 
         def _investigate(**kwargs: Any) -> None:
             self.investigations.append(kwargs)
 
         # Patch at the usage location (the investigate module's globals).
         monkeypatch.setattr(inv, "schedule_dashboard_notification", _notify)
-        monkeypatch.setattr(inv, "publish_check_transition_event", _publish)
         monkeypatch.setattr(inv, "_schedule_investigation", _investigate)
 
 
@@ -559,7 +554,6 @@ async def test_flake_suppressed_end_to_end(monkeypatch: pytest.MonkeyPatch) -> N
 
     assert await _memo(dashboard_id) == "ok"  # no rollup edge was claimed
     assert recorders.notifications == []  # no notification task spawned
-    assert recorders.published == []  # no transition event published
     assert recorders.investigations == []
 
 
@@ -586,9 +580,6 @@ async def test_confirmed_transition_claims_one_edge_one_mail(
     assert _aware(row.state_since) == _aware(row.last_evaluated_at)  # commit-time
     assert await _memo(dashboard_id) == "degraded"
     assert len(recorders.notifications) == 1  # exactly one claimed edge
-    assert len(recorders.published) == 1
-    assert recorders.published[0]["previous_state"] == "ok"
-    assert recorders.published[0]["new_state"] == "degraded"
 
 
 @pytest.mark.asyncio
@@ -613,4 +604,3 @@ async def test_recovery_flap_sends_no_all_clear(
     assert row.pending_state is None
     assert await _memo(dashboard_id) == "critical"
     assert recorders.notifications == []  # the observed nuisance all-clear
-    assert recorders.published == []

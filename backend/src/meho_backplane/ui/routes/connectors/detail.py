@@ -24,14 +24,13 @@ target's identity header:
    actually use it.
 
 3. **Recent operations** (``_recent_ops.html``) -- the last 10
-   ``audit_log`` rows scoped to this target plus the operator's
-   tenant. Initially seeded by the server-rendered list, then live-
-   appended via the existing ``/ui/broadcast/stream`` SSE bridge
-   filtered to ``target=<name>`` (G6.1 + G10.1). The HTMX 2 ``sse``
-   extension's ``sse-swap="broadcast"`` directive deserialises the
-   ``event: broadcast`` frames; an Alpine.js controller prepends
-   matching events to the list (cap at 50 rendered rows so a busy
-   target doesn't grow the DOM unboundedly).
+   ``operation_execution`` audit rows scoped to this target plus the
+   operator's tenant, rendered on the server. Since #3758 the card no
+   longer listens to Broadcast (which carries agent announcements
+   only): ``recent-ops-refresh.js`` re-fetches the same fragment from
+   ``GET /ui/connectors/{name}/recent-operations`` every 5 seconds
+   while the page is visible, and the card shows when it was last
+   updated.
 
 4. **Available operations matrix** (``_ops_matrix.html``) -- the
    ``endpoint_descriptor`` rows for the resolved connector, grouped
@@ -68,7 +67,9 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Final
+from urllib.parse import quote
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -80,6 +81,7 @@ from meho_backplane.connectors.registry import all_connectors_v2, registered_pro
 from meho_backplane.connectors.resolver import resolve_connector_or_label
 from meho_backplane.db.engine import get_raw_session
 from meho_backplane.db.models import (
+    AuditEventClass,
     AuditLog,
     EndpointDescriptor,
     GraphNode,
@@ -101,16 +103,9 @@ __all__ = ["build_detail_router"]
 
 _log = structlog.get_logger(__name__)
 
-#: Number of recent ``audit_log`` rows seeded into the recent-ops card.
-#: Acceptance criterion on #873 pins this at "last 10 audit rows"; the
-#: SSE-live extension adds rows as they stream in, capped client-side
-#: to keep the DOM bounded.
+#: Number of recent operation rows the recent-ops card shows. #873 pins
+#: "last 10 audit rows"; the refresh fragment uses the same bound.
 _RECENT_OPS_LIMIT: Final[int] = 10
-
-#: Client-side DOM row cap for the recent-ops card. The seeded server
-#: list is 10; SSE-live additions prepend until the cap is hit, then
-#: older rows trim. Mirrors the broadcast feed's bounded-list discipline.
-_RECENT_OPS_DOM_CAP: Final[int] = 50
 
 
 @dataclass(frozen=True)
@@ -361,7 +356,11 @@ async def _load_recent_ops(
     target_id: uuid.UUID,
     limit: int = _RECENT_OPS_LIMIT,
 ) -> list[AuditLog]:
-    """Return the most recent ``audit_log`` rows on this target.
+    """Return the most recent ``operation_execution`` audit rows on this target.
+
+    Only rows of class ``operation_execution`` (#3733) count: an
+    operation ran. Decision rows (policy, approval) and request wrapper
+    rows are left out, so the card lists operations, once each.
 
     Filters on ``(tenant_id, target_id)`` so a soft-FK violation
     (audit row carrying another tenant's target_id) could never leak
@@ -376,6 +375,7 @@ async def _load_recent_ops(
         .where(
             AuditLog.tenant_id == tenant_id,
             AuditLog.target_id == target_id,
+            AuditLog.event_class == AuditEventClass.OPERATION_EXECUTION.value,
         )
         .order_by(AuditLog.occurred_at.desc(), AuditLog.id.desc())
         .limit(limit)
@@ -418,18 +418,10 @@ def _project_audit_rows(rows: Iterable[AuditLog]) -> list[dict[str, Any]]:
     Keeps the recent-ops template free of ORM imports + tolerant of
     the ``payload`` JSON's flexible shape; the template renders the
     method + path + status_code + occurred_at, plus ``op_id`` /
-    ``op_class`` from the payload bag when present (these are the
-    same fields the broadcast publisher reads in
-    :func:`~meho_backplane.audit._resolve_op_id_and_class_override`).
+    ``op_class`` from the payload bag when present.
 
-    ``occurred_at`` is serialised to an ISO-8601 string here (not left
-    as a :class:`datetime`) because the template emits the rows
-    through Jinja ``| tojson`` into the Alpine ``x-data`` seed array:
-    ``tojson`` rejects datetimes by default (``TypeError: Object of
-    type datetime is not JSON serializable``). Pre-stringifying at
-    the projection boundary keeps the template free of datetime
-    handling and matches the SSE bridge's wire format (events on
-    ``/ui/broadcast/stream`` already carry ISO strings).
+    ``occurred_at`` is an ISO-8601 string so the template can put it in
+    a ``<time datetime>`` attribute as-is.
     """
     projected: list[dict[str, Any]] = []
     for row in rows:
@@ -524,13 +516,7 @@ async def _render_detail(
         "no_connector_cause": no_connector_cause,
         "valid_products": valid_products,
         "ops_matrix": ops_matrix,
-        "recent_ops": _project_audit_rows(recent_ops),
-        "recent_ops_dom_cap": _RECENT_OPS_DOM_CAP,
-        # SSE bridge URL -- the existing G10.1 stream supports a
-        # ``target=<name>`` filter so we ride it straight rather than
-        # duplicating the bridge. URL-encoded so a name carrying
-        # ``&`` or ``?`` does not split the query string.
-        "stream_endpoint": _build_stream_endpoint(target.name),
+        **_recent_ops_context(target.name, recent_ops),
         # tenant_admin gate for the re-probe button. The handler in
         # :mod:`probe` re-checks the role server-side; the template
         # hides the button when the operator can't use it so the
@@ -550,27 +536,53 @@ async def _render_detail(
     return response
 
 
-def _build_stream_endpoint(target_name: str) -> str:
-    """Build the URL-encoded SSE bridge endpoint for *target_name*.
+def _recent_ops_context(target_name: str, rows: Iterable[AuditLog]) -> dict[str, Any]:
+    """Template context for the recent-ops card (full page and fragment).
 
-    The G10.1 broadcast SSE bridge (``/ui/broadcast/stream``) takes a
-    ``target=<name>`` query parameter and filters the stream to events
-    whose ``BroadcastEvent.target_name`` matches. We piggy-back on it
-    (instead of standing up a parallel connectors-only stream) so the
-    SSE plumbing -- session gate, cursor resolver, heartbeat, replay
-    -- stays single-sourced. The target name is percent-encoded so a
-    name containing ``&`` / ``?`` / ``#`` does not split the query
-    string.
+    ``recent_ops_url`` is the refresh fragment's path; the target name is
+    percent-encoded so a name carrying ``/``, ``?`` or ``#`` stays one
+    path segment. ``recent_ops_updated_at`` is when this render read the
+    rows; the card shows it instead of a "live" label.
     """
-    from urllib.parse import quote
+    return {
+        "recent_ops": _project_audit_rows(rows),
+        "recent_ops_url": f"/ui/connectors/{quote(target_name, safe='')}/recent-operations",
+        "recent_ops_updated_at": datetime.now(UTC).isoformat(),
+    }
 
-    return f"/ui/broadcast/stream?target={quote(target_name, safe='')}"
+
+async def _render_recent_ops(
+    request: Request,
+    *,
+    target_name: str,
+    session_ctx: UISessionContext,
+    db_session: AsyncSession,
+) -> HTMLResponse:
+    """Render the recent-ops card alone, for the 5-second refresh (#3758).
+
+    Same tenant scope and target resolution as the detail page: a name
+    that does not resolve in the session's tenant is a 404, so the
+    fragment never shows another tenant's rows.
+    """
+    _resolve_target_or_404(target_name=target_name)
+    target = await resolve_target(db_session, session_ctx.tenant_id, target_name)
+    rows = await _load_recent_ops(
+        db_session,
+        tenant_id=session_ctx.tenant_id,
+        target_id=target.id,
+    )
+    return get_templates().TemplateResponse(
+        request,
+        "connectors/_recent_ops.html",
+        _recent_ops_context(target.name, rows),
+    )
 
 
 def build_detail_router() -> APIRouter:
     """Construct the targets-detail :class:`APIRouter`.
 
-    Registers the single ``GET /ui/connectors/{name}`` route. The
+    Registers ``GET /ui/connectors/{name}`` and its recent-ops refresh
+    fragment ``GET /ui/connectors/{name}/recent-operations``. The detail
     route name (``ui_connectors_detail``) is referenced by the list
     template's row "View" links and by the probe handler's
     HX-Redirect on the fingerprint-card refresh -- a rename here must
@@ -594,6 +606,27 @@ def build_detail_router() -> APIRouter:
             role_probe=role_probe,
         )
 
+    async def _recent_ops_handler(
+        request: Request,
+        name: str,
+        session_ctx: UISessionContext = _require_ui_session_dep,
+        db_session: AsyncSession = _get_raw_session_dep,
+    ) -> HTMLResponse:
+        """``GET /ui/connectors/{name}/recent-operations``."""
+        return await _render_recent_ops(
+            request,
+            target_name=name,
+            session_ctx=session_ctx,
+            db_session=db_session,
+        )
+
+    router.add_api_route(
+        "/ui/connectors/{name}/recent-operations",
+        _recent_ops_handler,
+        methods=["GET"],
+        name="ui_connectors_recent_operations",
+        response_class=HTMLResponse,
+    )
     router.add_api_route(
         "/ui/connectors/{name}",
         _handler,

@@ -22,7 +22,11 @@ with a smaller number.
   every wake-up or timeout. The stream is only the wake-up signal. When
   Valkey fails, the watch keeps going by scanning every
   :data:`WATCH_POLL_SECONDS` seconds. Event ids are de-duplicated within
-  a call.
+  a call. :func:`watch_announcement_rows` is the same wait for the SSE
+  feeds; it returns the stored events with their sequence numbers.
+* :func:`latest_announcements` reads the newest stored announcements
+  (the SSE backlog, the UI history pane, the MCP tenant feed resource,
+  #3758).
 
 Retention: the prune deletes rows by ``created_at``, but the tenant
 counter keeps counting, and committed numbers have no holes. So every
@@ -42,8 +46,9 @@ number. Every scan first gives such rows the next numbers
 (:func:`~meho_backplane.broadcast.archive_sequence.number_unnumbered_rows`),
 so they show up as new announcements instead of staying invisible.
 
-Operation events (the audit-driven ``BroadcastEvent`` entries) are not in
-the archive and are not returned here; ``query_audit`` is their record.
+Broadcast carries deliberate agent announcements only (#3758). Automatic
+activity (operations, approvals, checks) is not published to it;
+``query_audit`` is the record of that activity.
 """
 
 from __future__ import annotations
@@ -59,6 +64,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.broadcast.agent_events import AgentAnnouncementEvent
 from meho_backplane.broadcast.archive_cursor import (
     HistoryPosition,
     InvalidArchiveCursorError,
@@ -88,7 +94,12 @@ __all__ = [
     "WATCH_POLL_SECONDS",
     "WATCH_SCAN_LIMIT",
     "AnnouncementFilter",
+    "AnnouncementWatch",
+    "StoredAnnouncement",
+    "first_seq_since",
+    "latest_announcements",
     "read_announcement_history",
+    "watch_announcement_rows",
     "watch_announcements",
 ]
 
@@ -222,15 +233,23 @@ async def _scan(
     return list((await session.execute(stmt)).scalars().all())
 
 
-def _serialize(
+@dataclass(frozen=True)
+class StoredAnnouncement:
+    """One archived announcement with its per-tenant sequence number."""
+
+    seq: int
+    event: AgentAnnouncementEvent
+
+
+def _matching(
     rows: list[AgentAnnouncement],
     flt: AnnouncementFilter,
     seen: set[str] | None = None,
     since: datetime | None = None,
-) -> list[dict[str, Any]]:
-    """Filter and serialise *rows*; skip rows before *since* and event ids in *seen*."""
+) -> list[StoredAnnouncement]:
+    """Rows that pass *flt*; skip rows before *since* and event ids in *seen*."""
     now = datetime.now(UTC)
-    events: list[dict[str, Any]] = []
+    matched: list[StoredAnnouncement] = []
     for row in rows:
         event_id = str(row.id)
         if seen is not None:
@@ -241,8 +260,18 @@ def _serialize(
         if since is not None and announcement.ts < since:
             continue
         if flt.matches(row, now):
-            events.append(dump_event_wire(announcement))
-    return events
+            matched.append(StoredAnnouncement(seq=cast("int", row.seq), event=announcement))
+    return matched
+
+
+def _serialize(
+    rows: list[AgentAnnouncement],
+    flt: AnnouncementFilter,
+    seen: set[str] | None = None,
+    since: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Filter and serialise *rows* for the LLM-facing reads (untrusted text wrapped)."""
+    return [dump_event_wire(item.event) for item in _matching(rows, flt, seen, since)]
 
 
 def _parse_history_cursor(tenant_id: UUID, cursor: str | None) -> HistoryPosition | datetime:
@@ -330,9 +359,23 @@ async def read_announcement_history(
 
 @dataclass
 class _WatchScan:
-    events: list[dict[str, Any]]
+    matched: list[StoredAnnouncement]
     after: int
     full: bool
+    gap: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
+class AnnouncementWatch:
+    """What :func:`watch_announcement_rows` found.
+
+    ``after`` is the new resume point (a sequence number); it moves past
+    rows the filter hid. ``gap`` is set when retention removed rows or the
+    checkpoint was ahead of the archive.
+    """
+
+    events: list[StoredAnnouncement]
+    after: int
     gap: dict[str, Any] | None
 
 
@@ -358,7 +401,7 @@ async def _watch_scan(
     gap = _scan_gap(after, watermark, rows, WATCH_SCAN_LIMIT)
     full = len(rows) == WATCH_SCAN_LIMIT
     new_after = cast("int", rows[-1].seq) if full else watermark
-    return _WatchScan(_serialize(rows, flt, seen), new_after, full, gap)
+    return _WatchScan(_matching(rows, flt, seen), new_after, full, gap)
 
 
 class _StreamWake:
@@ -411,25 +454,21 @@ class _StreamWake:
             await asyncio.sleep(min(WATCH_POLL_SECONDS, remaining))
 
 
-async def watch_announcements(
+async def watch_announcement_rows(
     operator: Operator,
     *,
-    checkpoint: str,
+    after: int,
     flt: AnnouncementFilter,
     timeout_ms: int,
-) -> dict[str, Any]:
-    """Wait up to *timeout_ms* for announcements after *checkpoint*.
+) -> AnnouncementWatch:
+    """Wait up to *timeout_ms* for announcements stored after sequence *after*.
 
     Scans the archive first; returns at once when it finds a matching
     event, a full scan page, or a gap. Otherwise waits for a stream
-    wake-up (or a poll tick) and scans again, until the time is up.
-
-    Returns ``{events, next_cursor, gap}``; ``next_cursor`` is the new
-    watch checkpoint. Raises :class:`InvalidArchiveCursorError` for a bad
-    checkpoint; DB errors propagate (fail-loud).
+    wake-up (or a poll tick) and scans again, until the time is up. DB
+    errors propagate (fail-loud).
     """
     tenant_id = operator.tenant_id
-    after = decode_watch_checkpoint(checkpoint, tenant_id)
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_ms / 1000
     wake = _StreamWake(operator)
@@ -439,11 +478,89 @@ async def watch_announcements(
         scan = await _watch_scan(tenant_id, after, flt, seen)
         after = scan.after
         remaining = deadline - loop.time()
-        if scan.events or scan.full or scan.gap is not None or remaining <= 0:
+        if scan.matched or scan.full or scan.gap is not None or remaining <= 0:
             break
         await wake.wait(remaining)
+    return AnnouncementWatch(events=scan.matched, after=after, gap=scan.gap)
+
+
+async def watch_announcements(
+    operator: Operator,
+    *,
+    checkpoint: str,
+    flt: AnnouncementFilter,
+    timeout_ms: int,
+) -> dict[str, Any]:
+    """Wait up to *timeout_ms* for announcements after *checkpoint*.
+
+    See :func:`watch_announcement_rows` for the wait. Returns
+    ``{events, next_cursor, gap}``; ``next_cursor`` is the new watch
+    checkpoint. Raises :class:`InvalidArchiveCursorError` for a bad
+    checkpoint; DB errors propagate (fail-loud).
+    """
+    tenant_id = operator.tenant_id
+    after = decode_watch_checkpoint(checkpoint, tenant_id)
+    found = await watch_announcement_rows(operator, after=after, flt=flt, timeout_ms=timeout_ms)
     return {
-        "events": scan.events,
-        "next_cursor": encode_watch_checkpoint(tenant_id, after),
-        "gap": scan.gap,
+        "events": [dump_event_wire(item.event) for item in found.events],
+        "next_cursor": encode_watch_checkpoint(tenant_id, found.after),
+        "gap": found.gap,
     }
+
+
+@dataclass(frozen=True)
+class LatestAnnouncements:
+    """The newest stored announcements, oldest first, and the tenant's watermark."""
+
+    events: list[StoredAnnouncement]
+    watermark: int
+
+
+async def latest_announcements(
+    operator: Operator,
+    *,
+    limit: int,
+    since: datetime | None = None,
+    flt: AnnouncementFilter | None = None,
+) -> LatestAnnouncements:
+    """Read the newest *limit* stored announcements, oldest first.
+
+    *since* (optional) drops rows stored before that time. *flt* is
+    applied after the read, so the result can hold fewer than *limit*
+    events. ``watermark`` is the tenant's highest sequence number at the
+    time of the read: a watcher that starts there misses nothing after
+    this read. DB errors propagate (fail-loud).
+    """
+    tenant_id = operator.tenant_id
+    async with get_sessionmaker()() as session:
+        await _number_older_writes(session, tenant_id)
+        watermark = await archive_watermark(session, tenant_id)
+        stmt = (
+            select(AgentAnnouncement)
+            .where(
+                AgentAnnouncement.tenant_id == tenant_id,
+                AgentAnnouncement.seq <= watermark,
+            )
+            .order_by(AgentAnnouncement.seq.desc())
+            .limit(limit)
+        )
+        if since is not None:
+            stmt = stmt.where(AgentAnnouncement.created_at >= since)
+        rows = list((await session.execute(stmt)).scalars().all())
+    rows.reverse()
+    return LatestAnnouncements(
+        events=_matching(rows, flt or AnnouncementFilter()), watermark=watermark
+    )
+
+
+async def first_seq_since(operator: Operator, since: datetime) -> int:
+    """Return the resume point (a sequence number) just before *since*.
+
+    A watcher that starts there sees every announcement stored at or
+    after *since*. When none exists it is the current watermark.
+    """
+    tenant_id = operator.tenant_id
+    async with get_sessionmaker()() as session:
+        await _number_older_writes(session, tenant_id)
+        position, _gap = await _history_start(session, tenant_id, since)
+    return position.after_seq

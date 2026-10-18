@@ -923,34 +923,20 @@ async def test_approve_request_params_none_skips_hash_check(
         row = await approve_request(s2, pending.id, operator=operator, params=None)
         await s2.commit()
         assert row.status == ApprovalRequestStatus.APPROVED.value
-        # The transient audit_id attr is exposed so callers can publish the
-        # broadcast event AFTER commit, with the real audit row's id.
+        # The transient audit_id attr is exposed so callers can find the
+        # real decision audit row AFTER commit.
         assert isinstance(row._audit_id, uuid.UUID)  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
-async def test_publish_approval_event_audit_id_matches_decision_row(
+async def test_approve_request_audit_id_matches_decision_row(
     session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The broadcast event's ``audit_id`` is the decision row's real id.
+    """``request._audit_id`` is the decision audit row's real id.
 
-    BroadcastEvent.audit_id is documented as the FK to ``audit_log.id``; a
-    subscriber that wants the full row queries audit_log by this id. The
-    helper must therefore receive the audit row's actual id (threaded
-    via ``request._audit_id``) — not a fresh UUID. This test stubs the
-    broadcast publisher, exercises approve_request + the publish call,
-    and asserts the published event's audit_id equals the audit row's
-    primary key.
+    Callers use this id to find the decision row after commit, so it must
+    be the audit row's actual primary key — not a fresh UUID.
     """
-    captured: list[Any] = []
-
-    async def _capture(event: Any) -> None:
-        captured.append(event)
-
-    monkeypatch.setattr("meho_backplane.broadcast.publisher.publish_event", _capture)
-    from meho_backplane.operations.approval_queue import publish_approval_event
-
     requester = _make_operator(sub="requester-sub")
     operator = _make_operator(sub="reviewer-sub")
     original_params = {"x": 1}
@@ -970,18 +956,8 @@ async def test_publish_approval_event_audit_id_matches_decision_row(
         row = await approve_request(s2, pending.id, operator=operator, params=None)
         await s2.commit()
         decision_audit_id: uuid.UUID = row._audit_id  # type: ignore[attr-defined]
-        await publish_approval_event(
-            tenant_id=operator.tenant_id,
-            request=row,
-            decision="approved",
-            principal_sub=operator.sub,
-            audit_id=decision_audit_id,
-        )
 
-    # The event's audit_id must be the real decision audit row's id.
-    assert len(captured) == 1
-    assert captured[0].audit_id == decision_audit_id
-    # And the audit_log row at that id must exist.
+    # The audit_log row at that id must exist.
     async with get_sessionmaker()() as s3:
         audited = await s3.get(AuditLog, decision_audit_id)
         assert audited is not None
@@ -1704,29 +1680,15 @@ async def test_expire_stale_requests_respects_tenant_isolation(
 
 
 @pytest.mark.asyncio
-async def test_expire_stale_requests_publishes_approval_expired_broadcast(
+async def test_expire_stale_requests_exposes_decision_audit_id(
     session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Caller publishes one ``approval.expired`` event per expired row with FK audit_id.
+    """Each expired row exposes the real expiry decision audit row id.
 
-    #1114 follow-up to T4: the fourth lifecycle transition (expiry) now
-    surfaces on the broadcast feed alongside pending / approved /
-    rejected. The function exposes ``request._audit_id`` (the real
-    decision row's primary key) so the caller can publish **after
-    commit** — same publish-after-commit invariant the other three
-    transitions follow. The broadcast event's ``audit_id`` field is
-    documented as the FK to ``audit_log.id``; subscribers that want the
-    full row query audit_log by this id.
+    #1114 follow-up to T4: expiry is the fourth lifecycle transition. The
+    function exposes ``request._audit_id`` (the real decision row's
+    primary key) so the caller can find that row **after commit**.
     """
-    captured: list[Any] = []
-
-    async def _capture(event: Any) -> None:
-        captured.append(event)
-
-    monkeypatch.setattr("meho_backplane.broadcast.publisher.publish_event", _capture)
-    from meho_backplane.operations.approval_queue import publish_approval_event
-
     operator = _make_operator()
     past = datetime.now(UTC) - timedelta(hours=1)
 
@@ -1750,25 +1712,6 @@ async def test_expire_stale_requests_publishes_approval_expired_broadcast(
     assert expired[0].id == pending.id
     decision_audit_id: uuid.UUID = expired[0]._audit_id  # type: ignore[attr-defined]
     assert isinstance(decision_audit_id, uuid.UUID)
-
-    # Publish AFTER commit, mirroring the dispatcher / REST / MCP sites.
-    for row in expired:
-        await publish_approval_event(
-            tenant_id=operator.tenant_id,
-            request=row,
-            decision="expired",
-            principal_sub=operator.sub,
-            audit_id=row._audit_id,  # type: ignore[attr-defined]
-        )
-
-    # Exactly one ``approval.expired`` event landed with the FK audit_id.
-    assert len(captured) == 1
-    event = captured[0]
-    assert event.op_id == "approval.expired"
-    assert event.audit_id == decision_audit_id
-    assert event.tenant_id == operator.tenant_id
-    assert event.payload["decision"] == "expired"
-    assert event.payload["approval_request_id"] == str(pending.id)
 
     # The audit_log row at that id exists and is the expiry decision row.
     async with get_sessionmaker()() as fresh:
@@ -2184,7 +2127,6 @@ async def test_pause_approve_resume_execute(
     """
     from unittest.mock import AsyncMock
 
-    import meho_backplane.operations._audit as audit_module
     from meho_backplane.connectors.base import Connector
     from meho_backplane.connectors.registry import clear_registry, register_connector_v2
     from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
@@ -2194,18 +2136,10 @@ async def test_pause_approve_resume_execute(
         reset_dispatcher_caches,
     )
 
-    # Stub out broadcast.
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
     get_settings.cache_clear()
-
-    captured: list[Any] = []
-
-    async def _capture(event: Any) -> None:
-        captured.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
 
     reset_dispatcher_caches()
     clear_registry()
@@ -2324,7 +2258,6 @@ async def test_work_ref_inherited_through_park_approve_redispatch(
     """
     from unittest.mock import AsyncMock
 
-    import meho_backplane.operations._audit as audit_module
     from meho_backplane.connectors.base import Connector
     from meho_backplane.connectors.registry import clear_registry, register_connector_v2
     from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
@@ -2339,11 +2272,6 @@ async def test_work_ref_inherited_through_park_approve_redispatch(
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
     get_settings.cache_clear()
-
-    async def _capture(event: Any) -> None:
-        pass
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
 
     reset_dispatcher_caches()
     clear_registry()
@@ -2473,7 +2401,6 @@ async def test_human_requires_approval_queues_not_denies(
     """
     from unittest.mock import AsyncMock
 
-    import meho_backplane.operations._audit as audit_module
     from meho_backplane.connectors.base import Connector
     from meho_backplane.connectors.registry import clear_registry, register_connector_v2
     from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
@@ -2489,11 +2416,6 @@ async def test_human_requires_approval_queues_not_denies(
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
     get_settings.cache_clear()
-
-    async def _capture(event: Any) -> None:
-        pass
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
 
     reset_dispatcher_caches()
     clear_registry()
@@ -2631,7 +2553,6 @@ async def test_pause_reject_abort(
     """
     from unittest.mock import AsyncMock
 
-    import meho_backplane.operations._audit as audit_module
     from meho_backplane.connectors.base import Connector
     from meho_backplane.connectors.registry import clear_registry, register_connector_v2
     from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
@@ -2645,11 +2566,6 @@ async def test_pause_reject_abort(
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
     get_settings.cache_clear()
-
-    async def _capture(event: Any) -> None:
-        pass
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
 
     reset_dispatcher_caches()
     clear_registry()
@@ -2740,30 +2656,23 @@ async def test_pause_reject_abort(
 # #1503 — parked direct operator op approved via /decide or MCP by-id is
 # re-dispatched using the stored params (execute-after-approve on every
 # surface, not only REST /approve). Must NOT double-execute an agent-run
-# request (the in-process agent runtime resumes those off the broadcast).
+# request (the in-process agent runtime resumes those itself).
 # ---------------------------------------------------------------------------
 
 
 async def _register_recording_requires_approval_op(monkeypatch: pytest.MonkeyPatch) -> None:
     """Register a ``requires_approval`` typed op backed by the recording handler.
 
-    Shared setup for the #1503 surface tests: a clean registry, a stubbed
-    broadcast publisher, and one ``rectest.write`` op whose handler appends
-    to ``_RECORDED_EXECUTIONS`` so a test can assert the approved op ran
-    exactly once.
+    Shared setup for the #1503 surface tests: a clean registry and one
+    ``rectest.write`` op whose handler appends to ``_RECORDED_EXECUTIONS``
+    so a test can assert the approved op ran exactly once.
     """
     from unittest.mock import AsyncMock
 
-    import meho_backplane.operations._audit as audit_module
     from meho_backplane.connectors.base import Connector
     from meho_backplane.connectors.registry import register_connector_v2
     from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
     from meho_backplane.operations import register_typed_operation
-
-    async def _capture(event: Any) -> None:
-        pass
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
 
     class _RecConnector(Connector):
         product = "rectest"
@@ -3028,7 +2937,6 @@ async def test_proposed_effect_carries_catalog_safety_level(
     """
     from unittest.mock import AsyncMock
 
-    import meho_backplane.operations._audit as audit_module
     from meho_backplane.connectors.base import Connector
     from meho_backplane.connectors.registry import clear_registry, register_connector_v2
     from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
@@ -3037,11 +2945,6 @@ async def test_proposed_effect_carries_catalog_safety_level(
         register_typed_operation,
         reset_dispatcher_caches,
     )
-
-    async def _capture(event: Any) -> None:
-        pass
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
 
     reset_dispatcher_caches()
     clear_registry()
@@ -3295,7 +3198,6 @@ async def test_mcp_session_lineage_park_approve_resume_replays_as_tree(
 
     import structlog
 
-    import meho_backplane.operations._audit as audit_module
     from meho_backplane.audit_query.replay import replay_session
     from meho_backplane.connectors.base import Connector
     from meho_backplane.connectors.registry import clear_registry, register_connector_v2
@@ -3315,11 +3217,6 @@ async def test_mcp_session_lineage_park_approve_resume_replays_as_tree(
     monkeypatch.setenv("MCP_REQUIRE_SESSION_ID", "true")
     get_settings.cache_clear()
     assert mcp_session_id_capture_mode() == "enforced"
-
-    async def _capture(event: Any) -> None:
-        pass
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
 
     reset_dispatcher_caches()
     clear_registry()

@@ -7,10 +7,11 @@
 
 Initiative #1775 (G10.7 Operator-console hardening), Task #1778.
 
-The approval queue, its decision endpoints, and the lifecycle broadcasts
-already exist (Goal #800). This surface is the operator-console face of
-them: a bell/badge in the app-shell, fed live by the SSE bridge, opening a
-modal that approves or denies a pending request.
+The approval queue and its decision endpoints already exist (Goal #800).
+This surface is the operator-console face of them: a bell/badge in the
+app-shell, refreshed every few seconds while the page is visible
+(``approvals-bell.js``, #3758), opening a modal that approves or denies a
+pending request.
 
 Why a session BFF and not the Bearer ``/api/v1/approvals/*`` routes
 -------------------------------------------------------------------
@@ -73,7 +74,7 @@ Route inventory
   the modal's own ``hx-headers`` echo lines up with the cookie (the modal
   render rotates it -- #1693 / #1754).
 * ``POST /ui/approvals/{id}/approve`` -- approve in-process, re-dispatch
-  the parked op, publish the fail-open broadcast.
+  the parked op, record the add-on step event.
 * ``POST /ui/approvals/{id}/reject`` -- reject in-process, publish.
 
 The ``params`` / ``params_hash`` columns are internal (swap-defence +
@@ -145,7 +146,7 @@ from meho_backplane.operations.approval_queue import (
     get_request,
     list_pending,
     parse_delegation,
-    publish_approval_event,
+    record_approval_step_event,
     reject_request,
     resume_dispatch_after_approval,
 )
@@ -770,8 +771,8 @@ async def _commit_decision(
     (:func:`~meho_backplane.operations.approval_queue.approve_request` /
     :func:`reject_request`); this projects each onto the same HTTP status
     the REST surface uses so the modal can render a consistent banner. The
-    fail-open broadcast publishes only AFTER the commit (a phantom event
-    cannot outlive a failed transaction).
+    fail-open add-on step event is recorded only AFTER the commit (a phantom
+    event cannot outlive a failed transaction).
     """
     sessionmaker = get_sessionmaker()
     try:
@@ -785,11 +786,10 @@ async def _commit_decision(
                     db_session, request_id, operator=operator, reason=reason
                 )
             await db_session.commit()
-        await publish_approval_event(
+        await record_approval_step_event(
             tenant_id=operator.tenant_id,
             request=request,
             decision=decision,
-            principal_sub=operator.sub,
             audit_id=request._audit_id,  # type: ignore[attr-defined]
         )
     except ApprovalNotFoundError as exc:

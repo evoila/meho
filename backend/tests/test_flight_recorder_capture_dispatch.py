@@ -12,7 +12,7 @@ Drives the real :func:`meho_backplane.operations.dispatch` to prove:
   result byte-identical and the audit row committed.
 
 Shares the typed-op registration harness the dispatcher tests use (in-memory
-SQLite, recording broadcast publisher, autouse reset), plus a capture-enabled
+SQLite, autouse reset), plus a capture-enabled
 seeded tenant so ``should_capture`` returns True.
 """
 
@@ -29,9 +29,7 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
@@ -81,17 +79,6 @@ def stub_embedding_service() -> AsyncMock:
     service.encode.return_value = [[0.1] * 384]
     service.dimension = 384
     return service
-
-
-@pytest.fixture(autouse=True)
-def _capture_broadcast(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
-    events: list[BroadcastEvent] = []
-
-    async def _capture(event: BroadcastEvent) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
 
 
 @pytest.fixture

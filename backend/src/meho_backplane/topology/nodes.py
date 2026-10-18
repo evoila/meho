@@ -64,7 +64,6 @@ import structlog
 from sqlalchemy import select
 
 from meho_backplane.auth.delegation import resolve_actor_sub
-from meho_backplane.broadcast import BroadcastEvent, publish_event
 from meho_backplane.db.models import (
     KIND_SLUG_MAX_LENGTH,
     KIND_SLUG_MIN_LENGTH,
@@ -77,7 +76,6 @@ from meho_backplane.db.models import (
     GraphNode,
     is_valid_kind_slug,
 )
-from meho_backplane.operations._audit import resolve_broadcast_lineage
 from meho_backplane.topology.history import node_snapshot, record_node_change
 from meho_backplane.topology.identity_mode import NOT_LEGACY_SCOPE, read_identity_mode
 from meho_backplane.topology.resolvers import AmbiguousNodeError
@@ -270,46 +268,6 @@ def _create_node_is_meaningful(*, before: dict[str, Any] | None, after: dict[str
         return stripped
 
     return _strip(before) != _strip(after)
-
-
-async def _publish(
-    *,
-    audit_id: uuid.UUID,
-    operator: Operator,
-    node_name: str,
-    payload: dict[str, Any],
-) -> None:
-    """Fail-open broadcast publish.
-
-    Same shape as :func:`annotate._publish` — emits the broadcast event
-    and swallows publisher failure so a broken stream never rolls back
-    a successful create_or_get.
-    """
-    try:
-        lineage = resolve_broadcast_lineage()
-        event = BroadcastEvent(
-            event_id=uuid.uuid4(),
-            ts=datetime.now(UTC),
-            tenant_id=operator.tenant_id,
-            principal_sub=operator.sub,
-            principal_name=operator.name,
-            target_name=node_name,
-            op_id=_CREATE_NODE_OP_ID,
-            op_class=_OP_CLASS,
-            result_status="ok",
-            audit_id=audit_id,
-            payload=payload,
-            actor_sub=lineage.actor_sub,
-            agent_session_id=lineage.agent_session_id,
-            work_ref=lineage.work_ref,
-        )
-        await publish_event(event)
-    except Exception:
-        _log.exception(
-            "topology_create_node_broadcast_failed",
-            op_id=_CREATE_NODE_OP_ID,
-            tenant_id=str(operator.tenant_id),
-        )
 
 
 async def _find_seed_target(
@@ -558,10 +516,4 @@ async def create_or_get_node(
             )
         )
 
-    await _publish(
-        audit_id=audit_id,
-        operator=operator,
-        node_name=node.name,
-        payload=payload,
-    )
     return CreateNodeResult(node=node, was_created=was_created)

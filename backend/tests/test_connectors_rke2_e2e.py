@@ -43,7 +43,6 @@ import asyncssh
 import pytest
 
 import meho_backplane.connectors.rke2  # noqa: F401 -- import for registry side-effects
-import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.connectors.rke2 import Rke2SshConnector
@@ -227,7 +226,7 @@ async def fake_shell_server() -> AsyncIterator[types.SimpleNamespace]:
 
 
 # ---------------------------------------------------------------------------
-# Environment + DB + broadcast fixtures
+# Environment + DB fixtures
 # ---------------------------------------------------------------------------
 
 
@@ -248,18 +247,6 @@ def _reset_module_state() -> Iterator[None]:
     reset_dispatcher_caches()
     yield
     reset_dispatcher_caches()
-
-
-@pytest.fixture
-def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
-    """Stub out :func:`publish_event` so the broadcast bus doesn't fire."""
-    events: list[Any] = []
-
-    async def _capture(event: Any) -> None:
-        events.append(event)
-
-    monkeypatch.setattr(audit_module, "publish_event", _capture)
-    return events
 
 
 # ---------------------------------------------------------------------------
@@ -343,9 +330,7 @@ def _wire_seeded_connector() -> Rke2SshConnector:
 @pytest.fixture
 async def rke2_e2e(
     fake_shell_server: types.SimpleNamespace,
-    captured_events: list[Any],
 ) -> AsyncIterator[_Rke2E2EBundle]:
-    del captured_events  # autouse via parameter; reading drains the stub
     set_default_reducer(PassThroughReducer())
     await Rke2SshConnector.register_operations()
 
@@ -366,10 +351,8 @@ async def rke2_e2e(
 @pytest.mark.asyncio
 async def test_rke2_e2e_about_dispatches_ok(
     rke2_e2e: _Rke2E2EBundle,
-    captured_events: list[Any],
 ) -> None:
     """rke2.about returns vendor/product/version/node_os via the fake-shell."""
-    del captured_events
     result = await call_operation(
         _OPERATOR,
         {
@@ -390,10 +373,8 @@ async def test_rke2_e2e_about_dispatches_ok(
 @pytest.mark.asyncio
 async def test_rke2_e2e_posture_show_dispatches_ok_and_redacts(
     rke2_e2e: _Rke2E2EBundle,
-    captured_events: list[Any],
 ) -> None:
     """rke2.posture.show returns config modes + a redacted token entry."""
-    del captured_events
     result = await call_operation(
         _OPERATOR,
         {
@@ -422,7 +403,6 @@ async def test_rke2_e2e_posture_show_dispatches_ok_and_redacts(
 @pytest.mark.asyncio
 async def test_rke2_e2e_posture_show_unknown_token_survives_dispatch(
     rke2_e2e: _Rke2E2EBundle,
-    captured_events: list[Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An undetermined token reaches the caller as null, not false (#2698).
@@ -433,7 +413,6 @@ async def test_rke2_e2e_posture_show_unknown_token_survives_dispatch(
     contract -- this proves the dispatcher's reducer and the audit write
     tolerate it rather than rejecting or coercing the tri-state.
     """
-    del captured_events
     monkeypatch.setattr(
         "tests.test_connectors_rke2_e2e._PROBE_FIXTURE",
         "S|/etc/rancher/rke2/config.yaml|600|root|root\n"
@@ -461,7 +440,6 @@ async def test_rke2_e2e_posture_show_unknown_token_survives_dispatch(
 @pytest.mark.asyncio
 async def test_rke2_e2e_service_status_dispatches_ok(
     rke2_e2e: _Rke2E2EBundle,
-    captured_events: list[Any],
 ) -> None:
     """rke2.node.service.status dispatches safe/non-gated and reports unit state.
 
@@ -470,7 +448,6 @@ async def test_rke2_e2e_service_status_dispatches_ok(
     and returns the live systemd state of both probed units: rke2-server
     active, rke2-agent not installed on this node.
     """
-    del captured_events
     result = await call_operation(
         _OPERATOR,
         {
@@ -494,7 +471,6 @@ async def test_rke2_e2e_service_status_dispatches_ok(
 @pytest.mark.asyncio
 async def test_rke2_e2e_config_get_dispatches_ok_and_redacts(
     rke2_e2e: _Rke2E2EBundle,
-    captured_events: list[Any],
 ) -> None:
     """rke2.node.config.get returns parsed config content with the token redacted.
 
@@ -503,7 +479,6 @@ async def test_rke2_e2e_config_get_dispatches_ok_and_redacts(
     masked before it can reach the result envelope (and therefore the audit
     ``raw_payload``, which stores the raw handler result).
     """
-    del captured_events
     result = await call_operation(
         _OPERATOR,
         {
@@ -527,7 +502,6 @@ async def test_rke2_e2e_config_get_dispatches_ok_and_redacts(
 @pytest.mark.asyncio
 async def test_rke2_e2e_etcd_snapshot_save_dispatches_ok_non_gated(
     rke2_e2e: _Rke2E2EBundle,
-    captured_events: list[Any],
 ) -> None:
     """rke2.etcd-snapshot.save (safe, non-gated) auto-executes -- no approval park.
 
@@ -536,7 +510,6 @@ async def test_rke2_e2e_etcd_snapshot_save_dispatches_ok_non_gated(
     at ``awaiting_approval`` (that gate is only for the sibling write ops),
     and the result carries the parsed snapshot name + path with exit 0.
     """
-    del captured_events
     result = await call_operation(
         _OPERATOR,
         {
@@ -559,7 +532,6 @@ async def test_rke2_e2e_etcd_snapshot_save_dispatches_ok_non_gated(
 @pytest.mark.asyncio
 async def test_rke2_e2e_etcd_snapshot_list_dispatches_ok_read_only(
     rke2_e2e: _Rke2E2EBundle,
-    captured_events: list[Any],
 ) -> None:
     """rke2.etcd-snapshot.list (safe, read-only) enumerates snapshots via dispatch.
 
@@ -570,7 +542,6 @@ async def test_rke2_e2e_etcd_snapshot_list_dispatches_ok_read_only(
     rather than as a handle (the JSONFlux threshold is the reducer's concern,
     covered elsewhere).
     """
-    del captured_events
     result = await call_operation(
         _OPERATOR,
         {
@@ -658,10 +629,8 @@ class _AsyncReturn:
 @pytest.mark.asyncio
 async def test_rke2_token_rotate_parks_for_user(
     rke2_e2e: _Rke2E2EBundle,
-    captured_events: list[Any],
 ) -> None:
     """An un-approved USER dispatch parks (not run, not hard-denied)."""
-    del captured_events
     result = await _dispatch_rotate(rke2_e2e, approved=False)
     assert result["status"] == "awaiting_approval", result
     assert result.get("extras", {}).get("approval_request_id")
@@ -670,10 +639,8 @@ async def test_rke2_token_rotate_parks_for_user(
 @pytest.mark.asyncio
 async def test_rke2_token_rotate_approved_audit_row_has_no_token(
     rke2_e2e: _Rke2E2EBundle,
-    captured_events: list[Any],
 ) -> None:
     """AC: approved resume rotates + stashes to Vault; the raw audit row has NO token."""
-    del captured_events
     op_id = "rke2.token.rotate"
     with _fake_vault_write(version=5):
         result = await _dispatch_rotate(rke2_e2e, approved=True)

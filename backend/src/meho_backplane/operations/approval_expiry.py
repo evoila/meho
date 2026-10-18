@@ -40,16 +40,16 @@ one tenant is logged and swallowed so the remaining tenants still get
 swept — the same "loop survival over per-tick completeness" trade-off the
 topology scheduler makes.
 
-Audit + broadcast
------------------
+Audit + add-on step events
+--------------------------
 
 ``expire_stale_requests`` writes one ``approval.decision`` audit row per
 expired request inside the sweep transaction (the durable truth). After
-that transaction commits, one fail-open ``approval.expired`` broadcast
-event is published per expired row via
-:func:`~meho_backplane.operations.approval_queue.publish_approval_event`
-so operator watchers see the transition live; a broadcast outage never
-blocks the durable decision.
+that transaction commits, one ``approval.expired`` step event is
+recorded per expired row via
+:func:`~meho_backplane.operations.approval_queue.record_approval_step_event`
+for the paired add-on that asked for it (fail-open). No Broadcast event
+is published (#3758); watchers read the stored row.
 """
 
 from __future__ import annotations
@@ -69,7 +69,7 @@ from meho_backplane.metrics import note_loop_tick
 from meho_backplane.operations.approval_queue import (
     expire_stale_requests,
     expiry_operator,
-    publish_approval_event,
+    record_approval_step_event,
 )
 from meho_backplane.settings import get_settings
 
@@ -92,7 +92,7 @@ async def _sweep_one_tenant(
 
     Opens a dedicated session so a failure sweeping this tenant rolls back
     only its own work and is isolated from the rest of the sweep. The
-    ``approval.expired`` broadcasts are published **after** the sweep
+    ``approval.expired`` step events are recorded **after** the sweep
     transaction commits (fail-open) so a phantom event cannot outlive a
     rolled-back expiry.
     """
@@ -116,11 +116,10 @@ async def _sweep_one_tenant(
             return 0
 
     for request in expired:
-        await publish_approval_event(
+        await record_approval_step_event(
             tenant_id=tenant_id,
             request=request,
             decision="expired",
-            principal_sub=operator.sub,
             audit_id=request._audit_id,  # type: ignore[attr-defined]
         )
     return len(expired)

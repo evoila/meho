@@ -31,20 +31,35 @@ Omissions are structured, not silent:
   with ``reason="output_too_large"``;
 * conventions that did not fit the preamble budget are listed in
   :attr:`HostedContext.omissions` and named in the prompt.
+
+Delivery receipt (#3763)
+------------------------
+
+Each assembly also returns a :class:`HostedContextReceipt`. It says what
+MEHO *supplied* to the run: the conventions revision, the tools and their
+versions, size estimates, and the ids of what was left out. It holds no
+convention text, no retrieved text, and no claim that the model followed
+any of it. It goes to the run trace (the ``agent_hosted_context_delivered``
+log line and :attr:`~meho_backplane.agent.run.AgentRunResult.context_receipt`)
+and, through its ``correlation_id``, to the request usage sink as one
+``context_selected`` event. It is never written to ``audit_log``.
 """
 
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, Literal
+from uuid import UUID
 
 import structlog
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai import ModelRetry
 
 from meho_backplane.agent.meta_tool import MetaToolSpec
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.conventions.preamble import assemble_preamble
+from meho_backplane.conventions.preamble import assemble_preamble_detailed
+from meho_backplane.conventions.schemas import estimate_tokens
 from meho_backplane.mcp.registry import (
     capability_satisfied,
     get_resource_for_uri,
@@ -59,6 +74,7 @@ from meho_backplane.mcp.resources import tenant_conventions as _convention_resou
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.memory.schemas import MEMORY_ID_URI_TEMPLATE
 from meho_backplane.operations.delivery_budget import measure_delivered_wire_bytes
+from meho_backplane.request_usage.collector import note_context_selected
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -68,6 +84,7 @@ __all__ = [
     "READ_CONTEXT_RESOURCE",
     "ContextOmission",
     "HostedContext",
+    "HostedContextReceipt",
     "assemble_hosted_context",
     "build_read_context_resource_tool",
     "read_context_resource",
@@ -233,13 +250,63 @@ _TOOL_LINES: Final[tuple[tuple[str, str], ...]] = (
 )
 
 
+#: Why something was left out of a hosted run's context.
+#:
+#: * ``over_budget`` -- a convention did not fit the preamble size limit.
+#: * ``role_below_floor`` -- the definition asked for a tool, but the run's
+#:   role is below the tool's floor.
+#: * ``unsupported`` -- the definition asked for a tool this runtime does
+#:   not ship.
+OmissionReason = Literal["over_budget", "role_below_floor", "unsupported"]
+
+
 @dataclass(frozen=True, slots=True)
 class ContextOmission:
-    """One item the assembler left out of the prompt, and why."""
+    """One item left out of a hosted run, and why.
 
-    kind: Literal["convention"]
+    ``name`` is an id only: a convention slug or a tool name.
+    """
+
+    kind: Literal["convention", "capability"]
     name: str
-    reason: Literal["over_budget"]
+    reason: OmissionReason
+
+
+class HostedContextReceipt(BaseModel):
+    """What MEHO supplied to one configured hosted run (#3763).
+
+    The receipt states delivery, not use. It has no field for the context
+    text, retrieved text, prompts, or whether the model followed anything;
+    ``extra="forbid"`` keeps it that way. All ids belong to the run's own
+    tenant.
+
+    * ``conventions_revision`` -- digest of the tenant's operational
+      conventions the packer considered (see
+      :attr:`~meho_backplane.conventions.preamble.PreambleAssembly.conventions_revision`).
+    * ``capabilities`` -- each registered tool name and its version (a
+      short digest of the name, description, and input schema the model
+      was shown).
+    * ``context_chars`` / ``context_tokens_estimate`` -- size of the hosted
+      context part of the system prompt.
+    * ``conventions_delivered`` / ``conventions_tokens_estimate`` -- how many
+      conventions were packed, and the size of their band.
+    * ``omissions`` -- conventions over the size limit and requested tools
+      the run did not get.
+    * ``correlation_id`` -- the id of the matching ``context_selected``
+      request usage event, or ``None`` when no event was recorded (usage
+      collection off, or no open request).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    conventions_revision: str = Field(max_length=64)
+    capabilities: dict[str, str]
+    context_chars: int = Field(ge=0)
+    context_tokens_estimate: int = Field(ge=0)
+    conventions_delivered: int = Field(ge=0)
+    conventions_tokens_estimate: int = Field(ge=0)
+    omissions: tuple[ContextOmission, ...] = ()
+    correlation_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,16 +314,18 @@ class HostedContext:
     """The assembled hosted context.
 
     ``text`` is added to the system prompt after the definition's own
-    ``system_prompt``. ``omissions`` lists what was left out.
+    ``system_prompt``. ``omissions`` lists the conventions left out.
+    ``receipt`` describes the delivery without its content.
     """
 
     text: str
+    receipt: HostedContextReceipt
     omissions: tuple[ContextOmission, ...] = ()
 
 
 def _access_band(
     operator: Operator,
-    tool_names: Collection[str],
+    tool_names: Mapping[str, str],
     dropped_slugs: list[str],
 ) -> str:
     lines = [
@@ -304,24 +373,32 @@ def _access_band(
 
 async def assemble_hosted_context(
     operator: Operator,
-    tool_names: Collection[str],
+    tools: Mapping[str, str],
+    *,
+    capability_omissions: Sequence[ContextOmission] = (),
 ) -> HostedContext:
     """Assemble the context a configured hosted run gets after its system prompt.
 
-    *tool_names* is the run's registered tool surface; the band names only
-    the context tools in it, and says what to do when ``read_context_resource``
-    is missing. The conventions come from
-    :func:`~meho_backplane.conventions.preamble.assemble_preamble` with
-    ``conventions_only=True``: same order, same budget, same untrusted guard
-    and delimiters as the MCP ``initialize`` instructions. The broadcast,
-    runbook-priming, and doc-catalogue bands are left out because they name
-    MCP tools a hosted run does not have.
+    *tools* maps each registered tool name to its version; the band names
+    only the context tools in it, and says what to do when
+    ``read_context_resource`` is missing. *capability_omissions* are the
+    requested tools the run did not get; they go to the receipt only.
+
+    The conventions come from
+    :func:`~meho_backplane.conventions.preamble.assemble_preamble_detailed`
+    with ``conventions_only=True``: same order, same budget, same untrusted
+    guard and delimiters as the MCP ``initialize`` instructions. The
+    broadcast, runbook-priming, and doc-catalogue bands are left out because
+    they name MCP tools a hosted run does not have.
 
     The definition's ``system_prompt`` is not touched; the caller sends it
     first, as its own system prompt part, so it stays ahead of all tenant
     text.
+
+    Each call notes one ``context_selected`` request usage event when a
+    request boundary is open; its id is the receipt's ``correlation_id``.
     """
-    preamble = await assemble_preamble(
+    preamble = await assemble_preamble_detailed(
         operator.tenant_id,
         operator.sub,
         conventions_only=True,
@@ -332,10 +409,20 @@ async def assemble_hosted_context(
             tenant_id=str(operator.tenant_id),
             dropped_slugs=preamble.dropped_slugs,
         )
-    band = _access_band(operator, tool_names, preamble.dropped_slugs)
+    band = _access_band(operator, tools, preamble.dropped_slugs)
     text = "\n\n".join(part for part in (band, preamble.text) if part)
     omissions = tuple(
         ContextOmission(kind="convention", name=slug, reason="over_budget")
         for slug in preamble.dropped_slugs
     )
-    return HostedContext(text=text, omissions=omissions)
+    receipt = HostedContextReceipt(
+        conventions_revision=preamble.conventions_revision,
+        capabilities=dict(tools),
+        context_chars=len(text),
+        context_tokens_estimate=estimate_tokens(text),
+        conventions_delivered=len(preamble.kept_slugs),
+        conventions_tokens_estimate=preamble.conventions_tokens,
+        omissions=(*omissions, *capability_omissions),
+        correlation_id=note_context_selected(),
+    )
+    return HostedContext(text=text, receipt=receipt, omissions=omissions)

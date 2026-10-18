@@ -359,7 +359,11 @@ Who uses them:
   conventions_only=True)`. That returns the conventions band alone (same
   order, budget, guard, and delimiters), without the broadcast,
   priming, and catalogue bands, because those name MCP tools a hosted
-  run does not have. See `agent-runtime.md`.
+  run does not have. See `agent-runtime.md`. The hosted assembler
+  uses `assemble_preamble_detailed`, whose `conventions_revision` (a
+  16-character digest of every operational row's `id` and
+  `updated_at`, in pack order) goes on the run's delivery receipt
+  (#3763).
 - **MCP `initialize`**: `_session_instructions` logs one
   `mcp_preamble_receipt` record per session with `included_slugs`,
   `dropped_slugs`, `oversize_slugs`, `conventions_tokens`,

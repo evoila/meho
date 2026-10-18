@@ -20,7 +20,9 @@ an in-process :class:`asyncio.Task`:
   definition (one with a ``toolset``) also gets a second system prompt part
   with the hosted context (#3759,
   :mod:`meho_backplane.agent.hosted_context`): tenant conventions and a
-  note on which context tools the run has.
+  note on which context tools the run has. Its delivery receipt (#3763)
+  is logged as ``agent_hosted_context_delivered`` and returned on
+  :attr:`AgentRunResult.context_receipt`.
 * **Turn budget** — :attr:`AgentDefinition.request_limit` becomes a
   ``UsageLimits(request_limit=...)``; the framework raises
   :class:`~pydantic_ai.exceptions.UsageLimitExceeded` once the loop would
@@ -101,7 +103,11 @@ from pydantic_ai.exceptions import UsageLimitExceeded
 from pydantic_ai.usage import RunUsage
 
 from meho_backplane.agent.approval_wait import resume_or_surface_awaiting_approval
-from meho_backplane.agent.hosted_context import assemble_hosted_context
+from meho_backplane.agent.hosted_context import (
+    ContextOmission,
+    HostedContextReceipt,
+    assemble_hosted_context,
+)
 from meho_backplane.agent.invoke import (
     ChildAgentResolver,
     ChildRunFinalizer,
@@ -113,7 +119,11 @@ from meho_backplane.agent.models import (
     ModelResolver,
     ResolverError,
 )
-from meho_backplane.agent.toolset import resolve_agent_tools
+from meho_backplane.agent.toolset import (
+    ToolsetResolution,
+    capability_versions,
+    resolve_agent_toolset,
+)
 from meho_backplane.auth.operator import Operator
 from meho_backplane.operations.meta_tools import call_operation, list_operation_groups
 from meho_backplane.settings import get_settings
@@ -550,6 +560,12 @@ class AgentRunResult:
     pricing table charges against. Default to 0 so a deterministic
     test model that does not stamp usage (e.g. a function model that
     short-circuits the loop) still produces a valid result.
+
+    ``context_receipt`` (#3763) says what hosted context MEHO supplied to
+    a configured run (see
+    :class:`~meho_backplane.agent.hosted_context.HostedContextReceipt`).
+    It is ``None`` for a legacy run (``toolset is None``), which gets no
+    hosted context.
     """
 
     output: Any
@@ -559,6 +575,25 @@ class AgentRunResult:
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    context_receipt: HostedContextReceipt | None = None
+
+
+def _capability_omissions(resolution: ToolsetResolution) -> tuple[ContextOmission, ...]:
+    """Return the requested tools a run did not get, as receipt omissions.
+
+    Tools left out of the spec's allow-list are not listed: the author did
+    not ask for them.
+    """
+    unsupported = (
+        ContextOmission(kind="capability", name=name, reason="unsupported")
+        for name in resolution.missing
+    )
+    denied = (
+        ContextOmission(kind="capability", name=name, reason="role_below_floor")
+        for name, reason in resolution.disabled.items()
+        if reason == "role_below_floor"
+    )
+    return (*unsupported, *denied)
 
 
 class AgentRunEventKind(StrEnum):
@@ -929,6 +964,7 @@ class PydanticAgentRun:
         self,
         definition: AgentDefinition,
         operator: Operator,
+        receipts: list[HostedContextReceipt] | None = None,
     ) -> Agent[Operator, Any]:
         """Construct the framework agent for *definition* under *operator*.
 
@@ -943,7 +979,8 @@ class PydanticAgentRun:
         :func:`~meho_backplane.agent.hosted_context.assemble_hosted_context`
         as a second system prompt part. ``definition.system_prompt`` stays
         the first part, unchanged. The legacy ``None`` path gets no hosted
-        context.
+        context. Each time the hosted context is built, its delivery
+        receipt (#3763) is logged and appended to *receipts* when given.
 
         When this runtime carries a :attr:`child_agent_resolver` (G11.1-T5),
         the ``invoke_agent`` composition tool is appended to whichever surface
@@ -961,7 +998,8 @@ class PydanticAgentRun:
         model = self._resolve_model(definition, operator)
         invoke_tool = self._maybe_build_invoke_tool()
         if definition.toolset is not None:
-            tools = resolve_agent_tools(definition.toolset, operator)
+            resolution = resolve_agent_toolset(definition.toolset, operator)
+            tools = resolution.tools
             if invoke_tool is not None:
                 tools = [*tools, invoke_tool]
             agent: Agent[Operator, Any] = Agent(
@@ -971,12 +1009,27 @@ class PydanticAgentRun:
                 output_type=definition.output_type if definition.output_type is not None else str,
                 tools=tools,
             )
-            tool_names = frozenset(tool.name for tool in tools)
+            versions = capability_versions(tools)
+            omissions = _capability_omissions(resolution)
 
             # #3759: a second system prompt part, after the definition's own
             # prompt. Built at run start under the run's operator.
             async def _hosted_context(ctx: RunContext[Operator]) -> str:
-                return (await assemble_hosted_context(ctx.deps, tool_names)).text
+                context = await assemble_hosted_context(
+                    ctx.deps,
+                    versions,
+                    capability_omissions=omissions,
+                )
+                _log.info(
+                    "agent_hosted_context_delivered",
+                    agent=definition.name,
+                    operator_sub=ctx.deps.sub,
+                    tenant_id=str(ctx.deps.tenant_id),
+                    receipt=context.receipt.model_dump(mode="json"),
+                )
+                if receipts is not None:
+                    receipts.append(context.receipt)
+                return context.text
 
             agent.system_prompt(_hosted_context)
             return agent
@@ -1045,6 +1098,7 @@ class PydanticAgentRun:
         operator: Operator,
         inputs: str,
         run_id: UUID,
+        receipts: list[HostedContextReceipt] | None = None,
     ) -> AgentRunResult:
         """Drive one bounded loop and return its result.
 
@@ -1075,6 +1129,7 @@ class PydanticAgentRun:
             output_tokens=usage.output_tokens,
             cache_read_tokens=usage.cache_read_tokens,
             cache_write_tokens=usage.cache_write_tokens,
+            context_receipt=receipts[0] if receipts else None,
         )
         _log.info(
             "agent_run_succeeded",
@@ -1160,10 +1215,11 @@ class PydanticAgentRun:
                 "AgentRun.start requires a running event loop; "
                 "the sync invocation surface (T4) bridges at the edge",
             ) from exc
-        agent = self._build_agent(definition, operator)
+        receipts: list[HostedContextReceipt] = []
+        agent = self._build_agent(definition, operator, receipts)
         run_id = uuid4()
         task = asyncio.create_task(
-            self._run_loop(agent, definition, operator, inputs, run_id),
+            self._run_loop(agent, definition, operator, inputs, run_id, receipts),
             name=f"agent-run-{run_id}",
         )
         _log.info(

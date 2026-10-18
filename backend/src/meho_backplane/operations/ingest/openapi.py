@@ -358,6 +358,9 @@ _VERBS = frozenset({"get", "post", "put", "patch", "delete", "head", "options", 
 # Anything outside this set + the ``dangerous`` set below falls into
 # the ``safe`` bucket.
 _CAUTION_VERBS = frozenset({"POST", "PUT", "PATCH"})
+# A ``DELETE`` lands ``dangerous`` and also requires approval (#3827): it
+# usually removes something that cannot be brought back, so it must wait for
+# a second person on every seat, not run at once for a human operator.
 _DANGEROUS_VERBS = frozenset({"DELETE"})
 
 # VIM-over-JSON represents managed-object methods as POST requests such as
@@ -1164,7 +1167,7 @@ def _build_proto(
     _assert_parameter_schema_standalone(op_id=op_id, parameter_schema=parameter_schema)
 
     safety_level = _safety_level_for(method)
-    requires_approval = _has_destructive_action_hint(
+    requires_approval = method in _DANGEROUS_VERBS or _has_destructive_action_hint(
         operation_id=_optional_string(operation.get("operationId")),
         path=path,
     )

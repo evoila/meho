@@ -502,8 +502,18 @@ Frozen Pydantic v2 model. One per operation. Maps 1:1 to a subset of
 | `parameter_schema` | `parameter_schema` | Flattened JSON Schema 2020-12 with `x-meho-param-loc`; `additionalProperties: false` (#293) |
 | `response_schema` | `response_schema` | Success-response schema or `None` |
 | `safety_level` | `safety_level` | HTTP-verb heuristic, narrow VIM destructive-action hint, then any connector-owned minimum safety floor, then the catalog `safety_overlay` |
-| `requires_approval` | `requires_approval` | `False` for ordinary operations; `True` for destructive-action hints, a connector-owned minimum safety floor, or a catalog `safety_overlay` rule |
+| `requires_approval` | `requires_approval` | `False` for ordinary operations; `True` for every `DELETE` (#3827), destructive-action hints, a connector-owned minimum safety floor, or a catalog `safety_overlay` rule |
 | `llm_instructions` | `llm_instructions` | `None` from the parser; set only by a connector-owned spec correction |
+
+Every `DELETE` lands `dangerous` with `requires_approval=True` (#3827). A
+delete usually removes something that cannot be brought back. Without the
+approval flag, a human operator seat ran it at once. Now it waits until a
+second person approves, on every seat. The parser does not use the
+`destructive` tier here: that tier also needs a blast-radius statement from a
+preview builder, and ingested ops have none, so a `destructive` ingested
+delete could never run. `test_operations_ingest_delete_approval.py` checks
+that no `DELETE` in a shipped spec, or in the pinned vCenter and NSX specs,
+lands without approval.
 
 The parser treats a VIM-style operation whose `operationId` or final path
 method starts with `Destroy`, `Delete`, `Remove`, or `Unregister` as
@@ -574,6 +584,7 @@ listed methods.
 | `POST` `/vcenter/vm` | Promoted: matches the governed `vmware.composite.vm.create` posture. |
 | `DELETE` `/vcenter/vm/{vm}` | Promoted: matches the governed VM-destroy posture. |
 | mutating `/vcenter/vm/{vm}/power` and `/power/**` | Promoted: matches the governed VM-power posture. |
+| `POST` `/cis/tagging/tag-association[/{tagId}]?action=detach*` | Promoted (#3827): removes tags from inventory objects, like the tag and category `DELETE`s the parser already gates. |
 | VM reads and non-VMware connectors | Unchanged: no connector floor applies. |
 
 T2 owns the rest of the ORM columns: `tenant_id`, `source_kind`

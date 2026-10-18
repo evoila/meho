@@ -101,7 +101,7 @@ paths:
           description: Reset accepted.
 ```
 
-`--dry-run` against this file prints `operations: 2 total (2 inserted …)`; drop `--dry-run` to ingest for real, then continue from [Step 2](#step-2--ingest-the-spec). The parser applies the **same** safety heuristic a downloaded spec gets (`GET` → `safe`, `POST` → `caution`, `DELETE` → `dangerous`), so review the staged groups (Step 4) and mark per-op overrides (Step 6) the same way.
+`--dry-run` against this file prints `operations: 2 total (2 inserted …)`; drop `--dry-run` to ingest for real, then continue from [Step 2](#step-2--ingest-the-spec). The parser applies the **same** safety heuristic a downloaded spec gets (`GET` → `safe`, `POST` → `caution`, `DELETE` → `dangerous` and waits for approval), so review the staged groups (Step 4) and mark per-op overrides (Step 6) the same way.
 
 Authoring tips:
 
@@ -257,7 +257,7 @@ Most operators polish 2–4 groups per ingest; the LLM's output is usable for th
 
 ### Step 6 — mark per-op safety overrides
 
-The parser defaults `DELETE` verbs to `safety_level='dangerous'` but leaves `requires_approval=false`. Flip `requires_approval` on any op whose execution should block on the approval queue:
+The parser sets `DELETE` verbs to `safety_level='dangerous'` with `requires_approval=true`, so a delete waits for approval on every seat (#3827). Flip `requires_approval` on any other op whose execution should block on the approval queue:
 
 ```bash
 meho connector edit-op vmware-rest-9.0 'DELETE:/vcenter/vm/{vm}' \

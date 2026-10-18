@@ -24,7 +24,8 @@ process starts, :func:`wait_until_first_run`:
 3. returns at once if there is no such run (none within the last interval, a
    fresh install, or a loop that is set to keep rows forever and so writes no
    row); otherwise it waits only for the rest of the interval
-   (:func:`seconds_until_due`).
+   (:func:`seconds_until_due`). The rest is counted from the time *after*
+   the read, so a slow read does not make the run late.
 
 The loop then runs, and after that runs once per interval.
 
@@ -151,13 +152,12 @@ async def wait_until_first_run(
     """
     await asyncio.sleep(FIRST_RUN_DELAY_SECONDS)
 
-    now = datetime.now(UTC)
     try:
         last_run = await last_recorded_run(
             tenant_id=tenant_id,
             operator_sub=operator_sub,
             path=path,
-            since=now - timedelta(seconds=interval_seconds),
+            since=datetime.now(UTC) - timedelta(seconds=interval_seconds),
         )
     except Exception as exc:
         # Run at once: a run is safe to run twice, and running early is
@@ -169,6 +169,8 @@ async def wait_until_first_run(
         )
         last_run = None
 
+    # Read the clock after the lookup: a slow read must not make the run late.
+    now = datetime.now(UTC)
     wait_seconds = seconds_until_due(last_run, now=now, interval_seconds=interval_seconds)
     _log.info(
         f"{job}_scheduled",

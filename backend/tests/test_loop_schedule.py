@@ -16,7 +16,8 @@ What is covered:
   run runs one minute after start; a real run is found by the next start.
 * **The helper**: only rows the loop writes count as a run, and only within
   the window; the wait is the rest of the interval and a future last run is
-  due now; a failed read logs and runs at once.
+  due now; a failed read logs and runs at once; a slow read does not make
+  the run late.
 
 Tests run against the autouse SQLite engine from ``tests.conftest`` (a fresh
 migrated DB per test). ``asyncio.sleep`` is replaced by a fake that records
@@ -386,3 +387,42 @@ async def test_last_run_read_failure_runs_at_once(monkeypatch: pytest.MonkeyPatc
     assert failed[0]["error_type"] == "RuntimeError"
     scheduled = [e for e in captured if e["event"] == "test_cleanup_scheduled"]
     assert scheduled[0]["next_run_in_seconds"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_slow_last_run_read_does_not_delay_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Time that passes during the database read counts against the wait.
+
+    The last run was 2 days ago at the start of the read. The read takes 30
+    seconds. The wait must be the rest of the interval as of the end of the
+    read, 30 seconds shorter, so the run is not 30 seconds late.
+    """
+    read_seconds = 30.0
+    start = datetime(2026, 1, 15, 12, 0, tzinfo=UTC)
+    last_run = start - timedelta(days=2)
+    clock = [start]
+
+    class _Clock(datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> datetime:
+            return clock[0]
+
+    async def _slow_read(**_: Any) -> datetime:
+        clock[0] = clock[0] + timedelta(seconds=read_seconds)
+        return last_run
+
+    monkeypatch.setattr(loop_schedule, "datetime", _Clock)
+    monkeypatch.setattr(loop_schedule, "last_recorded_run", _slow_read)
+    sleep = AsyncMock()
+
+    with patch("asyncio.sleep", new=sleep):
+        await wait_until_first_run(
+            job="test_cleanup",
+            tenant_id=_TENANT,
+            operator_sub=_SUB,
+            path=_PATH,
+            interval_seconds=_WEEK_SECONDS,
+        )
+
+    waits = [c.args[0] for c in sleep.await_args_list]
+    assert waits == [FIRST_RUN_DELAY_SECONDS, _WEEK_SECONDS - 2 * _DAY_SECONDS - read_seconds]

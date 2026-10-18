@@ -1453,6 +1453,15 @@ runs under the **reviewing** operator's token
 so the preflight is the right early signal while the reviewer must carry
 the same grant.
 
+`k8s.secret.read_to_ref` (#3844) also registers a preflight. The op reads
+a Kubernetes Secret and writes the value to Vault through the
+`vault.kv.put` handler, so it gets the same `vault.kv.put` check on the
+path it writes to: `secret/data/tenants/<tenant_id>/<register_as>`. Its
+preview stays hidden (it is a credential op), but the check still runs,
+so a write Vault would refuse is refused at park time instead of after
+approval. See
+[`docs/codebase/connectors-kubernetes.md`](connectors-kubernetes.md).
+
 ## Transports
 
 ### REST (`backend/src/meho_backplane/api/v1/approvals.py`)

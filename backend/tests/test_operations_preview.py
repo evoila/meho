@@ -28,6 +28,7 @@ The kubernetes API surface is mocked so the test runs in every CI lane.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -42,6 +43,9 @@ from meho_backplane.operations._preview import (
     register_permission_preflight,
     register_preview_builder,
 )
+from meho_backplane.settings import get_settings
+
+from ._vault_fakes import install_fake_vault
 
 
 @dataclass
@@ -611,3 +615,100 @@ async def test_permission_preflight_is_fail_soft() -> None:
         params={},
     )
     assert await build_permission_preflight(ctx) is None
+
+
+# ---------------------------------------------------------------------------
+# k8s.secret.read_to_ref preflight (#3844)
+# ---------------------------------------------------------------------------
+
+_READ_TO_REF_PARAMS = {"name": "guest-kubeconfig", "namespace": "ns-a", "register_as": "guest-a"}
+_READ_TO_REF_PATH = "secret/data/tenants/00000000-0000-0000-0000-00000000a0a0/guest-a"
+
+
+@pytest.fixture
+def _vault_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Pin the settings the real Vault probe needs (fake client, no network)."""
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.setenv("VAULT_OIDC_ROLE", "meho-mcp")
+    monkeypatch.setenv("VAULT_OIDC_MOUNT_PATH", "jwt")
+    monkeypatch.delenv("VAULT_NAMESPACE", raising=False)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+def _read_to_ref_ctx() -> PreviewContext:
+    return PreviewContext(
+        descriptor=_FakeDescriptor(op_id="k8s.secret.read_to_ref"),  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=_operator(),
+        target=_FakeTarget(),
+        params=dict(_READ_TO_REF_PARAMS),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_vault_settings_env")
+@pytest.mark.parametrize(
+    ("granted", "will_be_denied"),
+    [(["read"], True), (["create", "update"], False)],
+)
+async def test_read_to_ref_preflight_probes_the_staged_vault_path(
+    monkeypatch: pytest.MonkeyPatch, granted: list[str], will_be_denied: bool
+) -> None:
+    """The op's preflight probes the Vault path the handler writes to.
+
+    ``k8s.secret.read_to_ref`` is credential-class, so its preview is
+    suppressed. The preflight still runs, on the tenant path derived from
+    ``register_as``, so a write Vault would refuse shows ``will_be_denied``
+    before anyone approves it.
+    """
+    fake = install_fake_vault(monkeypatch)
+    fake.sys.capabilities_by_path = {_READ_TO_REF_PATH: granted}
+    ctx = _read_to_ref_ctx()
+
+    assert await build_proposed_effect(ctx) is None
+    result = await build_permission_preflight(ctx)
+
+    assert result is not None
+    assert result["path"] == _READ_TO_REF_PATH
+    assert result["required"] == ["create", "update"]
+    assert result["will_be_denied"] is will_be_denied
+    assert fake.sys.get_capabilities_calls == [
+        {"paths": [_READ_TO_REF_PATH], "token": None, "accessor": None}
+    ]
+    assert fake.secrets.kv.v2.read_calls == []
+
+
+@pytest.mark.asyncio
+async def test_read_to_ref_preflight_uses_the_handler_vault_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The probe runs with ``target=None``, like the handler's write.
+
+    ``ctx.target`` is the Kubernetes cluster. Passing it on would make the
+    probe pick a role the real write never uses.
+    """
+    from meho_backplane.connectors.vault import ops as vault_ops
+
+    seen: dict[str, Any] = {}
+
+    async def _spy(
+        operator: Operator, op_id: str, params: dict[str, Any], target: Any = None
+    ) -> dict[str, Any]:
+        seen.update(op_id=op_id, params=params, target=target)
+        return {"will_be_denied": False}
+
+    monkeypatch.setattr(vault_ops, "vault_kv_write_capability_preflight", _spy)
+
+    assert await build_permission_preflight(_read_to_ref_ctx()) == {"will_be_denied": False}
+    assert seen == {
+        "op_id": "vault.kv.put",
+        "params": {
+            "mount": "secret",
+            "path": "tenants/00000000-0000-0000-0000-00000000a0a0/guest-a",
+        },
+        "target": None,
+    }

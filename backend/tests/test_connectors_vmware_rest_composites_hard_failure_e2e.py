@@ -22,12 +22,15 @@ The two destructive composites must go through preview, approval and resume:
 
 from __future__ import annotations
 
+import itertools
 import uuid
 from collections.abc import Callable, Iterator
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
 
+import httpx
 import pytest
 from sqlalchemy import select
 
@@ -44,7 +47,10 @@ from meho_backplane.operations.approval_queue import (
     approve_request,
     resume_dispatch_after_approval,
 )
+from meho_backplane.operations.dispatcher import set_default_reducer
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.operations.meta_tools import call_operation, preview_operation
+from meho_backplane.operations.reducer import PassThroughReducer
 from meho_backplane.settings import get_settings
 from tests.test_connectors_vmware_rest_composites_write_e2e import (
     _CONNECTOR_ID,
@@ -309,6 +315,48 @@ def _host_evacuate_aborted(mp: pytest.MonkeyPatch) -> Any:
     return recorder
 
 
+def _host_evacuate_partial(mp: pytest.MonkeyPatch) -> Any:
+    del mp
+    recorder = _RecordingVmwareConnector()
+    # The VM row carries no cluster. With partial failure allowed, the host
+    # still enters maintenance and the VM is reported as left behind.
+    recorder.responses["/vcenter/vm"] = {"value": [{"vm": "vm-1"}]}
+    recorder.vmomi_responses["/HostSystem/host-1/EnterMaintenanceMode_Task"] = _vmomi_task_moref(
+        "t-1"
+    )
+    return recorder
+
+
+def _guest_program_timeout(mp: pytest.MonkeyPatch) -> Any:
+    recorder = _guest_program_exit_unknown(mp)
+    # Each clock read jumps 10 s, so the 1 s timeout is over after one poll.
+    clock = itertools.count(start=0.0, step=10.0)
+    mp.setattr(_guest, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+
+    def _always_running(path: str, json: Any) -> Any | None:
+        del json
+        return [{"pid": 4242}] if path.endswith("/ListProcessesInGuest") else None
+
+    _wrap_vmomi(recorder, _always_running)
+    return recorder
+
+
+class _ToolsDownVmwareConnector(_RecordingVmwareConnector):
+    """Answers the guest power call with a 503, as vCenter does when Tools is down."""
+
+    async def _post_json(self, target: Any, path: str, **kwargs: Any) -> Any:
+        if self._spec(path).startswith("/vcenter/vm/vm-1/guest/power"):
+            request = httpx.Request("POST", f"https://vc{path}")
+            response = httpx.Response(503, request=request)
+            raise httpx.HTTPStatusError("Service unavailable", request=request, response=response)
+        return await super()._post_json(target, path, **kwargs)
+
+
+def _vm_power_tools_down(mp: pytest.MonkeyPatch) -> Any:
+    del mp
+    return _ToolsDownVmwareConnector()
+
+
 def _host_detach_incomplete(mp: pytest.MonkeyPatch) -> Any:
     del mp
     recorder = _RecordingVmwareConnector()
@@ -433,6 +481,12 @@ _HARD_FAILURES: list[tuple[str, dict[str, Any], Setup, str]] = [
     ),
     ("vmware.composite.vm.power", {"vm": "vm-1", "verb": "on"}, _vm_power_error, "error"),
     (
+        "vmware.composite.vm.power",
+        {"vm": "vm-1", "verb": "guest_shutdown"},
+        _vm_power_tools_down,
+        "tools_unavailable",
+    ),
+    (
         "vmware.composite.vm.power.bulk",
         {"action": "start"},
         _vm_power_bulk_item_error,
@@ -444,7 +498,19 @@ _HARD_FAILURES: list[tuple[str, dict[str, Any], Setup, str]] = [
         _guest_program_exit_unknown,
         "exit_unknown",
     ),
+    (
+        "vmware.composite.vm.guest.program.run",
+        {"vm": "vm-1", "program_path": "/bin/sleep", "wait": True, "timeout_seconds": 1},
+        _guest_program_timeout,
+        "timeout",
+    ),
     ("vmware.composite.host.evacuate", {"host": "host-1"}, _host_evacuate_aborted, "aborted"),
+    (
+        "vmware.composite.host.evacuate",
+        {"host": "host-1", "tolerate_partial_failure": True},
+        _host_evacuate_partial,
+        "partial",
+    ),
     (
         "vmware.composite.host.detach_from_vds",
         _DETACH_PARAMS,
@@ -542,6 +608,46 @@ async def test_content_library_status_read_error_dispatches_as_error(
     )
 
     await _assert_dispatch_error(result, op_id, "read_error")
+
+
+@pytest.fixture
+def jsonflux_reducer() -> Iterator[None]:
+    """Use the real :class:`JsonFluxReducer` (more than 50 rows -> a handle)."""
+    set_default_reducer(JsonFluxReducer())
+    try:
+        yield
+    finally:
+        set_default_reducer(PassThroughReducer())
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("jsonflux_reducer")
+async def test_large_failed_power_bulk_returns_a_handle(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A failed bulk over many VMs still returns a handle, with the failure inline.
+
+    The error path must not send the whole per-VM list back inline. The
+    ``status`` / ``summary`` / ``issues`` fields stay visible without a drill-in.
+    """
+    op_id = "vmware.composite.vm.power.bulk"
+    vm_count = 120
+    recorder = _RecordingVmwareConnector()
+    recorder.responses["/vcenter/vm"] = {"value": [{"vm": f"vm-{n}"} for n in range(vm_count)]}
+    recorder.failures["/vcenter/vm/vm-7/power?action=start"] = "500"
+
+    result = await _dispatch_direct(recorder, stub_embedding_service, op_id, {"action": "start"})
+
+    await _assert_dispatch_error(result, op_id, "composite_error")
+    assert result.handle is not None
+    assert result.handle.total_rows == vm_count
+    assert result.result is not None
+    assert "results" not in result.result
+    assert result.result["summary"] == {"ok": vm_count - 1, "error": 1}
+    assert "failed on 1 of 120 VMs" in result.result["issues"][0]["message"]
+    async with get_sessionmaker()() as s:
+        row = (await s.execute(select(AuditLog).where(AuditLog.path == op_id))).scalar_one()
+    assert row.payload["error"]["error_code"] == "composite_error"
 
 
 # ---------------------------------------------------------------------------

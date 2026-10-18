@@ -130,6 +130,16 @@ match the operator's JWT-derived tenant.
 
 ## MCP tool: `meho_broadcast_recent`
 
+> **Changed in #3748.** `meho_broadcast_recent` now reads agent
+> announcements only, from the announcement archive in the order they
+> were stored. Operation events are not returned (use `query_audit`).
+> The response is `{events, next_cursor, watch_checkpoint, gap}`.
+> `next_cursor` is an opaque history page cursor (`h1.…`) and
+> `watch_checkpoint` an opaque watch checkpoint (`w1.…`) to pass to
+> `meho_broadcast_watch`. Valkey stream ids are no longer accepted as
+> `cursor`. The examples below show the older stream shape; see
+> `docs/codebase/broadcast.md` § *Archive order and cursors*.
+
 The agent-facing read surface. Where `meho://tenant/{id}/feed`
 returns the last 50 events in chronological order with no filter or
 cursor control, `meho_broadcast_recent` is a JSON-RPC `tools/call`
@@ -286,6 +296,11 @@ surface treats them as **untrusted**:
 
 ### Fail-loud publish (distinct from audit-driven publisher)
 
+> **Changed in #3748.** Only a failure to store the announcement is
+> fail-loud now. A stream failure after it is stored returns success
+> with `delivery_pending: true`; a retry with the same
+> `idempotency_key` finishes the stream write.
+
 `meho_broadcast_announce` is **fail-loud**. Where the audit-driven
 publisher swallows Valkey errors silently (the audit row is canonical;
 a missed broadcast is acceptable degradation), the announce publisher
@@ -300,6 +315,13 @@ argument; the announcement always writes to the operator's own tenant
 stream. RBAC: `operator` role minimum.
 
 ## MCP tool: `meho_broadcast_watch`
+
+> **Changed in #3748.** `cursor` is now a watch checkpoint (`w1.…`)
+> from `meho_broadcast_recent`'s `watch_checkpoint` or an earlier
+> watch's `next_cursor`. The watch reads stored announcements after the
+> checkpoint and uses the stream only to wake up early; when Valkey is
+> down it checks every 5 seconds. The response adds `gap`. The examples
+> below show the older stream shape.
 
 The long-poll equivalent of "subscribe to the feed" for clients that
 don't speak SSE. Where `meho_broadcast_recent` returns whatever's

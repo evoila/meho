@@ -42,7 +42,7 @@ func TestRunRecentUsesGeneratedClientAndFilters(t *testing.T) {
 			t.Errorf("limit: %q", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"events":[{"cursor":"1-0","kind":"announcement"}],"next_cursor":"1-0"}`)
+		_, _ = io.WriteString(w, `{"events":[{"event_id":"e-1","kind":"agent_announcement"}],"next_cursor":"h1.x","watch_checkpoint":"w1.x","gap":null}`)
 	}))
 	defer srv.Close()
 	seedXDGAndToken(t, srv.URL)
@@ -50,7 +50,7 @@ func TestRunRecentUsesGeneratedClientAndFilters(t *testing.T) {
 	if err := runRecent(cmd, recentOptions{Target: "cluster-a", Limit: 5, JSONOut: true, BackplaneOverride: srv.URL}); err != nil {
 		t.Fatalf("runRecent: %v", err)
 	}
-	if !strings.Contains(stdout.String(), `"next_cursor": "1-0"`) {
+	if !strings.Contains(stdout.String(), `"next_cursor": "h1.x"`) {
 		t.Errorf("unexpected JSON: %s", stdout.String())
 	}
 }
@@ -72,7 +72,7 @@ func TestRunAnnouncePostsGeneratedRequest(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_, _ = io.WriteString(w, `{"event_id":"11111111-1111-1111-1111-111111111111","cursor":"1-0","claim_id":"22222222-2222-2222-2222-222222222222","phase":"start","owner_sub":"agent:triage","admission":"agent_principal","replayed":false,"targets":null,"planned_op_class":null,"ttl_minutes":30,"work_ref":null,"run_id":null}`)
+		_, _ = io.WriteString(w, `{"event_id":"11111111-1111-1111-1111-111111111111","watch_checkpoint":"w1.x","claim_id":"22222222-2222-2222-2222-222222222222","phase":"start","owner_sub":"agent:triage","admission":"agent_principal","replayed":false,"delivery_pending":false,"targets":null,"planned_op_class":null,"ttl_minutes":30,"work_ref":null,"run_id":null}`)
 	}))
 	defer srv.Close()
 	seedXDGAndToken(t, srv.URL)
@@ -80,7 +80,7 @@ func TestRunAnnouncePostsGeneratedRequest(t *testing.T) {
 	if err := runAnnounce(cmd, announceOptions{Activity: "Checking cluster-a", Target: "cluster-a", Phase: "start", BackplaneOverride: srv.URL}); err != nil {
 		t.Fatalf("runAnnounce: %v", err)
 	}
-	if !strings.Contains(stdout.String(), "claim_id=22222222-2222-2222-2222-222222222222 cursor=1-0") {
+	if !strings.Contains(stdout.String(), "claim_id=22222222-2222-2222-2222-222222222222 watch_checkpoint=w1.x") {
 		t.Errorf("summary: %s", stdout.String())
 	}
 }

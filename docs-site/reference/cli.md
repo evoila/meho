@@ -980,7 +980,7 @@ meho broadcast overrides set [flags]
 
 ### `meho broadcast recent`
 
-Read recent broadcast events for the operator's tenant
+Read recent agent announcements for the operator's tenant
 
 ```
 meho broadcast recent [flags]
@@ -989,7 +989,7 @@ meho broadcast recent [flags]
 - `--active-only` — exclude expired TTL claims
 - `--actor-sub` — exact delegated-agent filter
 - `--backplane` — backplane URL
-- `--cursor` — forward cursor (ISO-8601 timestamp or stream id)
+- `--cursor` — ISO-8601 window start, or next_cursor from a previous page
 - `--json` — emit JSON
 - `--limit` — maximum events (1-1000)
 - `--op-class` — exact op class filter

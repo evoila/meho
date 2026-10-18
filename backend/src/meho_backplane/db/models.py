@@ -3070,6 +3070,18 @@ class AgentAnnouncement(Base):
     * ``agent_announcement_claim_completion_uq`` --
       ``(tenant_id, claim_id)`` where ``phase = 'completion'``: a claim
       completes once.
+
+    Archive order (#3748, migration ``0113``):
+
+    * ``seq`` -- the per-tenant archive sequence number. The publisher
+      takes it from the tenant's :class:`AgentAnnouncementSequence` row
+      in the same transaction as the INSERT, so ``seq`` follows commit
+      order and has no holes from rolled-back writes. Readers page and
+      watch by ``seq``. Nullable only so a pod running the older code
+      during a rolling upgrade can still write; such a row has no place
+      in the archive order and readers skip it.
+    * ``agent_announcement_tenant_seq_uq`` -- ``(tenant_id, seq)``
+      unique: one row per sequence number per tenant.
     """
 
     __tablename__ = "agent_announcement"
@@ -3099,6 +3111,7 @@ class AgentAnnouncement(Base):
             postgresql_where=sa.text("phase = 'completion' AND claim_id IS NOT NULL"),
             sqlite_where=sa.text("phase = 'completion' AND claim_id IS NOT NULL"),
         ),
+        Index("agent_announcement_tenant_seq_uq", "tenant_id", "seq", unique=True),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -3136,6 +3149,40 @@ class AgentAnnouncement(Base):
     admission: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     idempotency_key: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     stream_entry_id: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    seq: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
+
+
+class AgentAnnouncementSequence(Base):
+    """The per-tenant counter behind :attr:`AgentAnnouncement.seq` (#3748).
+
+    One row per tenant. ``last_seq`` is the sequence number of the
+    newest committed announcement. The publisher raises it with
+    ``UPDATE ... SET last_seq = last_seq + 1 RETURNING last_seq`` in the
+    same transaction as the announcement INSERT. The UPDATE locks the row
+    until commit, so a second writer in the same tenant waits and gets
+    the next number only after the first one committed or rolled back.
+    That makes ``seq`` follow commit order, which is what lets a reader
+    use "the highest ``seq`` I have seen" as a safe resume point.
+
+    The lock is held only for the INSERT and the commit. It orders
+    writes; it is not a lease or a claim on any resource.
+
+    The row is created on the first announcement of a tenant
+    (``INSERT ... ON CONFLICT DO NOTHING``). The retention prune never
+    touches it, so ``last_seq`` keeps counting after old rows are
+    deleted, and a reader can tell how many events it missed.
+    """
+
+    __tablename__ = "agent_announcement_sequence"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        primary_key=True,
+    )
+    last_seq: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default=sa.text("0")
+    )
 
 
 class WebSession(Base):

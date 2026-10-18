@@ -3168,26 +3168,28 @@ type BroadcastAnnounceRequestPhase string
 // BroadcastAnnounceRequestPlannedOpClass defines model for BroadcastAnnounceRequest.PlannedOpClass.
 type BroadcastAnnounceRequestPlannedOpClass string
 
-// BroadcastAnnounceResponse Acknowledgement with distinct durable event id and stream cursor.
+// BroadcastAnnounceResponse Acknowledgement of a stored announcement.
 //
 // “replayed=true“ means the step was already stored and no new row was
-// written. “cursor“ is “None“ when the stream entry already existed;
-// it is set when this call wrote the stream entry, including a retry
-// that finished a delivery whose first stream write failed.
+// written. “watch_checkpoint“ is a watch cursor just after this
+// announcement in the archive order. “delivery_pending=true“ means
+// the announcement is stored and readable, but the live wake-up for
+// watchers failed; a retry with the same “idempotency_key“ finishes it.
 type BroadcastAnnounceResponse struct {
-	ActorSub       *string             `json:"actor_sub"`
-	Admission      string              `json:"admission"`
-	ClaimId        openapi_types.UUID  `json:"claim_id"`
-	Cursor         *string             `json:"cursor"`
-	EventId        openapi_types.UUID  `json:"event_id"`
-	OwnerSub       string              `json:"owner_sub"`
-	Phase          string              `json:"phase"`
-	PlannedOpClass *string             `json:"planned_op_class"`
-	Replayed       bool                `json:"replayed"`
-	RunId          *openapi_types.UUID `json:"run_id"`
-	Targets        *[]string           `json:"targets"`
-	TtlMinutes     *int                `json:"ttl_minutes"`
-	WorkRef        *string             `json:"work_ref"`
+	ActorSub        *string             `json:"actor_sub"`
+	Admission       string              `json:"admission"`
+	ClaimId         openapi_types.UUID  `json:"claim_id"`
+	DeliveryPending bool                `json:"delivery_pending"`
+	EventId         openapi_types.UUID  `json:"event_id"`
+	OwnerSub        string              `json:"owner_sub"`
+	Phase           string              `json:"phase"`
+	PlannedOpClass  *string             `json:"planned_op_class"`
+	Replayed        bool                `json:"replayed"`
+	RunId           *openapi_types.UUID `json:"run_id"`
+	Targets         *[]string           `json:"targets"`
+	TtlMinutes      *int                `json:"ttl_minutes"`
+	WatchCheckpoint *string             `json:"watch_checkpoint"`
+	WorkRef         *string             `json:"work_ref"`
 }
 
 // BroadcastOverrideCreate Incoming POST body. Pydantic v2 strict.

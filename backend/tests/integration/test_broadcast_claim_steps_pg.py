@@ -260,7 +260,7 @@ async def test_identical_completion_retry_replays_after_waiting(
     assert retry.replayed is True
     assert retry.event.event_id == first.event.event_id
     # Exactly one of the two wrote the stream entry.
-    assert sum(result.cursor is not None for result in (first, retry)) == 1
+    assert sum(result.stream_entry_id is not None for result in (first, retry)) == 1
 
     assert await _phases(claim_id) == ["start", "completion"]
     assert fake_stream.await_count == 2
@@ -295,9 +295,9 @@ async def test_overlapping_retries_deliver_a_stored_step_once(
     retry = await asyncio.wait_for(retry_task, _WAIT_SECONDS)
 
     assert first.replayed is False
-    assert first.cursor == "1700000000000-2"
+    assert first.stream_entry_id == "1700000000000-2"
     assert retry.replayed is True
-    assert retry.cursor is None
+    assert retry.stream_entry_id is None
     assert retry.event.event_id == first.event.event_id
 
     assert await _phases(claim_id) == ["start", "completion"]

@@ -65,6 +65,7 @@ from meho_backplane.broadcast.announcement_claims import (
     IDEMPOTENCY_KEY_REUSED,
     AnnouncementClaimError,
 )
+from meho_backplane.broadcast.archive_sequence import next_announcement_seq
 from meho_backplane.broadcast.client import get_broadcast_client
 from meho_backplane.broadcast.events import BroadcastEvent
 from meho_backplane.broadcast.history import row_to_announcement
@@ -123,14 +124,10 @@ BROADCAST_PUBLISH_ERRORS_TOTAL: Counter = Counter(
 #: Per-phase counter for agent-authored announcement publishes (G6.4-T2
 #: #1092). Labelled by ``phase`` (``"start"`` / ``"update"`` /
 #: ``"completion"``) so dashboards can graph the announce-discipline
-#: cadence per tenant fleet. No paired "errors" counter -- the
-#: ``publish_agent_announcement`` entry point is **fail-loud** (distinct
-#: from :func:`publish_event`'s fail-open contract), so a Valkey teardown
-#: surfaces as a JSON-RPC ``-32603`` Internal Error to the calling
-#: agent rather than as a silent metric increment. The
-#: ``mcp_handler_error`` structlog event from the dispatcher's exception
-#: handler is the operational signal on the failure path; the success
-#: counter is the only metric this entry point emits.
+#: cadence per tenant fleet. Counts stream entries written. An archive
+#: failure surfaces to the agent as JSON-RPC ``-32603``; a stream failure
+#: after the archive commit returns ``delivery_pending`` and logs
+#: ``broadcast_announcement_delivery_pending`` (#3748).
 BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL: Counter = Counter(
     "broadcast_agent_announcements_total",
     "Agent-authored AgentAnnouncementEvent publishes (G6.4-T2 fail-loud entry).",
@@ -157,27 +154,40 @@ class AnnouncementPublishResult:
 
     * ``event`` -- the stored announcement. On a replay this is the
       first stored copy, so the caller echoes the original ids.
-    * ``cursor`` -- the Valkey stream entry id this call wrote, or
-      ``None`` when the entry was already on the stream (a plain replay,
-      an overlapping request for the same step delivered it first, or an
-      earlier try wrote the entry but could not record it on the row).
+    * ``seq`` -- the stored row's archive sequence number (#3748). Readers
+      page and watch by it. ``None`` only for a row an older MEHO version
+      wrote without a number during a rolling upgrade.
+    * ``stream_entry_id`` -- the Valkey stream entry id this call wrote,
+      or ``None`` when it wrote none (the entry was already on the
+      stream, or the stream write failed).
     * ``replayed`` -- ``True`` when the ``idempotency_key`` matched an
-      earlier, identical step, so no new row was written. A replay still
-      writes the stream entry when the first try stored the row but never
-      reached the stream; ``cursor`` is then set.
+      earlier, identical step, so no new row was written.
+    * ``delivery_pending`` -- ``True`` when the row is committed to the
+      archive but the stream write failed. The announcement is stored and
+      readers see it (they read the archive); only the wake-up for live
+      watchers is missing. A retry with the same ``idempotency_key``
+      writes the stream entry without a second row.
     """
 
     event: AgentAnnouncementEvent
-    cursor: str | None
+    seq: int | None
+    stream_entry_id: str | None
     replayed: bool
+    delivery_pending: bool = False
 
 
 @dataclass(frozen=True)
 class _StoredStep:
-    """A step found by its retry key, and whether it reached the stream."""
+    """A stored step: found by its retry key, or just written.
+
+    ``delivered`` says whether it reached the stream; ``replayed`` whether
+    it was found by its retry key rather than written by this call.
+    """
 
     event: AgentAnnouncementEvent
     delivered: bool
+    seq: int | None
+    replayed: bool = True
 
 
 _STEP_FIELDS = (
@@ -229,7 +239,7 @@ async def _find_by_idempotency_key(
             IDEMPOTENCY_KEY_REUSED,
             "this idempotency_key was already used for a different step",
         )
-    return _StoredStep(event=stored, delivered=row.stream_entry_id is not None)
+    return _StoredStep(event=stored, delivered=row.stream_entry_id is not None, seq=row.seq)
 
 
 async def _check_open_claim(
@@ -292,7 +302,7 @@ async def _check_open_claim(
 
 
 def _announcement_row(
-    event: AgentAnnouncementEvent, idempotency_key: str | None
+    event: AgentAnnouncementEvent, idempotency_key: str | None, seq: int
 ) -> AgentAnnouncement:
     return AgentAnnouncement(
         id=event.event_id,
@@ -313,13 +323,14 @@ def _announcement_row(
         actor_sub=event.actor_sub,
         admission=event.admission,
         idempotency_key=idempotency_key,
+        seq=seq,
     )
 
 
 async def _persist_agent_announcement(
     event: AgentAnnouncementEvent,
     idempotency_key: str | None,
-) -> _StoredStep | None:
+) -> _StoredStep:
     """Check the claim rules and write one durable :class:`AgentAnnouncement` row.
 
     Broadcast v2 T2 (#2547) made this row the durable archive, written
@@ -341,8 +352,14 @@ async def _persist_agent_announcement(
     Delivery to the stream is serialised separately, per stored row
     (:func:`_deliver`).
 
-    Returns the stored step on a replay, else ``None`` (a new row was
-    written). Any other DB error propagates (fail-loud).
+    #3748: the new row takes the tenant's next archive sequence number
+    (:func:`~meho_backplane.broadcast.archive_sequence.next_announcement_seq`)
+    right before the INSERT. That locks the tenant's counter row until
+    this transaction ends, so numbers follow commit order. A rollback,
+    including the lost start race above, gives the number back.
+
+    Returns the stored step: the replayed one, or the row just written
+    (``replayed=False``). Any other DB error propagates (fail-loud).
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -352,7 +369,8 @@ async def _persist_agent_announcement(
             stored = await _check_open_claim(session, event, idempotency_key)
         if stored is not None:
             return stored
-        session.add(_announcement_row(event, idempotency_key))
+        seq = await next_announcement_seq(session, event.tenant_id)
+        session.add(_announcement_row(event, idempotency_key, seq))
         try:
             await session.commit()
         except IntegrityError:
@@ -365,7 +383,7 @@ async def _persist_agent_announcement(
                     CLAIM_COMPLETED, "this claim is already completed"
                 ) from None
             raise
-    return None
+    return _StoredStep(event=event, delivered=False, seq=seq, replayed=False)
 
 
 #: Valkey-side "write this announcement once" step, run as one Lua script
@@ -431,7 +449,15 @@ async def _write_stream_entry_once(event: AgentAnnouncementEvent) -> tuple[bool,
     return bool(written), str(entry_id)
 
 
-async def _deliver(event: AgentAnnouncementEvent) -> str | None:
+@dataclass(frozen=True)
+class _Delivery:
+    """What :func:`_deliver` did: the entry id it wrote, or that it failed."""
+
+    written_entry_id: str | None
+    pending: bool = False
+
+
+async def _deliver(event: AgentAnnouncementEvent) -> _Delivery:
     """Write the stored step to the stream once and record the entry id on its row.
 
     Two guards keep one stored step at one stream entry:
@@ -453,13 +479,14 @@ async def _deliver(event: AgentAnnouncementEvent) -> str | None:
       id instead of writing a second entry, and this call records it on
       the row.
 
-    Returns the entry id this call wrote, or ``None`` when the step was
-    already on the stream. The stream write is fail-loud: its error
-    propagates, the transaction rolls back, and the row keeps
-    ``stream_entry_id = NULL`` so a retry can finish the delivery. The
-    UPDATE after a successful write is fail-soft on purpose: the
-    announcement is already on the stream and in the archive, so a
-    failure there must not turn a delivered announcement into an error
+    Returns the entry id this call wrote (``None`` when the step was
+    already on the stream). A failed stream write does not raise (#3748):
+    the archive row is committed and is what readers read, so the call
+    reports ``pending=True`` instead. The transaction rolls back, the row
+    keeps ``stream_entry_id = NULL``, and a retry with the same key can
+    finish the delivery. The UPDATE after a successful write is fail-soft
+    too: the announcement is already on the stream and in the archive, so
+    a failure there must not turn a delivered announcement into an error
     for the caller. The cost is one warning line; a later retry marks the
     row without writing again.
     """
@@ -472,8 +499,17 @@ async def _deliver(event: AgentAnnouncementEvent) -> str | None:
             )
         ).scalar_one()
         if row.stream_entry_id is not None:
-            return None
-        written, entry_id = await _write_stream_entry_once(event)
+            return _Delivery(written_entry_id=None)
+        try:
+            written, entry_id = await _write_stream_entry_once(event)
+        except Exception as exc:
+            await session.rollback()
+            _log.warning(
+                "broadcast_announcement_delivery_pending",
+                error_class=type(exc).__name__,
+                event_id=str(event.event_id),
+            )
+            return _Delivery(written_entry_id=None, pending=True)
         row.stream_entry_id = entry_id
         try:
             await session.commit()
@@ -484,7 +520,7 @@ async def _deliver(event: AgentAnnouncementEvent) -> str | None:
                 error_class=type(exc).__name__,
                 event_id=str(event.event_id),
             )
-        return entry_id if written else None
+        return _Delivery(written_entry_id=entry_id if written else None)
 
 
 async def publish_event(event: BroadcastEvent) -> None:
@@ -553,39 +589,29 @@ async def publish_agent_announcement(
     *,
     idempotency_key: str | None = None,
 ) -> AnnouncementPublishResult:
-    """Fail-loud publish of an agent-authored announcement to the tenant stream.
+    """Store an agent-authored announcement in the archive, then wake the stream.
 
-    Companion to :func:`publish_event` -- same wire shape
-    (``XADD meho:feed:{tenant_id}`` with a single ``event`` field
-    carrying the JSON-serialised model), same ``MAXLEN ~`` trim
-    semantics, same per-tenant stream key. The two differ on a single
-    load-bearing axis: failure semantics.
+    Companion to :func:`publish_event` -- same wire shape on the stream
+    (``XADD meho:feed:{tenant_id}`` with a single ``event`` field carrying
+    the JSON-serialised model), same ``MAXLEN ~`` trim, same per-tenant
+    stream key.
 
-    Fail-loud vs. fail-open
-    -----------------------
+    Archive first, stream second (#3748)
+    ------------------------------------
 
-    :func:`publish_event` swallows every exception silently because the
-    audit row is canonical and a request-path failure to log a
-    side-channel broadcast is worse than the operator missing one entry
-    in the feed. **Inverted contract here.**
+    The ``agent_announcement`` row is the record. Readers
+    (``meho_broadcast_recent`` / ``meho_broadcast_watch``) read the
+    archive by its per-tenant sequence number; the stream entry only wakes
+    live watchers early. So the two legs fail differently:
 
-    An agent-authored announcement is the AGENT's deliberate
-    communication to its operators. A swallowed announcement leaves the
-    agent thinking it told the team while the team never saw it -- the
-    opposite of the team-coordination property the broadcast discipline
-    is meant to provide. The right semantics is:
-
-    1. Publisher raises on any redis-py / Valkey failure.
-    2. The MCP dispatcher (:mod:`meho_backplane.mcp.server`) catches the
-       exception and surfaces it as JSON-RPC ``-32603`` Internal Error.
-    3. The calling agent sees the error and can retry, reroute, or
-       degrade gracefully -- it KNOWS the announcement didn't land.
-
-    The same wire-side stream contract (one ``event`` JSON field per
-    entry) means T1's :func:`meho_backplane.mcp.tools.broadcast.broadcast_recent`
-    surfaces both kinds back to readers via the same ``XRANGE`` -- T1's
-    parser dispatches on the ``event_kind`` field to pick the right
-    model class.
+    * The archive write is **fail-loud**. Any DB error propagates; the MCP
+      dispatcher maps it to JSON-RPC ``-32603`` and the agent knows the
+      announcement did not land.
+    * The stream write is **fail-soft**. When it fails after the row
+      committed, the call still succeeds with ``delivery_pending=True``:
+      the announcement is stored and readers see it, and watchers find it
+      on their next archive scan. A retry with the same
+      ``idempotency_key`` writes the stream entry and never a second row.
 
     Parameters
     ----------
@@ -608,9 +634,10 @@ async def publish_agent_announcement(
     Returns
     -------
     AnnouncementPublishResult
-        The stored event, the Valkey stream entry id (``"<ms>-<seq>"``)
-        this call wrote (``None`` on a plain replay), and whether the
-        call was an idempotent replay.
+        The stored event, its archive sequence number, the Valkey stream
+        entry id this call wrote (``None`` when it wrote none), whether
+        the call was an idempotent replay, and whether the stream wake-up
+        is still pending.
 
     Raises
     ------
@@ -620,31 +647,28 @@ async def publish_agent_announcement(
         A claim rule failed (unknown claim, not the owner, already
         completed, reused idempotency key).
     Exception
-        Anything :func:`get_broadcast_client` or :meth:`Redis.xadd`
-        raises propagates verbatim. The dispatcher's generic exception
-        handler maps it to JSON-RPC ``-32603``; the log line
-        (``mcp_handler_error``) carries the exception class for
-        operator triage. No log line is emitted here -- adding one
-        would shadow the dispatcher's structured exception log and
-        violate the "one log line per failure" discipline the chassis
-        observability guide enforces.
+        Any archive (DB) error propagates verbatim; the dispatcher maps it
+        to JSON-RPC ``-32603``.
     """
     if not event.is_trusted_claim:
         # Only events built from a checked agent identity may be
         # published (#3736); see build_trusted_announcement.
         raise ValueError("publish_agent_announcement needs a trusted claim (claim_id + owner_sub)")
-    # Durable archive first (T2 #2547): the DB row is the coordination
-    # window that survives a Valkey restart. Written before the XADD so a
-    # stream-side failure never costs the durable record. Fail-loud --
-    # any DB exception propagates to the -32603 path.
     stored = await _persist_agent_announcement(event, idempotency_key)
-    if stored is not None and stored.delivered:
-        return AnnouncementPublishResult(event=stored.event, cursor=None, replayed=True)
-    # A replay whose row was stored but never marked as delivered finishes
-    # the delivery here, with the stored copy's ids. _deliver makes sure
-    # the step reaches the stream once (row lock + per-event marker).
-    to_publish = event if stored is None else stored.event
-    cursor = await _deliver(to_publish)
-    if cursor is not None:
-        BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL.labels(phase=to_publish.phase).inc()
-    return AnnouncementPublishResult(event=to_publish, cursor=cursor, replayed=stored is not None)
+    if stored.delivered:
+        return AnnouncementPublishResult(
+            event=stored.event, seq=stored.seq, stream_entry_id=None, replayed=True
+        )
+    # A new row, or a replay whose row was stored but never marked as
+    # delivered. _deliver makes sure the step reaches the stream once
+    # (row lock + per-event marker), with the stored copy's ids.
+    delivery = await _deliver(stored.event)
+    if delivery.written_entry_id is not None:
+        BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL.labels(phase=stored.event.phase).inc()
+    return AnnouncementPublishResult(
+        event=stored.event,
+        seq=stored.seq,
+        stream_entry_id=delivery.written_entry_id,
+        replayed=stored.replayed,
+        delivery_pending=delivery.pending,
+    )

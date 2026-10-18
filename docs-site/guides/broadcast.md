@@ -76,19 +76,23 @@ an agent consumes:
  "principal_sub": "…", "target_name": "prod-vc-1", "ts": "2026-07-31T09:20:00Z"}
 ```
 
-The agent surface returns the same rows in a paged envelope. The default
-window is the **last 30 minutes**; page forward with the cursor:
+The agent surface reads agent announcements only, from the store MEHO
+keeps them in (operation events are in the audit log; use
+`query_audit`). The default window is the **last 30 minutes**; page
+forward with the cursor:
 
 ```json
 // meho_broadcast_recent {"filter": {"target": "prod-vc-1"}, "limit": 100}
-{"events": [ /* rows as above */ ], "next_cursor": "1753948800000-0"}
+{"events": [ /* announcements, oldest first */ ],
+ "next_cursor": "h1.<opaque>", "watch_checkpoint": "w1.<opaque>", "gap": null}
 ```
 
-`next_cursor` round-trips back as the next call's `cursor` for gap-free
-pagination. The `filter` object narrows by exact match on `op_class`,
-`principal` (the human subject), `actor_sub` (the delegated agent),
-`target`, and `work_ref` (a change-ticket reference), plus `active_only`
-to drop expired TTL claims.
+`next_cursor` round-trips back as the next call's `cursor` to read the
+next page of the same view; it is `null` at the end. `watch_checkpoint`
+is where `broadcast_watch` starts so nothing after this read is missed.
+The `filter` object narrows by exact match on `principal`, `target`,
+and `work_ref` (a change-ticket reference), plus `active_only` to drop
+expired TTL claims.
 
 ## Announce intent
 
@@ -104,8 +108,8 @@ already emitted for you). `activity` is the only required field:
  "work_ref": "gh:evoila/meho#123"}
 ```
 
-The publish returns `{event_id, cursor}` plus any structured claims
-echoed back. The fields split into two trust classes, and this
+The publish returns `{event_id, watch_checkpoint, delivery_pending}`
+plus any structured claims echoed back. The fields split into two trust classes, and this
 distinction is load-bearing:
 
 - **Free text** — `activity`, `scope`, `target`, `targets`, `work_ref`
@@ -119,26 +123,31 @@ distinction is load-bearing:
 
 `phase` marks the lifecycle: `start` at intent, `update` for progress,
 `completion` for the wrap-up. Announces are rate-limited to 10 per
-minute per principal and the publish is **fail-loud** — a stream outage
-surfaces as an error, because an agent that announced needs to know it
-landed.
+minute per principal. MEHO stores the announcement first; if storing
+fails you get an error, because an agent that announced needs to know
+it landed. If storing works but the live wake-up fails, you still get a
+success with `delivery_pending: true`: readers see the announcement
+anyway, and a retry with the same `idempotency_key` finishes the
+wake-up without storing a second copy.
 
 ## Watch in real time (agents)
 
 `broadcast_watch` is the long-poll an agent's awareness loop turns on:
-it blocks on `XREAD` until an event past `cursor` arrives or `timeout_ms`
-(default 10 s, cap 30 s) elapses.
+it returns stored announcements after `cursor` (a watch checkpoint), or
+waits until one arrives or `timeout_ms` (default 10 s, cap 30 s)
+elapses.
 
 ```json
-// meho_broadcast_watch {"cursor": "1753948800000-0", "filter": {"target": "prod-rke2"}}
-{"events": [ /* new rows */ ], "next_cursor": "1753948800005-0"}
+// meho_broadcast_watch {"cursor": "w1.<opaque>", "filter": {"target": "prod-rke2"}}
+{"events": [ /* new rows */ ], "next_cursor": "w1.<opaque>", "gap": null}
 ```
 
 Seed the initial `cursor` from a `meho_broadcast_recent` call's
-`next_cursor`, then feed each response's `next_cursor` into the next
-watch — `watch → process → watch`. When nothing arrives in the window,
-`events` is empty and `next_cursor` is unchanged; re-poll with the same
-cursor.
+`watch_checkpoint`, then feed each response's `next_cursor` into the
+next watch — `watch → process → watch`. You never get the same event
+twice. When nothing arrives in the window, `events` is empty and
+`next_cursor` is unchanged; re-poll with the same cursor. If `gap` is
+set, older announcements were removed before you read them.
 
 ## Tenant scoping and redaction
 

@@ -26717,6 +26717,14 @@
             "title": "Ungrouped Op Count",
             "default": 0
           },
+          "ungrouped_ops": {
+            "items": {
+              "$ref": "#/components/schemas/ConnectorReviewOp"
+            },
+            "type": "array",
+            "title": "Ungrouped Ops",
+            "default": []
+          },
           "kind": {
             "type": "string",
             "enum": [

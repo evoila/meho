@@ -103,6 +103,7 @@ from meho_backplane.operations.ingest._internals import (
     load_groups,
     load_op,
     load_ops_in_groups,
+    load_ops_outside_groups,
     operator_disabled_op_ids,
     scope_has_groups,
     validate_edit_op_args,
@@ -133,11 +134,27 @@ from meho_backplane.operations.ingest.spec_provenance import load_spec_provenanc
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.base import Connector
+    from meho_backplane.db.models import EndpointDescriptor
     from meho_backplane.operations.ingest.api_schemas import ConnectorAuthoringKind
 
 __all__ = ["ReviewService"]
 
 _log = structlog.get_logger(__name__)
+
+
+def _review_op(op: EndpointDescriptor) -> ConnectorReviewOp:
+    """Project one descriptor row into its review-payload shape."""
+    return ConnectorReviewOp(
+        op_id=op.op_id,
+        summary=op.summary,
+        description=op.description,
+        custom_description=op.custom_description,
+        safety_level=op.safety_level,
+        requires_approval=op.requires_approval,
+        is_enabled=op.is_enabled,
+        tags=list(op.tags),
+        needs_reingest=op.needs_reingest,
+    )
 
 
 def _authoring_kind_for_payload(
@@ -583,23 +600,18 @@ class ReviewService:
                 when_to_use=group.when_to_use,
                 review_status=group.review_status,
                 op_count=len(ops_by_group[group.id]),
-                ops=[
-                    ConnectorReviewOp(
-                        op_id=op.op_id,
-                        summary=op.summary,
-                        description=op.description,
-                        custom_description=op.custom_description,
-                        safety_level=op.safety_level,
-                        requires_approval=op.requires_approval,
-                        is_enabled=op.is_enabled,
-                        tags=list(op.tags),
-                        needs_reingest=op.needs_reingest,
-                    )
-                    for op in ops_by_group[group.id]
-                ],
+                ops=[_review_op(op) for op in ops_by_group[group.id]],
             )
             for group in groups
         ]
+        # #3870: list every op outside the rendered groups too, with its
+        # enabled state and safety level, so the review shows the whole
+        # op set dispatch can serve — not only the grouped part.
+        ungrouped_ops = await load_ops_outside_groups(
+            session,
+            scope,
+            [group.id for group in groups],
+        )
         has_code_shipped_op = any(op.source_kind in ("typed", "composite") for op in ops)
         kind, dispatchable = _authoring_kind_for_payload(
             scope, rendered_groups, has_code_shipped_op=has_code_shipped_op
@@ -636,6 +648,7 @@ class ReviewService:
             groups=rendered_groups,
             total_op_count=grouped_op_count,
             ungrouped_op_count=max(all_op_count - grouped_op_count, 0),
+            ungrouped_ops=[_review_op(op) for op in ungrouped_ops],
             needs_reingest_op_count=needs_reingest_op_count,
             kind=kind,
             dispatchable=dispatchable,

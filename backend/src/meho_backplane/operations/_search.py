@@ -37,6 +37,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
+from meho_backplane.operations._lookup import visible_scope_clause
 from meho_backplane.retrieval.embedding import get_embedding_service
 from meho_backplane.retrieval.retriever import CANDIDATE_LIMIT, RRF_K
 
@@ -47,6 +48,18 @@ __all__ = [
     "hybrid_search",
     "resolve_group_id",
 ]
+
+# Raw-SQL twin of :func:`~meho_backplane.operations._lookup.visible_scope_clause`
+# for the PostgreSQL candidate queries below: the tenant's own rows when it
+# has any row for the connector, the built-in rows otherwise (#3870).
+_VISIBLE_SCOPE_SQL = """
+          (tenant_id = :tenant_id
+           OR (tenant_id IS NULL AND NOT EXISTS (
+               SELECT 1 FROM endpoint_descriptor owned
+               WHERE owned.tenant_id = :tenant_id
+                 AND owned.product = :product
+                 AND owned.version = :version
+                 AND owned.impl_id = :impl_id)))"""
 
 
 async def resolve_group_id(
@@ -60,10 +73,11 @@ async def resolve_group_id(
 ) -> uuid.UUID | None:
     """Look up an ``operation_group.id`` by natural key + group_key, tenant-scoped.
 
-    Tenant-scoped row wins over built-in row when both exist with the
-    same key (same precedence as
-    :func:`~meho_backplane.operations._lookup.lookup_descriptor`). Returns
-    ``None`` when neither bucket has a match.
+    Tenant scoping is
+    :func:`~meho_backplane.operations._lookup.visible_scope_clause`, the
+    same predicate dispatch uses: the tenant's own groups when it has a
+    row for the connector, the built-in groups otherwise (#3870). Returns
+    ``None`` when the visible bucket has no match.
 
     Visibility predicate (claude-rdc-hetzner-dc#1136): a group resolves
     when it is fully enabled (``review_status='enabled'``) **or** still
@@ -84,23 +98,15 @@ async def resolve_group_id(
         .exists()
     )
     visible = (OperationGroup.review_status == "enabled") | has_enabled_op
-    # Tenant-scoped first.
     result = await session.execute(
         select(OperationGroup.id).where(
-            OperationGroup.tenant_id == tenant_id,
-            OperationGroup.product == product,
-            OperationGroup.version == version,
-            OperationGroup.impl_id == impl_id,
-            OperationGroup.group_key == group_key,
-            visible,
-        )
-    )
-    row = result.scalar_one_or_none()
-    if row is not None:
-        return row
-    result = await session.execute(
-        select(OperationGroup.id).where(
-            OperationGroup.tenant_id.is_(None),
+            visible_scope_clause(
+                OperationGroup,
+                tenant_id=tenant_id,
+                product=product,
+                version=version,
+                impl_id=impl_id,
+            ),
             OperationGroup.product == product,
             OperationGroup.version == version,
             OperationGroup.impl_id == impl_id,
@@ -175,13 +181,13 @@ async def _hybrid_search_pg(
     embedding_literal = "[" + ", ".join(f"{x:.7f}" for x in query_embedding) + "]"
 
     bm25_sql = text(
-        """
+        f"""
         SELECT id, ts_rank_cd(
             to_tsvector('english', coalesce(summary, '') || ' ' || coalesce(description, '')),
             plainto_tsquery('english', :query)
         ) AS score
         FROM endpoint_descriptor
-        WHERE (tenant_id IS NULL OR tenant_id = :tenant_id)
+        WHERE {_VISIBLE_SCOPE_SQL}
           AND product = :product
           AND version = :version
           AND impl_id = :impl_id
@@ -208,10 +214,10 @@ async def _hybrid_search_pg(
     bm25_rows = bm25_result.all()
 
     cosine_sql = text(
-        """
+        f"""
         SELECT id, 1 - (embedding <=> CAST(:emb AS vector)) AS score
         FROM endpoint_descriptor
-        WHERE (tenant_id IS NULL OR tenant_id = :tenant_id)
+        WHERE {_VISIBLE_SCOPE_SQL}
           AND product = :product
           AND version = :version
           AND impl_id = :impl_id
@@ -263,7 +269,13 @@ async def _hybrid_search_fallback(
     stmt = (
         select(EndpointDescriptor)
         .where(
-            (EndpointDescriptor.tenant_id.is_(None)) | (EndpointDescriptor.tenant_id == tenant_id),
+            visible_scope_clause(
+                EndpointDescriptor,
+                tenant_id=tenant_id,
+                product=product,
+                version=version,
+                impl_id=impl_id,
+            ),
             EndpointDescriptor.product == product,
             EndpointDescriptor.version == version,
             EndpointDescriptor.impl_id == impl_id,

@@ -171,6 +171,14 @@ class ConnectorReviewPayload(BaseModel):
     # every op is grouped (the common case). Additive; defaults to ``0`` so
     # existing construction call sites keep working.
     ungrouped_op_count: int = 0
+    # #3870: the ops counted by ``ungrouped_op_count``, one entry each,
+    # sorted by ``op_id``, with the same per-op fields as a group's
+    # ``ops`` (enabled state, safety level, approval flag). Dispatch
+    # serves an enabled ungrouped op like any other, so the review lists
+    # them too: ``groups`` plus ``ungrouped_ops`` is the full op set.
+    # Additive with a default so existing construction call sites keep
+    # working; the service always sets it.
+    ungrouped_ops: list[ConnectorReviewOp] = []
     kind: ConnectorAuthoringKind = "ingested-shim"
     dispatchable: bool = False
     # #2291: one entry per spec ingested under this connector scope,

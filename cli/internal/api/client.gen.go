@@ -3772,6 +3772,7 @@ type ConnectorReviewPayload struct {
 	TenantId             *openapi_types.UUID          `json:"tenant_id"`
 	TotalOpCount         int                          `json:"total_op_count"`
 	UngroupedOpCount     *int                         `json:"ungrouped_op_count,omitempty"`
+	UngroupedOps         *[]ConnectorReviewOp         `json:"ungrouped_ops,omitempty"`
 	Version              string                       `json:"version"`
 }
 

@@ -1271,6 +1271,36 @@ func TestPrintReviewTableRendersUngroupedCount(t *testing.T) {
 	}
 }
 
+// TestPrintReviewTableListsUngroupedOps — the review render lists each
+// ungrouped op with its enabled state and safety level (evoila/meho#3870),
+// so the review shows every op dispatch can serve, not only grouped ones.
+func TestPrintReviewTableListsUngroupedOps(t *testing.T) {
+	ungrouped := 2
+	summary := "Get repository contents"
+	r := &api.ConnectorReviewPayload{
+		ConnectorId:      "acme-rest-3",
+		Product:          "acme",
+		Version:          "3",
+		ImplId:           "acme-rest",
+		UngroupedOpCount: &ungrouped,
+		UngroupedOps: &[]api.ConnectorReviewOp{
+			{OpId: "GET:/repos/contents", SafetyLevel: "safe", IsEnabled: true, Summary: &summary},
+			{OpId: "POST:/repos", SafetyLevel: "caution", IsEnabled: false},
+		},
+	}
+	var buf bytes.Buffer
+	printReviewTable(&buf, r)
+	out := buf.String()
+	for _, want := range []string{"Ungrouped ops: 2 (1 enabled)", "[ungrouped]", "GET:/repos/contents", "Get repository contents", "POST:/repos", "caution"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("review render missing ungrouped token %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "(no groups;") {
+		t.Errorf("review render claimed no operations while listing ungrouped ops:\n%s", out)
+	}
+}
+
 // TestPrintReviewTableOmitsUngroupedLineWhenZero — a connector whose ops are
 // all grouped (UngroupedOpCount nil or zero) prints no ungrouped line.
 func TestPrintReviewTableOmitsUngroupedLineWhenZero(t *testing.T) {

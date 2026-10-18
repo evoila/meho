@@ -51,8 +51,10 @@ The pipeline is broken into work items per Initiative #389:
   descriptors (`group_id IS NULL`) too (#3681) — the same connector scope
   `enable-reads` reaches group-agnostically — so a full `enable` never
   strands ungrouped write/typed ops at default-deny, and `connector review`
-  reports the ungrouped count (`ungrouped_op_count`, printed in the CLI
-  render) so an operator can see any the grouping pass left out.
+  reports the ungrouped count (`ungrouped_op_count`) and lists each
+  ungrouped op with its enabled state and safety level
+  (`ungrouped_ops`, the `[ungrouped]` section of the CLI render, #3870).
+  So `groups` plus `ungrouped_ops` is every op dispatch can serve.
 * **T5–T7 — CLI / REST / MCP surfaces** that drive the pipeline. T6
   (REST routes) lands the seven `/api/v1/connectors*` endpoints —
   `POST /ingest`, `GET /` (list), `GET /{id}/review`, `PATCH
@@ -658,7 +660,8 @@ sensor's id / name / tenant_id as `AffectedSensor` entries. The join
 follows the ingest's own tenant scope: a tenant-scoped ingest
 overwrote only that tenant's descriptor rows, so it filters
 `Sensor.tenant_id` to match — other tenants' sensors resolve their
-own or the built-in rows (tenant-wins, `operations/_lookup.py`) and
+own or the built-in rows (the tenant row is authoritative, see
+[Tenant connector row is authoritative](#tenant-connector-row-is-authoritative-3870)) and
 listing them would leak foreign sensor identities. Only a built-in /
 global ingest (`tenant_id IS NULL`) is deliberately unfiltered,
 since the built-in rows serve every tenant's Sensors. One structlog
@@ -822,6 +825,34 @@ product does not round-trip (the `_fixture` mechanism row parses to
 `fixture`). A malformed profile has already crashed the lifespan at
 `validate_shipped_artifacts()`; the stamp path re-parses with the same
 model, so it stays fail-closed as a second line of defence.
+
+### Tenant connector row is authoritative (#3870)
+
+A tenant-scoped ingest gives a tenant its own `endpoint_descriptor` rows
+for a connector triple `(product, version, impl_id)`. When such rows
+exist, they are the only rows that count for that tenant:
+
+- An op that is **enabled** on the tenant row runs from the tenant row.
+- An op that is **disabled** on the tenant row is refused (`unknown_op`).
+  It does not fall back to the built-in row, even when the built-in row
+  has it enabled.
+- An op that is **absent** from the tenant row is refused the same way.
+- A tenant with **no** descriptor row for the triple uses the built-in
+  rows (`tenant_id IS NULL`), as before.
+
+Ownership is decided by descriptor rows in any `is_enabled` state, so
+disabling every op on the tenant row leaves the tenant with nothing to
+run on that connector. To use the built-in row again, delete the tenant
+row (`connector delete` on the tenant scope).
+
+One predicate, `visible_scope_clause` in `operations/_lookup.py`, carries
+this rule. `lookup_descriptor` (dispatch, preview, sensors, gateway
+commands), `descriptor_exists_any_state`, `count_known_ops`,
+`list_operation_groups`, and `search_operations` (both the PostgreSQL SQL
+in `_search.py` and the SQLite fallback) all filter on it, so they always
+agree. The `GET /api/v1/connectors` listing still shows both rows; its
+`shadowed_by_tenant_scope` marker on the built-in row now means the
+built-in row is not used at all for that tenant.
 
 ### Operator-selectable auth scheme on a non-catalog ingest (#2289)
 

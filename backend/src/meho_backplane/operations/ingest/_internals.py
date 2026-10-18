@@ -66,6 +66,7 @@ __all__ = [
     "load_groups",
     "load_op",
     "load_ops_in_groups",
+    "load_ops_outside_groups",
     "operator_disabled_op_ids",
     "scope_has_groups",
     "ungrouped_op_ids",
@@ -312,6 +313,39 @@ async def load_ops_in_groups(
         EndpointDescriptor.impl_id == scope.impl_id,
         EndpointDescriptor.group_id.in_(group_ids),
     )
+    if scope.tenant_id is None:
+        stmt = stmt.where(EndpointDescriptor.tenant_id.is_(None))
+    else:
+        stmt = stmt.where(EndpointDescriptor.tenant_id == scope.tenant_id)
+    stmt = stmt.order_by(EndpointDescriptor.op_id)
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def load_ops_outside_groups(
+    session: AsyncSession,
+    scope: ConnectorScope,
+    group_ids: list[UUID],
+) -> list[EndpointDescriptor]:
+    """Return *scope*'s descriptors that are not in any of *group_ids*.
+
+    The complement of :func:`load_ops_in_groups` over the same scope:
+    ops with ``group_id IS NULL`` plus any op whose group is not in
+    *group_ids*. The review payload lists these as ``ungrouped_ops`` so
+    the review shows every op dispatch can serve (#3870). Same
+    universe as :func:`count_ops_in_scope` minus the grouped ops, so
+    the list length equals the payload's ``ungrouped_op_count``. Sorted
+    by ``op_id``.
+    """
+    stmt = select(EndpointDescriptor).where(
+        EndpointDescriptor.product == scope.product,
+        EndpointDescriptor.version == scope.version,
+        EndpointDescriptor.impl_id == scope.impl_id,
+    )
+    if group_ids:
+        stmt = stmt.where(
+            EndpointDescriptor.group_id.is_(None) | EndpointDescriptor.group_id.notin_(group_ids)
+        )
     if scope.tenant_id is None:
         stmt = stmt.where(EndpointDescriptor.tenant_id.is_(None))
     else:

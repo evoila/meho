@@ -87,8 +87,8 @@ healthy or wedged. See `docs/codebase/connectors-net-diagnostics.md`
    downstream principal token is a separate axis, #2642).
 3. The service parses `connector_id` into `(product, version, impl_id)`
    (`operations/_lookup.parse_connector_id`) and resolves the
-   `EndpointDescriptor` via `lookup_descriptor` (tenant-scoped, then
-   global). No descriptor ⇒ 422 `sensor_operation_not_found`.
+   `EndpointDescriptor` via `lookup_descriptor` (the tenant's own
+   connector row when it has one, otherwise the built-in row). No descriptor ⇒ 422 `sensor_operation_not_found`.
 4. **Safe-only guard**: `descriptor.safety_level != "safe"` ⇒ 422
    `sensor_requires_safe_operation`. This is the create-time half of a
    two-point enforcement. The dispatch-time policy gate

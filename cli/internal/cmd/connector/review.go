@@ -145,19 +145,18 @@ func printReviewTable(w io.Writer, r *api.ConnectorReviewPayload) {
 			*r.NeedsReingestOpCount,
 		)
 	}
-	// #3681: ungrouped descriptors (group_id IS NULL) never land in any
-	// group's op list below — the grouping pass left them out — so the
-	// per-group render alone hides them. Surface the count here so an
-	// operator can see the gap. A full `connector enable` covers them
-	// (the cascade now reaches ungrouped rows too), as does
-	// `connector enable-reads` for read-class ops; `--json` carries the
-	// reconciling `ungrouped_op_count` for tooling.
+	// #3681 / #3870: ungrouped descriptors (group_id IS NULL) never land
+	// in any group's op list below, yet dispatch serves the enabled ones.
+	// List them after the groups (with their enabled state and safety
+	// level) so the review shows the whole op set; this line points the
+	// operator at that section.
 	if r.UngroupedOpCount != nil && *r.UngroupedOpCount > 0 {
-		fmt.Fprintf(w, "\nUngrouped ops: %d — not shown in any group above; `connector enable` covers them (per-op `connector edit-op` can still override individual ones). Use --json for the full descriptor universe.\n",
-			*r.UngroupedOpCount,
+		fmt.Fprintf(w, "\nUngrouped ops: %d (%d enabled) — not in any group; listed under [ungrouped] below. `connector enable` covers them (per-op `connector edit-op` can still override individual ones).\n",
+			*r.UngroupedOpCount, enabledOpCount(r.UngroupedOps),
 		)
 	}
-	if len(r.Groups) == 0 {
+	hasUngrouped := r.UngroupedOps != nil && len(*r.UngroupedOps) > 0
+	if len(r.Groups) == 0 && !hasUngrouped {
 		fmt.Fprintln(w, "(no groups; the connector has no operations or the grouping pass produced no buckets)")
 		return
 	}
@@ -168,26 +167,48 @@ func printReviewTable(w io.Writer, r *api.ConnectorReviewPayload) {
 		if g.WhenToUse != "" {
 			fmt.Fprintf(w, "  when_to_use: %s\n", g.WhenToUse)
 		}
-		if len(g.Ops) == 0 {
-			continue
-		}
-		// Compact one-line-per-op render. Operators with a 3000-op
-		// vcenter connector cannot scroll through a verbose render;
-		// --json carries the full descriptions for the "ok now show
-		// me everything" path.
+		printReviewOps(w, g.Ops)
+	}
+	if hasUngrouped {
+		fmt.Fprintf(w, "\n[ungrouped] — %d op(s)\n", len(*r.UngroupedOps))
+		printReviewOps(w, *r.UngroupedOps)
+	}
+}
+
+// printReviewOps renders a compact one-line-per-op table. Operators with
+// a 3000-op vcenter connector cannot scroll through a verbose render;
+// --json carries the full descriptions for the "ok now show me
+// everything" path.
+func printReviewOps(w io.Writer, ops []api.ConnectorReviewOp) {
+	if len(ops) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "  %-42s %-9s %3s %3s  %s\n",
+		"op_id", "safety", "req", "en", "summary",
+	)
+	for _, op := range ops {
 		fmt.Fprintf(w, "  %-42s %-9s %3s %3s  %s\n",
-			"op_id", "safety", "req", "en", "summary",
+			truncate(op.OpId, 42),
+			op.SafetyLevel,
+			boolFlag(op.RequiresApproval),
+			boolFlag(op.IsEnabled),
+			truncate(strDeref(op.Summary), 70),
 		)
-		for _, op := range g.Ops {
-			fmt.Fprintf(w, "  %-42s %-9s %3s %3s  %s\n",
-				truncate(op.OpId, 42),
-				op.SafetyLevel,
-				boolFlag(op.RequiresApproval),
-				boolFlag(op.IsEnabled),
-				truncate(strDeref(op.Summary), 70),
-			)
+	}
+}
+
+// enabledOpCount counts the enabled ops in an optional op list.
+func enabledOpCount(ops *[]api.ConnectorReviewOp) int {
+	if ops == nil {
+		return 0
+	}
+	n := 0
+	for _, op := range *ops {
+		if op.IsEnabled {
+			n++
 		}
 	}
+	return n
 }
 
 // printProvenance renders the per-spec ingest provenance (#2291) so an

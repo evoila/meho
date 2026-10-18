@@ -444,6 +444,40 @@ async def test_review_payload_reports_ungrouped_descriptor_count() -> None:
 
 
 @pytest.mark.asyncio
+async def test_review_payload_lists_ungrouped_ops_with_state() -> None:
+    """#3870: the review lists every ungrouped op with its enabled state and safety level.
+
+    An enabled ungrouped op is served by dispatch like any grouped one, so
+    the review must show it. ``groups`` plus ``ungrouped_ops`` is the full
+    op set, and the list length matches ``ungrouped_op_count``.
+    """
+    tenant_id = uuid.uuid4()
+    await _seed_connector(tenant_id=tenant_id, group_count=1, ops_per_group=2)
+    await _add_ungrouped_op(
+        tenant_id=tenant_id,
+        op_id="POST:/api/v1/ungrouped/create",
+        method="POST",
+        is_enabled=False,
+    )
+    await _add_ungrouped_op(
+        tenant_id=tenant_id,
+        op_id="GET:/api/v1/ungrouped/list",
+        method="GET",
+        is_enabled=True,
+    )
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+
+    payload = await service.get_review_payload("vmware-rest-9.0", tenant_id)
+
+    assert [(op.op_id, op.is_enabled) for op in payload.ungrouped_ops] == [
+        ("GET:/api/v1/ungrouped/list", True),
+        ("POST:/api/v1/ungrouped/create", False),
+    ]
+    assert len(payload.ungrouped_ops) == payload.ungrouped_op_count
+    assert all(op.safety_level for op in payload.ungrouped_ops)
+
+
+@pytest.mark.asyncio
 async def test_review_counts_do_not_bleed_across_duplicate_scope_registrations() -> None:
     """A duplicate ``connector_id`` under two scopes keeps counts isolated (#2977).
 

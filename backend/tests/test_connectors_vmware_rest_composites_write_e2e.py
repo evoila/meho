@@ -1716,8 +1716,10 @@ async def test_deploy_from_library_queue_approve_resume_with_2681_envelope(
 #
 # The rename, the power-on and the cleanup removals run after the deploy's
 # main change exists. Their parks save where to continue (#4217), so approving
-# one continues the composite at that step: no second VM. The deploy's own
-# park saves its deploy name, so the approved deploy still matches.
+# one continues the composite at that step: no second VM. A cleanup removal
+# saves the object it removes, so its approval removes exactly that object.
+# The deploy's own park saves its resolved deploy parameters, so the approved
+# deploy still matches even when a name lookup would now answer differently.
 
 _DEPLOY_OP_ID = "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy"
 _RENAME_VM_OP_ID = "POST:/VirtualMachine/{moId}/Rename_Task"
@@ -1911,9 +1913,9 @@ async def test_deploy_cleanup_park_approve_resume_deletes_and_deploys_nothing(
     """Approving a waiting cleanup DELETE deletes the partial VM and deploys nothing (#4217).
 
     The deploy reports ``succeeded=false`` and names the VM it left. The
-    service principal has no grant on the delete, so the cleanup waits.
-    The approval re-runs only the cleanup: one more listing by the same
-    deploy name, then the approved DELETE. No second deploy.
+    service principal has no grant on the delete, so the cleanup waits and
+    saves the VM it removes. The approval runs only the approved DELETE on
+    that VM: no new listing by the deploy name, no second deploy.
     """
     recorder = _deploy_recorder(succeeded=False)
     await _bootstrap(recorder, stub_embedding_service)
@@ -1928,6 +1930,7 @@ async def test_deploy_cleanup_park_approve_resume_deletes_and_deploys_nothing(
     assert saved["deploy_name"] == recorder.deploy_bodies[0]["deployment_spec"]["name"]
     assert saved["failed"]["status"] == "deploy_failed"
     assert saved["failed"]["reported"] == ["vm-ovf-9", "VirtualMachine"]
+    assert saved["failed"]["removal"] == ["vm-ovf-9", "VirtualMachine"]
 
     resume = await _resume(request_id, reviewer)
 
@@ -1941,9 +1944,50 @@ async def test_deploy_cleanup_park_approve_resume_deletes_and_deploys_nothing(
     assert recorder.calls == [
         _DEPLOY_CALL,
         ("GET", "/vcenter/vm"),
-        ("GET", "/vcenter/vm"),
         ("DELETE", "/vcenter/vm/vm-ovf-9"),
     ]
+    assert len(recorder.deploy_bodies) == 1
+    assert await _approval_row_count() == 1
+
+
+@pytest.mark.asyncio
+async def test_deploy_cleanup_resume_deletes_the_saved_vm_not_the_vm_that_took_its_name(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """An approved cleanup delete removes the saved VM, whatever the name finds now (#4217).
+
+    After the park, the partial VM is renamed by hand and another VM takes
+    the deploy name. The re-run does not list VMs by the deploy name again
+    and reads no vApps: it deletes exactly the VM the person approved. The
+    other VM is never touched.
+    """
+    recorder = _deploy_recorder(succeeded=False)
+    await _bootstrap(recorder, stub_embedding_service)
+    reviewer, request_id, pending = await _service_deploys_until_a_follow_on_parks(
+        recorder, parked_op_id="DELETE:/vcenter/vm/{vm}"
+    )
+    assert pending.params == {"vm": "vm-ovf-9"}
+    assert pending.resume_parent is not None
+    assert pending.resume_parent["state"]["failed"]["removal"] == ["vm-ovf-9", "VirtualMachine"]
+    deploy_name = recorder.deploy_bodies[0]["deployment_spec"]["name"]
+    # Meanwhile: the partial VM was renamed, and another VM carries the deploy name.
+    recorder.responses["/vcenter/vm"] = {"value": [{"vm": "vm-other", "name": deploy_name}]}
+    calls_before = list(recorder.calls)
+    vmomi_calls_before = list(recorder.vmomi_calls)
+
+    resume = await _resume(request_id, reviewer)
+
+    assert resume.status == "ok", resume.error
+    assert resume.result["status"] == "deploy_failed"
+    assert resume.result["issues"][-1] == {
+        "category": "cleanup",
+        "severity": "info",
+        "message": "removed VM vm-ovf-9 left by the failed deploy",
+    }
+    assert recorder.calls == [*calls_before, ("DELETE", "/vcenter/vm/vm-ovf-9")]
+    assert recorder.vmomi_calls == vmomi_calls_before, "no new vApp lookup"
     assert len(recorder.deploy_bodies) == 1
     assert await _approval_row_count() == 1
 
@@ -1958,9 +2002,10 @@ async def test_deploy_vapp_destroy_park_approve_resume_destroys_once_and_deploys
 
     The failed deploy names the vApp it left. The service principal has no
     grant on ``Destroy_Task``, so the cleanup waits. The row saves the
-    deploy name and the failed deploy, marked ``after_main_effect``. The
-    approval re-runs only the cleanup: ``Destroy_Task`` runs once on that
-    vApp, and there is no second OVF deploy.
+    deploy name, the failed deploy and the vApp to remove, marked
+    ``after_main_effect``. The approval runs only that destroy:
+    ``Destroy_Task`` runs once on that vApp, with no new pool lookup, and
+    there is no second OVF deploy.
     """
     recorder = _deploy_recorder(succeeded=False)
     recorder.responses["/vcenter/ovf/library-item/li-1?action=deploy"] = {
@@ -1982,6 +2027,8 @@ async def test_deploy_vapp_destroy_park_approve_resume_destroys_once_and_deploys
     assert saved["deploy_name"] == recorder.deploy_bodies[0]["deployment_spec"]["name"]
     assert saved["failed"]["status"] == "deploy_failed"
     assert saved["failed"]["reported"] == ["vapp-7", "VirtualApp"]
+    assert saved["failed"]["removal"] == ["vapp-7", "VirtualApp"]
+    pool_reads_before = _pool_reads(recorder)
 
     resume = await _resume(request_id, reviewer)
 
@@ -1993,7 +2040,81 @@ async def test_deploy_vapp_destroy_park_approve_resume_destroys_once_and_deploys
         "message": "removed vApp vapp-7 and its VMs left by the failed deploy",
     }
     assert [path for path, _ in recorder.vmomi_calls if path == destroy_path] == [destroy_path]
+    assert _pool_reads(recorder) == pool_reads_before, "no new pool lookup"
     assert recorder.calls.count(_DEPLOY_CALL) == 1, "no second deploy"
+    assert len(recorder.deploy_bodies) == 1
+    assert await _approval_row_count() == 1
+
+
+def _pool_reads(recorder: _RecordingVmwareConnector) -> int:
+    """How many times the cleanup read the target pool's children (the vApp lookup)."""
+    return sum(
+        1
+        for path, body in recorder.vmomi_calls
+        if path.endswith("/RetrievePropertiesEx")
+        and body["specSet"][0]["propSet"][0]["type"] == "ResourcePool"
+    )
+
+
+@pytest.mark.asyncio
+async def test_deploy_vapp_destroy_resume_destroys_the_saved_vapp_not_the_one_that_took_its_name(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """An approved vApp destroy removes the saved vApp, whatever the pool shows now (#4217).
+
+    After the park, another vApp under the same pool takes the deploy name.
+    The re-run reads neither the pool nor the VM listing: it destroys
+    exactly the vApp the person approved, and the other vApp is never
+    touched.
+    """
+    recorder = _deploy_recorder(succeeded=False)
+    recorder.responses["/vcenter/ovf/library-item/li-1?action=deploy"] = {
+        "succeeded": False,
+        "resource_id": {"type": "VirtualApp", "id": "vapp-7"},
+    }
+    recorder.responses["/vcenter/vm"] = {"value": []}
+    recorder.vmomi_responses["/VirtualApp/vapp-7/Destroy_Task"] = _vmomi_task_moref("t-destroy-7")
+    await _bootstrap(recorder, stub_embedding_service)
+    reviewer, request_id, pending = await _service_deploys_until_a_follow_on_parks(
+        recorder, parked_op_id="POST:/VirtualApp/{moId}/Destroy_Task"
+    )
+    assert pending.params == {"moId": "vapp-7", "body": {}}
+    assert pending.resume_parent is not None
+    assert pending.resume_parent["state"]["failed"]["removal"] == ["vapp-7", "VirtualApp"]
+    deploy_name = recorder.deploy_bodies[0]["deployment_spec"]["name"]
+    # Meanwhile: another vApp under the pool carries the deploy name.
+    other_vapp = {"type": "VirtualApp", "value": "vapp-other"}
+    recorder.vmomi_responses["ResourcePool"] = _vmomi_retrieve_result(
+        "ResourcePool", "resgroup-8", "resourcePool", [other_vapp]
+    )
+    recorder.vmomi_responses["VirtualApp"] = _vmomi_retrieve_result(
+        "VirtualApp", "vapp-other", "name", deploy_name
+    )
+    recorder.vmomi_responses["/VirtualApp/vapp-other/Destroy_Task"] = _vmomi_task_moref("t-other")
+    calls_before = list(recorder.calls)
+    vmomi_count_before = len(recorder.vmomi_calls)
+
+    resume = await _resume(request_id, reviewer)
+
+    assert resume.status == "ok", resume.error
+    assert resume.result["status"] == "deploy_failed"
+    assert resume.result["issues"][-1] == {
+        "category": "cleanup",
+        "severity": "info",
+        "message": "removed vApp vapp-7 and its VMs left by the failed deploy",
+    }
+    assert recorder.calls == calls_before, "no VM listing, no second deploy"
+    new_vmomi_calls = recorder.vmomi_calls[vmomi_count_before:]
+    assert [path for path, _ in new_vmomi_calls if not path.endswith("/RetrievePropertiesEx")] == [
+        "/VirtualApp/vapp-7/Destroy_Task"
+    ]
+    assert all(
+        body["specSet"][0]["propSet"][0]["type"] == "Task"
+        for path, body in new_vmomi_calls
+        if path.endswith("/RetrievePropertiesEx")
+    ), "the only reads are the destroy task poll; no pool or vApp lookup"
     assert len(recorder.deploy_bodies) == 1
     assert await _approval_row_count() == 1
 
@@ -2088,6 +2209,89 @@ async def test_deploy_each_approval_continues_and_no_write_runs_twice(
     assert await _approval_row_count() == 3
 
 
+_DEPLOY_BY_NAME_PARAMS: dict[str, Any] = {
+    "library_item_name": "web-ova",
+    "name": "web-01",
+    "resource_pool": "resgroup-8",
+}
+_FIND_ITEM_CALL = ("POST", "/content/library/item?action=find")
+
+
+@pytest.mark.asyncio
+async def test_deploy_resume_deploys_the_saved_item_when_the_name_lookup_changed(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An approved deploy deploys the item its first run resolved, not what the name finds (#4217).
+
+    The deploy is asked for by library item name and waits for approval
+    (every write is forced to need one, as in
+    ``test_deploy_each_approval_continues_and_no_write_runs_twice``). Before
+    the approval, the name lookup starts to answer with another item. The
+    reviewer's re-run does not look the name up again: it sends the saved
+    deploy parameters, so the approved deploy matches its stored hash and
+    deploys the item the person approved. Nothing deploys the other item.
+    """
+    monkeypatch.setattr(
+        "meho_backplane.connectors.vmware_rest.composites._write._WRITE_REQUIRES_APPROVAL",
+        True,
+    )
+    recorder = _deploy_recorder(succeeded=True)
+    recorder.responses["/content/library/item?action=find"] = ["li-1"]
+    await _bootstrap(recorder, stub_embedding_service)
+    target_id = await _persist_vmware_target()
+    await _seed_composite_service_grant(
+        composite_op_id="vmware.composite.vm.deploy_from_library", target_id=target_id
+    )
+    svc = _make_operator(sub="svc-blueprint", principal_kind=PrincipalKind.SERVICE)
+
+    first = await dispatch(
+        operator=svc,
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.vm.deploy_from_library",
+        target=_FakeVmwareTarget(target_id=target_id),
+        params=_DEPLOY_BY_NAME_PARAMS,
+    )
+    assert first.status == "awaiting_approval", first.error
+    assert recorder.calls == [_FIND_ITEM_CALL], "the lookup ran; the deploy waits"
+    deploy_request = UUID(first.extras["approval_request_id"])
+    async with get_sessionmaker()() as s:
+        pending = await s.get(ApprovalRequest, deploy_request)
+    assert pending is not None
+    assert pending.op_id == _DEPLOY_OP_ID
+    assert pending.params["ovfLibraryItemId"] == "li-1"
+    deploy_name = pending.params["deployment_spec"]["name"]
+    assert deploy_name.startswith("web-01-meho-")
+    assert pending.resume_parent == {
+        "op_id": "vmware.composite.vm.deploy_from_library",
+        "params": _DEPLOY_BY_NAME_PARAMS,
+        "state": {
+            "deploy_name": deploy_name,
+            "deploy": {"params": pending.params, "name": "web-01"},
+        },
+    }
+
+    # Meanwhile: the same item name now finds another item.
+    recorder.responses["/content/library/item?action=find"] = ["li-2"]
+    recorder.responses["/vcenter/ovf/library-item/li-2?action=deploy"] = {
+        "succeeded": True,
+        "resource_id": {"type": "VirtualMachine", "id": "vm-wrong"},
+    }
+
+    resume = await _resume(deploy_request, await _approve_as(deploy_request, "ops-reviewer"))
+
+    assert resume.status == "ok", resume.error
+    assert resume.result["status"] == "deployed"
+    assert resume.result["vm_id"] == "vm-ovf-9"
+    assert resume.result["library_item_id"] == "li-1"
+    assert recorder.calls == [_FIND_ITEM_CALL, _DEPLOY_CALL], "no new lookup; li-2 never deploys"
+    assert recorder.deploy_bodies == [
+        {key: value for key, value in pending.params.items() if key != "ovfLibraryItemId"}
+    ]
+
+
 @pytest.mark.asyncio
 async def test_agent_waiter_resume_of_a_parked_deploy_deploys_once_under_the_same_name(
     stub_embedding_service: AsyncMock,
@@ -2097,9 +2301,9 @@ async def test_agent_waiter_resume_of_a_parked_deploy_deploys_once_under_the_sam
     """An approved deploy runs once, under the name the person approved (#4217).
 
     With the real token generator the first run draws a random deploy name
-    into the deploy body and saves it with the park. The agent waiter's
-    resume reuses it, so the approved deploy matches its stored parameter
-    hash and runs. The agent's rename then waits during that resume (an
+    into the deploy body and saves the whole deploy body with the park. The
+    agent waiter's resume sends it again, so the approved deploy matches
+    its stored parameter hash and runs. The agent's rename then waits during that resume (an
     agent's ``dangerous`` write always needs approval); approving it renames
     the VM and deploys nothing more.
     """
@@ -2126,7 +2330,10 @@ async def test_agent_waiter_resume_of_a_parked_deploy_deploys_once_under_the_sam
     assert pending.resume_parent == {
         "op_id": "vmware.composite.vm.deploy_from_library",
         "params": _DEPLOY_NAMED_PARAMS,
-        "state": {"deploy_name": deploy_name},
+        "state": {
+            "deploy_name": deploy_name,
+            "deploy": {"params": pending.params, "name": "web-01"},
+        },
     }
 
     await _approve_as_reviewer(request_id)

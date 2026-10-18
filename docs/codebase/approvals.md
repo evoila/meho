@@ -1843,7 +1843,10 @@ second VM). So these steps tell the seam two things:
   `composite_resume_state(op_id)` (only the parent composite gets it). The
   composite uses it to continue at the step that waited, with the same
   parameters, so the approved sub-op still matches its stored parameter
-  hash.
+  hash. The state must pin what the step acts on: the object id, or the
+  resolved parameters. It must not hold a name the re-run would look up
+  again, because by then the name may point at something else, and the
+  step would no longer be the one the person approved.
 - `after_main_effect=True`: this step runs after the main change. The row
   stores `resume_parent["after_main_effect"] = true`.
 

@@ -3323,9 +3323,11 @@ async def _clean_up_failed_deploy(
     listing already found. A removal whose response fails the same way is
     a ``warning`` for that entity, and the other removals still run.
 
-    A removal that waits for approval saves *resume_state* (#4217):
-    approving it re-runs the composite, which runs only this cleanup again
-    on what is still there (:func:`_fail_deploy`), never the deploy.
+    A removal that waits for approval saves *resume_state* plus the object
+    it removes (#4217, :func:`_removal_resume_state`): approving it re-runs
+    the composite, which removes only that object
+    (:func:`_resume_failed_deploy_removal`), with no new lookup and never
+    the deploy.
     """
     issues: list[dict[str, Any]] = []
     vm_ids: set[str] = set()
@@ -3461,7 +3463,9 @@ async def _delete_leftover_vm(
 
     The same best-effort ``DELETE:/vcenter/vm/{vm}`` ``vm.create`` uses for
     its rollback. A response that is not JSON (:exc:`ValueError`) is a
-    warning like a transport fault, so the other removals still run.
+    warning like a transport fault, so the other removals still run. A
+    delete that waits for approval saves *resume_state* with this VM as the
+    object to remove (#4217).
     """
     what = f"VM {vm_id} left by the failed deploy"
     try:
@@ -3471,7 +3475,7 @@ async def _delete_leftover_vm(
             operator,
             _OP_DELETE_VM,
             {"vm": vm_id},
-            resume_state=resume_state,
+            resume_state=_removal_resume_state(resume_state, vm_id, _VIRTUAL_MACHINE_MO_TYPE),
             after_main_effect=True,
         )
     except (httpx.HTTPError, ValueError) as exc:
@@ -3501,7 +3505,9 @@ async def _destroy_leftover_vapp(
     task-polled under the deploy's task bound. A fresh deploy is powered off,
     so the destroy needs no power-off first. An unavailable VI-JSON API (the
     connector's :exc:`RuntimeError`) or a response that is not JSON
-    (:exc:`ValueError`) is a warning like a transport fault.
+    (:exc:`ValueError`) is a warning like a transport fault. A destroy that
+    waits for approval saves *resume_state* with this vApp as the object to
+    remove (#4217).
     """
     what = f"vApp {vapp_id} and its VMs left by the failed deploy"
     try:
@@ -3513,7 +3519,7 @@ async def _destroy_leftover_vapp(
             vmomi_path=f"/{_VAPP_RESOURCE_TYPE}/{vapp_id}/Destroy_Task",
             body={},
             params={"moId": vapp_id, "body": {}},
-            resume_state=resume_state,
+            resume_state=_removal_resume_state(resume_state, vapp_id, _VAPP_RESOURCE_TYPE),
             after_main_effect=True,
         )
         if gate is not None:
@@ -3657,14 +3663,17 @@ async def vm_deploy_from_library_composite(
     re-runs this composite with that state
     (:func:`~meho_backplane.operations.composite.composite_resume_state`):
 
-    * a deploy that waited runs again under the *same* deploy name, so the
-      approved deploy matches what the person approved;
+    * a deploy that waited runs again with the deploy parameters its first
+      run resolved (the same library item, the same deploy name), so the
+      approved deploy matches what the person approved even when a name
+      lookup would now answer differently (:func:`_deploy_library_item`);
     * a rename or power-on that waited continues at that step on the VM
       that exists (:func:`_finish_deploy`); a waiting rename stops the
       first run before the power-on, so the power-on runs after the rename
       is approved;
-    * a cleanup removal that waited runs the cleanup again on what is still
-      there (:func:`_fail_deploy`).
+    * a cleanup removal that waited removes exactly the object the park
+      saved, with no new lookup by deploy name
+      (:func:`_resume_failed_deploy_removal`).
 
     The rename, power-on and cleanup steps are marked ``after_main_effect``,
     so the seam refuses any earlier write the resume would repeat. A resume
@@ -3674,6 +3683,16 @@ async def vm_deploy_from_library_composite(
     refusal = _refuse_deploy_resume(saved)
     if refusal is not None:
         return refusal
+    if "deploy" in saved:
+        return await _deploy_library_item(
+            connector,
+            target,
+            operator,
+            params=params,
+            deploy_name=saved["deploy_name"],
+            deploy_params=dict(saved["deploy"]["params"]),
+            name=str(saved["deploy"]["name"]),
+        )
     if "deployed" in saved:
         deployed = saved["deployed"]
         return await _finish_deploy(
@@ -3690,18 +3709,12 @@ async def vm_deploy_from_library_composite(
             step=str(deployed["step"]),
         )
     if "failed" in saved:
-        failed = saved["failed"]
-        reported = failed.get("reported")
-        return await _fail_deploy(
+        return await _resume_failed_deploy_removal(
             connector,
             target,
             operator,
-            status=str(failed["status"]),
-            item_id=str(failed["library_item_id"]),
             deploy_name=saved["deploy_name"],
-            resource_pool_id=str(params["resource_pool"]),
-            reported=(str(reported[0]), str(reported[1])) if reported else None,
-            issues=list(failed["issues"]),
+            failed=saved["failed"],
         )
 
     try:
@@ -3737,14 +3750,45 @@ async def vm_deploy_from_library_composite(
     assert name is not None  # name_error is None ⇒ name resolved
     # #3697: deploy under a unique name, so a failed deploy can find the VM it
     # created — and only that one. A successful deploy renames it to ``name``.
-    # A resumed deploy keeps the name its first run chose (#4217), so the
-    # approved deploy's params hash still matches.
-    deploy_name = saved.get("deploy_name") or _deploy_vm_name(name, _new_deploy_token())
-    resource_pool_id = str(params["resource_pool"])
+    deploy_name = _deploy_vm_name(name, _new_deploy_token())
     deploy_params = {
         "ovfLibraryItemId": item_id,
         **_build_ovf_deploy_body(params, eula_field, name=deploy_name),
     }
+    return await _deploy_library_item(
+        connector,
+        target,
+        operator,
+        params=params,
+        deploy_name=deploy_name,
+        deploy_params=deploy_params,
+        name=name,
+    )
+
+
+async def _deploy_library_item(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    params: dict[str, Any],
+    deploy_name: str,
+    deploy_params: dict[str, Any],
+    name: str,
+) -> dict[str, Any] | OperationResult:
+    """Issue the governed OVF deploy with *deploy_params*, then finish or clean up.
+
+    *deploy_params* are the deploy's resolved sub-op parameters (the library
+    item id and the deploy body under the unique *deploy_name*); *name* is
+    the final VM name. A deploy that waits for approval saves both on its
+    approval row (#4217): the resume calls this again with the saved values,
+    so the approved deploy reaches the seam with the parameters the person
+    approved and matches its stored hash. Nothing is resolved again during
+    that resume; a ``library_item_name`` that now names another item does
+    not change what deploys.
+    """
+    item_id = str(deploy_params["ovfLibraryItemId"])
+    resource_pool_id = str(params["resource_pool"])
     try:
         gate, deploy_payload = await _write_sub_op(
             connector,
@@ -3754,7 +3798,10 @@ async def vm_deploy_from_library_composite(
             deploy_params,
             # Synchronous deploy — the POST is held open for the whole copy (#3076).
             timeout=_LIBRARY_ITEM_DEPLOY_TIMEOUT,
-            resume_state={"deploy_name": deploy_name},
+            resume_state={
+                "deploy_name": deploy_name,
+                "deploy": {"params": deploy_params, "name": name},
+            },
         )
     except (httpx.HTTPError, ValueError) as exc:
         # A transport fault, or a 200 whose body is not JSON (``ValueError``,
@@ -3971,10 +4018,9 @@ async def _fail_deploy(
     Runs on the deploy's fault (``deploy_error``) and ``succeeded=false``
     (``deploy_failed``) paths. *reported* is the ``(id, type)`` the
     ``DeploymentResult`` named, if any; *issues* are the issues before the
-    cleanup, which the cleanup's own issues follow. It runs again on the
-    resume of a cleanup removal that waited for approval (#4217), with the
-    values that park saved: the lookups by *deploy_name* then find what is
-    still there, and the approved removal runs.
+    cleanup, which the cleanup's own issues follow. A removal that waits
+    for approval saves these values and the object it removes (#4217); its
+    resume runs :func:`_resume_failed_deploy_removal`, not this function.
     """
     resume_state = _failed_deploy_state(
         deploy_name, status=status, item_id=item_id, reported=reported, issues=issues
@@ -4001,7 +4047,11 @@ def _failed_deploy_state(
     reported: tuple[str, str] | None,
     issues: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """The resume state a cleanup removal of a failed deploy saves (#4217)."""
+    """The failed deploy a cleanup removal saves, without the object it removes (#4217).
+
+    :func:`_removal_resume_state` adds that object before the removal
+    reaches the seam.
+    """
     return {
         "deploy_name": deploy_name,
         "failed": {
@@ -4013,17 +4063,106 @@ def _failed_deploy_state(
     }
 
 
+def _removal_resume_state(
+    failed_state: dict[str, Any], entity_id: str, entity_type: str
+) -> dict[str, Any]:
+    """*failed_state* plus the one object (``removal``: id and type) a removal targets (#4217).
+
+    The resume of that removal removes exactly this object. It does not look
+    the deploy name up again: by then the object may carry another name,
+    and another object may carry the deploy name.
+    """
+    return {
+        **failed_state,
+        "failed": {**failed_state["failed"], "removal": [entity_id, entity_type]},
+    }
+
+
+async def _resume_failed_deploy_removal(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    deploy_name: str,
+    failed: dict[str, Any],
+) -> dict[str, Any]:
+    """Run again only the removal of a failed deploy that waited for approval (#4217).
+
+    *failed* is what the park saved (:func:`_removal_resume_state`): the
+    deploy's outcome, its issues and the object the removal targets. The
+    removal reaches the seam with the same parameters and the same saved
+    state, so the approved step matches its stored hash and runs. No
+    lookup by *deploy_name* happens, so a renamed leftover is still removed
+    and an object that took the deploy name since is never touched. The
+    envelope is the failed deploy's, with this removal's issue last.
+    """
+    entity_id, entity_type = (str(part) for part in failed["removal"])
+    status = str(failed["status"])
+    item_id = str(failed["library_item_id"])
+    issues = list(failed["issues"])
+    reported = failed.get("reported")
+    resume_state = _failed_deploy_state(
+        deploy_name,
+        status=status,
+        item_id=item_id,
+        reported=(str(reported[0]), str(reported[1])) if reported else None,
+        issues=issues,
+    )
+    removal_issues = await _drain_deploy_cleanup(
+        _remove_leftover(
+            connector,
+            target,
+            operator,
+            entity_id=entity_id,
+            entity_type=entity_type,
+            resume_state=resume_state,
+        )
+    )
+    return _deploy_failure(status, library_item_id=item_id, issues=[*issues, *removal_issues])
+
+
+async def _remove_leftover(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    entity_id: str,
+    entity_type: str,
+    resume_state: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Remove one saved leftover of a failed deploy: a vApp by type, a VM otherwise."""
+    if entity_type == _VAPP_RESOURCE_TYPE:
+        issue = await _destroy_leftover_vapp(
+            connector, target, operator, vapp_id=entity_id, resume_state=resume_state
+        )
+    else:
+        issue = await _delete_leftover_vm(
+            connector, target, operator, vm_id=entity_id, resume_state=resume_state
+        )
+    return [issue]
+
+
 def _resumed_deploy_state() -> dict[str, Any]:
     """The state a waiting ``vm.deploy_from_library`` write saved, during its resume (#4217).
 
-    Empty on an ordinary dispatch and when the state has no deploy name.
-    Otherwise ``{"deploy_name": ...}``, plus ``"deployed"`` (continue at the
-    rename or power-on of the VM that exists) or ``"failed"`` (run the
-    cleanup of a failed deploy again).
+    Empty on an ordinary dispatch, and when the state is not one this
+    composite can continue from: it needs a deploy name and one of
+    ``"deploy"`` (run the deploy again with its resolved parameters),
+    ``"deployed"`` (continue at the rename or power-on of the VM that
+    exists) or ``"failed"`` with the object to remove (run that one removal
+    again). Anything else is refused as missing state, before any read or
+    write, rather than run from the start.
     """
     saved = composite_resume_state(_COMPOSITE_OP_ID_VM_DEPLOY_FROM_LIBRARY)
     if saved is None or not isinstance(saved.get("deploy_name"), str):
         return {}
+    if not any(key in saved for key in ("deploy", "deployed", "failed")):
+        return {}
+    failed = saved.get("failed")
+    if isinstance(failed, dict):
+        removal = failed.get("removal")
+        if not (isinstance(removal, list) and len(removal) == 2):
+            return {}
     return saved
 
 

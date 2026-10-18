@@ -2139,22 +2139,31 @@ gives its VM a name nobody else uses:
    approving it runs the composite again (#3351). Each write saves on the
    row where that re-run continues (`resume_state`, read back with
    `composite_resume_state`):
-   - The deploy saves its deploy name. The re-run deploys under the same
-     name, so the approved deploy matches its stored parameter hash.
+   - The deploy saves its resolved deploy parameters (the library item id
+     and the deploy body under its unique deploy name) and the final VM
+     name (`"deploy"`). The re-run sends exactly those and resolves
+     nothing again, so the approved deploy matches its stored parameter
+     hash even when `library_item_name` would now find another item.
    - The rename and the power-on save the deployed VM and the step
      (`"deployed"`). The re-run goes straight to `_finish_deploy` at that
      step, on the VM that exists. A rename that waits ends the first run
      before the power-on; the power-on then runs after the rename is
      approved, and a `power_on` warning says so.
-   - A cleanup removal saves the failed deploy (`"failed"`). The re-run
-     goes straight to `_fail_deploy`: it looks the deploy name up again and
-     removes what is still there.
+   - A cleanup removal saves the failed deploy (`"failed"`) and the one
+     object it removes (`removal`: id and type). The re-run goes straight
+     to `_resume_failed_deploy_removal`: it removes exactly that object and
+     does not look the deploy name up again. So a leftover that was renamed
+     meanwhile is still removed, and an object that took the deploy name
+     since is never touched. When both a VM and a vApp wait, each approval
+     removes its own object.
    These steps are marked `after_main_effect`, so the seam refuses any
    earlier write a wrong re-run would repeat, and they may wait for
    approval again during a re-run (see "Continuing where it stopped" in
    `docs/codebase/approvals.md`). An approval row with no saved state (one
-   written before #4217) is still refused before any read or write
-   (`_refuse_deploy_resume`, `composite_resume_unsupported`).
+   written before #4217), or with a state the composite cannot continue
+   from (a deploy without its parameters, a removal without its object),
+   is refused before any read or write (`_refuse_deploy_resume`,
+   `composite_resume_unsupported`).
 
 Operator note: the rename and the cleanup removals are governed writes
 with their own ops (`POST:/VirtualMachine/{moId}/Rename_Task`, the

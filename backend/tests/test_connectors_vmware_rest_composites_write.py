@@ -3395,6 +3395,10 @@ async def test_deploy_from_library_vapp_fault_destroys_the_vapp_by_deploy_name(
     assert destroy == ("/VirtualApp/resgroup-v9/Destroy_Task", {})
     assert gate.gated_op_ids == [_DEPLOY_OVF_OP, _DESTROY_VAPP_OP]
     assert gate.calls[1]["params"] == {"moId": "resgroup-v9", "body": {}}
+    # The destroy's park saves the vApp it removes, so an approval destroys
+    # exactly this vApp without a new lookup (#4217).
+    assert gate.calls[1]["after_main_effect"] is True
+    assert gate.calls[1]["resume_state"]["failed"]["removal"] == ["resgroup-v9", _VAPP_TYPE]
     assert out["issues"][-1] == {
         "category": "cleanup",
         "severity": "info",
@@ -4206,7 +4210,14 @@ async def test_deploy_from_library_resume_at_power_on_only_powers_on(
 async def test_deploy_from_library_resume_of_a_cleanup_deletes_and_deploys_nothing(
     gate: _GateRecorder,
 ) -> None:
-    """An approved cleanup DELETE runs the cleanup again on what is left; no deploy (#4217)."""
+    """An approved cleanup DELETE removes the saved VM, with no new lookup; no deploy (#4217).
+
+    The park saved the VM it was about to delete. The re-run deletes that
+    VM and nothing else: it does not list VMs by the deploy name again (the
+    VM may carry another name by now, and another VM may carry the deploy
+    name) and reads no vApps. The delete reaches the seam with the same
+    parameters and the same saved state, so the approved step matches.
+    """
     first_issues = [_write._deploy_issue("placement", "error", "OVF deploy call faulted")]
     state = {
         "deploy_name": _SAVED_DEPLOY_NAME,
@@ -4215,11 +4226,10 @@ async def test_deploy_from_library_resume_of_a_cleanup_deletes_and_deploys_nothi
             "library_item_id": "li-ovf",
             "reported": None,
             "issues": first_issues,
+            "removal": ["vm-partial", "VirtualMachine"],
         },
     }
-    conn = _RecordingConnector(
-        [[{"vm": "vm-partial", "name": _SAVED_DEPLOY_NAME}], {}], vmomi=_NO_VAPPS
-    )
+    conn = _RecordingConnector({"/api/vcenter/vm/vm-partial": {}})
     with _resuming(_DEPLOY_COMPOSITE, _DELETE_VM_OP, state):
         out = await vm_deploy_from_library_composite(
             operator=_make_operator(),
@@ -4234,43 +4244,182 @@ async def test_deploy_from_library_resume_of_a_cleanup_deletes_and_deploys_nothi
         _write._deploy_issue("cleanup", "info", "removed VM vm-partial left by the failed deploy"),
     ]
     assert [(c["method"], c["path"]) for c in conn.calls] == [
-        ("GET", _LIST_VMS_PATH),
         ("DELETE", "/api/vcenter/vm/vm-partial"),
     ]
-    assert conn.calls[0]["query"] == {"names": [_SAVED_DEPLOY_NAME]}
+    assert conn.vmomi_calls == []
     assert gate.gated_op_ids == [_DELETE_VM_OP]
+    assert gate.calls[0]["params"] == {"vm": "vm-partial"}
+    assert gate.calls[0]["resume_state"] == state
+    assert gate.calls[0]["after_main_effect"] is True
 
 
 @pytest.mark.asyncio
-async def test_deploy_from_library_resumed_deploy_keeps_its_deploy_name(
+async def test_deploy_from_library_resume_of_a_vapp_destroy_destroys_only_the_saved_vapp(
     gate: _GateRecorder,
 ) -> None:
-    """An approved deploy runs under the name its first run chose, so it matches (#4217)."""
-    conn = _RecordingConnector(
-        [_deployment_result(succeeded=True, vm_id="vm-ovf-1")], vmomi=_rename_vmomi("vm-ovf-1")
-    )
-    scope_token = composite_resume_scope_var.set((_DEPLOY_OVF_OP, "deadbeef"))
-    state_token = composite_resume_state_var.set(
-        CompositeResumeState(
-            op_id=_DEPLOY_COMPOSITE,
-            state={"deploy_name": _SAVED_DEPLOY_NAME},
-            after_main_effect=False,
-        )
-    )
-    try:
+    """An approved vApp destroy destroys the saved vApp; no pool read, no deploy (#4217)."""
+    state = {
+        "deploy_name": _SAVED_DEPLOY_NAME,
+        "failed": {
+            "status": "deploy_failed",
+            "library_item_id": "li-ovf",
+            "reported": ["resgroup-v9", _VAPP_TYPE],
+            "issues": [],
+            "removal": ["resgroup-v9", _VAPP_TYPE],
+        },
+    }
+    conn = _RecordingConnector({}, vmomi=_destroy_vmomi("resgroup-v9"))
+    with _resuming(_DEPLOY_COMPOSITE, _DESTROY_VAPP_OP, state):
         out = await vm_deploy_from_library_composite(
             operator=_make_operator(),
             target=object(),
             params=dict(_DEPLOY_PARAMS_NAMED),
             connector=conn,  # type: ignore[arg-type]
         )
+    assert out["status"] == "deploy_failed"
+    assert out["issues"] == [
+        _write._deploy_issue(
+            "cleanup", "info", "removed vApp resgroup-v9 and its VMs left by the failed deploy"
+        )
+    ]
+    assert conn.calls == []
+    destroy, _poll = conn.vmomi_calls
+    assert destroy == ("/VirtualApp/resgroup-v9/Destroy_Task", {})
+    assert gate.gated_op_ids == [_DESTROY_VAPP_OP]
+    assert gate.calls[0]["params"] == {"moId": "resgroup-v9", "body": {}}
+    assert gate.calls[0]["resume_state"] == state
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("approved_op_id", "state"),
+    [
+        (_DEPLOY_OVF_OP, {"deploy_name": _SAVED_DEPLOY_NAME}),
+        (
+            _DELETE_VM_OP,
+            {
+                "deploy_name": _SAVED_DEPLOY_NAME,
+                "failed": {
+                    "status": "deploy_error",
+                    "library_item_id": "li-ovf",
+                    "reported": None,
+                    "issues": [],
+                },
+            },
+        ),
+    ],
+    ids=["deploy-without-its-parameters", "removal-without-its-object"],
+)
+async def test_deploy_from_library_refuses_a_state_it_cannot_continue_from(
+    gate: _GateRecorder, approved_op_id: str, state: dict[str, Any]
+) -> None:
+    """A saved state without what the step needs is refused like no state (#4217).
+
+    A deploy state must carry the resolved deploy parameters, else the
+    re-run would resolve the library item again and draw a fresh deploy
+    name. A cleanup state must name the object to remove, else the re-run
+    would look the deploy name up again. Neither runs from the start: no
+    read, no gate, no write.
+    """
+    conn = _RecordingConnector({})
+    with _resuming(_DEPLOY_COMPOSITE, approved_op_id, state):
+        out = await vm_deploy_from_library_composite(
+            operator=_make_operator(),
+            target=object(),
+            params=dict(_DEPLOY_PARAMS_NAMED),
+            connector=conn,  # type: ignore[arg-type]
+        )
+    assert isinstance(out, OperationResult)
+    assert out.status == "error"
+    assert out.extras["error_code"] == "composite_resume_unsupported"
+    assert out.extras["approved_op_id"] == approved_op_id
+    assert conn.calls == []
+    assert conn.vmomi_calls == []
+    assert gate.calls == []
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_deploy_park_saves_its_resolved_parameters(
+    gate: _GateRecorder, deploy_token: str
+) -> None:
+    """The deploy hands the seam its own resolved parameters and the final name (#4217)."""
+    conn = _RecordingConnector(
+        {_DEPLOY_PATH: _deployment_result(succeeded=True, vm_id="vm-ovf-1")},
+        vmomi=_rename_vmomi("vm-ovf-1"),
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deployed"
+    deploy_call = gate.calls[0]
+    assert deploy_call["op_id"] == _DEPLOY_OVF_OP
+    assert deploy_call["params"]["ovfLibraryItemId"] == "li-ovf"
+    assert deploy_call["params"]["deployment_spec"]["name"] == _DEPLOY_NAME
+    assert deploy_call["resume_state"] == {
+        "deploy_name": _DEPLOY_NAME,
+        "deploy": {"params": deploy_call["params"], "name": "router-01"},
+    }
+    assert deploy_call["after_main_effect"] is False
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_resumed_deploy_reuses_its_resolved_parameters(
+    gate: _GateRecorder,
+) -> None:
+    """An approved deploy sends the parameters its first run saved, so it matches (#4217).
+
+    The park saved the resolved deploy parameters (the library item id and
+    the deploy body under the deploy name) and the final VM name. The
+    re-run sends exactly those and resolves nothing again: the item name
+    in the composite's own parameters is never looked up, so a name that
+    would now find another item changes nothing. Only the deploy of the
+    saved item is served here; a find or an OVF summary read would fail.
+    """
+    deploy_params = {
+        "ovfLibraryItemId": "li-ovf",
+        "deployment_spec": {"accept_all_EULA": True, "name": _SAVED_DEPLOY_NAME},
+        "target": {"resource_pool_id": "resgroup-8"},
+    }
+    state = {
+        "deploy_name": _SAVED_DEPLOY_NAME,
+        "deploy": {"params": deploy_params, "name": "router-01"},
+    }
+    conn = _RecordingConnector(
+        {_DEPLOY_PATH: _deployment_result(succeeded=True, vm_id="vm-ovf-1")},
+        vmomi=_rename_vmomi("vm-ovf-1"),
+    )
+    scope_token = composite_resume_scope_var.set((_DEPLOY_OVF_OP, "deadbeef"))
+    state_token = composite_resume_state_var.set(
+        CompositeResumeState(op_id=_DEPLOY_COMPOSITE, state=state, after_main_effect=False)
+    )
+    try:
+        out = await vm_deploy_from_library_composite(
+            operator=_make_operator(),
+            target=object(),
+            params={
+                "library_item_name": "router-ova",
+                "name": "router-01",
+                "resource_pool": "resgroup-8",
+            },
+            connector=conn,  # type: ignore[arg-type]
+        )
     finally:
         composite_resume_state_var.reset(state_token)
         composite_resume_scope_var.reset(scope_token)
     assert out["status"] == "deployed"
-    assert conn.calls[0]["body"]["deployment_spec"]["name"] == _SAVED_DEPLOY_NAME
-    assert gate.calls[0]["resume_state"] == {"deploy_name": _SAVED_DEPLOY_NAME}
+    assert out["library_item_id"] == "li-ovf"
+    assert [(c["method"], c["path"]) for c in conn.calls] == [("POST", _DEPLOY_PATH)]
+    assert conn.calls[0]["body"] == {
+        "deployment_spec": deploy_params["deployment_spec"],
+        "target": deploy_params["target"],
+    }
+    assert gate.calls[0]["params"] == deploy_params
+    assert gate.calls[0]["resume_state"] == state
     assert gate.calls[0]["after_main_effect"] is False
+    assert conn.vmomi_calls[0] == ("/VirtualMachine/vm-ovf-1/Rename_Task", {"newName": "router-01"})
 
 
 # ===========================================================================

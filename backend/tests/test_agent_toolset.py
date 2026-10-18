@@ -418,6 +418,7 @@ _CONFIGURED_SURFACE: list[str] = [
     "list_operation_groups",
     "search_operations",
     "call_operation",
+    "meho_status",
     "meho_connector_list",
     "list_targets",
     "preview_operation",
@@ -436,9 +437,10 @@ def test_empty_configured_spec_resolves_pinned_surface() -> None:
     assert [t.name for t in tools] == _CONFIGURED_SURFACE
 
 
-def test_configured_definition_resolves_search_plus_four_governed_tools() -> None:
-    """A configured definition gets ``search_operations`` plus the four adapters."""
+def test_configured_definition_resolves_search_plus_five_governed_tools() -> None:
+    """A configured definition gets ``search_operations`` plus the five adapters."""
     assert {
+        "meho_status",
         "meho_connector_list",
         "list_targets",
         "preview_operation",
@@ -496,7 +498,7 @@ def test_missing_and_disabled_tools_are_reported_apart() -> None:
 
 
 def test_read_only_role_gets_no_governed_discovery_tool() -> None:
-    """The four adapters keep the MCP tools' OPERATOR floor."""
+    """The five adapters all have an OPERATOR floor."""
     read_only = _make_operator(role=TenantRole.READ_ONLY, sub="op-read-only")
     tools = resolve_agent_tools({}, read_only)
     assert not (_tool_names(tools) & _DISCOVERY_TOOLS)
@@ -504,14 +506,21 @@ def test_read_only_role_gets_no_governed_discovery_tool() -> None:
 
 @pytest.mark.parametrize("name", DISCOVERY_META_TOOL_NAMES)
 def test_bridged_tool_matches_mcp_definition(name: str) -> None:
-    """Each adapter publishes the MCP wire schema and keeps the MCP role floor."""
+    """Each adapter publishes the MCP wire schema and keeps the MCP role floor.
+
+    ``meho_status`` is the one exception: its hosted floor is OPERATOR, like
+    the REST health route (#4233).
+    """
     entry = get_tool(name)
     assert entry is not None
     definition, _handler = entry
     (spec,) = [m for m in toolset_mod._META_TOOL_CATALOG if m.name == name]
     assert spec.parameter_schema == definition.to_wire()["inputSchema"]
     assert spec.parameter_schema is not definition.inputSchema
-    assert spec.required_role == definition.required_role
+    if name == "meho_status":
+        assert spec.required_role is TenantRole.OPERATOR
+    else:
+        assert spec.required_role == definition.required_role
 
 
 async def test_bridged_tools_reuse_registered_mcp_handlers(

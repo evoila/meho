@@ -138,6 +138,22 @@ def test_change_users_do_not_get_needs_no_new_version(repo: Path, path: str) -> 
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.parametrize(
+    "new_path",
+    [f"{_PLUGIN}/test/a.md", "docs/a.md"],
+    ids=["moved-into-plugin-test", "moved-out-of-plugin"],
+)
+def test_moving_a_shipped_file_away_needs_a_new_version(repo: Path, new_path: str) -> None:
+    """Git reports a rename under its new path only; the old path must still count."""
+    target = repo / new_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    (repo / _PLUGIN / "skills" / "a" / "SKILL.md").rename(target)
+    _commit(repo, "move")
+    result = _run(repo, "--base", "HEAD^1")
+    assert result.returncode == 1
+    assert f"{_PLUGIN}/skills/a/SKILL.md" in result.stderr
+
+
 def test_version_that_is_not_x_y_z_fails(repo: Path) -> None:
     _write_versions(repo, "0.1")
     result = _run(repo)

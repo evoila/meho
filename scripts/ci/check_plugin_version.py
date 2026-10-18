@@ -17,7 +17,9 @@ that from happening again. It checks two rules:
    file under ``clients/claude-code-plugin/`` changed between ``--base``
    and ``HEAD``, the ``plugin.json`` version must be higher than it was at
    ``--base``. Files under ``test/`` do not count: the plugin does not use
-   them at run time.
+   them at run time. The diff runs with rename detection off, so a shipped
+   file that is moved to ``test/`` or out of the plugin still counts as a
+   change (git would otherwise report only the new path).
 
 Usage::
 
@@ -87,8 +89,13 @@ def check_agree(versions: dict[str, str]) -> list[str]:
 
 
 def shipped_changes(root: pathlib.Path, base: str) -> list[str]:
-    """Files under the plugin directory that changed since ``base``."""
-    changed = _git(root, "diff", "--name-only", base, "HEAD").splitlines()
+    """Files under the plugin directory that changed since ``base``.
+
+    ``--no-renames`` makes git list a moved file under both its old and its
+    new path. With rename detection on, only the new path is listed, so moving
+    a shipped file into ``test/`` or out of the plugin would look like no change.
+    """
+    changed = _git(root, "diff", "--name-only", "--no-renames", base, "HEAD").splitlines()
     return [
         path for path in changed if path.startswith(PLUGIN_DIR) and not path.startswith(NOT_SHIPPED)
     ]

@@ -143,18 +143,18 @@ class AgentDefinitionUpdate(BaseModel):
 
     ``extra="forbid"`` for the same reason as
     :class:`AgentDefinitionCreate`. A field left ``None`` (its default)
-    is *not* applied -- the service distinguishes "field omitted" from
-    "field set to a value" via :meth:`pydantic.BaseModel.model_dump`
-    with ``exclude_unset=True``, so a PATCH can change a single field
-    without clobbering the rest.
+    is *not* applied, and neither is a field sent as ``null`` -- the
+    service drops both via :meth:`pydantic.BaseModel.model_dump` with
+    ``exclude_unset=True, exclude_none=True``, so a PATCH can change a
+    single field without clobbering the rest.
 
     ``name`` is *not* updatable here: it is the per-tenant natural key
     (the URL path segment + unique index). Renaming an agent is a
     delete + recreate, which keeps the natural-key invariant simple and
     avoids a name-collision race inside the update path.
 
-    ``output_schema`` cannot be cleared through this shape (``None`` is
-    indistinguishable from "omitted" under ``exclude_unset``); clearing
+    ``output_schema`` cannot be cleared through this shape (``null`` is
+    treated the same as "omitted"); clearing
     a structured-output schema is a delete + recreate in v0.2. This is
     an accepted v0.2 limitation, not a silent bug -- documented so a
     future shape (a sentinel / ``JsonValue`` discriminator) can lift it.

@@ -288,26 +288,28 @@ async def _module_composite_handler_issue_list(
 ) -> dict[str, Any]:
     """Composite handler returning a terminal-error envelope with many issues.
 
-    ``issue_count`` warnings of ``message_chars`` characters each, plus one
-    ``error`` entry at ``error_index`` (#3813 follow-up: the inline result must
-    stay bounded however long this list is).
+    ``issue_count`` warnings of ``message_chars`` characters each, padded with
+    ``fill`` (ASCII by default), plus one ``error`` entry at ``error_index``
+    (#3813 follow-up: the inline result must stay bounded however long this
+    list is).
     """
     del operator, target
     count = int(params["issue_count"])
     chars = int(params.get("message_chars", 40))
+    fill = str(params.get("fill", "x"))
     error_index = int(params.get("error_index", count - 1))
     issues = [
         {
             "category": "deploy",
             "severity": "warning",
-            "message": f"disk {n} skipped ".ljust(chars, "x"),
+            "message": f"disk {n} skipped ".ljust(chars, fill),
         }
         for n in range(count)
     ]
     issues[error_index] = {
         "category": "deploy",
         "severity": "error",
-        "message": "deploy failed: ".ljust(chars, "y"),
+        "message": "deploy failed: ".ljust(chars, fill),
     }
     return {"status": "deploy_error", "vm_id": None, "issues": issues}
 
@@ -2738,6 +2740,41 @@ async def test_dispatch_composite_terminal_error_with_long_messages_stays_bounde
 
     rows = await _stored_rows(store, operator, result)
     assert [len(row["message"]) for row in rows] == [10_000] * 3
+
+
+@pytest.mark.asyncio
+async def test_dispatch_composite_terminal_error_with_non_ascii_messages_stays_bounded(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Five long non-ASCII messages stay within the inline byte budget (#3813).
+
+    The transport escapes a non-ASCII character to six bytes, so a cap that
+    counted characters let five truncated messages reach 8 KB of JSON text.
+    The caps count JSON bytes: each message is at most 256 bytes escaped, the
+    list stays under its 2 KB budget, the error stays visible, and the stored
+    rows keep the full text.
+    """
+    result, store, operator = await _dispatch_issue_list_error(
+        stub_embedding_service,
+        {"issue_count": 5, "message_chars": 2_000, "error_index": 0, "fill": "\u00fc"},
+    )
+
+    assert result.status == "error"
+    assert result.handle is not None
+    assert isinstance(result.result, dict)
+    assert result.result["issues_total"] == 5
+    inline = result.result["issues"]
+    assert inline[0]["severity"] == "error"
+    assert inline[0]["message"].startswith("deploy failed: ")
+    assert all(item["message"].endswith("...<truncated>") for item in inline)
+    assert all(json_text_bytes(item["message"]) - 2 <= 256 for item in inline)
+    assert json_text_bytes(inline) <= 2048
+    assert json_text_bytes(result.result) < 4096
+    assert "deploy failed" in (result.error or "")
+
+    rows = await _stored_rows(store, operator, result)
+    assert [len(row["message"]) for row in rows] == [2_000] * 5
+    assert rows[0]["message"].endswith("\u00fc")
 
 
 @pytest.mark.asyncio

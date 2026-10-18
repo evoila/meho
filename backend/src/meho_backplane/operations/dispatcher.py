@@ -368,6 +368,7 @@ from meho_backplane.operations.reducer import (
     Reducer,
     handle_owner_sub_var,
 )
+from meho_backplane.operations.result_document import json_text_bytes
 from meho_backplane.redaction import (
     RedactionMiddlewareResult,
     apply_connector_boundary_redaction,
@@ -953,8 +954,16 @@ _TERMINAL_ERROR_INLINE_KEYS: tuple[str, ...] = ("status", "summary")
 #: Matches the reducer's default preview size.
 _TERMINAL_ERROR_INLINE_ISSUES = 5
 
-#: Longest string value an inline issue entry may carry. The same cap as the
-#: result's ``error`` line (:data:`~meho_backplane.operations._errors._EXC_MESSAGE_CAP`).
+#: Budget for the inline ``issues`` list, in bytes of JSON text measured with
+#: :func:`json_text_bytes` (escaped, the way the MCP transport sends it). Half
+#: of the reducer's 4 KB inline threshold; the other half is left for the
+#: reducer's own summary fields, ``status`` and ``summary``.
+_TERMINAL_ERROR_ISSUES_BYTE_BUDGET = 2048
+
+#: Longest string value an inline issue entry may carry, in bytes of JSON text
+#: (a non-ASCII character costs six bytes, ``\u00fc``, not one). The same cap
+#: as the result's ``error`` line
+#: (:data:`~meho_backplane.operations._errors._EXC_MESSAGE_CAP`).
 _TERMINAL_ERROR_ISSUE_TEXT_CAP = 256
 
 _TERMINAL_ERROR_TEXT_CUT_MARK = "...<truncated>"
@@ -964,16 +973,32 @@ def _is_error_issue(item: Any) -> bool:
     return isinstance(item, dict) and item.get("severity") == "error"
 
 
+def _cut_text_to_bytes(text: str, cap: int) -> str:
+    """Cut *text* so its JSON text, cut mark included, is at most *cap* bytes."""
+    if json_text_bytes(text) - 2 <= cap:  # minus the enclosing quotes
+        return text
+    budget = cap - len(_TERMINAL_ERROR_TEXT_CUT_MARK)
+    used = 0
+    kept = 0
+    for char in text[:cap]:  # every character costs at least one byte
+        cost = json_text_bytes(char) - 2
+        if used + cost > budget:
+            break
+        used += cost
+        kept += 1
+    return text[:kept] + _TERMINAL_ERROR_TEXT_CUT_MARK
+
+
 def _cap_issue_text(item: Any) -> Any:
     """Return *item* with every string value cut to the inline text cap."""
     if not isinstance(item, dict):
         return item
-    capped: dict[str, Any] = {}
-    for key, value in item.items():
-        if isinstance(value, str) and len(value) > _TERMINAL_ERROR_ISSUE_TEXT_CAP:
-            value = value[:_TERMINAL_ERROR_ISSUE_TEXT_CAP] + _TERMINAL_ERROR_TEXT_CUT_MARK
-        capped[key] = value
-    return capped
+    return {
+        key: _cut_text_to_bytes(value, _TERMINAL_ERROR_ISSUE_TEXT_CAP)
+        if isinstance(value, str)
+        else value
+        for key, value in item.items()
+    }
 
 
 def _bounded_issues(issues: list[Any]) -> dict[str, Any]:
@@ -982,14 +1007,26 @@ def _bounded_issues(issues: list[Any]) -> dict[str, Any]:
     Keeps at most :data:`_TERMINAL_ERROR_INLINE_ISSUES` entries, in their
     original order, choosing the ``error``-severity entries first so the
     reason for the failure is never pushed out by warnings. Every string value
-    is cut to :data:`_TERMINAL_ERROR_ISSUE_TEXT_CAP`. ``issues_total`` carries
-    the full count so the caller can tell the view from the whole list.
+    is cut to :data:`_TERMINAL_ERROR_ISSUE_TEXT_CAP` bytes of JSON text, and
+    the list as a whole stays within :data:`_TERMINAL_ERROR_ISSUES_BYTE_BUDGET`
+    bytes: entries are added in rank order until the next one would not fit.
+    The first ranked entry (the error, when there is one) is always kept so
+    the reason for the failure stays visible. ``issues_total`` carries the
+    full count so the caller can tell the view from the whole list.
     """
     ranked = [i for i, item in enumerate(issues) if _is_error_issue(item)]
     ranked += [i for i, item in enumerate(issues) if not _is_error_issue(item)]
-    kept = sorted(ranked[:_TERMINAL_ERROR_INLINE_ISSUES])
+    kept: dict[int, Any] = {}
+    used = 2  # the enclosing brackets
+    for index in ranked[:_TERMINAL_ERROR_INLINE_ISSUES]:
+        capped = _cap_issue_text(issues[index])
+        cost = json_text_bytes(capped) + 1  # plus the separating comma
+        if kept and used + cost > _TERMINAL_ERROR_ISSUES_BYTE_BUDGET:
+            break
+        kept[index] = capped
+        used += cost
     return {
-        "issues": [_cap_issue_text(issues[i]) for i in kept],
+        "issues": [kept[index] for index in sorted(kept)],
         "issues_total": len(issues),
     }
 

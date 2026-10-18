@@ -225,7 +225,9 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   over many VMs, or a failed deploy with many or long issues) returns a
   result handle plus the failure fields inline: `status` and `summary`
   as they are, and a bounded view of `issues` (at most 5 entries, the
-  `error` entries first, string values cut at 256 characters) with
+  `error` entries first, every string value cut at 256 bytes of JSON text
+  and the list kept under 2 KB of JSON text, measured the way the
+  transport sends it, so non-ASCII text cannot grow it) with
   `issues_total`. So the caller sees why the call failed without a
   drill-in, and the inline result stays small. The full issues list is in
   the stored result (the handle's rows when `issues` is the envelope's

@@ -3078,8 +3078,8 @@ class AgentAnnouncement(Base):
       in the same transaction as the INSERT, so ``seq`` follows commit
       order and has no holes from rolled-back writes. Readers page and
       watch by ``seq``. Nullable only so a pod running the older code
-      during a rolling upgrade can still write; such a row has no place
-      in the archive order and readers skip it.
+      during a rolling upgrade can still write; the next read gives such
+      a row the next number (``archive_sequence.number_unnumbered_rows``).
     * ``agent_announcement_tenant_seq_uq`` -- ``(tenant_id, seq)``
       unique: one row per sequence number per tenant.
     """

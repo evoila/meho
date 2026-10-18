@@ -24,12 +24,23 @@ with a smaller number.
   :data:`WATCH_POLL_SECONDS` seconds. Event ids are de-duplicated within
   a call.
 
-Retention: the prune deletes old rows, but the tenant counter keeps
-counting, and committed numbers have no holes. A read that starts below
-the oldest kept number therefore knows how many rows it missed and says
-so in ``gap`` -- it never claims to be complete. A checkpoint above the
-current high-water mark (for example after a database restore) gets a
-``checkpoint_ahead`` reset and starts again from the current end.
+Retention: the prune deletes rows by ``created_at``, but the tenant
+counter keeps counting, and committed numbers have no holes. So every
+scan knows how many rows it should have found between its start and its
+end, and the difference to the rows it did find is the number of
+announcements that are gone. That count comes from the scanned rows
+themselves, not from a separate query, so a prune that lands between two
+statements is still counted, and so is a row pruned from the middle of
+the range (the prune cutoff is by time, and a row's time can be earlier
+than its number). The answer says so in ``gap`` -- it never claims to be
+complete. A checkpoint above the current high-water mark (for example
+after a database restore) gets a ``checkpoint_ahead`` reset and starts
+again from the current end.
+
+Rolling upgrade: a pod on the previous release writes rows without a
+number. Every scan first gives such rows the next numbers
+(:func:`~meho_backplane.broadcast.archive_sequence.number_unnumbered_rows`),
+so they show up as new announcements instead of staying invisible.
 
 Operation events (the audit-driven ``BroadcastEvent`` entries) are not in
 the archive and are not returned here; ``query_audit`` is their record.
@@ -56,7 +67,11 @@ from meho_backplane.broadcast.archive_cursor import (
     encode_history_cursor,
     encode_watch_checkpoint,
 )
-from meho_backplane.broadcast.archive_sequence import archive_watermark, oldest_retained_seq
+from meho_backplane.broadcast.archive_sequence import (
+    archive_watermark,
+    number_unnumbered_rows,
+    oldest_retained_seq,
+)
 from meho_backplane.broadcast.client import get_broadcast_blocking_client, get_broadcast_client
 from meho_backplane.broadcast.history import (
     DEFAULT_WINDOW_MINUTES,
@@ -123,14 +138,18 @@ def _gap(reason: str, missed: int | None, detail: str) -> dict[str, Any]:
     return {"reason": reason, "missed_events": missed, "detail": detail}
 
 
-def _retention_gap(after: int, oldest: int | None, watermark: int) -> dict[str, Any] | None:
-    """Rows ``after+1 ..`` that the retention prune already deleted, if any.
+def _scan_gap(
+    after: int, upper: int, rows: list[AgentAnnouncement], limit: int
+) -> dict[str, Any] | None:
+    """Rows the scan should have found but did not, because retention removed them.
 
-    Committed numbers have no holes, so every number between *after* and
-    the oldest kept row was a real announcement that is now gone.
+    Committed numbers have no holes, so a scan of ``after < seq <= upper``
+    must find one row per number up to the last row of a full page, or up
+    to *upper* otherwise. Fewer rows means the prune deleted the rest,
+    wherever in the range they were.
     """
-    first_kept = watermark + 1 if oldest is None else min(oldest, watermark + 1)
-    missed = first_kept - after - 1
+    end = cast("int", rows[-1].seq) if len(rows) == limit else upper
+    missed = end - after - len(rows)
     if missed <= 0:
         return None
     return _gap(
@@ -170,6 +189,12 @@ def _parse_window_start(raw: str) -> datetime:
     return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
 
 
+async def _number_older_writes(session: AsyncSession, tenant_id: UUID) -> None:
+    """Number rows an older pod wrote, and commit, before the scan reads."""
+    if await number_unnumbered_rows(session, tenant_id):
+        await session.commit()
+
+
 async def _scan(
     session: AsyncSession,
     tenant_id: UUID,
@@ -177,9 +202,13 @@ async def _scan(
     after: int,
     upper: int,
     limit: int,
-    since: datetime | None = None,
 ) -> list[AgentAnnouncement]:
-    """Archive rows with ``after < seq <= upper``, in sequence order."""
+    """Archive rows with ``after < seq <= upper``, in sequence order.
+
+    No time filter here: the time window is applied after the read, so
+    the row count stays comparable with the number range
+    (:func:`_scan_gap`).
+    """
     stmt = (
         select(AgentAnnouncement)
         .where(
@@ -190,15 +219,16 @@ async def _scan(
         .order_by(AgentAnnouncement.seq)
         .limit(limit)
     )
-    if since is not None:
-        stmt = stmt.where(AgentAnnouncement.created_at >= since)
     return list((await session.execute(stmt)).scalars().all())
 
 
 def _serialize(
-    rows: list[AgentAnnouncement], flt: AnnouncementFilter, seen: set[str] | None = None
+    rows: list[AgentAnnouncement],
+    flt: AnnouncementFilter,
+    seen: set[str] | None = None,
+    since: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    """Filter and serialise *rows*; skip event ids already in *seen*."""
+    """Filter and serialise *rows*; skip rows before *since* and event ids in *seen*."""
     now = datetime.now(UTC)
     events: list[dict[str, Any]] = []
     for row in rows:
@@ -207,8 +237,11 @@ def _serialize(
             if event_id in seen:
                 continue
             seen.add(event_id)
+        announcement = row_to_announcement(row)
+        if since is not None and announcement.ts < since:
+            continue
         if flt.matches(row, now):
-            events.append(dump_event_wire(row_to_announcement(row)))
+            events.append(dump_event_wire(announcement))
     return events
 
 
@@ -224,10 +257,15 @@ def _parse_history_cursor(tenant_id: UUID, cursor: str | None) -> HistoryPositio
 async def _history_start(
     session: AsyncSession, tenant_id: UUID, start: HistoryPosition | datetime
 ) -> tuple[HistoryPosition, dict[str, Any] | None]:
-    """Resolve where a recent read starts, plus any retention gap."""
-    oldest = await oldest_retained_seq(session, tenant_id)
+    """Resolve where a recent read starts, plus the window gap of a fresh read.
+
+    A page cursor continues as it is; its gap comes from the scan. A fresh
+    window starts at the first row inside it. Rows below that are older
+    than the window or pruned; :func:`_window_gap` says when the second
+    case is possible.
+    """
     if isinstance(start, HistoryPosition):
-        return start, _retention_gap(start.after_seq, oldest, start.watermark)
+        return start, None
     watermark = await archive_watermark(session, tenant_id)
     first = (
         await session.execute(
@@ -239,6 +277,7 @@ async def _history_start(
     ).scalar_one_or_none()
     after = watermark if first is None else min(int(first) - 1, watermark)
     position = HistoryPosition(watermark=watermark, after_seq=after, since=start)
+    oldest = await oldest_retained_seq(session, tenant_id)
     return position, _window_gap(start, oldest, watermark)
 
 
@@ -253,8 +292,9 @@ async def read_announcement_history(
 
     *cursor* is ``None`` (the last :data:`DEFAULT_WINDOW_MINUTES` minutes),
     an ISO-8601 window start, or a ``next_cursor`` from an earlier page.
-    Scans at most *limit* rows, then filters them, so a page can hold
-    fewer than *limit* events and still have a ``next_cursor``.
+    Scans at most *limit* rows, then applies the window and the filter,
+    so a page can hold fewer than *limit* events and still have a
+    ``next_cursor``.
 
     Returns ``{events, next_cursor, watch_checkpoint, gap}``. Raises
     :class:`InvalidArchiveCursorError` for a bad cursor; DB errors
@@ -263,15 +303,16 @@ async def read_announcement_history(
     tenant_id = operator.tenant_id
     start = _parse_history_cursor(tenant_id, cursor)
     async with get_sessionmaker()() as session:
-        position, gap = await _history_start(session, tenant_id, start)
+        await _number_older_writes(session, tenant_id)
+        position, window_gap = await _history_start(session, tenant_id, start)
         rows = await _scan(
             session,
             tenant_id,
             after=position.after_seq,
             upper=position.watermark,
             limit=limit,
-            since=position.since,
         )
+    gap = _scan_gap(position.after_seq, position.watermark, rows, limit) or window_gap
     next_cursor = None
     if len(rows) == limit:
         last = cast("int", rows[-1].seq)
@@ -280,7 +321,7 @@ async def read_announcement_history(
             HistoryPosition(watermark=position.watermark, after_seq=last, since=position.since),
         )
     return {
-        "events": _serialize(rows, flt),
+        "events": _serialize(rows, flt, since=position.since),
         "next_cursor": next_cursor,
         "watch_checkpoint": encode_watch_checkpoint(tenant_id, position.watermark),
         "gap": gap,
@@ -300,6 +341,7 @@ async def _watch_scan(
 ) -> _WatchScan:
     """One archive scan after *after*; moves the checkpoint even when nothing matches."""
     async with get_sessionmaker()() as session:
+        await _number_older_writes(session, tenant_id)
         watermark = await archive_watermark(session, tenant_id)
         if after > watermark:
             return _WatchScan(
@@ -312,8 +354,8 @@ async def _watch_scan(
                     "the checkpoint is ahead of the archive; watching restarts at its current end.",
                 ),
             )
-        gap = _retention_gap(after, await oldest_retained_seq(session, tenant_id), watermark)
         rows = await _scan(session, tenant_id, after=after, upper=watermark, limit=WATCH_SCAN_LIMIT)
+    gap = _scan_gap(after, watermark, rows, WATCH_SCAN_LIMIT)
     full = len(rows) == WATCH_SCAN_LIMIT
     new_after = cast("int", rows[-1].seq) if full else watermark
     return _WatchScan(_serialize(rows, flt, seen), new_after, full, gap)

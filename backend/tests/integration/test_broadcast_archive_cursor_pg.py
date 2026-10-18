@@ -15,7 +15,10 @@ open on purpose, right after it took its number, and checks:
   high-water mark never skips a row that commits later;
 * when the held writer rolls back, the waiting writer gets the number it
   gave back, so committed numbers have no holes;
-* a writer in another tenant does not wait at all.
+* a writer in another tenant does not wait at all;
+* readers that number rows an older pod wrote without ``seq`` (a rolling
+  upgrade) take the same lock, so three readers and a publisher at once
+  hand out each number exactly once.
 
 SQLite (the unit-suite driver) has one writer at a time and no row
 locks, so these checks need a real PostgreSQL.
@@ -26,7 +29,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +45,7 @@ from meho_backplane.broadcast.archive_reader import (
     AnnouncementFilter,
     read_announcement_history,
 )
-from meho_backplane.broadcast.archive_sequence import next_announcement_seq
+from meho_backplane.broadcast.archive_sequence import archive_watermark, next_announcement_seq
 from meho_backplane.broadcast.publisher import publish_agent_announcement
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentAnnouncement
@@ -123,6 +126,20 @@ class _HoldAfterNumber:
             return seq
 
         monkeypatch.setattr(publisher, "next_announcement_seq", gated)
+
+
+async def _seed_unnumbered(tenant_id: uuid.UUID, activities: list[str]) -> None:
+    """Store rows the way a pod on the previous release does: without ``seq``."""
+    now = datetime.now(UTC)
+    async with get_sessionmaker()() as session:
+        for offset, activity in enumerate(activities):
+            event = _event(activity, tenant_id).model_copy(
+                update={"ts": now - timedelta(minutes=len(activities) - offset)}
+            )
+            row = publisher._announcement_row(event, None, 0)
+            row.seq = None
+            session.add(row)
+        await session.commit()
 
 
 async def _rows(tenant_id: uuid.UUID) -> list[tuple[int, str]]:
@@ -219,3 +236,26 @@ async def test_other_tenant_does_not_wait(
     hold.release.set()
     held = await asyncio.wait_for(held_task, _WAIT_SECONDS)
     assert held.seq == 1
+
+
+@_skip_no_docker
+async def test_concurrent_readers_number_older_writes_exactly_once(
+    pg_engine: None,  # noqa: F811 -- fixture
+) -> None:
+    await _seed_unnumbered(_TENANT, ["legacy a", "legacy b", "legacy c"])
+
+    reads = [_recent(_TENANT) for _ in range(3)]
+    results = await asyncio.gather(*reads, publish_agent_announcement(_event("new")))
+
+    rows = await _rows(_TENANT)
+    assert sorted(seq for seq, _activity in rows) == [1, 2, 3, 4]
+    legacy = [seq for seq, activity in rows if activity.startswith("legacy")]
+    assert legacy == sorted(legacy), "older rows keep their time order"
+    assert legacy[-1] - legacy[0] == 2, "older rows got consecutive numbers"
+    async with get_sessionmaker()() as session:
+        assert await archive_watermark(session, _TENANT) == 4
+    for read in results[:3]:
+        assert read["gap"] is None
+    after = await _recent(_TENANT)
+    assert len(after["events"]) == 4
+    assert after["watch_checkpoint"] == encode_watch_checkpoint(_TENANT, 4)

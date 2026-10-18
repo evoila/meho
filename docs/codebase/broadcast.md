@@ -659,8 +659,10 @@ stop competing work. A unique index `(tenant_id, seq)` backs it up. The
 first announcement of a tenant creates the counter row (`INSERT ... ON
 CONFLICT DO NOTHING`). Existing rows were numbered 1..n per tenant by
 the migration, oldest first. `seq` is nullable only so an older pod
-can still write during a rolling upgrade; readers skip rows without a
-number. The PostgreSQL lock test is
+can still write during a rolling upgrade. Before every scan, the reader
+gives such rows the next numbers, oldest first, under the same counter
+lock (`number_unnumbered_rows`), so they show up as new announcements
+instead of staying invisible. The PostgreSQL lock tests are in
 `tests/integration/test_broadcast_archive_cursor_pg.py`.
 
 **Two cursor kinds.** `broadcast/archive_cursor.py`. Both are opaque,
@@ -697,13 +699,21 @@ timeout. `next_cursor` always moves past every scanned row, also when
 the filter hides them; event ids are de-duplicated within a call, and a
 reconnect with the returned checkpoint never repeats an event.
 
-**Gaps.** The retention prune deletes old rows but never the counter,
-and numbers have no holes. So a read that starts below the oldest kept
-row knows exactly how many rows it missed and says so, instead of
-claiming to be complete:
+**Gaps.** The retention prune deletes rows by `created_at` but never
+the counter, and numbers have no holes. So every scan knows how many
+rows it should have found between its start and its end (the last row
+of a full page, or the upper end), and the difference to the rows it did
+find is the number of announcements that are gone. The count comes from
+the scanned rows themselves, not from a separate "oldest kept row" query.
+That way a prune that lands between the high-water mark read and the row
+scan is still counted, and so is a row pruned from the middle of the
+range: a row's `created_at` is set before it takes its number, so the
+time-based prune can remove number 2 and keep 1 and 3. The read says so
+instead of claiming to be complete:
 
 - `{"reason": "retention_trimmed", "missed_events": N, ...}` — a watch
-  checkpoint or a history page cursor whose next rows were pruned.
+  checkpoint, a history page cursor, or a fresh window whose scanned
+  range is missing N rows.
 - `{"reason": "retention_trimmed", "missed_events": null, ...}` — a
   fresh recent window that starts before
   `broadcast_announcement_retention_days` while rows were pruned.

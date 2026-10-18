@@ -155,8 +155,9 @@ class AnnouncementPublishResult:
     * ``event`` -- the stored announcement. On a replay this is the
       first stored copy, so the caller echoes the original ids.
     * ``seq`` -- the stored row's archive sequence number (#3748). Readers
-      page and watch by it. ``None`` only for a row an older MEHO version
-      wrote without a number during a rolling upgrade.
+      page and watch by it. ``None`` only for a replayed row an older
+      MEHO version wrote during a rolling upgrade that no read has
+      numbered yet.
     * ``stream_entry_id`` -- the Valkey stream entry id this call wrote,
       or ``None`` when it wrote none (the entry was already on the
       stream, or the stream write failed).

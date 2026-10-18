@@ -21,8 +21,9 @@ Existing rows get numbers 1..n per tenant, oldest first (``created_at``,
 then ``id``), and each tenant's counter starts at its highest number.
 
 ``seq`` stays nullable. A pod that still runs the older code during a
-rolling upgrade writes rows without a number; readers skip those rows.
-Making the column ``NOT NULL`` is a later, separate migration.
+rolling upgrade writes rows without a number; the next read gives those
+rows the next numbers. Making the column ``NOT NULL`` is a later,
+separate migration.
 
 ``downgrade()`` drops the index, the column and the counter table.
 """

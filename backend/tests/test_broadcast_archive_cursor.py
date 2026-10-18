@@ -17,8 +17,13 @@ a rollback gives its number back to the waiter) is in
   reconnect with the returned checkpoint never repeats an event id.
 * A stream failure after the archive commit returns ``delivery_pending``;
   the retry with the same key finishes the delivery without a second row.
-* Rows removed by retention give an explicit ``gap``; a checkpoint ahead
-  of the archive gives a ``checkpoint_ahead`` reset.
+* Rows removed by retention give an explicit ``gap``, also when the
+  prune lands between the high-water mark read and the row scan, and
+  when it removes a number from the middle of the range (the prune goes
+  by time, and a row's time can be earlier than its number). A
+  checkpoint ahead of the archive gives a ``checkpoint_ahead`` reset.
+* Rows an older pod wrote without a number during a rolling upgrade get
+  the next numbers on the next read and stay readable.
 """
 
 from __future__ import annotations
@@ -30,10 +35,10 @@ from uuid import UUID, uuid4
 
 import pytest
 from redis.exceptions import ConnectionError as RedisConnectionError
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, select
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.broadcast import archive_reader, publisher
+from meho_backplane.broadcast import announcement_retention, archive_reader, publisher
 from meho_backplane.broadcast.archive_cursor import (
     HistoryPosition,
     InvalidArchiveCursorError,
@@ -47,7 +52,11 @@ from meho_backplane.broadcast.archive_reader import (
     read_announcement_history,
     watch_announcements,
 )
-from meho_backplane.broadcast.archive_sequence import archive_watermark, next_announcement_seq
+from meho_backplane.broadcast.archive_sequence import (
+    archive_watermark,
+    next_announcement_seq,
+    number_unnumbered_rows,
+)
 from meho_backplane.broadcast.publisher import publish_agent_announcement
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentAnnouncement
@@ -97,7 +106,7 @@ async def _seqs(tenant_id: UUID) -> list[int]:
 
 
 async def _prune(tenant_id: UUID, *, up_to_seq: int) -> None:
-    """Delete rows like the retention prune does (the counter row stays)."""
+    """Delete the lowest numbers, as a prune of an archive in time order does."""
     async with get_sessionmaker()() as session:
         await session.execute(
             delete(AgentAnnouncement).where(
@@ -105,6 +114,36 @@ async def _prune(tenant_id: UUID, *, up_to_seq: int) -> None:
             )
         )
         await session.commit()
+
+
+async def _seed_unnumbered(tenant_id: UUID, **fields: Any) -> str:
+    """Store a row the way a pod on the previous release does: without ``seq``."""
+    legacy = publisher._announcement_row(trusted_event(tenant_id=tenant_id, **fields), None, 0)
+    legacy.seq = None
+    async with get_sessionmaker()() as session:
+        session.add(legacy)
+        await session.commit()
+    return str(legacy.id)
+
+
+def _prune_after_watermark_read(
+    monkeypatch: pytest.MonkeyPatch, tenant_id: UUID, seqs: set[int]
+) -> None:
+    """Delete *seqs* right after the reader took the high-water mark, before its row scan."""
+    real = archive_reader.archive_watermark
+
+    async def racing(session: Any, tenant: UUID) -> int:
+        watermark = await real(session, tenant)
+        async with get_sessionmaker()() as other:
+            await other.execute(
+                delete(AgentAnnouncement).where(
+                    AgentAnnouncement.tenant_id == tenant_id, AgentAnnouncement.seq.in_(seqs)
+                )
+            )
+            await other.commit()
+        return watermark
+
+    monkeypatch.setattr(archive_reader, "archive_watermark", racing)
 
 
 async def _watch(tenant_id: UUID, checkpoint: str, **flt: Any) -> dict[str, Any]:
@@ -386,20 +425,133 @@ async def test_checkpoint_ahead_of_the_archive_resets() -> None:
     assert decode_watch_checkpoint(result["next_cursor"], tenant_id) == 1
 
 
-async def test_rows_without_a_number_are_skipped() -> None:
-    """A row an older pod wrote without ``seq`` has no place in the order."""
+async def test_prune_between_watermark_read_and_scan_is_still_reported_by_watch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gap comes from the rows the scan found, not from a separate query."""
+    tenant_id = uuid4()
+    seeded = [str((await seed_announcement(tenant_id))[0].event_id) for _ in range(5)]
+    _prune_after_watermark_read(monkeypatch, tenant_id, {2, 3})
+
+    result = await _watch(tenant_id, encode_watch_checkpoint(tenant_id, 0))
+
+    assert result["gap"]["reason"] == "retention_trimmed"
+    assert result["gap"]["missed_events"] == 2
+    assert _ids(result) == [seeded[0], seeded[3], seeded[4]]
+    assert decode_watch_checkpoint(result["next_cursor"], tenant_id) == 5
+
+
+async def test_prune_between_watermark_read_and_scan_is_still_reported_by_recent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rows gone from inside the read range are counted.
+
+    Rows below the first row inside the time window are not: a fresh
+    window cannot tell "older than the window" from "pruned", and only the
+    time check (``_window_gap``) speaks for them.
+    """
+    tenant_id = uuid4()
+    seeded = [str((await seed_announcement(tenant_id))[0].event_id) for _ in range(4)]
+    _prune_after_watermark_read(monkeypatch, tenant_id, {2, 3})
+
+    result = await read_announcement_history(_reader(tenant_id), cursor=None, flt=_ALL, limit=10)
+
+    assert result["gap"]["missed_events"] == 2
+    assert _ids(result) == [seeded[0], seeded[3]]
+    assert decode_watch_checkpoint(result["watch_checkpoint"], tenant_id) == 4
+
+
+async def test_time_based_prune_can_remove_a_middle_number() -> None:
+    """A row's time is set before its number, so the prune can leave 1 and 3 and delete 2."""
+    tenant_id = uuid4()
+    now = datetime.now(UTC)
+    kept_1, _ = await seed_announcement(tenant_id, ts=now - timedelta(days=10))
+    await seed_announcement(tenant_id, ts=now - timedelta(days=100))
+    kept_3, _ = await seed_announcement(tenant_id, ts=now - timedelta(days=10))
+    dropped = await announcement_retention._delete_announcements_older_than(
+        now - timedelta(days=90)
+    )
+    assert dropped == 1
+    assert await _seqs(tenant_id) == [1, 3]
+
+    watched = await _watch(tenant_id, encode_watch_checkpoint(tenant_id, 0))
+    assert watched["gap"]["reason"] == "retention_trimmed"
+    assert watched["gap"]["missed_events"] == 1
+    assert _ids(watched) == [str(kept_1.event_id), str(kept_3.event_id)]
+    assert decode_watch_checkpoint(watched["next_cursor"], tenant_id) == 3
+
+    since = (now - timedelta(days=200)).isoformat()
+    recent = await read_announcement_history(_reader(tenant_id), cursor=since, flt=_ALL, limit=10)
+    assert recent["gap"]["missed_events"] == 1
+    assert _ids(recent) == [str(kept_1.event_id), str(kept_3.event_id)]
+
+
+async def test_full_page_with_a_hole_counts_the_missing_number(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant_id = uuid4()
+    monkeypatch.setattr(archive_reader, "WATCH_SCAN_LIMIT", 3)
+    for _ in range(5):
+        await seed_announcement(tenant_id)
+    async with get_sessionmaker()() as session:
+        await session.execute(
+            delete(AgentAnnouncement).where(
+                AgentAnnouncement.tenant_id == tenant_id, AgentAnnouncement.seq == 2
+            )
+        )
+        await session.commit()
+
+    result = await _watch(tenant_id, encode_watch_checkpoint(tenant_id, 0))
+
+    assert result["gap"]["missed_events"] == 1
+    assert len(result["events"]) == 3
+    assert decode_watch_checkpoint(result["next_cursor"], tenant_id) == 4
+
+
+# ---------------------------------------------------------------------------
+# Rows written without a number by a pod on the previous release
+# ---------------------------------------------------------------------------
+
+
+async def test_rows_without_a_number_get_the_next_numbers_and_stay_readable() -> None:
     tenant_id = uuid4()
     numbered, _ = await seed_announcement(tenant_id)
-    legacy = publisher._announcement_row(trusted_event(tenant_id=tenant_id), None, 0)
-    legacy.seq = None
-    async with get_sessionmaker()() as session:
-        session.add(legacy)
-        await session.commit()
-        total = (
-            await session.execute(
-                select(func.count()).where(AgentAnnouncement.tenant_id == tenant_id)
-            )
-        ).scalar_one()
-    assert total == 2
+    now = datetime.now(UTC)
+    older = await _seed_unnumbered(tenant_id, ts=now - timedelta(minutes=2))
+    newer = await _seed_unnumbered(tenant_id, ts=now - timedelta(minutes=1))
+
     result = await read_announcement_history(_reader(tenant_id), cursor=None, flt=_ALL, limit=10)
-    assert _ids(result) == [str(numbered.event_id)]
+
+    assert _ids(result) == [str(numbered.event_id), older, newer]
+    assert result["gap"] is None
+    assert await _seqs(tenant_id) == [1, 2, 3]
+    assert decode_watch_checkpoint(result["watch_checkpoint"], tenant_id) == 3
+    async with get_sessionmaker()() as session:
+        assert await archive_watermark(session, tenant_id) == 3
+
+    # The next publisher takes the number after the ones just handed out.
+    _, seq = await seed_announcement(tenant_id)
+    assert seq == 4
+
+
+async def test_watch_returns_a_row_an_older_pod_wrote_after_the_checkpoint() -> None:
+    tenant_id = uuid4()
+    await seed_announcement(tenant_id)
+    checkpoint = encode_watch_checkpoint(tenant_id, 1)
+    legacy = await _seed_unnumbered(tenant_id)
+
+    result = await _watch(tenant_id, checkpoint)
+
+    assert _ids(result) == [legacy]
+    assert result["gap"] is None
+    assert decode_watch_checkpoint(result["next_cursor"], tenant_id) == 2
+
+
+async def test_tenant_with_only_unnumbered_rows_gets_a_counter() -> None:
+    tenant_id = uuid4()
+    legacy = await _seed_unnumbered(tenant_id)
+    result = await read_announcement_history(_reader(tenant_id), cursor=None, flt=_ALL, limit=10)
+    assert _ids(result) == [legacy]
+    async with get_sessionmaker()() as session:
+        assert await archive_watermark(session, tenant_id) == 1
+        assert await number_unnumbered_rows(session, tenant_id) == 0

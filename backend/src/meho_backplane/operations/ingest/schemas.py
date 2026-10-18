@@ -93,17 +93,17 @@ class EndpointDescriptorProto(BaseModel):
     """Heuristic from the HTTP verb plus narrow destructive-action hints.
 
     ``GET`` / ``HEAD`` / ``OPTIONS`` → ``safe``; ``POST`` / ``PUT`` /
-    ``PATCH`` → ``caution``; ``DELETE`` → ``dangerous``. A VIM-style
-    action named ``Destroy``, ``Delete``, ``Remove``, or ``Unregister``
-    raises its tier to ``dangerous`` and requires approval even though it
-    is a ``POST``. Operator review can still choose the most-restrictive
+    ``PATCH`` → ``caution``; ``DELETE`` → ``dangerous`` with approval
+    required. A VIM-style action named ``Destroy``, ``Delete``, ``Remove``,
+    or ``Unregister`` raises its tier to ``dangerous`` and requires approval
+    even though it is a ``POST``. Operator review can still choose the most-restrictive
     ``destructive`` tier (#3183); the parser never assigns it itself."""
 
     requires_approval: bool = False
-    """False for ordinary parsed operations; semantic destructive-action
-    hints set it to ``True``. Operators can also flip it during review
-    (T4) for ops that should pause the dispatcher for out-of-band
-    approval."""
+    """False for ordinary parsed operations; a ``DELETE`` (#3827) and the
+    semantic destructive-action hints set it to ``True``. Operators can
+    also flip it during review (T4) for ops that should pause the
+    dispatcher for out-of-band approval."""
 
     llm_instructions: dict[str, object] | None = None
     """Agent guidance for this operation. ``None`` from the parser. A

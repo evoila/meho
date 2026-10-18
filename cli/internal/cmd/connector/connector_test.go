@@ -1348,6 +1348,85 @@ func TestPrintReviewTableOmitsUngroupedLineWhenZero(t *testing.T) {
 	}
 }
 
+// TestPrintReviewTableRendersDeleteReview — the review render surfaces the
+// stored-delete report (#3827): the count line, the WARNING, and one row per
+// op that is weaker than a fresh ingest would make it. Rows that already
+// match the expected posture stay off the human render (they ride --json).
+func TestPrintReviewTableRendersDeleteReview(t *testing.T) {
+	needing := 1
+	r := &api.ConnectorReviewPayload{
+		ConnectorId: "vmware-rest-9.0",
+		Product:     "vmware",
+		Version:     "9.0",
+		ImplId:      "vmware-rest",
+		Groups: []api.ConnectorReviewGroup{
+			{GroupKey: "tagging", Name: "Tagging", ReviewStatus: "enabled", OpCount: 0},
+		},
+		DeleteOpsNeedingCorrectionCount: &needing,
+		DeleteOpsBelowDestructive: &[]api.ConnectorReviewDeleteOp{
+			{
+				OpId:                     "DELETE:/api/cis/tagging/category/{category_id}",
+				Method:                   "DELETE",
+				SafetyLevel:              "caution",
+				RequiresApproval:         false,
+				IsEnabled:                true,
+				ExpectedSafetyLevel:      "destructive",
+				ExpectedRequiresApproval: true,
+				NeedsCorrection:          true,
+				Reason:                   "stored at caution; a fresh ingest gives destructive.",
+			},
+			{
+				OpId:                     "DELETE:/vcenter/folder/{folder}",
+				Method:                   "DELETE",
+				SafetyLevel:              "dangerous",
+				RequiresApproval:         true,
+				IsEnabled:                true,
+				ExpectedSafetyLevel:      "dangerous",
+				ExpectedRequiresApproval: true,
+				NeedsCorrection:          false,
+				Reason:                   "waits for approval at dangerous.",
+			},
+		},
+	}
+	var buf bytes.Buffer
+	printReviewTable(&buf, r)
+	out := buf.String()
+	for _, want := range []string{
+		"Deletes below destructive: 2 stored op(s), 1 need(s) correction.",
+		"WARNING: these stored ops are weaker",
+		"DELETE:/api/cis/tagging/category/{category_id}",
+		"destructive",
+		"connector edit-op",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("review render missing delete-review token %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "DELETE:/vcenter/folder/{folder}") {
+		t.Errorf("review render listed a row that needs no correction:\n%s", out)
+	}
+}
+
+// TestPrintReviewTableOmitsDeleteReviewWhenEmpty — a connector with no stored
+// deletes below destructive prints no delete-review section.
+func TestPrintReviewTableOmitsDeleteReviewWhenEmpty(t *testing.T) {
+	zero := 0
+	empty := []api.ConnectorReviewDeleteOp{}
+	r := &api.ConnectorReviewPayload{
+		ConnectorId:                     "k8s-1.x",
+		DeleteOpsBelowDestructive:       &empty,
+		DeleteOpsNeedingCorrectionCount: &zero,
+		Groups: []api.ConnectorReviewGroup{
+			{GroupKey: "core", Name: "Core", ReviewStatus: "enabled", OpCount: 0},
+		},
+	}
+	var buf bytes.Buffer
+	printReviewTable(&buf, r)
+	if strings.Contains(buf.String(), "Deletes below destructive") {
+		t.Errorf("review render printed a delete-review section for an empty report:\n%s", buf.String())
+	}
+}
+
 // TestPrintReviewTableRendersProvenance — the review render surfaces
 // per-spec provenance (#2291): the fetched/inline/shipped origin, the
 // audit uri, a sha256 prefix, and the operator, so an operator can tell

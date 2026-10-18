@@ -101,6 +101,7 @@ from meho_backplane.operations.ingest._internals import (
     enable_time_auto_shim_warnings,
     load_group,
     load_groups,
+    load_ingested_writes_in_scope,
     load_op,
     load_ops_in_groups,
     load_ops_outside_groups,
@@ -118,6 +119,7 @@ from meho_backplane.operations.ingest.delete_connector import (
     deregister_staged_auto_shims,
     stage_connector_delete,
 )
+from meho_backplane.operations.ingest.delete_review import build_delete_review
 from meho_backplane.operations.ingest.exceptions import (
     AmbiguousConnectorScopeError,
     BuiltinConnectorWriteForbiddenError,
@@ -185,6 +187,38 @@ def _authoring_kind_for_payload(
         enabled_operation_count=enabled_op_count,
         has_code_shipped_op=has_code_shipped_op,
     )
+
+
+def _render_groups(groups: list[Any], ops: list[Any]) -> list[ConnectorReviewGroup]:
+    """Pack *ops* under their group rows for the review payload."""
+    ops_by_group: dict[UUID, list[Any]] = {group.id: [] for group in groups}
+    for op in ops:
+        if op.group_id is not None and op.group_id in ops_by_group:
+            ops_by_group[op.group_id].append(op)
+    return [
+        ConnectorReviewGroup(
+            group_key=group.group_key,
+            name=group.name,
+            when_to_use=group.when_to_use,
+            review_status=group.review_status,
+            op_count=len(ops_by_group[group.id]),
+            ops=[
+                ConnectorReviewOp(
+                    op_id=op.op_id,
+                    summary=op.summary,
+                    description=op.description,
+                    custom_description=op.custom_description,
+                    safety_level=op.safety_level,
+                    requires_approval=op.requires_approval,
+                    is_enabled=op.is_enabled,
+                    tags=list(op.tags),
+                    needs_reingest=op.needs_reingest,
+                )
+                for op in ops_by_group[group.id]
+            ],
+        )
+        for group in groups
+    ]
 
 
 class ReviewService:
@@ -610,21 +644,7 @@ class ReviewService:
             scope,
             [group.id for group in groups],
         )
-        ops_by_group: dict[UUID, list[Any]] = {group.id: [] for group in groups}
-        for op in ops:
-            if op.group_id is not None and op.group_id in ops_by_group:
-                ops_by_group[op.group_id].append(op)
-        rendered_groups = [
-            ConnectorReviewGroup(
-                group_key=group.group_key,
-                name=group.name,
-                when_to_use=group.when_to_use,
-                review_status=group.review_status,
-                op_count=len(ops_by_group[group.id]),
-                ops=[_review_op(op) for op in ops_by_group[group.id]],
-            )
-            for group in groups
-        ]
+        rendered_groups = _render_groups(groups, ops)
         # #3870: list every op outside the rendered groups too, with its
         # enabled state and safety level, so the review shows the whole
         # op set dispatch can serve — not only the grouped part.
@@ -649,6 +669,12 @@ class ReviewService:
         # a same-spec re-ingest" signal, including ungrouped ops the
         # rendered groups never show.
         needs_reingest_op_count = await count_needs_reingest_in_scope(session, scope)
+        # #3827: the stored deletes below ``destructive``, with the posture a
+        # fresh ingest would give, so an operator sees which rows still run
+        # without approval before one of them is hit live.
+        delete_review = build_delete_review(
+            await load_ingested_writes_in_scope(session, scope), scope
+        )
         # #2291: durable per-spec provenance for this connector scope,
         # ordered by ``uri``. Empty for connectors ingested before the
         # provenance table landed — the surfaces render that gap rather
@@ -671,6 +697,10 @@ class ReviewService:
             ungrouped_op_count=max(all_op_count - grouped_op_count, 0),
             ungrouped_ops=[_review_op(op) for op in ungrouped_ops],
             needs_reingest_op_count=needs_reingest_op_count,
+            delete_ops_below_destructive=delete_review,
+            delete_ops_needing_correction_count=sum(
+                1 for entry in delete_review if entry.needs_correction
+            ),
             kind=kind,
             dispatchable=dispatchable,
             provenance=[

@@ -98,6 +98,7 @@ func TestWorkRefHeaderOnControlPlaneVerbs(t *testing.T) {
 		{"connector disable", []string{"connector", "disable", "vault-1.15", "--confirm"}, "POST /api/v1/connectors/vault-1.15/disable"},
 		{"connector enable-reads", []string{"connector", "enable-reads", "vault-1.15", "--confirm"}, "POST /api/v1/connectors/vault-1.15/enable-reads"},
 		{"event-source list", []string{"event-source", "list"}, "GET /api/v1/event-sources"},
+		{"status --watch", []string{"status", "--watch"}, "GET /api/v1/feed"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

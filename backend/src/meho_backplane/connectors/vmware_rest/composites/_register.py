@@ -1385,16 +1385,21 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     _CompositeSpec(
         op_id="vmware.composite.folder.create",
         handler=folder_create_composite,
-        summary="Create a VM folder under a named parent (synchronous vim CreateFolder).",
+        summary="Create a VM folder under a parent folder (synchronous vim CreateFolder).",
         description=(
-            "Creates a VM folder under a named parent. /vcenter/folder is "
+            "Creates a VM folder under a parent. /vcenter/folder is "
             "GET-only, so the create goes through vim Folder.CreateFolder — "
             "which is synchronous: it returns the new folder's "
-            "ManagedObjectReference directly (no task poll). Resolves the "
-            "parent by display name among the VIRTUAL_MACHINE folders; an "
-            "unknown name returns status='parent_not_found' and an ambiguous "
-            "one status='ambiguous_parent', both before any write. Equivalent "
-            "of 'govc folder.create' for the VM-folder inventory tree."
+            "ManagedObjectReference directly (no task poll). Give the parent "
+            "as a display name (parent_folder, resolved among the "
+            "VIRTUAL_MACHINE folders, optionally scoped with a datacenter "
+            "moid) or as a moid pin (parent_folder_id). Every datacenter has "
+            "a root VM folder named 'vm', so on a multi-datacenter vCenter "
+            "pass datacenter or parent_folder_id. An unknown name fails with "
+            "status='parent_not_found' and an ambiguous one with "
+            "status='ambiguous_parent' (listing candidate_folders), both "
+            "before any write. Equivalent of 'govc folder.create' for the "
+            "VM-folder inventory tree."
         ),
         parameter_schema=FOLDER_CREATE_PARAMETER_SCHEMA,
         response_schema=FOLDER_CREATE_RESPONSE_SCHEMA,

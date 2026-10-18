@@ -73,6 +73,7 @@ __all__ = [
     "CONTENT_LIBRARY_ID_PATTERN",
     "CONTENT_LIBRARY_ITEM_DELETE_PARAMETER_SCHEMA",
     "CONTENT_LIBRARY_ITEM_DELETE_RESPONSE_SCHEMA",
+    "DATACENTER_MOID_PATTERN",
     "DATASTORE_DIR_CREATE_PARAMETER_SCHEMA",
     "DATASTORE_DIR_CREATE_RESPONSE_SCHEMA",
     "DATASTORE_FILE_DELETE_PARAMETER_SCHEMA",
@@ -147,6 +148,7 @@ __all__ = [
     "VM_DEVICE_CDROM_RESPONSE_SCHEMA",
     "VM_DISK_GROW_PARAMETER_SCHEMA",
     "VM_DISK_GROW_RESPONSE_SCHEMA",
+    "VM_FOLDER_MOID_PATTERN",
     "VM_MIGRATE_PARAMETER_SCHEMA",
     "VM_MIGRATE_RESPONSE_SCHEMA",
     "VM_MOID_PATTERN",
@@ -1889,13 +1891,24 @@ RESOURCE_POOL_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
 }
 
 
+#: VM folder moids only (``group-v``), e.g. a datacenter's root ``vm`` folder.
+VM_FOLDER_MOID_PATTERN: str = r"^group-v[0-9]+$"
+#: Datacenter moids, e.g. ``datacenter-3``.
+DATACENTER_MOID_PATTERN: str = r"^datacenter-[0-9]+$"
+
+
 #: ``vmware.composite.folder.create`` parameter schema.
 #:
-#: Create a VM folder under a named parent via the **synchronous** vim
+#: Create a VM folder under a parent via the **synchronous** vim
 #: ``Folder.CreateFolder`` (``/vcenter/folder`` is GET-only, so vim is the
-#: sole write path). The parent is resolved by display name among the
-#: ``VIRTUAL_MACHINE`` folders; no match → ``status='parent_not_found'``,
-#: more than one → ``status='ambiguous_parent'``.
+#: sole write path). The parent is either a display name (``parent_folder``,
+#: resolved among the ``VIRTUAL_MACHINE`` folders, optionally scoped to one
+#: ``datacenter``) or an explicit moid pin (``parent_folder_id``) that skips
+#: the lookup — the ``vm.create`` ``folder_name`` / ``folder`` shape (#3115).
+#: Every datacenter ships a root VM folder named ``vm``, so on a
+#: multi-datacenter vCenter the bare name ``vm`` needs one of the two (#3588).
+#: An unresolved parent fails the operation (``parent_not_found`` /
+#: ``ambiguous_parent`` with an ``error`` issue), it is never a silent no-op.
 FOLDER_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -1905,8 +1918,33 @@ FOLDER_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "description": (
                 "Display name of the parent VM folder the new folder is created "
                 "under. Resolved to its moid via ``GET:/vcenter/folder`` filtered "
-                "to VIRTUAL_MACHINE folders; an ambiguous or unknown name is "
-                "refused with a structured status before any write."
+                "to VIRTUAL_MACHINE folders (and to ``datacenter`` when given). "
+                "Every datacenter has a root VM folder named ``vm``, so on a "
+                "multi-datacenter vCenter pass ``datacenter`` or "
+                "``parent_folder_id`` too. An unknown or ambiguous name fails the "
+                "operation before any write. Ignored when ``parent_folder_id`` "
+                "is supplied."
+            ),
+        },
+        "parent_folder_id": {
+            "type": "string",
+            "pattern": VM_FOLDER_MOID_PATTERN,
+            "description": (
+                "Optional moid pin of the parent VM folder (``group-v...``), "
+                "the #3115 ``vm.create`` ``folder`` pattern. When present the "
+                "name lookup is skipped and the folder is created under this "
+                "moid. One of ``parent_folder`` / ``parent_folder_id`` is "
+                "required."
+            ),
+        },
+        "datacenter": {
+            "type": "string",
+            "pattern": DATACENTER_MOID_PATTERN,
+            "description": (
+                "Optional datacenter moid (``datacenter-...``) that scopes the "
+                "``parent_folder`` name lookup via ``filter.datacenters``. Use "
+                "it to pick one datacenter's root ``vm`` folder. Ignored when "
+                "``parent_folder_id`` is supplied."
             ),
         },
         "folder_name": {
@@ -1915,7 +1953,11 @@ FOLDER_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "description": "Name of the new sub-folder to create under the parent.",
         },
     },
-    "required": ["parent_folder", "folder_name"],
+    "required": ["folder_name"],
+    "anyOf": [
+        {"required": ["parent_folder"]},
+        {"required": ["parent_folder_id"]},
+    ],
     "additionalProperties": False,
 }
 
@@ -3040,17 +3082,25 @@ FOLDER_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "description": (
                 "``'created'`` — the synchronous CreateFolder returned the new "
                 "folder MoRef; ``'parent_not_found'`` — the parent name matched no "
-                "VM folder; ``'ambiguous_parent'`` — it matched more than one "
-                "(both refused before any write)."
+                "VM folder; ``'ambiguous_parent'`` — it matched more than one. "
+                "Both refusals happen before any write and fail the operation "
+                "(an ``error`` issue, so the audit row reads ``error``, #3588)."
             ),
         },
         "parent_folder": {
-            "type": "string",
-            "description": "The parent folder display name the operator supplied.",
+            "type": ["string", "null"],
+            "description": (
+                "The parent folder display name the operator supplied; ``null`` "
+                "when only the ``parent_folder_id`` pin was given."
+            ),
         },
         "parent_folder_id": {
             "type": ["string", "null"],
             "description": "Resolved parent folder moid; ``null`` on a resolution refusal.",
+        },
+        "datacenter": {
+            "type": ["string", "null"],
+            "description": "The datacenter moid that scoped the name lookup, if any.",
         },
         "new_folder_name": {"type": "string", "description": "The requested new folder name."},
         "folder": {
@@ -3058,6 +3108,23 @@ FOLDER_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "description": (
                 "The new folder's moid — CreateFolder is synchronous and returns "
                 "the MoRef directly (no task poll). ``null`` on a resolution refusal."
+            ),
+        },
+        "candidate_folders": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "On ``ambiguous_parent``: the VM folder moids the name matched. "
+                "Re-issue with one of them as ``parent_folder_id``, or scope the "
+                "name with ``datacenter``."
+            ),
+        },
+        "issues": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": (
+                "Structured problems. A resolution refusal carries one "
+                "``error``-severity entry; empty on ``created``."
             ),
         },
         "guidance": {

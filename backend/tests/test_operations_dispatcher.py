@@ -304,6 +304,41 @@ async def _module_composite_handler_terminal_error(
     }
 
 
+class _AmbiguousVmFolderConnector:
+    """Two datacenters, both with a root VM folder named ``vm`` (#3588)."""
+
+    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
+        return f"/api{path}"
+
+    async def adapt_op_query(
+        self, target: Any, query: dict[str, Any] | None, operator: Operator
+    ) -> dict[str, Any] | None:
+        return query
+
+    async def _get_json(
+        self, target: Any, path: str, *, operator: Operator, params: Any = None
+    ) -> Any:
+        return {
+            "value": [{"folder": "group-v4", "name": "vm"}, {"folder": "group-v115", "name": "vm"}]
+        }
+
+
+async def _module_composite_handler_folder_create_ambiguous(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> Any:
+    """Run the real ``folder.create`` handler against an ambiguous ``vm`` parent (#3588)."""
+    from meho_backplane.connectors.vmware_rest.composites._write import folder_create_composite
+
+    return await folder_create_composite(
+        operator=operator,
+        target=target,
+        params={"parent_folder": "vm", "folder_name": "X"},
+        connector=_AmbiguousVmFolderConnector(),  # type: ignore[arg-type]
+    )
+
+
 async def _module_composite_handler_gated_subop(
     operator: Operator,
     target: Any,
@@ -2587,6 +2622,53 @@ async def test_dispatch_composite_terminal_error_envelope_audits_error(
     assert row.status_code == 500
     assert row.payload["error"]["error_code"] == "create_error"
     # The broadcast frame carries the failed status, not a false ``ok``.
+    assert any(e.result_status == "error" for e in captured_events)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_folder_create_ambiguous_parent_audits_error(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """An unresolved ``folder.create`` parent is a failed op, not an ``ok`` no-op (#3588).
+
+    Before the fix the handler returned a bare ``ambiguous_parent`` dict and the
+    dispatcher audited it ``ok`` although no folder was created.
+    """
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await _register_module_composite(
+        "vault.composite.folder_create_ambiguous",
+        "tests.test_operations_dispatcher._module_composite_handler_folder_create_ambiguous",
+        stub_embedding_service.encode_one.return_value,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.composite.folder_create_ambiguous",
+        target=_FakeTarget(product="vault"),
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.extras["error_code"] == "ambiguous_parent"
+    assert isinstance(result.result, dict)
+    assert result.result["candidate_folders"] == ["group-v4", "group-v115"]
+
+    async with get_sessionmaker()() as fresh:
+        row = (
+            (
+                await fresh.execute(
+                    select(AuditLog).where(
+                        AuditLog.path == "vault.composite.folder_create_ambiguous"
+                    )
+                )
+            )
+            .scalars()
+            .one()
+        )
+    assert row.payload["result_status"] == "error"
+    assert row.payload["error"]["error_code"] == "ambiguous_parent"
     assert any(e.result_status == "error" for e in captured_events)
 
 

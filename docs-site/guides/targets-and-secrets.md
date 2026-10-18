@@ -171,6 +171,26 @@ the connector expects on Vault. A kubeconfig ref looks like
 On a GSM deploy, set `secret_ref` explicitly in the YAML (the
 server-derived default is the Vault layout).
 
+### Targets that need no credential
+
+Some products need no login, for example a Prometheus that you reach
+through a port-forward. If you leave `secret_ref` out, the server still
+derives the default path, and every call then fails on the Vault read.
+To store the target with no credential, send an explicit null:
+
+```bash
+# Create it with no credential, over plain HTTP:
+meho targets add lab-prom --product prometheus --host prom.example.com \
+  --port 9090 --no-secret-ref --extra scheme=http
+
+# Or fix a target that already exists:
+meho targets update lab-prom --clear secret-ref --extra scheme=http
+```
+
+`--extra` on `update` replaces the whole `extras` map, so pass every key
+you want to keep. `--clear extra` removes every extra, and `--clear alias`
+removes every alias. In YAML, write `secret_ref: null`.
+
 ## Import and verify
 
 ```bash

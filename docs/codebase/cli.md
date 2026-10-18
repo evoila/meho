@@ -1356,9 +1356,11 @@ updates flow through `meho targets import` (POST for new rows, PATCH
 under `--update`) for bulk reconciliation, or through `meho targets
 add` (Task #2862) for a single target without authoring a YAML file —
 the earlier blanket deferral of a standalone `create` verb (#1574 /
-#1559) is lifted for the single-target create case only. No standalone
-`update` / `delete` verb is surfaced yet, though the API supports
-`PATCH` / `DELETE /api/v1/targets/{name}` (`tenant_admin`).
+#1559) is lifted for the single-target create case only. `meho targets
+update` (Task #3854) changes one target through `PATCH
+/api/v1/targets/{name}`. No standalone `delete` verb is surfaced yet,
+though the API supports `DELETE /api/v1/targets/{name}`
+(`tenant_admin`).
 
 ### Subcommands
 
@@ -1372,7 +1374,13 @@ the earlier blanket deferral of a standalone `create` verb (#1574 /
   `--tls-server-name`, `--preferred-impl`, `--note`) and are sent only
   when set, so the server's defaults apply to the rest — notably an
   omitted `--secret-ref` derives the per-tenant default credential path
-  (#1723) rather than persisting "no credential". `tenant_id` is never
+  (#1723) rather than persisting "no credential". `--no-secret-ref`
+  (Task #3854; cannot be combined with `--secret-ref`) sends an
+  explicit `"secret_ref": null`, so the target is stored with no
+  credential and dispatch takes the auth-optional path — the way to
+  register a product that needs no login. `--extra key=value`
+  (repeatable) seeds the `extras` map with string values, for example
+  `--extra scheme=http` for a plain-HTTP Prometheus. `tenant_id` is never
   sent; the backplane binds it from the operator's JWT. All validation
   stays server-side: an unknown product, an out-of-tenant `secret_ref`,
   or an SSRF-guarded host come back as a 422 whose body the CLI prints
@@ -1381,6 +1389,23 @@ the earlier blanket deferral of a standalone `create` verb (#1574 /
   `import.go`'s `doAuthedRequest` POST plumbing, so a static-bearer
   escape hatch is deliberately **not** offered — auth stays interactive
   `meho login` only.
+- `meho targets update <name-or-alias> [field flags] [--clear F]`
+  (Task #3854) — calls `PATCH /api/v1/targets/{name}` (`TargetUpdate`)
+  for one target. The field flags have the same names as `add`'s and
+  are sent only when set, so every other column keeps its value.
+  `--alias` replaces the whole alias list and `--extra key=value`
+  replaces the whole `extras` map, matching the server's PATCH
+  semantics. `--clear <field>` (repeatable) sends an explicit JSON null
+  for a nullable column: `secret-ref`, `version`, `port`, `fqdn`,
+  `tls-ca-pin`, `tls-server-name`, `preferred-impl`, `note`. The two
+  collection columns are NOT NULL, so `--clear alias` sends
+  `"aliases": []` and `--clear extra` sends `"extras": {}` instead of
+  null; that is how an operator removes every alias or every extra.
+  Three checks run before any request: at least one field must be
+  given, `--clear` must name a field from that list, and one field
+  cannot be both set and cleared (all exit 4). Server errors use the shared
+  `renderHTTPStatus` ladder (404 near-misses, 409 ambiguous alias, 422
+  body verbatim). Same `doAuthedRequest` plumbing as `add`.
 - `meho targets list [--product P] [--limit N] [--cursor C]` — calls
   `GET /api/v1/targets`. Renders the operator's tenant-scoped targets
   as a `NAME / ALIASES / PRODUCT / HOST` table. Results are keyset-
@@ -1474,11 +1499,12 @@ verbatim.
 
 ### Out of scope (v0.2)
 
-- Standalone `update` / `delete` verbs. The API supports `PATCH` /
-  `DELETE /api/v1/targets/{name}` (`tenant_admin`); the CLI surfaces
-  them in a follow-up task when operators ask. Single-target **create**
-  now ships as `meho targets add` (Task #2862); bulk reconciliation of
-  updates stays with `meho targets import --update`.
+- A standalone `delete` verb. The API supports
+  `DELETE /api/v1/targets/{name}` (`tenant_admin`); the CLI surfaces it
+  in a follow-up task when operators ask. Single-target **create** ships
+  as `meho targets add` (Task #2862) and single-target **update** as
+  `meho targets update` (Task #3854); bulk reconciliation of updates
+  stays with `meho targets import --update`.
 - Auto-completion of target names. Operators type names; tab-completion
   would need a separate `cobra-complete`-style design pass.
 - Client-side caching. Every CLI invocation hits the API fresh — the

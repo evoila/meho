@@ -1118,7 +1118,11 @@ The only builder wired in #1437 is **`k8s.apply`**: it re-invokes the
 `k8s_apply` handler with `dry_run="server"` forced on (the API's
 `?dryRun=All`), so nothing persists and the per-document summary
 (resource identity + `resourceVersion` + `uid`) is the diff-preview the
-reviewer reads. The ArgoCD write ops register their own builders the same
+reviewer reads. When the API server rejects the dry-run (for example an
+admission webhook denial), the handler raises `ApplyRejectedError` and the
+row gets the `preview_unavailable` marker with the server's message in
+`preview_error`, so the reviewer sees that the apply will be rejected
+(#3876). The ArgoCD write ops register their own builders the same
 way (#1452): `argocd.app.set` / `argocd.appproject.update` populate
 `{before_spec, after_spec}` and `argocd.app.delete` populates
 `{cascade_resources}` from read-only GETs against the live

@@ -608,6 +608,15 @@ async def _k8s_apply_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     Returns ``None`` when no connector instance resolved (a k8s.apply
     without a target can't dry-run) so the caller falls back to the
     identifier-only default.
+
+    When the API server rejects the dry-run (an admission webhook denial,
+    an invalid object, a conflict), the handler raises
+    :class:`~meho_backplane.connectors.kubernetes.ops_write_dangerous.ApplyRejectedError`
+    and this builder lets it propagate. :func:`build_proposed_effect` then
+    stores the ``preview_unavailable`` marker with the server's message in
+    ``preview_error``, so the reviewer sees that the apply will be
+    rejected instead of a clean-looking preview with no
+    ``resourceVersion`` and no ``uid`` (#3876).
     """
     if ctx.connector_instance is None or ctx.target is None:
         return None

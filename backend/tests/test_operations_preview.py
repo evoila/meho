@@ -27,9 +27,11 @@ The kubernetes API surface is mocked so the test runs in every CI lane.
 
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -139,6 +141,70 @@ async def test_k8s_apply_preview_forces_server_dry_run(
     assert effect["preview"]["applied"][0]["resource_version"] == "dry"
     # Identity-only summary: no Secret data / manifest body echoed.
     assert "data" not in effect["preview"]["applied"][0]
+
+
+_WEBHOOK_DENIAL = 'admission webhook "machine.example.test" denied the request: not allowed'
+
+
+class _StatusFailureResponse:
+    """A raw API response carrying a Kubernetes ``Status`` failure body."""
+
+    status = 403
+    reason = "Forbidden"
+
+    async def text(self) -> str:
+        return json.dumps(
+            {
+                "kind": "Status",
+                "apiVersion": "v1",
+                "status": "Failure",
+                "reason": "Forbidden",
+                "code": 403,
+                "message": _WEBHOOK_DENIAL,
+            }
+        )
+
+
+@pytest.mark.asyncio
+async def test_k8s_apply_preview_shows_api_server_denial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dry-run the API server denies is not shown as a clean preview (#3876).
+
+    Runs the real ``k8s_apply`` handler against a stubbed dynamic client
+    that answers 403 with a ``Status`` failure body. The park preview must
+    carry the denial, not a summary with no resourceVersion and no uid.
+    """
+    dyn = MagicMock()
+    dyn.resources.get = AsyncMock(return_value=MagicMock())
+    dyn.server_side_apply = AsyncMock(return_value=_StatusFailureResponse())
+
+    async def _dynamic_client(_api_client: Any) -> Any:
+        return dyn
+
+    monkeypatch.setattr(
+        "meho_backplane.connectors.kubernetes.ops_write_dangerous.DynamicClient",
+        _dynamic_client,
+    )
+    connector = KubernetesConnector(kubeconfig_loader=None)  # type: ignore[arg-type]
+    monkeypatch.setattr(connector, "_get_api_client", AsyncMock(return_value=MagicMock()))
+    ctx = PreviewContext(
+        descriptor=_FakeDescriptor(op_id="k8s.apply"),  # type: ignore[arg-type]
+        connector_instance=connector,
+        operator=_operator(),
+        target=_FakeTarget(),
+        params={"manifest": _SINGLE_MANIFEST, "dry_run": "none"},
+    )
+
+    effect = await build_proposed_effect(ctx)
+
+    assert effect is not None
+    assert "preview" not in effect
+    assert effect["preview_unavailable"] is True
+    assert effect["preview_error"].startswith("ApplyRejectedError: ")
+    assert "HTTP 403 Forbidden" in effect["preview_error"]
+    assert _WEBHOOK_DENIAL in effect["preview_error"]
+    assert dyn.server_side_apply.call_args.kwargs["dry_run"] == "All"
 
 
 @pytest.mark.asyncio

@@ -26,6 +26,7 @@ Docker; the live k3s shape lives in
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -48,6 +49,7 @@ from meho_backplane.connectors.kubernetes.ops_write import UnsupportedKindError
 from meho_backplane.connectors.kubernetes.ops_write_dangerous import (
     ApplyManifestError,
     ApplyNotPersistedError,
+    ApplyRejectedError,
     KubernetesSecretRefError,
     UndeletableKindError,
     secret_create_summary,
@@ -454,25 +456,50 @@ spec:
 """
 
 
-def _applied_obj(rv: str = "123", uid: str = "u-1") -> MagicMock:
-    obj = MagicMock()
-    obj.metadata = MagicMock(resourceVersion=rv, uid=uid)
-    return obj
+class _FakeApplyResponse:
+    """The raw aiohttp response ``server_side_apply(serialize=False)`` returns.
+
+    The handler reads only ``status``, ``reason`` and ``await text()``.
+    """
+
+    def __init__(self, status: int, body: str, reason: str = "OK") -> None:
+        self.status = status
+        self.reason = reason
+        self._body = body
+
+    async def text(self) -> str:
+        return self._body
 
 
-def _unpersisted_obj() -> MagicMock:
+def _applied_obj(rv: str = "123", uid: str = "u-1") -> _FakeApplyResponse:
+    body = {"kind": "Deployment", "metadata": {"resourceVersion": rv, "uid": uid}}
+    return _FakeApplyResponse(200, json.dumps(body))
+
+
+def _status_failure(code: int, reason: str, message: str) -> _FakeApplyResponse:
+    """A non-2xx answer with the Kubernetes ``Status`` failure body."""
+    body = {
+        "kind": "Status",
+        "apiVersion": "v1",
+        "metadata": {},
+        "status": "Failure",
+        "message": message,
+        "reason": reason,
+        "code": code,
+    }
+    return _FakeApplyResponse(code, json.dumps(body), reason=reason)
+
+
+def _unpersisted_obj() -> _FakeApplyResponse:
     """An apply response with no resourceVersion/uid (the not-persisted shape).
 
     This is exactly what a vSphere Supervisor returned live when an
     approved, non-dry-run ``k8s.apply`` of a CAPI ``Cluster`` CR was
     accepted (HTTP 200) but wrote nothing: the response carried no
     ``resourceVersion`` and no ``uid`` -- byte-identical to the dry-run
-    preview. A ``MagicMock`` auto-vivifies attributes, so pin both to
-    ``None`` explicitly.
+    preview.
     """
-    obj = MagicMock()
-    obj.metadata = MagicMock(resourceVersion=None, uid=None)
-    return obj
+    return _FakeApplyResponse(200, json.dumps({"kind": "Cluster", "metadata": {"name": "c"}}))
 
 
 @pytest.mark.asyncio
@@ -494,7 +521,10 @@ async def test_apply_persists_by_default() -> None:
     # No dry_run kwarg => persisted apply.
     assert "dry_run" not in dyn.server_side_apply.call_args.kwargs
     assert dyn.server_side_apply.call_args.kwargs["field_manager"] == "meho"
+    # The raw response is requested so the handler can check the HTTP status.
+    assert dyn.server_side_apply.call_args.kwargs["serialize"] is False
     assert result["applied"][0]["resource_version"] == "123"
+    assert result["applied"][0]["uid"] == "u-1"
 
 
 @pytest.mark.asyncio
@@ -570,6 +600,101 @@ async def test_apply_dry_run_tolerates_missing_resource_version() -> None:
         )
     assert result["dry_run"] is True
     assert result["applied"][0]["resource_version"] is None
+
+
+_WEBHOOK_DENIAL = (
+    'admission webhook "machine.example.test" denied the request: '
+    "only the annotation example.test/paused may be changed"
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "reason", "message"),
+    [
+        (403, "Forbidden", _WEBHOOK_DENIAL),
+        (422, "Invalid", 'Deployment.apps "web" is invalid: spec.replicas: Invalid value: -1'),
+        (409, "Conflict", 'Apply failed with 1 conflict: conflict with "kubectl": .spec.replicas'),
+    ],
+)
+@pytest.mark.parametrize("dry_run", ["none", "server"])
+async def test_apply_rejected_by_api_server_raises_with_status_and_message(
+    code: int, reason: str, message: str, dry_run: str
+) -> None:
+    """A non-2xx answer raises on both the real and the dry-run path (#3876).
+
+    ``DynamicClient`` calls the API with ``_preload_content=False``, so the
+    library does not raise for a non-2xx answer. Before the fix the
+    ``Status`` failure body was read as the applied object: the real path
+    raised a misleading ``ApplyNotPersistedError`` and the dry-run path
+    returned a clean-looking preview with no resourceVersion and no uid.
+    """
+    conn = _make_connector()
+    dyn = MagicMock()
+    dyn.resources.get = AsyncMock(return_value=MagicMock())
+    dyn.server_side_apply = AsyncMock(return_value=_status_failure(code, reason, message))
+    with _patch_kubeconfig(), _dyn_patch() as dyn_cls:
+        dyn_cls.return_value = _awaitable(dyn)
+        with pytest.raises(ApplyRejectedError) as excinfo:
+            await conn.k8s_apply(
+                operator=_make_operator(),
+                target=_TARGET,
+                params={"manifest": _SINGLE_MANIFEST, "dry_run": dry_run},
+            )
+    exc = excinfo.value
+    assert not isinstance(exc, ApplyNotPersistedError)
+    assert exc.http_status == code
+    assert exc.upstream_message == message
+    assert f"HTTP {code} {reason}" in str(exc)
+    assert "apps/v1/Deployment argocd/web" in str(exc)
+    assert message in str(exc)
+
+
+@pytest.mark.asyncio
+async def test_apply_rejected_envelope_carries_status_code_and_message() -> None:
+    """The dispatcher envelope for a rejected apply names the status and message."""
+    from meho_backplane.operations._errors import result_connector_error
+
+    conn = _make_connector()
+    dyn = MagicMock()
+    dyn.resources.get = AsyncMock(return_value=MagicMock())
+    dyn.server_side_apply = AsyncMock(
+        return_value=_status_failure(403, "Forbidden", _WEBHOOK_DENIAL)
+    )
+    with _patch_kubeconfig(), _dyn_patch() as dyn_cls:
+        dyn_cls.return_value = _awaitable(dyn)
+        with pytest.raises(ApplyRejectedError) as excinfo:
+            await conn.k8s_apply(
+                operator=_make_operator(),
+                target=_TARGET,
+                params={"manifest": _SINGLE_MANIFEST},
+            )
+    result = result_connector_error("k8s.apply", excinfo.value, 1.0)
+    assert result.status == "error"
+    assert result.extras["exception_class"] == "ApplyRejectedError"
+    assert result.extras["http_status"] == 403
+    assert result.extras["upstream_message"] == _WEBHOOK_DENIAL
+
+
+@pytest.mark.asyncio
+async def test_apply_rejected_with_non_status_body_keeps_raw_text() -> None:
+    """A non-2xx answer whose body is not a ``Status`` object keeps the raw text."""
+    conn = _make_connector()
+    dyn = MagicMock()
+    dyn.resources.get = AsyncMock(return_value=MagicMock())
+    dyn.server_side_apply = AsyncMock(
+        return_value=_FakeApplyResponse(502, "upstream connect error", reason="Bad Gateway")
+    )
+    with _patch_kubeconfig(), _dyn_patch() as dyn_cls:
+        dyn_cls.return_value = _awaitable(dyn)
+        with pytest.raises(ApplyRejectedError) as excinfo:
+            await conn.k8s_apply(
+                operator=_make_operator(),
+                target=_TARGET,
+                params={"manifest": _SINGLE_MANIFEST},
+            )
+    assert excinfo.value.http_status == 502
+    assert excinfo.value.upstream_message == "upstream connect error"
 
 
 @pytest.mark.asyncio

@@ -150,12 +150,21 @@ func printReviewTable(w io.Writer, r *api.ConnectorReviewPayload) {
 	// List them after the groups (with their enabled state and safety
 	// level) so the review shows the whole op set; this line points the
 	// operator at that section.
-	if r.UngroupedOpCount != nil && *r.UngroupedOpCount > 0 {
-		fmt.Fprintf(w, "\nUngrouped ops: %d (%d enabled) — not in any group; listed under [ungrouped] below. `connector enable` covers them (per-op `connector edit-op` can still override individual ones).\n",
-			*r.UngroupedOpCount, enabledOpCount(r.UngroupedOps),
-		)
-	}
 	hasUngrouped := r.UngroupedOps != nil && len(*r.UngroupedOps) > 0
+	if r.UngroupedOpCount != nil && *r.UngroupedOpCount > 0 {
+		if r.UngroupedOps == nil {
+			// A server from before the list shipped sends the count
+			// alone. Say the enabled count is unknown rather than print
+			// "0 enabled", which would read as "all disabled".
+			fmt.Fprintf(w, "\nUngrouped ops: %d (enabled count unknown — the server did not send the list) — not in any group. `connector enable` covers them (per-op `connector edit-op` can still override individual ones).\n",
+				*r.UngroupedOpCount,
+			)
+		} else {
+			fmt.Fprintf(w, "\nUngrouped ops: %d (%d enabled) — not in any group; listed under [ungrouped] below. `connector enable` covers them (per-op `connector edit-op` can still override individual ones).\n",
+				*r.UngroupedOpCount, enabledOpCount(*r.UngroupedOps),
+			)
+		}
+	}
 	if len(r.Groups) == 0 && !hasUngrouped {
 		fmt.Fprintln(w, "(no groups; the connector has no operations or the grouping pass produced no buckets)")
 		return
@@ -197,13 +206,10 @@ func printReviewOps(w io.Writer, ops []api.ConnectorReviewOp) {
 	}
 }
 
-// enabledOpCount counts the enabled ops in an optional op list.
-func enabledOpCount(ops *[]api.ConnectorReviewOp) int {
-	if ops == nil {
-		return 0
-	}
+// enabledOpCount counts the enabled ops in an op list.
+func enabledOpCount(ops []api.ConnectorReviewOp) int {
 	n := 0
-	for _, op := range *ops {
+	for _, op := range ops {
 		if op.IsEnabled {
 			n++
 		}

@@ -1301,6 +1301,37 @@ func TestPrintReviewTableListsUngroupedOps(t *testing.T) {
 	}
 }
 
+// TestPrintReviewTableUngroupedCountWithoutList — an older server sends
+// `ungrouped_op_count` but no `ungrouped_ops`. The render must not print
+// "0 enabled" (which reads as "all disabled") or promise an [ungrouped]
+// section it cannot show; it reports the enabled count as unknown.
+func TestPrintReviewTableUngroupedCountWithoutList(t *testing.T) {
+	ungrouped := 3
+	r := &api.ConnectorReviewPayload{
+		ConnectorId:      "acme-rest-3",
+		Product:          "acme",
+		Version:          "3",
+		ImplId:           "acme-rest",
+		UngroupedOpCount: &ungrouped,
+		Groups: []api.ConnectorReviewGroup{
+			{GroupKey: "core", Name: "Core", ReviewStatus: "staged", OpCount: 0},
+		},
+	}
+	var buf bytes.Buffer
+	printReviewTable(&buf, r)
+	out := buf.String()
+	for _, want := range []string{"Ungrouped ops: 3", "enabled count unknown"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("review render missing token %q in:\n%s", want, out)
+		}
+	}
+	for _, reject := range []string{"0 enabled", "listed under [ungrouped] below", "[ungrouped]"} {
+		if strings.Contains(out, reject) {
+			t.Errorf("review render printed %q although the server sent no ungrouped list:\n%s", reject, out)
+		}
+	}
+}
+
 // TestPrintReviewTableOmitsUngroupedLineWhenZero — a connector whose ops are
 // all grouped (UngroupedOpCount nil or zero) prints no ungrouped line.
 func TestPrintReviewTableOmitsUngroupedLineWhenZero(t *testing.T) {

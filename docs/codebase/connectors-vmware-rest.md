@@ -87,11 +87,14 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   absence from the status code. Promotion defaults off on the shared seam, so
   task polls and destructive-composite preflight/execute reads retain their
   existing failure semantics; #3479 owns those paths.
-- **Read composites** (`composites/_read.py`) — seven module-level
+- **Read composites** (`composites/_read.py`) — 6 module-level
   `async def` handlers (`cluster_drs_recommendations_composite`,
-  `event_tail_composite`, `performance_summary_composite`,
-  `datastore_usage_composite`, `network_portgroup_audit_composite`,
-  `host_network_uplinks_composite`, `host_vsan_health_composite`).
+  `event_tail_composite`, `datastore_refresh_composite`,
+  `performance_summary_composite`, `datastore_usage_composite`,
+  `network_portgroup_audit_composite`). The other read composites live
+  next to their feature area (for example the guest reads in
+  `_guest.py`); `test_connectors_vmware_rest_doc_composite_counts.py`
+  keeps this list and the counts below in step with the registry.
   Since `#2253` each accepts `(operator, target, params, connector)`
   and issues its 1-3 sub-ops **directly on the resolved connector
   session** — `connector._get_json` / `connector._post_json` mounted
@@ -114,15 +117,16 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   write-composites bullet. Registered with `safety_level="safe"` +
   `requires_approval=False` — read-only overrides of
   `register_composite_operation()`'s `dangerous` / `True` defaults.
-  `host_network_uplinks_composite` (`#2080`) lists hosts via
+  Two former read composites were re-shipped as typed ops in `#2258`
+  and keep their behaviour: `vmware.host.network_uplinks` (`#2080`) lists hosts via
   `GET:/vcenter/host`, then per host reads `config.network.pnic` +
   `config.network.proxySwitch` through the vi-json PropertyCollector
   `RetrievePropertiesEx` method — the pnic link-state / uplink mapping
   the plain REST surface cannot reproduce (drives physical
   switch-port-occupancy reasoning); the per-host property read is
   best-effort (a failed read nulls the network detail with a
-  `read_note` rather than sinking the composite).
-  `host_vsan_health_composite` (`#2135`) queries the vSAN
+  `read_note` rather than sinking the op).
+  `vmware.host.vsan_health` (`#2135`) queries the vSAN
   health-service vmomi method `VsanQueryVcClusterHealthSummary` on the
   `vsan-cluster-health-system` singleton, scoped to the target
   cluster's MoRef — the `govc vsan.health.*` equivalent, returning the
@@ -450,7 +454,7 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   (see the VI-JSON mount section below) so it resolves on vCenter 8.0.x
   instead of 404ing (`#2466`). The per-host property read is best-effort (a failed
   read nulls the detail with a `read_note`, mirroring
-  `host_network_uplinks_composite`); the host listing is load-bearing.
+  `vmware.host.network_uplinks`); the host listing is load-bearing.
   This op is why the plain REST host summary (liveness only) is not
   enough — `overallCpuUsage` / `overallMemoryUsage` live on the WS-API
   `HostSystem`, not the REST resource. It establishes the vmware typed-op

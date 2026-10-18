@@ -15,12 +15,14 @@ A read is a composite with ``requires_approval=False``. That includes
 
 from __future__ import annotations
 
+import inspect
 import pathlib
 import re
 from collections import Counter
 
 import pytest
 
+from meho_backplane.connectors.vmware_rest.composites import _read
 from meho_backplane.connectors.vmware_rest.composites._register import _COMPOSITES
 
 _DOC = pathlib.Path(__file__).resolve().parents[2] / "docs/codebase/connectors-vmware-rest.md"
@@ -29,6 +31,15 @@ _TOTAL = len(_COMPOSITES)
 _READS = sum(1 for spec in _COMPOSITES if not spec.requires_approval)
 _WRITES = _TOTAL - _READS
 _WRITE_LEVELS = Counter(spec.safety_level for spec in _COMPOSITES if spec.requires_approval)
+
+#: Public ``async def`` handlers defined in ``_read.py`` itself (not imported into it).
+_READ_MODULE_HANDLERS = sorted(
+    name
+    for name, obj in vars(_read).items()
+    if name.endswith("_composite")
+    and inspect.iscoroutinefunction(obj)
+    and obj.__module__ == _read.__name__
+)
 
 
 def _doc_text() -> str:
@@ -73,6 +84,23 @@ def test_doc_composite_count_matches_registry(pattern: str, expected: tuple[int,
             f"{_DOC.name} says {found} for {pattern!r}, but the _COMPOSITES registry "
             f"gives {expected}. Update the doc."
         )
+
+
+def test_doc_read_module_handler_list_matches_module() -> None:
+    """The ``_read.py`` bullet names every handler in that file, and only those."""
+    match = re.search(
+        r"\(`composites/_read\.py`\) — (\d+) module-level `async def` handlers \((.*?)\)\.",
+        _doc_text(),
+    )
+    assert match, f"read-handler phrase not found in {_DOC.name}"
+    count, names_blob = match.groups()
+    names = sorted(re.findall(r"`(\w+)`", names_blob))
+    assert names == _READ_MODULE_HANDLERS, (
+        f"{_DOC.name} lists {names} for _read.py, but the module defines "
+        f"{_READ_MODULE_HANDLERS}. Update the doc."
+    )
+    assert int(count) == len(_READ_MODULE_HANDLERS)
+    assert len(_READ_MODULE_HANDLERS) > 0
 
 
 def test_registry_split_is_consistent() -> None:

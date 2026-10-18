@@ -509,11 +509,16 @@ Every `DELETE` lands `dangerous` with `requires_approval=True` (#3827). A
 delete usually removes something that cannot be brought back. Without the
 approval flag, a human operator seat ran it at once. Now it waits until a
 second person approves, on every seat. The parser does not use the
-`destructive` tier here: that tier also needs a blast-radius statement from a
-preview builder, and ingested ops have none, so a `destructive` ingested
-delete could never run. `test_operations_ingest_delete_approval.py` checks
-that no `DELETE` in a shipped spec, or in the pinned vCenter and NSX specs,
-lands without approval.
+`destructive` tier by itself: that tier also needs a blast-radius statement
+from a preview builder before the op can wait for approval, and a generic
+ingested delete has no builder, so a `destructive` default would make every
+ingested delete un-runnable. A connector floor raises an op to
+`destructive` when it ships the builder: the VMware floor does this for the
+vCenter tagging removals (see the floor table below and
+`connectors/vmware_rest/tagging_delete_preview.py`).
+`test_operations_ingest_delete_approval.py` checks that no `DELETE` in a
+shipped spec, or in the pinned vCenter and NSX specs, lands without
+approval, and that the pinned vCenter tagging removals land `destructive`.
 
 The parser treats a VIM-style operation whose `operationId` or final path
 method starts with `Destroy`, `Delete`, `Remove`, or `Unregister` as
@@ -584,8 +589,30 @@ listed methods.
 | `POST` `/vcenter/vm` | Promoted: matches the governed `vmware.composite.vm.create` posture. |
 | `DELETE` `/vcenter/vm/{vm}` | Promoted: matches the governed VM-destroy posture. |
 | mutating `/vcenter/vm/{vm}/power` and `/power/**` | Promoted: matches the governed VM-power posture. |
-| `POST` `/cis/tagging/tag-association[/{tagId}]?action=detach*` | Promoted (#3827): removes tags from inventory objects, like the tag and category `DELETE`s the parser already gates. |
 | VM reads and non-VMware connectors | Unchanged: no connector floor applies. |
+
+The same floor puts the vCenter **tagging removals** in the `destructive`
+tier with `requires_approval=True` (#3827), on the 8.0 and 9.0 catalogs and
+with or without the `/api` mount in the path:
+
+| Op | Why destructive | Preview lists |
+|---|---|---|
+| `DELETE` `/cis/tagging/category/{id}` | Removes every tag in the category and detaches them from every object. | The category, its tags, and the objects each tag is attached to. |
+| `DELETE` `/cis/tagging/tag/{id}` | Detaches the tag from every object. | The tag and its attached objects. |
+| `POST` `/cis/tagging/tag-association[/{id}]?action=detach*` (three actions) | Drops the association that governance (for example storage policy tags) relies on. | The tag and the objects named in the request; marked as reversible by attaching the tag again. |
+
+`destructive` means: every seat waits for a second person; a standing
+service-account grant can never satisfy the op (refused at grant creation
+and again at dispatch); and the caller must present a `preview_hash` from
+`preview_operation` so the park carries the blast radius above. The
+builders in `connectors/vmware_rest/tagging_delete_preview.py` are
+registered under every op_id spelling (`{categoryId}` / `{category_id}`,
+`{tagId}` / `{tag_id}`, with and without `/api`), because the vendor spec
+and an appliance-served spec spell the path parameter differently.
+`test_connectors_vmware_rest_tagging_delete_dispatch.py` proves the
+dispatch contract: refusal without a bound preview, the park with the
+blast radius, a second operator's approval running the delete once, and a
+service account's live grant never running a detach.
 
 T2 owns the rest of the ORM columns: `tenant_id`, `source_kind`
 (always `'ingested'`), `product`, `version`, `impl_id`, `embedding`,
@@ -2038,6 +2065,37 @@ not recoverable server-side. The shipped repair path is
   assigned. There is deliberately **no** separate "repair" verb — the
   existing `meho connector ingest` / `POST /api/v1/connectors/ingest` /
   `meho_connector_ingest` surfaces are the repair path.
+
+### Review report for stored deletes (#3827)
+
+A corrected parser default or connector floor changes nothing for rows an
+earlier ingest already stored; they keep their old `safety_level` and
+`requires_approval` until the connector is ingested again (the
+"Applying corrected floors to existing rows" rule above). A spec guard test
+cannot show an operator which stored rows still run without approval. The
+review payload therefore carries a report:
+
+* `ConnectorReviewPayload.delete_ops_below_destructive` — one
+  `ConnectorReviewDeleteOp` per stored `source_kind='ingested'` row that is
+  delete-shaped (a `DELETE` verb, or a write the connector floor treats as
+  a removal, such as the vCenter tag detach actions) and sits below
+  `destructive`. Each row shows the stored `safety_level` /
+  `requires_approval` next to the posture a fresh ingest of the same
+  `(method, path)` would assign today — `default_safety_posture` (parser),
+  then `apply_safety_floor` (connector floor + catalog overlay) — plus
+  `needs_correction` and a plain-English `reason`.
+* `ConnectorReviewPayload.delete_ops_needing_correction_count` — how many
+  of those rows are weaker than the fresh-ingest posture.
+
+`operations/ingest/delete_review.py` builds the report from
+`load_ingested_writes_in_scope` (full descriptor universe, group or not).
+`meho connector review` prints the count line and a WARNING table of the
+rows that need correction; `--json` and the MCP `meho_connector_review`
+tool carry the full list. The fix is the same as for `needs_reingest`:
+ingest the connector again, or correct single rows with `edit-op`.
+`test_operations_ingest_review.py` seeds stored unsafe rows (the issue's
+`caution` category delete, a `caution` detach, a `dangerous` delete without
+approval) and checks the report and the count.
 
 The four supported component buckets are: `#/components/schemas/*`,
 `#/components/parameters/*` (vi-json.yaml's shared `moId`),

@@ -84,7 +84,9 @@ from meho_backplane.operations.ingest import (
     parse_openapi,
     register_ingested_operations,
 )
+from meho_backplane.operations.result_document import json_text_bytes
 from meho_backplane.settings import get_settings
+from tests._result_store_helpers import MemoryResultStore
 
 # ---------------------------------------------------------------------------
 # Settings / fixtures
@@ -277,6 +279,37 @@ async def _module_composite_handler_connector(
     carry-forward) rather than forwarding ``connector=None``.
     """
     return {"has_connector": connector is not None}
+
+
+async def _module_composite_handler_issue_list(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Composite handler returning a terminal-error envelope with many issues.
+
+    ``issue_count`` warnings of ``message_chars`` characters each, plus one
+    ``error`` entry at ``error_index`` (#3813 follow-up: the inline result must
+    stay bounded however long this list is).
+    """
+    del operator, target
+    count = int(params["issue_count"])
+    chars = int(params.get("message_chars", 40))
+    error_index = int(params.get("error_index", count - 1))
+    issues = [
+        {
+            "category": "deploy",
+            "severity": "warning",
+            "message": f"disk {n} skipped ".ljust(chars, "x"),
+        }
+        for n in range(count)
+    ]
+    issues[error_index] = {
+        "category": "deploy",
+        "severity": "error",
+        "message": "deploy failed: ".ljust(chars, "y"),
+    }
+    return {"status": "deploy_error", "vm_id": None, "issues": issues}
 
 
 async def _module_composite_handler_terminal_error(
@@ -2571,6 +2604,9 @@ async def test_dispatch_composite_terminal_error_envelope_audits_error(
     # Upstream detail preserved in the caller-facing payload.
     assert isinstance(result.result, dict)
     assert result.result["issues"][0]["message"].endswith("RESOURCE_INACCESSIBLE")
+    # A small envelope passes through whole: no bounded view, no handle.
+    assert "issues_total" not in result.result
+    assert result.handle is None
     assert "RESOURCE_INACCESSIBLE" in (result.error or "")
 
     async with get_sessionmaker()() as fresh:
@@ -2588,6 +2624,120 @@ async def test_dispatch_composite_terminal_error_envelope_audits_error(
     assert row.payload["error"]["error_code"] == "create_error"
     # The broadcast frame carries the failed status, not a false ``ok``.
     assert any(e.result_status == "error" for e in captured_events)
+
+
+async def _dispatch_issue_list_error(
+    stub_embedding_service: AsyncMock, params: dict[str, Any]
+) -> tuple[OperationResult, MemoryResultStore, Operator]:
+    """Dispatch the many-issues composite through the real JSONFlux reducer."""
+    from meho_backplane.operations import set_default_reducer
+    from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
+
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await _register_module_composite(
+        "vault.composite.issue_list",
+        "tests.test_operations_dispatcher._module_composite_handler_issue_list",
+        stub_embedding_service.encode_one.return_value,
+    )
+    operator = _make_operator()
+    store = MemoryResultStore()
+    set_default_reducer(JsonFluxReducer(store=store))
+    try:
+        result = await dispatch(
+            operator=operator,
+            connector_id="vault-1.x",
+            op_id="vault.composite.issue_list",
+            target=_FakeTarget(product="vault"),
+            params=params,
+        )
+    finally:
+        set_default_reducer(PassThroughReducer())
+    return result, store, operator
+
+
+async def _stored_rows(
+    store: MemoryResultStore, operator: Operator, result: OperationResult
+) -> list[dict[str, Any]]:
+    assert result.handle is not None
+    assert operator.tenant_id is not None
+    spilled = await store.fetch_rows(
+        tenant_id=operator.tenant_id, operator_sub=operator.sub, handle_id=result.handle.handle_id
+    )
+    assert spilled is not None
+    return spilled.rows
+
+
+@pytest.mark.asyncio
+async def test_dispatch_composite_terminal_error_with_many_issues_stays_bounded(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A failed composite with 120 issues keeps a bounded view inline (#3813).
+
+    The full list goes behind the result handle. Inline: at most five entries,
+    the ``error`` one among them even though it sits deep in the list, plus
+    ``issues_total``. The inline result stays under the 4 KB budget.
+    """
+    result, store, operator = await _dispatch_issue_list_error(
+        stub_embedding_service, {"issue_count": 120, "error_index": 100}
+    )
+
+    assert result.status == "error"
+    assert result.extras["error_code"] == "deploy_error"
+    assert result.handle is not None
+    assert result.handle.total_rows == 120
+    assert isinstance(result.result, dict)
+    assert result.result["status"] == "deploy_error"
+    assert result.result["issues_total"] == 120
+    inline = result.result["issues"]
+    assert len(inline) == 5
+    assert [item["severity"] for item in inline] == ["warning"] * 4 + ["error"]
+    assert inline[-1]["message"].startswith("deploy failed")
+    assert json_text_bytes(result.result) < 4096
+    assert "deploy failed" in (result.error or "")
+
+    rows = await _stored_rows(store, operator, result)
+    assert len(rows) == 120
+    assert rows[100]["severity"] == "error"
+
+    async with get_sessionmaker()() as fresh:
+        row = (
+            (
+                await fresh.execute(
+                    select(AuditLog).where(AuditLog.path == "vault.composite.issue_list")
+                )
+            )
+            .scalars()
+            .one()
+        )
+    assert row.payload["result_status"] == "error"
+    assert row.payload["error"]["error_code"] == "deploy_error"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_composite_terminal_error_with_long_messages_stays_bounded(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Three issues with 10 KB messages do not come back inline in full (#3813).
+
+    Few rows, many bytes: the reducer still hands out a handle, and each inline
+    message is cut to the text cap. The stored rows keep the full text.
+    """
+    result, store, operator = await _dispatch_issue_list_error(
+        stub_embedding_service, {"issue_count": 3, "message_chars": 10_000, "error_index": 0}
+    )
+
+    assert result.status == "error"
+    assert result.handle is not None
+    assert isinstance(result.result, dict)
+    assert result.result["issues_total"] == 3
+    inline = result.result["issues"]
+    assert len(inline) == 3
+    assert all(item["message"].endswith("...<truncated>") for item in inline)
+    assert all(len(item["message"]) < 300 for item in inline)
+    assert json_text_bytes(result.result) < 4096
+
+    rows = await _stored_rows(store, operator, result)
+    assert [len(row["message"]) for row in rows] == [10_000] * 3
 
 
 @pytest.mark.asyncio

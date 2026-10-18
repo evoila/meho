@@ -203,8 +203,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   on the `deployed` envelope). The corollary is a **convention every
   composite follows**: a hard failure (the change did not complete,
   rolled back, timed out, or only partly applied) must attach an
-  error-severity issue, or it would still audit `ok`. Since #3813 every
-  write composite does this, using the one shared builder
+  error-severity issue, or it would still audit `ok`. Since #3813 the
+  write composites listed there do this, using the one shared builder
   `connectors/vmware_rest/composite_issues.py::issue`: `vm.create`
   `rolled_back`; the vim task `timeout` of `vm.destroy`, `vm.disk.grow`,
   `vm.snapshot.revert`, `host.detach_from_vds`, the three
@@ -220,12 +220,17 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   no error issue and stay `ok`. The regression tests are
   `tests/test_connectors_vmware_rest_composites_hard_failure_e2e.py`.
   The error path runs the same JSONFlux reducer as the success path
-  (`dispatcher._reduce_terminal_error_envelope`). A failed
-  `vm.power.bulk` over many VMs therefore returns a result handle for
-  the per-VM list, not the whole list inline. The `status`, `summary`
-  and `issues` fields always stay inline, so the caller sees why the call
-  failed without a drill-in. The audit row is unchanged: `error`, with
-  the error code and the full raw payload.
+  (`dispatcher._reduce_terminal_error_envelope`). An envelope within the
+  inline budget comes back whole. A larger one (a failed `vm.power.bulk`
+  over many VMs, or a failed deploy with many or long issues) returns a
+  result handle plus the failure fields inline: `status` and `summary`
+  as they are, and a bounded view of `issues` (at most 5 entries, the
+  `error` entries first, string values cut at 256 characters) with
+  `issues_total`. So the caller sees why the call failed without a
+  drill-in, and the inline result stays small. The full issues list is in
+  the stored result (the handle's rows when `issues` is the envelope's
+  only list, or the whole document otherwise). The audit row is
+  unchanged: `error`, with the error code and the full raw payload.
 
   **Preserving write governance on the direct path.** Because a direct
   session call bypasses the dispatcher, each mutating sub-call first

@@ -939,15 +939,68 @@ def _composite_terminal_error_code(descriptor: EndpointDescriptor, envelope: Any
     issues = envelope.get("issues")
     if not isinstance(issues, list):
         return None
-    if not any(isinstance(item, dict) and item.get("severity") == "error" for item in issues):
+    if not any(_is_error_issue(item) for item in issues):
         return None
     status = envelope.get("status")
     return status if isinstance(status, str) and status else "composite_error"
 
 
-#: Envelope keys a composite terminal-error result keeps inline even when the
-#: reducer moved the rest of the envelope behind a result handle.
-_TERMINAL_ERROR_INLINE_KEYS: tuple[str, ...] = ("status", "summary", "issues")
+#: Envelope keys a composite terminal-error result keeps inline, verbatim, when
+#: the reducer moved the rest of the envelope behind a result handle.
+_TERMINAL_ERROR_INLINE_KEYS: tuple[str, ...] = ("status", "summary")
+
+#: How many ``issues[]`` entries a reduced terminal-error result keeps inline.
+#: Matches the reducer's default preview size.
+_TERMINAL_ERROR_INLINE_ISSUES = 5
+
+#: Longest string value an inline issue entry may carry. The same cap as the
+#: result's ``error`` line (:data:`~meho_backplane.operations._errors._EXC_MESSAGE_CAP`).
+_TERMINAL_ERROR_ISSUE_TEXT_CAP = 256
+
+_TERMINAL_ERROR_TEXT_CUT_MARK = "...<truncated>"
+
+
+def _is_error_issue(item: Any) -> bool:
+    return isinstance(item, dict) and item.get("severity") == "error"
+
+
+def _cap_issue_text(item: Any) -> Any:
+    """Return *item* with every string value cut to the inline text cap."""
+    if not isinstance(item, dict):
+        return item
+    capped: dict[str, Any] = {}
+    for key, value in item.items():
+        if isinstance(value, str) and len(value) > _TERMINAL_ERROR_ISSUE_TEXT_CAP:
+            value = value[:_TERMINAL_ERROR_ISSUE_TEXT_CAP] + _TERMINAL_ERROR_TEXT_CUT_MARK
+        capped[key] = value
+    return capped
+
+
+def _bounded_issues(issues: list[Any]) -> dict[str, Any]:
+    """A bounded inline view of a terminal-error envelope's ``issues[]``.
+
+    Keeps at most :data:`_TERMINAL_ERROR_INLINE_ISSUES` entries, in their
+    original order, choosing the ``error``-severity entries first so the
+    reason for the failure is never pushed out by warnings. Every string value
+    is cut to :data:`_TERMINAL_ERROR_ISSUE_TEXT_CAP`. ``issues_total`` carries
+    the full count so the caller can tell the view from the whole list.
+    """
+    ranked = [i for i, item in enumerate(issues) if _is_error_issue(item)]
+    ranked += [i for i, item in enumerate(issues) if not _is_error_issue(item)]
+    kept = sorted(ranked[:_TERMINAL_ERROR_INLINE_ISSUES])
+    return {
+        "issues": [_cap_issue_text(issues[i]) for i in kept],
+        "issues_total": len(issues),
+    }
+
+
+def _terminal_error_inline_fields(envelope: dict[str, Any]) -> dict[str, Any]:
+    """The failure fields a reduced terminal-error result keeps inline."""
+    inline = {key: envelope[key] for key in _TERMINAL_ERROR_INLINE_KEYS if key in envelope}
+    issues = envelope.get("issues")
+    if isinstance(issues, list):
+        inline.update(_bounded_issues(issues))
+    return inline
 
 
 async def _reduce_terminal_error_envelope(
@@ -961,16 +1014,22 @@ async def _reduce_terminal_error_envelope(
 ) -> tuple[dict[str, Any], ResultHandle | None]:
     """Reduce a composite terminal-error envelope; keep its failure fields inline.
 
-    Runs the same reducer as the success path (:func:`_reduce_or_error`) so a
-    set-shaped envelope larger than the inline budget returns a handle. The
-    ``status`` / ``summary`` / ``issues`` keys are copied back over the reduced
-    summary, so the caller always sees why the call failed without a drill-in.
+    Runs the same reducer as the success path (:func:`_reduce_or_error`). An
+    envelope within the inline budget passes through whole, with no handle. A
+    larger one comes back as a handle plus the reducer's summary, over which
+    the failure fields are copied: ``status`` and ``summary`` verbatim, and a
+    bounded view of ``issues`` (:func:`_bounded_issues`) with ``issues_total``.
+    So the caller always sees why the call failed without a drill-in, and the
+    inline result stays small however many issues the handler returned. The
+    full list is in the stored result (as the handle's rows when ``issues`` is
+    the envelope's one list, or as the whole document otherwise) and in the
+    audit row's raw payload.
 
     Unlike the success path, a reducer failure does not change the result: the
     call already failed, so it stays an error. The caller then gets only the
-    inline failure fields and no handle; the audit row keeps the full payload.
+    bounded inline failure fields and no handle; the audit row keeps the full
+    payload.
     """
-    inline = {key: envelope[key] for key in _TERMINAL_ERROR_INLINE_KEYS if key in envelope}
     try:
         summary, handle = await _DEFAULT_REDUCER.reduce(
             envelope,
@@ -990,9 +1049,11 @@ async def _reduce_terminal_error_envelope(
             audit_id=str(audit_id),
             exception_class=type(exc).__name__,
         )
-        return inline, None
+        return _terminal_error_inline_fields(envelope), None
+    if handle is None:
+        return envelope, None
     reduced = dict(summary) if isinstance(summary, dict) else {"value": summary}
-    reduced.update(inline)
+    reduced.update(_terminal_error_inline_fields(envelope))
     return reduced, handle
 
 

@@ -564,6 +564,35 @@ func (c *adminClient) addClientOptionalScope(
 	return nil
 }
 
+// clientScopeRep is the slice of ClientScopeRepresentation we send
+// when creating a realm-level client scope.
+type clientScopeRep struct {
+	Name        string            `json:"name"`
+	Description string            `json:"description,omitempty"`
+	Protocol    string            `json:"protocol"`
+	Attributes  map[string]string `json:"attributes,omitempty"`
+}
+
+// createClientScope POSTs a new realm-level client scope. Keycloak
+// answers 201 on success and 409 when a scope with that name already
+// exists; callers check the realm's scope list first, so a 409 here is
+// returned as an error like any other unexpected status.
+func (c *adminClient) createClientScope(
+	ctx context.Context, rep clientScopeRep,
+) error {
+	status, body, err := c.do(ctx, http.MethodPost, "client-scopes", rep)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusCreated {
+		return &errKeycloakAPI{
+			method: http.MethodPost, url: "client-scopes",
+			statusCode: status, body: string(body),
+		}
+	}
+	return nil
+}
+
 // findGroup queries /groups?search=<name> and returns the
 // top-level group that exactly matches by name. The Keycloak admin
 // GET /groups endpoint does not currently support `exact=true` on all

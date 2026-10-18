@@ -53,7 +53,8 @@ resolved VM + host group sets).
 ``allocation.set``        CPU / memory limit + reservation from->to (#3880)
 ``cluster.drs_rule.create`` live-read: cluster, cluster_name, rule_type,
                           rule_name, enabled, resolved, total_resolved
-``folder.create``         echo: parent_folder, new_folder_name
+``folder.create``         echo: parent_folder / parent_folder_id,
+                          datacenter, new_folder_name
 ``vm.resize``             live-read: ``{vm, name, power_state, current,
                           requested}`` sizing from->to
 ``vm.nic.repoint``        live-read: ``{vm, name, nic, mac_address,
@@ -773,15 +774,23 @@ async def _folder_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     """Preview ``folder.create`` — echo the parent + new folder name (no I/O).
 
     Param echo (the ``secret.move`` precedent, #1580): the params fully name
-    the blast radius — one new folder under one named parent. Parent-name
-    resolution and the synchronous ``CreateFolder`` write stay the handler's
-    job at dispatch time.
+    the blast radius — one new folder under one parent. The parent is the
+    ``parent_folder`` name (optionally scoped by ``datacenter``) or the
+    ``parent_folder_id`` folder ID (#3588); whichever were given are echoed.
+    Parent-name resolution and the synchronous ``CreateFolder`` write stay
+    the handler's job at dispatch time.
     """
-    parent_folder = ctx.params.get("parent_folder")
     folder_name = ctx.params.get("folder_name")
-    if not isinstance(parent_folder, str) or not isinstance(folder_name, str):
+    if not isinstance(folder_name, str):
         return None
-    return {"parent_folder": parent_folder, "new_folder_name": folder_name}
+    parent = {
+        key: value
+        for key in ("parent_folder", "parent_folder_id", "datacenter")
+        if isinstance(value := ctx.params.get(key), str)
+    }
+    if "parent_folder" not in parent and "parent_folder_id" not in parent:
+        return None
+    return {**parent, "new_folder_name": folder_name}
 
 
 async def _resource_pool_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:

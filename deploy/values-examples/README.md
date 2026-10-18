@@ -1078,6 +1078,8 @@ client-shape contrast with `meho-cli`:
 | Web origins | `+` (or a tight allow-list) | CORS for the browser flow. |
 | PKCE challenge method | `S256` | Spec-required for public-client PKCE. |
 | **Optional client scopes** | **`offline_access`** | Claude Code's MCP client **always** requests `offline_access` in its scope parameter to obtain a refresh token; if the scope isn't assigned on the client, Keycloak rejects the authorization request with `invalid_scope` (Wall #7). Assign as **optional** rather than default — only flows that ask for a refresh token (browser MCP clients) should mint one. The CLI device-code client gets this scope only when a deployment opts in via `bootstrap-clients --cli-offline-access` (off by default, bounded by a tight per-client offline-session idle timeout); operators then request it per-login with `meho login --offline` (#2902). |
+| **Optional client scopes** | **`mcp:read`, `mcp:execute`, `mcp:admin`** | The MEHO Claude Code plugin and the Claude Desktop bundle ask for `mcp:read mcp:execute` at every login, and for `mcp:admin` when the user turns on the operator tools. Keycloak does not ship these scopes. Create each one as a realm **client scope** (protocol OpenID Connect, **Include in token scope** On), then assign it to `meho-mcp` as **optional**. If a scope is missing, Keycloak refuses the whole login with `invalid_scope`. `bootstrap-clients` does both steps for you. |
+| Client Offline Session Idle (attribute `client.offline.session.idle.timeout`) | `172800` (48h) | How long an unused MCP login lasts. Without it the realm's Offline Session Idle applies (30 days by default). `bootstrap-clients` sets it; change the value with `--mcp-offline-session-idle=<seconds>`. |
 
 The 5 protocol mappers + 4 default client scopes from Steps 3–4
 apply identically. The MCP client additionally carries
@@ -1196,30 +1198,35 @@ curl -sf https://keycloak.example.com/realms/<realm>/.well-known/openid-configur
 If the field is missing or `false`, the flag did not propagate —
 re-check the server startup environment and the realm name.
 
-#### Step C2 — Create the three MCP capability scopes (Optional type)
+#### Step C2 — Create the three MEHO MCP scopes (Optional type)
 
-MCP `2025-11-25` introduces three protocol-level scopes the
-authorization server uses to bind tokens to specific MCP
-capabilities. Create each as a realm-level **client scope** with
-type **Optional** (not Default — the spec leaves them opt-in per
-session) and, on each scope, an Audience mapper whose **Included
-Custom Audience** is the MCP server URL (`<backplane-url>/mcp`,
-no trailing slash — same normalisation rule as the
+A CIMD client asks for the scopes the backplane lists in its
+protected-resource metadata (`scopes_supported`: `mcp:read`,
+`mcp:execute`). Users add `mcp:admin` to turn on the operator
+tools. Create each as a realm-level **client scope** with type
+**Optional** (not Default — a session asks for them on purpose)
+and, on each scope, an Audience mapper whose **Included Custom
+Audience** is the MCP server URL (`<backplane-url>/mcp`, no
+trailing slash — same normalisation rule as the
 `meho-mcp-audience` mapper in Step 3 above):
 
 | Scope name | Type | Audience mapper (Included Custom Audience) |
 | --- | --- | --- |
-| `mcp:tools` | Optional | `<backplane-url>/mcp` |
-| `mcp:prompts` | Optional | `<backplane-url>/mcp` |
-| `mcp:resources` | Optional | `<backplane-url>/mcp` |
+| `mcp:read` | Optional | `<backplane-url>/mcp` |
+| `mcp:execute` | Optional | `<backplane-url>/mcp` |
+| `mcp:admin` | Optional | `<backplane-url>/mcp` |
 
-> **Source-of-truth note.** Earlier internal references named
-> these scopes `mcp:read` / `mcp:execute`. That naming did not
-> match the published Keycloak guide — the canonical names from
+If you ran `bootstrap-clients`, the three scopes already exist.
+It creates them without the Audience mapper, because `meho-mcp`
+carries its own audience mapper. Add the mapper to each scope for
+CIMD clients.
+
+> **Scope names.** Use the names above. They are the names MEHO's
+> backplane advertises and MEHO's clients ask for.
 > [Keycloak's MCP authorization-server guide](https://www.keycloak.org/securing-apps/mcp-authz-server)
-> are the three above (`mcp:tools` / `mcp:prompts` /
-> `mcp:resources`), and that's what a CIMD-capable client
-> requests at the `/authorize` step.
+> uses `mcp:tools` / `mcp:prompts` / `mcp:resources`. Those names
+> are only the guide's example for its own MCP server; MEHO does
+> not use them.
 
 These scopes coexist with the `meho-mcp-audience` mapper +
 4 default scopes from Steps 3–4 — a CIMD client still needs the

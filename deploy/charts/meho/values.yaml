@@ -639,7 +639,8 @@ topology:
   # required. Range [0, 3650] (10 years upper bound).
   historyRetentionDays: 90
   # -- Cadence of the in-process history retention prune sweeper, in
-  # seconds. Default 604800 (7d / weekly) matches Initiative #365's
+  # seconds. Counted from the last recorded run, so a pod restart does not
+  # start it again. Default 604800 (7d / weekly) matches Initiative #365's
   # stated cadence ("a weekly background task prunes rows"). Range
   # [60, 604800]: below one minute the prune competes with normal
   # write load; the ceiling is the documented weekly cadence --
@@ -709,7 +710,8 @@ broadcastAnnouncement:
   # exchange for full historical retention. Range [0, 3650] (10y ceiling).
   retentionDays: 90
   # -- Cadence of the in-process announcement retention prune sweeper, in
-  # seconds. Default 604800 (7d / weekly). Range [60, 604800]: below one
+  # seconds. Counted from the last recorded run, so a pod restart does not
+  # start it again. Default 604800 (7d / weekly). Range [60, 604800]: below one
   # minute the prune competes with the announce write load; the ceiling
   # is the documented weekly cadence.
   pruneIntervalSeconds: 604800

@@ -51,8 +51,10 @@ The pipeline is broken into work items per Initiative #389:
   descriptors (`group_id IS NULL`) too (#3681) — the same connector scope
   `enable-reads` reaches group-agnostically — so a full `enable` never
   strands ungrouped write/typed ops at default-deny, and `connector review`
-  reports the ungrouped count (`ungrouped_op_count`, printed in the CLI
-  render) so an operator can see any the grouping pass left out.
+  reports the ungrouped count (`ungrouped_op_count`) and lists each
+  ungrouped op with its enabled state and safety level
+  (`ungrouped_ops`, the `[ungrouped]` section of the CLI render, #3870).
+  So `groups` plus `ungrouped_ops` is every op dispatch can serve.
 * **T5–T7 — CLI / REST / MCP surfaces** that drive the pipeline. T6
   (REST routes) lands the seven `/api/v1/connectors*` endpoints —
   `POST /ingest`, `GET /` (list), `GET /{id}/review`, `PATCH
@@ -721,7 +723,8 @@ sensor's id / name / tenant_id as `AffectedSensor` entries. The join
 follows the ingest's own tenant scope: a tenant-scoped ingest
 overwrote only that tenant's descriptor rows, so it filters
 `Sensor.tenant_id` to match — other tenants' sensors resolve their
-own or the built-in rows (tenant-wins, `operations/_lookup.py`) and
+own or the built-in rows (the tenant row is authoritative, see
+[Tenant connector row is authoritative](#tenant-connector-row-is-authoritative-3870)) and
 listing them would leak foreign sensor identities. Only a built-in /
 global ingest (`tenant_id IS NULL`) is deliberately unfiltered,
 since the built-in rows serve every tenant's Sensors. One structlog
@@ -886,6 +889,34 @@ product does not round-trip (the `_fixture` mechanism row parses to
 `validate_shipped_artifacts()`; the stamp path re-parses with the same
 model, so it stays fail-closed as a second line of defence.
 
+### Tenant connector row is authoritative (#3870)
+
+A tenant-scoped ingest gives a tenant its own `endpoint_descriptor` rows
+for a connector triple `(product, version, impl_id)`. When such rows
+exist, they are the only rows that count for that tenant:
+
+- An op that is **enabled** on the tenant row runs from the tenant row.
+- An op that is **disabled** on the tenant row is refused (`unknown_op`).
+  It does not fall back to the built-in row, even when the built-in row
+  has it enabled.
+- An op that is **absent** from the tenant row is refused the same way.
+- A tenant with **no** descriptor row for the triple uses the built-in
+  rows (`tenant_id IS NULL`), as before.
+
+Ownership is decided by descriptor rows in any `is_enabled` state, so
+disabling every op on the tenant row leaves the tenant with nothing to
+run on that connector. To use the built-in row again, delete the tenant
+row (`connector delete` on the tenant scope).
+
+One predicate, `visible_scope_clause` in `operations/_lookup.py`, carries
+this rule. `lookup_descriptor` (dispatch, preview, sensors, gateway
+commands), `descriptor_exists_any_state`, `count_known_ops`,
+`list_operation_groups`, and `search_operations` (both the PostgreSQL SQL
+in `_search.py` and the SQLite fallback) all filter on it, so they always
+agree. The `GET /api/v1/connectors` listing still shows both rows; its
+`shadowed_by_tenant_scope` marker on the built-in row now means the
+built-in row is not used at all for that tenant.
+
 ### Operator-selectable auth scheme on a non-catalog ingest (#2289)
 
 Boot stamping (above) makes a *shipped* profile-backed catalog row
@@ -1035,6 +1066,11 @@ run_llm_grouping pipeline for one connector. Constructed from an
 `Operator` (so the service-level audit rows the helpers write carry
 the originating operator's identity); the same instance is reused
 across T5's CLI verbs, T6's REST routes, and T7's admin MCP tools.
+Those rows also carry the request's change ticket: the audit
+middleware binds the `Meho-Work-Ref` header onto `work_ref_var` for the
+whole request, and `write_audit_row` in `ingest/_internals.py` reads it
+into `audit_log.work_ref` (#3804). The async ingest job inherits the
+binding because `asyncio.create_task` copies the request context.
 
 The `LlmClient` Protocol is injected via a factory parameter so the
 chassis can lazy-resolve it; the fail-closed default factory raises
@@ -1757,7 +1793,10 @@ so they can never diverge on *which row* they act on. The resolver:
   path) does a single-pass existence check — no fallback, no
   ambiguity;
 - for the operator's own tenant, probes **both** the tenant scope and
-  the built-in scope with `scope_has_groups` and then:
+  the built-in scope with `scope_has_rows` (a group row **or** a
+  descriptor row counts, so a connector whose grouping pass produced no
+  groups is still found and reviewed with `groups=[]` and every op in
+  `ungrouped_ops`, #3870) and then:
   - both exist → raises `AmbiguousConnectorScopeError` (the route maps
     it to a 409 `connector_scope_ambiguous` enumerating the candidate
     rows — neither a silent pick nor a bare 404);
@@ -1776,15 +1815,17 @@ asymmetry. `bulk_enable_read_ops` and the `/review` payload render
 both run against the scope the shared resolver returns.
 
 The PATCH editing routes (`/groups`, `/operations`) and the
-connector-level `enable` / `disable` / `delete` transitions still
-keep their single-pass lookup against the operator's `tenant_id` via
-`_resolve_scope`: "do tenant_admins get to edit / transition
-built-ins?" is a policy choice distinct from the read/enable-reads
-visibility surface, and the route gate is `tenant_admin`-only —
-built-in writes already have an explicit MCP / CLI affordance
-(`ReviewService` accepts `tenant_id=None` under the `TENANT_ADMIN`
-role). They are free to adopt `_resolve_existing_scope` later if the
-same global-fallback / disambiguation is wanted there.
+connector-level `enable` / `disable` transitions resolve through
+`ReviewService._resolve_writable_scope` instead. It prefers the
+operator's own tenant row and falls back to the built-in row, which a
+`tenant_admin` without `platform_admin` may not write (403
+`BuiltinConnectorWriteForbiddenError`). It never raises the ambiguity
+error: with both rows present it acts on the tenant row. The group
+transitions and the group edit probe for group rows, because they have
+nothing to act on without them. The per-op edit (`edit_op`) probes with
+`scope_has_rows` (a group row **or** an operation row): an op that
+`enable_reads` enabled on a group-less connector must be disable-able
+again through the same tenant row (#3870).
 
 The `op_id` path segment uses the `:path` converter so operations
 whose natural key contains slashes (`"GET:/api/vcenter/cluster"`)

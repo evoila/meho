@@ -104,6 +104,7 @@ func newBootstrapClientsCmd() *cobra.Command {
 		insecureSkipTLS       bool
 		dryRun                bool
 		cliOfflineSessionIdle int
+		mcpOfflineSessionIdle int
 	)
 
 	cmd := &cobra.Command{
@@ -115,6 +116,7 @@ func newBootstrapClientsCmd() *cobra.Command {
 			"  * the public authorization-code+PKCE MCP client (default name `meho-mcp`)\n" +
 			"  * 5 protocol mappers on each client (audience-meho-backplane, meho-mcp-audience, tenant-id, tenant-role, groups-claim)\n" +
 			"  * 4 default client scopes on each client (basic, roles, web-origins, acr) — including the load-bearing `basic` scope that carries the `sub` claim in Keycloak 25+\n" +
+			"  * the `mcp:read`, `mcp:execute` and `mcp:admin` client scopes, plus `offline_access`, as optional scopes on the MCP client — MEHO's MCP clients ask for them at login, and Keycloak refuses a login that asks for a scope the client does not offer\n" +
 			"  * the `meho-admins` top-level group\n" +
 			"  * an admin user joined to `meho-admins` with a password\n\n" +
 			"Idempotent: re-runs detect existing resources, " +
@@ -181,6 +183,7 @@ func newBootstrapClientsCmd() *cobra.Command {
 				AdminUserPassword:            adminUserPassword,
 				SkipUserProvisioning:         skipUserProvisioning,
 				CLIOfflineSessionIdleSeconds: cliOfflineSessionIdle,
+				MCPOfflineSessionIdleSeconds: mcpOfflineSessionIdle,
 				MCPRedirectURIs:              mcpRedirectURIs,
 				MCPWebOrigins:                mcpWebOrigins,
 				DryRun:                       dryRun,
@@ -289,6 +292,12 @@ func newBootstrapClientsCmd() *cobra.Command {
 			"--offline`. Security: this enables a long-lived refresh token "+
 			"on the operator's disk — keep the bound tight and prefer the "+
 			"OS keyring for storage")
+	cmd.Flags().IntVar(&mcpOfflineSessionIdle, "mcp-offline-session-idle",
+		defaultMCPOfflineSessionIdleSeconds,
+		"how many seconds an unused MCP login stays valid: sets the "+
+			"`client.offline.session.idle.timeout` attribute on the MCP "+
+			"browser-flow client. Default 48h. Without it the realm's "+
+			"Offline Session Idle applies (30 days by default)")
 	// Optional-value flag: a bare `--cli-offline-access` yields the 48h
 	// default; a custom value MUST use the equals form
 	// (`--cli-offline-access=SECONDS`). pflag's NoOptDefVal treats a

@@ -106,10 +106,18 @@ shared core:
 - **Paging** (`handle_id` + `offset` + `limit`) — `read_result_window`
   returns a row window. Since #3387 the window is bounded by the same
   `RESULT_QUERY_MAX_OUTPUT_BYTES` ceiling the query path applies: a page that
-  serializes past the budget raises the recoverable over-budget error (its
-  remediation is a smaller `limit`, since paging has no `select` / `filter`)
+  serializes past the budget raises the recoverable over-budget error
   rather than returning a multi-MB window, so no agent ever sees an
-  over-budget page.
+  over-budget page. Rows that are large nested objects (one full
+  Kubernetes-style object per row) can hit this on the default page. So
+  the message (#3704) gives the row size, the largest `limit` that fits from
+  the current `offset`, and the row's top-level fields, which a query with
+  `select` can return instead of whole rows. Field names are vendor data,
+  so the list holds at most five names and leaves out any name over a
+  small byte budget; the refusal itself stays small. On REST the refusal is a
+  `422` whose `detail` is an object (`reason`, `message`), not the
+  validation-error list. The CLI reads that body itself instead of using
+  the generated parser, so the operator sees the message.
 - **Query** (`handle_id` + a `query` object) — `run_result_query`
   compiles the structured arguments into **exactly one parameterized,
   read-only `SELECT`** over the handle's rows and returns just the
@@ -275,6 +283,14 @@ the reducer keeps it **whole** as a document record under a handle:
   is not stored either (`reason=admission_limit_exceeded`).
 - Credential-class ops and reduces without an `op_id` pass through
   unchanged, as before.
+- A multi-step operation's failure envelope (an `issues[]` entry with
+  `severity: "error"`, #3809) takes the same reducer path as a success
+  payload (#4223). An oversized refusal — `folder.create`'s
+  `ambiguous_parent` listing hundreds of `candidate_folders` — becomes a
+  document record under a handle; the result keeps `status: "error"`,
+  its `error` line and `extras.error_code`, and the audit row reads
+  `error` with the `handle_id`. A reducer failure on that path drops the
+  inline envelope (`delivery: "unavailable"`) rather than ship it whole.
 
 Read it with `result_query` and `query={"path": "<RFC 6901 JSON
 Pointer>"}`. The pointer rules follow RFC 6901: `""` is the whole

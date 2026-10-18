@@ -11,8 +11,9 @@ Without a retention policy it grows unbounded: a fleet of announce-happy
 agents adds rows every coordination cycle, indefinitely.
 
 This module ships the physical cleanup: an ``asyncio`` task the FastAPI
-lifespan owns that ticks on a fixed cadence (default 7 days / weekly) and
-deletes rows where ``created_at < now() - broadcast_announcement_retention_days``.
+lifespan owns that runs once per interval (default 7 days / weekly, counted
+from its last recorded run -- see "When it runs" below) and deletes rows where
+``created_at < now() - broadcast_announcement_retention_days``.
 The table is otherwise append-only by contract (see
 :class:`~meho_backplane.db.models.AgentAnnouncement`); this prune task is
 the **only** place the application issues a DELETE against it.
@@ -46,6 +47,20 @@ task body names). The rationale carried over unchanged:
   :func:`_prune_loop` logs and continues -- one bad audit write must not
   kill the prune loop.
 
+When it runs
+------------
+
+The interval counts from the **last recorded run**, not from process start.
+Every run writes its ``broadcast.announcement.prune`` audit row, also when it
+deleted 0 rows, so the newest such row is the last real run. After the
+process starts, the loop waits one minute, reads that row, and runs at once
+if a full interval has passed (or no run is recorded); otherwise it waits
+only for the rest of the interval. After that it runs once per interval. So
+a pod restart never starts the interval again. The steps live in
+:func:`meho_backplane.loop_schedule.wait_until_first_run`. With
+``retention_days == 0`` no row is written, so each start runs the no-op
+heartbeat about one minute after start.
+
 Distinct from ``broadcast_retention_hours``
 -------------------------------------------
 
@@ -68,6 +83,7 @@ from sqlalchemy import delete
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentAnnouncement, AuditEventClass
+from meho_backplane.loop_schedule import FIRST_RUN_DELAY_SECONDS, wait_until_first_run
 from meho_backplane.memory.audit import (
     INTERNAL_METHOD,
     write_internal_audit_row,
@@ -187,7 +203,8 @@ async def _run_one_prune_tick() -> None:
     keep-forever sentinel) the function logs the heartbeat and returns
     without a DELETE or audit row -- the no-op case would otherwise emit
     one ``dropped_rows=0`` row per weekly tick, indistinguishable from a
-    real "swept clean" outcome.
+    real "swept clean" outcome. Any other run writes its row, also when it
+    deleted 0 rows: the schedule reads that row as the last run.
 
     Returns no value; the per-tick ``try`` / ``except`` in
     :func:`_prune_loop` catches any exception so one bad tick cannot kill
@@ -224,22 +241,29 @@ async def _run_one_prune_tick() -> None:
 
 
 async def _prune_loop() -> None:
-    """The forever loop: sleep one cadence, prune, repeat.
+    """The forever loop: wait until a run is due, prune, repeat.
 
-    Sleep-then-prune (not prune-then-sleep) so the first tick after start
-    does not race the rest of lifespan boot. Per-tick ``try`` / ``except``
-    means a transient DB blip is logged and the loop continues;
-    ``asyncio.CancelledError`` propagates so lifespan shutdown stops the
-    task cleanly.
+    The first run is timed from the last recorded run, not from process
+    start (see "When it runs" in the module docstring). After that, the loop
+    runs once per interval. Per-tick ``try`` / ``except`` means a transient
+    DB blip is logged and the loop continues; ``asyncio.CancelledError``
+    propagates so lifespan shutdown stops the task cleanly.
     """
     interval = get_settings().broadcast_announcement_prune_interval_seconds
     _log.info(
         "broadcast_announcement_retention_started",
         interval_seconds=interval,
         retention_days=get_settings().broadcast_announcement_retention_days,
+        first_check_in_seconds=FIRST_RUN_DELAY_SECONDS,
+    )
+    await wait_until_first_run(
+        job="broadcast_announcement_retention",
+        tenant_id=_resolve_system_tenant_id(),
+        operator_sub=SYSTEM_OPERATOR_SUB,
+        path=ANNOUNCEMENT_RETENTION_PRUNE_PATH,
+        interval_seconds=interval,
     )
     while True:
-        await asyncio.sleep(get_settings().broadcast_announcement_prune_interval_seconds)
         try:
             await _run_one_prune_tick()
         except asyncio.CancelledError:
@@ -253,6 +277,7 @@ async def _prune_loop() -> None:
             "announcement_retention",
             get_settings().broadcast_announcement_prune_interval_seconds,
         )
+        await asyncio.sleep(get_settings().broadcast_announcement_prune_interval_seconds)
 
 
 def start_announcement_retention_sweeper() -> asyncio.Task[None]:

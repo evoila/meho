@@ -1478,9 +1478,15 @@ type ApprovalRequestView struct {
 	//   agent waiter) store the envelope they get back.
 	// * :attr:`EXECUTED` -- the stored result has ``status == "ok"``.
 	// * :attr:`FAILED` -- a result is stored and its ``status`` is not ``ok``.
-	ResultState    *ApprovalResultState `json:"result_state,omitempty"`
-	ReviewedBy     *string              `json:"reviewed_by"`
-	ReviewedByName *string              `json:"reviewed_by_name"`
+	ResultState *ApprovalResultState `json:"result_state,omitempty"`
+
+	// ResumeOutcome What happened when an approved request ran (#3543).
+	//
+	// A summary read off the stored result envelope. The result body and the
+	// free-text error stay on the owner-only ``/result`` read.
+	ResumeOutcome  *ApprovalResumeOutcomeView `json:"resume_outcome,omitempty"`
+	ReviewedBy     *string                    `json:"reviewed_by"`
+	ReviewedByName *string                    `json:"reviewed_by_name"`
 
 	// ReviewerContext Redacted, human-legible context for judging a parked request (#3353).
 	//
@@ -1589,6 +1595,17 @@ type ApprovalResultView struct {
 	// :func:`tests.test_migration_0023_approval_request.test_status_check_matches_enum`
 	// asserts equality at unit-test time.
 	Status ApprovalRequestStatus `json:"status"`
+}
+
+// ApprovalResumeOutcomeView What happened when an approved request ran (#3543).
+//
+// A summary read off the stored result envelope. The result body and the
+// free-text error stay on the owner-only “/result“ read.
+type ApprovalResumeOutcomeView struct {
+	AuditId      *openapi_types.UUID `json:"audit_id"`
+	ErrorCode    *string             `json:"error_code"`
+	ResultStatus *string             `json:"result_status"`
+	ResumedAt    *string             `json:"resumed_at"`
 }
 
 // ApproveRequestBody POST body for “…/approve“.
@@ -3796,6 +3813,7 @@ type ConnectorReviewPayload struct {
 	TenantId                        *openapi_types.UUID          `json:"tenant_id"`
 	TotalOpCount                    int                          `json:"total_op_count"`
 	UngroupedOpCount                *int                         `json:"ungrouped_op_count,omitempty"`
+	UngroupedOps                    *[]ConnectorReviewOp         `json:"ungrouped_ops,omitempty"`
 	Version                         string                       `json:"version"`
 }
 

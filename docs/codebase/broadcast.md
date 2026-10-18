@@ -179,6 +179,38 @@ Three layers, separated for traceability:
     See [`docs/codebase/checks-broadcast.md`](checks-broadcast.md).
   - `other` — full detail.
 
+  **One class per call.** The audit row and the broadcast event of one
+  call carry the same `op_id` and `op_class`. Every writer gets the class
+  from `resolve_op_class(op_id, declared)` in `broadcast/events.py`:
+  - The declared class wins when there is one: the MCP tool's
+    `ToolDefinition.op_class`, or a route's `audit_op_class`. Tool names
+    like `list_targets` or `meho_status` have no verb suffix, so
+    `classify_op` alone would call them `other`.
+  - The exception: when `classify_op` says `credential_*` or
+    `audit_query`, that class wins. A declared class can never turn an
+    aggregate-only broadcast into a full one.
+  - With no declared class, the class is `classify_op(op_id)`.
+
+  Where it is used:
+  - **MCP `tools/call`** (`mcp/handlers.py`): the row and the event carry
+    the resolved class, and the event carries the row's `op_id` (the tool
+    name, or the `audit_op_id` the handler bound). `call_operation` keeps
+    `tool_call` on both; only the redaction detail comes from the inner op.
+    `resources/read` rows carry `op_id = mcp.resource.read` and `read`, like
+    their events.
+  - **Dispatch rows** (`operations/_audit.py`): the row's `op_id` is
+    always the op that ran, and the row stores its class. A route label
+    that is still bound while the op runs (for example `agent.run` /
+    `write` from an agent run) no longer replaces them.
+  - **HTTP rows** (`audit.py`): a route-declared class is stored as
+    resolved. Rows with no declared class keep none, and audit query
+    derives it the same way.
+
+  MEHO's own registry writes that run through the dispatcher
+  (`targets.register`, `topology.annotate` / `.unannotate` /
+  `.bulk_import` / `.create_node` / `.delete_node`) are pinned `write` in
+  `_WRITE_OPS`.
+
   `credential_read` and `audit_query` are *upgradeable*: a per-call or
   per-tenant override may surface full detail to an operator who already
   has the right to see the path/filter (G6.3 #379). `credential_mint`
@@ -629,6 +661,28 @@ Helm knobs: `broadcastAnnouncement.{retentionDays,pruneIntervalSeconds,pruneEnab
 (env `BROADCAST_ANNOUNCEMENT_*`). This is distinct from
 `broadcast_retention_hours` (the *stream* read-window heuristic, a
 different substrate).
+
+**When it runs.** The interval (`BROADCAST_ANNOUNCEMENT_PRUNE_INTERVAL_SECONDS`, default 7 days) counts
+from the **last recorded run**, not from pod start. So a pod restart (an
+update, a crash, a node drain) does not start the interval again:
+
+- After a pod starts, the prune waits one minute, so it does not run in
+  the middle of startup.
+- Then it reads the time of its newest `broadcast.announcement.prune` audit row within the
+  last interval. A row counts only if it has the system tenant id,
+  `method='INTERNAL'`, `operator_sub='system:broadcast-announcement-retention'` and that path. Every run
+  writes this row, also when it deleted 0 rows.
+- If there is no such row, it runs at once. Otherwise it waits only for
+  the rest of the interval. After that it runs once per interval.
+- A last-run time in the future (a pod with a fast clock wrote it) counts
+  as "due now". If the read fails, it logs `broadcast_announcement_retention_last_run_read_failed`
+  and runs at once. The wait is never longer than one interval.
+- Each start logs `broadcast_announcement_retention_scheduled` with `last_run_at` and
+  `next_run_in_seconds`, so you can check the schedule after a restart.
+- With retention days set to `0` no row is written, so the no-op
+  heartbeat runs about one minute after each start.
+
+The shared steps live in `backend/src/meho_backplane/loop_schedule.py`.
 
 ## Archive order and cursors (#3748)
 

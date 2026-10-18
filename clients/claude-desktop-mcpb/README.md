@@ -32,8 +32,10 @@ because the shim runs on a machine already on the VPN.
 |---|---|
 | `manifest.json` | MCPB manifest (`manifest_version` 0.3). Committed with a `0.0.0` placeholder version; `build.sh` injects the real version at pack time. |
 | `server/index.mjs` | The bundle's entry point. A thin stdio launcher that runs the vendored `mcp-remote` in-process (imports its CLI entry — spawns nothing), and presents the pre-registered `meho-mcp` OAuth client. |
-| `package.json` + `package-lock.json` | Pin `mcp-remote@0.1.38` and its full, integrity-checked dependency tree. `build.sh` runs `npm ci --omit=dev` from the lock to vendor `node_modules` into the bundle. Never committed: `node_modules/`. |
+| `../claude-code-plugin/lib/login-guard.mjs` | The login guard, shared with the Claude Code plugin. `build.sh` copies it to `server/login-guard.mjs` in the bundle. See [When the login expires or is not finished](#when-the-login-expires-or-is-not-finished). |
+| `package.json` + `package-lock.json` | Pin `mcp-remote@0.1.39` and its full, integrity-checked dependency tree. `build.sh` runs `npm ci --omit=dev` from the lock to vendor `node_modules` into the bundle. Never committed: `node_modules/`. |
 | `test/index.test.mjs` | Behavioral suite (`node --test`) for the launcher's in-process invocation contract, the in-process CA injection, and the guards. Runs on every PR (`mcpb-bundle.yml`); not shipped in the bundle. |
+| `test/login-guard.test.mjs` | Tests for the login guard in the bundle: stub tests, plus end-to-end tests with the real pinned `mcp-remote` against a fake MEHO and Keycloak on `127.0.0.1`. Run on every PR (`mcpb-bundle.yml`); not shipped in the bundle. |
 | `build.sh` | Vendors dependencies, then validates + packs the bundle via the pinned `@anthropic-ai/mcpb` CLI. |
 
 ## Building locally
@@ -87,8 +89,10 @@ requested OAuth scopes delivered as `MEHO_MCP_SCOPES`. The launcher:
 6. Sets `process.argv` to the `mcp-remote` invocation — the backplane URL,
    plus `--static-oauth-client-info '{"client_id": "…"}'` and
    `--static-oauth-client-metadata '{"scope": "<resolved scopes>"}'` — and
-   **imports** the vendored `mcp-remote@0.1.38` CLI entry into this
-   process. `mcp-remote` reads `process.argv` at import and takes over the
+   **imports** the login guard, which imports the vendored
+   `mcp-remote@0.1.39` CLI entry into this process (see
+   [When the login expires or is not finished](#when-the-login-expires-or-is-not-finished)).
+   `mcp-remote` reads `process.argv` at import and takes over the
    launcher's stdio; nothing is spawned. The static client info is
    load-bearing: MEHO's Keycloak realm blocks anonymous RFC 7591 Dynamic
    Client Registration (default Trusted Hosts policy → `403 "Host not
@@ -244,6 +248,42 @@ recommend 48 hours
 Without `offline_access`, the login ends at the realm's SSO idle limit,
 which is 30 minutes by default. The next MEHO call then needs a new browser
 login. So if you change the `scopes` field, keep `offline_access` in it.
+
+## When the login expires or is not finished
+
+The launcher runs `mcp-remote` through a small login guard. It is the same
+file the Claude Code plugin uses (`clients/claude-code-plugin/lib/login-guard.mjs`).
+The guard makes sure a MEHO call never hangs because of a login:
+
+- **The login expired during a session.** This happens after the offline
+  idle limit (48 hours with no use, see
+  [How long the login lasts](#how-long-the-login-lasts)) or when an admin
+  ended the session in Keycloak. The next MEHO call fails at once with:
+  "Your MEHO login has expired. Turn the MEHO extension off and on again in
+  Claude Desktop (Settings > Extensions) to log in again." Then the
+  extension stops. Do what the message says: turning it on again opens the
+  browser login. A browser tab with the MEHO login may also open when the
+  call fails. You can close it.
+- **Nobody finishes a browser login.** The extension stops after 5 minutes
+  without a connection. This frees the local login port. The extension's
+  log then has a line like this:
+
+  ```
+  meho-claude-desktop: MEHO did not connect within 5 minutes, so this attempt stopped. Finish any open MEHO login in your browser, then turn the MEHO extension off and on again in Claude Desktop (Settings > Extensions).
+  ```
+
+- **Claude Desktop starts the extension twice.** The second copy waits for
+  the first one, as described in [One sign-in at a time](#one-sign-in-at-a-time).
+  Its 5 minutes start only when it stops waiting. It does not crash.
+
+Older bundles used `mcp-remote@0.1.38`. A call whose login had expired got
+no answer, and an unfinished login waited forever.
+
+**One new browser login after the update.** `mcp-remote@0.1.39` keeps saved
+logins in `~/.mcp-auth/mcp-remote-0.1.38/` (it names the folder after its
+previous version). Older bundles used `~/.mcp-auth/mcp-remote-0.1.37/`. So
+after you install this bundle, the first use opens one browser login. If no
+other tool on your machine still uses the old folder, you can delete it.
 
 ## Elevated operator mode (opt-in)
 

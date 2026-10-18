@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 
 	"github.com/spf13/cobra"
 
@@ -46,8 +45,6 @@ type CallResult struct {
 	Extras     json.RawMessage `json:"extras,omitempty"`
 	DurationMs float64         `json:"duration_ms"`
 }
-
-var workRefPattern = regexp.MustCompile(`^gh:[^/[:space:]]+/[^#[:space:]]+#[1-9][0-9]*$`)
 
 // newCallCmd returns the `meho operation call` command.
 //
@@ -147,7 +144,7 @@ type callOptions struct {
 }
 
 func runCall(cmd *cobra.Command, opts callOptions) error {
-	if opts.WorkRef != "" && !workRefPattern.MatchString(opts.WorkRef) {
+	if opts.WorkRef != "" && !api.ValidWorkRef(opts.WorkRef) {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected("--work-ref must match gh:<owner>/<repo>#<n>"), opts.JSONOut)
 	}

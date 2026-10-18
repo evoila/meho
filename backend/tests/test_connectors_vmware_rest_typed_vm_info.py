@@ -305,11 +305,25 @@ async def test_vm_info_by_name_tolerates_legacy_value_envelope() -> None:
 
 
 @pytest.mark.asyncio
-async def test_vm_info_by_name_unknown_raises() -> None:
+async def test_vm_info_by_name_unknown_is_not_found() -> None:
+    """An empty name listing is a clean "absent" answer, not a connector error."""
     conn = _FakeConnector(listing=[])
 
-    with pytest.raises(RuntimeError, match="no VM named 'ghost'"):
-        await vm_info_impl(conn, _make_operator(), _Target(), {"name": "ghost"})
+    with pytest.raises(ConnectorResourceNotFoundError, match="no VM named 'missing-vm'") as raised:
+        await vm_info_impl(conn, _make_operator(), _Target(), {"name": "missing-vm"})
+
+    assert raised.value.resource_ids == ["missing-vm"]
+    assert conn.post_calls == []
+    result = result_connector_not_found("vmware.vm.info", raised.value, duration_ms=1.0)
+    assert result.status == "not_found"
+    assert result.extras == {
+        "error_code": "not_found",
+        "resource_ids": ["missing-vm"],
+        "resource_id": "missing-vm",
+    }
+    # The synthetic code for the audit row only. The REST route still
+    # answers HTTP 200 with this envelope (see test_api_v1_operations).
+    assert status_code_for_result(result.status) == 404
 
 
 @pytest.mark.asyncio
@@ -355,6 +369,8 @@ def test_retrieve_properties_managed_object_not_found_maps_to_structured_result(
     assert result.extras["error_code"] == "not_found"
     assert result.extras["resource_id"] == "vm-42"
     assert result.extras["resource_ids"] == ["vm-42"]
+    # The synthetic code for the audit row only. The REST route still
+    # answers HTTP 200 with this envelope (see test_api_v1_operations).
     assert status_code_for_result(result.status) == 404
 
 

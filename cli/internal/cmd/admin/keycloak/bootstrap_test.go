@@ -43,6 +43,7 @@ type fakeKeycloak struct {
 	defaultScopes  map[string][]string            // client UUID -> scope ID list
 	optionalScopes map[string][]string            // client UUID -> scope ID list
 	realmScopes    []scopeRep                     // realm-level client-scopes
+	createdScopes  []clientScopeRep               // bodies of POST /client-scopes
 	groups         map[string]*groupRep           // keyed by UUID
 	users          map[string]*userRep            // keyed by UUID
 	userGroups     map[string][]string            // user UUID -> group UUIDs
@@ -224,6 +225,23 @@ func (f *fakeKeycloak) handler() http.HandlerFunc {
 				return
 			}
 			w.WriteHeader(http.StatusNoContent)
+		case sub == "client-scopes" && r.Method == http.MethodPost:
+			f.calls["POST /client-scopes"]++
+			var rep clientScopeRep
+			if err := json.NewDecoder(r.Body).Decode(&rep); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			for _, rs := range f.realmScopes {
+				if rs.Name == rep.Name {
+					http.Error(w, "conflict", http.StatusConflict)
+					return
+				}
+			}
+			f.realmScopes = append(f.realmScopes,
+				scopeRep{ID: "scope-" + rep.Name, Name: rep.Name})
+			f.createdScopes = append(f.createdScopes, rep)
+			w.WriteHeader(http.StatusCreated)
 		case sub == "client-scopes" && r.Method == http.MethodGet:
 			f.calls["GET /client-scopes"]++
 			writeJSON(w, http.StatusOK, f.realmScopes)
@@ -1042,9 +1060,9 @@ func TestBootstrap_MCPClientHasOfflineAccessOptionalScope(t *testing.T) {
 	// harmless against real Keycloak but indicates a regression in
 	// the skip-if-already-present path).
 	putsAfterFirst := fake.calls["PUT /clients/{uuid}/optional-client-scopes/{sid}"]
-	if putsAfterFirst != 1 {
-		t.Errorf("first run PUT'd optional scope %d times; want 1",
-			putsAfterFirst)
+	if want := len(requiredMCPOptionalScopes()); putsAfterFirst != want {
+		t.Errorf("first run PUT'd optional scopes %d times; want %d",
+			putsAfterFirst, want)
 	}
 	if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err != nil {
 		t.Fatalf("second Bootstrap: %v", err)
@@ -1074,5 +1092,78 @@ func TestReadPassword_NonTTYFallbackReadsPipedSecret(t *testing.T) {
 	}
 	if errOut.String() != "Password: " {
 		t.Fatalf("prompt written to errOut = %q, want %q", errOut.String(), "Password: ")
+	}
+}
+
+// TestBootstrap_MCPClientOffersMCPScopes is the regression contract for
+// #4002: the Claude Code plugin and the Claude Desktop bundle ask for
+// `mcp:read mcp:execute` (plus `mcp:admin` when elevated), and Keycloak
+// refuses a login that asks for a scope the client does not offer. So
+// bootstrap must create the three scopes in the realm and offer them on
+// meho-mcp as optional scopes, and a re-run must not create them again.
+func TestBootstrap_MCPClientOffersMCPScopes(t *testing.T) {
+	fake := newFakeKeycloak()
+	if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	want := []string{"mcp:read", "mcp:execute", "mcp:admin"}
+
+	if len(fake.createdScopes) != len(want) {
+		t.Fatalf("created %d client scopes, want %d: %+v",
+			len(fake.createdScopes), len(want), fake.createdScopes)
+	}
+	for i, rep := range fake.createdScopes {
+		if rep.Name != want[i] {
+			t.Errorf("created scope %d = %q, want %q", i, rep.Name, want[i])
+		}
+		if rep.Protocol != "openid-connect" {
+			t.Errorf("scope %s protocol = %q, want openid-connect",
+				rep.Name, rep.Protocol)
+		}
+		if rep.Attributes["include.in.token.scope"] != "true" {
+			t.Errorf("scope %s must set include.in.token.scope=true "+
+				"(the backplane reads mcp:admin from the scope claim)",
+				rep.Name)
+		}
+	}
+
+	var cliUUID, mcpUUID string
+	for uuid, c := range fake.clients {
+		switch c.ClientID {
+		case "meho-cli":
+			cliUUID = uuid
+		case "meho-mcp":
+			mcpUUID = uuid
+		}
+	}
+	has := func(ids []string, id string) bool {
+		for _, got := range ids {
+			if got == id {
+				return true
+			}
+		}
+		return false
+	}
+	for _, name := range want {
+		id := "scope-" + name
+		if !has(fake.optionalScopes[mcpUUID], id) {
+			t.Errorf("meho-mcp missing optional scope %s; got %v",
+				name, fake.optionalScopes[mcpUUID])
+		}
+		if has(fake.defaultScopes[mcpUUID], id) {
+			t.Errorf("meho-mcp has %s as DEFAULT — must be optional", name)
+		}
+		if has(fake.optionalScopes[cliUUID], id) ||
+			has(fake.defaultScopes[cliUUID], id) {
+			t.Errorf("meho-cli must not get %s", name)
+		}
+	}
+
+	if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err != nil {
+		t.Fatalf("second Bootstrap: %v", err)
+	}
+	if got := fake.calls["POST /client-scopes"]; got != len(want) {
+		t.Errorf("POST /client-scopes called %d times across 2 runs; "+
+			"want %d (re-run must skip existing scopes)", got, len(want))
 	}
 }

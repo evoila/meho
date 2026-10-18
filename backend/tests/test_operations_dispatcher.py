@@ -41,6 +41,7 @@ patched to a recording stub so tests can assert on the
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import UTC, datetime
@@ -63,6 +64,7 @@ from meho_backplane.connectors.registry import (
     register_connector,
     register_connector_v2,
 )
+from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
 from meho_backplane.connectors.vmware_rest.connector import (
     VmwareRest80Connector,
@@ -76,6 +78,7 @@ from meho_backplane.operations import (
     import_handler,
     register_typed_operation,
     reset_dispatcher_caches,
+    set_default_reducer,
 )
 from meho_backplane.operations._validate import validate_params
 from meho_backplane.operations.dispatcher import _handler_requires_target
@@ -302,6 +305,94 @@ async def _module_composite_handler_terminal_error(
             }
         ],
     }
+
+
+class _AmbiguousVmFolderConnector:
+    """Two datacenters, both with a root VM folder named ``vm`` (#3588)."""
+
+    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
+        return f"/api{path}"
+
+    async def adapt_op_query(
+        self, target: Any, query: dict[str, Any] | None, operator: Operator
+    ) -> dict[str, Any] | None:
+        return query
+
+    async def _get_json(
+        self, target: Any, path: str, *, operator: Operator, params: Any = None
+    ) -> Any:
+        return {
+            "value": [{"folder": "group-v4", "name": "vm"}, {"folder": "group-v115", "name": "vm"}]
+        }
+
+
+async def _module_composite_handler_folder_create_ambiguous(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> Any:
+    """Run the real ``folder.create`` handler against an ambiguous ``vm`` parent (#3588)."""
+    from meho_backplane.connectors.vmware_rest.composites._write import folder_create_composite
+
+    return await folder_create_composite(
+        operator=operator,
+        target=target,
+        params={"parent_folder": "vm", "folder_name": "X"},
+        connector=_AmbiguousVmFolderConnector(),  # type: ignore[arg-type]
+    )
+
+
+#: Enough same-named folders to push the refusal envelope well past the 4 KB
+#: inline byte threshold (#4223).
+_MANY_VM_FOLDER_IDS: list[str] = [f"group-v{i}" for i in range(400)]
+
+
+class _ManyVmFolderConnector(_AmbiguousVmFolderConnector):
+    """A vCenter where hundreds of VM folders share the name ``vm`` (#4223)."""
+
+    async def _get_json(
+        self, target: Any, path: str, *, operator: Operator, params: Any = None
+    ) -> Any:
+        return {"value": [{"folder": moid, "name": "vm"} for moid in _MANY_VM_FOLDER_IDS]}
+
+
+async def _module_composite_handler_folder_create_many_candidates(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> Any:
+    """Run the real ``folder.create`` handler against hundreds of ``vm`` parents (#4223)."""
+    from meho_backplane.connectors.vmware_rest.composites._write import folder_create_composite
+
+    return await folder_create_composite(
+        operator=operator,
+        target=target,
+        params={"parent_folder": "vm", "folder_name": "X"},
+        connector=_ManyVmFolderConnector(),  # type: ignore[arg-type]
+    )
+
+
+class _FakeResultRedis:
+    """In-memory async Valkey double for the result-handle store (``set`` / ``get``)."""
+
+    def __init__(self) -> None:
+        self.values: dict[str, bytes] = {}
+
+    async def set(self, name: str, value: Any, ex: int | None = None) -> None:
+        del ex
+        self.values[name] = value if isinstance(value, bytes) else str(value).encode()
+
+    async def get(self, name: str) -> bytes | None:
+        return self.values.get(name)
+
+
+class _RaisingReducer(PassThroughReducer):
+    """A reducer that fails on every reduce (the #4223 error-arm fallback)."""
+
+    async def reduce(
+        self, payload: Any, schema: dict[str, Any] | None, context: dict[str, Any] | None = None
+    ) -> Any:
+        raise RuntimeError("reducer exploded")
 
 
 async def _module_composite_handler_gated_subop(
@@ -2587,6 +2678,178 @@ async def test_dispatch_composite_terminal_error_envelope_audits_error(
     assert row.status_code == 500
     assert row.payload["error"]["error_code"] == "create_error"
     # The broadcast frame carries the failed status, not a false ``ok``.
+    assert any(e.result_status == "error" for e in captured_events)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_folder_create_ambiguous_parent_audits_error(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """An unresolved ``folder.create`` parent is a failed op, not an ``ok`` no-op (#3588).
+
+    Before the fix the handler returned a bare ``ambiguous_parent`` dict and the
+    dispatcher audited it ``ok`` although no folder was created.
+    """
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await _register_module_composite(
+        "vault.composite.folder_create_ambiguous",
+        "tests.test_operations_dispatcher._module_composite_handler_folder_create_ambiguous",
+        stub_embedding_service.encode_one.return_value,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.composite.folder_create_ambiguous",
+        target=_FakeTarget(product="vault"),
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.extras["error_code"] == "ambiguous_parent"
+    assert isinstance(result.result, dict)
+    assert result.result["candidate_folders"] == ["group-v4", "group-v115"]
+
+    async with get_sessionmaker()() as fresh:
+        row = (
+            (
+                await fresh.execute(
+                    select(AuditLog).where(
+                        AuditLog.path == "vault.composite.folder_create_ambiguous"
+                    )
+                )
+            )
+            .scalars()
+            .one()
+        )
+    assert row.payload["result_status"] == "error"
+    assert row.payload["error"]["error_code"] == "ambiguous_parent"
+    assert any(e.result_status == "error" for e in captured_events)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_folder_create_oversized_candidates_land_behind_a_handle(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+    result_reducer_cls: type[Any],
+) -> None:
+    """An oversized refusal envelope ships a handle, not the whole list (#4223).
+
+    Hundreds of same-named parent folders made the ``ambiguous_parent`` envelope
+    far larger than the inline limit, and the error arm skipped the reducer. The
+    envelope must now take the reducer path: a bounded inline summary, the full
+    envelope behind a result handle, and the operation and audit row still
+    ``error`` with the ``ambiguous_parent`` code.
+    """
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await _register_module_composite(
+        "vault.composite.folder_create_many",
+        "tests.test_operations_dispatcher._module_composite_handler_folder_create_many_candidates",
+        stub_embedding_service.encode_one.return_value,
+    )
+    redis = _FakeResultRedis()
+    store = ResultHandleStore(redis)  # type: ignore[arg-type]
+    set_default_reducer(result_reducer_cls(store=store))
+    operator = _make_operator()
+
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.composite.folder_create_many",
+        target=_FakeTarget(product="vault"),
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.extras["error_code"] == "ambiguous_parent"
+    # The error line is short: the match count, never the ids.
+    assert result.error == "ambiguous_parent: parent VM folder name 'vm' matched 400 VM folders"
+    # The inline result is a bounded summary, and the ids are not in it.
+    assert isinstance(result.result, dict)
+    assert result.result["result_record"] == "document"
+    assert result.result["status"] == "ambiguous_parent"
+    inline = json.dumps(result.result)
+    assert len(inline) < 4096
+    assert "group-v" not in inline
+    # The full envelope is behind the handle and readable from the store.
+    assert result.handle is not None
+    assert result.handle.fetch_more.drill_in.available is True
+    assert operator.tenant_id is not None
+    stored = await store.fetch_document(
+        tenant_id=operator.tenant_id,
+        operator_sub=operator.sub,
+        handle_id=result.handle.handle_id,
+    )
+    assert stored is not None
+    assert stored.document["candidate_folders"] == _MANY_VM_FOLDER_IDS
+    assert stored.document["issues"][0]["severity"] == "error"
+
+    async with get_sessionmaker()() as fresh:
+        row = (
+            (
+                await fresh.execute(
+                    select(AuditLog).where(AuditLog.path == "vault.composite.folder_create_many")
+                )
+            )
+            .scalars()
+            .one()
+        )
+    assert row.payload["result_status"] == "error"
+    assert row.payload["error"]["error_code"] == "ambiguous_parent"
+    assert row.payload["handle_id"] == str(result.handle.handle_id)
+    assert any(e.result_status == "error" for e in captured_events)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_composite_error_envelope_reducer_failure_stays_error(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A reducer failure on the error arm keeps the error and drops the envelope (#4223).
+
+    The success arm turns a reducer failure into ``ok`` + ``delivery="unavailable"``
+    because the handler already ran. The error arm must not: the operation
+    stays ``error`` with its code, the unbounded envelope is not shipped inline,
+    and the audit row reads ``error``.
+    """
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await _register_module_composite(
+        "vault.composite.folder_create_ambiguous",
+        "tests.test_operations_dispatcher._module_composite_handler_folder_create_ambiguous",
+        stub_embedding_service.encode_one.return_value,
+    )
+    set_default_reducer(_RaisingReducer())
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.composite.folder_create_ambiguous",
+        target=_FakeTarget(product="vault"),
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.extras["error_code"] == "ambiguous_parent"
+    assert result.error == "ambiguous_parent: parent VM folder name 'vm' matched 2 VM folders"
+    assert result.result is None
+    assert result.handle is None
+    assert result.delivery == "unavailable"
+
+    async with get_sessionmaker()() as fresh:
+        row = (
+            (
+                await fresh.execute(
+                    select(AuditLog).where(
+                        AuditLog.path == "vault.composite.folder_create_ambiguous"
+                    )
+                )
+            )
+            .scalars()
+            .one()
+        )
+    assert row.payload["result_status"] == "error"
+    assert row.payload["error"]["error_code"] == "ambiguous_parent"
     assert any(e.result_status == "error" for e in captured_events)
 
 

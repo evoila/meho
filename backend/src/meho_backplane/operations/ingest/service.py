@@ -104,8 +104,11 @@ from meho_backplane.operations.ingest._internals import (
     load_ingested_writes_in_scope,
     load_op,
     load_ops_in_groups,
+    load_ops_outside_groups,
     operator_disabled_op_ids,
     scope_has_groups,
+    scope_has_rows,
+    select_groups,
     validate_edit_op_args,
     write_audit_row,
 )
@@ -134,12 +137,30 @@ from meho_backplane.operations.ingest.payload import (
 from meho_backplane.operations.ingest.spec_provenance import load_spec_provenance
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from meho_backplane.connectors.base import Connector
+    from meho_backplane.db.models import EndpointDescriptor
     from meho_backplane.operations.ingest.api_schemas import ConnectorAuthoringKind
 
 __all__ = ["ReviewService"]
 
 _log = structlog.get_logger(__name__)
+
+
+def _review_op(op: EndpointDescriptor) -> ConnectorReviewOp:
+    """Project one descriptor row into its review-payload shape."""
+    return ConnectorReviewOp(
+        op_id=op.op_id,
+        summary=op.summary,
+        description=op.description,
+        custom_description=op.custom_description,
+        safety_level=op.safety_level,
+        requires_approval=op.requires_approval,
+        is_enabled=op.is_enabled,
+        tags=list(op.tags),
+        needs_reingest=op.needs_reingest,
+    )
 
 
 def _authoring_kind_for_payload(
@@ -338,14 +359,14 @@ class ReviewService:
                 impl_id=scope.impl_id,
                 tenant_id=None,
             )
-            if await scope_has_groups(session, builtin_scope):
+            if await scope_has_rows(session, builtin_scope):
                 return builtin_scope
             raise ConnectorNotFoundError(
                 connector_id=connector_id,
                 tenant_id=None,
             )
         # prefer == "tenant"
-        if tenant_id is not None and await scope_has_groups(session, scope):
+        if tenant_id is not None and await scope_has_rows(session, scope):
             return scope
         raise ConnectorNotFoundError(
             connector_id=connector_id,
@@ -408,7 +429,7 @@ class ReviewService:
         if tenant_id is None:
             # Explicit built-in probe (admin path) — single-pass, no
             # fallback, no ambiguity.
-            if await scope_has_groups(session, scope):
+            if await scope_has_rows(session, scope):
                 return scope
             raise ConnectorNotFoundError(
                 connector_id=connector_id,
@@ -420,8 +441,8 @@ class ReviewService:
             impl_id=scope.impl_id,
             tenant_id=None,
         )
-        tenant_exists = await scope_has_groups(session, scope)
-        builtin_exists = await scope_has_groups(session, builtin_scope)
+        tenant_exists = await scope_has_rows(session, scope)
+        builtin_exists = await scope_has_rows(session, builtin_scope)
         if tenant_exists and builtin_exists:
             raise AmbiguousConnectorScopeError(
                 connector_id=connector_id,
@@ -475,6 +496,8 @@ class ReviewService:
         connector_id: str,
         tenant_id: UUID | None,
         session: AsyncSession,
+        *,
+        probe: Callable[[AsyncSession, ConnectorScope], Awaitable[bool]] = scope_has_groups,
     ) -> ConnectorScope:
         """Resolve ``(connector_id, tenant_id)`` for a mutating state/edit action.
 
@@ -511,9 +534,21 @@ class ReviewService:
         the ``platform_admin`` gate). A cross-tenant ``tenant_id`` never
         reaches here: :meth:`_resolve_scope` -> :meth:`_authorize_scope`
         already collapsed it into :class:`ConnectorNotFoundError`.
+
+        *probe* decides what counts as "the scope holds rows". The
+        default :func:`scope_has_groups` fits the group transitions and
+        :meth:`edit_group`, which have nothing to act on without group
+        rows. :meth:`edit_op` passes :func:`scope_has_rows` (a group row
+        **or** an operation row) because a per-op edit needs only the
+        op row: a connector whose grouping pass produced no groups still
+        has its reads enabled by :meth:`enable_reads` and served by
+        dispatch, so an operator must be able to disable one of them
+        again (#3870). With the group-only probe that edit either
+        ``404``'d or slid to the built-in row while the tenant op stayed
+        enabled.
         """
         scope = self._resolve_scope(connector_id, tenant_id)
-        if tenant_id is not None and await scope_has_groups(session, scope):
+        if tenant_id is not None and await probe(session, scope):
             return scope
         builtin_scope = ConnectorScope(
             product=scope.product,
@@ -521,7 +556,7 @@ class ReviewService:
             impl_id=scope.impl_id,
             tenant_id=None,
         )
-        if await scope_has_groups(session, builtin_scope):
+        if await probe(session, builtin_scope):
             self._require_platform_admin_for_builtin(connector_id, builtin_scope)
             return builtin_scope
         raise ConnectorNotFoundError(
@@ -545,9 +580,11 @@ class ReviewService:
         ``group_key`` and ops by ``op_id`` so consecutive calls
         produce identical payloads.
 
-        Empty group set → :class:`ConnectorNotFoundError`. A group
-        with zero ops is legal and renders as ``op_count=0,
-        ops=[]``.
+        No group row **and** no descriptor row →
+        :class:`ConnectorNotFoundError`. A group with zero ops is legal
+        and renders as ``op_count=0, ops=[]``; a connector with ops but
+        no groups renders ``groups=[]`` and lists every op in
+        ``ungrouped_ops`` (#3870).
 
         No audit row is written; the surrounding HTTP / MCP request
         already audits the read at the chassis layer.
@@ -593,20 +630,29 @@ class ReviewService:
     ) -> ConnectorReviewPayload:
         """Load groups + ops for *scope* and pack them into the payload.
 
-        Raises :class:`ConnectorNotFoundError` when no group rows
-        exist under *scope* (a defensive guard — the caller resolves
-        the scope via :meth:`_resolve_existing_scope` first, so on the
-        normal path rows are present). The caller owns the open
-        *session* / transaction so scope resolution and payload
-        rendering observe one consistent snapshot.
+        A scope with descriptor rows but no group rows (the grouping
+        pass produced no buckets) renders ``groups=[]`` with every op
+        in ``ungrouped_ops`` (#3870); the caller has already checked
+        via :meth:`_resolve_existing_scope` that the scope holds rows.
+        The caller owns the open *session* / transaction so scope
+        resolution and payload rendering observe one consistent
+        snapshot.
         """
-        groups = await load_groups(session, scope, connector_id)
+        groups = await select_groups(session, scope)
         ops = await load_ops_in_groups(
             session,
             scope,
             [group.id for group in groups],
         )
         rendered_groups = _render_groups(groups, ops)
+        # #3870: list every op outside the rendered groups too, with its
+        # enabled state and safety level, so the review shows the whole
+        # op set dispatch can serve — not only the grouped part.
+        ungrouped_ops = await load_ops_outside_groups(
+            session,
+            scope,
+            [group.id for group in groups],
+        )
         has_code_shipped_op = any(op.source_kind in ("typed", "composite") for op in ops)
         kind, dispatchable = _authoring_kind_for_payload(
             scope, rendered_groups, has_code_shipped_op=has_code_shipped_op
@@ -649,6 +695,7 @@ class ReviewService:
             groups=rendered_groups,
             total_op_count=grouped_op_count,
             ungrouped_op_count=max(all_op_count - grouped_op_count, 0),
+            ungrouped_ops=[_review_op(op) for op in ungrouped_ops],
             needs_reingest_op_count=needs_reingest_op_count,
             delete_ops_below_destructive=delete_review,
             delete_ops_needing_correction_count=sum(
@@ -755,19 +802,17 @@ class ReviewService:
         :meth:`enable_connector` consults the audit log to find
         operator-set False rows and skips them.
 
-        ``llm_instructions`` is the agent-facing per-op guidance blob
-        ingested rows land with as ``NULL``. The typed connectors
-        populate it at ``register_typed_operation`` time
-        (see e.g. :mod:`meho_backplane.connectors.vault.ops` and
-        :mod:`meho_backplane.connectors.bind9.ops_zone`); for
-        ingested connectors the operator-review pass writes the same
-        shape via this method so :func:`search_operations` and the
-        agent's ``call_operation`` see populated guidance once the
-        op is enabled. The argument is a plain ``dict`` (the model's
-        ``llm_instructions`` column is ``JSON``); the helper persists
-        it as-is. Passing ``{}`` clears the column to an empty
-        mapping rather than re-deleting it — operators wanting to
-        un-author the field should disable the op instead.
+        ``llm_instructions`` is the agent-facing per-op guidance blob ingested rows
+        land with as ``NULL``. The typed connectors populate it at
+        ``register_typed_operation`` time (see e.g.
+        :mod:`meho_backplane.connectors.vault.ops` and
+        :mod:`meho_backplane.connectors.bind9.ops_zone`); for ingested connectors the
+        operator-review pass writes the same shape via this method so
+        :func:`search_operations` and the agent's ``call_operation`` see populated
+        guidance once the op is enabled. The argument is a plain ``dict`` (the model's
+        ``llm_instructions`` column is ``JSON``); the helper persists it as-is. Passing
+        ``{}`` clears the column to an empty mapping rather than re-deleting it —
+        operators wanting to un-author the field should disable the op instead.
 
         Writes one audit row with payload
         ``{connector_id, op_id, fields_updated, is_enabled_set_to?}``.
@@ -787,7 +832,9 @@ class ReviewService:
         )
         sessionmaker = self._sessionmaker()
         async with sessionmaker() as session:
-            scope = await self._resolve_writable_scope(connector_id, tenant_id, session)
+            scope = await self._resolve_writable_scope(
+                connector_id, tenant_id, session, probe=scope_has_rows
+            )
             op_row = await load_op(session, scope, connector_id, op_id)
             fields_updated = apply_op_overrides(
                 op_row,

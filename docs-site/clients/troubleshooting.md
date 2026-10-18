@@ -83,27 +83,38 @@ open DCR on a production realm to work around a per-client config gap.
 CLI device-code flow, `meho-mcp` for MCP. See
 [Keycloak realm setup](../install/keycloak-realm.md).
 
-## Authorization request fails with `invalid_scope` naming `offline_access` (W7)
+## Authorization request fails with `invalid_scope` (W7)
 
 **Symptom.** The Keycloak login page never appears. Keycloak sends the
 browser back to the client's callback address with
-`error=invalid_scope` and `error_description=Invalid scopes: … offline_access`.
-Claude Code shows this error. With the `mcp-remote` shim (the MEHO plugin
-and the Claude Desktop bundle), the browser tab shows
+`error=invalid_scope` and `error_description=Invalid scopes: …`. The
+message names one or more of `offline_access`, `mcp:read`, `mcp:execute`
+or `mcp:admin`. Claude Code shows this error. With the `mcp-remote` shim
+(the MEHO plugin and the Claude Desktop bundle), the browser tab shows
 `Error: No authorization code received`.
 
-**Wall.** The client asked for `offline_access`, but the `meho-mcp`
-client does not offer that scope. Keycloak refuses a login that asks for
-a scope the client does not offer as a default or optional client scope.
-It does not drop the scope silently. The MEHO plugin, the Claude Desktop
-bundle, and Claude Code's own HTTP client all ask for `offline_access`.
-The same error appears for `mcp:admin` when the realm does not offer it.
+**Wall.** The client asked for a scope that the `meho-mcp` client does
+not offer. Keycloak refuses a login that asks for a scope the client does
+not offer as a default or optional client scope. It does not drop the
+scope silently. Four scopes can cause this:
 
-**Fix.** Assign the realm's built-in `offline_access` scope to
-`meho-mcp` as an **optional** scope (not default — only flows that ask
-for a refresh token should mint one). See
+- `offline_access` — the MEHO plugin, the Claude Desktop bundle, and
+  Claude Code's own HTTP client all ask for it.
+- `mcp:read` and `mcp:execute` — the MEHO plugin and the Claude Desktop
+  bundle ask for them at every login.
+- `mcp:admin` — asked for only when you turn on the operator tools.
+
+Keycloak ships `offline_access`, but not the three `mcp:*` scopes. A realm
+set up by hand often misses them.
+
+**Fix.** Re-run `meho admin keycloak bootstrap-clients`. It creates the
+missing `mcp:*` scopes and adds all four scopes to `meho-mcp` as
+**optional**. Or do it by hand: create each missing `mcp:*` scope under
+**Client scopes → Create client scope**, then add each scope the error
+names to `meho-mcp` as an **optional** scope (not default — only flows
+that ask for a scope should get it). See
 [Keycloak realm setup](../install/keycloak-realm.md#the-mcp-client-meho-mcp).
-`meho-cli` does not get this scope by default.
+`meho-cli` does not get these scopes by default.
 
 ## The MEHO login ends after about 30 minutes with no use
 
@@ -121,6 +132,38 @@ set the scopes yourself (`MEHO_MCP_SCOPES` or the bundle's `scopes`
 field), keep `offline_access` in the list. The login then lasts until the
 `meho-mcp` client's offline idle limit, 48 hours with the
 [recommended realm setting](../install/keycloak-realm.md#how-long-an-mcp-login-lasts).
+
+## A MEHO call says "Your MEHO login has expired" (Claude Desktop)
+
+**Symptom.** A MEHO tool call fails at once with "Your MEHO login has
+expired. Turn the MEHO extension off and on again in Claude Desktop
+(Settings > Extensions) to log in again." After that, the extension shows
+as stopped.
+
+**Wall.** The saved login can no longer be renewed: it was not used for
+the offline idle limit, or the session was ended in Keycloak. A new
+browser login is needed. The bundle does not wait for that login in the
+middle of a call, so the call fails fast instead of hanging. Older bundles
+gave the call no answer at all.
+
+**Fix.** In Claude Desktop, open **Settings > Extensions** and turn the
+MEHO extension off and on. Finish the login in the browser tab that opens;
+it may open behind the Claude Desktop window. If a MEHO login tab opened
+when the call failed, you can close it.
+
+## The extension stops with "MEHO did not connect" (Claude Desktop)
+
+**Symptom.** The MEHO extension shows as stopped, and its log has a line
+like `meho-claude-desktop: MEHO did not connect within 5 minutes, so this
+attempt stopped.`
+
+**Wall.** A browser login started, but nobody finished it within 5
+minutes. Stopping frees the local login port, so the next attempt can log
+in. Older bundles waited forever instead.
+
+**Fix.** Finish any open MEHO login in your browser. Then turn the MEHO
+extension off and on in **Settings > Extensions**. If several MEHO login
+tabs are open, close them all first.
 
 ## A MEHO call says "Your MEHO login has expired" (Claude Code plugin)
 
@@ -161,11 +204,9 @@ failed with `listen EADDRINUSE`.
 for it there. If several MEHO login tabs are open, close them all and
 reconnect once.
 
-**Known limit.** A session that finished its login keeps the callback
-port while it runs, so a new login in another session may not finish. Then
-reconnect `meho` (or close Claude Code) in your other sessions first, and
-try again. This is tracked in
-[evoila/meho#4000](https://github.com/evoila/meho/issues/4000).
+A session that is connected does not hold the callback port. It frees
+the port and removes its lockfile as soon as it connects, so a new login
+in another session can finish while it stays open.
 
 ## Token issues but every call 401s
 

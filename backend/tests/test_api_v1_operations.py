@@ -27,6 +27,7 @@ same shape ``test_api_v1_targets`` does. The chassis settings
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -43,12 +44,13 @@ from meho_backplane.api.v1.operations import router as operations_router
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
-from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.base import Connector, ConnectorResourceNotFoundError
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.operations import reset_dispatcher_caches
+from meho_backplane.operations._errors import result_connector_not_found
 from meho_backplane.operations.result_query import MAX_LIMIT
 from meho_backplane.settings import RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES, get_settings
 from tests._result_store_helpers import MemoryResultStore
@@ -755,6 +757,48 @@ def test_post_call_unknown_op_returns_200_with_error_envelope(client: TestClient
     assert body["error"].startswith("unknown_op:")
 
 
+def test_post_call_not_found_result_rides_200_envelope(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3653: a missing resource is a ``not_found`` envelope on HTTP 200.
+
+    When a typed op raises ``ConnectorResourceNotFoundError`` (for example
+    ``vmware.vm.info`` with a VM name that does not exist), the dispatcher
+    returns the structured ``not_found`` result. The route delivers it the
+    same way as every other dispatcher result: HTTP 200 with the envelope
+    in the body. The HTTP code never says 404 here; callers read
+    ``status`` and ``extras.error_code``.
+    """
+    missing = ConnectorResourceNotFoundError(
+        ["missing-vm"], "vmware.vm.info: no VM named 'missing-vm'"
+    )
+    dispatch_mock = AsyncMock(
+        return_value=result_connector_not_found("vmware.vm.info", missing, duration_ms=1.0)
+    )
+    monkeypatch.setattr("meho_backplane.operations.meta_tools.dispatch", dispatch_mock)
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/call",
+            json={
+                "connector_id": "vmware-rest-9.0",
+                "op_id": "vmware.vm.info",
+                "target": None,
+                "params": {"name": "missing-vm"},
+            },
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "not_found"
+    assert body["error"].startswith("not_found:")
+    assert body["extras"]["error_code"] == "not_found"
+    assert body["extras"]["resource_id"] == "missing-vm"
+    dispatch_mock.assert_awaited_once()
+    assert dispatch_mock.await_args.kwargs["op_id"] == "vmware.vm.info"
+
+
 @pytest.mark.asyncio
 async def test_post_call_accepts_bare_string_target(
     client: TestClient, stub_embedding_service: AsyncMock
@@ -997,6 +1041,107 @@ def test_post_result_query_paging_over_budget_returns_422(
     assert detail["reason"] == "output_too_large"
     # Paging remediation names a smaller `limit`, not `select` / `filter`.
     assert "limit" in detail["message"].lower()
+
+
+def _nested_app_row(i: int, pad: int = 0) -> dict[str, Any]:
+    """One row shaped like a full nested object (metadata / spec / status)."""
+    return {
+        "metadata": {"name": f"app-{i}", "namespace": "apps", "labels": {"team": "a"}},
+        "spec": {
+            "source": {"repoURL": "https://example.invalid/repo.git", "path": f"apps/{i}"},
+            "destination": {"namespace": f"ns-{i}"},
+        },
+        "status": {
+            "sync": {"status": "Synced"},
+            "health": {"status": "Healthy"},
+            "resources": [{"kind": "Deployment", "name": f"d-{i}", "note": "x" * pad}],
+        },
+    }
+
+
+def test_post_result_query_default_page_returns_nested_object_rows(
+    client: TestClient,
+    fake_result_store: MemoryResultStore,
+) -> None:
+    """A collection of deeply nested objects pages back on the default page (#3704).
+
+    No offset, no limit, no query: the 43 nested rows come back verbatim.
+    """
+    handle = uuid.uuid4()
+    rows = [_nested_app_row(i) for i in range(43)]
+    fake_result_store.seed(
+        tenant_id=uuid.UUID(DEFAULT_TENANT_ID),
+        operator_sub="op-1",
+        handle_id=handle,
+        rows=rows,
+    )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/result-query",
+            json={"handle_id": str(handle)},
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["returned_rows"] == 43
+    assert body["total_rows"] == 43
+    assert body["rows"] == rows
+
+
+def test_post_result_query_default_page_too_large_nested_rows_says_how_to_read(
+    client: TestClient,
+    fake_result_store: MemoryResultStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Over-budget nested rows on the default page get a readable 422 (#3704).
+
+    ``detail`` is an object with ``reason`` and ``message``. The message names
+    the shape (large nested objects), the largest ``limit`` that fits, and the
+    top-level fields a ``select`` query can return.
+    """
+    monkeypatch.setenv("RESULT_QUERY_MAX_OUTPUT_BYTES", "20000")
+    get_settings.cache_clear()
+    handle = uuid.uuid4()
+    rows = [_nested_app_row(i, pad=1500) for i in range(43)]
+    fake_result_store.seed(
+        tenant_id=uuid.UUID(DEFAULT_TENANT_ID),
+        operator_sub="op-1",
+        handle_id=handle,
+        rows=rows,
+    )
+    fit = max(
+        n
+        for n in range(1, 44)
+        if len(json.dumps(rows[:n], separators=(",", ":")).encode()) <= 20000
+    )
+    assert 1 < fit < 43
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/result-query",
+            json={"handle_id": str(handle)},
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert detail["reason"] == "output_too_large"
+        message = detail["message"]
+        assert "large nested objects" in message
+        assert f"set `limit` to {fit}" in message
+        assert f"`offset` {fit}" in message
+        assert "metadata, spec, status" in message
+
+        # Following the advice works.
+        retry = client.post(
+            "/api/v1/operations/result-query",
+            json={"handle_id": str(handle), "limit": fit},
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert retry.status_code == 200
+    assert retry.json()["rows"] == rows[:fit]
 
 
 def test_post_result_query_over_wire_ceiling_returns_422(

@@ -302,3 +302,92 @@ func TestAddServer422SurfacesBodyVerbatim(t *testing.T) {
 		t.Errorf("stderr should surface the 422 body verbatim; got:\n%s", stderr.String())
 	}
 }
+
+// captureAddBody runs `meho targets add` against a fake backplane and
+// returns the decoded POST body.
+func captureAddBody(t *testing.T, args ...string) (map[string]any, *bytes.Buffer, error) {
+	t.Helper()
+	var gotBody map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/targets", func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(createdTargetJSON))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	seedXDGAndToken(t, srv.URL)
+	_, stderr, err := runAddCmd(t, srv.URL, args...)
+	return gotBody, stderr, err
+}
+
+// TestAddNoSecretRefSendsExplicitNull pins that --no-secret-ref sends
+// "secret_ref": null (present, null), not an omitted key and not "".
+// The server stores NULL only for an explicit null; an omitted key
+// derives the per-tenant default credential path.
+func TestAddNoSecretRefSendsExplicitNull(t *testing.T) {
+	// No t.Parallel(): seedXDGAndToken calls t.Setenv.
+	gotBody, stderr, err := captureAddBody(t,
+		"prom", "--product", "prometheus", "--host", "prom.example.com",
+		"--no-secret-ref")
+	if err != nil {
+		t.Fatalf("add --no-secret-ref: %v\nstderr=%s", err, stderr.String())
+	}
+	v, present := gotBody["secret_ref"]
+	if !present {
+		t.Fatalf("secret_ref must be present in the body; got %v", gotBody)
+	}
+	if v != nil {
+		t.Errorf("secret_ref must be JSON null; got %#v", v)
+	}
+}
+
+// TestAddNoSecretRefConflictsWithSecretRef pins that the two flags
+// cannot be combined; cobra rejects the call before any request.
+func TestAddNoSecretRefConflictsWithSecretRef(t *testing.T) {
+	t.Parallel()
+	_, _, err := runAddCmd(t, "",
+		"prom", "--product", "prometheus", "--host", "prom.example.com",
+		"--no-secret-ref", "--secret-ref", "tenants/x/prom")
+	if err == nil || !strings.Contains(err.Error(), "no-secret-ref") {
+		t.Fatalf("expected a mutually-exclusive flag error; got %v", err)
+	}
+}
+
+// TestAddExtraSeedsExtrasMap pins that repeatable --extra key=value
+// flags land as one extras object with string values, and that the
+// value may itself contain "=".
+func TestAddExtraSeedsExtrasMap(t *testing.T) {
+	// No t.Parallel(): seedXDGAndToken calls t.Setenv.
+	gotBody, stderr, err := captureAddBody(t,
+		"prom", "--product", "prometheus", "--host", "prom.example.com",
+		"--extra", "scheme=http", "--extra", "path_prefix=/a=b")
+	if err != nil {
+		t.Fatalf("add --extra: %v\nstderr=%s", err, stderr.String())
+	}
+	extras, ok := gotBody["extras"].(map[string]any)
+	if !ok {
+		t.Fatalf("extras should be a JSON object; got %#v", gotBody["extras"])
+	}
+	if extras["scheme"] != "http" || extras["path_prefix"] != "/a=b" || len(extras) != 2 {
+		t.Errorf("extras: got %v", extras)
+	}
+}
+
+// TestAddExtraWithoutEqualsFails pins that a malformed --extra is a
+// local exit-4 error and no request is sent.
+func TestAddExtraWithoutEqualsFails(t *testing.T) {
+	t.Parallel()
+	_, stderr, err := runAddCmd(t, "",
+		"prom", "--product", "prometheus", "--host", "prom.example.com",
+		"--extra", "scheme")
+	type ec interface{ ExitCode() int }
+	if x, ok := err.(ec); !ok || x.ExitCode() != 4 {
+		t.Fatalf("malformed --extra should exit 4; got %v", err)
+	}
+	if !strings.Contains(stderr.String(), "expected key=value") {
+		t.Errorf("stderr should explain the expected shape; got:\n%s", stderr.String())
+	}
+}

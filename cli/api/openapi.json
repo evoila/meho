@@ -22953,6 +22953,10 @@
             "$ref": "#/components/schemas/ApprovalResultState",
             "nullable": true
           },
+          "resume_outcome": {
+            "$ref": "#/components/schemas/ApprovalResumeOutcomeView",
+            "nullable": true
+          },
           "reviewed_by": {
             "type": "string",
             "nullable": true,
@@ -23066,6 +23070,40 @@
         ],
         "title": "ApprovalResultView",
         "description": "Principal-scoped view of an approved dispatch's result (#3209).\n\nThe response body of ``GET /api/v1/approvals/{id}/result``. Surfaces the\nreduced / handle-shaped :class:`~meho_backplane.connectors.schemas.OperationResult`\nenvelope the backplane produced when it re-dispatched the approved op, so\nthe **originating** consumer that parked a non-idempotent op (VCF\n``bringup.start``) can resume by poll instead of a second submit. ``result``\nis ``None`` until the winning resumer captures it \u2014 a ``pending`` /\n``rejected`` / ``expired`` request, or an ``approved`` one whose resume has\nnot landed yet \u2014 so a consumer polls until ``status == \"approved\"`` and\n``result`` is populated. A set-shaped payload rides a JSONFlux ``handle``\ninside ``result`` (v0.1-spec \u00a74), never a raw body."
+      },
+      "ApprovalResumeOutcomeView": {
+        "properties": {
+          "resumed_at": {
+            "type": "string",
+            "nullable": true,
+            "title": "Resumed At"
+          },
+          "result_status": {
+            "type": "string",
+            "nullable": true,
+            "title": "Result Status"
+          },
+          "error_code": {
+            "type": "string",
+            "nullable": true,
+            "title": "Error Code"
+          },
+          "audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Audit Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "resumed_at",
+          "result_status",
+          "error_code",
+          "audit_id"
+        ],
+        "title": "ApprovalResumeOutcomeView",
+        "description": "What happened when an approved request ran (#3543).\n\nA summary read off the stored result envelope. The result body and the\nfree-text error stay on the owner-only ``/result`` read."
       },
       "ApproveRequestBody": {
         "properties": {
@@ -26770,6 +26808,14 @@
             "type": "integer",
             "title": "Ungrouped Op Count",
             "default": 0
+          },
+          "ungrouped_ops": {
+            "items": {
+              "$ref": "#/components/schemas/ConnectorReviewOp"
+            },
+            "type": "array",
+            "title": "Ungrouped Ops",
+            "default": []
           },
           "kind": {
             "type": "string",

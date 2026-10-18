@@ -152,6 +152,7 @@ func NewAuthedClient(_ context.Context, backplaneURL string, opts AuthedClientOp
 			return errors.New("meho: stored token has no access_token")
 		}
 		req.Header.Set("Authorization", authorizationHeader(bearer))
+		SetWorkRefHeader(req)
 		return nil
 	}
 

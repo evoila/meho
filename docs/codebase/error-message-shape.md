@@ -66,9 +66,15 @@ Examples in current use:
 - `receipt_too_large` (`call_operation`: the receipt of a completed run
   could not fit `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES`, so the call is
   refused before dispatch and nothing runs — #3641)
+- `audit_commit_failed` (dispatcher: the handler finished, but its audit
+  row did not commit. `extras.execution_outcome="uncertain"`,
+  `extras.retry=false`, no `audit_id`. The caller must not run the call
+  again. Applies to reads and writes)
 - `connector_scope_ambiguous` (connector review/enable-reads: a
   `connector_id` resolves to both a tenant row and a built-in row —
-  #1801; the message names the `prefer=tenant|builtin` retry — #2029)
+  #1801; the message names the `prefer=tenant|builtin` retry — #2029;
+  the CLI shows this code with a hint to retry with
+  `--prefer tenant` or `--prefer builtin` — #3799)
 - `connector_not_found` (all seven `meho.connector.*` `connector_id`
   tools — review/edit_group/edit_op/enable/enable_reads/disable/delete:
   an unknown or cross-tenant label maps to `-32602 connector_not_found`

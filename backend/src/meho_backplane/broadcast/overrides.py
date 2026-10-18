@@ -75,7 +75,7 @@ from uuid import UUID
 import structlog
 from sqlalchemy import select
 
-from meho_backplane.broadcast.events import classify_op
+from meho_backplane.broadcast.events import resolve_op_class
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import BroadcastOverride
 
@@ -341,9 +341,12 @@ async def compute_effective_broadcast_detail(
     route-bound ``audit_op_class`` contextvar (the retrieval-usage
     route at ``GET /api/v1/retrieve/usage`` binds it because
     ``meho.retrieval.usage`` has no recognisable suffix and would
-    otherwise classify as ``other``). When ``None`` (MCP path, chassis
-    HTTP routes) the resolver derives op_class from op_id via
-    :func:`classify_op`.
+    otherwise classify as ``other``). The MCP handler passes the tool's
+    declared ``op_class`` here too. The pair goes through
+    :func:`~meho_backplane.broadcast.events.resolve_op_class`, the same
+    mapping the audit writers use, so a declared class can never weaken a
+    credential or audit-query class. When ``None`` the class is derived
+    from op_id via :func:`~meho_backplane.broadcast.events.classify_op`.
 
     Glob matching uses :func:`fnmatch.fnmatchcase` -- case-sensitive,
     no regex, mirrors the Initiative's explicit rejection of regex
@@ -354,7 +357,7 @@ async def compute_effective_broadcast_detail(
     branch (origin=``"default"``). The publish path never blocks on a
     transient DB outage.
     """
-    op_class = op_class_override if op_class_override else classify_op(op_id)
+    op_class = resolve_op_class(op_id, op_class_override)
 
     if request_override == "full" and op_class in _UPGRADEABLE_OP_CLASSES:
         return op_class, "full", _ORIGIN_REQUEST_OVERRIDE

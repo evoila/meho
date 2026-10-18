@@ -1012,3 +1012,89 @@ func TestApproveSurfacesDecide422DelegatedReason(t *testing.T) {
 		t.Errorf("422 body lost the detail: %s", he.body)
 	}
 }
+
+// failedRunView is an approved request whose run failed after the
+// approval (#3543): status stays "approved", the run state says failed.
+func failedRunView(t *testing.T) api.ApprovalRequestView {
+	t.Helper()
+	d := newApprovalView(t, "approved", "T-test")
+	failed := api.ApprovalResultStateFailed
+	resumedAt := "2026-05-28T12:05:01Z"
+	resultStatus := "error"
+	errorCode := "connector_vault_forbidden"
+	auditID := mustUUID(t, "44444444-4444-4444-4444-444444444444")
+	d.ResultState = &failed
+	d.ResumeOutcome = &api.ApprovalResumeOutcomeView{
+		ResumedAt:    &resumedAt,
+		ResultStatus: &resultStatus,
+		ErrorCode:    &errorCode,
+		AuditId:      &auditID,
+	}
+	return d
+}
+
+// TestPrintDetailRendersFailedRun pins the approved-failed render
+// (#3543): show names the failed run, its error code and its audit row.
+func TestPrintDetailRendersFailedRun(t *testing.T) {
+	d := failedRunView(t)
+	cmd, stdout, _ := newCapturingCmd(t)
+	printDetail(cmd, &d)
+	out := stdout.String()
+	for _, want := range []string{
+		"Status:       approved",
+		"Run:          FAILED",
+		"Run started:  2026-05-28T12:05:01Z",
+		"Run result:   error",
+		"Error code:   connector_vault_forbidden",
+		"Run audit:    44444444-4444-4444-4444-444444444444 (meho audit show 44444444-4444-4444-4444-444444444444)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printDetail render missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+// TestPrintDetailOmitsRunWhenNotApproved keeps a pending request free of
+// the run lines (#3543).
+func TestPrintDetailOmitsRunWhenNotApproved(t *testing.T) {
+	d := newApprovalView(t, "pending", "")
+	cmd, stdout, _ := newCapturingCmd(t)
+	printDetail(cmd, &d)
+	if strings.Contains(stdout.String(), "Run:") {
+		t.Errorf("printDetail rendered run lines for a pending request:\n%s", stdout.String())
+	}
+}
+
+// TestPrintDecisionRendersFailedRun: `meho approvals approve` must not
+// report a plain "approved" when the run failed (#3543).
+func TestPrintDecisionRendersFailedRun(t *testing.T) {
+	d := failedRunView(t)
+	var buf bytes.Buffer
+	printDecision(&buf, stubID, &d)
+	for _, want := range []string{"→ approved", "Run:          FAILED", "Error code:   connector_vault_forbidden"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("printDecision render missing %q in:\n%s", want, buf.String())
+		}
+	}
+}
+
+// TestPrintListTableRendersRunState: the RUN column tells approved-and-ran
+// from approved-and-failed (#3543).
+func TestPrintListTableRendersRunState(t *testing.T) {
+	ok := newApprovalView(t, "approved", "T-test")
+	executed := api.ApprovalResultStateExecuted
+	ok.ResultState = &executed
+	items := []api.ApprovalRequestView{ok, failedRunView(t), newApprovalView(t, "pending", "")}
+	var buf bytes.Buffer
+	printListTable(&buf, items)
+	lines := strings.Split(buf.String(), "\n")
+	if !strings.Contains(lines[0], "RUN") {
+		t.Fatalf("header missing RUN column: %q", lines[0])
+	}
+	for i, want := range []string{"ok", "FAILED", "-"} {
+		fields := strings.Fields(lines[i+1])
+		if len(fields) < 3 || fields[2] != want {
+			t.Errorf("row %d: RUN = %v, want %q (line %q)", i, fields, want, lines[i+1])
+		}
+	}
+}

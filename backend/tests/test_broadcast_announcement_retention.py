@@ -44,6 +44,7 @@ from meho_backplane.broadcast.announcement_retention import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentAnnouncement, AuditLog, Tenant
+from meho_backplane.loop_schedule import FIRST_RUN_DELAY_SECONDS
 from meho_backplane.memory.audit import INTERNAL_METHOD
 from meho_backplane.settings import Settings, get_settings
 
@@ -335,7 +336,8 @@ async def test_loop_sleeps_configured_interval(monkeypatch: pytest.MonkeyPatch) 
 
     async def _fake_sleep(seconds: float) -> None:
         sleeps.append(seconds)
-        raise asyncio.CancelledError
+        if len(sleeps) >= 2:
+            raise asyncio.CancelledError
 
     with (
         patch(
@@ -347,4 +349,6 @@ async def test_loop_sleeps_configured_interval(monkeypatch: pytest.MonkeyPatch) 
     ):
         await announcement_retention._prune_loop()
 
-    assert sleeps == [1234]
+    # No run is recorded, so the loop runs after the one-minute start
+    # delay; the sleep after that run is the configured interval.
+    assert sleeps == [FIRST_RUN_DELAY_SECONDS, 1234]

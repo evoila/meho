@@ -491,6 +491,46 @@ bounds how long a sync run holds the HTTP connection. `run` awaits
 timeout abandons the *wait*, not the run, so a long run degrades to a
 pollable async run rather than being cancelled.
 
+### Output limit per answer (`AGENT_MAX_OUTPUT_TOKENS`)
+
+Each model request carries `max_tokens`: the most output tokens the
+model may write back in one answer. The setting
+`agent_max_output_tokens` (env `AGENT_MAX_OUTPUT_TOKENS`, Helm
+`agent.maxOutputTokens`) sets it.
+
+- Default 4096. This is the value MEHO has always sent, so an install
+  that does not set it sees no change.
+- Allowed range 1 to 128000. A value outside the range stops the
+  backplane at start with an error that names
+  `agent_max_output_tokens`. The chart schema checks the same range at
+  `helm template` time.
+- Both Anthropic builders read it: `anthropic_backend_builder`
+  (`agent/models.py`, used through the tier resolver) and
+  `default_model_factory` (`agent/run.py`). They send it as
+  `AnthropicModelSettings(max_tokens=...)`.
+- The Bedrock and OpenAI-compatible backends do **not** use it. They
+  send no output limit, so the model's own default applies, as before.
+  Applying the setting there would change their requests on upgrade,
+  and this setting must not change anything by default.
+
+Why the builders always send a value: since pydantic-ai 2.52, an unset
+`max_tokens` means the model's maximum (128,000 for
+`claude-sonnet-4-6`), and pydantic-ai then sends the request as a
+stream.
+
+What a higher value costs:
+
+- **Money.** A longer answer uses more output tokens, and output
+  tokens are the most expensive part of a request.
+- **Time.** One answer can take much longer. A sync run still converts
+  to async at `AGENT_SYNC_TIMEOUT_SECONDS`, but the loop holds the
+  model call for the whole answer.
+- **Streaming.** The `anthropic` SDK refuses a non-streamed request it
+  expects to take more than 10 minutes. With the SDK's default timeout
+  that is any `max_tokens` above about 21,333. pydantic-ai then sends
+  the request as a stream instead. The agent still gets the same
+  result, but the request on the wire is different.
+
 ## Composition — agent invokes agent (T5 #812)
 
 A running agent can invoke **another** agent definition in its tenant as a
@@ -1120,6 +1160,14 @@ the architecture grounding it links back to.
   but routes through a PrivateLink-flagged sibling registration
   cleanly; a tenant policy can split tiers across Anthropic + Bedrock
   by layering both default registrations.
+- Output limit (#3997) — `test_agent_run.py` and
+  `test_agent_model_resolver.py` each send one real request through the
+  `anthropic` SDK with only the HTTP transport replaced
+  (`tests/_anthropic_request_capture.py`). They check that both
+  Anthropic builders send `max_tokens == 4096` by default, not
+  streamed, and that `AGENT_MAX_OUTPUT_TOKENS=8192` reaches the
+  request. `test_settings.py` checks the default, an override, and that
+  a value outside [1, 128000] stops the start.
 - `backend/tests/test_agent_openai_compat_backend.py` (G11.5-T3) — unit
   tests for the OpenAI-compat builder, per-vendor profile dispatch
   (OpenAI / vLLM / Ollama), the air-gapped + on-prem registration path,

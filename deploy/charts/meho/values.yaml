@@ -931,6 +931,13 @@ agent:
   # matches the ESO target rendered by `eso.agent` when that path is
   # enabled, so operators who opt into both don't have to reconcile names.
   secretKey: api_key
+  # -- Most output tokens the agent asks the model for in one answer
+  # (`AGENT_MAX_OUTPUT_TOKENS`). Output tokens are the text the model writes
+  # back. Used by the Anthropic backend only. Range 1 to 128000. A higher
+  # value costs more, can make one answer take much longer, and above about
+  # 21000 the request is sent as a stream. The default 4096 keeps requests
+  # as they were before this setting existed.
+  maxOutputTokens: 4096
 
 # Keycloak Admin API credentials (G11.2 #803). The
 # `KeycloakAdminClient` (`meho_backplane.auth.keycloak_admin`) is what

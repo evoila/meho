@@ -83,27 +83,38 @@ open DCR on a production realm to work around a per-client config gap.
 CLI device-code flow, `meho-mcp` for MCP. See
 [Keycloak realm setup](../install/keycloak-realm.md).
 
-## Authorization request fails with `invalid_scope` naming `offline_access` (W7)
+## Authorization request fails with `invalid_scope` (W7)
 
 **Symptom.** The Keycloak login page never appears. Keycloak sends the
 browser back to the client's callback address with
-`error=invalid_scope` and `error_description=Invalid scopes: … offline_access`.
-Claude Code shows this error. With the `mcp-remote` shim (the MEHO plugin
-and the Claude Desktop bundle), the browser tab shows
+`error=invalid_scope` and `error_description=Invalid scopes: …`. The
+message names one or more of `offline_access`, `mcp:read`, `mcp:execute`
+or `mcp:admin`. Claude Code shows this error. With the `mcp-remote` shim
+(the MEHO plugin and the Claude Desktop bundle), the browser tab shows
 `Error: No authorization code received`.
 
-**Wall.** The client asked for `offline_access`, but the `meho-mcp`
-client does not offer that scope. Keycloak refuses a login that asks for
-a scope the client does not offer as a default or optional client scope.
-It does not drop the scope silently. The MEHO plugin, the Claude Desktop
-bundle, and Claude Code's own HTTP client all ask for `offline_access`.
-The same error appears for `mcp:admin` when the realm does not offer it.
+**Wall.** The client asked for a scope that the `meho-mcp` client does
+not offer. Keycloak refuses a login that asks for a scope the client does
+not offer as a default or optional client scope. It does not drop the
+scope silently. Four scopes can cause this:
 
-**Fix.** Assign the realm's built-in `offline_access` scope to
-`meho-mcp` as an **optional** scope (not default — only flows that ask
-for a refresh token should mint one). See
+- `offline_access` — the MEHO plugin, the Claude Desktop bundle, and
+  Claude Code's own HTTP client all ask for it.
+- `mcp:read` and `mcp:execute` — the MEHO plugin and the Claude Desktop
+  bundle ask for them at every login.
+- `mcp:admin` — asked for only when you turn on the operator tools.
+
+Keycloak ships `offline_access`, but not the three `mcp:*` scopes. A realm
+set up by hand often misses them.
+
+**Fix.** Re-run `meho admin keycloak bootstrap-clients`. It creates the
+missing `mcp:*` scopes and adds all four scopes to `meho-mcp` as
+**optional**. Or do it by hand: create each missing `mcp:*` scope under
+**Client scopes → Create client scope**, then add each scope the error
+names to `meho-mcp` as an **optional** scope (not default — only flows
+that ask for a scope should get it). See
 [Keycloak realm setup](../install/keycloak-realm.md#the-mcp-client-meho-mcp).
-`meho-cli` does not get this scope by default.
+`meho-cli` does not get these scopes by default.
 
 ## The MEHO login ends after about 30 minutes with no use
 

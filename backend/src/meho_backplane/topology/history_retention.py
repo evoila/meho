@@ -12,8 +12,9 @@ unbounded -- a 1-h refresh cadence on a churning tenant adds tens of
 thousands of rows per week, indefinitely.
 
 This module ships the corresponding *physical* cleanup: an
-``asyncio`` task the FastAPI lifespan owns that ticks on a fixed
-cadence (default 7 days / weekly) and deletes rows where
+``asyncio`` task the FastAPI lifespan owns that runs once per interval
+(default 7 days / weekly, counted from its last recorded run -- see
+"When it runs" below) and deletes rows where
 ``valid_from < now() - topology_history_retention_days``. The two
 history tables are otherwise append-only by contract (see
 :class:`~meho_backplane.db.models.GraphNodeHistory` docstring); this
@@ -53,6 +54,21 @@ The disk-growth tradeoff is flagged in
 operator-facing ``docs/codebase/topology.md`` runbook, and in the
 audit-channel ``docs/architecture/audit.md`` (the ``INTERNAL`` ``path``
 registry).
+
+When it runs
+------------
+
+The interval counts from the **last recorded run**, not from process
+start. Every run writes its ``topology.history.prune`` audit row, also
+when it deleted 0 rows, so the newest such row is the last real run.
+After the process starts, the loop waits one minute, reads that row,
+and runs at once if a full interval has passed (or no run is
+recorded); otherwise it waits only for the rest of the interval. After
+that it runs once per interval. So a pod restart never starts the
+interval again. The steps live in
+:func:`meho_backplane.loop_schedule.wait_until_first_run`. With
+``retention_days == 0`` no row is written, so each start runs the
+no-op heartbeat about one minute after start.
 
 Per-pod leader election
 -----------------------
@@ -117,6 +133,7 @@ from sqlalchemy import delete
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, GraphEdgeHistory, GraphNodeHistory
+from meho_backplane.loop_schedule import FIRST_RUN_DELAY_SECONDS, wait_until_first_run
 from meho_backplane.memory.audit import (
     INTERNAL_METHOD,
     write_internal_audit_row,
@@ -313,15 +330,13 @@ async def _run_one_prune_tick() -> None:
 
 
 async def _prune_loop() -> None:
-    """The forever loop: sleep one cadence, prune, repeat.
+    """The forever loop: wait until a run is due, prune, repeat.
 
-    Order is sleep-then-prune (rather than prune-then-sleep) so the
-    very first tick after process start does not race the rest of the
-    startup work (engine init, embedding preload, typed-op
-    registration, topology-refresh scheduler boot). A
-    ``TOPOLOGY_HISTORY_PRUNE_INTERVAL_SECONDS`` delay after startup is
-    the cleanest signal that all eager init has completed -- mirroring
-    the memory-expiry sweeper's choice for the same reason.
+    The first run is timed from the last recorded run, not from process
+    start (see "When it runs" in the module docstring): wait one minute
+    so startup can finish, read the last run, then run at once if it is
+    due or wait only for the rest of the interval. After that, the loop
+    runs once per interval.
 
     Per-tick ``try`` / ``except`` guards mean a transient DB blip is
     logged and the loop continues to the next cadence.
@@ -333,11 +348,16 @@ async def _prune_loop() -> None:
         "topology_history_retention_started",
         interval_seconds=interval,
         retention_days=get_settings().topology_history_retention_days,
+        first_check_in_seconds=FIRST_RUN_DELAY_SECONDS,
+    )
+    await wait_until_first_run(
+        job="topology_history_retention",
+        tenant_id=_resolve_system_tenant_id(),
+        operator_sub=SYSTEM_OPERATOR_SUB,
+        path=TOPOLOGY_HISTORY_PRUNE_PATH,
+        interval_seconds=interval,
     )
     while True:
-        # Sleep first so the first tick is delayed by one cadence; the
-        # ``CancelledError`` here is propagated up to ``stop_*`` cleanly.
-        await asyncio.sleep(get_settings().topology_history_prune_interval_seconds)
         try:
             await _run_one_prune_tick()
         except asyncio.CancelledError:
@@ -348,6 +368,9 @@ async def _prune_loop() -> None:
                 exc_info=True,
             )
         note_loop_tick("topology_history", get_settings().topology_history_prune_interval_seconds)
+        # The ``CancelledError`` from this sleep propagates up to
+        # ``stop_*`` cleanly.
+        await asyncio.sleep(get_settings().topology_history_prune_interval_seconds)
 
 
 def start_topology_history_retention_sweeper() -> asyncio.Task[None]:

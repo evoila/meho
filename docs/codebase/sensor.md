@@ -200,6 +200,19 @@ a total order the trend query's keyset cursor rides with no tiebreaker.
   behaviour. This deliberately diverges from the announcement/topology sweepers'
   `0`=keep-forever, because an evidence history that grows forever is the
   surprise #2756 exists to prevent.
+- **When the evidence prune runs**: the interval counts from the **last
+  recorded run**, not from pod start, so a pod restart does not start it
+  again. One minute after a pod starts, the sweeper reads its newest
+  `checks.evidence.prune` audit row within the last interval
+  (`operator_sub='system:checks-evidence-retention'`, `method='INTERNAL'`,
+  the system tenant id). Every run writes this row, also when it deleted
+  0 rows. No such row: it runs at once. Otherwise it waits only for the
+  rest of the interval, then runs once per interval. A future last-run
+  time counts as due; a failed read logs
+  `checks_evidence_retention_last_run_read_failed` and runs at once. Each
+  start logs `checks_evidence_retention_scheduled` with `last_run_at` and
+  `next_run_in_seconds`. The shared steps live in
+  `backend/src/meho_backplane/loop_schedule.py`.
 - **The trend query** (`SensorAdminService.list_results` →
   `repository.list_sensor_results`) answers the forensic question with binary
   filters only — `sensor_id` (exact), `from`/`to` (inclusive window), optional

@@ -972,6 +972,11 @@ run_llm_grouping pipeline for one connector. Constructed from an
 `Operator` (so the service-level audit rows the helpers write carry
 the originating operator's identity); the same instance is reused
 across T5's CLI verbs, T6's REST routes, and T7's admin MCP tools.
+Those rows also carry the request's change ticket: the audit
+middleware binds the `Meho-Work-Ref` header onto `work_ref_var` for the
+whole request, and `write_audit_row` in `ingest/_internals.py` reads it
+into `audit_log.work_ref` (#3804). The async ingest job inherits the
+binding because `asyncio.create_task` copies the request context.
 
 The `LlmClient` Protocol is injected via a factory parameter so the
 chassis can lazy-resolve it; the fail-closed default factory raises

@@ -872,9 +872,19 @@ that header from one place, so every verb gets it without its own flag.
 - The `AuthedClient` request editor calls `api.SetWorkRefHeader`, so
   every generated-client call made with `cmd.Context()` sends the
   header. The hand-rolled backplane requests (`targets add` / `import`,
-  `event-source`, the broadcast feed) call the same helper next to
+  `event-source`, the broadcast feed, and the `status --watch` feed
+  stream on every connect and reconnect) call the same helper next to
   their `Authorization` header. Keycloak admin calls, login, discovery
   and the version check do not send it.
+- The backplane binds the header for the whole request, not only for
+  the HTTP request row. So the rows the connector service writes
+  inside the request (`meho_connector_edit_op`,
+  `meho_connector_llm_grouping` for an ingest, enable / disable, ...)
+  carry the same work-ref, and `meho audit query --work-ref` finds
+  them together with the request row. `backend/tests/
+  test_audit_work_ref_control_plane.py` proves this round trip for
+  `targets add`, `agent grant create`, `connector ingest` (sync and
+  background job) and `connector edit-op`.
 - Some commands have their own local `--work-ref` (`operation call`,
   `scheduler create`, `runbook start`, `agent run`, and the filters on
   `audit query`, `approvals list`, `broadcast recent`, ...). Cobra lets a local

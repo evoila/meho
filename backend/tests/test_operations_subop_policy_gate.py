@@ -42,9 +42,11 @@ from meho_backplane.db.models import (
 )
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import (
+    ResumeRequester,
     SelfApprovalForbiddenError,
     approve_request,
     composite_resume_binding,
+    resume_requester_var,
 )
 from meho_backplane.operations.composite import (
     CompositeResumeState,
@@ -531,13 +533,17 @@ async def test_after_main_effect_step_may_wait_during_a_resume(session: AsyncSes
     ``test_subop_resume_scope_guard_fails_closed_on_second_gate``, but the
     second step runs after the main change and saved its state. Its own
     resume continues at this step, so it may wait for approval: a second
-    row is written, carrying the state.
+    row is written, carrying the state. The re-run runs as the reviewer,
+    but the new row names the requester of the request being re-run.
     """
     approved = ("POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy", "approved")
     before = await _approval_count(session)
     dispatch_token = composite_dispatch_var.set((_PARENT_OP_ID, _PARENT_PARAMS))
     scope_token = composite_resume_scope_var.set(approved)
     resume_token = composite_resume_var.set(None)  # the approved deploy already cleared
+    requester_token = resume_requester_var.set(
+        ResumeRequester(sub="svc-blueprint", act="agent-x", name="Blueprint")
+    )
     try:
         result = await enforce_subop_policy(
             operator=_operator(),
@@ -551,6 +557,7 @@ async def test_after_main_effect_step_may_wait_during_a_resume(session: AsyncSes
             after_main_effect=True,
         )
     finally:
+        resume_requester_var.reset(requester_token)
         composite_resume_var.reset(resume_token)
         composite_resume_scope_var.reset(scope_token)
         composite_dispatch_var.reset(dispatch_token)
@@ -562,6 +569,11 @@ async def test_after_main_effect_step_may_wait_during_a_resume(session: AsyncSes
     assert row is not None
     assert row.resume_parent is not None
     assert row.resume_parent["state"] == _SAVED_STATE
+    assert (row.principal_sub, row.principal_act, row.principal_name) == (
+        "svc-blueprint",
+        "agent-x",
+        "Blueprint",
+    )
 
 
 @pytest.mark.asyncio
@@ -639,16 +651,22 @@ async def test_resume_binding_hands_the_saved_state_to_the_parent_only() -> None
         "state": _SAVED_STATE,
         "after_main_effect": True,
     }
+    requester = ResumeRequester(sub="svc-blueprint", act=None, name=None)
     with composite_resume_binding(
-        subop_op_id=_RENAME_OP_ID, subop_params_hash="h", resume_parent=resume_parent
+        subop_op_id=_RENAME_OP_ID,
+        subop_params_hash="h",
+        resume_parent=resume_parent,
+        requester=requester,
     ) as parent_call:
         assert parent_call == (_PARENT_OP_ID, _PARENT_PARAMS)
+        assert resume_requester_var.get() == requester
         assert composite_resume_state(_PARENT_OP_ID) == _SAVED_STATE
         assert composite_resume_state("vmware.composite.vm.create") is None
         bound = composite_resume_state_var.get()
         assert bound is not None
         assert bound.after_main_effect is True
     assert composite_resume_state(_PARENT_OP_ID) is None
+    assert resume_requester_var.get() is None
 
     # A park that saved no state binds none, so the composite runs as before.
     with composite_resume_binding(

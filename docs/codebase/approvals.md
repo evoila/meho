@@ -1854,6 +1854,15 @@ step and repeats no earlier write. `enforce_subop_policy` checks
 `if resume_scope is not None and not after_main_effect`. Steps without the
 mark still fail closed (`test_vm_create_multi_gate_resume_fails_closed_no_double_execute`).
 
+**Who the new request belongs to.** A step that waits again during a
+re-run gets a new approval request. That request names the requester of
+the request being re-run (`principal_sub`, `principal_act`,
+`principal_name`), not the reviewer who runs the re-run. Both resume paths
+pass that requester to `composite_resume_binding`, which binds
+`resume_requester_var`; `enforce_subop_policy` hands it to
+`create_pending_request(requester=...)`. So the reviewer path and the agent
+path save the same requester.
+
 **The risk, and the two checks that limit it.** With the guard relaxed, safety
 depends on the composite: its re-run must really skip every earlier write.
 Two checks in `enforce_subop_policy` stop a composite that gets this wrong:

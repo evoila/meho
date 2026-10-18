@@ -238,7 +238,8 @@ composite_dispatch_var: ContextVar[tuple[str, dict[str, Any]] | None] = ContextV
 #: a second park + second resume would re-run earlier legs). It is detected via
 #: :data:`composite_resume_scope_var` and fails closed in
 #: :func:`enforce_subop_policy` with ``composite_resume_multi_gate_unsupported``
-#: rather than parking.
+#: rather than parking. A step marked ``after_main_effect`` is the exception
+#: (#4217): it saved where its own resume continues, so it may wait again.
 composite_resume_var: ContextVar[tuple[str, str] | None] = ContextVar(
     "composite_resume",
     default=None,
@@ -517,7 +518,9 @@ def _subop_resume_cleared(*, op_id: str, params_hash: str) -> bool:
     would instead need its own approval, the fail-closed multi-gate guard in
     :func:`enforce_subop_policy` (keyed off the unconsumed
     :data:`composite_resume_scope_var`) aborts the resume rather than re-park it
-    (#3351 review B1) — it does **not** re-park the rest.
+    (#3351 review B1) — it does **not** re-park the rest. The exception is a
+    step marked ``after_main_effect`` (#4217): it saved where to continue, so
+    it may wait for its own approval during the resume.
     """
     approved = composite_resume_var.get()
     if approved is not None and approved == (op_id, params_hash):
@@ -656,6 +659,7 @@ async def enforce_subop_policy(
     from meho_backplane.operations.approval_queue import (
         create_pending_request,
         publish_approval_event,
+        resume_requester_var,
     )
     from meho_backplane.operations.dispatcher import (
         _audit_denied_and_return,
@@ -846,6 +850,10 @@ async def enforce_subop_policy(
                 resume_parent=_resume_parent_for_current_composite(
                     resume_state, after_main_effect=after_main_effect
                 ),
+                # #4217: a step that waits again while an approved request is
+                # re-run belongs to the requester of that request, not to the
+                # reviewer who runs the re-run. ``None`` outside a re-run.
+                requester=resume_requester_var.get(),
             )
             await session.commit()
         # Publish AFTER commit so a broadcast can never outlive a failed

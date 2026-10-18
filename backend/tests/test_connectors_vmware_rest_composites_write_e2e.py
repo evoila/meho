@@ -1963,7 +1963,9 @@ async def test_deploy_each_approval_continues_and_no_write_runs_twice(
     The rename and the power-on run after the deploy and saved their
     state, so they may wait again during a resume (the relaxed guard). Each
     approval continues at its own step: the deploy fires once in total,
-    the rename once, the power-on once.
+    the rename once, the power-on once. Every request names the service
+    principal that started the deploy as its requester, not the reviewer
+    who ran the re-run, so the same reviewer can approve all three.
     """
     monkeypatch.setattr(
         "meho_backplane.connectors.vmware_rest.composites._write._WRITE_REQUIRES_APPROVAL",
@@ -2003,8 +2005,13 @@ async def test_deploy_each_approval_continues_and_no_write_runs_twice(
     assert second.result["powered_on"] is False
     rename_request = _request_id_in(rename_issue)
 
+    async with get_sessionmaker()() as s:
+        rename_row = await s.get(ApprovalRequest, rename_request)
+    assert rename_row is not None
+    assert rename_row.principal_sub == "svc-blueprint"
+
     # Approval 2: only the rename runs. The power-on waits again.
-    third = await _resume(rename_request, await _approve_as(rename_request, "ops-reviewer-2"))
+    third = await _resume(rename_request, await _approve_as(rename_request, "ops-reviewer"))
     assert third.status == "ok", third.error
     assert recorder.calls == [_DEPLOY_CALL], "the deploy did not run again"
     assert [path for path, _ in recorder.vmomi_calls if path.endswith("/Rename_Task")] == [
@@ -2013,6 +2020,10 @@ async def test_deploy_each_approval_continues_and_no_write_runs_twice(
     (power_waits,) = third.result["issues"]
     assert power_waits["category"] == "power_on"
     power_request = _request_id_in(power_waits)
+    async with get_sessionmaker()() as s:
+        power_row = await s.get(ApprovalRequest, power_request)
+    assert power_row is not None
+    assert power_row.principal_sub == "svc-blueprint"
 
     # Approval 3: only the power-on runs.
     fourth = await _resume(power_request, await _approve_as(power_request, "ops-reviewer"))
@@ -2086,6 +2097,13 @@ async def test_agent_waiter_resume_of_a_parked_deploy_deploys_once_under_the_sam
     (rename_issue,) = resumed["result"]["issues"]
     rename_request = _request_id_in(rename_issue)
     assert await _approval_row_count() == 2
+    # Both resume paths save the step that waits again for the requester of
+    # the request being re-run: here the agent, on the reviewer's path the
+    # service principal (test_deploy_each_approval_continues_and_no_write_runs_twice).
+    async with get_sessionmaker()() as s:
+        rename_row = await s.get(ApprovalRequest, rename_request)
+    assert rename_row is not None
+    assert rename_row.principal_sub == pending.principal_sub == _AGENT_SUB
 
     resume = await _resume(rename_request, await _approve_as(rename_request, "ops-reviewer-2"))
 

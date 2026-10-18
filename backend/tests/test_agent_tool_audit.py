@@ -218,8 +218,14 @@ async def test_rows_carry_decision_or_execution_class_after_cutover(
     }
 
 
-async def test_audit_write_failure_fails_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_audit_write_failure_fails_the_run(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_embedding_service: AsyncMock,
+) -> None:
+    # Seed the connector so the tool call itself succeeds; only the audit
+    # write fails.
     await _seed_definition()
+    await _seed_echo_op(stub_embedding_service)
 
     async def _fail(**_: Any) -> UUID:
         raise RuntimeError("audit store down")
@@ -229,6 +235,8 @@ async def test_audit_write_failure_fails_the_run(monkeypatch: pytest.MonkeyPatch
     outcome = await _invoker(_scripted(_GROUPS)).run(_make_operator(), "reader", "go")
 
     assert outcome.status is AgentRunStatus.FAILED
+    assert outcome.error is not None
+    assert "audit store down" in outcome.error
 
 
 async def test_cancelled_run_records_ended_at() -> None:

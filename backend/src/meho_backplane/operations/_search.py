@@ -61,6 +61,84 @@ _VISIBLE_SCOPE_SQL = """
                  AND owned.version = :version
                  AND owned.impl_id = :impl_id)))"""
 
+# The two candidate queries spell the visible-scope predicate out in full,
+# so each ``text()`` argument is a plain string literal (the
+# ``avoid-sqlalchemy-text`` rule rejects f-strings). ``_VISIBLE_SCOPE_SQL``
+# stays the one canonical copy; ``_assert_scope_inlined`` below fails at
+# import if either query drifts from it.
+_BM25_CANDIDATES_SQL = text(
+    """
+        SELECT id, ts_rank_cd(
+            to_tsvector('english', coalesce(summary, '') || ' ' || coalesce(description, '')),
+            plainto_tsquery('english', :query)
+        ) AS score
+        FROM endpoint_descriptor
+        WHERE
+          (tenant_id = :tenant_id
+           OR (tenant_id IS NULL AND NOT EXISTS (
+               SELECT 1 FROM endpoint_descriptor owned
+               WHERE owned.tenant_id = :tenant_id
+                 AND owned.product = :product
+                 AND owned.version = :version
+                 AND owned.impl_id = :impl_id)))
+          AND product = :product
+          AND version = :version
+          AND impl_id = :impl_id
+          AND is_enabled = TRUE
+          AND (CAST(:group_id AS uuid) IS NULL OR group_id = :group_id)
+          AND to_tsvector('english', coalesce(summary, '') || ' ' || coalesce(description, ''))
+              @@ plainto_tsquery('english', :query)
+        ORDER BY score DESC
+        LIMIT :limit
+        """
+)
+
+_COSINE_CANDIDATES_SQL = text(
+    """
+        SELECT id, 1 - (embedding <=> CAST(:emb AS vector)) AS score
+        FROM endpoint_descriptor
+        WHERE
+          (tenant_id = :tenant_id
+           OR (tenant_id IS NULL AND NOT EXISTS (
+               SELECT 1 FROM endpoint_descriptor owned
+               WHERE owned.tenant_id = :tenant_id
+                 AND owned.product = :product
+                 AND owned.version = :version
+                 AND owned.impl_id = :impl_id)))
+          AND product = :product
+          AND version = :version
+          AND impl_id = :impl_id
+          AND is_enabled = TRUE
+          AND embedding IS NOT NULL
+          AND (CAST(:group_id AS uuid) IS NULL OR group_id = :group_id)
+        ORDER BY embedding <=> CAST(:emb AS vector)
+        LIMIT :limit
+        """
+)
+
+
+def _assert_scope_inlined() -> None:
+    """Fail at import if a candidate query no longer holds the scope predicate.
+
+    Whitespace is normalised, then each query must contain
+    :data:`_VISIBLE_SCOPE_SQL` word for word. An edit to one copy that is
+    not made to the others is a loud ``AssertionError`` at import, not a
+    silent change in which rows a tenant can see.
+    """
+    scope = " ".join(_VISIBLE_SCOPE_SQL.split())
+    for name, statement in (
+        ("_BM25_CANDIDATES_SQL", _BM25_CANDIDATES_SQL),
+        ("_COSINE_CANDIDATES_SQL", _COSINE_CANDIDATES_SQL),
+    ):
+        if scope not in " ".join(str(statement.text).split()):
+            raise AssertionError(
+                f"{name} no longer contains _VISIBLE_SCOPE_SQL word for word; "
+                "keep the inlined predicate identical to it."
+            )
+
+
+_assert_scope_inlined()
+
 
 async def resolve_group_id(
     session: AsyncSession,
@@ -180,27 +258,8 @@ async def _hybrid_search_pg(
     query_embedding = await get_embedding_service().encode_one(query)
     embedding_literal = "[" + ", ".join(f"{x:.7f}" for x in query_embedding) + "]"
 
-    bm25_sql = text(
-        f"""
-        SELECT id, ts_rank_cd(
-            to_tsvector('english', coalesce(summary, '') || ' ' || coalesce(description, '')),
-            plainto_tsquery('english', :query)
-        ) AS score
-        FROM endpoint_descriptor
-        WHERE {_VISIBLE_SCOPE_SQL}
-          AND product = :product
-          AND version = :version
-          AND impl_id = :impl_id
-          AND is_enabled = TRUE
-          AND (CAST(:group_id AS uuid) IS NULL OR group_id = :group_id)
-          AND to_tsvector('english', coalesce(summary, '') || ' ' || coalesce(description, ''))
-              @@ plainto_tsquery('english', :query)
-        ORDER BY score DESC
-        LIMIT :limit
-        """
-    )
     bm25_result = await session.execute(
-        bm25_sql,
+        _BM25_CANDIDATES_SQL,
         {
             "query": query,
             "tenant_id": str(tenant_id),
@@ -213,23 +272,8 @@ async def _hybrid_search_pg(
     )
     bm25_rows = bm25_result.all()
 
-    cosine_sql = text(
-        f"""
-        SELECT id, 1 - (embedding <=> CAST(:emb AS vector)) AS score
-        FROM endpoint_descriptor
-        WHERE {_VISIBLE_SCOPE_SQL}
-          AND product = :product
-          AND version = :version
-          AND impl_id = :impl_id
-          AND is_enabled = TRUE
-          AND embedding IS NOT NULL
-          AND (CAST(:group_id AS uuid) IS NULL OR group_id = :group_id)
-        ORDER BY embedding <=> CAST(:emb AS vector)
-        LIMIT :limit
-        """
-    )
     cosine_result = await session.execute(
-        cosine_sql,
+        _COSINE_CANDIDATES_SQL,
         {
             "emb": embedding_literal,
             "tenant_id": str(tenant_id),

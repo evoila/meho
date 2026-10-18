@@ -28,7 +28,7 @@ import pytest
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
-from meho_backplane.operations import dispatch
+from meho_backplane.operations import _search, dispatch
 from meho_backplane.operations._lookup import (
     count_known_ops,
     descriptor_exists_any_state,
@@ -306,3 +306,17 @@ async def test_list_operation_groups_shows_only_tenant_row_groups() -> None:
 
 def _op_ids(result: dict[str, Any]) -> set[str]:
     return {hit["op_id"] for hit in result["hits"]}
+
+
+def test_postgres_search_queries_hold_the_visible_scope_predicate() -> None:
+    """Both PostgreSQL candidate queries carry ``_VISIBLE_SCOPE_SQL`` word for word."""
+    scope = " ".join(_search._VISIBLE_SCOPE_SQL.split())
+    for statement in (_search._BM25_CANDIDATES_SQL, _search._COSINE_CANDIDATES_SQL):
+        assert scope in " ".join(str(statement.text).split())
+
+
+def test_scope_guard_fails_when_a_query_drifts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The import-time guard raises when a query no longer matches the predicate."""
+    monkeypatch.setattr(_search, "_VISIBLE_SCOPE_SQL", "(tenant_id = :other)")
+    with pytest.raises(AssertionError, match="_BM25_CANDIDATES_SQL"):
+        _search._assert_scope_inlined()

@@ -68,7 +68,9 @@ Examples in current use:
   refused before dispatch and nothing runs — #3641)
 - `connector_scope_ambiguous` (connector review/enable-reads: a
   `connector_id` resolves to both a tenant row and a built-in row —
-  #1801; the message names the `prefer=tenant|builtin` retry — #2029)
+  #1801; the message names the `prefer=tenant|builtin` retry — #2029;
+  the CLI shows this code with a hint to retry with
+  `--prefer tenant` or `--prefer builtin` — #3799)
 - `connector_not_found` (all seven `meho.connector.*` `connector_id`
   tools — review/edit_group/edit_op/enable/enable_reads/disable/delete:
   an unknown or cross-tenant label maps to `-32602 connector_not_found`

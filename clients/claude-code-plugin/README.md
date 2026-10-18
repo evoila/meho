@@ -219,9 +219,10 @@ try again. Tracked in #4000.
 `mcp-remote` keeps saved logins in `~/.mcp-auth/mcp-remote-0.1.38/` (the
 pinned `mcp-remote@0.1.39` names the folder after its previous version). The
 folder changed with this version of the plugin, so expect one new browser
-login after you update. The Claude Desktop bundle still uses the old folder
-`~/.mcp-auth/mcp-remote-0.1.37/`. If you do not use Claude Desktop, you can
-delete that old folder.
+login after you update. Older Claude Desktop bundles use the old folder
+`~/.mcp-auth/mcp-remote-0.1.37/`; current ones use the same new folder as the
+plugin. Once your Claude Desktop bundle is current (or you do not use it), you
+can delete the old folder.
 
 ## Layer-2 skills → template sections
 

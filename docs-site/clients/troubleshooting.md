@@ -122,6 +122,38 @@ field), keep `offline_access` in the list. The login then lasts until the
 `meho-mcp` client's offline idle limit, 48 hours with the
 [recommended realm setting](../install/keycloak-realm.md#how-long-an-mcp-login-lasts).
 
+## A MEHO call says "Your MEHO login has expired" (Claude Desktop)
+
+**Symptom.** A MEHO tool call fails at once with "Your MEHO login has
+expired. Turn the MEHO extension off and on again in Claude Desktop
+(Settings > Extensions) to log in again." After that, the extension shows
+as stopped.
+
+**Wall.** The saved login can no longer be renewed: it was not used for
+the offline idle limit, or the session was ended in Keycloak. A new
+browser login is needed. The bundle does not wait for that login in the
+middle of a call, so the call fails fast instead of hanging. Older bundles
+gave the call no answer at all.
+
+**Fix.** In Claude Desktop, open **Settings > Extensions** and turn the
+MEHO extension off and on. Finish the login in the browser tab that opens;
+it may open behind the Claude Desktop window. If a MEHO login tab opened
+when the call failed, you can close it.
+
+## The extension stops with "MEHO did not connect" (Claude Desktop)
+
+**Symptom.** The MEHO extension shows as stopped, and its log has a line
+like `meho-claude-desktop: MEHO did not connect within 5 minutes, so this
+attempt stopped.`
+
+**Wall.** A browser login started, but nobody finished it within 5
+minutes. Stopping frees the local login port, so the next attempt can log
+in. Older bundles waited forever instead.
+
+**Fix.** Finish any open MEHO login in your browser. Then turn the MEHO
+extension off and on in **Settings > Extensions**. If several MEHO login
+tabs are open, close them all first.
+
 ## A MEHO call says "Your MEHO login has expired" (Claude Code plugin)
 
 **Symptom.** A MEHO tool call fails at once with "Your MEHO login has

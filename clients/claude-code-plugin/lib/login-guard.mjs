@@ -41,11 +41,21 @@ const DEFAULT_LIMIT_SECONDS = 300;
 // value would make the timer fire at once.
 const MAX_LIMIT_SECONDS = 86400;
 const FORWARD_FAILED = "Failed to forward message to remote server:";
+
+// The Claude Desktop bundle loads this same file (#4003). It sets these two
+// variables so the messages name the bundle and say how to reconnect in
+// Claude Desktop. The guard removes them, so mcp-remote never sees them.
+const LOG_PREFIX = process.env.MEHO_LOGIN_GUARD_PREFIX || "meho plugin";
+const RECONNECT =
+  process.env.MEHO_LOGIN_GUARD_RECONNECT || "run /mcp, pick meho, and reconnect";
+delete process.env.MEHO_LOGIN_GUARD_PREFIX;
+delete process.env.MEHO_LOGIN_GUARD_RECONNECT;
 const LOGIN_EXPIRED_MESSAGE =
-  "Your MEHO login has expired. Run /mcp, pick meho, and reconnect to log in again.";
+  `Your MEHO login has expired. ${RECONNECT[0].toUpperCase()}${RECONNECT.slice(1)} ` +
+  "to log in again.";
 
 function say(text) {
-  process.stderr.write(`meho plugin: ${text}\n`);
+  process.stderr.write(`${LOG_PREFIX}: ${text}\n`);
 }
 
 function limitSeconds() {
@@ -114,8 +124,7 @@ const limitText =
 const connectTimer = setTimeout(() => {
   say(
     `MEHO did not connect within ${limitText}, so this attempt stopped. ` +
-      "Finish any open MEHO login in your browser, then run /mcp, pick " +
-      "meho, and reconnect.",
+      `Finish any open MEHO login in your browser, then ${RECONNECT}.`,
   );
   process.exit(1);
 }, limit * 1000);

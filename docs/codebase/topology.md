@@ -935,17 +935,22 @@ What `bounded_closure` does (`_bounded_walk`):
   `(name, id)` order. On a dense mesh each node is expanded once, so the
   cost grows with the number of nodes, not with the number of paths
   (the recursive CTE follows every path).
-- **Bounded work inside a hop.** The hop statement has four parts.
+- **Bounded work inside a hop.** The hop statement has five parts.
   `reached` is every edge out of the frontier that passes the filters,
   with the node's id and name only. `picked` groups those by node and
   keeps the first `:row_limit` in `(name, id)` order, so the database
   sorts ids and names, never properties, and a top-N sort keeps only
   `:row_limit` rows in memory. `via` picks, for the kept nodes only,
   the parent and edge with the smallest ids (the same choice the
-  recursive CTE makes). `sized` loads the kept nodes' properties and
-  sizes. `reached` is `NOT MATERIALIZED`, so a very wide hop is one
-  pass over its edges plus `:row_limit` property reads, and PostgreSQL
-  never stores the whole hop as a temporary result.
+  recursive CTE makes). `ordered` is the kept ids as one array in that
+  order, and `loaded` walks it with a recursive query: it loads the
+  next node's properties only while the running byte total before it
+  is within `:byte_budget`. So a hop the byte limit cuts reads the
+  properties of the rows it returns and no others, and the largest
+  temporary result is the budget plus one row, never every kept node's
+  properties. `reached` is `NOT MATERIALIZED`, so a very wide hop is
+  one pass over its edges, and PostgreSQL never stores the whole hop as
+  a temporary result.
 - **Nodes.** `:row_limit` is `max_nodes + 1` minus the rows already in
   hand, so the walk never fetches more than `max_nodes + 1` rows in
   total, and it stops asking as soon as that row is in hand.
@@ -980,7 +985,9 @@ statements are counted (a star cut at the first hop sends one; the
 dense mesh sends one per layer plus the probe); a wide star with large
 properties is run under `EXPLAIN (ANALYZE, BUFFERS)` to show the hop
 reads a small part of the blocks all the properties take and sorts
-only kilobytes; edges written between two hops stay out of the answer;
+only kilobytes, once cut by the node limit and once by the byte limit
+with room for every node; edges written between two hops stay out of
+the answer;
 an oversized root is named without its properties; a slow lookup ends
 at the time budget with no root.
 

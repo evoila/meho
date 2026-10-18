@@ -1450,7 +1450,7 @@ class _HopStatements:
 
     def _record(self, conn: Any, cursor: Any, statement: str, *rest: Any) -> None:
         self.statements.append(statement)
-        if "WITH reached AS NOT MATERIALIZED" in statement:
+        if "WITH RECURSIVE reached AS NOT MATERIALIZED" in statement:
             self.hops += 1
 
 
@@ -1625,6 +1625,62 @@ async def test_bounded_closure_new_star_fixture_hop_reads_properties_for_kept_no
     # The hop read the kept rows' properties, and a small part of all of them.
     assert hop_blocks > 0
     assert hop_blocks * 10 < all_blocks, (hop_blocks, all_blocks)
+    # The hop's sorts hold ids and names, not the leaves' 9.6 MB of properties.
+    assert _plan_sort_space_kb(hop_plan) < 1024, hop_plan
+
+
+@_skip_no_docker
+async def test_bounded_closure_new_star_fixture_hop_reads_properties_within_the_byte_budget_only(
+    pg_engine: None,
+) -> None:
+    """With room for every node but not every byte, a hop loads the properties it returns."""
+    leaves, pad_bytes, kept = 300, 32_768, 4
+    await _seed_new_star_fixture(leaves=leaves, pad_bytes=pad_bytes, random_pad=True)
+    hop_sql = query_module._CLOSURE_STEP_SQL_REVERSE
+    all_properties_sql = text(
+        "SELECT sum(octet_length(CAST(properties AS text))) FROM graph_node"
+        " WHERE tenant_id = :tenant_id AND kind = 'vm'"
+    )
+    async with engine_module._engine.connect() as conn:
+        hub = (
+            await conn.execute(select(GraphNode.id).where(GraphNode.name == "star-hub"))
+        ).scalar_one()
+        params = {
+            "tenant_id": str(TENANT_A_ID),
+            "frontier": [str(hub)],
+            "visited": [str(hub)],
+            "kind_filter": None,
+            "class_kinds": None,
+            "class_excluded_kinds": None,
+            "include_stale": True,
+            # Room for 2000 nodes, bytes for a few of them: each leaf row is a
+            # little over ``pad_bytes``, so ``kept`` rows fit and the next does not.
+            "byte_budget": (kept + 1) * pad_bytes,
+            "bytes_before": 0,
+            "depth": 1,
+            "row_limit": 2001,
+        }
+        hop_plan = await _explain(conn, hop_sql.text, params)
+        before = await _graph_node_toast_blocks(conn)
+        rows = (await conn.execute(hop_sql, params)).fetchall()
+        after_hop = await _graph_node_toast_blocks(conn)
+        # Reading every leaf's properties is the work the hop must not do.
+        total = (
+            await conn.execute(all_properties_sql, {"tenant_id": str(TENANT_A_ID)})
+        ).scalar_one()
+        after_all = await _graph_node_toast_blocks(conn)
+
+    # The rows within the budget come back whole, plus one past it without properties.
+    assert len(rows) == kept + 1
+    assert [row._mapping["name"] for row in rows] == [f"star-leaf-{i:04d}" for i in range(kept + 1)]
+    assert all(len(row._mapping["properties"]["pad"]) == pad_bytes for row in rows[:kept])
+    assert rows[-1]._mapping["properties"] is None
+    assert rows[-1]._mapping["cumulative_bytes"] > params["byte_budget"]
+    assert total >= leaves * pad_bytes
+    hop_blocks, all_blocks = after_hop - before, after_all - after_hop
+    # The hop read the returned rows' properties, and a small part of all of them.
+    assert hop_blocks > 0
+    assert hop_blocks * 20 < all_blocks, (hop_blocks, all_blocks)
     # The hop's sorts hold ids and names, not the leaves' 9.6 MB of properties.
     assert _plan_sort_space_kb(hop_plan) < 1024, hop_plan
 

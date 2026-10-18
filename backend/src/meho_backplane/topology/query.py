@@ -515,20 +515,25 @@ _ONE_SNAPSHOT_SQL = text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ O
 # only. ``picked`` groups those rows by node and keeps the first
 # ``:row_limit`` nodes in ``(name, id)`` order: the database sorts ids and
 # names, never properties, and a top-N sort keeps only ``:row_limit``
-# rows in memory. Only then does ``sized`` load the kept nodes' properties
-# and the edge each was reached by, so a very wide hop costs one pass
-# over its edges plus ``:row_limit`` property reads. ``loaded`` is
-# ``MATERIALIZED`` (at most ``:row_limit`` rows) so each kept node's
-# properties are read once, as text; the size and the returned value both
-# come from that text instead of reading the stored value again. ``reached`` is
-# ``NOT MATERIALIZED`` so the database never stores the whole hop as a
-# temporary result; it is read again only for the kept nodes.
+# rows in memory. ``reached`` is ``NOT MATERIALIZED`` so the database
+# never stores the whole hop as a temporary result; it is read again
+# only for the kept nodes (``via``, the edge each was reached by).
 #
-# ``:bytes_before`` carries the running byte total into the hop, so the
-# byte budget also cuts inside a hop: one row past the budget comes back,
-# with its properties left out, and shows that the byte limit applied.
-# A node reached through several parents in one hop keeps the parent and
-# edge with the smallest ids, the same choice the recursive CTE makes.
+# Properties are loaded under the byte budget, one node at a time.
+# ``ordered`` is the kept ids as one array in ``(name, id)`` order and
+# ``loaded`` is a recursive query over it: it loads node ``pos + 1`` only
+# while the running byte total before it (``:bytes_before`` from the
+# earlier hops, plus the rows loaded so far) is within ``:byte_budget``.
+# So a hop that the byte limit cuts reads the properties of the rows it
+# returns and no others, and the largest temporary result is the budget
+# plus one row. Each node's properties are read once, as text; the size
+# and the returned value both come from that text.
+#
+# The byte budget cuts inside a hop the same way as across hops: one row
+# past the budget comes back, with its properties left out, and shows
+# that the byte limit applied. A node reached through several parents in
+# one hop keeps the parent and edge with the smallest ids, the same
+# choice the recursive CTE makes.
 #
 # ``row_bytes`` is the stored size of the node's kind, name, scope and
 # properties. Every value is a :named bind; nothing is interpolated.
@@ -558,7 +563,7 @@ _CLOSURE_ANCHOR_SQL = text(
 
 _CLOSURE_STEP_SQL_REVERSE = text(
     """
-    WITH reached AS NOT MATERIALIZED (
+    WITH RECURSIVE reached AS NOT MATERIALIZED (
         SELECT n.id            AS id,
                n.name          AS name,
                e.kind          AS via_edge_kind,
@@ -602,14 +607,32 @@ _CLOSURE_STEP_SQL_REVERSE = text(
         WHERE id IN (SELECT id FROM picked)
         ORDER BY id, parent_node_id, via_edge_id
     ),
-    loaded AS MATERIALIZED (
-        SELECT n.id, n.kind, n.name, n.source, n.source_scope, n.last_seen,
-               CAST(n.properties AS text) AS properties_text,
-               via.via_edge_kind, via.parent_node_id, via.via_edge_id,
-               via.via_edge_source, via.via_edge_last_seen
+    ordered AS (
+        SELECT array_agg(id ORDER BY name, id) AS ids
         FROM picked
-        JOIN graph_node n ON n.id = picked.id
-        JOIN via ON via.id = picked.id
+    ),
+    loaded AS (
+        SELECT 1 AS pos,
+               n.id, n.kind, n.name, n.source, n.source_scope, n.last_seen,
+               CAST(n.properties AS text) AS properties_text,
+               CAST(:bytes_before AS bigint) AS bytes_before
+        FROM ordered
+        JOIN graph_node n ON n.id = ordered.ids[1]
+        WHERE CAST(:bytes_before AS bigint) <= CAST(:byte_budget AS bigint)
+        UNION ALL
+        SELECT loaded.pos + 1,
+               n.id, n.kind, n.name, n.source, n.source_scope, n.last_seen,
+               CAST(n.properties AS text),
+               loaded.bytes_before + prev.row_bytes
+        FROM loaded
+        CROSS JOIN LATERAL (
+            SELECT octet_length(loaded.kind) + octet_length(loaded.name)
+                       + COALESCE(octet_length(loaded.source_scope), 0)
+                       + COALESCE(octet_length(loaded.properties_text), 0) AS row_bytes
+        ) prev
+        CROSS JOIN ordered
+        JOIN graph_node n ON n.id = ordered.ids[loaded.pos + 1]
+        WHERE loaded.bytes_before + prev.row_bytes <= CAST(:byte_budget AS bigint)
     ),
     sized AS (
         SELECT loaded.*,
@@ -617,23 +640,18 @@ _CLOSURE_STEP_SQL_REVERSE = text(
                    + COALESCE(octet_length(source_scope), 0)
                    + COALESCE(octet_length(properties_text), 0) AS row_bytes
         FROM loaded
-    ),
-    running AS (
-        SELECT sized.*,
-               CAST(:bytes_before AS bigint)
-                   + SUM(row_bytes) OVER (ORDER BY name, id) AS cumulative_bytes
-        FROM sized
     )
-    SELECT id, kind, name, source, source_scope,
-           CASE WHEN cumulative_bytes <= CAST(:byte_budget AS bigint)
+    SELECT sized.id, kind, name, source, source_scope,
+           CASE WHEN bytes_before + row_bytes <= CAST(:byte_budget AS bigint)
                 THEN CAST(properties_text AS jsonb) END AS properties,
            last_seen,
            CAST(:depth AS integer) AS depth,
            via_edge_kind, parent_node_id, via_edge_id, via_edge_source,
-           via_edge_last_seen, cumulative_bytes
-    FROM running
-    WHERE cumulative_bytes - row_bytes <= CAST(:byte_budget AS bigint)
-    ORDER BY name, id
+           via_edge_last_seen,
+           bytes_before + row_bytes AS cumulative_bytes
+    FROM sized
+    JOIN via ON via.id = sized.id
+    ORDER BY name, sized.id
     """
 )
 
@@ -641,7 +659,7 @@ _CLOSURE_STEP_SQL_REVERSE = text(
 # join columns and the parent column differ.
 _CLOSURE_STEP_SQL_FORWARD = text(
     """
-    WITH reached AS NOT MATERIALIZED (
+    WITH RECURSIVE reached AS NOT MATERIALIZED (
         SELECT n.id            AS id,
                n.name          AS name,
                e.kind          AS via_edge_kind,
@@ -685,14 +703,32 @@ _CLOSURE_STEP_SQL_FORWARD = text(
         WHERE id IN (SELECT id FROM picked)
         ORDER BY id, parent_node_id, via_edge_id
     ),
-    loaded AS MATERIALIZED (
-        SELECT n.id, n.kind, n.name, n.source, n.source_scope, n.last_seen,
-               CAST(n.properties AS text) AS properties_text,
-               via.via_edge_kind, via.parent_node_id, via.via_edge_id,
-               via.via_edge_source, via.via_edge_last_seen
+    ordered AS (
+        SELECT array_agg(id ORDER BY name, id) AS ids
         FROM picked
-        JOIN graph_node n ON n.id = picked.id
-        JOIN via ON via.id = picked.id
+    ),
+    loaded AS (
+        SELECT 1 AS pos,
+               n.id, n.kind, n.name, n.source, n.source_scope, n.last_seen,
+               CAST(n.properties AS text) AS properties_text,
+               CAST(:bytes_before AS bigint) AS bytes_before
+        FROM ordered
+        JOIN graph_node n ON n.id = ordered.ids[1]
+        WHERE CAST(:bytes_before AS bigint) <= CAST(:byte_budget AS bigint)
+        UNION ALL
+        SELECT loaded.pos + 1,
+               n.id, n.kind, n.name, n.source, n.source_scope, n.last_seen,
+               CAST(n.properties AS text),
+               loaded.bytes_before + prev.row_bytes
+        FROM loaded
+        CROSS JOIN LATERAL (
+            SELECT octet_length(loaded.kind) + octet_length(loaded.name)
+                       + COALESCE(octet_length(loaded.source_scope), 0)
+                       + COALESCE(octet_length(loaded.properties_text), 0) AS row_bytes
+        ) prev
+        CROSS JOIN ordered
+        JOIN graph_node n ON n.id = ordered.ids[loaded.pos + 1]
+        WHERE loaded.bytes_before + prev.row_bytes <= CAST(:byte_budget AS bigint)
     ),
     sized AS (
         SELECT loaded.*,
@@ -700,23 +736,18 @@ _CLOSURE_STEP_SQL_FORWARD = text(
                    + COALESCE(octet_length(source_scope), 0)
                    + COALESCE(octet_length(properties_text), 0) AS row_bytes
         FROM loaded
-    ),
-    running AS (
-        SELECT sized.*,
-               CAST(:bytes_before AS bigint)
-                   + SUM(row_bytes) OVER (ORDER BY name, id) AS cumulative_bytes
-        FROM sized
     )
-    SELECT id, kind, name, source, source_scope,
-           CASE WHEN cumulative_bytes <= CAST(:byte_budget AS bigint)
+    SELECT sized.id, kind, name, source, source_scope,
+           CASE WHEN bytes_before + row_bytes <= CAST(:byte_budget AS bigint)
                 THEN CAST(properties_text AS jsonb) END AS properties,
            last_seen,
            CAST(:depth AS integer) AS depth,
            via_edge_kind, parent_node_id, via_edge_id, via_edge_source,
-           via_edge_last_seen, cumulative_bytes
-    FROM running
-    WHERE cumulative_bytes - row_bytes <= CAST(:byte_budget AS bigint)
-    ORDER BY name, id
+           via_edge_last_seen,
+           bytes_before + row_bytes AS cumulative_bytes
+    FROM sized
+    JOIN via ON via.id = sized.id
+    ORDER BY name, sized.id
     """
 )
 
@@ -968,7 +999,8 @@ async def bounded_closure(
     * each hop expands only the nodes kept so far and asks for at most
       the nodes still allowed, so a dense graph cannot make the database
       follow every path; inside a hop the database sorts ids and names
-      only and loads properties for the kept nodes alone;
+      only and loads properties one node at a time while the running
+      byte total is within the budget;
     * at most ``budget.max_nodes`` nodes and ``budget.max_bytes`` stored
       bytes come back; the answer is then the first part of the closure.
       The root lookup selects no properties, and the anchor statement

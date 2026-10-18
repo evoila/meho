@@ -1,0 +1,132 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# Single-head migration guard (#4204).
+#
+# Migrations are numbered by hand. Two pull requests made at the same
+# time often take the same next number and the same parent. Git sees no
+# conflict (the file names differ), but Alembic then finds two heads and
+# the app refuses to start, so every database-backed job in the merge
+# queue fails with hundreds of `Multiple head revisions` errors.
+#
+# `scripts/ci/check_migration_heads.py` finds the clash in well under a
+# minute with no database and no Alembic install. It fails when two
+# files use the same revision number, when a down_revision points at a
+# revision that does not exist, or when the chain has more than one
+# head. The message says which number main is at and what to rename.
+#
+# Three triggers, each does a different part of the promise:
+#
+#   pull_request    — the check runs on the merge result of the PR and
+#                     main at that moment. Every PR, no path filter: a
+#                     required check skipped by `on.paths` stays Pending
+#                     and blocks the merge (#2140 trap).
+#   merge_group     — the check runs on the real merge-queue commit, so
+#                     a clash that slipped past the PR check fails here
+#                     fast, before the slow database jobs.
+#   push to main    — only when a migration file changed. The `check`
+#                     job confirms main itself is healthy, then
+#                     `recheck-open-prs` runs the check again for every
+#                     open PR that adds a migration, against the new
+#                     main, and posts the result as a fresh check run on
+#                     the PR's head commit under the same check name. A
+#                     PR that now clashes turns red before anyone adds
+#                     it to the merge queue.
+#
+# The `check` job always adds main's migration files (`--main`) before
+# checking, so the check sees main as it is now, not as it was when the
+# PR's merge result was computed.
+#
+# Required status check in branch protection: "Migration chain (single
+# head)". Registering it is a manual ops step, like the other required
+# contexts (see docs/codebase/devops.md, "Merge queue").
+
+name: migration-heads
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/alembic/versions/**'
+      - 'scripts/ci/check_migration_heads.py'
+      - 'scripts/ci/recheck_migration_prs.py'
+      - '.github/workflows/migration-heads.yml'
+  pull_request:
+    branches: [main]
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: migration-heads-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
+
+jobs:
+  check:
+    name: Migration chain (single head)
+    # A pull request from a fork runs on a disposable GitHub-hosted
+    # runner, not on the internal pool. The job runs the check script as
+    # it is on the pull request branch, so a fork controls that code. It
+    # needs no internal route or credential, so the hosted runner is
+    # enough. Same shape as migration-compat.yml; see docs/codebase/
+    # devops.md "Untrusted pull-request isolation".
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'meho-runners-ci' }}
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.14'
+
+      - name: Fetch the migration files that are on main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin main
+          mkdir -p "${RUNNER_TEMP}/main"
+          git archive FETCH_HEAD backend/alembic/versions | tar -x -C "${RUNNER_TEMP}/main"
+
+      - name: Check the migration chain against main
+        run: |
+          python scripts/ci/check_migration_heads.py backend/alembic/versions \
+            --main "${RUNNER_TEMP}/main/backend/alembic/versions"
+
+  recheck-open-prs:
+    name: Re-check open pull requests that add a migration
+    # A migration just landed on main. Every open PR that adds a
+    # migration was tested against the old main, so its green check may
+    # be stale. `scripts/ci/recheck_migration_prs.py` runs the check for
+    # each such PR, fork or not, and posts a fresh check run on the PR's
+    # head commit under the same check name. The PR branch does not need
+    # to carry this workflow.
+    #
+    # Push-only, so a pull_request can never reach this job. The checkout
+    # is main: no code from any PR runs here, the PR's migration files
+    # are only read. That is why a disposable hosted runner is enough for
+    # fork PRs too. `checks: write` is what lets the job create the check
+    # run on the PR's head commit.
+    needs: check
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: write
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.14'
+
+      - name: Re-check every open PR that adds a migration
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: python scripts/ci/recheck_migration_prs.py

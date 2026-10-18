@@ -33,6 +33,7 @@ backplane — reach for whichever the task in front of you needs:
 | [Audit forensics](audit-forensics.md) | Reconstructing "who did X to Y and when" from the append-only ledger, and tracing an agent session end to end. |
 | [Flight recorder](flight-recorder.md) | The redacted per-dispatch record of the vendor traffic behind an audit row — what it captures, and who can read it back. |
 | [Runbooks](runbooks.md) | Authoring versioned, multi-step procedures and running them one gated step at a time. |
+| [Hosted agents](hosted-agents.md) | Setting up an AI agent that MEHO runs on the server: its identity, its prompts, its tools, its permissions, and how to run it and check what it did. |
 | [Scheduler](scheduler.md) | Firing agent runs on cron / one-off triggers, and the durable-credential behavior that keeps them running unattended. |
 | [Event ingestion](event-ingestion.md) | Firing a governed agent run from an authenticated external webhook — a monitoring alert or a registry action. |
 | [Satellite gateway](satellite-gateway.md) | Remote check execution for networks the central instance cannot dial. |

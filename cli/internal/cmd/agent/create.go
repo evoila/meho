@@ -71,11 +71,11 @@ func newCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&modelTier, "model-tier", "",
 		"logical model tier: standard | fast | deep")
 	cmd.Flags().StringVar(&systemPrompt, "system-prompt", "",
-		"the agent's system prompt")
+		"the agent's standing rules, the same for every run; the task for one run goes in the --input flag of meho agent run (guide: https://evoila.github.io/meho/guides/hosted-agents/)")
 	cmd.Flags().IntVar(&turnBudget, "turn-budget", 0,
 		"max model turns the runtime allows (1..1000)")
 	cmd.Flags().StringVar(&toolset, "toolset", "",
-		"allowed-tools spec as a JSON object: inline JSON, @<path>, or @- (default {})")
+		"allowed-tools spec as a JSON object: inline JSON, @<path>, or @- (default {}); fields and tool names: https://evoila.github.io/meho/guides/hosted-agents/")
 	cmd.Flags().StringVar(&outputSchema, "output-schema", "",
 		"optional structured-output JSON Schema as a JSON object: inline JSON, @<path>, or @-")
 	cmd.Flags().BoolVar(&disabled, "disabled", false,

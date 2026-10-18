@@ -16,7 +16,11 @@ What the seam does
 One :meth:`AgentRun.start` call kicks off a single bounded tool-use loop as
 an in-process :class:`asyncio.Task`:
 
-* **System prompt** — taken from the :class:`AgentDefinition`.
+* **System prompt** — taken from the :class:`AgentDefinition`. A configured
+  definition (one with a ``toolset``) also gets a second system prompt part
+  with the hosted context (#3759,
+  :mod:`meho_backplane.agent.hosted_context`): tenant conventions and a
+  note on which context tools the run has.
 * **Turn budget** — :attr:`AgentDefinition.request_limit` becomes a
   ``UsageLimits(request_limit=...)``; the framework raises
   :class:`~pydantic_ai.exceptions.UsageLimitExceeded` once the loop would
@@ -97,6 +101,7 @@ from pydantic_ai.exceptions import UsageLimitExceeded
 from pydantic_ai.usage import RunUsage
 
 from meho_backplane.agent.approval_wait import resume_or_surface_awaiting_approval
+from meho_backplane.agent.hosted_context import assemble_hosted_context
 from meho_backplane.agent.invoke import (
     ChildAgentResolver,
     ChildRunFinalizer,
@@ -934,6 +939,12 @@ class PydanticAgentRun:
         definition with no toolset (``toolset is None``) falls back to the T1
         default two-meta-tool surface.
 
+        A configured definition (#3759) also gets the hosted context from
+        :func:`~meho_backplane.agent.hosted_context.assemble_hosted_context`
+        as a second system prompt part. ``definition.system_prompt`` stays
+        the first part, unchanged. The legacy ``None`` path gets no hosted
+        context.
+
         When this runtime carries a :attr:`child_agent_resolver` (G11.1-T5),
         the ``invoke_agent`` composition tool is appended to whichever surface
         the definition selected, so a running agent can invoke another
@@ -960,6 +971,14 @@ class PydanticAgentRun:
                 output_type=definition.output_type if definition.output_type is not None else str,
                 tools=tools,
             )
+            tool_names = frozenset(tool.name for tool in tools)
+
+            # #3759: a second system prompt part, after the definition's own
+            # prompt. Built at run start under the run's operator.
+            async def _hosted_context(ctx: RunContext[Operator]) -> str:
+                return (await assemble_hosted_context(ctx.deps, tool_names)).text
+
+            agent.system_prompt(_hosted_context)
             return agent
         agent = Agent(
             model,

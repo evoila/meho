@@ -354,6 +354,12 @@ Who uses them:
   `render_conventions` on the rows it loaded.
 - **Feedback**: `preamble_status` on POST/PATCH and `budget_status`
   on the list both read the same pack.
+- **Hosted agent runs** (#3759): `assemble_hosted_context` in
+  `agent/hosted_context.py` calls `assemble_preamble(...,
+  conventions_only=True)`. That returns the conventions band alone (same
+  order, budget, guard, and delimiters), without the broadcast,
+  priming, and catalogue bands, because those name MCP tools a hosted
+  run does not have. See `agent-runtime.md`.
 - **MCP `initialize`**: `_session_instructions` logs one
   `mcp_preamble_receipt` record per session with `included_slugs`,
   `dropped_slugs`, `oversize_slugs`, `conventions_tokens`,

@@ -117,7 +117,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import structlog
-from pydantic_ai import ModelRetry, RunContext, Tool
+from pydantic_ai import RunContext, Tool
 
 from meho_backplane.agent.approval_wait import resume_or_surface_awaiting_approval
 from meho_backplane.agent.hosted_context import (
@@ -125,6 +125,7 @@ from meho_backplane.agent.hosted_context import (
     build_read_context_resource_tool,
 )
 from meho_backplane.agent.meta_tool import MetaToolSpec
+from meho_backplane.agent.tool_audit import ToolRefusedRetry
 from meho_backplane.agent.toolset_broadcast import build_broadcast_meta_tools
 from meho_backplane.agent.toolset_discovery import (
     RETRIEVAL_META_TOOL_NAMES,
@@ -415,7 +416,9 @@ def _make_meta_tool(
                 operator_sub=ctx.deps.sub,
                 tenant_id=str(ctx.deps.tenant_id),
             )
-            raise ModelRetry(f"forbidden: {meta.name!r} requires a higher role. Do not retry it.")
+            raise ToolRefusedRetry(
+                f"forbidden: {meta.name!r} requires a higher role. Do not retry it."
+            )
         if is_connector_scoped and allowed_connectors is not None:
             connector_id = arguments.get(_CONNECTOR_ID_ARG)
             if connector_id not in allowed_connectors:
@@ -430,7 +433,7 @@ def _make_meta_tool(
                     operator_sub=ctx.deps.sub,
                     tenant_id=str(ctx.deps.tenant_id),
                 )
-                raise ModelRetry(
+                raise ToolRefusedRetry(
                     f"connector_id {connector_id!r} is not in this agent's "
                     f"allowed connectors {sorted(allowed_connectors)!r}. Pick "
                     f"an allowed connector or stop."

@@ -6350,7 +6350,14 @@ class ApprovalRequest(Base):
       to re-enter when this row is a parked composite **sub-op** (#3351):
       ``{"op_id": <composite op_id>, "params": <composite params>}``, captured
       at park time from
-      :data:`~meho_backplane.operations.composite.composite_dispatch_var`.
+      :data:`~meho_backplane.operations.composite.composite_dispatch_var`,
+      plus two optional keys (#4217): ``"state"``, the JSON the composite
+      saved for the re-entry (read back with
+      :func:`~meho_backplane.operations.composite.composite_resume_state`),
+      and ``"after_main_effect": true`` when the parked step runs after the
+      composite's main change exists. Such a re-entry continues at the
+      parked step instead of running the composite from the start, and may
+      wait for approval again.
       A composite's governed sub-op parks under its sub-op governance key +
       identity-only gate params, which is not a dispatchable descriptor call,
       so the shared resume path re-dispatches this parent composite
@@ -6363,7 +6370,8 @@ class ApprovalRequest(Base):
       in that single pass; a composite that would open a *second* governed gate
       is unsupported and fails closed
       (``composite_resume_multi_gate_unsupported``) rather than re-park (#3351
-      review B1). NULL for every non-composite (direct-op) park — those keep
+      review B1), unless that gate is an ``after_main_effect`` step with saved
+      state (#4217). NULL for every non-composite (direct-op) park — those keep
       the unchanged generic re-dispatch of ``op_id`` — and on pre-0099 rows.
       Internal resume input only; like ``params`` it is never projected onto a
       read view or a broadcast frame. Added by migration ``0099``.

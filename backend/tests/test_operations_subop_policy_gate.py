@@ -44,10 +44,14 @@ from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import (
     SelfApprovalForbiddenError,
     approve_request,
+    composite_resume_binding,
 )
 from meho_backplane.operations.composite import (
+    CompositeResumeState,
     composite_dispatch_var,
     composite_resume_scope_var,
+    composite_resume_state,
+    composite_resume_state_var,
     composite_resume_var,
     enforce_subop_policy,
 )
@@ -430,6 +434,229 @@ async def test_subop_resume_scope_guard_fails_closed_on_second_gate(
     # No second park was written — the guard refused rather than queue.
     after = await session.scalar(select(func.count()).select_from(ApprovalRequest))
     assert after == before
+
+
+# ===========================================================================
+# #4217 — a step after the main change continues where it stopped. The
+# relaxed multi-gate guard and the two checks that keep it safe.
+# ===========================================================================
+
+_PARENT_OP_ID = "vmware.composite.vm.deploy_from_library"
+_PARENT_PARAMS = {"library_item": "li-1", "name": "web-01", "resource_pool": "rp-1"}
+_RENAME_OP_ID = "POST:/VirtualMachine/{moId}/Rename_Task"
+_RENAME_PARAMS = {"moId": "vm-1", "body": {"newName": "web-01"}}
+_SAVED_STATE = {"deploy_name": "web-01-meho-x", "deployed": {"vm_id": "vm-1", "step": "rename"}}
+
+
+async def _approval_count(session: AsyncSession) -> int:
+    return int(await session.scalar(select(func.count()).select_from(ApprovalRequest)) or 0)
+
+
+@pytest.mark.asyncio
+async def test_after_main_effect_park_saves_its_state_on_the_row(session: AsyncSession) -> None:
+    """The park stores the saved state and the ``after_main_effect`` mark (#4217)."""
+    token = composite_dispatch_var.set((_PARENT_OP_ID, _PARENT_PARAMS))
+    try:
+        result = await enforce_subop_policy(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_RENAME_OP_ID,
+            safety_level="dangerous",
+            requires_approval=True,
+            target=None,
+            params=_RENAME_PARAMS,
+            resume_state=_SAVED_STATE,
+            after_main_effect=True,
+        )
+    finally:
+        composite_dispatch_var.reset(token)
+
+    assert result is not None
+    assert result.status == "awaiting_approval"
+    row = await session.get(ApprovalRequest, uuid.UUID(result.extras["approval_request_id"]))
+    assert row is not None
+    assert row.resume_parent == {
+        "op_id": _PARENT_OP_ID,
+        "params": _PARENT_PARAMS,
+        "state": _SAVED_STATE,
+        "after_main_effect": True,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("during_resume", [False, True])
+async def test_after_main_effect_without_saved_state_is_refused(
+    session: AsyncSession, during_resume: bool
+) -> None:
+    """A step marked ``after_main_effect`` that saved no state never runs or waits (#4217).
+
+    Its approval could only re-run the composite from the start and repeat
+    the earlier writes. So the seam refuses it, before the policy check,
+    in an ordinary run and during a resume: no write, no approval row.
+    """
+    before = await _approval_count(session)
+    dispatch_token = composite_dispatch_var.set((_PARENT_OP_ID, _PARENT_PARAMS))
+    scope_token = composite_resume_scope_var.set(
+        ("POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy", "h")
+        if during_resume
+        else None
+    )
+    try:
+        result = await enforce_subop_policy(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_RENAME_OP_ID,
+            safety_level="dangerous",
+            requires_approval=True,
+            target=None,
+            params=_RENAME_PARAMS,
+            after_main_effect=True,
+        )
+    finally:
+        composite_resume_scope_var.reset(scope_token)
+        composite_dispatch_var.reset(dispatch_token)
+
+    assert result is not None
+    assert result.status == "error"
+    assert result.extras["error_code"] == "composite_resume_state_missing"
+    assert result.extras["blocked_op_id"] == _RENAME_OP_ID
+    assert await _approval_count(session) == before
+
+
+@pytest.mark.asyncio
+async def test_after_main_effect_step_may_wait_during_a_resume(session: AsyncSession) -> None:
+    """The relaxed guard: an ``after_main_effect`` step parks during a resume (#4217).
+
+    The same situation as
+    ``test_subop_resume_scope_guard_fails_closed_on_second_gate``, but the
+    second step runs after the main change and saved its state. Its own
+    resume continues at this step, so it may wait for approval: a second
+    row is written, carrying the state.
+    """
+    approved = ("POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy", "approved")
+    before = await _approval_count(session)
+    dispatch_token = composite_dispatch_var.set((_PARENT_OP_ID, _PARENT_PARAMS))
+    scope_token = composite_resume_scope_var.set(approved)
+    resume_token = composite_resume_var.set(None)  # the approved deploy already cleared
+    try:
+        result = await enforce_subop_policy(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_RENAME_OP_ID,
+            safety_level="dangerous",
+            requires_approval=True,
+            target=None,
+            params=_RENAME_PARAMS,
+            resume_state=_SAVED_STATE,
+            after_main_effect=True,
+        )
+    finally:
+        composite_resume_var.reset(resume_token)
+        composite_resume_scope_var.reset(scope_token)
+        composite_dispatch_var.reset(dispatch_token)
+
+    assert result is not None
+    assert result.status == "awaiting_approval"
+    assert await _approval_count(session) == before + 1
+    row = await session.get(ApprovalRequest, uuid.UUID(result.extras["approval_request_id"]))
+    assert row is not None
+    assert row.resume_parent is not None
+    assert row.resume_parent["state"] == _SAVED_STATE
+
+
+@pytest.mark.asyncio
+async def test_resume_refuses_an_earlier_write_before_the_approved_step(
+    session: AsyncSession,
+) -> None:
+    """During the resume of an ``after_main_effect`` park, an earlier write is refused (#4217).
+
+    The approved rename has not run yet (``composite_resume_var`` is still
+    set). A composite that wrongly starts from the beginning reaches the
+    deploy first. The seam refuses it before it runs — even for a user
+    whose policy would auto-execute it — and writes no row. Once the
+    approved step has run, later writes are checked as usual.
+    """
+    before = await _approval_count(session)
+    dispatch_token = composite_dispatch_var.set((_PARENT_OP_ID, _PARENT_PARAMS))
+    approved = (_RENAME_OP_ID, compute_params_hash(_RENAME_PARAMS))
+    scope_token = composite_resume_scope_var.set(approved)
+    resume_token = composite_resume_var.set(approved)
+    state_token = composite_resume_state_var.set(
+        CompositeResumeState(op_id=_PARENT_OP_ID, state=_SAVED_STATE, after_main_effect=True)
+    )
+    try:
+        deploy = await enforce_subop_policy(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id="POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy",
+            safety_level="dangerous",
+            requires_approval=False,
+            target=None,
+            params={"ovfLibraryItemId": "li-1"},
+        )
+        rename = await enforce_subop_policy(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_RENAME_OP_ID,
+            safety_level="dangerous",
+            requires_approval=True,
+            target=None,
+            params=_RENAME_PARAMS,
+            resume_state=_SAVED_STATE,
+            after_main_effect=True,
+        )
+        later = await enforce_subop_policy(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id="POST:/vcenter/vm/{vm}/power?action=start",
+            safety_level="dangerous",
+            requires_approval=False,
+            target=None,
+            params={"vm": "vm-1"},
+        )
+    finally:
+        composite_resume_state_var.reset(state_token)
+        composite_resume_var.reset(resume_token)
+        composite_resume_scope_var.reset(scope_token)
+        composite_dispatch_var.reset(dispatch_token)
+
+    assert deploy is not None
+    assert deploy.status == "error"
+    assert deploy.extras["error_code"] == "composite_resume_repeats_write"
+    assert deploy.extras["approved_op_id"] == _RENAME_OP_ID
+    assert deploy.extras["composite_op_id"] == _PARENT_OP_ID
+    assert rename is None, "the approved step clears"
+    assert later is None, "after the approved step, a user's dangerous write auto-executes"
+    assert await _approval_count(session) == before
+
+
+@pytest.mark.asyncio
+async def test_resume_binding_hands_the_saved_state_to_the_parent_only() -> None:
+    """``composite_resume_binding`` binds the saved state for the parent composite (#4217)."""
+    resume_parent = {
+        "op_id": _PARENT_OP_ID,
+        "params": _PARENT_PARAMS,
+        "state": _SAVED_STATE,
+        "after_main_effect": True,
+    }
+    with composite_resume_binding(
+        subop_op_id=_RENAME_OP_ID, subop_params_hash="h", resume_parent=resume_parent
+    ) as parent_call:
+        assert parent_call == (_PARENT_OP_ID, _PARENT_PARAMS)
+        assert composite_resume_state(_PARENT_OP_ID) == _SAVED_STATE
+        assert composite_resume_state("vmware.composite.vm.create") is None
+        bound = composite_resume_state_var.get()
+        assert bound is not None
+        assert bound.after_main_effect is True
+    assert composite_resume_state(_PARENT_OP_ID) is None
+
+    # A park that saved no state binds none, so the composite runs as before.
+    with composite_resume_binding(
+        subop_op_id=_RENAME_OP_ID,
+        subop_params_hash="h",
+        resume_parent={"op_id": _PARENT_OP_ID, "params": _PARENT_PARAMS},
+    ):
+        assert composite_resume_state_var.get() is None
 
 
 # ===========================================================================

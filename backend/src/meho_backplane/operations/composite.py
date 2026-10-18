@@ -97,7 +97,7 @@ from __future__ import annotations
 import time
 import uuid
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 
 import structlog
 
@@ -113,10 +113,13 @@ if TYPE_CHECKING:  # pragma: no cover - imports for type checking only
 __all__ = [
     "COMPOSITE_DEPTH_TOP_LEVEL",
     "CompositeRecursionLimitExceeded",
+    "CompositeResumeState",
     "DispatchChild",
     "composite_depth_var",
     "composite_dispatch_var",
     "composite_resume_scope_var",
+    "composite_resume_state",
+    "composite_resume_state_var",
     "composite_resume_var",
     "enforce_subop_policy",
     "get_dispatch_child",
@@ -259,6 +262,61 @@ composite_resume_scope_var: ContextVar[tuple[str, str] | None] = ContextVar(
     "composite_resume_scope",
     default=None,
 )
+
+
+class CompositeResumeState(NamedTuple):
+    """What a parked sub-op saved for the resume of its parent composite (#4217).
+
+    ``op_id`` is the parent composite, ``state`` the JSON the composite
+    passed to :func:`enforce_subop_policy` as ``resume_state``, and
+    ``after_main_effect`` whether the parked step runs after the
+    composite's main change already exists.
+    """
+
+    op_id: str
+    state: dict[str, Any]
+    after_main_effect: bool
+
+
+#: The :class:`CompositeResumeState` of the approved sub-op, for the whole
+#: re-entry of its parent composite (#4217). Bound next to
+#: :data:`composite_resume_var` by
+#: :func:`~meho_backplane.operations.approval_queue.composite_resume_binding`
+#: from ``ApprovalRequest.resume_parent``. The composite reads its state
+#: with :func:`composite_resume_state`, so it can reuse what its first run
+#: chose (the unique name a VM was deployed under) or continue at the step
+#: that waited instead of running from the start. ``None`` for every
+#: ordinary dispatch and for a park that saved no state.
+composite_resume_state_var: ContextVar[CompositeResumeState | None] = ContextVar(
+    "composite_resume_state",
+    default=None,
+)
+
+
+def composite_resume_state(op_id: str) -> dict[str, Any] | None:
+    """The state the approved sub-op of composite *op_id* saved, during its resume (#4217).
+
+    ``None`` on an ordinary dispatch, when the park saved no state, or when
+    the resumed composite is a different one (a nested composite must not
+    read the state of its parent).
+    """
+    bound = composite_resume_state_var.get()
+    if bound is None or bound.op_id != op_id:
+        return None
+    return bound.state
+
+
+def _resume_has_not_reached_approved_step() -> bool:
+    """``True`` while a resume that must skip earlier writes has not run its approved step.
+
+    Set only when the approved sub-op was marked ``after_main_effect``
+    (#4217): the composite's resume must go straight to that step. Until
+    the approved sub-op clears (which consumes :data:`composite_resume_var`),
+    any other governed write that is not itself ``after_main_effect`` is a
+    write the first run already did.
+    """
+    bound = composite_resume_state_var.get()
+    return bound is not None and bound.after_main_effect and composite_resume_var.get() is not None
 
 
 class DispatchChild(Protocol):
@@ -469,7 +527,11 @@ def _subop_resume_cleared(*, op_id: str, params_hash: str) -> bool:
     return False
 
 
-def _resume_parent_for_current_composite() -> dict[str, Any] | None:
+def _resume_parent_for_current_composite(
+    resume_state: dict[str, Any] | None,
+    *,
+    after_main_effect: bool,
+) -> dict[str, Any] | None:
     """Build the ``ApprovalRequest.resume_parent`` payload from the composite ctx.
 
     Reads :data:`composite_dispatch_var` (the parent composite's ``(op_id,
@@ -478,20 +540,30 @@ def _resume_parent_for_current_composite() -> dict[str, Any] | None:
     parked sub-op records the composite to re-enter on resume (#3351). The
     stored ``params`` are the composite's own dispatch params — the resume
     re-dispatches this parent composite verbatim, ``_approved=True``, with the
-    approved sub-op pre-cleared. ``None`` when no composite is on the stack, so
-    the park keeps the unchanged generic re-dispatch of its ``op_id``.
+    approved sub-op pre-cleared. *resume_state*, when given, is stored under
+    ``state``, and ``after_main_effect: true`` marks a step that runs after
+    the composite's main change exists (#4217); both come back through
+    :data:`composite_resume_state_var` during the re-entry. ``None`` when no
+    composite is on the stack, so the park keeps the unchanged generic
+    re-dispatch of its ``op_id``.
     """
     ctx = composite_dispatch_var.get()
     if ctx is None:
         return None
     parent_op_id, parent_params = ctx
-    return {"op_id": parent_op_id, "params": parent_params}
+    resume_parent: dict[str, Any] = {"op_id": parent_op_id, "params": parent_params}
+    if resume_state is not None:
+        resume_parent["state"] = resume_state
+    if after_main_effect:
+        resume_parent["after_main_effect"] = True
+    return resume_parent
 
 
 # code-quality-allow: pre-existing 118-line function (predates #3151); this
 # change adds the approval-resume sub-op clear + the resume_parent capture
 # (#3351) and the #294 proposed_effect stamping + destructive-tier refusal,
-# alongside the earlier `connector_id=connector_id` grant pass-through.
+# alongside the earlier `connector_id=connector_id` grant pass-through, and
+# the #4217 resume-state checks.
 async def enforce_subop_policy(
     *,
     operator: Operator,
@@ -501,6 +573,8 @@ async def enforce_subop_policy(
     requires_approval: bool,
     target: Any,
     params: dict[str, Any],
+    resume_state: dict[str, Any] | None = None,
+    after_main_effect: bool = False,
 ) -> OperationResult | None:
     """Re-apply the dispatcher policy/approval gate around a direct-session sub-op.
 
@@ -535,6 +609,31 @@ async def enforce_subop_policy(
     "top-level-sufficiency" alternative, and the call-site example are
     documented in ``docs/architecture/operations-substrate.md`` under
     "Preserving write-composite policy on the direct path".
+
+    ``resume_state`` and ``after_main_effect`` decide what an approval of
+    this sub-op resumes (#4217). Approving a parked sub-op re-runs its
+    parent composite with this one sub-op cleared. ``resume_state`` is JSON
+    the composite saves on the approval row; the re-run reads it back with
+    :func:`composite_resume_state`. ``after_main_effect=True`` says the
+    composite's main change already exists when this sub-op runs (the
+    rename or cleanup of a deployed VM), and that the composite uses the
+    saved state to continue at this step instead of running from the start.
+    Three checks keep that safe:
+
+    * ``after_main_effect=True`` without ``resume_state`` is refused
+      (``composite_resume_state_missing``): without state the re-run could
+      only start from the beginning.
+    * During the resume of such a park, any other governed write that is
+      not ``after_main_effect`` and comes before the approved step is
+      refused (``composite_resume_repeats_write``): it is a write the first
+      run already did.
+    * **The relaxed guard.** The multi-gate guard below
+      (``composite_resume_multi_gate_unsupported``) does not apply to an
+      ``after_main_effect`` step, so such a step may wait for approval even
+      during a resume. Its own resume continues at that step and repeats no
+      earlier write. The risk: the composite must really skip every earlier
+      write when it continues; the second check above stops a composite
+      that does not, before the write runs.
     """
     # Lazy imports: this module is imported by the dispatcher, so a
     # top-level import of the policy/approval machinery (which imports
@@ -548,6 +647,8 @@ async def enforce_subop_policy(
     from meho_backplane.operations._errors import (
         result_awaiting_approval,
         result_composite_resume_multi_gate_unsupported,
+        result_composite_resume_repeats_write,
+        result_composite_resume_state_missing,
         result_denied,
     )
     from meho_backplane.operations._lookup import parse_connector_id
@@ -567,6 +668,15 @@ async def enforce_subop_policy(
     product, version, impl_id = parse_connector_id(connector_id)
     params_hash = compute_params_hash(params)
 
+    # #4217: a step that continues after the main change must save the state
+    # its resume continues from; without it an approval would re-run the
+    # composite from the start.
+    if after_main_effect and resume_state is None:
+        _log.error("composite_resume_state_missing", op_id=op_id)
+        return result_composite_resume_state_missing(
+            op_id=op_id, duration_ms=(time.monotonic() - started) * 1000.0
+        )
+
     # #3351: on the approval-resume re-dispatch of the parent composite
     # (``_approved=True``), the one sub-op the human approved clears its gate
     # here — reproducing the approved step through the governed path — instead
@@ -574,6 +684,28 @@ async def enforce_subop_policy(
     # agent principal whose sub-op parked resumes without a standing grant.
     if _subop_resume_cleared(op_id=op_id, params_hash=params_hash):
         return None
+
+    # #4217: the approved step runs after the composite's main change, so its
+    # resume must go straight to it. A governed write before it that is not
+    # itself ``after_main_effect`` is one the first run already did: refuse it
+    # before it runs, whatever the policy verdict would be.
+    if not after_main_effect and _resume_has_not_reached_approved_step():
+        composite_ctx = composite_dispatch_var.get()
+        composite_op_id = composite_ctx[0] if composite_ctx is not None else "<unknown>"
+        approved = composite_resume_var.get()
+        approved_op_id = approved[0] if approved is not None else "<unknown>"
+        _log.error(
+            "composite_resume_repeats_write",
+            composite_op_id=composite_op_id,
+            approved_op_id=approved_op_id,
+            blocked_op_id=op_id,
+        )
+        return result_composite_resume_repeats_write(
+            composite_op_id=composite_op_id,
+            approved_op_id=approved_op_id,
+            blocked_op_id=op_id,
+            duration_ms=(time.monotonic() - started) * 1000.0,
+        )
 
     # An in-memory descriptor carrying only the policy-relevant fields.
     # Never added to a session — it exists solely to feed ``policy_gate``
@@ -608,8 +740,12 @@ async def enforce_subop_policy(
         # writes. No shipped composite reaches here — every governed sub-op is
         # ``dangerous`` + ``requires_approval=False``, which the USER reviewer
         # auto-executes in the single resume pass. Refuse instead of parking.
+        #
+        # #4217 relaxes this guard for an ``after_main_effect`` step: it saved
+        # the state its resume continues from (checked above), so its own
+        # resume repeats no earlier write, and it may wait for approval here.
         resume_scope = composite_resume_scope_var.get()
-        if resume_scope is not None:
+        if resume_scope is not None and not after_main_effect:
             approved_op_id, _approved_hash = resume_scope
             composite_ctx = composite_dispatch_var.get()
             composite_op_id = composite_ctx[0] if composite_ctx is not None else "<unknown>"
@@ -705,8 +841,11 @@ async def enforce_subop_policy(
                 proposed_effect=proposed_effect,
                 # #3351: record the parent composite so the approval-resume
                 # re-enters it (this sub-op's key + gate params are not a
-                # dispatchable descriptor call). ``None`` outside a composite.
-                resume_parent=_resume_parent_for_current_composite(),
+                # dispatchable descriptor call), with the state its re-entry
+                # continues from (#4217). ``None`` outside a composite.
+                resume_parent=_resume_parent_for_current_composite(
+                    resume_state, after_main_effect=after_main_effect
+                ),
             )
             await session.commit()
         # Publish AFTER commit so a broadcast can never outlive a failed

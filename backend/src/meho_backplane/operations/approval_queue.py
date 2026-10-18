@@ -1086,6 +1086,9 @@ async def create_pending_request(
             dispatchable descriptor call, so
             :func:`resume_dispatch_after_approval` re-dispatches this parent
             composite ``_approved=True`` with the approved sub-op pre-cleared.
+            Optional keys (#4217): ``"state"``, the JSON the composite saved
+            for that re-entry, and ``"after_main_effect": true`` for a step
+            that runs after the composite's main change exists.
             ``None`` for a direct-op park (the generic re-dispatch of
             ``op_id`` is used).
         idempotency_key: Optional client-chosen retry key (#3486). When the
@@ -1873,22 +1876,42 @@ def composite_resume_binding(
       instead of parking (#3351 review B1).
     * ``resume_parent`` is ``None`` (a direct park) — yields ``None`` and sets
       nothing; the caller keeps its generic re-dispatch.
+
+    When the park saved a ``state`` (#4217), the block also binds
+    :data:`~meho_backplane.operations.composite.composite_resume_state_var`
+    with it and the park's ``after_main_effect`` mark, so the re-entered
+    composite can continue at the step that waited instead of running from
+    the start.
     """
     if resume_parent is None:
         yield None
         return
 
     from meho_backplane.operations.composite import (
+        CompositeResumeState,
         composite_resume_scope_var,
+        composite_resume_state_var,
         composite_resume_var,
     )
 
+    parent_op_id = str(resume_parent["op_id"])
+    saved_state = resume_parent.get("state")
     approved_subop = (subop_op_id, subop_params_hash)
     resume_token = composite_resume_var.set(approved_subop)
     scope_token = composite_resume_scope_var.set(approved_subop)
+    state_token = composite_resume_state_var.set(
+        CompositeResumeState(
+            op_id=parent_op_id,
+            state=cast(dict[str, Any], saved_state),
+            after_main_effect=bool(resume_parent.get("after_main_effect")),
+        )
+        if isinstance(saved_state, dict)
+        else None
+    )
     try:
-        yield str(resume_parent["op_id"]), cast(dict[str, Any], resume_parent["params"])
+        yield parent_op_id, cast(dict[str, Any], resume_parent["params"])
     finally:
+        composite_resume_state_var.reset(state_token)
         composite_resume_scope_var.reset(scope_token)
         composite_resume_var.reset(resume_token)
 

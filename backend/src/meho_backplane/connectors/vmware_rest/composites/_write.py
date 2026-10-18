@@ -3205,8 +3205,11 @@ async def _clean_up_failed_deploy(
     (``warning``). A faulted lookup is a ``warning`` too, naming
     *deploy_name* so the operator can look for it by hand, and the other
     lookup and the removals still run: an unavailable VI-JSON API (the
-    connector raises :exc:`RuntimeError` when both of its mounts 404) must
-    not stop the delete of a VM the listing already found.
+    connector raises :exc:`RuntimeError` when both of its mounts 404) or a
+    response that is not JSON (:exc:`ValueError`, which
+    :exc:`json.JSONDecodeError` is) must not stop the delete of a VM the
+    listing already found. A removal whose response fails the same way is
+    a ``warning`` for that entity, and the other removals still run.
     """
     issues: list[dict[str, Any]] = []
     vm_ids: set[str] = set()
@@ -3221,7 +3224,7 @@ async def _clean_up_failed_deploy(
             operator=operator,
             filter_dict={"names": [deploy_name]},
         )
-    except (httpx.HTTPError, RuntimeError) as exc:
+    except (httpx.HTTPError, RuntimeError, ValueError) as exc:
         issues.append(
             _deploy_issue(
                 "cleanup",
@@ -3238,7 +3241,7 @@ async def _clean_up_failed_deploy(
                 connector, target, operator, resource_pool_id=resource_pool_id, name=deploy_name
             )
         )
-    except (httpx.HTTPError, RuntimeError) as exc:
+    except (httpx.HTTPError, RuntimeError, ValueError) as exc:
         issues.append(
             _deploy_issue(
                 "cleanup",
@@ -3269,9 +3272,9 @@ async def _find_vapps_named(
     children (a vApp is a child resource pool of the pool it was deployed
     into), then the ``name`` of every child that is a ``VirtualApp``. No
     read leaves the named objects (no traversal). An unexpected shape
-    yields no match; a transport fault, or the connector's
-    :exc:`RuntimeError` for an unavailable VI-JSON API, raises for the
-    caller.
+    yields no match; a transport fault, the connector's :exc:`RuntimeError`
+    for an unavailable VI-JSON API, or a response that is not JSON raises
+    for the caller.
     """
     children_read = await connector._post_vmomi_json(
         target,
@@ -3332,12 +3335,13 @@ async def _delete_leftover_vm(
     """Delete one VM a failed deploy left; the ``cleanup`` issue for it (#3697).
 
     The same best-effort ``DELETE:/vcenter/vm/{vm}`` ``vm.create`` uses for
-    its rollback.
+    its rollback. A response that is not JSON (:exc:`ValueError`) is a
+    warning like a transport fault, so the other removals still run.
     """
     what = f"VM {vm_id} left by the failed deploy"
     try:
         gate, _ = await _write_sub_op(connector, target, operator, _OP_DELETE_VM, {"vm": vm_id})
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, ValueError) as exc:
         return _deploy_issue(
             "cleanup",
             "warning",
@@ -3362,7 +3366,8 @@ async def _destroy_leftover_vapp(
     The governed vim ``VirtualApp.Destroy_Task`` (``_write_vmomi_sub_op``),
     task-polled under the deploy's task bound. A fresh deploy is powered off,
     so the destroy needs no power-off first. An unavailable VI-JSON API (the
-    connector's :exc:`RuntimeError`) is a warning like a transport fault.
+    connector's :exc:`RuntimeError`) or a response that is not JSON
+    (:exc:`ValueError`) is a warning like a transport fault.
     """
     what = f"vApp {vapp_id} and its VMs left by the failed deploy"
     try:
@@ -3386,7 +3391,7 @@ async def _destroy_leftover_vapp(
             task=_unwrap_value(task_payload),
             timeout_seconds=_VM_DEPLOY_TASK_TIMEOUT_SECONDS,
         )
-    except (httpx.HTTPError, RuntimeError) as exc:
+    except (httpx.HTTPError, RuntimeError, ValueError) as exc:
         return _deploy_issue(
             "cleanup",
             "warning",

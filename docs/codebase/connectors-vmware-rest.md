@@ -2096,17 +2096,20 @@ gives its VM a name nobody else uses:
    meanwhile, never carries the deploy name, so it is never touched.
 4. Each VM or vApp gets a `cleanup` issue: `info` when it was removed,
    `warning` when the removal faulted, was denied, or waits for approval
-   (the message then names the approval request). A faulted lookup is a
-   `warning` that names the deploy name (and the pool, for the vApp
-   lookup), so the operator can look for it by hand.
+   (the message then names the approval request). A faulted lookup (a
+   transport fault, an unavailable VI-JSON API, or a response that is not
+   JSON) is a `warning` that names the deploy name (and the pool, for the
+   vApp lookup), so the operator can look for it by hand. The other lookup
+   and the removals still run, so a VM the listing already found is still
+   deleted. A removal whose response is not JSON is a `warning` for that
+   entity, and the other removals still run.
 5. On every failure path the cleanup runs as a shielded task (the audit
    middleware's drain pattern, `_drain_deploy_cleanup`): a caller cancel
    during the lookups or the removal does not stop it. A cancel seen during
    the cleanup is re-raised once the cleanup is done, and the cleanup
    outcome is logged because no envelope reaches the caller. A cleanup
-   that raises something other than a transport fault (for example a JSON
-   parsing error) becomes a `cleanup` warning; it never replaces the deploy
-   failure and never hides a cancel.
+   that raises anything the steps above do not catch becomes a `cleanup`
+   warning; it never replaces the deploy failure and never hides a cancel.
 6. A success renames the VM (or vApp) to the final name through the
    governed vim `Rename_Task` (`POST:/VirtualMachine/{moId}/Rename_Task` or
    `POST:/VirtualApp/{moId}/Rename_Task`, task-polled, 600 s bound). The

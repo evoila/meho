@@ -3432,18 +3432,65 @@ async def test_deploy_from_library_vapp_lookup_fault_names_the_pool(
 
 
 @pytest.mark.asyncio
-async def test_deploy_from_library_cleanup_json_fault_keeps_the_deploy_failure(
+async def test_deploy_from_library_cleanup_delete_json_fault_still_destroys_the_vapp(
     gate: _GateRecorder, deploy_token: str
 ) -> None:
-    """A cleanup step that raises a non-HTTP error → a ``warning``, the deploy failure kept (#3697).
+    """A DELETE whose JSON parsing fails → a ``warning`` for that VM; the vApp is still destroyed.
 
-    The DELETE's JSON parsing fails. The shielded cleanup task fails with it;
-    the drain must catch that and report it, not raise it over the original
-    ``deploy_error`` envelope.
+    The deploy failure is kept, and the drain is not what reports it: the
+    removal step catches the decode failure itself, so the other known
+    object (a reported vApp here) is still removed.
+    """
+    failed = _deployment_result(succeeded=False)
+    failed["resource_id"] = {"type": _VAPP_TYPE, "id": "resgroup-v9"}
+    conn = _RecordingConnector(
+        [failed, [{"vm": "vm-partial"}], json.JSONDecodeError("bad", "", 0)],
+        vmomi={**_NO_VAPPS, **_destroy_vmomi("resgroup-v9")},
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deploy_failed"
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("POST", _DEPLOY_PATH),
+        ("GET", _LIST_VMS_PATH),
+        ("DELETE", "/api/vcenter/vm/vm-partial"),
+    ]
+    assert conn.vmomi_calls[-2][0] == "/VirtualApp/resgroup-v9/Destroy_Task"
+    assert out["issues"][-2:] == [
+        {
+            "category": "cleanup",
+            "severity": "warning",
+            "message": (
+                "could not remove VM vm-partial left by the failed deploy (JSONDecodeError); "
+                "delete it by hand"
+            ),
+        },
+        {
+            "category": "cleanup",
+            "severity": "info",
+            "message": "removed vApp resgroup-v9 and its VMs left by the failed deploy",
+        },
+    ]
+    assert gate.gated_op_ids == [_DEPLOY_OVF_OP, _DELETE_VM_OP, _DESTROY_VAPP_OP]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_vapp_lookup_json_fault_still_deletes_the_vm(
+    gate: _GateRecorder, deploy_token: str
+) -> None:
+    """A vApp lookup whose JSON parsing fails → a ``warning``; the VM is still deleted (#3697).
+
+    The listing found a VM, then the pool read raised ``JSONDecodeError``.
+    The decode failure is handled in the lookup itself, so the delete of the
+    VM already found still runs instead of the drain ending the cleanup.
     """
     conn = _RecordingConnector(
-        [httpx.ReadTimeout(""), [{"vm": "vm-partial"}], json.JSONDecodeError("bad", "", 0)],
-        vmomi=_NO_VAPPS,
+        [httpx.ReadTimeout(""), [{"vm": "vm-partial"}], None],
+        vmomi={"ResourcePool": json.JSONDecodeError("bad", "", 0)},
     )
     out = await vm_deploy_from_library_composite(
         operator=_make_operator(),
@@ -3452,18 +3499,54 @@ async def test_deploy_from_library_cleanup_json_fault_keeps_the_deploy_failure(
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "deploy_error"
-    assert out["issues"] == [
-        {
-            "category": "placement",
-            "severity": "error",
-            "message": "OVF deploy call faulted: transport fault (ReadTimeout)",
-        },
-        {
-            "category": "cleanup",
-            "severity": "warning",
-            "message": "the cleanup failed (JSONDecodeError); check vCenter by hand",
-        },
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("POST", _DEPLOY_PATH),
+        ("GET", _LIST_VMS_PATH),
+        ("DELETE", "/api/vcenter/vm/vm-partial"),
     ]
+    assert [(i["category"], i["severity"]) for i in out["issues"]] == [
+        ("placement", "error"),
+        ("cleanup", "warning"),
+        ("cleanup", "info"),
+    ]
+    assert "JSONDecodeError" in out["issues"][1]["message"]
+    assert _DEPLOY_NAME in out["issues"][1]["message"]
+    assert _RESOURCE_POOL_ID in out["issues"][1]["message"]
+    assert out["issues"][2]["message"] == "removed VM vm-partial left by the failed deploy"
+    assert gate.gated_op_ids == [_DEPLOY_OVF_OP, _DELETE_VM_OP]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_vm_listing_json_fault_still_destroys_the_vapp(
+    gate: _GateRecorder, deploy_token: str
+) -> None:
+    """A VM listing whose JSON parsing fails → a ``warning``; the vApp is still destroyed."""
+    conn = _RecordingConnector(
+        [httpx.ReadTimeout(""), json.JSONDecodeError("bad", "", 0)],
+        vmomi=_vapp_cleanup_vmomi(("resgroup-v9", _DEPLOY_NAME), destroy="resgroup-v9"),
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deploy_error"
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("POST", _DEPLOY_PATH),
+        ("GET", _LIST_VMS_PATH),
+    ]
+    assert [(i["category"], i["severity"]) for i in out["issues"]] == [
+        ("placement", "error"),
+        ("cleanup", "warning"),
+        ("cleanup", "info"),
+    ]
+    assert "JSONDecodeError" in out["issues"][1]["message"]
+    assert _DEPLOY_NAME in out["issues"][1]["message"]
+    assert out["issues"][2]["message"] == (
+        "removed vApp resgroup-v9 and its VMs left by the failed deploy"
+    )
+    assert gate.gated_op_ids == [_DEPLOY_OVF_OP, _DESTROY_VAPP_OP]
 
 
 @pytest.mark.asyncio

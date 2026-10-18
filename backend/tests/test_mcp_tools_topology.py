@@ -48,6 +48,7 @@ from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.db.models import Tenant
 from meho_backplane.mcp.registry import all_tools_for, get_tool
 from meho_backplane.mcp.schemas import INVALID_PARAMS
+from meho_backplane.topology.query import BoundedClosure, ClosureBudget
 from meho_backplane.topology.resolvers import NodeNotFoundError
 from meho_backplane.topology.schemas import (
     TopologyEdge,
@@ -63,11 +64,19 @@ from tests.mcp_test_fixtures import (
     required_settings_env,  # noqa: F401 — pytest-discovered autouse fixture
 )
 
-_DEPENDENTS_PATCH = "meho_backplane.mcp.tools.topology.find_dependents"
-_DEPENDENCIES_PATCH = "meho_backplane.mcp.tools.topology.find_dependencies"
+# Both closure kinds run through one bounded traversal (#3764); the
+# two names keep each test's intent readable.
+_DEPENDENTS_PATCH = "meho_backplane.mcp.tools.topology.bounded_closure"
+_DEPENDENCIES_PATCH = "meho_backplane.mcp.tools.topology.bounded_closure"
 _PATH_PATCH = "meho_backplane.mcp.tools.topology.find_path"
 
 _OTHER_TENANT_ID = UUID("00000000-0000-0000-0000-0000000000b0")
+
+
+def _closure(nodes: list[TopologyNode]) -> AsyncMock:
+    """A ``bounded_closure`` mock that returns *nodes* as a complete closure."""
+    root = nodes[0] if nodes else _node("root", "vm", 0, None)
+    return AsyncMock(return_value=BoundedClosure(root, tuple(nodes), None, 16, ClosureBudget()))
 
 
 def _node(name: str, kind: str, depth: int, via: str | None) -> TopologyNode:
@@ -307,7 +316,7 @@ def test_query_topology_dependents_returns_node_list(
         _node("customer-a-prod-foo", "namespace", 0, None),
         _node("svc-a", "service", 1, "belongs-to"),
     ]
-    mock_dep = AsyncMock(return_value=nodes)
+    mock_dep = _closure(nodes)
     with patch(_DEPENDENTS_PATCH, new=mock_dep):
         response = client.post(
             "/mcp",
@@ -344,7 +353,7 @@ def test_query_topology_dependencies_passes_filters_through(
 ) -> None:
     """kind=dependencies forwards depth / kind_filter / node_kind to T4."""
     client, _op = client_with_operator
-    mock_deps = AsyncMock(return_value=[_node("vm-1", "vm", 0, None)])
+    mock_deps = _closure([_node("vm-1", "vm", 0, None)])
     with patch(_DEPENDENCIES_PATCH, new=mock_deps):
         response = client.post(
             "/mcp",
@@ -366,6 +375,7 @@ def test_query_topology_dependencies_passes_filters_through(
         )
     assert response.json()["result"]["isError"] is False
     assert mock_deps.await_args.kwargs == {
+        "reverse": False,
         "kind": "vm",
         "depth": 4,
         "kind_filter": "runs-on",
@@ -380,7 +390,7 @@ def test_query_topology_closure_forwards_include_stale_false(
 ) -> None:
     """#2538: `include_stale: false` reaches the closure verb as a bool."""
     client, _op = client_with_operator
-    mock_dep = AsyncMock(return_value=[_node("vm-1", "vm", 0, None)])
+    mock_dep = _closure([_node("vm-1", "vm", 0, None)])
     with patch(_DEPENDENTS_PATCH, new=mock_dep):
         response = client.post(
             "/mcp",
@@ -569,7 +579,7 @@ def test_query_topology_dependents_tracked_no_deps_omits_status(
     between untracked (status set) and tracked-empty (status omitted).
     """
     client, _op = client_with_operator
-    mock_dep = AsyncMock(return_value=[_node("ns-prod-foo", "namespace", 0, None)])
+    mock_dep = _closure([_node("ns-prod-foo", "namespace", 0, None)])
     with patch(_DEPENDENTS_PATCH, new=mock_dep):
         response = client.post(
             "/mcp",
@@ -901,7 +911,7 @@ def test_query_topology_closure_rows_carry_class_source_and_freshness(
             last_seen=now - timedelta(days=3),
         ),
     ]
-    mock_dep = AsyncMock(return_value=nodes)
+    mock_dep = _closure(nodes)
     with patch(_DEPENDENTS_PATCH, new=mock_dep):
         payload = _payload(
             _call_query_topology(
@@ -956,7 +966,7 @@ def test_query_topology_stale_root_is_reported_with_filter_off(
         via_edge_kind=None,
         last_seen=None,
     )
-    mock_verb = AsyncMock(return_value=[root])
+    mock_verb = _closure([root])
     target = _DEPENDENTS_PATCH if kind == "dependents" else _DEPENDENCIES_PATCH
     with patch(target, new=mock_verb):
         payload = _payload(
@@ -988,7 +998,7 @@ def test_query_topology_stale_rows_included_says_why_they_are_shown(
         via_edge_kind=None,
         last_seen=None,
     )
-    with patch(_DEPENDENTS_PATCH, new=AsyncMock(return_value=[root])):
+    with patch(_DEPENDENTS_PATCH, new=_closure([root])):
         payload = _payload(_call_query_topology(client, {"kind": "dependents", "target": "ns"}))
     evidence = payload["evidence"]
     assert evidence["stale_rows"] == "included"
@@ -1085,7 +1095,7 @@ def test_query_topology_read_only_role_forbidden(
 ) -> None:
     """read_only is below the operator gate."""
     client, _op = client_with_operator
-    mock_dep = AsyncMock(return_value=[])
+    mock_dep = _closure([])
     with patch(_DEPENDENTS_PATCH, new=mock_dep):
         response = client.post(
             "/mcp",

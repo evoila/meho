@@ -3074,7 +3074,7 @@ class AgentAnnouncement(Base):
       ``(tenant_id, claim_id)`` where ``phase = 'completion'``: a claim
       completes once.
 
-    Archive order (#3748, migration ``0113``):
+    Archive order (#3748, migration ``0114``):
 
     * ``seq`` -- the per-tenant archive sequence number. The publisher
       takes it from the tenant's :class:`AgentAnnouncementSequence` row

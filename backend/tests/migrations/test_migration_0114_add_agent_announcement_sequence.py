@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for Alembic migration ``0113_add_agent_announcement_sequence``.
+"""Tests for Alembic migration ``0114_add_agent_announcement_sequence``.
 
 #3748 adds the per-tenant counter table ``agent_announcement_sequence``,
 the nullable ``agent_announcement.seq`` column and a unique
@@ -27,8 +27,8 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0113"
-_DOWN_REVISION = "0112"
+_REVISION = "0114"
+_DOWN_REVISION = "0113"
 _TABLE = "agent_announcement"
 _COUNTER = "agent_announcement_sequence"
 _INDEX = "agent_announcement_tenant_seq_uq"
@@ -40,7 +40,7 @@ def alembic_cfg(
     tmp_path: Path,
 ) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0113.db"
+    db_path = tmp_path / "migration_0114.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)

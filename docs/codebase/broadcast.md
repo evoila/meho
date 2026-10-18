@@ -593,7 +593,7 @@ PK), `tenant_id` (FK), `principal_sub`, `activity`, `target`, `scope`,
 `work_ref`, `run_id`, `created_at` (the event's `ts`), plus the trusted
 claim columns from migration `0112` (#3736): `claim_id`, `owner_sub`,
 `actor_sub`, `admission`, `idempotency_key`, `stream_entry_id`, plus
-`seq` from migration `0113` (#3748). Indexes:
+`seq` from migration `0114` (#3748). Indexes:
 `(tenant_id, created_at DESC)` (recent backfill + prune) and
 `(tenant_id, work_ref)` (filter). This is the split Kubernetes draws
 between its bounded Events TTL and the durable records it expects
@@ -640,7 +640,7 @@ The archive is the record; the stream is only a wake-up for watchers.
 
 **Commit-order sequence.** `broadcast/archive_sequence.py`. Each tenant
 has one `agent_announcement_sequence` row (`tenant_id`, `last_seq`,
-migration `0113`). The publisher runs `UPDATE ... SET last_seq =
+migration `0114`). The publisher runs `UPDATE ... SET last_seq =
 last_seq + 1 RETURNING last_seq` in the same transaction as the
 announcement INSERT, right before it. The UPDATE locks the counter row
 until commit or rollback, so:

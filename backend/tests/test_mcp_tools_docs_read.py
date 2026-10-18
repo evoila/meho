@@ -401,7 +401,7 @@ def test_read_handle_never_reaches_the_audit_row_or_the_broadcast_feed(
     assert _HANDLE not in row_text
     assert _CURSOR not in row_text
 
-    events = [e for e in captured_broadcast if e.op_id == "read_docs"]
+    events = [e for e in captured_broadcast if e.op_id == "meho.docs.read"]
     assert len(events) == 1
     feed = json.dumps(events[0].payload)
     assert _HANDLE not in feed

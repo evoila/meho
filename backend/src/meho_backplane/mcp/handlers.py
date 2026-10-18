@@ -82,7 +82,7 @@ import json
 import time
 import uuid
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 import jsonschema
 import structlog
@@ -94,6 +94,7 @@ from meho_backplane.broadcast import (
     publish_event,
     redact_payload,
 )
+from meho_backplane.broadcast.events import resolve_op_class
 from meho_backplane.mcp.audit import compute_params_hash, write_mcp_audit_row
 from meho_backplane.mcp.human_only import human_only_remediation
 from meho_backplane.mcp.registry import (
@@ -182,6 +183,10 @@ def _read_mcp_broadcast_detail(raw_params: dict[str, Any]) -> Literal["full"] | 
     if raw is not None:
         _log.info("mcp_broadcast_detail_invalid_meta", value=raw)
     return None
+
+
+#: The op id every ``resources/read`` audit row and broadcast event carries.
+_RESOURCE_READ_OP_ID: Final[str] = "mcp.resource.read"
 
 
 # ---------------------------------------------------------------------------
@@ -346,7 +351,7 @@ async def handle_tools_call(
         defn, handler = entry
         # Request usage (#3734): label the request with the registered tool.
         note_request_route(f"tool:{name}")
-        audit_payload["op_class"] = defn.op_class
+        audit_payload["op_class"] = resolve_op_class(name, defn.op_class)
         broadcast_omit_args = defn.broadcast_omit_args
 
         # RBAC: the tool's required_role gates *invocation*, not just listing.
@@ -506,9 +511,9 @@ async def handle_tools_call(
         # matches credential / audit / read / write suffixes correctly
         # (e.g. ``vault.kv.read`` → ``credential_read`` → aggregate-only
         # redacted payload by default). A handler may bind ``audit_op_id``
-        # to override only the *persisted* row's op_id (see the
-        # strip-and-merge override below); that never touches the
-        # broadcast / ``classify_op`` identity used here.
+        # to rename the call (see the strip-and-merge override below); the
+        # row and the broadcast event both carry that name, but override
+        # rules and ``classify_op`` still match the tool name used here.
         #
         # ``resolver_params`` merges the raw tool ``arguments`` on top
         # of ``audit_payload`` so scope-matched override rules
@@ -551,6 +556,11 @@ async def handle_tools_call(
             and arguments["op_id"]
         ):
             _broadcast_op_id = arguments["op_id"]
+        # One class for the row and the event (resolve_op_class): a plain
+        # tool passes its own class to the resolver and stores what comes
+        # back. ``call_operation`` keeps its ``tool_call`` label on both;
+        # only the redaction detail comes from the inner op above.
+        _wraps_inner_op = _broadcast_op_id != audit_name
         (
             broadcast_op_class,
             broadcast_detail,
@@ -560,7 +570,10 @@ async def handle_tools_call(
             tenant_id=operator.tenant_id,
             raw_params=resolver_params,
             request_override=request_override,
+            op_class_override=None if _wraps_inner_op else audit_payload["op_class"],
         )
+        if not _wraps_inner_op:
+            audit_payload["op_class"] = broadcast_op_class
         # Snapshot the broadcast-visible params BEFORE injecting the
         # audit-only ``broadcast_detail_origin`` /
         # ``broadcast_detail_effective`` keys. The audit row gets the
@@ -599,10 +612,10 @@ async def handle_tools_call(
         # / MCP. ``audit_payload["op_id"]`` is seeded to the bare tool name
         # at dispatch entry, so the ``setdefault`` merge above can never
         # apply it — an explicit override is required. This is the *only*
-        # ``audit_*`` key allowed to overwrite a seeded value; it changes
-        # only the persisted payload's identity, never ``audit_name`` (which
-        # still drives ``classify_op`` broadcast sensitivity and the row's
-        # path, so the read/write/credential taxonomy is unchanged).
+        # ``audit_*`` key allowed to overwrite a seeded value. The row and
+        # the broadcast event both carry it; ``audit_name`` still drives
+        # ``classify_op`` sensitivity and the row's path, so the
+        # read/write/credential taxonomy is unchanged.
         _op_id_override = structlog.contextvars.get_contextvars().get("audit_op_id")
         if isinstance(_op_id_override, str) and _op_id_override:
             audit_payload["op_id"] = _op_id_override
@@ -638,8 +651,8 @@ async def handle_tools_call(
         await _publish_mcp_event(
             audit_id=audit_id,
             operator=operator,
-            op_id=audit_name,
-            op_class=broadcast_op_class,
+            op_id=audit_payload["op_id"] or audit_name,
+            op_class=audit_payload["op_class"],
             detail=broadcast_detail,
             audit_path=f"/mcp/tools/call/{audit_name}",
             status_code=status_code,
@@ -750,6 +763,7 @@ async def handle_resources_read(
     start = time.monotonic()
     audit_uri = uri if isinstance(uri, str) and uri else "<empty>"
     audit_payload: dict[str, Any] = {
+        "op_id": _RESOURCE_READ_OP_ID,
         "uri": audit_uri,
         "op_class": "read",
     }
@@ -846,19 +860,21 @@ async def handle_resources_read(
         # G6.3-T2 (#379): resolve broadcast detail BEFORE the audit
         # row commits. The broadcast op_id is the generic
         # ``mcp.resource.read`` (resource URIs are per-request unique
-        # and would explode the metric cardinality) so the resolver
-        # falls through to ``other`` op_class by default; tenant rules
-        # can still match via ``op_id_pattern="mcp.resource.*"``.
+        # and would explode the metric cardinality). The row's ``read``
+        # class goes to the resolver so the row and the event agree;
+        # tenant rules can still match via ``op_id_pattern="mcp.resource.*"``.
         (
             broadcast_op_class,
             broadcast_detail,
             broadcast_origin,
         ) = await compute_effective_broadcast_detail(
-            op_id="mcp.resource.read",
+            op_id=_RESOURCE_READ_OP_ID,
             tenant_id=operator.tenant_id,
             raw_params=audit_payload,
             request_override=request_override,
+            op_class_override=audit_payload["op_class"],
         )
+        audit_payload["op_class"] = broadcast_op_class
         # Snapshot the broadcast-visible params BEFORE injecting the
         # audit-only ``broadcast_detail_origin`` /
         # ``broadcast_detail_effective`` keys -- same separation of
@@ -889,7 +905,7 @@ async def handle_resources_read(
         await _publish_mcp_event(
             audit_id=audit_id,
             operator=operator,
-            op_id="mcp.resource.read",
+            op_id=_RESOURCE_READ_OP_ID,
             op_class=broadcast_op_class,
             detail=broadcast_detail,
             audit_path=f"/mcp/resources/read/{audit_uri}",
@@ -946,11 +962,11 @@ async def _publish_mcp_event(
 
     ``op_id`` differs from ``audit_path`` deliberately: the audit row
     keeps the per-URI path for forensic queries, while the broadcast
-    event uses the tool-name (tools/call) or a stable
-    ``mcp.resource.read`` constant (resources/read) so
-    :func:`~meho_backplane.broadcast.events.classify_op` matches the
-    sensitivity-class taxonomy correctly without per-URI cardinality
-    blowup on the ``broadcast_events_published_total`` metric.
+    event uses the row's ``op_id`` (tools/call: the tool name, or the
+    name the handler bound in ``audit_op_id``) or a stable
+    ``mcp.resource.read`` constant (resources/read), so there is no
+    per-URI cardinality blowup on the ``broadcast_events_published_total``
+    metric.
 
     As of G6.3-T2 (#379) the *(op_class, detail)* pair is resolved
     upstream by :func:`compute_effective_broadcast_detail`; this helper

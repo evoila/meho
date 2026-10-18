@@ -2522,9 +2522,20 @@ async def vm_create_composite(
     A rollback DELETE that waits for approval saves the rollback as its
     resume state (#4217). Approving it re-runs this composite, which then
     only deletes the VM the first run created and returns the same
-    ``rolled_back`` envelope: no second VM is created.
+    ``rolled_back`` envelope: no second VM is created. An approved rollback
+    DELETE with no saved rollback (a request saved before #4217) is refused
+    before anything runs.
     """
     rollback = _resumed_vm_create_rollback()
+    refusal = _refuse_resume_without_state(
+        composite_op_id=_COMPOSITE_OP_ID_VM_CREATE,
+        write_ops=frozenset({_OP_DELETE_VM}),
+        has_state=rollback is not None,
+        nothing_done="no VM was created",
+        remediation="Nothing ran. Delete the VM named in the approval request by hand.",
+    )
+    if refusal is not None:
+        return refusal
     if rollback is not None:
         return await _roll_back_created_vm(
             connector=connector, target=target, operator=operator, **rollback
@@ -3871,29 +3882,58 @@ def _refuse_deploy_resume(saved: dict[str, Any]) -> OperationResult | None:
     resumed deploy would draw a fresh deploy name. So that re-run stops
     here, before any read or write.
     """
+    return _refuse_resume_without_state(
+        composite_op_id=_COMPOSITE_OP_ID_VM_DEPLOY_FROM_LIBRARY,
+        write_ops=_DEPLOY_WRITE_OPS,
+        has_state=bool(saved),
+        nothing_done="no VM was deployed",
+        remediation=(
+            "Nothing ran. For a rename, power-on or delete, do the step by hand on the "
+            "VM named in the approval request. For the deploy itself, run the operation "
+            "again with a standing grant for its deploy write."
+        ),
+    )
+
+
+def _refuse_resume_without_state(
+    *,
+    composite_op_id: str,
+    write_ops: frozenset[str],
+    has_state: bool,
+    nothing_done: str,
+    remediation: str,
+) -> OperationResult | None:
+    """Refuse the re-run for an approved write in *write_ops* that saved no state (#4217).
+
+    ``None`` on an ordinary dispatch, when the approved write is not in
+    *write_ops*, or when *has_state*. Otherwise the approval request was
+    saved before #4217 and the composite could only run again from the
+    start, which would repeat its main change. So the re-run stops here,
+    before any read or write, with a ``composite_resume_unsupported`` error.
+    """
     resumed = composite_resume_scope_var.get()
-    if resumed is None or resumed[0] not in _DEPLOY_WRITE_OPS or saved:
+    if resumed is None or resumed[0] not in write_ops or has_state:
         return None
     approved_op_id = resumed[0]
-    _log.warning("vmware_deploy_from_library_resume_refused", approved_op_id=approved_op_id)
-    remediation = (
-        "Nothing ran. For a rename, power-on or delete, do the step by hand on the "
-        "VM named in the approval request. For the deploy itself, run the operation "
-        "again with a standing grant for its deploy write."
+    _log.warning(
+        "vmware_composite_resume_refused",
+        composite_op_id=composite_op_id,
+        approved_op_id=approved_op_id,
     )
+    short_name = composite_op_id.removeprefix("vmware.composite.")
     return OperationResult(
         status="error",
-        op_id=_COMPOSITE_OP_ID_VM_DEPLOY_FROM_LIBRARY,
+        op_id=composite_op_id,
         error=(
             f"composite_resume_unsupported: approving the waiting step {approved_op_id!r} "
-            "cannot continue vm.deploy_from_library, because the approval request has "
-            f"no saved state; the operation did not run again and no VM was deployed. "
+            f"cannot continue {short_name}, because the approval request has "
+            f"no saved state; the operation did not run again and {nothing_done}. "
             f"{remediation}"
         ),
         duration_ms=0.0,
         extras={
             "error_code": "composite_resume_unsupported",
-            "composite_op_id": _COMPOSITE_OP_ID_VM_DEPLOY_FROM_LIBRARY,
+            "composite_op_id": composite_op_id,
             "approved_op_id": approved_op_id,
             "remediation": remediation,
         },
@@ -4201,9 +4241,19 @@ async def vm_import_from_library_composite(
     A power-on that waits for approval saves the import's envelope as its
     resume state (#4217): approving it re-runs this composite, which then
     only powers on the imported VM (:func:`_power_on_imported_vm`) and does
-    not import again.
+    not import again. An approved power-on with no saved envelope (a request
+    saved before #4217) is refused before anything runs.
     """
     imported = _resumed_import_envelope()
+    refusal = _refuse_resume_without_state(
+        composite_op_id=_COMPOSITE_OP_ID_VM_IMPORT_FROM_LIBRARY,
+        write_ops=frozenset({_power_vm_op_id("start")}),
+        has_state=imported is not None,
+        nothing_done="nothing was imported",
+        remediation="Nothing ran. Power on the VM named in the approval request by hand.",
+    )
+    if refusal is not None:
+        return refusal
     if imported is not None:
         return await _power_on_imported_vm(connector, target, operator, envelope=imported)
 

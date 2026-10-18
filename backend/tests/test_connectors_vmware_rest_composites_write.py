@@ -661,6 +661,38 @@ async def test_vm_create_resumed_rollback_deletes_and_creates_nothing(
 
 
 @pytest.mark.asyncio
+async def test_vm_create_refuses_to_re_run_for_an_approved_rollback_without_state(
+    gate: _GateRecorder,
+) -> None:
+    """An approved rollback DELETE with no saved rollback stops before any call (#4217).
+
+    Such an approval request was saved before #4217. Running ``vm.create``
+    from the start would create a second VM, so the re-run refuses at once:
+    no read, no gate, no write.
+    """
+    conn = _RecordingConnector({})
+    token = composite_resume_scope_var.set((_DELETE_VM_OP, "deadbeef"))
+    try:
+        out = await vm_create_composite(
+            operator=_make_operator(),
+            target=object(),
+            params={"folder_name": "Prod", "name": "web-02", "guest_os": "UBUNTU_64"},
+            connector=conn,  # type: ignore[arg-type]
+        )
+    finally:
+        composite_resume_scope_var.reset(token)
+    assert isinstance(out, OperationResult)
+    assert out.status == "error"
+    assert out.op_id == "vmware.composite.vm.create"
+    assert out.extras["error_code"] == "composite_resume_unsupported"
+    assert out.extras["approved_op_id"] == _DELETE_VM_OP
+    assert "no VM was created" in (out.error or "")
+    assert conn.calls == []
+    assert conn.vmomi_calls == []
+    assert gate.calls == []
+
+
+@pytest.mark.asyncio
 async def test_vm_create_folder_lookup_empty_returns_rolled_back_no_create(
     gate: _GateRecorder,
 ) -> None:

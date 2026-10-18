@@ -924,3 +924,41 @@ async def test_import_resume_of_a_power_on_only_powers_on(
     assert envelope == {**imported, "powered_on": True}
     assert connector.calls == [("POST", "/api/vcenter/vm/vm-9/power?action=start")]
     assert [call["op_id"] for call in gate_calls] == ["POST:/vcenter/vm/{vm}/power?action=start"]
+
+
+async def test_import_refuses_to_re_run_for_an_approved_power_on_without_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An approved power-on with no saved envelope stops before any call (#4217).
+
+    Such an approval request was saved before #4217. Running the import
+    from the start would import a second VM, so the re-run refuses at once.
+    """
+    from meho_backplane.operations.composite import composite_resume_scope_var
+
+    async def _must_not_run(**_kw: Any) -> Any:
+        raise AssertionError("the refused resume must not resolve or import")
+
+    monkeypatch.setattr(_write, "_resolve_deploy_library_item", _must_not_run)
+    monkeypatch.setattr(_write, "import_ovf_from_source", _must_not_run)
+    gate_calls = _record_gate(monkeypatch, None)
+    connector = _PowerConnector()
+    power_op = "POST:/vcenter/vm/{vm}/power?action=start"
+    token = composite_resume_scope_var.set((power_op, "deadbeef"))
+    try:
+        out = await _write.vm_import_from_library_composite(
+            operator=_Operator(),  # type: ignore[arg-type]
+            target=_Target(),
+            params={"resource_pool": "rp-1", "datastore": "ds-1", "power_on": True},
+            connector=connector,  # type: ignore[arg-type]
+        )
+    finally:
+        composite_resume_scope_var.reset(token)
+    assert isinstance(out, OperationResult)
+    assert out.status == "error"
+    assert out.op_id == "vmware.composite.vm.import_from_library"
+    assert out.extras["error_code"] == "composite_resume_unsupported"
+    assert out.extras["approved_op_id"] == power_op
+    assert "nothing was imported" in (out.error or "")
+    assert connector.calls == []
+    assert gate_calls == []

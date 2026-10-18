@@ -1256,7 +1256,9 @@ mutation (`DELETE:/vcenter/vm/{vm}`) on partial failure. When that
 rollback DELETE waits for approval, it saves the rollback on the approval
 row (#4217); approving it re-runs `vm.create`, which then only deletes the
 VM the first run created (`_resumed_vm_create_rollback`) and returns the
-same `rolled_back` envelope. The other
+same `rolled_back` envelope. An approved rollback DELETE with no saved
+rollback (a request saved before #4217) is refused before anything runs
+(`composite_resume_unsupported`). The other
 write composites prefer "stop and report" semantics over silent
 rollback -- the operator decides whether to manually finish or
 revert. `vm.resize`'s `partial` follows the same rule: a CPU PATCH
@@ -2296,7 +2298,9 @@ content-library byte source in `library_download.py`):
 When it waits for approval, it saves the import's envelope on the approval
 row and is marked `after_main_effect`. Approving it re-runs the composite,
 which then only powers on the imported VM (`_power_on_imported_vm`): no
-library lookup, no second import.
+library lookup, no second import. An approved power-on with no saved
+envelope (a request saved before #4217) is refused before anything runs
+(`composite_resume_unsupported`).
 
 **Version-agnostic (AC5).** Every schema + method is core vim25 (`OvfManager`
 / `HttpNfcLease` predate 9.0), and the engine reads only the pre-9.0

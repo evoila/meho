@@ -20,6 +20,7 @@ import (
 func newReviewCmd() *cobra.Command {
 	var (
 		jsonOut           bool
+		prefer            string
 		backplaneOverride string
 	)
 	cmd := &cobra.Command{
@@ -35,7 +36,10 @@ func newReviewCmd() *cobra.Command {
 			"`meho connector edit-op` before running\n" +
 			"`meho connector enable <connector_id> --confirm`.\n\n" +
 			"--json returns the full machine-readable payload (suitable for\n" +
-			"piping to jq / saving for a review checkpoint).",
+			"piping to jq / saving for a review checkpoint).\n\n" +
+			"If the id matches both a built-in connector and a connector in\n" +
+			"your tenant, the command stops with an error. Pass\n" +
+			"--prefer tenant or --prefer builtin to pick one.",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -43,12 +47,14 @@ func newReviewCmd() *cobra.Command {
 			return runReview(cmd, reviewOptions{
 				ConnectorID:       args[0],
 				JSONOut:           jsonOut,
+				Prefer:            prefer,
 				BackplaneOverride: backplaneOverride,
 			})
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit machine-readable JSON to stdout instead of the human render")
+	cmd.Flags().StringVar(&prefer, "prefer", "", preferFlagUsage)
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to query (defaults to the URL recorded by the most recent `meho login`)")
 	return cmd
@@ -57,15 +63,19 @@ func newReviewCmd() *cobra.Command {
 type reviewOptions struct {
 	ConnectorID       string
 	JSONOut           bool
+	Prefer            string
 	BackplaneOverride string
 }
 
 func runReview(cmd *cobra.Command, opts reviewOptions) error {
+	if err := checkPreferFlag(cmd, opts.Prefer, opts.JSONOut); err != nil {
+		return err
+	}
 	backplaneURL, err := resolveBackplane(opts.BackplaneOverride)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), opts.JSONOut)
 	}
-	result, err := getReview(cmd.Context(), backplaneURL, opts.ConnectorID)
+	result, err := getReview(cmd.Context(), backplaneURL, opts.ConnectorID, opts.Prefer)
 	if err != nil {
 		var he *httpResponseError
 		if errors.As(err, &he) {
@@ -84,17 +94,23 @@ func runReview(cmd *cobra.Command, opts reviewOptions) error {
 // 401-retry. The route declares `response_model=ConnectorReviewPayload`
 // so JSON200 carries the typed envelope; non-2xx surfaces as
 // *httpResponseError for the caller to route through renderHTTPStatus.
-func getReview(ctx context.Context, backplaneURL, connectorID string) (*api.ConnectorReviewPayload, error) {
+// A non-empty prefer ("tenant" or "builtin") is sent as ?prefer=.
+func getReview(ctx context.Context, backplaneURL, connectorID, prefer string) (*api.ConnectorReviewPayload, error) {
 	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err
+	}
+	params := &api.GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams{}
+	if prefer != "" {
+		p := api.GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer(prefer)
+		params.Prefer = &p
 	}
 	resp, err := retryOn401(ctx, authed,
 		func(ctx context.Context) (*api.GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetResponse, error) {
 			return authed.GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetWithResponse(
 				ctx,
 				connectorID,
-				&api.GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams{},
+				params,
 			)
 		},
 		func(r *api.GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetResponse) int {

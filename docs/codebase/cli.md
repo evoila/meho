@@ -241,13 +241,14 @@ cli/
     │   │   ├── ingest.go         # `meho connector ingest` (POST /api/v1/connectors/ingest). 202-aware since G0.22-T4 #1609: polls GET /ingest/jobs/{job_id} to a terminal status by default, `--no-wait` exits 0 with the job handle; 200 stays the legacy sync render. Owns the shared pollIngestJob loop + renderIngestTerminal lifecycle switch (succeeded/failed/degraded/undocumented) that ingest_status.go reuses. `--tenant-id` (#2209) selects the write scope: omitted leaves the body's tenant_id unset (built-in/global, the #2085 omit-equals-global contract); the operator's own tenant UUID makes the ingest tenant-curated.
     │   │   ├── ingest_status.go  # `meho connector ingest-status <job-id> [--wait] [--json]` (#1621) — post-`--no-wait` poll/inspect verb. Snapshot by default (running → identity+lifecycle echo, exit 0), `--wait` polls to terminal; terminal render + poll loop reuse ingest.go's renderIngestTerminal / pollIngestJob (no duplicated switch). Closes the PR #1618 loop the `--no-wait` hint now names.
     │   │   ├── list.go           # `meho connector list` (GET  /api/v1/connectors). List endpoint returns dict[str, list[dict]] (no response_model on the backend; per-row UUID serialisation), so a package-private listEntry decode lives here.
-    │   │   ├── review.go         # `meho connector review <id>` (GET  /api/v1/connectors/{id}/review).
+    │   │   ├── review.go         # `meho connector review <id>` (GET  /api/v1/connectors/{id}/review). `--prefer tenant|builtin` (#3799) is sent as `?prefer=` to pick a row when the id matches both a built-in and a tenant connector; omitted, the 409 stays the default.
     │   │   ├── edit_group.go     # `meho connector edit-group <id> <key>` (PATCH groups/{key}).
     │   │   ├── edit_op.go        # `meho connector edit-op <id> <op>` (PATCH operations/{op}).
     │   │   ├── enable.go         # `meho connector enable <id>`  + shared transition factory + `disable`.
-    │   │   ├── enable_reads.go   # `meho connector enable-reads <id>` (POST /enable-reads, G0.25-T7 #1749) — bulk-enable GET/HEAD ingested ops; writes stay default-deny. Renders the ops_enabled count; idempotent.
+    │   │   ├── enable_reads.go   # `meho connector enable-reads <id>` (POST /enable-reads, G0.25-T7 #1749) — bulk-enable GET/HEAD ingested ops; writes stay default-deny. Renders the ops_enabled count; idempotent. Takes the same `--prefer tenant|builtin` flag as `review` (#3799).
     │   │   ├── disable.go        # `meho connector disable <id>` (constructor only; logic in enable.go).
-    │   │   └── connector_test.go # pure-function + typed-client mocked HTTP contract tests.
+    │   │   ├── connector_test.go # pure-function + typed-client mocked HTTP contract tests.
+    │   │   └── prefer_test.go    # `--prefer` on review / enable-reads + the 409 connector_scope_ambiguous CLI error (#3799).
     │   ├── operation/         # G0.6-T13 #481 — `meho operation …` meta-tool surface.
     │   │   ├── operation.go      # NewRootCmd + operationsAPI seam + apiResponseError sentinel + loadParamsFlag (G0.12-T2 #1260).
     │   │   ├── groups.go         # `meho operation groups` (GET /api/v1/operations/groups) — typed via api.GetGroupsApiV1OperationsGroupsGetParams.

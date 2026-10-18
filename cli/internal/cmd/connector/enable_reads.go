@@ -20,7 +20,7 @@ import (
 //
 // CLI shape:
 //
-//	meho connector enable-reads <connector_id> [--confirm] [--json] [--backplane <url>]
+//	meho connector enable-reads <connector_id> [--confirm] [--prefer tenant|builtin] [--json] [--backplane <url>]
 //
 // Hits POST /api/v1/connectors/<connector_id>/enable-reads, which
 // flips is_enabled=true on every ingested op whose HTTP method is GET
@@ -37,6 +37,7 @@ func newEnableReadsCmd() *cobra.Command {
 	var (
 		confirmFlag       bool
 		jsonOut           bool
+		prefer            string
 		backplaneOverride string
 	)
 	cmd := &cobra.Command{
@@ -51,6 +52,9 @@ func newEnableReadsCmd() *cobra.Command {
 			"Unlike `enable`, this does NOT move any group's review_status — it is a\n" +
 			"per-op flip. The route is idempotent: re-running once the reads are\n" +
 			"enabled flips nothing and reports 0.\n\n" +
+			"If the id matches both a built-in connector and a connector in\n" +
+			"your tenant, the command stops with an error. Pass\n" +
+			"--prefer tenant or --prefer builtin to pick one.\n\n" +
 			"Without --confirm, the verb prompts on stdin for confirmation;\n" +
 			"--confirm skips the prompt for scripted use (CI pipelines, etc.).\n\n" +
 			"Role: tenant_admin.",
@@ -62,6 +66,7 @@ func newEnableReadsCmd() *cobra.Command {
 				ConnectorID:       args[0],
 				Confirm:           confirmFlag,
 				JSONOut:           jsonOut,
+				Prefer:            prefer,
 				BackplaneOverride: backplaneOverride,
 			})
 		},
@@ -70,6 +75,7 @@ func newEnableReadsCmd() *cobra.Command {
 		"skip the interactive confirmation prompt")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit machine-readable JSON to stdout instead of the human summary")
+	cmd.Flags().StringVar(&prefer, "prefer", "", preferFlagUsage)
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to query (defaults to the URL recorded by the most recent `meho login`)")
 	return cmd
@@ -79,6 +85,7 @@ type enableReadsOptions struct {
 	ConnectorID       string
 	Confirm           bool
 	JSONOut           bool
+	Prefer            string
 	BackplaneOverride string
 }
 
@@ -92,6 +99,9 @@ type enableReadsResult struct {
 }
 
 func runEnableReads(cmd *cobra.Command, opts enableReadsOptions) error {
+	if err := checkPreferFlag(cmd, opts.Prefer, opts.JSONOut); err != nil {
+		return err
+	}
 	// Prompt before resolving the backplane so the operator's only
 	// interaction is the confirmation — if they hit 'n', they haven't
 	// made a network call yet.
@@ -110,7 +120,7 @@ func runEnableReads(cmd *cobra.Command, opts enableReadsOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), opts.JSONOut)
 	}
-	opsEnabled, err := postEnableReads(cmd.Context(), backplaneURL, opts.ConnectorID)
+	opsEnabled, err := postEnableReads(cmd.Context(), backplaneURL, opts.ConnectorID, opts.Prefer)
 	if err != nil {
 		var he *httpResponseError
 		if errors.As(err, &he) {
@@ -131,22 +141,29 @@ func runEnableReads(cmd *cobra.Command, opts enableReadsOptions) error {
 // non-2xx surfaces as *httpResponseError for the caller to route
 // through renderHTTPStatus. A 200 with a missing/empty JSON200 body
 // (contract drift) is surfaced as an error so the verb never reports a
-// silent zero count as success.
+// silent zero count as success. A non-empty prefer ("tenant" or
+// "builtin") is sent as ?prefer=.
 func postEnableReads(
 	ctx context.Context,
 	backplaneURL string,
 	connectorID string,
+	prefer string,
 ) (int, error) {
 	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return 0, err
+	}
+	params := &api.EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParams{}
+	if prefer != "" {
+		p := api.EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPrefer(prefer)
+		params.Prefer = &p
 	}
 	resp, rerr := retryOn401(ctx, authed,
 		func(ctx context.Context) (*api.EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostResponse, error) {
 			return authed.EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostWithResponse(
 				ctx,
 				connectorID,
-				&api.EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParams{},
+				params,
 			)
 		},
 		func(r *api.EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostResponse) int {

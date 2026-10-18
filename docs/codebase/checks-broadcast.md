@@ -4,10 +4,13 @@
 
 Every claimed Dashboard rollup edge is published to the tenant broadcast
 feed (`meho:feed:{tenant_id}`) as one `BroadcastEvent` with op-id
-`checks.transition` and op-class `checks`. Feed watchers —
-`meho_broadcast_recent`, `meho_broadcast_watch`, `GET /api/v1/feed`, and
-`/ui/broadcast/stream?op_class=checks` — see check state changes the way
-they already see `approval.*` lifecycle events (#2720).
+`checks.transition` and op-class `checks`. SSE feed readers —
+`GET /api/v1/feed` and `/ui/broadcast/stream?op_class=checks` — see check
+state changes the way they already see `approval.*` lifecycle events
+(#2720). That holds until #3758 moves them. Since #3748 the MCP and REST
+`recent` / `watch` reads (`meho_broadcast_recent`,
+`meho_broadcast_watch`) return agent announcements only, so they do not
+show `checks.*` events.
 
 The module also carries the evaluation-loop watchdog's liveness events
 (#2763): `checks.scheduler_stalled` (the runner's tick loop went quiet

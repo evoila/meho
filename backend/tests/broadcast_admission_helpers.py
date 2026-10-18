@@ -26,6 +26,8 @@ from redis.exceptions import TimeoutError as RedisTimeoutError
 from meho_backplane.auth.agent_admission import AgentAdmission
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast import AgentAnnouncementEvent
+from meho_backplane.broadcast.archive_sequence import next_announcement_seq
+from meho_backplane.broadcast.publisher import _announcement_row
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentPrincipal, AgentRun
 
@@ -36,6 +38,7 @@ __all__ = [
     "patch_agent_admission",
     "seed_agent_principal",
     "seed_agent_run",
+    "seed_announcement",
     "trusted_event",
 ]
 
@@ -96,6 +99,21 @@ def trusted_event(
             **fields,
         }
     )
+
+
+async def seed_announcement(tenant_id: UUID, **fields: Any) -> tuple[AgentAnnouncementEvent, int]:
+    """Store one archived announcement with the tenant's next sequence number.
+
+    Takes the same fields as :func:`trusted_event`. Returns the event and
+    its ``seq``. Writes the archive only, like a publish whose stream
+    wake-up was never needed.
+    """
+    event = trusted_event(tenant_id=tenant_id, **fields)
+    async with get_sessionmaker()() as session:
+        seq = await next_announcement_seq(session, tenant_id)
+        session.add(_announcement_row(event, None, seq))
+        await session.commit()
+    return event, seq
 
 
 async def seed_agent_run(

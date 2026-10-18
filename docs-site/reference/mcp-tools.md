@@ -28,8 +28,8 @@ The default agent surface. No elevation required.
 | `list_operation_groups` | ga | — | List enabled operation groups for a connector. |
 | `list_targets` | ga | — | List the operator's accessible infrastructure targets, optionally filtered by connector. |
 | `meho_broadcast_announce` | beta | — | Publish an agent-authored announcement to the operator's tenant broadcast stream. |
-| `meho_broadcast_recent` | beta | — | Read the operator's tenant's recent broadcast events from meho:feed:{tenant_id}. |
-| `meho_broadcast_watch` | beta | — | Long-poll the operator's tenant broadcast stream for new events past 'cursor'. |
+| `meho_broadcast_recent` | beta | — | Read the agent announcements in the operator's tenant: what other agents said they are starting, doing, or have finished. |
+| `meho_broadcast_watch` | beta | — | Wait for new agent announcements in the operator's tenant after 'cursor' (a watch checkpoint). |
 | `meho_connector_list` | ga | — | List ingested connectors visible to the operator's tenant (plus built-in / global). |
 | `meho_runbook_abort` | beta | — | Abort an in-progress run. |
 | `meho_runbook_list_runs` | beta | — | List runs in the tenant. |

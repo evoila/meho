@@ -20,14 +20,12 @@ Two halves, each pinned directly at its layer:
   write_audit_row) is exercised against a real DB in
   ``test_connectors_argocd_write_e2e.py``.
 
-* HALF 3 (fail-closed audit precondition, S07 #295) -- on the success
-  path a write-class / post-approval dispatch whose DISPATCH audit row
-  cannot commit returns a distinct ``connector_error`` instead of
-  ``status='ok'`` (CLAUDE.md postulate 7 / v0.1-spec §6), with no
-  phantom broadcast. Read-class ``safe`` ops keep the historical
-  fail-open posture. The gate lives in
-  :func:`~meho_backplane.operations.dispatcher._requires_durable_audit`
-  and is honoured by ``audit_and_broadcast_safe``'s ``require_audit`` flag.
+* HALF 3 (fail-closed audit precondition) -- on the success path any
+  dispatch, read or write, whose DISPATCH audit row cannot commit returns
+  ``audit_commit_failed`` instead of ``status='ok'`` (CLAUDE.md postulate 7
+  / v0.1-spec §6): ``execution_outcome='uncertain'``, ``retry=False``, no
+  ``audit_id``, and no phantom broadcast. It is never a ``connector_error``,
+  because the connector call itself worked.
 """
 
 from __future__ import annotations
@@ -61,7 +59,6 @@ from meho_backplane.operations import (
 )
 from meho_backplane.operations._audit import _build_audit_payload
 from meho_backplane.operations._errors import result_connector_error
-from meho_backplane.operations.dispatcher import _requires_durable_audit
 from meho_backplane.redaction import RedactionManifestEntry, RedactionMiddlewareResult
 from meho_backplane.settings import get_settings
 
@@ -426,86 +423,65 @@ def _install_preserved_redaction(
     return raw_payload, [entry.model_dump(mode="json") for entry in manifest], policy_id
 
 
-def test_requires_durable_audit_gates_on_write_class_and_safety_tier() -> None:
-    """The gate is True for write-class OR non-``safe`` ops, False for safe reads."""
-    # write-class op is fail-closed even at the safe tier ...
-    assert _requires_durable_audit(SimpleNamespace(op_id="demo.thing.create", safety_level="safe"))
-    # ... including the credential-write class.
-    assert _requires_durable_audit(SimpleNamespace(op_id="vault.kv.put", safety_level="safe"))
-    # A safe read-class op keeps the historical fail-open posture.
-    assert not _requires_durable_audit(
-        SimpleNamespace(op_id="demo.thing.list", safety_level="safe")
-    )
-    # A read-class op above the safe tier (the post-approval superset) is fail-closed.
-    assert _requires_durable_audit(SimpleNamespace(op_id="demo.thing.list", safety_level="caution"))
-    assert _requires_durable_audit(
-        SimpleNamespace(op_id="demo.thing.get", safety_level="destructive")
-    )
+def _assert_audit_commit_failed(result: Any) -> None:
+    """The handler ran but its row did not commit: uncertain, no receipt, no retry."""
+    assert result.status == "error"
+    assert result.error.startswith("audit_commit_failed:")
+    assert result.extras["error_code"] == "audit_commit_failed"
+    assert result.extras["execution_outcome"] == "uncertain"
+    assert result.extras["retry"] is False
+    assert "Do not run it again" in result.extras["remediation"]
+    # It is not a connector error: the connector call worked.
+    assert "connector_error" not in result.error
+    assert "exception_class" not in result.extras
+    assert result.audit_id is None
+    assert result.delivery is None
 
 
 @pytest.mark.asyncio
-async def test_write_class_dispatch_fails_closed_when_audit_row_cannot_commit(
+@pytest.mark.parametrize(
+    ("op_id", "safety_level"),
+    [
+        ("demo.thing.create", "safe"),  # write class
+        ("demo.thing.list", "safe"),  # safe read: no longer fail-open
+        ("demo.thing.list", "caution"),  # approved-run tier
+    ],
+)
+async def test_completed_dispatch_is_uncertain_when_audit_row_cannot_commit(
+    op_id: str,
+    safety_level: str,
     stub_embedding_service: AsyncMock,
     captured_events: list[BroadcastEvent],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A write-class op whose DISPATCH audit row cannot commit returns connector_error."""
-    await _register_op("demo.thing.create", safety_level="safe", embedding=stub_embedding_service)
+    """A completed handler whose audit row cannot commit never reports ok.
+
+    Reads and writes follow one rule: no committed row, no success. The
+    handler ran exactly once and the caller is told not to run it again.
+    """
+    calls = _configure_recording_handler({"state": "complete"})
+    await _register_op(
+        op_id,
+        safety_level=safety_level,
+        embedding=stub_embedding_service,
+        handler=_module_recording_handler,
+    )
     monkeypatch.setattr(audit_module, "write_audit_row", _raise_audit_commit)
 
     with patch.object(audit_module, "_log", Mock()) as mock_log:
         result = await dispatch(
             operator=_make_operator(),
             connector_id="demo-1.x",
-            op_id="demo.thing.create",
+            op_id=op_id,
             target=_FakeTarget(),
             params={"name": "widget"},
         )
 
-    # AC1: an error OperationResult, not wrap_ok_result.
-    assert result.status != "ok"
-    assert result.status == "error"
-    # AC2: a distinct connector_error code, not a generic ok envelope.
-    assert result.error == "connector_error: AuditCommitError"
-    assert result.extras["error_code"] == "connector_error"
-    assert result.extras["exception_class"] == "AuditCommitError"
-    # A failed write has no committed receipt and cannot claim delivery.
-    assert result.audit_id is None
-    assert result.delivery is None
-    # AC3: no phantom broadcast when the audit commit fails.
+    _assert_audit_commit_failed(result)
+    assert calls == [{"name": "widget"}]
+    # No phantom broadcast when the audit commit fails.
     assert captured_events == []
-    # AC4: the error-level dispatch_audit_failed log line still fires.
-    logged = [call.args[0] for call in mock_log.exception.call_args_list if call.args]
-    assert "dispatch_audit_failed" in logged
-
-
-@pytest.mark.asyncio
-async def test_read_class_dispatch_stays_fail_open_when_audit_row_cannot_commit(
-    stub_embedding_service: AsyncMock,
-    captured_events: list[BroadcastEvent],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A safe read-class op keeps the historical fail-open behaviour (still ok)."""
-    await _register_op("demo.thing.list", safety_level="safe", embedding=stub_embedding_service)
-    monkeypatch.setattr(audit_module, "write_audit_row", _raise_audit_commit)
-
-    with patch.object(audit_module, "_log", Mock()) as mock_log:
-        result = await dispatch(
-            operator=_make_operator(),
-            connector_id="demo-1.x",
-            op_id="demo.thing.list",
-            target=_FakeTarget(),
-            params={},
-        )
-
-    # Fail-open preserved for read-class: the caller still sees ok.
-    assert result.status == "ok", result.error
-    # No committed row means no receipt even though the response itself delivered.
-    assert result.audit_id is None
-    assert result.delivery == "complete"
-    # The broadcast is still skipped when the audit row does not land.
-    assert captured_events == []
-    # The failure is still recorded for the on-call.
+    # The error-level dispatch_audit_failed log line still fires.
     logged = [call.args[0] for call in mock_log.exception.call_args_list if call.args]
     assert "dispatch_audit_failed" in logged
 
@@ -564,6 +540,9 @@ async def test_completed_handler_reducer_failure_keeps_committed_audit_receipt(
     assert result.handle is None
     assert result.delivery == "unavailable"
     assert result.audit_id is not None
+    # Completed with a committed row: still ok, and the caller must not retry.
+    assert result.extras["retry"] is False
+    assert "error_code" not in result.extras
     assert "raw-delivery-secret" not in str(result)
     assert "private diagnostic" not in str(result)
     assert calls == [{"request": "once"}]
@@ -613,10 +592,7 @@ async def test_completed_write_reducer_failure_fails_closed_when_audit_cannot_co
     finally:
         set_default_reducer(PassThroughReducer())
 
-    assert result.status == "error"
-    assert result.error == "connector_error: AuditCommitError"
-    assert result.audit_id is None
-    assert result.delivery is None
+    _assert_audit_commit_failed(result)
     assert "raw-delivery-secret" not in str(result)
     assert "private diagnostic" not in str(result)
     assert calls == [{}]
@@ -624,12 +600,12 @@ async def test_completed_write_reducer_failure_fails_closed_when_audit_cannot_co
 
 
 @pytest.mark.asyncio
-async def test_completed_safe_read_reducer_failure_stays_ok_without_audit_receipt(
+async def test_completed_safe_read_reducer_failure_is_uncertain_without_audit_receipt(
     stub_embedding_service: AsyncMock,
     captured_events: list[BroadcastEvent],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The historical safe-read audit fail-open rule also covers shaping failure."""
+    """A safe read with failed shaping and no committed row is not ok either."""
     raw_payload = {"credential": "raw-delivery-secret"}
     _install_preserved_redaction(monkeypatch, raw_payload=raw_payload)
     calls = _configure_recording_handler(raw_payload)
@@ -653,10 +629,7 @@ async def test_completed_safe_read_reducer_failure_stays_ok_without_audit_receip
     finally:
         set_default_reducer(PassThroughReducer())
 
-    assert result.status == "ok"
-    assert result.error is None
-    assert result.audit_id is None
-    assert result.delivery == "unavailable"
+    _assert_audit_commit_failed(result)
     assert "raw-delivery-secret" not in str(result)
     assert "private diagnostic" not in str(result)
     assert calls == [{}]

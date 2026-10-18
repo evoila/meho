@@ -609,10 +609,35 @@ builders in `connectors/vmware_rest/tagging_delete_preview.py` are
 registered under every op_id spelling (`{categoryId}` / `{category_id}`,
 `{tagId}` / `{tag_id}`, with and without `/api`), because the vendor spec
 and an appliance-served spec spell the path parameter differently.
+A stored row can also spell a tag detach without the path parameter
+(`POST /api/cis/tagging/tag-association?action=detach`, the op_id the
+issue observed on a live connector); that spelling is registered too, and
+the builder takes the tag id from the request body.
+
+The builders follow three rules, because a detach request names tag ids
+in its body and the preview reads run before anyone approves:
+
+- Every id that enters a read path is escaped as one path segment, the
+  same way the dispatcher renders the write itself. A `..` traversal
+  segment, plain or percent-encoded, makes the builder raise, so the
+  removal is refused before it waits for approval and the refusal names
+  the reason.
+- Child lists are complete. The block carries `children_count`, the
+  exact number. Only the per-child detail reads (tag name, attached
+  objects) stop at 50 children; a child past that cap is listed by id
+  with `detail_omitted: true`.
+- A tag's attached-object list stops at 50 entries, next to the exact
+  `attached_object_count`; a cut list carries `attached_objects_omitted`.
+  When that list is the children of a tag delete, the block also carries
+  `children_omitted` and `children_full_list_op`, the read-only op that
+  lists every attached object.
+
 `test_connectors_vmware_rest_tagging_delete_dispatch.py` proves the
 dispatch contract: refusal without a bound preview, the park with the
-blast radius, a second operator's approval running the delete once, and a
-service account's live grant never running a detach.
+blast radius, a second operator's approval running the delete once, a
+service account's live grant never running a detach, the escaping and
+traversal refusal for body-supplied ids, and the complete lists above the
+detail cap.
 
 T2 owns the rest of the ORM columns: `tenant_id`, `source_kind`
 (always `'ingested'`), `product`, `version`, `impl_id`, `embedding`,

@@ -3043,7 +3043,7 @@ class AgentAnnouncement(Base):
       filter, mirroring :class:`AgentRun`'s
       ``agent_run_tenant_work_ref_idx``.
 
-    Trusted claim columns (#3736, migration ``0108``). All nullable; a
+    Trusted claim columns (#3736, migration ``0112``). All nullable; a
     row written before trusted admission keeps NULL in all six and is
     history only, never an active claim:
 

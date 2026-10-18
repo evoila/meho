@@ -3,8 +3,8 @@
 
 """Add trusted claim columns to ``agent_announcement`` (#3736).
 
-Revision ID: 0108
-Revises: 0107
+Revision ID: 0112
+Revises: 0111
 Create Date: 2026-10-16
 
 Only a trusted agent may now publish an announcement, and each new
@@ -37,8 +37,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0108"
-down_revision: str | None = "0107"
+revision: str = "0112"
+down_revision: str | None = "0111"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

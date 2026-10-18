@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for Alembic migration ``0108_add_agent_announcement_claims``.
+"""Tests for Alembic migration ``0112_add_agent_announcement_claims``.
 
 #3736 adds six nullable trusted-claim columns to ``agent_announcement``
 and three partial unique indexes. The tests check that ``upgrade`` adds
@@ -27,8 +27,8 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0108"
-_DOWN_REVISION = "0107"
+_REVISION = "0112"
+_DOWN_REVISION = "0111"
 _TABLE = "agent_announcement"
 _COLUMNS = {
     "claim_id",
@@ -51,7 +51,7 @@ def alembic_cfg(
     tmp_path: Path,
 ) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0108.db"
+    db_path = tmp_path / "migration_0112.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)

@@ -630,6 +630,28 @@ Helm knobs: `broadcastAnnouncement.{retentionDays,pruneIntervalSeconds,pruneEnab
 `broadcast_retention_hours` (the *stream* read-window heuristic, a
 different substrate).
 
+**When it runs.** The interval (`BROADCAST_ANNOUNCEMENT_PRUNE_INTERVAL_SECONDS`, default 7 days) counts
+from the **last recorded run**, not from pod start. So a pod restart (an
+update, a crash, a node drain) does not start the interval again:
+
+- After a pod starts, the prune waits one minute, so it does not run in
+  the middle of startup.
+- Then it reads the time of its newest `broadcast.announcement.prune` audit row within the
+  last interval. A row counts only if it has the system tenant id,
+  `method='INTERNAL'`, `operator_sub='system:broadcast-announcement-retention'` and that path. Every run
+  writes this row, also when it deleted 0 rows.
+- If there is no such row, it runs at once. Otherwise it waits only for
+  the rest of the interval. After that it runs once per interval.
+- A last-run time in the future (a pod with a fast clock wrote it) counts
+  as "due now". If the read fails, it logs `broadcast_announcement_retention_last_run_read_failed`
+  and runs at once. The wait is never longer than one interval.
+- Each start logs `broadcast_announcement_retention_scheduled` with `last_run_at` and
+  `next_run_in_seconds`, so you can check the schedule after a restart.
+- With retention days set to `0` no row is written, so the no-op
+  heartbeat runs about one minute after each start.
+
+The shared steps live in `backend/src/meho_backplane/loop_schedule.py`.
+
 ## Archive order and cursors (#3748)
 
 The archive is the record; the stream is only a wake-up for watchers.

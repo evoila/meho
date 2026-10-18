@@ -221,6 +221,22 @@ async def read_result_window(
 
 #: How many top-level field names a paging refusal lists as ``select`` hints.
 _SELECT_HINT_FIELDS = 5
+#: Largest JSON-encoded size of one listed field name. Field names come from
+#: the stored rows (vendor data), so a refusal must not copy a huge name into
+#: its own message; names over this budget are left out of the list.
+_SELECT_HINT_NAME_BYTES = 64
+
+
+def _select_hint_names(row: dict[str, Any]) -> list[str]:
+    """The first few top-level field names of *row* that fit the name budget."""
+    names: list[str] = []
+    for name in row:
+        if len(msgspec.json.encode(name)) > _SELECT_HINT_NAME_BYTES:
+            continue
+        names.append(name)
+        if len(names) == _SELECT_HINT_FIELDS:
+            break
+    return names
 
 
 def _paging_remediation(rows: list[Any], offset: int, max_bytes: int) -> str:
@@ -243,7 +259,6 @@ def _paging_remediation(rows: list[Any], offset: int, max_bytes: int) -> str:
             break
         fit += 1
     first = rows[0] if rows else None
-    fields = list(first)[:_SELECT_HINT_FIELDS] if isinstance(first, dict) else []
     nested = isinstance(first, dict) and any(
         isinstance(value, dict | list) for value in first.values()
     )
@@ -259,11 +274,14 @@ def _paging_remediation(rows: list[Any], offset: int, max_bytes: int) -> str:
             f"The rows in this window are {shape}: the row at `offset` {offset} alone "
             f"is {sizes[0] if sizes else 0} bytes, so no `limit` fits."
         )
-    if fields:
+    if isinstance(first, dict):
         hint += (
-            " To get fewer fields per row, run a query with `select` set to some "
-            f"top-level fields (this handle has: {', '.join(fields)})."
+            " To get fewer fields per row, run a query with `select` set to some top-level fields"
         )
+        names = _select_hint_names(first)
+        if names:
+            hint += f" (this handle has: {', '.join(names)})"
+        hint += "."
     return hint
 
 

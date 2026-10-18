@@ -112,7 +112,9 @@ shared core:
   Kubernetes-style object per row) can hit this on the default page. So
   the message (#3704) gives the row size, the largest `limit` that fits from
   the current `offset`, and the row's top-level fields, which a query with
-  `select` can return instead of whole rows. On REST the refusal is a
+  `select` can return instead of whole rows. Field names are vendor data,
+  so the list holds at most five names and leaves out any name over a
+  small byte budget; the refusal itself stays small. On REST the refusal is a
   `422` whose `detail` is an object (`reason`, `message`), not the
   validation-error list. The CLI reads that body itself instead of using
   the generated parser, so the operator sees the message.

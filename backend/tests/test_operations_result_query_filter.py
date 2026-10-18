@@ -420,6 +420,41 @@ async def test_paging_window_over_byte_cap_raises(monkeypatch: pytest.MonkeyPatc
     assert "filter" not in msg.lower()
 
 
+async def test_paging_refusal_leaves_out_huge_field_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A field name larger than the name budget never reaches the message.
+
+    Field names are vendor data. One 3 MiB name must not turn the refusal
+    itself into a multi-MB body that bypasses the response size check. The
+    short names are still listed and the ``select`` workaround stays.
+    """
+    huge = "k" * (3 * 1024 * 1024)
+    rows = [{"id": 1, huge: "v", "blob": "x" * 5000}]
+    _install(monkeypatch, _store(rows), _stub_settings(out_bytes=2048))
+    with pytest.raises(rq.ResultQueryOutputTooLargeError) as exc:
+        await rq.read_result_window(_operator(), uuid.uuid4(), offset=0, limit=50)
+    msg = str(exc.value)
+    assert huge not in msg
+    assert len(msg.encode()) < 1024
+    assert "run a query with `select`" in msg
+    assert "this handle has: id, blob" in msg
+
+
+async def test_paging_refusal_keeps_select_hint_without_fitting_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When no field name fits the budget, the workaround text still stands."""
+    rows = [{"k" * 100: "x" * 5000, "j" * 100: 1}]
+    _install(monkeypatch, _store(rows), _stub_settings(out_bytes=2048))
+    with pytest.raises(rq.ResultQueryOutputTooLargeError) as exc:
+        await rq.read_result_window(_operator(), uuid.uuid4(), offset=0, limit=50)
+    msg = str(exc.value)
+    assert "run a query with `select`" in msg
+    assert "this handle has" not in msg
+    assert len(msg.encode()) < 1024
+
+
 async def test_paging_window_in_budget_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
     """An in-budget window is returned verbatim — the byte check is transparent."""
     rows = _sample_rows(10)

@@ -132,7 +132,7 @@ gets, and which connectors it may use. You pass it with `--toolset`.
 
 | Field | Type | If you leave it out | If it is an empty list `[]` |
 |---|---|---|---|
-| `meta_tools` | list of tool names | The agent gets every tool marked "yes" in the "In the default set" column below. | The agent gets **no** tools. |
+| `meta_tools` | list of tool names | The agent gets every tool marked "yes" in the "In the default set" column below. | The agent gets **no** tools from the table below. It still gets `invoke_agent` (see the note under the table). |
 | `connectors` | list of connector ids, for example `k8s-1.x` | No connector limit. The agent may use any connector in your tenant. Grants and approvals still apply. | The agent may use **no** connector. Every `call_operation` is refused. |
 
 More rules:
@@ -151,7 +151,7 @@ More rules:
 
 ### The tool names
 
-These are all the names you can put in `meta_tools`:
+These are the names you can put in `meta_tools`:
 
 | Tool | What the agent can do with it | In the default set |
 |---|---|---|
@@ -172,6 +172,13 @@ These are all the names you can put in `meta_tools`:
 
 The last four return text that people in your tenant stored. That is
 why the agent only gets them when you name them.
+
+!!! note "One more tool: `invoke_agent`"
+
+    Every hosted run also gets the `invoke_agent` tool. With it, the
+    agent can start another agent definition in your tenant. The
+    toolset does not turn this tool on or off, so it is not in the table
+    above. Putting `invoke_agent` in `meta_tools` does nothing.
 
 ### Tools a hosted agent does not have
 
@@ -202,7 +209,7 @@ grants, in Step 5.
 !!! note "Definitions from older versions"
 
     A definition stored with **no** toolset at all (not even `{}`) gets
-    only two tools: `list_operation_groups` and `call_operation`. New
+    only two tools: `list_operation_groups_tool` and `call_operation_tool`. New
     definitions always get `{}` by default. To move an old definition to
     the full set, run `meho agent edit <name> --toolset '{}'`.
 
@@ -226,7 +233,7 @@ The flags:
 | `--model-tier` | yes | `standard`, `fast`, or `deep`. Use `standard` if you are not sure. In this version MEHO stores the tier with the definition and with each run, but every run uses the model your deployment sets as its default. |
 | `--turn-budget` | yes | The most model turns one run may take, from 1 to 1000. One turn is one request to the model. When a run reaches the limit, it stops and fails with `turn budget exhausted`. |
 | `--system-prompt` | yes | The standing rules from Step 2. |
-| `--toolset` | no | The JSON from Step 3. Write it inline, as `@<file>`, or as `@-` to read it from stdin. Default: `{}`. |
+| `--toolset` | no | The JSON from Step 3. Write it inline, as `@<file>`, or as `@-` to read it from stdin (for example from a pipe). Default: `{}`. |
 | `--disabled` | no | Create the definition switched off. Nobody can run it until you switch it on. |
 
 Check the result:
@@ -277,10 +284,12 @@ when the agent runs **as itself**:
   your behalf. **Your** permissions apply, not the agent's grants. The
   audit rows show your sub.
 
-For a run you start by hand, the toolset from Step 3 is what keeps the
-agent narrow. The safety-level table above still applies: the agent
-cannot run a `caution` operation without a second person's approval,
-and it cannot run a `dangerous` one at all.
+The safety-level table above and the grants apply only when the agent
+acts as itself. In a run you start by hand, MEHO checks each call the
+same way it checks a call you make yourself. See
+[Approvals and break-glass](approvals-and-break-glass.md) for which
+calls wait for a second person. For a run you start by hand, the
+toolset from Step 3 is what keeps the agent narrow.
 
 ### How a grant works
 
@@ -400,12 +409,12 @@ meho agent run-status <run-id>
 
 `run-status` shows the `status`, the number of `turns` used, and,
 when the run is done, the `output` or the `error`. The status is one
-of: `pending`, `running`, `awaiting_approval`, `succeeded`, `failed`,
-`cancelled`.
+of: `pending`, `running`, `succeeded`, `failed`, `cancelled`.
 
-`awaiting_approval` means the agent called an operation that needs a
-second person's approval. The run waits. Approve or reject it with
-`meho approvals list` and `meho approvals approve <id>` (see
+Sometimes the agent calls an operation that needs a second person's
+approval. The run then waits, and `run-status` still shows `running`.
+If a run seems to stop moving, check `meho approvals list`. Approve or
+reject the request with `meho approvals approve <id>` (see
 [Approvals and break-glass](approvals-and-break-glass.md)). After about
 30 minutes with no decision, the agent is told that no decision came.
 

@@ -124,7 +124,11 @@ block:
   in `(depth, name, id)` order. `limits_hit` says which limit, for
   example `hop_limit` (more nodes exist past `depth`).
 - `state: unavailable` — no nodes can be read, for example because the
-  walk ran out of time.
+  walk ran out of time. If even the lookup of the start node ran out of
+  time, the answer has no `root` block.
+
+The whole walk reads one state of the graph, so a refresh that lands
+while the walk runs does not mix into the answer.
 
 Do not read an `incomplete` or `unavailable` answer as everything that
 is affected. `guidance` says how to narrow the query. A large answer

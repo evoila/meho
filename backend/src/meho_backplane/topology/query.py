@@ -147,11 +147,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import GraphNode
 from meho_backplane.topology.evidence import relation_class_kind_filter
 from meho_backplane.topology.resolvers import (
     AmbiguousNodeError,
     NodeNotFoundError,
+    node_identity_statement,
+    pick_unique_node,
     resolve_node,
 )
 from meho_backplane.topology.schemas import (
@@ -494,17 +495,39 @@ _QUERY_CANCELED_SQLSTATE: Final[str] = "57014"
 # timeout ends with the transaction (PG 16 manual §9.28.1).
 _SET_STATEMENT_TIMEOUT_SQL = text("SELECT set_config('statement_timeout', :timeout_ms, true)")
 
+# The whole bounded walk runs in one read-only transaction on one
+# snapshot (``REPEATABLE READ``, PG 16 manual §13.2.2), so the root
+# lookup and every hop see the same graph. Without it a refresh between
+# two hops could join nodes from two graph states into a chain that never
+# existed. ``SET TRANSACTION`` must be the first statement of the
+# transaction (PG 16 manual, SET TRANSACTION).
+_ONE_SNAPSHOT_SQL = text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+
 # The bounded walk (#3764) runs one statement per hop instead of the
 # recursive CTE above, so the limits bound the database work itself and
 # not only the rows sent to Python. A hop statement expands only the
 # nodes kept at the previous hop (``:frontier``), skips every node already
 # in the answer (``:visited``), and returns at most ``:row_limit`` rows in
-# ``(name, id)`` order. ``:bytes_before`` carries the running byte total
-# into the hop, so the byte budget also cuts inside a hop: one row past
-# the budget comes back, with its properties left out, and shows that the
-# byte limit applied. The work per hop is the kept frontier times its
-# fan-out, and the walk stops asking as soon as a limit is reached. A
-# node reached through several parents in one hop keeps the parent and
+# ``(name, id)`` order.
+#
+# The work inside one hop is bounded too. ``reached`` is every edge out
+# of the frontier that passes the filters, with the node's id and name
+# only. ``picked`` groups those rows by node and keeps the first
+# ``:row_limit`` nodes in ``(name, id)`` order: the database sorts ids and
+# names, never properties, and a top-N sort keeps only ``:row_limit``
+# rows in memory. Only then does ``sized`` load the kept nodes' properties
+# and the edge each was reached by, so a very wide hop costs one pass
+# over its edges plus ``:row_limit`` property reads. ``loaded`` is
+# ``MATERIALIZED`` (at most ``:row_limit`` rows) so each kept node's
+# properties are read once, as text; the size and the returned value both
+# come from that text instead of reading the stored value again. ``reached`` is
+# ``NOT MATERIALIZED`` so the database never stores the whole hop as a
+# temporary result; it is read again only for the kept nodes.
+#
+# ``:bytes_before`` carries the running byte total into the hop, so the
+# byte budget also cuts inside a hop: one row past the budget comes back,
+# with its properties left out, and shows that the byte limit applied.
+# A node reached through several parents in one hop keeps the parent and
 # edge with the smallest ids, the same choice the recursive CTE makes.
 #
 # ``row_bytes`` is the stored size of the node's kind, name, scope and
@@ -535,23 +558,14 @@ _CLOSURE_ANCHOR_SQL = text(
 
 _CLOSURE_STEP_SQL_REVERSE = text(
     """
-    WITH step AS (
-        SELECT DISTINCT ON (n.id)
-            n.id            AS id,
-            n.kind          AS kind,
-            n.name          AS name,
-            n.source        AS source,
-            n.source_scope  AS source_scope,
-            n.properties    AS properties,
-            n.last_seen     AS last_seen,
-            e.kind          AS via_edge_kind,
-            e.to_node_id    AS parent_node_id,
-            e.id            AS via_edge_id,
-            e.source        AS via_edge_source,
-            e.last_seen     AS via_edge_last_seen,
-            octet_length(n.kind) + octet_length(n.name)
-                + COALESCE(octet_length(n.source_scope), 0)
-                + COALESCE(octet_length(CAST(n.properties AS text)), 0) AS row_bytes
+    WITH reached AS NOT MATERIALIZED (
+        SELECT n.id            AS id,
+               n.name          AS name,
+               e.kind          AS via_edge_kind,
+               e.to_node_id    AS parent_node_id,
+               e.id            AS via_edge_id,
+               e.source        AS via_edge_source,
+               e.last_seen     AS via_edge_last_seen
         FROM graph_edge e
         JOIN graph_node n ON n.id = e.from_node_id
         WHERE e.to_node_id = ANY(CAST(:frontier AS uuid[]))
@@ -573,25 +587,53 @@ _CLOSURE_STEP_SQL_REVERSE = text(
               CAST(:include_stale AS boolean)
               OR (n.last_seen IS NOT NULL AND e.last_seen IS NOT NULL)
           )
-        ORDER BY n.id, e.to_node_id, e.id
+    ),
+    picked AS (
+        SELECT id, name
+        FROM reached
+        GROUP BY id, name
+        ORDER BY name, id
+        LIMIT :row_limit
+    ),
+    via AS (
+        SELECT DISTINCT ON (id)
+               id, via_edge_kind, parent_node_id, via_edge_id, via_edge_source, via_edge_last_seen
+        FROM reached
+        WHERE id IN (SELECT id FROM picked)
+        ORDER BY id, parent_node_id, via_edge_id
+    ),
+    loaded AS MATERIALIZED (
+        SELECT n.id, n.kind, n.name, n.source, n.source_scope, n.last_seen,
+               CAST(n.properties AS text) AS properties_text,
+               via.via_edge_kind, via.parent_node_id, via.via_edge_id,
+               via.via_edge_source, via.via_edge_last_seen
+        FROM picked
+        JOIN graph_node n ON n.id = picked.id
+        JOIN via ON via.id = picked.id
     ),
     sized AS (
-        SELECT step.*,
+        SELECT loaded.*,
+               octet_length(kind) + octet_length(name)
+                   + COALESCE(octet_length(source_scope), 0)
+                   + COALESCE(octet_length(properties_text), 0) AS row_bytes
+        FROM loaded
+    ),
+    running AS (
+        SELECT sized.*,
                CAST(:bytes_before AS bigint)
                    + SUM(row_bytes) OVER (ORDER BY name, id) AS cumulative_bytes
-        FROM step
+        FROM sized
     )
     SELECT id, kind, name, source, source_scope,
-           CASE WHEN cumulative_bytes <= CAST(:byte_budget AS bigint) THEN properties END
-               AS properties,
+           CASE WHEN cumulative_bytes <= CAST(:byte_budget AS bigint)
+                THEN CAST(properties_text AS jsonb) END AS properties,
            last_seen,
            CAST(:depth AS integer) AS depth,
            via_edge_kind, parent_node_id, via_edge_id, via_edge_source,
            via_edge_last_seen, cumulative_bytes
-    FROM sized
+    FROM running
     WHERE cumulative_bytes - row_bytes <= CAST(:byte_budget AS bigint)
     ORDER BY name, id
-    LIMIT :row_limit
     """
 )
 
@@ -599,23 +641,14 @@ _CLOSURE_STEP_SQL_REVERSE = text(
 # join columns and the parent column differ.
 _CLOSURE_STEP_SQL_FORWARD = text(
     """
-    WITH step AS (
-        SELECT DISTINCT ON (n.id)
-            n.id            AS id,
-            n.kind          AS kind,
-            n.name          AS name,
-            n.source        AS source,
-            n.source_scope  AS source_scope,
-            n.properties    AS properties,
-            n.last_seen     AS last_seen,
-            e.kind          AS via_edge_kind,
-            e.from_node_id  AS parent_node_id,
-            e.id            AS via_edge_id,
-            e.source        AS via_edge_source,
-            e.last_seen     AS via_edge_last_seen,
-            octet_length(n.kind) + octet_length(n.name)
-                + COALESCE(octet_length(n.source_scope), 0)
-                + COALESCE(octet_length(CAST(n.properties AS text)), 0) AS row_bytes
+    WITH reached AS NOT MATERIALIZED (
+        SELECT n.id            AS id,
+               n.name          AS name,
+               e.kind          AS via_edge_kind,
+               e.from_node_id  AS parent_node_id,
+               e.id            AS via_edge_id,
+               e.source        AS via_edge_source,
+               e.last_seen     AS via_edge_last_seen
         FROM graph_edge e
         JOIN graph_node n ON n.id = e.to_node_id
         WHERE e.from_node_id = ANY(CAST(:frontier AS uuid[]))
@@ -637,25 +670,53 @@ _CLOSURE_STEP_SQL_FORWARD = text(
               CAST(:include_stale AS boolean)
               OR (n.last_seen IS NOT NULL AND e.last_seen IS NOT NULL)
           )
-        ORDER BY n.id, e.from_node_id, e.id
+    ),
+    picked AS (
+        SELECT id, name
+        FROM reached
+        GROUP BY id, name
+        ORDER BY name, id
+        LIMIT :row_limit
+    ),
+    via AS (
+        SELECT DISTINCT ON (id)
+               id, via_edge_kind, parent_node_id, via_edge_id, via_edge_source, via_edge_last_seen
+        FROM reached
+        WHERE id IN (SELECT id FROM picked)
+        ORDER BY id, parent_node_id, via_edge_id
+    ),
+    loaded AS MATERIALIZED (
+        SELECT n.id, n.kind, n.name, n.source, n.source_scope, n.last_seen,
+               CAST(n.properties AS text) AS properties_text,
+               via.via_edge_kind, via.parent_node_id, via.via_edge_id,
+               via.via_edge_source, via.via_edge_last_seen
+        FROM picked
+        JOIN graph_node n ON n.id = picked.id
+        JOIN via ON via.id = picked.id
     ),
     sized AS (
-        SELECT step.*,
+        SELECT loaded.*,
+               octet_length(kind) + octet_length(name)
+                   + COALESCE(octet_length(source_scope), 0)
+                   + COALESCE(octet_length(properties_text), 0) AS row_bytes
+        FROM loaded
+    ),
+    running AS (
+        SELECT sized.*,
                CAST(:bytes_before AS bigint)
                    + SUM(row_bytes) OVER (ORDER BY name, id) AS cumulative_bytes
-        FROM step
+        FROM sized
     )
     SELECT id, kind, name, source, source_scope,
-           CASE WHEN cumulative_bytes <= CAST(:byte_budget AS bigint) THEN properties END
-               AS properties,
+           CASE WHEN cumulative_bytes <= CAST(:byte_budget AS bigint)
+                THEN CAST(properties_text AS jsonb) END AS properties,
            last_seen,
            CAST(:depth AS integer) AS depth,
            via_edge_kind, parent_node_id, via_edge_id, via_edge_source,
            via_edge_last_seen, cumulative_bytes
-    FROM sized
+    FROM running
     WHERE cumulative_bytes - row_bytes <= CAST(:byte_budget AS bigint)
     ORDER BY name, id
-    LIMIT :row_limit
     """
 )
 
@@ -677,27 +738,30 @@ class BoundedClosure:
     id)`` with the root first. When a limit applied, ``nodes`` is the
     first part of the full closure in that order, never a sample from the
     middle. ``limit_hit`` is ``None`` only when the closure is complete
-    within ``depth``. ``root`` is the anchor the resolver picked; it is
-    known even when the time budget ran out and ``nodes`` is empty.
+    within ``depth``. ``root`` is the anchor the resolver picked, without
+    its properties (``nodes[0]`` carries them when they fit the byte
+    budget). It is known even when the time budget ran out during the
+    walk and ``nodes`` is empty; it is ``None`` only when the time budget
+    ran out during the root lookup itself.
     """
 
-    root: TopologyNode
+    root: TopologyNode | None
     nodes: tuple[TopologyNode, ...]
     limit_hit: ClosureLimit | None
     depth: int
     budget: ClosureBudget
 
 
-def _anchor_root(anchor: GraphNode) -> TopologyNode:
-    """The depth-0 row for *anchor*, built from the resolved ORM row."""
+def _root_from_identity(row: Row[Any]) -> TopologyNode:
+    """The root as the identity-only lookup saw it: no properties."""
     return TopologyNode(
-        id=anchor.id,
-        kind=anchor.kind,
-        name=anchor.name,
-        source=anchor.source,
-        source_scope=anchor.source_scope,
-        properties=anchor.properties or {},
-        last_seen=anchor.last_seen,
+        id=row.id,
+        kind=row.kind,
+        name=row.name,
+        source=row.source,
+        source_scope=row.source_scope,
+        properties={},
+        last_seen=row.last_seen,
         depth=0,
         via_edge_kind=None,
     )
@@ -903,12 +967,20 @@ async def bounded_closure(
 
     * each hop expands only the nodes kept so far and asks for at most
       the nodes still allowed, so a dense graph cannot make the database
-      follow every path;
+      follow every path; inside a hop the database sorts ids and names
+      only and loads properties for the kept nodes alone;
     * at most ``budget.max_nodes`` nodes and ``budget.max_bytes`` stored
-      bytes come back; the answer is then the first part of the closure;
-    * ``budget.time_budget_ms`` bounds the whole walk: every statement
-      runs with the time left as its ``statement_timeout``. When it runs
-      out the answer has no nodes and ``limit_hit="time_budget"``;
+      bytes come back; the answer is then the first part of the closure.
+      The root lookup selects no properties, and the anchor statement
+      returns them only when they fit the byte budget, so an oversized
+      root never reaches Python whole;
+    * ``budget.time_budget_ms`` bounds the whole walk, the root lookup
+      included: every statement runs with the time left as its
+      ``statement_timeout``. When it runs out the answer has no nodes and
+      ``limit_hit="time_budget"``; ``root`` is ``None`` when the lookup
+      itself ran out of time;
+    * the lookup and every hop run in one read-only ``REPEATABLE READ``
+      transaction, so they all see one snapshot of the graph;
     * the walk probes one hop past *depth* so the answer can say whether
       nodes exist beyond it (``limit_hit="hop_limit"``).
 
@@ -929,14 +1001,22 @@ async def bounded_closure(
     }
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
+        await session.execute(_ONE_SNAPSHOT_SQL)
         # Same anchor contract as the unbounded verbs: ``NodeNotFoundError``
         # for an untracked anchor, ``AmbiguousNodeError`` for a bare name
         # that resolves to several rows.
-        anchor = await resolve_node(session, operator.tenant_id, name_or_alias, kind)
-        root = _anchor_root(anchor)
+        candidates = await _execute_within_deadline(
+            session,
+            node_identity_statement(operator.tenant_id, name_or_alias, kind),
+            {},
+            deadline,
+        )
+        if candidates is None:
+            return BoundedClosure(None, (), "time_budget", depth, budget)
+        root = _root_from_identity(pick_unique_node(candidates, name_or_alias, kind))
         rows = await _bounded_walk(
             session,
-            anchor_id=str(anchor.id),
+            anchor_id=str(root.id),
             reverse=reverse,
             depth=depth,
             budget=budget,

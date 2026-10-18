@@ -529,18 +529,31 @@ class _CancelledError(Exception):
 
 
 class _FakeSession:
-    """Answers the anchor and hop statements from canned rows; records each hop."""
+    """Answers the lookup, anchor and hop statements from canned rows; records them.
+
+    ``statements`` is every statement in the order the walk sent it;
+    ``asked`` is the bind parameters of each hop statement.
+    """
 
     def __init__(
         self,
         hops: dict[int, list[_FakeRow]],
         *,
         cancel_hop: int | None = None,
+        cancel_lookup: bool = False,
+        anchor_bytes: int = 10,
         delay_s: float = 0.0,
     ) -> None:
         self.hops = hops
         self.cancel_hop = cancel_hop
+        self.cancel_lookup = cancel_lookup
         self.delay_s = delay_s
+        self.root = SimpleNamespace(
+            id=uuid4(), kind="host", name="root", source="auto", source_scope=None, last_seen=None
+        )
+        self.anchor = _FakeRow("root", 0, anchor_bytes)
+        self.anchor._mapping["id"] = self.root.id
+        self.statements: list[str] = []
         self.asked: list[dict[str, Any]] = []
 
     async def __aenter__(self) -> _FakeSession:
@@ -549,13 +562,19 @@ class _FakeSession:
     async def __aexit__(self, *exc: object) -> None:
         return None
 
-    async def execute(self, sql: Any, params: dict[str, Any]) -> _FakeResult:
+    async def execute(self, sql: Any, params: dict[str, Any] | None = None) -> _FakeResult:
         if self.delay_s:
             await asyncio.sleep(self.delay_s)
-        if "statement_timeout" in str(sql):
+        self.statements.append(str(sql))
+        params = params or {}
+        if "statement_timeout" in str(sql) or "SET TRANSACTION" in str(sql):
             return _FakeResult([])
         if "anchor_id" in params:
-            return _FakeResult([_FakeRow("root", 0, 10)])
+            return _FakeResult([self.anchor])
+        if "frontier" not in params:  # the identity-only root lookup
+            if self.cancel_lookup:
+                raise DBAPIError("lookup", {}, _CancelledError())
+            return _FakeResult([self.root])
         # Copy the bind lists: the walk grows ``visited`` in place after the hop.
         self.asked.append({k: list(v) if isinstance(v, list) else v for k, v in params.items()})
         if params["depth"] == self.cancel_hop:
@@ -570,23 +589,57 @@ def _hop_rows(hop: int, count: int, *, row_bytes: int = 10) -> list[_FakeRow]:
 async def _walk(
     session: _FakeSession, monkeypatch: pytest.MonkeyPatch, **kwargs: Any
 ) -> query_module.BoundedClosure:
-    anchor = SimpleNamespace(
-        id=uuid4(),
-        kind="host",
-        name="root",
-        source="auto",
-        source_scope=None,
-        properties={},
-        last_seen=None,
-    )
-
-    async def _resolve(*args: Any, **kw: Any) -> SimpleNamespace:
-        return anchor
-
     monkeypatch.setattr(query_module, "get_sessionmaker", lambda: lambda: session)
-    monkeypatch.setattr(query_module, "resolve_node", _resolve)
     operator = SimpleNamespace(tenant_id=uuid4())
     return await bounded_closure(operator, "root", reverse=True, **kwargs)  # type: ignore[arg-type]
+
+
+async def test_walk_starts_on_one_snapshot_and_looks_the_root_up_under_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One read-only snapshot for the whole walk; the lookup runs under the timeout."""
+    session = _FakeSession({1: _hop_rows(1, 2)})
+
+    answer = await _walk(session, monkeypatch, depth=1)
+
+    assert answer.limit_hit is None
+    assert "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY" in session.statements[0]
+    assert "statement_timeout" in session.statements[1]
+    lookup = session.statements[2]
+    assert "graph_node" in lookup
+    # The lookup identifies the root; it never selects the properties column.
+    assert "graph_node.properties" not in lookup
+    assert answer.root is not None
+    assert answer.root.id == session.root.id
+    assert answer.root.properties == {}
+
+
+async def test_walk_reports_time_budget_without_a_root_when_the_lookup_runs_out_of_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _FakeSession({1: _hop_rows(1, 2)}, cancel_lookup=True)
+
+    answer = await _walk(session, monkeypatch, depth=1)
+
+    assert answer.limit_hit == "time_budget"
+    assert answer.root is None
+    assert answer.nodes == ()
+    assert session.asked == []
+
+
+async def test_walk_keeps_an_oversized_root_without_its_properties(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A root over the byte budget is still named; no hop is asked for."""
+    session = _FakeSession({1: _hop_rows(1, 2)}, anchor_bytes=5000)
+
+    answer = await _walk(session, monkeypatch, depth=1, budget=ClosureBudget(max_bytes=100))
+
+    assert answer.limit_hit == "byte_limit"
+    assert answer.root is not None
+    assert [n.name for n in answer.nodes] == ["root"]
+    assert answer.nodes[0].properties == {}
+    assert session.asked == []
 
 
 async def test_walk_stops_asking_at_the_node_limit(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -599,7 +652,7 @@ async def test_walk_stops_asking_at_the_node_limit(monkeypatch: pytest.MonkeyPat
     assert len(answer.nodes) == 10
     assert [hop["depth"] for hop in session.asked] == [1]
     assert session.asked[0]["row_limit"] == 10
-    assert session.asked[0]["frontier"] == [str(answer.root.id)]
+    assert session.asked[0]["frontier"] == [str(session.root.id)]
 
 
 async def test_walk_expands_only_kept_nodes_and_probes_one_hop_past_depth(
@@ -614,7 +667,7 @@ async def test_walk_expands_only_kept_nodes_and_probes_one_hop_past_depth(
     assert [n.name for n in answer.nodes] == ["root"] + [
         r._mapping["name"] for r in [*hops[1], *hops[2]]
     ]
-    root_id = str(answer.root.id)
+    root_id = str(session.root.id)
     hop1_ids = [str(r._mapping["id"]) for r in hops[1]]
     hop2_ids = [str(r._mapping["id"]) for r in hops[2]]
     assert [hop["depth"] for hop in session.asked] == [1, 2, 3]
@@ -651,6 +704,7 @@ async def test_walk_stops_asking_when_a_hop_runs_out_of_time(
 
     assert answer.limit_hit == "time_budget"
     assert answer.nodes == ()
+    assert answer.root is not None
     assert answer.root.name == "root"
     assert [hop["depth"] for hop in session.asked] == [1, 2]
 

@@ -197,6 +197,24 @@ def test_time_budget_is_unavailable_with_the_root_still_named(
     assert "nothing depends on it" in payload["completeness"]["guidance"]
 
 
+def test_time_budget_during_the_lookup_leaves_the_root_out(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    store: MemoryResultStore,
+) -> None:
+    """When the lookup itself ran out of time there is no root to name."""
+    client, _op = client_with_operator
+    unknown_root = AsyncMock(
+        return_value=BoundedClosure(None, (), "time_budget", 16, ClosureBudget())
+    )
+    payload = _dependents(client, unknown_root)
+
+    assert payload["completeness"]["state"] == "unavailable"
+    assert payload["completeness"]["limits_hit"] == ["time_budget"]
+    assert "root" not in payload
+    assert payload["nodes"] == []
+    assert payload["query"]["target"] == "hub"
+
+
 def test_large_closure_is_kept_behind_a_readable_handle_in_order(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
     store: MemoryResultStore,

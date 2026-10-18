@@ -915,17 +915,37 @@ routes still call the unbounded recursive-CTE verbs (see Known issues).
 
 What `bounded_closure` does (`_bounded_walk`):
 
-- **One statement per hop, not one recursive CTE.** The anchor
-  statement (`_CLOSURE_ANCHOR_SQL`) returns the root. Each hop statement
+- **One snapshot.** The first statement is `SET TRANSACTION ISOLATION
+  LEVEL REPEATABLE READ READ ONLY`, so the root lookup and every hop
+  read the same state of the graph. A refresh that lands between two
+  hops is not seen until the next query; the answer can never join
+  nodes from two graph states into a chain that never existed.
+- **Root.** The lookup (`node_identity_statement` in `resolvers.py`,
+  with the same rules as `resolve_node`) selects id, kind, name,
+  source, scope and `last_seen`, never `properties`. The anchor
+  statement (`_CLOSURE_ANCHOR_SQL`) then returns the root row with its
+  properties only when they fit the byte budget. So a root with
+  oversized properties is named, is the one node in the answer with
+  empty properties, and stops the walk with `limit_hit="byte_limit"`;
+  its properties never reach Python.
+- **One statement per hop, not one recursive CTE.** Each hop statement
   (`_CLOSURE_STEP_SQL_REVERSE` / `_FORWARD`) expands only the nodes kept
   at the previous hop (`:frontier`), skips every node already in the
   answer (`:visited`), and returns at most `:row_limit` rows in
-  `(name, id)` order. The work per hop is the kept frontier times its
-  fan-out. On a dense mesh each node is expanded once, so the cost
-  grows with the number of nodes, not with the number of paths (the
-  recursive CTE follows every path). A node reached through several
-  parents in one hop keeps the parent and edge with the smallest ids,
-  the same choice the recursive CTE makes.
+  `(name, id)` order. On a dense mesh each node is expanded once, so the
+  cost grows with the number of nodes, not with the number of paths
+  (the recursive CTE follows every path).
+- **Bounded work inside a hop.** The hop statement has four parts.
+  `reached` is every edge out of the frontier that passes the filters,
+  with the node's id and name only. `picked` groups those by node and
+  keeps the first `:row_limit` in `(name, id)` order, so the database
+  sorts ids and names, never properties, and a top-N sort keeps only
+  `:row_limit` rows in memory. `via` picks, for the kept nodes only,
+  the parent and edge with the smallest ids (the same choice the
+  recursive CTE makes). `sized` loads the kept nodes' properties and
+  sizes. `reached` is `NOT MATERIALIZED`, so a very wide hop is one
+  pass over its edges plus `:row_limit` property reads, and PostgreSQL
+  never stores the whole hop as a temporary result.
 - **Nodes.** `:row_limit` is `max_nodes + 1` minus the rows already in
   hand, so the walk never fetches more than `max_nodes + 1` rows in
   total, and it stops asking as soon as that row is in hand.
@@ -935,13 +955,14 @@ What `bounded_closure` does (`_bounded_walk`):
   total before them is within `:byte_budget` come back, so one row past
   the budget comes back, with its properties left out, and shows that
   the byte limit applied. The walk stops asking after that row.
-- **Time.** The budget covers the whole walk. Before every statement
-  the time left is set as `SELECT set_config('statement_timeout',
-  :timeout_ms, true)` (the `true` makes it end with the transaction,
-  like `SET LOCAL`). When the time is up, or PostgreSQL stops a
-  statement (SQLSTATE `57014`), the answer has no nodes and
-  `limit_hit="time_budget"`. The root is still known, because the
-  resolver ran first.
+- **Time.** The budget covers the whole walk, the root lookup included.
+  Before every statement the time left is set as `SELECT
+  set_config('statement_timeout', :timeout_ms, true)` (the `true` makes
+  it end with the transaction, like `SET LOCAL`). When the time is up,
+  or PostgreSQL stops a statement (SQLSTATE `57014`), the answer has no
+  nodes and `limit_hit="time_budget"`. The root is still known when the
+  walk ran out of time; it is `None` when the lookup itself did, and the
+  MCP answer then has no `root` block.
 - **Depth.** After the last hop within `depth` the walk probes one hop
   further with `LIMIT 1`. A row there means more nodes exist
   (`limit_hit="hop_limit"`); it is not returned.
@@ -953,10 +974,15 @@ middle. The root is always kept. Defaults: `CLOSURE_MAX_NODES` 2000,
 `CLOSURE_MAX_BYTES` 4 MiB, `CLOSURE_TIME_BUDGET_MS` 5000.
 
 The walk is tested without a database with a fake session that records
-each hop (`tests/test_topology_query_schemas.py`), and against
-PostgreSQL by counting the hop statements the walk sends
-(`tests/integration/test_topology_query.py`: a star cut at the first hop
-sends one; the dense mesh sends one per layer plus the probe).
+each statement (`tests/test_topology_query_schemas.py`), and against
+PostgreSQL in `tests/integration/test_topology_query.py`: the hop
+statements are counted (a star cut at the first hop sends one; the
+dense mesh sends one per layer plus the probe); a wide star with large
+properties is run under `EXPLAIN (ANALYZE, BUFFERS)` to show the hop
+reads a small part of the blocks all the properties take and sorts
+only kilobytes; edges written between two hops stay out of the answer;
+an oversized root is named without its properties; a slow lookup ends
+at the time budget with no root.
 
 The MCP facet then hands the rows to `bounded_answer` in
 `mcp/tools/_topology_answer.py`. It reuses the shared result

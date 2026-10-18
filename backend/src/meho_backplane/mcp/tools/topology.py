@@ -925,19 +925,22 @@ async def _closure_facet(
         )
     shaper = _RowShaper()
     rows = [shaper.node(n) for n in answer.nodes]
-    root = answer.root
-    envelope = {
+    envelope: dict[str, Any] = {
         "kind": kind,
         "direction": _closure_direction(kind),
         "relation_class": query["relation_class"],
         "query": query,
         "snapshot_at": shaper.now.isoformat(),
-        "root": {
-            "id": str(root.id),
-            "kind": root.kind,
-            "name": root.name,
-            "source_scope": root.source_scope,
-        },
+    }
+    # The root is unknown only when the lookup itself ran out of time.
+    if answer.root is not None:
+        envelope["root"] = {
+            "id": str(answer.root.id),
+            "kind": answer.root.kind,
+            "name": answer.root.name,
+            "source_scope": answer.root.source_scope,
+        }
+    envelope |= {
         "ordering": "depth, name, id",
         "node_count": len(rows),
         "edge_count": max(len(rows) - 1, 0),
@@ -1528,7 +1531,8 @@ register_mcp_tool(
                     "description": (
                         "Closure kinds: the anchor the traversal started "
                         "from (`id`, `kind`, `name`, `source_scope`), shown "
-                        "even when no nodes came back."
+                        "even when no nodes came back. Missing only when "
+                        "the time budget ran out before the anchor was found."
                     ),
                 },
                 "query": {

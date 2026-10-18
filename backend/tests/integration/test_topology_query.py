@@ -55,6 +55,8 @@ Coverage matrix (mirrors the Task #451 acceptance criteria):
 
 from __future__ import annotations
 
+import json
+import secrets
 import time
 import uuid
 from collections import Counter
@@ -63,12 +65,13 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from sqlalchemy import event
+from sqlalchemy import delete, event, select, text
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db import engine as engine_module
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import GraphEdge, GraphNode, Target
+from meho_backplane.topology import query as query_module
 from meho_backplane.topology.evidence import classify_freshness
 from meho_backplane.topology.query import (
     AmbiguousNodeError,
@@ -1353,12 +1356,20 @@ def test_module_imports_cleanly() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _seed_new_star_fixture(*, leaves: int, pad_bytes: int = 0, children: int = 0) -> None:
+def _incompressible_pad(size: int) -> str:
+    """A random string PostgreSQL cannot compress, so it is stored out of line."""
+    return secrets.token_hex(size // 2)
+
+
+async def _seed_new_star_fixture(
+    *, leaves: int, pad_bytes: int = 0, children: int = 0, random_pad: bool = False
+) -> None:
     """New #3764 fixture: ``star-hub`` with *leaves* dependents ``star-leaf-NNNN``.
 
     Each leaf ``runs-on`` the hub, so a dependents walk from the hub has
     one level with *leaves* nodes. *pad_bytes* adds a string of that size
-    to every leaf's properties, for the byte-limit test. *children* adds
+    to every leaf's properties, for the byte-limit test; *random_pad*
+    makes it a random string that stays large on disk. *children* adds
     that many ``star-child-NNNN-MMMM`` nodes under every leaf, a second
     level that a walk cut at the first level must never ask for.
     """
@@ -1372,7 +1383,9 @@ async def _seed_new_star_fixture(*, leaves: int, pad_bytes: int = 0, children: i
                 kind="vm",
                 name=f"star-leaf-{i:04d}",
                 source="auto",
-                properties={"pad": "x" * pad_bytes},
+                properties={
+                    "pad": _incompressible_pad(pad_bytes) if random_pad else "x" * pad_bytes
+                },
                 discovered_by="test",
             )
             for i in range(leaves)
@@ -1422,10 +1435,11 @@ async def _seed_new_star_fixture(*, leaves: int, pad_bytes: int = 0, children: i
 
 
 class _HopStatements:
-    """Record the hop statements the bounded walk sends to PostgreSQL."""
+    """Record the statements the bounded walk sends to PostgreSQL; count the hops."""
 
     def __init__(self) -> None:
         self.hops = 0
+        self.statements: list[str] = []
 
     def __enter__(self) -> _HopStatements:
         event.listen(engine_module._engine.sync_engine, "before_cursor_execute", self._record)
@@ -1435,8 +1449,45 @@ class _HopStatements:
         event.remove(engine_module._engine.sync_engine, "before_cursor_execute", self._record)
 
     def _record(self, conn: Any, cursor: Any, statement: str, *rest: Any) -> None:
-        if "WITH step AS" in statement:
+        self.statements.append(statement)
+        if "WITH reached AS NOT MATERIALIZED" in statement:
             self.hops += 1
+
+
+async def _graph_node_toast_blocks(conn: Any) -> int:
+    """Blocks read so far from ``graph_node``'s out-of-line storage (large properties).
+
+    PostgreSQL keeps a value larger than about 2 kB out of line, so these
+    blocks are read only when a statement loads such a value. The backend
+    publishes its counts when it goes idle; ``pg_stat_force_next_flush``
+    makes that happen right after the next commit.
+    """
+    await conn.execute(text("SELECT pg_stat_force_next_flush()"))
+    await conn.commit()
+    await conn.execute(text("SELECT pg_stat_clear_snapshot()"))
+    blocks = (
+        await conn.execute(
+            text(
+                "SELECT COALESCE(toast_blks_hit, 0) + COALESCE(toast_blks_read, 0)"
+                " FROM pg_statio_user_tables WHERE relname = 'graph_node'"
+            )
+        )
+    ).scalar_one()
+    await conn.commit()
+    return int(blocks)
+
+
+def _plan_sort_space_kb(plan: dict[str, Any]) -> int:
+    """Memory or disk every sort in the plan used, in kB."""
+    own = int(plan.get("Sort Space Used", 0))
+    return own + sum(_plan_sort_space_kb(child) for child in plan.get("Plans", []))
+
+
+async def _explain(conn: Any, sql: str, params: dict[str, Any]) -> dict[str, Any]:
+    """Run *sql* under ``EXPLAIN ANALYZE`` and return the top plan node."""
+    raw = (await conn.execute(text("EXPLAIN (ANALYZE, FORMAT JSON) " + sql), params)).scalar_one()
+    plan = raw if isinstance(raw, list) else json.loads(raw)
+    return dict(plan[0]["Plan"])
 
 
 async def _seed_new_dense_mesh_fixture(*, layers: int, width: int) -> None:
@@ -1487,6 +1538,7 @@ async def test_bounded_closure_new_star_fixture_stops_at_node_limit(pg_engine: N
     assert len(full) == 301
     # The cut answer is the first part of the full closure, in its order.
     assert [n.id for n in answer.nodes] == [n.id for n in full[:40]]
+    assert answer.root is not None
     assert answer.root.name == "star-hub"
 
 
@@ -1528,6 +1580,166 @@ async def test_bounded_closure_new_star_fixture_stops_asking_past_the_node_limit
 
 
 @_skip_no_docker
+async def test_bounded_closure_new_star_fixture_hop_reads_properties_for_kept_nodes_only(
+    pg_engine: None,
+) -> None:
+    """A wide hop sorts ids and names only and reads properties for the kept rows alone."""
+    leaves, pad_bytes, row_limit = 300, 32_768, 10
+    await _seed_new_star_fixture(leaves=leaves, pad_bytes=pad_bytes, random_pad=True)
+    hop_sql = query_module._CLOSURE_STEP_SQL_REVERSE
+    all_properties_sql = text(
+        "SELECT sum(octet_length(CAST(properties AS text))) FROM graph_node"
+        " WHERE tenant_id = :tenant_id AND kind = 'vm'"
+    )
+    async with engine_module._engine.connect() as conn:
+        hub = (
+            await conn.execute(select(GraphNode.id).where(GraphNode.name == "star-hub"))
+        ).scalar_one()
+        params = {
+            "tenant_id": str(TENANT_A_ID),
+            "frontier": [str(hub)],
+            "visited": [str(hub)],
+            "kind_filter": None,
+            "class_kinds": None,
+            "class_excluded_kinds": None,
+            "include_stale": True,
+            "byte_budget": 1 << 30,
+            "bytes_before": 0,
+            "depth": 1,
+            "row_limit": row_limit,
+        }
+        hop_plan = await _explain(conn, hop_sql.text, params)
+        before = await _graph_node_toast_blocks(conn)
+        rows = (await conn.execute(hop_sql, params)).fetchall()
+        after_hop = await _graph_node_toast_blocks(conn)
+        # Reading every leaf's properties is the work the hop must not do.
+        total = (
+            await conn.execute(all_properties_sql, {"tenant_id": str(TENANT_A_ID)})
+        ).scalar_one()
+        after_all = await _graph_node_toast_blocks(conn)
+
+    assert len(rows) == row_limit
+    assert all(len(row._mapping["properties"]["pad"]) == pad_bytes for row in rows)
+    assert total >= leaves * pad_bytes
+    hop_blocks, all_blocks = after_hop - before, after_all - after_hop
+    # The hop read the kept rows' properties, and a small part of all of them.
+    assert hop_blocks > 0
+    assert hop_blocks * 10 < all_blocks, (hop_blocks, all_blocks)
+    # The hop's sorts hold ids and names, not the leaves' 9.6 MB of properties.
+    assert _plan_sort_space_kb(hop_plan) < 1024, hop_plan
+
+
+@_skip_no_docker
+async def test_bounded_closure_reads_one_snapshot_while_edges_change_between_hops(
+    pg_engine: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Edges written during the walk stay out of the answer; the next walk sees them."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        root = await _seed_node(session, tenant_id=TENANT_A_ID, kind="host", name="snap-root")
+        middle = await _seed_node(session, tenant_id=TENANT_A_ID, kind="vm", name="snap-a")
+        old_leaf = await _seed_node(session, tenant_id=TENANT_A_ID, kind="app", name="snap-b")
+        await _seed_edge(session, tenant_id=TENANT_A_ID, from_id=middle, to_id=root, kind="runs-on")
+        old_edge = await _seed_edge(
+            session, tenant_id=TENANT_A_ID, from_id=old_leaf, to_id=middle, kind="belongs-to"
+        )
+
+    real_execute = query_module._execute_within_deadline
+    changed = False
+
+    async def _execute_then_change_the_graph(
+        session: Any, sql: Any, params: dict[str, Any], deadline: float
+    ) -> Any:
+        rows = await real_execute(session, sql, params, deadline)
+        nonlocal changed
+        if not changed and "frontier" in params and params["depth"] == 1:
+            changed = True
+            async with sessionmaker() as other, other.begin():
+                new_leaf = await _seed_node(other, tenant_id=TENANT_A_ID, kind="app", name="snap-c")
+                await _seed_edge(
+                    other, tenant_id=TENANT_A_ID, from_id=new_leaf, to_id=middle, kind="belongs-to"
+                )
+                await other.execute(delete(GraphEdge).where(GraphEdge.id == old_edge))
+        return rows
+
+    monkeypatch.setattr(query_module, "_execute_within_deadline", _execute_then_change_the_graph)
+    operator = _operator(TENANT_A_ID)
+
+    during = await bounded_closure(operator, "snap-root", reverse=True)
+
+    assert changed
+    assert during.limit_hit is None
+    assert [n.name for n in during.nodes] == ["snap-root", "snap-a", "snap-b"]
+    after = await bounded_closure(operator, "snap-root", reverse=True)
+    assert [n.name for n in after.nodes] == ["snap-root", "snap-a", "snap-c"]
+
+
+@_skip_no_docker
+async def test_bounded_closure_names_an_oversized_root_without_loading_its_properties(
+    pg_engine: None,
+) -> None:
+    """A root over the byte budget is named; its properties never reach Python."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        fat_root = GraphNode(
+            id=uuid.uuid4(),
+            tenant_id=TENANT_A_ID,
+            kind="host",
+            name="fat-root",
+            source="auto",
+            properties={"pad": _incompressible_pad(65_536)},
+            discovered_by="test",
+        )
+        session.add(fat_root)
+        await session.flush()
+        leaf = await _seed_node(session, tenant_id=TENANT_A_ID, kind="vm", name="fat-leaf")
+        await _seed_edge(
+            session, tenant_id=TENANT_A_ID, from_id=leaf, to_id=fat_root.id, kind="runs-on"
+        )
+
+    with _HopStatements() as statements:
+        answer = await bounded_closure(
+            _operator(TENANT_A_ID), "fat-root", reverse=True, budget=ClosureBudget(max_bytes=1000)
+        )
+
+    assert answer.limit_hit == "byte_limit"
+    assert answer.root is not None
+    assert answer.root.name == "fat-root"
+    assert answer.root.properties == {}
+    assert [n.name for n in answer.nodes] == ["fat-root"]
+    assert answer.nodes[0].properties == {}
+    assert statements.hops == 0
+    lookup = next(stmt for stmt in statements.statements if "graph_node.name" in stmt)
+    assert "properties" not in lookup
+
+
+@_skip_no_docker
+async def test_bounded_closure_reports_time_budget_when_the_root_lookup_is_slow(
+    pg_engine: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A slow lookup ends at the time budget with no root; the pool stays usable."""
+    await _seed_new_star_fixture(leaves=3)
+    operator = _operator(TENANT_A_ID)
+    monkeypatch.setattr(
+        query_module, "node_identity_statement", lambda *args, **kwargs: text("SELECT pg_sleep(5)")
+    )
+
+    started = time.monotonic()
+    answer = await bounded_closure(
+        operator, "star-hub", reverse=True, budget=ClosureBudget(time_budget_ms=100)
+    )
+
+    assert time.monotonic() - started < 3
+    assert answer.limit_hit == "time_budget"
+    assert answer.root is None
+    assert answer.nodes == ()
+    monkeypatch.undo()
+    recovered = await bounded_closure(operator, "star-hub", reverse=True)
+    assert recovered.limit_hit is None
+    assert len(recovered.nodes) == 4
+
+
+@_skip_no_docker
 async def test_bounded_closure_new_dense_mesh_fixture_expands_each_node_once(
     pg_engine: None,
 ) -> None:
@@ -1562,6 +1774,7 @@ async def test_bounded_closure_new_dense_mesh_fixture_stops_at_time_budget(
 
     assert answer.limit_hit == "time_budget"
     assert answer.nodes == ()
+    assert answer.root is not None
     assert answer.root.name == "mesh-root"
     # A cancelled statement leaves the pool usable for the next query.
     shallow = await bounded_closure(operator, "mesh-root", reverse=True, depth=1)

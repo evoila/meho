@@ -52,6 +52,8 @@ __all__ = [
     "result_ambiguous_target",
     "result_awaiting_approval",
     "result_composite_resume_multi_gate_unsupported",
+    "result_composite_resume_repeats_write",
+    "result_composite_resume_state_missing",
     "result_composite_terminal_error",
     "result_connector_auth_failed",
     "result_connector_error",
@@ -646,6 +648,63 @@ def result_composite_resume_multi_gate_unsupported(
                 "requires_approval=False, or add a completed-leg guard before "
                 "introducing a second gate"
             ),
+        },
+    )
+
+
+def result_composite_resume_state_missing(*, op_id: str, duration_ms: float) -> OperationResult:
+    """Refusal of a sub-op marked ``after_main_effect`` that saved no resume state (#4217).
+
+    Returned by
+    :func:`~meho_backplane.operations.composite.enforce_subop_policy`. Such a
+    step tells the seam that its resume continues at this step, but without
+    saved state the composite can only start again from the beginning and
+    repeat its earlier writes. This is a bug in the composite, so the write
+    does not run and does not wait for approval.
+    """
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=(
+            f"composite_resume_state_missing: sub-op {op_id!r} is marked "
+            "after_main_effect but saved no resume state; it did not run and does "
+            "not wait for approval, because an approval could repeat earlier writes"
+        ),
+        duration_ms=duration_ms,
+        extras={"error_code": "composite_resume_state_missing", "blocked_op_id": op_id},
+    )
+
+
+def result_composite_resume_repeats_write(
+    *,
+    composite_op_id: str,
+    approved_op_id: str,
+    blocked_op_id: str,
+    duration_ms: float,
+) -> OperationResult:
+    """Refusal of an earlier write during a resume that must skip it (#4217).
+
+    Returned by
+    :func:`~meho_backplane.operations.composite.enforce_subop_policy` while a
+    composite resumes an approved step marked ``after_main_effect``: the
+    resume must go straight to that step, so a governed write before it
+    that is not itself ``after_main_effect`` is a write the first run already
+    did. It is refused before it runs, whatever the policy verdict.
+    """
+    return OperationResult(
+        status="error",
+        op_id=composite_op_id,
+        error=(
+            f"composite_resume_repeats_write: resuming composite {composite_op_id!r} "
+            f"for the approved step {approved_op_id!r} reached the earlier write "
+            f"{blocked_op_id!r}; it did not run, because the first run already did it"
+        ),
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "composite_resume_repeats_write",
+            "composite_op_id": composite_op_id,
+            "approved_op_id": approved_op_id,
+            "blocked_op_id": blocked_op_id,
         },
     )
 

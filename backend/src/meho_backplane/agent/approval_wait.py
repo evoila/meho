@@ -239,7 +239,7 @@ def _xread_items(raw_response: Any) -> list[tuple[str, dict[str, str]]]:
     Returns an empty list for the three "nothing for us" shapes ``XREAD``
     produces (``None`` on BLOCK timeout, empty outer list, inner list
     empty) so the caller has one ``if not items`` branch. Mirrors the
-    same idiom :func:`meho_backplane.mcp.tools.broadcast._xread_items_or_none`
+    idiom the SSE feed generator (:mod:`meho_backplane.api.v1.feed`)
     uses; duplicated for the same reason :func:`_stream_key` is.
     """
     if not raw_response:
@@ -848,7 +848,7 @@ async def _redispatch_approved(
     unchanged.
     """
     from meho_backplane.operations._audit import parent_audit_id_var
-    from meho_backplane.operations.approval_queue import composite_resume_binding
+    from meho_backplane.operations.approval_queue import composite_resume_binding, requester_of
     from meho_backplane.operations.meta_tools import call_operation_with_approval
 
     parent_token = parent_audit_id_var.set(request.request_audit_id)
@@ -857,6 +857,7 @@ async def _redispatch_approved(
             subop_op_id=request.op_id,
             subop_params_hash=request.params_hash,
             resume_parent=resume_parent,
+            requester=requester_of(request),
         ) as parent_call:
             if parent_call is None:
                 return await call_operation_with_approval(operator, call_arguments)

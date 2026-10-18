@@ -1478,9 +1478,15 @@ type ApprovalRequestView struct {
 	//   agent waiter) store the envelope they get back.
 	// * :attr:`EXECUTED` -- the stored result has ``status == "ok"``.
 	// * :attr:`FAILED` -- a result is stored and its ``status`` is not ``ok``.
-	ResultState    *ApprovalResultState `json:"result_state,omitempty"`
-	ReviewedBy     *string              `json:"reviewed_by"`
-	ReviewedByName *string              `json:"reviewed_by_name"`
+	ResultState *ApprovalResultState `json:"result_state,omitempty"`
+
+	// ResumeOutcome What happened when an approved request ran (#3543).
+	//
+	// A summary read off the stored result envelope. The result body and the
+	// free-text error stay on the owner-only ``/result`` read.
+	ResumeOutcome  *ApprovalResumeOutcomeView `json:"resume_outcome,omitempty"`
+	ReviewedBy     *string                    `json:"reviewed_by"`
+	ReviewedByName *string                    `json:"reviewed_by_name"`
 
 	// ReviewerContext Redacted, human-legible context for judging a parked request (#3353).
 	//
@@ -1589,6 +1595,17 @@ type ApprovalResultView struct {
 	// :func:`tests.test_migration_0023_approval_request.test_status_check_matches_enum`
 	// asserts equality at unit-test time.
 	Status ApprovalRequestStatus `json:"status"`
+}
+
+// ApprovalResumeOutcomeView What happened when an approved request ran (#3543).
+//
+// A summary read off the stored result envelope. The result body and the
+// free-text error stay on the owner-only “/result“ read.
+type ApprovalResumeOutcomeView struct {
+	AuditId      *openapi_types.UUID `json:"audit_id"`
+	ErrorCode    *string             `json:"error_code"`
+	ResultStatus *string             `json:"result_status"`
+	ResumedAt    *string             `json:"resumed_at"`
 }
 
 // ApproveRequestBody POST body for “…/approve“.
@@ -1808,7 +1825,9 @@ type AuditEntry struct {
 //   - :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every
 //     row written before migration “0106“ reads as this class; it is never
 //     guessed from “method“ / “path“. The REST and MCP request wrapper
-//     rows also keep this class until they are retired.
+//     rows also keep this class while “AUDIT_WRAPPER_ROWS_RETIRED“ is off;
+//     with it on they write a decision or execution class, or no row
+//     (#3757, :mod:`meho_backplane.audit_cutover`).
 type AuditEventClass string
 
 // AuditQueryRequest POST body for “/api/v1/audit/query“.
@@ -1842,7 +1861,9 @@ type AuditQueryRequest struct {
 	// * :attr:`LEGACY_REQUEST` -- a request-level row in the old meaning. Every
 	//   row written before migration ``0106`` reads as this class; it is never
 	//   guessed from ``method`` / ``path``. The REST and MCP request wrapper
-	//   rows also keep this class until they are retired.
+	//   rows also keep this class while ``AUDIT_WRAPPER_ROWS_RETIRED`` is off;
+	//   with it on they write a decision or execution class, or no row
+	//   (#3757, :mod:`meho_backplane.audit_cutover`).
 	EventClass    *AuditEventClass    `json:"event_class,omitempty"`
 	Limit         *int                `json:"limit,omitempty"`
 	OpClass       *string             `json:"op_class"`
@@ -3168,26 +3189,28 @@ type BroadcastAnnounceRequestPhase string
 // BroadcastAnnounceRequestPlannedOpClass defines model for BroadcastAnnounceRequest.PlannedOpClass.
 type BroadcastAnnounceRequestPlannedOpClass string
 
-// BroadcastAnnounceResponse Acknowledgement with distinct durable event id and stream cursor.
+// BroadcastAnnounceResponse Acknowledgement of a stored announcement.
 //
 // “replayed=true“ means the step was already stored and no new row was
-// written. “cursor“ is “None“ when the stream entry already existed;
-// it is set when this call wrote the stream entry, including a retry
-// that finished a delivery whose first stream write failed.
+// written. “watch_checkpoint“ is a watch cursor just after this
+// announcement in the archive order. “delivery_pending=true“ means
+// the announcement is stored and readable, but the live wake-up for
+// watchers failed; a retry with the same “idempotency_key“ finishes it.
 type BroadcastAnnounceResponse struct {
-	ActorSub       *string             `json:"actor_sub"`
-	Admission      string              `json:"admission"`
-	ClaimId        openapi_types.UUID  `json:"claim_id"`
-	Cursor         *string             `json:"cursor"`
-	EventId        openapi_types.UUID  `json:"event_id"`
-	OwnerSub       string              `json:"owner_sub"`
-	Phase          string              `json:"phase"`
-	PlannedOpClass *string             `json:"planned_op_class"`
-	Replayed       bool                `json:"replayed"`
-	RunId          *openapi_types.UUID `json:"run_id"`
-	Targets        *[]string           `json:"targets"`
-	TtlMinutes     *int                `json:"ttl_minutes"`
-	WorkRef        *string             `json:"work_ref"`
+	ActorSub        *string             `json:"actor_sub"`
+	Admission       string              `json:"admission"`
+	ClaimId         openapi_types.UUID  `json:"claim_id"`
+	DeliveryPending bool                `json:"delivery_pending"`
+	EventId         openapi_types.UUID  `json:"event_id"`
+	OwnerSub        string              `json:"owner_sub"`
+	Phase           string              `json:"phase"`
+	PlannedOpClass  *string             `json:"planned_op_class"`
+	Replayed        bool                `json:"replayed"`
+	RunId           *openapi_types.UUID `json:"run_id"`
+	Targets         *[]string           `json:"targets"`
+	TtlMinutes      *int                `json:"ttl_minutes"`
+	WatchCheckpoint *string             `json:"watch_checkpoint"`
+	WorkRef         *string             `json:"work_ref"`
 }
 
 // BroadcastOverrideCreate Incoming POST body. Pydantic v2 strict.

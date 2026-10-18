@@ -157,8 +157,10 @@ from meho_backplane.ui.auth.refresh import (
 )
 from meho_backplane.ui.csrf import mint_csrf_token
 from meho_backplane.ui.routes.approvals.render import (
+    RESULT_STATE_PILL,
     STATUS_PILL_CLASS,
     project_request_to_view,
+    project_run_result,
     set_csrf_cookie,
 )
 from meho_backplane.ui.templating import get_templates
@@ -558,6 +560,7 @@ async def _build_history_context(
     return {
         "requests": [project_request_to_view(row) for row in rows],
         "status_pill_class": STATUS_PILL_CLASS,
+        "result_state_pill": RESULT_STATE_PILL,
         "active_tab": tab,
         "tabs": list(_HISTORY_TABS.keys()),
         "work_ref": work_ref.strip(),
@@ -660,6 +663,7 @@ async def _render_detail_modal(
         "self_approval_error": self_approval_error,
         "operator_sub": operator.sub,
         "status_pill_class": STATUS_PILL_CLASS,
+        "result_state_pill": RESULT_STATE_PILL,
         "csrf_token": csrf_token,
         "error_status": error_status,
         "error_message": error_message,
@@ -725,6 +729,7 @@ async def _decide(
     # Approve re-dispatches the parked op (the committed approval is the
     # authorization). Reject does not. Mirrors the REST /approve route; the
     # service helper owns target re-hydration + the fail-closed branches.
+    run: dict[str, object] | None = None
     if decision == "approved":
         dispatch_result = await resume_dispatch_after_approval(
             operator=operator, request=approval, params=None
@@ -736,12 +741,14 @@ async def _decide(
             dispatch_status=dispatch_result.status,
             operator_sub=operator.sub,
         )
+        run = project_run_result(dispatch_result)
 
     context: dict[str, object] = {
         # The reason already passed validation in the service, so this
         # re-parse cannot raise; it shows the delegation on the outcome card.
         "request": project_request_to_view(approval, parse_delegation(reason)),
         "decision": decision,
+        "run": run,
     }
     response = get_templates().TemplateResponse(request, "approvals/_decided.html", context)
     # Drive the app-shell bell: decrement the live count + close the modal.

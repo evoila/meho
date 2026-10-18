@@ -55,6 +55,7 @@ meho admin keycloak bootstrap-clients [flags]
 - `--keycloak-base-url` — Keycloak base URL, e.g. https://keycloak.example.com
 - `--keycloak-ca-bundle` — path to a PEM CA bundle to verify the Keycloak server certificate against (keeps chain + hostname verification ON while trusting an internal realm CA). Preferred over --insecure-skip-tls-verify; the two are mutually exclusive
 - `--mcp-client-id` — public client_id for the MCP browser-flow client
+- `--mcp-offline-session-idle` — how many seconds an unused MCP login stays valid: sets the `client.offline.session.idle.timeout` attribute on the MCP browser-flow client. Default 48h. Without it the realm's Offline Session Idle applies (30 days by default)
 - `--mcp-redirect-uri` — redirect URI(s) for the MCP browser-flow client (default: loopback localhost + <ip>, any port/path)
 - `--mcp-resource-uri` — audience the `meho-mcp-audience` mapper emits, e.g. https://meho.example.com/mcp (no trailing slash)
 - `--mcp-web-origin` — CORS web origin(s) for the MCP browser-flow client (default: `+` — allow the redirect-URI origins)
@@ -981,7 +982,7 @@ meho broadcast overrides set [flags]
 
 ### `meho broadcast recent`
 
-Read recent broadcast events for the operator's tenant
+Read recent agent announcements for the operator's tenant
 
 ```
 meho broadcast recent [flags]
@@ -990,7 +991,7 @@ meho broadcast recent [flags]
 - `--active-only` — exclude expired TTL claims
 - `--actor-sub` — exact delegated-agent filter
 - `--backplane` — backplane URL
-- `--cursor` — forward cursor (ISO-8601 timestamp or stream id)
+- `--cursor` — ISO-8601 window start, or next_cursor from a previous page
 - `--json` — emit JSON
 - `--limit` — maximum events (1-1000)
 - `--op-class` — exact op class filter

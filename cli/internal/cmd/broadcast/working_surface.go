@@ -25,11 +25,11 @@ func newRecentCmd() *cobra.Command {
 	var opts recentOptions
 	cmd := &cobra.Command{
 		Use:   "recent",
-		Short: "Read recent broadcast events for the operator's tenant",
+		Short: "Read recent agent announcements for the operator's tenant",
 		Args:  cobra.NoArgs, SilenceUsage: true, SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error { return runRecent(cmd, opts) },
 	}
-	cmd.Flags().StringVar(&opts.Cursor, "cursor", "", "forward cursor (ISO-8601 timestamp or stream id)")
+	cmd.Flags().StringVar(&opts.Cursor, "cursor", "", "ISO-8601 window start, or next_cursor from a previous page")
 	cmd.Flags().StringVar(&opts.OpClass, "op-class", "", "exact op class filter")
 	cmd.Flags().StringVar(&opts.Principal, "principal", "", "exact principal filter")
 	cmd.Flags().StringVar(&opts.Target, "target", "", "exact target filter")
@@ -120,6 +120,11 @@ func recentBroadcast(ctx context.Context, client *api.AuthedClient, params *api.
 }
 
 func printRecent(w io.Writer, response *map[string]interface{}) error {
+	if gap, ok := (*response)["gap"].(map[string]interface{}); ok {
+		if _, err := fmt.Fprintf(w, "warning: history is incomplete: %s\n", gapText(gap)); err != nil {
+			return err
+		}
+	}
 	events, _ := (*response)["events"].([]interface{})
 	if len(events) == 0 {
 		_, err := fmt.Fprintln(w, "(no broadcast events in this page)")
@@ -131,6 +136,18 @@ func printRecent(w io.Writer, response *map[string]interface{}) error {
 		}
 	}
 	return nil
+}
+
+// gapText is the one-line reason the backplane gives for a page that
+// skips announcements, for example because archive retention removed them.
+func gapText(gap map[string]interface{}) string {
+	if detail, _ := gap["detail"].(string); detail != "" {
+		return detail
+	}
+	if reason, _ := gap["reason"].(string); reason != "" {
+		return reason
+	}
+	return "some announcements before this page were removed"
 }
 
 func newAnnounceCmd() *cobra.Command {
@@ -231,11 +248,11 @@ func runAnnounce(cmd *cobra.Command, opts announceOptions) error {
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), response)
 	}
-	cursor := ""
-	if response.Cursor != nil {
-		cursor = *response.Cursor
+	checkpoint := ""
+	if response.WatchCheckpoint != nil {
+		checkpoint = *response.WatchCheckpoint
 	}
-	_, err = fmt.Fprintf(cmd.OutOrStdout(), "announcement published: event_id=%s claim_id=%s cursor=%s replayed=%t\n", response.EventId, response.ClaimId, cursor, response.Replayed)
+	_, err = fmt.Fprintf(cmd.OutOrStdout(), "announcement published: event_id=%s claim_id=%s watch_checkpoint=%s replayed=%t delivery_pending=%t\n", response.EventId, response.ClaimId, checkpoint, response.Replayed, response.DeliveryPending)
 	return err
 }
 

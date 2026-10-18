@@ -66,6 +66,10 @@ Examples in current use:
 - `receipt_too_large` (`call_operation`: the receipt of a completed run
   could not fit `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES`, so the call is
   refused before dispatch and nothing runs — #3641)
+- `audit_commit_failed` (dispatcher: the handler finished, but its audit
+  row did not commit. `extras.execution_outcome="uncertain"`,
+  `extras.retry=false`, no `audit_id`. The caller must not run the call
+  again. Applies to reads and writes)
 - `connector_scope_ambiguous` (connector review/enable-reads: a
   `connector_id` resolves to both a tenant row and a built-in row —
   #1801; the message names the `prefer=tenant|builtin` retry — #2029)
@@ -221,6 +225,15 @@ secrecy bound — a credential inside the first 256 chars used to ride
 the envelope verbatim. Redaction runs first so a secret straddling
 the cap boundary cannot survive truncation as a cleartext fragment
 the patterns no longer match. See `docs/codebase/redaction.md`.
+
+**Non-httpx upstream status: `ConnectorUpstreamError` (#3876).** A
+connector whose client library does not raise `httpx.HTTPStatusError`
+reads the HTTP status and the upstream's message at its own boundary and
+raises `connectors/base.py::ConnectorUpstreamError` (or a subclass). The
+generic `connector_error` envelope then sets `extras.http_status` and
+`extras.upstream_message` (redacted, then capped at 2 KB), the same keys
+as the httpx path. First user: `k8s.apply`'s `ApplyRejectedError`, raised
+when the Kubernetes API server rejects a server-side apply.
 
 **Structured vim fault: `extras.upstream_fault` (#3567).** When the
 upstream error body is a vim fault, the builders that read an upstream

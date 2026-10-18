@@ -170,6 +170,9 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     # here or every PG-backed acceptance test errors at setup with
     # ``cannot truncate a table referenced in a foreign key constraint``.
     "agent_announcement",
+    # ``agent_announcement_sequence.tenant_id`` is a real FK from migration
+    # ``0114`` (#3748, the per-tenant archive sequence counter).
+    "agent_announcement_sequence",
     # ``agent_definition`` carries a real FK ``tenant(id)`` per migration
     # ``0016`` (#809 G11.1-T2). Listed here so the per-test TRUNCATE stays
     # non-cascading once that table exists.

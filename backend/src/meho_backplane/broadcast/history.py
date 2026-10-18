@@ -3,41 +3,20 @@
 
 """Shared read-side helper for the per-tenant Valkey broadcast stream.
 
-G6.4-T4 (#1103) factors the xrange + filter + redaction-aware parse
-loop into a single implementation that both the MCP ``broadcast.recent``
-tool (Task #1091) and the UI ``/ui/broadcast/history`` route (Task #869)
-go through. Two callers had previously duplicated this body because
-their **failure shape** differs:
+G6.4-T4 (#1103) factored the xrange + filter + redaction-aware parse
+loop into one core helper. Its only remaining caller is the UI
+``/ui/broadcast/history`` route (Task #869), through the **fail-soft**
+wrapper :func:`list_recent_events_fail_soft`: a transient
+broadcast-subchart blip degrades the Last-24h pane to its empty state
+instead of failing the fragment.
 
-* The MCP tool is **fail-loud** -- an agent calling ``broadcast.recent``
-  needs a Valkey teardown to surface as a JSON-RPC ``-32603`` Internal
-  Error; a silent empty result would be a correctness bug.
-* The UI history route is **fail-soft** -- a transient broadcast-subchart
-  blip should degrade the Last-24h pane to its empty state, not 500 the
-  fragment.
-
-The previous design solved this by writing the xrange + parse loop
-twice. Every redaction-policy or schema tweak then had to land in two
-places and stay in sync, which is exactly the kind of drift that
-produces incidents (see PR #1097 follow-up notes).
-
-This module factors the loop into a single core helper plus two named
-wrappers, one per failure shape. New callers should pick the wrapper
-whose name matches the failure contract their call site holds; the
-core helper is internal because a bare call elides the contract choice.
-
-Why two wrappers instead of ``fail_soft: bool``
-================================================
-
-A ``fail_soft: bool`` flag would compress the API to one function, but
-it gates the function's error-handling semantics on a parameter -- the
-"flag argument" anti-pattern Beck / Martin both flag as a code smell.
-The caller's intent ("I tolerate a missing read") would live in the
-*value* of an argument rather than the *name* of the function, which
-hurts grep ("show me every fail-soft call site"), hurts diff review
-(a one-character flip changes a load-bearing contract), and reads
-ambiguously at the call site. Two named wrappers cost one extra
-function definition each; that is a cheap trade for a clearer contract.
+The MCP ``meho_broadcast_recent`` / ``meho_broadcast_watch`` tools and
+``GET /api/v1/broadcast/recent`` no longer read the stream. Since #3748
+they read the announcement archive by commit order
+(:mod:`meho_backplane.broadcast.archive_reader`). This module still
+holds the shared parse / filter / serialise primitives they use
+(:func:`event_matches`, :func:`row_to_announcement`,
+:func:`dump_event_wire`).
 
 PII inheritance
 ===============
@@ -110,7 +89,6 @@ __all__ = [
     "dump_event_wire",
     "event_matches",
     "list_recent_events_fail_soft",
-    "list_recent_events_strict",
     "parse_entry",
     "parse_since",
     "row_to_announcement",
@@ -551,10 +529,9 @@ def dump_event_wire(
     than as bare context it might absorb as instructions. Audit-driven
     :class:`BroadcastEvent` dumps pass through unchanged.
 
-    Every surface that re-serves stream events **to a model** goes through
-    this helper — ``meho_broadcast_recent`` (via
-    :func:`list_recent_events_strict`), ``meho_broadcast_watch``
-    (:func:`meho_backplane.mcp.tools.broadcast._filter_xread_items`)
+    Every surface that re-serves events **to a model** goes through
+    this helper — ``meho_broadcast_recent`` and ``meho_broadcast_watch``
+    (:mod:`meho_backplane.broadcast.archive_reader`, #3748)
     and the ``meho://tenant/{tenant_id}/feed`` resource
     (:mod:`meho_backplane.mcp.resources.tenant_feed`). The UI history
     pane is *not* such a surface: it consumes
@@ -586,7 +563,7 @@ def dump_event_wire(
 def _backfill_window_start(since: str | None) -> datetime | None:
     """Resolve the window-start instant a DB archive backfill would cover.
 
-    Broadcast v2 T2 (#2547). ``meho_broadcast_recent`` backfills durable
+    Broadcast v2 T2 (#2547). The UI history read backfills durable
     :class:`~meho_backplane.db.models.AgentAnnouncement` rows when the
     caller's requested window reaches back before the stream's oldest
     surviving entry. That only makes sense for a wall-clock window:
@@ -803,20 +780,18 @@ async def _list_recent_events_core(
 ) -> dict[str, Any]:
     """Read recent events for *operator*'s tenant; the shared core body.
 
-    Internal -- callers pick :func:`list_recent_events_strict` or
-    :func:`list_recent_events_fail_soft` so the failure-shape choice
-    lives in the function name rather than a flag argument. Issues one
+    Internal -- :func:`list_recent_events_fail_soft` wraps it with the
+    UI's failure shape. Issues one
     ``XRANGE`` (capped at ``limit``) over ``meho:feed:{operator.tenant_id}``
     from the resolved ``since`` lower bound to ``"+"``, filters +
     serialises it in-process (:func:`_match_and_serialize_entries`), then
     archive-backfills from the DB (:func:`_backfill_recent_from_db`, T2
     #2547).
 
-    *serialize* is each wrapper's per-surface serialiser, applied to both
-    stream and backfill rows: :func:`dump_event_wire` (strict / LLM reads,
-    wraps agent prose in the stored-prompt-injection guard) or
-    :func:`_dump_event_plain` (fail-soft / UI pane, whose HTML sink escapes
-    separately). Returns ``{"events": [...], "next_cursor": <str|None>}``;
+    *serialize* is the per-surface serialiser, applied to both stream and
+    backfill rows: :func:`_dump_event_plain` for the UI pane (whose HTML
+    sink escapes separately), or :func:`dump_event_wire` for a model-facing
+    read. Returns ``{"events": [...], "next_cursor": <str|None>}``;
     stream rows carry the entry id as both ``cursor`` (round-trips as the
     tool's ``cursor`` arg, #2479) and ``id``, backfill rows carry both as
     ``None``. ``next_cursor`` is the last *fetched* stream entry id (not
@@ -826,7 +801,7 @@ async def _list_recent_events_core(
 
     Raises :class:`InvalidSinceError` on a malformed ``since`` and
     propagates :class:`redis.exceptions.RedisError` on Valkey teardown;
-    the two wrappers decide which to re-raise.
+    the wrapper decides which to re-raise.
     """
     client = get_broadcast_client()
     key = stream_key(operator.tenant_id)
@@ -932,58 +907,6 @@ def _match_and_serialize_entries(
             continue
         matched.append({"id": entry_id, "cursor": entry_id, **serialize(event)})
     return matched
-
-
-async def list_recent_events_strict(
-    operator: Operator,
-    *,
-    since: str | None = None,
-    op_class: str | None = None,
-    principal: str | None = None,
-    target: str | None = None,
-    actor_sub: str | None = None,
-    work_ref: str | None = None,
-    active_only: bool = False,
-    limit: int = 100,
-) -> dict[str, Any]:
-    """Fail-loud variant: re-raises any :class:`RedisError` from Valkey.
-
-    Use at call sites that need to know about Valkey teardowns -- e.g.
-    the MCP ``broadcast.recent`` tool, where a silent empty result
-    would mislead the calling agent into thinking the stream is empty.
-    The MCP dispatcher's generic error handler maps the propagated
-    exception to JSON-RPC ``-32603`` Internal Error.
-
-    A malformed ``since`` argument surfaces as
-    :class:`InvalidSinceError`; wire-layer callers map that to
-    ``-32602`` Invalid Params.
-
-    ``actor_sub`` narrows to a delegated agent's own operations (T3
-    #2545); ``work_ref`` narrows to any event -- an announcement claim
-    or an audit-driven operation -- linked to that opaque change-ticket
-    reference; ``active_only`` drops TTL'd claims whose ``expires_at``
-    has already elapsed (see :func:`event_matches`).
-
-    Mirrors the fail-loud contract on
-    :func:`~meho_backplane.broadcast.publisher.publish_agent_announcement`
-    (its write-side counterpart).
-
-    Serialises through :func:`dump_event_wire`: this is an LLM-facing MCP
-    read, so agent-authored announcement prose is wrapped in the
-    stored-prompt-injection guard envelope.
-    """
-    return await _list_recent_events_core(
-        operator,
-        since=since,
-        op_class=op_class,
-        principal=principal,
-        target=target,
-        actor_sub=actor_sub,
-        work_ref=work_ref,
-        active_only=active_only,
-        limit=limit,
-        serialize=dump_event_wire,
-    )
 
 
 async def list_recent_events_fail_soft(

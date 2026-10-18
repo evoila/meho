@@ -56,7 +56,7 @@ from meho_backplane.docs_collections import (
     update_doc_collection,
 )
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
-from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
 
 __all__: list[str] = []
 
@@ -232,7 +232,7 @@ async def _update_doc_collections_handler(
                 data=cast("dict[str, Any]", exc.detail),
             ) from exc
         except DocCollectionGlobalUpdateForbiddenError as exc:
-            raise McpInvalidParamsError(str(exc), data=exc.detail) from exc
+            raise McpPermissionDeniedError(str(exc), data=exc.detail) from exc
         except DocCollectionBackendTypeError as exc:
             raise McpInvalidParamsError(str(exc), data=exc.detail) from exc
         except DocCollectionEndpointError as exc:

@@ -3,8 +3,8 @@
 
 """Index ``request_usage_event.session_id`` (#3757).
 
-Revision ID: 0112
-Revises: 0111
+Revision ID: 0113
+Revises: 0112
 Create Date: 2026-10-17
 
 Why
@@ -34,8 +34,8 @@ from collections.abc import Sequence
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0112"
-down_revision: str | None = "0111"
+revision: str = "0113"
+down_revision: str | None = "0112"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

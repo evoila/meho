@@ -27,7 +27,7 @@ from sqlalchemy import select
 from meho_backplane.audit import _write_audit_row
 from meho_backplane.auth.delegation import actor_delegation
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog
+from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.settings import get_settings
 
 
@@ -52,6 +52,7 @@ async def _read_row(audit_id: uuid.UUID) -> AuditLog:
 def _write_kwargs(audit_id: uuid.UUID, operator_sub: str) -> dict[str, object]:
     return {
         "audit_id": audit_id,
+        "event_class": AuditEventClass.LEGACY_REQUEST,
         "operator_sub": operator_sub,
         "tenant_id": None,
         "target_id": None,

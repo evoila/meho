@@ -260,7 +260,7 @@ async def revoke_runner_principal(
     )
     service = RunnerPrincipalService()
     try:
-        return await service.revoke(operator.tenant_id, name)
+        return await service.revoke(operator.tenant_id, name, operator_sub=operator.sub)
     except RunnerPrincipalNotFoundError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,

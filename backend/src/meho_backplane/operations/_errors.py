@@ -42,7 +42,7 @@ import httpx
 
 from meho_backplane.connectors import OperationResult, ResultHandle
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
-from meho_backplane.connectors.base import ConnectorResourceNotFoundError
+from meho_backplane.connectors.base import ConnectorResourceNotFoundError, ConnectorUpstreamError
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.resolver import get_default_policy
 
@@ -960,6 +960,12 @@ def result_connector_error(
     so existing string matchers keep working; the new detail is additive
     in ``extras``.
 
+    #3876: a :exc:`~meho_backplane.connectors.base.ConnectorUpstreamError`
+    (raised by a connector whose client library is not ``httpx``, for
+    example the Kubernetes API server rejecting a server-side apply)
+    sets the same ``http_status`` and ``upstream_message`` keys from the
+    values the connector read at its boundary.
+
     #3567: ``extras.upstream_fault`` is set from the response body as above,
     or from a SOAP fault the ESXi path attached to *exc* (see
     :func:`_add_attached_upstream_fault`).
@@ -974,6 +980,13 @@ def result_connector_error(
         extras["http_status"] = exc.response.status_code
         extras["upstream_message"] = _http_upstream_message(exc.response)
         _add_upstream_fault(extras, exc.response)
+    elif isinstance(exc, ConnectorUpstreamError):
+        extras["http_status"] = exc.http_status
+        extras["upstream_message"] = (
+            _sanitize_free_text(exc.upstream_message, cap=_UPSTREAM_MESSAGE_CAP)
+            if exc.upstream_message
+            else None
+        )
     _add_attached_upstream_fault(extras, exc)
     return OperationResult(
         status="error",

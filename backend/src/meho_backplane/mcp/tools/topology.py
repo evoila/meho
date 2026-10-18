@@ -117,7 +117,11 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import GraphEdgeKind, Tenant
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
-from meho_backplane.mcp.server import McpInternalError, McpInvalidParamsError
+from meho_backplane.mcp.server import (
+    McpInternalError,
+    McpInvalidParamsError,
+    McpPermissionDeniedError,
+)
 from meho_backplane.mcp.tools._topology_answer import COMPLETENESS_SCHEMA, bounded_answer
 from meho_backplane.operations._lookup import parse_connector_id
 from meho_backplane.operations.dispatcher import dispatch
@@ -1753,7 +1757,7 @@ async def _resolve_tenant_scope(operator: Operator, tenant_arg: str | None) -> A
     if resolved == operator.tenant_id:
         return resolved
     if not operator.platform_admin:
-        raise McpInvalidParamsError(
+        raise McpPermissionDeniedError(
             "list_targets: the `tenant_id` argument (cross-tenant scope) "
             "requires the platform_admin capability",
         )

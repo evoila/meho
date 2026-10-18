@@ -76,7 +76,7 @@ from meho_backplane.broadcast import OP_CLASS_ENUM
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
-from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
 
 __all__: list[str] = []
 
@@ -458,7 +458,7 @@ def _resolve_self_session_id(arguments: dict[str, Any]) -> uuid.UUID:
         except ValueError:
             bound_id = None
     if bound_id is None or bound_id != requested_id:
-        raise McpInvalidParamsError(
+        raise McpPermissionDeniedError(
             'shape="tree" replays only your own session: agent_session_id '
             "must equal the caller's own MCP session id",
         )

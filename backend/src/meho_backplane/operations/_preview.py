@@ -43,7 +43,9 @@ Design contract
   unknown" from a genuinely small action. Only a *declined* preview
   (builder returns ``None``, credential-class suppression, or an empty
   params dict with no builder) yields ``None`` → the identifier-only
-  default.
+  default. The ``preview_error`` message is redacted with the packaged
+  default policy before it is truncated, because a builder fault can
+  echo an upstream error body (#3876).
 * **Redaction-safe.** The preview lands in a durable row surfaced over
   REST / MCP / CLI, so it must not carry secret material. The hook
   reuses the single-sourced sensitivity classification from
@@ -80,7 +82,7 @@ from typing import TYPE_CHECKING, Any, Final, Protocol
 import structlog
 
 from meho_backplane.broadcast.events import classify_op, is_secret_param_name
-from meho_backplane.redaction import apply_connector_boundary_redaction
+from meho_backplane.redaction import apply_connector_boundary_redaction, get_default_policy, redact
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -137,6 +139,12 @@ _PARAM_REDACTED = "***REDACTED***"
 #: from ballooning the durable approval row.
 _PREVIEW_ERROR_MAX_LEN: int = 500
 
+#: Fail-closed placeholder for the ``preview_error`` message when the
+#: redactor itself fails. The marker still says the preview is
+#: unavailable; only the message is withheld. Returning the raw text
+#: instead would be the leak this redaction exists to close.
+_PREVIEW_ERROR_WITHHELD: str = "<message withheld: redaction unavailable>"
+
 
 def _preview_failure_reason(exc: Exception) -> str:
     """Render a builder fault as the short reviewer-facing reason string.
@@ -144,12 +152,34 @@ def _preview_failure_reason(exc: Exception) -> str:
     Keeps the exception *message* front and centre (the type name alone
     is opaque -- the lesson of the ``connector_error`` flattening,
     sibling #1627) while staying robust for message-less exceptions.
+
+    The message is redacted **before** it is truncated, with the same
+    packaged default policy the ``connector_error`` envelope uses for
+    ``extras.upstream_message``. A builder fault can echo an upstream
+    body: a Kubernetes admission webhook that denies a dry-run may put a
+    password or token into its ``Status`` message (#3876), and the
+    marker is stored in the durable approval row. Redaction runs first
+    so the cap cannot cut a secret into a fragment the patterns no
+    longer match. If the redactor fails, the message is withheld.
     """
     message = str(exc)
+    if message:
+        message = _redact_preview_message(message)
     reason = f"{type(exc).__name__}: {message}" if message else type(exc).__name__
     if len(reason) > _PREVIEW_ERROR_MAX_LEN:
         reason = reason[:_PREVIEW_ERROR_MAX_LEN] + " [truncated]"
     return reason
+
+
+def _redact_preview_message(message: str) -> str:
+    """Tier-1-redact one builder fault message; withhold it on any failure."""
+    try:
+        redacted = redact(message, get_default_policy()).redacted
+    except Exception:  # fail-closed: this path must never leak and never raise
+        return _PREVIEW_ERROR_WITHHELD
+    if not isinstance(redacted, str):  # pragma: no cover -- str in, str out
+        return _PREVIEW_ERROR_WITHHELD
+    return redacted
 
 
 def _scrub_secret_param_keys(value: Any) -> Any:
@@ -429,23 +459,7 @@ async def build_proposed_effect(ctx: PreviewContext) -> dict[str, Any] | None:
     except Exception as exc:
         # Fail-soft: a preview is a convenience, the park is the
         # safety-relevant action. Never let a dry-run fault block it.
-        # But never silently (#1628): a registered builder that raised
-        # means the blast radius is UNKNOWN, and the reviewer must be
-        # able to distinguish that from a genuinely small action -- so
-        # the row carries an explicit marker + reason instead of the
-        # bare identifier-only default a server-side log line can't
-        # substitute for.
-        _log.warning(
-            "proposed_effect_preview_failed",
-            op_id=op_id,
-            operator_sub=getattr(ctx.operator, "sub", None),
-            exc_info=True,
-        )
-        return {
-            "op_class": op_class,
-            "preview_unavailable": True,
-            "preview_error": _preview_failure_reason(exc),
-        }
+        return _preview_unavailable_marker(ctx, exc, op_id=op_id, op_class=op_class)
 
     if preview is None:
         return None
@@ -453,6 +467,34 @@ async def build_proposed_effect(ctx: PreviewContext) -> dict[str, Any] | None:
     return {
         "op_class": op_class,
         "preview": preview,
+    }
+
+
+def _preview_unavailable_marker(
+    ctx: PreviewContext, exc: Exception, *, op_id: str, op_class: str
+) -> dict[str, Any]:
+    """Log a builder fault and return the ``preview_unavailable`` marker.
+
+    Never silent (#1628): a registered builder that raised means the
+    blast radius is UNKNOWN, and the reviewer must be able to
+    distinguish that from a genuinely small action -- so the row carries
+    an explicit marker + reason instead of the bare identifier-only
+    default a server-side log line can't substitute for.
+
+    The log line carries the same redacted reason as the row, not the
+    raw exception: a builder fault can echo an upstream body (#3876).
+    """
+    reason = _preview_failure_reason(exc)
+    _log.warning(
+        "proposed_effect_preview_failed",
+        op_id=op_id,
+        operator_sub=getattr(ctx.operator, "sub", None),
+        preview_error=reason,
+    )
+    return {
+        "op_class": op_class,
+        "preview_unavailable": True,
+        "preview_error": reason,
     }
 
 
@@ -608,6 +650,15 @@ async def _k8s_apply_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     Returns ``None`` when no connector instance resolved (a k8s.apply
     without a target can't dry-run) so the caller falls back to the
     identifier-only default.
+
+    When the API server rejects the dry-run (an admission webhook denial,
+    an invalid object, a conflict), the handler raises
+    :class:`~meho_backplane.connectors.kubernetes.ops_write_dangerous.ApplyRejectedError`
+    and this builder lets it propagate. :func:`build_proposed_effect` then
+    stores the ``preview_unavailable`` marker with the server's message in
+    ``preview_error``, so the reviewer sees that the apply will be
+    rejected instead of a clean-looking preview with no
+    ``resourceVersion`` and no ``uid`` (#3876).
     """
     if ctx.connector_instance is None or ctx.target is None:
         return None

@@ -226,6 +226,15 @@ the envelope verbatim. Redaction runs first so a secret straddling
 the cap boundary cannot survive truncation as a cleartext fragment
 the patterns no longer match. See `docs/codebase/redaction.md`.
 
+**Non-httpx upstream status: `ConnectorUpstreamError` (#3876).** A
+connector whose client library does not raise `httpx.HTTPStatusError`
+reads the HTTP status and the upstream's message at its own boundary and
+raises `connectors/base.py::ConnectorUpstreamError` (or a subclass). The
+generic `connector_error` envelope then sets `extras.http_status` and
+`extras.upstream_message` (redacted, then capped at 2 KB), the same keys
+as the httpx path. First user: `k8s.apply`'s `ApplyRejectedError`, raised
+when the Kubernetes API server rejects a server-side apply.
+
 **Structured vim fault: `extras.upstream_fault` (#3567).** When the
 upstream error body is a vim fault, the builders that read an upstream
 response (`result_connector_error` for an `httpx.HTTPStatusError`, the

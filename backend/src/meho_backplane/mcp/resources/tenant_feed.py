@@ -98,7 +98,7 @@ from meho_backplane.mcp.registry import (
     ResourceTemplateDefinition,
     register_mcp_resource,
 )
-from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
 
 __all__: list[str] = []
 
@@ -160,7 +160,7 @@ async def _tenant_feed_handler(
         ) from exc
 
     if bound_uuid != operator.tenant_id:
-        raise McpInvalidParamsError(
+        raise McpPermissionDeniedError(
             "tenant_feed: cross-tenant access denied — bound "
             f"tenant_id {raw_id!r} does not match the operator's tenant",
         )

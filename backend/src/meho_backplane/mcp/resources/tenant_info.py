@@ -43,7 +43,7 @@ from meho_backplane.mcp.registry import (
     ResourceTemplateDefinition,
     register_mcp_resource,
 )
-from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
 
 
 async def _tenant_info_handler(
@@ -80,7 +80,7 @@ async def _tenant_info_handler(
         ) from exc
 
     if bound_uuid != operator.tenant_id:
-        raise McpInvalidParamsError(
+        raise McpPermissionDeniedError(
             "tenant_info: cross-tenant access denied — bound "
             f"tenant_id {raw_id!r} does not match the operator's tenant",
         )

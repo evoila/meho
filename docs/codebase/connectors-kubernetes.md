@@ -485,11 +485,34 @@ value).
 **`k8s.apply` dry-run preview.** The op supports `dry_run="server"` (maps
 to the API's `?dryRun=All`) so the would-be object is returned without
 mutating -- the diff-preview an agent or reviewer runs before the real
-apply. Note: the dispatcher / approval-queue substrate has **no per-op
-`proposed_effect` builder hook**, so the dry-run result is not
-auto-populated into the approval row at queue time today; the dry-run is
-expressible + returned by the op, and queue-time auto-population is a
-follow-up that needs a dispatcher hook.
+apply. When the op waits for approval, the `k8s.apply` preview builder in
+`operations/_preview.py` runs this dry-run and stores the result on the
+approval row (see `approvals.md`).
+
+**`k8s.apply` API-server rejections (#3876).** `DynamicClient.request`
+calls the API with `_preload_content=False`, and kubernetes_asyncio only
+raises `ApiException` for a non-2xx answer when `_preload_content` is
+true. So the library hands back a rejection (an admission webhook 403, a
+422 invalid object, a 409 field conflict) as a normal response with a
+`Status` failure body. `_apply_one` therefore calls `server_side_apply`
+with `serialize=False`, checks the HTTP status itself, and raises
+`ApplyRejectedError` (a `ConnectorUpstreamError`) for any non-2xx answer,
+on the real apply and on the dry-run. The result is `error` with
+`extras.http_status` and the API server's `message` in
+`extras.upstream_message`. The approval preview shows the rejection
+(`preview_unavailable` with the message in `preview_error`) instead of a
+clean-looking summary with no `resourceVersion` and no `uid`. The preview
+message is redacted before it is stored, like `extras.upstream_message`,
+so a denial that quotes a credential does not put it into the approval
+row.
+`ApplyNotPersistedError` is now only raised for a 2xx real apply with no
+`resourceVersion`. `k8s.apply` is the only op that uses `DynamicClient`.
+The other ops use the generated API classes, which raise `ApiException`
+on a non-2xx answer (`k8s.exec` opens a websocket; a refused upgrade
+raises from aiohttp). The discovery reads that
+`DynamicClient` makes before the apply go through the same unchecked
+path, but a denied discovery read still ends in an error (usually
+`ResourceNotFoundError`), not a false success.
 
 ### Governed guest-cluster kubeconfig read -- `k8s.secret.read_to_ref` (#3496)
 

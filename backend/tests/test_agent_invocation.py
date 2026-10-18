@@ -578,6 +578,26 @@ async def test_failed_loop_records_failed_run() -> None:
     assert outcome.error is not None
 
 
+async def test_failed_run_error_names_the_returned_run_id() -> None:
+    """The failure text names the run id the caller got back (#4232).
+
+    ``meho agent run`` returns ``outcome.run_id`` and ``run-status`` reads the
+    durable row by it, so the error stored on that row must use the same id.
+    """
+    await _seed_definition()
+
+    def _fail(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        raise RuntimeError("model broke")
+
+    invoker = AgentInvoker(runtime=PydanticAgentRun(model_factory=lambda: FunctionModel(_fail)))
+    outcome = await invoker.run(_make_operator(), "reader", "go")
+
+    assert outcome.status is AgentRunStatus.FAILED
+    view = await invoker.poll(_make_operator(), outcome.run_id)
+    assert view.error is not None
+    assert f"agent run {outcome.run_id} failed" in view.error
+
+
 # ---------------------------------------------------------------------------
 # Turns counter (#2743) — the durable run row records the loop's model-request
 # turn total, so ``run_status`` stops reporting a constant 0.

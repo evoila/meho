@@ -124,7 +124,7 @@ from meho_backplane.agent.hosted_context import (
     READ_CONTEXT_RESOURCE,
     build_read_context_resource_tool,
 )
-from meho_backplane.agent.meta_tool import MetaToolSpec
+from meho_backplane.agent.meta_tool import MetaToolSpec, connector_errors_reach_model
 from meho_backplane.agent.toolset_broadcast import build_broadcast_meta_tools
 from meho_backplane.agent.toolset_discovery import (
     RETRIEVAL_META_TOOL_NAMES,
@@ -389,6 +389,10 @@ def _make_meta_tool(
     crash — when the requested connector is outside the spec's
     ``connectors`` list.
 
+    An unknown or not-yet-ingested ``connector_id`` from the handler goes
+    back to the model as a failed tool result (#4232), so the model can pick
+    another id and the run goes on.
+
     For ``call_operation`` specifically the wrapper also threads the G11.1-T9
     (#1117) approval-resume substrate: when the dispatch returns
     ``status="awaiting_approval"``, the wrapper blocks on
@@ -436,7 +440,8 @@ def _make_meta_tool(
                     f"an allowed connector or stop."
                 )
         call_arguments = dict(arguments)
-        result = await handler(ctx.deps, call_arguments)
+        with connector_errors_reach_model():
+            result = await handler(ctx.deps, call_arguments)
         if is_call_operation and result.get("status") == "awaiting_approval":
             settings = get_settings()
             return await resume_or_surface_awaiting_approval(

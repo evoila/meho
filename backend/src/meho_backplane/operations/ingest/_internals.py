@@ -370,6 +370,36 @@ async def count_needs_reingest_in_scope(session: AsyncSession, scope: ConnectorS
     return int(await session.scalar(stmt) or 0)
 
 
+async def load_ingested_writes_in_scope(
+    session: AsyncSession, scope: ConnectorScope
+) -> list[EndpointDescriptor]:
+    """Return *scope*'s ingested write rows that sit below ``destructive`` (#3827).
+
+    The input of the review report for stored deletes. Same full-universe
+    predicate as :func:`count_ops_in_scope` (group or not), narrowed to
+    ``source_kind='ingested'`` rows with a mutating verb and a
+    ``safety_level`` other than ``destructive``. Reads are never
+    delete-shaped and a ``destructive`` row is already at the top level,
+    so neither can appear on the report. Sorted by ``op_id`` so the report
+    is stable across calls.
+    """
+    stmt = select(EndpointDescriptor).where(
+        EndpointDescriptor.product == scope.product,
+        EndpointDescriptor.version == scope.version,
+        EndpointDescriptor.impl_id == scope.impl_id,
+        EndpointDescriptor.source_kind == "ingested",
+        EndpointDescriptor.method.in_(("POST", "PUT", "PATCH", "DELETE")),
+        EndpointDescriptor.safety_level != "destructive",
+    )
+    if scope.tenant_id is None:
+        stmt = stmt.where(EndpointDescriptor.tenant_id.is_(None))
+    else:
+        stmt = stmt.where(EndpointDescriptor.tenant_id == scope.tenant_id)
+    stmt = stmt.order_by(EndpointDescriptor.op_id)
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
 # ---------------------------------------------------------------------------
 # Audit emission
 # ---------------------------------------------------------------------------

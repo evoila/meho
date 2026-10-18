@@ -406,6 +406,148 @@ async def test_get_review_payload_surfaces_needs_reingest_flag_and_count() -> No
     assert payload.ungrouped_op_count == 1
 
 
+async def _add_stored_write(
+    *,
+    tenant_id: uuid.UUID,
+    op_id: str,
+    safety_level: str,
+    requires_approval: bool,
+    source_kind: str = "ingested",
+    is_enabled: bool = True,
+) -> None:
+    """Insert one stored write row the way an earlier ingest left it."""
+    method, path = op_id.split(":", 1)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        session.add(
+            EndpointDescriptor(
+                tenant_id=tenant_id,
+                product="vmware",
+                version="9.0",
+                impl_id="vmware-rest",
+                op_id=op_id,
+                source_kind=source_kind,
+                method=method,
+                path=path,
+                group_id=None,
+                summary=f"Stored {op_id}",
+                safety_level=safety_level,
+                requires_approval=requires_approval,
+                is_enabled=is_enabled,
+            )
+        )
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_review_payload_reports_stored_deletes_below_destructive() -> None:
+    """#3827: stored deletes that an earlier ingest left too weak are listed with a fix.
+
+    Rows persisted before the parser and floor changes keep their old
+    posture until the next ingest. The review report shows every stored
+    ingested delete-shaped row below ``destructive`` next to what a fresh
+    ingest would assign, and flags the rows that are weaker than that.
+    """
+    tenant_id = uuid.uuid4()
+    await _seed_connector(tenant_id=tenant_id, group_count=1, ops_per_group=1)
+    # The issue's shape: a category delete stored at caution, no approval.
+    await _add_stored_write(
+        tenant_id=tenant_id,
+        op_id="DELETE:/api/cis/tagging/category/{category_id}",
+        safety_level="caution",
+        requires_approval=False,
+    )
+    # A tag detach stored at caution: a POST the floor now treats as a removal.
+    await _add_stored_write(
+        tenant_id=tenant_id,
+        op_id="POST:/api/cis/tagging/tag-association?action=detach",
+        safety_level="caution",
+        requires_approval=False,
+    )
+    # A generic delete stored dangerous without approval (pre-#3827 parser).
+    await _add_stored_write(
+        tenant_id=tenant_id,
+        op_id="DELETE:/vcenter/datastore/{datastore}",
+        safety_level="dangerous",
+        requires_approval=False,
+    )
+    # A generic delete already at the current parser posture.
+    await _add_stored_write(
+        tenant_id=tenant_id,
+        op_id="DELETE:/vcenter/folder/{folder}",
+        safety_level="dangerous",
+        requires_approval=True,
+    )
+    # Not delete-shaped: an ordinary write, and a typed delete, stay off the report.
+    await _add_stored_write(
+        tenant_id=tenant_id,
+        op_id="POST:/vcenter/folder",
+        safety_level="caution",
+        requires_approval=False,
+    )
+    await _add_stored_write(
+        tenant_id=tenant_id,
+        op_id="DELETE:/typed/thing/{id}",
+        safety_level="dangerous",
+        requires_approval=False,
+        source_kind="typed",
+    )
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+
+    payload = await service.get_review_payload("vmware-rest-9.0", tenant_id)
+
+    rows = {row.op_id: row for row in payload.delete_ops_below_destructive}
+    assert sorted(rows) == [
+        "DELETE:/api/cis/tagging/category/{category_id}",
+        "DELETE:/vcenter/datastore/{datastore}",
+        "DELETE:/vcenter/folder/{folder}",
+        "POST:/api/cis/tagging/tag-association?action=detach",
+    ]
+    assert payload.delete_ops_needing_correction_count == 3
+
+    category = rows["DELETE:/api/cis/tagging/category/{category_id}"]
+    assert category.safety_level == "caution"
+    assert category.requires_approval is False
+    assert category.expected_safety_level == "destructive"
+    assert category.expected_requires_approval is True
+    assert category.needs_correction is True
+    assert "a fresh ingest gives destructive" in category.reason
+
+    detach = rows["POST:/api/cis/tagging/tag-association?action=detach"]
+    assert detach.method == "POST"
+    assert detach.expected_safety_level == "destructive"
+    assert detach.needs_correction is True
+
+    datastore = rows["DELETE:/vcenter/datastore/{datastore}"]
+    assert datastore.expected_safety_level == "dangerous"
+    assert datastore.expected_requires_approval is True
+    assert datastore.needs_correction is True
+    assert "runs at once for a human operator" in datastore.reason
+
+    folder = rows["DELETE:/vcenter/folder/{folder}"]
+    assert folder.needs_correction is False
+    assert "waits for approval at dangerous" in folder.reason
+
+
+@pytest.mark.asyncio
+async def test_review_payload_delete_report_is_empty_without_stored_deletes() -> None:
+    """A connector with only reads and ordinary writes reports no deletes."""
+    tenant_id = uuid.uuid4()
+    await _seed_connector(tenant_id=tenant_id, group_count=1, ops_per_group=2)
+    await _add_stored_write(
+        tenant_id=tenant_id,
+        op_id="POST:/vcenter/folder",
+        safety_level="caution",
+        requires_approval=False,
+    )
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+
+    payload = await service.get_review_payload("vmware-rest-9.0", tenant_id)
+
+    assert payload.delete_ops_below_destructive == []
+    assert payload.delete_ops_needing_correction_count == 0
+
+
 @pytest.mark.asyncio
 async def test_review_payload_reports_ungrouped_descriptor_count() -> None:
     """#3681: the review payload reports ungrouped descriptors so an operator can see the gap.

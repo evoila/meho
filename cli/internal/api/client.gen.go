@@ -3690,6 +3690,28 @@ type ConnectorListResponse struct {
 	NextCursor *string             `json:"next_cursor"`
 }
 
+// ConnectorReviewDeleteOp One stored ingested delete that sits below the “destructive“ risk level (#3827).
+//
+// The review report for stored deletes. Rows persisted by an earlier
+// ingest keep their old “safety_level“ / “requires_approval“ until the
+// connector is ingested again, so a guard test on the spec cannot show an
+// operator which stored rows still run without approval. Each row carries
+// what is stored next to what a fresh ingest of the same “(method, path)“
+// would assign today (parser default, then the connector floor, then the
+// catalog overlay). “needs_correction“ is “True“ when the stored row is
+// weaker than that; “reason“ says why in plain words.
+type ConnectorReviewDeleteOp struct {
+	ExpectedRequiresApproval bool   `json:"expected_requires_approval"`
+	ExpectedSafetyLevel      string `json:"expected_safety_level"`
+	IsEnabled                bool   `json:"is_enabled"`
+	Method                   string `json:"method"`
+	NeedsCorrection          bool   `json:"needs_correction"`
+	OpId                     string `json:"op_id"`
+	Reason                   string `json:"reason"`
+	RequiresApproval         bool   `json:"requires_approval"`
+	SafetyLevel              string `json:"safety_level"`
+}
+
 // ConnectorReviewGroup One group within the review payload.
 //
 // Carries the LLM-generated group metadata
@@ -3761,18 +3783,20 @@ type ConnectorReviewOp struct {
 // (the Goal flags secret-handling sensitivity). See
 // :data:`~meho_backplane.operations.ingest.api_schemas.ConnectorAuthoringKind`.
 type ConnectorReviewPayload struct {
-	ConnectorId          string                       `json:"connector_id"`
-	Dispatchable         *bool                        `json:"dispatchable,omitempty"`
-	Groups               []ConnectorReviewGroup       `json:"groups"`
-	ImplId               string                       `json:"impl_id"`
-	Kind                 *ConnectorReviewPayloadKind  `json:"kind,omitempty"`
-	NeedsReingestOpCount *int                         `json:"needs_reingest_op_count,omitempty"`
-	Product              string                       `json:"product"`
-	Provenance           *[]ConnectorReviewProvenance `json:"provenance,omitempty"`
-	TenantId             *openapi_types.UUID          `json:"tenant_id"`
-	TotalOpCount         int                          `json:"total_op_count"`
-	UngroupedOpCount     *int                         `json:"ungrouped_op_count,omitempty"`
-	Version              string                       `json:"version"`
+	ConnectorId                     string                       `json:"connector_id"`
+	DeleteOpsBelowDestructive       *[]ConnectorReviewDeleteOp   `json:"delete_ops_below_destructive,omitempty"`
+	DeleteOpsNeedingCorrectionCount *int                         `json:"delete_ops_needing_correction_count,omitempty"`
+	Dispatchable                    *bool                        `json:"dispatchable,omitempty"`
+	Groups                          []ConnectorReviewGroup       `json:"groups"`
+	ImplId                          string                       `json:"impl_id"`
+	Kind                            *ConnectorReviewPayloadKind  `json:"kind,omitempty"`
+	NeedsReingestOpCount            *int                         `json:"needs_reingest_op_count,omitempty"`
+	Product                         string                       `json:"product"`
+	Provenance                      *[]ConnectorReviewProvenance `json:"provenance,omitempty"`
+	TenantId                        *openapi_types.UUID          `json:"tenant_id"`
+	TotalOpCount                    int                          `json:"total_op_count"`
+	UngroupedOpCount                *int                         `json:"ungrouped_op_count,omitempty"`
+	Version                         string                       `json:"version"`
 }
 
 // ConnectorReviewPayloadKind defines model for ConnectorReviewPayload.Kind.

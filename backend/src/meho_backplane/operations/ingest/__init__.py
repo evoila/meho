@@ -127,6 +127,7 @@ from meho_backplane.operations.ingest.openapi import (
 )
 from meho_backplane.operations.ingest.parser import parse_connector_id
 from meho_backplane.operations.ingest.payload import (
+    ConnectorReviewDeleteOp,
     ConnectorReviewGroup,
     ConnectorReviewOp,
     ConnectorReviewPayload,
@@ -163,6 +164,7 @@ __all__ = [
     "ConnectorListItem",
     "ConnectorListResponse",
     "ConnectorNotFoundError",
+    "ConnectorReviewDeleteOp",
     "ConnectorReviewGroup",
     "ConnectorReviewOp",
     "ConnectorReviewPayload",

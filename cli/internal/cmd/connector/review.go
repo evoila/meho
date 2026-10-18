@@ -157,6 +157,11 @@ func printReviewTable(w io.Writer, r *api.ConnectorReviewPayload) {
 			*r.UngroupedOpCount,
 		)
 	}
+	// #3827: stored ingested deletes below the destructive risk level. A
+	// row an earlier ingest left weaker than a fresh ingest would make it
+	// needs a re-ingest or a per-op `connector edit-op`; the full list
+	// (including rows that need no change) rides the --json render.
+	printDeleteReview(w, r)
 	if len(r.Groups) == 0 {
 		fmt.Fprintln(w, "(no groups; the connector has no operations or the grouping pass produced no buckets)")
 		return
@@ -187,6 +192,44 @@ func printReviewTable(w io.Writer, r *api.ConnectorReviewPayload) {
 				truncate(strDeref(op.Summary), 70),
 			)
 		}
+	}
+}
+
+// printDeleteReview renders the review report for stored ingested deletes
+// below the destructive risk level (#3827). It prints a count line whenever
+// the report has rows, and a WARNING table of the rows that are weaker than
+// a fresh ingest would make them (stored posture next to the expected one).
+func printDeleteReview(w io.Writer, r *api.ConnectorReviewPayload) {
+	if r.DeleteOpsBelowDestructive == nil || len(*r.DeleteOpsBelowDestructive) == 0 {
+		return
+	}
+	rows := *r.DeleteOpsBelowDestructive
+	needing := 0
+	if r.DeleteOpsNeedingCorrectionCount != nil {
+		needing = *r.DeleteOpsNeedingCorrectionCount
+	}
+	fmt.Fprintf(w, "\nDeletes below destructive: %d stored op(s), %d need(s) correction.\n",
+		len(rows), needing,
+	)
+	if needing == 0 {
+		fmt.Fprintln(w, "  All of them wait for approval. Use --json for the full list.")
+		return
+	}
+	fmt.Fprintln(w, "WARNING: these stored ops are weaker than a fresh ingest would make them. Ingest the connector again, or fix each one with `connector edit-op <connector_id> <op_id> --safety <expected> --requires-approval`.")
+	fmt.Fprintf(w, "  %-60s %-9s %3s  %-11s %3s\n",
+		"op_id", "stored", "req", "expected", "req",
+	)
+	for _, op := range rows {
+		if !op.NeedsCorrection {
+			continue
+		}
+		fmt.Fprintf(w, "  %-60s %-9s %3s  %-11s %3s\n",
+			truncate(op.OpId, 60),
+			op.SafetyLevel,
+			boolFlag(op.RequiresApproval),
+			op.ExpectedSafetyLevel,
+			boolFlag(op.ExpectedRequiresApproval),
+		)
 	}
 }
 

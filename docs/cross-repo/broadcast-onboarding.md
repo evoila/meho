@@ -130,28 +130,19 @@ match the operator's JWT-derived tenant.
 
 ## MCP tool: `meho_broadcast_recent`
 
-> **Changed in #3748.** `meho_broadcast_recent` now reads agent
-> announcements only, from the announcement archive in the order they
-> were stored. Operation events are not returned (use `query_audit`).
-> The response is `{events, next_cursor, watch_checkpoint, gap}`.
-> `next_cursor` is an opaque history page cursor (`h1.…`) and
-> `watch_checkpoint` an opaque watch checkpoint (`w1.…`) to pass to
-> `meho_broadcast_watch`. Valkey stream ids are no longer accepted as
-> `cursor`. The examples below show the older stream shape; see
-> `docs/codebase/broadcast.md` § *Archive order and cursors*.
-
-The agent-facing read surface. Where `meho://tenant/{id}/feed`
-returns the last 50 events in chronological order with no filter or
-cursor control, `meho_broadcast_recent` is a JSON-RPC `tools/call`
-that accepts a `since` cursor, optional filters, and a tunable
-page size:
+The agent-facing read surface. It returns **agent announcements
+only**. MEHO stores every announcement before it sends it out, and
+`meho_broadcast_recent` reads that store in the order the
+announcements were saved. Operation events (what was run, by whom) are
+not in this answer; read them with `query_audit`. The SSE feed above
+still shows operation, approval and check events.
 
 ```json
 {
   "name": "meho_broadcast_recent",
   "arguments": {
-    "since": "2026-05-25T10:00:00Z",
-    "filter": {"op_class": "write", "principal": "op-alice"},
+    "cursor": "2026-05-25T10:00:00Z",
+    "filter": {"target": "prod-vc-1", "active_only": true},
     "limit": 100
   }
 }
@@ -163,63 +154,94 @@ Response shape:
 {
   "events": [
     {
-      "id": "1747800000000-0",
-      "event_id": "...",
-      "tenant_id": "...",
-      "op_class": "write",
-      "op_id": "vsphere.vm.create",
+      "kind": "agent_announcement",
+      "event_kind": "agent_announcement",
+      "event_id": "5b0c1c9e-…",
+      "tenant_id": "…",
       "principal_sub": "op-alice",
-      "target_name": "prod-vc-1",
-      "result_status": "ok",
-      "ts": "2026-05-25T10:00:00Z",
-      "payload": {"op_class": "write", "params": {...}, "result_status": "ok"},
-      "audit_id": "..."
+      "activity": "<untrusted-text envelope around the agent's text>",
+      "target": "<untrusted-text envelope around 'prod-vc-1'>",
+      "phase": "start",
+      "claim_id": "…",
+      "owner_sub": "op-alice",
+      "ttl_minutes": 30,
+      "ts": "2026-05-25T10:00:00Z"
     }
   ],
-  "next_cursor": "1747800099000-0"
+  "next_cursor": "h1.<opaque>",
+  "watch_checkpoint": "w1.<opaque>",
+  "gap": null
 }
 ```
 
+* `events` — announcements, oldest first. Each row has a stable
+  `event_id` (a UUID). Use it to drop duplicates. Free-text fields
+  (`activity`, `scope`, `target`, `targets`, `work_ref`) come wrapped
+  as untrusted text; see *Trust boundary* below.
+* `next_cursor` — an opaque page cursor (starts with `h1.`). Pass it
+  back as `cursor` to read the next page of the same read. It is
+  `null` when you have read everything up to the moment of the first
+  call.
+* `watch_checkpoint` — an opaque watch checkpoint (starts with `w1.`).
+  Pass it to `meho_broadcast_watch` to get every announcement stored
+  after this read. It is set even when no row matched your filter.
+* `gap` — `null`, or an object that says the answer is not complete
+  because old announcements were removed by retention:
+  `{"reason": "retention_trimmed", "missed_events": 3, "detail": "…"}`.
+  `missed_events` is `null` when MEHO cannot count them (a time window
+  that starts before the retention period).
+
 Arguments (all optional):
 
-* `since` — ISO-8601 timestamp (`2026-05-25T10:00:00Z`) OR a Valkey
-  stream cursor (`1747800000000-0`). Omit for the last 30 minutes.
-  Cursors are treated as **exclusive** lower bounds so paginating
-  forward via `next_cursor` never double-delivers the boundary event.
-* `filter.op_class` — one of `read`, `write`, `credential_read`,
-  `credential_mint`, `audit_query`, `other`.
+* `cursor` — either an ISO-8601 time (`2026-05-25T10:00:00Z`) to start
+  the window, or the `next_cursor` of an earlier page. Omit it for the
+  last 30 minutes. A Valkey stream id (`1747800000000-0`) is refused
+  with JSON-RPC `INVALID_PARAMS` (-32602). `since` is an old alias for
+  `cursor`; do not send both.
 * `filter.principal` — JWT `sub` claim (operator identifier).
-* `filter.target` — target name (when the op operates on a specific
-  target). Events with no target attribution (`target_name: null`)
-  never satisfy a non-null `target` filter.
-* `limit` — integer in `[1, 1000]`, default 100. Values outside the
-  range return JSON-RPC `INVALID_PARAMS` (-32602).
+* `filter.target` — matches an announcement's `target` or any entry in
+  its `targets` list.
+* `filter.work_ref` — a change-ticket reference such as
+  `gh:evoila/meho#123`.
+* `filter.active_only` — `true` drops claims whose time to live has
+  run out.
+* `filter.op_class` / `filter.actor_sub` — still accepted, but they
+  match operation events only, so no announcement matches them.
+* `limit` — integer in `[1, 1000]`, default 100. It caps the rows MEHO
+  reads per page. The filter runs after the read, so a page can hold
+  fewer events than `limit`. Values outside the range return
+  JSON-RPC `INVALID_PARAMS` (-32602).
 
 Pagination contract:
 
 ```javascript
 let cursor = null;
+let checkpoint = null;
 while (true) {
-  const args = cursor ? {since: cursor, limit: 100} : {limit: 100};
-  const {events, next_cursor} = await callTool("meho_broadcast_recent", args);
-  for (const e of events) handle(e);
-  if (next_cursor === null) break;  // reached the live tail
+  const args = cursor ? {cursor, limit: 100} : {limit: 100};
+  const {events, next_cursor, watch_checkpoint, gap} =
+    await callTool("meho_broadcast_recent", args);
+  if (gap) warn(gap);                // some old announcements are gone
+  for (const e of events) handle(e); // dedupe by e.event_id
+  if (checkpoint === null) checkpoint = watch_checkpoint; // keep the first
+  if (next_cursor === null) break;   // read everything up to the first call
   cursor = next_cursor;
 }
+// Start meho_broadcast_watch from `checkpoint`.
 ```
 
-`next_cursor` is the **last fetched** stream entry id (NOT the last
-*matched* one) so a page where every entry was filtered out still
-produces a non-null cursor and the walk progresses. `null` signals
-"this page was shorter than `limit` — you've reached the live tail".
+The first page fixes the end of the read. Later pages keep that same
+end, so new announcements do not make the walk longer. Every page
+carries the same `watch_checkpoint`; a watch that starts there sees
+everything stored after the read began.
 
 Tenant scoping is **structural**: the input schema has no `tenant_id`
-argument, so the stream key is derived exclusively from the operator's
-JWT-bound tenant. A cross-tenant request is not "checked then
-rejected" but "no surface that could ask for another tenant's stream
-in the first place". RBAC: `operator` role minimum (same as the SSE
-feed); `read_only` operators do not see the tool on `tools/list`
-and a direct call rejects with `forbidden`.
+argument, so MEHO reads only the operator's JWT-bound tenant. Both
+cursor kinds are bound to the tenant that issued them; a cursor from
+another tenant is refused with JSON-RPC `INVALID_PARAMS` (-32602).
+RBAC: `operator` role minimum (same as the SSE feed); `read_only`
+operators do not see the tool on `tools/list` and a direct call
+rejects with `forbidden`.
 
 ## MCP tool: `meho_broadcast_announce`
 
@@ -247,12 +269,34 @@ entry, periodic `update` announcements during long work, and a
 Response shape:
 
 ```json
-{"event_id": "1747800000000-7"}
+{
+  "event_id": "5b0c1c9e-…",
+  "watch_checkpoint": "w1.<opaque>",
+  "delivery_pending": false,
+  "claim_id": "…",
+  "phase": "start",
+  "owner_sub": "op-alice",
+  "admission": "…",
+  "ttl_minutes": 30,
+  "replayed": false
+}
 ```
 
-The `event_id` is the Valkey stream entry id; it round-trips through
-`meho_broadcast_recent`'s `since` cursor for verification or follow-up
-reads.
+* `event_id` — the announcement's UUID. It is the same `event_id` the
+  row has on `meho_broadcast_recent` and `meho_broadcast_watch` reads.
+* `watch_checkpoint` — a `meho_broadcast_watch` cursor just after this
+  announcement. Pass it to watch to see what others announce next.
+* `delivery_pending` — `true` when MEHO stored the announcement but
+  could not wake up live watchers. Readers see the announcement
+  anyway. A retry with the same `idempotency_key` finishes the wake-up
+  and stores no second copy.
+* `claim_id` — the claim this step belongs to. A `start` gets a new
+  one; send it on the `update` and `completion` steps.
+* `replayed` — `true` when this was a retry of a step MEHO already
+  stored; nothing new was stored.
+
+Any other claim fields you sent (`targets`, `planned_op_class`,
+`work_ref`, …) are echoed back.
 
 Arguments:
 
@@ -263,17 +307,25 @@ Arguments:
   activity is target-less.
 * `scope` (optional) — free-form scope hint
   (`investigating cluster X latency`).
-* `phase` (optional, default `update`) — one of `start`, `update`,
-  `completion`. Picks the label on the
+* `phase` (optional, default `start`) — one of `start`, `update`,
+  `completion`. `start` opens a new claim; `update` and `completion`
+  continue it. Picks the label on the
   `broadcast_agent_announcements_total{phase}` Prometheus counter.
+* `claim_id` — required on `update` and `completion` (the `claim_id`
+  the `start` returned); not allowed on `start`.
+* `idempotency_key` — your retry key for this step. Required on
+  `update` and `completion`, optional on `start`. The same key again
+  returns the first result with `replayed: true`.
+* `ttl_minutes`, `targets`, `planned_op_class`, `work_ref` — optional
+  claim fields; see the tool's description on `tools/list`.
 
-The published event surfaces back through `meho_broadcast_recent` with
-`event_kind: "agent_announcement"` and the agent-authored fields
-intact. No `op_id` / `op_class` / `audit_id` on the event — those are
+The published event surfaces back through `meho_broadcast_recent` and
+`meho_broadcast_watch` with `event_kind: "agent_announcement"`; the
+agent-authored free text comes wrapped as untrusted text. No `op_id` / `op_class` / `audit_id` on the event — those are
 audit-row fields, and an announcement is not an audit derivative (the
 chassis `AuditMiddleware` still writes an audit row for the
 `meho_broadcast_announce` tools/call invocation itself; that row is
-distinct from the announcement content on the stream).
+distinct from the stored announcement).
 
 ### Trust boundary (LOAD-BEARING)
 
@@ -294,21 +346,23 @@ surface treats them as **untrusted**:
   agent-untrusted operational rules (see
   [`backend/src/meho_backplane/conventions/preamble.py`](../../backend/src/meho_backplane/conventions/preamble.py)).
 
-### Fail-loud publish (distinct from audit-driven publisher)
+### Stored first, then sent out (distinct from audit-driven publisher)
 
-> **Changed in #3748.** Only a failure to store the announcement is
-> fail-loud now. A stream failure after it is stored returns success
-> with `delivery_pending: true`; a retry with the same
-> `idempotency_key` finishes the stream write.
+`meho_broadcast_announce` stores the announcement before it sends it
+out. Where the audit-driven publisher swallows Valkey errors silently
+(the audit row is canonical; a missed broadcast is acceptable
+degradation), the announce path works like this:
 
-`meho_broadcast_announce` is **fail-loud**. Where the audit-driven
-publisher swallows Valkey errors silently (the audit row is canonical;
-a missed broadcast is acceptable degradation), the announce publisher
-raises on any Valkey failure and the dispatcher surfaces it as
-JSON-RPC `INTERNAL_ERROR` (-32603). The agent explicitly emitted the
-announcement and needs to know whether it landed — a silent swallow
-would leave the agent thinking it told the team while the team never
-saw it.
+* **Storing fails** → the call fails with JSON-RPC `INTERNAL_ERROR`
+  (-32603) and nothing was stored. The agent explicitly emitted the
+  announcement and needs to know whether it landed — a silent swallow
+  would leave the agent thinking it told the team while the team never
+  saw it.
+* **Storing works, the live wake-up fails** → the call succeeds with
+  `delivery_pending: true`. `meho_broadcast_recent` and
+  `meho_broadcast_watch` already return the announcement, because they
+  read the store. Retry with the same `idempotency_key` to also reach
+  live SSE readers; MEHO does not store a second copy.
 
 Tenant scoping is **structural**: the input schema has no `tenant_id`
 argument; the announcement always writes to the operator's own tenant
@@ -316,26 +370,20 @@ stream. RBAC: `operator` role minimum.
 
 ## MCP tool: `meho_broadcast_watch`
 
-> **Changed in #3748.** `cursor` is now a watch checkpoint (`w1.…`)
-> from `meho_broadcast_recent`'s `watch_checkpoint` or an earlier
-> watch's `next_cursor`. The watch reads stored announcements after the
-> checkpoint and uses the stream only to wake up early; when Valkey is
-> down it checks every 5 seconds. The response adds `gap`. The examples
-> below show the older stream shape.
-
 The long-poll equivalent of "subscribe to the feed" for clients that
-don't speak SSE. Where `meho_broadcast_recent` returns whatever's
-already on the stream past `since`, `meho_broadcast_watch` uses Valkey
-`XREAD BLOCK <timeout_ms>` to **wait** for new entries past
-`since_cursor` and returns them as soon as they arrive — or returns
-empty when the block window expires.
+don't speak SSE. Like `meho_broadcast_recent`, it returns **stored
+agent announcements only**. It returns the announcements stored after
+your watch checkpoint. When there are none yet, it waits up to
+`timeout_ms` for a new one, then reads again. MEHO uses the Valkey
+stream only to wake up early; when Valkey is down it checks the store
+every 5 seconds instead, so nothing is lost, only later.
 
 ```json
 {
   "name": "meho_broadcast_watch",
   "arguments": {
-    "since_cursor": "1747800099000-0",
-    "filter": {"op_class": "write"},
+    "cursor": "w1.<opaque>",
+    "filter": {"target": "prod-vc-1"},
     "timeout_ms": 10000
   }
 }
@@ -347,17 +395,17 @@ Response shape (events arrived):
 {
   "events": [
     {
-      "id": "1747800100200-0",
-      "event_id": "...",
-      "op_id": "vsphere.vm.create",
-      "principal_sub": "op-alice",
-      "result_status": "ok",
-      "ts": "2026-05-25T10:01:40Z",
-      "payload": {...},
-      "audit_id": "..."
+      "kind": "agent_announcement",
+      "event_id": "9e41a7d2-…",
+      "principal_sub": "op-bob",
+      "activity": "<untrusted-text envelope around the agent's text>",
+      "phase": "update",
+      "claim_id": "…",
+      "ts": "2026-05-25T10:01:40Z"
     }
   ],
-  "next_cursor": "1747800100200-0"
+  "next_cursor": "w1.<opaque, moved forward>",
+  "gap": null
 }
 ```
 
@@ -366,51 +414,63 @@ Response shape (window expired with no events):
 ```json
 {
   "events": [],
-  "next_cursor": "1747800099000-0"
+  "next_cursor": "w1.<opaque, same as the cursor you sent>",
+  "gap": null
 }
 ```
 
-The **unchanged `next_cursor` is the "I waited; nothing landed" signal**.
-The caller re-polls with the same cursor.
+An **unchanged `next_cursor` with no events** means "I waited; nothing
+landed". The caller re-polls with the same cursor. `next_cursor` moves
+past every row MEHO read, also when your filter hid all of them, so a
+loop that always passes it back never gets the same event twice.
+
+`gap` is `null`, or one of:
+
+* `{"reason": "retention_trimmed", "missed_events": N, "detail": "…"}`
+  — announcements after your checkpoint were removed by retention
+  before you read them.
+* `{"reason": "checkpoint_ahead", …}` — your checkpoint is ahead of
+  the store (for example after a database restore). Watching restarts
+  at the current end.
 
 Arguments:
 
-* `since_cursor` (**required**) — Valkey stream cursor (`1747800000000-0`).
-  Obtain the initial value from `meho_broadcast_recent`'s `next_cursor`;
-  from that point forward the watch loop feeds itself.
-* `filter.op_class` / `filter.principal` / `filter.target` — same
-  semantics as `meho_broadcast_recent`. Filtered-out entries still
-  advance the cursor so the walk progresses even on busy-but-filtered
-  tenants.
+* `cursor` (**required**) — a watch checkpoint (starts with `w1.`).
+  Take the first one from `meho_broadcast_recent`'s `watch_checkpoint`
+  (or from your own announce's `watch_checkpoint`). After that, pass
+  each answer's `next_cursor`. A history page cursor (`h1.…`, the
+  `next_cursor` of `meho_broadcast_recent`) or a Valkey stream id is
+  refused with JSON-RPC `INVALID_PARAMS` (-32602). `since_cursor` is
+  an old alias for `cursor`; do not send both.
+* `filter` — same keys and meaning as `meho_broadcast_recent`.
 * `timeout_ms` — integer in `[100, 30000]`, default `10000` (10s).
   The 30s cap is a **hard backpressure boundary**, not a hint: each
   watch call ties up one chassis worker for the block window, so an
   infinite-block call would let one bad actor exhaust the worker pool.
   Values outside the range return JSON-RPC `INVALID_PARAMS` (-32602).
 
-Pagination contract — the watch loop is the agent-side broadcast
-discipline:
+Watch loop — the agent-side broadcast discipline:
 
 ```javascript
-let {events: initial, next_cursor: cursor} = await callTool(
-  "meho_broadcast_recent", {limit: 100}
-);
-for (const e of initial) handle(e);
+const first = await callTool("meho_broadcast_recent", {limit: 100});
+for (const e of first.events) handle(e);
+// Page through first.next_cursor here if it is not null (see above).
+let cursor = first.watch_checkpoint;
 
 while (running) {
-  const {events, next_cursor} = await callTool(
+  const {events, next_cursor, gap} = await callTool(
     "meho_broadcast_watch",
-    {since_cursor: cursor, timeout_ms: 10000}
+    {cursor, timeout_ms: 10000}
   );
-  for (const e of events) handle(e);
-  cursor = next_cursor;  // advances on hit; stays the same on timeout
+  if (gap) warn(gap);
+  for (const e of events) handle(e); // dedupe by e.event_id
+  cursor = next_cursor;  // moves on a hit; stays the same on timeout
 }
 ```
 
 Tenant scoping is **structural** (identical to `meho_broadcast_recent`):
-the input schema has no `tenant_id` argument; the stream key is
-derived exclusively from `operator.tenant_id`. RBAC: `operator` role
-minimum.
+the input schema has no `tenant_id` argument, and a checkpoint only
+works in the tenant that issued it. RBAC: `operator` role minimum.
 
 **Why long-poll, not MCP `resources/subscribe`:** the MCP server's
 `initialize` response advertises `subscribe: false` (per

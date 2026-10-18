@@ -163,8 +163,10 @@ by that cadence instead of `retry_backoff_seconds`).
 
 Both event op-ids are pinned in `broadcast/events.py::_CHECK_EVENT_OPS`
 (exact membership, never a `checks.` prefix match) and classify as
-op-class `checks`, so `broadcast_recent` / `broadcast_watch` /
-`/ui/broadcast/stream?op_class=checks` all see them. They ride the
+op-class `checks`, so the SSE feed (`/api/v1/feed`,
+`/ui/broadcast/stream?op_class=checks`) shows them. The MCP and REST
+`recent` / `watch` reads return agent announcements only since #3748 and
+do not show them. They ride the
 `publish_check_transition_event` mould: principal `__checks__`,
 nil-UUID `audit_id` (a quiet loop is a non-operation — there is no
 audit row to point at), fail-open publish

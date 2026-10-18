@@ -12,9 +12,9 @@ Acceptance-criteria coverage (per issue body):
 * Cross-tenant isolation: tenant-A's announcement is NOT visible to
   tenant-B's ``meho_broadcast_recent``; the stream key is derived
   exclusively from ``operator.tenant_id``.
-* Valkey unreachable during publish → handler raises (NOT fail-open);
-  error propagates as ``-32603`` Internal Error (distinct from the
-  audit-driven publisher's silent swallow).
+* Archive first (#3748): Valkey unreachable after the archive commit →
+  success with ``delivery_pending=true``; an archive (DB) failure
+  propagates (``-32603`` on the wire).
 * The ``broadcast_agent_announcements_total{phase}`` Prometheus counter
   increments per successful publish, labelled by the call's ``phase``.
 * Round-trip: an announce → recent pull surfaces the new event with the
@@ -22,11 +22,11 @@ Acceptance-criteria coverage (per issue body):
   agent-authored fields intact.
 
 The mocked-client suite covers the wire surface (registration, schema,
-validation, handler glue, metric increment, fail-loud propagation). The
+validation, handler glue, metric increment, failure split). The
 Docker-gated ``TestBroadcastAnnounceIntegration`` suite spins up
-``valkey/valkey:8`` via testcontainers and drives the full publish →
-xrange → tool-handler seam, including the cross-tenant isolation
-guarantee and the announce → recent round-trip.
+``valkey/valkey:8`` via testcontainers and drives announce → recent
+against a real stream, including the cross-tenant isolation guarantee
+and a stream wipe.
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ from meho_backplane.broadcast import (
     publish_agent_announcement,
     reset_broadcast_client_for_testing,
 )
-from meho_backplane.mcp.schemas import INTERNAL_ERROR, INVALID_PARAMS
+from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.mcp.tools.broadcast import (
     _handler_announce,
     _handler_recent,
@@ -440,7 +440,7 @@ async def test_handler_with_distinct_operator_writes_distinct_stream() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Fail-loud publish (Valkey unreachable propagates)
+# Archive first: a stream failure is delivery_pending, an archive failure raises
 # ---------------------------------------------------------------------------
 
 
@@ -449,16 +449,13 @@ async def test_handler_with_distinct_operator_writes_distinct_stream() -> None:
     [TenantRole.OPERATOR],
     indirect=True,
 )
-def test_valkey_unreachable_surfaces_as_internal_error(
+def test_valkey_unreachable_returns_delivery_pending(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """A redis-py ConnectionError on xadd surfaces as JSON-RPC -32603.
+    """A redis-py ConnectionError after the archive commit is not an error (#3748).
 
-    The fail-loud contract is the load-bearing difference from
-    :func:`publish_event` (audit-driven, fail-open). The agent
-    explicitly emitted the announcement and must know whether it
-    landed -- a swallowed error would leave the agent thinking it
-    told the team while the team never saw it.
+    The archive row is the record readers use, so the agent gets a
+    success with ``delivery_pending=true`` instead of ``-32603``.
     """
     from redis import exceptions as redis_exceptions
 
@@ -472,36 +469,50 @@ def test_valkey_unreachable_surfaces_as_internal_error(
             client,
             _tools_call("meho_broadcast_announce", {"activity": "investigating"}),
         )
-    body = resp.json()
-    assert "error" in body
-    # JSON-RPC -32603 Internal Error -- the dispatcher's generic
-    # exception handler maps non-McpInvalidParamsError exceptions here.
-    assert body["error"]["code"] == INTERNAL_ERROR
+    result = _result_dict(resp)
+    assert result["delivery_pending"] is True
+    assert result["watch_checkpoint"].startswith("w1.")
+    assert UUID(result["event_id"]).version == 4
 
 
-async def test_publish_agent_announcement_propagates_exception() -> None:
-    """``publish_agent_announcement`` directly raises on Valkey errors.
-
-    Unit-level companion to the dispatcher test above -- asserts the
-    publisher entry point itself is fail-loud, independent of MCP
-    plumbing. This is the contract the announce handler depends on;
-    the audit-driven :func:`publish_event` has the opposite contract
-    (silent swallow) and the test guards against an accidental
-    refactor that would unify them.
-    """
+async def test_stream_failure_keeps_the_archive_row() -> None:
+    """The publisher reports ``delivery_pending`` and the row stays stored."""
     from datetime import UTC, datetime
 
     from redis import exceptions as redis_exceptions
 
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import AgentAnnouncement
+
     event = trusted_event(tenant_id=OPERATOR_TENANT_ID, ts=datetime.now(UTC))
     bc = get_broadcast_client()
-    with (
-        fake_stream_write(
-            bc,
-            AsyncMock(side_effect=redis_exceptions.ConnectionError("refused")),
-        ),
-        pytest.raises(redis_exceptions.ConnectionError),
+    with fake_stream_write(
+        bc,
+        AsyncMock(side_effect=redis_exceptions.ConnectionError("refused")),
     ):
+        result = await publish_agent_announcement(event)
+    assert result.delivery_pending is True
+    assert result.stream_entry_id is None
+    assert result.seq == 1
+    async with get_sessionmaker()() as session:
+        row = await session.get(AgentAnnouncement, event.event_id)
+    assert row is not None
+    assert row.seq == 1
+    assert row.stream_entry_id is None
+
+
+async def test_archive_failure_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A database failure is fail-loud: nothing was stored, so the caller must know."""
+    from datetime import UTC, datetime
+
+    from meho_backplane.broadcast import publisher
+
+    def _broken() -> Any:
+        raise RuntimeError("database down")
+
+    monkeypatch.setattr(publisher, "get_sessionmaker", _broken)
+    event = trusted_event(tenant_id=OPERATOR_TENANT_ID, ts=datetime.now(UTC))
+    with pytest.raises(RuntimeError, match="database down"):
         await publish_agent_announcement(event)
 
 
@@ -518,13 +529,12 @@ async def test_publish_agent_announcement_propagates_exception() -> None:
 def test_successful_publish_returns_event_id(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """On success the ack carries a real UUID ``event_id`` + stream ``cursor``.
+    """On success the ack carries a real UUID ``event_id`` + a watch checkpoint.
 
-    T2 (#2547) mints a genuine per-announcement UUID at publish: the ack's
-    ``event_id`` is that UUID (equal to the durable ``agent_announcement``
-    row's id), while ``cursor`` remains the Valkey stream entry id. The two
-    are now distinct values (#2479 contract) -- historically both carried
-    the mislabelled stream cursor.
+    T2 (#2547) mints a genuine per-announcement UUID at publish (equal to
+    the durable ``agent_announcement`` row's id). #3748 replaces the
+    Valkey stream id in the ack with ``watch_checkpoint``, a watch cursor
+    just after this announcement in the archive order.
     """
     client, _op = client_with_operator
     bc = get_broadcast_client()
@@ -534,9 +544,9 @@ def test_successful_publish_returns_event_id(
             _tools_call("meho_broadcast_announce", {"activity": "investigating"}),
         )
     result = _result_dict(resp)
-    assert result["cursor"] == "1747800000000-7"
-    # event_id is a genuine UUID, distinct from the stream cursor.
-    assert result["event_id"] != result["cursor"]
+    assert "cursor" not in result
+    assert result["watch_checkpoint"].startswith("w1.")
+    assert result["delivery_pending"] is False
     assert UUID(result["event_id"]).version == 4
 
 
@@ -801,21 +811,17 @@ class TestBroadcastAnnounceIntegration:
                 "phase": "start",
             },
         )
-        assert "event_id" in result
-        # T2 (#2547): event_id is a genuine UUID minted at publish,
-        # distinct from the stream cursor (#2479 contract).
-        assert result["cursor"] != result["event_id"]
+        assert result["delivery_pending"] is False
         assert UUID(result["event_id"]).version == 4
 
         recent = await _handler_recent(op, {})
         assert len(recent["events"]) == 1
         event = recent["events"][0]
         assert event["event_kind"] == "agent_announcement"
-        assert event["cursor"] == result["cursor"]
         # The durable event UUID round-trips on the read as ``event_id``,
-        # equal to the announce ack's event_id and distinct from cursor.
+        # and the read's checkpoint matches the ack's.
         assert event["event_id"] == result["event_id"]
-        assert event["event_id"] != event["cursor"]
+        assert recent["watch_checkpoint"] == result["watch_checkpoint"]
         # dump_event_wire re-serves agent-authored free text inside the
         # untrusted-content envelope (_ANNOUNCEMENT_UNTRUSTED_FIELDS).
         assert event["activity"] == wrap_untrusted_text("investigating")
@@ -869,13 +875,10 @@ class TestBroadcastAnnounceIntegration:
         self,
         valkey_url: str,
     ) -> None:
-        """T2 (#2547) AC1: announce -> FLUSHALL -> recent still returns it from DB.
+        """T2 (#2547) AC1: announce -> FLUSHALL -> recent still returns it.
 
-        The durable ``agent_announcement`` row is the archive: after the
-        Valkey stream is wiped, a wide-window ``recent`` backfills the
-        announcement from the DB, wrapped per the T1 trust rule, and the
-        event's UUID ``event_id`` (equal to the durable row id) round-trips
-        distinct from the (now null) stream ``cursor``.
+        Since #3748 ``recent`` reads the archive only, so wiping the
+        Valkey stream changes nothing for readers.
         """
         op = build_operator(TenantRole.OPERATOR)
         ack = await _handler_announce(
@@ -894,6 +897,5 @@ class TestBroadcastAnnounceIntegration:
         assert len(recent["events"]) == 1, "announcement must survive the flush via the DB"
         event = recent["events"][0]
         assert event["event_id"] == ack["event_id"]
-        assert event["cursor"] is None  # DB-sourced row, no stream cursor
         assert event["event_kind"] == "agent_announcement"
         assert event["activity"] == wrap_untrusted_text("rotating tokens")

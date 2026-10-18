@@ -7609,33 +7609,80 @@ async def _resolve_parent_vm_folder(
     target: Any,
     operator: Operator,
     parent_name: str,
-) -> tuple[str | None, str | None]:
+    datacenter_moid: str | None,
+) -> tuple[str | None, str | None, list[str]]:
     """Resolve a VM-folder parent by display name to its moid.
 
     Read-only ``GET:/vcenter/folder`` filtered by ``names`` + the
     ``VIRTUAL_MACHINE`` folder type (the same listing ``vm.create`` resolves
-    its placement folder from). Returns ``(moid, None)`` on a unique match,
-    ``(None, "parent_not_found")`` on no match, or ``(None,
-    "ambiguous_parent")`` when the name resolves to more than one VM folder —
-    a structured status the caller surfaces instead of guessing a parent.
+    its placement folder from), plus ``datacenters`` when *datacenter_moid*
+    is given. Returns ``(moid, None, [])`` on a unique match, ``(None,
+    "parent_not_found", [])`` on no match, or ``(None, "ambiguous_parent",
+    candidates)`` when the name resolves to more than one VM folder. The
+    caller never guesses a parent.
     """
-    listing = await _read_sub_op(
-        connector,
-        target,
-        operator,
-        _OP_LIST_FOLDERS,
-        {"filter.names": [parent_name], "filter.type": "VIRTUAL_MACHINE"},
-    )
+    query: dict[str, Any] = {"filter.names": [parent_name], "filter.type": "VIRTUAL_MACHINE"}
+    if datacenter_moid is not None:
+        query["filter.datacenters"] = [datacenter_moid]
+    listing = await _read_sub_op(connector, target, operator, _OP_LIST_FOLDERS, query)
     entries = _unwrap_value(listing)
-    rows = [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
-    if not rows:
-        return None, "parent_not_found"
-    if len(rows) > 1:
-        return None, "ambiguous_parent"
-    moid = rows[0].get("folder")
-    if not isinstance(moid, str):
-        return None, "parent_not_found"
-    return moid, None
+    rows = entries if isinstance(entries, list) else []
+    moids = [
+        row["folder"]
+        for row in rows
+        if isinstance(row, dict) and isinstance(row.get("folder"), str)
+    ]
+    if not moids:
+        return None, "parent_not_found", []
+    if len(moids) > 1:
+        return None, "ambiguous_parent", moids
+    return moids[0], None, []
+
+
+def _folder_create_refusal(
+    *,
+    status: str,
+    parent_name: str,
+    datacenter_moid: str | None,
+    new_name: str,
+    candidates: list[str],
+) -> dict[str, Any]:
+    """The failed ``folder.create`` envelope for an unresolved parent (#3588).
+
+    Carries an ``error``-severity issue so the dispatcher records the
+    operation as failed (``result_status='error'``), not as an ``ok`` no-op.
+    The message names only the match *count*; the ids live in
+    ``candidate_folders``, which the dispatcher's reducer puts behind a result
+    handle when the list is large (#4223) — the message must stay short
+    because it also becomes the result's ``error`` line.
+    """
+    scope = f" in datacenter {datacenter_moid}" if datacenter_moid else ""
+    if status == "ambiguous_parent":
+        message = (
+            f"parent VM folder name {parent_name!r}{scope} matched {len(candidates)} VM folders"
+        )
+        guidance = (
+            "pick the intended folder ID from `candidate_folders` and pass it as "
+            "`parent_folder_id`, or scope the name with `datacenter`; no folder "
+            "was created"
+        )
+    else:
+        message = f"parent VM folder name {parent_name!r}{scope} matched no VM folder"
+        guidance = (
+            "check the parent name (it must be a VM folder, not a datacenter) or pass "
+            "`parent_folder_id`; no folder was created"
+        )
+    return {
+        "status": status,
+        "parent_folder": parent_name,
+        "parent_folder_id": None,
+        "datacenter": datacenter_moid,
+        "new_folder_name": new_name,
+        "folder": None,
+        "candidate_folders": candidates,
+        "issues": [{"category": "input", "severity": "error", "message": message}],
+        "guidance": guidance,
+    }
 
 
 async def folder_create_composite(
@@ -7645,7 +7692,7 @@ async def folder_create_composite(
     params: dict[str, Any],
     connector: VmwareRestConnector,
 ) -> dict[str, Any] | OperationResult:
-    """Create a VM folder under a named parent via the synchronous vim CreateFolder.
+    """Create a VM folder under a parent via the synchronous vim CreateFolder.
 
     Op-id: ``vmware.composite.folder.create``. ``/vcenter/folder`` is
     GET-only (spec-verified), so the create rides vim ``Folder.CreateFolder``,
@@ -7653,35 +7700,40 @@ async def folder_create_composite(
     ``ManagedObjectReference`` directly, not a ``*_Task``, so (unlike
     drs_rule / disk-grow) the returned MoRef is **not** polled.
 
-    Flow: resolve the parent folder *name* to a moid (a *read*; no match →
-    ``status="parent_not_found"``, >1 match → ``status="ambiguous_parent"``),
-    then issue the single ``CreateFolder`` through the governed vmomi write
-    seam (:func:`_write_vmomi_sub_op` → the #2254 gate). A parked/denied gate
-    returns the :class:`OperationResult` verbatim and no folder is created;
-    otherwise the new folder MoRef is unwrapped into ``status="created"``.
+    Flow: take the ``parent_folder_id`` folder ID as is, or resolve the
+    ``parent_folder`` *name* to a moid (a *read*, scoped to ``datacenter``
+    when given). No match → ``status="parent_not_found"``, >1 match →
+    ``status="ambiguous_parent"``; both carry an ``error`` issue so the
+    operation fails instead of auditing ``ok`` for a write that never
+    happened (#3588). Then issue the single ``CreateFolder`` through the
+    governed vmomi write seam (:func:`_write_vmomi_sub_op` → the #2254 gate).
+    A parked/denied gate returns the :class:`OperationResult` verbatim and no
+    folder is created; otherwise the new folder MoRef is unwrapped into
+    ``status="created"``.
     """
-    parent_name = params["parent_folder"]
+    parent_name = params.get("parent_folder")
+    parent_moid = params.get("parent_folder_id")
+    datacenter_moid = params.get("datacenter")
     new_name = params["folder_name"]
 
-    parent_moid, resolve_error = await _resolve_parent_vm_folder(
-        connector=connector, target=target, operator=operator, parent_name=parent_name
-    )
     if parent_moid is None:
-        return {
-            "status": resolve_error,
-            "parent_folder": parent_name,
-            "parent_folder_id": None,
-            "new_folder_name": new_name,
-            "folder": None,
-            "guidance": (
-                f"parent VM folder name {parent_name!r} "
-                + (
-                    "resolved to more than one folder — pass a unique parent name"
-                    if resolve_error == "ambiguous_parent"
-                    else "did not resolve to a VM folder"
-                )
-            ),
-        }
+        # The schema's anyOf makes ``parent_folder`` present when there is no pin.
+        lookup_name: str = params["parent_folder"]
+        parent_moid, resolve_error, candidates = await _resolve_parent_vm_folder(
+            connector=connector,
+            target=target,
+            operator=operator,
+            parent_name=lookup_name,
+            datacenter_moid=datacenter_moid,
+        )
+        if parent_moid is None:
+            return _folder_create_refusal(
+                status=resolve_error or "parent_not_found",
+                parent_name=lookup_name,
+                datacenter_moid=datacenter_moid,
+                new_name=new_name,
+                candidates=candidates,
+            )
 
     gate, folder_payload = await _write_vmomi_sub_op(
         connector,
@@ -7700,8 +7752,11 @@ async def folder_create_composite(
         "status": "created",
         "parent_folder": parent_name,
         "parent_folder_id": parent_moid,
+        "datacenter": datacenter_moid,
         "new_folder_name": new_name,
         "folder": new_folder_moid,
+        "candidate_folders": [],
+        "issues": [],
         "guidance": None,
     }
 

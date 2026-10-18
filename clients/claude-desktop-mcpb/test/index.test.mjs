@@ -47,6 +47,7 @@ import assert from "node:assert/strict";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REAL_SERVER = join(HERE, "..", "server");
 const REAL_INDEX = join(REAL_SERVER, "index.mjs");
+const REAL_GUARD = join(HERE, "..", "..", "claude-code-plugin", "lib", "login-guard.mjs");
 const MANIFEST = JSON.parse(readFileSync(join(HERE, "..", "manifest.json"), "utf8"));
 
 // A throwaway self-signed CA (certificate only; its key was discarded at
@@ -87,6 +88,8 @@ const MINIMAL_PATH = "/usr/bin:/bin";
 // mcp-remote whose entry echoes how it was launched.
 const BUNDLE = mkdtempSync(join(tmpdir(), "meho-mcpb-test-"));
 cpSync(REAL_SERVER, join(BUNDLE, "server"), { recursive: true });
+// build.sh stages the plugin's login guard next to index.mjs (#4003).
+cpSync(REAL_GUARD, join(BUNDLE, "server", "login-guard.mjs"));
 
 // mcp-remote's config folder (MCP_REMOTE_CONFIG_DIR), where the launcher
 // keeps its sign-in lock. Every run uses a folder inside the bundle copy, so

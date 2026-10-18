@@ -1078,6 +1078,7 @@ client-shape contrast with `meho-cli`:
 | Web origins | `+` (or a tight allow-list) | CORS for the browser flow. |
 | PKCE challenge method | `S256` | Spec-required for public-client PKCE. |
 | **Optional client scopes** | **`offline_access`** | Claude Code's MCP client **always** requests `offline_access` in its scope parameter to obtain a refresh token; if the scope isn't assigned on the client, Keycloak rejects the authorization request with `invalid_scope` (Wall #7). Assign as **optional** rather than default — only flows that ask for a refresh token (browser MCP clients) should mint one. The CLI device-code client gets this scope only when a deployment opts in via `bootstrap-clients --cli-offline-access` (off by default, bounded by a tight per-client offline-session idle timeout); operators then request it per-login with `meho login --offline` (#2902). |
+| Client Offline Session Idle (attribute `client.offline.session.idle.timeout`) | `172800` (48h) | How long an unused MCP login lasts. Without it the realm's Offline Session Idle applies (30 days by default). `bootstrap-clients` sets it; change the value with `--mcp-offline-session-idle=<seconds>`. |
 
 The 5 protocol mappers + 4 default client scopes from Steps 3–4
 apply identically. The MCP client additionally carries

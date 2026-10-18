@@ -477,7 +477,8 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         #   a table referenced in a foreign key constraint``.
         await conn.execute(
             text(
-                "TRUNCATE TABLE agent_announcement, approval_execution_payload, "
+                "TRUNCATE TABLE agent_announcement, agent_announcement_sequence, "
+                "approval_execution_payload, "
                 "approval_request, agent_permission, "
                 "agent_principal, runner_principal, runner_write_allowlist, "
                 "runner_assignments, runner_check_results, "
@@ -552,7 +553,8 @@ async def pg_engine_empty_tenant(
         # ``tenant`` stays empty, reproducing the clean-room deploy.
         await conn.execute(
             text(
-                "TRUNCATE TABLE agent_announcement, approval_execution_payload, "
+                "TRUNCATE TABLE agent_announcement, agent_announcement_sequence, "
+                "approval_execution_payload, "
                 "approval_request, agent_permission, "
                 "agent_principal, runner_principal, runner_write_allowlist, "
                 "runner_assignments, runner_check_results, "

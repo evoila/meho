@@ -1440,6 +1440,18 @@ async def test_folder_create_preview_echoes_parent_and_new_name() -> None:
     assert preview == {"parent_folder": "prod", "new_folder_name": "cluster-nodes"}
 
 
+async def test_folder_create_preview_echoes_datacenter_and_moid_pin() -> None:
+    """The #3588 parent shapes are echoed too: datacenter scope and the moid pin."""
+    scoped = await _write_preview._folder_create_preview(
+        _make_preview_ctx({"parent_folder": "vm", "datacenter": "datacenter-3", "folder_name": "x"})
+    )
+    assert scoped == {"parent_folder": "vm", "datacenter": "datacenter-3", "new_folder_name": "x"}
+    pinned = await _write_preview._folder_create_preview(
+        _make_preview_ctx({"parent_folder_id": "group-v4", "folder_name": "x"})
+    )
+    assert pinned == {"parent_folder_id": "group-v4", "new_folder_name": "x"}
+
+
 # ===========================================================================
 # #2891 hardware-write builders — live-read from->to diffs (builder-direct)
 # ===========================================================================

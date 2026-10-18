@@ -18,11 +18,23 @@ from typing import Any, Final
 from fastapi.responses import HTMLResponse
 
 from meho_backplane.db.models import ApprovalRequest
-from meho_backplane.operations.approval_queue import Delegation
+from meho_backplane.operations.approval_outcome import (
+    ResumeOutcome,
+    resume_outcome,
+    resume_outcome_from_envelope,
+)
+from meho_backplane.operations.approval_queue import Delegation, approval_result_state
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME
 from meho_backplane.ui.references import subject_ref
 
-__all__ = ["STATUS_PILL_CLASS", "project_request_to_view", "set_csrf_cookie"]
+__all__ = [
+    "RESULT_STATE_PILL",
+    "STATUS_PILL_CLASS",
+    "project_outcome",
+    "project_request_to_view",
+    "project_run_result",
+    "set_csrf_cookie",
+]
 
 #: DaisyUI badge modifier per request status, for the history view's pill.
 #: Pending is the actionable state (warning); approved/rejected are the two
@@ -36,6 +48,57 @@ STATUS_PILL_CLASS: Final[dict[str, str]] = {
     "rejected": "badge-error",
     "expired": "badge-neutral",
 }
+
+
+#: Label + DaisyUI badge modifier per run state of an approved request
+#: (#3543). Shown next to the ``approved`` pill so "approved, and the run
+#: failed" reads differently from "approved, and the change landed".
+RESULT_STATE_PILL: Final[dict[str, tuple[str, str]]] = {
+    "not_started": ("not run yet", "badge-ghost"),
+    "started": ("running", "badge-info"),
+    "executed": ("ran OK", "badge-success"),
+    "failed": ("run failed", "badge-error"),
+}
+
+
+def project_outcome(outcome: ResumeOutcome | None) -> dict[str, Any] | None:
+    """Project a run summary (#3543) into a template dict, with an audit link."""
+    if outcome is None:
+        return None
+    audit_id = str(outcome.audit_id) if outcome.audit_id else None
+    return {
+        "resumed_at": outcome.resumed_at,
+        "result_status": outcome.result_status,
+        "error_code": outcome.error_code,
+        "audit_id": audit_id,
+        "audit_href": f"/ui/audit?audit_id={audit_id}" if audit_id else None,
+    }
+
+
+def project_run_result(result: Any) -> dict[str, Any] | None:
+    """Project the result of the run that an approve just started (#3543).
+
+    Used by the decision-outcome fragment, which renders right after the
+    run returns. The request row in hand was read before the run, so the
+    outcome is read off the returned result, not off the row.
+
+    Returns ``None`` when another resumer (usually the waiting requester)
+    already ran the operation (``already_resumed``). That is not a failure,
+    so the fragment shows the normal "Request approved" card.
+    """
+    if getattr(result, "status", None) == "already_resumed":
+        return None
+    outcome = resume_outcome_from_envelope(
+        {
+            "status": getattr(result, "status", None),
+            "extras": getattr(result, "extras", None),
+            "audit_id": getattr(result, "audit_id", None),
+        }
+    )
+    return {
+        "result_state": "executed" if outcome.result_status == "ok" else "failed",
+        "outcome": project_outcome(outcome),
+    }
 
 
 def project_request_to_view(
@@ -73,7 +136,12 @@ def project_request_to_view(
     the decision audit row (no column), so only the callers that loaded it
     pass it; the key is always present so the templates stay
     ``StrictUndefined``-safe.
+
+    ``result_state`` and ``outcome`` (#3543) say whether an approved request
+    ran and how it ended. Both are ``None`` for a request that is not
+    approved; ``outcome`` is also ``None`` before the run starts.
     """
+    result_state = approval_result_state(row)
     return {
         "id": str(row.id),
         "op_id": row.op_id,
@@ -90,6 +158,8 @@ def project_request_to_view(
         "decided_at": row.decided_at.isoformat() if row.decided_at else None,
         "expires_at": row.expires_at.isoformat() if row.expires_at else None,
         "delegation": delegation.to_payload() if delegation is not None else None,
+        "result_state": result_state.value if result_state is not None else None,
+        "outcome": project_outcome(resume_outcome(row)),
     }
 
 

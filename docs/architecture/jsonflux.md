@@ -596,9 +596,12 @@ case applies. The full rules are in
 `OperationResult.audit_id` is set only after the dispatch audit row
 commits; null means no receipt. When the handler finished but the
 reducer failed, the result stays `status="ok"` with no `result`, no
-`handle`, `delivery="unavailable"`, and a remediation that says not to
-run the operation again. The reducer's failure never turns a completed
-operation into `connector_error`. A reduced result carries both the
+`handle`, `delivery="unavailable"`, `extras.retry=false`, and a
+remediation that says not to run the operation again. The reducer's
+failure never turns a completed operation into `connector_error`. If the
+audit row itself does not commit, the call is not `ok`: it returns
+`audit_commit_failed` with `extras.execution_outcome="uncertain"`,
+`extras.retry=false`, and no `audit_id`. This holds for reads and writes. A reduced result carries both the
 `handle` (how to read the rows) and the `audit_id` (proof the call ran).
 See [`docs/codebase/mcp.md`](../codebase/mcp.md#response-wire-ceiling-3641)
 for `delivery`.

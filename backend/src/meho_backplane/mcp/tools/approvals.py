@@ -50,8 +50,10 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.operations.approval_outcome import resume_outcome
 from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
+    approval_result_state,
     get_request,
     list_pending,
 )
@@ -118,7 +120,13 @@ def _row_to_dict(row: ApprovalRequest) -> dict[str, Any]:
 
     Inlined here (rather than importing the REST route's pydantic view)
     to keep the MCP transport independent of the FastAPI surface.
+
+    ``result_state`` and ``resume_outcome`` (#3486, #3543) match the REST
+    view: whether an approved request ran, and a short summary of how the
+    run ended. The result body stays on the owner-only REST ``/result``.
     """
+    result_state = approval_result_state(row)
+    outcome = resume_outcome(row)
     return {
         "id": str(row.id),
         "tenant_id": str(row.tenant_id),
@@ -130,6 +138,17 @@ def _row_to_dict(row: ApprovalRequest) -> dict[str, Any]:
         "target_id": str(row.target_id) if row.target_id else None,
         "proposed_effect": row.proposed_effect,
         "status": row.status,
+        "result_state": result_state.value if result_state is not None else None,
+        "resume_outcome": (
+            {
+                "resumed_at": outcome.resumed_at,
+                "result_status": outcome.result_status,
+                "error_code": outcome.error_code,
+                "audit_id": str(outcome.audit_id) if outcome.audit_id else None,
+            }
+            if outcome is not None
+            else None
+        ),
         "reviewed_by": row.reviewed_by,
         "decided_at": row.decided_at.isoformat() if row.decided_at else None,
         "expires_at": row.expires_at.isoformat() if row.expires_at else None,

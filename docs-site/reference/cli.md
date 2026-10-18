@@ -54,6 +54,7 @@ meho admin keycloak bootstrap-clients [flags]
 - `--keycloak-base-url` — Keycloak base URL, e.g. https://keycloak.example.com
 - `--keycloak-ca-bundle` — path to a PEM CA bundle to verify the Keycloak server certificate against (keeps chain + hostname verification ON while trusting an internal realm CA). Preferred over --insecure-skip-tls-verify; the two are mutually exclusive
 - `--mcp-client-id` — public client_id for the MCP browser-flow client
+- `--mcp-offline-session-idle` — how many seconds an unused MCP login stays valid: sets the `client.offline.session.idle.timeout` attribute on the MCP browser-flow client. Default 48h. Without it the realm's Offline Session Idle applies (30 days by default)
 - `--mcp-redirect-uri` — redirect URI(s) for the MCP browser-flow client (default: loopback localhost + <ip>, any port/path)
 - `--mcp-resource-uri` — audience the `meho-mcp-audience` mapper emits, e.g. https://meho.example.com/mcp (no trailing slash)
 - `--mcp-web-origin` — CORS web origin(s) for the MCP browser-flow client (default: `+` — allow the redirect-URI origins)
@@ -980,7 +981,7 @@ meho broadcast overrides set [flags]
 
 ### `meho broadcast recent`
 
-Read recent broadcast events for the operator's tenant
+Read recent agent announcements for the operator's tenant
 
 ```
 meho broadcast recent [flags]
@@ -989,7 +990,7 @@ meho broadcast recent [flags]
 - `--active-only` — exclude expired TTL claims
 - `--actor-sub` — exact delegated-agent filter
 - `--backplane` — backplane URL
-- `--cursor` — forward cursor (ISO-8601 timestamp or stream id)
+- `--cursor` — ISO-8601 window start, or next_cursor from a previous page
 - `--json` — emit JSON
 - `--limit` — maximum events (1-1000)
 - `--op-class` — exact op class filter
@@ -4466,7 +4467,7 @@ meho status [flags]
 
 ## `meho targets`
 
-Operate the MEHO targets registry (add / list / describe / probe / import / discover)
+Operate the MEHO targets registry (add / update / list / describe / probe / import / discover)
 
 ```
 meho targets
@@ -4483,9 +4484,11 @@ meho targets add <name> [flags]
 - `--alias` — additional name the target resolves by (repeatable)
 - `--auth-model` — per-target identity model (default: shared_service_account)
 - `--backplane` — backplane URL to create the target in (defaults to the URL recorded by `meho login`)
+- `--extra` — key=value to store in the target's extras map, e.g. scheme=http (repeatable)
 - `--fqdn` — fully-qualified domain name, when distinct from --host
 - `--host` — host or IP the connector dials (required)
 - `--json` — emit the created target as JSON instead of the human summary
+- `--no-secret-ref` — store the target with no credential (sends secret_ref: null); for products that need no login
 - `--note` — free-form operator note stored on the target
 - `--port` — connection port (default: the connector's product default)
 - `--preferred-impl` — connector impl_id override for the resolver's tie-break
@@ -4556,6 +4559,32 @@ meho targets probe <name-or-alias> [flags]
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit machine-readable JSON to stdout instead of the human summary
+
+### `meho targets update`
+
+Change fields on an existing target
+
+```
+meho targets update <name|alias> [flags]
+```
+
+- `--alias` — alias the target resolves by (repeatable; replaces the whole alias list)
+- `--auth-model` — per-target identity model
+- `--backplane` — backplane URL the target lives in (defaults to the URL recorded by `meho login`)
+- `--clear` — field to remove (repeatable; sends null, or an empty list for alias and an empty map for extra): alias, extra, fqdn, note, port, preferred-impl, secret-ref, tls-ca-pin, tls-server-name, version
+- `--extra` — key=value for the target's extras map, e.g. scheme=http (repeatable; replaces the whole map)
+- `--fqdn` — fully-qualified domain name, when distinct from --host
+- `--host` — new host or IP the connector dials
+- `--json` — emit the updated target as JSON instead of the human summary
+- `--note` — free-form operator note stored on the target
+- `--port` — connection port
+- `--preferred-impl` — connector impl_id override for the resolver's tie-break
+- `--product` — new connector product slug
+- `--secret-ref` — Vault path of the target's credential
+- `--tls-ca-pin` — PEM CA bundle to pin for this target
+- `--tls-server-name` — TLS SNI / certificate-verification hostname, decoupled from --host
+- `--verify-tls` — verify the target's TLS certificate; pass --verify-tls=false to opt out
+- `--version` — operator-asserted product version
 
 ## `meho tenants`
 

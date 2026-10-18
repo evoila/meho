@@ -34,9 +34,9 @@ Exit codes
 
 * 0 — every pull request got a result (or had nothing to re-check)
 * 1 — at least one pull request could not be checked (printed as a
-  warning; a slow fetch, a failed command or an archive that cannot be
-  unpacked stops only that pull request, the merge-queue run still
-  catches a clash there)
+  warning; a slow fetch, a failed command, a page of changed files that
+  cannot be read or an archive that cannot be unpacked stops only that
+  pull request, the merge-queue run still catches a clash there)
 * 2 — bad environment or arguments
 """
 
@@ -153,6 +153,12 @@ def _reason(exc: RecheckError | subprocess.TimeoutExpired) -> str:
     return str(exc)
 
 
+def _warn(number: int, is_fork: bool, exc: RecheckError | subprocess.TimeoutExpired) -> None:
+    """Report one pull request that could not be checked, then let the caller go on."""
+    origin = "fork" if is_fork else "same repo"
+    print(f"::warning::Could not re-check #{number} ({origin}): {_reason(exc)}")
+
+
 def _graphql(run: Runner, repo: str, query: str, **variables: str | int) -> dict[str, Any]:
     """Run one GraphQL query and return its ``data.repository`` object."""
     owner, _, name = repo.partition("/")
@@ -196,29 +202,38 @@ def _touches_migrations(run: Runner, repo: str, item: dict[str, Any]) -> bool:
         files = _graphql(run, repo, FILES_QUERY, number=number, after=after)["pullRequest"]["files"]
 
 
-def list_open_migration_prs(run: Runner, repo: str) -> list[PullRequest]:
+def list_open_migration_prs(run: Runner, repo: str) -> tuple[list[PullRequest], int]:
     """Every open pull request that changes a file under the migrations directory.
 
     Reads the whole list, page by page. A repository with many open pull
-    requests must not hide its oldest migration pull requests.
+    requests must not hide its oldest migration pull requests. Returns
+    the pull requests found and the number of pull requests whose
+    changed files could not be read; each of those is reported and
+    skipped, the others are still listed.
     """
     prs: list[PullRequest] = []
+    skipped = 0
     after: str | None = None
     while True:
         page = _list_page(run, repo, after)
         for item in page["nodes"]:
-            if _touches_migrations(run, repo, item):
-                prs.append(
-                    PullRequest(
-                        number=int(item["number"]),
-                        head_sha=str(item["headRefOid"]),
-                        is_fork=bool(item["isCrossRepository"]),
-                    )
-                )
+            pr = PullRequest(
+                number=int(item["number"]),
+                head_sha=str(item["headRefOid"]),
+                is_fork=bool(item["isCrossRepository"]),
+            )
+            try:
+                touches = _touches_migrations(run, repo, item)
+            except (RecheckError, subprocess.TimeoutExpired) as exc:
+                skipped += 1
+                _warn(pr.number, pr.is_fork, exc)
+                continue
+            if touches:
+                prs.append(pr)
         if not page["pageInfo"]["hasNextPage"]:
             break
         after = str(page["pageInfo"]["endCursor"])
-    return sorted(prs, key=lambda pr: pr.number)
+    return sorted(prs, key=lambda pr: pr.number), skipped
 
 
 def export_versions(run: Runner, pr: PullRequest, dest: pathlib.Path) -> pathlib.Path:
@@ -300,14 +315,14 @@ def recheck(run: Runner, target: Target, work_dir: pathlib.Path) -> int:
     """Give every open migration pull request a fresh result.
 
     A pull request that cannot be checked (a slow or failed ``gh`` or
-    ``git`` call, a head that moved, an archive that cannot be unpacked)
-    is reported and skipped. The others still get their result.
+    ``git`` call while reading its files, fetching or archiving it, or
+    posting its result; a head that moved; an archive that cannot be
+    unpacked) is reported and skipped. The others still get their result.
     """
-    prs = list_open_migration_prs(run, target.repo)
-    if not prs:
+    prs, failed = list_open_migration_prs(run, target.repo)
+    if not prs and not failed:
         print("No open pull request adds a migration. Nothing to re-check.")
         return 0
-    failed = 0
     for pr in prs:
         origin = "fork" if pr.is_fork else "same repo"
         try:
@@ -315,7 +330,7 @@ def recheck(run: Runner, target: Target, work_dir: pathlib.Path) -> int:
             create_check_run(run, pr, target, verdict)
         except (RecheckError, subprocess.TimeoutExpired) as exc:
             failed += 1
-            print(f"::warning::Could not re-check #{pr.number} ({origin}): {_reason(exc)}")
+            _warn(pr.number, pr.is_fork, exc)
             continue
         print(f"#{pr.number} ({origin}, head {pr.head_sha}): {verdict.conclusion}")
     print(f"Re-checked {len(prs)} pull request(s); {failed} could not be checked.")

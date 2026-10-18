@@ -67,6 +67,9 @@ class FakePullRequest:
     fetch_fails: bool = False
     #: ``git fetch`` raises ``subprocess.TimeoutExpired`` instead of answering.
     fetch_times_out: bool = False
+    #: How the second page of changed files answers: ``None`` for a normal
+    #: page, ``"fails"`` for a non-zero exit, ``"times out"`` for a timeout.
+    files_page_breaks: str | None = None
 
     def add_migration(self, name: str, revision: str, down_revision: str | None) -> None:
         _write(self.root / VERSIONS_DIR, name, revision, down_revision)
@@ -140,6 +143,10 @@ class FakeGitHub:
             assert flags == ["-f", "-f", "-f", "-F", "-f"]
             assert list(variables) == ["query", "owner", "name", "number", "after"]
             pr = next(pr for pr in self.prs if pr.number == int(variables["number"]))
+            if pr.files_page_breaks == "times out":
+                raise subprocess.TimeoutExpired(args, 300)
+            if pr.files_page_breaks == "fails":
+                return subprocess.CompletedProcess(args, 1, "", "gh: HTTP 502: Bad Gateway")
             repository = {"pullRequest": {"files": _files_page(pr.files, int(variables["after"]))}}
         body = {"data": {"repository": repository}}
         return subprocess.CompletedProcess(args, 0, json.dumps(body), "")
@@ -357,6 +364,37 @@ def test_a_migration_after_the_first_100_changed_files_is_still_found(
         if call[:3] == ["gh", "api", "graphql"] and any("number=" in arg for arg in call)
     ]
     assert file_pages == [["number=49", "after=100"]]
+
+
+@pytest.mark.parametrize(
+    ("breaks", "reason"),
+    [
+        ("fails", "GitHub query failed: gh: HTTP 502: Bad Gateway"),
+        ("times out", "gh api timed out after 300 s"),
+    ],
+)
+def test_a_broken_files_page_skips_only_that_pr(
+    tmp_path: pathlib.Path, capfd: pytest.CaptureFixture[str], breaks: str, reason: str
+) -> None:
+    """Reading the second page of one pull request's changed files fails
+    or takes too long. That must stop only this pull request; the
+    migration pull request after it still gets its result."""
+    big = _pr(tmp_path, 53, is_fork=True)
+    big.files = [f"backend/src/module_{n:03d}.py" for n in range(150)]
+    big.add_migration("0107_mine.py", "0107", "0106")
+    big.files_page_breaks = breaks
+    fine = _pr(tmp_path, 54, is_fork=False)
+    fine.add_migration("0107_mine.py", "0107", "0106")
+    github = FakeGitHub([big, fine])
+    assert _run(tmp_path, github) == 1
+    assert [(run["head_sha"], run["conclusion"]) for run in github.check_runs] == [
+        (fine.head_sha, "failure")
+    ]
+    assert not any(call[-1] == "pull/53/head" for call in github.calls)
+    out = capfd.readouterr().out
+    assert f"::warning::Could not re-check #53 (fork): {reason}" in out
+    assert "#54 (same repo, head" in out
+    assert "Re-checked 1 pull request(s); 1 could not be checked." in out
 
 
 def test_an_archive_that_cannot_be_unpacked_skips_only_that_pr(

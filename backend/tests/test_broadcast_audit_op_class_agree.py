@@ -9,6 +9,8 @@ The cases:
 * an MCP read tool whose name has no read suffix (``list_targets``) is
   ``read`` on the row and on the event, not ``read`` / ``other``;
 * an MCP write tool is ``write`` on both;
+* the audit-query tool is ``audit_query`` on both and broadcasts at
+  aggregate detail;
 * a declared class never weakens a credential or audit-query class;
 * an op the dispatcher runs inside an agent run keeps its own op id and
   class, even though the agent-run route bound ``agent.run`` / ``write``
@@ -77,6 +79,7 @@ async def _mcp_row_and_event(
     client: TestClient,
     tool: str,
     events: list[BroadcastEvent],
+    arguments: dict[str, Any] | None = None,
 ) -> tuple[AuditLog, BroadcastEvent]:
     response = post_mcp(
         client,
@@ -84,7 +87,7 @@ async def _mcp_row_and_event(
             "jsonrpc": "2.0",
             "id": 1,
             "method": "tools/call",
-            "params": {"name": tool, "arguments": {}},
+            "params": {"name": tool, "arguments": arguments or {}},
         },
     )
     assert response.status_code == 200
@@ -156,6 +159,31 @@ async def test_mcp_declared_class_never_weakens_credential_class(
 
     assert row.payload["op_class"] == event.op_class == "credential_read"
     assert "params" not in event.payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+async def test_mcp_audit_query_tool_broadcasts_at_aggregate_detail(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811 — the fixture
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """The audit-query tool broadcasts at aggregate detail.
+
+    The event carries only the class, the result status and the row
+    count. The filter arguments stay on the audit row's side.
+    """
+    client, _op = client_with_operator
+
+    row, event = await _mcp_row_and_event(
+        client,
+        "query_audit",
+        captured_events,
+        arguments={"principal": "someone", "op_id": "vault.*"},
+    )
+
+    assert row.payload["op_class"] == event.op_class == "audit_query"
+    assert set(event.payload) == {"op_class", "result_status", "row_count"}
+    assert row.payload["broadcast_detail_effective"] == "aggregate"
 
 
 @pytest.mark.asyncio

@@ -372,6 +372,41 @@ a caller that skipped the pre-check could push it over the ceiling; then it is
 delivered anyway with a `delivery_receipt_over_ceiling` warning, because
 dropping the `audit_id` of a completed write would be worse.
 
+### Reading result handles, and the call receipt
+
+A large `call_operation` result comes back as a `handle`. Three facts
+shape what the caller sees and how it reads more:
+
+- **Result field catalog (#3631, #3635).** The handle's `schema_` comes
+  from a catalog built over every captured row, not from the first row or
+  the sample. It has one property per top-level key, sorted by name. When
+  `result_query` runs a query, it builds the same catalog from the stored
+  rows and checks each field the query names. A field with mixed kinds,
+  objects, lists, only nulls, or integers past 64 bits cannot be used in
+  `filter`, `order_by`, `group_by`, or `aggregate`, but `select` still
+  returns it. Two cases still count as one kind: nulls next to one
+  scalar kind (the field is nullable, not mixed), and whole numbers next
+  to decimals, which query as one decimal column as long as every whole
+  number is within ±2^53. A flat query returns the stored rows exactly
+  as captured.
+- **`path` reads (#3633).** A large payload with no single list is kept
+  whole as a document record. `result_query` reads part of it with
+  `query={"path": "<RFC 6901 JSON Pointer>"}` (`""` is the whole
+  document; `~1` means `/` and `~0` means `~`). `path` cannot be combined
+  with the other query fields. The `result_query` `outputSchema` covers
+  both the rows shape and the `path` shape.
+- **The `audit_id` receipt (#3636).** `call_operation` returns
+  `audit_id` only after the dispatch audit row commits (`delivery` is
+  explained above, under "Response wire ceiling"). If the operation ran but its result could
+  not be shaped, the call stays `ok` with `delivery="unavailable"` and
+  the `audit_id`, so the caller knows not to run it again.
+
+The full rules, bounds, and errors are in
+[`result-spill.md`](result-spill.md). Tests:
+`tests/test_mcp_tool_result_query.py`,
+`tests/test_mcp_output_schema_conformance.py`, and
+`tests/test_result_reduction_properties.py`.
+
 ## Agent-surface scoping (working vs. operator, #3154)
 
 `tools/list` is filtered by **four orthogonal gates**, all AND-composed
@@ -499,7 +534,7 @@ add-on-family gate.
 | `meho_runbook_next` | operator | — | Advance one step of an in-progress run (opacity contract). |
 | `meho_runbook_show_template` | operator | — | Read a runbook template's full body. |
 | `meho_runbook_start` | operator | — | Start a new runbook run (self-assigned). |
-| `meho_status` | read_only | — | Return caller identity + backplane dependency status. |
+| `meho_status` | read_only | — | Return caller identity + backplane dependency status, plus `granted_scopes` and `surface_summary` (#3666). |
 | `preview_operation` | operator | — | Preview an operation without running it. |
 | `query_topology` | operator | — | Query the topology graph (dependents, blast radius, timeline). |
 | `read_docs` | operator | `meho-docs` | Read the text around a docs hit, its whole page or its section, through the hit's `read_handle` (#3948). |

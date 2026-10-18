@@ -406,11 +406,29 @@ const (
 	IngestRequestAuthSchemeStaticHeader      IngestRequestAuthScheme = "static_header"
 )
 
+// Defines values for KbProvenanceSourceKind.
+const (
+	KbProvenanceSourceKindDirect    KbProvenanceSourceKind = "direct"
+	KbProvenanceSourceKindDirectory KbProvenanceSourceKind = "directory"
+)
+
+// Defines values for KbProvenanceState.
+const (
+	KbProvenanceStateLegacy   KbProvenanceState = "legacy"
+	KbProvenanceStateRecorded KbProvenanceState = "recorded"
+)
+
 // Defines values for KindFilterValue.
 const (
 	KindFilterValueCron   KindFilterValue = "cron"
 	KindFilterValueEvent  KindFilterValue = "event"
 	KindFilterValueOneOff KindFilterValue = "one_off"
+)
+
+// Defines values for MemoryEntrySearchHitExpiryState.
+const (
+	MemoryEntrySearchHitExpiryStateNever     MemoryEntrySearchHitExpiryState = "never"
+	MemoryEntrySearchHitExpiryStateScheduled MemoryEntrySearchHitExpiryState = "scheduled"
 )
 
 // Defines values for MemoryScope.
@@ -710,6 +728,37 @@ const (
 const (
 	TopologyDiffEntrySourceEdge TopologyDiffEntrySource = "edge"
 	TopologyDiffEntrySourceNode TopologyDiffEntrySource = "node"
+)
+
+// Defines values for TopologyEdgeRelationClass.
+const (
+	TopologyEdgeRelationClassContainment TopologyEdgeRelationClass = "containment"
+	TopologyEdgeRelationClassDependency  TopologyEdgeRelationClass = "dependency"
+	TopologyEdgeRelationClassPlacement   TopologyEdgeRelationClass = "placement"
+	TopologyEdgeRelationClassUnknown     TopologyEdgeRelationClass = "unknown"
+)
+
+// Defines values for TopologyNodeScopeStatus.
+const (
+	TopologyNodeScopeStatusGlobal     TopologyNodeScopeStatus = "global"
+	TopologyNodeScopeStatusLegacy     TopologyNodeScopeStatus = "legacy"
+	TopologyNodeScopeStatusTarget     TopologyNodeScopeStatus = "target"
+	TopologyNodeScopeStatusUnresolved TopologyNodeScopeStatus = "unresolved"
+)
+
+// Defines values for TopologyNodeViaRelationClass.
+const (
+	TopologyNodeViaRelationClassContainment TopologyNodeViaRelationClass = "containment"
+	TopologyNodeViaRelationClassDependency  TopologyNodeViaRelationClass = "dependency"
+	TopologyNodeViaRelationClassPlacement   TopologyNodeViaRelationClass = "placement"
+	TopologyNodeViaRelationClassUnknown     TopologyNodeViaRelationClass = "unknown"
+)
+
+// Defines values for TopologyPathDirection.
+const (
+	TopologyPathDirectionForward    TopologyPathDirection = "forward"
+	TopologyPathDirectionReverse    TopologyPathDirection = "reverse"
+	TopologyPathDirectionUndirected TopologyPathDirection = "undirected"
 )
 
 // Defines values for UnderscoreKindFilter.
@@ -1657,6 +1706,39 @@ type AssignmentDocumentResponse struct {
 	Runner string              `json:"runner"`
 }
 
+// AuditClassCounts 200 body for “POST /api/v1/audit/class-counts“ (#3747).
+//
+// “counts“ has one key per event class (“operation_execution“,
+// “policy_decision“, “approval_decision“, “security_event“,
+// “legacy_request“), “0“ when a class has no rows. Old rows count
+// as “legacy_request“; they are never reclassified. “total“ is the
+// sum. “since“ is the start of the counted window: the request's
+// “since“, or 24 hours ago when the request set none.
+type AuditClassCounts struct {
+	Counts map[string]int `json:"counts"`
+	Since  time.Time      `json:"since"`
+	Total  int            `json:"total"`
+}
+
+// AuditClassCountsRequest POST body for “/api/v1/audit/class-counts“ (#3747).
+//
+// The same filters as :class:`AuditQueryRequest`, without
+// “event_class“, “limit“ and “cursor“: the answer counts every
+// class for the whole matching set, not one page.
+type AuditClassCountsRequest struct {
+	AgentSessionId *openapi_types.UUID `json:"agent_session_id"`
+	AuditId        *openapi_types.UUID `json:"audit_id"`
+	OpClass        *string             `json:"op_class"`
+	OpId           *string             `json:"op_id"`
+	ParentAuditId  *openapi_types.UUID `json:"parent_audit_id"`
+	Principal      *string             `json:"principal"`
+	ResultStatus   *string             `json:"result_status"`
+	Since          *string             `json:"since"`
+	Target         *string             `json:"target"`
+	Until          *string             `json:"until"`
+	WorkRef        *string             `json:"work_ref"`
+}
+
 // AuditEntry One row of the audit query result.
 //
 // Field-to-column mapping (see module docstring for the substrate
@@ -1737,11 +1819,6 @@ type AuditEventClass string
 // layer. All other fields pass through to the substrate filter
 // object unchanged. The empty body shape “{}“ is the no-filter
 // case — every field defaults to None or the substrate-side default.
-//
-// “extra="forbid"“ rejects unknown fields with 422
-// “extra_forbidden“ so a typo or a client passing “tenant_id“
-// in the body fails loud at the framework boundary — the route
-// always uses “operator.tenant_id“ from the JWT, never the body.
 type AuditQueryRequest struct {
 	AgentSessionId *openapi_types.UUID `json:"agent_session_id"`
 	AuditId        *openapi_types.UUID `json:"audit_id"`
@@ -1857,6 +1934,11 @@ type AuditReplayResult struct {
 //     normal state an operator must be able to observe, not an error. The
 //     console pane renders a "no trace captured" empty state for this case.
 //
+// Only an “operation_execution“ row resolves to the flight recorder
+// (#3747). A decision, security or legacy row is not an execution, so it
+// answers “trace_present=False“ and the route never reads a trace for
+// it. “event_class“ echoes the row's class so the reason is visible.
+//
 // “trace.redaction_uncertain“ surfaces the F5 degrade flag so an operator
 // (and a paired add-on reading over this route with its operator principal)
 // can see when a trace was withheld from the agent handle. The operator plane
@@ -1864,7 +1946,8 @@ type AuditReplayResult struct {
 //
 // Frozen like the models it carries.
 type AuditTraceResult struct {
-	AuditId openapi_types.UUID `json:"audit_id"`
+	AuditId    openapi_types.UUID `json:"audit_id"`
+	EventClass *string            `json:"event_class"`
 
 	// Trace A dispatch trace header plus its ordered spans, tenant-scoped.
 	//
@@ -3866,25 +3949,31 @@ type ConventionCreate struct {
 //
 // Per the issue's acceptance criterion, history returns newest
 // first ("pick newest first for v0.2; documented"); the route's
-// ORDER BY “ts DESC“ enforces this. “audit_id“ is the soft-FK
-// that G8's audit-query path joins on; it is nullable because
-// T5's seed migration inserts history rows with no audit_log row
-// (seeded rows pre-date any HTTP request).
+// ORDER BY “ts DESC“ enforces this.
+//
+// Provenance (#3747): the history row is the record of the edit.
+// “change_kind“ says what it was (“created“ / “updated“ /
+// “deleted“) and “request_id“ is the request correlation id of the
+// call, which links to the request usage event. Both are “None“ on
+// rows written before #3747. “audit_id“ is the legacy link to the
+// REST request wrapper row: old rows carry it, new rows and seeded
+// rows have “None“.
 //
 // “body_before“ is nullable -- the first history row (the
 // CREATE event) has no prior state. DELETE history rows get
 // “body_after=<final body>“ (a legible last-known state for
 // audit forensics) rather than an empty-string sentinel; the
-// lifecycle distinction (create / update / delete) lives in the
-// audit log row's “method“ / “path“ columns, not on the
-// history row itself.
+// lifecycle distinction (create / update / delete) is
+// “change_kind“ on rows since #3747.
 type ConventionHistoryEntry struct {
 	ActorSub     string              `json:"actor_sub"`
 	AuditId      *openapi_types.UUID `json:"audit_id"`
 	BodyAfter    string              `json:"body_after"`
 	BodyBefore   *string             `json:"body_before"`
+	ChangeKind   *string             `json:"change_kind"`
 	ConventionId openapi_types.UUID  `json:"convention_id"`
 	Id           openapi_types.UUID  `json:"id"`
+	RequestId    *openapi_types.UUID `json:"request_id"`
 	Ts           time.Time           `json:"ts"`
 }
 
@@ -5488,6 +5577,13 @@ type HTTPValidationError struct {
 // contract-compatible with this backplane build, and its last liveness
 // heartbeat. The list is empty when nothing is paired; the empty-default
 // keeps response decoders generated against the pre-#3025 shape working.
+//
+// “granted_scopes“ (#3666) lists the OAuth scope names on the caller's
+// token, sorted. It carries scope names only, never token material.
+// “surface_summary“ (#3666) compares the working-surface tools the
+// server registers with the ones this session lists
+// (:class:`SurfaceSummary`). Both have empty defaults so older response
+// decoders keep working; the handler always fills them.
 type HealthResponse struct {
 	// Db Database migration status.
 	//
@@ -5501,9 +5597,10 @@ type HealthResponse struct {
 	// ``bool | None`` for forward compatibility with response decoders
 	// that were generated against the chassis-stage shape, but the
 	// handler now always populates it from the probe.
-	Db                  DbStatus `json:"db"`
-	McpProtocolVersion  *string  `json:"mcp_protocol_version,omitempty"`
-	McpSessionIdCapture string   `json:"mcp_session_id_capture"`
+	Db                  DbStatus  `json:"db"`
+	GrantedScopes       *[]string `json:"granted_scopes,omitempty"`
+	McpProtocolVersion  *string   `json:"mcp_protocol_version,omitempty"`
+	McpSessionIdCapture string    `json:"mcp_session_id_capture"`
 
 	// Operator Operator identity surface exposed to the CLI and MCP ``meho_status``.
 	//
@@ -5549,6 +5646,21 @@ type HealthResponse struct {
 	// replica's claim stamp advances, so alert on the minimum across
 	// replicas, not per pod.
 	SensorRunner *SensorRunnerStatus `json:"sensor_runner,omitempty"`
+
+	// SurfaceSummary Which working-surface MCP tools this session should see, and which it does.
+	//
+	// ``expected_working_tools`` is every tool the server registers on the
+	// working surface, sorted. ``listed_working_tools`` is the part of that
+	// set this session's ``tools/list`` returns. ``missing_working_tools`` is
+	// the difference: tools hidden from this session by its tenant role, a
+	// tenant capability it lacks, or an add-on that is not paired.
+	// ``operator_surface_listed`` is ``True`` when the session also sees the
+	// operator planes (its token carries the ``mcp:admin`` scope).
+	//
+	// A client compares its own ``tools/list`` result against
+	// ``listed_working_tools``. A tool the server lists but the client does not
+	// see is a gap on the client side (``meho doctor`` reports it).
+	SurfaceSummary *SurfaceSummary `json:"surface_summary,omitempty"`
 
 	// Vault Federation-chain status for the deployment's credential backend.
 	//
@@ -5860,15 +5972,31 @@ type IngestionResultModel struct {
 // operator-facing identifier (“documents.source_id“ on the SQL
 // side); the underlying “Document.id“ UUID is also surfaced for
 // cross-correlation with audit-log rows and future MCP resource
-// URIs.
+// URIs. “id“ is the entry UUID.
+//
+// “revision_id“ is the retained revision that holds this body. Pass
+// it with “id“ to “meho://kb/id/{entry}/revision/{revision}“ to
+// read this exact body later, even after the entry changes. It is
+// “None“ only for a row that has no stored revision.
 type KbEntry struct {
 	Body      string                 `json:"body"`
 	CreatedAt time.Time              `json:"created_at"`
 	Id        openapi_types.UUID     `json:"id"`
 	Metadata  map[string]interface{} `json:"metadata"`
-	Slug      string                 `json:"slug"`
-	TenantId  openapi_types.UUID     `json:"tenant_id"`
-	UpdatedAt time.Time              `json:"updated_at"`
+
+	// Provenance Where a kb entry came from, as read back from its metadata.
+	//
+	// ``state="recorded"`` means the service stored provenance when it
+	// wrote the entry; the other fields are then set (``relative_path``
+	// stays ``None`` for direct writes). ``state="legacy"`` means the
+	// entry was written before provenance was stored, or the stored value
+	// is not in the expected shape; every other field is ``None``. Legacy
+	// rows are not rewritten -- the next write records real provenance.
+	Provenance KbProvenance        `json:"provenance"`
+	RevisionId *openapi_types.UUID `json:"revision_id"`
+	Slug       string              `json:"slug"`
+	TenantId   openapi_types.UUID  `json:"tenant_id"`
+	UpdatedAt  time.Time           `json:"updated_at"`
 }
 
 // KbEntryCreate POST body for “/api/v1/kb“ -- create / re-index one entry.
@@ -5906,10 +6034,22 @@ type KbEntryPreview struct {
 	UpdatedAt string                 `json:"updated_at"`
 }
 
+// KbIngestConflict Two or more files in one directory ingest claim the same slug.
+//
+// “relative_paths“ lists every file that claims “slug“, sorted,
+// relative to the ingest directory. None of these files is written,
+// and an existing entry with this slug stays unchanged. The operator
+// fixes the conflict (rename a file or change its “slug:“
+// front-matter) and runs the ingest again.
+type KbIngestConflict struct {
+	RelativePaths []string `json:"relative_paths"`
+	Slug          string   `json:"slug"`
+}
+
 // KbIngestionResult Summary of one :meth:`KbService.ingest_directory` run.
 //
-// The four counters partition every discovered “.md“ file into
-// exactly one of four buckets:
+// The five counters partition every discovered “.md“ file into
+// exactly one of five buckets:
 //
 //   - “inserted_count“ -- file's slug had no prior row in the tenant;
 //     a new document row was created and embedded.
@@ -5925,9 +6065,17 @@ type KbEntryPreview struct {
 //     front-matter). The matching error message is appended to
 //     :attr:`errors`; the ingestion run continues with the remaining
 //     files.
+//   - “conflict_count“ -- the file shares its slug with at least one
+//     other file in the same run. No file in that group is written;
+//     :attr:`conflicts` lists each group once.
 //
 // Sum invariant: “inserted_count + updated_count + skipped_count
-// + error_count == <total discovered .md files>“.
+// + error_count + conflict_count == <total discovered .md files>“.
+//
+// The run walks files in sorted relative-path order, so the same
+// directory gives the same counters, “errors“ order and
+// “conflicts“ order on every run, whatever order the filesystem
+// lists the files in.
 //
 // The “errors“ list is bounded in practice by the corpus size --
 // no per-file error string exceeds ~200 chars (the file path plus a
@@ -5935,11 +6083,13 @@ type KbEntryPreview struct {
 // corpus stays under ~200 KB of allocated memory. Truncation /
 // sampling can land in v0.2.next if real corpora drive that.
 type KbIngestionResult struct {
-	ErrorCount    int      `json:"error_count"`
-	Errors        []string `json:"errors"`
-	InsertedCount int      `json:"inserted_count"`
-	SkippedCount  int      `json:"skipped_count"`
-	UpdatedCount  int      `json:"updated_count"`
+	ConflictCount int                `json:"conflict_count"`
+	Conflicts     []KbIngestConflict `json:"conflicts"`
+	ErrorCount    int                `json:"error_count"`
+	Errors        []string           `json:"errors"`
+	InsertedCount int                `json:"inserted_count"`
+	SkippedCount  int                `json:"skipped_count"`
+	UpdatedCount  int                `json:"updated_count"`
 }
 
 // KbListResponse Response envelope for “GET /api/v1/kb“.
@@ -5953,6 +6103,27 @@ type KbIngestionResult struct {
 type KbListResponse struct {
 	Entries []KbEntryPreview `json:"entries"`
 }
+
+// KbProvenance Where a kb entry came from, as read back from its metadata.
+//
+// “state="recorded"“ means the service stored provenance when it
+// wrote the entry; the other fields are then set (“relative_path“
+// stays “None“ for direct writes). “state="legacy"“ means the
+// entry was written before provenance was stored, or the stored value
+// is not in the expected shape; every other field is “None“. Legacy
+// rows are not rewritten -- the next write records real provenance.
+type KbProvenance struct {
+	IngestedAt   *time.Time              `json:"ingested_at"`
+	RelativePath *string                 `json:"relative_path"`
+	SourceKind   *KbProvenanceSourceKind `json:"source_kind"`
+	State        KbProvenanceState       `json:"state"`
+}
+
+// KbProvenanceSourceKind defines model for KbProvenance.SourceKind.
+type KbProvenanceSourceKind string
+
+// KbProvenanceState defines model for KbProvenance.State.
+type KbProvenanceState string
 
 // KindFilterValue Closed enum of the trigger “kind“ values exposed in the filter URL.
 //
@@ -6098,6 +6269,68 @@ type MemoryEntry struct {
 	UserSub    *string            `json:"user_sub"`
 }
 
+// MemoryEntrySearchHit One bounded hit from :meth:`MemoryService.search_memories` (#3751).
+//
+// A hit is evidence for picking a result, not the entry itself. It holds
+// a short, query-relevant “snippet“ of the body (at most
+// :data:`~meho_backplane.memory.snippet.SNIPPET_MAX_CHARS` characters of
+// body text), never the whole body and never the free-form “metadata“.
+// The full entry is read through “locator“.
+//
+// “rank“ is the 1-based position in the result list. It is an order,
+// not a confidence: the fused (RRF) ranking score is not calibrated, so
+// it is not exposed.
+//
+// Provenance fields say where the evidence comes from and who can see
+// it: “scope“, “user_sub“ (the owner of a user-scoped entry, “None“
+// for shared scopes), “target_name“, and the “created_at“ /
+// “updated_at“ / “expires_at“ timestamps. Frozen for the same reason
+// as :class:`MemoryEntry`.
+type MemoryEntrySearchHit struct {
+	BodyChars int        `json:"body_chars"`
+	CreatedAt time.Time  `json:"created_at"`
+	ExpiresAt *time.Time `json:"expires_at"`
+
+	// ExpiryState ``never`` when the entry has no expiry, else ``scheduled``.
+	//
+	// Search leaves out expired entries, so there is no expired state.
+	ExpiryState *MemoryEntrySearchHitExpiryState `json:"expiry_state,omitempty"`
+	Id          openapi_types.UUID               `json:"id"`
+
+	// Locator Canonical selected-read URI (``meho://memory/id/{document_uuid}``).
+	//
+	// Built from the row id only, so it never carries a target name
+	// or owner. Read it with ``resources/read`` to get the full entry.
+	Locator *string `json:"locator,omitempty"`
+	Rank    int     `json:"rank"`
+
+	// Scope One of the five memory scopes from consumer-needs.md §G5 L137-141.
+	//
+	// The string value is the wire-level identifier (route path segment,
+	// CLI flag value, MCP tool arg). Each value maps to a single
+	// ``documents.kind`` row prefixed with ``memory-`` --
+	// :func:`kind_for_scope` is the canonical translation. The mapping is
+	// one-to-one and bijective with :func:`scope_for_kind`, so callers
+	// never round-trip through ad-hoc string-prefixing.
+	//
+	// ``StrEnum`` (PEP 663, stdlib in 3.11+) gives the members ``str``
+	// semantics for free: ``f"scope={MemoryScope.USER}"`` renders as
+	// ``"scope=user"`` rather than ``"scope=MemoryScope.USER"``, matching
+	// the :class:`~meho_backplane.auth.operator.TenantRole` convention.
+	Scope            MemoryScope `json:"scope"`
+	Slug             string      `json:"slug"`
+	Snippet          string      `json:"snippet"`
+	SnippetTruncated bool        `json:"snippet_truncated"`
+	TargetName       *string     `json:"target_name"`
+	UpdatedAt        time.Time   `json:"updated_at"`
+	UserSub          *string     `json:"user_sub"`
+}
+
+// MemoryEntrySearchHitExpiryState “never“ when the entry has no expiry, else “scheduled“.
+//
+// Search leaves out expired entries, so there is no expired state.
+type MemoryEntrySearchHitExpiryState string
+
 // MemoryListResponse Response envelope for “GET /api/v1/memory“.
 //
 // Wrapped in “{"entries": [...]}“ so a future cursor field can
@@ -6126,6 +6359,44 @@ type MemoryListResponse struct {
 // “"scope=user"“ rather than “"scope=MemoryScope.USER"“, matching
 // the :class:`~meho_backplane.auth.operator.TenantRole` convention.
 type MemoryScope string
+
+// MemorySearchBody POST body for “/api/v1/memory/search“.
+//
+// Same limits as the MCP “search_memory“ tool so the CLI and an agent
+// can send the same input: “query“ 1..256 chars, “limit“ 1..50
+// (default 10). Omit “scope“ to search all five scopes.
+type MemorySearchBody struct {
+	Limit *int   `json:"limit,omitempty"`
+	Query string `json:"query"`
+
+	// Scope One of the five memory scopes from consumer-needs.md §G5 L137-141.
+	//
+	// The string value is the wire-level identifier (route path segment,
+	// CLI flag value, MCP tool arg). Each value maps to a single
+	// ``documents.kind`` row prefixed with ``memory-`` --
+	// :func:`kind_for_scope` is the canonical translation. The mapping is
+	// one-to-one and bijective with :func:`scope_for_kind`, so callers
+	// never round-trip through ad-hoc string-prefixing.
+	//
+	// ``StrEnum`` (PEP 663, stdlib in 3.11+) gives the members ``str``
+	// semantics for free: ``f"scope={MemoryScope.USER}"`` renders as
+	// ``"scope=user"`` rather than ``"scope=MemoryScope.USER"``, matching
+	// the :class:`~meho_backplane.auth.operator.TenantRole` convention.
+	Scope *MemoryScope `json:"scope,omitempty"`
+}
+
+// MemorySearchResponse Response for “/api/v1/memory/search“ -- the same hits “search_memory“ returns.
+//
+// “hits“ is the only field. Each hit is bounded evidence (#3751): a
+// short snippet, provenance, and the selected-read “locator“, never the
+// full body. The MCP tool also wraps each snippet in the untrusted-text
+// envelope and adds its “delivery“ fields; this REST face serves the
+// plain snippet for the CLI table. There is deliberately no total or
+// count: "no match" and "only rows you may not see" both return
+// “{"hits": []}“.
+type MemorySearchResponse struct {
+	Hits []MemoryEntrySearchHit `json:"hits"`
+}
 
 // MyRecentPage Unified list envelope for “GET /api/v1/audit/my-recent“.
 //
@@ -8718,6 +8989,26 @@ type SurfaceResultSurface string
 // SurfaceResultVerdict defines model for SurfaceResult.Verdict.
 type SurfaceResultVerdict string
 
+// SurfaceSummary Which working-surface MCP tools this session should see, and which it does.
+//
+// “expected_working_tools“ is every tool the server registers on the
+// working surface, sorted. “listed_working_tools“ is the part of that
+// set this session's “tools/list“ returns. “missing_working_tools“ is
+// the difference: tools hidden from this session by its tenant role, a
+// tenant capability it lacks, or an add-on that is not paired.
+// “operator_surface_listed“ is “True“ when the session also sees the
+// operator planes (its token carries the “mcp:admin“ scope).
+//
+// A client compares its own “tools/list“ result against
+// “listed_working_tools“. A tool the server lists but the client does not
+// see is a gap on the client side (“meho doctor“ reports it).
+type SurfaceSummary struct {
+	ExpectedWorkingTools  *[]string `json:"expected_working_tools,omitempty"`
+	ListedWorkingTools    *[]string `json:"listed_working_tools,omitempty"`
+	MissingWorkingTools   *[]string `json:"missing_working_tools,omitempty"`
+	OperatorSurfaceListed *bool     `json:"operator_surface_listed,omitempty"`
+}
+
 // Target Full read shape — returned by GET /targets/{name} and the resolver.
 //
 // Maps 1:1 to the “targets“ table columns. Frozen so callers
@@ -9237,12 +9528,18 @@ type TopologyEdge struct {
 	// listing is a survey of relationships, not a node dump; callers that
 	// need the bag look the node up separately via
 	// :func:`meho_backplane.topology.resolvers.resolve_node`.
+	//
+	// ``source_scope`` (#3760) is the node's stored source scope, so an
+	// edge answer says which source each end came from.
 	From       TopologyEdgeEndpoint    `json:"from"`
 	Id         openapi_types.UUID      `json:"id"`
 	Kind       string                  `json:"kind"`
 	LastSeen   *time.Time              `json:"last_seen"`
 	Properties *map[string]interface{} `json:"properties,omitempty"`
-	Source     string                  `json:"source"`
+
+	// RelationClass What this edge means (#3760); unmapped kinds are ``unknown``.
+	RelationClass *TopologyEdgeRelationClass `json:"relation_class,omitempty"`
+	Source        string                     `json:"source"`
 
 	// To One endpoint of a :class:`TopologyEdge` — the ``from`` or ``to`` node.
 	//
@@ -9255,8 +9552,14 @@ type TopologyEdge struct {
 	// listing is a survey of relationships, not a node dump; callers that
 	// need the bag look the node up separately via
 	// :func:`meho_backplane.topology.resolvers.resolve_node`.
+	//
+	// ``source_scope`` (#3760) is the node's stored source scope, so an
+	// edge answer says which source each end came from.
 	To TopologyEdgeEndpoint `json:"to"`
 }
+
+// TopologyEdgeRelationClass What this edge means (#3760); unmapped kinds are “unknown“.
+type TopologyEdgeRelationClass string
 
 // TopologyEdgeEndpoint One endpoint of a :class:`TopologyEdge` — the “from“ or “to“ node.
 //
@@ -9269,10 +9572,14 @@ type TopologyEdge struct {
 // listing is a survey of relationships, not a node dump; callers that
 // need the bag look the node up separately via
 // :func:`meho_backplane.topology.resolvers.resolve_node`.
+//
+// “source_scope“ (#3760) is the node's stored source scope, so an
+// edge answer says which source each end came from.
 type TopologyEdgeEndpoint struct {
-	Id   openapi_types.UUID `json:"id"`
-	Kind string             `json:"kind"`
-	Name string             `json:"name"`
+	Id          openapi_types.UUID `json:"id"`
+	Kind        string             `json:"kind"`
+	Name        string             `json:"name"`
+	SourceScope *string            `json:"source_scope"`
 }
 
 // TopologyHistoryEntry One row of the per-resource history walk (G9.3-T3).
@@ -9350,28 +9657,66 @@ type TopologyHistoryResult struct {
 // every “parent_node_id“ in a closure result is itself a row of
 // that result. Additive with “None“ defaults so pre-#2538
 // constructors and payloads stay valid.
+//
+// “source_scope“ (#3739) is the stored “graph_node.source_scope“:
+// “global“, “target:<uuid>“, “legacy:<uuid>“ or “None“.
+// “scope_status“ is derived from it. “unresolved“ means the row
+// has no scope yet and the reader does not know which source the
+// name belongs to; it never falls back to the last target that saw
+// the row.
+//
+// “last_seen“ (#3760) is MEHO's own time, not the vendor's: the last
+// refresh that reported an “auto“ node, or when an operator entered
+// a “curated“ node (a later refresh that also observes it moves it
+// forward). “None“ means the latest refresh no longer reported the
+// row. “via_edge_source“ / “via_edge_last_seen“
+// are the same facts for the edge walked to reach the node, and
+// “via_relation_class“ is that edge's relation class (see
+// :mod:`meho_backplane.topology.evidence`). All are “None“ on the
+// root row.
 type TopologyNode struct {
 	Depth        int                     `json:"depth"`
 	Id           openapi_types.UUID      `json:"id"`
 	Kind         string                  `json:"kind"`
+	LastSeen     *time.Time              `json:"last_seen"`
 	Name         string                  `json:"name"`
 	ParentNodeId *openapi_types.UUID     `json:"parent_node_id"`
 	Properties   *map[string]interface{} `json:"properties,omitempty"`
-	Source       string                  `json:"source"`
-	ViaEdgeId    *openapi_types.UUID     `json:"via_edge_id"`
-	ViaEdgeKind  *string                 `json:"via_edge_kind"`
+
+	// ScopeStatus Where the name is unique, or ``unresolved`` when not recorded.
+	ScopeStatus     *TopologyNodeScopeStatus `json:"scope_status,omitempty"`
+	Source          string                   `json:"source"`
+	SourceScope     *string                  `json:"source_scope"`
+	ViaEdgeId       *openapi_types.UUID      `json:"via_edge_id"`
+	ViaEdgeKind     *string                  `json:"via_edge_kind"`
+	ViaEdgeLastSeen *time.Time               `json:"via_edge_last_seen"`
+	ViaEdgeSource   *string                  `json:"via_edge_source"`
+
+	// ViaRelationClass Relation class of the edge walked to reach this node.
+	ViaRelationClass *TopologyNodeViaRelationClass `json:"via_relation_class"`
 }
+
+// TopologyNodeScopeStatus Where the name is unique, or “unresolved“ when not recorded.
+type TopologyNodeScopeStatus string
+
+// TopologyNodeViaRelationClass Relation class of the edge walked to reach this node.
+type TopologyNodeViaRelationClass string
 
 // TopologyPath An ordered shortest path between two nodes.
 //
 // “nodes“ runs from the “from“ node (“depth == 0“) to the
 // “to“ node (“depth == total_hops“) inclusive. “total_hops“ is
 // the number of edges traversed, i.e. “len(nodes) - 1“. v0.2 is
-// unweighted: every edge costs one hop.
+// unweighted: every edge costs one hop. “direction“ (#3760) is the
+// edge direction the search applied.
 type TopologyPath struct {
-	Nodes     []TopologyNode `json:"nodes"`
-	TotalHops int            `json:"total_hops"`
+	Direction *TopologyPathDirection `json:"direction,omitempty"`
+	Nodes     []TopologyNode         `json:"nodes"`
+	TotalHops int                    `json:"total_hops"`
 }
+
+// TopologyPathDirection defines model for TopologyPath.Direction.
+type TopologyPathDirection string
 
 // TopologyTimelineEntry One row of the topology timeline (G9.3-T5).
 //
@@ -9991,6 +10336,11 @@ type ByWorkRefApiV1AuditByWorkRefRefGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ClassCountsApiV1AuditClassCountsPostParams defines parameters for ClassCountsApiV1AuditClassCountsPost.
+type ClassCountsApiV1AuditClassCountsPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // MyRecentApiV1AuditMyRecentGetParams defines parameters for MyRecentApiV1AuditMyRecentGet.
 type MyRecentApiV1AuditMyRecentGetParams struct {
 	Since         *string `form:"since,omitempty" json:"since,omitempty"`
@@ -10369,6 +10719,11 @@ type ListMemoriesApiV1MemoryGetParams struct {
 
 // RememberApiV1MemoryPostParams defines parameters for RememberApiV1MemoryPost.
 type RememberApiV1MemoryPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// SearchMemoriesApiV1MemorySearchPostParams defines parameters for SearchMemoriesApiV1MemorySearchPost.
+type SearchMemoriesApiV1MemorySearchPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -10930,6 +11285,7 @@ type UiAuditPageUiAuditGetParams struct {
 	WorkRef        *string             `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 	AuditId        *openapi_types.UUID `form:"audit_id,omitempty" json:"audit_id,omitempty"`
 	AgentSessionId *openapi_types.UUID `form:"agent_session_id,omitempty" json:"agent_session_id,omitempty"`
+	EventClass     *string             `form:"event_class,omitempty" json:"event_class,omitempty"`
 }
 
 // UiAuditResultsUiAuditResultsGetParams defines parameters for UiAuditResultsUiAuditResultsGet.
@@ -10944,6 +11300,7 @@ type UiAuditResultsUiAuditResultsGetParams struct {
 	WorkRef        *string             `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 	Cursor         *string             `form:"cursor,omitempty" json:"cursor,omitempty"`
 	AgentSessionId *openapi_types.UUID `form:"agent_session_id,omitempty" json:"agent_session_id,omitempty"`
+	EventClass     *string             `form:"event_class,omitempty" json:"event_class,omitempty"`
 	Partial        *string             `form:"partial,omitempty" json:"partial,omitempty"`
 }
 
@@ -11277,6 +11634,9 @@ type RejectApprovalRequestApiV1ApprovalsRequestIdRejectPostJSONRequestBody = Rej
 // AskDocsEndpointApiV1AskDocsPostJSONRequestBody defines body for AskDocsEndpointApiV1AskDocsPost for application/json ContentType.
 type AskDocsEndpointApiV1AskDocsPostJSONRequestBody = AskDocsRequest
 
+// ClassCountsApiV1AuditClassCountsPostJSONRequestBody defines body for ClassCountsApiV1AuditClassCountsPost for application/json ContentType.
+type ClassCountsApiV1AuditClassCountsPostJSONRequestBody = AuditClassCountsRequest
+
 // QueryApiV1AuditQueryPostJSONRequestBody defines body for QueryApiV1AuditQueryPost for application/json ContentType.
 type QueryApiV1AuditQueryPostJSONRequestBody = AuditQueryRequest
 
@@ -11333,6 +11693,9 @@ type IngestKbApiV1KbIngestPostJSONRequestBody = IngestKbRequest
 
 // RememberApiV1MemoryPostJSONRequestBody defines body for RememberApiV1MemoryPost for application/json ContentType.
 type RememberApiV1MemoryPostJSONRequestBody = RememberBody
+
+// SearchMemoriesApiV1MemorySearchPostJSONRequestBody defines body for SearchMemoriesApiV1MemorySearchPost for application/json ContentType.
+type SearchMemoriesApiV1MemorySearchPostJSONRequestBody = MemorySearchBody
 
 // PromoteApiV1MemoryScopeSlugPromotePostJSONRequestBody defines body for PromoteApiV1MemoryScopeSlugPromotePost for application/json ContentType.
 type PromoteApiV1MemoryScopeSlugPromotePostJSONRequestBody = PromoteBody
@@ -13189,6 +13552,11 @@ type ClientInterface interface {
 	// ByWorkRefApiV1AuditByWorkRefRefGet request
 	ByWorkRefApiV1AuditByWorkRefRefGet(ctx context.Context, ref string, params *ByWorkRefApiV1AuditByWorkRefRefGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ClassCountsApiV1AuditClassCountsPostWithBody request with any body
+	ClassCountsApiV1AuditClassCountsPostWithBody(ctx context.Context, params *ClassCountsApiV1AuditClassCountsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ClassCountsApiV1AuditClassCountsPost(ctx context.Context, params *ClassCountsApiV1AuditClassCountsPostParams, body ClassCountsApiV1AuditClassCountsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// MyRecentApiV1AuditMyRecentGet request
 	MyRecentApiV1AuditMyRecentGet(ctx context.Context, params *MyRecentApiV1AuditMyRecentGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -13415,6 +13783,11 @@ type ClientInterface interface {
 	RememberApiV1MemoryPostWithBody(ctx context.Context, params *RememberApiV1MemoryPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	RememberApiV1MemoryPost(ctx context.Context, params *RememberApiV1MemoryPostParams, body RememberApiV1MemoryPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SearchMemoriesApiV1MemorySearchPostWithBody request with any body
+	SearchMemoriesApiV1MemorySearchPostWithBody(ctx context.Context, params *SearchMemoriesApiV1MemorySearchPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	SearchMemoriesApiV1MemorySearchPost(ctx context.Context, params *SearchMemoriesApiV1MemorySearchPostParams, body SearchMemoriesApiV1MemorySearchPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ForgetApiV1MemoryScopeSlugDelete request
 	ForgetApiV1MemoryScopeSlugDelete(ctx context.Context, scope MemoryScope, slug string, params *ForgetApiV1MemoryScopeSlugDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -15190,6 +15563,30 @@ func (c *Client) ByWorkRefApiV1AuditByWorkRefRefGet(ctx context.Context, ref str
 	return c.Client.Do(req)
 }
 
+func (c *Client) ClassCountsApiV1AuditClassCountsPostWithBody(ctx context.Context, params *ClassCountsApiV1AuditClassCountsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewClassCountsApiV1AuditClassCountsPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ClassCountsApiV1AuditClassCountsPost(ctx context.Context, params *ClassCountsApiV1AuditClassCountsPostParams, body ClassCountsApiV1AuditClassCountsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewClassCountsApiV1AuditClassCountsPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) MyRecentApiV1AuditMyRecentGet(ctx context.Context, params *MyRecentApiV1AuditMyRecentGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewMyRecentApiV1AuditMyRecentGetRequest(c.Server, params)
 	if err != nil {
@@ -16164,6 +16561,30 @@ func (c *Client) RememberApiV1MemoryPostWithBody(ctx context.Context, params *Re
 
 func (c *Client) RememberApiV1MemoryPost(ctx context.Context, params *RememberApiV1MemoryPostParams, body RememberApiV1MemoryPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewRememberApiV1MemoryPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SearchMemoriesApiV1MemorySearchPostWithBody(ctx context.Context, params *SearchMemoriesApiV1MemorySearchPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSearchMemoriesApiV1MemorySearchPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SearchMemoriesApiV1MemorySearchPost(ctx context.Context, params *SearchMemoriesApiV1MemorySearchPostParams, body SearchMemoriesApiV1MemorySearchPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSearchMemoriesApiV1MemorySearchPostRequest(c.Server, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -23728,6 +24149,61 @@ func NewByWorkRefApiV1AuditByWorkRefRefGetRequest(server string, ref string, par
 	return req, nil
 }
 
+// NewClassCountsApiV1AuditClassCountsPostRequest calls the generic ClassCountsApiV1AuditClassCountsPost builder with application/json body
+func NewClassCountsApiV1AuditClassCountsPostRequest(server string, params *ClassCountsApiV1AuditClassCountsPostParams, body ClassCountsApiV1AuditClassCountsPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewClassCountsApiV1AuditClassCountsPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewClassCountsApiV1AuditClassCountsPostRequestWithBody generates requests for ClassCountsApiV1AuditClassCountsPost with any type of body
+func NewClassCountsApiV1AuditClassCountsPostRequestWithBody(server string, params *ClassCountsApiV1AuditClassCountsPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/audit/class-counts")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewMyRecentApiV1AuditMyRecentGetRequest generates requests for MyRecentApiV1AuditMyRecentGet
 func NewMyRecentApiV1AuditMyRecentGetRequest(server string, params *MyRecentApiV1AuditMyRecentGetParams) (*http.Request, error) {
 	var err error
@@ -27680,6 +28156,61 @@ func NewRememberApiV1MemoryPostRequestWithBody(server string, params *RememberAp
 	}
 
 	operationPath := fmt.Sprintf("/api/v1/memory")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewSearchMemoriesApiV1MemorySearchPostRequest calls the generic SearchMemoriesApiV1MemorySearchPost builder with application/json body
+func NewSearchMemoriesApiV1MemorySearchPostRequest(server string, params *SearchMemoriesApiV1MemorySearchPostParams, body SearchMemoriesApiV1MemorySearchPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewSearchMemoriesApiV1MemorySearchPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewSearchMemoriesApiV1MemorySearchPostRequestWithBody generates requests for SearchMemoriesApiV1MemorySearchPost with any type of body
+func NewSearchMemoriesApiV1MemorySearchPostRequestWithBody(server string, params *SearchMemoriesApiV1MemorySearchPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/memory/search")
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -35079,6 +35610,22 @@ func NewUiAuditPageUiAuditGetRequest(server string, params *UiAuditPageUiAuditGe
 
 		}
 
+		if params.EventClass != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "event_class", runtime.ParamLocationQuery, *params.EventClass); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -35286,6 +35833,22 @@ func NewUiAuditResultsUiAuditResultsGetRequest(server string, params *UiAuditRes
 		if params.AgentSessionId != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "agent_session_id", runtime.ParamLocationQuery, *params.AgentSessionId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.EventClass != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "event_class", runtime.ParamLocationQuery, *params.EventClass); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -43934,6 +44497,11 @@ type ClientWithResponsesInterface interface {
 	// ByWorkRefApiV1AuditByWorkRefRefGetWithResponse request
 	ByWorkRefApiV1AuditByWorkRefRefGetWithResponse(ctx context.Context, ref string, params *ByWorkRefApiV1AuditByWorkRefRefGetParams, reqEditors ...RequestEditorFn) (*ByWorkRefApiV1AuditByWorkRefRefGetResponse, error)
 
+	// ClassCountsApiV1AuditClassCountsPostWithBodyWithResponse request with any body
+	ClassCountsApiV1AuditClassCountsPostWithBodyWithResponse(ctx context.Context, params *ClassCountsApiV1AuditClassCountsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ClassCountsApiV1AuditClassCountsPostResponse, error)
+
+	ClassCountsApiV1AuditClassCountsPostWithResponse(ctx context.Context, params *ClassCountsApiV1AuditClassCountsPostParams, body ClassCountsApiV1AuditClassCountsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ClassCountsApiV1AuditClassCountsPostResponse, error)
+
 	// MyRecentApiV1AuditMyRecentGetWithResponse request
 	MyRecentApiV1AuditMyRecentGetWithResponse(ctx context.Context, params *MyRecentApiV1AuditMyRecentGetParams, reqEditors ...RequestEditorFn) (*MyRecentApiV1AuditMyRecentGetResponse, error)
 
@@ -44160,6 +44728,11 @@ type ClientWithResponsesInterface interface {
 	RememberApiV1MemoryPostWithBodyWithResponse(ctx context.Context, params *RememberApiV1MemoryPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RememberApiV1MemoryPostResponse, error)
 
 	RememberApiV1MemoryPostWithResponse(ctx context.Context, params *RememberApiV1MemoryPostParams, body RememberApiV1MemoryPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RememberApiV1MemoryPostResponse, error)
+
+	// SearchMemoriesApiV1MemorySearchPostWithBodyWithResponse request with any body
+	SearchMemoriesApiV1MemorySearchPostWithBodyWithResponse(ctx context.Context, params *SearchMemoriesApiV1MemorySearchPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SearchMemoriesApiV1MemorySearchPostResponse, error)
+
+	SearchMemoriesApiV1MemorySearchPostWithResponse(ctx context.Context, params *SearchMemoriesApiV1MemorySearchPostParams, body SearchMemoriesApiV1MemorySearchPostJSONRequestBody, reqEditors ...RequestEditorFn) (*SearchMemoriesApiV1MemorySearchPostResponse, error)
 
 	// ForgetApiV1MemoryScopeSlugDeleteWithResponse request
 	ForgetApiV1MemoryScopeSlugDeleteWithResponse(ctx context.Context, scope MemoryScope, slug string, params *ForgetApiV1MemoryScopeSlugDeleteParams, reqEditors ...RequestEditorFn) (*ForgetApiV1MemoryScopeSlugDeleteResponse, error)
@@ -46180,6 +46753,29 @@ func (r ByWorkRefApiV1AuditByWorkRefRefGetResponse) StatusCode() int {
 	return 0
 }
 
+type ClassCountsApiV1AuditClassCountsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AuditClassCounts
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ClassCountsApiV1AuditClassCountsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ClassCountsApiV1AuditClassCountsPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type MyRecentApiV1AuditMyRecentGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -47613,6 +48209,29 @@ func (r RememberApiV1MemoryPostResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r RememberApiV1MemoryPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type SearchMemoriesApiV1MemorySearchPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *MemorySearchResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r SearchMemoriesApiV1MemorySearchPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SearchMemoriesApiV1MemorySearchPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -54519,6 +55138,23 @@ func (c *ClientWithResponses) ByWorkRefApiV1AuditByWorkRefRefGetWithResponse(ctx
 	return ParseByWorkRefApiV1AuditByWorkRefRefGetResponse(rsp)
 }
 
+// ClassCountsApiV1AuditClassCountsPostWithBodyWithResponse request with arbitrary body returning *ClassCountsApiV1AuditClassCountsPostResponse
+func (c *ClientWithResponses) ClassCountsApiV1AuditClassCountsPostWithBodyWithResponse(ctx context.Context, params *ClassCountsApiV1AuditClassCountsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ClassCountsApiV1AuditClassCountsPostResponse, error) {
+	rsp, err := c.ClassCountsApiV1AuditClassCountsPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseClassCountsApiV1AuditClassCountsPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) ClassCountsApiV1AuditClassCountsPostWithResponse(ctx context.Context, params *ClassCountsApiV1AuditClassCountsPostParams, body ClassCountsApiV1AuditClassCountsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ClassCountsApiV1AuditClassCountsPostResponse, error) {
+	rsp, err := c.ClassCountsApiV1AuditClassCountsPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseClassCountsApiV1AuditClassCountsPostResponse(rsp)
+}
+
 // MyRecentApiV1AuditMyRecentGetWithResponse request returning *MyRecentApiV1AuditMyRecentGetResponse
 func (c *ClientWithResponses) MyRecentApiV1AuditMyRecentGetWithResponse(ctx context.Context, params *MyRecentApiV1AuditMyRecentGetParams, reqEditors ...RequestEditorFn) (*MyRecentApiV1AuditMyRecentGetResponse, error) {
 	rsp, err := c.MyRecentApiV1AuditMyRecentGet(ctx, params, reqEditors...)
@@ -55236,6 +55872,23 @@ func (c *ClientWithResponses) RememberApiV1MemoryPostWithResponse(ctx context.Co
 		return nil, err
 	}
 	return ParseRememberApiV1MemoryPostResponse(rsp)
+}
+
+// SearchMemoriesApiV1MemorySearchPostWithBodyWithResponse request with arbitrary body returning *SearchMemoriesApiV1MemorySearchPostResponse
+func (c *ClientWithResponses) SearchMemoriesApiV1MemorySearchPostWithBodyWithResponse(ctx context.Context, params *SearchMemoriesApiV1MemorySearchPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SearchMemoriesApiV1MemorySearchPostResponse, error) {
+	rsp, err := c.SearchMemoriesApiV1MemorySearchPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSearchMemoriesApiV1MemorySearchPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) SearchMemoriesApiV1MemorySearchPostWithResponse(ctx context.Context, params *SearchMemoriesApiV1MemorySearchPostParams, body SearchMemoriesApiV1MemorySearchPostJSONRequestBody, reqEditors ...RequestEditorFn) (*SearchMemoriesApiV1MemorySearchPostResponse, error) {
+	rsp, err := c.SearchMemoriesApiV1MemorySearchPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSearchMemoriesApiV1MemorySearchPostResponse(rsp)
 }
 
 // ForgetApiV1MemoryScopeSlugDeleteWithResponse request returning *ForgetApiV1MemoryScopeSlugDeleteResponse
@@ -60248,6 +60901,39 @@ func ParseByWorkRefApiV1AuditByWorkRefRefGetResponse(rsp *http.Response) (*ByWor
 	return response, nil
 }
 
+// ParseClassCountsApiV1AuditClassCountsPostResponse parses an HTTP response from a ClassCountsApiV1AuditClassCountsPostWithResponse call
+func ParseClassCountsApiV1AuditClassCountsPostResponse(rsp *http.Response) (*ClassCountsApiV1AuditClassCountsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ClassCountsApiV1AuditClassCountsPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AuditClassCounts
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseMyRecentApiV1AuditMyRecentGetResponse parses an HTTP response from a MyRecentApiV1AuditMyRecentGetWithResponse call
 func ParseMyRecentApiV1AuditMyRecentGetResponse(rsp *http.Response) (*MyRecentApiV1AuditMyRecentGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -62232,6 +62918,39 @@ func ParseRememberApiV1MemoryPostResponse(rsp *http.Response) (*RememberApiV1Mem
 			return nil, err
 		}
 		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSearchMemoriesApiV1MemorySearchPostResponse parses an HTTP response from a SearchMemoriesApiV1MemorySearchPostWithResponse call
+func ParseSearchMemoriesApiV1MemorySearchPostResponse(rsp *http.Response) (*SearchMemoriesApiV1MemorySearchPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SearchMemoriesApiV1MemorySearchPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest MemorySearchResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError

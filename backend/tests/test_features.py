@@ -297,6 +297,18 @@ def test_approval_queue_effective_posture_reports_break_glass() -> None:
     assert block["approval_queue"]["effective_posture"] == "single_operator_break_glass"
 
 
+def test_ready_delegated_decision_posture_defaults_to_production() -> None:
+    """#3693: by default ``/ready`` says delegated decisions are refused."""
+    block = build_features_block(_settings_with())
+    assert block["approval_queue"]["delegated_decision_posture"] == "production_own_hand_only"
+
+
+def test_ready_delegated_decision_posture_reports_lab_class() -> None:
+    """``APPROVAL_ALLOW_DELEGATED_DECISION=true`` surfaces on ``/ready`` (#3693)."""
+    block = build_features_block(_settings_with(approval_allow_delegated_decision=True))
+    assert block["approval_queue"]["delegated_decision_posture"] == "lab_class_delegation_allowed"
+
+
 # ---------------------------------------------------------------------------
 # mcp (G0.14-T13 #1202)
 # ---------------------------------------------------------------------------

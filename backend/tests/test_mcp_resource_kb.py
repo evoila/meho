@@ -17,6 +17,10 @@ resource surface:
 * Malformed slug (one that fails ``SLUG_PATTERN``) → INVALID_PARAMS.
 * Tenant boundary: another tenant's same-slug entry collapses to
   "not found" without revealing the foreign tenant's existence.
+* ``meho://kb/id/{entry}/revision/{revision}`` (#3753): an earlier body
+  stays readable after an overwrite while the slug read moves on; bad,
+  foreign and deleted ids all get the same "not found" reply; the
+  read needs the operator role.
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.kb.service import KbService
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.untrusted_text import BLOCK_END, BLOCK_START, GUARD_PREFIX
+from tests._kb_embedding_stub import fake_embedding_service
 from tests.mcp_test_fixtures import (
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
@@ -44,10 +49,7 @@ from tests.mcp_test_fixtures import (
 @pytest.fixture
 def stub_embedding() -> Iterator[AsyncMock]:
     """Patch the embedding service so SQLite-backed tests run without fastembed."""
-    fake = AsyncMock()
-    fake.encode_one.return_value = [0.1] * 384
-    fake.encode.return_value = [[0.1] * 384]
-    fake.dimension = 384
+    fake = fake_embedding_service()
     with patch(
         "meho_backplane.retrieval.indexer.get_embedding_service",
         return_value=fake,
@@ -280,3 +282,125 @@ def test_kb_resource_hidden_from_read_only_operator(
     templates = response.json()["result"]["resourceTemplates"]
     uri_templates = {t["uriTemplate"] for t in templates}
     assert "meho://kb/{slug}" not in uri_templates
+
+
+# ---------------------------------------------------------------------------
+# meho://kb/id/{entry}/revision/{revision} — exact retained read (#3753)
+# ---------------------------------------------------------------------------
+
+_REVISION_TEMPLATE = "meho://kb/id/{entry}/revision/{revision}"
+
+
+def _read(client: TestClient, uri: str) -> dict[str, object]:
+    response = post_mcp(
+        client,
+        {"jsonrpc": "2.0", "id": 1, "method": "resources/read", "params": {"uri": uri}},
+    )
+    assert response.status_code == 200
+    body: dict[str, object] = response.json()
+    return body
+
+
+def _payload(body: dict[str, object]) -> dict[str, object]:
+    result = body["result"]
+    assert isinstance(result, dict)
+    contents = result["contents"]
+    assert isinstance(contents, list)
+    loaded: dict[str, object] = json.loads(contents[0]["text"])
+    return loaded
+
+
+def _revision_uri(entry: object, revision: object) -> str:
+    return f"meho://kb/id/{entry}/revision/{revision}"
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+def test_revision_template_is_listed(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    client, _op = client_with_operator
+    response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "resources/templates/list"})
+    templates = response.json()["result"]["resourceTemplates"]
+    matches = [t for t in templates if t["uriTemplate"] == _REVISION_TEMPLATE]
+    assert len(matches) == 1
+    assert matches[0]["mimeType"] == "text/markdown"
+    assert "UNTRUSTED_AGENT_TEXT" in matches[0]["description"]
+    assert "required_role" not in matches[0]
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+@pytest.mark.asyncio
+async def test_exact_revision_survives_overwrite_while_slug_reads_latest(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stub_embedding: AsyncMock,
+) -> None:
+    client, op = client_with_operator
+    service = KbService()
+    first, _ = await service.create_entry(op.tenant_id, "cert-renew", "Old steps.")
+    second, _ = await service.create_entry(op.tenant_id, "cert-renew", "New steps.")
+
+    latest = _payload(_read(client, "meho://kb/cert-renew"))
+    assert "New steps." in str(latest["body"])
+    assert latest["id"] == str(first.id)
+    assert latest["revision_id"] == str(second.revision_id)
+
+    old = _payload(_read(client, _revision_uri(first.id, first.revision_id)))
+    assert old["entry_id"] == str(first.id)
+    assert old["revision_id"] == str(first.revision_id)
+    assert old["revision_number"] == 1
+    assert old["origin"] == "write"
+    body = str(old["body"])
+    assert body.startswith(BLOCK_START)
+    assert body.endswith(BLOCK_END)
+    assert GUARD_PREFIX in body
+    assert "Old steps." in body
+    assert "New steps." not in body
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+@pytest.mark.asyncio
+async def test_exact_revision_failures_share_one_message(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stub_embedding: AsyncMock,
+) -> None:
+    """Malformed, unknown, mismatched, foreign and deleted ids look the same."""
+    client, op = client_with_operator
+    service = KbService()
+    mine, _ = await service.create_entry(op.tenant_id, "mine", "my body")
+    other, _ = await service.create_entry(op.tenant_id, "other", "other body")
+    foreign, _ = await service.create_entry(uuid.uuid4(), "foreign", "foreign body")
+    gone, _ = await service.create_entry(op.tenant_id, "gone", "deleted body")
+    assert await service.delete_entry(op.tenant_id, "gone") is True
+
+    uris = [
+        _revision_uri("not-a-uuid", mine.revision_id),
+        _revision_uri(mine.id, "not-a-uuid"),
+        _revision_uri(mine.id, uuid.uuid4()),
+        _revision_uri(other.id, mine.revision_id),
+        _revision_uri(foreign.id, foreign.revision_id),
+        _revision_uri(gone.id, gone.revision_id),
+    ]
+    messages = set()
+    for uri in uris:
+        body = _read(client, uri)
+        error = body["error"]
+        assert isinstance(error, dict)
+        assert error["code"] == INVALID_PARAMS
+        messages.add(error["message"])
+    assert messages == {"kb revision not found"}
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.READ_ONLY], indirect=True)
+def test_exact_revision_needs_operator_role(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    client, _op = client_with_operator
+    response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "resources/templates/list"})
+    uri_templates = {t["uriTemplate"] for t in response.json()["result"]["resourceTemplates"]}
+    assert _REVISION_TEMPLATE not in uri_templates
+
+    body = _read(client, _revision_uri(uuid.uuid4(), uuid.uuid4()))
+    error = body["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == INVALID_PARAMS
+    assert "forbidden" in str(error["message"])

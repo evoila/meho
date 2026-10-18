@@ -181,7 +181,9 @@ async def written_memory(pg_engine: None) -> AsyncIterator[dict[str, Any]]:
 
 
 def _hit_bodies(result: dict[str, Any]) -> list[str]:
-    return [hit["entry"]["body"] for hit in result["hits"]]
+    # A hit carries a bounded snippet, not the body (#3751); this body is
+    # short, so the snippet holds all of it.
+    return [hit["snippet"] for hit in result["hits"]]
 
 
 # ---------------------------------------------------------------------------
@@ -292,7 +294,7 @@ async def test_rest_list_and_mcp_search_return_the_same_row(
         searched = await _search_memory_handler(operator, {"query": PROBE_QUERY})
 
     listed_ids = {str(entry.id) for entry in listed}
-    searched_ids = {hit["entry"]["id"] for hit in searched["hits"]}
+    searched_ids = {hit["id"] for hit in searched["hits"]}
 
     assert written_id in listed_ids, (
         f"REST list did not return the service account's own write -> {listed_ids}"

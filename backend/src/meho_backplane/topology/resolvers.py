@@ -15,10 +15,10 @@ row, and is silent on not-found. :func:`resolve_node` is a superset:
 * raises a new :class:`NodeNotFoundError` when nothing matches.
 
 The ambiguity check is the same code on both call paths: the read
-traversal verbs in :mod:`meho_backplane.topology.query` delegate their
-own check to :func:`_collect_distinct_kinds` so the
-"name → multiple kinds in this tenant" surface stays single-sourced
-between traversal and the new write-path callers.
+traversal verbs in :mod:`meho_backplane.topology.query` resolve their
+anchors through :func:`resolve_node` too, so the "name → several rows
+in this tenant" rule stays single-sourced between traversal and the
+write-path callers.
 
 Not-found semantics intentionally differ between the two surfaces:
 
@@ -48,10 +48,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import Uuid as SAUuid
-from sqlalchemy import bindparam, select, text
+from sqlalchemy import select
 
 from meho_backplane.db.models import GraphNode
+from meho_backplane.topology.identity_mode import NOT_LEGACY_SCOPE
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -80,13 +80,23 @@ class AmbiguousNodeError(ValueError):
     candidate kinds echoed in ``detail``.
     """
 
-    def __init__(self, name: str, kinds: list[str]) -> None:
+    def __init__(self, name: str, kinds: list[str], scopes: list[str] | None = None) -> None:
         self.name = name
         self.kinds = kinds
-        super().__init__(
-            f"node name {name!r} is ambiguous in this tenant — it exists "
-            f"as kinds {sorted(kinds)!r}; pass kind= to disambiguate"
-        )
+        #: Set when one ``(kind, name)`` exists in several source scopes
+        #: (after the #3749 cut-over); ``None`` for a kind ambiguity.
+        self.scopes = scopes
+        if scopes:
+            message = (
+                f"node {kinds[0]!r} {name!r} is ambiguous in this tenant — "
+                f"several sources report it (scopes {scopes!r})"
+            )
+        else:
+            message = (
+                f"node name {name!r} is ambiguous in this tenant — it exists "
+                f"as kinds {sorted(kinds)!r}; pass kind= to disambiguate"
+            )
+        super().__init__(message)
 
 
 class NodeNotFoundError(ValueError):
@@ -113,65 +123,6 @@ class NodeNotFoundError(ValueError):
         super().__init__(f"no graph_node matched {descriptor} in this tenant")
 
 
-#: ``SELECT DISTINCT kind FROM graph_node WHERE tenant_id = :tenant_id AND name = :name``.
-#:
-#: Module-level fully-literal ``text("...")`` so the
-#: ``avoid-sqlalchemy-text`` SAST rule does not fire (no string
-#: interpolation; every value is a ``:named`` bind). Mirrors the
-#: pattern in :mod:`meho_backplane.topology.query`.
-#:
-#: ``tenant_id`` rides through SQLAlchemy's :class:`Uuid` bind type so
-#: the asyncpg / aiosqlite drivers serialise the UUID natively. On
-#: ``Uuid()``-typed columns SQLite stores the value as 32-char hex
-#: (no dashes) and matches incoming binds via the same conversion;
-#: passing ``str(uuid)`` would deliver the dashed-canonical form,
-#: which mismatches the stored hex and produces a silent zero-row
-#: result -- :func:`resolve_node`'s bare-name branch would then
-#: raise :class:`NodeNotFoundError` even for a row that exists.
-#: Production PG accepts both forms, masking the bug there. Same
-#: pattern :mod:`meho_backplane.topology.query`'s ``_TIMELINE_*_SQL``
-#: uses since #861.
-_ANCHOR_KINDS_SQL = text(
-    """
-    SELECT DISTINCT kind
-    FROM graph_node
-    WHERE tenant_id = :tenant_id
-      AND name = :name
-    """
-).bindparams(bindparam("tenant_id", type_=SAUuid()))
-
-
-async def _collect_distinct_kinds(
-    session: AsyncSession,
-    *,
-    tenant_id: UUID | str,
-    name: str,
-) -> list[str]:
-    """Return the distinct ``kind`` values for ``(tenant_id, name)``.
-
-    Single source of truth for the ambiguity probe shared by
-    :func:`resolve_node` and the traversal verbs'
-    ``_assert_anchor_unambiguous`` in :mod:`meho_backplane.topology.query`.
-    Returns an empty list when the name does not exist in this tenant.
-
-    Kept private — the public ambiguity surface is
-    :class:`AmbiguousNodeError`, raised by callers that decide what to
-    do with the kind list. Accepts ``tenant_id`` as either a
-    :class:`UUID` or a ``str``; the :class:`Uuid` bind type on
-    :data:`_ANCHOR_KINDS_SQL` coerces both to the column's wire
-    format (PG native ``uuid`` / SQLite ``CHAR(32)`` hex). Production
-    PG masked the latent dashed-vs-hex mismatch the bind type now
-    resolves; the SQLite test driver surfaces it as a silent zero-row
-    result, which :func:`resolve_node` then turns into a spurious
-    :class:`NodeNotFoundError`.
-    """
-    result = await session.execute(
-        _ANCHOR_KINDS_SQL,
-        {"tenant_id": tenant_id, "name": name},
-    )
-    return [row._mapping["kind"] for row in result.fetchall()]
-
-
 async def resolve_node(
     session: AsyncSession,
     tenant_id: UUID,
@@ -189,22 +140,24 @@ async def resolve_node(
 
     Resolution rules:
 
-    1. If ``kind`` is supplied, look up the ``(tenant_id, kind, name)``
-       unique row (index ``graph_node_tenant_kind_name_idx``). At most
-       one match. Found → return the :class:`GraphNode`; absent →
-       :class:`NodeNotFoundError`.
-    2. If ``kind`` is omitted, probe the distinct kinds for
-       ``(tenant_id, name)``:
-
-       - **0 kinds** → :class:`NodeNotFoundError` (the name does not
-         exist in this tenant — including the case where it exists
-         only in *another* tenant; cross-tenant references never
-         resolve to the other tenant's node).
-       - **1 kind** → the ``(tenant_id, kind, name)`` row is unique by
-         the index; fetch and return it.
-       - **>1 kinds** → :class:`AmbiguousNodeError` listing the
-         candidate kinds. The caller must re-issue with ``kind=`` to
-         disambiguate.
+    1. Candidates are the tenant's rows named ``name`` (and of ``kind``
+       when it is supplied). ``legacy:<uuid>`` rows are never candidates:
+       the scope cut-over (#3749) set them aside because no target
+       vouched for them (see
+       :data:`~meho_backplane.topology.identity_mode.NOT_LEGACY_SCOPE`).
+    2. **0 candidates** → :class:`NodeNotFoundError` (the name does not
+       exist in this tenant — including the case where it exists only
+       in *another* tenant; cross-tenant references never resolve to
+       the other tenant's node).
+    3. Candidates of **more than one kind** and no ``kind`` →
+       :class:`AmbiguousNodeError` listing the kinds. The caller must
+       re-issue with ``kind=``.
+    4. **More than one candidate of one kind** → only possible after
+       the cut-over, when two sources own the same name (two clusters
+       each with a ``default`` namespace).
+       :class:`AmbiguousNodeError` lists their ``scopes``. The resolver
+       never picks one.
+    5. **Exactly one candidate** → return it.
 
     Args:
         session: An open :class:`AsyncSession`. The resolver does not
@@ -217,9 +170,8 @@ async def resolve_node(
             resolution — graph-node aliasing is the CLI/MCP front's
             job (deferred per ``docs/codebase/topology.md`` "Known
             issues").
-        kind: Optional ``graph_node.kind`` pin. When supplied, anchors
-            on the ``(tenant_id, kind, name)`` unique index directly
-            and skips the ambiguity probe.
+        kind: Optional ``graph_node.kind`` pin. When supplied, only
+            rows of that kind are candidates.
 
     Returns:
         The matching :class:`~meho_backplane.db.models.GraphNode` ORM
@@ -228,30 +180,25 @@ async def resolve_node(
 
     Raises:
         NodeNotFoundError: Nothing matches in this tenant.
-        AmbiguousNodeError: Bare-name lookup hit multiple kinds; pass
-            ``kind=`` to disambiguate.
+        AmbiguousNodeError: Bare-name lookup hit multiple kinds (pass
+            ``kind=``), or several sources own the same ``(kind, name)``
+            (``scopes`` is set).
     """
-    if kind is None:
-        kinds = await _collect_distinct_kinds(session, tenant_id=tenant_id, name=name)
-        if not kinds:
-            raise NodeNotFoundError(name)
-        if len(kinds) > 1:
-            raise AmbiguousNodeError(name, kinds)
-        kind = kinds[0]
-
-    # Pinned (tenant_id, kind, name) — unique-index lookup, at most one row.
     stmt = select(GraphNode).where(
         GraphNode.tenant_id == tenant_id,
-        GraphNode.kind == kind,
         GraphNode.name == name,
+        NOT_LEGACY_SCOPE,
     )
-    result = await session.execute(stmt)
-    node = result.scalar_one_or_none()
-    if node is None:
-        # Reached only when the caller supplied ``kind`` (the
-        # ``kind is None`` branch already proved the row exists).
-        # A pinned (tenant_id, kind, name) miss is a clean
-        # not-found — the unique index guarantees there is no
-        # alternative interpretation.
+    if kind is not None:
+        stmt = stmt.where(GraphNode.kind == kind)
+    rows = list((await session.execute(stmt)).scalars().all())
+    if not rows:
         raise NodeNotFoundError(name, kind=kind)
-    return node
+    kinds = sorted({row.kind for row in rows})
+    if len(kinds) > 1:
+        raise AmbiguousNodeError(name, kinds)
+    if len(rows) > 1:
+        raise AmbiguousNodeError(
+            name, kinds, scopes=sorted(row.source_scope or "unresolved" for row in rows)
+        )
+    return rows[0]

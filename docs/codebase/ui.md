@@ -3118,7 +3118,12 @@ ephemeral.
 Diagnostics is **own-tenant only**: tenant identity is derived from the
 reconstructed operator's `tenant_id` and the per-principal isolation predicate
 is bound from `operator.sub` (`principal_sub=`) — there is no `tenant_filter`
-(that is the sibling T3 concern). The surface is read-only, so no confirm gates.
+(that is the sibling T3 concern). When Memory rows can be candidates (Source
+is `memory` or empty) the handler also passes the Memory eligibility built by
+`MemoryRbacResolver.eligibility()` (#3741), so the candidate SQL drops
+memories the operator may not see, and expired ones, before ranking — the
+same contract as `POST /api/v1/retrieve`. Other sources pass `None`. The
+surface is read-only, so no confirm gates.
 
 ### Route ordering (two levels, both load-bearing)
 

@@ -75,7 +75,10 @@ privacy-bounded ``request_usage_event`` rows instead
 (:mod:`meho_backplane.request_usage`): a search is a ``request_finished``
 event on route ``tool:<search tool>`` with outcome ``ok``, and the
 conversion universe is every ``request_finished`` event of the same
-principal. The routes keep the default until the wrapper rows are retired.
+principal. The REST and console routes read ``"request_usage"`` (#3747);
+``"audit_log"`` stays only until the wrapper rows are retired. When usage
+collection is off (``REQUEST_USAGE_RETENTION_DAYS`` unset) the routes
+report zero searches.
 
 Cross-DB portability
 --------------------

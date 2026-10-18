@@ -242,10 +242,28 @@ and raw preview before the reducer returns
 `(summary_dict, ResultHandle)`. Small / scalar payloads return
 `(payload, None)` unchanged.
 
-The catalog records which scalar families are safe for a later relational
-projection, but it does not alter `result_query` in this change. That lazy
-DuckDB conversion remains on the drill-in path until its dedicated catalog
-consumer lands.
+The catalog records which scalar families are safe for a relational
+query. `result_query` builds the same catalog again from the stored rows
+and uses it to check every field a query names (#3635, see
+*"Query surface"* below). DuckDB only sees the result at query time, and
+only the queryable fields.
+
+### Result field catalog (#3631)
+
+The captured JSON is the source of truth. The catalog
+([`jsonflux/query/result_catalog.py`](../../backend/src/meho_backplane/jsonflux/query/result_catalog.py),
+`build_catalog`) has one entry per exact top-level key seen in **any**
+row: its JSON kinds, whether it is nullable (null or missing in some
+row), and whether it is queryable, with a `reason` when it is not. A
+queryable field has one scalar kind (or whole and decimal numbers that a
+64-bit float holds exactly), no integer past 64 bits, and no non-finite
+number. Entries are sorted by key, so neither the catalog nor `schema_`
+depends on row order. `schema_` lists one property per entry in that
+order; a field seen with several kinds gets a `type` array. The preview
+rows are raw captured rows, so the first row can lack a field the schema
+lists. `tests/test_result_reduction_properties.py` checks these rules
+with seeded row permutations; the full rules are in
+[`docs/codebase/result-spill.md`](../codebase/result-spill.md#result-field-catalog-3631).
 
 Collection detection distinguishes a *paginable list* from a
 *dict-of-arrays detail object* (#2113). A dict with no recognized
@@ -441,9 +459,19 @@ a thin wrapper over the broadcast Valkey client:
 
 ```
 KEY:   meho:reshandle:{tenant_id}:{handle_id}
-VALUE: JSON {operator_sub, op_id, rows, total_rows, stored_rows, created_at}
+       (meho:reshandle:v2:{tenant_id}:{handle_id} on the dedicated store, #3639)
+VALUE: JSON {operator_sub, op_id, rows, total_rows, stored_rows, created_at,
+             captured_rows, storage_coverage, source_coverage, metadata,
+             record_kind, document}
 TTL:   the handle's ttl_seconds (server-enforced)
 ```
+
+`record_kind` is `rows` or `document` (#3633). On a rows record,
+`document` holds the top-level fields left out of the inline summary, or
+is null. One record is also capped at `RESULT_HANDLE_MAX_RECORD_BYTES`
+(default 16 MiB): the store keeps the longest run of rows from the start
+that fits, never a gap, and sets `storage_coverage` to `complete` or
+`partial`.
 
 The store is bounded on both axes by construction: Valkey enforces the
 TTL server-side (no sweeper, a crashed process leaves no orphaned key),
@@ -541,6 +569,39 @@ result carries `coverage`: `complete` when `stored_rows == total_rows`,
 else `partial` plus a `coverage_note` — so a `COUNT` over a capped spill
 is labelled as covering the stored subset only, never presented as a
 whole-inventory total.
+
+### Document records and `path` reads (#3633)
+
+A large payload with no single list (a detail object with several lists,
+a dict of scalars, or a scalar root) is kept **whole** as a document
+record. The inline summary is only an outline: `result_record:
+"document"`, `root_type`, `document_bytes`, and the top-level field names
+and kinds. The caller reads parts of it with `result_query` and
+`query={"path": "<JSON Pointer>"}`, resolved by
+[`jsonflux/query/json_pointer.py`](../../backend/src/meho_backplane/jsonflux/query/json_pointer.py)
+under RFC 6901 rules: `""` is the whole document, `~1` means `/` and
+`~0` means `~`, an array index has no leading zero, and `-` never
+resolves. A `path` read never touches SQL, so it cannot be combined with
+`filter`, `select`, or the other query fields. An array value pages with
+`offset` / `limit`; any other value comes back whole. A rows handle also
+answers `path` reads, but only for the top-level **scalar** fields its
+summary left out and the store kept with the rows. Lists and objects
+beside the rows are not kept, and the store drops the omitted scalars
+when they leave no room for the rows; the drill-in rationale says which
+case applies. The full rules are in
+[`docs/codebase/result-spill.md`](../codebase/result-spill.md#document-records-and-path-reads-3633).
+
+### Completed-operation receipt (`audit_id`, #3636)
+
+`OperationResult.audit_id` is set only after the dispatch audit row
+commits; null means no receipt. When the handler finished but the
+reducer failed, the result stays `status="ok"` with no `result`, no
+`handle`, `delivery="unavailable"`, and a remediation that says not to
+run the operation again. The reducer's failure never turns a completed
+operation into `connector_error`. A reduced result carries both the
+`handle` (how to read the rows) and the `audit_id` (proof the call ran).
+See [`docs/codebase/mcp.md`](../codebase/mcp.md#response-wire-ceiling-3641)
+for `delivery`.
 
 ### Sample ordering — head vs tail (G0.19-T1, #1479)
 

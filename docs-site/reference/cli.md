@@ -1452,6 +1452,19 @@ meho docs search <query> [flags]
 - `--product` — optional vendor-product refinement within a single collection
 - `--version` — optional product-version refinement within a single collection
 
+## `meho doctor`
+
+Check this machine's MEHO client setup and say which layer is broken
+
+```
+meho doctor [flags]
+```
+
+- `--backplane` — backplane URL to check (defaults to the URL saved by the last `meho login`)
+- `--json` — emit one JSON document on stdout instead of the human report
+- `--no-network` — run only the offline layer; make no network call
+- `--plugin-root` — path to the installed Claude Code plugin (defaults to $CLAUDE_PLUGIN_ROOT, then a search under ~/.claude/plugins)
+
 ## `meho event-source`
 
 Operate the MEHO event_source registry (add / list / describe / update / delete)
@@ -3683,14 +3696,14 @@ meho promote <scope>/<slug> [flags]
 
 ## `meho recall`
 
-Fetch a memory by natural key or via retrieval (GET /api/v1/memory or /api/v1/retrieve)
+Fetch a memory by natural key or search memories (GET /api/v1/memory or POST /api/v1/memory/search)
 
 ```
 meho recall <scope>/<slug> [flags]
 ```
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by `meho login`)
-- `--json` — emit raw MemoryEntry / RetrieveResponse JSON instead of human output
+- `--json` — emit raw MemoryEntry / MemorySearchResponse JSON instead of human output
 - `--limit` — max hits to return in --query mode (1..50, server default 10 when omitted)
 - `--query` — run hybrid retrieval against memories with this query; mutually exclusive with the <scope>/<slug> positional
 - `--scope` — narrow --query mode to one scope: user|user-tenant|user-target|tenant|target
@@ -3753,7 +3766,7 @@ meho retrieval retire-checklist [flags]
 
 ### `meho retrieval usage`
 
-Read audit-log-backed retrieval usage telemetry (daily buckets per surface)
+Read retrieval usage telemetry (daily buckets per surface)
 
 ```
 meho retrieval usage [flags]

@@ -249,7 +249,7 @@
           "retrieval"
         ],
         "summary": "Usage Endpoint",
-        "description": "Return audit-backed retrieval usage aggregates for *operator*.\n\nTenant scoping: callers are scoped to ``operator.tenant_id``; a\n``tenant_filter`` naming a different tenant returns 403\n``cross_tenant_requires_platform_admin`` unless the caller holds the\n``platform_admin`` cross-tenant capability (#1638). *since*\naccepts ``<N>d`` / ``<N>h`` (relative) or an ISO-8601 date;\nmalformed \u2192 400. ``surface=all`` (default) covers all three;\n``surface=<one>`` narrows. Empty result is a structured zero\nreport, not 404. Audit overrides + enrichment contextvars are\nbound before :func:`compute_usage` runs so a handler exception\nstill produces an audit row with partial payload.",
+        "description": "Return retrieval usage aggregates for *operator*.\n\nReads request usage events (``request_usage``), not ``audit_log``. MEHO\ncollects them only when ``REQUEST_USAGE_RETENTION_DAYS`` is set, so the\nreport is empty when that setting is off and covers only the time\nsince collection started.\n\nTenant scoping: callers are scoped to ``operator.tenant_id``; a\n``tenant_filter`` naming a different tenant returns 403\n``cross_tenant_requires_platform_admin`` unless the caller holds the\n``platform_admin`` cross-tenant capability (#1638). *since*\naccepts ``<N>d`` / ``<N>h`` (relative) or an ISO-8601 date;\nmalformed \u2192 400. ``surface=all`` (default) covers all three;\n``surface=<one>`` narrows. Empty result is a structured zero\nreport, not 404. Audit overrides + enrichment contextvars are\nbound before :func:`compute_usage` runs so a handler exception\nstill produces an audit row with partial payload.",
         "operationId": "usage_endpoint_api_v1_retrieve_usage_get",
         "parameters": [
           {
@@ -388,7 +388,7 @@
           "retrieval"
         ],
         "summary": "Retire Checklist Endpoint",
-        "description": "Return the five-criterion retire-decision checklist per surface.\n\nTenant scoping mirrors the sibling usage route:\nCallers are scoped to ``operator.tenant_id``; a ``tenant_filter``\nquery parameter naming a different tenant returns 403\n``cross_tenant_requires_platform_admin`` unless the caller holds the\n``platform_admin`` cross-tenant capability (#1638).\nThe request body's ``surface=all`` (default) walks every supported\nsurface in the order :data:`SURFACE_VERDICT_ORDER` pins.\n\nAudit overrides + enrichment contextvars are bound **before** the\ntenant-filter 403 path so the denied request still produces an\naudit row with the canonical ``op_id`` /\n``op_class`` / ``tenant_scope`` payload (the \"audit row per call\"\ncontract from the issue body holds on every status code). The\nsame overrides also protect the happy-path handler-exception case:\na partial payload is itself a useful incident-postmortem signal.\n``audit_row_count`` is bound after the service returns so the\nbroadcast event's ``row_count`` field reflects the number of\nsurfaces evaluated, not the underlying audit_log scan size.",
+        "description": "Return the five-criterion retire-decision checklist per surface.\n\nThe usage criteria read request usage events (``request_usage``),\nnot ``audit_log``. MEHO collects them only when\n``REQUEST_USAGE_RETENTION_DAYS`` is set, so they stay unmet when that\nsetting is off, and they cover only the time since collection started.\n\nTenant scoping mirrors the sibling usage route:\nCallers are scoped to ``operator.tenant_id``; a ``tenant_filter``\nquery parameter naming a different tenant returns 403\n``cross_tenant_requires_platform_admin`` unless the caller holds the\n``platform_admin`` cross-tenant capability (#1638).\nThe request body's ``surface=all`` (default) walks every supported\nsurface in the order :data:`SURFACE_VERDICT_ORDER` pins.\n\nAudit overrides + enrichment contextvars are bound **before** the\ntenant-filter 403 path so the denied request still produces an\naudit row with the canonical ``op_id`` /\n``op_class`` / ``tenant_scope`` payload (the \"audit row per call\"\ncontract from the issue body holds on every status code). The\nsame overrides also protect the happy-path handler-exception case:\na partial payload is itself a useful incident-postmortem signal.\n``audit_row_count`` is bound after the service returns so the\nbroadcast event's ``row_count`` field reflects the number of\nsurfaces evaluated, not the underlying audit_log scan size.",
         "operationId": "retire_checklist_endpoint_api_v1_retrieve_retire_checklist_post",
         "parameters": [
           {
@@ -5239,7 +5239,7 @@
           "knowledge"
         ],
         "summary": "Ingest Kb",
-        "description": "Server-side bulk ingest from a directory on the backplane host.\n\n``tenant_admin`` only -- bulk ingest is a privileged operation.\nThe request shape accepts both ``directory`` and ``tarball_url``\nfields (the task body's contract), but only the ``directory``\nbranch is implemented in v0.2; a ``tarball_url`` request returns\n**501 Not Implemented**, mirroring\n:mod:`meho_backplane.api.v1.retrieve_eval`'s posture toward its\nunimplemented baseline field.\n\nWalks the supplied directory via\n:meth:`KbService.ingest_directory` and returns the four-bucket\n:class:`KbIngestionResult`. The directory is **confined to**\n``KB_INGEST_ROOT`` (default ``/opt/meho/kb-ingest``): a path\nresolving outside it (``..`` traversal or escaping symlink) raises\n:class:`~meho_backplane.kb.KbIngestRootError`, mapped to a **400**\n``kb_ingest_path_outside_root`` here before any file is read --\nclosing the path-traversal / LFI hole (#101 L8 + L14) even for a\n``tenant_admin``. A path inside the root that does not exist or is\nnot a directory fails closed with ``directory_not_found`` /\n``not_a_directory`` (also 400).\n\nBinds ``audit_op_id=\"kb.ingest\"`` + ``audit_op_class=\"write\"``\nplus the four ``KbIngestionResult`` counters in the audit\npayload (NOT the file contents -- the task body's audit\ncontract). ``audit_dry_run`` flags dry-run calls so an operator\ncan grep their audit log for trial vs real ingests.",
+        "description": "Server-side bulk ingest from a directory on the backplane host.\n\n``tenant_admin`` only -- bulk ingest is a privileged operation.\nThe request shape accepts both ``directory`` and ``tarball_url``\nfields (the task body's contract), but only the ``directory``\nbranch is implemented in v0.2; a ``tarball_url`` request returns\n**501 Not Implemented**, mirroring\n:mod:`meho_backplane.api.v1.retrieve_eval`'s posture toward its\nunimplemented baseline field.\n\nWalks the supplied directory via\n:meth:`KbService.ingest_directory` and returns the five-bucket\n:class:`KbIngestionResult` (files sharing a slug are listed in\n``conflicts`` and not written). The directory is **confined to**\n``KB_INGEST_ROOT`` (default ``/opt/meho/kb-ingest``): a path\nresolving outside it (``..`` traversal or escaping symlink) raises\n:class:`~meho_backplane.kb.KbIngestRootError`, mapped to a **400**\n``kb_ingest_path_outside_root`` here before any file is read --\nclosing the path-traversal / LFI hole (#101 L8 + L14) even for a\n``tenant_admin``. A path inside the root that does not exist or is\nnot a directory fails closed with ``directory_not_found`` /\n``not_a_directory`` (also 400).\n\nBinds ``audit_op_id=\"kb.ingest\"`` + ``audit_op_class=\"write\"``\nplus the five result counters in the audit payload (NOT the\nfile contents or paths). ``audit_dry_run`` flags dry-run calls so an operator\ncan grep their audit log for trial vs real ingests.",
         "operationId": "ingest_kb_api_v1_kb_ingest_post",
         "parameters": [
           {
@@ -6342,6 +6342,60 @@
         }
       }
     },
+    "/api/v1/memory/search": {
+      "post": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "Search Memories",
+        "description": "Rank the operator's eligible memories for a query (#3741).\n\nA thin adapter over :meth:`MemoryService.search_memories`, the same\ncall the MCP ``search_memory`` tool makes, so ``meho recall --query``\nand an agent get the same eligible result set. The service applies\ntenant, principal, scope, and expiry rules before ranking. Open to\n``read_only`` like the other memory reads. The query text is never\nbound to the audit row; only the op id, class, and scope are.",
+        "operationId": "search_memories_api_v1_memory_search_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemorySearchBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemorySearchResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/memory/{scope}/{slug}": {
       "get": {
         "tags": [
@@ -6881,7 +6935,7 @@
           "audit"
         ],
         "summary": "Trace",
-        "description": "Fetch the flight-recorder trace for one dispatch, scoped to the tenant.\n\nThe **operator read surface** of the dispatch flight recorder\n(``docs/decisions/dispatch-flight-recorder.md``): the ordered, already\nredacted+capped spans a governed dispatch produced. Read-only \u2014 it renders\nwhat the capture/redaction seams (#3213/#3214) stored and never\nre-processes, un-redacts, or writes.\n\nOperator plane keeps **full** access, independent of the agent gate: unlike\nthe agent read (a sibling task) this serves redaction-uncertain traces too,\nsurfacing ``trace.redaction_uncertain`` so an operator sees when a trace was\nwithheld from agents. Paired add-ons consume this same route with their\noperator principal \u2014 no separate add-on surface.\n\nAbsence has two levels. A missing / cross-tenant **audit row** is a 404\n(never 403), matching :func:`show`: the existence check runs through the\ntenant-scoped substrate, so a foreign ``audit_id`` yields zero rows and\nexistence never leaks. An audit row that exists but carries **no trace** is\na 200 with ``trace_present=False`` \u2014 capture is a best-effort opt-in\n(F1/F7), so \"no trace\" is a normal observable state, not an error.\n\nTenant isolation is enforced twice: the existence check is tenant-scoped,\nand :func:`~meho_backplane.flight_recorder.load_trace` additionally filters\nthe trace header on ``tenant_id`` as defence in depth.",
+        "description": "Fetch the flight-recorder trace for one dispatch, scoped to the tenant.\n\nThe **operator read surface** of the dispatch flight recorder\n(``docs/decisions/dispatch-flight-recorder.md``): the ordered, already\nredacted+capped spans a governed dispatch produced. Read-only \u2014 it renders\nwhat the capture/redaction seams (#3213/#3214) stored and never\nre-processes, un-redacts, or writes.\n\nOperator plane keeps **full** access, independent of the agent gate: unlike\nthe agent read (a sibling task) this serves redaction-uncertain traces too,\nsurfacing ``trace.redaction_uncertain`` so an operator sees when a trace was\nwithheld from agents. Paired add-ons consume this same route with their\noperator principal \u2014 no separate add-on surface.\n\nAbsence has two levels. A missing / cross-tenant **audit row** is a 404\n(never 403), matching :func:`show`: the existence check runs through the\ntenant-scoped substrate, so a foreign ``audit_id`` yields zero rows and\nexistence never leaks. An audit row that exists but carries **no trace** is\na 200 with ``trace_present=False`` \u2014 capture is a best-effort opt-in\n(F1/F7), so \"no trace\" is a normal observable state, not an error.\n\nTenant isolation is enforced twice: the existence check is tenant-scoped,\nand :func:`~meho_backplane.flight_recorder.load_trace` additionally filters\nthe trace header on ``tenant_id`` as defence in depth.\n\nOnly an ``operation_execution`` row resolves to the flight recorder\n(#3747); any other class answers ``trace_present=False``.",
         "operationId": "trace_api_v1_audit__audit_id__trace_get",
         "parameters": [
           {
@@ -6983,13 +7037,67 @@
         }
       }
     },
+    "/api/v1/audit/class-counts": {
+      "post": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Class Counts",
+        "description": "Count the matching rows per event class, tenant-scoped (#3747).",
+        "operationId": "class_counts_api_v1_audit_class_counts_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuditClassCountsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditClassCounts"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/audit/reflex": {
       "get": {
         "tags": [
           "audit"
         ],
         "summary": "Reflex Endpoint",
-        "description": "Return reflex-adoption KPIs for *operator* over the requested window.\n\nTenant scoping: callers are scoped to ``operator.tenant_id``; a\n``tenant_filter`` naming a different tenant returns 403\n``cross_tenant_requires_platform_admin`` unless the caller holds the\n``platform_admin`` capability (#1638). *since* / *until* accept\n``<N>d`` / ``<N>h`` (relative) or an ISO-8601 date; malformed \u2192 400.\n*until* defaults to now. An empty window is a structured zero report\n(both surfaces present, ``None`` ratios), not 404.",
+        "description": "Return reflex-adoption KPIs for *operator* over the requested window.\n\nReads request usage events (``request_usage``), not ``audit_log``. MEHO\ncollects them only when ``REQUEST_USAGE_RETENTION_DAYS`` is set, so the\nreport is empty when that setting is off and covers only the time\nsince collection started.\n\nTenant scoping: callers are scoped to ``operator.tenant_id``; a\n``tenant_filter`` naming a different tenant returns 403\n``cross_tenant_requires_platform_admin`` unless the caller holds the\n``platform_admin`` capability (#1638). *since* / *until* accept\n``<N>d`` / ``<N>h`` (relative) or an ISO-8601 date; malformed \u2192 400.\n*until* defaults to now. An empty window is a structured zero report\n(both surfaces present, ``None`` ratios), not 404.",
         "operationId": "reflex_endpoint_api_v1_audit_reflex_get",
         "parameters": [
           {
@@ -11040,7 +11148,7 @@
           "conventions"
         ],
         "summary": "Create Convention",
-        "description": "Create one convention; writes one history row in the same transaction.\n\nSequence: budget 422 -> pre-allocate audit_id -> insert\nconvention + history rows -> 409 on duplicate ``(tenant_id,\nslug)``. The CREATE history row has ``body_before=NULL``;\n``body_after=body.body``.",
+        "description": "Create one convention; writes one history row in the same transaction.\n\nSequence: budget 422 -> insert convention + history rows -> 409\non duplicate ``(tenant_id, slug)``. The CREATE history row has ``body_before=NULL``;\n``body_after=body.body``.",
         "operationId": "create_convention_api_v1_conventions_post",
         "parameters": [
           {
@@ -20987,6 +21095,17 @@
             }
           },
           {
+            "name": "event_class",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 32,
+              "default": "",
+              "title": "Event Class"
+            }
+          },
+          {
             "name": "partial",
             "in": "query",
             "required": false,
@@ -21260,6 +21379,17 @@
               "format": "uuid",
               "nullable": true,
               "title": "Agent Session Id"
+            }
+          },
+          {
+            "name": "event_class",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 32,
+              "default": "",
+              "title": "Event Class"
             }
           }
         ],
@@ -23167,6 +23297,108 @@
         "title": "AssignmentDocumentResponse",
         "description": "Echo returned by ``PUT``: the stored authored document + runner name."
       },
+      "AuditClassCounts": {
+        "properties": {
+          "counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Counts"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "since": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Since"
+          }
+        },
+        "type": "object",
+        "required": [
+          "counts",
+          "total",
+          "since"
+        ],
+        "title": "AuditClassCounts",
+        "description": "200 body for ``POST /api/v1/audit/class-counts`` (#3747).\n\n``counts`` has one key per event class (``operation_execution``,\n``policy_decision``, ``approval_decision``, ``security_event``,\n``legacy_request``), ``0`` when a class has no rows. Old rows count\nas ``legacy_request``; they are never reclassified. ``total`` is the\nsum. ``since`` is the start of the counted window: the request's\n``since``, or 24 hours ago when the request set none."
+      },
+      "AuditClassCountsRequest": {
+        "properties": {
+          "target": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Target"
+          },
+          "principal": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Principal"
+          },
+          "op_id": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Op Id"
+          },
+          "op_class": {
+            "type": "string",
+            "maxLength": 64,
+            "nullable": true,
+            "title": "Op Class"
+          },
+          "result_status": {
+            "type": "string",
+            "maxLength": 16,
+            "nullable": true,
+            "title": "Result Status"
+          },
+          "since": {
+            "type": "string",
+            "maxLength": 32,
+            "nullable": true,
+            "title": "Since"
+          },
+          "until": {
+            "type": "string",
+            "maxLength": 32,
+            "nullable": true,
+            "title": "Until"
+          },
+          "audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Audit Id"
+          },
+          "parent_audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Parent Audit Id"
+          },
+          "agent_session_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Agent Session Id"
+          },
+          "work_ref": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Work Ref"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "AuditClassCountsRequest",
+        "description": "POST body for ``/api/v1/audit/class-counts`` (#3747).\n\nThe same filters as :class:`AuditQueryRequest`, without\n``event_class``, ``limit`` and ``cursor``: the answer counts every\nclass for the whole matching set, not one page."
+      },
       "AuditEntry": {
         "properties": {
           "id": {
@@ -23408,7 +23640,7 @@
         "additionalProperties": false,
         "type": "object",
         "title": "AuditQueryRequest",
-        "description": "POST body for ``/api/v1/audit/query``.\n\nMirrors :class:`~meho_backplane.audit_query.AuditQueryFilters`\nexcept ``since`` / ``until`` are strings parsed by\n:func:`~meho_backplane.audit_query.parse_duration` at the router\nlayer. All other fields pass through to the substrate filter\nobject unchanged. The empty body shape ``{}`` is the no-filter\ncase \u2014 every field defaults to None or the substrate-side default.\n\n``extra=\"forbid\"`` rejects unknown fields with 422\n``extra_forbidden`` so a typo or a client passing ``tenant_id``\nin the body fails loud at the framework boundary \u2014 the route\nalways uses ``operator.tenant_id`` from the JWT, never the body."
+        "description": "POST body for ``/api/v1/audit/query``.\n\nMirrors :class:`~meho_backplane.audit_query.AuditQueryFilters`\nexcept ``since`` / ``until`` are strings parsed by\n:func:`~meho_backplane.audit_query.parse_duration` at the router\nlayer. All other fields pass through to the substrate filter\nobject unchanged. The empty body shape ``{}`` is the no-filter\ncase \u2014 every field defaults to None or the substrate-side default."
       },
       "AuditQueryResult": {
         "properties": {
@@ -23486,6 +23718,11 @@
           "trace": {
             "$ref": "#/components/schemas/TraceView",
             "nullable": true
+          },
+          "event_class": {
+            "type": "string",
+            "nullable": true,
+            "title": "Event Class"
           }
         },
         "type": "object",
@@ -23494,7 +23731,7 @@
           "trace_present"
         ],
         "title": "AuditTraceResult",
-        "description": "200 body for ``GET /api/v1/audit/{audit_id}/trace`` (#3215).\n\nThe operator read surface of the dispatch flight recorder\n(``docs/decisions/dispatch-flight-recorder.md``). Wraps the tenant-scoped\n:class:`~meho_backplane.flight_recorder.TraceView` with the echoed\n``audit_id`` and a ``trace_present`` discriminator, the same REST-envelope\nlayering :class:`AuditReplayResult` follows over the substrate's\n:class:`ReplayNode`.\n\nTwo-level absence semantics -- distinct on purpose:\n\n* The **audit row** being missing or in another tenant is a 404 from the\n  route, matching ``GET /show/{audit_id}``: existence never leaks across\n  the tenant boundary.\n* The audit row existing but carrying **no captured trace** is *not* a 404 --\n  it is a 200 with ``trace_present=False`` and ``trace=None``. Capture is a\n  per-tenant/per-target opt-in and best-effort (F1/F7), so \"no trace\" is a\n  normal state an operator must be able to observe, not an error. The\n  console pane renders a \"no trace captured\" empty state for this case.\n\n``trace.redaction_uncertain`` surfaces the F5 degrade flag so an operator\n(and a paired add-on reading over this route with its operator principal)\ncan see when a trace was withheld from the agent handle. The operator plane\nkeeps **full** access regardless of that flag.\n\nFrozen like the models it carries."
+        "description": "200 body for ``GET /api/v1/audit/{audit_id}/trace`` (#3215).\n\nThe operator read surface of the dispatch flight recorder\n(``docs/decisions/dispatch-flight-recorder.md``). Wraps the tenant-scoped\n:class:`~meho_backplane.flight_recorder.TraceView` with the echoed\n``audit_id`` and a ``trace_present`` discriminator, the same REST-envelope\nlayering :class:`AuditReplayResult` follows over the substrate's\n:class:`ReplayNode`.\n\nTwo-level absence semantics -- distinct on purpose:\n\n* The **audit row** being missing or in another tenant is a 404 from the\n  route, matching ``GET /show/{audit_id}``: existence never leaks across\n  the tenant boundary.\n* The audit row existing but carrying **no captured trace** is *not* a 404 --\n  it is a 200 with ``trace_present=False`` and ``trace=None``. Capture is a\n  per-tenant/per-target opt-in and best-effort (F1/F7), so \"no trace\" is a\n  normal state an operator must be able to observe, not an error. The\n  console pane renders a \"no trace captured\" empty state for this case.\n\nOnly an ``operation_execution`` row resolves to the flight recorder\n(#3747). A decision, security or legacy row is not an execution, so it\nanswers ``trace_present=False`` and the route never reads a trace for\nit. ``event_class`` echoes the row's class so the reason is visible.\n\n``trace.redaction_uncertain`` surfaces the F5 degrade flag so an operator\n(and a paired add-on reading over this route with its operator principal)\ncan see when a trace was withheld from the agent handle. The operator plane\nkeeps **full** access regardless of that flag.\n\nFrozen like the models it carries."
       },
       "AuthConfigResponse": {
         "properties": {
@@ -26811,6 +27048,17 @@
             "format": "uuid",
             "nullable": true,
             "title": "Audit Id"
+          },
+          "change_kind": {
+            "type": "string",
+            "nullable": true,
+            "title": "Change Kind"
+          },
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Request Id"
           }
         },
         "type": "object",
@@ -26824,7 +27072,7 @@
           "audit_id"
         ],
         "title": "ConventionHistoryEntry",
-        "description": "One row from ``GET /api/v1/conventions/{slug}/history``.\n\nPer the issue's acceptance criterion, history returns newest\nfirst (\"pick newest first for v0.2; documented\"); the route's\nORDER BY ``ts DESC`` enforces this. ``audit_id`` is the soft-FK\nthat G8's audit-query path joins on; it is nullable because\nT5's seed migration inserts history rows with no audit_log row\n(seeded rows pre-date any HTTP request).\n\n``body_before`` is nullable -- the first history row (the\nCREATE event) has no prior state. DELETE history rows get\n``body_after=<final body>`` (a legible last-known state for\naudit forensics) rather than an empty-string sentinel; the\nlifecycle distinction (create / update / delete) lives in the\naudit log row's ``method`` / ``path`` columns, not on the\nhistory row itself."
+        "description": "One row from ``GET /api/v1/conventions/{slug}/history``.\n\nPer the issue's acceptance criterion, history returns newest\nfirst (\"pick newest first for v0.2; documented\"); the route's\nORDER BY ``ts DESC`` enforces this.\n\nProvenance (#3747): the history row is the record of the edit.\n``change_kind`` says what it was (``created`` / ``updated`` /\n``deleted``) and ``request_id`` is the request correlation id of the\ncall, which links to the request usage event. Both are ``None`` on\nrows written before #3747. ``audit_id`` is the legacy link to the\nREST request wrapper row: old rows carry it, new rows and seeded\nrows have ``None``.\n\n``body_before`` is nullable -- the first history row (the\nCREATE event) has no prior state. DELETE history rows get\n``body_after=<final body>`` (a legible last-known state for\naudit forensics) rather than an empty-string sentinel; the\nlifecycle distinction (create / update / delete) is\n``change_kind`` on rows since #3747."
       },
       "ConventionKind": {
         "type": "string",
@@ -29393,6 +29641,23 @@
             "type": "array",
             "title": "Pairings",
             "default": []
+          },
+          "granted_scopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Granted Scopes",
+            "default": []
+          },
+          "surface_summary": {
+            "$ref": "#/components/schemas/SurfaceSummary",
+            "default": {
+              "expected_working_tools": [],
+              "listed_working_tools": [],
+              "missing_working_tools": [],
+              "operator_surface_listed": false
+            }
           }
         },
         "type": "object",
@@ -29403,7 +29668,7 @@
           "mcp_session_id_capture"
         ],
         "title": "HealthResponse",
-        "description": "``GET /api/v1/health`` response body.\n\n``mcp_session_id_capture`` (G0.14-T6 #1147) reports the deploy's\naudit-replay capture mode in a single field:\n\n* ``\"when_negotiated\"`` \u2014 a ``Mcp-Session-Id`` header is captured\n  into ``audit_log.agent_session_id`` only when the client\n  negotiated a session via the ``initialize`` handshake and echoes\n  the server-issued id; a header-less call is accepted and its row's\n  session id lands as NULL (invisible to session-lineage replay).\n  This is the default. It reads ``\"when_negotiated\"`` rather than\n  ``\"always\"`` because capture is not a guarantee \u2014 #2700 reported\n  the former ``\"always\"`` label as misleading, since header-less\n  callers stay out of lineage. Distinguish an empty forest from an\n  empty history via the replay surface's\n  ``excluded_null_session_count``.\n* ``\"enforced\"`` \u2014 capture works the same way **plus** a missing\n  header is a JSON-RPC ``-32600`` reject before any audit row is\n  written, so every accepted MCP call carries a session id. Flipped\n  on by ``MCP_REQUIRE_SESSION_ID=true`` in compliance deploys that\n  forbid header-less calls.\n\nThe field is the canonical operator-facing surface for the\ncapture state until T7 #1148's ``/ready`` features block ships\nthe richer enumeration (T7's ``audit_replay`` block pulls from\nthe same\n:func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`\nhelper so both surfaces stay consistent).\n\n``sensor_runner`` (#2763) carries the checks evaluation-loop's\nliveness (:class:`SensorRunnerStatus`), and is ``None`` exactly\nwhen ``SENSOR_RUNNER_ENABLED=false`` \u2014 a deliberately disabled\nrunner must not read as stalled. The ``None`` default keeps\nresponse decoders generated against the pre-#2763 shape working;\nthe handler always populates it on an enabled runner.\n\n``mcp_protocol_version`` (G0.14-T13 #1202) reports the server's\npinned :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`.\nMirrors the ``mcp_session_id_capture`` precedent: single-field\noperator visibility into the MCP layer's runtime state. The\nmatching ``mcp.protocol_version`` entry on ``/ready``'s features\nblock (see :func:`meho_backplane.features.build_features_block`)\nsurfaces the same value on the unauthenticated readiness probe so\na deploy operator can answer \"which MCP revision will this server\nnegotiate with my clients?\" without an authenticated GET.\n\n``pairings`` (#3025) carries the tenant's active add-on pairings \u2014\neach add-on's negotiated contract version, whether it is still\ncontract-compatible with this backplane build, and its last liveness\nheartbeat. The list is empty when nothing is paired; the empty-default\nkeeps response decoders generated against the pre-#3025 shape working."
+        "description": "``GET /api/v1/health`` response body.\n\n``mcp_session_id_capture`` (G0.14-T6 #1147) reports the deploy's\naudit-replay capture mode in a single field:\n\n* ``\"when_negotiated\"`` \u2014 a ``Mcp-Session-Id`` header is captured\n  into ``audit_log.agent_session_id`` only when the client\n  negotiated a session via the ``initialize`` handshake and echoes\n  the server-issued id; a header-less call is accepted and its row's\n  session id lands as NULL (invisible to session-lineage replay).\n  This is the default. It reads ``\"when_negotiated\"`` rather than\n  ``\"always\"`` because capture is not a guarantee \u2014 #2700 reported\n  the former ``\"always\"`` label as misleading, since header-less\n  callers stay out of lineage. Distinguish an empty forest from an\n  empty history via the replay surface's\n  ``excluded_null_session_count``.\n* ``\"enforced\"`` \u2014 capture works the same way **plus** a missing\n  header is a JSON-RPC ``-32600`` reject before any audit row is\n  written, so every accepted MCP call carries a session id. Flipped\n  on by ``MCP_REQUIRE_SESSION_ID=true`` in compliance deploys that\n  forbid header-less calls.\n\nThe field is the canonical operator-facing surface for the\ncapture state until T7 #1148's ``/ready`` features block ships\nthe richer enumeration (T7's ``audit_replay`` block pulls from\nthe same\n:func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`\nhelper so both surfaces stay consistent).\n\n``sensor_runner`` (#2763) carries the checks evaluation-loop's\nliveness (:class:`SensorRunnerStatus`), and is ``None`` exactly\nwhen ``SENSOR_RUNNER_ENABLED=false`` \u2014 a deliberately disabled\nrunner must not read as stalled. The ``None`` default keeps\nresponse decoders generated against the pre-#2763 shape working;\nthe handler always populates it on an enabled runner.\n\n``mcp_protocol_version`` (G0.14-T13 #1202) reports the server's\npinned :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`.\nMirrors the ``mcp_session_id_capture`` precedent: single-field\noperator visibility into the MCP layer's runtime state. The\nmatching ``mcp.protocol_version`` entry on ``/ready``'s features\nblock (see :func:`meho_backplane.features.build_features_block`)\nsurfaces the same value on the unauthenticated readiness probe so\na deploy operator can answer \"which MCP revision will this server\nnegotiate with my clients?\" without an authenticated GET.\n\n``pairings`` (#3025) carries the tenant's active add-on pairings \u2014\neach add-on's negotiated contract version, whether it is still\ncontract-compatible with this backplane build, and its last liveness\nheartbeat. The list is empty when nothing is paired; the empty-default\nkeeps response decoders generated against the pre-#3025 shape working.\n\n``granted_scopes`` (#3666) lists the OAuth scope names on the caller's\ntoken, sorted. It carries scope names only, never token material.\n``surface_summary`` (#3666) compares the working-surface tools the\nserver registers with the ones this session lists\n(:class:`SurfaceSummary`). Both have empty defaults so older response\ndecoders keep working; the handler always fills them."
       },
       "InCompare": {
         "properties": {
@@ -29782,6 +30047,9 @@
             "type": "object",
             "title": "Metadata"
           },
+          "provenance": {
+            "$ref": "#/components/schemas/KbProvenance"
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -29791,6 +30059,12 @@
             "type": "string",
             "format": "date-time",
             "title": "Updated At"
+          },
+          "revision_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Revision Id"
           }
         },
         "type": "object",
@@ -29800,11 +30074,12 @@
           "slug",
           "body",
           "metadata",
+          "provenance",
           "created_at",
           "updated_at"
         ],
         "title": "KbEntry",
-        "description": "One kb entry -- mirrors a row in the ``documents`` table.\n\nReturned by :meth:`KbService.get_entry`, :meth:`KbService.create_entry`,\nand (in list form) :meth:`KbService.list_entries`. ``slug`` is the\noperator-facing identifier (``documents.source_id`` on the SQL\nside); the underlying ``Document.id`` UUID is also surfaced for\ncross-correlation with audit-log rows and future MCP resource\nURIs."
+        "description": "One kb entry -- mirrors a row in the ``documents`` table.\n\nReturned by :meth:`KbService.get_entry`, :meth:`KbService.create_entry`,\nand (in list form) :meth:`KbService.list_entries`. ``slug`` is the\noperator-facing identifier (``documents.source_id`` on the SQL\nside); the underlying ``Document.id`` UUID is also surfaced for\ncross-correlation with audit-log rows and future MCP resource\nURIs. ``id`` is the entry UUID.\n\n``revision_id`` is the retained revision that holds this body. Pass\nit with ``id`` to ``meho://kb/id/{entry}/revision/{revision}`` to\nread this exact body later, even after the entry changes. It is\n``None`` only for a row that has no stored revision."
       },
       "KbEntryCreate": {
         "properties": {
@@ -29874,6 +30149,28 @@
         "title": "KbEntryPreview",
         "description": "Lightweight projection of :class:`KbEntry` for list responses.\n\nDrops the full body and emits a 200-char preview instead --\nconsumers that need the full body issue a follow-up ``GET\n/{slug}``. Mirrors the kb-search-hit snippet shape (T1's\n:class:`KbEntrySearchHit`) so an operator can do\n``list \u2192 identify slug \u2192 fetch full body`` without learning a\ndifferent field name on each surface."
       },
+      "KbIngestConflict": {
+        "properties": {
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "relative_paths": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Relative Paths"
+          }
+        },
+        "type": "object",
+        "required": [
+          "slug",
+          "relative_paths"
+        ],
+        "title": "KbIngestConflict",
+        "description": "Two or more files in one directory ingest claim the same slug.\n\n``relative_paths`` lists every file that claims ``slug``, sorted,\nrelative to the ingest directory. None of these files is written,\nand an existing entry with this slug stays unchanged. The operator\nfixes the conflict (rename a file or change its ``slug:``\nfront-matter) and runs the ingest again."
+      },
       "KbIngestionResult": {
         "properties": {
           "inserted_count": {
@@ -29892,12 +30189,23 @@
             "type": "integer",
             "title": "Error Count"
           },
+          "conflict_count": {
+            "type": "integer",
+            "title": "Conflict Count"
+          },
           "errors": {
             "items": {
               "type": "string"
             },
             "type": "array",
             "title": "Errors"
+          },
+          "conflicts": {
+            "items": {
+              "$ref": "#/components/schemas/KbIngestConflict"
+            },
+            "type": "array",
+            "title": "Conflicts"
           }
         },
         "type": "object",
@@ -29906,10 +30214,12 @@
           "updated_count",
           "skipped_count",
           "error_count",
-          "errors"
+          "conflict_count",
+          "errors",
+          "conflicts"
         ],
         "title": "KbIngestionResult",
-        "description": "Summary of one :meth:`KbService.ingest_directory` run.\n\nThe four counters partition every discovered ``.md`` file into\nexactly one of four buckets:\n\n* ``inserted_count`` -- file's slug had no prior row in the tenant;\n  a new document row was created and embedded.\n* ``updated_count`` -- file's slug had a prior row whose\n  ``body_hash`` differed from the current body; the row was\n  re-embedded and updated.\n* ``skipped_count`` -- file's slug had a prior row whose\n  ``body_hash`` matched (dominant case on the second run against\n  an unchanged corpus -- the body-hash short-circuit from\n  G0.4-T3 means no embedding compute happened).\n* ``error_count`` -- the file could not be read or parsed\n  (binary masquerading as ``.md``, invalid slug, malformed\n  front-matter). The matching error message is appended to\n  :attr:`errors`; the ingestion run continues with the remaining\n  files.\n\nSum invariant: ``inserted_count + updated_count + skipped_count\n+ error_count == <total discovered .md files>``.\n\nThe ``errors`` list is bounded in practice by the corpus size --\nno per-file error string exceeds ~200 chars (the file path plus a\nshort reason), so even a worst-case all-error run on a 1000-file\ncorpus stays under ~200 KB of allocated memory. Truncation /\nsampling can land in v0.2.next if real corpora drive that."
+        "description": "Summary of one :meth:`KbService.ingest_directory` run.\n\nThe five counters partition every discovered ``.md`` file into\nexactly one of five buckets:\n\n* ``inserted_count`` -- file's slug had no prior row in the tenant;\n  a new document row was created and embedded.\n* ``updated_count`` -- file's slug had a prior row whose\n  ``body_hash`` differed from the current body; the row was\n  re-embedded and updated.\n* ``skipped_count`` -- file's slug had a prior row whose\n  ``body_hash`` matched (dominant case on the second run against\n  an unchanged corpus -- the body-hash short-circuit from\n  G0.4-T3 means no embedding compute happened).\n* ``error_count`` -- the file could not be read or parsed\n  (binary masquerading as ``.md``, invalid slug, malformed\n  front-matter). The matching error message is appended to\n  :attr:`errors`; the ingestion run continues with the remaining\n  files.\n* ``conflict_count`` -- the file shares its slug with at least one\n  other file in the same run. No file in that group is written;\n  :attr:`conflicts` lists each group once.\n\nSum invariant: ``inserted_count + updated_count + skipped_count\n+ error_count + conflict_count == <total discovered .md files>``.\n\nThe run walks files in sorted relative-path order, so the same\ndirectory gives the same counters, ``errors`` order and\n``conflicts`` order on every run, whatever order the filesystem\nlists the files in.\n\nThe ``errors`` list is bounded in practice by the corpus size --\nno per-file error string exceeds ~200 chars (the file path plus a\nshort reason), so even a worst-case all-error run on a 1000-file\ncorpus stays under ~200 KB of allocated memory. Truncation /\nsampling can land in v0.2.next if real corpora drive that."
       },
       "KbListResponse": {
         "properties": {
@@ -29927,6 +30237,44 @@
         ],
         "title": "KbListResponse",
         "description": "Response envelope for ``GET /api/v1/kb``.\n\nWrapped in ``{\"entries\": [...]}`` so a future paging / cursor\nfield can land non-breakingly -- same shape\n:mod:`meho_backplane.api.v1.connectors_ingest` adopted for its\nlist response. Per-entry shape matches :class:`KbEntryPreview`;\nthe body is truncated to a 200-char preview so a casual\n``meho kb list`` does not stream every entry's full body."
+      },
+      "KbProvenance": {
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "recorded",
+              "legacy"
+            ],
+            "title": "State"
+          },
+          "source_kind": {
+            "type": "string",
+            "enum": [
+              "directory",
+              "direct"
+            ],
+            "nullable": true,
+            "title": "Source Kind"
+          },
+          "relative_path": {
+            "type": "string",
+            "nullable": true,
+            "title": "Relative Path"
+          },
+          "ingested_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Ingested At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "state"
+        ],
+        "title": "KbProvenance",
+        "description": "Where a kb entry came from, as read back from its metadata.\n\n``state=\"recorded\"`` means the service stored provenance when it\nwrote the entry; the other fields are then set (``relative_path``\nstays ``None`` for direct writes). ``state=\"legacy\"`` means the\nentry was written before provenance was stored, or the stored value\nis not in the expected shape; every other field is ``None``. Legacy\nrows are not rewritten -- the next write records real provenance."
       },
       "KindFilterValue": {
         "type": "string",
@@ -30082,6 +30430,101 @@
         "title": "MemoryEntry",
         "description": "Read shape -- one memory row as the service returns it.\n\nFrozen so callers can stash the entry in audit / log records\nwithout mutation surprises. ``expires_at`` is lifted out of\n``doc_metadata`` for filter convenience -- the read-side filter in\n:meth:`~meho_backplane.memory.service.MemoryService.list_memories`\nand :meth:`~meho_backplane.memory.service.MemoryService.recall`\ncompares it without re-parsing the dict. The raw ``metadata`` is\nstill carried so callers (audit middleware, MCP resource handlers)\nsee the original payload."
       },
+      "MemoryEntrySearchHit": {
+        "properties": {
+          "rank": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Rank"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/MemoryScope"
+          },
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "user_sub": {
+            "type": "string",
+            "nullable": true,
+            "title": "User Sub"
+          },
+          "target_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Name"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Expires At"
+          },
+          "snippet": {
+            "type": "string",
+            "title": "Snippet"
+          },
+          "snippet_truncated": {
+            "type": "boolean",
+            "title": "Snippet Truncated"
+          },
+          "body_chars": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Body Chars"
+          },
+          "expiry_state": {
+            "type": "string",
+            "enum": [
+              "never",
+              "scheduled"
+            ],
+            "title": "Expiry State",
+            "description": "``never`` when the entry has no expiry, else ``scheduled``.\n\nSearch leaves out expired entries, so there is no expired state.",
+            "readOnly": true
+          },
+          "locator": {
+            "type": "string",
+            "title": "Locator",
+            "description": "Canonical selected-read URI (``meho://memory/id/{document_uuid}``).\n\nBuilt from the row id only, so it never carries a target name\nor owner. Read it with ``resources/read`` to get the full entry.",
+            "readOnly": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "rank",
+          "id",
+          "scope",
+          "slug",
+          "user_sub",
+          "target_name",
+          "created_at",
+          "updated_at",
+          "expires_at",
+          "snippet",
+          "snippet_truncated",
+          "body_chars",
+          "expiry_state",
+          "locator"
+        ],
+        "title": "MemoryEntrySearchHit",
+        "description": "One bounded hit from :meth:`MemoryService.search_memories` (#3751).\n\nA hit is evidence for picking a result, not the entry itself. It holds\na short, query-relevant ``snippet`` of the body (at most\n:data:`~meho_backplane.memory.snippet.SNIPPET_MAX_CHARS` characters of\nbody text), never the whole body and never the free-form ``metadata``.\nThe full entry is read through ``locator``.\n\n``rank`` is the 1-based position in the result list. It is an order,\nnot a confidence: the fused (RRF) ranking score is not calibrated, so\nit is not exposed.\n\nProvenance fields say where the evidence comes from and who can see\nit: ``scope``, ``user_sub`` (the owner of a user-scoped entry, ``None``\nfor shared scopes), ``target_name``, and the ``created_at`` /\n``updated_at`` / ``expires_at`` timestamps. Frozen for the same reason\nas :class:`MemoryEntry`."
+      },
       "MemoryListResponse": {
         "properties": {
           "entries": {
@@ -30110,6 +30553,51 @@
         ],
         "title": "MemoryScope",
         "description": "One of the five memory scopes from consumer-needs.md \u00a7G5 L137-141.\n\nThe string value is the wire-level identifier (route path segment,\nCLI flag value, MCP tool arg). Each value maps to a single\n``documents.kind`` row prefixed with ``memory-`` --\n:func:`kind_for_scope` is the canonical translation. The mapping is\none-to-one and bijective with :func:`scope_for_kind`, so callers\nnever round-trip through ad-hoc string-prefixing.\n\n``StrEnum`` (PEP 663, stdlib in 3.11+) gives the members ``str``\nsemantics for free: ``f\"scope={MemoryScope.USER}\"`` renders as\n``\"scope=user\"`` rather than ``\"scope=MemoryScope.USER\"``, matching\nthe :class:`~meho_backplane.auth.operator.TenantRole` convention."
+      },
+      "MemorySearchBody": {
+        "properties": {
+          "query": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Query"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/MemoryScope",
+            "nullable": true
+          },
+          "limit": {
+            "type": "integer",
+            "maximum": 50.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "default": 10
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "title": "MemorySearchBody",
+        "description": "POST body for ``/api/v1/memory/search``.\n\nSame limits as the MCP ``search_memory`` tool so the CLI and an agent\ncan send the same input: ``query`` 1..256 chars, ``limit`` 1..50\n(default 10). Omit ``scope`` to search all five scopes."
+      },
+      "MemorySearchResponse": {
+        "properties": {
+          "hits": {
+            "items": {
+              "$ref": "#/components/schemas/MemoryEntrySearchHit"
+            },
+            "type": "array",
+            "title": "Hits"
+          }
+        },
+        "type": "object",
+        "required": [
+          "hits"
+        ],
+        "title": "MemorySearchResponse",
+        "description": "Response for ``/api/v1/memory/search`` -- the same hits ``search_memory`` returns.\n\n``hits`` is the only field. Each hit is bounded evidence (#3751): a\nshort snippet, provenance, and the selected-read ``locator``, never the\nfull body. The MCP tool also wraps each snippet in the untrusted-text\nenvelope and adds its ``delivery`` fields; this REST face serves the\nplain snippet for the CLI table. There is deliberately no total or\ncount: \"no match\" and \"only rows you may not see\" both return\n``{\"hits\": []}``."
       },
       "MyRecentPage": {
         "properties": {
@@ -34297,6 +34785,42 @@
         "title": "SurfaceResult",
         "description": "Per-surface aggregate: corpus-wide metrics + verdict + per-query rows.\n\nThe verdict band is computed from the macro-mean metrics against\nthe configured :class:`Thresholds` (default\n:data:`~meho_backplane.retrieval.eval.metrics.GREEN_DEFAULTS`). A\nsurface with ``query_count == 0`` (corpus YAML hasn't shipped\nyet) returns ``verdict=\"green\"`` deliberately \u2014 see runner.py\ndocstring.\n\n``baseline_verdict`` is computed only when the baseline ran;\n``None`` otherwise. The MEHO-\u2265-baseline overlay applies in the\naggregate verdict (see runner._apply_baseline_check)."
       },
+      "SurfaceSummary": {
+        "properties": {
+          "expected_working_tools": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Expected Working Tools",
+            "default": []
+          },
+          "listed_working_tools": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Listed Working Tools",
+            "default": []
+          },
+          "missing_working_tools": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Missing Working Tools",
+            "default": []
+          },
+          "operator_surface_listed": {
+            "type": "boolean",
+            "title": "Operator Surface Listed",
+            "default": false
+          }
+        },
+        "type": "object",
+        "title": "SurfaceSummary",
+        "description": "Which working-surface MCP tools this session should see, and which it does.\n\n``expected_working_tools`` is every tool the server registers on the\nworking surface, sorted. ``listed_working_tools`` is the part of that\nset this session's ``tools/list`` returns. ``missing_working_tools`` is\nthe difference: tools hidden from this session by its tenant role, a\ntenant capability it lacks, or an add-on that is not paired.\n``operator_surface_listed`` is ``True`` when the session also sees the\noperator planes (its token carries the ``mcp:admin`` scope).\n\nA client compares its own ``tools/list`` result against\n``listed_working_tools``. A tool the server lists but the client does not\nsee is a gap on the client side (``meho doctor`` reports it)."
+      },
       "Target": {
         "properties": {
           "id": {
@@ -35193,6 +35717,18 @@
             "format": "date-time",
             "nullable": true,
             "title": "Last Seen"
+          },
+          "relation_class": {
+            "type": "string",
+            "enum": [
+              "containment",
+              "placement",
+              "dependency",
+              "unknown"
+            ],
+            "title": "Relation Class",
+            "description": "What this edge means (#3760); unmapped kinds are ``unknown``.",
+            "readOnly": true
           }
         },
         "type": "object",
@@ -35202,7 +35738,8 @@
           "to",
           "kind",
           "source",
-          "last_seen"
+          "last_seen",
+          "relation_class"
         ],
         "title": "TopologyEdge",
         "description": "One ``graph_edge`` row returned by :func:`list_edges`.\n\nFlat edge summary (no traversal context \u2014 there is no ``depth`` or\n``via_edge_kind``; those concepts only mean something during a\nwalk). The frozen Pydantic shape mirrors the immutability discipline\nof :class:`TopologyNode`: ``properties`` is deep-frozen so the\nconflict-marker arrays (``conflicts_with``) and the supersede UUID\n(``superseded_by``) \u2014 both written by G9.2-T3 (#595) and read by\nthis helper's ``conflicts_only=True`` filter \u2014 cannot be mutated by\na caller and leak back into shared result state.\n\n``last_seen`` is the refresh service's \"I observed this edge at\"\ntimestamp (NULL after a soft-delete; soft-deleted edges are\nexcluded from :func:`list_edges` by default). It doubles as the\nstable total-order key the helper paginates against:\n``ORDER BY last_seen DESC NULLS LAST, id`` is total because ``id``\nis a UUID primary key, and ``DESC`` puts the most-recently-observed\nedges first \u2014 the order an operator scanning a fresh inventory\nexpects."
@@ -35221,6 +35758,11 @@
           "name": {
             "type": "string",
             "title": "Name"
+          },
+          "source_scope": {
+            "type": "string",
+            "nullable": true,
+            "title": "Source Scope"
           }
         },
         "type": "object",
@@ -35230,7 +35772,7 @@
           "name"
         ],
         "title": "TopologyEdgeEndpoint",
-        "description": "One endpoint of a :class:`TopologyEdge` \u2014 the ``from`` or ``to`` node.\n\nCompact node identity for the flat edge-listing helper. Carries the\nthree fields a human-readable edge summary needs: the node ``id``\n(caller may follow it back to the full :class:`TopologyNode`), the\n``kind`` (the closed enum from migration ``0007``), and the\n``name`` (unique within ``(tenant_id, kind)``). The full node\n``properties`` bag is intentionally **not** included \u2014 an edge\nlisting is a survey of relationships, not a node dump; callers that\nneed the bag look the node up separately via\n:func:`meho_backplane.topology.resolvers.resolve_node`."
+        "description": "One endpoint of a :class:`TopologyEdge` \u2014 the ``from`` or ``to`` node.\n\nCompact node identity for the flat edge-listing helper. Carries the\nthree fields a human-readable edge summary needs: the node ``id``\n(caller may follow it back to the full :class:`TopologyNode`), the\n``kind`` (the closed enum from migration ``0007``), and the\n``name`` (unique within ``(tenant_id, kind)``). The full node\n``properties`` bag is intentionally **not** included \u2014 an edge\nlisting is a survey of relationships, not a node dump; callers that\nneed the bag look the node up separately via\n:func:`meho_backplane.topology.resolvers.resolve_node`.\n\n``source_scope`` (#3760) is the node's stored source scope, so an\nedge answer says which source each end came from."
       },
       "TopologyHistoryEntry": {
         "properties": {
@@ -35355,6 +35897,54 @@
             "format": "uuid",
             "nullable": true,
             "title": "Via Edge Id"
+          },
+          "source_scope": {
+            "type": "string",
+            "pattern": "^(?:global|(?:target|legacy):[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",
+            "nullable": true,
+            "title": "Source Scope"
+          },
+          "last_seen": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Last Seen"
+          },
+          "via_edge_source": {
+            "type": "string",
+            "nullable": true,
+            "title": "Via Edge Source"
+          },
+          "via_edge_last_seen": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Via Edge Last Seen"
+          },
+          "via_relation_class": {
+            "type": "string",
+            "enum": [
+              "containment",
+              "placement",
+              "dependency",
+              "unknown"
+            ],
+            "nullable": true,
+            "title": "Via Relation Class",
+            "description": "Relation class of the edge walked to reach this node.",
+            "readOnly": true
+          },
+          "scope_status": {
+            "type": "string",
+            "enum": [
+              "global",
+              "target",
+              "legacy",
+              "unresolved"
+            ],
+            "title": "Scope Status",
+            "description": "Where the name is unique, or ``unresolved`` when not recorded.",
+            "readOnly": true
           }
         },
         "type": "object",
@@ -35364,10 +35954,12 @@
           "name",
           "source",
           "depth",
-          "via_edge_kind"
+          "via_edge_kind",
+          "via_relation_class",
+          "scope_status"
         ],
         "title": "TopologyNode",
-        "description": "One ``graph_node`` row reached during a traversal.\n\n``depth`` is the distance from the query root: the root itself is\ndepth ``0``, its immediate dependents/dependencies are depth ``1``,\ntransitive ones depth ``2``, and so on. ``via_edge_kind`` is the\n``graph_edge.kind`` of the edge used to reach this node, or\n``None`` for the root (which is reached by no edge). ``source``\nis ``'auto'`` (probe-derived) or ``'curated'`` (operator-seeded /\npromoted; #2536) \u2014 mirrors :attr:`TopologyEdge.source`.\n\n``parent_node_id`` / ``via_edge_id`` (#2538) are the chain\nprovenance: the ``graph_node.id`` the walk stepped from and the\n``graph_edge.id`` it walked to reach this node, both ``None`` on\nthe root row. They let a caller reconstruct the exact dependency\nchain from the flat closure list without follow-up edge lookups \u2014\nevery ``parent_node_id`` in a closure result is itself a row of\nthat result. Additive with ``None`` defaults so pre-#2538\nconstructors and payloads stay valid."
+        "description": "One ``graph_node`` row reached during a traversal.\n\n``depth`` is the distance from the query root: the root itself is\ndepth ``0``, its immediate dependents/dependencies are depth ``1``,\ntransitive ones depth ``2``, and so on. ``via_edge_kind`` is the\n``graph_edge.kind`` of the edge used to reach this node, or\n``None`` for the root (which is reached by no edge). ``source``\nis ``'auto'`` (probe-derived) or ``'curated'`` (operator-seeded /\npromoted; #2536) \u2014 mirrors :attr:`TopologyEdge.source`.\n\n``parent_node_id`` / ``via_edge_id`` (#2538) are the chain\nprovenance: the ``graph_node.id`` the walk stepped from and the\n``graph_edge.id`` it walked to reach this node, both ``None`` on\nthe root row. They let a caller reconstruct the exact dependency\nchain from the flat closure list without follow-up edge lookups \u2014\nevery ``parent_node_id`` in a closure result is itself a row of\nthat result. Additive with ``None`` defaults so pre-#2538\nconstructors and payloads stay valid.\n\n``source_scope`` (#3739) is the stored ``graph_node.source_scope``:\n``global``, ``target:<uuid>``, ``legacy:<uuid>`` or ``None``.\n``scope_status`` is derived from it. ``unresolved`` means the row\nhas no scope yet and the reader does not know which source the\nname belongs to; it never falls back to the last target that saw\nthe row.\n\n``last_seen`` (#3760) is MEHO's own time, not the vendor's: the last\nrefresh that reported an ``auto`` node, or when an operator entered\na ``curated`` node (a later refresh that also observes it moves it\nforward). ``None`` means the latest refresh no longer reported the\nrow. ``via_edge_source`` / ``via_edge_last_seen``\nare the same facts for the edge walked to reach the node, and\n``via_relation_class`` is that edge's relation class (see\n:mod:`meho_backplane.topology.evidence`). All are ``None`` on the\nroot row."
       },
       "TopologyPath": {
         "properties": {
@@ -35383,6 +35975,16 @@
             "type": "integer",
             "minimum": 0.0,
             "title": "Total Hops"
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "undirected",
+              "forward",
+              "reverse"
+            ],
+            "title": "Direction",
+            "default": "undirected"
           }
         },
         "type": "object",
@@ -35391,7 +35993,7 @@
           "total_hops"
         ],
         "title": "TopologyPath",
-        "description": "An ordered shortest path between two nodes.\n\n``nodes`` runs from the ``from`` node (``depth == 0``) to the\n``to`` node (``depth == total_hops``) inclusive. ``total_hops`` is\nthe number of edges traversed, i.e. ``len(nodes) - 1``. v0.2 is\nunweighted: every edge costs one hop."
+        "description": "An ordered shortest path between two nodes.\n\n``nodes`` runs from the ``from`` node (``depth == 0``) to the\n``to`` node (``depth == total_hops``) inclusive. ``total_hops`` is\nthe number of edges traversed, i.e. ``len(nodes) - 1``. v0.2 is\nunweighted: every edge costs one hop. ``direction`` (#3760) is the\nedge direction the search applied."
       },
       "TopologyTimelineEntry": {
         "properties": {

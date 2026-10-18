@@ -910,8 +910,12 @@ def test_over_length_reason_returns_422(
     assert "reason" in response.text
 
 
-def test_delegated_reject_is_shown_on_get(client: TestClient) -> None:
+def test_delegated_reject_is_shown_on_get(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A valid delegated reject lands, and GET /{id} shows the delegation."""
+    monkeypatch.setenv("APPROVAL_ALLOW_DELEGATED_DECISION", "true")
+    get_settings.cache_clear()
     request_id = _seed_pending_request()
     key = make_rsa_keypair("kid-op")
     with respx.mock as r:
@@ -934,6 +938,45 @@ def test_delegated_reject_is_shown_on_get(client: TestClient) -> None:
     }
     # The list view stays lean: the block is single-request only.
     assert all(item["delegation"] is None for item in listed.json())
+
+
+@pytest.mark.parametrize(
+    ("path_suffix", "extra_body"),
+    [
+        ("approve", {"params": {}}),
+        ("reject", {}),
+        ("decide", {"decision": "approved"}),
+        ("decide", {"decision": "rejected"}),
+    ],
+)
+def test_delegated_decision_on_production_returns_403(
+    client: TestClient, path_suffix: str, extra_body: dict[str, Any]
+) -> None:
+    """#3693: setting off, a valid delegated decision is a 403 on every route.
+
+    The ``/reject`` case pins its own error arm: without it the typed error
+    escapes the ladder and the route answers 500. A request header that
+    claims a lab environment changes nothing; only the boot setting does.
+    """
+    request_id = _seed_pending_request()
+    key = make_rsa_keypair("kid-op")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {
+            "Authorization": f"Bearer {_token(key, role=TenantRole.OPERATOR)}",
+            "X-Meho-Environment": "lab",
+        }
+        response = client.post(
+            f"/api/v1/approvals/{request_id}/{path_suffix}",
+            headers=headers,
+            json={**extra_body, "reason": _DELEGATED_OK},
+        )
+
+    assert response.status_code == 403, response.text
+    detail = response.json()["detail"]
+    assert detail.startswith("delegated_decision_forbidden:"), detail
+    assert "APPROVAL_ALLOW_DELEGATED_DECISION" in detail, detail
+    assert _request_status(request_id) == "pending"
 
 
 def test_ordinary_decision_has_no_delegation_on_get(client: TestClient) -> None:

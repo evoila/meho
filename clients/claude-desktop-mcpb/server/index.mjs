@@ -27,7 +27,7 @@
 // guard and reads `process.argv.slice(2)` at module top level, so importing
 // it runs its `main` against the argv set below.
 //
-// It adds two things over invoking mcp-remote directly:
+// It adds three things over invoking mcp-remote directly:
 //
 //  1. Internal-CA trust. The optional `ca_cert` user_config (a PEM file
 //     path) arrives as argv[3], and the launcher appends its certificates to
@@ -48,12 +48,18 @@
 //     public `meho-mcp` client via --static-oauth-client-info, overridable
 //     through the optional `client_id` user_config (delivered as
 //     MEHO_MCP_CLIENT_ID) without editing the installed bundle.
+//  3. One sign-in at a time (#3857). Claude Desktop can start the extension
+//     twice at once; signin-lock.mjs makes the second copy wait until the
+//     first one is connected, so only one browser tab opens.
 
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import tls from "node:tls";
 import { pathToFileURL } from "node:url";
+
+import { acquireSignInLock } from "./signin-lock.mjs";
 
 const rawUrl = process.argv[2];
 
@@ -79,7 +85,15 @@ if (url.protocol !== "https:") {
 // `${user_config.ca_cert}` placeholder, so an unsubstituted placeholder
 // means "no CA", the same as an empty or missing argument.
 const caArg = (process.argv[3] ?? "").trim();
-const caCertPath = /^\$\{[^}]*\}$/.test(caArg) ? "" : caArg;
+const caCertPath = /^\$\{[^}]*\}$/.test(caArg) ? "" : expandHome(caArg);
+
+// Desktop's file field also takes a typed path and stores it as typed.
+// Node does not expand `~`, so a typed `~/internal-ca.pem` would fail to
+// load. Expand a bare `~` or a leading `~/` (or `~\` on Windows) to the
+// home folder; leave every other path unchanged.
+function expandHome(path) {
+  return path === "~" || /^~[/\\]/.test(path) ? homedir() + path.slice(1) : path;
+}
 
 if (caCertPath && typeof tls.setDefaultCACertificates === "function") {
   // Append, never replace: the bundled roots and any OS-store roots already
@@ -163,6 +177,20 @@ process.argv = [
   "--static-oauth-client-metadata",
   JSON.stringify({ scope: scopes }),
 ];
+
+// One sign-in at a time (#3857): Claude Desktop can start this extension
+// twice at once, and both copies would open a browser sign-in. Wait until no
+// other copy is signing in, and release the lock once mcp-remote is
+// connected. mcp-remote writes nothing to stdout before its connection to
+// MEHO works, so its first stdout message is the "connected" signal. Details
+// in signin-lock.mjs.
+const releaseSignInLock = await acquireSignInLock(url.href);
+const stdoutWrite = process.stdout.write;
+process.stdout.write = function writeAndRelease(...args) {
+  process.stdout.write = stdoutWrite;
+  releaseSignInLock();
+  return stdoutWrite.apply(this, args);
+};
 
 // Import (not spawn) the vendored entry. pathToFileURL keeps the dynamic
 // import valid on Windows, where a bare path is not a valid import

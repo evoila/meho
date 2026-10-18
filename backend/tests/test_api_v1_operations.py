@@ -44,12 +44,13 @@ from meho_backplane.api.v1.operations import router as operations_router
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
-from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.base import Connector, ConnectorResourceNotFoundError
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.operations import reset_dispatcher_caches
+from meho_backplane.operations._errors import result_connector_not_found
 from meho_backplane.operations.result_query import MAX_LIMIT
 from meho_backplane.settings import RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES, get_settings
 from tests._result_store_helpers import MemoryResultStore
@@ -754,6 +755,48 @@ def test_post_call_unknown_op_returns_200_with_error_envelope(client: TestClient
     body = response.json()
     assert body["status"] == "error"
     assert body["error"].startswith("unknown_op:")
+
+
+def test_post_call_not_found_result_rides_200_envelope(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3653: a missing resource is a ``not_found`` envelope on HTTP 200.
+
+    When a typed op raises ``ConnectorResourceNotFoundError`` (for example
+    ``vmware.vm.info`` with a VM name that does not exist), the dispatcher
+    returns the structured ``not_found`` result. The route delivers it the
+    same way as every other dispatcher result: HTTP 200 with the envelope
+    in the body. The HTTP code never says 404 here; callers read
+    ``status`` and ``extras.error_code``.
+    """
+    missing = ConnectorResourceNotFoundError(
+        ["missing-vm"], "vmware.vm.info: no VM named 'missing-vm'"
+    )
+    dispatch_mock = AsyncMock(
+        return_value=result_connector_not_found("vmware.vm.info", missing, duration_ms=1.0)
+    )
+    monkeypatch.setattr("meho_backplane.operations.meta_tools.dispatch", dispatch_mock)
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/call",
+            json={
+                "connector_id": "vmware-rest-9.0",
+                "op_id": "vmware.vm.info",
+                "target": None,
+                "params": {"name": "missing-vm"},
+            },
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "not_found"
+    assert body["error"].startswith("not_found:")
+    assert body["extras"]["error_code"] == "not_found"
+    assert body["extras"]["resource_id"] == "missing-vm"
+    dispatch_mock.assert_awaited_once()
+    assert dispatch_mock.await_args.kwargs["op_id"] == "vmware.vm.info"
 
 
 @pytest.mark.asyncio

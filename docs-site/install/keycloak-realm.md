@@ -20,13 +20,15 @@ the end, then return to the trail.
 | `meho-mcp` | **Public** client, authorization-code + PKCE | Browser-capable MCP clients (Claude Desktop, MCP Inspector, …) |
 | 5 protocol mappers | On both public clients | Make issued tokens carry the claims the backplane validates |
 | 4 default client scopes | On both public clients | Including the `basic` scope that carries the mandatory `sub` claim |
+| `mcp:read`, `mcp:execute`, `mcp:admin` | Client scopes, optional on `meho-mcp` | The scopes MEHO's MCP clients ask for at login |
 | A user in `meho-admins` | Realm user | The human who approves device-code logins and operates MEHO |
 
 !!! tip "There is an automation for this"
 
     The CLI ships an idempotent helper — `meho admin keycloak
     bootstrap-clients` — that creates the two public clients, the five
-    mappers, and the four scopes in one invocation. This page is the
+    mappers, the four default scopes, and the three `mcp:*` scopes in
+    one invocation. This page is the
     manual reference path (and what the helper encodes); use the helper
     once you have an admin credential wired up, use this page to
     understand or verify what it did.
@@ -138,6 +140,7 @@ differences:
 | Valid redirect URIs | **Loopback only** — `http://localhost:<port>/callback` (Claude Code) plus `http://localhost:<port>/oauth/callback` and its `http://127.0.0.1:<port>/oauth/callback` twin (the `mcp-remote` shim) | MEHO is internal-only, so there is **no** public `claude.ai` Custom-Connector redirect. `<port>` matches the client's configured callback port; the exact per-client values are in [Connect clients](../clients/index.md). |
 | PKCE challenge method | `S256` | Spec-required for public clients. |
 | `offline_access` client scope | Assign as **Optional** | The MEHO Claude Code plugin, the Claude Desktop bundle, and Claude Code's own HTTP client ask for it, so the login lasts past the realm's SSO idle limit. Keycloak refuses a login that asks for a scope the client does not offer: it answers `invalid_scope` and issues no token. `meho-cli` does not get this scope by default. |
+| `mcp:read`, `mcp:execute`, `mcp:admin` client scopes | Create each, then assign as **Optional** | The Claude Code plugin and the Claude Desktop bundle ask for `mcp:read mcp:execute` at every login, and for `mcp:admin` when you turn on the operator tools. Keycloak does not ship these scopes. Create each one under **Client scopes → Create client scope**: protocol **OpenID Connect**, **Include in token scope** On. Then add all three to `meho-mcp` as **Optional**. If one is missing, Keycloak refuses the login with `invalid_scope`. `meho-cli` does not get them. |
 | Client Offline Session Idle (attribute `client.offline.session.idle.timeout`) | **`172800`** seconds (48 hours) — recommended | Sets how long the MCP login lasts with no use. Without it, the realm's Offline Session Idle applies (30 days by default). Set it on the **Advanced** tab of the client, or with `kcadm.sh update clients/<client-uuid> -r <realm> -s 'attributes."client.offline.session.idle.timeout"=172800'`. |
 
 The five mappers and four default scopes apply identically. Which MCP
@@ -162,8 +165,8 @@ Two more things must be true:
   user through the realm's default roles (`default-roles-<realm>`). Without
   it, the token request fails with "Offline tokens not allowed for the user
   or client".
-- `meho admin keycloak bootstrap-clients` assigns `offline_access` as an
-  optional scope on `meho-mcp`. It does **not** set the 48-hour offline
+- `meho admin keycloak bootstrap-clients` assigns `offline_access` (and
+  the three `mcp:*` scopes) as optional scopes on `meho-mcp`. It does **not** set the 48-hour offline
   idle limit yet, so set that by hand as shown in the table.
 
 ## Approve-only principal
@@ -261,7 +264,7 @@ usually appear:
 | Token issued, every call 401s with `invalid_audience` / `missing_tenant_claim` / `missing_tenant_role_claim` | Missing protocol mappers | Step 3 — add all five, then log out and back in. |
 | Token issued, every call 401s with `invalid_token` or `missing_sub`; the decoded token has no `sub` | The `basic` scope is not a default scope on the client | Step 4 — assign it, re-login (existing tokens stay broken). |
 | `meho login` times out before you can approve | An ambient wrapper timeout (CI step, IDE task) shorter than the approval wait | Run `meho login` in a real terminal, or raise the wrapper timeout. |
-| MCP login fails with `invalid_scope` ("Invalid scopes: …") and the Keycloak login page never appears | The client asked for a scope that `meho-mcp` does not offer, usually `offline_access` (or `mcp:admin`) | Assign the scope as an **optional** scope on `meho-mcp` (see the MCP client table above). |
+| MCP login fails with `invalid_scope` ("Invalid scopes: …") and the Keycloak login page never appears | The client asked for a scope that `meho-mcp` does not offer: `offline_access`, `mcp:read`, `mcp:execute` or `mcp:admin` | Create the scope if it is missing, then assign it as an **optional** scope on `meho-mcp` (see the MCP client table above). Or re-run `meho admin keycloak bootstrap-clients`. |
 | `x509: certificate signed by unknown authority` | Workstation OS trust store missing your CA | Step 1 / [TLS and ingress](tls-ingress.md#your-workstation-os-trust-store). |
 
 A fuller, client-by-client troubleshooting page ships with the

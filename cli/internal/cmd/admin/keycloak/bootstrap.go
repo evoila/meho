@@ -278,9 +278,43 @@ func requiredDefaultScopes() []string {
 	return []string{"basic", "roles", "web-origins", "acr"}
 }
 
+// mcpClientScopes returns the realm-level client scopes MEHO's own MCP
+// clients ask for: `mcp:read` and `mcp:execute` (the default request of
+// the Claude Code plugin and the Claude Desktop bundle) and `mcp:admin`
+// (the explicit opt-in to the operator tools). Keycloak does not ship
+// these, and it refuses a login that asks for a scope the client does
+// not offer (`invalid_scope`), so the bootstrap creates them and offers
+// them on the MCP client as optional scopes (#4002).
+//
+// `include.in.token.scope` is set so the scope name lands in the
+// token's `scope` claim; the backplane reads `mcp:admin` from there.
+// The scopes carry no mappers: the MCP client's own mappers already
+// produce every claim the backplane checks.
+func mcpClientScopes() []clientScopeRep {
+	names := []struct{ name, desc string }{
+		{"mcp:read", "MEHO MCP working surface: list and read."},
+		{"mcp:execute", "MEHO MCP working surface: run operations."},
+		{"mcp:admin", "MEHO MCP operator tools. Only granted when the client asks for it."},
+	}
+	scopes := make([]clientScopeRep, 0, len(names))
+	for _, n := range names {
+		scopes = append(scopes, clientScopeRep{
+			Name:        n.name,
+			Description: n.desc,
+			Protocol:    "openid-connect",
+			Attributes: map[string]string{
+				"include.in.token.scope":    "true",
+				"display.on.consent.screen": "false",
+			},
+		})
+	}
+	return scopes
+}
+
 // requiredMCPOptionalScopes returns the optional client-scopes the
-// recipe pins on the MCP browser-flow client. Today this is the
-// realm-built-in `offline_access` scope: OIDC Core §11 makes
+// recipe pins on the MCP browser-flow client: the realm-built-in
+// `offline_access` scope plus the three `mcp:*` scopes from
+// mcpClientScopes. For `offline_access`, OIDC Core §11 makes
 // `offline_access` the request signal for a refresh token, and Claude
 // Code's MCP client always requests it during its auth-code + PKCE
 // flow. Without the scope assigned (default OR optional), Keycloak
@@ -301,7 +335,11 @@ func requiredDefaultScopes() []string {
 // than the always-on default; see requiredCLIOptionalScopes and
 // desiredCLIClient.
 func requiredMCPOptionalScopes() []string {
-	return []string{"offline_access"}
+	scopes := []string{"offline_access"}
+	for _, s := range mcpClientScopes() {
+		scopes = append(scopes, s.Name)
+	}
+	return scopes
 }
 
 // requiredCLIOptionalScopes returns the optional client-scopes pinned
@@ -419,7 +457,9 @@ type Result struct {
 //  3. 4 default client scopes (basic / roles / web-origins / acr)
 //  4. Public MCP browser-flow client (`meho-mcp`)
 //  5. Same 5 mappers + 4 default scopes on the MCP client, **plus**
-//     `offline_access` as an *optional* client scope. The CLI
+//     `offline_access`, `mcp:read`, `mcp:execute` and `mcp:admin` as
+//     *optional* client scopes (the three `mcp:*` scopes are created in
+//     the realm first if missing). The CLI
 //     device-code client gets the same optional scope only when a
 //     deployment opts in via --cli-offline-access (off by default,
 //     #2902); see RDC Wall W7 in deploy/values-examples/README.md.
@@ -532,6 +572,12 @@ func Bootstrap(
 		return nil, fmt.Errorf("reconcile MCP default scopes: %w", err)
 	}
 	res.MapperEventsLog = append(res.MapperEventsLog, mcpScopeEvents...)
+	realmScopeEvents, err := reconcileRealmClientScopes(
+		ctx, c, mcpClientScopes())
+	if err != nil {
+		return nil, fmt.Errorf("reconcile MCP client scopes: %w", err)
+	}
+	res.MapperEventsLog = append(res.MapperEventsLog, realmScopeEvents...)
 	mcpOptionalEvents, err := reconcileOptionalScopes(
 		ctx, c, mcpUUID, requiredMCPOptionalScopes())
 	if err != nil {
@@ -591,8 +637,12 @@ func dryRunSummary(
 	for _, s := range requiredDefaultScopes() {
 		fmt.Fprintf(out, "    - %s\n", s)
 	}
+	fmt.Fprintln(out, "==> realm client scopes (created if missing):")
+	for _, s := range mcpClientScopes() {
+		fmt.Fprintf(out, "    - %s\n", s.Name)
+	}
 	fmt.Fprintln(out, "==> optional client scopes on the MCP browser-flow "+
-		"client (Claude Code requests offline_access for refresh tokens):")
+		"client (MEHO's MCP clients ask for these at login):")
 	for _, s := range requiredMCPOptionalScopes() {
 		fmt.Fprintf(out, "    - %s\n", s)
 	}
@@ -774,15 +824,46 @@ func reconcileDefaultScopes(
 	return events, nil
 }
 
+// reconcileRealmClientScopes creates every desired realm-level client
+// scope that does not exist yet, matched by name. An existing scope is
+// left as it is: an admin may have changed it on purpose.
+func reconcileRealmClientScopes(
+	ctx context.Context, c *adminClient, desired []clientScopeRep,
+) ([]string, error) {
+	allScopes, err := c.listRealmClientScopes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	exists := make(map[string]bool, len(allScopes))
+	for _, s := range allScopes {
+		exists[s.Name] = true
+	}
+	var events []string
+	for _, want := range desired {
+		if exists[want.Name] {
+			events = append(events,
+				fmt.Sprintf("[skip]    client scope %s (already in realm)",
+					want.Name))
+			continue
+		}
+		if err := c.createClientScope(ctx, want); err != nil {
+			return nil, fmt.Errorf(
+				"create client scope %s: %w", want.Name, err)
+		}
+		events = append(events,
+			fmt.Sprintf("[created] client scope %s", want.Name))
+	}
+	return events, nil
+}
+
 // reconcileOptionalScopes resolves each desired-scope name to its
 // realm-level UUID, then PUTs every one that isn't already an
 // optional scope on the client. Mirrors reconcileDefaultScopes for
 // the parallel `/optional-client-scopes` endpoint — the only
 // difference is the endpoint path baked into the adminClient calls.
 //
-// Used today to assign the realm-built-in `offline_access` scope to
-// the MCP browser-flow client (RDC Wall W7); see
-// requiredMCPOptionalScopes for the asymmetry rationale.
+// Used to assign `offline_access` and the `mcp:*` scopes to the MCP
+// browser-flow client; see requiredMCPOptionalScopes.
 func reconcileOptionalScopes(
 	ctx context.Context, c *adminClient,
 	clientUUID string, desired []string,

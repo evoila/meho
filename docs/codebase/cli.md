@@ -2218,6 +2218,19 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
      per-client `client.offline.session.idle.timeout` attribute
      (default 48h = 172800s) so an idle offline token expires fast.
      Operators then request it per-login with `meho login --offline`.
+  7. The MEHO MCP client scopes `mcp:read`, `mcp:execute` and
+     `mcp:admin` (#4002). Keycloak does not ship them, so the verb
+     creates each as a realm client scope (`POST /client-scopes`,
+     `include.in.token.scope=true`, no mappers) when it is missing,
+     then attaches all three to `meho-mcp` as **optional**. The Claude
+     Code plugin and the Claude Desktop bundle ask for
+     `mcp:read mcp:execute` by default and add `mcp:admin` for the
+     operator tools; Keycloak refuses a login that asks for a scope the
+     client does not offer (`invalid_scope`). An existing scope with the
+     same name is left as it is. `meho-cli` does not get them.
+     `backend/tests/integration/test_keycloak_bootstrap_mcp_login.py`
+     proves the login against a real Keycloak (empty realm → this verb
+     → browser login with and without `mcp:admin`).
 
 ### Idempotency
 
@@ -2230,6 +2243,8 @@ Every step does a "does this exist?" check before mutating:
   skip.
 - Default scopes: `GET /clients/{uuid}/default-client-scopes`;
   missing scope → PUT; already present → skip.
+- Realm client scopes (`mcp:*`): `GET /client-scopes`; missing by
+  name → POST; present → skip (never updated).
 - Optional scopes: `GET /clients/{uuid}/optional-client-scopes`;
   missing scope → PUT; already present → skip. Only applied to the
   MCP client (the CLI client's optional-scope set is left untouched

@@ -124,9 +124,10 @@ Without `offline_access`, the login ends at the realm's SSO idle limit,
 which is 30 minutes by default. The next MEHO call then needs a new browser
 login.
 
-The realm must offer `offline_access` as an **optional** client scope on
-`meho-mcp` (`meho admin keycloak bootstrap-clients` sets this up). If it
-does not, Keycloak refuses the login with `invalid_scope`.
+The realm must offer `offline_access`, `mcp:read`, `mcp:execute` and
+`mcp:admin` as **optional** client scopes on `meho-mcp`
+(`meho admin keycloak bootstrap-clients` sets this up). If one is
+missing, Keycloak refuses the login with `invalid_scope`.
 
 ### Prerequisites
 

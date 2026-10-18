@@ -160,7 +160,16 @@ __all__ = [
     "resume_dispatch_after_approval",
 ]
 
-_log = structlog.get_logger(__name__)
+
+def _log() -> Any:
+    # Resolved per call, not held as a module-level proxy. Production sets
+    # ``cache_logger_on_first_use=True`` in ``configure_logging``, and a
+    # cached logger keeps the processor list it was built with. A later
+    # ``structlog.configure(...)`` replaces that list, so test capture such
+    # as ``structlog.testing.capture_logs`` cannot reach a cached logger.
+    # Same precedent as ``meho_backplane.auth.jwt``.
+    return structlog.get_logger(__name__)
+
 
 #: Synthetic status code used for approval audit rows. Mirrors the
 #: ``status_code_for_result`` convention: ``202`` means "accepted / pending".
@@ -561,7 +570,7 @@ def _record_delegation(
     if delegation is None:
         return
     extra["delegation"] = delegation.to_payload()
-    _log.warning(
+    _log().warning(
         "approval_delegated_decision",
         approval_request_id=str(request.id),
         op_id=request.op_id,
@@ -596,7 +605,7 @@ def _check_delegated_allowed(
 
     if get_settings().approval_allow_delegated_decision:
         return
-    _log.warning(
+    _log().warning(
         "approval_delegated_decision_refused",
         approval_request_id=str(request.id),
         op_id=request.op_id,
@@ -712,7 +721,7 @@ def _reuse_idempotent_request(
     )
     if not same_call:
         raise IdempotencyKeyConflictError(existing.id)
-    _log.info(
+    _log().info(
         "approval_request_reused",
         approval_request_id=str(existing.id),
         op_id=op_id,
@@ -860,7 +869,7 @@ async def _resolve_idempotent_request(
         expired = await _lock_and_expire_pending(session, existing)
         if expired is not None:
             return None, expired
-        _log.info(
+        _log().info(
             "approval_request_idempotency_key_rechecked",
             approval_request_id=str(existing.id),
             principal_sub=principal_sub,
@@ -1273,7 +1282,7 @@ async def create_pending_request(
         duration_ms=0.0,
     )
 
-    _log.info(
+    _log().info(
         "approval_request_created",
         approval_request_id=str(request.id),
         op_id=op_id,
@@ -1408,7 +1417,7 @@ async def approve_request(
         extra_payload=extra,
     )
 
-    _log.info(
+    _log().info(
         "approval_request_approved",
         approval_request_id=str(request_id),
         op_id=request.op_id,
@@ -1493,7 +1502,7 @@ async def reject_request(
         extra_payload=extra,
     )
 
-    _log.info(
+    _log().info(
         "approval_request_rejected",
         approval_request_id=str(request_id),
         op_id=request.op_id,
@@ -1661,7 +1670,7 @@ async def consume_remote_write_approval(
     if cast(CursorResult[Any], claimed).rowcount != 1:
         return False
     request.resumed_at = stamp
-    _log.info(
+    _log().info(
         "remote_write_approval_bound",
         approval_request_id=str(request.id),
         op_id=request.op_id,
@@ -1751,7 +1760,7 @@ async def resume_dispatch_after_approval(
     # surface), so no-op with a benign already_resumed result rather than
     # double-dispatching the approved write.
     if not await claim_resume(request.id):
-        _log.info(
+        _log().info(
             "approval_resume_already_claimed",
             approval_request_id=str(request.id),
             op_id=request.op_id,
@@ -1851,7 +1860,7 @@ async def persist_resume_result(request_id: uuid.UUID, result: Any) -> None:
         # Fail-soft convenience write (see docstring): the dispatch's own
         # synchronous audit row already committed, so a capture failure must
         # not break the approve path.
-        _log.warning(
+        _log().warning(
             "approval_resume_result_persist_failed",
             approval_request_id=str(request_id),
             exc_info=True,
@@ -1867,7 +1876,7 @@ def _resume_pre0036_denied(operator: Operator, request: ApprovalRequest) -> Any:
     call. Reached before the claim, so it never burns it. Extracted to keep
     :func:`resume_dispatch_after_approval` under the function-size budget.
     """
-    _log.warning(
+    _log().warning(
         "approval_resume_params_unavailable",
         approval_request_id=str(request.id),
         op_id=request.op_id,
@@ -2108,7 +2117,7 @@ async def rehydrate_resume_target(
     if resolved_target is not None:
         return resolved_target, None
 
-    _log.warning(
+    _log().warning(
         "approval_resume_target_unresolvable",
         approval_request_id=str(request.id),
         op_id=request.op_id,
@@ -2306,7 +2315,7 @@ async def _expire_request(
         extra_payload={"decision": "expired", "expires_at": str(request.expires_at)},
     )
 
-    _log.info(
+    _log().info(
         "approval_request_expired",
         approval_request_id=str(request.id),
         op_id=request.op_id,
@@ -2407,7 +2416,7 @@ def _check_self_approval(operator: Operator, request: ApprovalRequest) -> None:
     from meho_backplane.settings import get_settings
 
     if not no_break_glass_tier and get_settings().approval_allow_self_approval:
-        _log.warning(
+        _log().warning(
             "approval_self_approval_break_glass",
             approval_request_id=str(request.id),
             op_id=request.op_id,
@@ -2721,7 +2730,7 @@ async def publish_approval_event(
     except Exception:
         # Fail-open: a broadcast outage must not block the durable
         # decision. The row + audit row remain the source of truth.
-        _log.exception(
+        _log().exception(
             "approval_broadcast_failed",
             approval_request_id=str(request.id),
             decision=decision,

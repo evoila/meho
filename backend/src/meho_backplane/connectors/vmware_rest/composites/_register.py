@@ -819,7 +819,15 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
             "(a faulted content-library find during name resolution as "
             "status='resolve_error') — structured statuses, never a raw vendor "
             "error. With power_on the "
-            "deployed VM is started best-effort. Equivalent of 'govc "
+            "deployed VM is started best-effort. The VM is deployed under a "
+            "temporary unique name and then renamed to the requested name with "
+            "POST:/VirtualMachine/{moId}/Rename_Task (POST:/VirtualApp/{moId}/"
+            "Rename_Task for a vApp); a failed deploy deletes what it left. A "
+            "service principal that runs this unattended needs a grant for the "
+            "rename op too, or the rename waits for approval and the VM keeps "
+            "its temporary name until it is approved. Approving a waiting "
+            "rename, power-on or cleanup step runs only that step on what the "
+            "deploy created; it never deploys again. Equivalent of 'govc "
             "library.deploy' for operator-facing dispatch."
         ),
         parameter_schema=VM_DEPLOY_FROM_LIBRARY_PARAMETER_SCHEMA,

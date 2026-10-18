@@ -209,12 +209,10 @@ of a login:
   for the 5 minutes.
 - **Several MEHO login tabs are open.** Only one of them can finish. Close
   them all, then reconnect once.
-
-**Known limit.** A session that finished its login keeps the local callback
-port and lockfile for as long as it runs. Another session that later needs
-a new login then cannot finish it. If a login does not finish, reconnect
-`meho` with `/mcp` (or close Claude Code) in your other sessions first, then
-try again. Tracked in #4000.
+- **Another session is already logged in.** A session frees the local
+  callback port and removes its lockfile as soon as it is connected. So
+  another session can run and finish its own browser login while the first
+  one stays open.
 
 `mcp-remote` keeps saved logins in `~/.mcp-auth/mcp-remote-0.1.38/` (the
 pinned `mcp-remote@0.1.39` names the folder after its previous version). The

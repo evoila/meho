@@ -2974,8 +2974,9 @@ class AgentAnnouncement(Base):
     (``meho_broadcast_recent`` backfills from here when the requested
     window predates the stream's oldest surviving entry).
 
-    Append-only by contract: the application never issues an UPDATE
-    against this table, and the only DELETE is the retention prune
+    Append-only by contract: the application never changes a stored
+    step. The one UPDATE it issues sets ``stream_entry_id`` after the
+    step reached the feed (#3736), and the only DELETE is the retention prune
     (:mod:`meho_backplane.broadcast.announcement_retention`) which drops
     rows older than ``broadcast_announcement_retention_days`` in one
     audited bounded batch per tick -- the same mold as
@@ -3044,9 +3045,64 @@ class AgentAnnouncement(Base):
       ``(tenant_id, work_ref)``. Drives the exact-match ``work_ref``
       filter, mirroring :class:`AgentRun`'s
       ``agent_run_tenant_work_ref_idx``.
+
+    Trusted claim columns (#3736, migration ``0112``). All nullable; a
+    row written before trusted admission keeps NULL in all six and is
+    history only, never an active claim:
+
+    * ``claim_id`` -- the logical claim UUID shared by a claim's
+      ``start`` / ``update`` / ``completion`` rows.
+    * ``owner_sub`` -- the trusted agent identity that owns the claim.
+    * ``actor_sub`` -- the RFC 8693 actor of a delegated hosted run.
+    * ``admission`` -- how the identity was checked (``hosted_run`` /
+      ``agent_principal``).
+    * ``idempotency_key`` -- the caller's retry key for this step.
+    * ``stream_entry_id`` -- the Valkey stream entry id, set after the
+      ``XADD`` succeeded. NULL on a row whose stream write failed; a
+      retry with the same ``idempotency_key`` writes the stream entry
+      then, without a second row.
+
+    Three partial unique indexes enforce the claim rules in the database,
+    so two racing requests cannot both win (declared here and in the
+    migration):
+
+    * ``agent_announcement_idempotency_uq`` --
+      ``(tenant_id, owner_sub, idempotency_key)`` where the key is set.
+    * ``agent_announcement_claim_start_uq`` -- ``(tenant_id, claim_id)``
+      where ``phase = 'start'``: one start per claim.
+    * ``agent_announcement_claim_completion_uq`` --
+      ``(tenant_id, claim_id)`` where ``phase = 'completion'``: a claim
+      completes once.
     """
 
     __tablename__ = "agent_announcement"
+    __table_args__ = (
+        Index(
+            "agent_announcement_idempotency_uq",
+            "tenant_id",
+            "owner_sub",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=sa.text("idempotency_key IS NOT NULL"),
+            sqlite_where=sa.text("idempotency_key IS NOT NULL"),
+        ),
+        Index(
+            "agent_announcement_claim_start_uq",
+            "tenant_id",
+            "claim_id",
+            unique=True,
+            postgresql_where=sa.text("phase = 'start' AND claim_id IS NOT NULL"),
+            sqlite_where=sa.text("phase = 'start' AND claim_id IS NOT NULL"),
+        ),
+        Index(
+            "agent_announcement_claim_completion_uq",
+            "tenant_id",
+            "claim_id",
+            unique=True,
+            postgresql_where=sa.text("phase = 'completion' AND claim_id IS NOT NULL"),
+            sqlite_where=sa.text("phase = 'completion' AND claim_id IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         Uuid(),
@@ -3077,6 +3133,12 @@ class AgentAnnouncement(Base):
         nullable=False,
         default=lambda: datetime.now(UTC),
     )
+    claim_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True, default=None)
+    owner_sub: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    actor_sub: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    admission: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    idempotency_key: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    stream_entry_id: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
 
 
 class WebSession(Base):

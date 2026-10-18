@@ -141,12 +141,14 @@ func newAnnounceCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&opts.Target, "target", "", "target name")
 	cmd.Flags().StringVar(&opts.Scope, "scope", "", "announcement scope")
-	cmd.Flags().StringVar(&opts.Phase, "phase", "update", "start, update, or completion")
+	cmd.Flags().StringVar(&opts.Phase, "phase", "start", "start, update, or completion")
+	cmd.Flags().StringVar(&opts.ClaimID, "claim-id", "", "claim UUID returned by the start (needed for update and completion)")
+	cmd.Flags().StringVar(&opts.IdempotencyKey, "idempotency-key", "", "retry key for this step (needed for update and completion)")
 	cmd.Flags().StringSliceVar(&opts.Targets, "targets", nil, "target names")
 	cmd.Flags().StringVar(&opts.PlannedOpClass, "planned-op-class", "", "declared operation class")
 	cmd.Flags().IntVar(&opts.TTLMinutes, "ttl-minutes", 0, "claim TTL in minutes (1-1440)")
 	cmd.Flags().StringVar(&opts.WorkRef, "work-ref", "", "external work reference")
-	cmd.Flags().StringVar(&opts.RunID, "run-id", "", "agent run UUID")
+	cmd.Flags().StringVar(&opts.RunID, "run-id", "", "deprecated: the server sets the agent run")
 	cmd.Flags().BoolVar(&opts.JSONOut, "json", false, "emit JSON")
 	cmd.Flags().StringVar(&opts.BackplaneOverride, "backplane", "", "backplane URL")
 	return cmd
@@ -154,6 +156,7 @@ func newAnnounceCmd() *cobra.Command {
 
 type announceOptions struct {
 	Activity, Target, Scope, Phase, PlannedOpClass, WorkRef, RunID, BackplaneOverride string
+	ClaimID, IdempotencyKey                                                           string
 	Targets                                                                           []string
 	TTLMinutes                                                                        int
 	JSONOut                                                                           bool
@@ -204,6 +207,20 @@ func runAnnounce(cmd *cobra.Command, opts announceOptions) error {
 		}
 		body.RunId = &runID
 	}
+	if opts.ClaimID != "" {
+		claimID, err := uuid.Parse(opts.ClaimID)
+		if err != nil {
+			return output.RenderError(
+				cmd.ErrOrStderr(),
+				output.Unexpected("--claim-id must be a UUID"),
+				opts.JSONOut,
+			)
+		}
+		body.ClaimId = &claimID
+	}
+	if opts.IdempotencyKey != "" {
+		body.IdempotencyKey = &opts.IdempotencyKey
+	}
 	response, err := announceBroadcast(cmd.Context(), client, body)
 	if err != nil {
 		return routeRequestError(cmd, backplaneURL, err, opts.JSONOut)
@@ -214,7 +231,11 @@ func runAnnounce(cmd *cobra.Command, opts announceOptions) error {
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), response)
 	}
-	_, err = fmt.Fprintf(cmd.OutOrStdout(), "announcement published: event_id=%s cursor=%s\n", response.EventId, response.Cursor)
+	cursor := ""
+	if response.Cursor != nil {
+		cursor = *response.Cursor
+	}
+	_, err = fmt.Fprintf(cmd.OutOrStdout(), "announcement published: event_id=%s claim_id=%s cursor=%s replayed=%t\n", response.EventId, response.ClaimId, cursor, response.Replayed)
 	return err
 }
 

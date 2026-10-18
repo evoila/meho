@@ -34,6 +34,7 @@ seeded rows (no substrate to patch — it is a direct query).
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, patch
 from uuid import UUID
@@ -48,7 +49,12 @@ from meho_backplane.db.models import Tenant
 from meho_backplane.mcp.registry import all_tools_for, get_tool
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.topology.resolvers import NodeNotFoundError
-from meho_backplane.topology.schemas import TopologyNode, TopologyPath
+from meho_backplane.topology.schemas import (
+    TopologyEdge,
+    TopologyEdgeEndpoint,
+    TopologyNode,
+    TopologyPath,
+)
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     build_operator,
@@ -363,6 +369,7 @@ def test_query_topology_dependencies_passes_filters_through(
         "kind": "vm",
         "depth": 4,
         "kind_filter": "runs-on",
+        "relation_class": None,
         "include_stale": True,
     }
 
@@ -505,6 +512,53 @@ def test_query_topology_dependencies_untracked_echoes_node_kind_when_supplied(
     assert payload["nodes"] == []
 
 
+@pytest.mark.parametrize(
+    ("kind", "patch_target", "direction"),
+    [
+        ("dependents", _DEPENDENTS_PATCH, "reverse"),
+        ("dependencies", _DEPENDENCIES_PATCH, "forward"),
+    ],
+)
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+def test_query_topology_closure_untracked_carries_direction_filters_and_evidence(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    kind: str,
+    patch_target: str,
+    direction: str,
+) -> None:
+    """#3760: an untracked closure root still reports the direction, the
+    relation filter and the stale view the lookup used, like every other
+    closure answer."""
+    client, _op = client_with_operator
+    mock_verb = AsyncMock(side_effect=NodeNotFoundError("ghost"))
+    with patch(patch_target, new=mock_verb):
+        payload = _payload(
+            _call_query_topology(
+                client,
+                {
+                    "kind": kind,
+                    "target": "ghost",
+                    "include_stale": False,
+                    "relation_class": "placement",
+                },
+            )
+        )
+    assert mock_verb.await_args.kwargs["include_stale"] is False
+    assert mock_verb.await_args.kwargs["relation_class"] == "placement"
+    assert payload["kind"] == kind
+    assert payload["status"] == "node_untracked"
+    assert payload["name"] == "ghost"
+    assert payload["nodes"] == []
+    assert payload["direction"] == direction
+    assert payload["relation_class"] == "placement"
+    evidence = payload["evidence"]
+    assert evidence["stale_rows"] == "excluded"
+    assert "include_stale is false" in evidence["stale_rows_note"]
+    assert "the root you named" in evidence["stale_rows_note"]
+    assert "not the vendor's own timestamp" in evidence["observation_note"]
+    assert evidence["freshness_meaning"] == {}
+
+
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
 def test_query_topology_dependents_tracked_no_deps_omits_status(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
@@ -541,10 +595,10 @@ def test_query_topology_dependents_tracked_no_deps_omits_status(
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
-def test_query_topology_path_returns_path_or_null(
+def test_query_topology_path_reports_found_or_no_route(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """kind=path returns the TopologyPath; an unreachable pair returns null."""
+    """kind=path returns the TopologyPath; an unreachable pair says ``no_route``."""
     client, _op = client_with_operator
     found = TopologyPath(
         nodes=(
@@ -572,6 +626,8 @@ def test_query_topology_path_returns_path_or_null(
         )
     payload = json.loads(ok.json()["result"]["content"][0]["text"])
     assert payload["kind"] == "path"
+    assert payload["status"] == "found"
+    assert payload["direction"] == "undirected"
     assert [n["name"] for n in payload["path"]["nodes"]] == ["a", "b"]
 
     with patch(_PATH_PATCH, new=AsyncMock(return_value=None)):
@@ -592,7 +648,383 @@ def test_query_topology_path_returns_path_or_null(
             },
         )
     miss_payload = json.loads(miss.json()["result"]["content"][0]["text"])
-    assert miss_payload == {"kind": "path", "path": None}
+    assert miss_payload["kind"] == "path"
+    assert miss_payload["status"] == "no_route"
+    assert miss_payload["path"] is None
+    assert miss_payload["direction"] == "undirected"
+    assert "no undirected route within 8 hops" in miss_payload["detail"]
+    assert "stale rows included, relation class any" in miss_payload["detail"]
+    assert miss_payload["evidence"]["stale_rows"] == "included"
+
+
+def _call_query_topology(client: TestClient, arguments: dict[str, Any]) -> dict[str, Any]:
+    response = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 40,
+            "method": "tools/call",
+            "params": {"name": "query_topology", "arguments": arguments},
+        },
+    )
+    return response.json()
+
+
+def _payload(body: dict[str, Any]) -> dict[str, Any]:
+    assert body["result"]["isError"] is False
+    return json.loads(body["result"]["content"][0]["text"])
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+def test_query_topology_path_missing_endpoint_is_not_no_route(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """#3760: a missing endpoint and an unreachable one get different statuses."""
+    client, _op = client_with_operator
+    mock_path = AsyncMock(side_effect=NodeNotFoundError("ghost", kind="vm"))
+    with patch(_PATH_PATCH, new=mock_path):
+        payload = _payload(
+            _call_query_topology(
+                client,
+                {"kind": "path", "from_name": "a", "to_name": "ghost", "to_node_kind": "vm"},
+            )
+        )
+    assert mock_path.await_args.kwargs["missing_endpoint_raises"] is True
+    assert payload["status"] == "node_untracked"
+    assert payload["name"] == "ghost"
+    assert payload["node_kind"] == "vm"
+    assert payload["path"] is None
+    assert "not in the topology graph" in payload["detail"]
+    # Every path outcome says which stale view the search used.
+    assert payload["evidence"]["stale_rows"] == "included"
+    assert "include_stale is true" in payload["evidence"]["stale_rows_note"]
+    assert payload["evidence"]["freshness_meaning"] == {}
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+def test_query_topology_path_no_route_and_untracked_carry_selected_stale_view(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """A ``no_route`` under ``include_stale=false`` may be caused by an
+    excluded stale edge, so the answer must say that stale rows were
+    excluded. ``node_untracked`` carries the same context."""
+    client, _op = client_with_operator
+    base = {
+        "kind": "path",
+        "from_name": "a",
+        "to_name": "b",
+        "include_stale": False,
+        "relation_class": "placement",
+        "path_direction": "forward",
+    }
+    with patch(_PATH_PATCH, new=AsyncMock(return_value=None)):
+        no_route = _payload(_call_query_topology(client, base))
+    assert no_route["status"] == "no_route"
+    assert "no forward route within 8 hops" in no_route["detail"]
+    assert "stale rows excluded, relation class placement" in no_route["detail"]
+    assert "under other filters" in no_route["detail"]
+    evidence = no_route["evidence"]
+    assert evidence["stale_rows"] == "excluded"
+    assert "include_stale is false" in evidence["stale_rows_note"]
+    assert "the two endpoints you named" in evidence["stale_rows_note"]
+    assert "not the vendor's own timestamp" in evidence["observation_note"]
+    assert evidence["freshness_meaning"] == {}
+
+    with patch(_PATH_PATCH, new=AsyncMock(side_effect=NodeNotFoundError("b"))):
+        untracked = _payload(_call_query_topology(client, base))
+    assert untracked["status"] == "node_untracked"
+    assert untracked["evidence"]["stale_rows"] == "excluded"
+    assert "the two endpoints you named" in untracked["evidence"]["stale_rows_note"]
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+def test_query_topology_path_stale_endpoint_is_reported_with_filter_off(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """``find_path`` returns the two named endpoints even when they are
+    stale and ``include_stale=false`` (#2538). The evidence must not say
+    the stale row is there because ``include_stale`` is true."""
+    client, _op = client_with_operator
+    now = datetime.now(UTC)
+    found = TopologyPath(
+        nodes=(
+            TopologyNode(
+                id=UUID(int=1),
+                kind="vm",
+                name="a",
+                source="auto",
+                depth=0,
+                via_edge_kind=None,
+                last_seen=None,
+            ),
+            TopologyNode(
+                id=UUID(int=2),
+                kind="host",
+                name="b",
+                source="auto",
+                depth=1,
+                via_edge_kind="runs-on",
+                parent_node_id=UUID(int=1),
+                via_edge_id=UUID(int=11),
+                via_edge_source="auto",
+                via_edge_last_seen=now,
+                last_seen=now,
+            ),
+        ),
+        total_hops=1,
+    )
+    mock_path = AsyncMock(return_value=found)
+    with patch(_PATH_PATCH, new=mock_path):
+        payload = _payload(
+            _call_query_topology(
+                client,
+                {"kind": "path", "from_name": "a", "to_name": "b", "include_stale": False},
+            )
+        )
+    assert mock_path.await_args.kwargs["include_stale"] is False
+    assert payload["status"] == "found"
+    start, end = payload["path"]["nodes"]
+    assert start["freshness"] == "stale"
+    assert end["freshness"] == "observed"
+    evidence = payload["evidence"]
+    assert evidence["stale_rows"] == "excluded"
+    note = evidence["stale_rows_note"]
+    assert "the two endpoints you named, which MEHO always shows, even when stale" in note
+    stale_meaning = evidence["freshness_meaning"]["stale"]
+    assert "include_stale is true" not in stale_meaning
+    assert "shown only because the call named it" in stale_meaning
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+@pytest.mark.parametrize("direction", ["forward", "reverse", "undirected"])
+def test_query_topology_path_forwards_and_echoes_direction(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    direction: str,
+) -> None:
+    """#3760: ``path_direction`` and ``relation_class`` reach ``find_path``."""
+    client, _op = client_with_operator
+    found = TopologyPath(
+        nodes=(_node("a", "vm", 0, None), _node("b", "host", 1, "runs-on")),
+        total_hops=1,
+        direction=direction,  # type: ignore[arg-type]
+    )
+    mock_path = AsyncMock(return_value=found)
+    with patch(_PATH_PATCH, new=mock_path):
+        payload = _payload(
+            _call_query_topology(
+                client,
+                {
+                    "kind": "path",
+                    "from_name": "a",
+                    "to_name": "b",
+                    "path_direction": direction,
+                    "relation_class": "placement",
+                },
+            )
+        )
+    assert mock_path.await_args.kwargs["direction"] == direction
+    assert mock_path.await_args.kwargs["relation_class"] == "placement"
+    assert payload["direction"] == direction
+    assert payload["path"]["direction"] == direction
+    assert payload["relation_class"] == "placement"
+    assert payload["path"]["nodes"][1]["via_relation_class"] == "placement"
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+@pytest.mark.parametrize(
+    "bad",
+    [{"path_direction": "sideways"}, {"relation_class": "service"}],
+)
+def test_query_topology_rejects_unknown_direction_or_class(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    bad: dict[str, str],
+) -> None:
+    client, _op = client_with_operator
+    mock_path = AsyncMock(return_value=None)
+    with patch(_PATH_PATCH, new=mock_path):
+        body = _call_query_topology(
+            client, {"kind": "path", "from_name": "a", "to_name": "b", **bad}
+        )
+    assert body["error"]["code"] == INVALID_PARAMS
+    mock_path.assert_not_awaited()
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+def test_query_topology_closure_rows_carry_class_source_and_freshness(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """#3760: stale, old, observed and curated rows read differently."""
+    client, _op = client_with_operator
+    now = datetime.now(UTC)
+    scope = "target:0f8fad5b-d9cb-469f-a165-70867728950e"
+    nodes = [
+        TopologyNode(
+            id=UUID(int=1),
+            kind="namespace",
+            name="ns",
+            source="auto",
+            depth=0,
+            via_edge_kind=None,
+            source_scope=scope,
+            last_seen=now,
+        ),
+        # Pod seen recently, over a containment edge that the latest
+        # refresh no longer reported.
+        TopologyNode(
+            id=UUID(int=2),
+            kind="pod",
+            name="pod-1",
+            source="auto",
+            depth=1,
+            via_edge_kind="belongs-to",
+            parent_node_id=UUID(int=1),
+            via_edge_id=UUID(int=11),
+            via_edge_source="auto",
+            via_edge_last_seen=None,
+            source_scope=scope,
+            last_seen=now - timedelta(minutes=5),
+        ),
+        # Service last seen long ago, over a curated edge of a kind
+        # MEHO does not map.
+        TopologyNode(
+            id=UUID(int=3),
+            kind="service",
+            name="svc-1",
+            source="auto",
+            depth=1,
+            via_edge_kind="depends-on",
+            parent_node_id=UUID(int=1),
+            via_edge_id=UUID(int=12),
+            via_edge_source="curated",
+            via_edge_last_seen=now - timedelta(days=40),
+            source_scope=scope,
+            last_seen=now - timedelta(days=3),
+        ),
+    ]
+    mock_dep = AsyncMock(return_value=nodes)
+    with patch(_DEPENDENTS_PATCH, new=mock_dep):
+        payload = _payload(
+            _call_query_topology(
+                client,
+                {"kind": "dependents", "target": "ns", "relation_class": "containment"},
+            )
+        )
+    assert mock_dep.await_args.kwargs["relation_class"] == "containment"
+    assert payload["direction"] == "reverse"
+    assert payload["relation_class"] == "containment"
+    root, pod, svc = payload["nodes"]
+    assert root["source_scope"] == scope
+    assert root["freshness"] == "observed"
+    assert root["via_edge_freshness"] is None
+    assert root["via_relation_class"] is None
+    assert pod["via_relation_class"] == "containment"
+    assert pod["freshness"] == "observed"
+    assert pod["via_edge_freshness"] == "stale"
+    assert svc["via_relation_class"] == "unknown"
+    assert svc["freshness"] == "old_observation"
+    assert svc["via_edge_freshness"] == "asserted"
+    assert svc["via_edge_source"] == "curated"
+
+    evidence = payload["evidence"]
+    assert evidence["stale_rows"] == "included"
+    assert "not the vendor's own timestamp" in evidence["observation_note"]
+    assert set(evidence["freshness_meaning"]) == {
+        "observed",
+        "stale",
+        "old_observation",
+        "asserted",
+    }
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+@pytest.mark.parametrize("kind", ["dependents", "dependencies"])
+def test_query_topology_stale_root_is_reported_with_filter_off(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    kind: str,
+) -> None:
+    """The closure root is never filtered by ``include_stale`` (#2538), so
+    a stale root appears with ``include_stale=false``. The evidence must
+    name that exception instead of claiming the row came from
+    ``include_stale=true``."""
+    client, _op = client_with_operator
+    root = TopologyNode(
+        id=UUID(int=1),
+        kind="namespace",
+        name="ns",
+        source="auto",
+        depth=0,
+        via_edge_kind=None,
+        last_seen=None,
+    )
+    mock_verb = AsyncMock(return_value=[root])
+    target = _DEPENDENTS_PATCH if kind == "dependents" else _DEPENDENCIES_PATCH
+    with patch(target, new=mock_verb):
+        payload = _payload(
+            _call_query_topology(client, {"kind": kind, "target": "ns", "include_stale": False})
+        )
+    assert mock_verb.await_args.kwargs["include_stale"] is False
+    (row,) = payload["nodes"]
+    assert row["freshness"] == "stale"
+    evidence = payload["evidence"]
+    assert evidence["stale_rows"] == "excluded"
+    note = evidence["stale_rows_note"]
+    assert "include_stale is false" in note
+    assert "the root you named, which MEHO always shows, even when stale" in note
+    assert "include_stale is true" not in evidence["freshness_meaning"]["stale"]
+    assert "shown only because the call named it" in evidence["freshness_meaning"]["stale"]
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+def test_query_topology_stale_rows_included_says_why_they_are_shown(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    client, _op = client_with_operator
+    root = TopologyNode(
+        id=UUID(int=1),
+        kind="namespace",
+        name="ns",
+        source="auto",
+        depth=0,
+        via_edge_kind=None,
+        last_seen=None,
+    )
+    with patch(_DEPENDENTS_PATCH, new=AsyncMock(return_value=[root])):
+        payload = _payload(_call_query_topology(client, {"kind": "dependents", "target": "ns"}))
+    evidence = payload["evidence"]
+    assert evidence["stale_rows"] == "included"
+    assert "include_stale is true" in evidence["stale_rows_note"]
+    stale_meaning = evidence["freshness_meaning"]["stale"]
+    assert stale_meaning.endswith("It is shown because include_stale is true.")
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+def test_query_topology_edges_carry_relation_class_and_freshness(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    client, _op = client_with_operator
+    edge = TopologyEdge(
+        id=UUID(int=5),
+        from_endpoint=TopologyEdgeEndpoint(id=UUID(int=1), kind="sa", name="sa-1"),
+        to_endpoint=TopologyEdgeEndpoint(id=UUID(int=2), kind="role", name="role-1"),
+        kind="authenticates-via",
+        source="curated",
+        last_seen=datetime.now(UTC),
+    )
+    mock_edges = AsyncMock(return_value=[edge])
+    with patch("meho_backplane.mcp.tools.topology.list_edges", new=mock_edges):
+        payload = _payload(
+            _call_query_topology(client, {"kind": "edges", "relation_class": "dependency"})
+        )
+    assert mock_edges.await_args.kwargs["relation_class"] == "dependency"
+    assert payload["relation_class"] == "dependency"
+    (row,) = payload["edges"]
+    assert row["relation_class"] == "dependency"
+    assert row["freshness"] == "asserted"
+    assert payload["evidence"]["stale_rows"] == "excluded"
+    assert payload["evidence"]["stale_rows_note"] == (
+        "Rows the latest refresh no longer reported are never listed."
+    )
+    assert set(payload["evidence"]["freshness_meaning"]) == {"asserted"}
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)

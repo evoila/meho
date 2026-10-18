@@ -72,7 +72,7 @@ func TestRunAnnouncePostsGeneratedRequest(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_, _ = io.WriteString(w, `{"event_id":"11111111-1111-1111-1111-111111111111","cursor":"1-0","targets":null,"planned_op_class":null,"ttl_minutes":null,"work_ref":null,"run_id":null}`)
+		_, _ = io.WriteString(w, `{"event_id":"11111111-1111-1111-1111-111111111111","cursor":"1-0","claim_id":"22222222-2222-2222-2222-222222222222","phase":"start","owner_sub":"agent:triage","admission":"agent_principal","replayed":false,"targets":null,"planned_op_class":null,"ttl_minutes":30,"work_ref":null,"run_id":null}`)
 	}))
 	defer srv.Close()
 	seedXDGAndToken(t, srv.URL)
@@ -80,7 +80,7 @@ func TestRunAnnouncePostsGeneratedRequest(t *testing.T) {
 	if err := runAnnounce(cmd, announceOptions{Activity: "Checking cluster-a", Target: "cluster-a", Phase: "start", BackplaneOverride: srv.URL}); err != nil {
 		t.Fatalf("runAnnounce: %v", err)
 	}
-	if !strings.Contains(stdout.String(), "cursor=1-0") {
+	if !strings.Contains(stdout.String(), "claim_id=22222222-2222-2222-2222-222222222222 cursor=1-0") {
 		t.Errorf("summary: %s", stdout.String())
 	}
 }

@@ -34,6 +34,7 @@ from meho_backplane.retrieval.eval.corpus import (
     MemoryCorpusQuery,
     OperationCorpusQuery,
     load_corpus,
+    load_kb_passage_fixtures,
 )
 from meho_backplane.retrieval.eval.metrics import (
     GREEN_DEFAULTS,
@@ -44,6 +45,12 @@ from meho_backplane.retrieval.eval.metrics import (
     precision_at_k,
     reciprocal_rank,
     verdict,
+)
+from meho_backplane.retrieval.eval.passage_bench import (
+    BASELINE_CANDIDATE,
+    CandidateSpec,
+    PassageBenchReport,
+    run_passage_bench,
 )
 from meho_backplane.retrieval.eval.runner import (
     DEFAULT_K,
@@ -61,15 +68,18 @@ from meho_backplane.retrieval.eval.runner import (
 )
 
 __all__ = [
+    "BASELINE_CANDIDATE",
     "DEFAULT_K",
     "GREEN_DEFAULTS",
     "BaselineConfigError",
+    "CandidateSpec",
     "CorpusValidationError",
     "EvalRequestSurface",
     "EvalResult",
     "KbCorpusQuery",
     "MemoryCorpusQuery",
     "OperationCorpusQuery",
+    "PassageBenchReport",
     "QueryResult",
     "RegressionEpsilon",
     "RetrieveCallable",
@@ -82,10 +92,12 @@ __all__ = [
     "eval_surface",
     "load_baseline",
     "load_corpus",
+    "load_kb_passage_fixtures",
     "mean_metric",
     "precision_at_k",
     "reciprocal_rank",
     "run_grep_baseline",
+    "run_passage_bench",
     "save_baseline",
     "verdict",
 ]

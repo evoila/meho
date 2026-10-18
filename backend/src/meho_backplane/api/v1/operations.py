@@ -41,7 +41,7 @@ import uuid
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi import status as http_status
 from fastapi.openapi.models import Example
 from pydantic import BaseModel, ConfigDict, Field
@@ -52,6 +52,7 @@ from meho_backplane.api.v1._freetext_filter import (
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
+from meho_backplane.operations.caller_gone import watch_caller
 from meho_backplane.operations.governed_subops import GovernedSubopsResponse
 from meho_backplane.operations.meta_tools import (
     CallOperationBody,
@@ -275,6 +276,7 @@ async def get_search(
 @router.post("/call")
 async def post_call(
     body: CallOperationBody,
+    request: Request,
     response: Response,
     operator: Operator = _require_operator,
 ) -> dict[str, Any]:
@@ -309,6 +311,10 @@ async def post_call(
     ``extras.error_code="ambiguous_target"`` — the resolution codes carry
     the candidate ``matches``. No target-failure mode returns a 4xx: a
     consumer's error handling is a single switch on ``extras.error_code``.
+
+    Caller gone (#3696): on the synchronous path a client that disconnects
+    does not stop the operation. It runs to the end, and its audit row
+    carries ``payload.caller_gone_at``. Use ``async: true`` for long work.
     """
     # Drop the transport-only ``async_`` control before it reaches the
     # dispatch arguments (``call_operation`` reads connector_id / op_id /
@@ -319,7 +325,8 @@ async def post_call(
         run_id = await get_operation_run_service().submit_call(operator, arguments)
         response.status_code = http_status.HTTP_202_ACCEPTED
         return {"run_id": str(run_id), "status": "pending", "async": True}
-    return await call_operation(operator, arguments)
+    async with watch_caller(request.receive):
+        return await call_operation(operator, arguments)
 
 
 class ResultQueryBody(BaseModel):

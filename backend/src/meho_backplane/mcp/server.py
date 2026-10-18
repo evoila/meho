@@ -108,6 +108,7 @@ from meho_backplane.mcp.session_limit import (
     check_mcp_session_cap,
     resolve_mcp_session_cap,
 )
+from meho_backplane.operations.caller_gone import watch_caller
 from meho_backplane.request_usage.collector import (
     note_request_fallback_status,
     note_request_route,
@@ -1313,7 +1314,10 @@ async def _dispatch_mcp_request(request: Request, operator: Operator) -> Respons
     # resource template once the handler has matched one. An unregistered
     # method is not in the route catalog, so it is stored as unmatched.
     note_request_route(f"method:{jrpc.method}")
-    response = await _dispatch_to_handler(jrpc, is_notification, operator)
+    # #3696: the body is fully read here, so the watcher can notice a
+    # caller that disconnects while a long tool call runs.
+    async with watch_caller(request.receive):
+        response = await _dispatch_to_handler(jrpc, is_notification, operator)
     _maybe_issue_initialize_session_id(request, jrpc.method, is_notification, response)
     return response
 

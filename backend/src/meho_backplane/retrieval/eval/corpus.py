@@ -29,18 +29,32 @@ where a bare ``yes`` or unquoted slug becomes a ``bool``.
 
 from __future__ import annotations
 
+import re
 from importlib import resources
-from typing import Annotated, Any, Literal, overload
+from typing import Annotated, Any, Final, Literal, overload
 
 import yaml
-from pydantic import BaseModel, BeforeValidator, ConfigDict, TypeAdapter, ValidationError
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    TypeAdapter,
+    ValidationError,
+    model_validator,
+)
 
 __all__ = [
+    "KB_PASSAGE_FIXTURE_VERSION",
     "CorpusValidationError",
     "KbCorpusQuery",
+    "KbPassageFixtureEntry",
+    "KbPassageFixtures",
+    "KbPassageQuery",
     "MemoryCorpusQuery",
     "OperationCorpusQuery",
     "load_corpus",
+    "load_kb_passage_fixtures",
+    "parse_kb_passage_fixtures",
 ]
 
 
@@ -148,6 +162,120 @@ class OperationCorpusQuery(BaseModel):
     expected_op_ids: list[str]
     govc_equivalent: str | None = None
     notes: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# KB passage benchmark fixtures (#3765)
+# ---------------------------------------------------------------------------
+
+#: Version of ``kb_passage_fixtures.yaml`` this code reads. Bump it with
+#: the YAML whenever a body, query or expected reference changes, so
+#: reports from different fixture versions are never compared.
+KB_PASSAGE_FIXTURE_VERSION: Final[int] = 1
+
+KbPassageScenario = Literal[
+    "middle_passage", "end_passage", "duplicate", "conflict", "stale", "no_match"
+]
+KbPassageLanguage = Literal["en", "de"]
+
+
+class KbPassageFixtureEntry(BaseModel):
+    """One synthetic kb entry: a Markdown body and whether it is still true.
+
+    ``stale`` marks an outdated entry and ``conflicting`` marks a
+    current-looking entry that contradicts the reviewed one. Queries
+    may only expect ``current`` entries.
+    """
+
+    model_config = _CORPUS_MODEL_CONFIG
+
+    slug: str
+    language: KbPassageLanguage
+    status: Literal["current", "stale", "conflicting"]
+    body: str
+
+
+class KbPassageQuery(BaseModel):
+    """One benchmark query with its expected source and passage.
+
+    See the header of ``kb_passage_fixtures.yaml`` for the meaning of
+    each field. ``no_match`` queries have no expected values.
+    """
+
+    model_config = _CORPUS_MODEL_CONFIG
+
+    id: str
+    scenario: KbPassageScenario
+    language: KbPassageLanguage
+    query: str
+    expected_slugs: list[str] = []
+    expected_heading: str | None = None
+    answer_terms: list[str] = []
+    harmful_slugs: list[str] = []
+
+
+def _has_heading(body: str, heading: str) -> bool:
+    return re.search(rf"^#{{1,6}}[ \t]+{re.escape(heading)}[ \t]*$", body, re.MULTILINE) is not None
+
+
+class KbPassageFixtures(BaseModel):
+    """The whole versioned fixture file, checked for internal consistency.
+
+    The checks make a broken fixture fail at load time: every expected
+    entry exists, is current, has the expected heading and holds every
+    answer term; every harmful entry exists and is not current.
+    """
+
+    model_config = _CORPUS_MODEL_CONFIG
+
+    version: int
+    entries: list[KbPassageFixtureEntry]
+    queries: list[KbPassageQuery]
+
+    @model_validator(mode="after")
+    def _check_consistency(self) -> KbPassageFixtures:
+        if self.version != KB_PASSAGE_FIXTURE_VERSION:
+            raise ValueError(
+                f"fixture version {self.version} does not match the code "
+                f"version {KB_PASSAGE_FIXTURE_VERSION}"
+            )
+        entries = {e.slug: e for e in self.entries}
+        if len(entries) != len(self.entries):
+            raise ValueError("entry slugs must be unique")
+        if len({q.id for q in self.queries}) != len(self.queries):
+            raise ValueError("query ids must be unique")
+        for q in self.queries:
+            _check_query(q, entries)
+        return self
+
+
+def _check_expected(
+    q: KbPassageQuery, heading: str, slug: str, entry: KbPassageFixtureEntry | None
+) -> None:
+    if entry is None or entry.status != "current":
+        raise ValueError(f"{q.id}: expected slug {slug!r} is not a current entry")
+    if not _has_heading(entry.body, heading):
+        raise ValueError(f"{q.id}: {slug!r} has no heading {heading!r}")
+    missing = [t for t in q.answer_terms if t not in entry.body]
+    if missing:
+        raise ValueError(f"{q.id}: {slug!r} does not contain {missing!r}")
+
+
+def _check_query(q: KbPassageQuery, entries: dict[str, KbPassageFixtureEntry]) -> None:
+    if q.scenario == "no_match":
+        if q.expected_slugs or q.expected_heading or q.answer_terms:
+            raise ValueError(f"{q.id}: a no_match query has no expected values")
+        return
+    if not q.expected_slugs or q.expected_heading is None or not q.answer_terms:
+        raise ValueError(f"{q.id}: needs expected_slugs, expected_heading and answer_terms")
+    if q.scenario in ("conflict", "stale") and not q.harmful_slugs:
+        raise ValueError(f"{q.id}: a {q.scenario} query needs harmful_slugs")
+    for slug in q.expected_slugs:
+        _check_expected(q, q.expected_heading, slug, entries.get(slug))
+    for slug in q.harmful_slugs:
+        entry = entries.get(slug)
+        if entry is None or entry.status == "current":
+            raise ValueError(f"{q.id}: harmful slug {slug!r} is not a stale or conflicting entry")
 
 
 # ---------------------------------------------------------------------------
@@ -280,3 +408,31 @@ def load_corpus(
         raise CorpusValidationError(
             f"{surface} corpus YAML failed validation ({filename}):\n{exc}"
         ) from exc
+
+
+_KB_PASSAGE_FIXTURE_FILE: Final[str] = "kb_passage_fixtures.yaml"
+
+
+def parse_kb_passage_fixtures(raw: str) -> KbPassageFixtures:
+    """Parse and check KB passage fixture YAML text.
+
+    Raises
+    ------
+    CorpusValidationError
+        The YAML does not parse, or the content fails a schema or
+        consistency check. The message names the failing field.
+    """
+    try:
+        parsed = yaml.safe_load(raw)
+    except yaml.YAMLError as exc:
+        raise CorpusValidationError(f"kb passage fixtures failed to parse: {exc}") from exc
+    try:
+        return KbPassageFixtures.model_validate(parsed)
+    except ValidationError as exc:
+        raise CorpusValidationError(f"kb passage fixtures failed validation:\n{exc}") from exc
+
+
+def load_kb_passage_fixtures() -> KbPassageFixtures:
+    """Load the shipped ``kb_passage_fixtures.yaml`` (#3765)."""
+    resource = resources.files(__package__).joinpath(_KB_PASSAGE_FIXTURE_FILE)
+    return parse_kb_passage_fixtures(resource.read_text(encoding="utf-8"))

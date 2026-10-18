@@ -48,6 +48,7 @@ from meho_backplane.mcp.schemas import RATE_LIMITED
 from meho_backplane.mcp.server import McpRateLimitedError
 from meho_backplane.mcp.tools.broadcast import _handler_announce
 from meho_backplane.settings import get_settings
+from tests.broadcast_admission_helpers import patch_agent_admission
 from tests.mcp_test_fixtures import (
     build_operator,
     client_with_operator,  # noqa: F401 -- pytest-discovered fixture
@@ -58,6 +59,12 @@ from tests.mcp_test_fixtures import (
 
 _TENANT = UUID("11110000-0000-0000-0000-000000000001")
 _FIXED_NOW = 1_700_000_000.0
+
+
+@pytest.fixture(autouse=True)
+def _admit_every_caller(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Admit every caller as an agent principal (#3736); this file tests the limit."""
+    patch_agent_admission(monkeypatch)
 
 
 # ---------------------------------------------------------------------------

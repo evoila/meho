@@ -931,6 +931,11 @@ class _SharedValkey(_FakeRedis):
         entries.append(fields)
         return f"1700000000000-{len(entries) - 1}"
 
+    def register_script(self, script: str) -> Any:
+        from tests.broadcast_admission_helpers import FakeStreamClient
+
+        return FakeStreamClient(xadd=self.xadd).register_script(script)
+
 
 async def test_full_result_cache_does_not_block_broadcast(
     monkeypatch: pytest.MonkeyPatch,
@@ -943,7 +948,6 @@ async def test_full_result_cache_does_not_block_broadcast(
     """
     from datetime import UTC, datetime
     from types import SimpleNamespace
-    from unittest.mock import AsyncMock
 
     from meho_backplane.broadcast import AgentAnnouncementEvent
     from meho_backplane.broadcast import publisher as publisher_module
@@ -980,21 +984,23 @@ async def test_full_result_cache_does_not_block_broadcast(
         lambda: SimpleNamespace(broadcast_announce_rate_per_minute=10),
     )
     monkeypatch.setattr(publisher_module, "get_broadcast_client", lambda: shared)
-    monkeypatch.setattr(publisher_module, "_persist_agent_announcement", AsyncMock())
 
     await enforce_announce_rate_limit(tenant, "op-a")
-    entry_id = await publish_agent_announcement(
+    result = await publish_agent_announcement(
         AgentAnnouncementEvent(
             tenant_id=tenant,
             principal_sub="op-a",
             activity="investigating",
             phase="start",
             ts=datetime.now(UTC),
+            claim_id=uuid4(),
+            owner_sub="agent:op-a",
+            admission="agent_principal",
         )
     )
 
     assert list(shared.counters.values()) == [1]
-    assert entry_id == "1700000000000-0"
+    assert result.cursor == "1700000000000-0"
     assert [len(entries) for entries in shared.streams.values()] == [1]
 
 

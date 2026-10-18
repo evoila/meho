@@ -197,6 +197,11 @@ async def _params(
         # #2538 staleness opt-out — the harness always walks the
         # default last-refresh-wins view.
         "include_stale": True,
+        # #3760 — the default undirected walk with no relation filter.
+        "walk_forward": True,
+        "walk_reverse": True,
+        "class_kinds": None,
+        "class_excluded_kinds": None,
     }
 
 

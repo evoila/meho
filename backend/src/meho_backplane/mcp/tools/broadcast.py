@@ -85,25 +85,34 @@ from uuid import UUID
 
 import structlog
 
+from meho_backplane.auth.agent_admission import (
+    AgentAdmission,
+    AgentIdentityRequiredError,
+    resolve_agent_admission,
+)
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast import (
     ACTIVITY_MAX_CHARS,
+    IDEMPOTENCY_KEY_MAX_CHARS,
     MAX_TARGETS,
     OP_CLASS_ENUM,
     PLANNED_OP_CLASS_VALUES,
     TARGET_MAX_CHARS,
+    TTL_DEFAULT_MINUTES,
     TTL_MAX_MINUTES,
     TTL_MIN_MINUTES,
     WORK_REF_MAX_CHARS,
-    AgentAnnouncementEvent,
+    AnnouncementClaimError,
     AnnounceRateLimitError,
     InvalidSinceError,
     PlannedOpClass,
+    build_trusted_announcement,
     enforce_announce_rate_limit,
     get_broadcast_blocking_client,
     list_recent_events_strict,
     publish_agent_announcement,
 )
+from meho_backplane.broadcast.announcement_claims import Phase
 from meho_backplane.broadcast.history import (
     dump_event_wire,
     event_matches,
@@ -413,6 +422,8 @@ class _AnnounceClaims(NamedTuple):
     ttl_minutes: int | None
     work_ref: str | None
     run_id: UUID | None
+    claim_id: UUID | None = None
+    idempotency_key: str | None = None
 
 
 def _parse_targets(raw: Any) -> list[str]:
@@ -435,16 +446,27 @@ def _parse_targets(raw: Any) -> list[str]:
     return cast("list[str]", raw)
 
 
-def _parse_run_id(raw: Any) -> UUID | None:
-    """Validate the optional ``run_id``; -32602 on a non-UUID string."""
+def _parse_uuid_arg(name: str, raw: Any) -> UUID | None:
+    """Validate an optional UUID argument; -32602 on a non-UUID string."""
     if raw is None:
         return None
     if not isinstance(raw, str):
-        raise McpInvalidParamsError("run_id: must be a UUID string when provided")
+        raise McpInvalidParamsError(f"{name}: must be a UUID string when provided")
     try:
         return UUID(raw)
     except ValueError as exc:
-        raise McpInvalidParamsError("run_id: must be a valid UUID string") from exc
+        raise McpInvalidParamsError(f"{name}: must be a valid UUID string") from exc
+
+
+def _parse_idempotency_key(raw: Any) -> str | None:
+    """Validate the optional ``idempotency_key``; -32602 on any miss."""
+    if raw is None:
+        return None
+    if not isinstance(raw, str) or not 1 <= len(raw) <= IDEMPOTENCY_KEY_MAX_CHARS:
+        raise McpInvalidParamsError(
+            f"idempotency_key: must be a string 1..{IDEMPOTENCY_KEY_MAX_CHARS} chars",
+        )
+    return raw
 
 
 def _parse_announce_claims(arguments: dict[str, Any]) -> _AnnounceClaims:
@@ -483,12 +505,15 @@ def _parse_announce_claims(arguments: dict[str, Any]) -> _AnnounceClaims:
         planned_op_class=cast("PlannedOpClass | None", planned),
         ttl_minutes=ttl,
         work_ref=work_ref,
-        run_id=_parse_run_id(arguments.get("run_id")),
+        run_id=_parse_uuid_arg("run_id", arguments.get("run_id")),
+        claim_id=_parse_uuid_arg("claim_id", arguments.get("claim_id")),
+        idempotency_key=_parse_idempotency_key(arguments.get("idempotency_key")),
     )
 
 
 async def _publish_agent_announcement_impl(
     operator: Operator,
+    admission: AgentAdmission,
     *,
     activity: str,
     target: str | None,
@@ -496,27 +521,19 @@ async def _publish_agent_announcement_impl(
     phase: str,
     claims: _AnnounceClaims | None = None,
 ) -> dict[str, Any]:
-    """Build + publish one :class:`AgentAnnouncementEvent`, return the ack.
+    """Build + publish one trusted announcement, return the ack.
 
     Internal helper for ``meho_broadcast_announce``. Kept separate from
-    :func:`_handler_announce` so the construction-and-publish seam is
-    importable by tests that want to bypass the wire-side argument
-    plumbing (e.g. cross-tenant isolation assertions that operate on
-    a directly-constructed :class:`Operator`).
+    :func:`_handler_announce` so tests can drive the build-and-publish
+    step with a directly-constructed :class:`Operator` and
+    :class:`~meho_backplane.auth.agent_admission.AgentAdmission`.
 
-    ``phase`` arrives pre-validated by the caller (either by the
-    JSON-Schema enum on ``inputSchema`` or by a unit-test passing one
-    of the three accepted literals). The function casts it to the
-    :class:`AgentAnnouncementEvent` ``phase`` field's
-    :class:`typing.Literal` union via pydantic validation -- a bad
-    value would raise :class:`ValidationError` at the model
-    constructor, which the handler maps to ``-32602`` upstream.
-
-    ``claims`` carries the optional structured intent fields (typed
-    targets / planned_op_class / TTL / work_ref / run_id). When
-    omitted, the announcement is a plain narrative event (the pre-v2
-    shape). The declared (non-empty) claim fields are echoed back on
-    the ack so the caller can confirm what landed.
+    The server stamps every identity field from *admission* (#3736):
+    principal, owner, actor, run, and (inside a hosted run) the work
+    reference. A ``start`` gets a fresh ``claim_id``; a missing
+    ``ttl_minutes`` becomes :data:`TTL_DEFAULT_MINUTES`. Claim rule
+    failures surface as ``-32602`` with ``error.data.code`` set to the
+    rule's stable code.
 
     Tenant scoping is structural: the ``tenant_id`` on the constructed
     event is sourced exclusively from ``operator.tenant_id`` (the
@@ -525,43 +542,52 @@ async def _publish_agent_announcement_impl(
     by check-then-reject.
     """
     claims = claims or _AnnounceClaims([], None, None, None, None)
-    event = AgentAnnouncementEvent(
-        tenant_id=operator.tenant_id,
-        principal_sub=operator.sub,
-        activity=activity,
-        target=target,
-        targets=claims.targets,
-        scope=scope,
-        planned_op_class=claims.planned_op_class,
-        ttl_minutes=claims.ttl_minutes,
-        work_ref=claims.work_ref,
-        run_id=claims.run_id,
-        phase=phase,  # type: ignore[arg-type]  # pydantic validates the Literal at construction
-        ts=datetime.now(UTC),
-    )
-    entry_id = await publish_agent_announcement(event)
-    # The two keys are now genuinely distinct values (#2479 / #2547):
-    # ``event_id`` is the real per-announcement UUID minted at publish
-    # (equal to the durable ``agent_announcement`` row's PK, round-trips
-    # as the event's ``event_id`` on recent/watch reads); ``cursor`` is
-    # the Valkey stream entry id, self-labelled to round-trip through
-    # recent/watch's ``cursor`` arg. Historically both carried the
-    # mislabelled stream cursor; T2 mints the UUID that makes ``event_id``
-    # a stable durable identity.
-    ack: dict[str, Any] = {"event_id": str(event.event_id), "cursor": entry_id}
-    # Echo only the declared (non-empty) structured claims -- a plain
-    # announce keeps the pre-v2 ``{event_id, cursor}`` ack shape. These
-    # are trusted structured values, so they are echoed unwrapped.
-    if claims.targets:
-        ack["targets"] = claims.targets
-    if claims.planned_op_class is not None:
-        ack["planned_op_class"] = claims.planned_op_class
-    if claims.ttl_minutes is not None:
-        ack["ttl_minutes"] = claims.ttl_minutes
-    if claims.work_ref is not None:
-        ack["work_ref"] = claims.work_ref
-    if claims.run_id is not None:
-        ack["run_id"] = str(claims.run_id)
+    try:
+        event = build_trusted_announcement(
+            admission,
+            tenant_id=operator.tenant_id,
+            activity=activity,
+            target=target,
+            targets=claims.targets,
+            scope=scope,
+            planned_op_class=claims.planned_op_class,
+            ttl_minutes=claims.ttl_minutes,
+            work_ref=claims.work_ref,
+            run_id=claims.run_id,
+            phase=cast("Phase", phase),
+            claim_id=claims.claim_id,
+            idempotency_key=claims.idempotency_key,
+            ts=datetime.now(UTC),
+        )
+        result = await publish_agent_announcement(event, idempotency_key=claims.idempotency_key)
+    except AnnouncementClaimError as exc:
+        raise McpInvalidParamsError(str(exc), data={"code": exc.code}) from exc
+    stored = result.event
+    # ``event_id`` is the per-announcement UUID (the durable row's PK);
+    # ``cursor`` is the Valkey stream entry id this call wrote (``None``
+    # on a replay whose entry was already on the stream). The stamped
+    # identity and claim fields are trusted structured values, echoed
+    # unwrapped.
+    ack: dict[str, Any] = {
+        "event_id": str(stored.event_id),
+        "cursor": result.cursor,
+        "claim_id": str(stored.claim_id),
+        "phase": stored.phase,
+        "owner_sub": stored.owner_sub,
+        "admission": stored.admission,
+        "ttl_minutes": stored.ttl_minutes,
+        "replayed": result.replayed,
+    }
+    if stored.targets:
+        ack["targets"] = list(stored.targets)
+    if stored.planned_op_class is not None:
+        ack["planned_op_class"] = stored.planned_op_class
+    if stored.work_ref is not None:
+        ack["work_ref"] = stored.work_ref
+    if stored.run_id is not None:
+        ack["run_id"] = str(stored.run_id)
+    if stored.actor_sub is not None:
+        ack["actor_sub"] = stored.actor_sub
     return ack
 
 
@@ -619,7 +645,7 @@ async def _handler_announce(
     scope = arguments.get("scope")
     if scope is not None and not isinstance(scope, str):
         raise McpInvalidParamsError("scope: must be a string when provided")
-    phase_arg = arguments.get("phase", "update")
+    phase_arg = arguments.get("phase", "start")
     if phase_arg not in ("start", "update", "completion"):
         raise McpInvalidParamsError(
             "phase: must be one of 'start', 'update', 'completion'",
@@ -628,6 +654,16 @@ async def _handler_announce(
     # a malformed request from a looping caller still gets a clean
     # ``-32602`` rather than being masked by the rate-limit gate below.
     claims = _parse_announce_claims(arguments)
+    # Trusted admission (#3736): only a checked agent identity publishes.
+    # A person's own token gets the stable ``agent_identity_required``
+    # error with the way to get a trusted identity.
+    try:
+        admission = await resolve_agent_admission(operator)
+    except AgentIdentityRequiredError as exc:
+        raise McpInvalidParamsError(
+            str(exc),
+            data={"code": exc.code, "reason": exc.reason, "remediation": exc.remediation},
+        ) from exc
     # Per-principal flood control BEFORE the publish (G6.5-T6 #2546): the
     # tenant stream is count-trimmed (``BROADCAST_MAXLEN`` = 10000), so a
     # looping principal could otherwise evict the whole tenant's
@@ -648,6 +684,7 @@ async def _handler_announce(
         ) from exc
     return await _publish_agent_announcement_impl(
         operator,
+        admission,
         activity=activity,
         target=target,
         scope=scope,
@@ -679,19 +716,35 @@ register_mcp_tool(
             "(audit-driven events carry kind='operation' per "
             "docs/codebase/api-shape-conventions.md §6); other "
             "operators read it back via meho_broadcast_recent. "
+            "ONLY A TRUSTED AGENT CAN PUBLISH: a call from inside a "
+            "MEHO-hosted agent run, or a call with the token of a "
+            "registered agent principal (`meho agent-principal "
+            "register`). Any other caller, such as a person's own login, "
+            "gets -32602 with error.data.code='agent_identity_required' "
+            "and a remediation. People can still read the feed. "
+            "EACH ANNOUNCEMENT IS ONE STEP OF A CLAIM: 'phase'='start' "
+            "(the default) opens a claim and the server returns a new "
+            "'claim_id'; 'update' and 'completion' continue it and need "
+            "that 'claim_id' plus an 'idempotency_key' (a retry with the "
+            "same key returns the first result with replayed=true). Only "
+            "the claim's owner may update or complete it, and a completed "
+            "claim takes no more steps. A claim is advisory: it never "
+            "locks a target or blocks anyone. The server sets the owner, "
+            "actor, run_id and (in a hosted run) work_ref; do not send "
+            "them. "
             "'activity' is mandatory (1..500 chars), 'target' and "
-            "'scope' are optional free-form attribution, 'phase' is "
-            "one of 'start' / 'update' / 'completion' (default "
-            "'update'). Optional STRUCTURED INTENT CLAIMS turn an "
+            "'scope' are optional free-form attribution. "
+            "Optional STRUCTURED INTENT CLAIMS turn an "
             "announcement into coordination data other agents can trust: "
             "'targets' (up to 10 target names the work touches -- "
             "supersedes 'target' for multi-target claims), "
             "'planned_op_class' (the op class you are about to run, e.g. "
-            "'write' / 'credential_read'), 'ttl_minutes' (1..1440; the "
+            "'write' / 'credential_read'), 'ttl_minutes' (1..1440, "
+            f"default {TTL_DEFAULT_MINUTES}; the "
             "claim's lifetime -- readers derive expires_at = ts + ttl "
-            "and can filter to active claims), 'work_ref' (an opaque "
-            "change-ticket reference such as 'gh:evoila/meho#123'), and "
-            "'run_id' (the UUID of the agent run). These typed fields are "
+            "and can filter to active claims), and 'work_ref' (an opaque "
+            "change-ticket reference such as 'gh:evoila/meho#123'; set by "
+            "the server inside a hosted run). These typed fields are "
             "server-validated and served UNWRAPPED (they cannot carry an "
             "injection); the free-text 'activity' / 'scope' / 'target' / "
             "'targets' / 'work_ref' stay quarantined behind the "
@@ -706,7 +759,8 @@ register_mcp_tool(
             "Valkey restart and the stream's ~24h trim window; "
             "meho_broadcast_recent backfills from that archive when the "
             "requested window predates the stream's oldest surviving "
-            "entry. Returns {event_id, cursor} plus any declared claim "
+            "entry. Returns {event_id, cursor, claim_id, phase, owner_sub, "
+            "admission, ttl_minutes, replayed} plus any other claim "
             "fields echoed back. 'event_id' is the real per-announcement "
             "UUID (equal to the durable row's id; it round-trips as the "
             "event's 'event_id' on recent/watch reads); 'cursor' is the "
@@ -789,7 +843,8 @@ register_mcp_tool(
                     "maximum": TTL_MAX_MINUTES,
                     "description": (
                         "Optional claim lifetime in minutes "
-                        f"({TTL_MIN_MINUTES}..{TTL_MAX_MINUTES}). Readers "
+                        f"({TTL_MIN_MINUTES}..{TTL_MAX_MINUTES}, default "
+                        f"{TTL_DEFAULT_MINUTES}). Readers "
                         "derive expires_at = ts + ttl and can drop "
                         "elapsed claims via recent/watch 'active_only'. "
                         "TRUSTED int, served unwrapped."
@@ -803,7 +858,9 @@ register_mcp_tool(
                         "Optional opaque change-ticket reference "
                         "(e.g. 'gh:evoila/meho#123'), same convention as "
                         "AgentRun.work_ref. Exact-match filterable on "
-                        "recent/watch. UNTRUSTED prose (wrapped on read) "
+                        "recent/watch. Inside a hosted run the server "
+                        "sets it from the run; a different value is "
+                        "refused. UNTRUSTED prose (wrapped on read) "
                         "but filtered pre-wrap."
                     ),
                 },
@@ -811,21 +868,43 @@ register_mcp_tool(
                     "type": "string",
                     "format": "uuid",
                     "description": (
-                        "Optional UUID of the agent run this "
-                        "announcement belongs to, so peers/humans can "
-                        "group a run's announcements. TRUSTED UUID, "
-                        "served unwrapped."
+                        "DEPRECATED. The server sets the run id from the "
+                        "checked agent run. A value that is not that run "
+                        "is refused with error.data.code="
+                        "'server_stamped_field'. Do not send it."
+                    ),
+                    "deprecated": True,
+                },
+                "claim_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "description": (
+                        "The claim this step continues. Required for "
+                        "'update' and 'completion' (use the claim_id the "
+                        "'start' returned); not allowed on 'start'."
+                    ),
+                },
+                "idempotency_key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": IDEMPOTENCY_KEY_MAX_CHARS,
+                    "description": (
+                        "Your retry key for this step. Required for "
+                        "'update' and 'completion', optional for 'start'. "
+                        "Sending the same key again returns the first "
+                        "result (replayed=true) and stores nothing new. If "
+                        "the first try was stored but never reached the "
+                        "feed, the retry delivers it and returns a cursor."
                     ),
                 },
                 "phase": {
                     "type": "string",
                     "enum": ["start", "update", "completion"],
-                    "default": "update",
+                    "default": "start",
                     "description": (
-                        "Lifecycle phase. 'start' marks intent at "
-                        "task entry; 'update' is the default for "
-                        "in-flight progress; 'completion' marks the "
-                        "wrap-up summary. The Prometheus counter "
+                        "Claim step. 'start' (the default) opens a new "
+                        "claim; 'update' reports progress on it; "
+                        "'completion' closes it. The Prometheus counter "
                         "broadcast_agent_announcements_total partitions "
                         "by this label."
                     ),

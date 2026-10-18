@@ -42,8 +42,10 @@ from pydantic import (
 )
 
 from meho_backplane.db.models import SOURCE_SCOPE_GLOBAL, SOURCE_SCOPE_PATTERN
+from meho_backplane.topology.evidence import RelationClass, relation_class_for
 
 __all__ = [
+    "PathDirection",
     "ScopeStatus",
     "TopologyDiffEntry",
     "TopologyDiffResult",
@@ -64,6 +66,11 @@ __all__ = [
 #: the row predates source-qualified identity and MEHO does not know
 #: which source it belongs to).
 ScopeStatus = Literal["global", "target", "legacy", "unresolved"]
+
+#: How a path search walks stored edges (#3760). ``undirected`` (the
+#: default) walks both ways; ``forward`` follows ``from -> to`` only;
+#: ``reverse`` follows ``to -> from`` only.
+PathDirection = Literal["undirected", "forward", "reverse"]
 
 
 def _deep_freeze(value: Any) -> Any:
@@ -123,6 +130,16 @@ class TopologyNode(BaseModel):
     has no scope yet and the reader does not know which source the
     name belongs to; it never falls back to the last target that saw
     the row.
+
+    ``last_seen`` (#3760) is MEHO's own time, not the vendor's: the last
+    refresh that reported an ``auto`` node, or when an operator entered
+    a ``curated`` node (a later refresh that also observes it moves it
+    forward). ``None`` means the latest refresh no longer reported the
+    row. ``via_edge_source`` / ``via_edge_last_seen``
+    are the same facts for the edge walked to reach the node, and
+    ``via_relation_class`` is that edge's relation class (see
+    :mod:`meho_backplane.topology.evidence`). All are ``None`` on the
+    root row.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -137,6 +154,15 @@ class TopologyNode(BaseModel):
     parent_node_id: UUID | None = None
     via_edge_id: UUID | None = None
     source_scope: Annotated[str, StringConstraints(pattern=SOURCE_SCOPE_PATTERN)] | None = None
+    last_seen: datetime | None = None
+    via_edge_source: str | None = None
+    via_edge_last_seen: datetime | None = None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def via_relation_class(self) -> RelationClass | None:
+        """Relation class of the edge walked to reach this node."""
+        return relation_class_for(self.via_edge_kind)
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -170,13 +196,15 @@ class TopologyPath(BaseModel):
     ``nodes`` runs from the ``from`` node (``depth == 0``) to the
     ``to`` node (``depth == total_hops``) inclusive. ``total_hops`` is
     the number of edges traversed, i.e. ``len(nodes) - 1``. v0.2 is
-    unweighted: every edge costs one hop.
+    unweighted: every edge costs one hop. ``direction`` (#3760) is the
+    edge direction the search applied.
     """
 
     model_config = ConfigDict(frozen=True)
 
     nodes: tuple[TopologyNode, ...] = Field(min_length=1)
     total_hops: int = Field(ge=0)
+    direction: PathDirection = "undirected"
 
     @model_validator(mode="after")
     def _check_hops_match_nodes(self) -> TopologyPath:
@@ -200,6 +228,9 @@ class TopologyEdgeEndpoint(BaseModel):
     listing is a survey of relationships, not a node dump; callers that
     need the bag look the node up separately via
     :func:`meho_backplane.topology.resolvers.resolve_node`.
+
+    ``source_scope`` (#3760) is the node's stored source scope, so an
+    edge answer says which source each end came from.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -207,6 +238,7 @@ class TopologyEdgeEndpoint(BaseModel):
     id: UUID
     kind: str
     name: str
+    source_scope: str | None = None
 
 
 class TopologyEdge(BaseModel):
@@ -251,6 +283,12 @@ class TopologyEdge(BaseModel):
     source: str
     properties: dict[str, Any] = Field(default_factory=dict)
     last_seen: datetime | None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def relation_class(self) -> RelationClass:
+        """What this edge means (#3760); unmapped kinds are ``unknown``."""
+        return relation_class_for(self.kind) or "unknown"
 
     @model_validator(mode="after")
     def _freeze_properties(self) -> TopologyEdge:

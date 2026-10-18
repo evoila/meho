@@ -211,11 +211,13 @@ async def _resolve_vm_moid_by_name(
 
     Raises :exc:`ConnectorResourceNotFoundError` when the listing answers
     with no VM of that name: the vCenter call succeeded and the VM does
-    not exist, so the dispatcher returns a ``not_found`` result (HTTP 404)
-    instead of a ``connector_error``. Callers use this to check whether a
-    VM already exists. Raises :exc:`RuntimeError` when the name matches
-    more than one VM (ambiguous) -- the caller must then re-issue with the
-    specific ``vm`` moid.
+    not exist, so the dispatcher returns a ``not_found`` result instead
+    of a ``connector_error``. As with every dispatcher result, the REST
+    ``/api/v1/operations/call`` route delivers that envelope on HTTP 200;
+    callers read ``status`` to check whether a VM already exists. Raises
+    :exc:`RuntimeError` when the name matches more than one VM
+    (ambiguous) -- the caller must then re-issue with the specific ``vm``
+    moid.
     """
     list_path = await connector.mount_op_path(target, _LIST_VMS_PATH, operator)
     # Key the ``filter.names`` param off the mount flavor (#2298): the

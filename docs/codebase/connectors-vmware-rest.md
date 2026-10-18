@@ -469,10 +469,14 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     `GET /vcenter/vm?filter.names=`). An unknown name — the listing
     answers `200 []` — raises `ConnectorResourceNotFoundError` with the
     name as the resource id, so the dispatcher returns
-    `status="not_found"` (HTTP 404, `extras.error_code="not_found"`)
-    and callers can use the op to check whether a VM exists (#3653). An
-    ambiguous name still raises a plain error. One PropertyCollector
-    read of the `VirtualMachine`'s
+    `status="not_found"` with `extras.error_code="not_found"` and
+    `extras.resource_id=<name>` (#3653). Like every dispatcher result,
+    `POST /api/v1/operations/call` delivers this envelope on HTTP 200;
+    callers check `status`, not the HTTP code, to learn that the VM does
+    not exist. (The 404 from `status_code_for_result` is only the
+    synthetic code written to the audit row.) An ambiguous name still
+    raises a plain error. One PropertyCollector read of the
+    `VirtualMachine`'s
     `runtime.powerState`, `guest.ipAddress` / `guest.hostName` /
     `guest.toolsStatus` / `guest.toolsRunningStatus`,
     `guestHeartbeatStatus`, and `storage.perDatastoreUsage`. Unlike

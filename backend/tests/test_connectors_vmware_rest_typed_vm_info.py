@@ -321,6 +321,8 @@ async def test_vm_info_by_name_unknown_is_not_found() -> None:
         "resource_ids": ["missing-vm"],
         "resource_id": "missing-vm",
     }
+    # The synthetic code for the audit row only. The REST route still
+    # answers HTTP 200 with this envelope (see test_api_v1_operations).
     assert status_code_for_result(result.status) == 404
 
 
@@ -367,6 +369,8 @@ def test_retrieve_properties_managed_object_not_found_maps_to_structured_result(
     assert result.extras["error_code"] == "not_found"
     assert result.extras["resource_id"] == "vm-42"
     assert result.extras["resource_ids"] == ["vm-42"]
+    # The synthetic code for the audit row only. The REST route still
+    # answers HTTP 200 with this envelope (see test_api_v1_operations).
     assert status_code_for_result(result.status) == 404
 
 

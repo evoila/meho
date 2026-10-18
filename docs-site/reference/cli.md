@@ -4466,7 +4466,7 @@ meho status [flags]
 
 ## `meho targets`
 
-Operate the MEHO targets registry (add / list / describe / probe / import / discover)
+Operate the MEHO targets registry (add / update / list / describe / probe / import / discover)
 
 ```
 meho targets
@@ -4483,9 +4483,11 @@ meho targets add <name> [flags]
 - `--alias` — additional name the target resolves by (repeatable)
 - `--auth-model` — per-target identity model (default: shared_service_account)
 - `--backplane` — backplane URL to create the target in (defaults to the URL recorded by `meho login`)
+- `--extra` — key=value to store in the target's extras map, e.g. scheme=http (repeatable)
 - `--fqdn` — fully-qualified domain name, when distinct from --host
 - `--host` — host or IP the connector dials (required)
 - `--json` — emit the created target as JSON instead of the human summary
+- `--no-secret-ref` — store the target with no credential (sends secret_ref: null); for products that need no login
 - `--note` — free-form operator note stored on the target
 - `--port` — connection port (default: the connector's product default)
 - `--preferred-impl` — connector impl_id override for the resolver's tie-break
@@ -4556,6 +4558,32 @@ meho targets probe <name-or-alias> [flags]
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit machine-readable JSON to stdout instead of the human summary
+
+### `meho targets update`
+
+Change fields on an existing target
+
+```
+meho targets update <name|alias> [flags]
+```
+
+- `--alias` — alias the target resolves by (repeatable; replaces the whole alias list)
+- `--auth-model` — per-target identity model
+- `--backplane` — backplane URL the target lives in (defaults to the URL recorded by `meho login`)
+- `--clear` — field to remove by sending null (repeatable): fqdn, note, port, preferred-impl, secret-ref, tls-ca-pin, tls-server-name, version
+- `--extra` — key=value for the target's extras map, e.g. scheme=http (repeatable; replaces the whole map)
+- `--fqdn` — fully-qualified domain name, when distinct from --host
+- `--host` — new host or IP the connector dials
+- `--json` — emit the updated target as JSON instead of the human summary
+- `--note` — free-form operator note stored on the target
+- `--port` — connection port
+- `--preferred-impl` — connector impl_id override for the resolver's tie-break
+- `--product` — new connector product slug
+- `--secret-ref` — Vault path of the target's credential
+- `--tls-ca-pin` — PEM CA bundle to pin for this target
+- `--tls-server-name` — TLS SNI / certificate-verification hostname, decoupled from --host
+- `--verify-tls` — verify the target's TLS certificate; pass --verify-tls=false to opt out
+- `--version` — operator-asserted product version
 
 ## `meho tenants`
 

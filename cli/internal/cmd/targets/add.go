@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -21,9 +22,10 @@ import (
 //
 //	meho targets add <name> --product <p> --host <h> \
 //	  [--alias a --alias b] [--version v] [--port n] [--fqdn f] \
-//	  [--secret-ref <ref>] [--auth-model <m>] [--verify-tls=false] \
-//	  [--tls-ca-pin <pin>] [--tls-server-name <sni>] \
-//	  [--preferred-impl <id>] [--note <n>] [--json] [--backplane <url>]
+//	  [--secret-ref <ref> | --no-secret-ref] [--auth-model <m>] \
+//	  [--verify-tls=false] [--tls-ca-pin <pin>] [--tls-server-name <sni>] \
+//	  [--preferred-impl <id>] [--note <n>] [--extra key=value ...] \
+//	  [--json] [--backplane <url>]
 //
 // It POSTs a single TargetCreate to POST /api/v1/targets — the same
 // route `meho targets import` drives for each new row — reusing this
@@ -43,7 +45,11 @@ import (
 // the server applies its documented defaults — most importantly, an
 // omitted `secret_ref` derives the per-tenant default
 // (`tenants/<tenant_id>/<name>`, #1723), whereas an explicit null would
-// persist "no credential" (#2872). This mirrors `import`'s
+// persist "no credential" (#2872). `--no-secret-ref` is the one flag
+// that sends an explicit null: it creates a target with no credential,
+// for products that need none (for example an in-cluster Prometheus).
+// `--extra key=value` seeds the `extras` map (for example
+// `--extra scheme=http`). This mirrors `import`'s
 // entryToCreateBody, which likewise carries only the keys present in
 // the source descriptor.
 //
@@ -63,12 +69,14 @@ func newAddCmd() *cobra.Command {
 		port              int
 		fqdn              string
 		secretRef         string
+		noSecretRef       bool
 		authModel         string
 		verifyTLS         bool
 		tlsCaPin          string
 		tlsServerName     string
 		preferredImpl     string
 		note              string
+		extras            []string
 		jsonOut           bool
 		backplaneOverride string
 	)
@@ -85,6 +93,12 @@ func newAddCmd() *cobra.Command {
 			"rest (a target created without `--secret-ref` derives the " +
 			"per-tenant default credential path; `--verify-tls=false` opts " +
 			"out of TLS verification).\n\n" +
+			"For a target that needs no credential, pass `--no-secret-ref`. " +
+			"It sends an explicit null, so the target is stored with no " +
+			"credential path and the connector calls it without one. " +
+			"`--extra key=value` (repeatable) seeds the target's `extras` " +
+			"map; values are sent as strings. For example, a plain-HTTP " +
+			"Prometheus needs `--no-secret-ref --extra scheme=http`.\n\n" +
 			"All validation is server-side: an unknown `--product`, a " +
 			"`--secret-ref` outside the operator's tenant subtree, or an " +
 			"SSRF-guarded `--host` come back as a 422 whose body the CLI " +
@@ -124,6 +138,9 @@ func newAddCmd() *cobra.Command {
 			if fs.Changed("secret-ref") {
 				body["secret_ref"] = secretRef
 			}
+			if noSecretRef {
+				body["secret_ref"] = nil
+			}
 			if fs.Changed("auth-model") {
 				body["auth_model"] = authModel
 			}
@@ -141,6 +158,13 @@ func newAddCmd() *cobra.Command {
 			}
 			if fs.Changed("note") {
 				body["notes"] = note
+			}
+			if fs.Changed("extra") {
+				parsed, perr := parseExtraFlags(extras)
+				if perr != nil {
+					return output.RenderError(cmd.ErrOrStderr(), perr, jsonOut)
+				}
+				body["extras"] = parsed
 			}
 			return runAdd(cmd, addOptions{
 				Body:              body,
@@ -163,6 +187,8 @@ func newAddCmd() *cobra.Command {
 		"fully-qualified domain name, when distinct from --host")
 	cmd.Flags().StringVar(&secretRef, "secret-ref", "",
 		"Vault path of the target's credential (omit to derive the per-tenant default)")
+	cmd.Flags().BoolVar(&noSecretRef, "no-secret-ref", false,
+		"store the target with no credential (sends secret_ref: null); for products that need no login")
 	cmd.Flags().StringVar(&authModel, "auth-model", "",
 		"per-target identity model (default: shared_service_account)")
 	cmd.Flags().BoolVar(&verifyTLS, "verify-tls", true,
@@ -175,13 +201,33 @@ func newAddCmd() *cobra.Command {
 		"connector impl_id override for the G0.6 resolver's tie-break")
 	cmd.Flags().StringVar(&note, "note", "",
 		"free-form operator note stored on the target")
+	cmd.Flags().StringArrayVar(&extras, "extra", nil,
+		"key=value to store in the target's extras map, e.g. scheme=http (repeatable)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit the created target as JSON instead of the human summary")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to create the target in (defaults to the URL recorded by `meho login`)")
 	_ = cmd.MarkFlagRequired("product")
 	_ = cmd.MarkFlagRequired("host")
+	cmd.MarkFlagsMutuallyExclusive("secret-ref", "no-secret-ref")
 	return cmd
+}
+
+// parseExtraFlags folds repeatable `--extra key=value` flags into the
+// `extras` map. The value is everything after the first `=`, sent as a
+// string. A later flag with the same key wins. A flag without `=` or
+// with an empty key is an error (exit code 4).
+func parseExtraFlags(pairs []string) (map[string]any, *output.StructuredError) {
+	out := make(map[string]any, len(pairs))
+	for _, pair := range pairs {
+		key, value, ok := strings.Cut(pair, "=")
+		if !ok || key == "" {
+			return nil, output.Unexpected(fmt.Sprintf(
+				"invalid --extra %q: expected key=value", pair))
+		}
+		out[key] = value
+	}
+	return out, nil
 }
 
 // addOptions carries the resolved inputs for runAdd. Body is the JSON

@@ -1124,7 +1124,8 @@ the architecture grounding it links back to.
   tests for the OpenAI-compat builder, per-vendor profile dispatch
   (OpenAI / vLLM / Ollama), the air-gapped + on-prem registration path,
   the settings-driven default builder's host-hint heuristic, and
-  fail-closed posture without `OPENAI_API_KEY`.
+  fail-closed posture without `OPENAI_API_KEY`. One test sends a real
+  openai SDK request and checks its URL, `Authorization` header and body.
 - `backend/tests/test_agent_vcf_paif_backend.py` (G11.5-T4) — unit tests
   for the VCF PAIF builder and the bundled OIDC token provider: the
   vLLM-equivalent profile flips strict-tool-def off; the `client_credentials`
@@ -1134,7 +1135,19 @@ the architecture grounding it links back to.
   the air-gapped tenant resolves all three tiers to PAIF with **zero**
   SaaS-host traffic; a mis-flagged `is_saas_egress=True` PAIF registration
   still fails closed for an air-gapped tenant; the settings-driven default
-  fails closed naming every missing setting.
+  fails closed naming every missing setting. The zero-traffic check uses
+  two guards: `respx` for plain `httpx` (the token fetch) and
+  `no_httpx2_egress` for `httpx2` (the openai SDK). A self-test proves the
+  `httpx2` guard catches an SDK request. Other tests send one real SDK
+  request (base URL plus IdP token) and check that the SDK client trusts
+  the CA file named by `SSL_CERT_FILE`.
+- `backend/tests/_httpx2_capture.py` — shared test helpers. The `anthropic`
+  1.x and `openai` 3.x SDKs send with `httpx2`, which `respx` cannot see.
+  The helpers patch `httpx2.AsyncHTTPTransport` to capture the request the
+  real SDK built, or to fail a test that sends one. They also read the SSL
+  context an SDK client uses. `test_operations_ingest_anthropic_client.py`
+  uses them to check that the spec-ingest client really sends our
+  `max_tokens`, uses the 120-second timeout, and retries exactly once.
 - `backend/tests/test_agent_toolset.py` — unit tests for the resolver /
   adapter directly (no model run): the spec ∩ identity-perms intersection
   (including the read_only-floor exclusion), operator threading, tool input

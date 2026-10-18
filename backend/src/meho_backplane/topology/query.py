@@ -131,6 +131,8 @@ f-string with the join columns swapped.
 from __future__ import annotations
 
 import json
+import math
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -285,16 +287,8 @@ def _row_to_node(row: Row[Any]) -> TopologyNode:
 # the caller named it explicitly, and G0.18-T4's NodeNotFoundError
 # contract owns anchor existence.
 #
-# Bounds (#3764): ``deduped`` adds ``row_bytes`` (the stored bytes of the
-# node's kind, name, scope and properties) and ``sized`` a running total
-# in the answer order ``(depth, name, id)``. ``:byte_budget`` keeps the
-# rows whose running total *before* them is within the budget, so exactly
-# one row past the budget comes back (with its properties left out) and
-# the caller can see that the byte limit applied. ``:row_limit`` caps the
-# rows sent to Python. Both are NULL for the unbounded verbs (``LIMIT
-# NULL`` is ``LIMIT ALL``). PostgreSQL still walks the whole closure
-# before it sorts, so the time budget (``statement_timeout``, set by
-# :func:`bounded_closure`) is what bounds that work.
+# The bounded ``query_topology`` walk (#3764) does not use these two
+# statements; see ``_CLOSURE_STEP_SQL_REVERSE`` below.
 _TRAVERSAL_SQL_REVERSE = text(
     """
     WITH RECURSIVE walk AS (
@@ -351,38 +345,21 @@ _TRAVERSAL_SQL_REVERSE = text(
               CAST(:include_stale AS boolean)
               OR (n.last_seen IS NOT NULL AND e.last_seen IS NOT NULL)
           )
-    ) CYCLE id SET is_cycle USING path,
-    deduped AS (
+    ) CYCLE id SET is_cycle USING path
+    SELECT id, kind, name, source, source_scope, properties, last_seen, depth,
+           via_edge_kind, parent_node_id, via_edge_id, via_edge_source,
+           via_edge_last_seen
+    FROM (
         SELECT DISTINCT ON (id)
             id, kind, name, source, source_scope, properties, last_seen, depth,
             via_edge_kind, parent_node_id, via_edge_id, via_edge_source,
-            via_edge_last_seen,
-            octet_length(kind) + octet_length(name)
-                + COALESCE(octet_length(source_scope), 0)
-                + COALESCE(octet_length(CAST(properties AS text)), 0) AS row_bytes
+            via_edge_last_seen
         FROM walk
         WHERE depth <= :depth
           AND NOT is_cycle
         ORDER BY id, depth, name, parent_node_id, via_edge_id
-    ),
-    sized AS (
-        SELECT deduped.*,
-               SUM(row_bytes) OVER (ORDER BY depth, name, id) AS cumulative_bytes
-        FROM deduped
-    )
-    SELECT id, kind, name, source, source_scope,
-           CASE
-               WHEN CAST(:byte_budget AS bigint) IS NULL
-                    OR cumulative_bytes <= CAST(:byte_budget AS bigint)
-               THEN properties
-           END AS properties,
-           last_seen, depth, via_edge_kind, parent_node_id, via_edge_id,
-           via_edge_source, via_edge_last_seen, cumulative_bytes
-    FROM sized
-    WHERE CAST(:byte_budget AS bigint) IS NULL
-       OR cumulative_bytes - row_bytes <= CAST(:byte_budget AS bigint)
+    ) deduped
     ORDER BY depth, name, id
-    LIMIT :row_limit
     """
 )
 
@@ -391,8 +368,7 @@ _TRAVERSAL_SQL_REVERSE = text(
 # the two join columns differ from the reverse statement; everything
 # else (tenant scoping, kind pin, kind filter, depth bound, CYCLE
 # guard, closure-wide DISTINCT ON dedupe, ordering, §6 superseded-edge
-# exclusion, #2538 chain provenance + staleness opt-out, #3764 byte and
-# row bounds) is identical.
+# exclusion, #2538 chain provenance + staleness opt-out) is identical.
 _TRAVERSAL_SQL_FORWARD = text(
     """
     WITH RECURSIVE walk AS (
@@ -449,38 +425,21 @@ _TRAVERSAL_SQL_FORWARD = text(
               CAST(:include_stale AS boolean)
               OR (n.last_seen IS NOT NULL AND e.last_seen IS NOT NULL)
           )
-    ) CYCLE id SET is_cycle USING path,
-    deduped AS (
+    ) CYCLE id SET is_cycle USING path
+    SELECT id, kind, name, source, source_scope, properties, last_seen, depth,
+           via_edge_kind, parent_node_id, via_edge_id, via_edge_source,
+           via_edge_last_seen
+    FROM (
         SELECT DISTINCT ON (id)
             id, kind, name, source, source_scope, properties, last_seen, depth,
             via_edge_kind, parent_node_id, via_edge_id, via_edge_source,
-            via_edge_last_seen,
-            octet_length(kind) + octet_length(name)
-                + COALESCE(octet_length(source_scope), 0)
-                + COALESCE(octet_length(CAST(properties AS text)), 0) AS row_bytes
+            via_edge_last_seen
         FROM walk
         WHERE depth <= :depth
           AND NOT is_cycle
         ORDER BY id, depth, name, parent_node_id, via_edge_id
-    ),
-    sized AS (
-        SELECT deduped.*,
-               SUM(row_bytes) OVER (ORDER BY depth, name, id) AS cumulative_bytes
-        FROM deduped
-    )
-    SELECT id, kind, name, source, source_scope,
-           CASE
-               WHEN CAST(:byte_budget AS bigint) IS NULL
-                    OR cumulative_bytes <= CAST(:byte_budget AS bigint)
-               THEN properties
-           END AS properties,
-           last_seen, depth, via_edge_kind, parent_node_id, via_edge_id,
-           via_edge_source, via_edge_last_seen, cumulative_bytes
-    FROM sized
-    WHERE CAST(:byte_budget AS bigint) IS NULL
-       OR cumulative_bytes - row_bytes <= CAST(:byte_budget AS bigint)
+    ) deduped
     ORDER BY depth, name, id
-    LIMIT :row_limit
     """
 )
 
@@ -516,7 +475,7 @@ async def _resolve_endpoint_id(
 #: Bounds for :func:`bounded_closure` (#3764). The ``query_topology``
 #: closure answer stops at whichever comes first: this many nodes (root
 #: included), this many stored bytes of node kind, name, scope and
-#: properties, or this much database time for the traversal statement.
+#: properties, or this much time for the whole walk.
 CLOSURE_MAX_NODES: Final[int] = 2000
 CLOSURE_MAX_BYTES: Final[int] = 4 * 1024 * 1024
 CLOSURE_TIME_BUDGET_MS: Final[int] = 5000
@@ -524,7 +483,7 @@ CLOSURE_TIME_BUDGET_MS: Final[int] = 5000
 #: Why a bounded closure stopped early (#3764). ``hop_limit``: more nodes
 #: exist past the requested depth. ``node_limit`` / ``byte_limit``: the
 #: answer is the first part of the closure in ``(depth, name, id)`` order.
-#: ``time_budget``: the traversal ran out of time and returned no nodes.
+#: ``time_budget``: the walk ran out of time and returned no nodes.
 ClosureLimit = Literal["hop_limit", "node_limit", "byte_limit", "time_budget"]
 
 #: PostgreSQL's ``query_canceled`` SQLSTATE, raised when
@@ -534,6 +493,171 @@ _QUERY_CANCELED_SQLSTATE: Final[str] = "57014"
 # ``set_config(..., true)`` is ``SET LOCAL`` with a bind parameter: the
 # timeout ends with the transaction (PG 16 manual §9.28.1).
 _SET_STATEMENT_TIMEOUT_SQL = text("SELECT set_config('statement_timeout', :timeout_ms, true)")
+
+# The bounded walk (#3764) runs one statement per hop instead of the
+# recursive CTE above, so the limits bound the database work itself and
+# not only the rows sent to Python. A hop statement expands only the
+# nodes kept at the previous hop (``:frontier``), skips every node already
+# in the answer (``:visited``), and returns at most ``:row_limit`` rows in
+# ``(name, id)`` order. ``:bytes_before`` carries the running byte total
+# into the hop, so the byte budget also cuts inside a hop: one row past
+# the budget comes back, with its properties left out, and shows that the
+# byte limit applied. The work per hop is the kept frontier times its
+# fan-out, and the walk stops asking as soon as a limit is reached. A
+# node reached through several parents in one hop keeps the parent and
+# edge with the smallest ids, the same choice the recursive CTE makes.
+#
+# ``row_bytes`` is the stored size of the node's kind, name, scope and
+# properties. Every value is a :named bind; nothing is interpolated.
+_CLOSURE_ANCHOR_SQL = text(
+    """
+    SELECT id, kind, name, source, source_scope,
+           CASE WHEN row_bytes <= CAST(:byte_budget AS bigint) THEN properties END AS properties,
+           last_seen,
+           0 AS depth,
+           CAST(NULL AS text) AS via_edge_kind,
+           CAST(NULL AS uuid) AS parent_node_id,
+           CAST(NULL AS uuid) AS via_edge_id,
+           CAST(NULL AS text) AS via_edge_source,
+           CAST(NULL AS timestamptz) AS via_edge_last_seen,
+           row_bytes AS cumulative_bytes
+    FROM (
+        SELECT n.id, n.kind, n.name, n.source, n.source_scope, n.properties, n.last_seen,
+               octet_length(n.kind) + octet_length(n.name)
+                   + COALESCE(octet_length(n.source_scope), 0)
+                   + COALESCE(octet_length(CAST(n.properties AS text)), 0) AS row_bytes
+        FROM graph_node n
+        WHERE n.id = :anchor_id
+          AND n.tenant_id = :tenant_id
+    ) anchor
+    """
+)
+
+_CLOSURE_STEP_SQL_REVERSE = text(
+    """
+    WITH step AS (
+        SELECT DISTINCT ON (n.id)
+            n.id            AS id,
+            n.kind          AS kind,
+            n.name          AS name,
+            n.source        AS source,
+            n.source_scope  AS source_scope,
+            n.properties    AS properties,
+            n.last_seen     AS last_seen,
+            e.kind          AS via_edge_kind,
+            e.to_node_id    AS parent_node_id,
+            e.id            AS via_edge_id,
+            e.source        AS via_edge_source,
+            e.last_seen     AS via_edge_last_seen,
+            octet_length(n.kind) + octet_length(n.name)
+                + COALESCE(octet_length(n.source_scope), 0)
+                + COALESCE(octet_length(CAST(n.properties AS text)), 0) AS row_bytes
+        FROM graph_edge e
+        JOIN graph_node n ON n.id = e.from_node_id
+        WHERE e.to_node_id = ANY(CAST(:frontier AS uuid[]))
+          AND e.tenant_id = :tenant_id
+          AND n.tenant_id = :tenant_id
+          AND n.id <> ALL(CAST(:visited AS uuid[]))
+          AND (n.source_scope IS NULL OR n.source_scope NOT LIKE 'legacy:%')
+          AND (CAST(:kind_filter AS text) IS NULL OR e.kind = :kind_filter)
+          AND (
+              CAST(:class_kinds AS text[]) IS NULL
+              OR e.kind = ANY(CAST(:class_kinds AS text[]))
+          )
+          AND (
+              CAST(:class_excluded_kinds AS text[]) IS NULL
+              OR e.kind <> ALL(CAST(:class_excluded_kinds AS text[]))
+          )
+          AND e.properties->>'superseded_by' IS NULL
+          AND (
+              CAST(:include_stale AS boolean)
+              OR (n.last_seen IS NOT NULL AND e.last_seen IS NOT NULL)
+          )
+        ORDER BY n.id, e.to_node_id, e.id
+    ),
+    sized AS (
+        SELECT step.*,
+               CAST(:bytes_before AS bigint)
+                   + SUM(row_bytes) OVER (ORDER BY name, id) AS cumulative_bytes
+        FROM step
+    )
+    SELECT id, kind, name, source, source_scope,
+           CASE WHEN cumulative_bytes <= CAST(:byte_budget AS bigint) THEN properties END
+               AS properties,
+           last_seen,
+           CAST(:depth AS integer) AS depth,
+           via_edge_kind, parent_node_id, via_edge_id, via_edge_source,
+           via_edge_last_seen, cumulative_bytes
+    FROM sized
+    WHERE cumulative_bytes - row_bytes <= CAST(:byte_budget AS bigint)
+    ORDER BY name, id
+    LIMIT :row_limit
+    """
+)
+
+# Forward hop (dependencies): the mirror of the reverse hop. Only the two
+# join columns and the parent column differ.
+_CLOSURE_STEP_SQL_FORWARD = text(
+    """
+    WITH step AS (
+        SELECT DISTINCT ON (n.id)
+            n.id            AS id,
+            n.kind          AS kind,
+            n.name          AS name,
+            n.source        AS source,
+            n.source_scope  AS source_scope,
+            n.properties    AS properties,
+            n.last_seen     AS last_seen,
+            e.kind          AS via_edge_kind,
+            e.from_node_id  AS parent_node_id,
+            e.id            AS via_edge_id,
+            e.source        AS via_edge_source,
+            e.last_seen     AS via_edge_last_seen,
+            octet_length(n.kind) + octet_length(n.name)
+                + COALESCE(octet_length(n.source_scope), 0)
+                + COALESCE(octet_length(CAST(n.properties AS text)), 0) AS row_bytes
+        FROM graph_edge e
+        JOIN graph_node n ON n.id = e.to_node_id
+        WHERE e.from_node_id = ANY(CAST(:frontier AS uuid[]))
+          AND e.tenant_id = :tenant_id
+          AND n.tenant_id = :tenant_id
+          AND n.id <> ALL(CAST(:visited AS uuid[]))
+          AND (n.source_scope IS NULL OR n.source_scope NOT LIKE 'legacy:%')
+          AND (CAST(:kind_filter AS text) IS NULL OR e.kind = :kind_filter)
+          AND (
+              CAST(:class_kinds AS text[]) IS NULL
+              OR e.kind = ANY(CAST(:class_kinds AS text[]))
+          )
+          AND (
+              CAST(:class_excluded_kinds AS text[]) IS NULL
+              OR e.kind <> ALL(CAST(:class_excluded_kinds AS text[]))
+          )
+          AND e.properties->>'superseded_by' IS NULL
+          AND (
+              CAST(:include_stale AS boolean)
+              OR (n.last_seen IS NOT NULL AND e.last_seen IS NOT NULL)
+          )
+        ORDER BY n.id, e.from_node_id, e.id
+    ),
+    sized AS (
+        SELECT step.*,
+               CAST(:bytes_before AS bigint)
+                   + SUM(row_bytes) OVER (ORDER BY name, id) AS cumulative_bytes
+        FROM step
+    )
+    SELECT id, kind, name, source, source_scope,
+           CASE WHEN cumulative_bytes <= CAST(:byte_budget AS bigint) THEN properties END
+               AS properties,
+           last_seen,
+           CAST(:depth AS integer) AS depth,
+           via_edge_kind, parent_node_id, via_edge_id, via_edge_source,
+           via_edge_last_seen, cumulative_bytes
+    FROM sized
+    WHERE cumulative_bytes - row_bytes <= CAST(:byte_budget AS bigint)
+    ORDER BY name, id
+    LIMIT :row_limit
+    """
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -594,10 +718,7 @@ async def _traverse(
     relation_class: str | None,
     include_stale: bool,
     reverse: bool,
-    row_limit: int | None = None,
-    byte_budget: int | None = None,
-    timeout_ms: int | None = None,
-) -> tuple[TopologyNode, list[Row[Any]] | None]:
+) -> list[TopologyNode]:
     """Shared dependents/dependencies recursive-CTE traversal.
 
     Picks the reverse or forward literal statement and runs it
@@ -617,12 +738,6 @@ async def _traverse(
       reads as "safe to delete" for the pre-destructive blast-radius
       use case and is the RDC #789 N2 false-negative this resolution
       closes.
-
-    Returns the anchor as a depth-0 row plus the raw result rows.
-    ``row_limit`` / ``byte_budget`` / ``timeout_ms`` (#3764) are the
-    bounds :func:`bounded_closure` passes; the unbounded verbs leave them
-    ``None``. When ``timeout_ms`` is set and PostgreSQL cancels the
-    statement, the rows are ``None`` instead of an exception.
     """
     sql = _TRAVERSAL_SQL_REVERSE if reverse else _TRAVERSAL_SQL_FORWARD
     tenant_id = str(operator.tenant_id)
@@ -646,39 +761,97 @@ async def _traverse(
         # cut-over a ``(kind, name)`` pair can exist in several
         # scopes, and the resolver refuses rather than guessing).
         anchor = await resolve_node(session, operator.tenant_id, name_or_alias, kind)
-        root = _anchor_root(anchor)
-        if timeout_ms is not None:
-            await session.execute(_SET_STATEMENT_TIMEOUT_SQL, {"timeout_ms": str(timeout_ms)})
-        try:
-            result = await session.execute(
-                sql,
-                {
-                    "anchor_id": str(anchor.id),
-                    "tenant_id": tenant_id,
-                    "depth": depth,
-                    "kind_filter": kind_filter,
-                    "class_kinds": class_kinds,
-                    "class_excluded_kinds": class_excluded_kinds,
-                    "include_stale": include_stale,
-                    "row_limit": row_limit,
-                    "byte_budget": byte_budget,
-                },
-            )
-        except DBAPIError as exc:
-            if timeout_ms is None or not _is_statement_timeout(exc):
-                raise
-            return root, None
-        rows = list(result.fetchall())
+        result = await session.execute(
+            sql,
+            {
+                "anchor_id": str(anchor.id),
+                "tenant_id": tenant_id,
+                "depth": depth,
+                "kind_filter": kind_filter,
+                "class_kinds": class_kinds,
+                "class_excluded_kinds": class_excluded_kinds,
+                "include_stale": include_stale,
+            },
+        )
+        rows = result.fetchall()
 
-    return root, rows
+    return [_row_to_node(row) for row in rows]
 
 
-async def _unbounded_closure(
-    operator: Operator, name_or_alias: str, **kwargs: Any
-) -> list[TopologyNode]:
-    """Run :func:`_traverse` with no bounds and map every row."""
-    _root, rows = await _traverse(operator, name_or_alias, **kwargs)
-    return [_row_to_node(row) for row in rows or []]
+async def _execute_within_deadline(
+    session: AsyncSession, sql: Any, params: dict[str, Any], deadline: float
+) -> list[Row[Any]] | None:
+    """Run *sql* with the time left until *deadline* as its ``statement_timeout``.
+
+    Returns ``None`` when the deadline has passed or PostgreSQL cancelled
+    the statement. *deadline* is a :func:`time.monotonic` value.
+    """
+    remaining_ms = math.ceil((deadline - time.monotonic()) * 1000)
+    if remaining_ms <= 0:
+        return None
+    await session.execute(_SET_STATEMENT_TIMEOUT_SQL, {"timeout_ms": str(remaining_ms)})
+    try:
+        result = await session.execute(sql, params)
+    except DBAPIError as exc:
+        if not _is_statement_timeout(exc):
+            raise
+        return None
+    return list(result.fetchall())
+
+
+async def _bounded_walk(
+    session: AsyncSession,
+    *,
+    anchor_id: str,
+    reverse: bool,
+    depth: int,
+    budget: ClosureBudget,
+    params: dict[str, Any],
+    deadline: float,
+) -> list[Row[Any]] | None:
+    """Walk hop by hop from *anchor_id* until a limit stops the walk.
+
+    Returns rows in ``(depth, name, id)`` order: at most ``max_nodes + 1``
+    of them, at most one past the byte budget, and at most one past
+    *depth* (fetched with ``LIMIT 1``; it only shows that more nodes
+    exist). The walk stops asking the database as soon as one of those
+    rows is in hand, or when a hop returns nothing. ``None`` means the
+    time budget ran out.
+    """
+    step_sql = _CLOSURE_STEP_SQL_REVERSE if reverse else _CLOSURE_STEP_SQL_FORWARD
+    rows = await _execute_within_deadline(
+        session, _CLOSURE_ANCHOR_SQL, {**params, "anchor_id": anchor_id}, deadline
+    )
+    if not rows:
+        return rows
+    frontier = [anchor_id]
+    visited = [anchor_id]
+    for hop in range(1, depth + 2):
+        remaining = budget.max_nodes + 1 - len(rows)
+        bytes_before = rows[-1]._mapping["cumulative_bytes"]
+        if remaining < 1 or bytes_before > budget.max_bytes:
+            break
+        step = await _execute_within_deadline(
+            session,
+            step_sql,
+            {
+                **params,
+                "frontier": frontier,
+                "visited": visited,
+                "depth": hop,
+                "row_limit": 1 if hop > depth else remaining,
+                "bytes_before": bytes_before,
+            },
+            deadline,
+        )
+        if step is None:
+            return None
+        if not step:
+            break
+        rows.extend(step)
+        frontier = [str(row._mapping["id"]) for row in step]
+        visited.extend(frontier)
+    return rows
 
 
 def _cut_closure_rows(
@@ -686,12 +859,13 @@ def _cut_closure_rows(
 ) -> tuple[list[TopologyNode], ClosureLimit | None]:
     """Keep the rows within *depth* and *budget*; name the limit that stopped them.
 
-    *rows* come from a walk one hop deeper than *depth*, capped at
-    ``max_nodes + 1`` rows and one row past the byte budget, all in
-    ``(depth, name, id)`` order. So a row past *depth* means more nodes
-    exist beyond the hop limit, and a row past either budget means the
-    node or byte limit cut the closure. The root is always kept, even when
-    it alone is over the byte budget (its properties are then left out).
+    *rows* come from :func:`_bounded_walk`: at most ``max_nodes + 1`` rows,
+    at most one row past the byte budget and at most one row past
+    *depth*, all in ``(depth, name, id)`` order. So a row past *depth*
+    means more nodes exist beyond the hop limit, and a row past either
+    budget means the node or byte limit cut the closure. The root is
+    always kept, even when it alone is over the byte budget (its
+    properties are then left out).
     """
     kept: list[TopologyNode] = []
     for row in rows:
@@ -723,16 +897,19 @@ async def bounded_closure(
 ) -> BoundedClosure:
     """Dependents (``reverse=True``) or dependencies closure under limits (#3764).
 
-    Same traversal, filters, ordering, tenant scope and anchor contract
-    as :func:`find_dependents` / :func:`find_dependencies`, but the walk
-    is bounded before rows reach Python:
+    Same filters, ordering, tenant scope and anchor contract as
+    :func:`find_dependents` / :func:`find_dependencies`, but the walk
+    itself is bounded (see :func:`_bounded_walk`):
 
-    * a ``statement_timeout`` of ``budget.time_budget_ms`` bounds the
-      database work; when it fires the answer has no nodes and
-      ``limit_hit="time_budget"``;
+    * each hop expands only the nodes kept so far and asks for at most
+      the nodes still allowed, so a dense graph cannot make the database
+      follow every path;
     * at most ``budget.max_nodes`` nodes and ``budget.max_bytes`` stored
       bytes come back; the answer is then the first part of the closure;
-    * the walk goes one hop past *depth* so the answer can say whether
+    * ``budget.time_budget_ms`` bounds the whole walk: every statement
+      runs with the time left as its ``statement_timeout``. When it runs
+      out the answer has no nodes and ``limit_hit="time_budget"``;
+    * the walk probes one hop past *depth* so the answer can say whether
       nodes exist beyond it (``limit_hit="hop_limit"``).
 
     The result never claims a complete closure when a limit applied.
@@ -740,19 +917,32 @@ async def bounded_closure(
     budget = budget or ClosureBudget()
     if budget.max_nodes < 1 or budget.max_bytes < 1 or budget.time_budget_ms < 1:
         raise ValueError("closure budget limits must be positive")
-    root, rows = await _traverse(
-        operator,
-        name_or_alias,
-        depth=depth + 1,
-        kind=kind,
-        kind_filter=kind_filter,
-        relation_class=relation_class,
-        include_stale=include_stale,
-        reverse=reverse,
-        row_limit=budget.max_nodes + 1,
-        byte_budget=budget.max_bytes,
-        timeout_ms=budget.time_budget_ms,
-    )
+    deadline = time.monotonic() + budget.time_budget_ms / 1000
+    class_kinds, class_excluded_kinds = relation_class_kind_filter(relation_class)
+    params = {
+        "tenant_id": str(operator.tenant_id),
+        "kind_filter": kind_filter,
+        "class_kinds": class_kinds,
+        "class_excluded_kinds": class_excluded_kinds,
+        "include_stale": include_stale,
+        "byte_budget": budget.max_bytes,
+    }
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        # Same anchor contract as the unbounded verbs: ``NodeNotFoundError``
+        # for an untracked anchor, ``AmbiguousNodeError`` for a bare name
+        # that resolves to several rows.
+        anchor = await resolve_node(session, operator.tenant_id, name_or_alias, kind)
+        root = _anchor_root(anchor)
+        rows = await _bounded_walk(
+            session,
+            anchor_id=str(anchor.id),
+            reverse=reverse,
+            depth=depth,
+            budget=budget,
+            params=params,
+            deadline=deadline,
+        )
     if rows is None:
         return BoundedClosure(root, (), "time_budget", depth, budget)
     nodes, limit_hit = _cut_closure_rows(rows, depth=depth, budget=budget)
@@ -825,7 +1015,7 @@ async def find_dependents(
       *Not* equivalent to "safe to delete" — the call has produced no
       blast-radius signal.
     """
-    return await _unbounded_closure(
+    return await _traverse(
         operator,
         name_or_alias,
         depth=depth,
@@ -860,7 +1050,7 @@ async def find_dependencies(
     :func:`find_dependents` for the full contract). An empty return
     list is structurally impossible.
     """
-    return await _unbounded_closure(
+    return await _traverse(
         operator,
         name_or_alias,
         depth=depth,

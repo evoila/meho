@@ -27,14 +27,18 @@ Coverage matrix:
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
+from typing import Any
 from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy.exc import DBAPIError
 
+import meho_backplane.topology.query as query_module
 from meho_backplane.topology.evidence import (
     FRESHNESS_COPY,
     MAPPED_RELATION_KINDS,
@@ -502,3 +506,162 @@ def test_cut_closure_rows_reports_hop_limit_for_a_row_past_the_depth() -> None:
 async def test_bounded_closure_rejects_a_non_positive_budget(budget: ClosureBudget) -> None:
     with pytest.raises(ValueError, match="must be positive"):
         await bounded_closure(None, "x", reverse=True, budget=budget)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# #3764 — the hop-by-hop walk stops asking the database at the limits
+# (fake session, no database)
+# ---------------------------------------------------------------------------
+
+
+class _FakeResult:
+    def __init__(self, rows: list[_FakeRow]) -> None:
+        self._rows = rows
+
+    def fetchall(self) -> list[_FakeRow]:
+        return self._rows
+
+
+class _CancelledError(Exception):
+    """What asyncpg raises when ``statement_timeout`` stops a statement."""
+
+    sqlstate = "57014"
+
+
+class _FakeSession:
+    """Answers the anchor and hop statements from canned rows; records each hop."""
+
+    def __init__(
+        self,
+        hops: dict[int, list[_FakeRow]],
+        *,
+        cancel_hop: int | None = None,
+        delay_s: float = 0.0,
+    ) -> None:
+        self.hops = hops
+        self.cancel_hop = cancel_hop
+        self.delay_s = delay_s
+        self.asked: list[dict[str, Any]] = []
+
+    async def __aenter__(self) -> _FakeSession:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+    async def execute(self, sql: Any, params: dict[str, Any]) -> _FakeResult:
+        if self.delay_s:
+            await asyncio.sleep(self.delay_s)
+        if "statement_timeout" in str(sql):
+            return _FakeResult([])
+        if "anchor_id" in params:
+            return _FakeResult([_FakeRow("root", 0, 10)])
+        # Copy the bind lists: the walk grows ``visited`` in place after the hop.
+        self.asked.append({k: list(v) if isinstance(v, list) else v for k, v in params.items()})
+        if params["depth"] == self.cancel_hop:
+            raise DBAPIError("hop", {}, _CancelledError())
+        return _FakeResult(self.hops.get(params["depth"], [])[: params["row_limit"]])
+
+
+def _hop_rows(hop: int, count: int, *, row_bytes: int = 10) -> list[_FakeRow]:
+    return [_FakeRow(f"hop{hop}-{i:04d}", hop, 10 + row_bytes * (i + 1)) for i in range(count)]
+
+
+async def _walk(
+    session: _FakeSession, monkeypatch: pytest.MonkeyPatch, **kwargs: Any
+) -> query_module.BoundedClosure:
+    anchor = SimpleNamespace(
+        id=uuid4(),
+        kind="host",
+        name="root",
+        source="auto",
+        source_scope=None,
+        properties={},
+        last_seen=None,
+    )
+
+    async def _resolve(*args: Any, **kw: Any) -> SimpleNamespace:
+        return anchor
+
+    monkeypatch.setattr(query_module, "get_sessionmaker", lambda: lambda: session)
+    monkeypatch.setattr(query_module, "resolve_node", _resolve)
+    operator = SimpleNamespace(tenant_id=uuid4())
+    return await bounded_closure(operator, "root", reverse=True, **kwargs)  # type: ignore[arg-type]
+
+
+async def test_walk_stops_asking_at_the_node_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The first hop is asked for the nodes still allowed; the next hop is never asked."""
+    session = _FakeSession({1: _hop_rows(1, 50), 2: _hop_rows(2, 50)})
+
+    answer = await _walk(session, monkeypatch, depth=4, budget=ClosureBudget(max_nodes=10))
+
+    assert answer.limit_hit == "node_limit"
+    assert len(answer.nodes) == 10
+    assert [hop["depth"] for hop in session.asked] == [1]
+    assert session.asked[0]["row_limit"] == 10
+    assert session.asked[0]["frontier"] == [str(answer.root.id)]
+
+
+async def test_walk_expands_only_kept_nodes_and_probes_one_hop_past_depth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hops = {1: _hop_rows(1, 3), 2: _hop_rows(2, 2), 3: _hop_rows(3, 5)}
+    session = _FakeSession(hops)
+
+    answer = await _walk(session, monkeypatch, depth=2)
+
+    assert answer.limit_hit == "hop_limit"
+    assert [n.name for n in answer.nodes] == ["root"] + [
+        r._mapping["name"] for r in [*hops[1], *hops[2]]
+    ]
+    root_id = str(answer.root.id)
+    hop1_ids = [str(r._mapping["id"]) for r in hops[1]]
+    hop2_ids = [str(r._mapping["id"]) for r in hops[2]]
+    assert [hop["depth"] for hop in session.asked] == [1, 2, 3]
+    assert session.asked[1]["frontier"] == hop1_ids
+    assert session.asked[1]["visited"] == [root_id, *hop1_ids]
+    assert session.asked[2]["frontier"] == hop2_ids
+    assert session.asked[2]["visited"] == [root_id, *hop1_ids, *hop2_ids]
+    # The probe past ``depth`` only needs to know whether a node exists.
+    assert session.asked[2]["row_limit"] == 1
+    # Each hop starts from the running byte total of the last row in hand.
+    assert [hop["bytes_before"] for hop in session.asked] == [
+        10,
+        hops[1][-1]._mapping["cumulative_bytes"],
+        hops[2][-1]._mapping["cumulative_bytes"],
+    ]
+
+
+async def test_walk_stops_asking_at_the_byte_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _FakeSession({1: _hop_rows(1, 5, row_bytes=100), 2: _hop_rows(2, 5)})
+
+    answer = await _walk(session, monkeypatch, depth=4, budget=ClosureBudget(max_bytes=250))
+
+    assert answer.limit_hit == "byte_limit"
+    assert [n.name for n in answer.nodes] == ["root", "hop1-0000", "hop1-0001"]
+    assert [hop["depth"] for hop in session.asked] == [1]
+
+
+async def test_walk_stops_asking_when_a_hop_runs_out_of_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _FakeSession({1: _hop_rows(1, 3), 2: _hop_rows(2, 3)}, cancel_hop=2)
+
+    answer = await _walk(session, monkeypatch, depth=4)
+
+    assert answer.limit_hit == "time_budget"
+    assert answer.nodes == ()
+    assert answer.root.name == "root"
+    assert [hop["depth"] for hop in session.asked] == [1, 2]
+
+
+async def test_walk_stops_asking_once_the_deadline_has_passed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The time budget covers the whole walk, not each statement on its own."""
+    session = _FakeSession({1: _hop_rows(1, 3)}, delay_s=0.002)
+
+    answer = await _walk(session, monkeypatch, depth=4, budget=ClosureBudget(time_budget_ms=1))
+
+    assert answer.limit_hit == "time_budget"
+    assert session.asked == []

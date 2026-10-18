@@ -63,8 +63,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from sqlalchemy import event
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.db import engine as engine_module
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import GraphEdge, GraphNode, Target
 from meho_backplane.topology.evidence import classify_freshness
@@ -1351,12 +1353,14 @@ def test_module_imports_cleanly() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _seed_new_star_fixture(*, leaves: int, pad_bytes: int = 0) -> None:
+async def _seed_new_star_fixture(*, leaves: int, pad_bytes: int = 0, children: int = 0) -> None:
     """New #3764 fixture: ``star-hub`` with *leaves* dependents ``star-leaf-NNNN``.
 
     Each leaf ``runs-on`` the hub, so a dependents walk from the hub has
     one level with *leaves* nodes. *pad_bytes* adds a string of that size
-    to every leaf's properties, for the byte-limit test.
+    to every leaf's properties, for the byte-limit test. *children* adds
+    that many ``star-child-NNNN-MMMM`` nodes under every leaf, a second
+    level that a walk cut at the first level must never ask for.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session, session.begin():
@@ -1373,7 +1377,23 @@ async def _seed_new_star_fixture(*, leaves: int, pad_bytes: int = 0) -> None:
             )
             for i in range(leaves)
         ]
+        child_nodes = [
+            (
+                leaf,
+                GraphNode(
+                    id=uuid.uuid4(),
+                    tenant_id=TENANT_A_ID,
+                    kind="app",
+                    name=f"star-child-{i:04d}-{j:04d}",
+                    source="auto",
+                    discovered_by="test",
+                ),
+            )
+            for i, leaf in enumerate(leaf_nodes)
+            for j in range(children)
+        ]
         session.add_all(leaf_nodes)
+        session.add_all(child for _leaf, child in child_nodes)
         await session.flush()
         session.add_all(
             GraphEdge(
@@ -1387,6 +1407,36 @@ async def _seed_new_star_fixture(*, leaves: int, pad_bytes: int = 0) -> None:
             )
             for leaf in leaf_nodes
         )
+        session.add_all(
+            GraphEdge(
+                id=uuid.uuid4(),
+                tenant_id=TENANT_A_ID,
+                from_node_id=child.id,
+                to_node_id=leaf.id,
+                kind="runs-on",
+                source="auto",
+                discovered_by="test",
+            )
+            for leaf, child in child_nodes
+        )
+
+
+class _HopStatements:
+    """Record the hop statements the bounded walk sends to PostgreSQL."""
+
+    def __init__(self) -> None:
+        self.hops = 0
+
+    def __enter__(self) -> _HopStatements:
+        event.listen(engine_module._engine.sync_engine, "before_cursor_execute", self._record)
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        event.remove(engine_module._engine.sync_engine, "before_cursor_execute", self._record)
+
+    def _record(self, conn: Any, cursor: Any, statement: str, *rest: Any) -> None:
+        if "WITH step AS" in statement:
+            self.hops += 1
 
 
 async def _seed_new_dense_mesh_fixture(*, layers: int, width: int) -> None:
@@ -1394,8 +1444,9 @@ async def _seed_new_dense_mesh_fixture(*, layers: int, width: int) -> None:
 
     Every node of a layer depends on every node of the layer above it, so
     the number of distinct walks grows as ``width ** layers``. The
-    recursive CTE follows each walk, which is the dense fan-out a depth
-    limit alone does not bound.
+    recursive CTE behind the unbounded verbs follows each walk, which is
+    the dense fan-out a depth limit alone does not bound. The bounded walk
+    expands each node once, so it visits ``layers * width`` nodes.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session, session.begin():
@@ -1458,10 +1509,50 @@ async def test_bounded_closure_new_star_fixture_stops_at_byte_limit(pg_engine: N
 
 
 @_skip_no_docker
+async def test_bounded_closure_new_star_fixture_stops_asking_past_the_node_limit(
+    pg_engine: None,
+) -> None:
+    """A walk cut at the first hop never asks for the second hop at all."""
+    await _seed_new_star_fixture(leaves=50, children=20)  # 1000 nodes at depth 2
+    operator = _operator(TENANT_A_ID)
+
+    with _HopStatements() as statements:
+        answer = await bounded_closure(
+            operator, "star-hub", reverse=True, budget=ClosureBudget(max_nodes=10)
+        )
+
+    assert answer.limit_hit == "node_limit"
+    assert len(answer.nodes) == 10
+    assert all(n.depth <= 1 for n in answer.nodes)
+    assert statements.hops == 1
+
+
+@_skip_no_docker
+async def test_bounded_closure_new_dense_mesh_fixture_expands_each_node_once(
+    pg_engine: None,
+) -> None:
+    """The dense mesh costs one hop statement per layer, not one walk per path."""
+    await _seed_new_dense_mesh_fixture(layers=8, width=6)
+    operator = _operator(TENANT_A_ID)
+
+    with _HopStatements() as statements:
+        answer = await bounded_closure(operator, "mesh-root", reverse=True)
+
+    assert answer.limit_hit is None
+    assert len(answer.nodes) == 1 + 8 * 6
+    assert [n.depth for n in answer.nodes] == sorted(n.depth for n in answer.nodes)
+    # Eight layers plus the empty probe one hop past the last layer.
+    assert statements.hops == 9
+    assert [n.id for n in answer.nodes] == [
+        n.id for n in await find_dependents(operator, "mesh-root")
+    ]
+
+
+@_skip_no_docker
 async def test_bounded_closure_new_dense_mesh_fixture_stops_at_time_budget(
     pg_engine: None,
 ) -> None:
-    """The dense mesh stops at the time budget with no nodes and a known root."""
+    """A walk that runs out of time has no nodes and a known root."""
     await _seed_new_dense_mesh_fixture(layers=8, width=6)
     operator = _operator(TENANT_A_ID)
 
@@ -1472,7 +1563,7 @@ async def test_bounded_closure_new_dense_mesh_fixture_stops_at_time_budget(
     assert answer.limit_hit == "time_budget"
     assert answer.nodes == ()
     assert answer.root.name == "mesh-root"
-    # The cancelled statement leaves the pool usable for the next query.
+    # A cancelled statement leaves the pool usable for the next query.
     shallow = await bounded_closure(operator, "mesh-root", reverse=True, depth=1)
     assert shallow.limit_hit == "hop_limit"
     assert len(shallow.nodes) == 7

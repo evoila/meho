@@ -38,7 +38,7 @@ from functools import lru_cache
 from typing import Final
 from uuid import UUID
 
-from pydantic import BaseModel, Field, HttpUrl, field_validator
+from pydantic import BaseModel, Field, HttpUrl, ValidationInfo, field_validator
 
 from meho_backplane.retrieval.embedding import (
     BAKED_MODEL_CACHE_DIR,
@@ -595,6 +595,18 @@ class Settings(BaseModel):
         When set, one event is written per request and a daily job deletes
         events older than this many days. Range ``[1, 3650]``. Env var
         ``REQUEST_USAGE_RETENTION_DAYS``; an empty value counts as unset.
+    audit_wrapper_rows_retired:
+        Stop writing the routine REST and MCP request rows into
+        ``audit_log`` (#3757). Default ``False``: every authenticated
+        request still writes one ``legacy_request`` row. When ``True``,
+        reads, searches, lists, resource reads and ordinary validation
+        failures write only a request usage event; a refused request
+        (401 / 403) writes a ``policy_decision`` row; a MEHO change with no
+        record of its own writes an ``operation_execution`` row. See
+        :mod:`meho_backplane.audit_cutover`. Needs
+        ``REQUEST_USAGE_RETENTION_DAYS``: without usage collection, routine
+        activity would leave no record at all, so the pod refuses to start.
+        Env var ``AUDIT_WRAPPER_ROWS_RETIRED``.
     result_handle_max_spill_rows:
         Upper bound on how many rows the reducer spills into the
         :class:`~meho_backplane.connectors.result_handle_store.ResultHandleStore`
@@ -1485,6 +1497,9 @@ class Settings(BaseModel):
     # Request usage events (#3734). ``None`` = collection off. There is no
     # default window on purpose: the operator chooses how long to keep them.
     request_usage_retention_days: int | None = Field(default=None, ge=1, le=3650)
+    # #3757: off by default. Must stay declared after
+    # ``request_usage_retention_days``: its validator reads that value.
+    audit_wrapper_rows_retired: bool = False
     result_handle_max_spill_rows: int = Field(default=10000, gt=0)
     result_cache_redis_url: str = Field(default="redis://localhost:6379", min_length=1)
     result_cache_redis_password: str | None = Field(default=None)
@@ -2337,6 +2352,25 @@ class Settings(BaseModel):
                 ) from exc
         return value
 
+    @field_validator("audit_wrapper_rows_retired")
+    @classmethod
+    def _wrapper_cutover_needs_request_usage(cls, value: bool, info: ValidationInfo) -> bool:
+        """Refuse to start when the wrapper rows are retired without usage events (#3757).
+
+        After the cutover, routine REST and MCP activity is recorded only
+        as request usage events. Those are written only when
+        ``REQUEST_USAGE_RETENTION_DAYS`` is set. Retiring the rows without
+        it would make that activity leave no trace, so this fails closed.
+        """
+        if value and info.data.get("request_usage_retention_days") is None:
+            raise ValueError(
+                "AUDIT_WRAPPER_ROWS_RETIRED=true needs REQUEST_USAGE_RETENTION_DAYS. "
+                "Without request usage events, routine REST and MCP activity would "
+                "leave no record. Set REQUEST_USAGE_RETENTION_DAYS, or set "
+                "AUDIT_WRAPPER_ROWS_RETIRED=false."
+            )
+        return value
+
 
 # Flat env-var -> Settings constructor, one kwarg per field: the length is
 # the field count, not branching complexity (McCabe is trivial). Extracting
@@ -2574,6 +2608,9 @@ def get_settings() -> Settings:
             os.environ.get("CHECKS_EVIDENCE_PRUNE_ENABLED", "true"),
         ),
         request_usage_retention_days=request_usage_retention_days,
+        audit_wrapper_rows_retired=parse_bool_env(
+            os.environ.get("AUDIT_WRAPPER_ROWS_RETIRED", "false"),
+        ),
         result_handle_max_spill_rows=int(
             os.environ.get("RESULT_HANDLE_MAX_SPILL_ROWS", "10000"),
         ),

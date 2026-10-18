@@ -298,6 +298,10 @@ async def test_revoke_writes_audit_trail(client: TestClient) -> None:
     assert row.method == "INTERNAL"
     assert row.tenant_id == _TENANT_A
     assert row.payload["runner"] == "edge-runner"
+    # #3757: the row names the operator who revoked and the request.
+    assert row.operator_sub == "op-admin"
+    assert row.actor_sub is None
+    assert row.request_id is not None
 
 
 @pytest.mark.asyncio

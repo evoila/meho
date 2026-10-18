@@ -27,7 +27,7 @@ import json
 from typing import Any, Final, Literal, NoReturn, cast
 from uuid import UUID
 
-from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
 from meho_backplane.operations.ingest import (
     AmbiguousConnectorScopeError,
     BuiltinConnectorWriteForbiddenError,
@@ -352,5 +352,7 @@ def raise_invalid_params_for_builtin_write_forbidden(
     :func:`~meho_backplane.mcp.tools.doc_collections_update` uses for the
     global doc-collection seat (#3616). The message names the platform
     requirement so an agent can escalate rather than retry blindly.
+    It raises :class:`McpPermissionDeniedError` so the refusal keeps its
+    decision row once the wrapper rows are retired (#3757).
     """
-    raise McpInvalidParamsError(str(exc), data=exc.detail) from exc
+    raise McpPermissionDeniedError(str(exc), data=exc.detail) from exc

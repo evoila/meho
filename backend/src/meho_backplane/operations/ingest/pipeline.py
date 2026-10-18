@@ -88,6 +88,7 @@ import structlog
 from packaging.version import InvalidVersion, Version
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from meho_backplane.audit_cutover import note_preview
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.profile import AuthSchemeName, ExecutionProfile
 from meho_backplane.connectors.registry import product_impl_id_round_trips
@@ -766,6 +767,8 @@ class IngestionPipelineService:
         )
 
         if dry_run:
+            # A dry run changes nothing, so the request needs no audit row (#3757).
+            note_preview()
             return await self._dispatch_dry_run(
                 product=product,
                 version=version,

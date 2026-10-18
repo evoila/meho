@@ -77,11 +77,12 @@ import re
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any, Final, cast
+from typing import Any, Final, NamedTuple, cast
 
 import structlog
 from sqlalchemy import CursorResult, and_, or_, select, update
@@ -1023,6 +1024,30 @@ async def _write_audit_row(
     await session.flush()
 
 
+class ResumeRequester(NamedTuple):
+    """The requester of an approval request, as saved on its row (#4217).
+
+    Bound in :data:`resume_requester_var` while an approved composite step is
+    re-run, so a later step that waits again is saved for this requester.
+    """
+
+    sub: str
+    act: str | None
+    name: str | None
+
+
+#: The requester of the approval request whose composite is being re-run
+#: (#4217). Bound by :func:`composite_resume_binding` on both resume paths
+#: (the reviewer's and the agent's). A composite step that waits again
+#: during the re-run is saved for this requester, so the new request belongs
+#: to whoever started the operation, whoever runs the re-run. ``None``
+#: outside such a re-run.
+resume_requester_var: ContextVar[ResumeRequester | None] = ContextVar(
+    "resume_requester",
+    default=None,
+)
+
+
 # code-quality-allow: already over the 100-line limit on main before #1481
 # (105 lines); the principal_act source fix adds a handful of lines, not the
 # bulk — splitting the row-build + audit-write is out of scope for this fix.
@@ -1041,6 +1066,7 @@ async def create_pending_request(
     preview_hash: str | None = None,
     resume_parent: dict[str, Any] | None = None,
     idempotency_key: str | None = None,
+    requester: ResumeRequester | None = None,
 ) -> ApprovalRequest:
     """Insert a pending :class:`ApprovalRequest` row + one audit row.
 
@@ -1086,6 +1112,9 @@ async def create_pending_request(
             dispatchable descriptor call, so
             :func:`resume_dispatch_after_approval` re-dispatches this parent
             composite ``_approved=True`` with the approved sub-op pre-cleared.
+            Optional keys (#4217): ``"state"``, the JSON the composite saved
+            for that re-entry, and ``"after_main_effect": true`` for a step
+            that runs after the composite's main change exists.
             ``None`` for a direct-op park (the generic re-dispatch of
             ``op_id`` is used).
         idempotency_key: Optional client-chosen retry key (#3486). When the
@@ -1100,6 +1129,12 @@ async def create_pending_request(
             carries the expired one as ``_expired_request`` (else
             ``None``), so the caller can publish ``approval.expired``
             after commit. ``None`` keeps the old behaviour.
+        requester: The requester to save on the row instead of *operator*
+            (#4217). Set for a composite step that waits again while an
+            approved request is re-run: the new request belongs to the
+            requester of the request being re-run, not to the reviewer who
+            runs it. ``None`` saves *operator* (and the bound actor) as the
+            requester.
 
     Returns:
         The flushed :class:`ApprovalRequest` row (new, or reused).
@@ -1151,6 +1186,10 @@ async def create_pending_request(
     # ``None``. The prior ``getattr(operator, "identity_act", None)`` was
     # dead code — ``Operator`` has no such field, so it was always ``None``.
     principal_act: str | None = resolve_actor_sub()
+    principal_sub = operator.sub
+    principal_name = operator.name
+    if requester is not None:
+        principal_sub, principal_act, principal_name = requester
 
     # External change-ticket ref (work_ref I2-T1 #1659): read from the
     # same request-time ContextVar the audit writers read (bound at the
@@ -1185,13 +1224,13 @@ async def create_pending_request(
         id=uuid.uuid4(),
         tenant_id=operator.tenant_id,
         run_id=run_id,
-        principal_sub=operator.sub,
+        principal_sub=principal_sub,
         principal_act=principal_act,
         # Requester display name hoisted from the JWT ``name`` claim at park
         # time (#3300) so every approvals surface renders a name alongside
         # ``principal_sub``. ``None`` when the token carried no name --
         # fail-open to the raw sub. Same pattern as audit_log.principal_name.
-        principal_name=operator.name,
+        principal_name=principal_name,
         op_id=op_id,
         connector_id=connector_id,
         target_id=target_id,
@@ -1239,7 +1278,7 @@ async def create_pending_request(
         approval_request_id=str(request.id),
         op_id=op_id,
         connector_id=connector_id,
-        principal_sub=operator.sub,
+        principal_sub=principal_sub,
         tenant_id=str(operator.tenant_id),
         run_id=str(run_id) if run_id else None,
     )
@@ -1846,12 +1885,18 @@ def _resume_pre0036_denied(operator: Operator, request: ApprovalRequest) -> Any:
     )
 
 
+def requester_of(request: ApprovalRequest) -> ResumeRequester:
+    """The requester saved on *request* (#4217)."""
+    return ResumeRequester(request.principal_sub, request.principal_act, request.principal_name)
+
+
 @contextmanager
 def composite_resume_binding(
     *,
     subop_op_id: str,
     subop_params_hash: str,
     resume_parent: dict[str, Any] | None,
+    requester: ResumeRequester | None = None,
 ) -> Iterator[tuple[str, dict[str, Any]] | None]:
     """Set up the re-entry of a parent composite for an approved sub-op park.
 
@@ -1870,25 +1915,50 @@ def composite_resume_binding(
       :data:`~meho_backplane.operations.composite.composite_resume_scope_var`,
       which is never consumed, so a second governed sub-op that would need its
       own approval fails closed (``composite_resume_multi_gate_unsupported``)
-      instead of parking (#3351 review B1).
+      instead of parking (#3351 review B1). A step marked
+      ``after_main_effect`` is the exception: it may wait again (#4217).
     * ``resume_parent`` is ``None`` (a direct park) — yields ``None`` and sets
       nothing; the caller keeps its generic re-dispatch.
+
+    When the park saved a ``state`` (#4217), the block also binds
+    :data:`~meho_backplane.operations.composite.composite_resume_state_var`
+    with it and the park's ``after_main_effect`` mark, so the re-entered
+    composite can continue at the step that waited instead of running from
+    the start. It binds :data:`resume_requester_var` with *requester*, the
+    requester of the request being re-run, so a step that waits again is
+    saved for that requester on both resume paths (#4217).
     """
     if resume_parent is None:
         yield None
         return
 
     from meho_backplane.operations.composite import (
+        CompositeResumeState,
         composite_resume_scope_var,
+        composite_resume_state_var,
         composite_resume_var,
     )
 
+    parent_op_id = str(resume_parent["op_id"])
+    saved_state = resume_parent.get("state")
     approved_subop = (subop_op_id, subop_params_hash)
     resume_token = composite_resume_var.set(approved_subop)
     scope_token = composite_resume_scope_var.set(approved_subop)
+    state_token = composite_resume_state_var.set(
+        CompositeResumeState(
+            op_id=parent_op_id,
+            state=cast(dict[str, Any], saved_state),
+            after_main_effect=bool(resume_parent.get("after_main_effect")),
+        )
+        if isinstance(saved_state, dict)
+        else None
+    )
+    requester_token = resume_requester_var.set(requester)
     try:
-        yield str(resume_parent["op_id"]), cast(dict[str, Any], resume_parent["params"])
+        yield parent_op_id, cast(dict[str, Any], resume_parent["params"])
     finally:
+        resume_requester_var.reset(requester_token)
+        composite_resume_state_var.reset(state_token)
         composite_resume_scope_var.reset(scope_token)
         composite_resume_var.reset(resume_token)
 
@@ -1931,8 +2001,11 @@ async def _dispatch_resume_with_bound_context(
     pass. ``composite_resume_scope_var`` is bound too — unconsumed for the whole
     re-entry — so :func:`~meho_backplane.operations.composite.enforce_subop_policy`
     can fail closed (``composite_resume_multi_gate_unsupported``) if a second
-    governed sub-op would ever need its own approval, rather than re-park and
-    re-run the earlier legs on a second resume (#3351 review B1).
+    governed sub-op would need its own approval, rather than re-park and
+    re-run the earlier legs on a second resume (#3351 review B1). The
+    exception is a step marked ``after_main_effect`` (#4217): it saved where
+    to continue, so it may wait again. That new request is saved for the
+    requester of *request*, not for the reviewer who runs this re-run.
     """
     from meho_backplane.operations.dispatcher import dispatch
 
@@ -1951,6 +2024,7 @@ async def _dispatch_resume_with_bound_context(
             subop_op_id=request.op_id,
             subop_params_hash=request.params_hash,
             resume_parent=resume_parent,
+            requester=requester_of(request),
         ) as parent_call:
             dispatch_op_id, dispatch_params = (
                 parent_call if parent_call is not None else (request.op_id, effective_params)

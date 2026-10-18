@@ -59,6 +59,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.keycloak_admin import (
     KeycloakAdminClient,
     KeycloakClientConflictError,
@@ -68,6 +69,7 @@ from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, RunnerPrincipal
 from meho_backplane.memory.audit import INTERNAL_METHOD, write_internal_audit_row
+from meho_backplane.request_usage.collector import current_request_id
 from meho_backplane.scheduler.vault_credentials import (
     SchedulerVaultNotConfiguredError,
     write_agent_secret,
@@ -104,14 +106,10 @@ _CLIENT_ID_PREFIX: str = "runner:"
 #: write-path kill switch (satellite write-path decision, mechanism 4:
 #: "revocation observable"); this row is the tamper-evident trail that a
 #: runner's write capability was withdrawn, distinct from the liveness
-#: ``gateway.runner.stale`` dead-man flip. Written on the central clock with a
-#: system-attributed ``operator_sub`` (the service method takes no operator).
+#: ``gateway.runner.stale`` dead-man flip. Written on the central clock in
+#: the name of the operator who revoked (#3757), with the request id, so the
+#: row says who did it and the wrapper row can be retired.
 _REVOKE_AUDIT_PATH: str = "runner.principal.revoked"
-
-#: System identity stamped on the revocation audit row (the revoke service
-#: method is invoked by the REST route but does not thread the operator sub);
-#: a stable name so audit filters can partition by this background source.
-_REVOKE_AUDIT_SUB: str = "system:runner-principal-revoke"
 
 #: ``tenant_role`` stamped into the runner client's access token. Read-only
 #: credential scope in v1 (vs the agent's ``tenant_admin``): a runner is a
@@ -519,8 +517,12 @@ class RunnerPrincipalService:
         self,
         tenant_id: uuid.UUID,
         name: str,
+        *,
+        operator_sub: str,
     ) -> RunnerPrincipalRead:
         """Revoke a runner principal (kill switch).
+
+        ``operator_sub``: the operator who revokes; the row is written in their name.
 
         Phase 1: look up the principal (must exist and not already be
         revoked) to obtain its ``keycloak_internal_id``.
@@ -588,14 +590,17 @@ class RunnerPrincipalService:
         # Revocation audit trail (#3192, mechanism 4): a tamper-evident row
         # proving the runner's write capability was withdrawn, on the central
         # clock, distinct from the liveness dead-man flip. Written after the
-        # DB commit so it records only a completed revocation.
+        # DB commit so it records only a completed revocation. It names the
+        # caller and the request (#3757): after the cutover it is the only row.
         await write_internal_audit_row(
             event_class=AuditEventClass.OPERATION_EXECUTION,
-            operator_sub=_REVOKE_AUDIT_SUB,
+            operator_sub=operator_sub,
+            actor_sub=resolve_actor_sub(),
             tenant_id=tenant_id,
             method=INTERNAL_METHOD,
             path=_REVOKE_AUDIT_PATH,
             status_code=200,
+            request_id=current_request_id(),
             duration_ms=(time.monotonic() - started) * 1000,
             payload={"runner": name, "keycloak_internal_id": keycloak_internal_id},
         )

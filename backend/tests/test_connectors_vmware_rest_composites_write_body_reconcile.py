@@ -50,6 +50,9 @@ _EXPECTED_REST_WRITE_OP_IDS = {
     "POST:/vcenter/vm/{vm}?action=relocate",
     "POST:/vcenter/vm-template/library-items/{templateLibraryItem}?action=deploy",
     "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy",
+    # #3697: the un-gated OVF summary read (flat ``{target}`` body) that
+    # supplies the default VM name for a name-less deploy.
+    "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=filter",
     "POST:/content/library?action=find",
     "POST:/content/library/item?action=find",
     # Content-library download-session flow the typed HttpNfcLease import source

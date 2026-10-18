@@ -1749,6 +1749,7 @@ def _build_drill_in(
             "args": {"handle_id": str(handle_id), "offset": 0, "limit": 50},
         },
         expires_at=datetime.now(UTC) + timedelta(seconds=ttl_seconds),
+        stored_rows=spill_outcome.stored_rows,
     )
 
 

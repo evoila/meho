@@ -24,6 +24,7 @@ import meho_backplane.operations.result_query as rq
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.jsonflux.query.contract import QueryContractError, ResultQuerySpec
 from tests._result_store_helpers import MemoryResultStore
+from tests.mcp_test_fixtures import required_settings_env  # noqa: F401 — fixture
 
 _TENANT = uuid.UUID("00000000-0000-0000-0000-0000000000ff")
 
@@ -478,3 +479,52 @@ async def test_wire_ceiling_uses_the_real_encoded_size(monkeypatch: pytest.Monke
     _install(monkeypatch, _store(rows), _stub_settings(wire_bytes=exact - 1))
     with pytest.raises(rq.ResultQueryOutputTooLargeError):
         await rq.read_result_window(_operator(), handle, offset=0, limit=10)
+
+
+@pytest.mark.usefixtures("required_settings_env")
+async def test_topology_closure_handle_filters_by_relation_and_keeps_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3764: closure rows kept by the shared reducer query like any handle.
+
+    A ``query_topology`` closure spilled through the real reducer keeps each
+    row's node identity, parent and walked edge, so a filter on the stored
+    rows narrows the answer without re-running the traversal, in the stored
+    ``(depth, name, id)`` order. Another caller cannot read the handle.
+    """
+    from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
+
+    store = MemoryResultStore()
+    _install(monkeypatch, store, _stub_settings())
+    root = str(uuid.uuid4())
+    rows = [{"id": root, "name": "hub", "depth": 0, "via_relation_class": None}]
+    rows += [
+        {
+            "id": str(uuid.uuid4()),
+            "name": f"leaf-{i:03d}",
+            "depth": 1,
+            "parent_node_id": root,
+            "via_edge_id": str(uuid.uuid4()),
+            "via_relation_class": "placement" if i % 2 else "containment",
+        }
+        for i in range(60)
+    ]
+    operator = _operator()
+    _summary, handle = await JsonFluxReducer(store=store).reduce(
+        {"nodes": rows},
+        None,
+        {"op_id": "query_topology", "tenant_id": str(_TENANT), "operator_sub": operator.sub},
+    )
+    assert handle is not None
+
+    result = await rq.run_result_query(
+        operator,
+        handle.handle_id,
+        ResultQuerySpec(filter=[{"field": "via_relation_class", "op": "=", "value": "placement"}]),
+    )
+
+    expected = [row for row in rows if row["via_relation_class"] == "placement"]
+    assert result["rows"] == expected
+    assert result["coverage"] == "complete"
+    with pytest.raises(rq.ResultHandleNotFoundError):
+        await rq.run_result_query(_operator(sub="op-b"), handle.handle_id, ResultQuerySpec())

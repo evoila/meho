@@ -116,6 +116,7 @@ func newBootstrapClientsCmd() *cobra.Command {
 			"  * the public authorization-code+PKCE MCP client (default name `meho-mcp`)\n" +
 			"  * 5 protocol mappers on each client (audience-meho-backplane, meho-mcp-audience, tenant-id, tenant-role, groups-claim)\n" +
 			"  * 4 default client scopes on each client (basic, roles, web-origins, acr) — including the load-bearing `basic` scope that carries the `sub` claim in Keycloak 25+\n" +
+			"  * the `mcp:read`, `mcp:execute` and `mcp:admin` client scopes, plus `offline_access`, as optional scopes on the MCP client — MEHO's MCP clients ask for them at login, and Keycloak refuses a login that asks for a scope the client does not offer\n" +
 			"  * the `meho-admins` top-level group\n" +
 			"  * an admin user joined to `meho-admins` with a password\n\n" +
 			"Idempotent: re-runs detect existing resources, " +

@@ -273,7 +273,8 @@ http://127.0.0.1:8456/oauth/callback
 `mcp-remote` tries `localhost` and its `127.0.0.1` twin, so register
 both. The port must match the one in the config below. The rest of the
 `meho-mcp` client shape (public PKCE client, five protocol mappers,
-four default scopes, `offline_access` optional) is in
+four default scopes, and `offline_access`, `mcp:read`, `mcp:execute` and
+`mcp:admin` optional) is in
 [Keycloak realm setup](../install/keycloak-realm.md).
 
 ## Configure `claude_desktop_config.json`

@@ -203,10 +203,11 @@ http://localhost:8456/callback
 (This is distinct from the `/oauth/callback` path the
 [Claude Desktop shim](claude-desktop.md#one-time-realm-redirect-uris)
 uses — a client used for both needs both.) Claude Code's flow also
-requests `offline_access` to obtain a refresh token, so the `meho-mcp`
-client must carry `offline_access` as an **optional** scope, or the
-authorization request fails with `invalid_scope` (Wall W7). Both are
-covered in [Keycloak realm setup](../install/keycloak-realm.md).
+requests `offline_access` to obtain a refresh token. So the `meho-mcp`
+client must offer `offline_access`, `mcp:read`, `mcp:execute` and
+`mcp:admin` as **optional** scopes. If one is missing, the authorization
+request fails with `invalid_scope` (Wall W7). Both are covered in
+[Keycloak realm setup](../install/keycloak-realm.md).
 
 ## Internal-CA trust
 
@@ -234,5 +235,6 @@ tools. Confirm the connection with two calls:
 If the server shows as failed, or the browser never opens for the OAuth
 step, the [troubleshooting page](troubleshooting.md) maps the symptom —
 a DCR `403 Host not trusted` means the `clientId` was dropped from
-`.mcp.json`; an `invalid_scope` means the `offline_access` optional
-scope is missing.
+`.mcp.json`; an `invalid_scope` means `meho-mcp` does not offer one of
+the optional scopes `offline_access`, `mcp:read`, `mcp:execute` or
+`mcp:admin`.

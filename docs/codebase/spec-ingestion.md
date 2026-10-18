@@ -1752,15 +1752,17 @@ asymmetry. `bulk_enable_read_ops` and the `/review` payload render
 both run against the scope the shared resolver returns.
 
 The PATCH editing routes (`/groups`, `/operations`) and the
-connector-level `enable` / `disable` / `delete` transitions still
-keep their single-pass lookup against the operator's `tenant_id` via
-`_resolve_scope`: "do tenant_admins get to edit / transition
-built-ins?" is a policy choice distinct from the read/enable-reads
-visibility surface, and the route gate is `tenant_admin`-only —
-built-in writes already have an explicit MCP / CLI affordance
-(`ReviewService` accepts `tenant_id=None` under the `TENANT_ADMIN`
-role). They are free to adopt `_resolve_existing_scope` later if the
-same global-fallback / disambiguation is wanted there.
+connector-level `enable` / `disable` transitions resolve through
+`ReviewService._resolve_writable_scope` instead. It prefers the
+operator's own tenant row and falls back to the built-in row, which a
+`tenant_admin` without `platform_admin` may not write (403
+`BuiltinConnectorWriteForbiddenError`). It never raises the ambiguity
+error: with both rows present it acts on the tenant row. The group
+transitions and the group edit probe for group rows, because they have
+nothing to act on without them. The per-op edit (`edit_op`) probes with
+`scope_has_rows` (a group row **or** an operation row): an op that
+`enable_reads` enabled on a group-less connector must be disable-able
+again through the same tenant row (#3870).
 
 The `op_id` path segment uses the `:path` converter so operations
 whose natural key contains slashes (`"GET:/api/vcenter/cluster"`)

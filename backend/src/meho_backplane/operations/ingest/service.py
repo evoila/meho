@@ -135,6 +135,8 @@ from meho_backplane.operations.ingest.payload import (
 from meho_backplane.operations.ingest.spec_provenance import load_spec_provenance
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from meho_backplane.connectors.base import Connector
     from meho_backplane.db.models import EndpointDescriptor
     from meho_backplane.operations.ingest.api_schemas import ConnectorAuthoringKind
@@ -460,6 +462,8 @@ class ReviewService:
         connector_id: str,
         tenant_id: UUID | None,
         session: AsyncSession,
+        *,
+        probe: Callable[[AsyncSession, ConnectorScope], Awaitable[bool]] = scope_has_groups,
     ) -> ConnectorScope:
         """Resolve ``(connector_id, tenant_id)`` for a mutating state/edit action.
 
@@ -496,9 +500,21 @@ class ReviewService:
         the ``platform_admin`` gate). A cross-tenant ``tenant_id`` never
         reaches here: :meth:`_resolve_scope` -> :meth:`_authorize_scope`
         already collapsed it into :class:`ConnectorNotFoundError`.
+
+        *probe* decides what counts as "the scope holds rows". The
+        default :func:`scope_has_groups` fits the group transitions and
+        :meth:`edit_group`, which have nothing to act on without group
+        rows. :meth:`edit_op` passes :func:`scope_has_rows` (a group row
+        **or** an operation row) because a per-op edit needs only the
+        op row: a connector whose grouping pass produced no groups still
+        has its reads enabled by :meth:`enable_reads` and served by
+        dispatch, so an operator must be able to disable one of them
+        again (#3870). With the group-only probe that edit either
+        ``404``'d or slid to the built-in row while the tenant op stayed
+        enabled.
         """
         scope = self._resolve_scope(connector_id, tenant_id)
-        if tenant_id is not None and await scope_has_groups(session, scope):
+        if tenant_id is not None and await probe(session, scope):
             return scope
         builtin_scope = ConnectorScope(
             product=scope.product,
@@ -506,7 +522,7 @@ class ReviewService:
             impl_id=scope.impl_id,
             tenant_id=None,
         )
-        if await scope_has_groups(session, builtin_scope):
+        if await probe(session, builtin_scope):
             self._require_platform_admin_for_builtin(connector_id, builtin_scope)
             return builtin_scope
         raise ConnectorNotFoundError(
@@ -756,19 +772,17 @@ class ReviewService:
         :meth:`enable_connector` consults the audit log to find
         operator-set False rows and skips them.
 
-        ``llm_instructions`` is the agent-facing per-op guidance blob
-        ingested rows land with as ``NULL``. The typed connectors
-        populate it at ``register_typed_operation`` time
-        (see e.g. :mod:`meho_backplane.connectors.vault.ops` and
-        :mod:`meho_backplane.connectors.bind9.ops_zone`); for
-        ingested connectors the operator-review pass writes the same
-        shape via this method so :func:`search_operations` and the
-        agent's ``call_operation`` see populated guidance once the
-        op is enabled. The argument is a plain ``dict`` (the model's
-        ``llm_instructions`` column is ``JSON``); the helper persists
-        it as-is. Passing ``{}`` clears the column to an empty
-        mapping rather than re-deleting it — operators wanting to
-        un-author the field should disable the op instead.
+        ``llm_instructions`` is the agent-facing per-op guidance blob ingested rows
+        land with as ``NULL``. The typed connectors populate it at
+        ``register_typed_operation`` time (see e.g.
+        :mod:`meho_backplane.connectors.vault.ops` and
+        :mod:`meho_backplane.connectors.bind9.ops_zone`); for ingested connectors the
+        operator-review pass writes the same shape via this method so
+        :func:`search_operations` and the agent's ``call_operation`` see populated
+        guidance once the op is enabled. The argument is a plain ``dict`` (the model's
+        ``llm_instructions`` column is ``JSON``); the helper persists it as-is. Passing
+        ``{}`` clears the column to an empty mapping rather than re-deleting it —
+        operators wanting to un-author the field should disable the op instead.
 
         Writes one audit row with payload
         ``{connector_id, op_id, fields_updated, is_enabled_set_to?}``.
@@ -788,7 +802,9 @@ class ReviewService:
         )
         sessionmaker = self._sessionmaker()
         async with sessionmaker() as session:
-            scope = await self._resolve_writable_scope(connector_id, tenant_id, session)
+            scope = await self._resolve_writable_scope(
+                connector_id, tenant_id, session, probe=scope_has_rows
+            )
             op_row = await load_op(session, scope, connector_id, op_id)
             fields_updated = apply_op_overrides(
                 op_row,

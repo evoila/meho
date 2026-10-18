@@ -2085,6 +2085,70 @@ async def test_enable_reads_on_connector_without_groups_flips_read_ops() -> None
 
 
 @pytest.mark.asyncio
+async def test_edit_op_disables_read_on_connector_without_groups() -> None:
+    """#3870: an op enabled by enable-reads on a group-less connector can be disabled again.
+
+    ``edit_op`` must find the tenant's op rows without any group row,
+    the same way ``enable_reads`` does. Before the fix the per-op edit
+    probed group rows only and raised ``ConnectorNotFoundError``, so the
+    op stayed enabled.
+    """
+    tenant_id = uuid.uuid4()
+    await _add_ungrouped_op(
+        tenant_id=tenant_id,
+        op_id="GET:/api/v1/ungrouped/list",
+        method="GET",
+        is_enabled=False,
+    )
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+    assert await service.enable_reads("vmware-rest-9.0", tenant_id=tenant_id) == 1
+
+    await service.edit_op(
+        "vmware-rest-9.0",
+        "GET:/api/v1/ungrouped/list",
+        tenant_id=tenant_id,
+        is_enabled=False,
+    )
+
+    state = await _ops_enabled_state(tenant_id=tenant_id)
+    assert state["GET:/api/v1/ungrouped/list"] is False
+
+
+@pytest.mark.asyncio
+async def test_edit_op_disables_tenant_read_when_only_builtin_has_groups() -> None:
+    """#3870: a tenant op-only row is edited in tenant scope even when a built-in row has groups.
+
+    Before the fix the per-op edit saw no tenant group rows and slid to
+    the built-in scope: a ``tenant_admin`` was refused with
+    ``BuiltinConnectorWriteForbiddenError`` and the tenant op stayed
+    enabled. The built-in row must stay untouched.
+    """
+    tenant_id = uuid.uuid4()
+    await _seed_connector(tenant_id=None, group_count=1, ops_per_group=1, op_is_enabled=False)
+    await _add_ungrouped_op(
+        tenant_id=tenant_id,
+        op_id="GET:/api/v1/tenant-only",
+        method="GET",
+        is_enabled=False,
+    )
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+    enabled = await service.enable_reads("vmware-rest-9.0", tenant_id=tenant_id, prefer="tenant")
+    assert enabled == 1
+
+    await service.edit_op(
+        "vmware-rest-9.0",
+        "GET:/api/v1/tenant-only",
+        tenant_id=tenant_id,
+        is_enabled=False,
+    )
+
+    tenant_state = await _ops_enabled_state(tenant_id=tenant_id)
+    assert tenant_state == {"GET:/api/v1/tenant-only": False}
+    builtin_state = await _ops_enabled_state(tenant_id=None)
+    assert builtin_state == {"GET:/api/v1/group-0/0": False}
+
+
+@pytest.mark.asyncio
 async def test_enable_reads_unknown_connector_raises_not_found() -> None:
     """A connector triple with no rows yields :class:`ConnectorNotFoundError`."""
     tenant_id = uuid.uuid4()

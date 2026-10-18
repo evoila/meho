@@ -56,6 +56,7 @@ from meho_backplane.api.v1.kb import router as kb_router
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Tenant
+from tests._kb_embedding_stub import StubPassageTokenizer
 
 from .conftest import (
     DOCKER_AVAILABLE,
@@ -83,6 +84,7 @@ def _make_stub_embedding_service() -> AsyncMock:
     fake = AsyncMock()
     fake.encode_one.side_effect = lambda t: _make_stub_embedding_vector(t)
     fake.encode.side_effect = lambda ts: [_make_stub_embedding_vector(t) for t in ts]
+    fake.passage_tokenizer.return_value = StubPassageTokenizer()
     fake.dimension = 384
     return fake
 

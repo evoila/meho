@@ -28,6 +28,7 @@ from meho_backplane.retrieval.eval.metrics import (
     Thresholds,
     coverage_at_k,
     mean_metric,
+    percentile,
     precision_at_k,
     reciprocal_rank,
     verdict,
@@ -270,3 +271,22 @@ def test_thresholds_rejects_negative_values() -> None:
     """No metric can be < 0."""
     with pytest.raises(ValidationError):
         Thresholds(mrr=-0.1)
+
+
+# ---------------------------------------------------------------------------
+# percentile (KB passage benchmark, #3765)
+# ---------------------------------------------------------------------------
+
+
+def test_percentile_nearest_rank_returns_a_measured_value() -> None:
+    """p95 of 1..20 is the 19th value; p100 is the maximum."""
+    values = [float(v) for v in range(20, 0, -1)]
+    assert percentile(values, 95) == 19.0
+    assert percentile(values, 100) == 20.0
+    assert percentile([7.0], 95) == 7.0
+
+
+def test_percentile_empty_is_zero_and_bad_pct_raises() -> None:
+    assert percentile([], 95) == 0.0
+    with pytest.raises(ValueError):
+        percentile([1.0], 0)

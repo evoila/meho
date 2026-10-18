@@ -33,7 +33,8 @@ threshold (>50 rows or >4 KB by default), the caller gets back:
   bounded `result_objects` hint); and
 - a `ResultHandle` on `OperationResult.handle` carrying `summary_md`,
   `schema_`, `total_rows`, `sample_rows`, and the self-documenting
-  `fetch_more` envelope.
+  `fetch_more` envelope. `schema_` comes from the result field catalog
+  built over every captured row (next section), not from the sample.
 
 The **full** normalized row list is spilled to the Valkey-backed
 `ResultHandleStore` keyed by `(tenant_id, handle_id)`; the `result_query`
@@ -52,6 +53,44 @@ on `handle.fetch_more.drill_in`:
 The handle itself is minted **unconditionally** on every reduce — a
 skipped spill never suppresses the handle, it only flips the drill-in
 branch to `available=false`.
+
+## Result field catalog (#3631)
+
+The captured JSON is the source of truth for a reduced result. The
+reducer does not guess field names or types from a DuckDB table or from
+the first row. After the admission check, it builds the result field
+catalog (`build_catalog` in `jsonflux/query/result_catalog.py`) from
+**every** captured row:
+
+- One entry per exact top-level key. Names are case-sensitive (`Name`
+  and `name` are two fields). Nested values are not flattened.
+- Each entry records the JSON kinds seen (`boolean`, `integer`,
+  `number`, `string`, `array`, `object`, `null`), whether the field is
+  nullable (null in some row, or missing from some row), and whether it
+  is queryable, with a `reason` when it is not.
+- Entries are sorted by field name, and the generated column names
+  (`_rr_v_0000`, ...) follow that order. So the catalog does not depend
+  on row order.
+
+The catalog drives three things on the handle:
+
+- `schema_`: a JSON Schema (Draft 2020-12) array of objects with one
+  property per field, in name order. A field seen with several kinds
+  lists them all as a `type` array.
+- the field list in `summary_md`;
+- the inline preview. `sample_rows` are raw captured rows, so a sample
+  row can lack a field that a later row has. The schema keys are the
+  union of the keys of all rows, not the keys of the first row.
+
+`result_query` builds the same catalog again from the stored rows when a
+query runs (see "Field catalog and raw output" below). When the store
+kept every row, the two catalogs are the same.
+
+Tests: `tests/test_result_catalog.py` pins the rules.
+`tests/test_result_reduction_properties.py` runs seeded property tests
+over many row orders of generated JSON: the catalog and the schema order
+never change, and paging, a flat query, and a `select` of fields that
+cannot be queried return the captured values byte for byte.
 
 ## Read-back modes: paging vs. query (#3366)
 
@@ -150,8 +189,12 @@ reads): `RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES`
 recoverable `output_too_large` error, now carrying `delivery=unavailable`
 (MCP `data`, REST `detail`). Nothing is cut; the caller narrows the read.
 
-Because the spill itself is capped at `RESULT_HANDLE_MAX_SPILL_ROWS`, a
-query may run over a subset of the true collection. The result carries
+Because the spill itself is capped at `RESULT_HANDLE_MAX_SPILL_ROWS`, and
+one stored record is capped at `RESULT_HANDLE_MAX_RECORD_BYTES` (default
+16 MiB, measured on the encoded record), a query may run over a subset of
+the true collection. Under the byte cap the store keeps the longest run of
+rows from the start that fits. It never skips a row in the middle, and
+`stored_rows` says how many it kept. The result carries
 `coverage`: `complete` when `stored_rows == total_rows`, else `partial`
 plus a `coverage_note` — so a `COUNT` over a capped spill is labelled as
 covering the stored subset, **never** presented as a whole-inventory
@@ -229,15 +272,52 @@ the reducer keeps it **whole** as a document record under a handle:
   unchanged, as before.
 
 Read it with `result_query` and `query={"path": "<RFC 6901 JSON
-Pointer>"}`. `path` cannot be combined with any relational field (a
+Pointer>"}`. The pointer rules follow RFC 6901: `""` is the whole
+document, each `/` starts one step, and in a step `~1` means `/` and `~0`
+means `~` (in that order, so `/a~1b~0c` reads the key `a/b~c`). An array
+index has no leading zero, and `-` never resolves. On a rows handle, the
+document is only the top-level scalar fields left out of the inline
+summary that the store kept with the rows (see Overview). Lists and
+objects beside the rows are not part of it, and when the store dropped
+the omitted scalars to make room for the rows, there is no document at
+all. `path` cannot be combined with any relational field (a
 `ValidationError` at spec construction). An array value pages with the
 call's `offset` / `limit` (items that are not objects come back as
 `{"value": item}`); any other value comes back whole in `value`, with
 `value_type` naming its JSON type. A pointer that does not resolve
 (missing member, `-`, a leading-zero or out-of-range index) is a
-recoverable `QueryContractError`. So is a `path` read on a rows handle,
-or paging / a relational query on a document handle. The same output
+recoverable `QueryContractError`. So is a `path` read on a rows handle
+that kept no fields beside its rows, or paging / a relational query on a
+document handle. The same output
 byte budget applies, and so does the terminal wire check (#3641).
+
+## Completed-operation receipt (`audit_id`, #3636)
+
+`OperationResult.audit_id` is the id of the dispatch audit row for the
+call. It is set only after that row commits. A null `audit_id` means the
+call gives no receipt: for example, the optional audit write of a safe
+read failed, and the read still returned.
+
+The receipt matters most when shaping the response fails after the
+operation already ran:
+
+- If the handler finished but the reducer failed, the result stays
+  `status="ok"`. It has no `result` and no `handle`, and
+  `delivery="unavailable"`. The remediation text says the operation
+  already ran and must not be run again. The call is never relabelled
+  `connector_error`, so a completed write never looks safe to repeat.
+- This is not the same as a failed audit write. If the required audit
+  row of a write does not commit, the call still returns an error, as
+  before.
+- The caller uses `audit_id` to find what happened (for example
+  `meho audit show <audit-id>`).
+- `delivery` is about shaping the response, not about how many rows a
+  handle kept: `complete`, `partial` (the response was too large, but the
+  `handle` can still be read with `result_query`), or `unavailable`. The
+  details are in [`mcp.md`](mcp.md#response-wire-ceiling-3641).
+
+A reduced result carries both the `handle` and the `audit_id`. The handle
+is how to read the rows; the receipt is how to prove the call ran.
 
 ## Key types
 
@@ -250,6 +330,8 @@ byte budget applies, and so does the terminal wire check (#3641).
 | `parse_json_pointer` / `resolve_json_pointer` | `backend/src/meho_backplane/jsonflux/query/json_pointer.py` | RFC 6901 pointer syntax and resolution for `path` reads (#3633) |
 | `document_outline` and friends | `backend/src/meho_backplane/operations/result_document.py` | The bounded inline view of a document record (#3633) |
 | `read_result_window` / `run_result_query` / `ResultHandleNotFoundError` | `backend/src/meho_backplane/operations/result_query.py` | Transport-neutral windowed-read core (#3179) + bounded query core (#3366) both surfaces wrap; misses raise the recoverable not-found error |
+| `build_catalog` / `ResultFieldCatalog` / `ResultField` / `AdmissionGuard` | `backend/src/meho_backplane/jsonflux/query/result_catalog.py` | The result field catalog built from every captured row; drives `schema_` at reduce time and field checks at query time (#3631, #3635) |
+| `OperationResult.audit_id` / `OperationResult.delivery` | `backend/src/meho_backplane/connectors/schemas.py` | The committed-audit receipt and the response-shaping state of a call (#3636, #3641) |
 | `compile_query` / `ResultQuerySpec` / `QueryContractError` / `OutputPlan` | `backend/src/meho_backplane/jsonflux/query/contract.py` | Compiles the validated query grammar against the result field catalog to one parameterized read-only `SELECT` plus an output plan (#3366, #3635) |
 | `result_query` (MCP) | `backend/src/meho_backplane/mcp/tools/result_query.py` | MCP read surface; misses surface as recoverable `handle_not_found` (`-32602`) |
 | `POST /api/v1/operations/result-query` | `backend/src/meho_backplane/api/v1/operations.py` | REST read surface; misses surface as a `404` with `reason=handle_not_found` (#3179) |
@@ -398,6 +480,68 @@ Metrics (aggregate only, no row content, keys, or vendor totals):
 - `result_cache_memory_bytes{kind}` — `used` and `max` memory of the
   dedicated store, sampled from `INFO memory` after each `v2` write.
 
+A read checks the record's byte length against
+`RESULT_HANDLE_MAX_RECORD_BYTES` before it decodes it, so an older record
+over the cap is a "handle not readable" miss. Capacity numbers for this
+store and the telemetry rules are in [`result-delivery.md`](result-delivery.md).
+
+## Release verification
+
+Before a release that touches result reduction, the stored rows, or
+`result_query`, check that these suites pass. Do not delete an assertion
+to make one pass. If a fuller catalog shows more fields, update the
+expected value on purpose and say why in the commit.
+
+1. Reference pages are fresh (no drift, nothing internal):
+
+   ```bash
+   cd backend && uv run python scripts/generate_reference_docs.py && cd ..
+   make -C cli cli-docs
+   git diff --exit-code docs-site/reference/connectors.md \
+     docs-site/reference/mcp-tools.md docs-site/reference/cli.md
+   cd backend && uv run pytest tests/test_reference_docs_drift.py -q
+   ```
+
+2. Seeded property tests over many row orders:
+
+   ```bash
+   cd backend && uv run pytest tests/test_result_reduction_properties.py -q
+   ```
+
+3. Forced-handle acceptance, the `result_query` contract, and MCP
+   conformance. The six acceptance suites start vendor simulators in
+   containers. Without Docker they skip, so they only count when they run
+   (CI runs them):
+
+   ```bash
+   cd backend && uv run pytest \
+     tests/acceptance/test_g35_harbor_jsonflux_force_handle.py \
+     tests/acceptance/test_g35_nsx_jsonflux_force_handle.py \
+     tests/acceptance/test_g35_sddc_jsonflux_force_handle.py \
+     tests/acceptance/test_g36_vrops_jsonflux_force_handle.py \
+     tests/acceptance/test_g37_robot_jsonflux_force_handle.py \
+     tests/acceptance/test_vmware_rest_jsonflux_force_handle.py \
+     tests/test_jsonflux_query_contract.py \
+     tests/test_operations_result_query_filter.py \
+     tests/test_mcp_tool_result_query.py \
+     tests/test_mcp_output_schema_conformance.py \
+     tests/test_mcp_structured_content.py \
+     tests/test_mcp_surface_conformance.py -q
+   ```
+
+4. Optional smoke against a real deployment. **Read-only:** use a list
+   operation with no side effects, and never a write. It does not block
+   a merge.
+   - Run a read that returns more than 50 rows or 4 KB through the
+     backplane: `meho operation call <connector_id> <op_id> --target
+     <target> --json`.
+   - Check the response: `status="ok"`, a `handle` with
+     `fetch_more.drill_in.available=true`, and an `audit_id`.
+   - Page the whole handle with `meho operation result-query <handle_id>
+     --offset <n> --limit <m> --json`, and run one query with `--select`.
+   - The rows from paging must match the rows from the query for the
+     same fields, and `total_rows` must match the vendor's count.
+
 ## Dependencies
 
 - Valkey via two clients: the broadcast fast client
@@ -448,5 +592,10 @@ Metrics (aggregate only, no row content, keys, or vendor totals):
   (G0.23-T3, RDC cycle-8 signal `k8s-logs-mcp-five-row-sample-cap`).
 - #1479 — tail sample ordering for log-shaped ops (G0.19-T1).
 - #3548 — an approval resume's handle belongs to the parking principal.
+- #3631 — the result field catalog built from every captured row.
+- #3633 — document records and RFC 6901 `path` reads.
+- #3635 — catalog-checked queries and raw-row output.
+- #3636 — the `audit_id` receipt on a completed operation.
+- RFC 6901 (JSON Pointer): https://www.rfc-editor.org/rfc/rfc6901
 - `docs/architecture/jsonflux.md` — engine provenance + full reducer
   contract.

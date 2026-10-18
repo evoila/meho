@@ -135,6 +135,7 @@ from fastapi.responses import HTMLResponse
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.rbac import authorize_tenant_scope
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.memory.rbac import MemoryRbacResolver
 from meho_backplane.retrieval.eval import EvalResult, eval_all
 from meho_backplane.retrieval.retire import (
     SURFACE_VERDICT_ORDER,
@@ -143,6 +144,7 @@ from meho_backplane.retrieval.retire import (
 )
 from meho_backplane.retrieval.retriever import (
     CANDIDATE_LIMIT,
+    MemoryEligibility,
     RetrievalFacets,
     RetrievalHit,
     list_retrieval_facets,
@@ -308,6 +310,20 @@ def _compute_query_hash(query: str) -> str:
     The raw query is never bound to the audit payload -- only this hash.
     """
     return hashlib.sha256(query.encode("utf-8")).hexdigest()
+
+
+def _memory_eligibility(operator: Operator, source: str | None) -> MemoryEligibility | None:
+    """Return the Memory eligibility when Memory rows can be candidates.
+
+    Same rule as ``POST /api/v1/retrieve``: ``source="memory"`` or no
+    source means Memory rows can rank, so the candidate SQL must apply
+    the Memory service's typed eligibility (#3741) before ``LIMIT``.
+    ``None`` for any other source, because no Memory row is a candidate
+    there. ``principal_sub`` is passed either way.
+    """
+    if source not in (None, "memory"):
+        return None
+    return MemoryRbacResolver().eligibility(operator)
 
 
 def _set_csrf_cookie(response: HTMLResponse, csrf_token: str) -> None:
@@ -602,7 +618,10 @@ async def _run_diagnostics(
     even on a mid-retrieval exception, then ``audit_hit_count`` after. Tenant-
     scoped to ``operator.tenant_id`` with the mandatory per-principal isolation
     predicate (``principal_sub=operator.sub``) -- own-tenant only, no
-    tenant_filter. Returns ``(hits, duration_ms)``.
+    tenant_filter. When Memory rows can be candidates (``source="memory"``
+    or no source) it also passes the Memory eligibility (#3741), so this
+    front follows the same Memory contract as the REST and MCP fronts.
+    Returns ``(hits, duration_ms)``.
     """
     start = time.monotonic()
     query_hash = _compute_query_hash(query)
@@ -618,6 +637,7 @@ async def _run_diagnostics(
         kind=kind or None,
         limit=limit,
         principal_sub=operator.sub,
+        memory_eligibility=_memory_eligibility(operator, source or None),
     )
     structlog.contextvars.bind_contextvars(audit_hit_count=len(hits))
     duration_ms = round((time.monotonic() - start) * 1000, 2)
@@ -718,6 +738,7 @@ async def _run_usage(
             until=now,
             surfaces=SUPPORTED_SURFACES,
             tenant_id=operator.tenant_id,
+            source="request_usage",
         )
     log.info(
         "ui_retrieval_usage_completed",
@@ -896,6 +917,7 @@ async def _run_retire(
             session=db_session,
             surfaces=list(SURFACE_VERDICT_ORDER),
             tenant_id=target_tenant,
+            source="request_usage",
         )
     log.info(
         "ui_retrieval_retire_checklist_completed",

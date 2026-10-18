@@ -433,6 +433,13 @@ def _approval_queue_block(settings: Settings) -> dict[str, Any]:
     running with the break-glass flag set, without grepping the
     values file. The field reports posture, not health — it never
     affects ``configured``.
+
+    ``delegated_decision_posture`` does the same for delegated decisions
+    (#3693): ``"production_own_hand_only"`` when
+    :attr:`Settings.approval_allow_delegated_decision` is ``False`` (the
+    default — a decision made on someone else's ``Instructed-by:``
+    instruction is refused), ``"lab_class_delegation_allowed"`` when
+    ``APPROVAL_ALLOW_DELEGATED_DECISION=true`` is set.
     """
     agent_runtime = _agent_runtime_block(settings)
     return {
@@ -442,6 +449,11 @@ def _approval_queue_block(settings: Settings) -> dict[str, Any]:
             "single_operator_break_glass"
             if settings.approval_allow_self_approval
             else "four_eyes_enforced"
+        ),
+        "delegated_decision_posture": (
+            "lab_class_delegation_allowed"
+            if settings.approval_allow_delegated_decision
+            else "production_own_hand_only"
         ),
     }
 

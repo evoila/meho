@@ -280,10 +280,13 @@ from meho_backplane.checks.assertions import CheckState
 __all__ = [
     "AUDIT_EVENT_CLASSES",
     "EVENT_OUTBOX_NOTIFY_CHANNEL",
+    "KB_REVISION_ORIGINS",
     "KIND_SLUG_MAX_LENGTH",
     "KIND_SLUG_MIN_LENGTH",
     "KIND_SLUG_PATTERN",
     "KIND_SLUG_RE",
+    "SOURCE_SCOPE_GLOBAL",
+    "SOURCE_SCOPE_PATTERN",
     "WELL_KNOWN_NODE_KINDS",
     "AgentRun",
     "AgentRunStatus",
@@ -293,6 +296,7 @@ __all__ = [
     "Base",
     "BroadcastOverride",
     "BudgetWindowKind",
+    "ConventionHistoryChangeKind",
     "DispatchTrace",
     "DispatchTraceSpan",
     "Document",
@@ -305,6 +309,7 @@ __all__ = [
     "GraphNode",
     "GraphNodeHistory",
     "IdentityBudget",
+    "KbRevision",
     "OperationGroup",
     "RequestUsageEvent",
     "RunbookRun",
@@ -1042,6 +1047,86 @@ class Document(Base):
             "documents_body_hash_idx",
             "body_hash",
             postgresql_using="btree",
+        ),
+    )
+
+
+#: Closed set for :attr:`KbRevision.origin`. ``write`` rows were stored
+#: by a kb write. ``backfill-current`` rows were copied from the current
+#: kb entry by migration ``0110``; they are not historical versions.
+KB_REVISION_ORIGINS: tuple[str, ...] = ("write", "backfill-current")
+
+
+class KbRevision(Base):
+    """One retained, immutable body of a kb entry.
+
+    The :class:`Document` row with ``source="kb"`` stays the latest
+    head: it is what search and ``meho://kb/{slug}`` read, and a new
+    body overwrites it. Each time a kb write changes the body, the
+    service also adds one row here in the same transaction. The row
+    is never updated, so an older body stays readable by its revision
+    id after the head moves on. It ends only when the entry is
+    deleted (explicit delete, or a cascade from the ``documents`` row).
+
+    Columns:
+
+    * ``id`` -- the revision UUID used in
+      ``meho://kb/id/{entry}/revision/{revision}``.
+    * ``tenant_id`` -- owning tenant; every read filters on it.
+    * ``entry_id`` -- the ``documents.id`` of the kb entry (the entry
+      UUID). ``ON DELETE CASCADE`` so no revision outlives its entry.
+    * ``revision_number`` -- 1, 2, 3, ... per entry. The highest number
+      is the current revision. Unique per entry.
+    * ``body`` / ``body_hash`` -- the stored text and its SHA-256 hex.
+    * ``provenance`` -- the provenance block of the write (see
+      :mod:`meho_backplane.kb.provenance`); ``None`` when not recorded.
+    * ``origin`` -- one of :data:`KB_REVISION_ORIGINS`.
+    * ``embedding_model`` / ``chunker_version`` -- which embedding
+      model and chunking rule indexed this body. ``None`` on backfill
+      rows, because the migration cannot know them.
+    * ``created_at`` -- when the revision was stored.
+    """
+
+    __tablename__ = "kb_revision"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    entry_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    revision_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    body_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    # ``none_as_null`` stores ``None`` as SQL ``NULL``, matching migration 0110.
+    provenance: Mapped[dict[str, object] | None] = mapped_column(
+        JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql"),
+        nullable=True,
+    )
+    origin: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding_model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    chunker_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "kb_revision_entry_number_idx",
+            "entry_id",
+            "revision_number",
+            unique=True,
+        ),
+        sa.CheckConstraint(
+            "origin IN ('write', 'backfill-current')",
+            name="ck_kb_revision_origin",
         ),
     )
 
@@ -2050,6 +2135,48 @@ def _ck_in(column: str, values: tuple[str, ...]) -> str:
     return f"{column} IN ({', '.join(f"'{v}'" for v in values)})"
 
 
+#: :attr:`GraphNode.source_scope` value for a node whose name means the
+#: same thing for the whole tenant, whichever source reported it (#3739).
+SOURCE_SCOPE_GLOBAL: Final[str] = "global"
+
+#: The full :attr:`GraphNode.source_scope` grammar (#3739). Three forms:
+#:
+#: * ``global`` -- the name is tenant-wide (see :data:`SOURCE_SCOPE_GLOBAL`).
+#: * ``target:<uuid>`` -- the name is only unique inside one target; the
+#:   UUID is that target's ``targets.id``.
+#: * ``legacy:<uuid>`` -- a pre-migration row kept apart from scoped rows;
+#:   the UUID is the row's own ``graph_node.id``, so two legacy rows never
+#:   collide.
+#:
+#: UUIDs are canonical lowercase text. ``NULL`` means "not resolved yet".
+SOURCE_SCOPE_PATTERN: Final[str] = (
+    r"^(?:global|(?:target|legacy):"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
+)
+
+
+def _ck_source_scope(column: str) -> str:
+    """Render the portable CHECK body for :data:`SOURCE_SCOPE_PATTERN`.
+
+    Regex CHECKs are not portable, so the UUID form is checked in four
+    portable steps: the 7-character prefix (``=`` is case-sensitive on
+    both dialects, unlike SQLite ``LIKE``); the ``LIKE`` layout (length
+    and hyphen positions); exactly four hyphens (``_`` in ``LIKE`` also
+    matches a hyphen); and ``ltrim`` with the lowercase hex alphabet
+    (anything left over is a bad character). ``substr`` / ``replace`` /
+    ``ltrim`` mean the same on PostgreSQL and SQLite. Mirrored verbatim
+    in migration ``0108``.
+    """
+    return (
+        f"{column} IS NULL "
+        f"OR {column} = 'global' "
+        f"OR (substr({column}, 1, 7) IN ('target:', 'legacy:') "
+        f"AND {column} LIKE '_______________-____-____-____-____________' "
+        f"AND length(replace({column}, '-', '')) = 39 "
+        f"AND ltrim(substr({column}, 8), '0123456789abcdef-') = '')"
+    )
+
+
 def _ck_kind_shape(column: str) -> str:
     """Render the portable minimal shape CHECK for an open kind column.
 
@@ -2142,6 +2269,20 @@ class GraphNode(Base):
       out once a node has been absent past the configured threshold
       (the spec's soft-delete signal -- the row stays queryable for
       G9.3 history replay but is filtered out of default queries).
+    * ``source_scope`` -- Text NULL with the portable
+      ``ck_graph_node_source_scope`` CHECK (migration ``0108``,
+      #3739). Says where the node's name is unique: ``global``,
+      ``target:<uuid>`` or ``legacy:<uuid>`` (see
+      :data:`SOURCE_SCOPE_PATTERN`). ``NULL`` means not resolved yet:
+      the row predates source-qualified identity, and ``target_id``
+      only names the last target that saw it, so readers must not
+      treat it as the scope. Writers fill it only after the staged
+      scope cut-over (#3749, :mod:`meho_backplane.topology.scope_repair`),
+      which also makes it ``NOT NULL`` at the database level. This
+      declaration keeps the pre-cut-over shape that fresh installs have.
+    * ``source_scope_provenance`` -- Text NULL. What set
+      ``source_scope`` (``migration:0108`` for the backfill). Lets the
+      later repair tell a mechanical value from a rediscovered one.
 
     Indexes on :class:`GraphNode`:
 
@@ -2149,7 +2290,15 @@ class GraphNode(Base):
       ``(tenant_id, kind, name)``. Enforces the "one (kind, name) per
       tenant" invariant at the DB layer. Named index only; no
       ``unique=True`` on the column triple to avoid PG auto-generating
-      a duplicate anonymous index alongside it.
+      a duplicate anonymous index alongside it. It stays in place until
+      the staged cut-over: PostgreSQL treats NULLs as distinct in a
+      unique index, so adding ``source_scope`` as a fourth key column
+      would let two unresolved rows share a name. The cut-over (#3749)
+      drops it and makes ``graph_node_tenant_scope_kind_name_idx``
+      unique instead.
+    * ``graph_node_tenant_scope_kind_name_idx`` -- non-unique b-tree on
+      ``(tenant_id, source_scope, kind, name)`` (migration ``0108``).
+      Serves per-scope lookups and the "unresolved rows" scan.
 
     The model deliberately ships with no helper methods -- write paths
     land in T3's refresh service, read paths in T4's recursive-CTE
@@ -2193,6 +2342,12 @@ class GraphNode(Base):
         nullable=True,
         default=None,
     )
+    source_scope: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    source_scope_provenance: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
         Index(
@@ -2203,6 +2358,14 @@ class GraphNode(Base):
             unique=True,
             postgresql_using="btree",
         ),
+        Index(
+            "graph_node_tenant_scope_kind_name_idx",
+            "tenant_id",
+            "source_scope",
+            "kind",
+            "name",
+            postgresql_using="btree",
+        ),
         sa.CheckConstraint(
             _ck_kind_shape("kind"),
             name="ck_graph_node_kind",
@@ -2210,6 +2373,10 @@ class GraphNode(Base):
         sa.CheckConstraint(
             _ck_in("source", _GRAPH_SOURCES),
             name="ck_graph_node_source",
+        ),
+        sa.CheckConstraint(
+            _ck_source_scope("source_scope"),
+            name="ck_graph_node_source_scope",
         ),
     )
 
@@ -3169,6 +3336,19 @@ class TenantConvention(Base):
     )
 
 
+class ConventionHistoryChangeKind(StrEnum):
+    """What one :class:`TenantConventionHistory` row records (#3747).
+
+    Mirrored by the CHECK ``ck_tenant_convention_history_change_kind``
+    (migration ``0109``). Rows written before ``0109`` have ``NULL``; the
+    kind is never guessed for them.
+    """
+
+    CREATED = "created"
+    UPDATED = "updated"
+    DELETED = "deleted"
+
+
 class TenantConventionHistory(Base):
     """One row per edit to a :class:`TenantConvention`.
 
@@ -3243,17 +3423,29 @@ class TenantConventionHistory(Base):
         nullable=False,
         default=lambda: datetime.now(UTC),
     )
-    # Nullable -- migration-seeded rows have no audit_log row to point
-    # at. T2's CRUD writes populate ``audit_id`` from the audit
-    # middleware's contextvar so G8's audit-query path can join
-    # history back to the originating request.
+    # Nullable. Legacy link to the REST request wrapper row: rows written
+    # before #3747 carry it; new rows leave it ``NULL`` because the
+    # history row itself is the record of the edit (see ``change_kind``
+    # and ``request_id``). Migration-seeded rows never had one.
     audit_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(),
         nullable=True,
         default=None,
     )
+    # Nullable (#3747, migration ``0109``). ``created`` / ``updated`` /
+    # ``deleted`` -- what this edit was. ``NULL`` on rows written before
+    # ``0109``; never guessed.
+    change_kind: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # Nullable (#3747). The request correlation id of the call that made
+    # the edit; links the row to the request usage event. ``NULL`` when
+    # the call had no usable request id, and on rows before ``0109``.
+    request_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True, default=None)
 
     __table_args__ = (
+        sa.CheckConstraint(
+            "change_kind IN ('created', 'updated', 'deleted')",
+            name="ck_tenant_convention_history_change_kind",
+        ),
         Index(
             "tenant_convention_history_convention_idx",
             "convention_id",
@@ -8563,7 +8755,7 @@ class RequestUsageEvent(Base):
     * ``correlation_id`` -- opaque id that links a ``context_selected``
       event to later evaluation data; ``NULL`` on ``request_finished``.
 
-    Indexes are declared in migration ``0107``:
+    Indexes are declared in migration ``0108``:
     ``(tenant_id, occurred_at)`` for tenant-scoped window reads, and
     ``occurred_at`` for the retention delete.
     """

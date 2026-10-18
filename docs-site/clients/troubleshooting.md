@@ -14,6 +14,27 @@ which carries the deepest realm-side detail.
     VPN / internal network** — never to expose the backplane through a
     public ingress or tunnel.
 
+## Start with `meho doctor`
+
+`meho doctor` checks your machine and names the layer that fails. It
+only reports; it changes nothing.
+
+```
+meho doctor
+```
+
+- The **offline layer** checks the plugin shim, the vendored
+  `mcp-remote` lock and cache, your CA bundle, and which credential
+  store holds your login.
+- The **authenticated layer** checks DNS, TLS, and your token, then runs
+  the MCP handshake. It shows your scopes and any working-surface tool
+  your session should see but does not.
+
+Use the failure class it prints (`dns`, `tls`, `refresh_rejected`,
+`surface_gap`, ...) to pick the section below. See also the
+[CLI reference](../reference/cli.md) and
+[MCP surface and scopes](mcp-surface-and-scopes.md).
+
 ## The client never reaches the OAuth screen
 
 **Symptom.** The `/mcp` call returns `401` with

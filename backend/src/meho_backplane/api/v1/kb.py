@@ -104,7 +104,10 @@ Schema constraints
 Out of scope
 ------------
 
-* Per-entry version history -- v0.2.next.
+* A REST route for per-entry revision history. Retained revisions
+  exist (#3753): ``GET /api/v1/kb/{slug}`` returns ``revision_id``, and
+  agents read an exact revision through the MCP resource
+  ``meho://kb/id/{entry}/revision/{revision}``.
 * Multipart tarball upload via ``multipart/form-data`` -- v0.2.next
   (the request schema accepts a ``tarball_url`` only).
 * KB search endpoint -- already covered by ``/api/v1/retrieve``

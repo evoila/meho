@@ -329,3 +329,29 @@ func TestPrintSearchTableHandlesNilScores(t *testing.T) {
 		t.Errorf("expected hit rendered; got %q", buf.String())
 	}
 }
+
+// TestHitSlugReadsPassageLocator — a kb passage row shows the entry
+// slug from doc_metadata.kb_passage, not its opaque passage id; a
+// legacy head row or a malformed locator falls back to source_id.
+func TestHitSlugReadsPassageLocator(t *testing.T) {
+	passage := api.RetrievalHit{
+		Source:      "kb-passage",
+		SourceId:    "0b6c-opaque:abc:2",
+		DocMetadata: map[string]interface{}{"kb_passage": map[string]interface{}{"slug": "vcenter-ha"}},
+	}
+	if got := hitSlug(passage); got != "vcenter-ha" {
+		t.Errorf("passage slug: got %q", got)
+	}
+	head := api.RetrievalHit{Source: "kb", SourceId: "legacy-entry"}
+	if got := hitSlug(head); got != "legacy-entry" {
+		t.Errorf("head slug: got %q", got)
+	}
+	broken := api.RetrievalHit{
+		Source:      "kb-passage",
+		SourceId:    "opaque",
+		DocMetadata: map[string]interface{}{"kb_passage": "not-a-map"},
+	}
+	if got := hitSlug(broken); got != "opaque" {
+		t.Errorf("malformed locator: got %q", got)
+	}
+}

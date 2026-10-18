@@ -59,7 +59,12 @@ __all__ = [
     "object_collect_impl",
 ]
 
-_log = structlog.get_logger(__name__)
+
+def _log() -> Any:
+    """Get the logger per call, so a cached proxy never hides events from
+    ``structlog.testing.capture_logs`` (same as ``checks/investigate.py``)."""
+    return structlog.get_logger(__name__)
+
 
 # PropertyCollector RetrievePropertiesEx against the singleton
 # ``propertyCollector`` moId (carried in the path, so the body is only
@@ -280,7 +285,7 @@ async def _collect_with_auth_health_reset(
         return read_props, missing, missing_properties, fault_counts, []
 
     reset_fault_types = sorted(fault_counts)
-    _log.info(
+    _log().info(
         "vmware_object_collect_auth_reset",
         target=target.name,
         mo_type=mo_type,
@@ -354,7 +359,7 @@ async def object_collect_impl(
         connector, operator, target, mo_type, moid, properties
     )
 
-    _log.info(
+    _log().info(
         "vmware_object_collect_read",
         target=target.name,
         mo_type=mo_type,

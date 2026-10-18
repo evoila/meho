@@ -62,6 +62,34 @@ sudo install -m 0755 meho /usr/local/bin/meho
 meho version
 ```
 
+## Keep the CLI in step with the backplane
+
+Use a CLI release that is close to the backplane's version:
+
+- **Supported:** the same minor version as the backplane, or one minor
+  version older. For backplane `0.35.x`, use CLI `v0.35.x` or `v0.34.x`.
+- `meho login` and `meho status` check this. When the versions are too
+  far apart they print one line on stderr, for example:
+
+  ```text
+  warning: CLI v0.12.0 vs backplane 0.35.12 — this CLI is too old for this backplane. Upgrade: https://github.com/evoila/meho/releases/tag/v0.35.12
+  ```
+
+- A much older CLI can also show
+  `backplane returned OperationResult.status "…", which this CLI (…) does not know`.
+  This does not mean the operation failed. It may have run, or it may
+  be waiting for approval. Check with `meho approvals list` before you
+  run it again.
+
+To upgrade, repeat the download, verify, and install steps
+[above](#install-the-signed-binary) with `TAG` set to the backplane's
+version (the tag in the warning). Then check the result:
+
+```bash
+meho version
+meho status
+```
+
 ## Trust the deployment's CA
 
 Skip this if your backplane and Keycloak present publicly-trusted

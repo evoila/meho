@@ -15,6 +15,7 @@ import (
 	openapi_types "github.com/oapi-codegen/runtime/types"
 
 	"github.com/evoila/meho/cli/internal/api"
+	"github.com/evoila/meho/cli/internal/output"
 )
 
 // fakeOperationsClient is a per-package test double satisfying the
@@ -701,6 +702,42 @@ func TestRunCallAwaitingApprovalRealPath(t *testing.T) {
 	}
 	if strings.Contains(errBuf.String(), "invalid OperationResult") {
 		t.Errorf("awaiting_approval was wrongly rejected as invalid status: %s", errBuf.String())
+	}
+}
+
+// TestRunCallUnknownStatusNamesVersionSkew — a status the CLI does not
+// know (old CLI, newer backplane) exits 4 on the real runCall path with
+// a message that names the likely version gap instead of "invalid", and
+// prints no result envelope.
+func TestRunCallUnknownStatusNamesVersionSkew(t *testing.T) {
+	cr, _ := json.Marshal(CallResult{Status: "queued_for_window", OpID: "argocd.app.sync"})
+	f := &fakeOperationsClient{
+		callResponses: []*api.PostCallApiV1OperationsCallPostResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: cr},
+		},
+	}
+	withFakeClient(t, f)
+
+	cmd := newCallCmd()
+	var out, errBuf bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errBuf)
+	cmd.SetArgs([]string{"argocd-api-3.x", "argocd.app.sync", "--backplane", "https://x"})
+	err := cmd.Execute()
+	var ec output.ExitCoder
+	if !errors.As(err, &ec) || ec.ExitCode() != output.ExitUnexpected {
+		t.Fatalf("unknown status must exit %d; got %v", output.ExitUnexpected, err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("no envelope on stdout for an unknown status; got %q", out.String())
+	}
+	for _, want := range []string{"queued_for_window", "probably newer than this CLI", "meho status"} {
+		if !strings.Contains(errBuf.String(), want) {
+			t.Errorf("stderr missing %q; got %q", want, errBuf.String())
+		}
+	}
+	if strings.Contains(errBuf.String(), "invalid") {
+		t.Errorf("unknown status must not be called invalid; got %q", errBuf.String())
 	}
 }
 

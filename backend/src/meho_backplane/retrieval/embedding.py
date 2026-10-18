@@ -66,6 +66,7 @@ import os
 import threading
 from collections.abc import Iterable
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -75,6 +76,7 @@ __all__ = [
     "DEFAULT_EMBEDDING_MODEL",
     "EMBEDDING_DIMENSION",
     "EmbeddingService",
+    "PassageTokenizer",
     "get_embedding_service",
     "reset_embedding_service_for_testing",
 ]
@@ -112,6 +114,43 @@ BAKED_MODEL_CACHE_DIR: str = "/opt/meho/model-cache"
 #: migration; the constant exists as the load-bearing contract callers
 #: assert against.
 EMBEDDING_DIMENSION: int = 384
+
+
+class PassageTokenizer:
+    """Count tokens the way the embedding model counts them, with no length cut.
+
+    The model's own tokenizer cuts every text at the model window
+    (512 tokens for the default model) and pads batches. Counting with
+    it would report at most the window, so a too-long passage would look
+    like it fits. This class loads a **second, separate** tokenizer from
+    the same model files with fastembed's own loader, reads the window
+    from it, then turns off cutting and padding on that second copy
+    only. The model's tokenizer is never changed. The post-processor
+    stays on, so :meth:`count` includes the special tokens the model
+    adds (``[CLS]`` and ``[SEP]`` for BERT-style models).
+    """
+
+    def __init__(self, tokenizer: Any, window: int) -> None:
+        self._tokenizer = tokenizer
+        self.window = window
+
+    @classmethod
+    def from_model_dir(cls, model_dir: Path) -> PassageTokenizer:
+        """Load a separate tokenizer from the model files in *model_dir*."""
+        from fastembed.common.preprocessor_utils import load_tokenizer
+
+        tokenizer, _special_tokens = load_tokenizer(model_dir)
+        truncation = tokenizer.truncation
+        if not truncation or not truncation.get("max_length"):
+            raise RuntimeError(f"tokenizer in {model_dir} has no model window to count against")
+        window = int(truncation["max_length"])
+        tokenizer.no_truncation()
+        tokenizer.no_padding()
+        return cls(tokenizer, window)
+
+    def count(self, text: str) -> int:
+        """Return the number of tokens the model would get for *text*, special tokens included."""
+        return len(self._tokenizer.encode(text, add_special_tokens=True).ids)
 
 
 class EmbeddingService:
@@ -166,6 +205,7 @@ class EmbeddingService:
         # race before any real request lands, but the contract should
         # not depend on lifespan ordering.
         self._model_lock = threading.Lock()
+        self._passage_tokenizer: PassageTokenizer | None = None
 
     @property
     def model_name(self) -> str:
@@ -271,6 +311,30 @@ class EmbeddingService:
                 dimension=self.dimension,
             )
         return self._model
+
+    async def passage_tokenizer(self) -> PassageTokenizer:
+        """Return a :class:`PassageTokenizer` built from this model's own files.
+
+        Loads the model first (the files come from the same installed
+        artifact the model reads), then builds the separate tokenizer
+        once and keeps it.
+        """
+        if self._passage_tokenizer is None:
+            self._passage_tokenizer = await asyncio.to_thread(self._load_passage_tokenizer)
+        return self._passage_tokenizer
+
+    def _load_passage_tokenizer(self) -> PassageTokenizer:
+        """Find the loaded model's file directory and build the counter from it."""
+        model = self._ensure_loaded()
+        # fastembed keeps the directory it loaded the model from on the
+        # inner ONNX model object; there is no public accessor in 0.9.
+        model_dir = getattr(getattr(model, "model", None), "_model_dir", None)
+        if model_dir is None:
+            raise RuntimeError(
+                f"cannot find the files of embedding model {self._model_name!r} "
+                "to build its token counter"
+            )
+        return PassageTokenizer.from_model_dir(Path(model_dir))
 
     async def encode(self, texts: Iterable[str]) -> list[list[float]]:
         """Encode a batch of texts into 384-dim dense vectors.

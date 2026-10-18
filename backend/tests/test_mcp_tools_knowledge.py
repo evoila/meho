@@ -42,7 +42,8 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.kb.service import KbService
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.mcp.tools.knowledge import _MAX_BODY_CHARS, _MAX_QUERY_CHARS
-from meho_backplane.retrieval.retriever import RetrievalHit
+from meho_backplane.retrieval.retriever import CANDIDATE_LIMIT, RetrievalHit
+from tests._kb_embedding_stub import fake_embedding_service
 from tests.mcp_test_fixtures import (
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
@@ -60,10 +61,7 @@ def stub_embedding() -> Iterator[AsyncMock]:
     /ONNX runtime, so patching at the import site lets the SQLite-
     backed test DB carry every assertion below.
     """
-    fake = AsyncMock()
-    fake.encode_one.return_value = [0.1] * 384
-    fake.encode.return_value = [[0.1] * 384]
-    fake.dimension = 384
+    fake = fake_embedding_service()
     with patch(
         "meho_backplane.retrieval.indexer.get_embedding_service",
         return_value=fake,
@@ -336,7 +334,9 @@ async def test_tools_call_search_knowledge_forwards_filters_and_limit(
         )
     assert response.status_code == 200
     assert captured["kind"] == "kb-entry"
-    assert captured["limit"] == 5
+    # The service ranks a full candidate set of passages, then folds
+    # them into at most ``limit`` entries.
+    assert captured["limit"] == CANDIDATE_LIMIT
 
 
 @pytest.mark.parametrize(

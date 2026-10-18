@@ -71,6 +71,10 @@ func newLoginCmd() *cobra.Command {
 			"--client-id to skip discovery or override either half (e.g. when " +
 			"the backplane URL isn't reachable on the operator's network but " +
 			"the IdP is).\n\n" +
+			"Version check: after login the CLI reads <backplane-url>/version " +
+			"and prints a one-line warning on stderr when the CLI and the " +
+			"backplane versions are too far apart (supported: same minor " +
+			"version, or the CLI one minor version behind).\n\n" +
 			"Split-DNS escape hatch: on workstations where the system resolver " +
 			"can reach the backplane host but returns NXDOMAIN for the Keycloak " +
 			"host (a common VPN split-DNS quirk), pass --resolve " +
@@ -220,6 +224,7 @@ func newLoginCmd() *cobra.Command {
 			}
 
 			fmt.Fprintf(humanOut, "Logged in to %s; token stored in %s.\n", backplaneURL, store.Describe())
+			printVersionSkew(parentCtx, httpClient, backplaneURL, errOut)
 			printMigrationNudge(humanOut)
 
 			// --print-token contract: the freshly minted bearer is the

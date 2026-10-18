@@ -294,6 +294,28 @@ Refs: #12, CHG-9"
 - **Instruction:** their words, in quotes, exactly as they wrote them.
 - **Refs:** the issue or change ticket, comma-separated.
 
+!!! warning "Only on lab-class deployments"
+    On production, MEHO refuses a decision made on someone else's
+    instruction. You must decide on your own judgement. A lab-class
+    deployment turns this on at install time with
+    `config.approvalAllowDelegatedDecision: "true"` (env var
+    `APPROVAL_ALLOW_DELEGATED_DECISION`). The default is `"false"`.
+    No request can change it.
+
+    When it is off, MEHO answers with a 403 error whose message starts
+    with `delegated_decision_forbidden:`. The request stays pending.
+    Remove the three lines and decide yourself, or ask the person who
+    instructed you to decide. MEHO also writes a WARNING log event named
+    `approval_delegated_decision_refused`.
+
+    Check the stance of a deploy on `/ready`:
+
+    ```bash
+    curl -s https://<your-backplane>/ready | jq .features.approval_queue.delegated_decision_posture
+    # "production_own_hand_only"      → the default; delegated decisions are refused
+    # "lab_class_delegation_allowed"  → APPROVAL_ALLOW_DELEGATED_DECISION=true is set
+    ```
+
 The same lines work in the console reason box and in the REST
 `reason` field.
 

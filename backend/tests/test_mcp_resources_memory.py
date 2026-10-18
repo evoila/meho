@@ -38,6 +38,7 @@ from meho_backplane.mcp.resources.memory import _memory_entry_handler
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.memory.schemas import MemoryScope
 from meho_backplane.memory.service import MemoryService
+from meho_backplane.settings import get_settings
 from meho_backplane.untrusted_text import BLOCK_END, BLOCK_START, GUARD_PREFIX
 from tests.mcp_test_fixtures import (
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
@@ -634,3 +635,32 @@ async def test_legacy_read_returns_canonical_locator_and_forwards_id_uris(
     forwarded = await _memory_entry_handler(op, {"scope": "id", "slug": str(stored.id)})
     assert forwarded["id"] == str(stored.id)
     assert forwarded["locator"] == f"meho://memory/id/{stored.id}"
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+@pytest.mark.asyncio
+async def test_resources_read_over_wire_limit_is_refused_not_cut(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stub_embedding: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A selected read over the shared read limit fails honestly and is never cut (#3751)."""
+    client, op = client_with_operator
+    row = await MemoryService().remember(
+        op, scope=MemoryScope.USER_TENANT, body="long note " * 500, slug="long-note"
+    )
+    monkeypatch.setenv("RESULT_QUERY_RESPONSE_WIRE_MAX_BYTES", "4096")
+    get_settings.cache_clear()
+
+    body = _read(client, f"meho://memory/id/{row.id}")
+    assert "result" not in body
+    error = body["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == INVALID_PARAMS
+    assert error["data"] == {"reason": "output_too_large", "delivery": "unavailable"}
+    assert "long note" not in error["message"]
+    assert "meho recall" in error["message"]

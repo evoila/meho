@@ -74,6 +74,7 @@ from meho_backplane.api.v1.agents import router as api_v1_agents_router
 from meho_backplane.api.v1.approvals import router as api_v1_approvals_router
 from meho_backplane.api.v1.ask_docs import router as api_v1_ask_docs_router
 from meho_backplane.api.v1.audit import router as api_v1_audit_router
+from meho_backplane.api.v1.audit_counts import router as api_v1_audit_counts_router
 from meho_backplane.api.v1.audit_reflex import router as api_v1_audit_reflex_router
 from meho_backplane.api.v1.auth_config import router as api_v1_auth_config_router
 from meho_backplane.api.v1.automation import router as api_v1_automation_router
@@ -848,7 +849,7 @@ app.include_router(api_v1_health_router)
 # privacy-preserving query_hash payload (the raw query is never
 # persisted -- per v0.2 sensitivity defaults).
 app.include_router(api_v1_retrieve_router)
-# G4.3-T5 (#444) -- audit-backed retrieval usage telemetry
+# G4.3-T5 (#444) -- retrieval usage telemetry (request usage events, #3747)
 # (`GET /api/v1/retrieve/usage`). Operator role minimum; the route uses
 # `require_role(TenantRole.OPERATOR)` and gates the `tenant_filter`
 # cross-tenant parameter behind tenant_admin. Broadcast publishes
@@ -1052,6 +1053,7 @@ app.include_router(api_v1_memory_router)
 # row this surface writes carries the canonical `meho.audit.query`
 # identity and broadcasts as aggregate-only per decision #3.
 app.include_router(api_v1_audit_router)
+app.include_router(api_v1_audit_counts_router)
 # #3134 (Initiative #3128) -- reflex-adoption KPIs at
 # `GET /api/v1/audit/reflex`. Read-only `audit_log` + announce-store
 # aggregation reusing the #444 usage-telemetry seam: read-before-act,

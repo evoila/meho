@@ -15,6 +15,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/api"
+	"github.com/evoila/meho/cli/internal/output"
+	"github.com/evoila/meho/cli/internal/version"
 )
 
 // fakeOperationsClient is the dispatch-test double satisfying the
@@ -637,6 +639,50 @@ func TestRenderInvalidStatusReturnsRenderError(t *testing.T) {
 	err := c.Render(cmd, "op", &CallResult{Status: "weird"}, false, nil)
 	if err == nil || errors.Is(err, ErrOpError) {
 		t.Fatalf("invalid status should yield a non-ErrOpError render error, got %v", err)
+	}
+}
+
+// TestRenderUnknownStatusNamesVersionSkew — a status this CLI does not
+// know (an old CLI talking to a newer backplane) must not be called
+// "invalid". The message names the CLI version and the likely version
+// gap, warns that the operation may have run, and points at
+// `meho status`. Nothing is written to stdout and the exit code stays
+// unexpected_response (4).
+func TestRenderUnknownStatusNamesVersionSkew(t *testing.T) {
+	prev := version.Version
+	version.Version = "v0.12.0"
+	t.Cleanup(func() { version.Version = prev })
+
+	for _, jsonOut := range []bool{false, true} {
+		c := New("c")
+		cmd := &cobra.Command{}
+		var out, errBuf bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&errBuf)
+		err := c.Render(cmd, "op", &CallResult{Status: "queued_for_window"}, jsonOut, nil)
+
+		var ec output.ExitCoder
+		if !errors.As(err, &ec) || ec.ExitCode() != output.ExitUnexpected {
+			t.Fatalf("json=%v: want exit %d, got %v", jsonOut, output.ExitUnexpected, err)
+		}
+		if out.Len() != 0 {
+			t.Errorf("json=%v: stdout must stay empty; got %q", jsonOut, out.String())
+		}
+		msg := errBuf.String()
+		for _, want := range []string{
+			"queued_for_window",
+			"this CLI (v0.12.0) does not know",
+			"probably newer than this CLI",
+			"not necessarily a failure",
+			"meho status",
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("json=%v: stderr missing %q; got %q", jsonOut, want, msg)
+			}
+		}
+		if strings.Contains(msg, "invalid") {
+			t.Errorf("json=%v: unknown status must not be called invalid; got %q", jsonOut, msg)
+		}
 	}
 }
 

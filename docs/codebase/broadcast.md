@@ -137,8 +137,9 @@ Three layers, separated for traceability:
   envelope (`_ANNOUNCEMENT_UNTRUSTED_FIELDS` +
   `_ANNOUNCEMENT_UNTRUSTED_LIST_FIELDS`, wrapped per-element for the
   list) **only on LLM-facing re-serves**. The wrap is applied by the
-  read-side serialiser: `list_recent_events_strict` (the MCP
-  `broadcast.recent` tool) passes `dump_event_wire` (wraps prose);
+  read-side serialiser: the archive reader `broadcast/archive_reader.py`
+  (MCP `meho_broadcast_recent` / `meho_broadcast_watch` and
+  `GET /api/v1/broadcast/recent`, #3748) uses `dump_event_wire` (wraps prose);
   `list_recent_events_fail_soft` (the UI history pane) passes
   `_dump_event_plain` (no wrap) because the browser sink escapes every
   field separately (Alpine `x-text` sets `textContent`) and the

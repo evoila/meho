@@ -26,8 +26,11 @@ truth:
   the broadcast notifications: each `create_pending_request` /
   `approve_request` / `reject_request` publishes an
   `approval.{pending,approved,rejected}` event via
-  `broadcast.publisher.publish_event` so a `broadcast_watch` operator
-  session learns of pending requests without polling.
+  `broadcast.publisher.publish_event`. These events go to the live SSE
+  feed (`/api/v1/feed`, `/ui/broadcast/stream`) until #3758 moves them,
+  and the audit log (`query_audit`) records them. Since #3748 the MCP and
+  REST `recent` / `watch` reads return agent announcements only, so an
+  operator session does not see approval events there.
 
 The durable state is one `approval_request` row (table created by
 `backend/alembic/versions/0023_create_approval_request.py`, T4 #817).

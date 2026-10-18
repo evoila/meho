@@ -1074,8 +1074,13 @@ Three invariants make the hook safe to wire on the park path:
    dispatcher merges that marker onto the identifier fields, so the
    parked row reads "blast-radius unknown: <reason>" instead of a bare
    identifier default a reviewer can't tell from a small action. The
-   reason string is the exception's type + message, truncated at 500
-   chars. A builder that *declines* (returns `None` — op not
+   reason string is the exception's type + message. The message is
+   redacted with the packaged default credential policy (the same one
+   the `connector_error` envelope uses) and then truncated at 500 chars,
+   because a builder fault can echo an upstream error body — for example
+   a Kubernetes admission webhook denial that quotes a password (#3876).
+   Redaction runs before the cut so a secret cannot survive as a
+   fragment. A builder that *declines* (returns `None` — op not
    previewable from these params) still collapses to the identifier-only
    default with no marker, as do connector-resolution faults outside
    the hook.
@@ -1118,7 +1123,11 @@ The only builder wired in #1437 is **`k8s.apply`**: it re-invokes the
 `k8s_apply` handler with `dry_run="server"` forced on (the API's
 `?dryRun=All`), so nothing persists and the per-document summary
 (resource identity + `resourceVersion` + `uid`) is the diff-preview the
-reviewer reads. The ArgoCD write ops register their own builders the same
+reviewer reads. When the API server rejects the dry-run (for example an
+admission webhook denial), the handler raises `ApplyRejectedError` and the
+row gets the `preview_unavailable` marker with the server's message in
+`preview_error`, so the reviewer sees that the apply will be rejected
+(#3876). The ArgoCD write ops register their own builders the same
 way (#1452): `argocd.app.set` / `argocd.appproject.update` populate
 `{before_spec, after_spec}` and `argocd.app.delete` populates
 `{cascade_resources}` from read-only GETs against the live

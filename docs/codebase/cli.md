@@ -978,7 +978,10 @@ in `meho login`" stays consistent.
 `meho broadcast recent` reads a bounded, filterable history page through
 `GET /api/v1/broadcast/recent`; the route uses the same archive reader
 as `meho_broadcast_recent` and returns stored agent announcements only
-(#3748). `meho broadcast announce
+(#3748). Without `--json`, `recent` prints one warning line first when
+the answer carries a `gap` (archive retention removed announcements
+the page would have shown), also when the page is empty; with `--json`
+the `gap` object is part of the output. `meho broadcast announce
 <activity>` posts to `/api/v1/broadcast/announce`, which rate-limits and
 then uses the same durable-before-stream publisher as
 `meho_broadcast_announce`. `meho broadcast watch` consumes the existing

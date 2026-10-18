@@ -120,6 +120,11 @@ func recentBroadcast(ctx context.Context, client *api.AuthedClient, params *api.
 }
 
 func printRecent(w io.Writer, response *map[string]interface{}) error {
+	if gap, ok := (*response)["gap"].(map[string]interface{}); ok {
+		if _, err := fmt.Fprintf(w, "warning: history is incomplete: %s\n", gapText(gap)); err != nil {
+			return err
+		}
+	}
 	events, _ := (*response)["events"].([]interface{})
 	if len(events) == 0 {
 		_, err := fmt.Fprintln(w, "(no broadcast events in this page)")
@@ -131,6 +136,18 @@ func printRecent(w io.Writer, response *map[string]interface{}) error {
 		}
 	}
 	return nil
+}
+
+// gapText is the one-line reason the backplane gives for a page that
+// skips announcements, for example because archive retention removed them.
+func gapText(gap map[string]interface{}) string {
+	if detail, _ := gap["detail"].(string); detail != "" {
+		return detail
+	}
+	if reason, _ := gap["reason"].(string); reason != "" {
+		return reason
+	}
+	return "some announcements before this page were removed"
 }
 
 func newAnnounceCmd() *cobra.Command {

@@ -55,6 +55,62 @@ func TestRunRecentUsesGeneratedClientAndFilters(t *testing.T) {
 	}
 }
 
+func TestRunRecentPrintsGapWarningWithoutJSON(t *testing.T) {
+	gap := `{"reason":"retention_trimmed","missed_events":2,"detail":"2 announcement(s) after this cursor were removed by archive retention."}`
+	cases := []struct {
+		name, body     string
+		want, unwanted []string
+	}{
+		{
+			name: "events with a gap",
+			body: `{"events":[{"event_id":"e-1","kind":"agent_announcement"}],"next_cursor":"h1.x","watch_checkpoint":"w1.x","gap":` + gap + `}`,
+			want: []string{
+				"warning: history is incomplete: 2 announcement(s) after this cursor were removed by archive retention.\n",
+				`"event_id": "e-1"`,
+			},
+		},
+		{
+			name: "empty page with a gap",
+			body: `{"events":[],"next_cursor":null,"watch_checkpoint":"w1.x","gap":` + gap + `}`,
+			want: []string{
+				"warning: history is incomplete: 2 announcement(s) after this cursor were removed by archive retention.\n",
+				"(no broadcast events in this page)\n",
+			},
+		},
+		{
+			name:     "no gap",
+			body:     `{"events":[{"event_id":"e-1","kind":"agent_announcement"}],"next_cursor":"h1.x","watch_checkpoint":"w1.x","gap":null}`,
+			want:     []string{`"event_id": "e-1"`},
+			unwanted: []string{"warning"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := tc.body
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, body)
+			}))
+			defer srv.Close()
+			seedXDGAndToken(t, srv.URL)
+			cmd, stdout, _ := newRunCmd(t)
+			if err := runRecent(cmd, recentOptions{Limit: 5, BackplaneOverride: srv.URL}); err != nil {
+				t.Fatalf("runRecent: %v", err)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(stdout.String(), want) {
+					t.Errorf("output missing %q:\n%s", want, stdout.String())
+				}
+			}
+			for _, unwanted := range tc.unwanted {
+				if strings.Contains(stdout.String(), unwanted) {
+					t.Errorf("output has unwanted %q:\n%s", unwanted, stdout.String())
+				}
+			}
+		})
+	}
+}
+
 func TestRunAnnouncePostsGeneratedRequest(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/broadcast/announce" || r.Method != http.MethodPost {

@@ -1074,8 +1074,13 @@ Three invariants make the hook safe to wire on the park path:
    dispatcher merges that marker onto the identifier fields, so the
    parked row reads "blast-radius unknown: <reason>" instead of a bare
    identifier default a reviewer can't tell from a small action. The
-   reason string is the exception's type + message, truncated at 500
-   chars. A builder that *declines* (returns `None` — op not
+   reason string is the exception's type + message. The message is
+   redacted with the packaged default credential policy (the same one
+   the `connector_error` envelope uses) and then truncated at 500 chars,
+   because a builder fault can echo an upstream error body — for example
+   a Kubernetes admission webhook denial that quotes a password (#3876).
+   Redaction runs before the cut so a secret cannot survive as a
+   fragment. A builder that *declines* (returns `None` — op not
    previewable from these params) still collapses to the identifier-only
    default with no marker, as do connector-resolution faults outside
    the hook.
@@ -1118,7 +1123,11 @@ The only builder wired in #1437 is **`k8s.apply`**: it re-invokes the
 `k8s_apply` handler with `dry_run="server"` forced on (the API's
 `?dryRun=All`), so nothing persists and the per-document summary
 (resource identity + `resourceVersion` + `uid`) is the diff-preview the
-reviewer reads. The ArgoCD write ops register their own builders the same
+reviewer reads. When the API server rejects the dry-run (for example an
+admission webhook denial), the handler raises `ApplyRejectedError` and the
+row gets the `preview_unavailable` marker with the server's message in
+`preview_error`, so the reviewer sees that the apply will be rejected
+(#3876). The ArgoCD write ops register their own builders the same
 way (#1452): `argocd.app.set` / `argocd.appproject.update` populate
 `{before_spec, after_spec}` and `argocd.app.delete` populates
 `{cascade_resources}` from read-only GETs against the live
@@ -1452,6 +1461,15 @@ runs under the **reviewing** operator's token
 (`resume_dispatch_after_approval`); both share the `meho-mcp` role policy,
 so the preflight is the right early signal while the reviewer must carry
 the same grant.
+
+`k8s.secret.read_to_ref` (#3844) also registers a preflight. The op reads
+a Kubernetes Secret and writes the value to Vault through the
+`vault.kv.put` handler, so it gets the same `vault.kv.put` check on the
+path it writes to: `secret/data/tenants/<tenant_id>/<register_as>`. Its
+preview stays hidden (it is a credential op), but the check still runs,
+so a write Vault would refuse is refused at park time instead of after
+approval. See
+[`docs/codebase/connectors-kubernetes.md`](connectors-kubernetes.md).
 
 ## Transports
 
@@ -1829,6 +1847,69 @@ composite's own dispatch audit row. This is enforced in
 `enforce_subop_policy` (the `NEEDS_APPROVAL` branch, keyed off the unconsumed
 `composite_resume_scope_var`) and is unreachable for shipped composites.
 
+#### Continuing where it stopped (#4217)
+
+Some steps run after the composite's main change already exists: the
+rename or power-on of a VM that was just deployed, the delete that cleans
+up a failed deploy, or `vm.create`'s rollback delete. Running the whole
+composite again for such a step repeats the main change (it deploys a
+second VM). So these steps tell the seam two things:
+
+- `resume_state`: JSON the composite saves on the approval row, under
+  `resume_parent["state"]`. During the re-run, `composite_resume_binding`
+  binds it on `composite_resume_state_var`, and the composite reads it with
+  `composite_resume_state(op_id)` (only the parent composite gets it). The
+  composite uses it to continue at the step that waited, with the same
+  parameters, so the approved sub-op still matches its stored parameter
+  hash. The state must pin what the step acts on: the object id, or the
+  resolved parameters. It must not hold a name the re-run would look up
+  again, because by then the name may point at something else, and the
+  step would no longer be the one the person approved.
+- `after_main_effect=True`: this step runs after the main change. The row
+  stores `resume_parent["after_main_effect"] = true`.
+
+**The safety-check change (the relaxed guard).** The multi-gate guard above
+does not apply to an `after_main_effect` step. Such a step may wait for
+approval even during a re-run, because its own re-run continues at that
+step and repeats no earlier write. `enforce_subop_policy` checks
+`if resume_scope is not None and not after_main_effect`. Steps without the
+mark still fail closed (`test_vm_create_multi_gate_resume_fails_closed_no_double_execute`).
+
+**Who the new request belongs to.** A step that waits again during a
+re-run gets a new approval request. That request names the requester of
+the request being re-run (`principal_sub`, `principal_act`,
+`principal_name`), not the reviewer who runs the re-run. Both resume paths
+pass that requester to `composite_resume_binding`, which binds
+`resume_requester_var`; `enforce_subop_policy` hands it to
+`create_pending_request(requester=...)`. So the reviewer path and the agent
+path save the same requester.
+
+**The risk, and the two checks that limit it.** With the guard relaxed, safety
+depends on the composite: its re-run must really skip every earlier write.
+Two checks in `enforce_subop_policy` stop a composite that gets this wrong:
+
+- `after_main_effect=True` without `resume_state` is refused
+  (`composite_resume_state_missing`), in every run, before the policy
+  check. Without state the re-run could only start from the beginning.
+- During the re-run of an `after_main_effect` park, until the approved
+  sub-op has cleared, any other governed write that is not itself
+  `after_main_effect` is refused before it runs, whatever the policy
+  verdict (`composite_resume_repeats_write`). That is a write the first run
+  already did.
+
+What is left: a composite can still repeat an earlier step that is itself
+marked `after_main_effect` (for example a second removal in the same
+cleanup), so only mark steps that are safe to run again. Ungoverned reads
+are not checked.
+
+Steps that use the switch today: in `vm.deploy_from_library` the rename,
+the power-on, the cleanup VM delete and the vApp destroy; in `vm.create`
+the rollback delete; in `vm.import_from_library` the power-on. Tests:
+`test_operations_subop_policy_gate.py` (the seam checks, on their own) and
+the `#4217` tests in `test_connectors_vmware_rest_composites_write_e2e.py`
+(through the real dispatcher, including three approvals in a row where
+each write runs once).
+
 A direct (non-composite) park is unchanged — `resume_parent` is NULL, so
 the resume keeps the generic re-dispatch of the stored `op_id`.
 
@@ -1883,8 +1964,9 @@ One difference stays on purpose: the agent waiter re-enters the composite
 as the **agent**, not as the reviewer. So every other governed sub-op is
 checked against the agent's own grants. If one would need its own approval,
 the multi-gate guard above fails closed
-(`composite_resume_multi_gate_unsupported`) on the agent path too. If the
-agent has no grant for it, that sub-op is denied.
+(`composite_resume_multi_gate_unsupported`) on the agent path too, unless
+that step is marked `after_main_effect` (#4217): then it waits for its own
+approval. If the agent has no grant for it, that sub-op is denied.
 
 Note: every shipped governed composite is `requires_approval=True` at the
 top level, so an agent's first call makes the composite itself wait for

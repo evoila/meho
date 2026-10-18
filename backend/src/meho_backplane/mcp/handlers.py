@@ -87,6 +87,12 @@ from typing import Any, Literal
 import jsonschema
 import structlog
 
+from meho_backplane.audit_cutover import (
+    close_classified_record_scope,
+    mcp_tool_is_routine,
+    open_classified_record_scope,
+    wrapper_row_class,
+)
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast import (
     BroadcastEvent,
@@ -94,6 +100,7 @@ from meho_backplane.broadcast import (
     publish_event,
     redact_payload,
 )
+from meho_backplane.db.models import AuditEventClass
 from meho_backplane.mcp.audit import compute_params_hash, write_mcp_audit_row
 from meho_backplane.mcp.human_only import human_only_remediation
 from meho_backplane.mcp.registry import (
@@ -111,10 +118,15 @@ from meho_backplane.mcp.registry import (
     role_at_least,
     surface_visible,
 )
-from meho_backplane.mcp.server import McpInvalidParamsError, register_method
+from meho_backplane.mcp.server import (
+    McpExecutionFailedError,
+    McpInvalidParamsError,
+    McpPermissionDeniedError,
+    register_method,
+)
 from meho_backplane.operations._audit import resolve_broadcast_lineage
 from meho_backplane.operations.delivery_budget import tool_result_text
-from meho_backplane.request_usage.collector import note_request_route
+from meho_backplane.request_usage.collector import note_request_route, note_request_status
 
 __all__ = [
     "handle_resources_list",
@@ -317,6 +329,9 @@ async def handle_tools_call(
     audit_name = name if isinstance(name, str) and name else "<empty>"
     #: Argument keys the resolved tool keeps off the broadcast feed (#3948).
     broadcast_omit_args: frozenset[str] = frozenset()
+    #: The handler itself refused the arguments (the #1481 projection below).
+    handler_rejected = False
+    record_scope = open_classified_record_scope()
 
     try:
         if not isinstance(name, str) or not name:
@@ -477,7 +492,7 @@ async def handle_tools_call(
         if defn.outputSchema is not None:
             response["structuredContent"] = result
         return response
-    except McpInvalidParamsError:
+    except McpInvalidParamsError as exc:
         # Class-wide audit-status correction (#1481). A tool handler can
         # raise ``McpInvalidParamsError`` *after* all the explicit
         # pre-dispatch gates (name/arguments/unknown-tool/RBAC/schema)
@@ -492,159 +507,227 @@ async def handle_tools_call(
         # consistently with the wire outcome instead of mis-reporting a
         # crash. Explicit pre-dispatch branches already set 400/403/404,
         # so they flow through here unchanged; only the residual init 500
-        # is corrected.
+        # is corrected. A handler that reports a failed MEHO change
+        # (:class:`McpExecutionFailedError`, #3757) is projected to 502,
+        # the REST status for the same failure, so the row and the
+        # broadcast record a failed attempt, not a refusal.
         if status_code == 500:
-            status_code = 403
+            if isinstance(exc, McpExecutionFailedError):
+                status_code = 502
+            else:
+                status_code = 403
+                handler_rejected = not isinstance(exc, McpPermissionDeniedError)
         raise
     finally:
-        duration_ms = (time.monotonic() - start) * 1000
-        audit_id = uuid.uuid4()
-        # G6.3-T2 (#379): resolve broadcast detail BEFORE the audit
-        # row commits so ``broadcast_detail_origin`` lands on the
-        # row's payload. The broadcast / ``classify_op`` op_id is
-        # ``audit_name`` (the tool name verbatim) so :func:`classify_op`
-        # matches credential / audit / read / write suffixes correctly
-        # (e.g. ``vault.kv.read`` → ``credential_read`` → aggregate-only
-        # redacted payload by default). A handler may bind ``audit_op_id``
-        # to override only the *persisted* row's op_id (see the
-        # strip-and-merge override below); that never touches the
-        # broadcast / ``classify_op`` identity used here.
-        #
-        # ``resolver_params`` merges the raw tool ``arguments`` on top
-        # of ``audit_payload`` so scope-matched override rules
-        # (``scope_field="namespace"`` keys into ``raw_params["namespace"]``,
-        # ``scope_field="target_name"`` keys into ``raw_params["target"]``)
-        # can match against the actual MCP call. The hashed
-        # ``audit_payload`` (``params_hash``) stays the persistence
-        # shape; the resolver-visible view also carries the unhashed
-        # arguments. Arguments win on key collision -- if a tool
-        # happens to define an ``op_class`` argument, the operator
-        # value would take precedence, but that overlap is a tool-
-        # naming bug T4's API layer can warn on later. The keys the tool
-        # lists in ``broadcast_omit_args`` (#3948, e.g. ``read_docs``'s
-        # ``read_handle``) are left out, so they never reach the feed.
-        resolver_params: dict[str, Any] = dict(audit_payload)
-        if isinstance(arguments, dict):
-            resolver_params.update(
-                {key: value for key, value in arguments.items() if key not in broadcast_omit_args}
-            )
-        # #93: ``call_operation`` is a wrapper tool — its name does not
-        # carry any sensitivity signal, so ``classify_op("call_operation")``
-        # falls through to ``"other"`` → ``"full"`` detail and ships raw
-        # ``params`` (including secret-bearing ``params.data`` /
-        # ``params.password``) onto the per-tenant feed. The inner
-        # ``arguments["op_id"]`` is the real operation the agent dispatched
-        # and must be used for the redaction classification instead.
-        # This mirrors the inner DISPATCH row's precedent at
-        # ``operations/_audit.py:443`` where ``classify_op(descriptor.op_id)``
-        # is called on the real op id so credential_write/credential_mint/
-        # credential_read ops collapse to aggregate-only. The outer envelope's
-        # ``op_id`` broadcast field and the audit row's ``path`` column are
-        # intentionally left as ``audit_name`` (the wrapper tool name) so
-        # ``meho audit query`` cardinality and path-based correlations are
-        # unchanged (AC #5).
-        _broadcast_op_id = audit_name
-        if (
-            audit_name == "call_operation"
-            and isinstance(arguments, dict)
-            and isinstance(arguments.get("op_id"), str)
-            and arguments["op_id"]
-        ):
-            _broadcast_op_id = arguments["op_id"]
-        (
-            broadcast_op_class,
-            broadcast_detail,
-            broadcast_origin,
-        ) = await compute_effective_broadcast_detail(
-            op_id=_broadcast_op_id,
-            tenant_id=operator.tenant_id,
-            raw_params=resolver_params,
-            request_override=request_override,
-        )
-        # Snapshot the broadcast-visible params BEFORE injecting the
-        # audit-only ``broadcast_detail_origin`` /
-        # ``broadcast_detail_effective`` keys. The audit row gets the
-        # augmented ``audit_payload``; the broadcast event reads
-        # ``broadcast_params`` so audit-internal metadata (origin,
-        # ``tenant_rule:<uuid>``, effective-detail enum) never reaches
-        # the broadcast feed.
-        broadcast_params = dict(resolver_params)
-        audit_payload["broadcast_detail_origin"] = broadcast_origin
-        # G6.3-T3 (#380): effective detail joins origin as an audit-
-        # only forensic field. Subscribers see ``detail`` through the
-        # rendered ``redact_payload`` shape; the audit row needs the
-        # raw enum for ``meho audit query`` filtering.
-        audit_payload["broadcast_detail_effective"] = broadcast_detail
-        # #704 strip-and-merge, applied to MCP path. Per-tool handlers
-        # bind ``audit_*`` contextvars (e.g. ``audit_override_op`` from
-        # G6.3-T5's broadcast-overrides verbs); the chassis HTTP route
-        # path merges them via :func:`audit._resolve_audit_payload` and
-        # the typed-op dispatcher path via
-        # :func:`operations._audit._build_audit_payload`. MCP was the
-        # third audit-write path missing the merge — the test
-        # ``test_set_via_mcp_writes_audit_row_with_override_diff``
-        # expects ``override_op``/``override_id``/``override_pattern``/
-        # ``override_detail`` to land on the row's payload.
-        _audit_prefix = "audit_"
-        for _k, _v in structlog.contextvars.get_contextvars().items():
-            if not _k.startswith(_audit_prefix) or _v is None:
-                continue
-            _stripped = _k[len(_audit_prefix) :]
-            if _stripped:
-                audit_payload.setdefault(_stripped, _v)
-        # G4.5-T8 (#1549): a handler may bind ``audit_op_id`` to declare a
-        # canonical, dotted op_id for the persisted row (e.g.
-        # ``meho.docs.search`` on ``search_docs``) so a who-touched /
-        # ``query_audit`` filter is transport-independent across REST / CLI
-        # / MCP. ``audit_payload["op_id"]`` is seeded to the bare tool name
-        # at dispatch entry, so the ``setdefault`` merge above can never
-        # apply it — an explicit override is required. This is the *only*
-        # ``audit_*`` key allowed to overwrite a seeded value; it changes
-        # only the persisted payload's identity, never ``audit_name`` (which
-        # still drives ``classify_op`` broadcast sensitivity and the row's
-        # path, so the read/write/credential taxonomy is unchanged).
-        _op_id_override = structlog.contextvars.get_contextvars().get("audit_op_id")
-        if isinstance(_op_id_override, str) and _op_id_override:
-            audit_payload["op_id"] = _op_id_override
         try:
-            await write_mcp_audit_row(
-                audit_id=audit_id,
-                operator=operator,
-                method="MCP",
-                path=f"/mcp/tools/call/{audit_name}",
-                status_code=status_code,
-                duration_ms=duration_ms,
-                payload=audit_payload,
+            # #3757: after the cutover, routine and dispatcher-owned calls
+            # get no wrapper row; the request usage event records them.
+            row_class = wrapper_row_class(
+                status_code=_decision_status(status_code, handler_rejected=handler_rejected),
+                routine=mcp_tool_is_routine(audit_payload["op_class"]),
+                operator_sub=operator.sub,
             )
-        except Exception:
-            # Fail-closed: an audit-write failure invalidates the call.
-            # The finally's bare raise replaces any in-flight return or
-            # exception with the audit-write exception; the dispatcher
-            # then maps it to JSON-RPC -32603 Internal Error. Detail
-            # strings stay scrubbed (only the exception class lands in
-            # the structlog payload below).
-            _log.exception(
-                "mcp_audit_write_failed",
-                method="MCP",
-                path=f"/mcp/tools/call/{audit_name}",
-                status_code=status_code,
-            )
-            raise
-        # G6.1-T3 (#309) publish-on-write hook — runs AFTER the audit
-        # commit succeeds. ``publish_event`` is fail-open by contract,
-        # so a Valkey wobble never converts an OK tool call into a
-        # JSON-RPC -32603. Audit row is the canonical record; broadcast
-        # is the real-time view.
-        await _publish_mcp_event(
-            audit_id=audit_id,
-            operator=operator,
-            op_id=audit_name,
-            op_class=broadcast_op_class,
-            detail=broadcast_detail,
-            audit_path=f"/mcp/tools/call/{audit_name}",
-            status_code=status_code,
-            audit_payload=broadcast_params,
+            if row_class is None:
+                note_request_status(status_code)
+            else:
+                await _write_tool_call_row(
+                    event_class=row_class,
+                    operator=operator,
+                    audit_name=audit_name,
+                    arguments=arguments,
+                    audit_payload=audit_payload,
+                    broadcast_omit_args=broadcast_omit_args,
+                    request_override=request_override,
+                    status_code=status_code,
+                    duration_ms=(time.monotonic() - start) * 1000,
+                )
+        finally:
+            close_classified_record_scope(record_scope)
+
+
+# code-quality-allow: the ``tools/call`` audit + broadcast tail moved here
+# unchanged from :func:`handle_tools_call`'s ``finally`` (#3757); its length
+# is the existing comments on the broadcast and payload rules.
+async def _write_tool_call_row(
+    *,
+    event_class: AuditEventClass,
+    operator: Operator,
+    audit_name: str,
+    arguments: Any,
+    audit_payload: dict[str, Any],
+    broadcast_omit_args: frozenset[str],
+    request_override: Literal["full"] | None,
+    status_code: int,
+    duration_ms: float,
+) -> None:
+    """Write the ``tools/call`` wrapper row, then publish its broadcast event.
+
+    Raises when the audit write fails, so the caller's ``finally`` turns
+    the call into a JSON-RPC ``-32603`` (fail closed).
+    """
+    audit_id = uuid.uuid4()
+    # G6.3-T2 (#379): resolve broadcast detail BEFORE the audit
+    # row commits so ``broadcast_detail_origin`` lands on the
+    # row's payload. The broadcast / ``classify_op`` op_id is
+    # ``audit_name`` (the tool name verbatim) so :func:`classify_op`
+    # matches credential / audit / read / write suffixes correctly
+    # (e.g. ``vault.kv.read`` → ``credential_read`` → aggregate-only
+    # redacted payload by default). A handler may bind ``audit_op_id``
+    # to override only the *persisted* row's op_id (see the
+    # strip-and-merge override below); that never touches the
+    # broadcast / ``classify_op`` identity used here.
+    #
+    # ``resolver_params`` merges the raw tool ``arguments`` on top
+    # of ``audit_payload`` so scope-matched override rules
+    # (``scope_field="namespace"`` keys into ``raw_params["namespace"]``,
+    # ``scope_field="target_name"`` keys into ``raw_params["target"]``)
+    # can match against the actual MCP call. The hashed
+    # ``audit_payload`` (``params_hash``) stays the persistence
+    # shape; the resolver-visible view also carries the unhashed
+    # arguments. Arguments win on key collision -- if a tool
+    # happens to define an ``op_class`` argument, the operator
+    # value would take precedence, but that overlap is a tool-
+    # naming bug T4's API layer can warn on later. The keys the tool
+    # lists in ``broadcast_omit_args`` (#3948, e.g. ``read_docs``'s
+    # ``read_handle``) are left out, so they never reach the feed.
+    resolver_params: dict[str, Any] = dict(audit_payload)
+    if isinstance(arguments, dict):
+        resolver_params.update(
+            {key: value for key, value in arguments.items() if key not in broadcast_omit_args}
         )
+    # #93: ``call_operation`` is a wrapper tool — its name does not
+    # carry any sensitivity signal, so ``classify_op("call_operation")``
+    # falls through to ``"other"`` → ``"full"`` detail and ships raw
+    # ``params`` (including secret-bearing ``params.data`` /
+    # ``params.password``) onto the per-tenant feed. The inner
+    # ``arguments["op_id"]`` is the real operation the agent dispatched
+    # and must be used for the redaction classification instead.
+    # This mirrors the inner DISPATCH row's precedent at
+    # ``operations/_audit.py:443`` where ``classify_op(descriptor.op_id)``
+    # is called on the real op id so credential_write/credential_mint/
+    # credential_read ops collapse to aggregate-only. The outer envelope's
+    # ``op_id`` broadcast field and the audit row's ``path`` column are
+    # intentionally left as ``audit_name`` (the wrapper tool name) so
+    # ``meho audit query`` cardinality and path-based correlations are
+    # unchanged (AC #5).
+    _broadcast_op_id = audit_name
+    if (
+        audit_name == "call_operation"
+        and isinstance(arguments, dict)
+        and isinstance(arguments.get("op_id"), str)
+        and arguments["op_id"]
+    ):
+        _broadcast_op_id = arguments["op_id"]
+    (
+        broadcast_op_class,
+        broadcast_detail,
+        broadcast_origin,
+    ) = await compute_effective_broadcast_detail(
+        op_id=_broadcast_op_id,
+        tenant_id=operator.tenant_id,
+        raw_params=resolver_params,
+        request_override=request_override,
+    )
+    # Snapshot the broadcast-visible params BEFORE injecting the
+    # audit-only ``broadcast_detail_origin`` /
+    # ``broadcast_detail_effective`` keys. The audit row gets the
+    # augmented ``audit_payload``; the broadcast event reads
+    # ``broadcast_params`` so audit-internal metadata (origin,
+    # ``tenant_rule:<uuid>``, effective-detail enum) never reaches
+    # the broadcast feed.
+    broadcast_params = dict(resolver_params)
+    audit_payload["broadcast_detail_origin"] = broadcast_origin
+    # G6.3-T3 (#380): effective detail joins origin as an audit-
+    # only forensic field. Subscribers see ``detail`` through the
+    # rendered ``redact_payload`` shape; the audit row needs the
+    # raw enum for ``meho audit query`` filtering.
+    audit_payload["broadcast_detail_effective"] = broadcast_detail
+    # #704 strip-and-merge, applied to MCP path. Per-tool handlers
+    # bind ``audit_*`` contextvars (e.g. ``audit_override_op`` from
+    # G6.3-T5's broadcast-overrides verbs); the chassis HTTP route
+    # path merges them via :func:`audit._resolve_audit_payload` and
+    # the typed-op dispatcher path via
+    # :func:`operations._audit._build_audit_payload`. MCP was the
+    # third audit-write path missing the merge — the test
+    # ``test_set_via_mcp_writes_audit_row_with_override_diff``
+    # expects ``override_op``/``override_id``/``override_pattern``/
+    # ``override_detail`` to land on the row's payload.
+    _audit_prefix = "audit_"
+    for _k, _v in structlog.contextvars.get_contextvars().items():
+        if not _k.startswith(_audit_prefix) or _v is None:
+            continue
+        _stripped = _k[len(_audit_prefix) :]
+        if _stripped:
+            audit_payload.setdefault(_stripped, _v)
+    # G4.5-T8 (#1549): a handler may bind ``audit_op_id`` to declare a
+    # canonical, dotted op_id for the persisted row (e.g.
+    # ``meho.docs.search`` on ``search_docs``) so a who-touched /
+    # ``query_audit`` filter is transport-independent across REST / CLI
+    # / MCP. ``audit_payload["op_id"]`` is seeded to the bare tool name
+    # at dispatch entry, so the ``setdefault`` merge above can never
+    # apply it — an explicit override is required. This is the *only*
+    # ``audit_*`` key allowed to overwrite a seeded value; it changes
+    # only the persisted payload's identity, never ``audit_name`` (which
+    # still drives ``classify_op`` broadcast sensitivity and the row's
+    # path, so the read/write/credential taxonomy is unchanged).
+    _op_id_override = structlog.contextvars.get_contextvars().get("audit_op_id")
+    if isinstance(_op_id_override, str) and _op_id_override:
+        audit_payload["op_id"] = _op_id_override
+    try:
+        await write_mcp_audit_row(
+            audit_id=audit_id,
+            event_class=event_class,
+            operator=operator,
+            method="MCP",
+            path=f"/mcp/tools/call/{audit_name}",
+            status_code=status_code,
+            duration_ms=duration_ms,
+            payload=audit_payload,
+        )
+    except Exception:
+        # Fail-closed: an audit-write failure invalidates the call.
+        # The finally's bare raise replaces any in-flight return or
+        # exception with the audit-write exception; the dispatcher
+        # then maps it to JSON-RPC -32603 Internal Error. Detail
+        # strings stay scrubbed (only the exception class lands in
+        # the structlog payload below).
+        _log.exception(
+            "mcp_audit_write_failed",
+            method="MCP",
+            path=f"/mcp/tools/call/{audit_name}",
+            status_code=status_code,
+        )
+        raise
+    # G6.1-T3 (#309) publish-on-write hook — runs AFTER the audit
+    # commit succeeds. ``publish_event`` is fail-open by contract,
+    # so a Valkey wobble never converts an OK tool call into a
+    # JSON-RPC -32603. Audit row is the canonical record; broadcast
+    # is the real-time view.
+    await _publish_mcp_event(
+        audit_id=audit_id,
+        operator=operator,
+        op_id=audit_name,
+        op_class=broadcast_op_class,
+        detail=broadcast_detail,
+        audit_path=f"/mcp/tools/call/{audit_name}",
+        status_code=status_code,
+        audit_payload=broadcast_params,
+    )
+
+
+def _decision_status(status_code: int, *, handler_rejected: bool) -> int:
+    """Return the status the wrapper-row decision sees (#3757).
+
+    A handler that rejects its arguments is projected to ``403`` on the
+    row and the broadcast (#1481), but it is a validation failure, not a
+    policy refusal, so the decision sees it as ``400``. Refusals are the
+    explicit role / capability / surface / add-on gates and a handler that
+    raises :class:`McpPermissionDeniedError`; those keep their ``403``. A
+    failed MEHO change (:class:`McpExecutionFailedError`) is already
+    ``502`` and keeps it, so the attempt gets an ``operation_execution``
+    row.
+    """
+    return 400 if handler_rejected else status_code
 
 
 def _operator_meets_required_role(
@@ -754,6 +837,7 @@ async def handle_resources_read(
         "op_class": "read",
     }
     status_code = 500
+    handler_rejected = False
 
     try:
         if not isinstance(uri, str) or not uri:
@@ -828,7 +912,7 @@ async def handle_resources_read(
                 },
             ],
         }
-    except McpInvalidParamsError:
+    except McpInvalidParamsError as exc:
         # Class-wide audit-status correction (#1481), mirroring
         # :func:`handle_tools_call`. A resource handler that raises
         # ``McpInvalidParamsError`` after the explicit gates leaves
@@ -839,63 +923,100 @@ async def handle_resources_read(
         # through untouched.
         if status_code == 500:
             status_code = 403
+            handler_rejected = not isinstance(exc, McpPermissionDeniedError)
         raise
     finally:
-        duration_ms = (time.monotonic() - start) * 1000
-        audit_id = uuid.uuid4()
-        # G6.3-T2 (#379): resolve broadcast detail BEFORE the audit
-        # row commits. The broadcast op_id is the generic
-        # ``mcp.resource.read`` (resource URIs are per-request unique
-        # and would explode the metric cardinality) so the resolver
-        # falls through to ``other`` op_class by default; tenant rules
-        # can still match via ``op_id_pattern="mcp.resource.*"``.
-        (
-            broadcast_op_class,
-            broadcast_detail,
-            broadcast_origin,
-        ) = await compute_effective_broadcast_detail(
-            op_id="mcp.resource.read",
-            tenant_id=operator.tenant_id,
-            raw_params=audit_payload,
-            request_override=request_override,
+        # #3757: resources are reads. After the cutover only a refused
+        # read gets a row; the request usage event records the rest.
+        row_class = wrapper_row_class(
+            status_code=_decision_status(status_code, handler_rejected=handler_rejected),
+            routine=True,
+            operator_sub=operator.sub,
         )
-        # Snapshot the broadcast-visible params BEFORE injecting the
-        # audit-only ``broadcast_detail_origin`` /
-        # ``broadcast_detail_effective`` keys -- same separation of
-        # audit-row and broadcast-event payloads as the tools/call
-        # path above.
-        broadcast_params = dict(audit_payload)
-        audit_payload["broadcast_detail_origin"] = broadcast_origin
-        audit_payload["broadcast_detail_effective"] = broadcast_detail
-        try:
-            await write_mcp_audit_row(
-                audit_id=audit_id,
+        if row_class is None:
+            note_request_status(status_code)
+        else:
+            await _write_resource_read_row(
+                event_class=row_class,
                 operator=operator,
-                method="MCP",
-                path=f"/mcp/resources/read/{audit_uri}",
+                audit_uri=audit_uri,
+                audit_payload=audit_payload,
+                request_override=request_override,
                 status_code=status_code,
-                duration_ms=duration_ms,
-                payload=audit_payload,
+                duration_ms=(time.monotonic() - start) * 1000,
             )
-        except Exception:
-            _log.exception(
-                "mcp_audit_write_failed",
-                method="MCP",
-                path=f"/mcp/resources/read/{audit_uri}",
-                status_code=status_code,
-            )
-            raise
-        # G6.1-T3 publish-on-write hook for the resources/read path.
-        await _publish_mcp_event(
+
+
+async def _write_resource_read_row(
+    *,
+    event_class: AuditEventClass,
+    operator: Operator,
+    audit_uri: str,
+    audit_payload: dict[str, Any],
+    request_override: Literal["full"] | None,
+    status_code: int,
+    duration_ms: float,
+) -> None:
+    """Write the ``resources/read`` wrapper row, then publish its broadcast event.
+
+    Moved unchanged from :func:`handle_resources_read`'s ``finally``
+    (#3757). Raises when the audit write fails (fail closed).
+    """
+    audit_id = uuid.uuid4()
+    # G6.3-T2 (#379): resolve broadcast detail BEFORE the audit
+    # row commits. The broadcast op_id is the generic
+    # ``mcp.resource.read`` (resource URIs are per-request unique
+    # and would explode the metric cardinality) so the resolver
+    # falls through to ``other`` op_class by default; tenant rules
+    # can still match via ``op_id_pattern="mcp.resource.*"``.
+    (
+        broadcast_op_class,
+        broadcast_detail,
+        broadcast_origin,
+    ) = await compute_effective_broadcast_detail(
+        op_id="mcp.resource.read",
+        tenant_id=operator.tenant_id,
+        raw_params=audit_payload,
+        request_override=request_override,
+    )
+    # Snapshot the broadcast-visible params BEFORE injecting the
+    # audit-only ``broadcast_detail_origin`` /
+    # ``broadcast_detail_effective`` keys -- same separation of
+    # audit-row and broadcast-event payloads as the tools/call
+    # path above.
+    broadcast_params = dict(audit_payload)
+    audit_payload["broadcast_detail_origin"] = broadcast_origin
+    audit_payload["broadcast_detail_effective"] = broadcast_detail
+    try:
+        await write_mcp_audit_row(
             audit_id=audit_id,
+            event_class=event_class,
             operator=operator,
-            op_id="mcp.resource.read",
-            op_class=broadcast_op_class,
-            detail=broadcast_detail,
-            audit_path=f"/mcp/resources/read/{audit_uri}",
+            method="MCP",
+            path=f"/mcp/resources/read/{audit_uri}",
             status_code=status_code,
-            audit_payload=broadcast_params,
+            duration_ms=duration_ms,
+            payload=audit_payload,
         )
+    except Exception:
+        _log.exception(
+            "mcp_audit_write_failed",
+            method="MCP",
+            path=f"/mcp/resources/read/{audit_uri}",
+            status_code=status_code,
+        )
+        raise
+    # G6.1-T3 publish-on-write hook for the resources/read path.
+    await _publish_mcp_event(
+        audit_id=audit_id,
+        operator=operator,
+        op_id="mcp.resource.read",
+        op_class=broadcast_op_class,
+        detail=broadcast_detail,
+        audit_path=f"/mcp/resources/read/{audit_uri}",
+        status_code=status_code,
+        audit_payload=broadcast_params,
+    )
 
 
 # ---------------------------------------------------------------------------

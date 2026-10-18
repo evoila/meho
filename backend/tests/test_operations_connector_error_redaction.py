@@ -26,6 +26,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
+from meho_backplane.connectors.base import ConnectorUpstreamError
 from meho_backplane.operations._errors import (
     result_ambiguous_connector,
     result_connector_error,
@@ -91,6 +92,28 @@ def test_connector_error_redacts_bearer_token() -> None:
     msg = result.extras["exception_message"]
     assert "[REDACTED:bearer_token]" in msg
     assert _BEARER_SECRET not in msg
+
+
+def test_connector_upstream_error_sets_status_and_redacted_message() -> None:
+    """A ``ConnectorUpstreamError`` lands its status and redacted message in extras."""
+    exc = ConnectorUpstreamError(
+        "the API server rejected the call (HTTP 403 Forbidden)",
+        http_status=403,
+        upstream_message=_BEARER_TEXT,
+    )
+    result = result_connector_error("k8s.apply", exc, 1.0)
+    assert result.status == "error"
+    assert result.extras["http_status"] == 403
+    assert result.extras["upstream_message"].startswith("request rejected; header was ")
+    assert _BEARER_SECRET not in repr(result.model_dump())
+
+
+def test_connector_upstream_error_without_message() -> None:
+    """An empty upstream body yields ``upstream_message=None``, like the httpx path."""
+    exc = ConnectorUpstreamError("rejected (HTTP 500)", http_status=500, upstream_message=None)
+    result = result_connector_error("k8s.apply", exc, 1.0)
+    assert result.extras["http_status"] == 500
+    assert result.extras["upstream_message"] is None
 
 
 def test_connector_error_redacts_before_capping() -> None:

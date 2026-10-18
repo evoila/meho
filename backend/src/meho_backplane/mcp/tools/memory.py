@@ -112,7 +112,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
-from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
 from meho_backplane.mcp.tools._memory_evidence import (
     SEARCH_OUTPUT_SCHEMA,
     bounded_search_response,
@@ -422,7 +422,7 @@ async def _add_to_memory_handler(
             target_name=target_name,
         )
     except PermissionDeniedError as exc:
-        raise McpInvalidParamsError(f"add_to_memory: {exc}") from exc
+        raise McpPermissionDeniedError(f"add_to_memory: {exc}") from exc
     except ValueError as exc:
         # Service raises ValueError for missing target_name on
         # target-scoped writes and for invalid slug shape. Both are

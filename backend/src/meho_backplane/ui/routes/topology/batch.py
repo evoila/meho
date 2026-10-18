@@ -105,6 +105,7 @@ import structlog
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import HTMLResponse
 
+from meho_backplane.audit_cutover import note_preview
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import GraphEdgeKind
@@ -384,6 +385,9 @@ async def _bulk_import(
             submitted_rows=text,
         )
 
+    if dry_run:
+        # A dry run changes nothing, so the request needs no audit row (#3757).
+        note_preview()
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as db_session:
         try:

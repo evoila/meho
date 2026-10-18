@@ -156,8 +156,10 @@ _RESPONSE_BODY: Final[str] = "http.response.body"
 #: FastAPI route resolution, so there is no ``Request`` object to declare
 #: a ``Header(...)`` param on -- same posture as ``X-Request-Id`` in
 #: :func:`meho_backplane.middleware._extract_request_id`). Bound onto
-#: :data:`~meho_backplane.operations._audit.work_ref_var` for the audit
-#: write so the chassis ``audit_log.work_ref`` column carries it. Because
+#: :data:`~meho_backplane.operations._audit.work_ref_var` for the whole
+#: request -- route handler and chassis audit write (#3804) -- so the
+#: chassis ``audit_log.work_ref`` column and every service-level row
+#: written inside the request carry it. Because
 #: it is never declared as a FastAPI param, it does NOT appear in the
 #: OpenAPI schema -- the documented surface (and thus the CLI snapshot)
 #: is untouched by this header; only the ``CallOperationBody.work_ref``
@@ -846,11 +848,8 @@ class AuditMiddleware:
         finally:
             close_classified_record_scope(record_scope)
 
-    # code-quality-allow: the pre-#3734 ``__call__`` body moved here unchanged
-    # so ``__call__`` can wrap it in the request usage boundary; splitting the
-    # shielded-cancellation drain is out of scope for #3734.
     async def _handle_http(self, scope: Scope, receive: Receive, send: Send) -> None:
-        """Write the audit row for one HTTP request (the pre-#3734 ``__call__`` body)."""
+        """Audit one HTTP request: bind the work-ref, run the inner app, write the row."""
         # G0.5-T5 (#250): MCP requests are audited at per-operation
         # granularity by the MCP handlers themselves, not at the
         # JSON-RPC-envelope layer. Skip the chassis audit path entirely
@@ -865,6 +864,40 @@ class AuditMiddleware:
 
         start = time.monotonic()
 
+        # work_ref I1-T2 (#1657), widened by #3804: bind the inbound
+        # ``Meho-Work-Ref`` header onto :data:`work_ref_var` for the WHOLE
+        # request -- the route handler and the chassis audit write in
+        # ``_finalize``. Service-level audit writers that run inside the
+        # handler (the connector review / ingest rows, a parked approval
+        # request, the DISPATCH row when the body carries no ``work_ref``
+        # of its own) read the var, so they inherit the request's change
+        # ticket instead of landing NULL. A background task the handler
+        # starts (the async ingest job) copies this context at creation,
+        # so its rows carry it too. Token + ``try/finally`` / ``reset``:
+        # the middleware is a single instance serving concurrent requests
+        # on one event loop, so a leaked binding would mis-stamp the NEXT
+        # request's rows. ``None`` header -> no bind -> NULL, unchanged.
+        work_ref_token = None
+        work_ref_header = _extract_work_ref(scope)
+        if work_ref_header is not None:
+            work_ref_token = work_ref_var.set(work_ref_header)
+        try:
+            await self._run_and_finalize(scope, receive, send, start)
+        finally:
+            if work_ref_token is not None:
+                work_ref_var.reset(work_ref_token)
+
+    # code-quality-allow: the pre-#3734 ``__call__`` body lives here
+    # unchanged (moved out of ``_handle_http`` so the work-ref bind can
+    # bracket it); splitting the shielded-cancellation drain is out of scope.
+    async def _run_and_finalize(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+        start: float,
+    ) -> None:
+        """Run the inner app, then write the audit row and forward the response."""
         # Buffer the inner app's send messages so we can decide, after
         # the audit insert, whether to forward them or replace with a
         # fresh 500. Single-shot JSON responses keep the buffer small.
@@ -1065,26 +1098,8 @@ class AuditMiddleware:
             # for forensic queries, not for subscribers.
             payload["broadcast_detail_effective"] = broadcast_decision[1]
 
-        # work_ref I1-T2 (#1657): bind the inbound ``Meho-Work-Ref``
-        # header onto :data:`work_ref_var` so the chassis writer
-        # (:func:`_write_audit_row`) stamps ``audit_log.work_ref`` for
-        # this request. Token + ``try/finally`` / ``reset(token)`` is
-        # the same set/reset discipline the sibling boundary binds use
-        # (``run_id_var`` / ``step_id_var`` in
-        # ``runbooks.run_service``); the ``finally`` is load-bearing
-        # because the ``except`` arm below has early ``return`` / ``raise``
-        # exits, and the middleware is a single instance serving
-        # concurrent requests on the same event loop, so a leaked
-        # binding would mis-stamp the NEXT request's audit row. ``None``
-        # header → no bind → the column lands NULL, unchanged from
-        # pre-#1657. The reset restores the prior value (almost always
-        # ``None`` at the chassis boundary -- the per-op
-        # ``call_operation`` override binds further down the dispatch,
-        # on the inner DISPATCH row, not here).
-        work_ref_token = None
-        work_ref_header = _extract_work_ref(scope)
-        if work_ref_header is not None:
-            work_ref_token = work_ref_var.set(work_ref_header)
+        # ``work_ref_var`` is bound for the whole request by
+        # ``_handle_http`` (#1657 / #3804); ``_write_audit_row`` reads it.
         try:
             await _write_audit_row(
                 audit_id=audit_id,
@@ -1137,9 +1152,6 @@ class AuditMiddleware:
                 raise handler_exc from None
             await _send_audit_failure_response(send)
             return
-        finally:
-            if work_ref_token is not None:
-                work_ref_var.reset(work_ref_token)
 
         # Audit row was committed. The G6.1-T3 (#309) publish-on-write
         # hook fires here — exactly ONCE per audit commit, AFTER the

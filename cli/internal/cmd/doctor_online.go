@@ -205,6 +205,7 @@ func (s *mcpSession) post(ctx context.Context, body map[string]any) (*http.Respo
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("Authorization", "Bearer "+s.bearer())
+	api.SetWorkRefHeader(req)
 	if s.protocol != "" {
 		req.Header.Set("MCP-Protocol-Version", s.protocol)
 	}

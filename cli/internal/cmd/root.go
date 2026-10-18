@@ -11,9 +11,11 @@ import (
 	"context"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/auth"
 	"github.com/evoila/meho/cli/internal/cmd/admin"
 	"github.com/evoila/meho/cli/internal/cmd/agent"
@@ -59,6 +61,7 @@ import (
 	vcfoperations "github.com/evoila/meho/cli/internal/cmd/vcf-operations"
 	"github.com/evoila/meho/cli/internal/cmd/vmware"
 	"github.com/evoila/meho/cli/internal/discovery"
+	"github.com/evoila/meho/cli/internal/output"
 )
 
 // Execute builds the command tree and runs it, returning any error
@@ -122,6 +125,13 @@ func newRootCmdFor(args []string) *cobra.Command {
 		false,
 		"enable verbose output",
 	)
+	root.PersistentFlags().String(
+		"work-ref",
+		"",
+		"external change-ticket reference sent on every backplane request, so the audit rows carry it "+
+			"(e.g. gh:evoila/meho#13; default: $"+api.WorkRefEnv+")",
+	)
+	root.PersistentPreRunE = applyWorkRef
 
 	root.AddCommand(newVersionCmd())
 	root.AddCommand(newLoginCmd())
@@ -626,6 +636,63 @@ func newRootCmdFor(args []string) *cobra.Command {
 	}
 
 	return root
+}
+
+// applyWorkRef reads the global --work-ref flag (or MEHO_WORK_REF when
+// the flag is not set), checks its shape, and puts it on the command
+// context. Every AuthedClient request and every hand-rolled backplane
+// request built from that context then sends the Meho-Work-Ref header.
+//
+// A subcommand that defines its own local --work-ref (operation call,
+// audit query, ...) hides the global flag; for those commands only the
+// environment variable reaches the header.
+//
+// Commands that send no backplane request skip the check, so a bad
+// MEHO_WORK_REF does not break help, shell completion, version or
+// `doctor --no-network`. An online doctor run sends an authenticated
+// request to the health route, which the backplane audits, so it keeps
+// the check and sends the header like every other verb.
+func applyWorkRef(cmd *cobra.Command, _ []string) error {
+	if sendsNoBackplaneRequest(cmd) {
+		return nil
+	}
+	ref, source := "", ""
+	if f := cmd.Root().PersistentFlags().Lookup("work-ref"); f != nil && f.Changed {
+		ref, source = f.Value.String(), "--work-ref"
+	} else if v, ok := os.LookupEnv(api.WorkRefEnv); ok {
+		ref, source = strings.TrimSpace(v), api.WorkRefEnv
+	}
+	if ref == "" {
+		return nil
+	}
+	if !api.ValidWorkRef(ref) {
+		jsonOut := false
+		if f := cmd.Flags().Lookup("json"); f != nil {
+			jsonOut = f.Value.String() == "true"
+		}
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(source+" must match gh:<owner>/<repo>#<n>"), jsonOut)
+	}
+	cmd.SetContext(api.WithWorkRef(cmd.Context(), ref))
+	return nil
+}
+
+// sendsNoBackplaneRequest reports whether cmd is, or sits under, a
+// top-level command that never talks to the backplane. `doctor` counts
+// only with --no-network; its online layer talks to the backplane.
+func sendsNoBackplaneRequest(cmd *cobra.Command) bool {
+	top := cmd
+	for top.HasParent() && top.Parent().HasParent() {
+		top = top.Parent()
+	}
+	switch top.Name() {
+	case "help", "completion", cobra.ShellCompRequestCmd, cobra.ShellCompNoDescRequestCmd, "version":
+		return true
+	case "doctor":
+		f := cmd.Flags().Lookup("no-network")
+		return f != nil && f.Value.String() == "true"
+	}
+	return false
 }
 
 // invokesDoctor reports whether args select the built-in `doctor`

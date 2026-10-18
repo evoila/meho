@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/auth"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -216,6 +217,9 @@ func streamOnce(ctx context.Context, args streamArgs) error {
 		return fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+args.Bearer)
+	// The feed is an audited request. ctx is the command context, so
+	// the global --work-ref rides along on every connect and reconnect.
+	api.SetWorkRefHeader(req)
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Cache-Control", "no-cache")
 	if args.LastEventID != "" {

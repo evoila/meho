@@ -154,7 +154,13 @@ func render(root *cobra.Command) string {
 	sb.WriteString("## Global flags\n\n")
 	sb.WriteString("- `--config` — path to the meho config file " +
 		"(default: `$XDG_CONFIG_HOME/meho/config.json`).\n")
-	sb.WriteString("- `--verbose`, `-v` — enable verbose output.\n\n")
+	sb.WriteString("- `--verbose`, `-v` — enable verbose output.\n")
+	sb.WriteString("- `--work-ref` — external change-ticket reference " +
+		"(`gh:<owner>/<repo>#<n>`, default: `$MEHO_WORK_REF`). The CLI sends it as the " +
+		"`Meho-Work-Ref` header on every backplane request, so the audit rows carry it. " +
+		"Some commands have their own `--work-ref` flag (for example `operation call`, or " +
+		"the filter on `audit query`). On those commands the flag means what that command " +
+		"says, and only `$MEHO_WORK_REF` is sent as the header.\n\n")
 	for _, sub := range sortedSubcommands(root) {
 		renderCommand(&sb, sub, 0)
 	}

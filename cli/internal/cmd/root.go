@@ -646,7 +646,13 @@ func newRootCmdFor(args []string) *cobra.Command {
 // A subcommand that defines its own local --work-ref (operation call,
 // audit query, ...) hides the global flag; for those commands only the
 // environment variable reaches the header.
+//
+// Commands that send no backplane request skip the check, so a bad
+// MEHO_WORK_REF does not break help, shell completion, version or doctor.
 func applyWorkRef(cmd *cobra.Command, _ []string) error {
+	if sendsNoBackplaneRequest(cmd) {
+		return nil
+	}
 	ref, source := "", ""
 	if f := cmd.Root().PersistentFlags().Lookup("work-ref"); f != nil && f.Changed {
 		ref, source = f.Value.String(), "--work-ref"
@@ -666,6 +672,20 @@ func applyWorkRef(cmd *cobra.Command, _ []string) error {
 	}
 	cmd.SetContext(api.WithWorkRef(cmd.Context(), ref))
 	return nil
+}
+
+// sendsNoBackplaneRequest reports whether cmd is, or sits under, a
+// top-level command that never talks to the backplane.
+func sendsNoBackplaneRequest(cmd *cobra.Command) bool {
+	top := cmd
+	for top.HasParent() && top.Parent().HasParent() {
+		top = top.Parent()
+	}
+	switch top.Name() {
+	case "help", "completion", cobra.ShellCompRequestCmd, cobra.ShellCompNoDescRequestCmd, "version", "doctor":
+		return true
+	}
+	return false
 }
 
 // invokesDoctor reports whether args select the built-in `doctor`

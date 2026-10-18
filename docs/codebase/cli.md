@@ -865,6 +865,10 @@ that header from one place, so every verb gets it without its own flag.
   shape once. A bad value stops the command before any request leaves
   the CLI. A good value goes on the command context
   (`api.WithWorkRef`).
+- Commands that send no backplane request skip the check:
+  `help`, `completion` and its children, `__complete` /
+  `__completeNoDesc` (shell completion), `version` and `doctor`. A bad
+  `MEHO_WORK_REF` in the shell does not break them.
 - The `AuthedClient` request editor calls `api.SetWorkRefHeader`, so
   every generated-client call made with `cmd.Context()` sends the
   header. The hand-rolled backplane requests (`targets add` / `import`,

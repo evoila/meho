@@ -173,3 +173,51 @@ func TestWorkRefMalformedRejectedBeforeAnyRequest(t *testing.T) {
 		})
 	}
 }
+
+// TestWorkRefMalformedEnvSkippedForLocalCommands checks that a bad
+// MEHO_WORK_REF does not break commands that send no backplane request.
+// A verb that does send one is still refused before the request leaves.
+func TestWorkRefMalformedEnvSkippedForLocalCommands(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"version", []string{"version"}},
+		{"doctor", []string{"doctor", "--no-network"}},
+		{"help", []string{"help", "targets"}},
+		{"completion", []string{"completion", "bash"}},
+		{"__complete", []string{cobra.ShellCompRequestCmd, "targ"}},
+		{"__completeNoDesc", []string{cobra.ShellCompNoDescRequestCmd, "targ"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, rec := newWorkRefBackplane(t)
+			t.Setenv(api.WorkRefEnv, "bad")
+			if stderr, err := runRoot(t, tc.args...); err != nil {
+				t.Fatalf("want success with a bad %s; err=%v stderr=%s", api.WorkRefEnv, err, stderr)
+			}
+			rec.mu.Lock()
+			defer rec.mu.Unlock()
+			if len(rec.seen) != 0 {
+				t.Errorf("no request should leave the CLI; backplane saw %v", rec.seen)
+			}
+		})
+	}
+
+	t.Run("targets add still refused", func(t *testing.T) {
+		_, rec := newWorkRefBackplane(t)
+		t.Setenv(api.WorkRefEnv, "bad")
+		stderr, err := runRoot(t, "targets", "add", "vault-a", "--product", "vault", "--host", "vault.example.test")
+		if err == nil {
+			t.Fatal("want an error for a malformed work-ref")
+		}
+		if !strings.Contains(stderr, api.WorkRefEnv+" must match") {
+			t.Errorf("stderr = %q; want the shape error", stderr)
+		}
+		rec.mu.Lock()
+		defer rec.mu.Unlock()
+		if len(rec.seen) != 0 {
+			t.Errorf("no request should leave the CLI; backplane saw %v", rec.seen)
+		}
+	})
+}

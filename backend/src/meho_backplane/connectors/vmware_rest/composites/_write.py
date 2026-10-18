@@ -242,10 +242,11 @@ _OP_FILTER_OVF_LIBRARY_ITEM = "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}
 # 30-min window live, faulting mid-transfer while vCenter kept copying.
 # Widening the read cap is a *bounded mitigation*, not the durable fix — a
 # still-larger item or a slower fabric can outrun any fixed ceiling, and on
-# this synchronous path a caller that disconnects mid-wait still aborts + rolls
-# the deploy back. The durable fixes are orthogonal and live elsewhere: async
-# governed dispatch (#3079) decouples completion from the request connection so
-# a dropped caller no longer cancels the in-flight deploy (the supported mode
+# this synchronous path a caller that disconnects mid-wait never gets the
+# answer (the deploy still runs to the end; the audit row records
+# ``caller_gone_at``, #3696). The durable fixes are orthogonal and live
+# elsewhere: async governed dispatch (#3079) decouples completion from the
+# request connection so a dropped caller loses nothing (the supported mode
 # for multi-GB items — see ``vm_deploy_from_library_composite``'s docstring),
 # and a typed pyvmomi ``HttpNfcLease`` import (#2890) would uncouple completion
 # from a single blocking read entirely.
@@ -3493,11 +3494,11 @@ async def vm_deploy_from_library_composite(
     on the default sync path, but a **multi-GB installer OVA should be
     dispatched in async mode** (``call_operation`` with ``async=true`` → HTTP
     202 + a durable run handle, #3079): the deploy then runs on a background
-    task that owns the vCenter POST, so a caller that disconnects mid-transfer
-    no longer cancels the in-flight deploy — on the sync path a dropped caller
-    propagates cancellation into the POST. The sync ceiling stays a bounded
-    mitigation; an item large enough to outrun 3 h still needs the typed
-    ``HttpNfcLease`` import (#2890).
+    task that owns the vCenter POST, so the caller does not have to keep the
+    connection open. On the sync path a caller that disconnects never gets the
+    answer; the deploy still runs to the end, and the audit row records
+    ``caller_gone_at`` (#3696). The sync ceiling stays a bounded mitigation; an item large enough to
+    outrun 3 h still needs the typed ``HttpNfcLease`` import (#2890).
 
     **No partial VM after a failed deploy (#3697).** vCenter's own rollback of
     an interrupted deploy depends on timing, so the composite cleans up
@@ -3597,7 +3598,7 @@ async def vm_deploy_from_library_composite(
             ],
         )
     except asyncio.CancelledError:
-        # The caller went away mid-deploy. Remove a partial VM before the
+        # The deploy was cancelled mid-way. Remove a partial VM before the
         # cancellation unwinds (#3697); no envelope reaches the caller, so
         # the outcome is logged.
         cleanup_issues = await _drain_deploy_cleanup(

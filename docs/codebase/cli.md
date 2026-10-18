@@ -165,6 +165,7 @@ cli/
     ├── api/
     │   ├── client.gen.go      # generated typed client (oapi-codegen v2.5).
     │   ├── client.go          # auth-aware wrapper; NewAuthedClient + GetHealth.
+    │   ├── workref.go         # Meho-Work-Ref header + MEHO_WORK_REF env names, work-ref shape check, context helpers (#3804).
     │   └── refresh.go         # lazy 401-retry refresh via x/oauth2.
     ├── auth/
     │   ├── devicecode.go      # OAuth 2.0 device-code flow + OIDC discovery.
@@ -176,7 +177,7 @@ cli/
     │   ├── config.go          # backplane-URL config file ($XDG/meho/config.json).
     │   └── config_test.go     # roundtrip + 0600/0700 mode test.
     ├── cmd/
-    │   ├── root.go            # cobra root + dynamic-discovery hook.
+    │   ├── root.go            # cobra root + dynamic-discovery hook + global --work-ref pre-run (#3804).
     │   ├── root_test.go       # built-in command surface + dynamic-graft test.
     │   ├── version.go         # `meho version` subcommand.
     │   ├── version_test.go    # output-contract test.
@@ -849,6 +850,34 @@ probably newer than the CLI, that the operation may have run or be
 waiting for approval, and points at `meho status`. The exit code stays
 `4` (`unexpected_response`) because the CLI cannot tell whether the
 operation worked.
+
+## Global work-ref (`--work-ref`, `MEHO_WORK_REF`, #3804)
+
+A change-ticket reference (`gh:<owner>/<repo>#<n>`) links an audit row
+to the change that allowed it. The backplane audit middleware reads it
+from the `Meho-Work-Ref` request header and writes it to
+`audit_log.work_ref` on the row for that request (#1657). The CLI sets
+that header from one place, so every verb gets it without its own flag.
+
+- The root command has a persistent `--work-ref` flag. When the flag is
+  not set, the CLI reads `MEHO_WORK_REF`. The flag wins.
+- The root `PersistentPreRunE` (`applyWorkRef` in `root.go`) checks the
+  shape once. A bad value stops the command before any request leaves
+  the CLI. A good value goes on the command context
+  (`api.WithWorkRef`).
+- The `AuthedClient` request editor calls `api.SetWorkRefHeader`, so
+  every generated-client call made with `cmd.Context()` sends the
+  header. The hand-rolled backplane requests (`targets add` / `import`,
+  `event-source`, the broadcast feed) call the same helper next to
+  their `Authorization` header. Keycloak admin calls, login, discovery
+  and the version check do not send it.
+- Some commands have their own local `--work-ref` (`operation call`,
+  `scheduler create`, `runbook start`, `agent run`, and the filters on
+  `audit query`, `approvals list`, `broadcast recent`, ...). Cobra lets a local
+  flag hide the parent's persistent flag, so on those commands the flag
+  keeps its own meaning. Only `MEHO_WORK_REF` reaches the header there.
+- No PersistentPreRun hooks exist below the root. If one is added, it
+  must call `applyWorkRef` too (cobra runs only the nearest hook).
 
 ## Doctor flow (`meho doctor`, #3666)
 

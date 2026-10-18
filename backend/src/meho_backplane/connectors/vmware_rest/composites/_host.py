@@ -341,8 +341,7 @@ async def _resolve_host_and_manager(
                     issue(
                         "connector",
                         "error",
-                        f"could not read {prop} of host {host_moid!r}; "
-                        "nothing was changed",
+                        f"could not read {prop} of host {host_moid!r}; nothing was changed",
                     )
                 ],
             },

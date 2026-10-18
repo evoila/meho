@@ -14,8 +14,9 @@ What is true today:
 - When it is on, every authenticated HTTP request (REST and `POST /mcp`)
   writes exactly one `request_finished` event.
 - A daily job deletes events older than the retention window.
-- This is the **dual-write** phase: the wrapper `audit_log` rows for REST
-  and MCP are still written. They are removed in a later task (#3757).
+- By default the wrapper `audit_log` rows for REST and MCP are still
+  written too. Set `AUDIT_WRAPPER_ROWS_RETIRED=true` to stop the routine
+  ones (#3757). See [Retiring the wrapper rows](#retiring-the-wrapper-rows).
 - The retrieval usage, retirement checklist and reflex adoption reports
   read these events (`source="request_usage"`). Their REST and console
   routes switched to them in #3747. When collection is off, those
@@ -79,6 +80,65 @@ is never stored. A request with no known route is stored as `<unmatched>`.
    swallowed: it never changes the response, the audit row, or a policy
    decision.
 
+## Retiring the wrapper rows
+
+`AUDIT_WRAPPER_ROWS_RETIRED=true` (#3757) makes the audit log hold only
+actions and decisions. Routine REST and MCP activity is then recorded only
+as usage events. `backend/src/meho_backplane/audit_cutover.py` decides,
+for each REST request and each MCP tool call or resource read:
+
+| The request | What goes into `audit_log` |
+|---|---|
+| A classified writer already wrote a row in the caller's name (the dispatcher, an approval decision, a topology edit, a runner revocation, ...) and that row committed | Nothing more. That row is the record. A row under another identity (a system job's name) does not count, so the wrapper row stays and the record still says who called. A row that rolled back with a failed change does not count either; the failed attempt gets its `operation_execution` row below. |
+| Refused: HTTP 401 / 403, an MCP role / capability / surface / add-on gate, or an MCP handler that raises `McpPermissionDeniedError` (the caller may not use this target, memory scope, docs collection, tenant, built-in connector or doc collection, runbook template or run, or another session's audit trail). REST answers 403 for the same checks. | One `policy_decision` row. |
+| Routine: a `GET`, a read-only `POST` (search, query, preview, heartbeat, runner results), an MCP `read` or `audit_query` tool, a resource read, or the dry run of a write route or `write` tool (a topology bulk import, a connector ingest, a kb ingest with `dry_run`) | Nothing. |
+| An operation call (`POST /api/v1/operations/call`, MCP `call_operation`) | Nothing more. The dispatcher writes the execution or policy row, also for a connector error. An async run writes it when the run finishes. |
+| Any other 4xx (validation failure, not found, conflict), or an MCP handler that rejects its arguments with a plain `McpInvalidParamsError` | Nothing. |
+| Anything else: a MEHO change with no record of its own (create a target, enable a connector, an MCP `write` tool), or one that failed with 5xx, or an MCP handler that raises `McpExecutionFailedError` (the change failed in Keycloak or Vault; REST answers 502 or 503 for the same failure) | One `operation_execution` row. |
+
+A request with no row also publishes no broadcast event. Every request
+still writes its usage event.
+
+The wrapper row carried the request's lineage: the agent session, the
+delegated actor, the parent record, the request id and the work
+reference. Many domain writers (a connector edit, a topology edit, ...)
+leave those columns empty. After the cutover, a record written during a
+request gets each of them filled from the request context when its writer
+left it empty; a value the writer set is kept. So a connector edit made
+over MCP still shows up in its session's replay, and its request id
+matches the request's usage event. Records written outside a request (a
+system job, an async run that finishes after the response) are not
+changed.
+
+The routine `POST` routes and the operation routes are two lists in
+`audit_cutover.py` (`ROUTINE_POST_ROUTES`, `DISPATCH_ROUTES`). A new
+read-only `POST` route must be added to the first list; otherwise, after
+the cutover, each call writes an `operation_execution` row. A write route
+or `write` tool with a dry-run branch calls `note_preview()` on that
+branch instead, so the dry run is routine and the real run still gets its
+record.
+
+The cutover is fail closed:
+
+- The setting needs `REQUEST_USAGE_RETENTION_DAYS`. Without it, routine
+  activity would leave no record at all, so the pod refuses to start with
+  a message that names both settings.
+- `tests/test_audit_wrapper_cutover.py` checks the code side: the two
+  wrapper writers take the class as an argument, no writer except the
+  `approval.result` read row hard-codes `legacy_request`, the three
+  reports read usage events, and the route lists match the app. It also
+  runs the same cases through REST and MCP.
+- With the setting off (the default), nothing changes: every
+  authenticated request still writes one `legacy_request` row.
+
+Before you turn it on, set `REQUEST_USAGE_RETENTION_DAYS`. Old rows are
+not deleted or reclassified.
+
+The reflex advisory ("did this agent session read the broadcast feed?")
+reads both the `meho_broadcast_recent` wrapper row and the session's
+`tool:meho_broadcast_recent` usage event, so it works before and after the
+cutover. Migration `0113` adds the `session_id` index it uses.
+
 ## Context selection
 
 `note_context_selected(correlation_id=None)` adds one `context_selected`
@@ -115,8 +175,14 @@ the loop goes on.
 - `backend/src/meho_backplane/db/models.py` — `RequestUsageEvent`.
 - `backend/alembic/versions/0107_create_request_usage_event.py` — table,
   CHECK constraints, indexes.
-- `backend/src/meho_backplane/settings.py` — `request_usage_retention_days`.
-- Tests: `backend/tests/test_request_usage.py`, plus the
+- `backend/alembic/versions/0113_add_request_usage_session_index.py` — the
+  `session_id` index for the reflex advisory.
+- `backend/src/meho_backplane/audit_cutover.py` — which wrapper rows are
+  still written (#3757).
+- `backend/src/meho_backplane/settings.py` — `request_usage_retention_days`,
+  `audit_wrapper_rows_retired`.
+- Tests: `backend/tests/test_request_usage.py`,
+  `backend/tests/test_audit_wrapper_cutover.py`, plus the
   `source="request_usage"` cases in `test_retrieval_usage.py`,
   `test_retrieval_retire.py` and `test_reflex_adoption.py`.
 

@@ -108,6 +108,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.api.v1._envelope import ENVELOPE_QUERY, EnvelopeVersion
+from meho_backplane.audit_cutover import note_preview
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.connectors import (
@@ -1247,6 +1248,9 @@ async def bulk_import_edges_route(
         )
         for edge in body.edges
     ]
+    if body.dry_run:
+        # A dry run changes nothing, so the request needs no audit row (#3757).
+        note_preview()
     try:
         result = await bulk_import_edges(session, operator, rows, dry_run=body.dry_run)
     except BulkImportValidationError as exc:

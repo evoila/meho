@@ -242,6 +242,29 @@ class McpInvalidParamsError(Exception):
         self.data = data
 
 
+class McpPermissionDeniedError(McpInvalidParamsError):
+    """An :class:`McpInvalidParamsError` that is a permission refusal (#3757).
+
+    Same ``-32602`` wire error as its parent, so callers and clients see no
+    change. It tells the audit path that a handler refused the call because
+    the caller lacks permission (the MCP form of an HTTP 403), not because
+    the params were wrong. With ``AUDIT_WRAPPER_ROWS_RETIRED`` on, such a
+    refusal still writes a ``policy_decision`` row, as REST does for a 403.
+    """
+
+
+class McpExecutionFailedError(McpInvalidParamsError):
+    """An :class:`McpInvalidParamsError` raised because a MEHO change failed (#3757).
+
+    Same ``-32602`` wire error as its parent, so callers and clients see no
+    change. It tells the audit path that the handler tried to make a change
+    and the write failed (Keycloak or Vault unreachable, not configured, or
+    refused the write): the MCP form of an HTTP 502 / 503, not a bad
+    argument. With ``AUDIT_WRAPPER_ROWS_RETIRED`` on, the failed attempt
+    still writes an ``operation_execution`` row, as REST does for a 5xx.
+    """
+
+
 class McpInternalError(Exception):
     """Handler-side sentinel mapped to JSON-RPC ``INTERNAL_ERROR`` **with data**.
 

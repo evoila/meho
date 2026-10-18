@@ -76,6 +76,8 @@ from meho_backplane.operations import (
 from meho_backplane.operations._audit import agent_session_id_var
 from meho_backplane.settings import get_settings
 
+from ._request_usage_helpers import seed_usage_event
+
 _TENANT = UUID("00000000-0000-0000-0000-000000003133")
 _SESSION = UUID("33333333-3333-3333-3333-333333333333")
 _RECENT_PATH = "/mcp/tools/call/meho_broadcast_recent"
@@ -303,6 +305,21 @@ async def test_read_nudge_silent_once_session_has_read_broadcast() -> None:
         advisory = await build_reflex_advisory(_operator(), op_id="vault.kv.list", target_name=None)
     assert advisory == {}
     # Heuristic did not qualify, so no claim was ever attempted.
+    assert store.calls == 0
+
+
+async def test_read_recorded_only_as_usage_event_counts() -> None:
+    """After the wrapper row cutover (#3757) the read is only a usage event."""
+    await seed_usage_event(
+        tenant_id=_TENANT,
+        route="tool:meho_broadcast_recent",
+        occurred_at=datetime.now(UTC),
+        session_id=_SESSION,
+    )
+    store = _FakeSetStore()
+    with _patch_set(store), _bound_session(_SESSION):
+        advisory = await build_reflex_advisory(_operator(), op_id="vault.kv.list", target_name=None)
+    assert advisory == {}
     assert store.calls == 0
 
 

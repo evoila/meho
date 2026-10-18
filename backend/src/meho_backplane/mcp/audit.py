@@ -19,6 +19,12 @@ T5 splits the responsibilities:
   :func:`write_mcp_audit_row` before propagating the result or
   exception.
 
+With ``AUDIT_WRAPPER_ROWS_RETIRED=true`` (#3757) the handlers call this
+writer only when :func:`~meho_backplane.audit_cutover.wrapper_row_class`
+asks for a row: a refused call, or a write tool with no record of its
+own. Reads, ``call_operation`` and validation failures are recorded only
+as request usage events.
+
 Field semantics (matched against
 :class:`~meho_backplane.db.models.AuditLog`):
 
@@ -158,6 +164,7 @@ def _resolve_str_contextvar(name: str) -> str | None:
 # not branching logic — extracting helpers would fragment one DB transaction.
 async def write_mcp_audit_row(
     *,
+    event_class: AuditEventClass,
     operator: Operator,
     method: str,
     path: str,
@@ -212,6 +219,12 @@ async def write_mcp_audit_row(
     omit the kwarg and get a fresh uuid4 generated here. Returns the
     audit id used for the row so the dispatch call site can plumb it
     through to ``publish_event`` either way.
+
+    *event_class* has no default. The handlers take it from
+    :func:`~meho_backplane.audit_cutover.wrapper_row_class`:
+    ``legacy_request`` before the cutover, a decision or execution class
+    after it (#3757). After the cutover routine calls never reach this
+    writer.
     """
     # Merge ``audit_*`` contextvars into the row payload — same
     # surfacing the REST middleware does. Caller's payload wins on
@@ -282,7 +295,7 @@ async def write_mcp_audit_row(
     log = structlog.get_logger(__name__)
     if audit_id is None:
         audit_id = uuid.uuid4()
-    # #3734 dual write: hand the projected status to the open request usage
+    # #3734: hand the projected status to the open request usage
     # boundary (MCP answers HTTP 200 even when the call failed). If this
     # audit commit fails, the caller turns the call into an internal error,
     # so the usage outcome becomes a server error too.
@@ -291,8 +304,7 @@ async def write_mcp_audit_row(
     async with sessionmaker() as session:
         row = AuditLog(
             id=audit_id,
-            # A request wrapper row: it keeps the old request meaning (#3733).
-            event_class=AuditEventClass.LEGACY_REQUEST,
+            event_class=event_class,
             occurred_at=datetime.now(UTC),
             operator_sub=operator.sub,
             actor_sub=resolve_actor_sub(),

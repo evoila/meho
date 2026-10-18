@@ -12,7 +12,8 @@ Broadcast v2 Initiative #2543, Task #2547 (T2). Two contracts:
 
 * **Recent archive backfill.** When the requested window reaches before
   the stream's oldest surviving entry (or the stream is empty -- the
-  Valkey-restart / ``FLUSHALL`` shape), ``meho_broadcast_recent`` reads
+  Valkey-restart / ``FLUSHALL`` shape), the UI history read
+  (:func:`list_recent_events_fail_soft`) reads
   the announcements that lived in that gap back from the DB, deduped
   against the stream page by ``event_id`` and bounded by the page limit.
 
@@ -35,14 +36,13 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast import (
     AgentAnnouncementEvent,
     get_broadcast_client,
-    list_recent_events_strict,
+    list_recent_events_fail_soft,
     publish_agent_announcement,
     reset_broadcast_client_for_testing,
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentAnnouncement, Tenant
 from meho_backplane.settings import get_settings
-from meho_backplane.untrusted_text import wrap_untrusted_text
 from tests.broadcast_admission_helpers import fake_stream_write
 
 pytestmark = pytest.mark.asyncio
@@ -143,8 +143,9 @@ async def test_publish_persists_durable_row_keyed_on_event_uuid() -> None:
     with fake_stream_write(bc, AsyncMock(return_value="1747800000000-0")):
         result = await publish_agent_announcement(event, idempotency_key="key-1")
 
-    # The result carries the stream cursor; the durable id is the UUID.
-    assert result.cursor == "1747800000000-0"
+    # The result carries the stream entry id and the archive number (#3748).
+    assert result.stream_entry_id == "1747800000000-0"
+    assert result.seq == 1
     assert result.replayed is False
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -190,7 +191,7 @@ async def test_recent_backfills_from_db_when_stream_empty() -> None:
     )
     bc = get_broadcast_client()
     with patch.object(bc, "xrange", new=AsyncMock(return_value=[])):
-        result = await list_recent_events_strict(op, limit=100)
+        result = await list_recent_events_fail_soft(op, limit=100)
 
     assert len(result["events"]) == 1
     event = result["events"][0]
@@ -198,8 +199,8 @@ async def test_recent_backfills_from_db_when_stream_empty() -> None:
     # A DB-sourced row carries no stream cursor.
     assert event["cursor"] is None
     assert event["event_kind"] == "agent_announcement"
-    # Free-text stays enveloped on serve even from the archive.
-    assert event["activity"] == wrap_untrusted_text("rotating tokens")
+    # The UI pane reads the raw text and escapes it at its HTML sink.
+    assert event["activity"] == "rotating tokens"
 
 
 async def test_recent_backfill_respects_tenant_scope() -> None:
@@ -210,7 +211,7 @@ async def test_recent_backfill_respects_tenant_scope() -> None:
     op_a = _operator(tenant_a)
     bc = get_broadcast_client()
     with patch.object(bc, "xrange", new=AsyncMock(return_value=[])):
-        result = await list_recent_events_strict(op_a, limit=100)
+        result = await list_recent_events_fail_soft(op_a, limit=100)
     assert result["events"] == []
 
 
@@ -230,7 +231,7 @@ async def test_recent_backfill_applies_work_ref_filter() -> None:
     )
     bc = get_broadcast_client()
     with patch.object(bc, "xrange", new=AsyncMock(return_value=[])):
-        result = await list_recent_events_strict(op, limit=100, work_ref="gh:evoila/meho#123")
+        result = await list_recent_events_fail_soft(op, limit=100, work_ref="gh:evoila/meho#123")
     assert [e["event_id"] for e in result["events"]] == [str(match)]
 
 
@@ -247,13 +248,13 @@ async def test_recent_backfill_active_only_excludes_expired_claim() -> None:
     bc = get_broadcast_client()
     with patch.object(bc, "xrange", new=AsyncMock(return_value=[])):
         # Wide window so the expired claim is inside the look-back.
-        active = await list_recent_events_strict(
+        active = await list_recent_events_fail_soft(
             op,
             since=(datetime.now(UTC) - timedelta(hours=2)).isoformat(),
             active_only=True,
             limit=100,
         )
-        allrows = await list_recent_events_strict(
+        allrows = await list_recent_events_fail_soft(
             op,
             since=(datetime.now(UTC) - timedelta(hours=2)).isoformat(),
             limit=100,
@@ -269,7 +270,7 @@ async def test_recent_backfill_short_circuits_on_op_class_filter() -> None:
     await _seed_row(tenant_id=tenant_id, created_at=datetime.now(UTC) - timedelta(minutes=5))
     bc = get_broadcast_client()
     with patch.object(bc, "xrange", new=AsyncMock(return_value=[])):
-        result = await list_recent_events_strict(op, op_class="write", limit=100)
+        result = await list_recent_events_fail_soft(op, op_class="write", limit=100)
     assert result["events"] == []
 
 
@@ -280,7 +281,7 @@ async def test_recent_no_backfill_when_paginating_by_cursor() -> None:
     await _seed_row(tenant_id=tenant_id, created_at=datetime.now(UTC) - timedelta(minutes=5))
     bc = get_broadcast_client()
     with patch.object(bc, "xrange", new=AsyncMock(return_value=[])):
-        result = await list_recent_events_strict(op, since="1747800000000-0", limit=100)
+        result = await list_recent_events_fail_soft(op, since="1747800000000-0", limit=100)
     assert result["events"] == []
 
 
@@ -303,7 +304,7 @@ async def test_recent_dedups_backfill_against_stream_by_event_id() -> None:
     entry = ("1747800000000-0", {"event": event.model_dump_json()})
     bc = get_broadcast_client()
     with patch.object(bc, "xrange", new=AsyncMock(return_value=[entry])):
-        result = await list_recent_events_strict(
+        result = await list_recent_events_fail_soft(
             op,
             since=(datetime.now(UTC) - timedelta(hours=1)).isoformat(),
             limit=100,

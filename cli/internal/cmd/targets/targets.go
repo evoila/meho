@@ -13,6 +13,11 @@
 //     set (so server defaults apply), renders the created row like
 //     `describe`, and keeps all validation server-side.
 //
+//   - `meho targets update <name|alias> [field flags] [--clear F]`
+//     (Task #3854) — PATCH /api/v1/targets/{name} for one target.
+//     Sends only the flags the operator set; `--clear <field>` sends
+//     an explicit null (for example to drop a target's credential).
+//
 //   - `meho targets list [--product P] [--json]` —
 //     GET /api/v1/targets, keyset-paginated, optionally narrowed by
 //     product slug.
@@ -62,9 +67,10 @@
 //
 // Single-target create ships as `meho targets add <name>` (alias
 // `create`; Task #2862) — see add.go, which reuses import.go's
-// `doAuthedRequest` POST plumbing. The remaining write verbs
-// (`update` / `delete`) stay out of scope; operators use
-// `import --update` for bulk reconciliation.
+// `doAuthedRequest` POST plumbing; `meho targets update <name>`
+// (Task #3854, update.go) reuses the same plumbing for PATCH. `delete`
+// stays out of scope; operators use `import --update` for bulk
+// reconciliation.
 package targets
 
 import (
@@ -91,11 +97,12 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "targets",
-		Short:        "Operate the MEHO targets registry (add / list / describe / probe / import / discover)",
-		Long:         "Add, list, describe, probe, bulk-import, and discover targets in the operator's tenant.",
+		Short:        "Operate the MEHO targets registry (add / update / list / describe / probe / import / discover)",
+		Long:         "Add, update, list, describe, probe, bulk-import, and discover targets in the operator's tenant.",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newAddCmd())
+	cmd.AddCommand(newUpdateCmd())
 	cmd.AddCommand(newListCmd())
 	cmd.AddCommand(newDescribeCmd())
 	cmd.AddCommand(newProbeCmd())

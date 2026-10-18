@@ -1000,7 +1000,7 @@ async def test_full_result_cache_does_not_block_broadcast(
     )
 
     assert list(shared.counters.values()) == [1]
-    assert result.cursor == "1700000000000-0"
+    assert result.stream_entry_id == "1700000000000-0"
     assert [len(entries) for entries in shared.streams.values()] == [1]
 
 

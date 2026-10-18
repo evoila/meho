@@ -32,7 +32,6 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 from redis.exceptions import RedisError
-from redis.exceptions import TimeoutError as RedisTimeoutError
 from sqlalchemy import func, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -419,7 +418,8 @@ async def test_same_key_replays_without_a_second_write(_fake_stream: AsyncMock) 
     assert first["replayed"] is False
     assert again["replayed"] is True
     assert again["event_id"] == first["event_id"]
-    assert again["cursor"] is None
+    assert again["watch_checkpoint"] == first["watch_checkpoint"]
+    assert again["delivery_pending"] is False
     assert await _row_count(tenant_id) == 2
     assert _fake_stream.await_count == 2
 
@@ -430,7 +430,11 @@ async def test_same_key_replays_without_a_second_write(_fake_stream: AsyncMock) 
 async def test_retry_finishes_a_delivery_whose_stream_write_failed(
     _fake_stream: AsyncMock,
 ) -> None:
-    """The row is stored, the stream write fails, the retry delivers it once."""
+    """The row is stored, the stream write fails, the retry delivers it once.
+
+    The first call succeeds with ``delivery_pending`` (#3748): the archive
+    row is the record, so a stream failure is not an error any more.
+    """
     tenant_id = uuid4()
     agent = await _registered_agent(tenant_id)
     start = await _handler_announce(agent, {"activity": "start"})
@@ -450,8 +454,9 @@ async def test_retry_finishes_a_delivery_whose_stream_write_failed(
 
     _fake_stream.side_effect = _next_outcome
 
-    with pytest.raises(RedisError):
-        await _handler_announce(agent, step)
+    pending_ack = await _handler_announce(agent, step)
+    assert pending_ack["delivery_pending"] is True
+    assert pending_ack["replayed"] is False
     assert await _row_count(tenant_id) == 2
     async with get_sessionmaker()() as session:
         pending = (
@@ -464,8 +469,9 @@ async def test_retry_finishes_a_delivery_whose_stream_write_failed(
 
     delivered = await _handler_announce(agent, step)
     assert delivered["replayed"] is True
-    assert delivered["cursor"] == "1700000000000-77"
-    assert delivered["event_id"] == str(pending_id)
+    assert delivered["delivery_pending"] is False
+    assert delivered["event_id"] == str(pending_id) == pending_ack["event_id"]
+    assert delivered["watch_checkpoint"] == pending_ack["watch_checkpoint"]
     assert await _row_count(tenant_id) == 2
     assert _fake_stream.await_count == 3
     _stream_key, fields = _fake_stream.await_args.args
@@ -477,7 +483,7 @@ async def test_retry_finishes_a_delivery_whose_stream_write_failed(
 
     again = await _handler_announce(agent, step)
     assert again["replayed"] is True
-    assert again["cursor"] is None
+    assert again["delivery_pending"] is False
     assert _fake_stream.await_count == 3
 
     data = await _announce_error(
@@ -544,12 +550,12 @@ async def test_retry_after_a_failed_delivery_mark_writes_no_second_entry(
 
     first = await _handler_announce(agent, step)
     assert first["replayed"] is False
-    assert first["cursor"] == "1700000000000-77"
+    assert first["delivery_pending"] is False
     assert (await _completion_row(claim_id)).stream_entry_id is None
 
     retry = await _handler_announce(agent, step)
     assert retry["replayed"] is True
-    assert retry["cursor"] is None
+    assert retry["delivery_pending"] is False
     assert retry["event_id"] == first["event_id"]
     assert _fake_valkey.xadd.await_count == 2, "start + one completion write, no duplicate"
     assert (await _completion_row(claim_id)).stream_entry_id == "1700000000000-77"
@@ -565,8 +571,8 @@ async def test_retry_after_a_lost_stream_reply_writes_no_second_entry(
     step, claim_id = await _completion_step(agent, "c1")
 
     _fake_valkey.lose_next_response = True
-    with pytest.raises(RedisTimeoutError):
-        await _handler_announce(agent, step)
+    lost = await _handler_announce(agent, step)
+    assert lost["delivery_pending"] is True
     assert (await _completion_row(claim_id)).stream_entry_id is None
     assert _fake_valkey.xadd.await_count == 2
     _stream_key, fields = _fake_valkey.xadd.await_args.args
@@ -574,7 +580,7 @@ async def test_retry_after_a_lost_stream_reply_writes_no_second_entry(
 
     retry = await _handler_announce(agent, step)
     assert retry["replayed"] is True
-    assert retry["cursor"] is None
+    assert retry["delivery_pending"] is False
     assert retry["event_id"] == written_event_id
     assert _fake_valkey.xadd.await_count == 2, "the retry found the entry and wrote nothing"
     assert (await _completion_row(claim_id)).stream_entry_id == "1700000000000-2"
@@ -582,7 +588,7 @@ async def test_retry_after_a_lost_stream_reply_writes_no_second_entry(
 
     again = await _handler_announce(agent, step)
     assert again["replayed"] is True
-    assert again["cursor"] is None
+    assert again["delivery_pending"] is False
     assert _fake_valkey.xadd.await_count == 2
 
 

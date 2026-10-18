@@ -19,6 +19,8 @@
   Context variables:
     requests          -- list[dict]: projected rows
     status_pill_class -- dict[str, str]: status -> DaisyUI badge modifier
+    result_state_pill -- dict[str, tuple[str, str]]: run state of an
+                         approved request -> (label, badge modifier) (#3543)
 -#}
 {% from "_references.html" import subject %}
 {% for req in requests %}
@@ -29,6 +31,16 @@
           class="badge badge-sm {{ status_pill_class.get(req.status, 'badge-ghost') }}"
           aria-label="Status {{ req.status }}"
         >{{ req.status }}</span>
+        {#- Run state of an approved request (#3543): "approved" alone does
+            not say whether the change landed. -#}
+        {% if req.result_state %}
+          {% set run_label, run_class = result_state_pill.get(req.result_state, (req.result_state, "badge-ghost")) %}
+          <span
+            class="badge badge-sm {{ run_class }}"
+            data-result-state="{{ req.result_state }}"
+            aria-label="Run state {{ run_label }}"
+          >{{ run_label }}</span>
+        {% endif %}
         <p class="truncate font-mono text-sm">{{ req.op_id }}</p>
       </div>
       <p class="truncate text-xs text-base-content/55">

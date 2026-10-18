@@ -186,6 +186,23 @@ hours with the
 Without it, the login ends at the realm's SSO idle limit (30 minutes by
 default). If you change the scopes field, keep `offline_access` in it.
 
+### When the login expires or is not finished
+
+The bundle makes sure a MEHO call never hangs because of a login:
+
+- **The login expired.** The next MEHO call fails at once with "Your MEHO
+  login has expired. Turn the MEHO extension off and on again in Claude
+  Desktop (Settings > Extensions) to log in again." Then the extension
+  stops. Turn it off and on in **Settings > Extensions**, and finish the
+  browser login that opens.
+- **Nobody finished the browser login.** The extension stops after 5
+  minutes, so the local login port is free again. Finish any open MEHO
+  login in your browser, then turn the extension off and on.
+
+After you update to a bundle with this fix, the first use opens **one new
+browser login**. The bundle's newer `mcp-remote` keeps saved logins in a
+new folder, `~/.mcp-auth/mcp-remote-0.1.38/`.
+
 The bundle still expects the realm's public `meho-mcp` client with the
 shim's loopback redirect URIs registered (below), and — on an
 internal-CA deploy — one of the two CA trust routes below. If you cannot

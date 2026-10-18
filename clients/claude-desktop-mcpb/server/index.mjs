@@ -3,7 +3,7 @@
 //
 // Claude Desktop runs this file with its bundled Node runtime (the
 // manifest's server.mcp_config.command is "node"). It hands the proven
-// onramp `mcp-remote@0.1.38 <url> …` (recipe:
+// onramp `mcp-remote@0.1.39 <url> …` (recipe:
 // docs/cross-repo/mcp-client-setup.md, proven by #2666) full ownership of
 // this process's stdio.
 //
@@ -27,7 +27,7 @@
 // guard and reads `process.argv.slice(2)` at module top level, so importing
 // it runs its `main` against the argv set below.
 //
-// It adds three things over invoking mcp-remote directly:
+// It adds four things over invoking mcp-remote directly:
 //
 //  1. Internal-CA trust. The optional `ca_cert` user_config (a PEM file
 //     path) arrives as argv[3], and the launcher appends its certificates to
@@ -51,13 +51,19 @@
 //  3. One sign-in at a time (#3857). Claude Desktop can start the extension
 //     twice at once; signin-lock.mjs makes the second copy wait until the
 //     first one is connected, so only one browser tab opens.
+//  4. The login guard (#4003). mcp-remote runs through the Claude Code
+//     plugin's login guard (clients/claude-code-plugin/lib/login-guard.mjs;
+//     build.sh copies it into server/). It stops a connect that is not done
+//     within MEHO_MCP_LOGIN_TIMEOUT seconds (default 300), which frees the
+//     login port, and it answers a call whose login has expired with a
+//     clear message instead of no answer.
 
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import tls from "node:tls";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { acquireSignInLock } from "./signin-lock.mjs";
 
@@ -161,15 +167,20 @@ const mcpRemoteBin =
     : mcpRemotePkg.bin["mcp-remote"];
 const mcpRemoteEntry = join(dirname(mcpRemotePkgPath), mcpRemoteBin);
 
-// Hand mcp-remote its invocation via process.argv, then import it: it reads
-// process.argv.slice(2), so argv[2..] carry the URL and the static-OAuth
-// contract. argv[0]/argv[1] are ignored by its parser (kept only so any
-// usage string it prints names the real entry). Present the static
+// The login guard, staged next to this file by build.sh.
+const loginGuard = fileURLToPath(new URL("./login-guard.mjs", import.meta.url));
+
+// Hand the guard its invocation via process.argv, then import it. The guard
+// reads process.argv.slice(2): the mcp-remote entry first, then the
+// arguments for mcp-remote. It sets process.argv to [node, entry, ...args]
+// before it imports mcp-remote, which reads process.argv.slice(2), so
+// mcp-remote gets the URL and the static-OAuth contract. Present the static
 // `meho-mcp` client via --static-oauth-client-info so the shim skips the
 // DCR the realm blocks; the scope metadata matches what the backplane's
 // token audience mappers expect.
 process.argv = [
   process.argv[0],
+  loginGuard,
   mcpRemoteEntry,
   url.href,
   "--static-oauth-client-info",
@@ -184,21 +195,30 @@ process.argv = [
 // connected. mcp-remote writes nothing to stdout before its connection to
 // MEHO works, so its first stdout message is the "connected" signal. Details
 // in signin-lock.mjs.
+// The wrapper stays in place for every write: the login guard wraps
+// process.stdout.write on top of it, so this wrapper must not swap itself
+// out. Calling the release again is cheap; it does nothing once released.
 const releaseSignInLock = await acquireSignInLock(url.href);
 const stdoutWrite = process.stdout.write;
 process.stdout.write = function writeAndRelease(...args) {
-  process.stdout.write = stdoutWrite;
   releaseSignInLock();
   return stdoutWrite.apply(this, args);
 };
 
-// Import (not spawn) the vendored entry. pathToFileURL keeps the dynamic
-// import valid on Windows, where a bare path is not a valid import
-// specifier. mcp-remote takes over this process's stdio and installs its
-// own SIGINT / stdin-EOF handlers; Desktop closing the stdio pipe drives
-// its graceful shutdown. A failure to import surfaces as a clear error.
+// The guard's messages name this bundle and say how to reconnect in Claude
+// Desktop. The guard removes both variables before mcp-remote loads.
+process.env.MEHO_LOGIN_GUARD_PREFIX = "meho-claude-desktop";
+process.env.MEHO_LOGIN_GUARD_RECONNECT =
+  "turn the MEHO extension off and on again in Claude Desktop (Settings > Extensions)";
+
+// Import (not spawn) the guard, which imports the vendored entry in this
+// same process. pathToFileURL keeps the dynamic import valid on Windows,
+// where a bare path is not a valid import specifier. mcp-remote takes over
+// this process's stdio and installs its own SIGINT / stdin-EOF handlers;
+// Desktop closing the stdio pipe drives its graceful shutdown. A failure to
+// import surfaces as a clear error.
 try {
-  await import(pathToFileURL(mcpRemoteEntry).href);
+  await import(pathToFileURL(loginGuard).href);
 } catch (err) {
   process.stderr.write(
     `meho-claude-desktop: failed to launch mcp-remote: ${err.message}\n`,

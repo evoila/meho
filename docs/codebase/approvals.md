@@ -26,8 +26,11 @@ truth:
   the broadcast notifications: each `create_pending_request` /
   `approve_request` / `reject_request` publishes an
   `approval.{pending,approved,rejected}` event via
-  `broadcast.publisher.publish_event` so a `broadcast_watch` operator
-  session learns of pending requests without polling.
+  `broadcast.publisher.publish_event`. These events go to the live SSE
+  feed (`/api/v1/feed`, `/ui/broadcast/stream`) until #3758 moves them,
+  and the audit log (`query_audit`) records them. Since #3748 the MCP and
+  REST `recent` / `watch` reads return agent announcements only, so an
+  operator session does not see approval events there.
 
 The durable state is one `approval_request` row (table created by
 `backend/alembic/versions/0023_create_approval_request.py`, T4 #817).
@@ -826,9 +829,11 @@ captured envelope, or `null` while unready). A consumer polls until
 returned task id. When the approved run failed on an upstream vim fault,
 `result.extras.upstream_fault` carries the fault type and full faultstring
 (#3567), so the owner can see why without the approver-owned
-flight-recorder handle. `resume_result` is **internal to this surface** — like
-`params` it is never projected onto the default read view (`_view`) or a
-broadcast frame.
+flight-recorder handle. The `resume_result` **payload** is internal to this
+surface — like `params` it is never projected onto the default read view
+(`_view`) or a broadcast frame. Only a short summary of it (status, error
+code, audit id) appears on the list and show views; see "Approved, but the
+run failed" below (#3543).
 
 ### Who owns a result handle from an approved run (#3548)
 
@@ -987,6 +992,60 @@ request the agent resumed also reaches `executed` or `failed`. Limits of
 `started`: the result write is best-effort, and a re-dispatch that raised
 instead of returning an envelope stores nothing. In those cases the row
 stays `started`.
+
+### 4. Approved, but the run failed: `resume_outcome` (#3543)
+
+`status` stays `approved` even when the run after the approval failed (for
+example a Vault write that Vault refused). `result_state` already tells
+`executed` from `failed`. Next to it, the list and show views carry
+`resume_outcome`, a short summary read off the stored result by
+`operations/approval_outcome.py` (`resume_outcome`):
+
+| Field | Meaning |
+|---|---|
+| `resumed_at` | When MEHO started the run (the `resumed_at` claim). |
+| `result_status` | `status` of the stored result: `ok`, `error`, `denied`, ... `null` while no result is stored. |
+| `error_code` | `extras.error_code` of a failed run, for example `connector_error`. |
+| `audit_id` | The audit row the dispatcher wrote for the run. |
+
+`resume_outcome` is `null` for a request that is not approved, and before
+the run starts. The result body and the free-text `error` stay on the
+owner-only `/result` read: an odd or missing field reads as `null`, never
+raises.
+
+Where it shows:
+
+- **REST** `GET /api/v1/approvals` and `GET /api/v1/approvals/{id}`: the
+  `resume_outcome` field.
+- **MCP** `meho_approvals_list` / `meho_approvals_get`: `result_state` and
+  `resume_outcome`, same shape.
+- **CLI** `meho approvals list`: a `RUN` column (`not-run`, `started`,
+  `ok`, `FAILED`, or `-` when the request is not approved). `meho approvals
+  show` and `approve`: `Run:`, `Run started:`, `Run result:`, `Error code:`
+  and `Run audit:` lines, with the `meho audit show <id>` command for the
+  audit row.
+- **Console** `/ui/approvals`: a run badge next to the `approved` pill in
+  the history list (`ran OK`, `run failed`, ...). The detail modal of a
+  failed run shows a red banner with the error code and a link to the audit
+  row (`/ui/audit?audit_id=<id>`). The card after an approve says "Approved,
+  but the run failed" when the run returned an error. When another resumer
+  (usually the waiting requester) already ran the operation
+  (`already_resumed`), it shows the normal "Request approved" card.
+
+**Decision: reads of an approval request stay as they are here.** A client
+that polls `GET /api/v1/approvals/{id}` until the run ends makes one
+routine REST read per poll. Routine reads moving off the audit log and into
+request usage records is the job of #3757 (it retires the per-request
+wrapper rows), not of this change. The owner-only `/result` read keeps its
+`approval.result` audit row on purpose: it hands out the result payload,
+which is a data release worth a record. With `result_state` and
+`resume_outcome` on the list and show views, a client no longer needs to
+poll `/result` to learn whether the run ended.
+
+**Pinned by tests:** `tests/test_approval_resume_outcome.py` (summary
+shape, odd envelopes, a resume that errors shows on REST show, list and
+MCP), `tests/test_ui_approvals.py` (run badge, failed-run modal, failed
+approve card) and `cli/internal/cmd/approvals/approvals_test.go`.
 
 ### The add-on governed-destroy round trip (#3478)
 
@@ -1558,7 +1617,9 @@ dispatcher re-checks `required_role` at `tools/call`.
 ### CLI (`cli/internal/cmd/approvals/`)
 
 `meho approvals list / show <id> / approve <id> / reject <id> [--reason]`
-verbs that hit the REST surface via the generated typed client.
+verbs that hit the REST surface via the generated typed client. `list`
+has a `RUN` column and `show` / `approve` print how the run of an approved
+request ended (#3543, see "Approved, but the run failed" above).
 
 ### Operator console (`backend/src/meho_backplane/ui/routes/approvals/`)
 
@@ -1599,7 +1660,7 @@ no new gate, service call, route, or migration.
 | `GET` | `/ui/approvals/badge` | Live **pending** count for the app-shell bell. Always `status='pending'` — it counts actionable work, not history. |
 | `GET` | `/ui/approvals` | Content-negotiated. A normal navigation (no `HX-Request`) → the **full-page console**: status tabs (Pending / Approved / Rejected / Expired / All), a `work_ref` filter, and the decision-history list. The bell's `hx-get` (`HX-Request: true`) → the existing pending **panel** modal fragment (unchanged). (G10.8-T #1827) |
 | `GET` | `/ui/approvals/list` | Decision-history partial — the HTMX swap target for the status tabs / `work_ref` filter / "Load more" offset pager. Reuses `list_pending(status=…, work_ref=…, offset=…)`; `tab=all` passes `status=None`. Pages with a real offset, not the badge's 50-row glance cap. (G10.8-T #1827) |
-| `GET` | `/ui/approvals/{id}` | Request-detail modal. A pending row offers Approve/Deny; a **decided** row renders read-only with a decision banner ("Approved/Rejected by X at T"). The `proposed_effect` envelope renders **structurally** (#2447), not as raw JSON (below). |
+| `GET` | `/ui/approvals/{id}` | Request-detail modal. A pending row offers Approve/Deny; a **decided** row renders read-only with a decision banner ("Approved/Rejected by X at T"). An approved row also shows how its run ended; a failed run turns the banner red (#3543). The `proposed_effect` envelope renders **structurally** (#2447), not as raw JSON (below). |
 | `POST` | `/ui/approvals/{id}/approve` | Approve in-process + re-dispatch the parked op + fail-open broadcast. |
 | `POST` | `/ui/approvals/{id}/reject` | Reject in-process + broadcast; the op never runs. |
 

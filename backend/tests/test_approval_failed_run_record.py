@@ -22,6 +22,7 @@ from typing import Any
 
 import hvac.exceptions
 import pytest
+import requests.exceptions
 import respx
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -48,6 +49,7 @@ from meho_backplane.targets.resolver import resolve_target
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
 from ._oidc_jwt_helpers import ISSUER as _ISSUER
 from ._oidc_jwt_helpers import make_rsa_keypair, mint_token, mock_discovery_and_jwks, public_jwks
+from ._vault_fakes import install_fake_client
 
 _CONNECTOR_ID = "keycloak-admin-26.x"
 _OP_ID = "keycloak.user.create"
@@ -223,6 +225,54 @@ async def test_unreadable_password_ref_fails_the_approved_run(
     }
     # The route's own row keeps its label once the run is over.
     assert decide_row.payload["op_id"] == "approval.decide"
+
+
+@pytest.mark.parametrize(
+    "read_exc",
+    [
+        requests.exceptions.ConnectionError(
+            "HTTPSConnectionPool(host='vault.test', port=443): Max retries exceeded "
+            f"with url: /v1/secret/data/{_PASSWORD_REF}"
+        ),
+        requests.exceptions.ReadTimeout(
+            f"HTTPSConnectionPool(host='vault.test', port=443): Read timed out "
+            f"(url: /v1/secret/data/{_PASSWORD_REF})"
+        ),
+    ],
+    ids=["connection_error", "read_timeout"],
+)
+async def test_unreachable_vault_read_fails_the_approved_run(
+    monkeypatch: pytest.MonkeyPatch, keycloak_target: Any, read_exc: Exception
+) -> None:
+    """Vault login works, then the secret read itself fails on the wire.
+
+    These are ``requests`` errors, not hvac ones, and their message carries
+    the full secret path. The run must still fail with
+    ``vault_credentials_read_error`` and never show that path.
+    """
+    fake = install_fake_client(monkeypatch, read_exc=read_exc)
+    request_id = await _park(keycloak_target)
+
+    body, user_posts = _approve(request_id, users_status=201)
+
+    # Login happened and the read was attempted on the password ref.
+    assert fake.auth.jwt.login_calls, "the read failure must come after a successful login"
+    assert fake.secrets.kv.v2.read_calls[-1]["path"] == _PASSWORD_REF
+    assert body["dispatch_status"] == "error"
+    assert body["dispatch_error"].startswith("vault_credentials_read_error:")
+    assert _PASSWORD_REF not in body["dispatch_error"]
+    assert user_posts == 0
+
+    request, run_rows, _ = await _run_rows(request_id)
+    run = _assert_failed_run_recorded(request, run_rows, error_code="vault_credentials_read_error")
+    assert run.payload["error"] == {
+        "error_code": "vault_credentials_read_error",
+        "param": "password_secret_ref",
+        "secret_ref_prefix": "tenants/…",
+        "cause_class": type(read_exc).__name__,
+    }
+    assert _PASSWORD_REF not in str(run.payload)
+    assert _PASSWORD_REF not in str(request.resume_result)
 
 
 async def test_keycloak_403_fails_the_approved_run(

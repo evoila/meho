@@ -94,6 +94,7 @@ import asyncio
 from typing import Protocol, runtime_checkable
 
 import hvac.exceptions
+import requests.exceptions
 import structlog
 
 from meho_backplane.auth.operator import Operator
@@ -625,15 +626,25 @@ async def load_param_secret_data(
     """Read a secret whose ref came from the op param *param* (#3864).
 
     Same read as :func:`load_vault_secret_data`; *target* carries the ref.
-    When Vault refuses or cannot serve the read (an hvac ``VaultError`` such
-    as ``Forbidden`` or ``InvalidPath``, or a Vault login error), this raises
-    :class:`SecretRefReadError` naming *param*. The dispatcher turns that
-    into a ``vault_credentials_read_error`` result, so the failure is never
-    reported as a problem with the target's own ``secret_ref``.
+    When Vault refuses, cannot serve, or cannot be reached for the read (an
+    hvac ``VaultError`` such as ``Forbidden`` or ``InvalidPath``, a Vault
+    login error, or a ``requests`` transport error such as
+    ``ConnectionError`` or ``Timeout`` raised by the read itself), this
+    raises :class:`SecretRefReadError` naming *param*. The dispatcher turns
+    that into a ``vault_credentials_read_error`` result, so the failure is
+    never reported as a problem with the target's own ``secret_ref``.
+
+    The transport errors matter: the login phase already maps them to
+    :class:`VaultClientError`, but the read phase does not, and their
+    message carries the request URL and so the full secret path.
     """
     try:
         return await load_vault_secret_data(target, operator, mount=mount)
-    except (hvac.exceptions.VaultError, VaultClientError) as exc:
+    except (
+        hvac.exceptions.VaultError,
+        VaultClientError,
+        requests.exceptions.RequestException,
+    ) as exc:
         raise SecretRefReadError(
             param=param, secret_ref=target.secret_ref or "", cause=exc
         ) from exc

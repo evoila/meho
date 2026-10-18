@@ -904,9 +904,10 @@ Two failures that must never read as success, both covered by
 
 - **The password ref cannot be read.** `keycloak.user.create` and
   `keycloak.user.reset_password` read the password from `password_secret_ref`.
-  When Vault refuses or cannot find it, the run fails with
+  When Vault refuses, cannot find, or cannot be reached for it (a connection
+  failure or timeout during the read), the run fails with
   `vault_credentials_read_error`. The error shows only the ref prefix (for
-  example `tenants/…`) and the Vault error class. No user is created.
+  example `tenants/…`) and the error class. No user is created.
 - **The Keycloak account may not write.** A 403 from Keycloak fails the run
   with `connector_http_403`.
 

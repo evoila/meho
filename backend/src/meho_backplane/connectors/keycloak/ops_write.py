@@ -105,7 +105,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from meho_backplane.connectors._shared.vault_creds import (
-    load_vault_secret_data,
+    load_param_secret_data,
     strip_credential_value,
 )
 from meho_backplane.connectors.keycloak._paths import (
@@ -221,15 +221,20 @@ async def _read_password_from_vault(
     reader no longer opens hvac directly.
 
     Raises :exc:`KeycloakPasswordSecretError` when the requested key is
-    absent or its value is not a non-empty string.
+    absent or its value is not a non-empty string, and
+    :exc:`~meho_backplane.connectors._shared.vault_creds.SecretRefReadError`
+    when Vault refuses or cannot serve the read (#3864).
     """
     secret_ref = str(params["password_secret_ref"]).strip()
     mount = str(params.get("password_secret_mount") or _DEFAULT_PASSWORD_MOUNT).strip()
     key = str(params.get("password_secret_key") or _DEFAULT_PASSWORD_KEY).strip()
 
-    secret_data = await load_vault_secret_data(
+    # #3864: a denied or missing password ref raises SecretRefReadError, so
+    # the write fails with a clear error about this ref, not the target's.
+    secret_data = await load_param_secret_data(
         _PasswordSecretTarget(name=target.name, host=target.host, secret_ref=secret_ref),
         operator,
+        param="password_secret_ref",
         mount=mount,
     )
     value = secret_data.get(key) if isinstance(secret_data, dict) else None

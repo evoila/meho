@@ -266,6 +266,7 @@ from meho_backplane.connectors import (
     resolve_connector_or_label,
     resolve_target_version,
 )
+from meho_backplane.connectors._shared.vault_creds import SecretRefReadError
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import Connector, ConnectorResourceNotFoundError, shim_kind
 from meho_backplane.db.models import AuditEventClass, EndpointDescriptor, PermissionVerdict
@@ -316,6 +317,7 @@ from meho_backplane.operations._errors import (
     result_target_required,
     result_unknown_op,
     result_unqualified_target_version,
+    result_vault_credentials_read_error,
     result_write_capability_denied,
     wrap_ok_result,
 )
@@ -1600,6 +1602,20 @@ async def _run_branch_with_error_handling(
             params_hash=params_hash,
             duration_ms=duration_ms,
         )
+    except SecretRefReadError as ref_exc:
+        # #3864: a secret named in the op params (a password ref) could not be
+        # read. The write did not run; say so with its own code.
+        duration_ms = _elapsed_ms(started)
+        return await _audit_error_and_return(
+            result_vault_credentials_read_error(op_id, ref_exc, duration_ms),
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
+        )
     except ConnectorResourceNotFoundError as not_found_exc:
         duration_ms = _elapsed_ms(started)
         return await _audit_error_and_return(
@@ -1694,8 +1710,12 @@ async def _audit_error_and_return(
     *handle_metadata* (#4223) is set by the composite terminal-error arm when
     the reducer put an oversized error envelope behind a result handle, so the
     audit row carries the ``handle_id`` the way a reduced success row does.
+
+    #3864: when the row commits, the returned result carries its ``audit_id``,
+    the same receipt the success path returns. So an approver, and the stored
+    result of an approved run, can point at the row that records the failure.
     """
-    await audit_and_broadcast_safe(
+    receipt = await audit_and_broadcast_safe(
         audit_id=audit_id,
         event_class=AuditEventClass.OPERATION_EXECUTION,
         operator=operator,
@@ -1711,6 +1731,8 @@ async def _audit_error_and_return(
         handle_metadata=handle_metadata,
         error_extras=_error_extras_for_audit(result),
     )
+    if receipt is not None and result.audit_id is None:
+        return result.model_copy(update={"audit_id": receipt})
     return result
 
 

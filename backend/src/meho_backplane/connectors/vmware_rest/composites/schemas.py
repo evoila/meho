@@ -1903,7 +1903,7 @@ DATACENTER_MOID_PATTERN: str = r"^datacenter-[0-9]+$"
 #: ``Folder.CreateFolder`` (``/vcenter/folder`` is GET-only, so vim is the
 #: sole write path). The parent is either a display name (``parent_folder``,
 #: resolved among the ``VIRTUAL_MACHINE`` folders, optionally scoped to one
-#: ``datacenter``) or an explicit moid pin (``parent_folder_id``) that skips
+#: ``datacenter``) or an explicit folder ID (``parent_folder_id``) that skips
 #: the lookup — the ``vm.create`` ``folder_name`` / ``folder`` shape (#3115).
 #: Every datacenter ships a root VM folder named ``vm``, so on a
 #: multi-datacenter vCenter the bare name ``vm`` needs one of the two (#3588).
@@ -1930,11 +1930,11 @@ FOLDER_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "pattern": VM_FOLDER_MOID_PATTERN,
             "description": (
-                "Optional moid pin of the parent VM folder (``group-v...``), "
-                "the #3115 ``vm.create`` ``folder`` pattern. When present the "
-                "name lookup is skipped and the folder is created under this "
-                "moid. One of ``parent_folder`` / ``parent_folder_id`` is "
-                "required."
+                "Optional folder ID (moid, ``group-v...``) of the parent VM "
+                "folder, the #3115 ``vm.create`` ``folder`` pattern. When "
+                "present the name lookup is skipped and the folder is created "
+                "under this ID. One of ``parent_folder`` / ``parent_folder_id`` "
+                "is required."
             ),
         },
         "datacenter": {

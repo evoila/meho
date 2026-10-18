@@ -194,7 +194,13 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   the envelope's `status` sentinel, a synthetic 500, and a
   `result_status="error"` audit row (the redacted envelope is preserved
   in `result`, so a parked-then-approved run's decision result keeps the
-  `issues` detail). **The signal is the `error`-severity issue, not the
+  `issues` detail). The envelope goes through the same result reducer as
+  a success payload (`_reduce_and_audit_composite_error`, #4223): a small
+  one passes through unchanged, an oversized one (a refusal naming
+  hundreds of candidate ids) comes back as the bounded summary with the
+  full envelope behind a result handle, while `error` and
+  `extras.error_code` are read from the full envelope and the audit row
+  still reads `error`. **The signal is the `error`-severity issue, not the
   `status` sentinel** — the sentinel space is unbounded and mixes hard
   failures with legitimate soft refusals / idempotency guards
   (`rule_exists`, `not_powered_off`, `no_change_requested`, `ambiguous`,
@@ -1238,7 +1244,7 @@ enum) are:
 | `cluster.drs_vm_host_rule.create` | `created`, `rule_exists`, `group_exists`, `insufficient_vms`, `insufficient_hosts`, `timeout` (#3505 VM-Host rule; rule + group names are idempotence keys refused before any write; `insufficient_*` when no VM / host name resolves in the cluster; `timeout` when the `ReconfigureComputeResource_Task` poll gives up) |
 | `resource_pool.create` | `created`, `cluster_root_pool_unresolved`, `no_parent` (#3505; the REST `POST:/vcenter/resource-pool` create — `cluster_root_pool_unresolved` when the `cluster` convenience cannot read the cluster's root pool, `no_parent` when neither `parent` nor `cluster` is given, both before any write; read-back confirms the pool under the resolved parent) |
 | `resource_pool.delete` | `deleted`, `not_empty`, `delete_unverified` (#3505; `not_empty` refuses a pool with child pools / VMs unless `force=true` — the REST `DELETE` reparents children up to the parent; `delete_unverified` when the read-back still lists the pool) |
-| `folder.create` | `created`, `parent_not_found`, `ambiguous_parent` (synchronous `CreateFolder`; both resolution refusals happen before any write and carry an `error` issue, so the operation fails and the audit row reads `error`, #3588; `ambiguous_parent` lists `candidate_folders`) |
+| `folder.create` | `created`, `parent_not_found`, `ambiguous_parent` (synchronous `CreateFolder`; both resolution refusals happen before any write and carry an `error` issue, so the operation fails and the audit row reads `error`, #3588; `ambiguous_parent` lists `candidate_folders`, behind a result handle when oversized, #4223) |
 | `network.portgroup.create` | `created`, `invalid_vlan_spec`, `timeout` (vim `CreateDVPortgroup_Task` polled, #3091; `invalid_vlan_spec` refuses a trunk+access clash before any write; `timeout` when the poll gives up; a task *fault* — e.g. `DuplicateName` — raises `connector_error`. The `created` envelope carries a read-back `observed` = `{name, vlan}` off the new portgroup's `config`. The trunk / access VLAN specs are `InheritablePolicy` subtypes, so each wire body carries `inherited: false` — without it vCenter defaults `inherited: true` and drops the `vlanId`, silently creating an untagged (VLAN 0) portgroup, #3356) |
 | `network.portgroup.security.set` | `updated`, `no_change_requested`, `timeout` (vim `ReconfigureDVPortgroup_Task` polled, #3091; `no_change_requested` refuses when none of the three booleans is supplied, before any read/write; `timeout` when the poll gives up; a task *fault* raises `connector_error`. Carries `previous` (pre-write security triple) + `observed` (post-write triple) read-backs) |
 | `network.portgroup.vlan.set` | `set`, `unchanged`, `invalid_vlan_spec`, `timeout` (vim `ReconfigureDVPortgroup_Task` polled; reconfigures an **existing** portgroup's `defaultPortConfig.vlan` to a trunk `NumericRange[]` or a single access VLAN — the given spec **replaces** the current config, there is no merge. Idempotent: the current VLAN is read + normalised (ranges sorted + merged-adjacent) first and a request that already matches returns `unchanged` with no write / no task; `invalid_vlan_spec` refuses both/neither VLAN mode (or `replace=false`) before any write; `timeout` when the poll gives up; a task *fault* raises `connector_error`. Carries normalised `before` / `after` VLAN views) |
@@ -2405,13 +2411,16 @@ of two ways (#3588, the `vm.create` `folder_name` / `folder` shape from #3115):
   An optional `datacenter` moid adds `filter.datacenters`. Every datacenter
   has a root VM folder named `vm`, so on a multi-datacenter vCenter the bare
   name `vm` is ambiguous without `datacenter`.
-- `parent_folder_id` — a `group-v…` moid pin. The lookup is skipped.
+- `parent_folder_id` — a `group-v…` folder ID (moid). The lookup is skipped.
 
 No match → `status='parent_not_found'`, more than one → `ambiguous_parent`
 with `candidate_folders`. Both happen before any write and carry an
 `error`-severity issue, so the dispatcher's composite terminal-error check
 fails the operation and audits `error` — before #3588 they audited `ok` for a
-write that never happened. Then the single `CreateFolder` goes through
+write that never happened. The issue message names only the match count;
+the ids ride `candidate_folders`, which the dispatcher's reducer puts behind
+a result handle when the envelope is oversized (#4223), so a vCenter with
+hundreds of same-named folders never ships the whole list inline. Then the single `CreateFolder` goes through
 `_write_vmomi_sub_op`. The preview is a param echo `{parent_folder |
 parent_folder_id, datacenter?, new_folder_name}` (no I/O — the params fully
 name the blast radius). Both

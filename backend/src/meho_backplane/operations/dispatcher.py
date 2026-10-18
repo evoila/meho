@@ -858,25 +858,17 @@ async def _execute_and_audit_inner(
     # and the redacted envelope's upstream detail is preserved on both surfaces.
     terminal_error_code = _composite_terminal_error_code(descriptor, redaction.redacted)
     if terminal_error_code is not None:
-        duration_ms = _elapsed_ms(started)
-        return await _audit_error_and_return(
-            result_composite_terminal_error(
-                op_id,
-                error_code=terminal_error_code,
-                envelope=redaction.redacted,
-                error_summary=_composite_error_summary(terminal_error_code, redaction.redacted),
-                duration_ms=duration_ms,
-            ),
-            audit_id=audit_id,
-            operator=operator,
+        return await _reduce_and_audit_composite_error(
+            op_id=op_id,
             descriptor=descriptor,
+            operator=operator,
             target=target,
             params=params,
             params_hash=params_hash,
-            duration_ms=duration_ms,
-            raw_payload=redaction.raw,
-            redaction_manifest=manifest_to_audit_payload(redaction.manifest),
-            redaction_policy_id=redaction.policy_id,
+            audit_id=audit_id,
+            redaction=redaction,
+            started=started,
+            error_code=terminal_error_code,
         )
 
     return await _reduce_and_audit_success(
@@ -940,6 +932,87 @@ def _composite_error_summary(error_code: str, envelope: dict[str, Any]) -> str:
             if isinstance(message, str) and message:
                 return f"{error_code}: {message}"
     return error_code
+
+
+async def _reduce_and_audit_composite_error(
+    *,
+    op_id: str,
+    descriptor: EndpointDescriptor,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    params_hash: str,
+    audit_id: uuid.UUID,
+    redaction: RedactionMiddlewareResult,
+    started: float,
+    error_code: str,
+) -> OperationResult:
+    """Reduce a composite terminal-error envelope, audit it as ``error``, return it.
+
+    #4223: the error arm used to hand the redacted envelope to the caller
+    verbatim, so only success payloads went through the result reducer. A
+    refusal that lists many candidates (``folder.create``'s
+    ``ambiguous_parent`` on a vCenter with hundreds of same-named folders)
+    then shipped the whole list inline with no handle — the postulate-6 limit
+    on inline lists applies to failures too. The envelope now takes the same
+    reducer path as a success payload: a small envelope passes through
+    unchanged, an oversized one comes back as the bounded summary with the
+    full envelope behind a result handle (a document record, #3633).
+
+    The ``error_code`` and the ``"<sentinel>: <message>"`` line are read from
+    the **full** envelope before the reduce, so they never depend on what the
+    summary kept. A reducer failure keeps the operation an error and drops the
+    inline envelope (``delivery="unavailable"``) instead of leaking it; the
+    audit row still records the raw payload and the redaction manifest.
+    """
+    error_summary = _composite_error_summary(error_code, redaction.redacted)
+    serialised_manifest = manifest_to_audit_payload(redaction.manifest)
+    envelope: dict[str, Any] | None = redaction.redacted
+    handle: ResultHandle | None = None
+    delivery: Literal["complete", "partial", "unavailable"] | None = None
+    try:
+        envelope, handle = await _DEFAULT_REDUCER.reduce(
+            redaction.redacted,
+            descriptor.response_schema,
+            _build_reducer_context(
+                op_id=op_id,
+                descriptor=descriptor,
+                operator=operator,
+                target=target,
+                audit_id=audit_id,
+            ),
+        )
+    except Exception as exc:
+        _log.warning(
+            "result_delivery_unavailable",
+            op_id=op_id,
+            audit_id=str(audit_id),
+            exception_class=type(exc).__name__,
+        )
+        envelope, handle, delivery = None, None, "unavailable"
+    duration_ms = _elapsed_ms(started)
+    return await _audit_error_and_return(
+        result_composite_terminal_error(
+            op_id,
+            error_code=error_code,
+            envelope=envelope,
+            error_summary=error_summary,
+            duration_ms=duration_ms,
+            handle=handle,
+            delivery=delivery,
+        ),
+        audit_id=audit_id,
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        params=params,
+        params_hash=params_hash,
+        duration_ms=duration_ms,
+        raw_payload=redaction.raw,
+        redaction_manifest=serialised_manifest,
+        redaction_policy_id=redaction.policy_id,
+        handle_metadata=_handle_metadata_for_audit(handle),
+    )
 
 
 def _requires_durable_audit(descriptor: EndpointDescriptor) -> bool:
@@ -1500,6 +1573,7 @@ async def _audit_error_and_return(
     raw_payload: Any | None = None,
     redaction_manifest: list[dict[str, Any]] | None = None,
     redaction_policy_id: str | None = None,
+    handle_metadata: dict[str, Any] | None = None,
 ) -> OperationResult:
     """Write the ``result_status='error'`` audit row for a built result, then return it.
 
@@ -1520,6 +1594,10 @@ async def _audit_error_and_return(
     preserved: ``audit_and_broadcast_safe`` swallows its own internal failures,
     so the never-raises contract holds and the built ``result`` is always
     returned.
+
+    *handle_metadata* (#4223) is set by the composite terminal-error arm when
+    the reducer put an oversized error envelope behind a result handle, so the
+    audit row carries the ``handle_id`` the way a reduced success row does.
     """
     await audit_and_broadcast_safe(
         audit_id=audit_id,
@@ -1534,6 +1612,7 @@ async def _audit_error_and_return(
         raw_payload=raw_payload,
         redaction_manifest=redaction_manifest,
         redaction_policy_id=redaction_policy_id,
+        handle_metadata=handle_metadata,
         error_extras=_error_extras_for_audit(result),
     )
     return result
@@ -2098,6 +2177,55 @@ async def _reduce_or_error(
     a debugger has the same pre-redaction evidence available as on
     the success path.
     """
+    reducer_context = _build_reducer_context(
+        op_id=op_id,
+        descriptor=descriptor,
+        operator=operator,
+        target=target,
+        audit_id=audit_id,
+    )
+    try:
+        return await _DEFAULT_REDUCER.reduce(
+            raw,
+            descriptor.response_schema,
+            reducer_context,
+        )
+    except Exception as exc:
+        _log.warning(
+            "result_delivery_unavailable",
+            op_id=op_id,
+            audit_id=str(audit_id),
+            exception_class=type(exc).__name__,
+        )
+        return await _unavailable_delivery_result(
+            op_id=op_id,
+            descriptor=descriptor,
+            operator=operator,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            audit_id=audit_id,
+            duration_ms=_elapsed_ms(started),
+            raw_payload=raw_payload_for_audit,
+            redaction_manifest=redaction_manifest_for_audit,
+            redaction_policy_id=redaction_policy_id,
+        )
+
+
+def _build_reducer_context(
+    *,
+    op_id: str,
+    descriptor: EndpointDescriptor,
+    operator: Operator,
+    target: Any,
+    audit_id: uuid.UUID,
+) -> dict[str, Any]:
+    """The per-dispatch context dict handed to the result reducer.
+
+    Shared by the success path (:func:`_reduce_or_error`) and the composite
+    terminal-error arm (:func:`_reduce_and_audit_composite_error`, #4223) so
+    both reduce under the same owner, tenant and author hints.
+    """
     reducer_context: dict[str, Any] = {
         "op_id": op_id,
         # #3548: an approval resume runs under the approver but binds the
@@ -2162,32 +2290,7 @@ async def _reduce_or_error(
     result_digest = _result_digest_from_descriptor(descriptor)
     if result_digest is not None:
         reducer_context["result_digest"] = result_digest
-    try:
-        return await _DEFAULT_REDUCER.reduce(
-            raw,
-            descriptor.response_schema,
-            reducer_context,
-        )
-    except Exception as exc:
-        _log.warning(
-            "result_delivery_unavailable",
-            op_id=op_id,
-            audit_id=str(audit_id),
-            exception_class=type(exc).__name__,
-        )
-        return await _unavailable_delivery_result(
-            op_id=op_id,
-            descriptor=descriptor,
-            operator=operator,
-            target=target,
-            params=params,
-            params_hash=params_hash,
-            audit_id=audit_id,
-            duration_ms=_elapsed_ms(started),
-            raw_payload=raw_payload_for_audit,
-            redaction_manifest=redaction_manifest_for_audit,
-            redaction_policy_id=redaction_policy_id,
-        )
+    return reducer_context
 
 
 def _identifier_default_effect(

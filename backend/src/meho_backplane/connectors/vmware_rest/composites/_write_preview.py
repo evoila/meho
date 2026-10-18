@@ -776,7 +776,7 @@ async def _folder_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     Param echo (the ``secret.move`` precedent, #1580): the params fully name
     the blast radius — one new folder under one parent. The parent is the
     ``parent_folder`` name (optionally scoped by ``datacenter``) or the
-    ``parent_folder_id`` moid pin (#3588); whichever were given are echoed.
+    ``parent_folder_id`` folder ID (#3588); whichever were given are echoed.
     Parent-name resolution and the synchronous ``CreateFolder`` write stay
     the handler's job at dispatch time.
     """

@@ -7863,6 +7863,9 @@ async def test_folder_create_ambiguous_parent_fails_before_write(gate: _GateReco
     assert out["status"] == "ambiguous_parent"
     assert out["candidate_folders"] == ["group-v4", "group-v115"]
     assert [i["severity"] for i in out["issues"]] == ["error"]
+    # The message names the count only; the ids ride ``candidate_folders`` (#4223).
+    assert out["issues"][0]["message"] == "parent VM folder name 'vm' matched 2 VM folders"
+    assert "`candidate_folders`" in out["guidance"]
     assert _composite_terminal_error_code(_COMPOSITE_DESCRIPTOR, out) == "ambiguous_parent"
     assert conn.vmomi_calls == []
     assert gate.calls == []

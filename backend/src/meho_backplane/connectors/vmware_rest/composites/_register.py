@@ -1401,7 +1401,7 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
             "ManagedObjectReference directly (no task poll). Give the parent "
             "as a display name (parent_folder, resolved among the "
             "VIRTUAL_MACHINE folders, optionally scoped with a datacenter "
-            "moid) or as a moid pin (parent_folder_id). Every datacenter has "
+            "moid) or as a folder ID (parent_folder_id). Every datacenter has "
             "a root VM folder named 'vm', so on a multi-datacenter vCenter "
             "pass datacenter or parent_folder_id. An unknown name fails with "
             "status='parent_not_found' and an ambiguous one with "

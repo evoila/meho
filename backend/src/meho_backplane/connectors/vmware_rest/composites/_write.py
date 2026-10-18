@@ -7592,16 +7592,20 @@ def _folder_create_refusal(
 
     Carries an ``error``-severity issue so the dispatcher records the
     operation as failed (``result_status='error'``), not as an ``ok`` no-op.
+    The message names only the match *count*; the ids live in
+    ``candidate_folders``, which the dispatcher's reducer puts behind a result
+    handle when the list is large (#4223) — the message must stay short
+    because it also becomes the result's ``error`` line.
     """
     scope = f" in datacenter {datacenter_moid}" if datacenter_moid else ""
     if status == "ambiguous_parent":
         message = (
-            f"parent VM folder name {parent_name!r}{scope} matched {len(candidates)} "
-            f"folders ({', '.join(candidates)})"
+            f"parent VM folder name {parent_name!r}{scope} matched {len(candidates)} VM folders"
         )
         guidance = (
-            "pass the intended moid as `parent_folder_id`, or scope the name with "
-            "`datacenter`; no folder was created"
+            "pick the intended folder ID from `candidate_folders` and pass it as "
+            "`parent_folder_id`, or scope the name with `datacenter`; no folder "
+            "was created"
         )
     else:
         message = f"parent VM folder name {parent_name!r}{scope} matched no VM folder"
@@ -7637,7 +7641,7 @@ async def folder_create_composite(
     ``ManagedObjectReference`` directly, not a ``*_Task``, so (unlike
     drs_rule / disk-grow) the returned MoRef is **not** polled.
 
-    Flow: take the ``parent_folder_id`` moid pin as is, or resolve the
+    Flow: take the ``parent_folder_id`` folder ID as is, or resolve the
     ``parent_folder`` *name* to a moid (a *read*, scoped to ``datacenter``
     when given). No match → ``status="parent_not_found"``, >1 match →
     ``status="ambiguous_parent"``; both carry an ``error`` issue so the

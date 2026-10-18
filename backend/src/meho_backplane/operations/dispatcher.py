@@ -856,16 +856,30 @@ async def _execute_and_audit_inner(
     # DISPATCH row reads ``error``, the caller (and a parked-then-approved run's
     # decision result + step events) sees ``status='error'`` + ``error_code``,
     # and the redacted envelope's upstream detail is preserved on both surfaces.
+    #
+    # The envelope goes through the reducer like a success payload, so a large
+    # per-item list (``vm.power.bulk`` over hundreds of VMs) comes back as a
+    # result handle, not inline (postulate 6). ``status`` / ``summary`` /
+    # ``issues`` always stay inline so the caller can see why it failed.
     terminal_error_code = _composite_terminal_error_code(descriptor, redaction.redacted)
     if terminal_error_code is not None:
+        reduced_envelope, handle = await _reduce_terminal_error_envelope(
+            op_id=op_id,
+            descriptor=descriptor,
+            operator=operator,
+            target=target,
+            audit_id=audit_id,
+            envelope=redaction.redacted,
+        )
         duration_ms = _elapsed_ms(started)
         return await _audit_error_and_return(
             result_composite_terminal_error(
                 op_id,
                 error_code=terminal_error_code,
-                envelope=redaction.redacted,
+                envelope=reduced_envelope,
                 error_summary=_composite_error_summary(terminal_error_code, redaction.redacted),
                 duration_ms=duration_ms,
+                handle=handle,
             ),
             audit_id=audit_id,
             operator=operator,
@@ -929,6 +943,57 @@ def _composite_terminal_error_code(descriptor: EndpointDescriptor, envelope: Any
         return None
     status = envelope.get("status")
     return status if isinstance(status, str) and status else "composite_error"
+
+
+#: Envelope keys a composite terminal-error result keeps inline even when the
+#: reducer moved the rest of the envelope behind a result handle.
+_TERMINAL_ERROR_INLINE_KEYS: tuple[str, ...] = ("status", "summary", "issues")
+
+
+async def _reduce_terminal_error_envelope(
+    *,
+    op_id: str,
+    descriptor: EndpointDescriptor,
+    operator: Operator,
+    target: Any,
+    audit_id: uuid.UUID,
+    envelope: dict[str, Any],
+) -> tuple[dict[str, Any], ResultHandle | None]:
+    """Reduce a composite terminal-error envelope; keep its failure fields inline.
+
+    Runs the same reducer as the success path (:func:`_reduce_or_error`) so a
+    set-shaped envelope larger than the inline budget returns a handle. The
+    ``status`` / ``summary`` / ``issues`` keys are copied back over the reduced
+    summary, so the caller always sees why the call failed without a drill-in.
+
+    Unlike the success path, a reducer failure does not change the result: the
+    call already failed, so it stays an error. The caller then gets only the
+    inline failure fields and no handle; the audit row keeps the full payload.
+    """
+    inline = {key: envelope[key] for key in _TERMINAL_ERROR_INLINE_KEYS if key in envelope}
+    try:
+        summary, handle = await _DEFAULT_REDUCER.reduce(
+            envelope,
+            descriptor.response_schema,
+            _reducer_context(
+                op_id=op_id,
+                descriptor=descriptor,
+                operator=operator,
+                target=target,
+                audit_id=audit_id,
+            ),
+        )
+    except Exception as exc:
+        _log.warning(
+            "composite_error_reduce_failed",
+            op_id=op_id,
+            audit_id=str(audit_id),
+            exception_class=type(exc).__name__,
+        )
+        return inline, None
+    reduced = dict(summary) if isinstance(summary, dict) else {"value": summary}
+    reduced.update(inline)
+    return reduced, handle
 
 
 def _composite_error_summary(error_code: str, envelope: dict[str, Any]) -> str:
@@ -2098,6 +2163,49 @@ async def _reduce_or_error(
     a debugger has the same pre-redaction evidence available as on
     the success path.
     """
+    try:
+        return await _DEFAULT_REDUCER.reduce(
+            raw,
+            descriptor.response_schema,
+            _reducer_context(
+                op_id=op_id,
+                descriptor=descriptor,
+                operator=operator,
+                target=target,
+                audit_id=audit_id,
+            ),
+        )
+    except Exception as exc:
+        _log.warning(
+            "result_delivery_unavailable",
+            op_id=op_id,
+            audit_id=str(audit_id),
+            exception_class=type(exc).__name__,
+        )
+        return await _unavailable_delivery_result(
+            op_id=op_id,
+            descriptor=descriptor,
+            operator=operator,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            audit_id=audit_id,
+            duration_ms=_elapsed_ms(started),
+            raw_payload=raw_payload_for_audit,
+            redaction_manifest=redaction_manifest_for_audit,
+            redaction_policy_id=redaction_policy_id,
+        )
+
+
+def _reducer_context(
+    *,
+    op_id: str,
+    descriptor: EndpointDescriptor,
+    operator: Operator,
+    target: Any,
+    audit_id: uuid.UUID,
+) -> dict[str, Any]:
+    """The context dict the reducer receives: ids, tenant, target and op hints."""
     reducer_context: dict[str, Any] = {
         "op_id": op_id,
         # #3548: an approval resume runs under the approver but binds the
@@ -2162,32 +2270,7 @@ async def _reduce_or_error(
     result_digest = _result_digest_from_descriptor(descriptor)
     if result_digest is not None:
         reducer_context["result_digest"] = result_digest
-    try:
-        return await _DEFAULT_REDUCER.reduce(
-            raw,
-            descriptor.response_schema,
-            reducer_context,
-        )
-    except Exception as exc:
-        _log.warning(
-            "result_delivery_unavailable",
-            op_id=op_id,
-            audit_id=str(audit_id),
-            exception_class=type(exc).__name__,
-        )
-        return await _unavailable_delivery_result(
-            op_id=op_id,
-            descriptor=descriptor,
-            operator=operator,
-            target=target,
-            params=params,
-            params_hash=params_hash,
-            audit_id=audit_id,
-            duration_ms=_elapsed_ms(started),
-            raw_payload=raw_payload_for_audit,
-            redaction_manifest=redaction_manifest_for_audit,
-            redaction_policy_id=redaction_policy_id,
-        )
+    return reducer_context
 
 
 def _identifier_default_effect(

@@ -219,6 +219,13 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   document the `issues` field. Soft refusals and idempotency guards keep
   no error issue and stay `ok`. The regression tests are
   `tests/test_connectors_vmware_rest_composites_hard_failure_e2e.py`.
+  The error path runs the same JSONFlux reducer as the success path
+  (`dispatcher._reduce_terminal_error_envelope`). A failed
+  `vm.power.bulk` over many VMs therefore returns a result handle for
+  the per-VM list, not the whole list inline. The `status`, `summary`
+  and `issues` fields always stay inline, so the caller sees why the call
+  failed without a drill-in. The audit row is unchanged: `error`, with
+  the error code and the full raw payload.
 
   **Preserving write governance on the direct path.** Because a direct
   session call bypasses the dispatcher, each mutating sub-call first

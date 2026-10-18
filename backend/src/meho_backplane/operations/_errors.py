@@ -864,6 +864,7 @@ def result_composite_terminal_error(
     envelope: dict[str, Any],
     error_summary: str,
     duration_ms: float,
+    handle: ResultHandle | None = None,
 ) -> OperationResult:
     """A composite handler's terminal-error envelope mapped to a dispatch error (#3809).
 
@@ -884,6 +885,9 @@ def result_composite_terminal_error(
     error-severity issue; it is Tier-1-redacted + length-capped here as a second
     line of defence even though the dispatcher's connector-boundary middleware
     already redacted the envelope's string leaves.
+
+    *envelope* is the reducer's output, and *handle* is set when the reducer
+    moved a large per-item list behind a result handle (#3813).
     """
     return OperationResult(
         status="error",
@@ -891,6 +895,7 @@ def result_composite_terminal_error(
         result=envelope,
         error=_sanitize_free_text(error_summary),
         duration_ms=duration_ms,
+        handle=handle,
         extras={"error_code": error_code},
     )
 

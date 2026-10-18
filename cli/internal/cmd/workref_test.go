@@ -6,6 +6,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -175,6 +176,74 @@ func TestWorkRefMalformedRejectedBeforeAnyRequest(t *testing.T) {
 	}
 }
 
+// TestWorkRefHeaderOnOnlineDoctor runs an online `meho doctor` through
+// the real root command against a fake backplane that answers the
+// health route and the MCP handshake. The health request is an
+// authenticated REST call the backplane audits, so it must carry the
+// Meho-Work-Ref header from the global flag or from the environment.
+func TestWorkRefHeaderOnOnlineDoctor(t *testing.T) {
+	cases := []struct {
+		name string
+		flag string
+		env  string
+		want string
+	}{
+		{"flag", testWorkRef, "", testWorkRef},
+		{"env", "", "gh:evoila/meho#1", "gh:evoila/meho#1"},
+		{"neither", "", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CLAUDE_PLUGIN_ROOT", "")
+			t.Setenv(api.WorkRefEnv, tc.env)
+			rec := &workRefRecorder{seen: map[string]string{}}
+			stub := (&mcpStub{liveStatus: http.StatusOK}).handler(t)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				rec.mu.Lock()
+				rec.seen[r.Method+" "+r.URL.Path] = r.Header.Get(api.WorkRefHeader)
+				rec.mu.Unlock()
+				stub.ServeHTTP(w, r)
+			}))
+			t.Cleanup(srv.Close)
+			xdg := withTempXDG(t)
+			seedCreds(t, xdg, srv.URL, auth.StoredToken{
+				BackplaneURL: srv.URL,
+				AccessToken:  jwtMarker,
+				TokenType:    "Bearer",
+				Expiry:       time.Now().Add(time.Hour),
+			})
+
+			args := []string{"doctor", "--json"}
+			if tc.flag != "" {
+				args = append([]string{"--work-ref", tc.flag}, args...)
+			}
+			t.Cleanup(setDynamicRegistrar(func(*cobra.Command) {}))
+			root := newRootCmdFor(args)
+			var stdout, stderr bytes.Buffer
+			root.SetOut(&stdout)
+			root.SetErr(&stderr)
+			root.SetArgs(args)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			t.Cleanup(cancel)
+			_ = root.ExecuteContext(ctx)
+
+			var report doctorReport
+			if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+				t.Fatalf("not JSON: %v\n%s\n%s", err, stdout.String(), stderr.String())
+			}
+			if c := findCheck(t, &report, "token"); c.Status != doctorOK {
+				t.Fatalf("the online layer did not run: %+v", c)
+			}
+			if got := rec.header(t, "GET /api/v1/health/live"); got != tc.want {
+				t.Errorf("health %s header = %q; want %q", api.WorkRefHeader, got, tc.want)
+			}
+			if got := rec.header(t, "POST /mcp"); got != tc.want {
+				t.Errorf("mcp %s header = %q; want %q", api.WorkRefHeader, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestWorkRefMalformedEnvSkippedForLocalCommands checks that a bad
 // MEHO_WORK_REF does not break commands that send no backplane request.
 // A verb that does send one is still refused before the request leaves.
@@ -205,20 +274,30 @@ func TestWorkRefMalformedEnvSkippedForLocalCommands(t *testing.T) {
 		})
 	}
 
-	t.Run("targets add still refused", func(t *testing.T) {
-		_, rec := newWorkRefBackplane(t)
-		t.Setenv(api.WorkRefEnv, "bad")
-		stderr, err := runRoot(t, "targets", "add", "vault-a", "--product", "vault", "--host", "vault.example.test")
-		if err == nil {
-			t.Fatal("want an error for a malformed work-ref")
-		}
-		if !strings.Contains(stderr, api.WorkRefEnv+" must match") {
-			t.Errorf("stderr = %q; want the shape error", stderr)
-		}
-		rec.mu.Lock()
-		defer rec.mu.Unlock()
-		if len(rec.seen) != 0 {
-			t.Errorf("no request should leave the CLI; backplane saw %v", rec.seen)
-		}
-	})
+	refused := []struct {
+		name string
+		args []string
+	}{
+		{"targets add still refused", []string{"targets", "add", "vault-a", "--product", "vault", "--host", "vault.example.test"}},
+		{"online doctor still refused", []string{"doctor"}},
+	}
+	for _, tc := range refused {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CLAUDE_PLUGIN_ROOT", "")
+			_, rec := newWorkRefBackplane(t)
+			t.Setenv(api.WorkRefEnv, "bad")
+			stderr, err := runRoot(t, tc.args...)
+			if err == nil {
+				t.Fatal("want an error for a malformed work-ref")
+			}
+			if !strings.Contains(stderr, api.WorkRefEnv+" must match") {
+				t.Errorf("stderr = %q; want the shape error", stderr)
+			}
+			rec.mu.Lock()
+			defer rec.mu.Unlock()
+			if len(rec.seen) != 0 {
+				t.Errorf("no request should leave the CLI; backplane saw %v", rec.seen)
+			}
+		})
+	}
 }

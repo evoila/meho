@@ -867,8 +867,13 @@ that header from one place, so every verb gets it without its own flag.
   (`api.WithWorkRef`).
 - Commands that send no backplane request skip the check:
   `help`, `completion` and its children, `__complete` /
-  `__completeNoDesc` (shell completion), `version` and `doctor`. A bad
-  `MEHO_WORK_REF` in the shell does not break them.
+  `__completeNoDesc` (shell completion), `version` and
+  `doctor --no-network`. A bad `MEHO_WORK_REF` in the shell does not
+  break them. An online `doctor` run sends an authenticated request to
+  `/api/v1/health/live`, which the backplane audits, so it keeps the
+  check and sends the header (also on its MCP handshake posts).
+  `TestWorkRefHeaderOnOnlineDoctor` proves this through the real root
+  command.
 - The `AuthedClient` request editor calls `api.SetWorkRefHeader`, so
   every generated-client call made with `cmd.Context()` sends the
   header. The hand-rolled backplane requests (`targets add` / `import`,
@@ -953,7 +958,9 @@ makes exactly the calls it reports, and none with `--no-network`.
 
 1. **dns** — resolves the backplane host (skipped for an IP).
 2. **token** — `GET /api/v1/health/live` (no role gate, no Vault). On a
-   401 it refreshes the token the normal way and tries once more.
+   401 it refreshes the token the normal way and tries once more. The
+   request carries the global work-ref header when one is set, because
+   the backplane audits this authenticated route.
 3. **MCP handshake** — `initialize` → `notifications/initialized` →
    `resources/list` → `tools/list` → `tools/call meho_status` on
    `<backplane>/mcp`, with the same bearer. Answers may be JSON or SSE.

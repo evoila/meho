@@ -318,6 +318,12 @@ their own idempotency above):
   credential body but never in op params; audit stores a `params_hash`
   (never raw params); and both ops are pinned in
   `broadcast.events._CREDENTIAL_WRITE_OPS` → aggregate-only broadcast.
+  When Vault refuses or cannot find the ref, the op fails with
+  `vault_credentials_read_error` and sends nothing to Keycloak. The error
+  shows only the ref prefix and the Vault error class (#3864).
+- **Permission errors.** A write that Keycloak answers with 403 (for example
+  a service account without `manage-users`) fails with `connector_http_403`.
+  It is never reported as a success.
 
 **Length guard (#3628).** Keycloak keeps some text fields in 255-character
 database columns. A longer value fails the database write, and Keycloak

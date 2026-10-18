@@ -22,7 +22,8 @@ Each builder owns one ``error_code`` from the contract documented in
 ``connector_http_403`` / ``connector_http_422`` /
 ``connector_auth_failed`` / ``connector_tls_verify_failed`` /
 ``connector_vault_forbidden`` / ``connector_probe_refused`` /
-``write_capability_denied`` / ``not_found`` / ``connector_timeout`` / ``connector_error``.
+``write_capability_denied`` / ``not_found`` / ``connector_timeout`` /
+``vault_credentials_read_error`` / ``connector_error``.
 The ``status`` field maps
 to ``OperationResult.status``; the ``error_code`` lives in ``extras``
 so callers can both string-match the ``error`` field
@@ -35,7 +36,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Mapping
 from functools import lru_cache
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
 import httpx
@@ -45,6 +46,9 @@ from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import ConnectorResourceNotFoundError
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.resolver import get_default_policy
+
+if TYPE_CHECKING:
+    from meho_backplane.connectors._shared.vault_creds import SecretRefReadError
 
 __all__ = [
     "result_already_resumed",
@@ -76,6 +80,7 @@ __all__ = [
     "result_target_required",
     "result_unknown_op",
     "result_unqualified_target_version",
+    "result_vault_credentials_read_error",
     "result_write_capability_denied",
     "status_code_for_result",
     "wrap_ok_result",
@@ -944,6 +949,36 @@ def result_connector_error(
         error=f"connector_error: {type(exc).__name__}",
         duration_ms=duration_ms,
         extras=extras,
+    )
+
+
+def result_vault_credentials_read_error(
+    op_id: str,
+    exc: SecretRefReadError,
+    duration_ms: float,
+) -> OperationResult:
+    """A secret named in the op params could not be read (#3864).
+
+    Example: an approved ``keycloak.user.create`` whose ``password_secret_ref``
+    MEHO may not read. The op did not run. The extras carry only the ref cut
+    to its prefix and the class of the store error, so the caller and the
+    audit row learn where the read failed without the full path.
+    """
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=(
+            f"vault_credentials_read_error: {exc}. The operation did not run. "
+            f"Check that MEHO may read this secret, or point {exc.param} at a "
+            "path it can read, then request the operation again."
+        ),
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "vault_credentials_read_error",
+            "param": exc.param,
+            "secret_ref_prefix": exc.ref_prefix,
+            "cause_class": exc.cause_class,
+        },
     )
 
 

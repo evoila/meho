@@ -1893,6 +1893,25 @@ def composite_resume_binding(
         composite_resume_var.reset(resume_token)
 
 
+def _run_audit_context(request: ApprovalRequest) -> dict[str, Any]:
+    """The ``audit_*`` log context to bind while an approved op runs (#3864).
+
+    The REST approve routes bind ``audit_op_id="approval.decide"`` (and its
+    siblings) for their own request row. The dispatcher copies every bound
+    ``audit_*`` key into the run's audit payload, so those keys relabelled the
+    run as ``approval.decide``. A search for the real op then found no run at
+    all. Every route key is set to ``None`` here (the payload builder skips
+    ``None``), and only ``approval_request_id`` is kept, so the run row names
+    its own op and the request it ran for. ``bound_contextvars`` puts the
+    route keys back when the run ends.
+    """
+    context: dict[str, Any] = {
+        key: None for key in structlog.contextvars.get_contextvars() if key.startswith("audit_")
+    }
+    context["audit_approval_request_id"] = str(request.id)
+    return context
+
+
 async def _dispatch_resume_with_bound_context(
     *,
     operator: Operator,
@@ -1947,11 +1966,14 @@ async def _dispatch_resume_with_bound_context(
     # result handle this run spills.
     owner_token = handle_owner_sub_var.set(request.principal_sub)
     try:
-        with composite_resume_binding(
-            subop_op_id=request.op_id,
-            subop_params_hash=request.params_hash,
-            resume_parent=resume_parent,
-        ) as parent_call:
+        with (
+            structlog.contextvars.bound_contextvars(**_run_audit_context(request)),
+            composite_resume_binding(
+                subop_op_id=request.op_id,
+                subop_params_hash=request.params_hash,
+                resume_parent=resume_parent,
+            ) as parent_call,
+        ):
             dispatch_op_id, dispatch_params = (
                 parent_call if parent_call is not None else (request.op_id, effective_params)
             )

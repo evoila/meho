@@ -320,8 +320,11 @@ the one-time transfer `url` — with `content_fetch="deferred"`. Pass
   for the transfer handle, or raise `max_inline_bytes` up to the hard cap.
 - **A non-2xx transfer GET returns a clean structured error.** An expired /
   consumed one-time ticket (404/403), a transfer-host 5xx, or a refused
-  cross-origin 3xx is turned into a `connector_error` naming the HTTP status
-  and a bounded (~4 KiB) body snippet — never the raw `httpx.HTTPStatusError`
+  cross-origin 3xx is turned into a `connector_error` built from the response
+  metadata only: the HTTP status, the `Content-Type` media type (only a plain
+  `type/subtype` value, cut to under 128 characters) and the declared
+  `Content-Length` (only plain digits, cut to under 20 digits). The body is
+  never read (#3768, #3779). It is never the raw `httpx.HTTPStatusError`
   with an unread streamed response (which would make the dispatcher's
   downstream body-read enrichment raise `httpx.ResponseNotRead` and skip the
   synchronous error-audit row) and never the transfer URL/token (#3720).

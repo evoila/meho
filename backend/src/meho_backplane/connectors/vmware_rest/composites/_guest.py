@@ -161,6 +161,15 @@ _KNOWN_CONTENT_ENCODINGS: frozenset[str] = frozenset(
 #: attacker-influenceable -- the allow-list leaves no room for control
 #: characters, escape sequences, or smuggled bytes in the audit line.
 _MEDIA_TYPE_RE = re.compile(r"[a-z0-9][a-z0-9.+_-]*/[a-z0-9][a-z0-9.+_-]*")
+#: A ``Content-Length`` value as RFC 9110 defines it: one or more ASCII digits.
+_DIGITS_RE = re.compile(r"[0-9]+")
+#: Longest header-derived values the transfer refusals echo. The media type and
+#: the declared length come from the transfer host's response headers, which only
+#: the HTTP parser's header-size limit bounds. Longer values are cut (see
+#: :func:`_clip_echo`) so the error message and the audit row stay short. 19
+#: digits holds every 64-bit byte count.
+_MAX_ECHOED_MEDIA_TYPE_CHARS = 127
+_MAX_ECHOED_LENGTH_DIGITS = 19
 #: Chunk width (base64 characters per ``content_lines`` row) for binary content.
 #: Wider than RFC 2045's 76-char MIME wrap so a large binary spilling to a
 #: result handle produces far fewer rows to page (an 8 MiB file is ~2.7k rows
@@ -671,14 +680,25 @@ def _file_too_large(size_bytes: int, max_bytes: int) -> RuntimeError:
 
     The dispatcher maps a :class:`RuntimeError` to ``connector_error`` with the
     message intact (as the other guest-handler guards do), so the caller sees
-    an actionable size + remediation.
+    an actionable size + remediation. The size can come from the declared
+    ``Content-Length``, so it is cut to :data:`_MAX_ECHOED_LENGTH_DIGITS`.
     """
+    size = _clip_echo(str(size_bytes), _MAX_ECHOED_LENGTH_DIGITS)
     return RuntimeError(
-        f"guest.file.read: file is {size_bytes} bytes, over the "
+        f"guest.file.read: file is {size} bytes, over the "
         f"{max_bytes}-byte inline-fetch cap (max_inline_bytes; hard cap "
         f"{_FILE_READ_HARD_CAP_BYTES}). Re-read without fetch_content for the "
         f"transfer handle, or raise max_inline_bytes."
     )
+
+
+def _clip_echo(token: str, limit: int) -> str:
+    """Return ``token`` cut to at most ``limit`` characters.
+
+    A cut value ends in ``...`` (inside the limit), so the reader can see it was
+    shortened.
+    """
+    return token if len(token) <= limit else token[: limit - 3] + "..."
 
 
 def _media_type_token(raw: str | None) -> str:
@@ -690,12 +710,16 @@ def _media_type_token(raw: str | None) -> str:
     (drop any ``;``-separated parameters), lower-case it, and echo it **only if
     it matches a plain ``type/subtype`` token** (:data:`_MEDIA_TYPE_RE`) --
     otherwise ``"unknown"``. That allow-list shape leaves no room for control
-    characters, escape sequences, or smuggled bytes in the audit line.
+    characters, escape sequences, or smuggled bytes in the audit line. A
+    matching token is cut to :data:`_MAX_ECHOED_MEDIA_TYPE_CHARS` so a very
+    long header cannot make the message or the audit row long.
     """
     if not raw:
         return "unknown"
     token = raw.split(";", 1)[0].strip().lower()
-    return token if _MEDIA_TYPE_RE.fullmatch(token) else "unknown"
+    if not _MEDIA_TYPE_RE.fullmatch(token):
+        return "unknown"
+    return _clip_echo(token, _MAX_ECHOED_MEDIA_TYPE_CHARS)
 
 
 def _declared_length(raw: str | None) -> str:
@@ -703,16 +727,17 @@ def _declared_length(raw: str | None) -> str:
 
     Read from the header only -- the body is **never** read to measure it (a
     hostile transfer host could otherwise make the error path stream an
-    unbounded body). A missing, non-integer, or negative value yields
-    ``"unknown"``; a valid one is a bounded digit run, safe to echo verbatim.
+    unbounded body). A missing value, or one that is not plain ASCII digits,
+    yields ``"unknown"``. A valid value loses its leading zeros and is cut to
+    :data:`_MAX_ECHOED_LENGTH_DIGITS` digits, so a very long header cannot make
+    the message or the audit row long.
     """
     if raw is None:
         return "unknown"
-    try:
-        length = int(raw)
-    except ValueError:
+    digits = raw.strip()
+    if not _DIGITS_RE.fullmatch(digits):
         return "unknown"
-    return str(length) if length >= 0 else "unknown"
+    return _clip_echo(digits.lstrip("0") or "0", _MAX_ECHOED_LENGTH_DIGITS)
 
 
 def _transfer_get_failed(status_code: int, content_type: str, content_length: str) -> RuntimeError:

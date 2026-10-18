@@ -106,6 +106,7 @@ class _FakeStreamResponse:
         state: dict[str, int],
         content_encoding: str | None = None,
         content_type: str | None = None,
+        content_length: str | None = None,
     ) -> None:
         self.status_code = status
         self._body = body
@@ -115,6 +116,8 @@ class _FakeStreamResponse:
         headers: dict[str, str] = {}
         if declare_content_length:
             headers["content-length"] = str(len(body))
+        if content_length is not None:
+            headers["content-length"] = content_length
         if content_encoding is not None:
             headers["content-encoding"] = content_encoding
         if content_type is not None:
@@ -168,6 +171,7 @@ class _FakeTransferClient:
         chunk_size: int = 65536,
         get_content_encoding: str | None = None,
         get_content_type: str | None = None,
+        get_content_length: str | None = None,
     ) -> None:
         self._put_calls = put_calls
         self._get_calls = get_calls
@@ -179,6 +183,7 @@ class _FakeTransferClient:
         self._chunk_size = chunk_size
         self._get_content_encoding = get_content_encoding
         self._get_content_type = get_content_type
+        self._get_content_length = get_content_length
 
     async def put(self, url: str, *, content: bytes | None = None) -> httpx.Response:
         self._put_calls.append({"url": url, "content": content})
@@ -200,6 +205,7 @@ class _FakeTransferClient:
                 state=self._stream_state,
                 content_encoding=self._get_content_encoding,
                 content_type=self._get_content_type,
+                content_length=self._get_content_length,
             )
         )
 
@@ -215,7 +221,8 @@ class _GuestRecordingConnector:
     ``declare_content_length`` toggles whether the response advertises a
     ``Content-Length`` (off = a chunked / lying host, exercising the streamed
     running-total abort); ``stream_state["yielded"]`` records how many body
-    bytes were actually drained.
+    bytes were actually drained. ``get_content_length`` sets a raw
+    ``Content-Length`` header value, replacing the real body length.
     """
 
     vmomi: dict[str, Any] = field(default_factory=dict)
@@ -226,6 +233,7 @@ class _GuestRecordingConnector:
     stream_chunk_size: int = 65536
     get_content_encoding: str | None = None
     get_content_type: str | None = None
+    get_content_length: str | None = None
     vmomi_calls: list[dict[str, Any]] = field(default_factory=list)
     put_calls: list[dict[str, Any]] = field(default_factory=list)
     get_calls: list[dict[str, Any]] = field(default_factory=list)
@@ -255,6 +263,7 @@ class _GuestRecordingConnector:
             chunk_size=self.stream_chunk_size,
             get_content_encoding=self.get_content_encoding,
             get_content_type=self.get_content_type,
+            get_content_length=self.get_content_length,
         )
 
 
@@ -918,6 +927,67 @@ async def test_file_read_fetch_error_message_omits_the_entire_body(creds: _CredR
     assert len(message) < 400
     # The body was never read: not a single byte drained off the stream.
     assert conn.stream_state["yielded"] == 0
+
+
+@pytest.mark.asyncio
+async def test_file_read_fetch_error_clips_long_header_values(creds: _CredRecorder) -> None:
+    """A 16 KB media type and a 16 KB declared length are cut before they are echoed.
+
+    Both values come from the transfer host's response headers and land in the
+    error message, which is also what the audit row stores. The media type is
+    cut to under 128 characters and the length to under 20 digits.
+    """
+    long_type = "application/" + "x" * (16 * 1024)
+    long_length = "9" * (16 * 1024)
+    conn = _read_conn(
+        _read_info(size=10),
+        get_status=500,
+        get_body=b"err",
+        get_content_type=long_type,
+        get_content_length=long_length,
+    )
+    with pytest.raises(RuntimeError) as excinfo:
+        await _guest.guest_file_read_composite(
+            operator=_operator(),
+            target=_Target(),
+            params={"vm": "vm-42", "guest_path": "/etc/hostname", "fetch_content": True},
+            connector=conn,  # type: ignore[arg-type]
+        )
+    message = str(excinfo.value)
+    echoed_type = message.split("Content-Type: ", 1)[1].split(",", 1)[0]
+    echoed_length = message.split("Content-Length: ", 1)[1].split(")", 1)[0]
+    assert len(echoed_type) < 128
+    assert echoed_type.startswith("application/xxx") and echoed_type.endswith("...")
+    assert len(echoed_length.rstrip(".")) < 20
+    assert echoed_length.startswith("999") and echoed_length.endswith("...")
+    assert len(message) < 400
+    assert conn.stream_state["yielded"] == 0
+
+
+def test_transfer_metadata_helpers_clip_to_ceilings() -> None:
+    """The header helpers cut long values and keep short ones as they are."""
+    media = _guest._media_type_token("text/" + "a" * (16 * 1024))
+    assert len(media) == _guest._MAX_ECHOED_MEDIA_TYPE_CHARS < 128
+    assert media.endswith("...")
+    length = _guest._declared_length("1" * (16 * 1024))
+    assert len(length) == _guest._MAX_ECHOED_LENGTH_DIGITS < 20
+    assert length.endswith("...")
+    # Normal values pass through unchanged.
+    assert _guest._media_type_token("Application/JSON; charset=utf-8") == "application/json"
+    assert _guest._declared_length("1048576") == "1048576"
+    assert _guest._declared_length("0") == "0"
+    assert _guest._declared_length("007") == "7"
+    # Anything that is not plain ASCII digits is not echoed.
+    for bad in ("-1", "+5", "1_000", "12a", "", "\u0661\u0662"):
+        assert _guest._declared_length(bad) == "unknown"
+
+
+def test_file_too_large_clips_a_long_declared_size() -> None:
+    """The over-cap refusal also cuts a very long declared size."""
+    message = str(_guest._file_too_large(int("9" * 4000), 1024))
+    assert "9" * 20 not in message
+    assert "file is 9999999999999999... bytes" in message
+    assert "file is 2048 bytes" in str(_guest._file_too_large(2048, 1024))
 
 
 @pytest.mark.asyncio

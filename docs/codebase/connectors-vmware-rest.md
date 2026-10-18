@@ -8,15 +8,17 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 54 hand-authored composites
-that orchestrate cross-spec workflows: 14 read composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 66 hand-authored composites
+that orchestrate cross-spec workflows: 16 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
 in `#2258`; plus the four guest-operations reads `#3100` and the
 Supervisor status read `#3281` + the vSphere Namespace status read
 `namespace.status` / `#3502` + the storage-policy list read `#3494` +
 the two SUBSCRIBED content-library reads `content_library.subscribed.status` +
-`content_library.subscribed.items.list` / `#3495`) and 40 write
+`content_library.subscribed.items.list` / `#3495` + the datastore
+cache-refresh read `datastore.refresh` / `#3789` + the VM limit and
+reservation read `vm.resource_allocation.show` / `#3880`) and 50 write
 composites (G3.1-T6 / `#509`, incl. the destructive-tier `vm.destroy` / `#3198`, the
 governed vSphere Namespace `namespace.create` (caution) +
 `namespace.delete` (destructive) / `#3502` (see the **Governed vSphere
@@ -85,11 +87,14 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   absence from the status code. Promotion defaults off on the shared seam, so
   task polls and destructive-composite preflight/execute reads retain their
   existing failure semantics; #3479 owns those paths.
-- **Read composites** (`composites/_read.py`) — seven module-level
+- **Read composites** (`composites/_read.py`) — 6 module-level
   `async def` handlers (`cluster_drs_recommendations_composite`,
-  `event_tail_composite`, `performance_summary_composite`,
-  `datastore_usage_composite`, `network_portgroup_audit_composite`,
-  `host_network_uplinks_composite`, `host_vsan_health_composite`).
+  `event_tail_composite`, `datastore_refresh_composite`,
+  `performance_summary_composite`, `datastore_usage_composite`,
+  `network_portgroup_audit_composite`). The other read composites live
+  next to their feature area (for example the guest reads in
+  `_guest.py`); `test_connectors_vmware_rest_doc_composite_counts.py`
+  keeps this list and the counts below in step with the registry.
   Since `#2253` each accepts `(operator, target, params, connector)`
   and issues its 1-3 sub-ops **directly on the resolved connector
   session** — `connector._get_json` / `connector._post_json` mounted
@@ -112,15 +117,16 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   write-composites bullet. Registered with `safety_level="safe"` +
   `requires_approval=False` — read-only overrides of
   `register_composite_operation()`'s `dangerous` / `True` defaults.
-  `host_network_uplinks_composite` (`#2080`) lists hosts via
+  Two former read composites were re-shipped as typed ops in `#2258`
+  and keep their behaviour: `vmware.host.network_uplinks` (`#2080`) lists hosts via
   `GET:/vcenter/host`, then per host reads `config.network.pnic` +
   `config.network.proxySwitch` through the vi-json PropertyCollector
   `RetrievePropertiesEx` method — the pnic link-state / uplink mapping
   the plain REST surface cannot reproduce (drives physical
   switch-port-occupancy reasoning); the per-host property read is
   best-effort (a failed read nulls the network detail with a
-  `read_note` rather than sinking the composite).
-  `host_vsan_health_composite` (`#2135`) queries the vSAN
+  `read_note` rather than sinking the op).
+  `vmware.host.vsan_health` (`#2135`) queries the vSAN
   health-service vmomi method `VsanQueryVcClusterHealthSummary` on the
   `vsan-cluster-health-system` singleton, scoped to the target
   cluster's MoRef — the `govc vsan.health.*` equivalent, returning the
@@ -416,10 +422,10 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `vcenter.yaml` by `test_connectors_vmware_rest_library_reconcile.py`.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 55
-  `_CompositeSpec` rows (15 read — incl. the `#3789` datastore
-  cache-refresh read `datastore.refresh` — + 34 dangerous/destructive
-  writes + 6 caution writes); each row carries its
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 66
+  `_CompositeSpec` rows (16 read — incl. the `#3789` datastore
+  cache-refresh read `datastore.refresh` — + 42 dangerous/destructive
+  writes + 8 caution writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. The derived registration-coverage guard uses explicit, closed exceptions only for write operations whose existing semantics intentionally omit a preview or governed-suboperation discovery entry; every other registry id must be represented. `test_reference_docs_drift.py` remains the single total-set drift gate for generated `docs-site/reference/connectors.md`; regenerate it with `cd backend && uv run python scripts/generate_reference_docs.py` when the registry changes. Idempotent on re-run via the body-hash skip path.
 - **Typed ops** (`typed_ops.py`, `#2257`) — the first vmware
@@ -429,8 +435,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   binds to the resolved connector instance and calls directly — no
   `dispatch_child`, no ingested-descriptor sub-ops, no L2 pre-flight. It
   therefore works on a **fresh boot with zero catalog ingest** — the same
-  direct-session property the 5 read composites (`#2253`) and, since
-  `#2256`, the 14 write composites now share. The only `dispatch_child`
+  direct-session property the read composites (`#2253`) and, since
+  `#2256`, the write composites now share. The only `dispatch_child`
   leg left on the whole vmware surface is the `host.evacuate` →
   `vm.migrate` composite→composite recursion (a registrar-guaranteed
   `source_kind="composite"` row, not an ingested primitive, `#2248`). The metadata
@@ -448,7 +454,7 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   (see the VI-JSON mount section below) so it resolves on vCenter 8.0.x
   instead of 404ing (`#2466`). The per-host property read is best-effort (a failed
   read nulls the detail with a `read_note`, mirroring
-  `host_network_uplinks_composite`); the host listing is load-bearing.
+  `vmware.host.network_uplinks`); the host listing is load-bearing.
   This op is why the plain REST host summary (liveness only) is not
   enough — `overallCpuUsage` / `overallMemoryUsage` live on the WS-API
   `HostSystem`, not the REST resource. It establishes the vmware typed-op
@@ -644,17 +650,19 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 54 `vmware.composite.*` rows with
-   `source_kind="composite"` — 14 reads (13 with `safety_level="safe"` +
+   queued registrar and upserts: the 66 `vmware.composite.*` rows with
+   `source_kind="composite"` — 16 reads (15 with `safety_level="safe"` +
    `requires_approval=False`, plus `vm.guest.file.read` at
    `safety_level="caution"` since `#3720`, which auto-parks for agent /
-   service principals), and 40 writes, all `requires_approval=True`
-   (31 `safety_level="dangerous"`; 6 `safety_level="caution"` —
+   service principals), and 50 writes, all `requires_approval=True`
+   (32 `safety_level="dangerous"`; 8 `safety_level="caution"` —
    `resource_pool.create` + `cluster.drs_vm_host_rule.create` / `#3505`,
    `namespace.create`, `storage_policy.create`,
-   `content_library.subscribed.create` + `content_library.subscribed.sync`;
-   and 3 `safety_level="destructive"` — `vm.destroy` / `#3198`,
-   `namespace.delete`, `storage_policy.delete`) —
+   `content_library.subscribed.create` + `content_library.subscribed.sync`,
+   `vm.resource_allocation.set` / `#3880`, `datastore.dir.create` / `#3339`;
+   and 10 `safety_level="destructive"` — `vm.destroy` / `#3198`,
+   `namespace.delete`, `storage_policy.delete`, `cluster.drs_rule.delete`,
+   and the six `#3339` teardown deletes) —
    plus the `vmware.host.usage` row with
    `source_kind="typed"` (`safety_level="safe"` + `requires_approval=False`).
    The typed row resolves and dispatches with **zero catalog ingest** —
@@ -1035,7 +1043,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 54 composites (14 reads + 40 writes) land as `source_kind="composite"`
+The 66 composites (16 reads + 50 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -1102,7 +1110,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 42 composites are hand-authored aggregators the connector ships as
+The 66 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -2634,7 +2642,7 @@ so existing string-matching consumers keep working.
 
 ### Park-time approval previews (#1608)
 
-All 19 write composites ship `requires_approval=True`, so a human/agent
+All write composites ship `requires_approval=True`, so a human/agent
 dispatch parks as a durable `ApprovalRequest` row. Pre-#1608 that row's
 `proposed_effect` was the identifier-only default `{op_id, connector_id,
 target_id}` — and since the dispatch `params` are deliberately never
@@ -2716,8 +2724,7 @@ identifier fields **plus** `preview_unavailable: true` and a
 every reviewer surface that renders `proposed_effect` verbatim (REST
 `GET /api/v1/approvals`, `meho_approvals_list` / `.get`, `meho
 approvals show`), so "blast-radius unknown" is distinguishable from a
-genuinely small action. The 7 read composites register no builder —
-they never park.
+genuinely small action. The read composites register no builder.
 
 ## Dependencies
 
@@ -2817,8 +2824,8 @@ they never park.
   `vm.clone_from_template`), #2895 a 12th + 13th (the vim cluster /
   inventory writes `cluster.drs_rule.create` + `folder.create`), and
   #2891 a 14th / 15th / 16th (the post-clone hardware reconfigure trio
-  `vm.resize` / `vm.nic.repoint` / `vm.device.cdrom`) — 21
-  composites today. The
+  `vm.resize` / `vm.nic.repoint` / `vm.device.cdrom`). Later issues
+  added more; the Overview gives the current count. The
   "All hand-authored composites land as endpoint_descriptor rows with
   source_kind='composite'" Definition-of-done line in [#227](https://github.com/evoila/meho/issues/227)
   is fully ticked.

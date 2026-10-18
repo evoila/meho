@@ -689,7 +689,8 @@ a `SELECT DISTINCT ON (id) ... ORDER BY id, depth, name,
 parent_node_id, via_edge_id` subquery (keeping the minimum-depth
 occurrence of each node; the provenance columns extend the ORDER BY as
 a deterministic tie-break so converging equal-depth parents resolve
-identically on every run) and re-orders the result by `(depth, name)`.
+identically on every run) and re-orders the result by `(depth, name,
+id)`.
 `CYCLE` only prevents revisiting a node on the *same* branch; the
 `DISTINCT ON` collapse is what makes a converging DAG return one row
 per node rather than one row per path.
@@ -903,6 +904,144 @@ merge entirely — only `last_seen` bumps; the operator-supplied `note`
 Only `unannotate_edge` of the curated row clears the marker. The `->>`
 operator is PG-only (manual §9.16); the recursive CTE is itself PG-only,
 so the guard runs only where the column is JSONB.
+
+### Bounded closure answers (#3764)
+
+`query_topology` with `kind=dependents` / `dependencies` does not call
+`find_dependents` / `find_dependencies`. It calls `bounded_closure`,
+which walks the graph hop by hop under limits, so a dense graph cannot
+make the database do unbounded work. The REST, CLI and console closure
+routes still call the unbounded recursive-CTE verbs (see Known issues).
+
+What `bounded_closure` does (`_bounded_walk`):
+
+- **One snapshot.** The first statement is `SET TRANSACTION ISOLATION
+  LEVEL REPEATABLE READ READ ONLY`, so the root lookup and every hop
+  read the same state of the graph. A refresh that lands between two
+  hops is not seen until the next query; the answer can never join
+  nodes from two graph states into a chain that never existed.
+- **Root.** The lookup (`node_identity_statement` in `resolvers.py`,
+  with the same rules as `resolve_node`) selects id, kind, name,
+  source, scope and `last_seen`, never `properties`. The anchor
+  statement (`_CLOSURE_ANCHOR_SQL`) then returns the root row with its
+  properties only when they fit the byte budget. So a root with
+  oversized properties is named, is the one node in the answer with
+  empty properties, and stops the walk with `limit_hit="byte_limit"`;
+  its properties never reach Python.
+- **One statement per hop, not one recursive CTE.** Each hop statement
+  (`_CLOSURE_STEP_SQL_REVERSE` / `_FORWARD`) expands only the nodes kept
+  at the previous hop (`:frontier`), skips every node already in the
+  answer (`:visited`), and returns at most `:row_limit` rows in
+  `(name, id)` order. On a dense mesh each node is expanded once, so the
+  cost grows with the number of nodes, not with the number of paths
+  (the recursive CTE follows every path).
+- **Bounded work inside a hop.** The hop statement has five parts.
+  `reached` is every edge out of the frontier that passes the filters,
+  with the node's id and name only. `picked` groups those by node and
+  keeps the first `:row_limit` in `(name, id)` order, so the database
+  sorts ids and names, never properties, and a top-N sort keeps only
+  `:row_limit` rows in memory. `via` picks, for the kept nodes only,
+  the parent and edge with the smallest ids (the same choice the
+  recursive CTE makes). `ordered` is the kept ids as one array in that
+  order, and `loaded` walks it with a recursive query: it loads the
+  next node's properties only while the running byte total before it
+  is within `:byte_budget`. So a hop the byte limit cuts reads the
+  properties of the rows it returns and no others, and the largest
+  temporary result is the budget plus one row, never every kept node's
+  properties. `reached` is `NOT MATERIALIZED`, so a very wide hop is
+  one pass over its edges, and PostgreSQL never stores the whole hop as
+  a temporary result.
+- **Nodes.** `:row_limit` is `max_nodes + 1` minus the rows already in
+  hand, so the walk never fetches more than `max_nodes + 1` rows in
+  total, and it stops asking as soon as that row is in hand.
+- **Bytes.** Each hop computes `row_bytes` (the stored bytes of the
+  node's kind, name, scope and properties) and a running total that
+  continues from the previous hop (`:bytes_before`). Rows whose running
+  total before them is within `:byte_budget` come back, so one row past
+  the budget comes back, with its properties left out, and shows that
+  the byte limit applied. The walk stops asking after that row.
+- **Time.** The budget covers the whole walk, the root lookup included.
+  Before every statement the time left is set as `SELECT
+  set_config('statement_timeout', :timeout_ms, true)` (the `true` makes
+  it end with the transaction, like `SET LOCAL`). When the time is up,
+  or PostgreSQL stops a statement (SQLSTATE `57014`), the answer has no
+  nodes and `limit_hit="time_budget"`. The root is still known when the
+  walk ran out of time; it is `None` when the lookup itself did, and the
+  MCP answer then has no `root` block.
+- **Depth.** After the last hop within `depth` the walk probes one hop
+  further with `LIMIT 1`. A row there means more nodes exist
+  (`limit_hit="hop_limit"`); it is not returned.
+
+`_cut_closure_rows` keeps the rows within all limits and names the first
+limit that stopped them. The kept rows are always the first part of
+the full closure in `(depth, name, id)` order, never a sample from the
+middle. The root is always kept. Defaults: `CLOSURE_MAX_NODES` 2000,
+`CLOSURE_MAX_BYTES` 4 MiB, `CLOSURE_TIME_BUDGET_MS` 5000.
+
+The walk is tested without a database with a fake session that records
+each statement (`tests/test_topology_query_schemas.py`), and against
+PostgreSQL in `tests/integration/test_topology_query.py`: the hop
+statements are counted (a star cut at the first hop sends one; the
+dense mesh sends one per layer plus the probe); a wide star with large
+properties is run under `EXPLAIN (ANALYZE, BUFFERS)` to show the hop
+reads a small part of the blocks all the properties take and sorts
+only kilobytes, once cut by the node limit and once by the byte limit
+with room for every node; edges written between two hops stay out of
+the answer;
+an oversized root is named without its properties; a slow lookup ends
+at the time budget with no root.
+
+The MCP facet then hands the rows to `bounded_answer` in
+`mcp/tools/_topology_answer.py`. It reuses the shared result
+contracts and adds nothing of its own:
+
+1. The rows go through the shared `JsonFluxReducer`. A small answer
+   stays inline (`nodes`). A large one is kept behind a result handle
+   under the caller's tenant and subject; `result_query` reads it back
+   with the usual ownership check. The answer then carries the reducer
+   summary and `handle` instead of `nodes`. The handle's
+   `fetch_more.drill_in.stored_rows` says how many rows the store kept.
+   Rows the reducer could not profile (its admission work limit) come
+   back from it as `status: unprofiled`; `status` means something else
+   on this tool and its `outputSchema` only allows those values, so the
+   answer drops `status`, keeps the reducer's `reason`
+   (`admission_limit_exceeded`) and reports `store_unavailable`.
+2. The finished answer, `completeness` and `delivery` included, is
+   measured with `measure_delivered_wire_bytes` against
+   `RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES`. Over the ceiling, smaller
+   answers are built and measured in turn until one fits: the inline
+   preview is dropped when the handle is readable
+   (`delivery="partial"`); then the inline rows and the handle are
+   dropped (`delivery="unavailable"`); the last resort keeps only `kind`,
+   `completeness` and `delivery`. Each smaller answer carries
+   `delivered_bytes` (the size of the whole answer) and
+   `delivery_max_bytes`. The last resort fits by construction for any
+   ceiling the settings accept; it is still measured, and a warning is
+   logged if it is ever over.
+3. A `completeness` block names every limit that applied:
+
+| Limit | `state` | What it means |
+|---|---|---|
+| none | `complete` | Every node is in `nodes` or behind `handle`. |
+| `hop_limit` | `incomplete` | Every node within `depth` is there; more exist past it. |
+| `node_limit`, `byte_limit` | `incomplete` | The first part of the closure in row order. |
+| `time_budget` | `unavailable` | No nodes. The traversal ran out of time. |
+| `store_cap` | `incomplete` | The store kept only the first `retained` rows. |
+| `store_unavailable` | `unavailable` | The store kept nothing; only the preview exists. |
+| `delivery_cap` | unchanged, or `unavailable` | The answer was too large to send inline; see `delivery`. |
+
+`found` is how many rows the query produced and `retained` how many can
+be read. `guidance` says how to narrow the query. The answer also
+carries `root` (the anchor), `query` (target and filters), `node_count`,
+`edge_count` (one walked edge per non-root node), `ordering` and
+`snapshot_at` (when the query ran; rows behind the handle are that
+answer, not a re-run).
+
+`kind=history` goes through the same `bounded_answer` with `rows`. A
+page that reaches `limit` is reported as `row_limit` (`incomplete`),
+because older rows may exist. When the rows are kept behind a handle,
+the handle's inline preview leaves out `snapshot` (`preview_omits`);
+the full rows, snapshots included, are read through `result_query`.
 
 ## Annotation control flow (write half — G9.2-T3 #595)
 
@@ -1862,6 +2001,10 @@ shape.
   contracts (deep `properties` immutability, `TopologyPath` invariants)
   have no DB dependency and are unit-tested in
   `backend/tests/test_topology_query_schemas.py`.
+- **Closure limits are MCP-only.** The REST, CLI and console closure
+  routes still call `find_dependents` / `find_dependencies` with no
+  node, byte or time limit (#3764 changed the `query_topology` answer
+  only).
 - **Unweighted only.** `find_path` treats every edge as cost 1.
   Weighted-edge support is deferred to v0.2.next per #363.
 - **No graph-node alias resolution yet.** `name_or_alias` is matched

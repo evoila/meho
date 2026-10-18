@@ -50,6 +50,11 @@ on `handle.fetch_more.drill_in`:
 | Store did not persist | `false` | `result_store_unavailable` | Re-call with narrower params / native pagination; operator checks the Valkey backend |
 | Admission work limit exceeded | `false` | `admission_limit_exceeded` | Re-call with narrower params; the captured graph was not profiled or retained |
 
+On the spilled branch, `drill_in.stored_rows` is the number of rows the
+store kept. It is smaller than `total_rows` when the row or byte cap kept
+only the first rows, so a caller can tell a capped spill apart before it
+reads (#3764; `query_topology` uses it to report `store_cap`).
+
 The handle itself is minted **unconditionally** on every reduce — a
 skipped spill never suppresses the handle, it only flips the drill-in
 branch to `available=false`.

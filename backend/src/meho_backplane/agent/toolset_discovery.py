@@ -36,6 +36,18 @@ call:
 A failed gate, and any ``McpInvalidParamsError`` / ``McpRateLimitedError`` the
 handler raises, reaches the model as :class:`~pydantic_ai.ModelRetry` (tool
 feedback it can act on) instead of aborting the run.
+
+Retrieval tools (#3759)
+=======================
+
+:func:`build_retrieval_meta_tools` bridges three more working-surface tools
+the same way: ``query_topology``, ``search_memory``, and ``search_knowledge``.
+They return stored text from the tenant (Memory and knowledge base entries,
+topology names), so the toolset resolver registers them only when a
+definition names them in its ``meta_tools`` list. The two search tools' MCP
+descriptions say to read a hit's ``locator`` or ``uri`` with
+``resources/read``; a hosted run has no ``resources/read``, so their hosted
+description adds one sentence that points at ``read_context_resource``.
 """
 
 from __future__ import annotations
@@ -61,11 +73,18 @@ from meho_backplane.mcp.server import McpInvalidParamsError, McpRateLimitedError
 # ``register_mcp_tool`` call for one of the bridged tools, so :func:`get_tool`
 # can resolve its (definition, handler) pair below.
 from meho_backplane.mcp.tools import connector_admin as _connector_admin_tools  # noqa: F401
+from meho_backplane.mcp.tools import knowledge as _knowledge_tools  # noqa: F401
+from meho_backplane.mcp.tools import memory as _memory_tools  # noqa: F401
 from meho_backplane.mcp.tools import operations as _operations_tools  # noqa: F401
 from meho_backplane.mcp.tools import result_query as _result_query_tools  # noqa: F401
 from meho_backplane.mcp.tools import topology as _topology_tools  # noqa: F401
 
-__all__ = ["DISCOVERY_META_TOOL_NAMES", "build_discovery_meta_tools"]
+__all__ = [
+    "DISCOVERY_META_TOOL_NAMES",
+    "RETRIEVAL_META_TOOL_NAMES",
+    "build_discovery_meta_tools",
+    "build_retrieval_meta_tools",
+]
 
 
 _CONNECTOR_LIST = "meho_connector_list"
@@ -81,6 +100,26 @@ DISCOVERY_META_TOOL_NAMES: tuple[str, ...] = (
     _LIST_TARGETS,
     _PREVIEW_OPERATION,
     _RESULT_QUERY,
+)
+
+_QUERY_TOPOLOGY = "query_topology"
+_SEARCH_MEMORY = "search_memory"
+_SEARCH_KNOWLEDGE = "search_knowledge"
+
+#: The bridged retrieval tools (#3759), in advertised order. Opt-in: see
+#: :data:`~meho_backplane.agent.toolset.OPT_IN_META_TOOL_NAMES`.
+RETRIEVAL_META_TOOL_NAMES: tuple[str, ...] = (
+    _QUERY_TOPOLOGY,
+    _SEARCH_MEMORY,
+    _SEARCH_KNOWLEDGE,
+)
+
+#: Added to the MCP description of a bridged retrieval tool. The MCP text
+#: names ``resources/read``, which a hosted run does not have.
+_HOSTED_READ_NOTE = (
+    " In this hosted run there is no `resources/read`: read a hit's `locator` "
+    "or `uri` with `read_context_resource` when you have that tool, otherwise "
+    "work from the snippet or passages returned here."
 )
 
 #: Hosted description for ``meho_connector_list``. The MCP text points at
@@ -174,3 +213,17 @@ def build_discovery_meta_tools() -> tuple[MetaToolSpec, ...]:
         _bridge(_PREVIEW_OPERATION),
         _bridge(_RESULT_QUERY),
     )
+
+
+def build_retrieval_meta_tools() -> tuple[MetaToolSpec, ...]:
+    """Build the three governed retrieval meta-tools (#3759).
+
+    Same bridge as :func:`build_discovery_meta_tools`, so the MCP handler,
+    tenant scoping, Memory RBAC, the untrusted-text envelope on stored text,
+    and the response size limits are the same code as on MCP.
+    """
+    search_tools = tuple(
+        _bridge(name, description=_mcp_tool(name)[0].description + _HOSTED_READ_NOTE)
+        for name in (_SEARCH_MEMORY, _SEARCH_KNOWLEDGE)
+    )
+    return (_bridge(_QUERY_TOPOLOGY), *search_tools)

@@ -45,10 +45,10 @@ sites keep working.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Protocol
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import Select, select
 
 from meho_backplane.db.models import GraphNode
 from meho_backplane.topology.identity_mode import NOT_LEGACY_SCOPE
@@ -59,6 +59,8 @@ if TYPE_CHECKING:
 __all__ = [
     "AmbiguousNodeError",
     "NodeNotFoundError",
+    "node_identity_statement",
+    "pick_unique_node",
     "resolve_node",
 ]
 
@@ -184,14 +186,47 @@ async def resolve_node(
             ``kind=``), or several sources own the same ``(kind, name)``
             (``scopes`` is set).
     """
-    stmt = select(GraphNode).where(
-        GraphNode.tenant_id == tenant_id,
-        GraphNode.name == name,
-        NOT_LEGACY_SCOPE,
-    )
-    if kind is not None:
-        stmt = stmt.where(GraphNode.kind == kind)
+    stmt = _candidates(select(GraphNode), tenant_id, name, kind)
     rows = list((await session.execute(stmt)).scalars().all())
+    return pick_unique_node(rows, name, kind)
+
+
+class _Candidate(Protocol):
+    """What :func:`pick_unique_node` reads from a candidate row."""
+
+    @property
+    def kind(self) -> str: ...
+
+    @property
+    def source_scope(self) -> str | None: ...
+
+
+def node_identity_statement(tenant_id: UUID, name: str, kind: str | None = None) -> Select[Any]:
+    """The :func:`resolve_node` candidate query with identity columns only.
+
+    Selects ``id, kind, name, source, source_scope, last_seen`` and never
+    ``properties``, so a caller that must stay within a memory budget
+    (the bounded closure, #3764) can find the root without loading its
+    properties. The caller runs the statement and hands the rows to
+    :func:`pick_unique_node`, which applies the resolution rules.
+    """
+    return _candidates(
+        select(
+            GraphNode.id,
+            GraphNode.kind,
+            GraphNode.name,
+            GraphNode.source,
+            GraphNode.source_scope,
+            GraphNode.last_seen,
+        ),
+        tenant_id,
+        name,
+        kind,
+    )
+
+
+def pick_unique_node[C: _Candidate](rows: list[C], name: str, kind: str | None) -> C:
+    """Apply the :func:`resolve_node` rules 2-5 to the candidate *rows*."""
     if not rows:
         raise NodeNotFoundError(name, kind=kind)
     kinds = sorted({row.kind for row in rows})
@@ -202,3 +237,15 @@ async def resolve_node(
             name, kinds, scopes=sorted(row.source_scope or "unresolved" for row in rows)
         )
     return rows[0]
+
+
+def _candidates[S: Select[Any]](stmt: S, tenant_id: UUID, name: str, kind: str | None) -> S:
+    """Rule 1: the tenant's rows named *name* (and of *kind*), never ``legacy:`` rows."""
+    stmt = stmt.where(
+        GraphNode.tenant_id == tenant_id,
+        GraphNode.name == name,
+        NOT_LEGACY_SCOPE,
+    )
+    if kind is not None:
+        stmt = stmt.where(GraphNode.kind == kind)
+    return stmt

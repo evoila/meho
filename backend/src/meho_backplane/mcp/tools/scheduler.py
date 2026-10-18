@@ -66,7 +66,7 @@ from pydantic import ValidationError
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import authorize_tenant_scope
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
-from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
 from meho_backplane.scheduler.schemas import (
     ScheduledTriggerCreate,
     ScheduledTriggerRead,
@@ -245,11 +245,10 @@ async def _create_handler(
         target_tenant = authorize_tenant_scope(operator, payload.tenant_id)
     except HTTPException as exc:
         # 403 cross_tenant_requires_platform_admin -> the MCP wire-error;
-        # the same detail token the REST caller sees (there is no MCP
-        # analogue for 403, so invalid-params is the closest shape). Mirrors
-        # meho_backplane.mcp.tools.broadcast_overrides._http_to_mcp.
+        # the same detail token the REST caller sees. A permission refusal,
+        # so it keeps its decision row like the REST 403 does (#3757).
         detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
-        raise McpInvalidParamsError(detail) from exc
+        raise McpPermissionDeniedError(detail) from exc
     structlog.contextvars.bind_contextvars(
         audit_op_id=_SCHEDULER_OP_IDS["create"],
         audit_op_class="write",

@@ -73,7 +73,7 @@ from meho_backplane.broadcast.history import (
     caller_has_active_announce_claim,
 )
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog
+from meho_backplane.db.models import AuditLog, RequestUsageEvent
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -103,6 +103,11 @@ _HEURISTIC_ANNOUNCE: Final[str] = "announce_before_mutate"
 #: names is the recent-feed pull.
 _BROADCAST_RECENT_PATH: Final[str] = "/mcp/tools/call/meho_broadcast_recent"
 
+#: The request usage route of the same call (#3734). After the wrapper row
+#: cutover (#3757) a read tool call writes no ``audit_log`` row, only this
+#: usage event, so the probe looks in both places.
+_BROADCAST_RECENT_ROUTE: Final[str] = "tool:meho_broadcast_recent"
+
 #: The nudges. One line each, imperative, naming the exact meta-tool.
 _READ_NUDGE: Final[str] = (
     "This session has not read the broadcast feed yet. Call "
@@ -130,6 +135,10 @@ async def _session_read_broadcast(session_id: uuid.UUID) -> bool:
     ``LIMIT 1``-shaped via ``EXISTS``. The current dispatch's own audit
     row (a ``call_operation`` / inner-dispatch row) never matches the
     ``meho_broadcast_recent`` path, so there is no self-match to exclude.
+
+    The probe also checks the ``request_finished`` usage events of the
+    session (#3757): once the wrapper rows are retired, the read leaves
+    only that event. Either record counts.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -138,6 +147,11 @@ async def _session_read_broadcast(session_id: uuid.UUID) -> bool:
                 exists().where(
                     AuditLog.agent_session_id == session_id,
                     AuditLog.path == _BROADCAST_RECENT_PATH,
+                )
+                | exists().where(
+                    RequestUsageEvent.session_id == session_id,
+                    RequestUsageEvent.kind == "request_finished",
+                    RequestUsageEvent.route == _BROADCAST_RECENT_ROUTE,
                 )
             )
         )

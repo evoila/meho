@@ -103,7 +103,11 @@ from meho_backplane.mcp.registry import (
     ToolSurface,
     register_mcp_tool,
 )
-from meho_backplane.mcp.server import McpInternalError, McpInvalidParamsError
+from meho_backplane.mcp.server import (
+    McpInternalError,
+    McpInvalidParamsError,
+    McpPermissionDeniedError,
+)
 from meho_backplane.runbooks.hydration_errors import (
     TEMPLATE_BODY_VALIDATION_FAILED,
     build_template_body_validation_detail,
@@ -699,7 +703,7 @@ async def _show_template_operator_path(
         raise _opacity_floor_denial() from exc
 
 
-def _opacity_floor_denial() -> McpInvalidParamsError:
+def _opacity_floor_denial() -> McpPermissionDeniedError:
     """Construct the canonical opacity-floor refusal.
 
     Centralised so every operator-path denial uses the same message --
@@ -707,7 +711,7 @@ def _opacity_floor_denial() -> McpInvalidParamsError:
     which leg of the predicate failed (slug missing, version missing, no
     completed run).
     """
-    return McpInvalidParamsError("meho_runbook_show_template: opacity_floor")
+    return McpPermissionDeniedError("meho_runbook_show_template: opacity_floor")
 
 
 # ---------------------------------------------------------------------------

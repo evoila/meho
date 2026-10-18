@@ -547,6 +547,20 @@ FastAPI-coupled, so the connector-appropriate reuse is the shared guard
 it wraps). The derived path is inside the operator's tenant subtree by
 construction.
 
+**Vault write check before approval (#3844).** The op is approval-gated
+and its preview is hidden (it is a credential op), so on its own the
+approver could not tell that Vault will refuse the write. The op
+therefore registers a permission preflight
+(`operations/_preview.py::_k8s_secret_read_to_ref_preflight`). At park
+time it builds the same path the handler writes to
+(`tenant_secret_ref(operator.tenant_id, register_as)` on the `secret`
+mount) and runs the `vault.kv.put` capability check there
+(`sys/capabilities-self`, capability names only, no secret value). It
+uses `target=None`, like the handler's write, so the check uses the same
+Vault role. If the identity lacks `create` + `update`, MEHO refuses the
+park with `write_capability_denied` (#3542) and nobody approves a write
+that would fail.
+
 **Supervisor case: no server rewrite (corpus-verified).** A VKS guest
 kubeconfig's `clusters[].cluster.server` already points at the guest
 cluster's own LoadBalancer API-server VIP and is used as-is, so **no**

@@ -37,6 +37,19 @@ The same wrapper binds ``tenant_id`` (as the canonical UUID string),
 which the middleware re-parses into a :class:`uuid.UUID` before
 writing the new ``audit_log.tenant_id`` column (see :func:`_resolve_tenant_id`).
 
+Wrapper row cutover (#3757)
+===========================
+
+With ``AUDIT_WRAPPER_ROWS_RETIRED=true`` this middleware no longer
+writes a row for every request.
+:func:`~meho_backplane.audit_cutover.wrapper_row_class` decides: routine
+reads, dispatcher calls, validation failures and requests that already
+wrote a classified row get no row (the request usage event records
+them); a refused request gets a ``policy_decision`` row; any other change
+gets an ``operation_execution`` row. A request without a row also
+publishes no broadcast event. With the setting off, every authenticated
+request writes one ``legacy_request`` row, as described below.
+
 Skip rules
 ==========
 
@@ -109,6 +122,12 @@ from typing import Any, Final, Literal
 import structlog
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from meho_backplane.audit_cutover import (
+    close_classified_record_scope,
+    open_classified_record_scope,
+    rest_request_is_routine,
+    wrapper_row_class,
+)
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.broadcast import (
     BroadcastEvent,
@@ -355,6 +374,7 @@ def _resolve_target_id() -> uuid.UUID | None:
 async def _write_audit_row(
     *,
     audit_id: uuid.UUID,
+    event_class: AuditEventClass,
     operator_sub: str,
     tenant_id: uuid.UUID | None,
     target_id: uuid.UUID | None,
@@ -384,6 +404,10 @@ async def _write_audit_row(
     hook references the same id on the
     :class:`~meho_backplane.broadcast.events.BroadcastEvent` it emits
     after the audit commit succeeds.
+
+    *event_class* comes from :func:`~meho_backplane.audit_cutover.wrapper_row_class`:
+    ``legacy_request`` before the cutover (#3733), a decision or execution
+    class after it (#3757).
     """
     sessionmaker = get_sessionmaker()
     # work_ref I1-T1 #1655 -- read the external change-ticket reference
@@ -398,8 +422,7 @@ async def _write_audit_row(
     async with sessionmaker() as session:
         row = AuditLog(
             id=audit_id,
-            # A request wrapper row: it keeps the old request meaning (#3733).
-            event_class=AuditEventClass.LEGACY_REQUEST,
+            event_class=event_class,
             occurred_at=datetime.now(UTC),
             operator_sub=operator_sub,
             actor_sub=resolve_actor_sub(),
@@ -757,6 +780,25 @@ async def _send_audit_failure_response(send: Send) -> None:
     )
 
 
+async def _forward_without_audit_row(
+    send: Send,
+    buffered: list[Message],
+    result: _InnerAppResult,
+) -> None:
+    """Finish a request that gets no wrapper audit row.
+
+    Forward the buffered response unchanged, or, if the handler raised,
+    re-raise so the outer ServerErrorMiddleware builds the 500. Streamed
+    responses were already forwarded live, so there is nothing to flush.
+    """
+    if result.streamed:
+        return
+    if result.handler_exc is not None:
+        raise result.handler_exc
+    for message in buffered:
+        await send(message)
+
+
 #: Path prefixes the chassis audit middleware skips entirely. The MCP
 #: transport at ``/mcp`` is JSON-RPC over POST and a single request can
 #: carry multiple tool / resource invocations; the per-operation audit
@@ -790,13 +832,19 @@ class AuditMiddleware:
         # after the response is sent and never raises, so it cannot change
         # the audit write or the response.
         usage = open_request_usage()
-        if usage is None:
-            await self._handle_http(scope, receive, send)
-            return
+        # #3757: watch for classified audit rows written inside the request,
+        # so the wrapper row is not written twice (see audit_cutover).
+        record_scope = open_classified_record_scope()
         try:
-            await self._handle_http(scope, receive, usage.wrap_send(send))
+            if usage is None:
+                await self._handle_http(scope, receive, send)
+                return
+            try:
+                await self._handle_http(scope, receive, usage.wrap_send(send))
+            finally:
+                await usage.close(scope)
         finally:
-            await usage.close(scope)
+            close_classified_record_scope(record_scope)
 
     # code-quality-allow: the pre-#3734 ``__call__`` body moved here unchanged
     # so ``__call__`` can wrap it in the request usage boundary; splitting the
@@ -940,18 +988,25 @@ class AuditMiddleware:
         if not isinstance(operator_sub, str) or not operator_sub:
             # No operator to attribute. Skip the audit write entirely
             # (public surfaces, 401s, and any other unauthenticated
-            # path land here); forward the buffered response unchanged
-            # — or, if the handler raised, re-raise so the outer
-            # ServerErrorMiddleware builds the 500. Streamed responses
-            # were already forwarded live, so there is nothing to flush.
-            if handler_exc is not None and not result.streamed:
-                raise handler_exc
-            if not result.streamed:
-                for message in buffered:
-                    await send(message)
+            # path land here).
+            await _forward_without_audit_row(send, buffered, result)
             return
 
         method, path, request_id = _resolve_request_metadata(scope)
+        # #3757: after the cutover, routine requests and requests that
+        # already have a classified row get no wrapper row.
+        route_template = getattr(scope.get("route"), "path_format", None)
+        event_class = wrapper_row_class(
+            status_code=status_code,
+            routine=rest_request_is_routine(
+                method,
+                route_template if isinstance(route_template, str) else None,
+            ),
+            operator_sub=operator_sub,
+        )
+        if event_class is None:
+            await _forward_without_audit_row(send, buffered, result)
+            return
         log = structlog.get_logger()
         tenant_id = _resolve_tenant_id(
             operator_sub=operator_sub,
@@ -1027,6 +1082,7 @@ class AuditMiddleware:
         try:
             await _write_audit_row(
                 audit_id=audit_id,
+                event_class=event_class,
                 operator_sub=operator_sub,
                 tenant_id=tenant_id,
                 target_id=target_id,

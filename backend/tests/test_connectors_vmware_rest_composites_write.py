@@ -3807,6 +3807,122 @@ async def test_deploy_from_library_rename_runtime_error_stays_deployed_and_power
 
 
 @pytest.mark.asyncio
+async def test_deploy_from_library_deploy_response_not_json_still_cleans_up(
+    gate: _GateRecorder, deploy_token: str
+) -> None:
+    """A deploy answer that is not JSON → ``deploy_error``; the partial VM is deleted (#3697).
+
+    ``JSONDecodeError`` is not an ``httpx.HTTPError``. vCenter answered, so
+    the VM may exist; the composite treats it like a faulted deploy call and
+    runs the same shielded cleanup.
+    """
+    conn = _RecordingConnector(
+        [
+            json.JSONDecodeError("bad", "", 0),
+            [{"vm": "vm-partial", "name": _DEPLOY_NAME}],
+            None,
+        ],
+        vmomi=_NO_VAPPS,
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=dict(_DEPLOY_PARAMS_NAMED),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deploy_error"
+    assert out["vm_id"] is None
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("POST", _DEPLOY_PATH),
+        ("GET", _LIST_VMS_PATH),
+        ("DELETE", "/api/vcenter/vm/vm-partial"),
+    ]
+    assert conn.calls[1]["query"] == {"names": [_DEPLOY_NAME]}
+    assert [(i["category"], i["severity"]) for i in out["issues"]] == [
+        ("placement", "error"),
+        ("cleanup", "info"),
+    ]
+    assert out["issues"][0]["message"].startswith(
+        "OVF deploy call faulted: response is not JSON (JSONDecodeError): "
+    )
+    assert out["issues"][1]["message"] == "removed VM vm-partial left by the failed deploy"
+    assert gate.gated_op_ids == [_DEPLOY_OVF_OP, _DELETE_VM_OP]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_rename_response_not_json_stays_deployed_and_powers_on(
+    gate: _GateRecorder, deploy_token: str
+) -> None:
+    """A ``Rename_Task`` answer that is not JSON → ``deployed`` with a warning; power-on runs."""
+    conn = _RecordingConnector(
+        [_deployment_result(succeeded=True, vm_id="vm-ovf-1"), {}],
+        vmomi={"/VirtualMachine/vm-ovf-1/Rename_Task": json.JSONDecodeError("bad", "", 0)},
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={**_DEPLOY_PARAMS_NAMED, "power_on": True},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deployed"
+    assert out["vm_id"] == "vm-ovf-1"
+    assert out["powered_on"] is True
+    (issue,) = out["issues"]
+    assert (issue["category"], issue["severity"]) == ("rename", "warning")
+    assert issue["message"].startswith(
+        f"deployed as {_DEPLOY_NAME!r}; rename to 'router-01' failed: "
+    )
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("POST", _DEPLOY_PATH),
+        ("POST", "/api/vcenter/vm/vm-ovf-1/power?action=start"),
+    ]
+    assert [path for path, _ in conn.vmomi_calls] == ["/VirtualMachine/vm-ovf-1/Rename_Task"]
+    assert gate.gated_op_ids == [_DEPLOY_OVF_OP, _RENAME_VM_OP, _write._power_vm_op_id("start")]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_rename_poll_response_not_json_stays_deployed_and_powers_on(
+    gate: _GateRecorder, deploy_token: str
+) -> None:
+    """A rename task poll whose answer is not JSON → ``deployed`` with a warning; power-on runs.
+
+    The ``Rename_Task`` POST itself succeeded, so the rename may finish on
+    vCenter; the composite reports that it could not confirm it and keeps
+    the VM id.
+    """
+    conn = _RecordingConnector(
+        [_deployment_result(succeeded=True, vm_id="vm-ovf-1"), {}],
+        vmomi={
+            "/VirtualMachine/vm-ovf-1/Rename_Task": _task_moref("task-rename-9"),
+            "Task": json.JSONDecodeError("bad", "", 0),
+        },
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={**_DEPLOY_PARAMS_NAMED, "power_on": True},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deployed"
+    assert out["vm_id"] == "vm-ovf-1"
+    assert out["powered_on"] is True
+    (issue,) = out["issues"]
+    assert (issue["category"], issue["severity"]) == ("rename", "warning")
+    assert issue["message"].startswith(
+        f"deployed as {_DEPLOY_NAME!r}; rename to 'router-01' failed: "
+    )
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("POST", _DEPLOY_PATH),
+        ("POST", "/api/vcenter/vm/vm-ovf-1/power?action=start"),
+    ]
+    assert [path for path, _ in conn.vmomi_calls] == [
+        "/VirtualMachine/vm-ovf-1/Rename_Task",
+        "/PropertyCollector/propertyCollector/RetrievePropertiesEx",
+    ]
+    assert gate.gated_op_ids == [_DEPLOY_OVF_OP, _RENAME_VM_OP, _write._power_vm_op_id("start")]
+
+
+@pytest.mark.asyncio
 async def test_deploy_from_library_rename_park_does_not_stop_the_power_on(
     monkeypatch: pytest.MonkeyPatch, deploy_token: str
 ) -> None:

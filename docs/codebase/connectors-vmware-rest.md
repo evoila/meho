@@ -2078,8 +2078,9 @@ gives its VM a name nobody else uses:
    80-character VM-name limit). While the copy runs, vCenter shows this
    name, and an adopt-by-name consumer does not see a half-copied VM under
    the requested name.
-3. When the deploy call faults (`deploy_error`), reports `succeeded=false`
-   (`deploy_failed`), or is cancelled, the
+3. When the deploy call faults (`deploy_error`), answers with a body that
+   is not JSON (also `deploy_error`: the result is unknown, so the VM may
+   exist), reports `succeeded=false` (`deploy_failed`), or is cancelled, the
    composite looks the deploy name up twice, both un-gated reads: the VM
    listing (`GET:/vcenter/vm`), and the target resource pool's child
    resource pools (`RetrievePropertiesEx` on `ResourcePool.resourcePool`,
@@ -2114,9 +2115,11 @@ gives its VM a name nobody else uses:
    governed vim `Rename_Task` (`POST:/VirtualMachine/{moId}/Rename_Task` or
    `POST:/VirtualApp/{moId}/Rename_Task`, task-polled, 600 s bound). The
    rename is best-effort like the power-on: a parked/denied gate, a transport
-   fault, a task fault (for example the requested name now exists) or a poll
-   timeout leaves `status='deployed'` with a `rename` warning that names
-   both names. A success issues no listing and no delete.
+   fault, an unavailable VI-JSON API, a response that is not JSON from the
+   rename or from its task poll, a task fault (for example the requested
+   name now exists) or a poll timeout leaves `status='deployed'` with a
+   `rename` warning that names both names. A success issues no listing and
+   no delete.
 7. **An approval never deploys twice.** A governed write that waits for
    approval records this composite on its approval row, and approving it
    runs the composite again from the start (#3351). For this composite that

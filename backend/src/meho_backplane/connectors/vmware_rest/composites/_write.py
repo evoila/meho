@@ -3136,9 +3136,11 @@ async def _rename_deployed_vm(
     seam (:func:`_write_vmomi_sub_op`), task-polled. Best-effort like the
     power-on: a parked/denied gate, a transport fault, an unavailable VI-JSON
     API (the connector raises :exc:`RuntimeError` when both of its mounts
-    404), a task fault or a poll timeout returns a ``rename`` warning issue
-    that names both names, and the composite still reports ``deployed`` —
-    the VM is complete, it only carries the deploy name.
+    404), a response that is not JSON from the rename or from its task poll
+    (:exc:`ValueError`, which :exc:`json.JSONDecodeError` is), a task fault
+    or a poll timeout returns a ``rename`` warning issue that names both
+    names, and the composite still reports ``deployed`` — the VM is
+    complete, it only carries the deploy name.
     """
     if resource_type == _VAPP_RESOURCE_TYPE:
         op_id, mo_type = _OP_RENAME_VAPP_TASK, _VAPP_RESOURCE_TYPE
@@ -3165,7 +3167,7 @@ async def _rename_deployed_vm(
             task=_unwrap_value(task_payload),
             timeout_seconds=_VM_DEPLOY_TASK_TIMEOUT_SECONDS,
         )
-    except (httpx.HTTPError, RuntimeError) as exc:
+    except (httpx.HTTPError, RuntimeError, ValueError) as exc:
         return _deploy_issue("rename", "warning", f"{prefix} failed: {exc}")
     if outcome.state == TASK_STATE_ERROR:
         return _deploy_issue(
@@ -3506,9 +3508,10 @@ async def vm_deploy_from_library_composite(
     deployed under a unique name (``<name>-meho-<token>``,
     :func:`_deploy_vm_name`); without ``name`` the OVF default name is read
     first, and the deploy is refused when there is none. When the deploy
-    faults, reports ``succeeded=false``, or is cancelled, the composite looks
-    up that unique name twice — the VM listing, and the target pool's child
-    vApps (a multi-VM OVF deploys as a vApp whose VMs carry other names) —
+    faults, answers with a body that is not JSON, reports ``succeeded=false``,
+    or is cancelled, the composite looks up that unique name twice — the VM
+    listing, and the target pool's child vApps (a multi-VM OVF deploys as a
+    vApp whose VMs carry other names) —
     deletes what it finds plus the entity the ``DeploymentResult`` names (a
     vApp is destroyed with its VMs), and adds a ``cleanup`` issue per entity
     (``info`` = removed, ``warning`` = still there). The cleanup is shielded
@@ -3579,7 +3582,10 @@ async def vm_deploy_from_library_composite(
             # Synchronous deploy — the POST is held open for the whole copy (#3076).
             timeout=_LIBRARY_ITEM_DEPLOY_TIMEOUT,
         )
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, ValueError) as exc:
+        # A transport fault, or a 200 whose body is not JSON (``ValueError``,
+        # which ``json.JSONDecodeError`` is): the DeploymentResult is unknown
+        # either way and vCenter may have created the VM, so clean up (#3697).
         return await _fail_deploy(
             connector,
             target,
@@ -3593,7 +3599,7 @@ async def vm_deploy_from_library_composite(
                 _deploy_issue(
                     "placement",
                     "error",
-                    f"OVF deploy call faulted: {_vsphere_fault_detail(exc)}",
+                    f"OVF deploy call faulted: {_deploy_call_fault_detail(exc)}",
                 )
             ],
         )
@@ -3720,6 +3726,20 @@ def _refuse_deploy_resume() -> OperationResult | None:
             "remediation": remediation,
         },
     )
+
+
+def _deploy_call_fault_detail(exc: httpx.HTTPError | ValueError) -> str:
+    """Detail for a deploy call that faulted, or answered with a body that is not JSON.
+
+    An :exc:`httpx.HTTPError` renders through :func:`_vsphere_fault_detail`.
+    A :exc:`ValueError` (which :exc:`json.JSONDecodeError` is) means vCenter
+    answered but the ``DeploymentResult`` could not be read; the type name
+    is folded in like a transport fault's, because the text alone does not
+    say what went wrong.
+    """
+    if isinstance(exc, httpx.HTTPError):
+        return _vsphere_fault_detail(exc)
+    return f"response is not JSON ({type(exc).__name__}): {exc}"
 
 
 async def _fail_deploy(

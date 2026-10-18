@@ -410,10 +410,14 @@ async def test_paging_window_over_byte_cap_raises(monkeypatch: pytest.MonkeyPatc
     _install(monkeypatch, _store(wide), _stub_settings(out_bytes=2048))
     with pytest.raises(rq.ResultQueryOutputTooLargeError) as exc:
         await rq.read_result_window(_operator(), uuid.uuid4(), offset=0, limit=50)
-    # Paging remediation names a smaller `limit` — never `select` / `filter`.
-    msg = str(exc.value).lower()
-    assert "limit" in msg
-    assert "select" not in msg and "filter" not in msg
+    # Paging remediation names a smaller `limit`. Paging itself has no
+    # `select`, so `select` is offered only as a query to run instead (#3704).
+    msg = str(exc.value)
+    assert "`limit`" in msg
+    assert "no `limit` fits" in msg  # one 5 KB row is over the 2 KB budget
+    assert "run a query with `select`" in msg
+    assert "this handle has: id, blob" in msg
+    assert "filter" not in msg.lower()
 
 
 async def test_paging_window_in_budget_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -112,16 +113,29 @@ func (f *fakeOperationsClient) GetSearchApiV1OperationsSearchGetWithResponse(
 	return popSearchResp(&f.searchResponses), popErr(&f.searchErrors)
 }
 
-func (f *fakeOperationsClient) PostResultQueryApiV1OperationsResultQueryPostWithResponse(
+// PostResultQueryApiV1OperationsResultQueryPost turns the canned typed
+// response into the raw *http.Response the verb reads itself.
+func (f *fakeOperationsClient) PostResultQueryApiV1OperationsResultQueryPost(
 	_ context.Context,
 	params *api.PostResultQueryApiV1OperationsResultQueryPostParams,
 	body api.PostResultQueryApiV1OperationsResultQueryPostJSONRequestBody,
 	_ ...api.RequestEditorFn,
-) (*api.PostResultQueryApiV1OperationsResultQueryPostResponse, error) {
+) (*http.Response, error) {
 	f.lastResultQueryParams = params
 	bodyCopy := body
 	f.lastResultQueryBody = &bodyCopy
-	return popResultQueryResp(&f.resultQueryResponses), popErr(&f.resultQueryErrors)
+	canned := popResultQueryResp(&f.resultQueryResponses)
+	if err := popErr(&f.resultQueryErrors); err != nil {
+		return nil, err
+	}
+	if canned == nil {
+		return nil, errors.New("fakeOperationsClient: no canned result-query response")
+	}
+	return &http.Response{
+		StatusCode: canned.HTTPResponse.StatusCode,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(bytes.NewReader(canned.Body)),
+	}, nil
 }
 
 func (f *fakeOperationsClient) Refresh(_ context.Context) error {

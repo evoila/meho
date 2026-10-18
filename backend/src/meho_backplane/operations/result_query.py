@@ -195,7 +195,7 @@ async def read_result_window(
                 handle_id,
                 output_bytes,
                 max_bytes,
-                remediation=ResultQueryOutputTooLargeError.PAGING_REMEDIATION,
+                remediation=_paging_remediation(window.rows, offset, max_bytes),
             )
         payload = {
             "handle_id": str(handle_id),
@@ -217,6 +217,54 @@ async def read_result_window(
         work,
         timeout_remediation=ResultQueryTimeoutError.PAGING_REMEDIATION,
     )
+
+
+#: How many top-level field names a paging refusal lists as ``select`` hints.
+_SELECT_HINT_FIELDS = 5
+
+
+def _paging_remediation(rows: list[Any], offset: int, max_bytes: int) -> str:
+    """Say how to read an over-budget paging window (#3704).
+
+    Rows that are large nested objects (for example one full Kubernetes or
+    ArgoCD object per row) can push even the default page past the byte
+    budget. A bare "lower `limit`" leaves the caller guessing, so this names
+    the row size, the largest ``limit`` that fits from *offset*, and the
+    top-level fields a ``select`` query can return instead of whole rows.
+    Only runs on the refusal path, so encoding each row again is cheap
+    enough.
+    """
+    sizes = [len(msgspec.json.encode(row)) for row in rows]
+    fit = 0
+    used = 2  # the enclosing "[" and "]"
+    for size in sizes:
+        used += size + (1 if fit else 0)  # a "," between rows
+        if used > max_bytes:
+            break
+        fit += 1
+    first = rows[0] if rows else None
+    fields = list(first)[:_SELECT_HINT_FIELDS] if isinstance(first, dict) else []
+    nested = isinstance(first, dict) and any(
+        isinstance(value, dict | list) for value in first.values()
+    )
+    shape = "large nested objects" if nested else "large"
+    if fit:
+        hint = (
+            f"The rows in this window are {shape} (about {sum(sizes) // len(sizes)} bytes "
+            f"each). The first {fit} rows fit: set `limit` to {fit}, then continue "
+            f"with `offset` {offset + fit}."
+        )
+    else:
+        hint = (
+            f"The rows in this window are {shape}: the row at `offset` {offset} alone "
+            f"is {sizes[0] if sizes else 0} bytes, so no `limit` fits."
+        )
+    if fields:
+        hint += (
+            " To get fewer fields per row, run a query with `select` set to some "
+            f"top-level fields (this handle has: {', '.join(fields)})."
+        )
+    return hint
 
 
 class ResultQueryTimeoutError(Exception):

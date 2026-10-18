@@ -165,6 +165,7 @@ cli/
     ├── api/
     │   ├── client.gen.go      # generated typed client (oapi-codegen v2.5).
     │   ├── client.go          # auth-aware wrapper; NewAuthedClient + GetHealth.
+    │   ├── workref.go         # Meho-Work-Ref header + MEHO_WORK_REF env names, work-ref shape check, context helpers (#3804).
     │   └── refresh.go         # lazy 401-retry refresh via x/oauth2.
     ├── auth/
     │   ├── devicecode.go      # OAuth 2.0 device-code flow + OIDC discovery.
@@ -176,7 +177,7 @@ cli/
     │   ├── config.go          # backplane-URL config file ($XDG/meho/config.json).
     │   └── config_test.go     # roundtrip + 0600/0700 mode test.
     ├── cmd/
-    │   ├── root.go            # cobra root + dynamic-discovery hook.
+    │   ├── root.go            # cobra root + dynamic-discovery hook + global --work-ref pre-run (#3804).
     │   ├── root_test.go       # built-in command surface + dynamic-graft test.
     │   ├── version.go         # `meho version` subcommand.
     │   ├── version_test.go    # output-contract test.
@@ -850,6 +851,53 @@ waiting for approval, and points at `meho status`. The exit code stays
 `4` (`unexpected_response`) because the CLI cannot tell whether the
 operation worked.
 
+## Global work-ref (`--work-ref`, `MEHO_WORK_REF`, #3804)
+
+A change-ticket reference (`gh:<owner>/<repo>#<n>`) links an audit row
+to the change that allowed it. The backplane audit middleware reads it
+from the `Meho-Work-Ref` request header and writes it to
+`audit_log.work_ref` on the row for that request (#1657). The CLI sets
+that header from one place, so every verb gets it without its own flag.
+
+- The root command has a persistent `--work-ref` flag. When the flag is
+  not set, the CLI reads `MEHO_WORK_REF`. The flag wins.
+- The root `PersistentPreRunE` (`applyWorkRef` in `root.go`) checks the
+  shape once. A bad value stops the command before any request leaves
+  the CLI. A good value goes on the command context
+  (`api.WithWorkRef`).
+- Commands that send no backplane request skip the check:
+  `help`, `completion` and its children, `__complete` /
+  `__completeNoDesc` (shell completion), `version` and
+  `doctor --no-network`. A bad `MEHO_WORK_REF` in the shell does not
+  break them. An online `doctor` run sends an authenticated request to
+  `/api/v1/health/live`, which the backplane audits, so it keeps the
+  check and sends the header (also on its MCP handshake posts).
+  `TestWorkRefHeaderOnOnlineDoctor` proves this through the real root
+  command.
+- The `AuthedClient` request editor calls `api.SetWorkRefHeader`, so
+  every generated-client call made with `cmd.Context()` sends the
+  header. The hand-rolled backplane requests (`targets add` / `import`,
+  `event-source`, the broadcast feed, and the `status --watch` feed
+  stream on every connect and reconnect) call the same helper next to
+  their `Authorization` header. Keycloak admin calls, login, discovery
+  and the version check do not send it.
+- The backplane binds the header for the whole request, not only for
+  the HTTP request row. So the rows the connector service writes
+  inside the request (`meho_connector_edit_op`,
+  `meho_connector_llm_grouping` for an ingest, enable / disable, ...)
+  carry the same work-ref, and `meho audit query --work-ref` finds
+  them together with the request row. `backend/tests/
+  test_audit_work_ref_control_plane.py` proves this round trip for
+  `targets add`, `agent grant create`, `connector ingest` (sync and
+  background job) and `connector edit-op`.
+- Some commands have their own local `--work-ref` (`operation call`,
+  `scheduler create`, `runbook start`, `agent run`, and the filters on
+  `audit query`, `approvals list`, `broadcast recent`, ...). Cobra lets a local
+  flag hide the parent's persistent flag, so on those commands the flag
+  keeps its own meaning. Only `MEHO_WORK_REF` reaches the header there.
+- No PersistentPreRun hooks exist below the root. If one is added, it
+  must call `applyWorkRef` too (cobra runs only the nearest hook).
+
 ## Doctor flow (`meho doctor`, #3666)
 
 `meho doctor` checks the client setup on this machine and says which
@@ -910,7 +958,9 @@ makes exactly the calls it reports, and none with `--no-network`.
 
 1. **dns** — resolves the backplane host (skipped for an IP).
 2. **token** — `GET /api/v1/health/live` (no role gate, no Vault). On a
-   401 it refreshes the token the normal way and tries once more.
+   401 it refreshes the token the normal way and tries once more. The
+   request carries the global work-ref header when one is set, because
+   the backplane audits this authenticated route.
 3. **MCP handshake** — `initialize` → `notifications/initialized` →
    `resources/list` → `tools/list` → `tools/call meho_status` on
    `<backplane>/mcp`, with the same bearer. Answers may be JSON or SSE.
@@ -1356,9 +1406,11 @@ updates flow through `meho targets import` (POST for new rows, PATCH
 under `--update`) for bulk reconciliation, or through `meho targets
 add` (Task #2862) for a single target without authoring a YAML file —
 the earlier blanket deferral of a standalone `create` verb (#1574 /
-#1559) is lifted for the single-target create case only. No standalone
-`update` / `delete` verb is surfaced yet, though the API supports
-`PATCH` / `DELETE /api/v1/targets/{name}` (`tenant_admin`).
+#1559) is lifted for the single-target create case only. `meho targets
+update` (Task #3854) changes one target through `PATCH
+/api/v1/targets/{name}`. No standalone `delete` verb is surfaced yet,
+though the API supports `DELETE /api/v1/targets/{name}`
+(`tenant_admin`).
 
 ### Subcommands
 
@@ -1372,7 +1424,13 @@ the earlier blanket deferral of a standalone `create` verb (#1574 /
   `--tls-server-name`, `--preferred-impl`, `--note`) and are sent only
   when set, so the server's defaults apply to the rest — notably an
   omitted `--secret-ref` derives the per-tenant default credential path
-  (#1723) rather than persisting "no credential". `tenant_id` is never
+  (#1723) rather than persisting "no credential". `--no-secret-ref`
+  (Task #3854; cannot be combined with `--secret-ref`) sends an
+  explicit `"secret_ref": null`, so the target is stored with no
+  credential and dispatch takes the auth-optional path — the way to
+  register a product that needs no login. `--extra key=value`
+  (repeatable) seeds the `extras` map with string values, for example
+  `--extra scheme=http` for a plain-HTTP Prometheus. `tenant_id` is never
   sent; the backplane binds it from the operator's JWT. All validation
   stays server-side: an unknown product, an out-of-tenant `secret_ref`,
   or an SSRF-guarded host come back as a 422 whose body the CLI prints
@@ -1381,6 +1439,23 @@ the earlier blanket deferral of a standalone `create` verb (#1574 /
   `import.go`'s `doAuthedRequest` POST plumbing, so a static-bearer
   escape hatch is deliberately **not** offered — auth stays interactive
   `meho login` only.
+- `meho targets update <name-or-alias> [field flags] [--clear F]`
+  (Task #3854) — calls `PATCH /api/v1/targets/{name}` (`TargetUpdate`)
+  for one target. The field flags have the same names as `add`'s and
+  are sent only when set, so every other column keeps its value.
+  `--alias` replaces the whole alias list and `--extra key=value`
+  replaces the whole `extras` map, matching the server's PATCH
+  semantics. `--clear <field>` (repeatable) sends an explicit JSON null
+  for a nullable column: `secret-ref`, `version`, `port`, `fqdn`,
+  `tls-ca-pin`, `tls-server-name`, `preferred-impl`, `note`. The two
+  collection columns are NOT NULL, so `--clear alias` sends
+  `"aliases": []` and `--clear extra` sends `"extras": {}` instead of
+  null; that is how an operator removes every alias or every extra.
+  Three checks run before any request: at least one field must be
+  given, `--clear` must name a field from that list, and one field
+  cannot be both set and cleared (all exit 4). Server errors use the shared
+  `renderHTTPStatus` ladder (404 near-misses, 409 ambiguous alias, 422
+  body verbatim). Same `doAuthedRequest` plumbing as `add`.
 - `meho targets list [--product P] [--limit N] [--cursor C]` — calls
   `GET /api/v1/targets`. Renders the operator's tenant-scoped targets
   as a `NAME / ALIASES / PRODUCT / HOST` table. Results are keyset-
@@ -1474,11 +1549,12 @@ verbatim.
 
 ### Out of scope (v0.2)
 
-- Standalone `update` / `delete` verbs. The API supports `PATCH` /
-  `DELETE /api/v1/targets/{name}` (`tenant_admin`); the CLI surfaces
-  them in a follow-up task when operators ask. Single-target **create**
-  now ships as `meho targets add` (Task #2862); bulk reconciliation of
-  updates stays with `meho targets import --update`.
+- A standalone `delete` verb. The API supports
+  `DELETE /api/v1/targets/{name}` (`tenant_admin`); the CLI surfaces it
+  in a follow-up task when operators ask. Single-target **create** ships
+  as `meho targets add` (Task #2862) and single-target **update** as
+  `meho targets update` (Task #3854); bulk reconciliation of updates
+  stays with `meho targets import --update`.
 - Auto-completion of target names. Operators type names; tab-completion
   would need a separate `cobra-complete`-style design pass.
 - Client-side caching. Every CLI invocation hits the API fresh — the

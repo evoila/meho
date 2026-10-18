@@ -34,6 +34,7 @@ from sqlalchemy import CursorResult, func, literal, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.models import AuditEventClass, AuditLog, EndpointDescriptor, OperationGroup
+from meho_backplane.operations._audit import work_ref_var
 from meho_backplane.operations.ingest.api_schemas import EditOpWarning
 from meho_backplane.operations.ingest.connector_registration import (
     resolved_auto_shim_class,
@@ -438,6 +439,14 @@ async def write_audit_row(
     :func:`~meho_backplane.audit._write_audit_row` so SQLAlchemy's
     ``Numeric`` adapter sees the same input across every audit
     writer in the codebase.
+
+    ``work_ref`` is read off
+    :data:`~meho_backplane.operations._audit.work_ref_var`. The audit
+    middleware binds the request's ``Meho-Work-Ref`` header there for
+    the whole request (#3804), so a connector action made with
+    ``meho --work-ref ...`` is found by ``meho audit query --work-ref``
+    together with its HTTP request row. ``None`` when no reference
+    was supplied.
     """
     audit_id = uuid.uuid4()
     row = AuditLog(
@@ -451,6 +460,7 @@ async def write_audit_row(
         status_code=200,
         request_id=None,
         duration_ms=Decimal("0"),
+        work_ref=work_ref_var.get(),
         payload=payload,
     )
     session.add(row)

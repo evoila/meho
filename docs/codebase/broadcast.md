@@ -179,6 +179,38 @@ Three layers, separated for traceability:
     See [`docs/codebase/checks-broadcast.md`](checks-broadcast.md).
   - `other` — full detail.
 
+  **One class per call.** The audit row and the broadcast event of one
+  call carry the same `op_id` and `op_class`. Every writer gets the class
+  from `resolve_op_class(op_id, declared)` in `broadcast/events.py`:
+  - The declared class wins when there is one: the MCP tool's
+    `ToolDefinition.op_class`, or a route's `audit_op_class`. Tool names
+    like `list_targets` or `meho_status` have no verb suffix, so
+    `classify_op` alone would call them `other`.
+  - The exception: when `classify_op` says `credential_*` or
+    `audit_query`, that class wins. A declared class can never turn an
+    aggregate-only broadcast into a full one.
+  - With no declared class, the class is `classify_op(op_id)`.
+
+  Where it is used:
+  - **MCP `tools/call`** (`mcp/handlers.py`): the row and the event carry
+    the resolved class, and the event carries the row's `op_id` (the tool
+    name, or the `audit_op_id` the handler bound). `call_operation` keeps
+    `tool_call` on both; only the redaction detail comes from the inner op.
+    `resources/read` rows carry `op_id = mcp.resource.read` and `read`, like
+    their events.
+  - **Dispatch rows** (`operations/_audit.py`): the row's `op_id` is
+    always the op that ran, and the row stores its class. A route label
+    that is still bound while the op runs (for example `agent.run` /
+    `write` from an agent run) no longer replaces them.
+  - **HTTP rows** (`audit.py`): a route-declared class is stored as
+    resolved. Rows with no declared class keep none, and audit query
+    derives it the same way.
+
+  MEHO's own registry writes that run through the dispatcher
+  (`targets.register`, `topology.annotate` / `.unannotate` /
+  `.bulk_import` / `.create_node` / `.delete_node`) are pinned `write` in
+  `_WRITE_OPS`.
+
   `credential_read` and `audit_query` are *upgradeable*: a per-call or
   per-tenant override may surface full detail to an operator who already
   has the right to see the path/filter (G6.3 #379). `credential_mint`

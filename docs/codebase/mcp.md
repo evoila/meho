@@ -346,7 +346,8 @@ inline `result` and the extras and keeps the status `ok`:
 - `delivery="unavailable"` otherwise. Only the `audit_id` receipt and the
   remediation text remain; an unreadable handle is dropped too.
 
-`extras.remediation` says the operation already ran and must not be re-invoked;
+`extras.remediation` says the operation already ran and must not be re-invoked,
+and `extras.retry` is `false` so a program can see the same rule;
 `extras.delivered_bytes` and `extras.delivery_max_bytes` give the numbers. A
 completed write is never reported as an error because its response was too
 large. Non-`ok` envelopes are not rewritten. The REST `/call` twin shares the

@@ -17,18 +17,33 @@ claude plugin marketplace add evoila/meho
 /plugin install meho@meho
 ```
 
-To get a newer plugin version later, run `claude plugin update meho@meho`,
-then restart Claude Code. Claude Code does not update plugins from this
-marketplace on its own unless you turn on auto-update for it in `/plugin`.
-Each change that users need must also raise the `version` in this
-plugin's `.claude-plugin/plugin.json` and in the repo-root
-`.claude-plugin/marketplace.json`. Without that, `claude plugin update`
-keeps the copy you already have.
-
 `evoila/meho` is both the marketplace (`.claude-plugin/marketplace.json` at
 the repo root) and the host of this inline plugin
 (`./clients/claude-code-plugin`). During development you can point the
 marketplace at a local checkout instead of `evoila/meho`.
+
+### Get updates
+
+- Run `claude plugin update meho@meho`, then restart Claude Code.
+- Or turn on auto-update: open `/plugin`, go to **Marketplaces**, pick
+  `meho`, and choose **Enable auto-update**. It is off by default for this
+  marketplace.
+- Claude Code installs a new copy only when the plugin version goes up.
+
+### How the plugin version works
+
+- The plugin has its own version. It is not the MEHO release version.
+- The version is in two files, and they must show the same value: this
+  plugin's `.claude-plugin/plugin.json` and the repo-root
+  `.claude-plugin/marketplace.json` (both of its `version` fields).
+- A pull request that changes a file in this directory must raise the
+  version. Files under `test/` do not count. Raise the last number for a
+  fix, the middle number for a new feature.
+- The CI check `Plugin Version Check`
+  ([`scripts/ci/check_plugin_version.py`](../../scripts/ci/check_plugin_version.py))
+  fails when the files disagree or the version was not raised. Run it
+  yourself from the repo root with
+  `python scripts/ci/check_plugin_version.py --base "$(git merge-base origin/main HEAD)"`.
 
 ## What it installs
 
@@ -217,9 +232,10 @@ of a login:
 `mcp-remote` keeps saved logins in `~/.mcp-auth/mcp-remote-0.1.38/` (the
 pinned `mcp-remote@0.1.39` names the folder after its previous version). The
 folder changed with this version of the plugin, so expect one new browser
-login after you update. The Claude Desktop bundle still uses the old folder
-`~/.mcp-auth/mcp-remote-0.1.37/`. If you do not use Claude Desktop, you can
-delete that old folder.
+login after you update. Older Claude Desktop bundles use the old folder
+`~/.mcp-auth/mcp-remote-0.1.37/`; current ones use the same new folder as the
+plugin. Once your Claude Desktop bundle is current (or you do not use it), you
+can delete the old folder.
 
 ## Layer-2 skills → template sections
 

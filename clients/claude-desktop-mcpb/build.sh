@@ -45,6 +45,10 @@ jq --arg v "${VERSION}" '.version = $v' "${SCRIPT_DIR}/manifest.json" \
   > "${STAGE}/manifest.json"
 cp -R "${SCRIPT_DIR}/server" "${STAGE}/server"
 
+# The login guard is shared with the Claude Code plugin (#4003): one source
+# file, copied into the bundle's server/ folder, where index.mjs loads it.
+cp "${SCRIPT_DIR}/../claude-code-plugin/lib/login-guard.mjs" "${STAGE}/server/login-guard.mjs"
+
 # Vendor mcp-remote into the bundle. MCPB Node servers must ship their
 # dependencies in node_modules (MANIFEST spec) — there is no `npx` fetch
 # at runtime. `npm ci` installs the exact, integrity-checked tree pinned

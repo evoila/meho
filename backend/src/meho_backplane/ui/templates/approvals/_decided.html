@@ -16,12 +16,39 @@
     request  -- dict: id / op_id / connector_id / principal_sub / ...
                 plus ``delegation`` (#3692): who instructed the approver,
                 their words and refs, or None
+    run      -- dict | None (#3543): how the run of an approved request
+                ended (``result_state`` + ``outcome``); None on a deny
 -#}
 {% from "_icons.html" import icon %}
 <dialog id="meho-approvals-modal" class="modal" aria-label="Decision recorded">
   <div class="modal-box max-w-md">
     <div class="flex flex-col items-center gap-3 py-6 text-center" role="status" aria-live="polite">
-      {% if decision == "approved" %}
+      {% if decision == "approved" and run and run.result_state == "failed" %}
+        {#- Approved, but the run did not succeed (#3543): say so instead
+            of a plain success card. -#}
+        <span class="grid size-12 place-items-center rounded-full bg-error/15 text-error">
+          {{ icon("ban", class="size-6") }}
+        </span>
+        <h3 class="text-lg font-semibold">Approved, but the run failed</h3>
+        <p class="text-sm text-base-content/60">
+          The operation for <span class="font-mono">{{ request.op_id }}</span>
+          was approved and ran, but it did not succeed.
+        </p>
+        <dl class="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-left text-sm" data-testid="approval-outcome">
+          {% if run.outcome.result_status %}
+            <dt class="opacity-70">Result status</dt>
+            <dd class="font-mono">{{ run.outcome.result_status }}</dd>
+          {% endif %}
+          {% if run.outcome.error_code %}
+            <dt class="opacity-70">Error code</dt>
+            <dd class="font-mono [overflow-wrap:anywhere]">{{ run.outcome.error_code }}</dd>
+          {% endif %}
+          {% if run.outcome.audit_href %}
+            <dt class="opacity-70">Audit</dt>
+            <dd><a class="link font-mono text-xs" href="{{ run.outcome.audit_href }}">{{ run.outcome.audit_id }}</a></dd>
+          {% endif %}
+        </dl>
+      {% elif decision == "approved" %}
         <span class="grid size-12 place-items-center rounded-full bg-success/15 text-success">
           {{ icon("check", class="size-6") }}
         </span>

@@ -43,7 +43,8 @@ import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, ClassVar
 from uuid import UUID, uuid4
 
 import httpx
@@ -86,6 +87,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     vm_snapshot_revert_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites.schemas import (
+    FOLDER_CREATE_PARAMETER_SCHEMA,
     VM_CREATE_RESPONSE_SCHEMA,
     VM_NIC_REPOINT_PARAMETER_SCHEMA,
 )
@@ -94,6 +96,7 @@ from meho_backplane.operations.composite import (
     composite_resume_scope_var,
     composite_resume_state_var,
 )
+from meho_backplane.operations.dispatcher import _composite_terminal_error_code
 from tests._vmware_cluster_config_fake import (
     cluster_config_ex,
     config_ex_member_path,
@@ -7750,6 +7753,10 @@ async def test_drs_rule_create_reconfig_body_reaches_the_wire_respx(
 # ===========================================================================
 
 
+#: The only descriptor field the dispatcher's terminal-error check reads.
+_COMPOSITE_DESCRIPTOR: Any = SimpleNamespace(source_kind="composite")
+
+
 class _FolderCreateConnector:
     """Recording double for folder.create: parent REST read + vim CreateFolder.
 
@@ -7821,8 +7828,8 @@ async def test_folder_create_happy_path_is_synchronous_no_poll(gate: _GateRecord
     assert body == {"name": "cluster-nodes"}
 
 
-async def test_folder_create_parent_not_found_refused_before_write(gate: _GateRecorder) -> None:
-    """No parent match -> status=parent_not_found; no write, no gate."""
+async def test_folder_create_parent_not_found_fails_before_write(gate: _GateRecorder) -> None:
+    """No parent match -> parent_not_found with an error issue; no write, no gate (#3588)."""
     conn = _FolderCreateConnector(parents=[])
     out = await folder_create_composite(
         operator=_make_operator(),
@@ -7833,25 +7840,126 @@ async def test_folder_create_parent_not_found_refused_before_write(gate: _GateRe
     assert isinstance(out, dict)
     assert out["status"] == "parent_not_found"
     assert out["folder"] is None
+    assert [i["severity"] for i in out["issues"]] == ["error"]
+    assert "ghost" in out["issues"][0]["message"]
+    # The dispatcher reads the error issue and audits the op as failed, not ok.
+    assert _composite_terminal_error_code(_COMPOSITE_DESCRIPTOR, out) == "parent_not_found"
     assert conn.vmomi_calls == []
     assert gate.calls == []
 
 
-async def test_folder_create_ambiguous_parent_refused_before_write(gate: _GateRecorder) -> None:
-    """A parent name matching >1 folder -> status=ambiguous_parent; no write."""
+async def test_folder_create_ambiguous_parent_fails_before_write(gate: _GateRecorder) -> None:
+    """A parent name matching >1 folder -> ambiguous_parent with candidates; no write (#3588)."""
     conn = _FolderCreateConnector(
-        parents=[{"folder": "group-v1", "name": "prod"}, {"folder": "group-v2", "name": "prod"}]
+        parents=[{"folder": "group-v4", "name": "vm"}, {"folder": "group-v115", "name": "vm"}]
     )
     out = await folder_create_composite(
         operator=_make_operator(),
         target=object(),
-        params={"parent_folder": "prod", "folder_name": "cluster-nodes"},
+        params={"parent_folder": "vm", "folder_name": "cluster-nodes"},
         connector=conn,  # type: ignore[arg-type]
     )
     assert isinstance(out, dict)
     assert out["status"] == "ambiguous_parent"
+    assert out["candidate_folders"] == ["group-v4", "group-v115"]
+    assert [i["severity"] for i in out["issues"]] == ["error"]
+    # The message names the count only; the ids ride ``candidate_folders`` (#4223).
+    assert out["issues"][0]["message"] == "parent VM folder name 'vm' matched 2 VM folders"
+    assert "`candidate_folders`" in out["guidance"]
+    assert _composite_terminal_error_code(_COMPOSITE_DESCRIPTOR, out) == "ambiguous_parent"
     assert conn.vmomi_calls == []
     assert gate.calls == []
+
+
+class _TwoDatacenterFolderConnector(_FolderCreateConnector):
+    """Two datacenters, each with a root VM folder named ``vm``.
+
+    Honours the ``datacenters`` listing filter the way vCenter does, so an
+    unscoped ``vm`` lookup is ambiguous and a scoped one is unique.
+    """
+
+    _ROOTS: ClassVar[dict[str, str]] = {"datacenter-3": "group-v4", "datacenter-114": "group-v115"}
+
+    async def _get_json(
+        self, target: Any, path: str, *, operator: Operator, params: Any = None
+    ) -> Any:
+        self.rest_calls.append((path, params))
+        wanted = (params or {}).get("datacenters")
+        return {
+            "value": [
+                {"folder": moid, "name": "vm"}
+                for dc, moid in self._ROOTS.items()
+                if not wanted or dc in wanted
+            ]
+        }
+
+
+async def test_folder_create_datacenter_scopes_the_shared_vm_root(gate: _GateRecorder) -> None:
+    """On two datacenters, ``datacenter`` picks one root ``vm`` folder (#3588)."""
+    conn = _TwoDatacenterFolderConnector()
+    out = await folder_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"parent_folder": "vm", "datacenter": "datacenter-114", "folder_name": "x"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "created"
+    assert out["parent_folder_id"] == "group-v115"
+    assert out["datacenter"] == "datacenter-114"
+    assert out["issues"] == []
+    assert conn.rest_calls[0][1]["datacenters"] == ["datacenter-114"]
+    assert conn.vmomi_calls == [("/Folder/group-v115/CreateFolder", {"name": "x"})]
+    assert gate.calls[0]["params"] == {"parent_folder": "group-v115", "folder_name": "x"}
+
+
+async def test_folder_create_unscoped_vm_on_two_datacenters_is_ambiguous(
+    gate: _GateRecorder,
+) -> None:
+    """Without scoping, the shared ``vm`` name is refused, never the first row."""
+    conn = _TwoDatacenterFolderConnector()
+    out = await folder_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"parent_folder": "vm", "folder_name": "x"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "ambiguous_parent"
+    assert sorted(out["candidate_folders"]) == ["group-v115", "group-v4"]
+    assert conn.vmomi_calls == []
+
+
+async def test_folder_create_parent_moid_pin_skips_the_lookup(gate: _GateRecorder) -> None:
+    """``parent_folder_id`` creates under that moid with no name lookup (#3588)."""
+    conn = _TwoDatacenterFolderConnector()
+    out = await folder_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"parent_folder_id": "group-v4", "folder_name": "x"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "created"
+    assert out["parent_folder"] is None
+    assert out["parent_folder_id"] == "group-v4"
+    assert conn.rest_calls == []
+    assert conn.vmomi_calls == [("/Folder/group-v4/CreateFolder", {"name": "x"})]
+
+
+def test_folder_create_parameter_schema_parent_shapes() -> None:
+    """One of parent_folder / parent_folder_id is required; moids are pattern-checked."""
+    validator = Draft202012Validator(FOLDER_CREATE_PARAMETER_SCHEMA)
+    validator.validate({"parent_folder": "vm", "folder_name": "x"})
+    validator.validate({"parent_folder": "vm", "datacenter": "datacenter-3", "folder_name": "x"})
+    validator.validate({"parent_folder_id": "group-v4", "folder_name": "x"})
+    for bad in (
+        {"folder_name": "x"},
+        {"parent_folder_id": "group-h4", "folder_name": "x"},
+        {"parent_folder": "vm", "datacenter": "DC-East", "folder_name": "x"},
+    ):
+        with pytest.raises(ValidationError):
+            validator.validate(bad)
 
 
 async def test_folder_create_gate_short_circuits_before_the_write(

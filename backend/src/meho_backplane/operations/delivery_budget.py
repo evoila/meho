@@ -142,6 +142,14 @@ def _trimmed(
     limit: int,
 ) -> OperationResult:
     template = _PARTIAL_REMEDIATION if delivery == "partial" else _UNAVAILABLE_REMEDIATION
+    extras: dict[str, Any] = {
+        "remediation": template.format(size=size, limit=limit),
+        "delivered_bytes": size,
+        "delivery_max_bytes": limit,
+    }
+    if result.status == "ok":
+        # The operation already ran; running it again could repeat a change.
+        extras["retry"] = False
     return OperationResult(
         status=result.status,
         op_id=result.op_id,
@@ -149,11 +157,7 @@ def _trimmed(
         handle=result.handle if delivery == "partial" else None,
         audit_id=result.audit_id,
         delivery=delivery,
-        extras={
-            "remediation": template.format(size=size, limit=limit),
-            "delivered_bytes": size,
-            "delivery_max_bytes": limit,
-        },
+        extras=extras,
     )
 
 

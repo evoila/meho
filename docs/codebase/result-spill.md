@@ -275,6 +275,14 @@ the reducer keeps it **whole** as a document record under a handle:
   is not stored either (`reason=admission_limit_exceeded`).
 - Credential-class ops and reduces without an `op_id` pass through
   unchanged, as before.
+- A multi-step operation's failure envelope (an `issues[]` entry with
+  `severity: "error"`, #3809) takes the same reducer path as a success
+  payload (#4223). An oversized refusal — `folder.create`'s
+  `ambiguous_parent` listing hundreds of `candidate_folders` — becomes a
+  document record under a handle; the result keeps `status: "error"`,
+  its `error` line and `extras.error_code`, and the audit row reads
+  `error` with the `handle_id`. A reducer failure on that path drops the
+  inline envelope (`delivery: "unavailable"`) rather than ship it whole.
 
 Read it with `result_query` and `query={"path": "<RFC 6901 JSON
 Pointer>"}`. The pointer rules follow RFC 6901: `""` is the whole

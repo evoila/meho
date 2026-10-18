@@ -50,6 +50,7 @@ __all__ = [
     "result_already_resumed",
     "result_ambiguous_connector",
     "result_ambiguous_target",
+    "result_audit_commit_failed",
     "result_awaiting_approval",
     "result_composite_resume_multi_gate_unsupported",
     "result_composite_resume_repeats_write",
@@ -589,6 +590,42 @@ def result_receipt_too_large(
                 "The operation did not run, so it is safe to call again. Check the "
                 "op_id with search_operations; if it is correct, an operator must "
                 "raise RESULT_COMPLETE_RESPONSE_WIRE_MAX_BYTES."
+            ),
+        },
+    )
+
+
+def result_audit_commit_failed(op_id: str, duration_ms: float) -> OperationResult:
+    """The handler finished, but its audit record could not be saved.
+
+    An operation does not return success unless its audit row commits
+    (CLAUDE.md postulate 7 / v0.1-spec §6). This applies to every completed
+    handler: safe reads, writes, and approved runs. When the commit fails
+    after the handler returned, MEHO cannot prove what happened, so:
+
+    * ``status`` is ``error``, but the error is not a connector error -- the
+      connector call itself worked.
+    * ``extras.execution_outcome`` is ``uncertain``: the vendor may already
+      hold the change.
+    * ``extras.retry`` is ``False``: running it again could repeat a change.
+    * ``audit_id`` stays ``None``: there is no committed record to point at.
+    """
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=(
+            "audit_commit_failed: the operation ran, but MEHO could not save its "
+            "audit record. Do not run it again."
+        ),
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "audit_commit_failed",
+            "execution_outcome": "uncertain",
+            "retry": False,
+            "remediation": (
+                "The operation may have changed the target. Do not run it again. "
+                "Check the target's current state, and ask an operator to check "
+                "the audit database."
             ),
         },
     )

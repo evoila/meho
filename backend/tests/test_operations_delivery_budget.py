@@ -132,6 +132,7 @@ def test_over_budget_with_readable_handle_is_partial() -> None:
     assert bounded.result is None
     assert "result_query" in bounded.extras["remediation"]
     assert "Do not re-invoke" in bounded.extras["remediation"]
+    assert bounded.extras["retry"] is False
     assert bounded.extras["delivered_bytes"] > 4096
     assert measure_delivered_wire_bytes(bounded.model_dump(mode="json")) <= 4096
 
@@ -146,6 +147,7 @@ def test_over_budget_without_room_for_handle_is_unavailable() -> None:
     assert bounded.audit_id == result.audit_id
     assert bounded.result is None
     assert "audit" in bounded.extras["remediation"]
+    assert bounded.extras["retry"] is False
     assert measure_delivered_wire_bytes(bounded.model_dump(mode="json")) <= _LIMIT
 
 

@@ -656,6 +656,36 @@ async def _vault_kv_write_preflight(ctx: PreviewContext) -> dict[str, Any] | Non
     )
 
 
+async def _k8s_secret_read_to_ref_preflight(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Permission preflight for ``k8s.secret.read_to_ref`` (#3844).
+
+    The op reads a Kubernetes Secret and writes the value to Vault through
+    the ``vault.kv.put`` handler. Its preview is suppressed (it classifies
+    ``credential_read``), so without this check the approver could not see
+    that Vault will refuse the write. This computes the same destination
+    the handler writes to -- ``tenant_secret_ref(operator.tenant_id,
+    register_as)`` on the default KV mount -- and runs the ``vault.kv.put``
+    capability probe there. It passes ``target=None`` on purpose: the
+    handler writes with ``target=None`` (the global Vault role), and
+    ``ctx.target`` is the Kubernetes cluster, not a Vault target.
+    """
+    register_as = ctx.params.get("register_as")
+    if not isinstance(register_as, str):
+        return None
+
+    from meho_backplane.connectors._shared.vault_creds import DEFAULT_KV_MOUNT
+    from meho_backplane.connectors.vault.ops import vault_kv_write_capability_preflight
+    from meho_backplane.connectors.vault.tenant_paths import tenant_secret_ref
+
+    dest_ref = tenant_secret_ref(ctx.operator.tenant_id, register_as)
+    return await vault_kv_write_capability_preflight(
+        ctx.operator,
+        "vault.kv.put",
+        {"mount": DEFAULT_KV_MOUNT, "path": dest_ref},
+        target=None,
+    )
+
+
 def _register_builtin_builders() -> None:
     """Wire the in-tree preview builders + permission preflights.
 
@@ -664,6 +694,8 @@ def _register_builtin_builders() -> None:
     capability-only permission preflight (#1504) -- a different hook
     because a credential-class op's preview is suppressed but its
     permission check (capability names, no secret) is not.
+    ``k8s.secret.read_to_ref`` registers the same probe on the Vault path
+    it stages to (#3844).
     """
     register_preview_builder("k8s.apply", _k8s_apply_preview)
     for _write_op in (
@@ -673,6 +705,7 @@ def _register_builtin_builders() -> None:
         "vault.kv.metadata.delete",
     ):
         register_permission_preflight(_write_op, _vault_kv_write_preflight)
+    register_permission_preflight("k8s.secret.read_to_ref", _k8s_secret_read_to_ref_preflight)
 
 
 _register_builtin_builders()

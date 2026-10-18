@@ -61,6 +61,7 @@ import httpx
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import OperationResult
+from meho_backplane.connectors.vmware_rest.composite_issues import issue
 from meho_backplane.connectors.vmware_rest.composites._host_nfs_mount import (
     build_mounted_result,
     build_nas_volume_spec,
@@ -330,7 +331,22 @@ async def _resolve_host_and_manager(
         connector, target, operator, host_moid=host_moid, prop=prop
     )
     if manager_moid is None:
-        return None, None, {"status": "config_manager_unreadable", "host": host_moid}
+        return (
+            None,
+            None,
+            {
+                "status": "config_manager_unreadable",
+                "host": host_moid,
+                "issues": [
+                    issue(
+                        "connector",
+                        "error",
+                        f"could not read {prop} of host {host_moid!r}; "
+                        "nothing was changed",
+                    )
+                ],
+            },
+        )
     return host_moid, manager_moid, None
 
 
@@ -462,14 +478,20 @@ async def disk_mark_flash_composite(
         results.append(await _poll_mark_disk(connector, target, operator, disk_uuid, task_payload))
 
     marked = sum(1 for row in results if row["status"] == "marked")
-    return {
-        "status": "marked" if marked == len(results) else "partial",
+    failed = len(results) - marked
+    envelope: dict[str, Any] = {
+        "status": "marked" if failed == 0 else "partial",
         "host": host_moid,
         "mode": mode,
         "results": results,
-        "summary": {"marked": marked, "failed": len(results) - marked},
+        "summary": {"marked": marked, "failed": failed},
         "guidance": None,
     }
+    if failed:
+        envelope["issues"] = [
+            issue("connector", "error", f"{failed} of {len(results)} disk(s) were not marked")
+        ]
+    return envelope
 
 
 async def _poll_mark_disk(

@@ -167,6 +167,28 @@ __all__ = [
 ]
 
 
+#: The ``issues`` field a write composite adds when it did not complete (#3813).
+#: An ``error``-severity entry makes the dispatcher record the call as failed
+#: (``status="error"``, audit ``result_status="error"``), not ``ok``.
+_HARD_FAILURE_ISSUES_PROPERTY: dict[str, Any] = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "category": {"type": "string"},
+            "severity": {"type": "string", "enum": ["error", "warning", "info"]},
+            "message": {"type": "string"},
+        },
+    },
+    "description": (
+        "Present only when the operation did not complete (timeout, rollback, "
+        "partial apply, failed sub-step). Each entry is ``{category, severity, "
+        "message}``; an ``error`` entry means the call is recorded as failed. "
+        "Absent on success and on a soft refusal such as ``not_found``."
+    ),
+}
+
+
 #: ``vmware.composite.cluster.drs_recommendations`` parameter schema.
 #:
 #: Reads cluster summary + DRS state (optionally surfacing the cluster's
@@ -2137,6 +2159,7 @@ NETWORK_PORTGROUP_VLAN_SET_PARAMETER_SCHEMA: dict[str, Any] = {
 VM_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "issues": _HARD_FAILURE_ISSUES_PROPERTY,
         "status": {
             "type": "string",
             "enum": ["created", "rolled_back"],
@@ -2334,6 +2357,7 @@ VM_CLONE_FROM_TEMPLATE_RESPONSE_SCHEMA: dict[str, Any] = {
 VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "issues": _HARD_FAILURE_ISSUES_PROPERTY,
         "status": {
             "type": "string",
             "enum": ["reverted", "ambiguous", "not_found", "timeout"],
@@ -2372,6 +2396,7 @@ VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA: dict[str, Any] = {
 VM_DESTROY_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "issues": _HARD_FAILURE_ISSUES_PROPERTY,
         "status": {
             "type": "string",
             "enum": ["destroyed", "not_powered_off", "not_found", "timeout"],
@@ -2450,6 +2475,7 @@ VM_MIGRATE_RESPONSE_SCHEMA: dict[str, Any] = {
 VM_POWER_BULK_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "issues": _HARD_FAILURE_ISSUES_PROPERTY,
         "results": {
             "type": "array",
             "items": {
@@ -2487,6 +2513,7 @@ VM_POWER_BULK_RESPONSE_SCHEMA: dict[str, Any] = {
 VM_POWER_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "issues": _HARD_FAILURE_ISSUES_PROPERTY,
         "vm": {"type": "string", "description": "VM moid the verb targeted."},
         "verb": {
             "type": "string",
@@ -2533,6 +2560,7 @@ VM_POWER_RESPONSE_SCHEMA: dict[str, Any] = {
 HOST_EVACUATE_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "issues": _HARD_FAILURE_ISSUES_PROPERTY,
         "status": {
             "type": "string",
             "enum": ["evacuated", "partial", "aborted"],
@@ -2587,6 +2615,7 @@ HOST_EVACUATE_RESPONSE_SCHEMA: dict[str, Any] = {
 HOST_DETACH_FROM_VDS_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "issues": _HARD_FAILURE_ISSUES_PROPERTY,
         "status": {
             "type": "string",
             "enum": ["detached", "incomplete", "timeout"],
@@ -2685,6 +2714,7 @@ CLUSTER_PATCH_RESPONSE_SCHEMA: dict[str, Any] = {
 VM_DISK_GROW_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "issues": _HARD_FAILURE_ISSUES_PROPERTY,
         "status": {
             "type": "string",
             "enum": ["grown", "invalid_shrink", "disk_not_found", "timeout"],
@@ -2801,6 +2831,7 @@ VM_DISK_ATTACH_RESPONSE_SCHEMA: dict[str, Any] = {
 CLUSTER_DRS_RULE_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "issues": _HARD_FAILURE_ISSUES_PROPERTY,
         "status": {
             "type": "string",
             "enum": ["created", "rule_exists", "insufficient_vms", "timeout"],
@@ -3074,6 +3105,7 @@ FOLDER_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
 NETWORK_PORTGROUP_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "issues": _HARD_FAILURE_ISSUES_PROPERTY,
         "status": {
             "type": "string",
             "enum": ["created", "invalid_vlan_spec", "timeout"],
@@ -3119,6 +3151,7 @@ NETWORK_PORTGROUP_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
 NETWORK_PORTGROUP_SECURITY_SET_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "issues": _HARD_FAILURE_ISSUES_PROPERTY,
         "status": {
             "type": "string",
             "enum": ["updated", "no_change_requested", "timeout"],
@@ -3168,6 +3201,7 @@ NETWORK_PORTGROUP_SECURITY_SET_RESPONSE_SCHEMA: dict[str, Any] = {
 NETWORK_PORTGROUP_VLAN_SET_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "issues": _HARD_FAILURE_ISSUES_PROPERTY,
         "status": {
             "type": "string",
             "enum": ["set", "unchanged", "invalid_vlan_spec", "timeout"],
@@ -3405,6 +3439,7 @@ VM_DEVICE_CDROM_PARAMETER_SCHEMA: dict[str, Any] = {
 VM_RESIZE_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "issues": _HARD_FAILURE_ISSUES_PROPERTY,
         "status": {
             "type": "string",
             "enum": ["resized", "requires_power_off", "no_change", "partial"],
@@ -4578,6 +4613,7 @@ HOST_SERVICE_CONTROL_PARAMETER_SCHEMA: dict[str, Any] = {
 HOST_DATASTORE_MOUNT_NFS_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "issues": _HARD_FAILURE_ISSUES_PROPERTY,
         "status": {
             "type": "string",
             "enum": [
@@ -4643,6 +4679,7 @@ HOST_DATASTORE_MOUNT_NFS_RESPONSE_SCHEMA: dict[str, Any] = {
 HOST_DISK_MARK_FLASH_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "issues": _HARD_FAILURE_ISSUES_PROPERTY,
         "status": {
             "type": "string",
             "enum": [
@@ -4709,6 +4746,7 @@ HOST_DISK_MARK_FLASH_RESPONSE_SCHEMA: dict[str, Any] = {
 HOST_SERVICE_CONTROL_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "issues": _HARD_FAILURE_ISSUES_PROPERTY,
         "status": {
             "type": "string",
             "enum": [
@@ -5270,6 +5308,7 @@ GUEST_PROGRAM_RUN_PARAMETER_SCHEMA: dict[str, Any] = {
 GUEST_PROGRAM_RUN_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "issues": _HARD_FAILURE_ISSUES_PROPERTY,
         "status": {
             "type": "string",
             "enum": ["started", "exited", "timeout", "exit_unknown"],
@@ -5840,6 +5879,7 @@ STORAGE_POLICY_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
 STORAGE_POLICY_DELETE_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "issues": _HARD_FAILURE_ISSUES_PROPERTY,
         "status": {
             "type": "string",
             "enum": ["deleted", "delete_failed", "still_present"],

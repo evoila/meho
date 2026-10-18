@@ -99,6 +99,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.vmware_rest import library_download, ovf_import_control
+from meho_backplane.connectors.vmware_rest.composite_issues import issue
 from meho_backplane.connectors.vmware_rest.ovf_import import (
     ImportPlacement,
     LeaseImportResult,
@@ -1365,19 +1366,38 @@ async def _write_vmomi_sub_op(
     return None, payload
 
 
+def _task_timeout_issue(task_kind: str, task_moid: str) -> dict[str, Any]:
+    """``error`` issue for a vim task that did not finish in time (#3813).
+
+    The change may still land later, but the operation did not confirm it,
+    so the dispatcher must record a failure, not ``ok``.
+    """
+    return issue(
+        "connector",
+        "error",
+        f"{task_kind} {task_moid} did not finish in time; the change is not confirmed",
+    )
+
+
 def _rolled_back(
     *,
     steps: list[str],
     failed_step: str,
     reason: str,
 ) -> dict[str, Any]:
-    """Build the canonical rolled_back response envelope for :func:`vm_create_composite`."""
+    """Build the canonical rolled_back response envelope for :func:`vm_create_composite`.
+
+    A rollback means no VM was created, so the envelope carries an
+    ``error``-severity issue and the dispatcher records a failure (#3813).
+    """
+    message = f"vm.create failed at step {failed_step!r}" + (f": {reason}" if reason else "")
     return {
         "status": "rolled_back",
         "vm_id": None,
         "steps_succeeded": steps,
         "failed_step": failed_step,
         "rollback_reason": reason,
+        "issues": [issue("connector", "error", message)],
     }
 
 
@@ -2725,11 +2745,6 @@ async def vm_clone_composite(
 # the pinned ``vcenter.yaml``), un-gated reads that mutate nothing.
 
 
-def _deploy_issue(category: str, severity: str, message: str) -> dict[str, Any]:
-    """Build one issue projection ``{category, severity, message}``."""
-    return {"category": category, "severity": severity, "message": message}
-
-
 def _deploy_failure(
     status: str,
     *,
@@ -2792,7 +2807,7 @@ def _extract_ovf_issues(error_report: Any) -> list[dict[str, Any]]:
             if isinstance(entry, dict):
                 category = entry.get("category")
                 issues.append(
-                    _deploy_issue(
+                    issue(
                         category if isinstance(category, str) else "unknown",
                         severity,
                         _ovf_message(entry),
@@ -2859,7 +2874,7 @@ async def _resolve_deploy_library_item(
         return None, _deploy_failure(
             "invalid_reference",
             issues=[
-                _deploy_issue(
+                issue(
                     "input",
                     "error",
                     "supply library_item (id) or library_item_name to identify the OVF item",
@@ -2876,16 +2891,14 @@ async def _resolve_deploy_library_item(
         if not library_ids:
             return None, _deploy_failure(
                 "library_not_found",
-                issues=[
-                    _deploy_issue("input", "error", f"library {library_name!r} matched no library")
-                ],
+                issues=[issue("input", "error", f"library {library_name!r} matched no library")],
             )
         if len(library_ids) > 1:
             return None, _deploy_failure(
                 "ambiguous_library",
                 candidates=library_ids,
                 issues=[
-                    _deploy_issue(
+                    issue(
                         "input",
                         "error",
                         f"library {library_name!r} matched {len(library_ids)} libraries",
@@ -2903,18 +2916,14 @@ async def _resolve_deploy_library_item(
     if not item_ids:
         return None, _deploy_failure(
             "item_not_found",
-            issues=[
-                _deploy_issue("input", "error", f"OVF item {item_name!r} matched no library item")
-            ],
+            issues=[issue("input", "error", f"OVF item {item_name!r} matched no library item")],
         )
     if len(item_ids) > 1:
         return None, _deploy_failure(
             "ambiguous_item",
             candidates=item_ids,
             issues=[
-                _deploy_issue(
-                    "input", "error", f"OVF item {item_name!r} matched {len(item_ids)} items"
-                )
+                issue("input", "error", f"OVF item {item_name!r} matched {len(item_ids)} items")
             ],
         )
     return item_ids[0], None
@@ -2997,11 +3006,9 @@ async def _power_on_deployed_vm(
             connector, target, operator, _power_vm_op_id("start"), {"vm": vm_id}
         )
     except httpx.HTTPError as exc:
-        return False, _deploy_issue(
-            "power_on", "warning", f"deploy succeeded but power-on failed: {exc}"
-        )
+        return False, issue("power_on", "warning", f"deploy succeeded but power-on failed: {exc}")
     if gate is not None:
-        return False, _deploy_issue(
+        return False, issue(
             "power_on",
             "warning",
             f"deploy succeeded but the follow-on power-on {_gate_outcome(gate)}",
@@ -3095,7 +3102,7 @@ async def _resolve_deploy_vm_name(
             "resolve_error",
             library_item_id=item_id,
             issues=[
-                _deploy_issue(
+                issue(
                     "resolve",
                     "error",
                     f"OVF summary lookup faulted: {_vsphere_fault_detail(exc)}",
@@ -3109,7 +3116,7 @@ async def _resolve_deploy_vm_name(
             "invalid_reference",
             library_item_id=item_id,
             issues=[
-                _deploy_issue(
+                issue(
                     "input",
                     "error",
                     "the OVF descriptor names no VM; set name so the deploy can find "
@@ -3159,7 +3166,7 @@ async def _rename_deployed_vm(
             params={"moId": vm_id, "body": body},
         )
         if gate is not None:
-            return _deploy_issue("rename", "warning", f"{prefix} {_gate_outcome(gate)}")
+            return issue("rename", "warning", f"{prefix} {_gate_outcome(gate)}")
         outcome = await poll_vim_task(
             connector,
             target,
@@ -3168,15 +3175,15 @@ async def _rename_deployed_vm(
             timeout_seconds=_VM_DEPLOY_TASK_TIMEOUT_SECONDS,
         )
     except (httpx.HTTPError, RuntimeError, ValueError) as exc:
-        return _deploy_issue("rename", "warning", f"{prefix} failed: {exc}")
+        return issue("rename", "warning", f"{prefix} failed: {exc}")
     if outcome.state == TASK_STATE_ERROR:
-        return _deploy_issue(
+        return issue(
             "rename",
             "warning",
             f"{prefix} faulted: {outcome.error_message or '<no fault reported>'}",
         )
     if outcome.timed_out:
-        return _deploy_issue(
+        return issue(
             "rename",
             "warning",
             f"{prefix} did not finish within {int(_VM_DEPLOY_TASK_TIMEOUT_SECONDS)}s",
@@ -3229,7 +3236,7 @@ async def _clean_up_failed_deploy(
         )
     except (httpx.HTTPError, RuntimeError, ValueError) as exc:
         issues.append(
-            _deploy_issue(
+            issue(
                 "cleanup",
                 "warning",
                 f"could not list VMs named {deploy_name!r} after the failed deploy "
@@ -3246,7 +3253,7 @@ async def _clean_up_failed_deploy(
         )
     except (httpx.HTTPError, RuntimeError, ValueError) as exc:
         issues.append(
-            _deploy_issue(
+            issue(
                 "cleanup",
                 "warning",
                 f"could not list vApps named {deploy_name!r} under resource pool "
@@ -3345,16 +3352,16 @@ async def _delete_leftover_vm(
     try:
         gate, _ = await _write_sub_op(connector, target, operator, _OP_DELETE_VM, {"vm": vm_id})
     except (httpx.HTTPError, ValueError) as exc:
-        return _deploy_issue(
+        return issue(
             "cleanup",
             "warning",
             f"could not remove {what} ({type(exc).__name__}); delete it by hand",
         )
     if gate is not None:
-        return _deploy_issue(
+        return issue(
             "cleanup", "warning", f"{what} is still there; its removal {_gate_outcome(gate)}"
         )
-    return _deploy_issue("cleanup", "info", f"removed {what}")
+    return issue("cleanup", "info", f"removed {what}")
 
 
 async def _destroy_leftover_vapp(
@@ -3384,7 +3391,7 @@ async def _destroy_leftover_vapp(
             params={"moId": vapp_id, "body": {}},
         )
         if gate is not None:
-            return _deploy_issue(
+            return issue(
                 "cleanup", "warning", f"{what} are still there; their removal {_gate_outcome(gate)}"
             )
         outcome = await poll_vim_task(
@@ -3395,26 +3402,26 @@ async def _destroy_leftover_vapp(
             timeout_seconds=_VM_DEPLOY_TASK_TIMEOUT_SECONDS,
         )
     except (httpx.HTTPError, RuntimeError, ValueError) as exc:
-        return _deploy_issue(
+        return issue(
             "cleanup",
             "warning",
             f"could not remove {what} ({type(exc).__name__}); delete them by hand",
         )
     if outcome.state == TASK_STATE_ERROR:
-        return _deploy_issue(
+        return issue(
             "cleanup",
             "warning",
             f"could not remove {what}: {outcome.error_message or '<no fault reported>'}; "
             "delete them by hand",
         )
     if outcome.timed_out:
-        return _deploy_issue(
+        return issue(
             "cleanup",
             "warning",
             f"removal of {what} did not finish within "
             f"{int(_VM_DEPLOY_TASK_TIMEOUT_SECONDS)}s; check vCenter by hand",
         )
-    return _deploy_issue("cleanup", "info", f"removed {what}")
+    return issue("cleanup", "info", f"removed {what}")
 
 
 async def _drain_deploy_cleanup(
@@ -3447,9 +3454,7 @@ async def _drain_deploy_cleanup(
         except Exception:  # the task failed; its exception is read below
             break
     if task.cancelled():
-        issues = [
-            _deploy_issue("cleanup", "warning", "the cleanup was cancelled; check vCenter by hand")
-        ]
+        issues = [issue("cleanup", "warning", "the cleanup was cancelled; check vCenter by hand")]
     elif (exc := task.exception()) is not None:
         _log.warning(
             "vmware_deploy_from_library_cleanup_failed",
@@ -3457,7 +3462,7 @@ async def _drain_deploy_cleanup(
             error=str(exc),
         )
         issues = [
-            _deploy_issue(
+            issue(
                 "cleanup",
                 "warning",
                 f"the cleanup failed ({type(exc).__name__}); check vCenter by hand",
@@ -3545,7 +3550,7 @@ async def vm_deploy_from_library_composite(
         return _deploy_failure(
             "resolve_error",
             issues=[
-                _deploy_issue(
+                issue(
                     "resolve",
                     "error",
                     f"content-library lookup faulted: {_vsphere_fault_detail(exc)}",
@@ -3596,7 +3601,7 @@ async def vm_deploy_from_library_composite(
             resource_pool_id=resource_pool_id,
             reported=None,
             issues=[
-                _deploy_issue(
+                issue(
                     "placement",
                     "error",
                     f"OVF deploy call faulted: {_deploy_call_fault_detail(exc)}",
@@ -3957,7 +3962,7 @@ async def vm_import_from_library_composite(
         return _deploy_failure(
             "resolve_error",
             issues=[
-                _deploy_issue(
+                issue(
                     "resolve",
                     "error",
                     f"content-library lookup faulted: {_vsphere_fault_detail(exc)}",
@@ -4145,6 +4150,7 @@ async def vm_snapshot_revert_composite(
                 f"within {int(_SNAPSHOT_REVERT_TASK_TIMEOUT_SECONDS)}s; poll the task -- "
                 "the revert may still complete in the background"
             ),
+            "issues": [_task_timeout_issue("RevertToSnapshot_Task", outcome.task)],
         }
     return {
         "status": "reverted",
@@ -4311,6 +4317,7 @@ async def vm_destroy_composite(
                     f"within {int(_VM_DESTROY_TASK_TIMEOUT_SECONDS)}s; poll the task — "
                     "the destroy may still complete in the background"
                 ),
+                "issues": [_task_timeout_issue("Destroy_Task", outcome.task)],
             }
         return {
             "status": "destroyed",
@@ -4489,11 +4496,21 @@ async def vm_power_bulk_composite(
             return gate
         results.append({"vm": vm_moid, "status": "ok", "error": None})
         ok_count += 1
-    return {
+    envelope: dict[str, Any] = {
         "results": results,
         "summary": {"ok": ok_count, "error": err_count},
         "aborted_on_failure": aborted,
     }
+    if err_count:
+        # Any per-VM failure means the batch did not fully apply (#3813).
+        envelope["issues"] = [
+            issue(
+                "connector",
+                "error",
+                f"power action {action!r} failed on {err_count} of {ok_count + err_count} VMs",
+            )
+        ]
+    return envelope
 
 
 # ===========================================================================
@@ -4618,6 +4635,13 @@ async def vm_power_composite(
                 "error": str(exc),
                 "error_type": error_type,
                 "guest_tools": "unavailable",
+                "issues": [
+                    issue(
+                        "connector",
+                        "error",
+                        f"{verb} on vm {vm_moid!r} failed: VMware Tools is not running",
+                    )
+                ],
             }
         return {
             "vm": vm_moid,
@@ -4626,6 +4650,7 @@ async def vm_power_composite(
             "error": str(exc),
             "error_type": error_type,
             "guest_tools": "unavailable" if is_guest_verb else None,
+            "issues": [issue("connector", "error", f"{verb} on vm {vm_moid!r} failed: {exc}")],
         }
     if gate is not None:
         return gate
@@ -4709,6 +4734,27 @@ def _classify_vm_migrate_outcome(
     return False, str(inner_status or "unknown")
 
 
+def _evacuate_aborted(
+    host_moid: str, migrated: list[str], failed: list[dict[str, str]]
+) -> dict[str, Any]:
+    """``aborted`` envelope: a VM failed to migrate and partial failure is not tolerated."""
+    return {
+        "status": "aborted",
+        "host": host_moid,
+        "migrated_vms": migrated,
+        "failed_vms": failed,
+        "maintenance_entered": False,
+        "issues": [
+            issue(
+                "connector",
+                "error",
+                f"evacuation of host {host_moid!r} stopped: {len(failed)} VM(s) could not "
+                "be migrated; maintenance mode was not entered",
+            )
+        ],
+    }
+
+
 async def host_evacuate_composite(
     *,
     operator: Operator,
@@ -4751,13 +4797,7 @@ async def host_evacuate_composite(
         if not isinstance(vm_cluster, str) or not vm_cluster:
             failed.append({"vm": vm_moid, "error": "missing_cluster"})
             if not tolerate_partial:
-                return {
-                    "status": "aborted",
-                    "host": host_moid,
-                    "migrated_vms": migrated,
-                    "failed_vms": failed,
-                    "maintenance_entered": False,
-                }
+                return _evacuate_aborted(host_moid, migrated, failed)
             continue
         migrate_result = await dispatch_child(
             connector_id=_CONNECTOR_ID,
@@ -4770,13 +4810,7 @@ async def host_evacuate_composite(
             continue
         failed.append({"vm": vm_moid, "error": err_text})
         if not tolerate_partial:
-            return {
-                "status": "aborted",
-                "host": host_moid,
-                "migrated_vms": migrated,
-                "failed_vms": failed,
-                "maintenance_entered": False,
-            }
+            return _evacuate_aborted(host_moid, migrated, failed)
 
     gate, reason = await _host_maintenance_vim_step(
         connector=connector,
@@ -4793,13 +4827,24 @@ async def host_evacuate_composite(
         # ``connector_error`` (mirrors the pre-#2970 propagate-on-HTTPError
         # semantics of the synchronous REST fiction).
         raise RuntimeError(f"host.evacuate: {reason}")
-    return {
+    envelope: dict[str, Any] = {
         "status": "partial" if failed else "evacuated",
         "host": host_moid,
         "migrated_vms": migrated,
         "failed_vms": failed,
         "maintenance_entered": True,
     }
+    if failed:
+        # Even when tolerated, VMs left behind mean the evacuation is incomplete.
+        envelope["issues"] = [
+            issue(
+                "connector",
+                "error",
+                f"host {host_moid!r} entered maintenance but {len(failed)} VM(s) "
+                "could not be migrated off it",
+            )
+        ]
+    return envelope
 
 
 # ===========================================================================
@@ -4916,6 +4961,14 @@ async def host_detach_from_vds_composite(
             "host": host_moid,
             "vm_migration_failures": migration_failures,
             "vms_migrated": vms_migrated,
+            "issues": [
+                issue(
+                    "connector",
+                    "error",
+                    f"{len(migration_failures)} VM(s) could not be moved off the switch; "
+                    f"host {host_moid!r} was not removed from it",
+                )
+            ],
         }
 
     # ``DVSConfigSpec.configVersion`` must echo the switch's current
@@ -4979,6 +5032,7 @@ async def host_detach_from_vds_composite(
                 f"{int(_DVS_RECONFIGURE_TASK_TIMEOUT_SECONDS)}s; poll the task -- the "
                 "detach may still complete in the background"
             ),
+            "issues": [_task_timeout_issue("ReconfigureDvs_Task", outcome.task)],
         }
     return {
         "status": "detached",
@@ -5156,6 +5210,7 @@ async def network_portgroup_create_composite(
                 f"{int(_NETWORK_PORTGROUP_TASK_TIMEOUT_SECONDS)}s; poll the task or re-read the "
                 "switch's portgroups -- the create may still complete in the background"
             ),
+            "issues": [_task_timeout_issue("CreateDVPortgroup_Task", outcome.task)],
         }
 
     portgroup_moid = _moref_value(outcome.result)
@@ -5354,6 +5409,7 @@ async def network_portgroup_security_set_composite(
                 "re-read the portgroup's security policy -- the change may still complete "
                 "in the background"
             ),
+            "issues": [_task_timeout_issue("ReconfigureDVPortgroup_Task", outcome.task)],
         }
 
     observed = await _read_portgroup_security_policy(
@@ -5619,6 +5675,7 @@ async def network_portgroup_vlan_set_composite(
                 "re-read the portgroup's VLAN config -- the change may still complete "
                 "in the background"
             ),
+            "issues": [_task_timeout_issue("ReconfigureDVPortgroup_Task", outcome.task)],
         }
 
     post_read = await connector._post_vmomi_json(
@@ -6066,6 +6123,7 @@ async def vm_disk_grow_composite(
                 f"{int(_DISK_GROW_TASK_TIMEOUT_SECONDS)}s; poll the task or re-read the disk "
                 "capacity — the grow may still complete in the background"
             ),
+            "issues": [_task_timeout_issue("ReconfigVM_Task", outcome.task)],
         }
     return {
         "status": "grown",
@@ -7034,6 +7092,7 @@ async def cluster_drs_rule_create_composite(
                 f"within {int(_DRS_RULE_TASK_TIMEOUT_SECONDS)}s; poll the task or re-read the "
                 "cluster's DRS rules — the rule add may still complete in the background"
             ),
+            "issues": [_task_timeout_issue("ReconfigureComputeResource_Task", outcome.task)],
         }
     return {
         "status": "created",
@@ -8068,6 +8127,9 @@ async def vm_resize_composite(
                     "status": "partial",
                     "applied": {"cpu": True, "memory": False},
                     "guidance": f"CPU applied; memory update failed: {exc}",
+                    "issues": [
+                        issue("connector", "error", f"CPU applied; memory update failed: {exc}")
+                    ],
                 }
             raise
         if gate is not None:

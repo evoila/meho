@@ -201,11 +201,24 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   success / warning envelopes therefore carry only `warning` / `info`
   issues (a power-on that fails after a successful deploy is a `warning`
   on the `deployed` envelope). The corollary is a **convention every
-  composite must follow to be covered**: a hard failure signalled only by
-  a bare `status` sentinel with no error-severity issue (`vm.create`'s
-  `rolled_back`, the `timeout` / `partial` / `aborted` writes) is *not*
-  auto-detected and still audits `ok` — those handlers must attach an
-  error-severity issue on their failure paths to be surfaced.
+  composite follows**: a hard failure (the change did not complete,
+  rolled back, timed out, or only partly applied) must attach an
+  error-severity issue, or it would still audit `ok`. Since #3813 every
+  write composite does this, using the one shared builder
+  `connectors/vmware_rest/composite_issues.py::issue`: `vm.create`
+  `rolled_back`; the vim task `timeout` of `vm.destroy`, `vm.disk.grow`,
+  `vm.snapshot.revert`, `host.detach_from_vds`, the three
+  `network.portgroup.*` writes and `cluster.drs_rule.create`;
+  `vm.resize` / `host.disk_mark_flash` / `host.evacuate` `partial`;
+  `host.evacuate` `aborted`; `host.detach_from_vds` `incomplete`;
+  `vm.power` `error` / `tools_unavailable`; `vm.power.bulk` when any VM
+  failed (no `status` key, so `error_code` is `composite_error`);
+  `vm.guest.program.run` `timeout` / `exit_unknown`;
+  `storage_policy.delete` `delete_failed`; and `config_manager_unreadable`
+  for the three host config-manager composites. Their response schemas
+  document the `issues` field. Soft refusals and idempotency guards keep
+  no error issue and stay `ok`. The regression tests are
+  `tests/test_connectors_vmware_rest_composites_hard_failure_e2e.py`.
 
   **Preserving write governance on the direct path.** Because a direct
   session call bypasses the dispatcher, each mutating sub-call first

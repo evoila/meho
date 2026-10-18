@@ -1,22 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Agent-facing MCP tools backed by the per-tenant broadcast stream.
+"""Agent-facing MCP tools for the per-tenant announcement feed.
 
 G6.4 Initiative (#1090) ships three agent-facing MCP tools that mirror
 the four-step ``broadcast discipline`` documented in the Layer-2
 consumer-onboarding template (PR #1028 / Initiative #229 G7.1):
 
-* T1 (#1091, this module) -- ``meho_broadcast_recent``: read the last
-  N events from ``meho:feed:{tenant_id}`` with optional time-window
-  and filter narrowing. Returns ``{events, next_cursor}``; the cursor
-  round-trips back as ``since`` to walk forward without overlap or
-  gaps.
+* T1 (#1091, this module) -- ``meho_broadcast_recent``: read archived
+  agent announcements with optional time-window and filter narrowing.
+  Returns ``{events, next_cursor, watch_checkpoint, gap}`` (#3748).
 * T2 (#1092, follow-on) -- ``meho_broadcast_announce``: agent-authored
   intent / completion publish.
-* T3 (#1093, follow-on) -- ``meho_broadcast_watch``: long-poll batch
-  read (caller passes ``since_cursor``, server returns ``{events,
-  next_cursor}`` capped at N events).
+* T3 (#1093, follow-on) -- ``meho_broadcast_watch``: long-poll for
+  announcements after a watch checkpoint (``{events, next_cursor,
+  gap}``).
+
+Since #3748 both read tools read the ``agent_announcement`` archive by
+its commit-order sequence number
+(:mod:`meho_backplane.broadcast.archive_reader`); the Valkey stream only
+wakes watchers. Operation events are not returned; ``query_audit`` is
+their record.
 
 File-layout convention
 ======================
@@ -28,34 +32,20 @@ by ``# === <tool-name> ===`` / ``# === end <tool-name> ===`` markers so
 T2 and T3 can land in parallel branches with minimal merge-conflict
 surface against this file's body.
 
-T1's xrange + filter + redact-aware parse loop lives in
-:mod:`meho_backplane.broadcast.history`; the UI history route at
-``/ui/broadcast/history`` uses the same body through its fail-soft
-sibling wrapper (G6.4-T4 #1103). The parse primitives the watch tool
-(T3) shares with T1 (``event_matches`` / ``parse_entry`` /
-``stream_key``) also live in that module and are re-used here.
+Untrusted text
+==============
 
-PII inheritance
-===============
-
-Every entry on ``meho:feed:{tenant_id}`` was already redacted by
-:func:`~meho_backplane.broadcast.events.redact_payload` at publish
-time (T3, the ``publish-on-write`` hook). This tool reads what's on
-the stream verbatim -- it does NOT re-redact, does NOT mutate the
-payload field, and does NOT call ``redact_payload``. The contract
-flows: publisher redacts -> stream stores redacted -> every reader
-(SSE, UI history, MCP resource, THIS tool) surfaces redacted-as-is.
+Agent-authored free text (``activity`` / ``scope`` / ``target`` /
+``targets`` / ``work_ref``) reaches the reading agent wrapped in the
+untrusted-content envelope (:func:`~meho_backplane.broadcast.history.dump_event_wire`).
 
 Tenant scoping is structural
 ============================
 
-The stream key is derived exclusively from ``operator.tenant_id``
-(the verified JWT claim). The MCP tool's input schema has NO
-``tenant_id`` argument; cross-tenant reads are structurally
-impossible -- not "checked then rejected" but "no surface that could
-ask for another tenant's stream in the first place". A tenant-A
-operator's call always reads ``meho:feed:{A}``; the path that would
-read ``meho:feed:{B}`` does not exist.
+Every read is scoped to ``operator.tenant_id`` (the verified JWT
+claim). The MCP tool's input schema has NO ``tenant_id`` argument, and
+every cursor is bound to the tenant that issued it; a cursor from
+another tenant is refused.
 
 References
 ----------
@@ -64,21 +54,18 @@ References
 * Parent Goal: #217.
 * Stream key + redaction contract:
   :mod:`~meho_backplane.broadcast.events`.
-* Shared read-side helper (xrange + filter + redact-aware parse):
-  :mod:`~meho_backplane.broadcast.history` (G6.4-T4 #1103).
+* Archive reader: :mod:`~meho_backplane.broadcast.archive_reader` (#3748).
 * Sibling tool registration shape:
   :mod:`~meho_backplane.mcp.tools.broadcast_overrides`.
 * Sibling resource (poll-only snapshot of latest 50):
   :mod:`~meho_backplane.mcp.resources.tenant_feed`.
 * MCP 2025-06-18 Tools:
   https://modelcontextprotocol.io/specification/2025-06-18/server/tools
-* Valkey XRANGE (cursor + exclusive ``(`` syntax):
-  https://valkey.io/commands/xrange/
+* Valkey XREAD (the watch wake-up): https://valkey.io/commands/xread/
 """
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime
 from typing import Any, Final, NamedTuple, cast
 from uuid import UUID
@@ -103,22 +90,18 @@ from meho_backplane.broadcast import (
     TTL_MIN_MINUTES,
     WORK_REF_MAX_CHARS,
     AnnouncementClaimError,
+    AnnouncementFilter,
     AnnounceRateLimitError,
-    InvalidSinceError,
+    InvalidArchiveCursorError,
     PlannedOpClass,
     build_trusted_announcement,
+    encode_watch_checkpoint,
     enforce_announce_rate_limit,
-    get_broadcast_blocking_client,
-    list_recent_events_strict,
     publish_agent_announcement,
+    read_announcement_history,
+    watch_announcements,
 )
 from meho_backplane.broadcast.announcement_claims import Phase
-from meho_backplane.broadcast.history import (
-    dump_event_wire,
-    event_matches,
-    parse_entry,
-    stream_key,
-)
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError, McpRateLimitedError
 
@@ -132,18 +115,7 @@ _log = structlog.get_logger(__name__)
 # ===========================================================================
 
 
-class _BroadcastFilter(NamedTuple):
-    """Typed view of the ``filter`` object shared by recent + watch."""
-
-    op_class: str | None
-    principal: str | None
-    target: str | None
-    actor_sub: str | None
-    work_ref: str | None
-    active_only: bool
-
-
-def _extract_filter(arguments: dict[str, Any]) -> _BroadcastFilter:
+def _extract_filter(arguments: dict[str, Any]) -> AnnouncementFilter:
     """Extract the ``filter.*`` sub-keys, asserting each field's type.
 
     The wire schema's ``filter`` object permits each sub-key to be
@@ -181,7 +153,7 @@ def _extract_filter(arguments: dict[str, Any]) -> _BroadcastFilter:
     active_only = filter_obj.get("active_only", False)
     if not isinstance(active_only, bool):
         raise McpInvalidParamsError("filter.active_only: must be a boolean when provided")
-    return _BroadcastFilter(op_class, principal, target, actor_sub, work_ref, active_only)
+    return AnnouncementFilter(op_class, principal, target, actor_sub, work_ref, active_only)
 
 
 async def _handler_recent(
@@ -190,32 +162,16 @@ async def _handler_recent(
 ) -> dict[str, Any]:
     """``meho_broadcast_recent`` handler.
 
-    Parses the wire arguments, delegates to
-    :func:`~meho_backplane.broadcast.history.list_recent_events_strict`
-    (the fail-loud wrapper -- a Valkey teardown propagates to the MCP
-    dispatcher's ``-32603`` Internal Error path), and returns the
-    JSON-shaped response the dispatcher wraps in the MCP ``content``
-    envelope. Errors surface as :class:`McpInvalidParamsError`
-    (-32602); the JSON Schema validator at the dispatcher already
-    enforces the coarse shape (``limit`` range, ``filter`` object
-    type) so the per-field re-checks here are belt-and-suspenders for
-    the handler's typed contract.
-
-    A malformed ``since`` arrives as :class:`InvalidSinceError` from
-    the helper module and is mapped to ``-32602`` Invalid Params here
-    -- the helper raises a generic domain error so the UI fail-soft
-    counterpart can swallow non-RedisError teardowns selectively
-    without taking the MCP error vocabulary as a dependency.
-
-    Forward-cursor naming (G0.18-T5 #1358 RDC #789 N4)
-    --------------------------------------------------
+    Parses the wire arguments and delegates to
+    :func:`~meho_backplane.broadcast.archive_reader.read_announcement_history`,
+    which reads the announcement archive by commit order (#3748). A bad
+    ``cursor`` maps to ``-32602``; an archive (DB) error propagates to the
+    dispatcher's ``-32603`` path.
 
     ``cursor`` is the canonical forward-cursor parameter name across
-    every MCP read tool that paginates (audit / topology / targets /
-    operation groups). ``since`` remains accepted as a deprecated
-    alias for backward compatibility with the v0.8.0 wire shape; the
-    two are mutually exclusive (passing both is rejected). New
-    callers SHOULD use ``cursor``.
+    every MCP read tool that paginates (G0.18-T5 #1358). ``since``
+    remains accepted as a deprecated alias; the two are mutually
+    exclusive (passing both is rejected).
     """
     cursor_arg = arguments.get("cursor")
     since_arg = arguments.get("since")
@@ -223,8 +179,8 @@ async def _handler_recent(
         raise McpInvalidParamsError(
             "pass either `cursor` (canonical) or `since` (deprecated alias), not both",
         )
-    since = cursor_arg if cursor_arg is not None else since_arg
-    if since is not None and not isinstance(since, str):
+    cursor = cursor_arg if cursor_arg is not None else since_arg
+    if cursor is not None and not isinstance(cursor, str):
         raise McpInvalidParamsError("cursor: must be a string when provided")
     flt = _extract_filter(arguments)
     raw_limit = arguments.get("limit", 100)
@@ -233,18 +189,8 @@ async def _handler_recent(
     if raw_limit < 1 or raw_limit > 1000:
         raise McpInvalidParamsError("limit: must be in [1, 1000]")
     try:
-        return await list_recent_events_strict(
-            operator,
-            since=since,
-            op_class=flt.op_class,
-            principal=flt.principal,
-            target=flt.target,
-            actor_sub=flt.actor_sub,
-            work_ref=flt.work_ref,
-            active_only=flt.active_only,
-            limit=raw_limit,
-        )
-    except InvalidSinceError as exc:
+        return await read_announcement_history(operator, cursor=cursor, flt=flt, limit=raw_limit)
+    except InvalidArchiveCursorError as exc:
         raise McpInvalidParamsError(str(exc)) from exc
 
 
@@ -254,39 +200,38 @@ register_mcp_tool(
         name="meho_broadcast_recent",
         surface=ToolSurface.WORKING,
         description=(
-            "Read the operator's tenant's recent broadcast events from "
-            "meho:feed:{tenant_id} (Initiative #1090, Task #1091). "
+            "Read the agent announcements in the operator's tenant: what "
+            "other agents said they are starting, doing, or have finished. "
             "WHEN TO CALL: as a first reflex at the start of a working "
-            "session — before your first `call_operation` — to see what "
-            "other operators and agents in the tenant are already doing, "
-            "so you don't collide with in-flight work; re-read it before "
-            "picking up a new target. This is proactive coordination, "
-            "not only a reaction to an explicit 'what is happening' "
-            "request. "
-            "Returns {events, next_cursor}. Each event row carries "
-            "'cursor' -- its Valkey stream entry id, usable as this "
-            "tool's (or meho_broadcast_watch's) 'cursor' arg -- plus "
-            "'id' as a legacy alias of the same stream cursor (NOT "
-            "the event's UUID; that is 'event_id' on operation rows). "
-            "Default window is the last "
-            "30 minutes when 'cursor' is omitted; pass an ISO-8601 "
-            "timestamp ('2026-05-25T10:00:00Z') or a Valkey stream "
-            "cursor ('1747800000000-0') to override. The 'filter' "
-            "object narrows by exact-match op_class / principal "
-            "(JWT 'sub') / target (target_name or any of an "
-            "announcement's 'targets') / actor_sub (the delegated agent) "
-            "/ work_ref (change ticket), plus 'active_only' "
-            "(drop expired TTL claims). 'limit' caps the "
-            "page at 1..1000 (default 100); the response's "
-            "'next_cursor' round-trips as the next call's 'cursor' "
-            "for gap-free pagination. 'since' is accepted as a "
-            "deprecated alias for 'cursor' (v0.8.0 wire shape) and is "
-            "mutually exclusive with it. Tenant scoping is structural -- "
-            "every read targets the operator's own tenant stream; "
-            "there is no input that could request another tenant's "
-            "events. Payloads inherit the publisher-side redaction "
-            "(credential_read + audit_query events are already "
-            "aggregate-only on the stream)."
+            "session — before your first `call_operation` — so you don't "
+            "collide with in-flight work; re-read it before picking up a "
+            "new target. This is proactive coordination, not only a "
+            "reaction to an explicit 'what is happening' request. "
+            "MEHO stores every announcement before it is sent out, and "
+            "this tool reads that store in the order the announcements "
+            "were saved. Operation events are not included; use "
+            "`query_audit` for what was run. "
+            "Returns {events, next_cursor, watch_checkpoint, gap}, events "
+            "oldest first; dedupe by each event's 'event_id'. Default "
+            "window is the last 30 minutes; pass an ISO-8601 time "
+            "('2026-05-25T10:00:00Z') as 'cursor' to start earlier. "
+            "'next_cursor' continues this same read (pass it back as "
+            "'cursor'); it is null when you have read everything up to "
+            "the moment of the first call. 'watch_checkpoint' is where "
+            "`meho_broadcast_watch` should start so you miss nothing that "
+            "comes after this read; it is set even when no event matched "
+            "your filter. 'gap' is null, or says that older announcements "
+            "were removed by archive retention, so the answer is not "
+            "complete. Both cursors only work in your own tenant. The "
+            "'filter' object narrows by exact-match principal (JWT 'sub') "
+            "/ target (an announcement's 'target' or any of its 'targets') "
+            "/ work_ref (change ticket), plus 'active_only' (drop expired "
+            "claims). 'op_class' and 'actor_sub' match operation events "
+            "only, so with them no announcement matches. 'limit' caps the "
+            "rows read per page at 1..1000 (default 100); filtering runs "
+            "after the read, so a page can hold fewer events. 'since' is "
+            "a deprecated alias for 'cursor' and is mutually exclusive "
+            "with it."
         ),
         inputSchema={
             "type": "object",
@@ -296,9 +241,9 @@ register_mcp_tool(
                     "minLength": 1,
                     "maxLength": 64,
                     "description": (
-                        "Forward-pagination cursor. Either an ISO-8601 "
-                        "timestamp ('2026-05-25T10:00:00Z') OR a Valkey "
-                        "stream cursor ('1747800000000-0'). Omit for the "
+                        "Either an ISO-8601 time ('2026-05-25T10:00:00Z') "
+                        "to start the window, OR the 'next_cursor' of an "
+                        "earlier page to continue that read. Omit for the "
                         "last 30 minutes. Canonical name; matches the "
                         "`cursor` parameter on `query_audit` / "
                         "`query_topology` / `list_targets`."
@@ -390,8 +335,7 @@ register_mcp_tool(
                     "maximum": 1000,
                     "default": 100,
                     "description": (
-                        "Max events returned in one page. The XRANGE "
-                        "fetch is capped at this value before filtering."
+                        "Max archive rows read in one page. The filter runs after the read."
                     ),
                 },
             },
@@ -564,13 +508,16 @@ async def _publish_agent_announcement_impl(
         raise McpInvalidParamsError(str(exc), data={"code": exc.code}) from exc
     stored = result.event
     # ``event_id`` is the per-announcement UUID (the durable row's PK);
-    # ``cursor`` is the Valkey stream entry id this call wrote (``None``
-    # on a replay whose entry was already on the stream). The stamped
-    # identity and claim fields are trusted structured values, echoed
-    # unwrapped.
+    # ``watch_checkpoint`` points just after this announcement in the
+    # archive order (#3748); ``delivery_pending`` says the archive row is
+    # stored but the stream wake-up failed. The stamped identity and claim
+    # fields are trusted structured values, echoed unwrapped.
     ack: dict[str, Any] = {
         "event_id": str(stored.event_id),
-        "cursor": result.cursor,
+        "watch_checkpoint": (
+            None if result.seq is None else encode_watch_checkpoint(operator.tenant_id, result.seq)
+        ),
+        "delivery_pending": result.delivery_pending,
         "claim_id": str(stored.claim_id),
         "phase": stored.phase,
         "owner_sub": stored.owner_sub,
@@ -748,25 +695,22 @@ register_mcp_tool(
             "server-validated and served UNWRAPPED (they cannot carry an "
             "injection); the free-text 'activity' / 'scope' / 'target' / "
             "'targets' / 'work_ref' stay quarantined behind the "
-            "untrusted-content envelope on read. The publish is fail-loud "
-            "-- a Valkey teardown surfaces as JSON-RPC -32603 Internal "
-            "Error so the agent knows the announcement did not land "
-            "(distinct from the audit-driven publisher which fail-opens). "
-            "Tenant scoping is structural -- the input schema has no "
-            "tenant_id argument; the event always writes to the "
-            "operator's own tenant stream. The announcement is persisted "
-            "to a durable agent_announcement DB row so it survives a "
-            "Valkey restart and the stream's ~24h trim window; "
-            "meho_broadcast_recent backfills from that archive when the "
-            "requested window predates the stream's oldest surviving "
-            "entry. Returns {event_id, cursor, claim_id, phase, owner_sub, "
-            "admission, ttl_minutes, replayed} plus any other claim "
-            "fields echoed back. 'event_id' is the real per-announcement "
-            "UUID (equal to the durable row's id; it round-trips as the "
-            "event's 'event_id' on recent/watch reads); 'cursor' is the "
-            "Valkey stream entry id, self-labelled to round-trip through "
-            "meho_broadcast_recent/watch's 'cursor' arg for verification. "
-            "The two are distinct values (#2479 / #2547). Announces are "
+            "untrusted-content envelope on read. "
+            "MEHO first stores the announcement; that is the record "
+            "meho_broadcast_recent and meho_broadcast_watch read. If "
+            "storing fails you get JSON-RPC -32603 and nothing was "
+            "stored. If storing works but the live wake-up for watchers "
+            "fails, the call still succeeds with delivery_pending=true: "
+            "readers see the announcement anyway; retry with the same "
+            "'idempotency_key' to finish the wake-up (no second copy is "
+            "stored). Tenant scoping is structural -- the input schema "
+            "has no tenant_id argument. Returns {event_id, "
+            "watch_checkpoint, delivery_pending, claim_id, phase, "
+            "owner_sub, admission, ttl_minutes, replayed} plus any other "
+            "claim fields echoed back. 'event_id' is the announcement's "
+            "UUID (it matches 'event_id' on recent/watch reads); "
+            "'watch_checkpoint' is a meho_broadcast_watch cursor just "
+            "after this announcement. Announces are "
             "rate-limited per principal (default 10 per minute); "
             "exceeding the limit returns a -32000 error naming the "
             "window and a retry-after -- announce meaningful "
@@ -893,8 +837,9 @@ register_mcp_tool(
                         "'update' and 'completion', optional for 'start'. "
                         "Sending the same key again returns the first "
                         "result (replayed=true) and stores nothing new. If "
-                        "the first try was stored but never reached the "
-                        "feed, the retry delivers it and returns a cursor."
+                        "the first try was stored but its live wake-up "
+                        "failed (delivery_pending=true), the retry "
+                        "finishes the wake-up."
                     ),
                 },
                 "phase": {
@@ -928,7 +873,7 @@ register_mcp_tool(
 # === meho_broadcast_watch ===
 # ===========================================================================
 
-#: Default ``XREAD BLOCK`` window when the caller omits ``timeout_ms``. 10s
+#: Default wait window when the caller omits ``timeout_ms``. 10s
 #: balances "wait long enough that the average operator pause produces a
 #: hit" against "release the chassis worker before any HTTP intermediary
 #: idles the connection". Half the maximum so a default-shaped client has
@@ -949,13 +894,6 @@ _WATCH_MIN_TIMEOUT_MS: Final[int] = 100
 #: chassis worker for the lifetime of the process; the cap is a hard
 #: backpressure boundary, not a hint.
 _WATCH_MAX_TIMEOUT_MS: Final[int] = 30_000
-
-#: Upper bound on entries returned in one ``XREAD`` call. Mirrors
-#: :data:`meho_backplane.api.v1.feed._XREAD_COUNT` so a busy tenant
-#: doesn't surface a 10,000-event burst in a single tool response that
-#: would blow the agent's token budget. The caller paginates by calling
-#: again with the returned ``next_cursor``.
-_WATCH_XREAD_COUNT: Final[int] = 100
 
 
 def _validate_timeout_ms(raw: Any) -> int:
@@ -988,223 +926,16 @@ def _validate_timeout_ms(raw: Any) -> int:
     return raw
 
 
-async def _xread_or_cancelled(
-    operator: Operator,
-    *,
-    stream_key: str,
-    since_cursor: str,
-    timeout_ms: int,
-) -> Any:
-    """Await ``XREAD BLOCK`` for *operator*'s stream; re-raise cancellation cleanly.
-
-    Wraps the single ``xread`` call so the ``except asyncio.CancelledError``
-    arm stays self-contained -- which both bounds the cancellation
-    contract to one shape (xread is the only awaitable in this leg of
-    :func:`_watch_events_impl`) and keeps the parent function under the
-    code-quality function-size ceiling.
-
-    Cancellation contract: when Starlette cancels the JSON-RPC request
-    mid-block (client hung up, transport closed, MCP dispatcher tore the
-    call down), the pending ``xread`` raises
-    :class:`asyncio.CancelledError`. We log the structured disconnect and
-    re-raise -- swallowing ``CancelledError`` breaks the task tree's
-    unwind invariants per the asyncio contract (Sonar S7497; Python 3.13+
-    re-issues cancellation if it goes unpropagated). The chassis worker
-    is released the moment the re-raise lands.
-
-    *since_cursor* is passed to ``xread`` verbatim; XREAD reads entries
-    strictly past the cursor (its "last id seen" semantics are
-    exclusive, unlike XRANGE's inclusive ``min``).
-
-    Reads via the long-timeout blocking client
-    (:func:`get_broadcast_blocking_client`, ``socket_timeout=35 s``) so
-    a 30 s BLOCK against a quiet stream returns ``None`` (the natural
-    "nothing for us" branch :func:`_xread_items_or_none` already
-    handles) instead of raising ``redis.TimeoutError`` from the socket
-    layer at 5 s -- the spurious ``feed_error`` shape catalogued in
-    RDC #789 N1 / Initiative #1353 on the SSE surface. See
-    :mod:`meho_backplane.broadcast.client` for the two-client rationale.
-    """
-    client = get_broadcast_blocking_client()
-    try:
-        return await client.xread(
-            {stream_key: since_cursor},
-            block=timeout_ms,
-            count=_WATCH_XREAD_COUNT,
-        )
-    except asyncio.CancelledError:
-        _log.info(
-            "broadcast_watch_cancelled",
-            stream_key=stream_key,
-            operator_sub=operator.sub,
-            since_cursor=since_cursor,
-        )
-        raise
-
-
-def _xread_items_or_none(
-    raw_response: Any,
-) -> list[tuple[str, dict[str, str]]] | None:
-    """Unwrap the redis-py ``XREAD`` envelope to the entry list, or ``None``.
-
-    XREAD's two distinguishable result shapes:
-
-    * ``None`` (timeout-with-no-entries) or an empty outer list -- the
-      "nothing for us" branch. The truthiness check collapses both into
-      the same return ``None`` here; the SSE bridge's
-      ``_feed_generator`` uses the same idiom.
-    * ``[[stream_key, [(entry_id, fields), ...]]]`` -- one outer tuple
-      per stream queried. We query exactly one stream (the operator's
-      tenant feed), so ``raw_response[0][1]`` is the
-      ``[(entry_id, fields_dict), ...]`` list. A defensive third branch
-      catches an outer tuple with an empty inner list (never observed
-      with redis-py 7.x in practice -- the client collapses to ``None``
-      -- but the branch keeps the response safe under a future redis-py
-      shape change).
-
-    Returning the inner list (or ``None``) collapses three branches in
-    the caller to one ``if items is None`` check.
-    """
-    if not raw_response:
-        return None
-    entries = cast(
-        "list[tuple[str, list[tuple[str, dict[str, str]]]]]",
-        raw_response,
-    )
-    _key, items = entries[0]
-    if not items:
-        return None
-    return items
-
-
-def _filter_xread_items(
-    items: list[tuple[str, dict[str, str]]],
-    *,
-    stream_key: str,
-    op_class: str | None,
-    principal: str | None,
-    target: str | None,
-    actor_sub: str | None,
-    work_ref: str | None,
-    active_only: bool,
-) -> list[dict[str, Any]]:
-    """Parse + filter the XREAD batch into the wire-shape events list.
-
-    Each surviving entry carries the Valkey stream entry id twice --
-    as ``cursor`` (self-labelled to match the ``cursor`` input arg it
-    round-trips through, #2479) and as ``id`` (the historical alias)
-    -- plus every :class:`BroadcastEvent` field
-    (including the durable ``event_id`` UUID and the ``audit_id`` for
-    audit-log correlation). Entries that fail :func:`parse_entry` (bad
-    field shape, malformed JSON) are logged + skipped inside the helper
-    so the watch handler never raises on a single bad entry.
-
-    Serialisation goes through
-    :func:`~meho_backplane.broadcast.history.dump_event_wire` so
-    agent-authored announcement free-text (``activity`` / ``scope`` /
-    ``target`` / ``targets`` / ``work_ref``) reaches the calling agent
-    wrapped in the untrusted-content envelope — same
-    stored-prompt-injection guard as the ``broadcast.recent`` path
-    (evoila-bosnia/meho-internal#154). The structured claim fields
-    (``planned_op_class`` / ``ttl_minutes`` / ``run_id`` / ``phase`` /
-    ``ts`` / ``expires_at``) are served unwrapped.
-    """
-    now = datetime.now(UTC)
-    matched: list[dict[str, Any]] = []
-    for entry_id, fields in items:
-        event = parse_entry(entry_id, fields, stream_key=stream_key)
-        if event is None:
-            continue
-        if not event_matches(
-            event,
-            op_class=op_class,
-            principal=principal,
-            target=target,
-            actor_sub=actor_sub,
-            work_ref=work_ref,
-            active_only=active_only,
-            now=now,
-        ):
-            continue
-        matched.append({"id": entry_id, "cursor": entry_id, **dump_event_wire(event)})
-    return matched
-
-
-async def _watch_events_impl(
-    operator: Operator,
-    *,
-    since_cursor: str,
-    op_class: str | None,
-    principal: str | None,
-    target: str | None,
-    actor_sub: str | None,
-    work_ref: str | None,
-    active_only: bool,
-    timeout_ms: int,
-) -> dict[str, Any]:
-    """Long-poll the operator's tenant stream for entries strictly past *since_cursor*.
-
-    Issues a single ``XREAD BLOCK`` against ``meho:feed:{operator.tenant_id}``
-    with ``timeout_ms`` as the block window; the caller's chassis worker
-    is tied up for up to that long. When entries arrive, advances the
-    cursor to the **last fetched** entry id (NOT the last *matched* one --
-    same invariant as
-    :func:`~meho_backplane.broadcast.history._list_recent_events_core`) so a filter-heavy
-    page where every entry was dropped still advances the cursor and the
-    next call doesn't re-read the same batch.
-
-    No-events shape: returns ``{events: [], next_cursor: since_cursor}``.
-    The unchanged cursor signals "I waited; nothing landed" -- the caller
-    re-polls with the same cursor.
-
-    Implementation split across three helpers:
-
-    * :func:`_xread_or_cancelled` owns the ``xread`` await and the
-      :class:`asyncio.CancelledError` re-raise contract.
-    * :func:`_xread_items_or_none` unwraps the redis-py envelope.
-    * :func:`_filter_xread_items` parses + filters the batch.
-
-    The caller obtains an initial cursor from :func:`_handler_recent`'s
-    ``next_cursor`` field; from that point forward each watch call's
-    ``next_cursor`` feeds the next call's ``since_cursor``.
-    """
-    key = stream_key(operator.tenant_id)
-    raw_response = await _xread_or_cancelled(
-        operator,
-        stream_key=key,
-        since_cursor=since_cursor,
-        timeout_ms=timeout_ms,
-    )
-    items = _xread_items_or_none(raw_response)
-    if items is None:
-        return {"events": [], "next_cursor": since_cursor}
-    # Advance to the LAST FETCHED entry id BEFORE filtering, mirroring
-    # the M2 fix on the SSE generator: a page where every entry is
-    # filtered out still moves the cursor forward so a busy-but-filtered
-    # tenant doesn't deliver the same batch on every poll. The cursor
-    # is the canonical "last id seen" -- the filter is the caller's
-    # post-fetch concern.
-    next_cursor = items[-1][0]
-    matched = _filter_xread_items(
-        items,
-        stream_key=key,
-        op_class=op_class,
-        principal=principal,
-        target=target,
-        actor_sub=actor_sub,
-        work_ref=work_ref,
-        active_only=active_only,
-    )
-    return {"events": matched, "next_cursor": next_cursor}
-
-
 async def _handler_watch(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
     """``meho_broadcast_watch`` handler.
 
-    Parses the wire arguments, then delegates to :func:`_watch_events_impl`.
+    Parses the wire arguments, then delegates to
+    :func:`~meho_backplane.broadcast.archive_reader.watch_announcements`
+    (#3748): archive scans after the checkpoint, with the Valkey stream
+    only as the wake-up and 5-second polling when Valkey fails.
     The dispatcher's JSON-Schema validator catches the coarse shape errors
     (missing ``since_cursor``, ``timeout_ms`` outside the integer range,
     extra top-level keys); the per-field re-checks here are the typed
@@ -1212,7 +943,7 @@ async def _handler_watch(
     silently widen what the handler accepts.
 
     Tenant scoping is structural: ``arguments`` has no ``tenant_id`` field,
-    so the stream key is always ``meho:feed:{operator.tenant_id}``.
+    and a checkpoint from another tenant is refused with ``-32602``.
 
     Forward-cursor naming (G0.18-T5 #1358 RDC #789 N4)
     --------------------------------------------------
@@ -1230,24 +961,19 @@ async def _handler_watch(
         raise McpInvalidParamsError(
             "pass either `cursor` (canonical) or `since_cursor` (deprecated alias), not both",
         )
-    since_cursor = cursor_arg if cursor_arg is not None else since_cursor_arg
-    if not isinstance(since_cursor, str) or not since_cursor:
+    checkpoint = cursor_arg if cursor_arg is not None else since_cursor_arg
+    if not isinstance(checkpoint, str) or not checkpoint:
         raise McpInvalidParamsError(
-            "cursor: required, must be a non-empty Valkey stream cursor",
+            "cursor: required, must be a non-empty watch checkpoint",
         )
     flt = _extract_filter(arguments)
     timeout_ms = _validate_timeout_ms(arguments.get("timeout_ms"))
-    return await _watch_events_impl(
-        operator,
-        since_cursor=since_cursor,
-        op_class=flt.op_class,
-        principal=flt.principal,
-        target=flt.target,
-        actor_sub=flt.actor_sub,
-        work_ref=flt.work_ref,
-        active_only=flt.active_only,
-        timeout_ms=timeout_ms,
-    )
+    try:
+        return await watch_announcements(
+            operator, checkpoint=checkpoint, flt=flt, timeout_ms=timeout_ms
+        )
+    except InvalidArchiveCursorError as exc:
+        raise McpInvalidParamsError(str(exc)) from exc
 
 
 register_mcp_tool(
@@ -1256,41 +982,29 @@ register_mcp_tool(
         name="meho_broadcast_watch",
         surface=ToolSurface.WORKING,
         description=(
-            "Long-poll the operator's tenant broadcast stream for new "
-            "events past 'cursor' (Initiative #1090, Task #1093). "
-            "Issues XREAD BLOCK against meho:feed:{tenant_id} with "
-            "'timeout_ms' as the block window (default 10000, cap "
-            "30000 -- the chassis worker is tied up for up to that long, "
-            "so the cap is a hard backpressure boundary, not a hint). "
-            "Returns {events, next_cursor}. Each event row carries "
-            "'cursor' -- its Valkey stream entry id, usable as this "
-            "tool's (or meho_broadcast_recent's) 'cursor' arg -- plus "
-            "'id' as a legacy alias of the same stream cursor (NOT "
-            "the event's UUID; that is 'event_id' on operation rows). "
-            "When no events arrive within "
-            "the window: returns {events: [], next_cursor: <unchanged>} -- "
-            "re-poll with the same cursor. When events arrive: "
-            "'next_cursor' advances to the last *fetched* entry id (NOT "
-            "the last matched one) so a busy-but-filtered tenant still "
-            "progresses. Designed for the agent-side discipline loop: "
-            "'broadcast_watch -> process -> broadcast_watch with new "
-            "cursor'. Obtain the initial 'cursor' from "
-            "'meho_broadcast_recent's 'next_cursor'. 'since_cursor' is "
-            "accepted as a deprecated alias for 'cursor' (v0.8.0 wire "
-            "shape) and is mutually exclusive with it. The 'filter' "
-            "object narrows by exact-match op_class / principal "
-            "(JWT 'sub') / target (target_name or any of an "
-            "announcement's 'targets') / actor_sub (the delegated agent) "
-            "/ work_ref (change ticket), plus 'active_only' "
-            "(drop expired TTL claims). Tenant scoping is "
-            "structural -- every watch targets the operator's own tenant "
-            "stream; there is no input that could request another "
-            "tenant's stream. Payloads inherit the publisher-side "
-            "redaction (credential_read + audit_query events are already "
-            "aggregate-only on the stream). MCP 'resources/subscribe' "
-            "(server-push) remains advertised as 'false' per "
-            "backend/src/meho_backplane/mcp/resources/kb.py; "
-            "this long-poll is the v0.2 pragmatic shape."
+            "Wait for new agent announcements in the operator's tenant "
+            "after 'cursor' (a watch checkpoint). Get the first checkpoint "
+            "from `meho_broadcast_recent`'s 'watch_checkpoint' (or from "
+            "the 'watch_checkpoint' of your own announce), then pass each "
+            "answer's 'next_cursor' to the next call. Returns {events, "
+            "next_cursor, gap}. MEHO reads its stored announcements after "
+            "the checkpoint first; if there are none it waits up to "
+            "'timeout_ms' (default 10000, cap 30000) for a new one and "
+            "reads again. 'next_cursor' always moves past everything "
+            "read, also when your filter hid every event, so you never "
+            "get the same event twice when you pass it back. If the live "
+            "wake-up is down, MEHO checks every 5 seconds instead, so "
+            "nothing is lost, only later. 'gap' is null, or says that "
+            "announcements after your checkpoint were removed by archive "
+            "retention ('retention_trimmed', with 'missed_events'), or "
+            "that the checkpoint is ahead of the archive "
+            "('checkpoint_ahead'; watching restarts at the current end). "
+            "Dedupe by 'event_id'. Same 'filter' as "
+            "`meho_broadcast_recent`. Operation events are not included. "
+            "'since_cursor' is a deprecated alias for 'cursor' and is "
+            "mutually exclusive with it. A checkpoint only works in the "
+            "tenant that issued it. This is a single bounded long-poll, "
+            "not a background subscription."
         ),
         inputSchema={
             "type": "object",
@@ -1300,14 +1014,12 @@ register_mcp_tool(
                     "minLength": 1,
                     "maxLength": 64,
                     "description": (
-                        "Valkey stream cursor ('1747800000000-0'). "
-                        "Required (either as `cursor` or via the "
-                        "deprecated `since_cursor` alias). Obtain "
-                        "initial value from `meho_broadcast_recent`'s "
-                        "`next_cursor`. XREAD reads entries strictly "
-                        "past this cursor. Canonical name; matches "
-                        "the `cursor` parameter on `query_audit` / "
-                        "`query_topology` / `list_targets`."
+                        "Watch checkpoint. Required (either as `cursor` "
+                        "or via the deprecated `since_cursor` alias). "
+                        "Get the first one from `meho_broadcast_recent`'s "
+                        "`watch_checkpoint`; then pass each answer's "
+                        "`next_cursor`. Returns announcements stored "
+                        "after this point."
                     ),
                 },
                 "since_cursor": {
@@ -1396,9 +1108,10 @@ register_mcp_tool(
                     "maximum": _WATCH_MAX_TIMEOUT_MS,
                     "default": _WATCH_DEFAULT_TIMEOUT_MS,
                     "description": (
-                        "XREAD BLOCK window in milliseconds. Cap at "
-                        f"{_WATCH_MAX_TIMEOUT_MS} (long-poll, not "
-                        "infinite-block) to bound chassis worker tie-up."
+                        "How long to wait for a new announcement, in "
+                        f"milliseconds. Cap at {_WATCH_MAX_TIMEOUT_MS} "
+                        "(long-poll, not infinite-block) to bound chassis "
+                        "worker tie-up."
                     ),
                 },
             },

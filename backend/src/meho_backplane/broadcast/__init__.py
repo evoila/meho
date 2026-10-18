@@ -26,6 +26,15 @@ from meho_backplane.broadcast.announcement_claims import (
     AnnouncementClaimError,
     build_trusted_announcement,
 )
+from meho_backplane.broadcast.archive_cursor import (
+    InvalidArchiveCursorError,
+    encode_watch_checkpoint,
+)
+from meho_backplane.broadcast.archive_reader import (
+    AnnouncementFilter,
+    read_announcement_history,
+    watch_announcements,
+)
 from meho_backplane.broadcast.client import (
     BROADCAST_BLOCKING_SOCKET_TIMEOUT_SECONDS,
     dispose_broadcast_blocking_client,
@@ -45,7 +54,6 @@ from meho_backplane.broadcast.history import (
     OP_CLASS_ENUM,
     InvalidSinceError,
     list_recent_events_fail_soft,
-    list_recent_events_strict,
 )
 from meho_backplane.broadcast.overrides import (
     compute_effective_broadcast_detail,
@@ -92,8 +100,10 @@ __all__ = [
     "AgentAnnouncementEvent",
     "AnnounceRateLimitError",
     "AnnouncementClaimError",
+    "AnnouncementFilter",
     "AnnouncementPublishResult",
     "BroadcastEvent",
+    "InvalidArchiveCursorError",
     "InvalidSinceError",
     "PlannedOpClass",
     "broadcast_readiness_probe",
@@ -102,17 +112,19 @@ __all__ = [
     "compute_effective_broadcast_detail",
     "dispose_broadcast_blocking_client",
     "dispose_broadcast_client",
+    "encode_watch_checkpoint",
     "enforce_announce_rate_limit",
     "get_broadcast_blocking_client",
     "get_broadcast_client",
     "invalidate_tenant_cache",
     "list_recent_events_fail_soft",
-    "list_recent_events_strict",
     "publish_agent_announcement",
     "publish_event",
+    "read_announcement_history",
     "read_request_override",
     "redact_payload",
     "reset_broadcast_blocking_client_for_testing",
     "reset_broadcast_client_for_testing",
     "reset_overrides_cache_for_testing",
+    "watch_announcements",
 ]

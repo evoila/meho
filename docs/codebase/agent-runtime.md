@@ -166,10 +166,11 @@ tenant's shared feed (`meho:feed:{tenant_id}`) rather than a mute
 participant:
 
 - `broadcast_announce` — publish intent / progress / completion.
-- `broadcast_recent` — read recent feed events (peer announcements + audit
-  events).
-- `broadcast_watch` — a single bounded long-poll (≤30s) for new events; no
-  background subscription.
+- `broadcast_recent` — read recent stored agent announcements (since #3748
+  it does not return operation, approval or check events; those are in
+  `query_audit`).
+- `broadcast_watch` — a single bounded long-poll (≤30s) for new agent
+  announcements; no background subscription.
 
 These do **not** re-implement the feed. `build_broadcast_meta_tools` in
 `toolset_broadcast.py` resolves the `(inputSchema, handler)` pairs the MCP surface
@@ -593,8 +594,8 @@ The agent runtime closes that gap with a wrapped `call_operation`. On
      A decision made before the wait started is returned at once.
    - While the row is `pending`, it listens on the per-tenant Valkey stream
      (`meho:feed:{tenant_id}`) with `XREAD BLOCK`, filtered to its own
-     `approval_request_id`. This is the same stream the SSE feed and
-     `meho_broadcast_watch` read.
+     `approval_request_id`. This is the same stream the SSE feed reads (`meho_broadcast_watch`
+     uses it only as a wake-up since #3748).
    - It reads the stored row again after every Valkey error, and at least
      every 5 seconds (`_DURABLE_RECHECK_SECONDS`). So a lost broadcast event
      delays the agent by at most a few seconds; it does not end in a timeout.

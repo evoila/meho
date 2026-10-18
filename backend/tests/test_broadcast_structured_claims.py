@@ -16,7 +16,7 @@ Covers the keystone contract of Broadcast v2 (Initiative #2543):
 * ``meho_broadcast_recent`` gains ``work_ref`` + ``active_only`` filters
   and the ``target`` filter now matches an announcement's ``targets``
   list; invalid claims reject at the boundary with ``-32602``.
-* Back-compat: single-``target`` announcements and pre-v2 stream entries
+* Back-compat: single-``target`` announcements and pre-v2 archive rows
   (no claim fields) still parse and render.
 """
 
@@ -41,7 +41,10 @@ from meho_backplane.broadcast import (
     get_broadcast_client,
     reset_broadcast_client_for_testing,
 )
+from meho_backplane.broadcast.archive_sequence import next_announcement_seq
 from meho_backplane.broadcast.history import dump_event_wire, event_matches
+from meho_backplane.broadcast.publisher import _announcement_row
+from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.mcp.tools.broadcast import _handler_recent
 from meho_backplane.settings import get_settings
@@ -49,7 +52,6 @@ from meho_backplane.untrusted_text import wrap_untrusted_text
 from tests.broadcast_admission_helpers import fake_stream_write, patch_agent_admission
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
-    build_operator,
     client_with_operator,  # noqa: F401 -- pytest-discovered fixture
     isolated_registry,  # noqa: F401 -- pytest-discovered autouse fixture
     post_mcp,
@@ -137,13 +139,6 @@ def _broadcast_event(*, target_name: str | None = None) -> BroadcastEvent:
         audit_id=_AUDIT_ID,
         payload={"op_class": "read"},
     )
-
-
-def _entry(
-    event: AgentAnnouncementEvent | BroadcastEvent,
-    entry_id: str,
-) -> tuple[str, dict[str, str]]:
-    return entry_id, {"event": event.model_dump_json()}
 
 
 def _result_dict(response: Any) -> dict[str, Any]:
@@ -418,9 +413,9 @@ def test_announce_echoes_declared_claims_and_publishes_them(
             ),
         )
     result = _result_dict(resp)
-    assert result["cursor"] == "1747800000000-0"
-    # T2 (#2547): event_id is a genuine UUID, distinct from the cursor.
-    assert result["event_id"] != result["cursor"]
+    # #3748: the ack carries a watch checkpoint, not the stream entry id.
+    assert result["watch_checkpoint"].startswith("w1.")
+    assert result["delivery_pending"] is False
     assert UUID(result["event_id"]).version == 4
     assert result["targets"] == ["cluster-x"]
     assert result["planned_op_class"] == "write"
@@ -465,7 +460,8 @@ def test_bare_announce_returns_stamped_claim_ack(
     # No declared claims -> only the ids plus the server-stamped claim fields.
     assert set(result) == {
         "event_id",
-        "cursor",
+        "watch_checkpoint",
+        "delivery_pending",
         "claim_id",
         "phase",
         "owner_sub",
@@ -476,9 +472,7 @@ def test_bare_announce_returns_stamped_claim_ack(
     assert result["phase"] == "start"
     assert result["ttl_minutes"] == 30  # product default when none is sent
     assert result["replayed"] is False
-    assert result["cursor"] == "1747800000000-7"
-    # T2 (#2547): event_id is a genuine UUID, distinct from the cursor.
-    assert result["event_id"] != result["cursor"]
+    assert result["delivery_pending"] is False
     assert UUID(result["event_id"]).version == 4
 
 
@@ -487,24 +481,42 @@ def test_bare_announce_returns_stamped_claim_ack(
 # ---------------------------------------------------------------------------
 
 
+async def _archive(event: AgentAnnouncementEvent) -> None:
+    """Store *event* in the archive with the next sequence number (#3748)."""
+    async with get_sessionmaker()() as session:
+        seq = await next_announcement_seq(session, event.tenant_id)
+        session.add(_announcement_row(event, None, seq))
+        await session.commit()
+
+
+def _reader(tenant_id: UUID) -> Operator:
+    return Operator(
+        sub="op-test", raw_jwt="x", tenant_id=tenant_id, tenant_role=TenantRole.OPERATOR
+    )
+
+
 async def test_recent_target_and_work_ref_filters_surface_the_claim() -> None:
     """A claim on ``cluster-x`` is found by target and by work_ref filters."""
-    op = build_operator(TenantRole.OPERATOR)
-    claim = _announcement(
-        activity="rotating tokens",
-        targets=["cluster-x"],
-        planned_op_class="write",
-        ttl_minutes=30,
-        work_ref="gh:evoila/meho#123",
-        ts=datetime.now(UTC),
+    tenant_id = uuid4()
+    op = _reader(tenant_id)
+    await _archive(
+        _announcement(
+            activity="rotating tokens",
+            targets=["cluster-x"],
+            planned_op_class="write",
+            ttl_minutes=30,
+            work_ref="gh:evoila/meho#123",
+            ts=datetime.now(UTC),
+        ).model_copy(update={"tenant_id": tenant_id})
     )
-    other = _announcement(activity="unrelated", targets=["cluster-z"])
-    entries = [_entry(claim, "1-0"), _entry(other, "2-0")]
-    bc = get_broadcast_client()
+    await _archive(
+        _announcement(activity="unrelated", targets=["cluster-z"], ts=datetime.now(UTC)).model_copy(
+            update={"tenant_id": tenant_id}
+        )
+    )
 
-    with patch.object(bc, "xrange", new=AsyncMock(return_value=entries)):
-        by_target = await _handler_recent(op, {"filter": {"target": "cluster-x"}})
-        by_work_ref = await _handler_recent(op, {"filter": {"work_ref": "gh:evoila/meho#123"}})
+    by_target = await _handler_recent(op, {"filter": {"target": "cluster-x"}})
+    by_work_ref = await _handler_recent(op, {"filter": {"work_ref": "gh:evoila/meho#123"}})
 
     assert [e["targets"] for e in by_target["events"]] == [[wrap_untrusted_text("cluster-x")]]
     assert by_target["events"][0]["planned_op_class"] == "write"
@@ -514,65 +526,57 @@ async def test_recent_target_and_work_ref_filters_surface_the_claim() -> None:
 
 async def test_recent_active_only_excludes_expired_claim() -> None:
     """Before TTL elapses ``active_only`` surfaces the claim; after, it drops."""
-    op = build_operator(TenantRole.OPERATOR)
+    tenant_id = uuid4()
+    op = _reader(tenant_id)
     fresh = _announcement(targets=["cluster-x"], ttl_minutes=30, ts=datetime.now(UTC))
     stale = _announcement(
         targets=["cluster-x"],
         ttl_minutes=30,
         ts=datetime.now(UTC) - timedelta(minutes=90),
     )
-    bc = get_broadcast_client()
+    for event in (stale, fresh):
+        await _archive(event.model_copy(update={"tenant_id": tenant_id}))
 
-    with patch.object(bc, "xrange", new=AsyncMock(return_value=[_entry(fresh, "1-0")])):
-        active = await _handler_recent(op, {"filter": {"active_only": True}})
-    assert len(active["events"]) == 1
-
-    with patch.object(bc, "xrange", new=AsyncMock(return_value=[_entry(stale, "1-0")])):
-        expired = await _handler_recent(op, {"filter": {"active_only": True}})
-    assert expired["events"] == []
+    window = (datetime.now(UTC) - timedelta(hours=3)).isoformat()
+    active = await _handler_recent(op, {"cursor": window, "filter": {"active_only": True}})
+    everything = await _handler_recent(op, {"cursor": window})
+    assert [e["event_id"] for e in active["events"]] == [str(fresh.event_id)]
+    assert len(everything["events"]) == 2
 
 
 # ---------------------------------------------------------------------------
-# Back-compat: pre-v2 stream entries (no claim fields) parse + render
+# Back-compat: archive rows written before the claim fields still render
 # ---------------------------------------------------------------------------
 
 
 async def test_pre_v2_entry_without_claim_fields_still_parses() -> None:
-    """An entry written before the claim fields existed round-trips cleanly.
+    """An archive row with no claim fields renders beside a v2 claim.
 
-    The wire JSON omits ``targets`` / ``planned_op_class`` / ``ttl_minutes``
-    / ``work_ref`` / ``run_id`` entirely (the v0.8.0 announcement shape);
-    the model fills defaults and the reader serves it beside a v2 claim on
-    the same mixed stream.
+    Pre-v2 rows have no ``targets`` / ``planned_op_class`` / ``ttl_minutes``
+    / ``work_ref`` / ``run_id`` / claim columns; the reader fills defaults.
     """
-    op = build_operator(TenantRole.OPERATOR)
-    legacy_json = json.dumps(
-        {
-            "kind": "agent_announcement",
-            "event_kind": "agent_announcement",
-            "tenant_id": str(OPERATOR_TENANT_ID),
-            "principal_sub": "op-test",
-            "activity": "legacy announce",
-            "target": "prod-vc-1",
-            "scope": None,
-            "phase": "start",
-            "ts": "2026-05-25T09:00:00Z",
-        }
+    tenant_id = uuid4()
+    op = _reader(tenant_id)
+    legacy = AgentAnnouncementEvent(
+        tenant_id=tenant_id,
+        principal_sub="op-test",
+        activity="legacy announce",
+        target="prod-vc-1",
+        ts=datetime.now(UTC) - timedelta(minutes=2),
     )
     v2 = _announcement(activity="v2 announce", targets=["cluster-x"], ttl_minutes=30)
-    entries = [("1-0", {"event": legacy_json}), _entry(v2, "2-0")]
-    bc = get_broadcast_client()
+    await _archive(legacy)
+    await _archive(v2.model_copy(update={"tenant_id": tenant_id, "ts": datetime.now(UTC)}))
 
-    with patch.object(bc, "xrange", new=AsyncMock(return_value=entries)):
-        result = await _handler_recent(op, {})
+    result = await _handler_recent(op, {})
 
     activities = [e["activity"] for e in result["events"]]
     assert activities == [
         wrap_untrusted_text("legacy announce"),
         wrap_untrusted_text("v2 announce"),
     ]
-    # Legacy entry renders with the claim defaults (empty list, nulls).
-    legacy = result["events"][0]
-    assert legacy["targets"] == []
-    assert legacy["planned_op_class"] is None
-    assert legacy["expires_at"] is None
+    # Legacy row renders with the claim defaults (empty list, nulls).
+    first = result["events"][0]
+    assert first["targets"] == []
+    assert first["planned_op_class"] is None
+    assert first["expires_at"] is None

@@ -37,9 +37,10 @@
 //    callback port, so another session could not finish its own login while
 //    this one runs. When the connection is up, the guard closes the servers
 //    mcp-remote opened and removes the lockfile that holds this process's
-//    pid. Nothing needs the callback server after that: when the login
-//    expires later, rule 2 stops this process, and a reconnect starts a
-//    fresh one.
+//    pid. It also removes mcp-remote's exit hooks that would delete the
+//    lockfile again later, when it may belong to another session. Nothing
+//    needs the callback server after that: when the login expires later,
+//    rule 2 stops this process, and a reconnect starts a fresh one.
 //
 // The guard only reads what mcp-remote writes to stdout. It changes one
 // thing there: the text of that one error. Every other message passes
@@ -154,6 +155,30 @@ function removeOwnLockfiles() {
   }
 }
 
+// During a login, mcp-remote also adds a process.once("exit") hook and a
+// process.once("SIGINT") hook that delete the lockfile without checking
+// its pid. Once this process has removed its own lockfile, the lockfile on
+// disk can belong to another session that is logging in, so these hooks
+// must go. Only hooks added after the snapshot taken before mcp-remote
+// loads are removed. On SIGINT only the once() hooks go (raw listeners
+// with a .listener property); mcp-remote's normal shutdown handler stays.
+const hooksBefore = {};
+function snapshotLockfileHooks() {
+  for (const event of ["exit", "SIGINT"]) {
+    hooksBefore[event] = new Set(process.rawListeners(event));
+  }
+}
+function removeLockfileHooks() {
+  for (const fn of process.rawListeners("exit")) {
+    if (!hooksBefore.exit.has(fn)) process.removeListener("exit", fn);
+  }
+  for (const fn of process.rawListeners("SIGINT")) {
+    if (!hooksBefore.SIGINT.has(fn) && typeof fn.listener === "function") {
+      process.removeListener("SIGINT", fn);
+    }
+  }
+}
+
 function freeLoginPort() {
   Server.prototype.listen = originalListen;
   for (const server of openedServers) {
@@ -161,6 +186,7 @@ function freeLoginPort() {
   }
   openedServers.clear();
   removeOwnLockfiles();
+  removeLockfileHooks();
 }
 
 const [entry, ...mcpRemoteArgs] = process.argv.slice(2);
@@ -217,6 +243,7 @@ process.stdout.write = (chunk, encoding, callback) => {
 // Hand mcp-remote its usual argv, then load it. It reads
 // process.argv.slice(2) when it loads and owns stdio from then on.
 process.argv = [process.argv[0], entry, ...mcpRemoteArgs];
+snapshotLockfileHooks();
 try {
   await import(pathToFileURL(entry).href);
 } catch (err) {

@@ -9,6 +9,8 @@
 //      message, and the process stops.
 //   3. Once connected, the process frees the OAuth callback port and removes
 //      its own lockfile, so another session can run its own login (#4000).
+//      It also drops mcp-remote's exit hooks that would later delete
+//      another session's lockfile.
 //
 // Two layers:
 //   - Stub tests: tiny fake mcp-remote entries. No network, always run.
@@ -573,6 +575,43 @@ e2e("e2e: a second session can log in while a logged-in session stays open", { t
     first.child.kill("SIGTERM");
     second.child.kill("SIGTERM");
     await Promise.all([first.exited, second.exited]);
+  } finally {
+    fake.close();
+  }
+});
+
+e2e("e2e: a connected session that stops leaves another session's lockfile alone", { timeout: 60000 }, async () => {
+  const fake = await startFakeMeho("browser");
+  try {
+    const configDir = tempDir("meho-guard-auth-");
+    const env = { MCP_REMOTE_CONFIG_DIR: configDir, MEHO_MCP_LOGIN_TIMEOUT: "30" };
+    const hash = createHash("md5").update(fake.url).digest("hex");
+    const lock = join(configDir, `mcp-remote-${mcpRemoteConfigVersion()}`, `${hash}_lock.json`);
+
+    // Session A logs in in the browser and connects.
+    const first = startGuard(REAL_ENTRY, mcpRemoteArgs(fake.url), env);
+    first.send(INITIALIZE);
+    await finishBrowserLogin(first, "code-a");
+    const answerA = await waitForAnswer(first, 1, "session A to connect");
+    assert.ok(answerA.result, `session A must connect; stderr:\n${first.stderr}`);
+
+    // Session B starts a browser login and writes its lockfile.
+    fake.expireLogin();
+    const second = startGuard(REAL_ENTRY, mcpRemoteArgs(fake.url), env);
+    second.send(INITIALIZE);
+    await waitFor(() => /Creating lockfile/.test(second.stderr), "session B's lockfile");
+    await waitFor(() => existsSync(lock), "session B's lockfile on disk");
+
+    // Claude Code closes session A. B's lockfile must stay, so a third
+    // session waits for B's login instead of failing on the busy port.
+    first.child.stdin.end();
+    const { code } = await first.exited;
+    assert.equal(code, 0, first.stderr);
+    assert.equal(existsSync(lock), true, "session B's lockfile must stay");
+    assert.equal(JSON.parse(readFileSync(lock, "utf8")).pid, second.child.pid);
+
+    second.child.kill("SIGTERM");
+    await second.exited;
   } finally {
     fake.close();
   }

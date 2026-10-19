@@ -810,6 +810,37 @@ async def datastore_refresh_composite(
     }
 
 
+# vim types for the performance-summary entity (#4038). VI-JSON wants the
+# ``entity`` argument of QueryAvailablePerfMetric / PerfQuerySpec as an
+# annotated ManagedObjectReference; vCenter 8.0.3 answers a bare moid string
+# with 500 ``InvalidArgument: Unexpected string value``. The type comes from
+# the caller's ``entity_type`` or, failing that, from the moid prefix.
+_PERF_ENTITY_TYPE_BY_MOID_PREFIX: tuple[tuple[str, str], ...] = (
+    ("host-", "HostSystem"),
+    ("vm-", _VIRTUAL_MACHINE_MO_TYPE),
+    ("domain-c", _CLUSTER_COMPUTE_RESOURCE_MO_TYPE),
+)
+_PERF_QUERY_SPEC_TYPE = "PerfQuerySpec"
+
+
+def _perf_entity_moref(entity_moid: str, entity_type: str | None) -> dict[str, str]:
+    """The annotated ``ManagedObjectReference`` for the perf *entity_moid*.
+
+    *entity_type* wins when given; otherwise the vim type comes from the
+    moid prefix. Raises :class:`ValueError` when neither yields a type.
+    """
+    if entity_type:
+        return vim_moref(entity_type, entity_moid)
+    for prefix, mo_type in _PERF_ENTITY_TYPE_BY_MOID_PREFIX:
+        if entity_moid.startswith(prefix):
+            return vim_moref(mo_type, entity_moid)
+    known = ", ".join(f"{prefix!r}" for prefix, _ in _PERF_ENTITY_TYPE_BY_MOID_PREFIX)
+    raise ValueError(
+        f"performance_summary: cannot tell the vim type of entity_moid "
+        f"{entity_moid!r} from its prefix (known: {known}); pass entity_type"
+    )
+
+
 async def performance_summary_composite(
     *,
     operator: Operator,
@@ -841,13 +872,18 @@ async def performance_summary_composite(
     ``counter_ids``) is an explicit v0.2.next concern per the issue
     body's *Out of scope* section.
 
-    The vi-json method arguments (``entity``, ``interval_seconds``)
-    become the flat JSON request body; the ``moId`` targets the
-    PerformanceManager singleton in the path -- the same method-args-as-
-    body shape the ``vmware.host.usage`` typed op sends for
-    RetrievePropertiesEx.
+    The vi-json method arguments become the flat JSON request body; the
+    ``moId`` targets the PerformanceManager singleton in the path -- the
+    same method-args-as-body shape the ``vmware.host.usage`` typed op
+    sends for RetrievePropertiesEx. Per the pinned ``vi-json.yaml``:
+    QueryAvailablePerfMetric takes ``entity`` + ``intervalId``; QueryPerf
+    takes ``querySpec`` (a ``PerfQuerySpec`` list carrying ``entity`` /
+    ``intervalId`` / ``maxSample``). ``entity`` is an annotated
+    ``ManagedObjectReference`` built by :func:`_perf_entity_moref` (#4038);
+    vCenter 8.0.3 rejects a bare moid string.
     """
     entity_moid = params["entity_moid"]
+    entity = _perf_entity_moref(entity_moid, params.get("entity_type"))
     perf_mgr_moid = params.get("perf_manager_moid", "PerfMgr")
     interval_s = int(params.get("interval_seconds", 20))
     max_samples = int(params.get("max_samples", 60))
@@ -858,7 +894,7 @@ async def performance_summary_composite(
         operator,
         _OP_POST_QUERY_AVAILABLE_PERF_METRIC,
         path_params={"moId": perf_mgr_moid},
-        body={"entity": entity_moid},
+        body={"entity": entity, "intervalId": interval_s},
     )
     available = _unwrap_value(available_raw)
     if not isinstance(available, list):
@@ -874,7 +910,16 @@ async def performance_summary_composite(
         operator,
         _OP_POST_QUERY_PERF,
         path_params={"moId": perf_mgr_moid},
-        body={"entity": entity_moid, "interval_seconds": interval_s},
+        body={
+            "querySpec": [
+                {
+                    VIM_TYPE_NAME_KEY: _PERF_QUERY_SPEC_TYPE,
+                    "entity": entity,
+                    "intervalId": interval_s,
+                    "maxSample": max_samples,
+                }
+            ]
+        },
     )
     samples = _unwrap_value(samples_raw)
     if not isinstance(samples, list):

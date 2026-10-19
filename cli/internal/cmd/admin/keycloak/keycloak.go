@@ -6,13 +6,14 @@
 // provisioning. The first verb (G0.9.1-T11 / #791) is
 // `bootstrap-clients`, which idempotently provisions:
 //
-//  1. The public `meho-cli` device-code client + 5 protocol mappers
+//  1. The public `meho-cli` device-code client + 6 protocol mappers
 //     + 4 default client scopes (`basic`, `roles`, `web-origins`,
 //     `acr`).
 //  2. The public `meho-mcp` authorization-code+PKCE client +
-//     the same 5 mappers + 4 default scopes.
-//  3. The `meho-admins` group.
-//  4. An admin user joined to `meho-admins` with a password.
+//     the same 6 mappers + 4 default scopes.
+//  3. The five MEHO role groups. Their attributes give each person
+//     their tenant and role (docs/decisions/login-role-groups.md).
+//  4. An admin user in `MEHO-Admins` with a password.
 //
 // The verb encodes the 5-step recipe documented in
 // deploy/values-examples/README.md § Auth onramp recipe. It does NOT
@@ -59,10 +60,10 @@ func NewRootCmd() *cobra.Command {
 			"talk to a Keycloak admin REST API directly. The first " +
 			"verb is `bootstrap-clients`, which idempotently " +
 			"provisions the public device-code client, the public " +
-			"MCP browser-flow client, their 5 protocol mappers, " +
-			"their 4 default client scopes, the meho-admins group, " +
-			"and an admin user — the realm-side prerequisites for " +
-			"`meho login` and the MCP onramp.",
+			"MCP browser-flow client, their 6 protocol mappers, " +
+			"their 4 default client scopes, the five MEHO role " +
+			"groups, and an admin user — the realm-side prerequisites " +
+			"for `meho login` and the MCP onramp.",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newBootstrapClientsCmd())
@@ -93,8 +94,6 @@ func newBootstrapClientsCmd() *cobra.Command {
 		backplaneAudience     string
 		mcpResourceURI        string
 		tenantID              string
-		tenantRole            string
-		adminGroupName        string
 		adminUserUsername     string
 		adminUserEmail        string
 		skipUserProvisioning  bool
@@ -114,11 +113,18 @@ func newBootstrapClientsCmd() *cobra.Command {
 			"`meho login` and the MCP browser-flow onramp need:\n\n" +
 			"  * the public device-code client (default name `meho-cli`)\n" +
 			"  * the public authorization-code+PKCE MCP client (default name `meho-mcp`)\n" +
-			"  * 5 protocol mappers on each client (audience-meho-backplane, meho-mcp-audience, tenant-id, tenant-role, groups-claim)\n" +
+			"  * 6 protocol mappers on each client (audience-meho-backplane, meho-mcp-audience, groups-claim, and the User Attribute mappers tenant-id, tenant-role, approver)\n" +
 			"  * 4 default client scopes on each client (basic, roles, web-origins, acr) — including the load-bearing `basic` scope that carries the `sub` claim in Keycloak 25+\n" +
 			"  * the `mcp:read`, `mcp:execute` and `mcp:admin` client scopes, plus `offline_access`, as optional scopes on the MCP client — MEHO's MCP clients ask for them at login, and Keycloak refuses a login that asks for a scope the client does not offer\n" +
-			"  * the `meho-admins` top-level group\n" +
-			"  * an admin user joined to `meho-admins` with a password\n\n" +
+			"  * the five MEHO role groups, each with a `tenant_id` and a `tenant_role` attribute:\n" +
+			"      MEHO-Readers (read_only), MEHO-Operators (operator), MEHO-SA-Operators (operator),\n" +
+			"      MEHO-Admins (tenant_admin), MEHO-Approvers (read_only, plus approver=true)\n" +
+			"  * an admin user in MEHO-Admins with a password\n\n" +
+			"A person gets their tenant and role from their group. Put each " +
+			"person in exactly one of the five groups. A person in no group " +
+			"gets no tenant, and MEHO refuses the login (401 " +
+			"missing_tenant_claim). `--tenant-id` sets the `tenant_id` " +
+			"attribute on all five groups.\n\n" +
 			"Idempotent: re-runs detect existing resources, " +
 			"reconcile drift via PUT, and never duplicate. " +
 			"Confidential clients (e.g. `meho-backplane`) are " +
@@ -126,15 +132,16 @@ func newBootstrapClientsCmd() *cobra.Command {
 			"clients only.\n\n" +
 			"Passwords are read from env vars or stdin; they are " +
 			"never accepted via command-line flags.",
-		Example: "  # provision against the lab realm\n" +
+		Example: "  # provision against a realm\n" +
 			"  KEYCLOAK_ADMIN_PASSWORD=$(vault kv get -field=password secret/.../admin) \\\n" +
 			"  KEYCLOAK_ADMIN_USER_PASSWORD='changeme123' \\\n" +
 			"  meho admin keycloak bootstrap-clients \\\n" +
-			"      --keycloak-base-url https://keycloak.evba.lab \\\n" +
-			"      --realm evba \\\n" +
+			"      --keycloak-base-url https://keycloak.example.com \\\n" +
+			"      --realm meho \\\n" +
 			"      --admin-username admin \\\n" +
-			"      --mcp-resource-uri https://meho.evba.lab/mcp \\\n" +
-			"      --admin-user-username damir.topic@example.com\n",
+			"      --mcp-resource-uri https://meho.example.com/mcp \\\n" +
+			"      --tenant-id 9b7c2e10-3d44-4f6a-91b5-1de8c7a92f04 \\\n" +
+			"      --admin-user-username admin@example.com\n",
 		// No positional args — flags only. Also guards the
 		// --cli-offline-access optional-value flag: pflag's NoOptDefVal
 		// treats `--cli-offline-access 3600` (space form) as a
@@ -176,8 +183,6 @@ func newBootstrapClientsCmd() *cobra.Command {
 				BackplaneAudience:            backplaneAudience,
 				MCPResourceURI:               mcpResourceURI,
 				TenantID:                     tenantID,
-				TenantRole:                   tenantRole,
-				AdminGroupName:               adminGroupName,
 				AdminUserUsername:            adminUserUsername,
 				AdminUserEmail:               adminUserEmail,
 				AdminUserPassword:            adminUserPassword,
@@ -256,17 +261,15 @@ func newBootstrapClientsCmd() *cobra.Command {
 	cmd.Flags().StringVar(&mcpResourceURI, "mcp-resource-uri", "",
 		"audience the `meho-mcp-audience` mapper emits, e.g. https://meho.example.com/mcp (no trailing slash)")
 	cmd.Flags().StringVar(&tenantID, "tenant-id", "",
-		"hardcoded value for the `tenant_id` claim mapper (UUID; the lab convention is one tenant per realm)")
-	cmd.Flags().StringVar(&tenantRole, "tenant-role", "tenant_admin",
-		"hardcoded value for the `tenant_role` claim mapper (one of tenant_admin / operator / read_only)")
-	cmd.Flags().StringVar(&adminGroupName, "admin-group-name", "meho-admins",
-		"top-level group the admin user joins (drives group-gated tools)")
+		"tenant UUID written as the `tenant_id` attribute on the five MEHO role groups "+
+			"(default: the all-zero UUID). Changing it later moves everyone to a new tenant")
 	cmd.Flags().StringVar(&adminUserUsername, "admin-user-username", "",
-		"username of the admin user to provision (required unless --skip-user-provisioning)")
+		"username of the admin user to provision in MEHO-Admins (required unless --skip-user-provisioning)")
 	cmd.Flags().StringVar(&adminUserEmail, "admin-user-email", "",
 		"optional email for the new admin user")
 	cmd.Flags().BoolVar(&skipUserProvisioning, "skip-user-provisioning", false,
-		"skip the group + user creation steps (use when users are externally-managed via federation / SCIM)")
+		"skip the admin user step (use when people come from a directory or another login system); "+
+			"the five role groups are still created")
 	cmd.Flags().StringSliceVar(&mcpRedirectURIs, "mcp-redirect-uri", nil,
 		"redirect URI(s) for the MCP browser-flow client (default: loopback localhost + 127.0.0.1, any port/path)")
 	cmd.Flags().StringSliceVar(&mcpWebOrigins, "mcp-web-origin", nil,
@@ -401,16 +404,14 @@ func printSummary(out io.Writer, opts BootstrapOptions, res *Result) {
 		fmt.Fprintln(out, "    "+line)
 	}
 	if !opts.SkipUserProvisioning {
-		if res.AdminGroupCreated {
-			fmt.Fprintf(out, "    [created] group %s\n", opts.AdminGroupName)
-		} else {
-			fmt.Fprintf(out, "    [skip]    group %s (already exists)\n",
-				opts.AdminGroupName)
-		}
-		if res.AdminUserCreated {
+		switch {
+		case res.AdminUserCreated:
 			fmt.Fprintf(out, "    [created] user %s (joined %s)\n",
-				opts.AdminUserUsername, opts.AdminGroupName)
-		} else {
+				opts.AdminUserUsername, adminGroupName)
+		case res.AdminUserJoined:
+			fmt.Fprintf(out, "    [updated] user %s (joined %s; password not reset)\n",
+				opts.AdminUserUsername, adminGroupName)
+		default:
 			fmt.Fprintf(out, "    [skip]    user %s (already exists; password not reset)\n",
 				opts.AdminUserUsername)
 		}

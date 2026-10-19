@@ -212,8 +212,14 @@ the ingested-catalog boundary.
   op, `unqualified_target_version` is reported before `invalid_params`.
   `preview_operation` makes the same choice (without an audit row), so its
   envelope names the sibling's `connector_id` and its `preview_hash` matches
-  the call. A destructive op can then use the fallback too. Code:
-  `backend/src/meho_backplane/operations/_catalog_guard.py`.
+  the call. A destructive op can then use the fallback too. The fallback
+  is for a fresh call only. When an approved request resumes, the call
+  stays on the catalog the approval request stored. If the target's
+  detected version moved while the request waited and that catalog no
+  longer fits, the resume is refused with `unqualified_target_version`
+  and the caller must make a new request. The resume skips the policy
+  gate, so switching catalogs there would run an operation the approver
+  never saw. Code: `backend/src/meho_backplane/operations/_catalog_guard.py`.
 - **Safety floors.** The VMware hardware/lifecycle/power write floor
   (`dangerous` + approval) is keyed on `(product, impl_id)` and applies to the
   8.0 catalog's ingested rows exactly as it does for 9.0.

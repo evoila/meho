@@ -27,6 +27,14 @@ row), so a ``preview_hash`` taken with the named catalog matches the
 dispatch that runs on the sibling. Typed and composite
 descriptors never reach this code: the guard only applies to
 ``source_kind == "ingested"``.
+
+The fallback is for a fresh call only. An approval request stores the
+catalog that was checked by policy and shown to the approver. When that
+request resumes (``allow_sibling=False``), the call stays on that catalog:
+if the target's detected version moved meanwhile and the catalog no longer
+fits, the resume is refused with ``unqualified_target_version`` and the
+caller must make a new request. Switching catalogs there would run an
+operation the approver never saw, with the policy gate skipped.
 """
 
 from __future__ import annotations
@@ -92,12 +100,15 @@ async def choose_catalog_for_target(
     descriptor: EndpointDescriptor,
     connector_id: str,
     target: Any,
+    allow_sibling: bool = True,
 ) -> CatalogSelection | CatalogRefusal:
     """Pick the catalog that serves *target*, without writing an audit row.
 
     Returns a :class:`CatalogSelection` (the named catalog, or a qualified
     sibling) or a :class:`CatalogRefusal`. Both dispatch and preview use
     this, so a preview binds the same catalog the dispatch runs on.
+    ``allow_sibling=False`` pins the named catalog: a refusal is returned
+    even when a sibling would fit (the approval-resume path).
     """
     owner_class = get_connector_v2(descriptor.product, descriptor.version, descriptor.impl_id)
     if (
@@ -120,6 +131,8 @@ async def choose_catalog_for_target(
     )
     if incompatibility is None:
         return CatalogSelection(descriptor, connector_id, resolved_class)
+    if not allow_sibling:
+        return CatalogRefusal(incompatibility, target_product, target_version)
 
     sibling = await _qualified_sibling_descriptor(
         operator=operator,
@@ -149,17 +162,20 @@ async def select_catalog_for_target(
     target: Any,
     params_hash: str,
     started: float,
+    allow_sibling: bool = True,
 ) -> CatalogSelection | OperationResult:
     """Run the catalog target guard; fall back to a qualified sibling catalog.
 
     Returns a :class:`CatalogSelection` when the dispatch may go on, or the
     audited ``unqualified_target_version`` result when it may not.
+    ``allow_sibling=False`` disables the fallback (see the module docstring).
     """
     choice = await choose_catalog_for_target(
         operator=operator,
         descriptor=descriptor,
         connector_id=connector_id,
         target=target,
+        allow_sibling=allow_sibling,
     )
     if isinstance(choice, CatalogSelection):
         return choice

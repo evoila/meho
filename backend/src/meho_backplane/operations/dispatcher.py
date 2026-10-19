@@ -3040,7 +3040,11 @@ async def dispatch(
     # and its parameter schema. The params are checked once, after this
     # choice, against the descriptor that will run -- so for a guarded
     # ingested op, ``unqualified_target_version`` comes before
-    # ``invalid_params``.
+    # ``invalid_params``. An approval resume (``_approved``) never
+    # switches: the approver saw and the gate checked the stored catalog,
+    # and this path skips both. If the target's detected version moved
+    # while the request waited, the resume is refused and the caller
+    # must make a new request.
     selection = await select_catalog_for_target(
         operator=operator,
         descriptor=descriptor,
@@ -3048,6 +3052,7 @@ async def dispatch(
         target=target,
         params_hash=params_hash,
         started=started,
+        allow_sibling=not _approved,
     )
     if isinstance(selection, OperationResult):
         return selection

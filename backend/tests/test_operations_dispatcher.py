@@ -2101,6 +2101,59 @@ async def test_vmware_sibling_fallback_parks_approval_under_resolved_connector_i
     assert [a.connector_id for a in approvals] == ["vmware-rest-8.0"]
 
 
+@pytest.mark.asyncio
+async def test_vmware_sibling_fallback_resume_stays_on_the_approved_catalog(
+    session: AsyncSession,
+) -> None:
+    """An approved request never switches catalogs when the target version moved.
+
+    The request parked under ``vmware-rest-8.0`` (the sibling chosen for an
+    8.0.3 target). By the time it resumes, the target reports 9.0.1. The
+    resume runs with the policy gate skipped, so running the 9.0 catalog's
+    op here would be an operation the approver never saw. The resume is
+    refused instead; the caller must make a new request.
+    """
+    from meho_backplane.db.models import ApprovalRequest
+
+    _register_vmware_sibling_catalogs()
+    await _add_vmware_guard_descriptor(session, version="9.0")
+    await _add_vmware_guard_descriptor(session, version="8.0")
+
+    parked = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=_FakeTarget(product="vmware", version="8.0.3"),
+        params={},
+    )
+    assert parked.status == "awaiting_approval", parked.error
+    async with get_sessionmaker()() as fresh:
+        approvals = (await fresh.execute(select(ApprovalRequest))).scalars().all()
+    assert [a.connector_id for a in approvals] == ["vmware-rest-8.0"]
+
+    resumed = await dispatch(
+        operator=_make_operator(),
+        connector_id=approvals[0].connector_id,
+        op_id="POST:/api/vcenter/vm/example",
+        target=_FakeTarget(product="vmware", version="9.0.1"),
+        params={},
+        _approved=True,
+    )
+
+    assert resumed.status == "error"
+    assert resumed.extras["error_code"] == "unqualified_target_version"
+    assert resumed.extras["reason"] == (
+        "target version is outside the supported 8.0.x catalog boundary"
+    )
+    assert resumed.extras["target_product"] == "vmware"
+    assert resumed.extras["target_version"] == "9.0.1"
+    assert _RecordingVmwareTransport.sent == []
+    audits = await _audit_rows_for_guard_op()
+    assert len(audits) == 1
+    assert audits[0].payload["result_status"] == "unqualified_target_version"
+    assert audits[0].payload["connector_version"] == "8.0"
+
+
 class _RecordingVmware80WideConnector(_RecordingVmwareTransport, VmwareRest80Connector):  # type: ignore[misc]
     """A second 8.x catalog whose band overlaps the 8.0 catalog's band."""
 

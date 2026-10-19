@@ -613,6 +613,9 @@ async def _vm_disk_grow_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     """
     vm = ctx.params.get("vm")
     disk = ctx.params.get("disk")
+    # ``disk`` may be the int vim device key as well as the REST string id.
+    if isinstance(disk, int) and not isinstance(disk, bool):
+        disk = str(disk)
     capacity_bytes = ctx.params.get("capacity_bytes")
     if (
         not isinstance(vm, str)

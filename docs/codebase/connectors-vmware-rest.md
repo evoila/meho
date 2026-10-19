@@ -688,6 +688,30 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    list. The package `__init__` then queues
    `register_typed_op_registrar(register_vmware_typed_operations)`
    (`#2257`) for the typed-op rows.
+3b. **Composites and typed ops on the 8.0 catalog (#3789).** Two more
+   registrars, `register_vmware_composite_operations_8_0` and
+   `register_vmware_typed_operations_8_0`, write the same rows under
+   `connector_id="vmware-rest-8.0"`. The resolver sends a fingerprinted
+   8.0.x target to that catalog, so an agent that picks it finds
+   `vm.disk.grow`, the guest ops, `object.collect` and the rest there. The
+   rows use the same handlers and the same safety level and approval rule
+   as on 9.0; the handlers already choose the right path per vCenter
+   release. Notes:
+   - The Supervisor and namespace composites are not on the 8.0 catalog.
+     `COMPOSITES_NOT_ON_8_0` in `composites/_register.py` lists each
+     excluded composite with its reason. The test
+     `test_connectors_vmware_rest_catalog_parity.py` fails when a composite
+     or typed op on 9.0 is neither on 8.0 nor in that list.
+   - The governed child ops inside a composite keep their
+     `vmware-rest-9.0` keys on both catalogs. One grant set covers the
+     composite on either catalog, and approving a parked child op re-runs
+     the composite on the 9.0 catalog, where it is also registered.
+   - VI-JSON needs vCenter 8.0 U1 or later, so the VI-JSON composites do
+     not work on an 8.0 GA target.
+   - When the 9.0 catalog refuses an ingested op for an 8.0.x target
+     (`unqualified_target_version`), the reason now names the catalog to
+     use: `...; use connector vmware-rest-8.0 for this target`. The 8.0
+     catalog does the same for a 9.x target.
 4. The registry's v2 table now resolves `(vmware, 9.0, vmware-rest)`
    to `VmwareRestConnector`. The G0.7 auto-shim's idempotency check
    (in `ensure_connector_class_registered`, once #408's pipeline lands
@@ -1514,7 +1538,8 @@ issue a single-device `ReconfigVM_Task` edit (`deviceChange=[{operation:
 "edit", device: {…VirtualDisk…, capacityInBytes: <raised>}}]`) through
 `_write_vmomi_sub_op`; poll the returned Task to terminal via
 `poll_vim_task`. The `disk` param is the REST disk id, which is the string
-form of the vim `VirtualDevice.key` — so the handler matches the device by
+form of the vim `VirtualDevice.key`. It also accepts the int key (#3789);
+the handler turns it into a string first. The handler matches the device by
 `str(key)` and the REST `GET hardware/disk/{disk}` supplies label +
 capacity for the park-time preview. The preview is a live-read from→to
 capacity diff (`{vm, name, disk, disk_label, current_capacity_bytes,

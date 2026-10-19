@@ -110,6 +110,7 @@ from meho_backplane.connectors.vmware_rest import composites  # noqa: E402
 from meho_backplane.connectors.vmware_rest.typed_ops import (  # noqa: E402
     VMWARE_TYPED_OPS,
     register_vmware_typed_operations,
+    register_vmware_typed_operations_8_0,
 )
 from meho_backplane.operations.typed_register import (  # noqa: E402
     register_typed_op_registrar,
@@ -121,6 +122,8 @@ from meho_backplane.operations.typed_register import (  # noqa: E402
 # composite/ingested path, so it registers via its own registrar the same
 # way argocd's typed reads do.
 register_typed_op_registrar(register_vmware_typed_operations)
+# The same typed reads on the ``vmware-rest-8.0`` catalog (#3789).
+register_typed_op_registrar(register_vmware_typed_operations_8_0)
 
 __all__ = [
     "VMWARE_TYPED_OPS",
@@ -133,4 +136,5 @@ __all__ = [
     "load_session_credentials_from_vault",
     "product_from_line_id",
     "register_vmware_typed_operations",
+    "register_vmware_typed_operations_8_0",
 ]

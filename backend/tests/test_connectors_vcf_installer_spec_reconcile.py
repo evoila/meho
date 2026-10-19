@@ -16,7 +16,8 @@ pattern — never a hardcoded mirror), across the four surfaces that hand-code a
 path:
 
 * :mod:`~meho_backplane.connectors.vcf_installer.typed_reads` — the ``_*_PATH``
-  module constants (the bring-up status and validation status polls). Each
+  module constants (the bring-up status and validation status polls, the
+  id-less bring-up task list, and the depot-lifecycle reads). Each
   typed read dispatches through :meth:`HttpConnector._get_json`, so each
   declares ``GET:``.
 * :mod:`~meho_backplane.connectors.vcf_installer.typed_writes` — the submit
@@ -81,6 +82,7 @@ def test_typed_read_path_constants_are_all_discovered() -> None:
         "_BUNDLES_PATH",
         "_BUNDLE_DOWNLOAD_STATUS_PATH",
         "_DEPOT_SETTINGS_PATH",
+        "_SDDC_LIST_PATH",
         "_SDDC_STATUS_PATH",
         "_TRUSTED_CERTIFICATES_PATH",
         "_VALIDATION_STATUS_PATH",

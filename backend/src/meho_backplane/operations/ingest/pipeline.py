@@ -93,6 +93,10 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.profile import AuthSchemeName, ExecutionProfile
 from meho_backplane.connectors.registry import product_impl_id_round_trips
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.operations.ingest._internals import (
+    OP_CROSS_TENANT_INGEST,
+    write_audit_row,
+)
 from meho_backplane.operations.ingest._llm_grouping_internals import (
     DEFAULT_GROUPING_BATCH_SIZE,
     DEFAULT_MAX_GROUPS,
@@ -491,12 +495,14 @@ class IngestionPipelineService:
     CLI verbs (T5) and admin MCP tools (T7); both pass their own
     :class:`Operator` at construction.
 
-    Tenant scoping: the constructor optionally takes an explicit
+    Tenant scoping: :meth:`ingest` optionally takes an explicit
     ``tenant_id`` (``None`` → built-in scope). Built-in ingests are
     gated on :class:`TenantRole.TENANT_ADMIN`; tenant-curated ingests
     are gated on a match between the requested ``tenant_id`` and the
-    operator's tenant. Mismatches raise :class:`PermissionError`,
-    which the REST router maps onto HTTP 403.
+    operator's tenant, unless the operator holds ``platform_admin``
+    (#3800 — a platform operator seeding a connector row for another
+    tenant). Mismatches raise :class:`PermissionError`, which the REST
+    router maps onto HTTP 403.
 
     LLM-client factory: pass a custom factory to inject a test stub or
     a production adapter once one lands. The default fail-closed
@@ -531,6 +537,13 @@ class IngestionPipelineService:
         ingests require the operator's tenant_id to match. Raises
         :class:`PermissionError` on a violation.
 
+        The one exception (#3800): an operator with ``platform_admin``
+        may ingest into another tenant. This only happens when the
+        caller names that tenant explicitly — ``None`` still means the
+        built-in scope, never "some other tenant". :meth:`ingest`
+        writes a :data:`OP_CROSS_TENANT_INGEST` audit row for such a
+        write before any row lands.
+
         Public because it is the single tenant-scope predicate for
         ingest writes, checked at two layers on purpose: the REST
         route calls it eagerly *before* minting the async job row
@@ -546,7 +559,7 @@ class IngestionPipelineService:
                     "built-in connector ingest requires tenant_admin",
                 )
             return
-        if tenant_id != self._operator.tenant_id:
+        if tenant_id != self._operator.tenant_id and not self._operator.platform_admin:
             raise PermissionError(
                 f"operator tenant_id={self._operator.tenant_id} cannot ingest into "
                 f"tenant_id={tenant_id}",
@@ -778,6 +791,9 @@ class IngestionPipelineService:
                 log=log,
             )
 
+        if tenant_id is not None and tenant_id != self._operator.tenant_id:
+            await self._audit_cross_tenant_ingest(connector_id=connector_id, tenant_id=tenant_id)
+
         execution_profile = (
             build_ingest_execution_profile(
                 product=product,
@@ -802,6 +818,28 @@ class IngestionPipelineService:
         )
 
     # ----- private helpers ------------------------------------------------
+
+    async def _audit_cross_tenant_ingest(self, *, connector_id: str, tenant_id: UUID) -> None:
+        """Commit the audit row for a platform-admin ingest into another tenant (#3800).
+
+        The row carries the acting operator (``operator_sub`` and the
+        operator's own tenant on the row) and the target tenant in the
+        payload. It commits before the register phase writes anything,
+        so a failed audit write stops the ingest with no rows written.
+        """
+        async with self._sessionmaker()() as session:
+            await write_audit_row(
+                session,
+                operator_sub=self._operator.sub,
+                operator_tenant_id=self._operator.tenant_id,
+                op_id=OP_CROSS_TENANT_INGEST,
+                payload={
+                    "connector_id": connector_id,
+                    "target_tenant_id": str(tenant_id),
+                    "platform_admin": True,
+                },
+            )
+            await session.commit()
 
     def _assert_product_round_trips(self, *, product: str, version: str, impl_id: str) -> None:
         """Reject a supplied ``product`` that does not round-trip its connector_id.

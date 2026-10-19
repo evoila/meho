@@ -3,8 +3,8 @@
 
 """Typed-op metadata + registrar for :class:`InstallerConnector`.
 
-The Installer's governed bring-up surface ships as five submit/poll typed
-primitives (``source_kind="typed"``, #3078; retry #3123) so they dispatch on
+The Installer's governed bring-up surface ships as six submit/poll/list typed
+primitives (``source_kind="typed"``, #3078; retry #3123; list #3418) so they dispatch on
 a fresh boot with zero catalog ingest:
 
 * ``installer.sddc.spec.validate`` — submit an ``SddcSpec`` validation
@@ -18,6 +18,8 @@ a fresh boot with zero catalog ingest:
   ``dangerous`` + ``requires_approval``).
 * ``installer.sddc.bringup.status`` — poll one bring-up task
   (``GET /v1/sddcs/{id}``; ``safe``).
+* ``installer.sddc.list`` — list every bring-up task with its id and status,
+  no id needed (``GET /v1/sddcs``; ``safe``; #3418).
 
 Plus the **air-gapped depot lifecycle** family (#3121, group
 ``installer-depot``): ``installer.system.depot.get`` / ``.set`` (read /
@@ -110,7 +112,9 @@ INSTALLER_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "its verdict; installer.sddc.bringup.start (dangerous, approval-gated) "
         "starts the bring-up and installer.sddc.bringup.status polls the task's "
         "lifecycle state (IN_PROGRESS / COMPLETED_WITH_SUCCESS / "
-        "COMPLETED_WITH_FAILURE) and per-stage sub-tasks; on "
+        "COMPLETED_WITH_FAILURE) and per-stage sub-tasks; installer.sddc.list "
+        "lists every bring-up task with its id and status and needs no id, so "
+        "use it to find a running bring-up whose id you do not have; on "
         "COMPLETED_WITH_FAILURE, installer.sddc.bringup.retry (dangerous, "
         "approval-gated) resumes the task from its failed sub-task. The "
         "one-shot governed validate-then-deploy unit is "
@@ -533,6 +537,64 @@ _EMPTY_PARAMS: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+_SDDC_LIST = InstallerTypedOp(
+    op_id="installer.sddc.list",
+    handler_attr="sddc_list",
+    summary="List every VCF bring-up task on the Installer with its id and status.",
+    description=(
+        "Reads GET /v1/sddcs — every VCF bring-up (SDDC) task the Installer "
+        "knows, running or finished. Needs no id: use it to find the id of a "
+        "bring-up that was started (for example by an approved "
+        "installer.sddc.bringup.start) when that id was lost. Each task is cut "
+        "down to id / name / status / deploymentType / vcfInstanceName / "
+        "creationTimestamp; the large sddcSubTasks[] and milestones[] arrays are "
+        "dropped — read them with installer.sddc.bringup.status and the id. "
+        "Works with zero catalog ingest. safety_level=safe, read-only."
+    ),
+    parameter_schema=_EMPTY_PARAMS,
+    response_schema={
+        "type": "object",
+        "properties": {
+            "elements": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "name": {"type": "string"},
+                        "status": {"type": "string"},
+                        "deploymentType": {"type": "string"},
+                        "vcfInstanceName": {"type": "string"},
+                        "creationTimestamp": {"type": "string"},
+                    },
+                },
+            },
+            "pageMetadata": {"type": "object"},
+        },
+        "additionalProperties": True,
+    },
+    group_key=_GROUP_BRINGUP,
+    tags=("read-only", "vcf", "installer", "bringup", "status", "list"),
+    safety_level="safe",
+    requires_approval=False,
+    llm_instructions=_instructions(
+        when_to_use=(
+            "Call to see which VCF bring-ups exist on the Installer and their "
+            "state, or to recover the id of a running bring-up you no longer "
+            "have, then poll installer.sddc.bringup.status with that id."
+        ),
+        output_shape=(
+            "{elements: [{id, name, status, deploymentType, vcfInstanceName, "
+            "creationTimestamp}], pageMetadata?}. status is IN_PROGRESS / "
+            "COMPLETED_WITH_SUCCESS / ROLLBACK_SUCCESS / COMPLETED_WITH_FAILURE. "
+            "No sub-task detail here — call installer.sddc.bringup.status with "
+            "the id for it. A long list reduces to a JSONFlux handle; read the "
+            "rest with result_query."
+        ),
+        parameter_hints={},
+    ),
+)
+
 _DEPOT_GET = InstallerTypedOp(
     op_id="installer.system.depot.get",
     handler_attr="system_depot_get",
@@ -862,7 +924,8 @@ _BUNDLES_DOWNLOAD = InstallerTypedOp(
 
 #: The typed ops :class:`InstallerConnector` registers at lifespan startup,
 #: in submit → poll order per primitive pair (the bring-up trio adds the
-#: failed-task retry between its submit and its poll; the depot family runs
+#: failed-task retry between its submit and its poll, and the id-less task
+#: list after its poll; the depot family runs
 #: in its air-gapped lifecycle order: settings read/write → trust store
 #: read/write → bundle inventory read / download-detail read / download).
 INSTALLER_TYPED_OPS: tuple[InstallerTypedOp, ...] = (
@@ -871,6 +934,7 @@ INSTALLER_TYPED_OPS: tuple[InstallerTypedOp, ...] = (
     _BRINGUP_START,
     _BRINGUP_RETRY,
     _BRINGUP_STATUS,
+    _SDDC_LIST,
     _DEPOT_GET,
     _DEPOT_SET,
     _TRUSTED_CERTIFICATES_LIST,

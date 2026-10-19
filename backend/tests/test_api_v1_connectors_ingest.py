@@ -3040,6 +3040,45 @@ def test_ingest_cross_tenant_tenant_id_rejected_403(client: TestClient) -> None:
     assert "cannot ingest into" in response.json()["detail"]
 
 
+def test_ingest_platform_admin_foreign_tenant_id_passes_scope_gate(
+    client: TestClient,
+) -> None:
+    """A ``platform_admin`` naming another tenant passes the route gate (#3800).
+
+    Driven as a dry run with inline spec content, so the request passes
+    the eager :func:`_authorize_write_scope_or_403` gate and the
+    service-layer re-check without any fetch or DB write.
+    """
+    tenant_a = uuid.uuid4()
+    other_tenant = uuid.uuid4()
+    key, token = _admin_token(tenant_id=tenant_a, platform_admin=True)
+    spec = (
+        'openapi: "3.1.0"\n'
+        "info: {title: Scope fixture, version: '1.0.0'}\n"
+        "paths:\n"
+        "  /things:\n"
+        "    get:\n"
+        "      operationId: listThings\n"
+        "      responses: {'200': {description: ok}}\n"
+    )
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={
+                "product": "scopeallowed",
+                "version": "1.0",
+                "impl_id": "scopeallowed-rest",
+                "specs": [{"uri": "fixture://scopeallowed/spec.yaml", "content": spec}],
+                "tenant_id": str(other_tenant),
+                "dry_run": True,
+            },
+            headers=_authed(token),
+        )
+    assert response.status_code == 200, response.text
+    assert response.json()["ingestion"]["inserted_count"] == 1
+
+
 def test_ingest_async_cross_tenant_tenant_id_rejected_403_no_job(
     client: TestClient,
 ) -> None:

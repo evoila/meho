@@ -398,6 +398,90 @@ def test_bringup_retry_registers_its_own_preview_builder() -> None:
     )
 
 
+# --------------------------------------------------------------- sddc.list (#3418)
+
+
+def _sddc_task_row(task_id: str, status: str) -> dict[str, object]:
+    """A vendor ``SddcTask`` as ``GET /v1/sddcs`` returns it (9.1 field names)."""
+    return {
+        "id": task_id,
+        "name": f"bring-up {task_id}",
+        "status": status,
+        "deploymentType": "VCF",
+        "vcfInstanceName": "vcf-mgmt-01",
+        "creationTimestamp": "2026-10-01T08:00:00.000Z",
+        "localizableNamePack": {"component": "VCF"},
+        "sddcSubTasks": [{"name": f"subtask-{i}", "status": status} for i in range(260)],
+        "milestones": [{"name": "Deploy vCenter", "status": status}],
+        "unexpectedVendorField": {"rootPassword": "SECRET-vendor"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_sddc_list_returns_each_task_id_and_status_without_an_id() -> None:
+    """The list needs no id and keeps only the summary fields of each task."""
+    connector = _make_connector()
+    async with respx.mock(base_url="https://installer-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(201, json={"accessToken": "tok-abc"})
+        list_route = mock.get(_SDDCS_PATH).respond(
+            200,
+            json={
+                "elements": [
+                    _sddc_task_row("sddc-old", "COMPLETED_WITH_FAILURE"),
+                    _sddc_task_row("sddc-new", "IN_PROGRESS"),
+                ],
+                "pageMetadata": {"pageNumber": 0, "totalElements": 2},
+            },
+        )
+        result = await connector.sddc_list(_make_operator(), _TARGET, {})
+
+    assert list_route.call_count == 1
+    assert list_route.calls[0].request.headers.get("authorization") == "Bearer tok-abc"
+    assert [(t["id"], t["status"]) for t in result["elements"]] == [
+        ("sddc-old", "COMPLETED_WITH_FAILURE"),
+        ("sddc-new", "IN_PROGRESS"),
+    ]
+    assert set(result["elements"][0]) == {
+        "id",
+        "name",
+        "status",
+        "deploymentType",
+        "vcfInstanceName",
+        "creationTimestamp",
+    }
+    assert result["pageMetadata"] == {"pageNumber": 0, "totalElements": 2}
+    assert "SECRET-vendor" not in json.dumps(result)
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_sddc_list_returns_empty_elements_when_no_bring_up_exists() -> None:
+    connector = _make_connector()
+    async with respx.mock(base_url="https://installer-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(201, json={"accessToken": "tok-abc"})
+        mock.get(_SDDCS_PATH).respond(200, json={})
+        result = await connector.sddc_list(_make_operator(), _TARGET, {})
+
+    assert result == {"elements": []}
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_sddc_list_propagates_401_for_session_recovery() -> None:
+    """A session-expiry 401 reaches the dispatcher's #2067 recovery arm unretried."""
+    connector = _make_connector()
+    async with respx.mock(base_url="https://installer-a.test.invalid") as mock:
+        token_route = mock.post(_TOKEN_PATH).respond(201, json={"accessToken": "tok-abc"})
+        list_route = mock.get(_SDDCS_PATH).respond(401, json={"message": "token expired"})
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            await connector.sddc_list(_make_operator(), _TARGET, {})
+
+    assert exc_info.value.response.status_code == 401
+    assert token_route.call_count == 1
+    assert list_route.call_count == 1
+    await connector.aclose()
+
+
 # --------------------------------------------------------------- depot family (#3121)
 
 _DEPOT_PATH = "/v1/system/settings/depot"

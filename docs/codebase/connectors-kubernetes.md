@@ -819,6 +819,39 @@ conditional on a versioned entry being present.
    ones pass through — writes the audit row, fires the broadcast event,
    and wraps the result in `OperationResult.status="ok"`.
 
+### Flight-recorder span per API request (`_wire_span.py`, #3841)
+
+When the flight recorder captures a dispatch, every Kubernetes API HTTP
+request now gets its own `vendor_call` span under the op's `typed` span.
+Before, the trace showed only the `typed` span, so a "200 but nothing
+happened" apply could not be explained from the trace.
+
+- `instrument_api_client()` wraps `RESTClientObject.request` on each
+  cached `ApiClient` once, when `_get_api_client` builds it. All typed
+  `CoreV1Api` / `AppsV1Api` calls and the `DynamicClient` used by
+  `k8s.apply` pass through that one method.
+- The span holds: method, path (no query), the query with values kept
+  only for safe switches (`dryRun`, `fieldManager`, `force`, selectors,
+  ...; `continue` is masked), status, request and response headers
+  through the header allowlist (`content-type`, `server`, `via`,
+  `warning`, `audit-id` survive), bodies through the normal body
+  redaction, and `response_object`: `kind`, `apiVersion`, `name`,
+  `namespace`, `uid`, `resourceVersion`, `creationTimestamp`,
+  `generation`, and a `managedFields` summary (manager, operation,
+  apiVersion, time, subresource). Annotations, labels and `fieldsV1`
+  are never copied into `response_object`.
+- Non-2xx (`ApiException`) and transport errors are recorded
+  (`status` = HTTP code or `error:<ExceptionClass>`) and re-raised
+  unchanged. With `_preload_content=False` the wrapper reads the body
+  first; `aiohttp` caches it, so the caller's later `json()` still
+  works. A `watch` / `follow` stream is never read.
+- When capture is off the wrapper costs one contextvar read.
+- Not covered: `k8s.exec` over `WsApiClient` (websocket transport).
+
+The shared recorder is
+`flight_recorder/sdk_http.py::record_sdk_vendor_call`; it reuses the
+generic-connector redaction path so both span sources look the same.
+
 ### Topology discovery (`discover_topology`)
 
 G0.14-T12 (#1201) lands the first

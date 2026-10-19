@@ -755,8 +755,16 @@ signed-URL/client-identity header is absent by construction:
 | `content-type`, `content-length`, `content-encoding`, `content-language`, `content-range` | `authorization`, `proxy-authorization`, `www-authenticate`, `proxy-authenticate` |
 | `accept*`, `connection`, `transfer-encoding`, `host`, `user-agent`, `server`, `via`, `allow` | `cookie`, `set-cookie` |
 | `cache-control`, `date`, `age`, `expires`, `etag`, `vary`, `if-*`, `range`, `retry-after` | every `x-*-token`, `x-api-key`, `x-csrf-token`, `x-xsrf-token`, `x-vault-token`, `x-amz-security-token` |
-| `x-request-id`, `x-correlation-id`, `traceparent`, `tracestate`, `x-ratelimit-*` | `location`, `content-location`, `referer` (signed URLs / tokens) |
+| `x-request-id`, `x-correlation-id`, `traceparent`, `tracestate`, `x-ratelimit-*`, `audit-id` (Kubernetes request id), `warning` (RFC 7234; Kubernetes deprecation and admission notices) | `location`, `content-location`, `referer` (signed URLs / tokens) |
 | `strict-transport-security`, `x-content-type-options`, `x-frame-options`, `referrer-policy`, `content-security-policy` | `forwarded`, `x-forwarded-*`, `x-real-ip` (client identity / PII) |
+
+**Query strings** (`query.py`, #3841). The vendor-call seam drops the
+query from a recorded URL. A transport that needs the query on the span
+(Kubernetes: `dryRun`, `fieldManager`) passes it to `redact_query(params,
+safe_names)`. Every parameter name is kept. A value is kept only when its
+name is on the caller's safe list, and it still gets the credential-shape
+scrub. Every other value becomes `[redacted]` without being read. A query
+shape the engine cannot walk records nothing and is uncertain.
 
 As defense-in-depth the value of every *surviving* header is still run
 through the credential-shape net (`_content.py`), so a `Bearer …` pasted

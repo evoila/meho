@@ -86,8 +86,8 @@ meho agent create <name> [flags]
 - `--json` — emit raw AgentDefinitionRead JSON instead of the human summary
 - `--model-tier` — logical model tier: standard | fast | deep
 - `--output-schema` — optional structured-output JSON Schema as a JSON object: inline JSON, @<path>, or @-
-- `--system-prompt` — the agent's standing rules, the same for every run; the task for one run goes in the --input flag of meho agent run (guide: https://evoila.github.io/meho/guides/hosted-agents/)
-- `--toolset` — allowed-tools spec as a JSON object: inline JSON, @<path>, or @- (default {}); fields and tool names: https://evoila.github.io/meho/guides/hosted-agents/
+- `--system-prompt` — the agent's standing rules, the same for every run; the task for one run goes in the --input flag of meho agent run (guide: https://evoila.github.io/meho/latest/guides/hosted-agents/)
+- `--toolset` — allowed-tools spec as a JSON object: inline JSON, @<path>, or @- (default {}); fields and tool names: https://evoila.github.io/meho/latest/guides/hosted-agents/
 - `--turn-budget` — max model turns the runtime allows (1..1000)
 
 ### `meho agent delete`
@@ -117,8 +117,8 @@ meho agent edit <name> [flags]
 - `--json` — emit raw AgentDefinitionRead JSON instead of the human summary
 - `--model-tier` — new model tier: standard | fast | deep
 - `--output-schema` — new output schema as a JSON object: inline JSON, @<path>, or @-
-- `--system-prompt` — new system prompt: the agent's standing rules (guide: https://evoila.github.io/meho/guides/hosted-agents/)
-- `--toolset` — new toolset spec as a JSON object: inline JSON, @<path>, or @-; fields and tool names: https://evoila.github.io/meho/guides/hosted-agents/
+- `--system-prompt` — new system prompt: the agent's standing rules (guide: https://evoila.github.io/meho/latest/guides/hosted-agents/)
+- `--toolset` — new toolset spec as a JSON object: inline JSON, @<path>, or @-; fields and tool names: https://evoila.github.io/meho/latest/guides/hosted-agents/
 - `--turn-budget` — new turn budget (1..1000)
 
 ### `meho agent grant`

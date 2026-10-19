@@ -76,7 +76,7 @@ import contextlib
 import os
 import socket
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -104,7 +104,7 @@ from meho_backplane.agent.toolset import toolset_admits_runbook_execution
 from meho_backplane.agents.schemas import AgentDefinitionRead
 from meho_backplane.agents.service import AgentDefinitionService
 from meho_backplane.auth.agent_token import get_client_credentials_token
-from meho_backplane.auth.delegation import actor_delegation
+from meho_backplane.auth.delegation import actor_delegation, resolve_actor_sub
 from meho_backplane.auth.jwt import verify_jwt_for_audience
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
@@ -213,6 +213,13 @@ class AgentRunStatusView:
     #: :attr:`agent_definition_id`. ``None`` for an ad-hoc run and for a
     #: dangling soft-FK (the definition was deleted after the run).
     agent_name: str | None = None
+    #: Who the run acts for: the person who started a direct run, or the
+    #: agent's own principal on a scheduled run (#4237).
+    identity_sub: str | None = None
+    #: The agent that acts for :attr:`identity_sub` on a direct run (the
+    #: definition's ``identity_ref``). ``None`` when the agent is itself
+    #: the subject (a scheduled run) and on rows written before #4237.
+    identity_act: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,6 +253,13 @@ class AgentRunSummary:
     #: :attr:`agent_definition_id`. ``None`` for an ad-hoc run and for a
     #: dangling soft-FK (the definition was deleted after the run).
     agent_name: str | None = None
+    #: Who the run acts for: the person who started a direct run, or the
+    #: agent's own principal on a scheduled run (#4237).
+    identity_sub: str | None = None
+    #: The agent that acts for :attr:`identity_sub` on a direct run (the
+    #: definition's ``identity_ref``). ``None`` when the agent is itself
+    #: the subject (a scheduled run) and on rows written before #4237.
+    identity_act: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -621,6 +635,7 @@ class AgentInvoker:
         provider: str,
         model: str,
         trigger: AgentRunTrigger = AgentRunTrigger.DIRECT,
+        identity_act: str | None = None,
     ) -> tuple[uuid.UUID, str]:
         """Insert a ``pending`` run row, claim a lease, go ``running``, commit.
 
@@ -633,6 +648,11 @@ class AgentInvoker:
         row this worker claimed. A human-initiated :meth:`run` records
         ``DIRECT``; an autonomous :meth:`run_scheduled` records
         ``SCHEDULED``.
+
+        *identity_act* is the agent that acts for the person on a direct
+        run (the definition's ``identity_ref``). It is ``None`` on a
+        scheduled run, where the agent is itself the subject. The run row
+        records it so the run's read views show who acted for whom (#4237).
 
         The lease is stamped (#1501 / G11.3-T4 #825) in the *same*
         transaction as the ``pending`` -> ``running`` transition, so a
@@ -661,6 +681,7 @@ class AgentInvoker:
                 session,
                 tenant_id=operator.tenant_id,
                 identity_sub=operator.sub,
+                identity_act=identity_act,
                 trigger=trigger,
                 model_tier=entry.model_tier,
                 agent_definition_id=entry.id,
@@ -900,7 +921,7 @@ class AgentInvoker:
         # committed — never a ``running`` row with no backing task.
         with actor_delegation(entry.identity_ref):
             run_id, lease_owner = await self._create_run_row(
-                operator, entry, provider=provider, model=model
+                operator, entry, provider=provider, model=model, identity_act=entry.identity_ref
             )
             # Unexecutable-runbook guard (#2077): a prompt instructing the
             # agent to execute a runbook can never be satisfied — the agent
@@ -1481,6 +1502,24 @@ class AgentInvoker:
                 response before the SSE connection is opened.
         """
         entry = await self._load_definition(operator, name)
+        # Same delegation binding as :meth:`run`: the person stays the
+        # subject and the definition's agent is the actor (#4237).
+        # ``aclosing`` runs the inner stream's cleanup (heartbeat stop, final
+        # run state) at once when the client goes away.
+        with actor_delegation(entry.identity_ref):
+            stream = self._stream_delegated_run(operator, entry, name, inputs)
+            async with contextlib.aclosing(stream):
+                async for item in stream:
+                    yield item
+
+    async def _stream_delegated_run(
+        self,
+        operator: Operator,
+        entry: AgentDefinitionRead,
+        name: str,
+        inputs: str,
+    ) -> AsyncGenerator[tuple[uuid.UUID, AgentRunEvent]]:
+        """The body of :meth:`stream_events`, run inside the actor binding."""
         definition = self._to_agent_definition(entry)
         # G11.5-T6 #1080 — pre-execution budget gate. Raised
         # *before* the durable row is created so the SSE consumer
@@ -1491,7 +1530,7 @@ class AgentInvoker:
         settings = get_settings()
         provider, model = _split_model_id(settings.agent_default_model)
         run_id, lease_owner = await self._create_run_row(
-            operator, entry, provider=provider, model=model
+            operator, entry, provider=provider, model=model, identity_act=entry.identity_ref
         )
 
         # Unexecutable-runbook guard (#2077) — same refusal as :meth:`run`,
@@ -1599,6 +1638,10 @@ async def _record_child_run(
     so the child run is inspectable while it executes (mirrors
     :meth:`AgentInvoker._create_run_row`).
 
+    The child records the actor in force for the parent run as its
+    ``identity_act`` (#4237): the parent's agent on a direct run, ``None``
+    on a scheduled run.
+
     Like the top-level path (#1501), the row is leased in the same
     transaction as the ``running`` transition; the lease owner is returned so
     the ``invoke_agent`` tool can heartbeat the child for its loop's lifetime
@@ -1633,6 +1676,7 @@ async def _record_child_run(
             session,
             tenant_id=operator.tenant_id,
             identity_sub=operator.sub,
+            identity_act=resolve_actor_sub(),
             trigger=AgentRunTrigger.AGENT_INVOKED,
             model_tier=entry.model_tier,
             agent_definition_id=entry.id,
@@ -1719,6 +1763,8 @@ def _row_to_view(row: AgentRunRow, *, agent_name: str | None = None) -> AgentRun
         error=row.error,
         agent_definition_id=row.agent_definition_id,
         agent_name=agent_name,
+        identity_sub=row.identity_sub,
+        identity_act=row.identity_act,
     )
 
 
@@ -1744,6 +1790,8 @@ def _row_to_summary(row: AgentRunRow, *, agent_name: str | None = None) -> Agent
         ended_at=row.ended_at,
         agent_definition_id=row.agent_definition_id,
         agent_name=agent_name,
+        identity_sub=row.identity_sub,
+        identity_act=row.identity_act,
     )
 
 

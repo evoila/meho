@@ -101,8 +101,11 @@ What is **not** in T6 or T4 (other tasks own these):
   lineage key), `agent_definition_id` (soft-FK to the G11.1-T2 table
   landing in parallel #809), `tenant_id` (real FK to `tenant.id`),
   `identity_sub` / `identity_act` (the RFC 8693 delegation pair —
-  `sub` = principal acted for, `act` = agent acting, nullable for a
-  direct human run), `trigger`, `model_tier` (logical tier; the G11.5
+  `sub` = principal acted for, `act` = agent acting. A direct run
+  records the person in `sub` and the definition's `identity_ref` in
+  `act` (#4237); a scheduled run records the agent in `sub` and leaves
+  `act` null; a child run copies the actor in force for its parent.
+  The REST, MCP and CLI run views show both), `trigger`, `model_tier` (logical tier; the G11.5
   resolver maps it to a concrete pair), `provider` / `model` (resolved,
   nullable until `start`), `status`, `turns`, `cost` (stub until C3),
   `output`, `error`, `parent_run_id` (self-referential soft-FK for

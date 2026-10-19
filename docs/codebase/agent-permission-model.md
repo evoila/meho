@@ -123,15 +123,32 @@ G11.2-T1):
   at once; MEHO records the grant use on the approvals audit ledger (#3151,
   see [service-principal-grants.md](service-principal-grants.md)). Everything
   else returns `auto-execute`.
-  **The per-agent resolver is never consulted for a non-agent token: no
-  `agent_permission` row is loaded on this branch, so a grant has zero effect
-  on a `user`/`service`-kind dispatch.** This is deliberate (G11.2-T3) — an op a
+  **Outside a direct hosted-agent run, the per-agent resolver is never
+  consulted for a non-agent token: no `agent_permission` row is loaded on this
+  branch, so a grant has zero effect on a `user`/`service`-kind dispatch.** This is deliberate (G11.2-T3) — an op a
   human operator has always been able to run must not silently start
   pending/denying because someone wrote a grant.
 - **`agent`** — the full per-(principal, op, target) resolver below. After
   resolution, `requires_approval=True` folds the verdict up to at least
   `needs-approval`, so a connector-flagged op is never auto-executed by an agent
   regardless of its `safety_level`.
+- **Any caller inside a direct hosted-agent run** (#4237) — when a caller
+  starts a hosted agent run directly, the run binds the definition's agent
+  (`identity_ref`, `agent:<name>`) as the actor
+  (`auth/delegation.py::actor_delegation`). `policy_gate` checks the bound
+  actor before it looks at the caller's kind, and works out two verdicts:
+  the hosted agent's (the resolver below, keyed on `agent:<name>`, with the
+  caller's role ceiling) and the caller's own (the branch above that matches
+  the caller's kind, so an `agent`-kind caller keeps its own grants). The
+  stricter one wins. The caller's verdict is skipped when it cannot change
+  the outcome: a hosted-agent `deny` returns at once, and a hosted-agent
+  `needs-approval` returns at once for a person or service caller, because
+  the non-agent branch never returns `deny`. This also means a standing
+  grant is recorded as used only when the call runs. An `agent`-kind caller
+  is still checked in that case, so its own `deny` grant refuses the call
+  instead of parking it. The rule in one line: a direct run may do only
+  what both the caller and the hosted agent may do. See `agent-runtime.md`
+  "Whose identity a direct run uses".
 
 Because a grant is consulted **only** on the `agent` branch, a grant whose
 `principal_sub` names no registered, non-revoked agent principal can never be

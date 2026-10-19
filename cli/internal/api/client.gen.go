@@ -1291,13 +1291,19 @@ type AgentRunStatus string
 
 // AgentRunStatusResponse Poll response for “GET /agents/runs/{handle}“.
 type AgentRunStatusResponse struct {
-	AgentDefinitionId *openapi_types.UUID     `json:"agent_definition_id"`
-	AgentName         *string                 `json:"agent_name"`
-	Error             *string                 `json:"error"`
-	Model             *string                 `json:"model"`
-	Output            *map[string]interface{} `json:"output"`
-	Provider          *string                 `json:"provider"`
-	RunId             openapi_types.UUID      `json:"run_id"`
+	AgentDefinitionId *openapi_types.UUID `json:"agent_definition_id"`
+	AgentName         *string             `json:"agent_name"`
+	Error             *string             `json:"error"`
+
+	// IdentityAct The agent that acts for identity_sub on a direct run. Null when the agent is itself the subject.
+	IdentityAct *string `json:"identity_act"`
+
+	// IdentitySub Who the run acts for: the person who started a direct run, or the agent itself on a scheduled run.
+	IdentitySub *string                 `json:"identity_sub"`
+	Model       *string                 `json:"model"`
+	Output      *map[string]interface{} `json:"output"`
+	Provider    *string                 `json:"provider"`
+	RunId       openapi_types.UUID      `json:"run_id"`
 
 	// Status Closed lifecycle status of an :class:`AgentRun`.
 	//
@@ -1349,11 +1355,17 @@ type AgentRunSummaryResponse struct {
 	AgentName         *string             `json:"agent_name"`
 	CreatedAt         time.Time           `json:"created_at"`
 	EndedAt           *time.Time          `json:"ended_at"`
-	Model             *string             `json:"model"`
-	ModelTier         string              `json:"model_tier"`
-	Provider          *string             `json:"provider"`
-	RunId             openapi_types.UUID  `json:"run_id"`
-	StartedAt         *time.Time          `json:"started_at"`
+
+	// IdentityAct The agent that acts for identity_sub on a direct run. Null when the agent is itself the subject.
+	IdentityAct *string `json:"identity_act"`
+
+	// IdentitySub Who the run acts for: the person who started a direct run, or the agent itself on a scheduled run.
+	IdentitySub *string            `json:"identity_sub"`
+	Model       *string            `json:"model"`
+	ModelTier   string             `json:"model_tier"`
+	Provider    *string            `json:"provider"`
+	RunId       openapi_types.UUID `json:"run_id"`
+	StartedAt   *time.Time         `json:"started_at"`
 
 	// Status Closed lifecycle status of an :class:`AgentRun`.
 	//

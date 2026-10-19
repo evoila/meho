@@ -573,12 +573,25 @@ async def test_topology_write_audit_rows_carry_actor_sub(
     Mirrors how ``mcp/audit.py`` populates the column: inside an RFC
     8693 delegation scope the acting principal lands on the row; outside
     it the column stays NULL (direct human requests, autonomous runs).
+
+    Inside a delegation scope the actor's grants also apply (#4237). The
+    actor holds no grant, so the caution write first waits for approval;
+    the approved resume then runs the write and lands the audit row.
     """
     await _seed_edge_endpoints()
     human = _make_operator("operator:human")
 
     with actor_delegation("user:boss@example.com"):
-        result = await _dispatch_topology(human, TOPOLOGY_ANNOTATE_OP_ID, _ANNOTATE_PARAMS)
+        parked = await _dispatch_topology(human, TOPOLOGY_ANNOTATE_OP_ID, _ANNOTATE_PARAMS)
+        assert parked.status == "awaiting_approval", parked.error
+        result = await dispatch(
+            operator=human,
+            connector_id=TOPOLOGY_GRAPH_CONNECTOR_ID,
+            op_id=TOPOLOGY_ANNOTATE_OP_ID,
+            target=None,
+            params=_ANNOTATE_PARAMS,
+            _approved=True,
+        )
     assert result.status == "ok", result.error
 
     async with get_sessionmaker()() as session:

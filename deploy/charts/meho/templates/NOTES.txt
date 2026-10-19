@@ -19,6 +19,9 @@ Resources deployed:
 {{- if .Values.prometheusRule.enabled }}
   - PrometheusRule / {{ include "meho.fullname" . }} (starter alerts)
 {{- end }}
+{{- if .Values.coreKeycloak.enabled }}
+  - StatefulSet / {{ include "coreKeycloak.fullname" . }} (built-in Keycloak; realm meho at https://{{ .Values.coreKeycloak.hostname }}/auth/realms/meho)
+{{- end }}
 {{- if .Values.corePostgres.enabled }}
 
 Built-in PostgreSQL (corePostgres):
@@ -41,6 +44,14 @@ Next steps:
 {{- end }}
   3. Tail backplane logs:
        kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/name={{ include "meho.name" . }} -f
+{{- if .Values.coreKeycloak.enabled }}
+  4. Watch the built-in Keycloak start (the first start imports the realm):
+       kubectl -n {{ .Release.Namespace }} rollout status statefulset/{{ include "coreKeycloak.fullname" . }}
+     Pods reach it at http://{{ include "coreKeycloak.fullname" . }}:{{ .Values.coreKeycloak.service.port | default 8080 }}/auth.
+{{- if not .Values.coreKeycloak.ingress.exposeAdmin }}
+     The admin console is not on the ingress (coreKeycloak.ingress.exposeAdmin=false).
+{{- end }}
+{{- end }}
 {{- if and .Values.checkRunner.enabled (eq .Values.config.credentialBackend "vault") }}
 
 WARNING: checkRunner.enabled=true on a Vault credential backend (#2642).

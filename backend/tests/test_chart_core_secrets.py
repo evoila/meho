@@ -52,7 +52,18 @@ _BASE_OVERRIDES = [
     "networkPolicy.enabled=false",
 ]
 
-_CORE_ON = ["--set", "corePostgres.enabled=true", "--set", "coreKeycloak.enabled=true"]
+# The Keycloak subchart (#4040) needs its host name and first tenant id
+# whenever coreKeycloak is on, and the schema needs corePostgres with it.
+_CORE_ON = [
+    "--set",
+    "corePostgres.enabled=true",
+    "--set",
+    "coreKeycloak.enabled=true",
+    "--set",
+    "coreKeycloak.hostname=meho.test",
+    "--set",
+    "coreKeycloak.firstTenantId=3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c",
+]
 
 _HOOK_PHASES = "pre-install,pre-upgrade,post-install,post-upgrade"
 _CORE_NAMES = [
@@ -173,7 +184,7 @@ def test_role_grants_exactly_the_designed_rights() -> None:
 
 
 def test_role_has_no_operator_rule_when_nothing_is_named() -> None:
-    docs = _render("--set", "coreKeycloak.enabled=true")
+    docs = _render(*_CORE_ON, "--set", f"postgres.credentialsSecret={_RELEASE}-core-postgres-meho")
     verbs = [tuple(rule["verbs"]) for rule in _core_objects(docs)["Role"]["rules"]]
     assert ("get",) not in verbs
 
@@ -201,8 +212,19 @@ def test_postgres_plan_makes_the_three_database_secrets() -> None:
 
 
 def test_keycloak_plan_makes_the_bootstrap_and_three_client_secrets() -> None:
-    made = _made(_plan(_render("--set", "coreKeycloak.enabled=true")))
+    made = _made(
+        _plan(
+            _render(
+                *_CORE_ON,
+                "--set",
+                f"postgres.credentialsSecret={_RELEASE}-core-postgres-meho",
+            )
+        )
+    )
     assert set(made.values()) == {
+        "postgres-superuser",
+        "postgres-meho",
+        "postgres-keycloak",
         "keycloak-bootstrap",
         "keycloak-admin",
         "ui-auth",

@@ -43,10 +43,20 @@ each site has one tenant, so all five groups carry the same
    `meho-mcp`, and later `meho-web`) each have three User Attribute
    mappers: `tenant_id`, `tenant_role` and `approver`. No scripts. No
    fixed values on a client that many people share.
-4. **Leave the person's own attributes empty.** The mapper looks at the
+4. **Nobody sets these values on a person.** The mapper looks at the
    person first. Only when the person has no value of their own does it
    look at the person's groups. So a `tenant_role` set on the person
-   wins over the group.
+   wins over the group. This means:
+   - leave the person's own `tenant_id`, `tenant_role` and `approver`
+     attributes empty;
+   - people must not be able to edit these attributes themselves. Keep
+     the realm's **Unmanaged Attributes** setting at **Disabled** (the
+     Keycloak default), **Admin can view** or **Admin can edit**. With
+     **Enabled**, a person can set their own `tenant_role` in the
+     account console
+     ([Keycloak docs](https://www.keycloak.org/docs/26.8.1/server_admin/#_understanding-managed-and-unmanaged-attributes));
+   - a directory link (LDAP or Active Directory) must not copy a
+     directory field into these attribute names.
 
 ## How the mapper reads a group attribute
 

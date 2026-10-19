@@ -150,9 +150,16 @@ Then put each person in **exactly one** of the five groups:
   tell which one.
 - To change a person's role, move them to another group. The change
   applies at their next login.
+- Leave the person's own `tenant_id`, `tenant_role` and `approver`
+  attributes empty: a value on the person wins over the group. Keep
+  **Realm settings → General → Unmanaged Attributes** at **Disabled**
+  (the default), **Admin can view** or **Admin can edit**, so people
+  cannot set these values on themselves
+  ([Keycloak docs](https://www.keycloak.org/docs/26.8.1/server_admin/#_understanding-managed-and-unmanaged-attributes)).
 
 `meho admin keycloak bootstrap-clients --tenant-id <uuid>` creates the
-five groups for you.
+five groups for you. On a later run, pass the same `--tenant-id`:
+without it, the command writes the all-zero UUID to the five groups.
 
 ## Step 6 — Create an operator user
 

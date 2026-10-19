@@ -230,6 +230,14 @@ The rules:
   `tenant_id`, and the backplane answers `401 missing_tenant_claim`.
 - **Leave the person's own `tenant_id` / `tenant_role` / `approver`
   attributes empty.** A value on the person wins over the group.
+- **People must not be able to set these attributes on themselves.**
+  Keep **Realm settings → General → Unmanaged Attributes** at
+  **Disabled** (the Keycloak default), **Admin can view** or **Admin
+  can edit**. With **Enabled**, a person can set their own
+  `tenant_role` in the account console, and it wins over their group
+  ([Keycloak docs](https://www.keycloak.org/docs/26.8.1/server_admin/#_understanding-managed-and-unmanaged-attributes)).
+  Do not add these three names to the user profile as attributes a
+  user can edit, and do not let a directory (LDAP) mapper write them.
 - **To change a role, move the person to another group.** The change
   applies at the person's next login (or when their current token
   expires).
@@ -252,7 +260,11 @@ them:
   prints `[updated] mapper tenant-id (replaced
   oidc-hardcoded-claim-mapper with oidc-usermodel-attribute-mapper)`.
   It does not delete old groups (for example `meho-admins`) or move
-  other people.
+  other people. The first admin user stays in the old group too; take
+  them out of it once nothing uses it.
+- **Pass the same `--tenant-id` as before.** Without it the command
+  writes the all-zero UUID to the five groups, which moves everyone to
+  another tenant.
 - **Or by hand:** delete every Hardcoded claim mapper for `tenant_id`
   or `tenant_role` on the client and on its client scopes, then do
   Steps 1–3.

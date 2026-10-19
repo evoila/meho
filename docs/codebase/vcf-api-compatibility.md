@@ -207,7 +207,12 @@ the ingested-catalog boundary.
   (`vmware-rest-8.0`), not the one the caller named. If no sibling qualifies,
   or the op is missing or disabled there, the result is still
   `unqualified_target_version` with the same fields. Typed and composite
-  descriptors are not affected. Code:
+  descriptors are not affected. The params are checked once, after this
+  choice, against the schema of the catalog that runs. So for a guarded
+  op, `unqualified_target_version` is reported before `invalid_params`.
+  `preview_operation` makes the same choice (without an audit row), so its
+  envelope names the sibling's `connector_id` and its `preview_hash` matches
+  the call. A destructive op can then use the fallback too. Code:
   `backend/src/meho_backplane/operations/_catalog_guard.py`.
 - **Safety floors.** The VMware hardware/lifecycle/power write floor
   (`dangerous` + approval) is keyed on `(product, impl_id)` and applies to the

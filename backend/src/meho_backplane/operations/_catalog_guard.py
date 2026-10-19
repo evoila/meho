@@ -21,7 +21,10 @@ the other catalog's descriptor instead (#3600), but only when:
 * the same ``op_id`` exists there as an **enabled** ingested descriptor
   the caller can see.
 
-Otherwise the rejection stands, unchanged. Typed and composite
+Otherwise the rejection stands, unchanged. The preview path uses the
+same choice (:func:`choose_catalog_for_target`, which writes no audit
+row), so a ``preview_hash`` taken with the named catalog matches the
+dispatch that runs on the sibling. Typed and composite
 descriptors never reach this code: the guard only applies to
 ``source_kind == "ingested"``.
 """
@@ -48,7 +51,12 @@ from meho_backplane.operations._audit import audit_rejection_safe
 from meho_backplane.operations._errors import result_unqualified_target_version
 from meho_backplane.operations._lookup import lookup_descriptor
 
-__all__ = ["CatalogSelection", "select_catalog_for_target"]
+__all__ = [
+    "CatalogRefusal",
+    "CatalogSelection",
+    "choose_catalog_for_target",
+    "select_catalog_for_target",
+]
 
 _log = structlog.get_logger(__name__)
 
@@ -69,19 +77,27 @@ class CatalogSelection:
     connector_class: type[Connector] | None
 
 
-async def select_catalog_for_target(
+@dataclass(frozen=True)
+class CatalogRefusal:
+    """Why neither the named catalog nor a sibling can serve the target."""
+
+    reason: str
+    target_product: str | None
+    target_version: str | None
+
+
+async def choose_catalog_for_target(
     *,
     operator: Operator,
     descriptor: EndpointDescriptor,
     connector_id: str,
     target: Any,
-    params_hash: str,
-    started: float,
-) -> CatalogSelection | OperationResult:
-    """Run the catalog target guard; fall back to a qualified sibling catalog.
+) -> CatalogSelection | CatalogRefusal:
+    """Pick the catalog that serves *target*, without writing an audit row.
 
-    Returns a :class:`CatalogSelection` when the dispatch may go on, or the
-    audited ``unqualified_target_version`` result when it may not.
+    Returns a :class:`CatalogSelection` (the named catalog, or a qualified
+    sibling) or a :class:`CatalogRefusal`. Both dispatch and preview use
+    this, so a preview binds the same catalog the dispatch runs on.
     """
     owner_class = get_connector_v2(descriptor.product, descriptor.version, descriptor.impl_id)
     if (
@@ -122,6 +138,31 @@ async def select_catalog_for_target(
             target_version=target_version,
         )
         return CatalogSelection(sibling, sibling_connector_id, resolved_class)
+    return CatalogRefusal(incompatibility, target_product, target_version)
+
+
+async def select_catalog_for_target(
+    *,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    connector_id: str,
+    target: Any,
+    params_hash: str,
+    started: float,
+) -> CatalogSelection | OperationResult:
+    """Run the catalog target guard; fall back to a qualified sibling catalog.
+
+    Returns a :class:`CatalogSelection` when the dispatch may go on, or the
+    audited ``unqualified_target_version`` result when it may not.
+    """
+    choice = await choose_catalog_for_target(
+        operator=operator,
+        descriptor=descriptor,
+        connector_id=connector_id,
+        target=target,
+    )
+    if isinstance(choice, CatalogSelection):
+        return choice
 
     duration_ms = (time.monotonic() - started) * 1000.0
     await audit_rejection_safe(
@@ -135,9 +176,9 @@ async def select_catalog_for_target(
     )
     return result_unqualified_target_version(
         descriptor.op_id,
-        reason=incompatibility,
-        target_product=target_product,
-        target_version=target_version,
+        reason=choice.reason,
+        target_product=choice.target_product,
+        target_version=choice.target_version,
         duration_ms=duration_ms,
     )
 

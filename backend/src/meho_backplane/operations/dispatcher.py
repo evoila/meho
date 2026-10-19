@@ -15,15 +15,17 @@ phases the parent Initiative names:
 2. Look up :class:`EndpointDescriptor` by the natural key
    (:func:`~meho_backplane.operations._lookup.lookup_descriptor`).
    Unknown -> structured ``unknown_op`` error.
-3. Validate ``params`` against ``descriptor.parameter_schema`` via
+3. For an ingested op whose catalog opts into a target check, the
+   catalog must accept the target, or a sibling catalog of the same
+   implementation that does must have the same op enabled; the dispatch
+   then runs on that sibling
+   (:mod:`meho_backplane.operations._catalog_guard`, #3600). Otherwise ->
+   structured ``unqualified_target_version`` error. Then validate
+   ``params`` against the chosen ``descriptor.parameter_schema`` via
    :class:`Draft202012Validator` (JSON Schema 2020-12, OpenAPI 3.1
    compatible) -- :func:`~meho_backplane.operations._validate.validate_params`.
-   Invalid -> structured ``invalid_params`` error. For an ingested op
-   whose catalog opts into a target check, the catalog must accept the
-   target, or a sibling catalog of the same implementation that does
-   must have the same op enabled; the dispatch then runs on that sibling
-   (:mod:`meho_backplane.operations._catalog_guard`, #3600). Otherwise ->
-   structured ``unqualified_target_version`` error.
+   Invalid -> structured ``invalid_params`` error. So for a guarded op a
+   target the catalogs cannot serve is reported before bad params.
 4. Policy gate (G11.2-T3 + T4;
    :func:`~meho_backplane.operations._validate.policy_gate`). **Agent**
    principals resolve a three-state
@@ -3029,17 +3031,16 @@ async def dispatch(
         )
         return result_unknown_op(op_id, known_op_count, _elapsed_ms(started))
 
-    # --- Step 3: parameter_schema validation ------------------------------
-    params_error = _params_error(descriptor, op_id, params, started)
-    if params_error is not None:
-        return params_error
-
+    # --- Step 3: catalog target guard + parameter_schema validation -------
     # A connector may opt an ingested catalog into a target-compatibility
     # guard. When the named catalog cannot serve the target but a sibling
     # catalog of the same implementation can and has the same op enabled,
     # the dispatch moves to that sibling (#3600): its descriptor, its
     # connector_id (so policy, approval and audit name what really runs),
-    # and its parameter schema.
+    # and its parameter schema. The params are checked once, after this
+    # choice, against the descriptor that will run -- so for a guarded
+    # ingested op, ``unqualified_target_version`` comes before
+    # ``invalid_params``.
     selection = await select_catalog_for_target(
         operator=operator,
         descriptor=descriptor,
@@ -3055,9 +3056,9 @@ async def dispatch(
         descriptor = selection.descriptor
         connector_id = selection.connector_id
         product, version = descriptor.product, descriptor.version
-        params_error = _params_error(descriptor, op_id, params, started)
-        if params_error is not None:
-            return params_error
+    params_error = _params_error(descriptor, op_id, params, started)
+    if params_error is not None:
+        return params_error
 
     # --- Step 3.5: dispatch limits (#3500) --------------------------------
     # Per-principal rate limit + per-principal concurrent-op cap, enforced

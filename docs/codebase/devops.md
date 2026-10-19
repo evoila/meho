@@ -37,6 +37,9 @@ resources that make up a running backplane:
   per ADR 0005, plus its **own** ingress NetworkPolicy and a chart-managed
   `requirepass` Secret (#276) so the store is ingress-isolated and
   authenticated regardless of the umbrella policy.
+- PostgreSQL subchart — the built-in PostgreSQL 17 with pgvector (#4039),
+  off by default (`corePostgres.enabled`); see
+  [PostgreSQL subchart](#postgresql-subchart-chartspostgres-4039).
 
 ## Log shipping (stdout → collector)
 

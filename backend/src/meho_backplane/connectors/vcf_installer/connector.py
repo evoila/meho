@@ -486,6 +486,16 @@ class InstallerConnector(HttpConnector):
 
         return await installer_bundles_list_impl(self, operator, target, params)
 
+    async def bundles_download_status(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.bundles.download-status`` shim — per-bundle download detail read."""
+        from meho_backplane.connectors.vcf_installer.typed_reads import (
+            installer_bundles_download_status_impl,
+        )
+
+        return await installer_bundles_download_status_impl(self, operator, target, params)
+
     async def bundles_download(
         self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:

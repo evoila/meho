@@ -397,3 +397,43 @@ async def test_small_two_list_task_passes_through_even_with_digest_hint() -> Non
     assert handle is None, "an under-threshold task must not materialize"
     assert reduced is payload, "pass-through must return the exact vendor object"
     assert "status_counts" not in reduced, "no digest when nothing reduced"
+
+
+# ---------------------------------------------------------------------------
+# Bundle download status — bundles.download-status (#3410)
+# ---------------------------------------------------------------------------
+
+
+async def test_release_wide_download_status_reduces_with_status_counts() -> None:
+    """A release-wide ``PageOfBundleDownloadStatusInfo`` reduces with a digest.
+
+    Per-``downloadStatus`` counts and the IN_PROGRESS bundle ids ride inline.
+    FAILED rows are not kept whole inline (a depot outage fails every row), so
+    the digest carries no ``failed`` list; callers drill in per bundle.
+    """
+    op_id = "installer.bundles.download-status"
+    statuses = ["SUCCESSFUL"] * 170 + ["IN_PROGRESS"] * 2 + ["FAILED"] * 8
+    payload = {
+        "elements": [
+            {
+                "bundleId": f"bundle-{i}",
+                "componentType": "ESX_HOST",
+                "version": "9.1.0.0",
+                "downloadStatus": status,
+                "downloadScheduledTime": 1,
+                "isDownloadCancellable": False,
+            }
+            for i, status in enumerate(statuses)
+        ],
+        "pageMetadata": {"totalElements": len(statuses)},
+    }
+    reducer = _reducer(sample_size=5, sample_byte_budget=4096)
+
+    reduced, handle = await reducer.reduce(payload, None, _registered_reducer_context(op_id))
+
+    assert handle is not None
+    assert handle.total_rows == 180
+    assert reduced["source_key"] == "elements"
+    assert reduced["status_counts"] == {"SUCCESSFUL": 170, "IN_PROGRESS": 2, "FAILED": 8}
+    assert reduced["in_progress"] == ["bundle-170", "bundle-171"]
+    assert "failed" not in reduced

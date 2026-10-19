@@ -104,9 +104,10 @@ machinery exist here.
 | `installer.system.trusted-certificates.list` | `GET /v1/sddc-manager/trusted-certificates` | `safe` |
 | `installer.system.trusted-certificates.add` | `POST /v1/sddc-manager/trusted-certificates` | `caution` + `requires_approval` |
 | `installer.bundles.list` | `GET /v1/bundles` → `PageOfBundle` | `safe` |
+| `installer.bundles.download-status` | `GET /v1/bundles/download-status` → `PageOfBundleDownloadStatusInfo` | `safe` |
 | `installer.bundles.download` | `PATCH /v1/bundles/{id}` per id (one approved batch) | `caution` + `requires_approval` |
 
-The bottom six rows are the **air-gapped depot lifecycle** (#3121, group
+The bottom seven rows are the **air-gapped depot lifecycle** (#3121, group
 `installer-depot`) — the steps that used to force a governed bring-up
 out-of-band: configure the depot (`depot.set` maps the vendor rejection to a
 structured `depot_error`, with inline remediation for the common
@@ -120,6 +121,18 @@ scrubs every `password` key at every depth before the settings echo crosses
 the governed surface; `depot.set`'s park-time preview echoes
 hostname/port/mode + account username only, `trusted-certificates.add`'s a
 SHA-256 fingerprint, `bundles.download`'s the id batch (truncated past 20).
+`bundles.download-status` ([#3410](https://github.com/evoila/meho/issues/3410))
+explains a `FAILED` row on `bundles.list`, which only carries `downloadStatus`.
+Per bundle it returns the vendor failure `message`, `downloadedSize` (bytes so
+far; compare with `sizeMB` from `bundles.list` for progress), `isDownloadable`
+(can the bundle be downloaded right now), and `downloadId` (the download task
+id). Optional `bundle_id` / `release_version` / `image_type` params map to the
+vendor `bundleId` / `releaseVersion` / `imageType` query filters. A
+release-wide read reduces to a result handle; its `result_digest` hint adds
+per-`downloadStatus` counts and the `IN_PROGRESS` bundle ids inline. `FAILED`
+rows are not copied inline, because a depot outage fails every row; read them
+with `bundle_id` or `result_query`. The vendor schema has no credential
+fields, so nothing is scrubbed.
 The group's `when_to_use` and the `spec` parameter hint on the submit
 primitives carry the 9.1 field rules proven live (three unique
 `vspClusterSpec` FQDNs outside the pool, ≤20-char core passwords, the

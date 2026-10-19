@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vcf_installer.session import InstallerTargetLike
 
 __all__ = [
+    "installer_bundles_download_status_impl",
     "installer_bundles_list_impl",
     "installer_depot_settings_get_impl",
     "installer_sddc_bringup_status_impl",
@@ -67,6 +68,18 @@ _TRUSTED_CERTIFICATES_PATH = "/v1/sddc-manager/trusted-certificates"
 #: Bundle inventory (``PageOfBundle``; populated only after a depot connect +
 #: catalog ingest) — the read half of #3121's bundle pair.
 _BUNDLES_PATH = "/v1/bundles"
+
+#: Per-bundle download state (``PageOfBundleDownloadStatusInfo``: status,
+#: failure ``message``, ``downloadedSize`` progress, ``isDownloadable``, the
+#: download task id) — the detail ``PageOfBundle`` rows do not carry (#3410).
+_BUNDLE_DOWNLOAD_STATUS_PATH = "/v1/bundles/download-status"
+
+#: Op param name → vendor query param name for the download-status filters.
+_BUNDLE_DOWNLOAD_STATUS_QUERY = {
+    "bundle_id": "bundleId",
+    "release_version": "releaseVersion",
+    "image_type": "imageType",
+}
 
 
 def scrub_password_keys(value: Any) -> Any:
@@ -173,3 +186,30 @@ async def installer_bundles_list_impl(
     ``downloadStatus`` / ``version`` fields rather than dumping elements.
     """
     return await connector._get_json(target, _BUNDLES_PATH, operator=operator)
+
+
+async def installer_bundles_download_status_impl(
+    connector: InstallerConnector,
+    operator: Operator,
+    target: InstallerTargetLike,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """``installer.bundles.download-status`` — read per-bundle download detail
+    via ``GET /v1/bundles/download-status``.
+
+    The optional ``bundle_id`` / ``release_version`` / ``image_type`` params
+    map to the vendor ``bundleId`` / ``releaseVersion`` / ``imageType`` query
+    filters; absent ones are not sent. Returns the vendor
+    ``PageOfBundleDownloadStatusInfo``: per element ``downloadStatus``, the
+    failure ``message``, ``downloadedSize`` (bytes so far), ``isDownloadable``,
+    ``downloadId`` (the download task id) and the start/end/scheduled times.
+    The vendor schema carries no credential fields, so nothing is scrubbed.
+    """
+    query = {
+        vendor_key: str(params[param_key])
+        for param_key, vendor_key in _BUNDLE_DOWNLOAD_STATUS_QUERY.items()
+        if params.get(param_key)
+    }
+    return await connector._get_json(
+        target, _BUNDLE_DOWNLOAD_STATUS_PATH, operator=operator, params=query or None
+    )

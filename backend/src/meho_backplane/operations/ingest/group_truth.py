@@ -14,9 +14,14 @@ group:
 * a count of the enabled ops per ``safety_level``, plus how many of them
   need approval (:class:`GroupSafetyDistribution`);
 * short, plain flags where the text does not match the ops: the text
-  makes a safety claim the ops break (for example "read-only", "all ...
-  destructive", "all ... require approval"), or the text shares no word
-  with the op ids and summaries.
+  makes a safety claim the ops break (for example "read-only",
+  "non-destructive", "all ... destructive", "all ... require approval"),
+  or the text shares no word with the op ids and summaries.
+
+A "read-only" claim is broken by any op that is not ``safe`` or needs
+approval. A "non-destructive" claim is broken only by a ``destructive``
+op. An "all ... <level>" claim is broken by any op at another level,
+higher or lower, so text that understates the risk is flagged too.
 
 Ops in a ``staged`` group are all disabled until the operator enables
 the group. So when no op in the group is enabled, the flags check the
@@ -40,15 +45,15 @@ from meho_backplane.operations.ingest.payload import (
 
 __all__ = ["build_group_advisory"]
 
-_SAFETY_RANK: dict[str, int] = {"safe": 0, "caution": 1, "dangerous": 2, "destructive": 3}
+_SAFETY_LEVELS = ("safe", "caution", "dangerous", "destructive")
 
 _MAX_FLAGS = 5
 
-_READ_ONLY_RE = re.compile(
-    r"\b(read[- ]?only|no side[- ]effects?|non[- ]destructive|does not (?:change|modify))\b"
-)
-# "all ... dangerous" / "every ... destructive" inside one sentence.
-_ALL_LEVEL_RE = re.compile(r"\b(?:all|every)\b[^.;]*?\b(dangerous|destructive)\b")
+_READ_ONLY_RE = re.compile(r"\b(read[- ]?only|no side[- ]effects?|does not (?:change|modify))\b")
+_NON_DESTRUCTIVE_RE = re.compile(r"\bnon[- ]?destructive\b")
+# "all ... dangerous" / "every ... destructive" inside one sentence. The
+# lookbehinds keep "non-destructive" and "non destructive" out of it.
+_ALL_LEVEL_RE = re.compile(r"\b(?:all|every)\b[^.;]*?(?<!non-)(?<!non )\b(dangerous|destructive)\b")
 _ALL_APPROVAL_RE = re.compile(r"\b(?:all|every)\b[^.;]*?\b(?:require|need)s? approval\b")
 
 _CAMEL_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
@@ -112,7 +117,7 @@ def _words(text: str) -> set[str]:
 
 def _distribution(enabled: Sequence[ConnectorReviewOp]) -> GroupSafetyDistribution:
     """Count *enabled* ops per ``safety_level`` and per approval flag."""
-    counts = dict.fromkeys(_SAFETY_RANK, 0)
+    counts = dict.fromkeys(_SAFETY_LEVELS, 0)
     for op in enabled:
         if op.safety_level in counts:
             counts[op.safety_level] += 1
@@ -126,7 +131,7 @@ def _distribution(enabled: Sequence[ConnectorReviewOp]) -> GroupSafetyDistributi
 def _level_counts(ops: Sequence[ConnectorReviewOp], levels: set[str]) -> str:
     """Render ``"caution: 1, dangerous: 2"`` for the ops whose level is in *levels*."""
     parts = []
-    for level in _SAFETY_RANK:
+    for level in _SAFETY_LEVELS:
         count = sum(1 for op in ops if op.safety_level == level)
         if level in levels and count:
             parts.append(f"{level}: {count}")
@@ -143,13 +148,17 @@ def _posture_flags(prose: str, ops: Sequence[ConnectorReviewOp]) -> list[str]:
                 f"The text says read-only, but {len(not_safe)} op(s) are not safe or need "
                 f"approval ({_level_counts(not_safe, {'caution', 'dangerous', 'destructive'})})."
             )
+    if _NON_DESTRUCTIVE_RE.search(prose):
+        destructive = sum(1 for op in ops if op.safety_level == "destructive")
+        if destructive:
+            flags.append(f"The text says non-destructive, but {destructive} op(s) are destructive.")
     for match in _ALL_LEVEL_RE.finditer(prose):
         level = match.group(1)
-        below = [op for op in ops if _SAFETY_RANK.get(op.safety_level, 0) < _SAFETY_RANK[level]]
-        if below:
+        others = [op for op in ops if op.safety_level != level]
+        if others:
             flags.append(
-                f"The text says all ops are {level}, but {len(below)} op(s) are lower "
-                f"({_level_counts(below, {'safe', 'caution', 'dangerous'})})."
+                f"The text says all ops are {level}, but {len(others)} op(s) are at another "
+                f"level ({_level_counts(others, set(_SAFETY_LEVELS) - {level})})."
             )
     if _ALL_APPROVAL_RE.search(prose):
         no_approval = sum(1 for op in ops if not op.requires_approval)

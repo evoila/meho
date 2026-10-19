@@ -2190,9 +2190,10 @@ Each `ConnectorReviewGroup` carries `advisory`
   (`enabled_op_count`). Disabled ops are not counted.
 * `flags` — short, plain notes, at most five, without repeats:
   * the text makes a safety claim the ops break: "read-only" (or "no
-    side effects", "non-destructive", "does not modify") while an op is
-    not `safe` or needs approval; "all ... dangerous/destructive" while an
-    op is lower; "all ... require approval" while an op does not;
+    side effects", "does not modify") while an op is not `safe` or needs
+    approval; "non-destructive" while an op is `destructive`; "all ...
+    dangerous/destructive" while an op is at another level, higher or
+    lower; "all ... require approval" while an op does not;
   * the text shares no word with the op ids and summaries.
 
 A `staged` group has no enabled op until the operator enables it. Then

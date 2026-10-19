@@ -2726,6 +2726,82 @@ async def test_group_advisory_prose_mismatch_all_destructive_claim_contradicted(
 
 
 @pytest.mark.asyncio
+async def test_group_advisory_prose_mismatch_all_dangerous_claim_understates_risk() -> None:
+    """Text that says every op is dangerous is flagged when one is destructive."""
+    tenant_id = uuid.uuid4()
+    await _seed_group_with_ops(
+        tenant_id=tenant_id,
+        when_to_use="All virtual machine operations in this group are dangerous.",
+        ops=[
+            ("DELETE:/vcenter/vm/{vm}", "Delete a virtual machine", "dangerous", True, True),
+            ("POST:/vcenter/vm/{vm}/destroy", "Destroy VM", "destructive", True, True),
+        ],
+    )
+
+    advisory = await _group_advisory(tenant_id)
+
+    assert len(advisory.flags) == 1
+    assert "all ops are dangerous" in advisory.flags[0]
+    assert "destructive: 1" in advisory.flags[0]
+
+
+@pytest.mark.asyncio
+async def test_group_advisory_all_non_destructive_claim_is_not_a_destructive_claim() -> None:
+    """Text that says every op is non-destructive raises no flag over safe ops."""
+    tenant_id = uuid.uuid4()
+    await _seed_group_with_ops(
+        tenant_id=tenant_id,
+        when_to_use="All virtual machine operations in this group are non-destructive.",
+        ops=[
+            ("GET:/vcenter/vm", "List virtual machines", "safe", False, True),
+            ("GET:/vcenter/vm/{vm}", "Get one virtual machine", "safe", False, True),
+        ],
+    )
+
+    advisory = await _group_advisory(tenant_id)
+
+    assert advisory.flags == []
+
+
+@pytest.mark.asyncio
+async def test_group_advisory_non_destructive_claim_allows_caution_ops() -> None:
+    """Text that says non-destructive is not a read-only claim; caution ops pass."""
+    tenant_id = uuid.uuid4()
+    await _seed_group_with_ops(
+        tenant_id=tenant_id,
+        when_to_use="Non-destructive updates to virtual machine settings.",
+        ops=[
+            ("GET:/vcenter/vm/{vm}", "Get one virtual machine", "safe", False, True),
+            ("PATCH:/vcenter/vm/{vm}", "Update a virtual machine", "caution", False, True),
+        ],
+    )
+
+    advisory = await _group_advisory(tenant_id)
+
+    assert advisory.flags == []
+
+
+@pytest.mark.asyncio
+async def test_group_advisory_non_destructive_claim_contradicted_by_destructive_op() -> None:
+    """Text that says non-destructive is flagged when an op is destructive."""
+    tenant_id = uuid.uuid4()
+    await _seed_group_with_ops(
+        tenant_id=tenant_id,
+        when_to_use="Non-destructive updates to virtual machine settings.",
+        ops=[
+            ("PATCH:/vcenter/vm/{vm}", "Update a virtual machine", "caution", False, True),
+            ("POST:/vcenter/vm/{vm}/destroy", "Destroy VM", "destructive", True, True),
+        ],
+    )
+
+    advisory = await _group_advisory(tenant_id)
+
+    assert len(advisory.flags) == 1
+    assert "non-destructive" in advisory.flags[0]
+    assert "1 op(s) are destructive" in advisory.flags[0]
+
+
+@pytest.mark.asyncio
 async def test_group_advisory_prose_mismatch_no_shared_words() -> None:
     """Text that shares no word with the enabled ops is flagged."""
     tenant_id = uuid.uuid4()

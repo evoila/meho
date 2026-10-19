@@ -99,6 +99,7 @@ machinery exist here.
 | `installer.sddc.bringup.start` | `POST /v1/sddcs` → `SddcTask` | `dangerous` + `requires_approval` |
 | `installer.sddc.bringup.retry` | `PATCH /v1/sddcs/{id}` (`retrySddc`) → `SddcTask` | `dangerous` + `requires_approval` |
 | `installer.sddc.bringup.status` | `GET /v1/sddcs/{id}` → `SddcTask` | `safe` |
+| `installer.sddc.list` | `GET /v1/sddcs` (`getSddcTasks`) → `PageOfSddcTask`, cut down per task | `safe` |
 | `installer.system.depot.get` | `GET /v1/system/settings/depot` → `DepotSettings` (passwords scrubbed) | `safe` |
 | `installer.system.depot.set` | `PUT /v1/system/settings/depot` (sync connection check) | `caution` + `requires_approval` |
 | `installer.system.trusted-certificates.list` | `GET /v1/sddc-manager/trusted-certificates` | `safe` |
@@ -139,7 +140,17 @@ provided, it is the vendor's edit-and-retry flow), and its own park-time
 preview leads with the failed task id, appending the blast-radius identity only
 when a spec rides along. `bringup.status` polls the `SddcTask` (`IN_PROGRESS` /
 `COMPLETED_WITH_SUCCESS` / `COMPLETED_WITH_FAILURE`, plus `sddcSubTasks[]` /
-`milestones[]`). Session-expiry recovery for all five rides the dispatcher's
+`milestones[]`). `installer.sddc.list`
+([#3418](https://github.com/evoila/meho/issues/3418)) lists every bring-up task
+and needs no id. Use it when the id of a running bring-up is lost — for example
+when the result of an approved `bringup.start` was not picked up in time — then
+poll `bringup.status` with the id it returns. Each task is cut down to `id` /
+`name` / `status` / `deploymentType` / `vcfInstanceName` / `creationTimestamp`.
+That list of fields is a whitelist, so the ~260-row `sddcSubTasks[]`,
+`milestones[]` and any field the vendor adds later never reach the result. A
+normal appliance has a few tasks, so the list stays inline; a long list goes
+through the normal JSONFlux reduction and returns a handle whose sample rows
+still carry the ids. Session-expiry recovery for all of these rides the dispatcher's
 #2067 arm (raw `401` → `invalidate_session` → re-dispatch once — safe for the
 POSTs/PATCH too, since a `401` is rejected at auth before the server processes
 the request).
@@ -218,8 +229,8 @@ Shipped as increment 2 of [#3065](https://github.com/evoila/meho/issues/3065).
 
 Every hand-coded `METHOD:/path` — `POST:/v1/tokens`,
 `GET:/v1/system/appliance-info` (fingerprint), the typed reads'
-`GET:/v1/sddcs/{id}` and `GET:/v1/sddcs/validations/{id}` (the `_*_PATH`
-constants of `typed_reads.py`), the submit primitives'
+`GET:/v1/sddcs/{id}`, `GET:/v1/sddcs` and `GET:/v1/sddcs/validations/{id}`
+(the `_*_PATH` constants of `typed_reads.py`, among others), the submit primitives'
 `POST:/v1/sddcs/validations` and `POST:/v1/sddcs` (introspected from
 `typed_writes.TYPED_WRITE_DECLARED_OP_IDS`), and the composite's
 `POST:/v1/sddcs/validations`, `POST:/v1/sddcs`,

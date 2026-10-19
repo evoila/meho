@@ -56,6 +56,7 @@ from typing import Any
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.tools._call_operation_async import poll_call, submit_async_call
 from meho_backplane.operations.meta_tools import (
     ConnectorNotIngestedError,
     UnknownConnectorError,
@@ -141,8 +142,24 @@ async def _call_operation_handler(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    """Thin shim over :func:`call_operation`."""
-    return await call_operation(operator, arguments)
+    """Shim over :func:`call_operation`, plus async mode (#3695).
+
+    ``async`` and ``run_id`` are MCP controls, not dispatch arguments, so
+    they are taken out before the call reaches :func:`call_operation`.
+    """
+    call_arguments = dict(arguments)
+    run_async = bool(call_arguments.pop("async", False))
+    run_id = call_arguments.pop("run_id", None)
+    if run_id is not None:
+        if run_async:
+            raise McpInvalidParamsError(
+                "send either `async: true` (start a call) or `run_id` (check a call), not both",
+                data={"reason": "async_with_run_id"},
+            )
+        return await poll_call(operator, call_arguments, str(run_id))
+    if run_async:
+        return await submit_async_call(operator, call_arguments)
+    return await call_operation(operator, call_arguments)
 
 
 async def _preview_operation_handler(
@@ -416,7 +433,12 @@ register_mcp_tool(
             "`query_topology` / `query_audit` -- OR a dict "
             '`{"name": "rdc-vcenter"}`; required for ops that act on a '
             "target), `params` (operation-specific). Returns the full "
-            "OperationResult shape."
+            "OperationResult shape. For a long call (a deploy or another "
+            "multi-step operation that can take minutes) pass `async: true`: "
+            'you get `status="pending"` and `extras.run_id` at once, and the '
+            "call runs in the background. Then call `call_operation` again "
+            "with the same `connector_id`, `op_id` and that `run_id` to check "
+            "it; once it is done you get its normal result."
         ),
         inputSchema={
             "type": "object",
@@ -543,6 +565,30 @@ register_mcp_tool(
                         "call is refused with `idempotency_key_conflict`."
                     ),
                 },
+                "async": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Start the call in the background. Use it for long "
+                        "calls (deploys, multi-step operations) that can take "
+                        "minutes. The answer comes at once with "
+                        '`status="pending"` and `extras.run_id`; the policy '
+                        "checks, approvals and audit rows are the same as for "
+                        "a normal call. Check the call later with `run_id`."
+                    ),
+                },
+                "run_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "description": (
+                        "Check a call you started with `async: true`. Send the "
+                        "same `connector_id` and `op_id` and the `extras.run_id` "
+                        'you got. While it runs: `status="pending"` or '
+                        '`"running"`, with `extras.started_at`. When it is done: '
+                        "the call's normal result. A run that failed or was "
+                        'cancelled gives `status="error"`. Nothing is run again.'
+                    ),
+                },
             },
             "required": ["connector_id", "op_id"],
             "additionalProperties": False,
@@ -559,9 +605,10 @@ register_mcp_tool(
                     # client validating the structured result against this
                     # outputSchema (MCP 2025-06-18: "Clients SHOULD
                     # validate structured results against this schema")
-                    # must accept it. The enum lists only statuses the
-                    # dispatcher actually emits (no ``pending``).
-                    "enum": ["ok", "error", "denied", "awaiting_approval"],
+                    # must accept it. ``pending`` / ``running`` are the
+                    # async-mode answers (#3695): a call started with
+                    # ``async: true`` that has not finished yet.
+                    "enum": ["ok", "error", "denied", "awaiting_approval", "pending", "running"],
                 },
                 "op_id": {"type": "string"},
                 "result": {

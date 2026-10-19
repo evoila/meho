@@ -285,6 +285,12 @@ carries `matched_by="selector"` and the selector predicate under
 the selector authorised (a concrete / targetless match records
 `matched_by="target"`).
 
+The row also carries lineage ids (#3695): `request_id` (the same value the
+call's `DISPATCH` row carries), `agent_session_id` (agent-run or MCP
+session; NULL for a plain REST call) and `parent_audit_id` (the multi-step
+parent's audit id when a child step was cleared). Details:
+[`approvals.md`](approvals.md#service-principal-standing-grants--safety_level-gate-3151--3152).
+
 ## Governed-subop discovery (#3349)
 
 A composite fans out to child ops, and child gating consults the grant plane

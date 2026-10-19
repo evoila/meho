@@ -1831,8 +1831,9 @@ def test_call_operation_output_schema_status_enum_includes_awaiting_approval() -
     """The ``call_operation`` outputSchema ``status`` enum lists the parked
     outcome so a spec-compliant MCP client validating the structured result
     accepts ``awaiting_approval`` (G11.7-T1 #1401 / MCP 2025-06-18 server
-    output contract). The enum stays bounded to statuses the dispatcher
-    actually emits — no ``pending``.
+    output contract). The enum stays bounded to statuses the tool actually
+    emits: the dispatcher's four, plus ``pending`` / ``running`` from the
+    async mode (#3695).
     """
     import meho_backplane.mcp.tools.operations  # noqa: F401  (registers the tool)
     from meho_backplane.mcp.registry import get_tool
@@ -1842,4 +1843,4 @@ def test_call_operation_output_schema_status_enum_includes_awaiting_approval() -
     defn, _ = entry
     assert defn.outputSchema is not None
     enum = defn.outputSchema["properties"]["status"]["enum"]
-    assert set(enum) == {"ok", "error", "denied", "awaiting_approval"}, enum
+    assert set(enum) == {"ok", "error", "denied", "awaiting_approval", "pending", "running"}, enum

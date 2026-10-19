@@ -19,7 +19,9 @@ row unless the call already wrote its own record:
   the model. If the write fails, the tool call fails and so does the run
   (audit is fail-closed).
 * ``agent_session_id`` is the run id
-  (:func:`~meho_backplane.operations._audit.resolve_agent_session_id`).
+  (:func:`~meho_backplane.operations._audit.resolve_agent_session_id`). For
+  a child run started by ``invoke_agent`` it is the child's run id:
+  :mod:`meho_backplane.agent.invoke` binds it around the child loop.
 * A call that committed its own classified row for the same caller (a
   dispatch through ``call_operation``) gets no second row. The check uses
   the same record scope the REST and MCP wrappers use
@@ -27,6 +29,11 @@ row unless the call already wrote its own record:
 * The payload stores the tool name, a hash of the arguments, the op class,
   and for a failure the error type. It never stores the arguments or the
   error text.
+* A call to a tool name the run cannot use never reaches a tool hook:
+  Pydantic AI rejects the name first and asks the model to retry. The
+  ``after_model_request`` hook records the attempt from the model's
+  response (400, ``UnknownToolError``). The tool is not enabled; the model
+  still gets the framework's retry message.
 
 Event class: ``legacy_request`` while ``AUDIT_WRAPPER_ROWS_RETIRED`` is
 off, like every other wrapper row. With it on, a refused call is a
@@ -35,8 +42,9 @@ agent run has no request usage event to fall back on, so routine agent
 calls keep their row after the cutover.
 
 Status codes follow the MCP wrapper rows: 200 for success, 403 for a call
-the toolset refused (:class:`ToolRefusedRetry`), 400 for bad arguments or
-a retry the tool asked for, 500 for an error.
+the toolset refused (:class:`ToolRefusedRetry`), 400 for bad arguments, a
+retry the tool asked for, or a call to a tool name the run cannot use, 500
+for an error.
 """
 
 from __future__ import annotations
@@ -59,7 +67,8 @@ from pydantic_ai.capabilities import (
     WrapToolExecuteHandler,
 )
 from pydantic_ai.exceptions import ToolFailedError, ToolRetryError
-from pydantic_ai.messages import ToolCallPart
+from pydantic_ai.messages import ModelResponse, ToolCallPart
+from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.tools import ToolDefinition
 
 from meho_backplane.audit_cutover import (
@@ -81,7 +90,13 @@ from meho_backplane.operations._audit import (
     work_ref_var,
 )
 
-__all__ = ["AGENT_TOOL_AUDIT_METHOD", "ToolCallAudit", "ToolRefusedRetry", "write_agent_tool_row"]
+__all__ = [
+    "AGENT_TOOL_AUDIT_METHOD",
+    "ToolCallAudit",
+    "ToolRefusedRetry",
+    "UnknownToolError",
+    "write_agent_tool_row",
+]
 
 _log = structlog.get_logger(__name__)
 
@@ -97,6 +112,14 @@ class ToolRefusedRetry(ModelRetry):
 
     It reaches the model like any retry. The audit row records it as a
     refusal (403), not as bad input.
+    """
+
+
+class UnknownToolError(LookupError):
+    """The model called a tool name this run cannot use.
+
+    Pydantic AI rejects the name before any tool hook runs, so the audit
+    row names this type. The error itself is never raised.
     """
 
 
@@ -224,6 +247,32 @@ class ToolCallAudit(AbstractCapability[Operator]):
                     await self._write(ctx.deps, tool_def.name, args, status_code, start, error)
             finally:
                 close_classified_record_scope(scope)
+
+    async def after_model_request(
+        self,
+        ctx: RunContext[Operator],
+        *,
+        request_context: ModelRequestContext,
+        response: ModelResponse,
+    ) -> ModelResponse:
+        # A call to a tool name this run cannot use never reaches the tool
+        # hooks: Pydantic AI rejects the name first and asks the model to
+        # retry. Record the attempt from the response, so a run that keeps
+        # calling a missing tool still shows what it tried.
+        if ctx.tool_manager is None or ctx.tool_manager.tools is None:
+            # The step's tools are not resolved, so no name can be checked.
+            return response
+        for part in response.parts:
+            if isinstance(part, ToolCallPart) and not ctx.is_tool_available(part.tool_name):
+                await self._write(
+                    ctx.deps,
+                    part.tool_name,
+                    part.args,
+                    400,
+                    time.monotonic(),
+                    UnknownToolError(part.tool_name),
+                )
+        return response
 
     async def on_tool_validate_error(
         self,

@@ -11,6 +11,10 @@ The tests drive real runs through :class:`AgentInvoker` with a scripted
   keeps only the dispatcher's row (no second row for one call).
 * A failing run that never reaches the dispatcher: the refused call and the
   call that crashed both have rows. A call with bad arguments has one too.
+* A call to a tool name the run cannot use has a row for every attempt,
+  even though Pydantic AI rejects the name before any tool hook runs.
+* A child run started by ``invoke_agent`` keys its rows by the child's run
+  id; the parent's ``invoke_agent`` row keeps the parent's run id.
 * With ``AUDIT_WRAPPER_ROWS_RETIRED`` on, the rows carry a decision or
   execution class, not ``legacy_request``.
 * Audit is fail-closed: if the row cannot be written, the run fails.
@@ -26,12 +30,17 @@ from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
-from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from sqlalchemy import select
 
 from meho_backplane.agent import tool_audit, toolset
-from meho_backplane.agent.invocation import AgentInvoker
+from meho_backplane.agent.invocation import (
+    AgentInvoker,
+    _finalize_child_run,
+    _record_child_run,
+    _resolve_child_definition,
+)
 from meho_backplane.agent.run import PydanticAgentRun
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.registry import clear_registry
@@ -102,6 +111,52 @@ def _invoker(model: FunctionModel) -> AgentInvoker:
     return AgentInvoker(runtime=PydanticAgentRun(model_factory=lambda: model))
 
 
+def _parent_invokes_child(*child_steps: ToolCallPart) -> FunctionModel:
+    """A model for a parent and its child run.
+
+    As the parent it calls ``invoke_agent`` for ``child`` once, then answers.
+    As the child (its system prompt holds ``CHILD``) it makes one tool call
+    per turn from *child_steps*, then answers.
+    """
+    remaining = list(child_steps)
+
+    def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        request_parts = [
+            part
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+        ]
+        is_child = any(
+            getattr(part, "part_kind", "") == "system-prompt"
+            and "CHILD" in getattr(part, "content", "")
+            for part in request_parts
+        )
+        if is_child:
+            if remaining:
+                return ModelResponse(parts=[remaining.pop(0)])
+            return ModelResponse(parts=[TextPart("child done")])
+        if any(getattr(part, "part_kind", "") == "tool-return" for part in request_parts):
+            return ModelResponse(parts=[TextPart("parent done")])
+        return ModelResponse(
+            parts=[ToolCallPart("invoke_agent", {"agent_name": "child", "inputs": "sub"})]
+        )
+
+    return FunctionModel(fn)
+
+
+def _composing_invoker(model: FunctionModel) -> AgentInvoker:
+    """An invoker with the live child resolver, recorder and finalizer."""
+    return AgentInvoker(
+        runtime=PydanticAgentRun(
+            model_factory=lambda: model,
+            child_agent_resolver=_resolve_child_definition,
+            child_run_recorder=_record_child_run,
+            child_run_finalizer=_finalize_child_run,
+        )
+    )
+
+
 async def _rows(run_id: UUID) -> list[AuditLog]:
     async with get_sessionmaker()() as session:
         result = await session.execute(
@@ -110,6 +165,14 @@ async def _rows(run_id: UUID) -> list[AuditLog]:
             .order_by(AuditLog.occurred_at)
         )
         return list(result.scalars())
+
+
+async def _child_run_id(parent_run_id: UUID) -> UUID:
+    async with get_sessionmaker()() as session:
+        result = await session.execute(
+            select(AgentRunRow.id).where(AgentRunRow.parent_run_id == parent_run_id)
+        )
+        return result.scalar_one()
 
 
 async def _run_row(run_id: UUID) -> AgentRunRow:
@@ -194,6 +257,53 @@ async def test_arguments_that_fail_validation_are_audited() -> None:
 
     rows = _agent_rows(await _rows(outcome.run_id))
     assert [(r.payload["op_id"], r.status_code) for r in rows] == [("list_operation_groups", 400)]
+
+
+async def test_calls_to_unknown_tools_are_audited_and_fail_the_run() -> None:
+    # Pydantic AI rejects the name before any tool hook runs and asks the
+    # model to retry. The model keeps calling it, so the run fails. Every
+    # attempt still has a row.
+    await _seed_definition()
+    missing = ToolCallPart("delete_everything", {"target": "vault-prod"})
+
+    outcome = await _invoker(_scripted(missing, missing, missing)).run(
+        _make_operator(), "reader", "go"
+    )
+
+    assert outcome.status is AgentRunStatus.FAILED
+    rows = await _rows(outcome.run_id)
+    assert all(r.method == tool_audit.AGENT_TOOL_AUDIT_METHOD for r in rows)
+    seen = [(r.payload["op_id"], r.status_code, r.payload["error_type"]) for r in rows]
+    assert seen == [("delete_everything", 400, "UnknownToolError")] * 2
+    assert all("vault-prod" not in str(r.payload) for r in rows)
+    # The tool was not enabled: the run row is failed, not succeeded.
+    run = await _run_row(outcome.run_id)
+    assert run.status == AgentRunStatus.FAILED.value
+
+
+async def test_child_run_rows_carry_the_child_run_id(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    await _seed_definition(name="parent")
+    await _seed_definition(name="child", system_prompt="CHILD: you read secrets.")
+    await _seed_echo_op(stub_embedding_service)
+
+    invoker = _composing_invoker(_parent_invokes_child(_GROUPS, _CALL))
+    outcome = await invoker.run(_make_operator(), "parent", "go")
+
+    assert outcome.status is AgentRunStatus.SUCCEEDED
+    # The parent's only call is invoke_agent, keyed by the parent run id.
+    parent_rows = await _rows(outcome.run_id)
+    assert [(r.method, r.path, r.status_code) for r in parent_rows] == [
+        (tool_audit.AGENT_TOOL_AUDIT_METHOD, "/agent/tools/call/invoke_agent", 200)
+    ]
+    # The child's calls, including the dispatcher's row, are keyed by the
+    # child run id.
+    child_rows = await _rows(await _child_run_id(outcome.run_id))
+    child_agent_rows = _agent_rows(child_rows)
+    assert [r.payload["op_id"] for r in child_agent_rows] == ["list_operation_groups"]
+    dispatch_rows = [r for r in child_rows if r not in child_agent_rows]
+    assert [r.event_class for r in dispatch_rows] == [AuditEventClass.OPERATION_EXECUTION]
 
 
 async def test_rows_carry_decision_or_execution_class_after_cutover(

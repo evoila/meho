@@ -342,8 +342,10 @@ audit row; they write the agent tool call row.
 
 Every tool call a hosted agent makes leaves one `audit_log` row, keyed by
 `agent_session_id` = the run id. This covers discovery calls, broadcast
-reads, refused calls, and calls that fail. A run that fails before it
-reaches the dispatcher still shows what the agent tried.
+reads, refused calls, calls that fail, and calls to a tool name the run
+cannot use. A run that fails before it reaches the dispatcher still shows
+what the agent tried. For a child run started by `invoke_agent`, the rows
+carry the child's run id (see [Lineage](#lineage--the-cascade-tree-is-reconstructable)).
 
 - **Where.** `agent/tool_audit.py`. `ToolCallAudit` is a Pydantic AI
   capability. `PydanticAgentRun._build_agent` passes it to every agent it
@@ -351,7 +353,10 @@ reaches the dispatcher still shows what the agent tried.
   `wrap_tool_execute` hook wraps every function tool: the catalog tools,
   the legacy two-tool surface, and `invoke_agent`. Its
   `on_tool_validate_error` hook records a call whose arguments failed
-  validation.
+  validation. Its `after_model_request` hook records a call to a tool name
+  the run cannot use: Pydantic AI rejects such a name before any tool hook
+  runs, so the hook reads the attempt from the model's response. The tool
+  is not enabled; the model still gets the framework's retry message.
 - **One row per call.** The hook opens the same classified record scope the
   REST and MCP wrappers use (`audit_cutover.open_classified_record_scope`).
   If the call already committed its own classified row for the caller (a
@@ -362,7 +367,8 @@ reaches the dispatcher still shows what the agent tried.
   error text are never stored.
 - **Status.** 200 success, 403 a call the toolset refused (role floor or
   connector allow-list; `_make_meta_tool` raises `ToolRefusedRetry`), 400 bad
-  arguments or a retry the tool asked for, 500 an error. Pydantic AI wraps
+  arguments, a retry the tool asked for, or a call to a tool name the run
+  cannot use (`error_type` is `UnknownToolError`), 500 an error. Pydantic AI wraps
   a tool's `ModelRetry` in `ToolRetryError`; the hook reads the tool's own
   exception from `__cause__`.
 - **Event class.** `legacy_request` while `AUDIT_WRAPPER_ROWS_RETIRED` is
@@ -593,8 +599,12 @@ The child run is recorded as a child of the parent in two parallel lineages:
   is nothing for the finalizer to close).
 - **Session lineage** — `current_agent_run_id_var` carries the current run's id
   for the duration of a child invocation, so a nested `invoke_agent` reads it as
-  the next child's `parent_run_id` and per-tool-call audit rows correlate to
-  their run.
+  the next child's `parent_run_id`. `agent_session_id_var` (the audit session
+  id) is bound to the child's run id for the same span (#4234), so every audit
+  row the child writes, including the dispatcher's rows, carries the child's
+  run id. The parent's own `invoke_agent` row is written after the child loop
+  ends and keeps the parent's run id. A query by either run id finds that
+  run's calls.
 
 ### Why a tool factory, not a standalone service
 

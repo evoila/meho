@@ -26719,6 +26719,9 @@
             },
             "type": "array",
             "title": "Ops"
+          },
+          "advisory": {
+            "$ref": "#/components/schemas/ConnectorReviewGroupAdvisory"
           }
         },
         "type": "object",
@@ -26732,6 +26735,23 @@
         ],
         "title": "ConnectorReviewGroup",
         "description": "One group within the review payload.\n\nCarries the LLM-generated group metadata\n(``group_key``, ``name``, ``when_to_use``), the current\n``review_status``, and the full list of child operations. The\noperator-facing review UI iterates this list to render the\nreview queue; ``op_count`` is the cheap precomputed length for\nthe CLI's ``meho connector review`` summary view (T5)."
+      },
+      "ConnectorReviewGroupAdvisory": {
+        "properties": {
+          "distribution": {
+            "$ref": "#/components/schemas/GroupSafetyDistribution"
+          },
+          "flags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Flags"
+          }
+        },
+        "type": "object",
+        "title": "ConnectorReviewGroupAdvisory",
+        "description": "Advice for the operator who reviews one group (#3671).\n\n``distribution`` is what the group's enabled ops really do.\n``flags`` lists short, plain notes where the group's ``when_to_use``\ntext does not match those ops (for example the text says\n\"read-only\" but some ops need approval). Empty when nothing looks\nwrong.\n\nThis is advice only. It never blocks a dispatch, an ingest, or the\nmove from ``staged`` to ``enabled``. Dispatch keeps using each op's\nown ``safety_level``, ``requires_approval``, and policy; the group\nlabel and its text are never part of that decision."
       },
       "ConnectorReviewOp": {
         "properties": {
@@ -29653,6 +29673,43 @@
         ],
         "title": "GrantPrincipalKind",
         "description": "What kind of principal a grant's ``principal_sub`` names (#3795).\n\nSelects the create-time enforceability check applied by\n:meth:`~meho_backplane.agents.grants.AgentGrantService.grant`:\n\n* :attr:`AGENT` (default) \u2014 ``principal_sub`` must name a registered,\n  non-revoked :class:`~meho_backplane.db.models.AgentPrincipal` by its\n  ``keycloak_client_id`` (``agent:<name>``). This is the shipped\n  behaviour; the grant enforces against a registered agent client's\n  token (matched on the token's client identity, #3795).\n* :attr:`USER_AGENT` \u2014 ``principal_sub`` is the JWT ``sub`` of a **human\n  user** who authenticates with ``principal_kind=agent`` through a\n  public client. There is no ``AgentPrincipal`` row for such a sub (its\n  ``azp`` is the public client, not ``agent:<name>``), so the registry\n  check is skipped and the raw sub is accepted. Enforcement matches on\n  the token ``sub`` directly. Deliberately explicit \u2014 the caller opts\n  into keying a grant on a bare sub, which the default rejects to catch\n  typos.\n\nThe field is optional on the create surfaces and defaults to\n:attr:`AGENT`, so every existing caller is unaffected."
+      },
+      "GroupSafetyDistribution": {
+        "properties": {
+          "enabled_op_count": {
+            "type": "integer",
+            "title": "Enabled Op Count",
+            "default": 0
+          },
+          "safe": {
+            "type": "integer",
+            "title": "Safe",
+            "default": 0
+          },
+          "caution": {
+            "type": "integer",
+            "title": "Caution",
+            "default": 0
+          },
+          "dangerous": {
+            "type": "integer",
+            "title": "Dangerous",
+            "default": 0
+          },
+          "destructive": {
+            "type": "integer",
+            "title": "Destructive",
+            "default": 0
+          },
+          "requires_approval_count": {
+            "type": "integer",
+            "title": "Requires Approval Count",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "title": "GroupSafetyDistribution",
+        "description": "Risk levels of the enabled ops in one group (#3671).\n\nCounts only ops with ``is_enabled=True``. One count per value of the\nclosed ``safety_level`` set, plus how many of those ops need approval\nand how many ops are enabled in total. Disabled ops are not counted."
       },
       "GroupSummaryModel": {
         "properties": {

@@ -212,7 +212,11 @@ def _augment_cluster_health(payload: dict[str, Any]) -> dict[str, Any]:
     if isinstance(groups, list):
         for group in groups:
             status = group.get("group_status") if isinstance(group, dict) else None
-            key = status if status in _GROUP_STATUS_VALUES else _HEALTH_UNKNOWN
+            key = (
+                status
+                if isinstance(status, str) and status in _GROUP_STATUS_VALUES
+                else _HEALTH_UNKNOWN
+            )
             counts[key] = counts.get(key, 0) + 1
     payload["health_overall"] = _status_or_unknown(overall)
     payload["health_mgmt"] = _status_or_unknown(

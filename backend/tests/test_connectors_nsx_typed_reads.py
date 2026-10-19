@@ -536,6 +536,40 @@ async def test_cluster_status_malformed_body_defaults(
 
 
 @pytest.mark.asyncio
+async def test_cluster_status_non_string_statuses_count_as_unknown(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """#3674: a dict or list where a status string belongs never raises.
+
+    Each such value lands in the derived "unknown" bucket or scalar.
+    """
+    payload: dict[str, Any] = {
+        "overall_status": {"x": 1},
+        "detailed_cluster_status": {
+            "overall_status": ["DEGRADED"],
+            "groups": [
+                {"group_id": "g-1", "group_status": {"x": 1}},
+                {"group_id": "g-2", "group_status": ["STABLE"]},
+                {"group_id": "g-3", "group_status": "STABLE"},
+            ],
+        },
+        "mgmt_cluster_status": {"status": {"x": 1}},
+        "control_cluster_status": {"status": ["STABLE"]},
+    }
+    result = await _dispatch_cluster_status(_stub_embedding, payload)
+
+    assert result.status == "ok", result.error
+    body = result.result
+    assert body["health_overall"] == "unknown"
+    assert body["health_mgmt"] == "unknown"
+    assert body["health_control"] == "unknown"
+    assert body["group_status_counts"] == {"unknown": 2, "STABLE": 1}
+    for key, value in payload.items():
+        assert body[key] == value
+
+
+@pytest.mark.asyncio
 async def test_cluster_status_malformed_non_object_body_passes_through(
     _stub_embedding: AsyncMock,
     session: AsyncSession,

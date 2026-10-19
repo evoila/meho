@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
@@ -60,6 +61,7 @@ from meho_backplane.operations.meta_tools import (
     OperationSearchHit,
     UnknownConnectorError,
     _classify_hits,
+    _search_guidance,
     call_operation,
     describe_descriptor,
     list_operation_groups,
@@ -1446,6 +1448,34 @@ async def test_search_operations_limit_one_still_sees_near_tie(
     assert [h["op_id"] for h in two["hits"]] == ["a", "b"]
     assert asked_limits == [SEARCH_CLASSIFY_MIN_HITS, 2]
     assert all(asked >= SEARCH_CLASSIFY_MIN_HITS for asked in asked_limits)
+
+
+def test_search_operations_ambiguous_guidance_requires_narrowing() -> None:
+    """Every place that explains ``ambiguous`` says: do not call, narrow first.
+
+    The advisory, the hosted-agent tool description, the MCP tool
+    description, and ``docs/codebase/mcp.md`` must agree. None may allow a
+    call on an ``ambiguous`` result.
+    """
+    import meho_backplane.mcp.tools.operations  # noqa: F401  (registers the tool)
+    from meho_backplane.agent.toolset import _OPERATIONS_META_TOOLS
+    from meho_backplane.mcp.registry import get_tool
+
+    advisory, _ = _search_guidance("ambiguous", group_key=None)
+    assert advisory is not None
+    agent_spec = next(s for s in _OPERATIONS_META_TOOLS if s.name == "search_operations")
+    entry = get_tool("search_operations")
+    assert entry is not None
+    docs = (Path(__file__).resolve().parents[2] / "docs" / "codebase" / "mcp.md").read_text()
+    docs_row = next(line for line in docs.splitlines() if line.startswith("| `ambiguous` |"))
+
+    for text in (advisory, agent_spec.description, entry[0].description, docs_row):
+        lowered = text.lower()
+        assert "do not call" in lowered
+        assert "narrow" in lowered
+        assert "clearly does what was asked" not in lowered
+        assert "call one only if" not in lowered
+        assert "call a hit only if" not in lowered
 
 
 # ---------------------------------------------------------------------------

@@ -425,7 +425,7 @@ Every other result has an `outcome` field:
 | `outcome` | Meaning | What the agent should do |
 |---|---|---|
 | `matched` | The top hit matched the query's words and is clearly ahead. | Check `safety_level` and `requires_approval`, then call it. |
-| `ambiguous` | Hits came back, but the top hit matched no query word (it is only close in meaning), or the top two are nearly tied. | Call a hit only if it clearly does what was asked. Otherwise narrow the search. |
+| `ambiguous` | Hits came back, but the top hit matched no query word (it is only close in meaning), or the top two are nearly tied. | Do not call any hit. Narrow the search first. |
 | `no_match` | The connector has enabled operations, but none matched. | Do not call anything. Search again with other words. |
 | `unknown_group` | The `group` filter names no visible group. | Retry with a group key from `narrowing`. |
 | `zero_enabled_operations` | The connector is loaded, but no operation is enabled for this caller. | Do not call it. An operator must enable operations. |
@@ -434,7 +434,9 @@ Every other result has an `outcome` field:
 `narrowing` lists next steps, at most `SEARCH_NARROWING_MAX` entries.
 
 - The outcome reads the scores the search already made. Hit order does
-  not change.
+  not change. The search always reads at least two hits from the
+  retriever (`SEARCH_CLASSIFY_MIN_HITS`), even for `limit=1`, so a tied
+  second hit cannot hide. The returned list is then cut to `limit`.
 - The near-tie band is `SEARCH_NEAR_TIE_BAND`: one list position at the
   top of one ranking signal.
 - The enabled-operation check and the group list use the same tenant

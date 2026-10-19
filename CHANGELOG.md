@@ -90,6 +90,15 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added
+
+- CI now checks that the Helm chart installs with the rights of a
+  namespace admin. The chart check fails when any render makes an object
+  outside its namespace, and names the object and its template file. The
+  kind install runs `helm install` and `helm test` as a namespace admin.
+  `docs/deploying.md` has a new section, "Rights the installer needs"
+  (#4099).
+
 ## [0.35.22] - 2026-10-13
 
 This release fixes a security problem in the audit clean-up. The

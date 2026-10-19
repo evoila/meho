@@ -70,6 +70,27 @@ but they explain failure modes you may still hit if you mis-set values.
 - **Unresolvable MCP audience (#2394)** — see the MCP-audience row above;
   the chart fails at render time rather than serving a dark `/mcp`.
 
+### Rights the installer needs
+
+The person who runs `helm install` needs the rights of a namespace admin
+in one namespace, and nothing more:
+
+- **The rights:** the built-in Kubernetes `admin` ClusterRole, bound with a
+  RoleBinding in the MEHO namespace only. On OpenShift, a project admin has
+  these rights.
+- **Why that is enough:** the chart creates nothing outside its namespace —
+  no ClusterRole, ClusterRoleBinding, CRD, Namespace, StorageClass or
+  webhook. CI checks this on every chart change: it fails on any
+  cluster-scoped object, and it installs the chart on kind as a namespace
+  admin (#4099).
+- **The namespace must exist first.** Creating a namespace is a cluster
+  right, so the cluster admin creates it, and the installer leaves out
+  `--create-namespace`.
+- **Opt-in custom resources:** with `eso.enabled`, `serviceMonitor.enabled`
+  or `prometheusRule.enabled`, the installer also needs rights on those
+  resources. Check before the install, for example
+  `kubectl auth can-i create externalsecrets -n <namespace>`.
+
 ## Install paths
 
 Two credential-backend shapes are supported. Both use the same chart; they

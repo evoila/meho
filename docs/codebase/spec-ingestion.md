@@ -1793,9 +1793,14 @@ admin seat yet. The rules:
   `meho_connector_ingest_cross_tenant` (`OP_CROSS_TENANT_INGEST`)
   audit row. The row is attributed to the acting operator
   (`operator_sub` and the operator's own `tenant_id`); the payload
-  names the `connector_id` and the `target_tenant_id`. If that write
-  fails, the ingest stops with nothing written. A dry run writes no
-  audit row.
+  names the `connector_id` and the `target_tenant_id`. The row also
+  carries the agent session (`agent_session_id`), read through
+  `resolve_agent_session_id` like every row `write_audit_row` builds,
+  so a session search finds it whether or not
+  `AUDIT_WRAPPER_ROWS_RETIRED` is on. The async MCP path keeps the
+  session too: the background task copies the tool call's context.
+  If that write fails, the ingest stops with nothing written. A dry
+  run writes no audit row.
 - The `--auth-scheme` profile stamp follows the same allowance:
   `ReviewService.record_profile_stamp` passes
   `allow_platform_admin_cross_tenant=True` to `_resolve_scope`. No

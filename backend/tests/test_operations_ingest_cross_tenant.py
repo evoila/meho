@@ -15,19 +15,28 @@ The DB-backed tests run against ``sqlite+aiosqlite`` via the autouse
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Iterator
 from typing import Any
 from uuid import UUID
 
 import pytest
+import structlog
 from sqlalchemy import select
 
+import meho_backplane.mcp.tools.connector_ingest as ci_mod
+from meho_backplane.audit_cutover import wrapper_rows_retired
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.registry import all_connectors_v2, clear_registry
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor
-from meho_backplane.operations.ingest import IngestJobNotFoundError, IngestJobRegistry
+from meho_backplane.operations._audit import agent_session_id_var
+from meho_backplane.operations.ingest import (
+    IngestJobNotFoundError,
+    IngestJobRegistry,
+    reset_job_registry_for_tests,
+)
 from meho_backplane.operations.ingest._internals import OP_CROSS_TENANT_INGEST
 from meho_backplane.operations.ingest.api_schemas import SpecSource
 from meho_backplane.operations.ingest.llm_groups import GroupingResult
@@ -73,6 +82,24 @@ def _clean_registry() -> Iterator[None]:
     clear_registry()
 
 
+@pytest.fixture
+def mcp_session_id() -> Iterator[UUID]:
+    """Bind an MCP session id the way the MCP server does for one tool call."""
+    session_id = uuid.uuid4()
+    structlog.contextvars.bind_contextvars(mcp_session_id=str(session_id))
+    try:
+        yield session_id
+    finally:
+        structlog.contextvars.unbind_contextvars("mcp_session_id")
+
+
+@pytest.fixture
+def _isolated_job_registry() -> Iterator[None]:
+    reset_job_registry_for_tests()
+    yield
+    reset_job_registry_for_tests()
+
+
 def _operator(*, platform_admin: bool, role: TenantRole = TenantRole.TENANT_ADMIN) -> Operator:
     return Operator(
         sub=f"op-{uuid.uuid4()}",
@@ -113,6 +140,35 @@ def _service(operator: Operator, monkeypatch: pytest.MonkeyPatch) -> IngestionPi
 
     monkeypatch.setattr(service, "_run_grouping_phase", _no_grouping)
     return service
+
+
+def _use_stubbed_service_in_mcp_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the MCP ingest tool build the grouping-stubbed pipeline."""
+
+    def _factory(operator: Operator, **_kwargs: Any) -> IngestionPipelineService:
+        return _service(operator, monkeypatch)
+
+    monkeypatch.setattr(ci_mod, "IngestionPipelineService", _factory)
+
+
+def _mcp_ingest_arguments(target: UUID, *, run_async: bool) -> dict[str, Any]:
+    return {
+        "product": _PRODUCT,
+        "version": _VERSION,
+        "impl_id": _IMPL_ID,
+        "specs": [{"uri": "fixture://xtenant/spec.yaml", "content": _SPEC_YAML}],
+        "tenant_id": str(target),
+        "async": run_async,
+    }
+
+
+async def _poll_until_terminal(operator: Operator, job_id: str) -> dict[str, Any]:
+    for _ in range(100):
+        payload = await ci_mod._ingest_status_handler(operator, {"job_id": job_id})
+        if payload["status"] != "running":
+            return payload
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"job {job_id} never reached a terminal state")  # pragma: no cover
 
 
 async def _ingest(
@@ -269,6 +325,112 @@ async def test_dry_run_into_foreign_tenant_writes_nothing() -> None:
     )
 
     assert await _cross_tenant_audit_rows() == []
+
+
+# ---------------------------------------------------------------------------
+# Session lineage: the audit row names the agent session
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cross_tenant_audit_row_carries_mcp_session_without_cutover(
+    monkeypatch: pytest.MonkeyPatch,
+    mcp_session_id: UUID,
+) -> None:
+    """The row keeps the MCP session id even with the wrapper-row cutover off.
+
+    The cutover listener fills lineage only when ``AUDIT_WRAPPER_ROWS_RETIRED``
+    is on. The writer must set the session itself so a session search
+    finds this cross-tenant action under the default settings.
+    """
+    assert wrapper_rows_retired() is False
+
+    await _ingest(_service(_operator(platform_admin=True), monkeypatch), tenant_id=uuid.uuid4())
+
+    rows = await _cross_tenant_audit_rows()
+    assert len(rows) == 1
+    assert rows[0].agent_session_id == mcp_session_id
+
+
+@pytest.mark.asyncio
+async def test_cross_tenant_audit_row_prefers_agent_run_session(
+    monkeypatch: pytest.MonkeyPatch,
+    mcp_session_id: UUID,
+) -> None:
+    """Inside an agent run the run's session wins over the MCP session."""
+    run_session = uuid.uuid4()
+    token = agent_session_id_var.set(run_session)
+    try:
+        await _ingest(_service(_operator(platform_admin=True), monkeypatch), tenant_id=uuid.uuid4())
+    finally:
+        agent_session_id_var.reset(token)
+
+    rows = await _cross_tenant_audit_rows()
+    assert len(rows) == 1
+    assert rows[0].agent_session_id == run_session
+    assert rows[0].agent_session_id != mcp_session_id
+
+
+@pytest.mark.asyncio
+async def test_cross_tenant_audit_row_has_no_session_outside_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _ingest(_service(_operator(platform_admin=True), monkeypatch), tenant_id=uuid.uuid4())
+
+    rows = await _cross_tenant_audit_rows()
+    assert len(rows) == 1
+    assert rows[0].agent_session_id is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_isolated_job_registry")
+async def test_mcp_inline_ingest_into_foreign_tenant_names_the_session(
+    monkeypatch: pytest.MonkeyPatch,
+    mcp_session_id: UUID,
+) -> None:
+    """``meho_connector_ingest`` (inline) writes an audit row with the session id."""
+    _use_stubbed_service_in_mcp_tool(monkeypatch)
+    operator = _operator(platform_admin=True)
+    target = uuid.uuid4()
+
+    payload = await ci_mod._ingest_handler(operator, _mcp_ingest_arguments(target, run_async=False))
+
+    assert payload["ingestion"]["inserted_count"] == 1
+    assert await _descriptor_tenants() == [target]
+    rows = await _cross_tenant_audit_rows()
+    assert len(rows) == 1
+    assert rows[0].operator_sub == operator.sub
+    assert rows[0].agent_session_id == mcp_session_id
+    assert rows[0].payload["target_tenant_id"] == str(target)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_isolated_job_registry")
+async def test_mcp_async_ingest_into_foreign_tenant_names_the_session(
+    monkeypatch: pytest.MonkeyPatch,
+    mcp_session_id: UUID,
+) -> None:
+    """``meho_connector_ingest`` (async) keeps the session id on the background task.
+
+    The pipeline runs in a task started from the tool call. The task
+    copies the call's context, so the session id the client sent still
+    reaches the audit row written after the handle was returned.
+    """
+    _use_stubbed_service_in_mcp_tool(monkeypatch)
+    operator = _operator(platform_admin=True)
+    target = uuid.uuid4()
+
+    handle = await ci_mod._ingest_handler(operator, _mcp_ingest_arguments(target, run_async=True))
+    assert handle["status"] == "running"
+
+    terminal = await _poll_until_terminal(operator, handle["job_id"])
+    assert terminal["status"] == "succeeded", terminal
+    assert await _descriptor_tenants() == [target]
+    rows = await _cross_tenant_audit_rows()
+    assert len(rows) == 1
+    assert rows[0].operator_sub == operator.sub
+    assert rows[0].agent_session_id == mcp_session_id
+    assert rows[0].payload["target_tenant_id"] == str(target)
 
 
 # ---------------------------------------------------------------------------

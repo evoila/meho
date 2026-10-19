@@ -73,6 +73,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.conventions.index import index_revision
 from meho_backplane.conventions.render import (
     BLOCK_END,
     BLOCK_START,
@@ -225,6 +226,12 @@ class PreambleAssembly(NamedTuple):
       in-progress runs and the helper rendered the summary form
       instead of per-run blocks; ``False`` otherwise (including the
       no-runs case).
+    * ``conventions_revision`` -- a short digest of every operational
+      row's ``(id, updated_at)`` in pack order (#3763). It changes when
+      any operational convention is added, edited, removed, or
+      reordered. A hosted run's delivery receipt reports it, so a reader
+      can tell which set of conventions the run was given without
+      storing the text.
 
     The MCP read path stays on :func:`assemble_preamble` (returns a
     :class:`PreambleResult`); the inclusion-feedback write path uses
@@ -247,6 +254,7 @@ class PreambleAssembly(NamedTuple):
     oversize_slugs: list[str]
     runbook_block_count: int = 0
     runbook_summarized: bool = False
+    conventions_revision: str = ""
 
 
 async def _fetch_operational_conventions(
@@ -411,6 +419,7 @@ async def assemble_preamble_detailed(
         [ConventionEntry(conv.slug, conv.title, conv.body) for conv in conventions],
         max_tokens,
     )
+    revision = index_revision((conv.id, conv.updated_at) for conv in conventions)
     if conventions_only:
         return PreambleAssembly(
             text=rendered.text,
@@ -419,6 +428,7 @@ async def assemble_preamble_detailed(
             token_counts=rendered.token_counts,
             conventions_tokens=rendered.estimated_tokens,
             oversize_slugs=rendered.oversize_slugs,
+            conventions_revision=revision,
         )
     # The priming helper opens its own DB session through
     # :class:`RunbookRunService` -- threading the caller's *session*
@@ -446,6 +456,7 @@ async def assemble_preamble_detailed(
         oversize_slugs=rendered.oversize_slugs,
         runbook_block_count=priming.block_count,
         runbook_summarized=priming.summarized,
+        conventions_revision=revision,
     )
 
 

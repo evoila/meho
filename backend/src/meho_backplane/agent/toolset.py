@@ -113,6 +113,9 @@ so existing definitions keep their surface; such a tool is reported
 
 from __future__ import annotations
 
+import hashlib
+import json
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -147,6 +150,7 @@ __all__ = [
     "DisabledReason",
     "MetaToolSpec",
     "ToolsetResolution",
+    "capability_versions",
     "resolve_agent_tools",
     "resolve_agent_toolset",
     "toolset_admits_runbook_execution",
@@ -576,3 +580,24 @@ def resolve_agent_tools(
     missing / disabled report call :func:`resolve_agent_toolset`.
     """
     return resolve_agent_toolset(toolset, operator).tools
+
+
+def capability_versions(tools: Iterable[Tool[Operator]]) -> dict[str, str]:
+    """Return ``{tool name: version}`` for *tools* (#3763).
+
+    The version is the first 12 hex characters of a SHA-256 over the
+    name, description, and input schema the model is shown. It changes
+    when any of them changes, so a delivery receipt can say which shape
+    of each tool a run had without copying the text.
+    """
+    versions: dict[str, str] = {}
+    for tool in tools:
+        definition = tool.tool_def
+        shown = {
+            "name": definition.name,
+            "description": definition.description,
+            "parameters": definition.parameters_json_schema,
+        }
+        encoded = json.dumps(shown, sort_keys=True, separators=(",", ":")).encode()
+        versions[definition.name] = hashlib.sha256(encoded).hexdigest()[:12]
+    return versions

@@ -333,9 +333,52 @@ count), and logged as `agent_hosted_context_over_budget`. With
 `read_context_resource` the band also names the URI to read one.
 
 Memory, knowledge base, and topology are on demand only; nothing loads them
-into the prompt. Delivery receipts for the hosted context are separate work
-(#3763). Like the #3737 tools, hosted reads do not write the per-call MCP
-audit row.
+into the prompt. Like the #3737 tools, hosted reads do not write the per-call
+MCP audit row.
+
+**Delivery receipt (#3763).** Each hosted context build also returns a
+`HostedContextReceipt` (`HostedContext.receipt`). It says what MEHO
+*supplied*, not what the model did with it:
+
+| Field | Meaning |
+|---|---|
+| `conventions_revision` | `PreambleAssembly.conventions_revision`: a 16-character digest of the tenant's operational conventions (`id`, `updated_at`, pack order). |
+| `capabilities` | Registered tool name → version. The version is 12 hex characters of SHA-256 over the name, description, and input schema the model saw (`toolset.capability_versions`). |
+| `context_chars`, `context_tokens_estimate` | Size of the hosted context prompt part. |
+| `conventions_delivered`, `conventions_tokens_estimate` | How many conventions were packed, and the size of their band. |
+| `omissions` | Ids only: conventions over the budget (`over_budget`), requested tools the role may not use (`kind="capability"`, `role_below_floor`), and requested tools this runtime does not ship (`unsupported`). Tools the spec did not ask for are not listed. |
+| `correlation_id` | The id of the matching `context_selected` request usage event, or `None` when no event was recorded. |
+
+The model is `extra="forbid"`: it has no field for convention or retrieved
+text, prompts, or any claim that the model followed the context. Every id in
+it belongs to the run's own tenant.
+
+Where it goes:
+
+- **Run trace.** `PydanticAgentRun._build_agent` logs it as
+  `agent_hosted_context_delivered` every time the hosted context is built,
+  child runs included. The line carries the agent name, operator, tenant,
+  and `run_id`. The `run_id` is the durable `agent_run` id bound for the
+  run by the invocation layer; a recorded child run logs its own id. A run
+  with no bound id (the runtime used on its own) logs the id of its
+  `AgentRunHandle`. So two runs of the same agent stay apart in the log
+  even when usage collection is off and the receipt has no
+  `correlation_id`. A run started with `start()` also returns the receipt
+  on `AgentRunResult.context_receipt`. A legacy run (`toolset is None`)
+  has no hosted context, so no log line and `context_receipt=None`.
+- **Request usage sink (#3734).** `assemble_hosted_context` calls
+  `note_context_selected()`. When usage collection is on and the run started
+  inside an open request, that request stores one `context_selected` event
+  with the receipt's `correlation_id`. The usage schema only holds ids, so
+  the sizes and revision stay in the trace; the correlation id joins the
+  two. Scheduled runs and runs that outlive their request get
+  `correlation_id=None`.
+- **Never `audit_log`.** A receipt is telemetry, not an accountable action.
+
+Fixtures in `tests/test_agent_toolset.py` pin the configured-empty, legacy
+`None`, granted-versus-denied capability, budget-overflow, usage-link, and
+run-id (two concurrent runs, a bound durable id, a parent and its child)
+cases.
 
 ## Invocation surface (T4 #811)
 

@@ -199,6 +199,9 @@ volumes together, or neither: new passwords do not match old data.
   `broadcast:` block reach it.
 - The PostgreSQL subchart (#4039) must name its Service `<release>-postgres`;
   the made database URL points there.
+- A kept `-core-tls` keeps the host it was made for. After a change of
+  `ingress.host`, delete `<release>-core-tls` and run `helm upgrade`; the Job
+  makes a new certificate (and a new CA, so give the CLI the new `ca.crt`).
 - The kind CI job that installs the full core and checks every made Secret
   (#4051) does not exist yet.
 

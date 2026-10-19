@@ -8,7 +8,8 @@ When you finish, you will have:
 
 - an agent with its own identity;
 - an agent definition: its prompt, its tools, and its limits;
-- permission grants that make the agent read-only;
+- permission grants that make the agent read-only when it runs as
+  itself;
 - one finished run, and the audit rows that show what the agent did.
 
 !!! note "Prerequisites, roles, and maturity"
@@ -288,8 +289,13 @@ The safety-level table above and the grants apply only when the agent
 acts as itself. In a run you start by hand, MEHO checks each call the
 same way it checks a call you make yourself. See
 [Approvals and break-glass](approvals-and-break-glass.md) for which
-calls wait for a second person. For a run you start by hand, the
-toolset from Step 3 is what keeps the agent narrow.
+calls wait for a second person.
+
+In a run you start by hand, the toolset from Step 3 still limits the
+agent to the tools and connectors you listed. It does not limit the
+operations. The agent may run any operation on `k8s-1.x` that you may
+run, including writes. So the read-only recipe below only holds when
+the agent runs as itself. Step 6 shows both ways to start a run.
 
 ### How a grant works
 
@@ -381,8 +387,26 @@ stops working.
 
 ## Step 6 — Run the agent
 
+There are two ways to start a run. They use different permissions.
+
+| How you start the run | Whose permissions apply | Whose sub is in the audit rows |
+|---|---|---|
+| By hand, with `meho agent run` | **Yours.** The grants from Step 5 do not apply. | Yours |
+| Through the scheduler, with `meho scheduler create` | **The agent's.** The grants from Step 5 apply. | The agent's |
+
+### A run by hand, with your permissions
+
 Any user with the `operator` or `tenant_admin` role can run a
 definition in their tenant.
+
+!!! warning "A run by hand is not limited by the grants"
+
+    This run acts as you. It may run every operation on `k8s-1.x` that
+    you may run, including writes. The system prompt tells the agent to
+    only read, but a prompt is not a permission check. Use a run by
+    hand to test the prompt and the toolset. For the read-only result
+    from Step 5, start the run through the scheduler (see
+    [below](#a-run-as-the-agent-with-its-grants)).
 
 ```bash
 meho agent run pod-reader \
@@ -427,15 +451,58 @@ meho agent run-cancel <run-id>                # stop a run
 meho agent run-events pod-reader --input "..." # start a run and watch each step live
 ```
 
-To run the agent on a schedule, with its own identity and its own
-grants, see the [scheduler guide](scheduler.md). The scheduler needs
-the agent's login secret. That guide explains where to store it.
+### A run as the agent, with its grants
+
+The [scheduler](scheduler.md) starts runs with the agent's own
+identity. In such a run the grants from Step 5 apply, so `pod-reader`
+can only run `k8s.pod.list` on `cluster-a`. This is the run that is
+truly read-only.
+
+A one-off trigger fires once, at a UTC time you give. Pick a time a few
+minutes from now:
+
+```bash
+meho scheduler create --kind one_off \
+  --agent-definition pod-reader \
+  --fire-at 2026-10-20T02:00:00Z \
+  --inputs '{"task": "List the pods in namespace web on cluster-a that are not running."}'
+```
+
+`--inputs` is a JSON object. MEHO puts it into the agent's prompt when
+the trigger fires. Creating a trigger needs `tenant_admin`.
+
+Before the first scheduled run, two things must be in place:
+
+- The scheduler needs the agent's login secret. The
+  [scheduler guide](scheduler.md) explains where to store it. Without
+  it, the scheduler skips the fire and shows
+  `last_skip_reason=credentials_unresolved`.
+- The grants from Step 5 must exist. Otherwise the agent runs with the
+  safety-level defaults, which allow every `safe` operation.
+
+After the time passes, find the run and check it:
+
+```bash
+meho scheduler list
+meho agent run-list --agent-name pod-reader
+meho agent run-status <run-id>
+```
+
+For a run that repeats, use `--kind cron` with `--cron-expr` and
+`--timezone`. The scheduler guide shows the full set of flags.
 
 ## Step 7 — Check what the agent did
 
-Every tool call the agent makes writes an audit row. All rows of one run
-carry the run id in the `agent_session_id` field. So the run id is all
-you need.
+Each operation the agent runs through `call_operation` writes an audit
+row. The row carries the run id in the `agent_session_id` field. So the
+run id is all you need to find the operations of one run.
+
+Not every tool call writes a row. In a hosted run, the discovery tools
+(`meho_connector_list`, `list_operation_groups`, `search_operations`,
+`list_targets`), `preview_operation`, and `result_query` do not write
+audit rows. So the audit shows **which operations the agent ran**, not
+every tool it touched. The run itself, with its status, its turns, and
+its output, is in `meho agent run-status <run-id>`.
 
 List every row of the run:
 
@@ -473,6 +540,7 @@ In each row, check:
 | The agent says it has no tool for something | The tool is not in `meta_tools`, the name is misspelled, or hosted agents do not have that tool. | Check the tool table in Step 3. |
 | The agent says a connector is not allowed | The connector is not in the `connectors` list. | Add the connector id to `connectors`, or remove the list. |
 | A call is `denied` | A grant or the safety level denies it. | Check `meho agent grant list --principal agent:<name>` and the operation's `safety_level`. |
+| A run you started by hand ran an operation the grants deny | A run by hand acts as you. The grants do not apply to it. | Start the run through the scheduler, so the agent runs as itself. |
 | The run fails with `turn budget exhausted` | The agent used all its turns. | Raise `--turn-budget` with `meho agent edit`, or make the task smaller. |
 | The run fails right away and the error names a runbook | The prompt or input tells the agent to run a runbook. Hosted agents cannot run runbooks. | Remove that instruction. |
 | `agent run` gives back a run id but no output | The run took longer than the wait limit, so it went on in the background. | Run `meho agent run-status <run-id>`. |

@@ -581,6 +581,64 @@ async def test_event_tail_reduces_each_event_to_a_short_row() -> None:
 
 
 @pytest.mark.asyncio
+async def test_event_tail_prefers_the_event_own_object_over_its_context() -> None:
+    """``objectId`` / ``managedObject`` win over inherited ``Event`` context members.
+
+    Both ``EventEx`` and ``ExtendedEvent`` inherit ``datacenter`` / ``host`` /
+    ``ds`` / ... from ``Event``. A row must name the object the event is about,
+    not the surrounding datacenter or host.
+    """
+    events_payload = [
+        {
+            "_typeName": "EventEx",
+            "createdTime": "2026-10-19T09:01:00Z",
+            "eventTypeId": "esx.problem.storage.apd.start",
+            "datacenter": {
+                "_typeName": "DatacenterEventArgument",
+                "name": "dc-01",
+                "datacenter": vim_moref("Datacenter", "datacenter-2"),
+            },
+            "ds": {
+                "_typeName": "DatastoreEventArgument",
+                "name": "nfs-01",
+                "datastore": vim_moref("Datastore", "datastore-12"),
+            },
+            "objectId": "datastore-12",
+            "objectType": "Datastore",
+            "objectName": "nfs-01",
+        },
+        {
+            "_typeName": "ExtendedEvent",
+            "createdTime": "2026-10-19T09:02:00Z",
+            "eventTypeId": "com.example.extension.event",
+            "host": {
+                "_typeName": "HostEventArgument",
+                "name": "esx-1",
+                "host": vim_moref("HostSystem", "host-9"),
+            },
+            "managedObject": vim_moref("VirtualMachine", "vm-42"),
+        },
+        {
+            "_typeName": "EventEx",
+            "createdTime": "2026-10-19T09:03:00Z",
+            "eventTypeId": "com.example.no.object",
+            "datacenter": {
+                "_typeName": "DatacenterEventArgument",
+                "name": "dc-01",
+                "datacenter": vim_moref("Datacenter", "datacenter-2"),
+            },
+        },
+    ]
+    conn = _RecordingConnector({_QUERY_EVENTS_PATH: events_payload})
+    out = await _run_event_tail(conn, {})
+    assert [row["entity"] for row in out["events"]] == [
+        {"type": "Datastore", "moId": "datastore-12", "name": "nfs-01"},
+        {"type": "VirtualMachine", "moId": "vm-42", "name": None},
+        {"type": "Datacenter", "moId": "datacenter-2", "name": "dc-01"},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_event_tail_cuts_to_max_count_when_the_server_ignores_it() -> None:
     """A server that returns more than ``maxCount`` is cut to ``max_count`` rows."""
     events_payload = [{"_typeName": "Event", "key": n} for n in range(200)]

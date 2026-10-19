@@ -577,14 +577,36 @@ def _build_query_events_body(params: dict[str, Any], max_count: int) -> dict[str
     return {"filter": spec}
 
 
-def _event_entity(event: dict[str, Any]) -> dict[str, Any] | None:
-    """The entity an event is about, as ``{type, moId, name}``, else ``None``.
+def _event_explicit_entity(event: dict[str, Any]) -> dict[str, Any] | None:
+    """The object an ``EventEx`` / ``ExtendedEvent`` names itself, else ``None``.
 
-    Classic events carry ``EntityEventArgument`` members (``vm`` / ``ds`` /
-    ``host`` / ...); the most specific one wins. ``EventEx`` names its object
-    in ``objectType`` / ``objectId`` / ``objectName`` and ``ExtendedEvent`` in
-    ``managedObject``.
+    ``EventEx`` carries ``objectId`` / ``objectType`` / ``objectName``;
+    ``ExtendedEvent`` carries ``managedObject``. Both event classes also
+    inherit the base ``Event`` context members, so these fields must be read
+    before them.
     """
+    object_id = event.get("objectId")
+    if isinstance(object_id, str):
+        object_type = event.get("objectType")
+        object_name = event.get("objectName")
+        return {
+            "type": object_type if isinstance(object_type, str) else None,
+            "moId": object_id,
+            "name": object_name if isinstance(object_name, str) else None,
+        }
+    managed_object = event.get("managedObject")
+    if isinstance(managed_object, dict) and isinstance(managed_object.get("value"), str):
+        mo_type = managed_object.get("type")
+        return {
+            "type": mo_type if isinstance(mo_type, str) else None,
+            "moId": managed_object["value"],
+            "name": None,
+        }
+    return None
+
+
+def _event_argument_entity(event: dict[str, Any]) -> dict[str, Any] | None:
+    """The most specific ``EntityEventArgument`` member of an event, else ``None``."""
     for field in _EVENT_ENTITY_ARGUMENTS:
         argument = event.get(field)
         if not isinstance(argument, dict):
@@ -605,24 +627,19 @@ def _event_entity(event: dict[str, Any]) -> dict[str, Any] | None:
             "moId": moref["value"] if moref else None,
             "name": name if isinstance(name, str) else None,
         }
-    object_id = event.get("objectId")
-    if isinstance(object_id, str):
-        object_type = event.get("objectType")
-        object_name = event.get("objectName")
-        return {
-            "type": object_type if isinstance(object_type, str) else None,
-            "moId": object_id,
-            "name": object_name if isinstance(object_name, str) else None,
-        }
-    managed_object = event.get("managedObject")
-    if isinstance(managed_object, dict) and isinstance(managed_object.get("value"), str):
-        mo_type = managed_object.get("type")
-        return {
-            "type": mo_type if isinstance(mo_type, str) else None,
-            "moId": managed_object["value"],
-            "name": None,
-        }
     return None
+
+
+def _event_entity(event: dict[str, Any]) -> dict[str, Any] | None:
+    """The entity an event is about, as ``{type, moId, name}``, else ``None``.
+
+    The event's own object (``EventEx`` ``objectId``, ``ExtendedEvent``
+    ``managedObject``) wins. Only when an event names no object of its own do
+    the base ``Event`` context members (``vm`` / ``ds`` / ``host`` / ...)
+    count, most specific first. Reading the context first would turn an
+    ``EventEx`` about a datastore into a row about its datacenter.
+    """
+    return _event_explicit_entity(event) or _event_argument_entity(event)
 
 
 def _reduce_event(event: Any) -> dict[str, Any]:

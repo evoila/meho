@@ -2969,9 +2969,13 @@ genuinely small action. The read composites register no builder.
   `fullFormattedMessage`. Each event comes back as a short row
   `{createdTime, eventTypeId, fullFormattedMessage, entity}`; `eventTypeId`
   is the `EventEx` / `ExtendedEvent` type id or else the event class name,
-  so it can be passed back as a filter value. Rows keep the order vCenter
-  returned. `QueryEvents` has no ESXi SOAP builder, so this composite does
-  not run against a standalone ESXi host.
+  so it can be passed back as a filter value. `entity` is the object the
+  event is about: an `EventEx` `objectId` or an `ExtendedEvent`
+  `managedObject` wins, and only an event without one falls back to the
+  inherited `Event` context members (`vm`, `ds`, `host`, `net`, `dvs`,
+  `computeResource`, `datacenter`, most specific first). Rows keep the
+  order vCenter returned. `QueryEvents` has no ESXi SOAP builder, so this
+  composite does not run against a standalone ESXi host.
 - **`performance.summary` request bodies (#4038)** — both vi-json calls
   send `entity` as an annotated `ManagedObjectReference`
   (`vim_body.vim_moref`), never a bare moid string: vCenter 8.0.3 answers

@@ -5,9 +5,11 @@
 
 The file ``deploy/charts/meho/charts/keycloak/files/meho-realm.json`` is what
 Keycloak imports at its first start. These checks pin the realm the product
-owner decided: five groups that carry ``tenant_id`` and ``tenant_role`` (plus
-``approver`` on MEHO-Approvers), the six clients, the five mappers on the
-clients people log in with, and no secret or host name written into the file.
+owner decided (``docs/decisions/login-role-groups.md``): five groups that
+carry ``tenant_id`` and ``tenant_role`` (plus ``approver`` on MEHO-Approvers),
+the six clients, the mappers ``meho admin keycloak bootstrap-clients`` puts
+on the clients people log in with, and no secret or host name written into
+the file.
 Every value that differs per install is a ``${...}`` placeholder that
 Keycloak fills from the pod's environment during the import.
 """
@@ -116,22 +118,27 @@ def test_human_clients_read_claims_from_groups(realm: dict[str, Any], client_id:
         "tenant-id",
         "tenant-role",
         "approver",
+        "groups-claim",
     }
-    for name, attribute in (
-        ("tenant-id", "tenant_id"),
-        ("tenant-role", "tenant_role"),
-        ("approver", "approver"),
+    for name, attribute, json_type in (
+        ("tenant-id", "tenant_id", "String"),
+        ("tenant-role", "tenant_role", "String"),
+        ("approver", "approver", "boolean"),
     ):
         mapper = mappers[name]
         assert mapper["protocolMapper"] == "oidc-usermodel-attribute-mapper"
         config = mapper["config"]
         assert config["user.attribute"] == attribute
         assert config["claim.name"] == attribute
+        assert config["jsonType.label"] == json_type
         # The first group that carries the attribute wins, which is why a
         # person is in exactly one group.
         assert config["aggregate.attrs"] == "false"
         assert config["multivalued"] == "false"
         assert config["access.token.claim"] == "true"
+        assert config["id.token.claim"] == "false"
+        assert config["userinfo.token.claim"] == "true"
+    assert mappers["groups-claim"]["protocolMapper"] == "oidc-group-membership-mapper"
     assert mappers["audience-meho-backplane"]["config"]["included.client.audience"] == (
         "meho-backplane"
     )

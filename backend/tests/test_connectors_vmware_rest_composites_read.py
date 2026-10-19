@@ -560,9 +560,20 @@ async def test_performance_summary_reads_two_sub_ops_in_order() -> None:
         "/api/PerformanceManager/PerfMgr/QueryPerf",
     ]
     # The vi-json method arguments become the flat JSON request body; the
-    # PerfMgr singleton rides the path.
-    assert conn.calls[0]["body"] == {"entity": "vm-1234"}
-    assert conn.calls[1]["body"] == {"entity": "vm-1234", "interval_seconds": 20}
+    # PerfMgr singleton rides the path. ``entity`` is an annotated MoRef and
+    # QueryPerf takes a PerfQuerySpec list (#4038).
+    entity = vim_moref("VirtualMachine", "vm-1234")
+    assert conn.calls[0]["body"] == {"entity": entity, "intervalId": 20}
+    assert conn.calls[1]["body"] == {
+        "querySpec": [
+            {
+                "_typeName": "PerfQuerySpec",
+                "entity": entity,
+                "intervalId": 20,
+                "maxSample": 60,
+            }
+        ]
+    }
     assert out == {
         "entity_moid": "vm-1234",
         "perf_manager_moid": "PerfMgr",
@@ -613,9 +624,64 @@ async def test_performance_summary_passes_through_interval_and_custom_perf_mgr()
         },
         connector=conn,  # type: ignore[arg-type]
     )
-    # AltPerfMgr rides the path; the interval rides the QueryPerf body.
+    # AltPerfMgr rides the path; the interval rides both bodies as intervalId.
     assert conn.calls[1]["path"] == "/api/PerformanceManager/AltPerfMgr/QueryPerf"
-    assert conn.calls[1]["body"] == {"entity": "vm-99", "interval_seconds": 300}
+    assert conn.calls[0]["body"]["intervalId"] == 300
+    assert conn.calls[1]["body"]["querySpec"][0]["intervalId"] == 300
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("entity_moid", "mo_type"),
+    [
+        ("host-5678", "HostSystem"),
+        ("vm-12", "VirtualMachine"),
+        ("domain-c9", "ClusterComputeResource"),
+    ],
+)
+async def test_performance_summary_entity_type_from_moid_prefix(
+    entity_moid: str, mo_type: str
+) -> None:
+    """The moid prefix picks the MoRef type; vCenter 8.0.3 rejects a bare string (#4038)."""
+    conn = _RecordingConnector([[], []])
+    await performance_summary_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"entity_moid": entity_moid},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    expected = {"_typeName": "ManagedObjectReference", "type": mo_type, "value": entity_moid}
+    assert conn.calls[0]["body"]["entity"] == expected
+    assert conn.calls[1]["body"]["querySpec"][0]["entity"] == expected
+
+
+@pytest.mark.asyncio
+async def test_performance_summary_entity_type_overrides_prefix() -> None:
+    """An explicit ``entity_type`` wins, so other entity kinds work too."""
+    conn = _RecordingConnector([[], []])
+    await performance_summary_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"entity_moid": "resgroup-4", "entity_type": "ResourcePool"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    expected = vim_moref("ResourcePool", "resgroup-4")
+    assert conn.calls[0]["body"]["entity"] == expected
+    assert conn.calls[1]["body"]["querySpec"][0]["entity"] == expected
+
+
+@pytest.mark.asyncio
+async def test_performance_summary_unknown_prefix_without_type_raises() -> None:
+    """An unknown prefix and no ``entity_type`` fails before any call."""
+    conn = _RecordingConnector([[], []])
+    with pytest.raises(ValueError, match="entity_type"):
+        await performance_summary_composite(
+            operator=_make_operator(),
+            target=object(),
+            params={"entity_moid": "resgroup-4"},
+            connector=conn,  # type: ignore[arg-type]
+        )
+    assert conn.calls == []
 
 
 # ---------------------------------------------------------------------------

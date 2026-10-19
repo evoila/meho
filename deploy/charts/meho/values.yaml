@@ -16,6 +16,14 @@
 # suitable for the chassis-stage backplane; tune via overrides for higher-
 # throughput deployments.
 
+# Values Helm hands to the parent chart and every subchart.
+global:
+  # -- Set to true on OpenShift. The built-in core parts then leave out
+  # `runAsUser`, `runAsGroup` and `fsGroup`, so OpenShift can pick the user
+  # id from the project's range (it refuses a fixed one outside it). On
+  # other clusters keep false: the pods run with fixed, non-root user ids.
+  openshift: false
+
 # -- Number of backplane replicas. v0.1 is single-replica; HA lands in v0.2.
 replicaCount: 1
 
@@ -1044,6 +1052,126 @@ approvalHandoff:
   secretName: ""
   secretKey: approval_handoff_encryption_key
 
+# Built-in core: the Secrets the install makes (#4041).
+#
+# When a built-in part is on, a hook Job runs before every install and
+# upgrade (templates/core-secrets-job.yaml). It makes each password and key
+# that part needs as a Kubernetes Secret named `<release>-core-…`, if the
+# Secret is missing. It never changes an existing Secret and prints no
+# value. Secret names, keys and formats: docs/codebase/core-secrets.md.
+#
+# To use your own Secret instead, put its name in the matching values key
+# (for example `postgres.credentialsSecret` or `approvalHandoff.secretName`).
+# The Job then only checks that your Secret holds the keys MEHO reads. An
+# empty key, or the `<release>-core-…` name itself, lets the install make the
+# Secret.
+#
+# The Job reuses `migrationJob.backoffLimit`, `ttlSecondsAfterFinished` and
+# `resources`. The PostgreSQL and Keycloak subcharts add their own settings
+# to the two blocks below.
+corePostgres:
+  # -- Built-in PostgreSQL. When on, the install makes
+  # `<release>-core-postgres-superuser`, `-core-postgres-meho` and
+  # `-core-postgres-keycloak`.
+  enabled: false
+  existingSecrets:
+    # -- Your own Secret with the PostgreSQL superuser password (key
+    # `password`). Empty = the install makes
+    # `<release>-core-postgres-superuser`.
+    superuser: ""
+    # -- Your own Secret with the password of the `keycloak` database role
+    # (key `password`). Empty = the install makes
+    # `<release>-core-postgres-keycloak`.
+    keycloak: ""
+  # The subchart settings below (#4039): one PostgreSQL 17 server with
+  # pgvector and two databases, `meho` and `keycloak`, each owned by a role
+  # of the same name that is not a superuser. The chart creates the
+  # `vector` extension itself, so the pgvector step described at
+  # `postgres.credentialsSecret` is not needed. A sidecar in the
+  # PostgreSQL pod sets the role passwords again whenever the Secrets
+  # change. The superuser Secret is mounted by the PostgreSQL pod alone.
+  # Off by default for now; it turns on by default once the existing
+  # bring-your-own installs set `corePostgres.enabled: false`.
+  image:
+    repository: pgvector/pgvector
+    tag: "0.8.7-pg17-bookworm"
+    # -- When set, the pod uses `repository@digest`; the tag is a label.
+    digest: "sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d"
+    pullPolicy: IfNotPresent
+  persistence:
+    # -- Data disk size. Fixed after the first install (StatefulSet rule).
+    size: 10Gi
+    # -- Storage class. Empty = the cluster default.
+    storageClass: ""
+  # -- UID/GID 999 is the image's `postgres` user. `global.openshift: true`
+  # leaves out `runAsUser`, `runAsGroup` and `fsGroup`.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+    runAsGroup: 999
+    fsGroup: 999
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+  resources:
+    limits:
+      cpu: "1"
+      memory: 1Gi
+      ephemeral-storage: 1Gi
+    requests:
+      cpu: 250m
+      memory: 512Mi
+      ephemeral-storage: 128Mi
+  reconcile:
+    # -- Resources of the reconcile sidecar.
+    resources:
+      limits:
+        cpu: 100m
+        memory: 64Mi
+        ephemeral-storage: 64Mi
+      requests:
+        cpu: 10m
+        memory: 32Mi
+        ephemeral-storage: 16Mi
+  # -- The subchart's own ingress NetworkPolicy: tcp/5432 only from the
+  # backplane pods (also the migration step and the helm test pod) and the
+  # Keycloak pods of this release.
+  networkPolicy:
+    enabled: true
+    backplanePodLabels:
+      app.kubernetes.io/name: meho
+    keycloakPodLabels:
+      app.kubernetes.io/name: keycloak
+    extraAllowedSelectors: []
+coreKeycloak:
+  # -- Built-in Keycloak. When on, the install makes
+  # `<release>-core-keycloak-bootstrap` and the three MEHO client secrets
+  # `-core-keycloak-admin`, `-core-ui-auth` and `-core-check-runner`, and
+  # deploys the Keycloak subchart (`charts/keycloak/`): Keycloak on the
+  # official image at `https://<host>/auth`, with the MEHO realm loaded at
+  # the first start. Needs `corePostgres.enabled: true`. Every other key is
+  # described in `charts/keycloak/values.yaml`; set it here.
+  enabled: false
+  # -- MEHO's public DNS name. Set the same value as `ingress.host`.
+  hostname: ""
+  # -- The first tenant's id (a UUID). Pick one per install and keep it.
+  firstTenantId: ""
+  ingress:
+    # -- Also route the admin console (`/auth/admin`, `/auth/realms/master`)
+    # on the MEHO host. Default false: the admin console is then not
+    # reachable from outside the cluster.
+    exposeAdmin: false
+  existingSecrets:
+    # -- Your own Secret with Keycloak's first-start service account (keys
+    # `client_id` and `client_secret`). Empty = the install makes
+    # `<release>-core-keycloak-bootstrap`.
+    bootstrap: ""
+
 audit:
   # -- v0.1: audit rows written to PostgreSQL only. The S3 / object-store
   # mirror is explicitly v0.2 per Goal #11 spec.
@@ -1174,25 +1302,6 @@ resultCache:
     backplanePodLabels:
       app.kubernetes.io/name: meho
     extraAllowedSelectors: []
-
-# Built-in Keycloak (`charts/keycloak/`), the login server of the MEHO core.
-# Off by default; with it off the chart renders exactly what it rendered
-# before. When on, the install brings Keycloak on the official image with the
-# MEHO realm loaded at the first start, reachable at `https://<host>/auth`.
-# It needs the built-in PostgreSQL (`corePostgres.enabled: true`) and the
-# Secrets the install's secrets Job creates. Every key is described in
-# `charts/keycloak/values.yaml`; set any of them here under `coreKeycloak:`.
-coreKeycloak:
-  enabled: false
-  # -- MEHO's public DNS name. Set the same value as `ingress.host`.
-  hostname: ""
-  # -- The first tenant's id (a UUID). Pick one per install and keep it.
-  firstTenantId: ""
-  ingress:
-    # -- Also route the admin console (`/auth/admin`, `/auth/realms/master`)
-    # on the MEHO host. Default false: the admin console is then not
-    # reachable from outside the cluster.
-    exposeAdmin: false
 
 # Pre-install / pre-upgrade migration Job (Helm hook).
 #

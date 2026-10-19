@@ -162,7 +162,8 @@
             "included.client.audience": "meho-backplane",
             "id.token.claim": "false",
             "access.token.claim": "true",
-            "introspection.token.claim": "true"
+            "introspection.token.claim": "true",
+            "userinfo.token.claim": "false"
           }
         },
         {
@@ -173,7 +174,8 @@
             "included.custom.audience": "${MEHO_REALM_PUBLIC_URL}/mcp",
             "id.token.claim": "false",
             "access.token.claim": "true",
-            "introspection.token.claim": "true"
+            "introspection.token.claim": "true",
+            "userinfo.token.claim": "false"
           }
         },
         {
@@ -189,7 +191,7 @@
             "id.token.claim": "false",
             "access.token.claim": "true",
             "introspection.token.claim": "true",
-            "userinfo.token.claim": "false"
+            "userinfo.token.claim": "true"
           }
         },
         {
@@ -205,7 +207,7 @@
             "id.token.claim": "false",
             "access.token.claim": "true",
             "introspection.token.claim": "true",
-            "userinfo.token.claim": "false"
+            "userinfo.token.claim": "true"
           }
         },
         {
@@ -215,10 +217,23 @@
           "config": {
             "user.attribute": "approver",
             "claim.name": "approver",
-            "jsonType.label": "String",
+            "jsonType.label": "boolean",
             "aggregate.attrs": "false",
             "multivalued": "false",
             "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "groups-claim",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "config": {
+            "claim.name": "groups",
+            "full.path": "false",
+            "id.token.claim": "true",
             "access.token.claim": "true",
             "introspection.token.claim": "true",
             "userinfo.token.claim": "false"
@@ -275,7 +290,8 @@
             "included.client.audience": "meho-backplane",
             "id.token.claim": "false",
             "access.token.claim": "true",
-            "introspection.token.claim": "true"
+            "introspection.token.claim": "true",
+            "userinfo.token.claim": "false"
           }
         },
         {
@@ -286,7 +302,8 @@
             "included.custom.audience": "${MEHO_REALM_PUBLIC_URL}/mcp",
             "id.token.claim": "false",
             "access.token.claim": "true",
-            "introspection.token.claim": "true"
+            "introspection.token.claim": "true",
+            "userinfo.token.claim": "false"
           }
         },
         {
@@ -302,7 +319,7 @@
             "id.token.claim": "false",
             "access.token.claim": "true",
             "introspection.token.claim": "true",
-            "userinfo.token.claim": "false"
+            "userinfo.token.claim": "true"
           }
         },
         {
@@ -318,7 +335,7 @@
             "id.token.claim": "false",
             "access.token.claim": "true",
             "introspection.token.claim": "true",
-            "userinfo.token.claim": "false"
+            "userinfo.token.claim": "true"
           }
         },
         {
@@ -328,10 +345,23 @@
           "config": {
             "user.attribute": "approver",
             "claim.name": "approver",
-            "jsonType.label": "String",
+            "jsonType.label": "boolean",
             "aggregate.attrs": "false",
             "multivalued": "false",
             "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "groups-claim",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "config": {
+            "claim.name": "groups",
+            "full.path": "false",
+            "id.token.claim": "true",
             "access.token.claim": "true",
             "introspection.token.claim": "true",
             "userinfo.token.claim": "false"
@@ -384,7 +414,8 @@
             "included.client.audience": "meho-backplane",
             "id.token.claim": "false",
             "access.token.claim": "true",
-            "introspection.token.claim": "true"
+            "introspection.token.claim": "true",
+            "userinfo.token.claim": "false"
           }
         },
         {
@@ -395,7 +426,8 @@
             "included.custom.audience": "${MEHO_REALM_PUBLIC_URL}/mcp",
             "id.token.claim": "false",
             "access.token.claim": "true",
-            "introspection.token.claim": "true"
+            "introspection.token.claim": "true",
+            "userinfo.token.claim": "false"
           }
         },
         {
@@ -411,7 +443,7 @@
             "id.token.claim": "false",
             "access.token.claim": "true",
             "introspection.token.claim": "true",
-            "userinfo.token.claim": "false"
+            "userinfo.token.claim": "true"
           }
         },
         {
@@ -427,7 +459,7 @@
             "id.token.claim": "false",
             "access.token.claim": "true",
             "introspection.token.claim": "true",
-            "userinfo.token.claim": "false"
+            "userinfo.token.claim": "true"
           }
         },
         {
@@ -437,10 +469,23 @@
           "config": {
             "user.attribute": "approver",
             "claim.name": "approver",
-            "jsonType.label": "String",
+            "jsonType.label": "boolean",
             "aggregate.attrs": "false",
             "multivalued": "false",
             "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "groups-claim",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "config": {
+            "claim.name": "groups",
+            "full.path": "false",
+            "id.token.claim": "true",
             "access.token.claim": "true",
             "introspection.token.claim": "true",
             "userinfo.token.claim": "false"

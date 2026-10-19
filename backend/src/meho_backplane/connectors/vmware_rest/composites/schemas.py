@@ -282,8 +282,29 @@ PERFORMANCE_SUMMARY_PARAMETER_SCHEMA: dict[str, Any] = {
             "minLength": 1,
             "description": (
                 "Managed-object ID of the entity to query metrics for "
-                "(e.g. 'vm-1234', 'host-5678'). Required: every QueryPerf "
-                "call is per-entity."
+                "(e.g. 'vm-1234', 'host-5678', 'domain-c9'). Required: every "
+                "QueryPerf call is per-entity. The vim type is read from the "
+                "prefix: 'host-' is HostSystem, 'vm-' is VirtualMachine, "
+                "'domain-c' is ClusterComputeResource. For any other entity, "
+                "set entity_type."
+            ),
+        },
+        "entity_type": {
+            "type": "string",
+            "enum": [
+                "HostSystem",
+                "VirtualMachine",
+                "ClusterComputeResource",
+                "ComputeResource",
+                "ResourcePool",
+                "VirtualApp",
+                "Datastore",
+                "Datacenter",
+            ],
+            "description": (
+                "vim type of the entity. Optional: when left out it comes "
+                "from the entity_moid prefix. Set it when the prefix is not "
+                "one of 'host-', 'vm-' or 'domain-c'."
             ),
         },
         "perf_manager_moid": {
@@ -301,8 +322,10 @@ PERFORMANCE_SUMMARY_PARAMETER_SCHEMA: dict[str, Any] = {
             "minimum": 1,
             "default": 20,
             "description": (
-                "Sample interval for the QueryPerf call. The default 20 s "
-                "matches vSphere's real-time historical interval."
+                "Sample interval (vim intervalId) for both calls. The "
+                "default 20 s is the real-time interval of hosts and VMs. "
+                "Clusters have no real-time data; use a historical "
+                "interval such as 300 for them."
             ),
         },
         "max_samples": {
@@ -312,7 +335,8 @@ PERFORMANCE_SUMMARY_PARAMETER_SCHEMA: dict[str, Any] = {
             "default": 60,
             "description": (
                 "Cap on the number of returned samples per counter. "
-                "Applied client-side after the sub-op returns."
+                "Sent to QueryPerf as maxSample; vCenter applies it to "
+                "real-time data only."
             ),
         },
     },

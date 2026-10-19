@@ -1,0 +1,235 @@
+# Render fixture for the bring-your-own rule (#4039): with the built-in
+# core parts turned off, `helm template` of this file must stay the same
+# from one chart version to the next.
+# `backend/tests/test_chart_bring_your_own_render.py` compares the render
+# with the saved copy in
+# `backend/tests/fixtures/chart/bring-your-own-render.golden`.
+#
+# Built from the non-secret parts of the values file of our own
+# bring-your-own install (outside PostgreSQL, Keycloak and Vault). Host
+# names, addresses and Secret names are replaced with example values; the
+# keys and the shape are kept. This is a test fixture, not a template to
+# copy: start from one of the example files next to it instead.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/evoila/meho
+  tag: "fixture"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+serviceAccount:
+  create: false
+  name: meho-backplane
+  annotations: {}
+
+service:
+  type: ClusterIP
+  port: 8000
+  portName: http
+
+ingress:
+  enabled: true
+  className: ""
+  host: meho.example.test
+  path: /
+  pathType: Prefix
+  annotations: {}
+  tls:
+    enabled: true
+    secretName: meho-tls
+
+probes:
+  liveness:
+    httpGet:
+      path: /healthz
+      port: http
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 1
+    failureThreshold: 3
+  readiness:
+    httpGet:
+      path: /ready
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 3
+
+resources:
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+  requests:
+    cpu: 1000m
+    memory: 1Gi
+
+config:
+  keycloakIssuerUrl: "https://keycloak.example.test/realms/meho"
+  keycloakAudience: meho-backplane
+  keycloakJwksCacheTtlSeconds: "300"
+  keycloakJwtLeewaySeconds: "30"
+  vaultAddr: https://vault.example.test
+  vaultOidcRole: meho-mcp
+  vaultOidcMountPath: jwt-meho
+  vaultTimeoutSeconds: "10.0"
+  approvalAllowSelfApproval: "true"
+  databasePoolSize: "10"
+  databasePoolTimeout: "30.0"
+  retrievalEmbeddingModel: "BAAI/bge-small-en-v1.5"
+  retrievalModelCacheDir: "/opt/meho/model-cache"
+  forwardedAllowIps: "192.0.2.0/24"
+  kbIngestRoot: "/opt/meho/kb-ingest"
+  targetSsrfAllowlist: "198.51.100.0/24,203.0.113.0/24,knowledge.meho.svc.cluster.local,automation.example.test"
+
+# Bring-your-own: the built-in core parts stay off whatever the chart's
+# defaults are.
+corePostgres:
+  enabled: false
+
+postgres:
+  host: postgres.meho.svc.cluster.local
+  port: 5432
+  database: meho
+  credentialsSecret: meho-postgres-url
+
+vault:
+  address: https://vault.example.test
+  authMethod: jwt
+  role: meho-mcp
+  paths:
+    kv: secret/meho
+
+keycloak:
+  issuer: "https://keycloak.example.test/realms/meho"
+  audience: meho-backplane
+  clientSecretSyncFromVault: secret/meho/keycloak/client_secret
+
+audit:
+  postgresOnly: true
+
+retrieval:
+  modelCache:
+    enabled: false
+
+broadcast:
+  enabled: true
+  image:
+    repository: valkey/valkey
+    tag: "9.0-alpine"
+    pullPolicy: IfNotPresent
+  replicas: 1
+  networkPolicy:
+    enabled: true
+    extraAllowedSelectors: []
+  auth:
+    enabled: true
+
+connectors:
+  enabled: []
+
+networkPolicy:
+  enabled: true
+  ingressControllerNamespace: traefik
+  postgresCIDR: 192.0.2.0/24
+  vaultCIDR: 192.0.2.0/24
+  keycloakCIDR: 192.0.2.0/24
+  ingestAllowedNamespaces: []
+
+eso:
+  enabled: false
+
+extraVolumes:
+  - name: trust-bundle
+    configMap:
+      name: trust-bundle
+      optional: false
+
+extraVolumeMounts:
+  - name: trust-bundle
+    mountPath: /etc/ssl/extra-certs
+    readOnly: true
+
+extraEnv:
+  - name: SSL_CERT_FILE
+    value: /etc/ssl/extra-certs/ca.crt
+  - name: REQUESTS_CA_BUNDLE
+    value: /etc/ssl/extra-certs/ca.crt
+  - name: UI_KEYCLOAK_CLIENT_ID
+    value: "meho-web"
+  - name: UI_KEYCLOAK_CLIENT_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: meho-ui-auth
+        key: client_secret
+  - name: UI_SESSION_ENCRYPTION_KEY
+    valueFrom:
+      secretKeyRef:
+        name: meho-ui-auth
+        key: session_encryption_key
+  - name: KEYCLOAK_ADMIN_URL
+    value: "https://keycloak.example.test/admin/realms/meho"
+  - name: KEYCLOAK_ADMIN_CLIENT_ID
+    value: "meho-admin"
+  - name: KEYCLOAK_CLI_CLIENT_ID
+    value: "meho-cli"
+  - name: AGENT_DEFAULT_MODEL
+    value: "claude-sonnet-4-6"
+  - name: KEYCLOAK_ADMIN_CLIENT_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: meho-agent-runtime
+        key: keycloak_admin_client_secret
+  - name: ANTHROPIC_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: meho-agent-runtime
+        key: anthropic_api_key
+  - name: JWT_PLATFORM_ADMIN_ROLE_NAME
+    value: "meho-admin"
+  - name: VAULT_SCHEDULER_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: meho-agent-runtime
+        key: vault_scheduler_token
+        optional: true
+  - name: SCHEDULER_AGENT_VAULT_PATH_PATTERN
+    value: "secret/data/meho/agents/{tenant_id}_{client_id}/credentials"
+  - name: CORPUS_URL
+    value: "https://knowledge.meho.svc.cluster.local:8443"
+  - name: VAULT_KV_TENANT_SCOPE_PREFIX
+    value: ""
+  - name: MAIL_SMTP_HOST
+    value: "smtp.example.test"
+  - name: MAIL_SMTP_PORT
+    value: "587"
+  - name: MAIL_SMTP_USERNAME
+    value: "alerts@example.test"
+  - name: MAIL_FROM
+    value: "alerts@example.test"
+  - name: MAIL_RECIPIENT_ALLOWLIST
+    value: "example.test"
+  - name: MAIL_SMTP_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: meho-mail-smtp
+        key: password
+        optional: true
+
+netdiag:
+  probeAllowlist: "198.51.100.0/24,203.0.113.0/24"
+
+checkRunner:
+  enabled: true
+  clientId: "meho-check-runner"
+  clientSecret:
+    secretName: "meho-check-runner"
+    secretKey: client_secret
+
+approvalHandoff:
+  enabled: true
+  secretName: meho-approval-handoff
+  secretKey: approval_handoff_encryption_key

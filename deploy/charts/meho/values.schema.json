@@ -454,6 +454,17 @@
         }
       }
     },
+    "global": {
+      "type": "object",
+      "description": "Values Helm hands to the parent chart and every subchart.",
+      "additionalProperties": false,
+      "properties": {
+        "openshift": {
+          "type": "boolean",
+          "description": "Set to true on OpenShift. The built-in core parts then leave out `runAsUser`, `runAsGroup` and `fsGroup`, so OpenShift can pick the user id from the project's range. Default false: the pods run with fixed, non-root user ids."
+        }
+      }
+    },
     "vault": {
       "type": "object",
       "additionalProperties": false,
@@ -714,6 +725,168 @@
         "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
         "then": { "required": ["secretName"], "properties": { "secretName": { "type": "string", "minLength": 1 } } }
       }]
+    },
+    "corePostgres": {
+      "type": "object",
+      "description": "Built-in PostgreSQL subchart values (`charts/postgres/`, #4039): one PostgreSQL 17 server with pgvector and two databases, `meho` and `keycloak`, each owned by a role of the same name that is not a superuser. The chart creates the `vector` extension itself. It reads the Secrets `<release>-core-postgres-superuser`, `-meho` and `-keycloak` (key `password`), which the install's secrets Job makes. Off by default; with it off the chart renders exactly what it rendered before.",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["repository", "tag"],
+          "properties": {
+            "repository": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*$"
+            },
+            "tag": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$" },
+            "digest": {
+              "type": "string",
+              "pattern": "^(sha256:[0-9a-f]{64})?$",
+              "description": "Image digest (`sha256:<64 hex>`). When set, the pod uses `repository@digest` and the tag is only a label. Empty string = use the tag."
+            },
+            "pullPolicy": {
+              "type": "string",
+              "enum": ["Always", "IfNotPresent", "Never"]
+            }
+          }
+        },
+        "existingSecrets": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Names of operator-made Secrets (key `password`) to use instead of the generated ones. Empty = `<release>-core-postgres-superuser` / `<release>-core-postgres-keycloak`.",
+          "properties": {
+            "superuser": { "type": "string" },
+            "keycloak": { "type": "string" }
+          }
+        },
+        "persistence": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "size": {
+              "type": "string",
+              "pattern": "^[0-9]+(\\.[0-9]+)?(E|P|T|G|M|K|Ei|Pi|Ti|Gi|Mi|Ki)?$",
+              "description": "Data disk size. A StatefulSet cannot change it after the first install."
+            },
+            "storageClass": {
+              "type": "string",
+              "description": "Storage class of the data disk. Empty = the cluster default."
+            }
+          }
+        },
+        "podSecurityContext": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "securityContext": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "resources": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "limits": { "$ref": "#/definitions/resourceQuantities" },
+            "requests": { "$ref": "#/definitions/resourceQuantities" }
+          }
+        },
+        "reconcile": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "resources": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "limits": { "$ref": "#/definitions/resourceQuantities" },
+                "requests": { "$ref": "#/definitions/resourceQuantities" }
+              }
+            }
+          }
+        },
+        "networkPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "backplanePodLabels": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            },
+            "keycloakPodLabels": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            },
+            "extraAllowedSelectors": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+              }
+            }
+          }
+        },
+        "podAnnotations": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "podLabels": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "nodeSelector": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "tolerations": {
+          "type": "array",
+          "items": { "type": "object" }
+        },
+        "affinity": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "global": {
+          "type": "object",
+          "description": "Helm injects the parent chart's `.Values.global` into every subchart's values namespace. The key must be permitted by the schema.",
+          "additionalProperties": true
+        }
+      }
+    },
+    "coreKeycloak": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Built-in Keycloak. When enabled, the core secrets Job makes <release>-core-keycloak-bootstrap, -core-keycloak-admin, -core-ui-auth and -core-check-runner unless you name your own Secret (see docs/codebase/core-secrets.md), and the Keycloak subchart (`charts/keycloak/`) is deployed. Needs `corePostgres.enabled: true` (allOf below). This block names every key the subchart has; Helm checks their full shape against `charts/keycloak/values.schema.json` when `enabled` is true.",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "hostname": { "type": "string", "description": "MEHO's public DNS name, equal to `ingress.host`. Keycloak's public address is `https://<hostname>/auth`. Required when enabled." },
+        "firstTenantId": { "type": "string", "description": "The first tenant's id (a UUID). Every realm group carries it as `tenant_id`. Required when enabled." },
+        "ingress": { "type": "object", "description": "`exposeAdmin`: also route the admin console on the MEHO host." },
+        "image": { "type": "object" },
+        "waitForDatabase": { "type": "object" },
+        "database": { "type": "object" },
+        "podSecurityContext": { "type": "object" },
+        "securityContext": { "type": "object" },
+        "resources": { "type": "object" },
+        "service": { "type": "object" },
+        "networkPolicy": { "type": "object" },
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
+        "affinity": { "type": "object" },
+        "global": { "type": "object" },
+        "existingSecrets": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "bootstrap": { "type": "string", "description": "Your own Secret with Keycloak's first-start service account (keys `client_id` and `client_secret`). Empty = the install makes <release>-core-keycloak-bootstrap." }
+          }
+        }
+      }
     },
     "audit": {
       "type": "object",
@@ -1057,30 +1230,6 @@
           "type": "object",
           "description": "Helm injects the parent chart's `.Values.global` into every subchart's values namespace. The key must be permitted by the schema; the contents are arbitrary (operators use it to pass shared values across subcharts).",
           "additionalProperties": true
-        }
-      }
-    },
-    "coreKeycloak": {
-      "type": "object",
-      "description": "Built-in Keycloak subchart values (`charts/keycloak/`), the login server of the MEHO core. Off by default; off renders exactly what the chart rendered before. Helm checks the keys against `charts/keycloak/values.schema.json` only when `enabled` is true. Needs the built-in PostgreSQL (`corePostgres.enabled: true`), enforced by the allOf below.",
-      "properties": {
-        "enabled": { "type": "boolean" }
-      }
-    },
-    "corePostgres": {
-      "type": "object",
-      "description": "Built-in PostgreSQL subchart values. Only `enabled` is checked here; `coreKeycloak` needs it on.",
-      "properties": {
-        "enabled": { "type": "boolean" }
-      }
-    },
-    "global": {
-      "type": "object",
-      "description": "Values Helm shares with every subchart.",
-      "properties": {
-        "openshift": {
-          "type": "boolean",
-          "description": "True on OpenShift: the built-in parts then set no user or group id, because OpenShift assigns them."
         }
       }
     },

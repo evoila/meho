@@ -35,28 +35,12 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
-Image reference from a `{repository, tag, digest}` map: the digest wins.
+The image reference and the OpenShift-aware security context come from the
+parent chart's shared core helpers (templates/_core-postgres-helpers.tpl):
+`meho.core.image` and `meho.core.podSecurityContext`. The latter also
+serves the container security contexts: it only leaves out the user and
+group ids when `global.openshift` is true.
 */}}
-{{- define "coreKeycloak.image" -}}
-{{- if .digest -}}
-{{ .repository }}@{{ .digest }}
-{{- else -}}
-{{ .repository }}:{{ .tag }}
-{{- end -}}
-{{- end }}
-
-{{/*
-Security context without user and group ids when `global.openshift` is
-true: OpenShift's restricted SCC assigns them and refuses fixed ones.
-Call with (dict "ctx" <map> "root" $).
-*/}}
-{{- define "coreKeycloak.securityContext" -}}
-{{- $ctx := deepCopy .ctx -}}
-{{- if dig "openshift" false (.root.Values.global | default dict) -}}
-{{- $ctx = omit $ctx "runAsUser" "runAsGroup" "fsGroup" -}}
-{{- end -}}
-{{- toYaml $ctx -}}
-{{- end }}
 
 {{/*
 Name of a Secret the install's secrets Job creates: `<release>-core-<kind>`.

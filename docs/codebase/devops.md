@@ -37,6 +37,9 @@ resources that make up a running backplane:
   per ADR 0005, plus its **own** ingress NetworkPolicy and a chart-managed
   `requirepass` Secret (#276) so the store is ingress-isolated and
   authenticated regardless of the umbrella policy.
+- PostgreSQL subchart — the built-in PostgreSQL 17 with pgvector (#4039),
+  off by default (`corePostgres.enabled`); see
+  [PostgreSQL subchart](#postgresql-subchart-chartspostgres-4039).
 
 ## Log shipping (stdout → collector)
 
@@ -64,7 +67,7 @@ exception that keeps uvicorn's own plain format.
 
 ```
 deploy/charts/meho/
-├── Chart.yaml              # apiVersion v2, kubeVersion >=1.28, dependencies: broadcast, result-cache, keycloak (alias coreKeycloak)
+├── Chart.yaml              # apiVersion v2, kubeVersion >=1.28, dependencies: broadcast, result-cache, postgres (alias corePostgres), keycloak (alias coreKeycloak)
 ├── .helmignore             # standard exclusions
 ├── values.yaml             # safe-by-default; required fields are blank
 ├── values.schema.json      # draft-07 typed contract; rejects typos and empty required fields
@@ -77,7 +80,12 @@ deploy/charts/meho/
 │   ├── serviceaccount.yaml # Pod identity
 │   ├── networkpolicy.yaml  # default-deny + explicit egress (broadcast / result-cache egress conditional)
 │   ├── migration-job.yaml  # pre-install/pre-upgrade Helm hook (alembic upgrade head)
-│   ├── _core-keycloak.tpl  # /auth paths for the Ingress + render checks (coreKeycloak.enabled only)
+│   ├── _core-secrets.tpl   # built-in core: hook account name, core Secret names, the secrets Job's plan
+│   ├── core-secrets-rbac.yaml # built-in core: hook ServiceAccount + Role + RoleBinding (weight -40)
+│   ├── core-secrets-job.yaml  # built-in core: makes missing <release>-core-* Secrets (weight -30)
+│   ├── _core-postgres-helpers.tpl # shared core helpers: image triple, OpenShift-aware pod security context
+│   ├── tests/test-pgvector.yaml   # helm test pod on the chart's PostgreSQL image
+│   ├── _core-keycloak.tpl  # /auth paths for the Ingress + the hostname check (coreKeycloak.enabled only)
 │   ├── core-keycloak-checks.yaml # renders nothing; runs those checks
 │   └── NOTES.txt           # post-install hints
 └── charts/
@@ -92,6 +100,8 @@ deploy/charts/meho/
     │       ├── secret.yaml        # chart-managed requirepass Secret (#276)
     │       └── networkpolicy.yaml # own ingress policy: 6379 from backplane only (#276)
     ├── result-cache/       # dedicated Valkey for result handles (#3639), same file set
+    ├── postgres/           # built-in PostgreSQL 17 + pgvector (#4039), off by default
+    │   └── templates/      # statefulset (server + reconcile sidecar), service, configmap (SQL + scripts), networkpolicy
     └── keycloak/           # built-in Keycloak, off by default (#4040)
         ├── Chart.yaml
         ├── values.yaml
@@ -374,7 +384,25 @@ pre-created once by a superuser (or bootstrapped via CNPG
 extension prerequisite* and the recorded decision at
 `docs/decisions/pgvector-superuser-prerequisite.md` (which rejects a
 dedicated `migrationSuperuserDsn` chart value in favour of the documented
-prerequisite). The chart does **not** ship a superuser migration DSN.
+prerequisite). The chart does **not** ship a superuser migration DSN. With
+the built-in PostgreSQL (`corePostgres.enabled: true`, below) the chart
+pre-creates the extension itself, so this step goes away; the migrations
+still run as a role that is not a superuser.
+
+### Core secrets Job (`templates/core-secrets-*.yaml`)
+
+Rendered only when a built-in part is on (`corePostgres.enabled` or
+`coreKeycloak.enabled`); with every part off the chart renders none of these
+objects. A pre-install and pre-upgrade hook Job (weight -30) runs
+`python -m meho_backplane.core.secrets` from the backplane image and makes
+every missing `<release>-core-*` Secret: database passwords, the Keycloak
+first-start service account, the three MEHO client secrets, the approval
+hand-off key, the Valkey password and a first TLS certificate. It never
+changes an existing Secret and prints no value. It runs under its own hook
+ServiceAccount, Role and RoleBinding (weight -40, all four phases), which
+may create Secrets, read and patch only the `<release>-core-*` names, and
+read the Secrets the operator names in values.
+Secret table, rules and rights: [core-secrets.md](core-secrets.md).
 
 ### Broadcast subchart (`charts/broadcast/`)
 
@@ -516,6 +544,103 @@ central deploy and any GitOps-managed install) gains one result-cache pod.
    then written to the result-cache store. Old handles stay readable from
    the broadcast store until their TTL ends.
 
+### PostgreSQL subchart (`charts/postgres/`, #4039)
+
+The built-in PostgreSQL of the core. Off by default
+(`corePostgres.enabled: false`); it turns on by default once the existing
+bring-your-own installs set `corePostgres.enabled: false` in their values.
+Design: the internal core design note, §2 (one database server) and §1
+(images, OpenShift).
+
+- **Shape.** One StatefulSet `<release>-postgres` with one replica, one PVC
+  (`data`, 10 Gi, `corePostgres.persistence.*`) and a ClusterIP Service
+  `<release>-postgres:5432`. Image `pgvector/pgvector:0.8.7-pg17-bookworm`,
+  pinned by digest (`corePostgres.image.{repository,tag,digest}`, digest
+  wins). The image is built FROM the official `postgres:17-bookworm` image,
+  so the official entrypoint runs. PostgreSQL 18 is not used: it moves the
+  data directory layout.
+- **Two databases, two roles.** One SQL file (`core.sql` in the ConfigMap)
+  makes the roles `meho` and `keycloak` (`LOGIN NOSUPERUSER NOCREATEDB
+  NOCREATEROLE`, connection limits 60 and 25), the databases `meho` and
+  `keycloak`, each owned by its role, takes CONNECT and TEMPORARY away from
+  PUBLIC, and creates `vector` in `meho` as the image superuser. Every
+  statement is safe to run twice (`CREATE` is guarded with `\gexec`).
+  Passwords reach SQL only as psql variables (`\getenv`).
+- **Two paths, one file.** On an empty disk the entrypoint runs `apply.sh`
+  from `/docker-entrypoint-initdb.d`. On every pod start, and whenever a
+  mounted password changes, the `reconcile` sidecar runs the same
+  `apply.sh`. So a regenerated or restored Secret never drifts from the
+  live role (the failure shape of a chart regenerating a database password
+  while the database keeps the old one). The sidecar waits for the server
+  on TCP (the initdb temporary server listens on the socket only), checks
+  every 30 s, and connects as `postgres` over the shared socket directory
+  (`/var/run/postgresql`, an emptyDir) through initdb's `local all all
+  trust` line. It never needs the superuser password.
+- **Secrets.** The chart makes no password. It reads
+  `<release>-core-postgres-superuser`, `-meho` and `-keycloak` (key
+  `password`), which the install's secrets Job makes (#4041). The
+  superuser Secret is mounted by the `postgres` container alone, as
+  `POSTGRES_PASSWORD_FILE`; initdb reads it once. The sidecar mounts only
+  the two role Secrets. `corePostgres.existingSecrets.{superuser,keycloak}`
+  names operator-made Secrets instead.
+- **Logins.** `POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256`: TCP logins
+  from inside the pod (127.0.0.1, also `kubectl port-forward`) need a
+  password; only the local socket is `trust`. Other pods use
+  `scram-sha-256`.
+- **User ids.** `runAsUser`/`runAsGroup`/`fsGroup` 999 (the image's
+  `postgres` user). `global.openshift: true` leaves the three out through
+  the shared helper `meho.core.podSecurityContext`
+  (`templates/_core-postgres-helpers.tpl`), so OpenShift picks them;
+  `runAsNonRoot`, `seccompProfile: RuntimeDefault`, `drop: [ALL]` and no
+  privilege escalation stay. PGDATA is a sub-directory of the mount
+  (`/var/lib/postgresql/data/pgdata`), so initdb gets an empty directory it
+  owns under any user id; the image's entrypoint fakes a passwd entry for a
+  user id it does not know. The root filesystem is read-only, with
+  emptyDirs at `/tmp`, `/var/run/postgresql` and a memory emptyDir at
+  `/dev/shm`.
+- **Probes.** `pg_isready` on `127.0.0.1:5432` for startup (up to 5 min
+  for a first setup), readiness and liveness.
+- **NetworkPolicy.** Its own ingress-only policy admits tcp/5432 from the
+  backplane pods (`networkPolicy.backplanePodLabels`; the migration Job and
+  the helm test pod carry the same labels) and the Keycloak pods
+  (`networkPolicy.keycloakPodLabels`) of the release. The parent policy's
+  egress rule to the built-in database (by pod, not CIDR) comes with #4050.
+- **Disk lifetime.** The PVC outlives `helm uninstall` (StatefulSet default).
+  Delete the PVC and the generated Secrets together, or neither.
+- **After a restore.** A restored dump brings the role passwords of the
+  dump. Restart the pod after a restore: the sidecar then sets the
+  passwords from the Secrets again (it also does so on the next Secret
+  change, but not on its own clock).
+- **What wires it to the backplane.** Not this subchart: the
+  `DATABASE_URL` default, the schema conditionals and the migration as an
+  init container come with #4041 and #4047.
+
+**Helm test.** `templates/tests/test-pgvector.yaml` runs on the same
+image (`corePostgres.image`), in both modes, as user 999. It needs no
+Bitnami image.
+
+**Bring-your-own render.** With the built-in parts off, a new chart version
+must render the same objects as the previous one.
+`backend/tests/test_chart_bring_your_own_render.py` renders
+`deploy/values-examples/values-bring-your-own-fixture.yaml` and compares it
+with `backend/tests/fixtures/chart/bring-your-own-render.golden` (blank
+lines and the random broadcast password evened out). A wanted change is
+committed with a new copy (`MEHO_UPDATE_CHART_RENDER=1`), so the review
+shows it.
+
+**Database tests.** `backend/tests/_pgvector_image.py` gives the
+testcontainers database tests the chart's image (`repository@digest` from
+`values.yaml`); CI's `MEHO_TEST_PGVECTOR_IMAGE` pins the same digest
+through the registry mirror, and a test keeps the two equal.
+
+**CI.** `chart.yml` validates a `corePostgres.enabled=true` render (also
+with `global.openshift=true`) with kubeconform. The kind job starts the
+subchart (`--show-only` its templates, with the three Secrets made the way
+the secrets Job makes them), installs the release in bring-your-own mode
+against it so the migration Job runs every migration as `meho`, runs
+`helm test`, and then checks the roles, the fencing, `vector` and a
+reconcile after a changed Secret plus a pod restart.
+
 ### Built-in Keycloak subchart (`charts/keycloak/`)
 
 The install can bring its own Keycloak, the login server, so nobody sets
@@ -538,11 +663,14 @@ Keycloak reads exactly these names. To use your own value, create the
 Secret with that name before the install; the secrets Job keeps a Secret
 that exists. Only the bootstrap Secret may have another name, through
 `coreKeycloak.existingSecrets.bootstrap`, which the secrets Job reads too.
-The parent chart stops the render when `corePostgres.existingSecrets.keycloak`,
-`keycloakAdmin.clientSecret.secretName`, `uiConsole.secretName` or
-`checkRunner.clientSecret.secretName` names any other Secret, because the
-secrets Job would then not make the one Keycloak reads. The pod does not
-start until all five exist.
+While the built-in Keycloak is on, leave
+`corePostgres.existingSecrets.keycloak`,
+`keycloakAdmin.clientSecret.secretName`, `uiConsole.secretName` and
+`checkRunner.clientSecret.secretName` empty (or set them to the core name):
+the subchart cannot read these parent keys, so with another name the
+secrets Job would check that Secret, not make the core one, and the
+Keycloak pod would wait for it. The render-time guard for this belongs to
+the core wiring Task (#4047). The pod does not start until all five exist.
 
 **What it renders.**
 
@@ -577,7 +705,9 @@ the container's own disk by the build at start.
 **Security.** No `runAsUser`: the image runs as user 1000 in group 0 and
 `runAsNonRoot` checks that number. `global.openshift: true` removes
 `runAsUser`, `runAsGroup` and `fsGroup` from every security context of the
-subchart (OpenShift assigns them). The init container uses user 999 (the
+subchart (OpenShift assigns them), through the shared helper
+`meho.core.podSecurityContext`; the image reference uses `meho.core.image`
+(both in `templates/_core-postgres-helpers.tpl`). The init container uses user 999 (the
 PostgreSQL image has no `USER` line), also removed under
 `global.openshift`. `readOnlyRootFilesystem: false` for the Keycloak
 container only: the stock image rebuilds under `/opt/keycloak` at every
@@ -629,11 +759,13 @@ on a person directly: the claim always comes from the group.
 
 The three clients people log in with (`meho-cli`, `meho-mcp`, `meho-web`)
 have the default scopes `basic`, `roles`, `web-origins`, `acr`,
-`profile`, `email` and five mappers: `tenant_id`, `tenant_role` and
-`approver` with the stock User Attribute mapper (`aggregate.attrs` and
-`multivalued` false, into the access token), plus the audience mappers for
-`meho-backplane` and `https://<host>/mcp`. No client has a fixed-value
-tenant or role mapper.
+`profile`, `email` and the six mappers `meho admin keycloak
+bootstrap-clients` sets: `tenant_id`, `tenant_role` and `approver` with the
+stock User Attribute mapper (`aggregate.attrs` and `multivalued` false; into
+the access token and userinfo; `approver` as a boolean), the audience
+mappers for `meho-backplane` and `https://<host>/mcp`, and the `groups`
+claim. No client has a fixed-value tenant or role mapper. The group model is
+the decision in `docs/decisions/login-role-groups.md`.
 
 **Realm settings.** Offline sessions end after 7 days at most
 (`offlineSessionMaxLifespanEnabled`). Brute-force detection is on.
@@ -813,7 +945,9 @@ them).
 | `networkPolicy.ingressControllerNamespace` | `ingress-nginx` | RKE2 default; override per cluster. |
 | `audit.postgresOnly` | `true` | Postgres-only audit sink baseline. |
 | `broadcast.enabled` | `true` | Deploys the bundled Valkey broadcast subchart. |
-| `coreKeycloak.enabled` | `false` | Deploys the built-in Keycloak subchart (#4040). When true it needs `corePostgres.enabled: true`, `coreKeycloak.hostname` (equal to `ingress.host`) and `coreKeycloak.firstTenantId` (a UUID). See [Built-in Keycloak subchart](#built-in-keycloak-subchart-chartskeycloak). |
+| `corePostgres.enabled` / `coreKeycloak.enabled` | `false` | Built-in core parts (#4041). When on, the core secrets Job makes the missing `<release>-core-*` Secrets; see [core-secrets.md](core-secrets.md). |
+| `corePostgres.existingSecrets.{superuser,keycloak}` / `coreKeycloak.existingSecrets.bootstrap` | `""` | Your own Secret instead of a made one; the Job only checks its keys. |
+| `coreKeycloak.enabled` | `false` | Also deploys the built-in Keycloak subchart (#4040). When true it needs `corePostgres.enabled: true`, `coreKeycloak.hostname` (equal to `ingress.host`) and `coreKeycloak.firstTenantId` (a UUID). See [Built-in Keycloak subchart](#built-in-keycloak-subchart-chartskeycloak). |
 | `connectors.enabled` | `[]` | Opt-in list; pick from the shipped connector catalog (see [`docs/architecture/connectors.md`](../architecture/connectors.md) — VMware/VCF, NSX, Kubernetes, Vault, Harbor, Keycloak, ArgoCD, GCloud, BIND9, pfSense, and more). |
 | `config.ingestJobTimeoutSeconds` | `""` | Async ingest-job watchdog budget override, in seconds (#2318, hardens #2275). Empty (default) omits `INGEST_JOB_TIMEOUT_SECONDS` so the backend's built-in 30-min ceiling applies; set a positive number to raise it for a slow shared executor / large spec fleet. Set via a values file or `--set-string` (bare `--set` coerces to a number and fails the `type: string` schema — as with every `*Seconds` knob here). Non-finite (`inf`/`nan`), non-positive, or malformed values are rejected at the backend (warn + fall back to 30 min), so the watchdog can never be disabled. |
 

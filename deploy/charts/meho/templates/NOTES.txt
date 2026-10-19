@@ -22,6 +22,18 @@ Resources deployed:
 {{- if .Values.coreKeycloak.enabled }}
   - StatefulSet / {{ include "coreKeycloak.fullname" . }} (built-in Keycloak; realm meho at https://{{ .Values.coreKeycloak.hostname }}/auth/realms/meho)
 {{- end }}
+{{- if .Values.corePostgres.enabled }}
+
+Built-in PostgreSQL (corePostgres):
+  - StatefulSet / {{ include "corePostgres.statefulSetName" . }} and Service {{ include "corePostgres.fullname" . }}:5432
+  - Databases meho and keycloak, each owned by a role of the same name; neither role is a superuser.
+  - It reads these Secrets (key `password`); the install's secrets Job makes them:
+      {{ .Values.corePostgres.existingSecrets.superuser | default (printf "%s-core-postgres-superuser" .Release.Name) }} (mounted by the PostgreSQL pod alone)
+      {{ printf "%s-core-postgres-meho" .Release.Name }}
+      {{ .Values.corePostgres.existingSecrets.keycloak | default (printf "%s-core-postgres-keycloak" .Release.Name) }}
+  - The disk (PVC data-{{ include "corePostgres.statefulSetName" . }}-0) stays after helm uninstall.
+    Delete the PVC and these Secrets together, or neither.
+{{- end }}
 
 Next steps:
   1. Watch the rollout:

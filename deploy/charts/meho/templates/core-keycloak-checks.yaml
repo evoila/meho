@@ -1,4 +1,4 @@
-{{- /* Renders nothing: it only stops a render whose built-in Keycloak settings disagree (see _core-keycloak.tpl). */ -}}
+{{- /* Renders nothing: it only stops a render whose Keycloak hostname differs from ingress.host (see _core-keycloak.tpl). */ -}}
 {{- if .Values.coreKeycloak.enabled -}}
 {{- include "meho.coreKeycloakChecks" . -}}
 {{- end -}}

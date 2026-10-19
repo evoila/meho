@@ -91,7 +91,11 @@ database:
 # `<release>-core-keycloak-admin`, `<release>-core-ui-auth` and
 # `<release>-core-check-runner` (key `client_secret` each). To use your own
 # value, create the Secret with that name before the install: the Job keeps
-# a Secret that exists. Only the bootstrap Secret can have another name.
+# a Secret that exists. Only the bootstrap Secret can have another name:
+# while the built-in Keycloak is on, leave `corePostgres.existingSecrets.keycloak`,
+# `keycloakAdmin.clientSecret.secretName`, `uiConsole.secretName` and
+# `checkRunner.clientSecret.secretName` empty (or set them to the core
+# name), because Keycloak reads only the core names.
 existingSecrets:
   # -- Your own Secret with Keycloak's first-start service account (keys
   # `client_id` and `client_secret`). Empty =

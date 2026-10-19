@@ -54,6 +54,7 @@ from meho_backplane.db.engine import (
 )
 from meho_backplane.db.migrations import alembic_config, find_alembic_ini
 from meho_backplane.settings import get_settings
+from tests._pgvector_image import pgvector_test_image
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -407,7 +408,8 @@ class TestPostgresIntegration:
         """
         from testcontainers.postgres import PostgresContainer
 
-        # ``pgvector/pgvector:pg16`` — Postgres 16 + pgvector pre-installed.
+        # The chart's own PostgreSQL 17 + pgvector image
+        # (``tests/_pgvector_image.py``, #4039).
         # Hosted on Docker Hub at ``pgvector/pgvector``; not available on
         # ``mirror.gcr.io/library/`` because that mirror only covers the
         # ``library/*`` (official) namespace. Falling back to Docker Hub
@@ -417,7 +419,7 @@ class TestPostgresIntegration:
         # without re-rolling the test on the first 429 from Docker Hub
         # rate limits. Same env knob the integration conftest and
         # ``test_migration_rollback`` honour.
-        image = os.environ.get("MEHO_TEST_PGVECTOR_IMAGE", "pgvector/pgvector:pg16")
+        image = pgvector_test_image()
         with PostgresContainer(image) as pg:
             sync_url = pg.get_connection_url()  # postgresql+psycopg2://...
             async_url = sync_url.replace(
@@ -464,7 +466,7 @@ class TestPostgresIntegration:
         from sqlalchemy.ext.asyncio import create_async_engine
         from testcontainers.postgres import PostgresContainer
 
-        image = os.environ.get("MEHO_TEST_PGVECTOR_IMAGE", "pgvector/pgvector:pg16")
+        image = pgvector_test_image()
         with PostgresContainer(image) as pg:
             sync_url = pg.get_connection_url()
             async_url = sync_url.replace(

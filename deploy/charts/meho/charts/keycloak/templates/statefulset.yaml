@@ -20,7 +20,7 @@ spec:
     spec:
       automountServiceAccountToken: false
       securityContext:
-        {{- include "coreKeycloak.securityContext" (dict "ctx" .Values.podSecurityContext "root" .) | nindent 8 }}
+        {{- include "meho.core.podSecurityContext" (dict "podSecurityContext" .Values.podSecurityContext "global" .Values.global) | nindent 8 }}
       initContainers:
         # Keycloak does not retry a failed database connection at start.
         # Wait here until PostgreSQL accepts connections. `-U` and `-d` are
@@ -28,7 +28,7 @@ spec:
         # user, which fails under a user id that has no passwd entry (as on
         # OpenShift), and then it never reports ready.
         - name: wait-for-database
-          image: {{ include "coreKeycloak.image" .Values.waitForDatabase.image | quote }}
+          image: {{ include "meho.core.image" .Values.waitForDatabase.image | quote }}
           imagePullPolicy: {{ .Values.waitForDatabase.image.pullPolicy }}
           command:
             - /bin/sh
@@ -46,10 +46,10 @@ spec:
           resources:
             {{- toYaml .Values.waitForDatabase.resources | nindent 12 }}
           securityContext:
-            {{- include "coreKeycloak.securityContext" (dict "ctx" .Values.waitForDatabase.securityContext "root" .) | nindent 12 }}
+            {{- include "meho.core.podSecurityContext" (dict "podSecurityContext" .Values.waitForDatabase.securityContext "global" .Values.global) | nindent 12 }}
       containers:
         - name: keycloak
-          image: {{ include "coreKeycloak.image" .Values.image | quote }}
+          image: {{ include "meho.core.image" .Values.image | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - start
@@ -164,7 +164,7 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           securityContext:
-            {{- include "coreKeycloak.securityContext" (dict "ctx" .Values.securityContext "root" .) | nindent 12 }}
+            {{- include "meho.core.podSecurityContext" (dict "podSecurityContext" .Values.securityContext "global" .Values.global) | nindent 12 }}
           volumeMounts:
             - name: realm
               mountPath: /opt/keycloak/data/import

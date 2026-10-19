@@ -456,6 +456,16 @@ class InstallerConnector(HttpConnector):
 
         return await installer_depot_settings_set_impl(self, operator, target, params)
 
+    async def system_depot_sync_status(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.system.depot.sync-status`` shim — depot catalog sync read."""
+        from meho_backplane.connectors.vcf_installer.typed_reads import (
+            installer_depot_sync_status_impl,
+        )
+
+        return await installer_depot_sync_status_impl(self, operator, target, params)
+
     async def system_trusted_certificates_list(
         self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:

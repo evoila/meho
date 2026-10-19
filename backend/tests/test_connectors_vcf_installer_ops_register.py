@@ -49,6 +49,7 @@ _EXPECTED_POSTURE: dict[str, tuple[str, bool]] = {
     "installer.sddc.bringup.status": ("safe", False),
     "installer.system.depot.get": ("safe", False),
     "installer.system.depot.set": ("caution", True),
+    "installer.system.depot.sync-status": ("safe", False),
     "installer.system.trusted-certificates.list": ("safe", False),
     "installer.system.trusted-certificates.add": ("caution", True),
     "installer.bundles.list": ("safe", False),

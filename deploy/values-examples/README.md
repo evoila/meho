@@ -41,6 +41,7 @@ request.
 | [`values-rdc-example.yaml`](./values-rdc-example.yaml) | The RDC Hetzner lab (`*.evba.lab` hosts, rke2-infra ingress-nginx, cluster-internal Postgres + Vault + Keycloak). | The actual, private file lives in `evoila-bosnia/claude-rdc-hetzner-dc`'s `manifests/meho/values-rdc.yaml`; this file is the sanitized template for other Vault-+-Keycloak-+-Postgres-shaped labs. |
 | [`values-gsm-example.yaml`](./values-gsm-example.yaml) | A **Vault-free, GCP-native** install (Initiative #2227) — credentials + the `/api/v1/health` federation proof resolve through GCP Secret Manager (`config.credentialBackend: gsm`) instead of Vault. `vault.address` is left blank; the schema requires it only when `credentialBackend: vault`. | The GSM SA-direct backend (#2230, Phase 1). `gsm.workloadIdentityFederation.*` is left empty here — for the per-operator token-exchange (WIF) shape see `values-gsm-wif-example.yaml`. |
 | [`values-gsm-wif-example.yaml`](./values-gsm-wif-example.yaml) | The GSM backend with **per-operator Workload Identity Federation** (#2232, Phase 2) — credential reads run under the calling operator's Keycloak identity, and the `gsm.workloadIdentityFederation.*` keys render first-class as `GSM_WIF_*` (no `extraEnv`, #2667). Targets the on-prem/no-ambient-identity shape, so it also enables the `checkRunner` service principal (#2642) that background dispatch needs. | The GSM WIF path (#2232); the `GSM_WIF_*` chart rendering landed in #2659. |
+| [`values-bring-your-own-fixture.yaml`](./values-bring-your-own-fixture.yaml) | **Not a template — a test fixture** (#4039). With the built-in core parts off, `helm template` of this file must stay the same from one chart version to the next; `backend/tests/test_chart_bring_your_own_render.py` compares it with a saved copy. | Built from the non-secret parts of the values file of our own bring-your-own install, with example host names and addresses. |
 
 ## Using `values-rdc-example.yaml`
 
@@ -1490,6 +1491,10 @@ numbered for cross-reference with the originating dogfood reports.
   closes Wall #4 in code.
 
 ## pgvector extension prerequisite
+
+> **Built-in PostgreSQL:** with `corePostgres.enabled: true` (#4039) the
+> chart brings its own PostgreSQL and creates the extension itself, so this
+> section does not apply. It applies to every bring-your-own PostgreSQL.
 
 The chart's pre-install migration Job runs Alembic revision `0003`
 ([`backend/alembic/versions/0003_create_documents_with_pgvector.py`](../../backend/alembic/versions/0003_create_documents_with_pgvector.py)),

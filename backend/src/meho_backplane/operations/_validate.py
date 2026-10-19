@@ -492,8 +492,10 @@ async def policy_gate(
     (``needs-approval``) rather than hard-denying.
 
     **Direct hosted-agent runs** (#4237): when an actor is bound, the call
-    gets the stricter of the person's and the agent's verdict
-    (:func:`_direct_run_verdict`).
+    gets the stricter of the caller's and the hosted agent's verdict
+    (:func:`_direct_run_verdict`). This applies to every caller kind: an
+    agent-kind caller keeps its own grants and the hosted agent's grants
+    limit the run on top of them.
 
     **Service principals** (client-credentials, ``principal_kind ==
     service``) additionally consult ``safety_level`` (#3152): a mutating
@@ -515,8 +517,6 @@ async def policy_gate(
     caller's :class:`~meho_backplane.db.models.AgentPermission` rows,
     mirroring the same pattern :func:`audit_and_broadcast_safe` uses.
     """
-    if operator.principal_kind is PrincipalKind.AGENT:
-        return await _agent_verdict(operator=operator, descriptor=descriptor, target=target)
     actor_sub = resolve_actor_sub()
     if actor_sub is not None:
         return await _direct_run_verdict(
@@ -526,6 +526,21 @@ async def policy_gate(
             target=target,
             connector_id=connector_id,
         )
+    return await _caller_verdict(
+        operator=operator, descriptor=descriptor, target=target, connector_id=connector_id
+    )
+
+
+async def _caller_verdict(
+    *,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    connector_id: str | None,
+) -> tuple[PermissionVerdict, str | None]:
+    """Verdict for the caller alone, by its principal kind."""
+    if operator.principal_kind is PrincipalKind.AGENT:
+        return await _agent_verdict(operator=operator, descriptor=descriptor, target=target)
     return await _non_agent_verdict(
         operator=operator, descriptor=descriptor, target=target, connector_id=connector_id
     )
@@ -541,14 +556,15 @@ async def _direct_run_verdict(
 ) -> tuple[PermissionVerdict, str | None]:
     """Verdict for a call made by a direct hosted-agent run (#4237).
 
-    The person who started the run is the subject; the run's agent is the
-    actor. The agent's verdict uses its ``agent:<name>`` grants, the agent
-    safety defaults and the person's role ceiling. The stricter of the
-    agent's and the person's verdict wins. The person's verdict is worked
-    out only when the agent may run the op (agent verdict auto-execute).
-    The person's verdict can only make the result stricter, so this does
-    not change the outcome. It means a standing grant is recorded as used
-    only when the call runs.
+    The caller who started the run is the subject; the run's agent is the
+    actor. The hosted agent's verdict uses its ``agent:<name>`` grants, the
+    agent safety defaults and the caller's role ceiling. The caller's own
+    verdict uses the caller's principal kind (:func:`_caller_verdict`), so
+    an agent-kind caller keeps its own grants. The stricter of the two
+    verdicts wins. The caller's verdict is worked out only when the hosted
+    agent may run the op (agent verdict auto-execute). The caller's verdict
+    can only make the result stricter, so this does not change the outcome.
+    It means a standing grant is recorded as used only when the call runs.
     """
     agent = operator.model_copy(
         update={"sub": actor_sub, "principal_kind": PrincipalKind.AGENT, "client_id": actor_sub}
@@ -559,7 +575,7 @@ async def _direct_run_verdict(
     agent_result = (agent_verdict, f"agent {actor_sub} acting for {operator.sub}: {agent_reason}")
     if agent_verdict is not PermissionVerdict.AUTO_EXECUTE:
         return agent_result
-    verdict, reason = await _non_agent_verdict(
+    verdict, reason = await _caller_verdict(
         operator=operator, descriptor=descriptor, target=target, connector_id=connector_id
     )
     if _more_restrictive(verdict, agent_verdict) is verdict:

@@ -65,6 +65,13 @@ def _person(*, principal_kind: PrincipalKind = PrincipalKind.USER) -> Operator:
     )
 
 
+def _agent_caller(sub: str = "agent:caller") -> Operator:
+    """An agent-kind caller: the hosted agent runs on behalf of another agent."""
+    return _person(principal_kind=PrincipalKind.AGENT).model_copy(
+        update={"sub": sub, "client_id": sub}
+    )
+
+
 def _descriptor(
     op_id: str = "vault.kv.read",
     *,
@@ -157,6 +164,32 @@ async def test_grant_for_another_agent_does_not_apply() -> None:
             operator=_person(), descriptor=_descriptor(), target=None
         )
     assert verdict is PermissionVerdict.AUTO_EXECUTE
+
+
+async def test_agent_caller_is_limited_by_the_hosted_agent_grants() -> None:
+    """An agent-kind caller that may run the op is still bound by the hosted agent."""
+    await _seed_grant("*", "auto-execute", principal_sub="agent:caller")
+    await _seed_grant("*", "deny")
+    with actor_delegation(_AGENT):
+        verdict, reason = await policy_gate(
+            operator=_agent_caller(), descriptor=_descriptor(), target=None
+        )
+    assert verdict is PermissionVerdict.DENY
+    assert reason is not None
+    assert "agent agent:reader acting for agent:caller" in reason
+
+
+async def test_agent_caller_own_grants_still_apply_inside_a_direct_run() -> None:
+    """The caller's own deny grant holds even when the hosted agent may run the op."""
+    await _seed_grant("*", "deny", principal_sub="agent:caller")
+    await _seed_grant("vault.kv.*", "auto-execute")
+    with actor_delegation(_AGENT):
+        verdict, reason = await policy_gate(
+            operator=_agent_caller(), descriptor=_descriptor(), target=None
+        )
+    assert verdict is PermissionVerdict.DENY
+    assert reason is not None
+    assert "acting for" not in reason
 
 
 async def test_agent_denial_skips_the_person_verdict(monkeypatch: pytest.MonkeyPatch) -> None:

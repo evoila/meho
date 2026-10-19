@@ -132,18 +132,20 @@ G11.2-T1):
   resolution, `requires_approval=True` folds the verdict up to at least
   `needs-approval`, so a connector-flagged op is never auto-executed by an agent
   regardless of its `safety_level`.
-- **`user` / `service` inside a direct hosted-agent run** (#4237) — when a
-  person starts a hosted agent run directly, the run binds the definition's
-  agent (`identity_ref`, `agent:<name>`) as the actor
-  (`auth/delegation.py::actor_delegation`). `policy_gate` sees the bound actor
-  and works out two verdicts: the agent's (the resolver below, keyed on
-  `agent:<name>`, with the person's role ceiling) and the person's (the
-  `user` / `service` branch above). The stricter one wins. The person's
-  verdict is worked out only when the agent may run the op (agent verdict
-  `auto-execute`). An agent `deny` or `needs-approval` returns at once, so a
-  standing grant is recorded as used only when the call runs. The rule in one line:
-  a direct run may do only what both the person and the agent may do. See
-  `agent-runtime.md` "Whose identity a direct run uses".
+- **Any caller inside a direct hosted-agent run** (#4237) — when a caller
+  starts a hosted agent run directly, the run binds the definition's agent
+  (`identity_ref`, `agent:<name>`) as the actor
+  (`auth/delegation.py::actor_delegation`). `policy_gate` checks the bound
+  actor before it looks at the caller's kind, and works out two verdicts:
+  the hosted agent's (the resolver below, keyed on `agent:<name>`, with the
+  caller's role ceiling) and the caller's own (the branch above that matches
+  the caller's kind, so an `agent`-kind caller keeps its own grants). The
+  stricter one wins. The caller's verdict is worked out only when the hosted
+  agent may run the op (agent verdict `auto-execute`). An agent `deny` or
+  `needs-approval` returns at once, so a standing grant is recorded as used
+  only when the call runs. The rule in one line: a direct run may do only
+  what both the caller and the hosted agent may do. See `agent-runtime.md`
+  "Whose identity a direct run uses".
 
 Because a grant is consulted **only** on the `agent` branch, a grant whose
 `principal_sub` names no registered, non-revoked agent principal can never be

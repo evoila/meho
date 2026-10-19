@@ -64,7 +64,7 @@ from meho_backplane.agent.run import (
 )
 from meho_backplane.agents.schemas import AgentDefinitionCreate, AgentModelTier
 from meho_backplane.agents.service import AgentDefinitionService
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, OperationResult, ProbeResult
@@ -128,6 +128,7 @@ def _make_operator(
     tenant_id: UUID = _TENANT_A,
     role: TenantRole = TenantRole.OPERATOR,
     sub: str = "op-agent",
+    principal_kind: PrincipalKind = PrincipalKind.USER,
 ) -> Operator:
     return Operator(
         sub=sub,
@@ -136,6 +137,8 @@ def _make_operator(
         raw_jwt="<test-raw-jwt>",
         tenant_id=tenant_id,
         tenant_role=role,
+        principal_kind=principal_kind,
+        client_id=sub if principal_kind is PrincipalKind.AGENT else None,
     )
 
 
@@ -1445,6 +1448,33 @@ async def test_direct_run_is_limited_by_the_agent_grants(
     assert (view.identity_sub, view.identity_act) == ("alice", "agent:reader")
     summaries = await invoker.list_runs(person)
     assert [(s.identity_sub, s.identity_act) for s in summaries] == [("alice", "agent:reader")]
+
+
+async def test_direct_run_by_an_agent_caller_is_limited_by_the_hosted_agent_grants(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """An agent-kind caller that may run the op cannot do what the hosted agent's grants deny.
+
+    The caller holds an ``auto-execute`` grant for every op. The hosted agent
+    holds a ``*`` deny grant, so the call the run makes is denied. The audit
+    row names the caller as the subject and the hosted agent as the actor.
+    """
+    await _seed_echo_op(stub_embedding_service)
+    await _seed_definition(toolset={"meta_tools": ["call_operation"]})
+    await _seed_agent_grant(principal_sub="agent:caller", op_pattern="*", verdict="auto-execute")
+    await _seed_agent_grant(principal_sub="agent:reader", op_pattern="*", verdict="deny")
+    invoker = _invoker_with(_call_op_then_text("answer"))
+    caller = _make_operator(sub="agent:caller", principal_kind=PrincipalKind.AGENT)
+
+    outcome = await invoker.run(caller, "reader", "go")
+    assert outcome.status is AgentRunStatus.SUCCEEDED
+
+    rows = await _dispatch_rows("vault.kv.read")
+    assert len(rows) == 1
+    assert rows[0].policy_decision == "deny"
+    assert (rows[0].operator_sub, rows[0].actor_sub) == ("agent:caller", "agent:reader")
+    view = await invoker.poll(caller, outcome.run_id)
+    assert (view.identity_sub, view.identity_act) == ("agent:caller", "agent:reader")
 
 
 async def test_streamed_direct_run_is_limited_by_the_agent_grants(

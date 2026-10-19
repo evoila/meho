@@ -449,7 +449,7 @@ func (o BootstrapOptions) desiredCLIClient() *clientRep {
 		},
 		RedirectURIs:        []string{},
 		WebOrigins:          []string{},
-		DefaultClientScopes: append([]string{"openid", "profile", "email"}, requiredDefaultScopes()...),
+		DefaultClientScopes: append([]string{"profile", "email"}, requiredDefaultScopes()...),
 	}
 	// Opt-in offline-token path (#2902): assign offline_access as an
 	// OPTIONAL scope on the CLI client and bound the per-client
@@ -496,7 +496,7 @@ func (o BootstrapOptions) desiredMCPClient() *clientRep {
 		},
 		RedirectURIs:         append([]string{}, o.MCPRedirectURIs...),
 		WebOrigins:           append([]string{}, o.MCPWebOrigins...),
-		DefaultClientScopes:  append([]string{"openid", "profile", "email"}, requiredDefaultScopes()...),
+		DefaultClientScopes:  append([]string{"profile", "email"}, requiredDefaultScopes()...),
 		OptionalClientScopes: append([]string{}, requiredMCPOptionalScopes()...),
 	}
 }

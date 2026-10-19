@@ -125,6 +125,7 @@ from meho_backplane.targets.resolver import (
 )
 
 __all__ = [
+    "SEARCH_CLASSIFY_MIN_HITS",
     "SEARCH_LIMIT_MAX",
     "SEARCH_NARROWING_MAX",
     "SEARCH_NEAR_TIE_BAND",
@@ -259,6 +260,13 @@ SEARCH_OUTCOMES: Final[tuple[str, ...]] = get_args(SearchOutcome)
 
 #: Most entries a ``search_operations`` ``narrowing`` list holds.
 SEARCH_NARROWING_MAX: Final[int] = 20
+
+#: Fewest hits :func:`_classify_hits` needs to tell ``matched`` from a
+#: near tie. ``search_operations`` always reads at least this many from the
+#: retriever, even when the caller asked for ``limit=1``, and cuts the list
+#: down to the caller's ``limit`` afterwards. Otherwise a tied second hit
+#: would be hidden and the result would read as ``matched``.
+SEARCH_CLASSIFY_MIN_HITS: Final[int] = 2
 
 #: Near-tie band for the ``ambiguous`` outcome. When the top hit's
 #: ``fused_score`` beats the second hit's by less than this, the two are
@@ -970,8 +978,7 @@ def _search_guidance(
             narrowing,
         )
     return (
-        "The hits are weak or nearly tied. If no hit clearly does what was "
-        "asked, do not call any of them; narrow the search instead.",
+        "The hits are weak or nearly tied. Do not call any of them. Narrow the search first.",
         narrowing,
     )
 
@@ -992,6 +999,11 @@ async def _run_search(
     Returns ``(hits, outcome, group_keys)``. ``group_keys`` is set only for
     ``unknown_group``. The enabled-op ``EXISTS`` runs only when the search
     found nothing, to tell ``no_match`` from ``zero_enabled_operations``.
+
+    The retriever is asked for at least :data:`SEARCH_CLASSIFY_MIN_HITS`
+    hits so the near-tie check can see the second hit. The outcome is read
+    from that list; the returned ``hits`` are then cut to *limit* without
+    changing their order.
     """
     group_id: uuid.UUID | None = None
     if group_key is not None:
@@ -1022,10 +1034,10 @@ async def _run_search(
         impl_id=impl_id,
         group_id=group_id,
         query=query,
-        limit=limit,
+        limit=max(limit, SEARCH_CLASSIFY_MIN_HITS),
     )
     if hits:
-        return hits, _classify_hits(hits), None
+        return hits[:limit], _classify_hits(hits), None
     has_enabled = await _has_enabled_operation(
         session,
         tenant_id=tenant_id,

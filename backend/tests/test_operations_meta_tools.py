@@ -52,6 +52,7 @@ from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import register_typed_operation, reset_dispatcher_caches
 from meho_backplane.operations.meta_tools import (
+    SEARCH_CLASSIFY_MIN_HITS,
     SEARCH_NARROWING_MAX,
     SEARCH_NEAR_TIE_BAND,
     SEARCH_OUTCOMES,
@@ -1398,8 +1399,53 @@ def test_search_operations_near_tie_is_ambiguous() -> None:
     assert _classify_hits([_hit("a", 0.05, 1.0)]) == "matched"
     assert _classify_hits(tied) == "ambiguous"
     assert _classify_hits(semantic_only) == "ambiguous"
-    # Classification reads the order; it never re-ranks.
-    assert [h.op_id for h in tied] == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_search_operations_limit_one_still_sees_near_tie(
+    stub_embedding_service: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``limit=1`` must not hide the tied second hit from the near-tie check.
+
+    The retriever is asked for at least ``SEARCH_CLASSIFY_MIN_HITS`` hits.
+    The outcome is the same for ``limit=1`` and ``limit=2``; only the
+    returned list is cut, and its order does not change.
+    """
+    group_id = await _seed_group(
+        tenant_id=None,
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        group_key="kv",
+        name="KV",
+        when_to_use="kv.",
+    )
+    await _seed_descriptors(
+        group_id=group_id, product="vault", version="1.x", impl_id="vault", enabled_flags=[True]
+    )
+    tied = [_hit("a", 0.05, 2.0), _hit("b", 0.05 - SEARCH_NEAR_TIE_BAND / 2, 1.0)]
+    asked_limits: list[int] = []
+
+    async def fake_hybrid_search(session: Any, **kwargs: Any) -> list[OperationSearchHit]:
+        asked_limits.append(kwargs["limit"])
+        return tied[: kwargs["limit"]]
+
+    monkeypatch.setattr("meho_backplane.operations.meta_tools.hybrid_search", fake_hybrid_search)
+    operator = _make_operator()
+
+    one = await search_operations(
+        operator, {"connector_id": "vault-1.x", "query": "op", "limit": 1}
+    )
+    two = await search_operations(
+        operator, {"connector_id": "vault-1.x", "query": "op", "limit": 2}
+    )
+
+    assert one["outcome"] == two["outcome"] == "ambiguous"
+    assert [h["op_id"] for h in one["hits"]] == ["a"]
+    assert [h["op_id"] for h in two["hits"]] == ["a", "b"]
+    assert asked_limits == [SEARCH_CLASSIFY_MIN_HITS, 2]
+    assert all(asked >= SEARCH_CLASSIFY_MIN_HITS for asked in asked_limits)
 
 
 # ---------------------------------------------------------------------------

@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Final
 
+import httpx
 import msgspec
 import structlog
 
@@ -38,11 +39,22 @@ __all__ = [
     "response_content",
     "safe_url",
     "serialize",
+    "transport_fault_phase",
 ]
 
 #: Per-span body cap (F3). A request/response body larger than this truncates
 #: (marker + forced redaction-uncertainty); it never errors a dispatch.
 MAX_SPAN_BODY_BYTES: Final[int] = 64 * 1024
+
+#: Timeout class -> phase name. Same labels as the ``connector_timeout``
+#: error result (``operations._errors.result_connector_timeout``), so the
+#: trace and the error the caller sees name the same phase.
+_TIMEOUT_PHASES: Final[tuple[tuple[type[httpx.TimeoutException], str], ...]] = (
+    (httpx.ConnectTimeout, "connect"),
+    (httpx.ReadTimeout, "read"),
+    (httpx.WriteTimeout, "write"),
+    (httpx.PoolTimeout, "pool"),
+)
 
 
 def now_utc() -> datetime:
@@ -167,3 +179,16 @@ def approx_bytes(payload: Any) -> int:
 def approx_span_bytes(span: SpanInput) -> int:
     """Cheap upper-ish estimate of a span's persisted size for the trace cap."""
     return len(span.name) + approx_bytes(span.attributes)
+
+
+def transport_fault_phase(exc: BaseException) -> str:
+    """Name the phase a transport fault happened in.
+
+    A timeout maps to ``connect`` / ``read`` / ``write`` / ``pool``. Any other
+    fault (connection refused, network error, protocol error) has no truthful
+    phase, so it is ``transport``.
+    """
+    for timeout_type, phase in _TIMEOUT_PHASES:
+        if isinstance(exc, timeout_type):
+            return phase
+    return "transport"

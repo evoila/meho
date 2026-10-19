@@ -85,26 +85,18 @@ database:
   host: ""
   port: 5432
 
-# -- Names of the Secrets Keycloak reads. Empty = the name the install's
-# secrets Job creates (shown after each key). Set a name only to use a
-# Secret you made yourself; it must have the same keys.
+# Keycloak reads five Secrets that the install's secrets Job creates:
+# `<release>-core-postgres-keycloak` (key `password`),
+# `<release>-core-keycloak-bootstrap` (keys `client_id`, `client_secret`),
+# `<release>-core-keycloak-admin`, `<release>-core-ui-auth` and
+# `<release>-core-check-runner` (key `client_secret` each). To use your own
+# value, create the Secret with that name before the install: the Job keeps
+# a Secret that exists. Only the bootstrap Secret can have another name.
 existingSecrets:
-  # -- `<release>-core-postgres-keycloak`, key `password`: the password of
-  # the `keycloak` database role.
-  database: ""
-  # -- `<release>-core-keycloak-bootstrap`, keys `client_id` and
-  # `client_secret`: the temporary service account Keycloak creates in the
-  # master realm at the first start.
+  # -- Your own Secret with Keycloak's first-start service account (keys
+  # `client_id` and `client_secret`). Empty =
+  # `<release>-core-keycloak-bootstrap`. The secrets Job reads the same key.
   bootstrap: ""
-  # -- `<release>-core-keycloak-admin`, key `client_secret`: the secret of
-  # the `meho-admin` client.
-  adminClient: ""
-  # -- `<release>-core-ui-auth`, key `client_secret`: the secret of the
-  # `meho-web` client (the web console login).
-  webClient: ""
-  # -- `<release>-core-check-runner`, key `client_secret`: the secret of the
-  # `meho-check-runner` client.
-  checkRunnerClient: ""
 
 ingress:
   # -- The parent chart's Ingress routes only `/auth/realms/meho` and

@@ -174,25 +174,9 @@
     "existingSecrets": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Names of Secrets you made yourself. Empty = the Secret the install's secrets Job creates.",
+      "description": "Your own Secret for Keycloak's first-start service account. Empty = the Secret the install's secrets Job creates.",
       "properties": {
-        "database": {
-          "type": "string",
-          "pattern": "^([a-z0-9]([-a-z0-9.]*[a-z0-9])?)?$"
-        },
         "bootstrap": {
-          "type": "string",
-          "pattern": "^([a-z0-9]([-a-z0-9.]*[a-z0-9])?)?$"
-        },
-        "adminClient": {
-          "type": "string",
-          "pattern": "^([a-z0-9]([-a-z0-9.]*[a-z0-9])?)?$"
-        },
-        "webClient": {
-          "type": "string",
-          "pattern": "^([a-z0-9]([-a-z0-9.]*[a-z0-9])?)?$"
-        },
-        "checkRunnerClient": {
           "type": "string",
           "pattern": "^([a-z0-9]([-a-z0-9.]*[a-z0-9])?)?$"
         }

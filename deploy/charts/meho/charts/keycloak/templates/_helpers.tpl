@@ -59,17 +59,10 @@ Call with (dict "ctx" <map> "root" $).
 {{- end }}
 
 {{/*
-Name of a Secret: the operator's `existingSecrets.<key>`, or the name the
-install's secrets Job creates. Call with (list $ "<key>" "<suffix>").
+Name of a Secret the install's secrets Job creates: `<release>-core-<kind>`.
 */}}
-{{- define "coreKeycloak.secretName" -}}
-{{- $root := index . 0 -}}
-{{- $name := index $root.Values.existingSecrets (index . 1) -}}
-{{- if $name -}}
-{{ $name }}
-{{- else -}}
-{{ printf "%s-core-%s" $root.Release.Name (index . 2) }}
-{{- end -}}
+{{- define "coreKeycloak.coreSecret" -}}
+{{- printf "%s-core-%s" .root.Release.Name .kind -}}
 {{- end }}
 
 {{- define "coreKeycloak.databaseHost" -}}

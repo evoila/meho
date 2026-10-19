@@ -192,23 +192,34 @@ def test_secrets_come_from_the_secrets_job_by_name() -> None:
         assert "value" in e or "optional" not in e["valueFrom"]["secretKeyRef"]
 
 
-def test_existing_secrets_override_the_names() -> None:
+def test_bootstrap_secret_can_be_your_own() -> None:
+    # The secrets Job reads the same key, so the two always agree.
     env = _env(
-        _pod(
-            _keycloak_docs(
-                "--set",
-                "coreKeycloak.existingSecrets.database=my-db",
-                "--set",
-                "coreKeycloak.existingSecrets.webClient=my-web",
-            )
-        )["containers"][0]
+        _pod(_keycloak_docs("--set", "coreKeycloak.existingSecrets.bootstrap=my-bootstrap"))[
+            "containers"
+        ][0]
     )
-    assert env["KC_DB_PASSWORD"]["valueFrom"]["secretKeyRef"]["name"] == "my-db"
-    assert env["MEHO_REALM_WEB_CLIENT_SECRET"]["valueFrom"]["secretKeyRef"]["name"] == "my-web"
-    assert (
-        env["MEHO_REALM_ADMIN_CLIENT_SECRET"]["valueFrom"]["secretKeyRef"]["name"]
-        == "test-core-keycloak-admin"
-    )
+    for name in ("KC_BOOTSTRAP_ADMIN_CLIENT_ID", "KC_BOOTSTRAP_ADMIN_CLIENT_SECRET"):
+        assert env[name]["valueFrom"]["secretKeyRef"]["name"] == "my-bootstrap"
+
+
+@pytest.mark.parametrize(
+    ("values_key", "core_name"),
+    [
+        ("corePostgres.existingSecrets.keycloak", "test-core-postgres-keycloak"),
+        ("keycloakAdmin.clientSecret.secretName", "test-core-keycloak-admin"),
+        ("uiConsole.secretName", "test-core-ui-auth"),
+        ("checkRunner.clientSecret.secretName", "test-core-check-runner"),
+    ],
+)
+def test_other_secret_names_must_be_the_core_ones(values_key: str, core_name: str) -> None:
+    # Keycloak reads the core name; a different name would leave its pod
+    # waiting for a Secret the secrets Job never makes.
+    result = _run(*_ON, "--set", f"{values_key}=my-secret")
+    assert result.returncode != 0
+    assert f'built-in Keycloak reads "{core_name}"' in result.stderr, result.stderr
+    # Naming the core Secret itself is fine.
+    assert _run(*_ON, "--set", f"{values_key}={core_name}").returncode == 0
 
 
 def test_every_realm_placeholder_has_an_env_var() -> None:

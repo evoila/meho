@@ -77,7 +77,8 @@ deploy/charts/meho/
 │   ├── serviceaccount.yaml # Pod identity
 │   ├── networkpolicy.yaml  # default-deny + explicit egress (broadcast / result-cache egress conditional)
 │   ├── migration-job.yaml  # pre-install/pre-upgrade Helm hook (alembic upgrade head)
-│   ├── _core-keycloak.tpl  # /auth paths added to the Ingress (coreKeycloak.enabled only)
+│   ├── _core-keycloak.tpl  # /auth paths for the Ingress + render checks (coreKeycloak.enabled only)
+│   ├── core-keycloak-checks.yaml # renders nothing; runs those checks
 │   └── NOTES.txt           # post-install hints
 └── charts/
     ├── broadcast/          # in-tree Valkey 9.x subchart (ADR 0005)
@@ -533,8 +534,15 @@ that the install's secrets Job creates. Keycloak only reads them:
 | `<release>-core-ui-auth` | `client_secret` | the `meho-web` client (web console login) |
 | `<release>-core-check-runner` | `client_secret` | the `meho-check-runner` client |
 
-`coreKeycloak.existingSecrets.<key>` replaces a name when you made the
-Secret yourself. The pod does not start until all five exist.
+Keycloak reads exactly these names. To use your own value, create the
+Secret with that name before the install; the secrets Job keeps a Secret
+that exists. Only the bootstrap Secret may have another name, through
+`coreKeycloak.existingSecrets.bootstrap`, which the secrets Job reads too.
+The parent chart stops the render when `corePostgres.existingSecrets.keycloak`,
+`keycloakAdmin.clientSecret.secretName`, `uiConsole.secretName` or
+`checkRunner.clientSecret.secretName` names any other Secret, because the
+secrets Job would then not make the one Keycloak reads. The pod does not
+start until all five exist.
 
 **What it renders.**
 

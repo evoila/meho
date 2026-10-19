@@ -71,7 +71,7 @@ spec:
             - name: KC_DB_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "coreKeycloak.secretName" (list . "database" "postgres-keycloak") }}
+                  name: {{ include "coreKeycloak.coreSecret" (dict "root" . "kind" "postgres-keycloak") }}
                   key: password
             - name: KC_DB_POOL_INITIAL_SIZE
               value: "2"
@@ -103,12 +103,12 @@ spec:
             - name: KC_BOOTSTRAP_ADMIN_CLIENT_ID
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "coreKeycloak.secretName" (list . "bootstrap" "keycloak-bootstrap") }}
+                  name: {{ .Values.existingSecrets.bootstrap | default (include "coreKeycloak.coreSecret" (dict "root" . "kind" "keycloak-bootstrap")) }}
                   key: client_id
             - name: KC_BOOTSTRAP_ADMIN_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "coreKeycloak.secretName" (list . "bootstrap" "keycloak-bootstrap") }}
+                  name: {{ .Values.existingSecrets.bootstrap | default (include "coreKeycloak.coreSecret" (dict "root" . "kind" "keycloak-bootstrap")) }}
                   key: client_secret
             # Values for the `${...}` placeholders in the realm file. Keycloak
             # reads them only while it imports the realm.
@@ -119,17 +119,17 @@ spec:
             - name: MEHO_REALM_ADMIN_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "coreKeycloak.secretName" (list . "adminClient" "keycloak-admin") }}
+                  name: {{ include "coreKeycloak.coreSecret" (dict "root" . "kind" "keycloak-admin") }}
                   key: client_secret
             - name: MEHO_REALM_WEB_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "coreKeycloak.secretName" (list . "webClient" "ui-auth") }}
+                  name: {{ include "coreKeycloak.coreSecret" (dict "root" . "kind" "ui-auth") }}
                   key: client_secret
             - name: MEHO_REALM_CHECK_RUNNER_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "coreKeycloak.secretName" (list . "checkRunnerClient" "check-runner") }}
+                  name: {{ include "coreKeycloak.coreSecret" (dict "root" . "kind" "check-runner") }}
                   key: client_secret
           ports:
             - name: http

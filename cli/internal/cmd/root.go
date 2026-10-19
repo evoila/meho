@@ -66,10 +66,11 @@ import (
 
 // Execute builds the command tree and runs it, returning any error
 // produced by the executed subcommand. The caller is responsible for
-// translating that error into a process exit code; cobra has already
-// rendered the human-facing error message to stderr because the root
-// command is configured with SilenceUsage = true (suppress the usage
-// wall on RunE errors).
+// translating that error into a process exit code; the error message
+// is already on stderr. A command prints its own errors (SilenceErrors)
+// or cobra prints them; an unknown flag or a wrong argument count is
+// printed by installUsageErrors. SilenceUsage = true on the root
+// suppresses the usage wall on RunE errors.
 //
 // The returned error may satisfy output.ExitCoder; main inspects it
 // to pick the process exit code (auth_expired → 2, unreachable → 3,
@@ -87,9 +88,10 @@ func newRootCmd() *cobra.Command {
 // line without the program name). A constructor (rather than a
 // package-level var) keeps the command tree free of mutable global
 // state, which matters for tests: every test gets its own independent
-// tree and can swap stdout/stderr via SetOut / SetErr. args only
-// decides whether the dynamic command discovery fetch runs; cobra
-// parses the real arguments in Execute.
+// tree and can swap stdout/stderr via SetOut / SetErr. args decides
+// whether the dynamic command discovery fetch runs, and lets a usage
+// error find a --json that cobra did not parse (see
+// installUsageErrors); cobra parses the real arguments in Execute.
 func newRootCmdFor(args []string) *cobra.Command {
 	root := &cobra.Command{
 		Use:   "meho",
@@ -634,6 +636,9 @@ func newRootCmdFor(args []string) *cobra.Command {
 	if !invokesDoctor(root, args) {
 		registerDynamicSubcommands(root)
 	}
+
+	// Last, so the discovered commands are covered too.
+	installUsageErrors(root, args)
 
 	return root
 }

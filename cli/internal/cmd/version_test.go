@@ -158,8 +158,10 @@ func TestVersionCommandRejectsArgs(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error for unexpected positional arg; got nil")
 	}
-	if !strings.Contains(err.Error(), "unknown command") &&
-		!strings.Contains(err.Error(), "accepts") {
-		t.Fatalf("unexpected error message: %v", err)
+	// The usage error is printed to stderr; the returned error only
+	// carries the exit code.
+	if !strings.Contains(stderr.String(), "unknown command") &&
+		!strings.Contains(stderr.String(), "accepts") {
+		t.Fatalf("unexpected error message on stderr: %q", stderr.String())
 	}
 }

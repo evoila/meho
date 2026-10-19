@@ -1643,8 +1643,8 @@ unqualified names. After G0.12-T16 #1274 the 15 vendor dirs (`vault`,
 `gcloud`, `bind9`, `k8s`, `sddc-manager`, `vcf-automation`, `vcf-fleet`,
 `vcf-logs`, `vcf-operations`) share **one** transport implementation
 instead of byte-near-identical `doAuthedRequest` / `sendRequest` /
-`httpError` trios. Exit codes: `0` status=ok, `1` status=error/denied
-(via the `errOpError` sentinel re-exported from
+`httpError` trios. Exit codes: `0` status=ok, `1`
+status=error/denied/rate_limited (via the `errOpError` sentinel re-exported from
 `dispatch.ErrOpError`), `2` auth_expired, `3` unreachable,
 `4` unexpected_response.
 

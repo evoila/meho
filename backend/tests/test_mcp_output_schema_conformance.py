@@ -50,6 +50,7 @@ from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.main import app
 from meho_backplane.mcp import registry as mcp_registry
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
+from meho_backplane.operations._errors import result_rate_limited
 from meho_backplane.operations.addon_capability import AddonCapabilityService
 from meho_backplane.operations.addon_capability_schemas import (
     CapabilityDeclaration,
@@ -137,7 +138,7 @@ def _call(
     )
 
 
-def _assert_conforms(tool_name: str, response: Any) -> dict[str, Any]:
+def _assert_conforms(tool_name: str, response: Any, *, is_error: bool = False) -> dict[str, Any]:
     """Assert a successful tools/call response conforms to the declared schema.
 
     Returns the ``structuredContent`` payload for scenario-specific
@@ -145,12 +146,17 @@ def _assert_conforms(tool_name: str, response: Any) -> dict[str, Any]:
     Draft 2020-12 validator + format checker the input side uses
     (``handlers.handle_tools_call``), so ``format: uuid`` in a declared
     schema is load-bearing here too.
+
+    ``is_error`` is the expected MCP ``isError`` flag. It is ``True`` only
+    for an ``OperationResult`` envelope whose status is ``error``,
+    ``denied`` or ``rate_limited`` (MCP 2025-06-18 §Tools/Error Handling).
+    The structured result must conform to the schema either way.
     """
     assert response.status_code == 200
     body = response.json()
     assert "error" not in body, body
     result = body["result"]
-    assert result["isError"] is False, result
+    assert result["isError"] is is_error, result
     assert "structuredContent" in result, (
         f"{tool_name}: declaring tool emitted no structuredContent (#2774)"
     )
@@ -689,7 +695,7 @@ def test_call_operation_refuses_undeliverable_receipt_before_dispatch(
                 "params": {"kind": "vault-role", "name": "conf-call-op-refused"},
             },
         )
-    payload = _assert_conforms("call_operation", response)
+    payload = _assert_conforms("call_operation", response, is_error=True)
     assert payload["status"] == "error", payload
     assert payload["extras"]["error_code"] == "receipt_too_large"
     assert payload["extras"]["receipt_bytes"] > RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES
@@ -698,6 +704,46 @@ def test_call_operation_refuses_undeliverable_receipt_before_dispatch(
     assert payload["result"] is None
     assert "did not run" in payload["error"]
     dispatch_mock.assert_not_awaited()
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+def test_call_operation_rate_limited_envelope_conforms(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """A rate-limited call is a tool execution error that still conforms (#3500).
+
+    The dispatcher refuses a caller over its rate or concurrency cap with
+    ``status="rate_limited"``. A client that checks the structured result
+    against the declared ``outputSchema`` must accept it, and the MCP
+    ``isError`` flag is ``true`` (MCP 2025-06-18 §Tools/Error Handling).
+    The envelope keeps ``extras.retry_after_seconds`` so the agent knows
+    how long to wait.
+    """
+    client, _op = client_with_operator
+    dispatch_mock = AsyncMock(
+        return_value=result_rate_limited(
+            "topology.create_node",
+            kind="rate",
+            limit=60,
+            retry_after_seconds=7,
+            duration_ms=1.0,
+        )
+    )
+    with patch.object(meta_tools, "dispatch", new=dispatch_mock):
+        response = _call(
+            client,
+            "call_operation",
+            {
+                "connector_id": "topology-graph-1.x",
+                "op_id": "topology.create_node",
+                "params": {"kind": "vault-role", "name": "conf-call-op-rate-limited"},
+            },
+        )
+    payload = _assert_conforms("call_operation", response, is_error=True)
+    assert payload["status"] == "rate_limited", payload
+    assert payload["extras"]["error_code"] == "rate_limited"
+    assert payload["extras"]["retry_after_seconds"] == 7
+    dispatch_mock.assert_awaited_once()
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)

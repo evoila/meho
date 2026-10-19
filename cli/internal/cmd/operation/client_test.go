@@ -755,6 +755,52 @@ func TestRunCallUnknownStatusNamesVersionSkew(t *testing.T) {
 	}
 }
 
+// TestRunCallRateLimitedExitsOne — status=rate_limited is a known
+// dispatcher refusal (#3500), not a version gap. `operation call` prints
+// the envelope, including extras.retry_after_seconds, and exits 1 via
+// errOpError (not exit 4), in both human and --json mode.
+func TestRunCallRateLimitedExitsOne(t *testing.T) {
+	for _, jsonOut := range []bool{false, true} {
+		errText := "rate_limited: over the dispatch rate limit; retry after 30s"
+		cr, _ := json.Marshal(CallResult{
+			Status: "rate_limited", OpID: "vault.kv.read", Error: &errText,
+			Extras: json.RawMessage(`{"error_code":"rate_limited","kind":"rate","limit":5,"retry_after_seconds":30}`),
+		})
+		f := &fakeOperationsClient{
+			callResponses: []*api.PostCallApiV1OperationsCallPostResponse{
+				{HTTPResponse: makeHTTPResp(200), Body: cr},
+			},
+		}
+		withFakeClient(t, f)
+
+		cmd := newCallCmd()
+		var out, errBuf bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&errBuf)
+		args := []string{"vault-1.x", "vault.kv.read", "--backplane", "https://x"}
+		if jsonOut {
+			args = append(args, "--json")
+		}
+		cmd.SetArgs(args)
+		err := cmd.Execute()
+		if !errors.Is(err, errOpError) {
+			t.Fatalf("json=%t: rate_limited must exit 1 via errOpError; got %v", jsonOut, err)
+		}
+		var ec output.ExitCoder
+		if errors.As(err, &ec) {
+			t.Fatalf("json=%t: rate_limited must not carry exit code %d", jsonOut, ec.ExitCode())
+		}
+		for _, want := range []string{"rate_limited", "retry_after_seconds"} {
+			if !strings.Contains(out.String(), want) {
+				t.Errorf("json=%t: stdout missing %q; got %q", jsonOut, want, out.String())
+			}
+		}
+		if strings.Contains(errBuf.String(), "does not know") {
+			t.Errorf("json=%t: rate_limited was treated as an unknown status: %s", jsonOut, errBuf.String())
+		}
+	}
+}
+
 // TestRunCallAwaitingApprovalJSON — with --json the parked envelope
 // round-trips as the full OperationResult JSON (incl.
 // extras.approval_request_id) and the command exits 0.

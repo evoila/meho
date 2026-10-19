@@ -1353,11 +1353,12 @@ scenarios.
 ### Exit codes
 
 - `0` — verb ran cleanly; for `call`, `status == "ok"`.
-- `1` — `call` only: dispatcher returned `status == "error"` or
-  `status == "denied"` (connector raised, schema validation rejected,
-  or policy denied — the three structured-failure envelopes the
-  backend `Connector.execute` contract defines). Surfaced via the
-  `errOpError` sentinel.
+- `1` — `call` only: dispatcher returned `status == "error"`,
+  `status == "denied"` or `status == "rate_limited"` (connector raised,
+  schema validation rejected, policy denied, or the caller is over its
+  rate or concurrency limit). The envelope is printed first; a
+  `rate_limited` one shows `extras.retry_after_seconds`. Surfaced via
+  the `errOpError` sentinel.
 - `2` — `auth_expired` (no stored credentials, or refresh failed).
 - `3` — `unreachable` (network / transport failure).
 - `4` — `unexpected_response` (parse error, malformed JSON, or an

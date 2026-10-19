@@ -559,9 +559,14 @@ register_mcp_tool(
                     # client validating the structured result against this
                     # outputSchema (MCP 2025-06-18: "Clients SHOULD
                     # validate structured results against this schema")
-                    # must accept it. The enum lists only statuses the
-                    # dispatcher actually emits (no ``pending``).
-                    "enum": ["ok", "error", "denied", "awaiting_approval"],
+                    # must accept it. ``rate_limited`` is the refusal the
+                    # dispatcher returns when the caller is over its
+                    # per-principal rate or concurrency cap (#3500); the
+                    # envelope carries ``extras.retry_after_seconds``. The
+                    # enum lists only statuses the dispatcher actually
+                    # emits at this boundary (no ``pending``, no
+                    # ``already_resumed`` — that one is approval-resume only).
+                    "enum": ["ok", "error", "denied", "awaiting_approval", "rate_limited"],
                 },
                 "op_id": {"type": "string"},
                 "result": {

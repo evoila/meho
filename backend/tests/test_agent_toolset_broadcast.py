@@ -20,12 +20,17 @@ acceptance criteria map onto the tests here as:
 * ``test_recent_read_wraps_untrusted_prose`` — a read result delivered to
   the run passes announcement free-text through ``dump_event_wire``'s
   untrusted-content envelope (AC4).
+* ``test_recent_without_cursor_skips_the_start_of_the_stream`` /
+  ``test_recent_server_time_lets_the_model_widen_the_window`` — with no
+  cursor the tool returns the newest events, the same as the MCP tool, and
+  each answer carries the server time (#4236).
 """
 
 from __future__ import annotations
 
 import contextlib
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
@@ -356,3 +361,68 @@ async def test_recent_read_wraps_untrusted_prose(
     # Structured / server-derived fields are served unwrapped.
     assert event["phase"] == "update"
     assert event["principal_sub"] == "peer-agent"
+
+
+# ---------------------------------------------------------------------------
+# No cursor reads the newest events; answers carry the server time (#4236)
+# ---------------------------------------------------------------------------
+
+
+async def _seed_old_and_new(operator: Operator) -> None:
+    """One announcement at the start of the stream (days ago), one just now."""
+    await seed_announcement(
+        operator.tenant_id,
+        principal_sub="old-peer",
+        activity="old test activity",
+        ts=datetime.now(UTC) - timedelta(days=5),
+    )
+    await seed_announcement(operator.tenant_id, principal_sub="new-peer", activity="new activity")
+
+
+@pytest.mark.asyncio
+async def test_recent_without_cursor_skips_the_start_of_the_stream() -> None:
+    """With no cursor the agent gets the newest event, the same as the MCP tool."""
+    operator = _make_operator()
+    await _seed_old_and_new(operator)
+
+    tools = resolve_agent_tools({"meta_tools": ["broadcast_recent"]}, operator)
+    (tool,) = tools
+    result = await tool.function(_make_run_context(operator))
+
+    assert [e["principal_sub"] for e in result["events"]] == ["new-peer"]
+
+    entry = get_tool("meho_broadcast_recent")
+    assert entry is not None
+    mcp_result = await entry[1](operator, {})
+    assert [e["event_id"] for e in result["events"]] == [
+        e["event_id"] for e in mcp_result["events"]
+    ]
+
+
+@pytest.mark.asyncio
+async def test_recent_server_time_lets_the_model_widen_the_window() -> None:
+    """``server_time`` is the current UTC time, in a form ``cursor`` accepts."""
+    operator = _make_operator()
+    await _seed_old_and_new(operator)
+
+    tools = resolve_agent_tools({"meta_tools": ["broadcast_recent"]}, operator)
+    (tool,) = tools
+    ctx = _make_run_context(operator)
+
+    before = datetime.now(UTC).replace(microsecond=0)
+    first = await tool.function(ctx)
+    after = datetime.now(UTC)
+
+    raw = first["server_time"]
+    assert raw.endswith("Z")
+    server_time = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    assert before <= server_time <= after
+    # Each event's own time is there too, so the model can compare the two.
+    (event,) = first["events"]
+    assert datetime.fromisoformat(event["ts"].replace("Z", "+00:00")) <= after
+
+    # "The last 24 hours", worked out from server_time, still skips the old event.
+    day_ago = (server_time - timedelta(hours=24)).isoformat().replace("+00:00", "Z")
+    widened = await tool.function(ctx, cursor=day_ago)
+    assert [e["principal_sub"] for e in widened["events"]] == ["new-peer"]
+    assert "server_time" in widened
